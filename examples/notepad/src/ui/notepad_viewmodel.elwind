@@ -1,0 +1,53 @@
+enum SaveState { Unsaved, Saving, Saved }
+
+viewmodel NotepadViewModel {
+    #[observable]
+    #[length(0..=100000)]
+    content: String = String::new(),
+
+    #[observable]
+    file_name: String = "untitled.txt",
+
+    #[observable]
+    current_path: String = String::new(),
+
+    #[observable]
+    state: SaveState = SaveState::Unsaved,
+
+    #[computed]
+    char_count: i32 = content.chars().count() as i32,
+
+    #[computed]
+    window_title: String = t!("notepad-window-title", file_name: file_name),
+
+    #[command(async, can_execute: state != SaveState::Saving)]
+    save: Command = command!(async || {
+        state = SaveState::Saving;
+        let path = if current_path.is_empty() {
+            platform::file_dialog::save().await
+        } else {
+            Some(std::path::PathBuf::from(current_path.clone()))
+        };
+        match path {
+            Some(path) => {
+                let _ = std::fs::write(&path, content.clone());
+                file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                current_path = path.to_string_lossy().to_string();
+                state = SaveState::Saved;
+            }
+            None => {
+                state = SaveState::Unsaved;
+            }
+        }
+    }),
+
+    #[command(async)]
+    open: Command = command!(async || {
+        if let Some(path) = platform::file_dialog::open().await {
+            content = std::fs::read_to_string(&path).unwrap_or_default();
+            file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            current_path = path.to_string_lossy().to_string();
+            state = SaveState::Unsaved;
+        }
+    }),
+}

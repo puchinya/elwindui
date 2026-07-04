@@ -1,0 +1,7 @@
+[package]
+name = "elwindui-languageserver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+elwindui-codegen = { path = "../elwindui-codegen" }

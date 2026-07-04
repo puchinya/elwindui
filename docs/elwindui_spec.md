@@ -1,6 +1,6 @@
-# RustyUIL 言語仕様書
+# ElwindUIL 言語仕様書
 
-Rust向けGUIフレームワークのための宣言的レイアウト記述言語。
+Rust向けGUIフレームワーク(Elwind)のための宣言的レイアウト記述言語。
 Rustの構文・慣習に寄せることで学習コストを下げつつ、機械可読性・事前検証性を重視した設計。
 
 ---
@@ -519,10 +519,10 @@ view VolumeControl {
 
 # 付録A. バックエンド抽象化(GUIフレームワークとの関係)
 
-RustyUILは特定のGUIフレームワークに依存しない**中間表現**として設計する。`.uil`は論理的な要素ツリーを記述するのみで、egui・iced・druid/xilemなど具体的なフレームワークへの変換は「バックエンド」が担う。
+ElwindUILは特定のGUIフレームワークに依存しない**中間表現**として設計する。`.elwind`は論理的な要素ツリーを記述するのみで、egui・iced・druid/xilemなど具体的なフレームワークへの変換は「バックエンド」が担う。
 
 ```
-.uil ファイル(RustyUIL構文)
+.elwind ファイル(ElwindUIL構文)
         │  コンパイル
         ▼
 共通AST(フレームワーク非依存の要素ツリー)
@@ -547,7 +547,7 @@ use components::slider::Slider;
 
 ## A.2 論理要素 ⇔ 具体要素のマッピング例(eguiバックエンド)
 
-| RustyUIL論理要素 | eguiでの実体 |
+| ElwindUIL論理要素 | eguiでの実体 |
 |---|---|
 | `Window { ... }` | `egui::Window::new(title).show(ctx, \|ui\| { ... })` |
 | `Row { ... }` | `ui.horizontal(\|ui\| { ... })` |
@@ -590,13 +590,13 @@ view Dashboard {
 
 ## B.1 ビルド時自動生成
 
-`.uil`をクレートの`build.rs`で自動的にRustソースへ変換する。
+`.elwind`をクレートの`build.rs`で自動的にRustソースへ変換する。
 
 ```rust
 // build.rs
 fn main() {
     println!("cargo:rerun-if-changed=src/ui");
-    rustyuil_codegen::compile_dir("src/ui", std::env::var("OUT_DIR").unwrap());
+    elwindui_codegen::compile_dir("src/ui", std::env::var("OUT_DIR").unwrap());
 }
 ```
 
@@ -605,13 +605,13 @@ fn main() {
 include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
 ```
 
-- `cargo:rerun-if-changed`により、`.uil`保存後の次回ビルドで自動再生成される(手動コマンド不要)
+- `cargo:rerun-if-changed`により、`.elwind`保存後の次回ビルドで自動再生成される(手動コマンド不要)
 
 **代替方式(proc-macro):**
 
 ```rust
-rustyuil::component! {
-    include_str!("ui/notepad_window.uil")
+elwindui::component! {
+    include_str!("ui/notepad_window.elwind")
 }
 ```
 
@@ -619,7 +619,7 @@ rustyuil::component! {
 
 ## B.2 エディタ内リアルタイム診断(LSP)
 
-専用言語サーバー(`rustyuil-analyzer`)が以下を提供する。
+専用言語サーバー(`elwindui-languageserver`)が以下を提供する。
 
 - 入力中からの即時診断(制約違反、enum網羅漏れ、`#[param]`への`bind!`混入など)
 - 生成されるRustコードのプレビュー表示
@@ -638,7 +638,7 @@ rustyuil::component! {
 **①の処理フロー:**
 
 ```
-.uil保存 → LSPが増分パース → component既定値でインスタンス化
+.elwind保存 → LSPが増分パース → component既定値でインスタンス化
     → バックエンドのオフスクリーンレンダリング → WebViewへ画像送信
 ```
 
@@ -668,14 +668,14 @@ mod hot_notepad_ui {
 ┌──────────────────────────────────────────────┐
 │ エディタ(VSCode等)                             │
 │  ┌──────────────┐  ┌─────────────────────────┐ │
-│  │ .uilエディタ   │  │ プレビューパネル(WebView) │ │
+│  │ .elwindエディタ   │  │ プレビューパネル(WebView) │ │
 │  │ (診断・補完)   │  │  ①静的 / ②操作可能        │ │
 │  └──────────────┘  └─────────────────────────┘ │
 └──────────────────────────────────────────────┘
         │ 保存イベント
         ▼
 ┌──────────────────────────────────────────────┐
-│ rustyuil-analyzer (LSP)                        │
+│ elwindui-languageserver (LSP)                        │
 │  - 増分パース・型検査・制約検証                  │
 │  - プレビュー用インスタンス生成(既定値/モック)   │
 └──────────────────────────────────────────────┘
@@ -696,10 +696,10 @@ mod hot_notepad_ui {
 
 # 付録C. OSネイティブツールキットへのバックエンド抽象化
 
-`.uil`の記述は常に1つに保ち、Windows向けビルドでは**WinUI 3**(Windows App SDK。旧WinUI 2/UWP版とは別系統)、macOS向けビルドでは**AppKit**、Linux向けビルドでは**GTK4**というOS標準ツールキットへ、コンパイル時に振り分けてコード生成する。
+`.elwind`の記述は常に1つに保ち、Windows向けビルドでは**WinUI 3**(Windows App SDK。旧WinUI 2/UWP版とは別系統)、macOS向けビルドでは**AppKit**、Linux向けビルドでは**GTK4**というOS標準ツールキットへ、コンパイル時に振り分けてコード生成する。
 
 ```
-.uil ファイル(共通定義、1つだけ)
+.elwind ファイル(共通定義、1つだけ)
         │
         ▼
 共通AST(フレームワーク非依存)
@@ -733,7 +733,7 @@ OS判定は実行時の`env::os()`(動的定数、実体化時に一度だけ確
 
 ## C.2 論理要素 ⇔ 各ネイティブAPIのマッピング
 
-| RustyUIL論理要素 | WinUI 3 backend | AppKit backend | GTK4 backend |
+| ElwindUIL論理要素 | WinUI 3 backend | AppKit backend | GTK4 backend |
 |---|---|---|---|
 | `Window { title, ... }` | `Microsoft::UI::Xaml::Window` | `NSWindow` | `gtk::ApplicationWindow` |
 | `Button { text, on_click }` | `Microsoft::UI::Xaml::Controls::Button` | `NSButton` | `gtk::Button` |
@@ -817,9 +817,9 @@ view NotepadWindow {
 
 | 項目 | 担当 |
 |---|---|
-| `.uil`の記述 | 常に1つ、プラットフォーム分岐は原則書かない |
+| `.elwind`の記述 | 常に1つ、プラットフォーム分岐は原則書かない |
 | どのOSでどのツールキットを使うか | `#![backend(native)]` またはビルドターゲット別の明示指定(`winui3`/`appkit`/`gtk4`) |
-| 論理要素→具体API変換 | 各バックエンドクレート(`rustyuil-winui3`, `rustyuil-appkit`, `rustyuil-gtk4`) |
+| 論理要素→具体API変換 | 各バックエンドクレート(`elwindui-winui3`, `elwindui-appkit`, `elwindui-gtk4`) |
 | OSごとの見た目差 | `style { select(..., backend == ...) }` |
 | OS固有機能の直接利用 | `#[cfg(backend = "...")]` + `native!` |
 | プロパティ変更の反映方式 | バックエンドが保持モードAPIへの更新呼び出しとして生成、DSL側の`param`/`prop`定義は不変 |
@@ -828,7 +828,7 @@ view NotepadWindow {
 
 # 付録D. バックエンド種別の静的定数(`target::backend()`)
 
-フレームワーク種別(WinUI 3 / AppKit / GTK4 / egui / iced 等)を、`.uil`ファイル内の式から直接参照できる**コンパイル時静的定数**として扱う。これにより、抽象化されたコンポーネント定義を**1つの`.uil`ファイル内で完結**させられる。
+フレームワーク種別(WinUI 3 / AppKit / GTK4 / egui / iced 等)を、`.elwind`ファイル内の式から直接参照できる**コンパイル時静的定数**として扱う。これにより、抽象化されたコンポーネント定義を**1つの`.elwind`ファイル内で完結**させられる。
 
 ## D.1 `Backend` enumと`target::backend()`
 
@@ -857,7 +857,7 @@ enum Backend {
 ## D.2 1ファイルで完結する抽象コンポーネント定義
 
 ```rust
-// components/notepad_window.uil
+// components/notepad_window.elwind
 component NotepadWindow {
     #[param]
     chrome_style: ChromeStyle = match target::backend() {
@@ -906,7 +906,7 @@ style {
 `target::backend()`はコード生成器がビルド設定から得た値へ定数畳み込みし、該当しない分岐(他backend向けの`native!`ブロック等)は生成対象から静的に除去する。実行バイナリには不要な分岐コードが一切残らない。
 
 ```rust
-// rustyuil_codegen 内部(擬似)
+// elwindui_codegen 内部(擬似)
 const fn resolve_backend() -> Backend {
     #[cfg(feature = "backend-winui3")] { Backend::Winui3 }
     #[cfg(feature = "backend-appkit")] { Backend::Appkit }
@@ -919,7 +919,7 @@ const fn resolve_backend() -> Backend {
 | 概念 | 役割 | 確定タイミング |
 |---|---|---|
 | `#![backend(native)]` / `#![backend(winui3)]`(付録A・C) | どのコード生成器(crate)を使うかというビルド設定 | ビルド構成時 |
-| `target::backend()`(本付録) | その結果を`.uil`の式中から参照するための静的定数 | コンパイル時(式に畳み込み) |
+| `target::backend()`(本付録) | その結果を`.elwind`の式中から参照するための静的定数 | コンパイル時(式に畳み込み) |
 
 両者は役割が異なるため併存する。前者はプロジェクト全体・ファイル単位のビルド設定、後者はコンポーネント定義内部の条件分岐に使う窓口である。
 
@@ -1329,7 +1329,7 @@ NotepadWindow
 | `Dropdown` / `Option` | `Vec<Option>`という複合型プロパティ、backendごとの選択状態同期 |
 | `Rect` | `Backend::Egui`/`Backend::Iced`でのみ到達、他backendでは`unreachable!()` |
 
-これらの標準ビルトイン実装は、通常はコード生成器(`rustyuil-codegen`)が内部に持ち利用者が直接編集する必要はないが、`#[overrides(builtin::X)]`(付録E)を使うことで、プロジェクト固有の要件に応じて安全に差し替えられる。
+これらの標準ビルトイン実装は、通常はコード生成器(`elwindui-codegen`)が内部に持ち利用者が直接編集する必要はないが、`#[overrides(builtin::X)]`(付録E)を使うことで、プロジェクト固有の要件に応じて安全に差し替えられる。
 
 ---
 
@@ -1339,9 +1339,9 @@ NotepadWindow
 
 ## G.1 基本方針
 
-- レイアウト(どこに何を置くか)は引き続き宣言的な`.uil`で書く
+- レイアウト(どこに何を置くか)は引き続き宣言的な`.elwind`で書く
 - 描画内容(何をどう塗るか)は宣言的に書かず、`Painter`という抽象描画APIを受け取るRust関数として書く
-- `Painter`はバックエンドごとの実描画API(Direct2D/Win2D, Core Graphics, Cairo, egui::Painter等)を裏で呼ぶ薄い抽象化層であり、`rustyuil-core`(付録H参照)に属する
+- `Painter`はバックエンドごとの実描画API(Direct2D/Win2D, Core Graphics, Cairo, egui::Painter等)を裏で呼ぶ薄い抽象化層であり、`elwindui-core`(付録H参照)に属する
 
 ```rust
 use painters::volume_meter::draw_meter;
@@ -1438,11 +1438,11 @@ view Canvas {
 
 ## G.4 描画コードのRustファイル分離
 
-`on_paint`のようなコールバックは`on_click`と同じく、`.uil`側は関数参照のみを持ち、実装は通常のRustファイルに分離する。
+`on_paint`のようなコールバックは`on_click`と同じく、`.elwind`側は関数参照のみを持ち、実装は通常のRustファイルに分離する。
 
 ```rust
-// src/painters/volume_meter.rs (通常のRustファイル、.uilの外)
-use rustyuil::painter::{Painter, Rect, Color};
+// src/painters/volume_meter.rs (通常のRustファイル、.elwindの外)
+use elwindui::painter::{Painter, Rect, Color};
 
 pub fn draw_meter(p: &mut Painter, level: f64) {
     p.fill_rect(Rect::new(0.0, 0.0, 200.0, 40.0), Color::hex("#eeeeee"));
@@ -1455,9 +1455,9 @@ pub fn draw_meter(p: &mut Painter, level: f64) {
 
 ```
 src/
-├── ui/                       # .uil本体(レイアウト定義)
-│   ├── notepad_window.uil
-│   └── volume_meter.uil
+├── ui/                       # .elwind本体(レイアウト定義)
+│   ├── notepad_window.elwind
+│   └── volume_meter.elwind
 ├── painters/                 # 描画ロジック(通常のRust、バックエンド共通実装)
 │   ├── volume_meter.rs
 │   ├── knob.rs
@@ -1466,9 +1466,9 @@ src/
     └── document.rs
 ```
 
-`Painter`が既にバックエンド差異を吸収しているため、`painters/*.rs`は原則1ファイル1実装で全バックエンドに対応できる。`use painters::volume_meter::draw_meter;` は12章の`use`構文をそのまま使い、参照先が`.uil`か`.rs`かはパスからコンパイラが自動判別する。
+`Painter`が既にバックエンド差異を吸収しているため、`painters/*.rs`は原則1ファイル1実装で全バックエンドに対応できる。`use painters::volume_meter::draw_meter;` は12章の`use`構文をそのまま使い、参照先が`.elwind`か`.rs`かはパスからコンパイラが自動判別する。
 
-`Painter`で表現しきれないネイティブ専用描画がどうしても必要な場合のみ、`painters/<name>/`をディレクトリ化しRust標準の`#[cfg(feature = "backend-...")]`で分岐する。これは`.uil`の文法ではなく通常のRustコード側の関心事であるため、`target::backend()`ではなくRust標準のcfg機構を使う。
+`Painter`で表現しきれないネイティブ専用描画がどうしても必要な場合のみ、`painters/<name>/`をディレクトリ化しRust標準の`#[cfg(feature = "backend-...")]`で分岐する。これは`.elwind`の文法ではなく通常のRustコード側の関心事であるため、`target::backend()`ではなくRust標準のcfg機構を使う。
 
 ## G.5 再描画のトリガーとアニメーション
 
@@ -1572,19 +1572,19 @@ view VolumeSlider {
 
 # 付録H. コアランタイム(レイアウト・フォーカス・アクセシビリティ)
 
-Button/Textのような個別ウィジェットの抽象化(付録F・G)とは別レイヤーとして、WinUI 3の`Composition`/`UIAutomation`/`Measure-Arrange`に相当する共通基盤を`rustyuil-core`として定義し、各バックエンドがこれを実装する。
+Button/Textのような個別ウィジェットの抽象化(付録F・G)とは別レイヤーとして、WinUI 3の`Composition`/`UIAutomation`/`Measure-Arrange`に相当する共通基盤を`elwindui-core`として定義し、各バックエンドがこれを実装する。
 
 ## H.1 全体構造
 
 ```
-.uil (component/view)
+.elwind (component/view)
         │
         ▼
 Element ツリー(13章で定義済み)
         │
         ▼
 ┌─────────────────────────────────────────┐
-│ RustyUIL Core Runtime(rustyuil-core)      │
+│ ElwindUIL Core Runtime(elwindui-core)      │
 │  ├─ LayoutEngine      (制約ベースのMeasure/Arrange) │
 │  ├─ FocusManager      (フォーカス移動・トラップ)     │
 │  ├─ AccessibilityTree (UIAツリー相当)              │
@@ -1610,8 +1610,8 @@ trait LayoutNode {
 ```
 
 - `Stack`(付録F.2)や`Canvas`(付録G)を含む全ビルトインがこのトレイトを実装する
-- `.uil`側では既存の`width`/`height`/`spacing`等の属性がそのままMeasure/Arrangeの入力になり、新しい構文は不要
-- レイアウト計算自体は`rustyuil-core`内の共通実装(1つのRustクレート)で行い、バックエンドは計算結果(確定した矩形座標)を受け取ってネイティブAPIに反映するだけ、という役割分担にする
+- `.elwind`側では既存の`width`/`height`/`spacing`等の属性がそのままMeasure/Arrangeの入力になり、新しい構文は不要
+- レイアウト計算自体は`elwindui-core`内の共通実装(1つのRustクレート)で行い、バックエンドは計算結果(確定した矩形座標)を受け取ってネイティブAPIに反映するだけ、という役割分担にする
 
 | バックエンド | レイアウト計算の主体 |
 |---|---|
@@ -1634,7 +1634,7 @@ trait FocusManager {
 enum FocusDirection { Next, Previous, Up, Down, Left, Right }
 ```
 
-**`.uil`側の属性:**
+**`.elwind`側の属性:**
 
 ```rust
 component LoginForm {
@@ -1663,7 +1663,7 @@ trait AccessibilityNode {
 enum AccessibilityRole { Button, TextInput, CheckBox, Slider, StaticText, ... }
 ```
 
-**`.uil`側の属性:**
+**`.elwind`側の属性:**
 
 ```rust
 Button {
@@ -1688,15 +1688,15 @@ Button {
 ## H.5 Core Runtimeの位置づけ(クレート構成)
 
 ```
-rustyuil-core           # Element, LayoutEngine, FocusManager, AccessibilityTree, InputRouter, Painter(共通・バックエンド非依存)
-rustyuil-backend-winui3 # rustyuil-coreを実装 + windows-rsでネイティブAPIに橋渡し
-rustyuil-backend-appkit # 同上、objc2経由
-rustyuil-backend-gtk4   # 同上、gtk-rs経由
-rustyuil-backend-egui   # 同上 + accesskitでa11y補完
-rustyuil-backend-iced   # 同上 + accesskitでa11y補完
+elwindui-core           # Element, LayoutEngine, FocusManager, AccessibilityTree, InputRouter, Painter(共通・バックエンド非依存)
+elwindui-backend-winui3 # elwindui-coreを実装 + windows-rsでネイティブAPIに橋渡し
+elwindui-backend-appkit # 同上、objc2経由
+elwindui-backend-gtk4   # 同上、gtk-rs経由
+elwindui-backend-egui   # 同上 + accesskitでa11y補完
+elwindui-backend-iced   # 同上 + accesskitでa11y補完
 ```
 
-`.uil`コンパイラが生成するコードは常に`rustyuil-core`のトレイト境界に対して書かれ、実行時にどのバックエンドクレートがリンクされるかで実体が決まる(付録D`target::backend()`と対応)。
+`.elwind`コンパイラが生成するコードは常に`elwindui-core`のトレイト境界に対して書かれ、実行時にどのバックエンドクレートがリンクされるかで実体が決まる(付録D`target::backend()`と対応)。
 
 ## H.6 まとめ
 
@@ -1704,8 +1704,8 @@ rustyuil-backend-iced   # 同上 + accesskitでa11y補完
 |---|---|
 | フォーカス管理の共通化 | `FocusManager`トレイト + `#[focus(order/trap)]`属性、ネイティブ系はOS機構とミラー同期 |
 | アクセシビリティの共通化 | `AccessibilityNode`トレイト + `#[accessible(role/label/state)]`属性、egui/iced系は`accesskit`で補完 |
-| レイアウト計算の共通化 | `LayoutNode`(Measure/Arrange)を`rustyuil-core`で一元計算し、バックエンド間の見た目のズレを防止 |
-| WinUI3ライクな基盤全体 | `rustyuil-core`という共通クレートに集約し、各バックエンドがこれを実装する構成 |
+| レイアウト計算の共通化 | `LayoutNode`(Measure/Arrange)を`elwindui-core`で一元計算し、バックエンド間の見た目のズレを防止 |
+| WinUI3ライクな基盤全体 | `elwindui-core`という共通クレートに集約し、各バックエンドがこれを実装する構成 |
 | 独自部品(付録G)との整合 | `Canvas`ベースの部品は`#[accessible(...)]`の明示を推奨(付けない場合は静的警告) |
 
 ---
@@ -2286,7 +2286,7 @@ trait Painter {
 
 ## N.8 まとめ
 
-| WinUI3相当の機能 | RustyUILでの対応 |
+| WinUI3相当の機能 | ElwindUILでの対応 |
 |---|---|
 | ブラシ(単色/グラデーション/画像/Acrylic) | `Brush` enum + `fill_rect_brush`/`stroke_path_brush` |
 | ジオメトリ(ベジエ・弧・線スタイル) | `Path` + `StrokeStyle`(cap/join/dash) |
@@ -2297,17 +2297,17 @@ trait Painter {
 | キーフレームアニメーション | `KeyframeAnimation`(`Canvas`内で手続き的に使用) |
 | リッチテキスト | `TextRun` + `draw_rich_text` |
 
-いずれもG.2で定義した`Painter`トレイトの拡張メソッド・付随データ型として`rustyuil-core`(付録H)に属し、バックエンドごとの実装差はG.3の原則通り`builtin::Canvas`内部にのみ許可される。GTK4のように一部エフェクト(Acrylic/Blur)が未対応のバックエンドでは、静的警告(14章ルール17)とともに単色/効果無しへのフォールバック描画が行われる。
+いずれもG.2で定義した`Painter`トレイトの拡張メソッド・付随データ型として`elwindui-core`(付録H)に属し、バックエンドごとの実装差はG.3の原則通り`builtin::Canvas`内部にのみ許可される。GTK4のように一部エフェクト(Acrylic/Blur)が未対応のバックエンドでは、静的警告(14章ルール17)とともに単色/効果無しへのフォールバック描画が行われる。
 
 ---
 
 # 付録O. MVVM対応
 
-WinUI3/WPF由来のMVVM(Model-View-ViewModel)パターンをRustyUILに導入する。Rustの所有権モデルはC#のようなイベントデリゲート主体のMVVM実装と相性が悪いため、**新しい実行時機構を作らず、既存の`#[computed]`(4章、静的依存関係抽出)と`store`(付録J)の仕組みを再利用する**ことで、動的ディスパッチや参照カウント地獄を避けた低オーバーヘッドな実装にする。
+WinUI3/WPF由来のMVVM(Model-View-ViewModel)パターンをElwindUILに導入する。Rustの所有権モデルはC#のようなイベントデリゲート主体のMVVM実装と相性が悪いため、**新しい実行時機構を作らず、既存の`#[computed]`(4章、静的依存関係抽出)と`store`(付録J)の仕組みを再利用する**ことで、動的ディスパッチや参照カウント地獄を避けた低オーバーヘッドな実装にする。
 
 ## O.1 設計方針:M/V/VMの対応関係
 
-| MVVMの層 | RustyUILでの対応 |
+| MVVMの層 | ElwindUILでの対応 |
 |---|---|
 | Model | 通常のRust構造体、または`store`(付録J、アプリ全体の永続的データ) |
 | ViewModel | 本付録で定義する`viewmodel`(Viewに紐づく表示用データ+操作) |
@@ -2426,11 +2426,11 @@ view NotepadWindow {
 
 ## O.5 低オーバーヘッドな内部表現
 
-C#のMVVM実装は`INotifyPropertyChanged`イベント+ボックス化されたデリゲートに依存し、実行時のイベント購読・発火コストと動的ディスパッチを伴う。RustyUILでは以下の方針でこれを避ける。
+C#のMVVM実装は`INotifyPropertyChanged`イベント+ボックス化されたデリゲートに依存し、実行時のイベント購読・発火コストと動的ディスパッチを伴う。ElwindUILでは以下の方針でこれを避ける。
 
 **1. 依存関係はコンパイル時に静的抽出する(4章の`#[computed]`と同一の仕組み)**
 
-`window_title`が`file_name`に依存する、`char_count`が`content`に依存する、といった関係は`.uil`のAST解析時点で判明しているため、実行時に依存グラフを構築・走査する必要がない。コード生成器は「`content`が変化したら`char_count`と`command!`の`can_execute`を直接呼び出して再計算する」という**具体的な更新関数を静的に生成**する。これは動的な購読リスト(`Vec<Box<dyn Fn()>>`等)を持たない。
+`window_title`が`file_name`に依存する、`char_count`が`content`に依存する、といった関係は`.elwind`のAST解析時点で判明しているため、実行時に依存グラフを構築・走査する必要がない。コード生成器は「`content`が変化したら`char_count`と`command!`の`can_execute`を直接呼び出して再計算する」という**具体的な更新関数を静的に生成**する。これは動的な購読リスト(`Vec<Box<dyn Fn()>>`等)を持たない。
 
 **2. `#[observable]`フィールドは`Cell<T>`/`Copy`前提の生成コードにする**
 
@@ -2453,7 +2453,7 @@ struct NotepadViewModel {
 
 **4. 複雑な相互依存がある場合のフォールバック**
 
-依存関係が動的(実行時にしか確定しない参照パス等)で静的解析が困難なケースに限り、`rustyuil-core`が提供する小さな汎用リアクティブグラフ(スロットマップ+世代インデックスによる`SignalId`、Leptos/Xilem系のリアクティブランタイムと同様の設計)にフォールバックする。ただし本付録で示した通常のMVVM用途(observable + computed + command)では、このフォールバックは基本的に発生しない。
+依存関係が動的(実行時にしか確定しない参照パス等)で静的解析が困難なケースに限り、`elwindui-core`が提供する小さな汎用リアクティブグラフ(スロットマップ+世代インデックスによる`SignalId`、Leptos/Xilem系のリアクティブランタイムと同様の設計)にフォールバックする。ただし本付録で示した通常のMVVM用途(observable + computed + command)では、このフォールバックは基本的に発生しない。
 
 ## O.6 テスト容易性
 
@@ -2470,7 +2470,7 @@ fn save_disables_command_while_saving() {
 }
 ```
 
-これはMVVMパターン本来の利点(表示ロジックと業務ロジックの分離によるテスト容易性)を、RustyUILでも通常の`#[test]`だけで実現できることを意味する。
+これはMVVMパターン本来の利点(表示ロジックと業務ロジックの分離によるテスト容易性)を、ElwindUILでも通常の`#[test]`だけで実現できることを意味する。
 
 ## O.7 `store`(付録J)との関係
 
@@ -2561,7 +2561,7 @@ save: Command = command!(async || {
 
 ## P.5 実行基盤
 
-`rustyuil-core`(付録H)はホストアプリの非同期ランタイム(tokio/async-std、またはOS標準のディスパッチキュー)を直接指定せず、`spawn(fut)`という薄い抽象を提供する。各バックエンドクレートがこれを実際のランタイムに橋渡しする。
+`elwindui-core`(付録H)はホストアプリの非同期ランタイム(tokio/async-std、またはOS標準のディスパッチキュー)を直接指定せず、`spawn(fut)`という薄い抽象を提供する。各バックエンドクレートがこれを実際のランタイムに橋渡しする。
 
 | バックエンド | 橋渡し先 |
 |---|---|
@@ -2578,7 +2578,7 @@ save: Command = command!(async || {
 | propの非同期算出 | `#[async_computed]` + `task!(async { ... })` |
 | 非同期Command(多重実行防止込み) | `#[command(async, can_execute: ...)]` + `command!(async || { ... })` |
 | キャンセル | `#[command(async, cancellable)]` + `vm.command.cancel()` |
-| ランタイム統合 | `rustyuil-core::spawn`を各バックエンドがホストの非同期基盤に橋渡し |
+| ランタイム統合 | `elwindui-core::spawn`を各バックエンドがホストの非同期基盤に橋渡し |
 
 ---
 
@@ -2631,7 +2631,7 @@ VirtualList {
 | WinUI3 | `ItemsRepeater` + `VirtualizingLayout` |
 | AppKit | `NSTableView` / `NSCollectionView`(セル再利用機構をそのまま利用) |
 | GTK4 | `gtk::ListView` + `GListModel`(GTK4は元々仮想化前提の設計) |
-| egui / iced | `rustyuil-core`の`LayoutEngine`(付録H.2)がビューポート情報を持ち、表示範囲外の`render_item`呼び出し自体をスキップする |
+| egui / iced | `elwindui-core`の`LayoutEngine`(付録H.2)がビューポート情報を持ち、表示範囲外の`render_item`呼び出し自体をスキップする |
 
 ## Q.6 まとめ
 
@@ -2766,7 +2766,7 @@ save: Command = command!(|| {
 
 ## S.4 デフォルトフォールバック
 
-`ErrorBoundary`で囲まれていない箇所でエラーが発生した場合、`rustyuil-core`が提供する既定のエラー画面(デバッグビルドでは詳細なスタック情報、リリースビルドでは簡潔なメッセージ)に切り替わり、アプリ全体のクラッシュを防ぐ。
+`ErrorBoundary`で囲まれていない箇所でエラーが発生した場合、`elwindui-core`が提供する既定のエラー画面(デバッグビルドでは詳細なスタック情報、リリースビルドでは簡潔なメッセージ)に切り替わり、アプリ全体のクラッシュを防ぐ。
 
 ## S.5 まとめ
 
@@ -2775,7 +2775,7 @@ save: Command = command!(|| {
 | サブツリー単位のエラー捕捉 | `ErrorBoundary { fallback: \|err\| ..., children }` |
 | Command実行時のエラー捕捉 | `#[command(catches: ErrorType)]`(同期)、付録P(非同期)と対になる仕組み |
 | ネイティブ境界のパニック対策 | ネイティブAPI呼び出しは`Result`化を必須とし、`catch_unwind`は純粋Rustロジックの範囲に限定 |
-| 未捕捉時の挙動 | `rustyuil-core`既定のフォールバック画面でクラッシュを防止 |
+| 未捕捉時の挙動 | `elwindui-core`既定のフォールバック画面でクラッシュを防止 |
 
 ---
 
@@ -2900,7 +2900,7 @@ content: String = String::new(),
 #[test]
 fn notepad_initial_view_matches_snapshot() {
     let vm = NotepadViewModel::new();
-    let tree = rustyuil_test::render_tree(&NotepadWindow { vm });
+    let tree = elwindui_test::render_tree(&NotepadWindow { vm });
     assert_snapshot!(tree);
 }
 ```
@@ -2913,7 +2913,7 @@ fn notepad_initial_view_matches_snapshot() {
 ```rust
 #[test]
 fn knob_renders_correctly_at_half_value() {
-    let image = rustyuil_test::render_canvas_snapshot(|p| draw_knob(p, 0.5), Size::new(60.0, 60.0));
+    let image = elwindui_test::render_canvas_snapshot(|p| draw_knob(p, 0.5), Size::new(60.0, 60.0));
     assert_image_snapshot!(image);
 }
 ```
@@ -2956,7 +2956,7 @@ fn knob_renders_correctly_at_half_value() {
 #![backend(jetpack)]
 ```
 
-| RustyUIL論理要素 | UIKit(iOS) | Android(jni経由) |
+| ElwindUIL論理要素 | UIKit(iOS) | Android(jni経由) |
 |---|---|---|
 | `Window` | `UIWindow` + `UIViewController` | `Activity` + `ComposeView`/`Fragment` |
 | `Button` | `UIButton` | `android.widget.Button` または Compose `Button` |

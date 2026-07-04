@@ -1,0 +1,35 @@
+use elwindui::viewmodel::NotepadViewModel;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+
+    content: String = bind!(vm.content, TwoWay),
+}
+
+view NotepadWindow {
+    Window {
+        title: vm.window_title
+
+        Column {
+            Row {
+                Button {
+                    text: t!("notepad-menu-save")
+                    on_click: vm.save.execute()
+                    enabled: vm.save.can_execute
+                }
+                Button {
+                    text: t!("notepad-menu-open")
+                    on_click: vm.open.execute()
+                }
+            }
+
+            TextArea { text: content }
+
+            Row {
+                Text { text: t!("notepad-status-chars", count: vm.char_count) }
+            }
+        }
+    }
+}

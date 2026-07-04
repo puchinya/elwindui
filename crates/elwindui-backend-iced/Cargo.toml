@@ -1,0 +1,7 @@
+[package]
+name = "elwindui-backend-iced"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+elwindui-core = { path = "../elwindui-core" }

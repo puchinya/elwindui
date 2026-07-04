@@ -1,0 +1,11 @@
+[package]
+name = "elwindui-macros"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+elwindui-codegen = { path = "../elwindui-codegen" }
+quote = "1"

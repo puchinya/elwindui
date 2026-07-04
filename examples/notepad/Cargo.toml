@@ -1,0 +1,15 @@
+[package]
+name = "notepad"
+version.workspace = true
+edition.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+elwindui = { path = "../../crates/elwindui", features = ["backend-appkit"] }
+elwindui-backend-appkit = { path = "../../crates/elwindui-backend-appkit" }
+fluent-bundle = "0.15"
+unic-langid = "0.9"
+
+[build-dependencies]
+elwindui-codegen = { path = "../../crates/elwindui-codegen" }

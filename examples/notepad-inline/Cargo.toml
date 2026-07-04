@@ -1,0 +1,11 @@
+[package]
+name = "notepad-inline"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+elwindui = { path = "../../crates/elwindui", features = ["backend-appkit"] }
+elwindui-backend-appkit = { path = "../../crates/elwindui-backend-appkit" }
+fluent-bundle = "0.15"
+unic-langid = "0.9"

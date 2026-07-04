@@ -1,6 +1,7 @@
-[package]
-name = "elwindui"
+[workspace]
+resolver = "2"
+members = ["crates/*", "examples/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-
-[dependencies]

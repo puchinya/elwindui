@@ -4,32 +4,30 @@ component NotepadWindow {
     #[param]
     #[inject]
     vm: NotepadViewModel,
-
-    content: String = bind!(vm.content, TwoWay),
 }
 
 view NotepadWindow {
     Window {
-        title: vm.window_title
+        title: t!("notepad-app-title")
 
-        Column {
-            Row {
-                Button {
-                    text: t!("notepad-menu-save")
-                    on_click: vm.save.execute()
-                    enabled: vm.save.can_execute
-                }
-                Button {
-                    text: t!("notepad-menu-open")
-                    on_click: vm.open.execute()
+        MenuBar {
+            MenuBarItem {
+                text: t!("notepad-menu-file")
+                Menu {
+                    MenuItem { text: t!("notepad-menu-new"), shortcut: "n", on_select: vm.new_tab.execute() }
+                    MenuItem { text: t!("notepad-menu-open"), shortcut: "o", on_select: vm.open.execute() }
+                    MenuItem { text: t!("notepad-menu-save"), shortcut: "s", on_select: vm.save.execute(), enabled: vm.save.can_execute }
                 }
             }
+        }
 
-            TextArea { text: content }
-
-            Row {
-                Text { text: t!("notepad-status-chars", count: vm.char_count) }
-            }
+        TabView {
+            tabs: vm.documents
+            selected: vm.active_tab
+            on_select: vm.select_tab
+            on_close: vm.close_tab
+            on_new_tab: vm.new_tab.execute()
+            closable: true
         }
     }
 }

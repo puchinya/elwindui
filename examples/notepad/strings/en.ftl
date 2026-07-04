@@ -1,4 +1,5 @@
-notepad-window-title = { $file_name }
-notepad-menu-save = Save
+notepad-app-title = Notepad
+notepad-menu-file = File
+notepad-menu-new = New
 notepad-menu-open = Open
-notepad-status-chars = { $count } chars
+notepad-menu-save = Save

@@ -84,8 +84,11 @@ pub struct FieldDef {
 pub enum Initializer {
     /// `bind!(vm.content, TwoWay)`. See §10.
     Bind { path: Vec<String>, mode: String },
-    /// `command!(|| { ... })`. See 付録O.3.
-    Command(syn::Block),
+    /// `command!(|| { ... })` / `command!(|index: usize| { ... })`. `params` is empty for the
+    /// common zero-arg case; a parameterized command (needed so e.g. `TabView`'s per-tab
+    /// close/select callbacks can pass an index through to a `Command`) generates
+    /// `pub fn X_execute(&self, index: usize)` instead of the zero-arg form. See 付録O.3.
+    Command { params: Vec<(String, syn::Type)>, body: syn::Block },
     /// Any other initializer expression (literals, `String::new()`, `content.chars().count()
     /// as i32`, `t!(...)`, ...), parsed as a real `syn::Expr`.
     Expr(syn::Expr),

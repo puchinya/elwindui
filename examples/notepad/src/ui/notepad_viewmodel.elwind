@@ -1,6 +1,9 @@
 enum SaveState { Unsaved, Saving, Saved }
 
-viewmodel NotepadViewModel {
+// One open document. Held as `Rc<Document>` inside `NotepadViewModel.documents` (see
+// docs/elwindui_builtins_spec.md 付録Y.2) so each tab's edits reach the same shared instance
+// rather than a throwaway clone.
+viewmodel Document {
     #[observable]
     #[length(0..=100000)]
     content: String = String::new(),
@@ -16,27 +19,57 @@ viewmodel NotepadViewModel {
 
     #[computed]
     char_count: i32 = content.chars().count() as i32,
+}
 
-    #[computed]
-    window_title: String = t!("notepad-window-title", file_name: file_name),
+viewmodel NotepadViewModel {
+    #[observable]
+    documents: Vec<Document> = Vec::new(),
 
-    #[command(async, can_execute: state != SaveState::Saving)]
+    #[observable]
+    active_tab: usize = 0,
+
+    #[command]
+    new_tab: Command = command!(|| {
+        documents.push(std::rc::Rc::new(Document::new()));
+        active_tab = documents.len() - 1;
+    }),
+
+    #[command]
+    close_tab: Command = command!(|index: usize| {
+        if documents.len() > 1 {
+            documents.remove(index);
+            if active_tab >= documents.len() {
+                active_tab = documents.len() - 1;
+            }
+        }
+    }),
+
+    #[command]
+    select_tab: Command = command!(|index: usize| {
+        active_tab = index;
+    }),
+
+    // `documents.len() > 0` (rather than indexing into the active document's `state`) so this is
+    // safe to evaluate even in the brief window right after construction, before `main.rs` has
+    // called `new_tab_execute()` to open the first tab.
+    #[command(async, can_execute: documents.len() > 0)]
     save: Command = command!(async || {
-        state = SaveState::Saving;
-        let path = if current_path.is_empty() {
+        let doc = documents[active_tab].clone();
+        doc.set_state(SaveState::Saving);
+        let path = if doc.current_path().is_empty() {
             platform::file_dialog::save().await
         } else {
-            Some(std::path::PathBuf::from(current_path.clone()))
+            Some(std::path::PathBuf::from(doc.current_path()))
         };
         match path {
             Some(path) => {
-                let _ = std::fs::write(&path, content.clone());
-                file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                current_path = path.to_string_lossy().to_string();
-                state = SaveState::Saved;
+                let _ = std::fs::write(&path, doc.content());
+                doc.set_file_name(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                doc.set_current_path(path.to_string_lossy().to_string());
+                doc.set_state(SaveState::Saved);
             }
             None => {
-                state = SaveState::Unsaved;
+                doc.set_state(SaveState::Unsaved);
             }
         }
     }),
@@ -44,10 +77,11 @@ viewmodel NotepadViewModel {
     #[command(async)]
     open: Command = command!(async || {
         if let Some(path) = platform::file_dialog::open().await {
-            content = std::fs::read_to_string(&path).unwrap_or_default();
-            file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            current_path = path.to_string_lossy().to_string();
-            state = SaveState::Unsaved;
+            let doc = documents[active_tab].clone();
+            doc.set_content(std::fs::read_to_string(&path).unwrap_or_default());
+            doc.set_file_name(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+            doc.set_current_path(path.to_string_lossy().to_string());
+            doc.set_state(SaveState::Unsaved);
         }
     }),
 }

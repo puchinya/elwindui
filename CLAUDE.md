@@ -6,14 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to multiple backends (egui/iced, or native OS toolkits WinUI 3 / AppKit / GTK4). The project is currently at the **specification stage only** — `src/main.rs` is still the default `cargo new` stub and `Cargo.toml` has no dependencies. There is no parser, codegen, or runtime implemented yet.
 
-The authoritative source of truth is `docs/elwindui_spec.md` (written in Japanese, ~3000 lines). Any implementation work (parser, codegen, LSP, runtime library) must conform to it. It is long — read the relevant section rather than the whole file. Section map (grep the file for these headers):
+The authoritative source of truth is `docs/elwindui_spec.md` (written in Japanese, core language:
+`component`/`view`, `param`/`prop`, control flow, static verification rules, etc.), plus
+`docs/elwindui_builtins_spec.md` — split out from the same doc because it had grown too large —
+which covers every `builtin::`-namespace UI element and `platform::`-namespace OS API. Both are
+long — read the relevant section rather than the whole file. Section map (grep each file for these
+headers):
 
+`docs/elwindui_spec.md` (core language/runtime, no builtin-widget catalog):
 - §1–§15 — core language: `component`/`view` split, `param`/`prop`, control flow, `style`, constraints, `enum`, `env::*`/`once`, `bind!`, i18n (Fluent), imports, the `Element` trait, and the full list of ~24 static verification rules (§14) a future compiler/linter must implement.
-- 付録A/C/D/E/F — backend abstraction: common AST → per-backend codegen, `target::backend()` compile-time constant, the `builtin::` namespace and `#[overrides(builtin::X)]` rule, reference implementations of `Window`/`Row`/`Column`/`Text`/`TextArea`/`Dropdown`.
+- 付録A/C/D — backend abstraction: common AST → per-backend codegen, `target::backend()` compile-time constant.
+- 付録E — the `builtin::` namespace and `#[overrides(builtin::X)]` override rule (static verification only; the builtins themselves are in `elwindui_builtins_spec.md` 付録F).
 - 付録B — toolchain: `.elwind` → Rust via `build.rs` codegen (or proc-macro), `elwindui-languageserver` LSP, 3-tier live preview, hot-reload semantics.
-- 付録G/H — custom drawing (`Canvas`/`Painter`), core runtime (layout/focus/accessibility).
-- 付録J/O — `store` (global/scoped shared state) and `viewmodel`/`Command` (MVVM), both reusing `component`'s field syntax rather than introducing new mechanisms.
-- 付録L/M/N/Q/R/K/T/U/W — navigation, dialogs/menus, animation/effects, list virtualization, theming, keyboard shortcuts, clipboard/DnD, undo/redo, mobile lifecycle.
+- 付録H — core runtime (layout/focus/accessibility), consumed by builtins but not itself a widget.
+- 付録I/J/K/O/P/R/S/U/V/W — lifecycle hooks, `store` (global/scoped shared state), keyboard shortcut *attribute*, `viewmodel`/`Command` (MVVM), async, theme/design tokens, error boundaries, undo/redo, snapshot testing, mobile lifecycle.
+
+`docs/elwindui_builtins_spec.md` (every concrete `builtin::`/`platform::` element):
+- 付録F — reference implementations of `Window`/`Row`/`Column`/`Text`/`TextArea`/`Dropdown`.
+- 付録G/N — custom drawing (`Canvas`/`Painter`) and its Composition-style extensions (gradients/shadows/transforms/animation).
+- 付録L — `NavigationHost`/`Route` screen navigation.
+- 付録M — `Dialog`/`Menu`/`MenuItem`/`Tooltip` (dialogs, context menus, tooltips).
+- 付録Q — `VirtualList` (large-list virtualization).
+- 付録T — `platform::clipboard`/`platform::file_dialog`, drag & drop.
+- 付録X/Y — `MenuBar`/`MenuBarItem` (native app menu bar) and `TabView`/`TabItem` (multi-document tabs), added for the notepad example.
 
 ## Core architectural rules to preserve when implementing
 

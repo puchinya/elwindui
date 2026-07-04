@@ -12,9 +12,9 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSScrollView,
-    NSStackView, NSTextDelegate, NSTextField, NSTextView, NSTextViewDelegate,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSMenu,
+    NSMenuItem, NSScrollView, NSStackView, NSTextDelegate, NSTextField, NSTextView,
+    NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
 use std::cell::RefCell;
@@ -32,6 +32,7 @@ pub enum AnyView {
     TextArea(TextArea),
     Button(Button),
     Text(Text),
+    TabView(TabView),
 }
 
 impl AnyView {
@@ -50,6 +51,7 @@ impl AnyView {
                 let view: Retained<NSView> = Retained::into_super(control);
                 view
             }
+            AnyView::TabView(v) => Retained::into_super(v.root.clone()),
         }
     }
 }
@@ -77,6 +79,11 @@ impl From<Button> for AnyView {
 impl From<Text> for AnyView {
     fn from(v: Text) -> Self {
         AnyView::Text(v)
+    }
+}
+impl From<TabView> for AnyView {
+    fn from(v: TabView) -> Self {
+        AnyView::TabView(v)
     }
 }
 
@@ -113,6 +120,11 @@ impl Window {
 
     pub fn set_title(&self, title: &str) {
         self.ns.setTitle(&NSString::from_str(title));
+    }
+
+    /// Sets `NSApplication.mainMenu` (macOS has one global top menu bar, not a per-window one).
+    pub fn set_menu_bar(&self, menu_bar: &MenuBar) {
+        NSApplication::sharedApplication(mtm()).setMainMenu(Some(&menu_bar.ns));
     }
 
     /// Blocking: activates the app and runs the AppKit main loop.
@@ -180,6 +192,14 @@ impl TextArea {
         self.text_view.setString(&NSString::from_str(text));
     }
 
+    /// `NSTextView.delegate` is an unretained (weak) reference, so the delegate this creates is
+    /// only kept alive by `self.delegate_storage`. Since `TextArea` derives `Clone` by sharing
+    /// that `Rc`, the delegate survives as long as *any* clone of this `TextArea` value does —
+    /// but if every clone is dropped (e.g. a caller extracts just the raw `NSView` and discards
+    /// the `TextArea` struct itself), the delegate is deallocated and `on_change` silently stops
+    /// firing, even though typed characters keep appearing on screen (native `NSTextView`
+    /// rendering needs no delegate). Found via `TabView`'s content pane, which used to do exactly
+    /// that — see `TabView::set_content`'s doc comment.
     pub fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
         let m = mtm();
         let ivars = TextDelegateIvars { text_view: self.text_view.clone(), callback };
@@ -249,6 +269,11 @@ impl Button {
         }
         *self.target_storage.borrow_mut() = Some(target);
     }
+
+    /// Used by `TabChip` to rename a tab's title button when its document's file name changes.
+    pub fn set_text(&self, text: &str) {
+        self.ns.setTitle(&NSString::from_str(text));
+    }
 }
 
 struct ButtonTargetIvars {
@@ -291,6 +316,293 @@ impl Text {
 
     pub fn set_text(&self, text: &str) {
         self.ns.setStringValue(&NSString::from_str(text));
+    }
+}
+
+/// See docs/elwindui_builtins_spec.md 付録Y. A single tab's header: a title button (click to
+/// select) plus a small close button, packed into one row so `TabStrip` can insert/remove it as
+/// one unit.
+#[derive(Clone)]
+pub struct TabChip {
+    ns: Retained<NSStackView>,
+    pub title_button: Button,
+    pub close_button: Button,
+}
+
+impl TabChip {
+    fn new(title: &str) -> Self {
+        let title_button = Button::new(title);
+        let close_button = Button::new("×");
+        let ns = new_stack(
+            vec![AnyView::Button(title_button.clone()), AnyView::Button(close_button.clone())],
+            NSUserInterfaceLayoutOrientation::Horizontal,
+        );
+        Self { ns, title_button, close_button }
+    }
+
+    pub fn set_title(&self, title: &str) {
+        self.title_button.set_text(title);
+    }
+}
+
+/// The row of `TabChip`s plus a trailing "+" button. `TabView` owns one of these and the content
+/// area below it; kept as a separate type since 付録Y's backend table describes it as its own
+/// piece (a custom `NSStackView`-based strip, not `NSTabViewController`).
+#[derive(Clone)]
+pub struct TabStrip {
+    ns: Retained<NSStackView>,
+    pub new_tab_button: Button,
+}
+
+impl TabStrip {
+    fn new() -> Self {
+        let new_tab_button = Button::new("+");
+        let ns = new_stack(
+            vec![AnyView::Button(new_tab_button.clone())],
+            NSUserInterfaceLayoutOrientation::Horizontal,
+        );
+        Self { ns, new_tab_button }
+    }
+
+    /// Inserts a chip before the "+" button, at arranged-subview position `index`.
+    fn insert_tab(&self, index: usize, title: &str) -> TabChip {
+        let chip = TabChip::new(title);
+        let view: Retained<NSView> = Retained::into_super(chip.ns.clone());
+        self.ns.insertArrangedSubview_atIndex(&view, index as isize);
+        chip
+    }
+
+    fn remove_tab(&self, chip: &TabChip) {
+        let view: Retained<NSView> = Retained::into_super(chip.ns.clone());
+        self.ns.removeArrangedSubview(&view);
+        view.removeFromSuperview();
+    }
+}
+
+/// See docs/elwindui_builtins_spec.md 付録Y. Vertical stack of `[TabStrip, content_area]`; the
+/// generated code (see `elwindui-codegen`'s specialized `TabView` codegen path) owns the mapping
+/// from the observable tab list to `TabChip`s and calls `set_content` whenever the active tab
+/// changes. This type only holds the two widget areas — it has no notion of "the list of tabs" on
+/// its own, matching how `Column`/`Row` don't know about the data their children came from either.
+#[derive(Clone)]
+pub struct TabView {
+    root: Retained<NSStackView>,
+    pub strip: TabStrip,
+    content_area: Retained<NSStackView>,
+    // Stores the whole `AnyView`, not just its extracted `Retained<NSView>` — a `TextArea`'s
+    // change-notification delegate (`delegate_storage`) only stays alive as long as *some* clone
+    // of that `TextArea` value does (see `TextArea::set_on_change`'s doc comment). Keeping only
+    // the bare `NSView` here would drop the last such clone the moment `set_content` returns,
+    // deallocating the delegate — typed characters would still render (native `NSTextView`
+    // behavior needs no delegate) but `on_change` would silently never fire again, so edits would
+    // never reach the model.
+    current_content: Rc<RefCell<Option<AnyView>>>,
+}
+
+impl TabView {
+    pub fn new() -> Self {
+        let strip = TabStrip::new();
+        let content_area = new_stack(vec![], NSUserInterfaceLayoutOrientation::Vertical);
+        let strip_view: Retained<NSView> = Retained::into_super(strip.ns.clone());
+        let content_view: Retained<NSView> = Retained::into_super(content_area.clone());
+        let root = NSStackView::stackViewWithViews(
+            &objc2_foundation::NSArray::from_retained_slice(&[strip_view, content_view]),
+            mtm(),
+        );
+        root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+        Self { root, strip, content_area, current_content: Rc::new(RefCell::new(None)) }
+    }
+
+    pub fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
+        self.strip.new_tab_button.set_on_click(callback);
+    }
+
+    /// Inserts a new tab chip at `index`, wiring `on_select`/`on_close` to the given callbacks.
+    pub fn insert_tab(
+        &self,
+        index: usize,
+        title: &str,
+        on_select: Box<dyn Fn()>,
+        on_close: Box<dyn Fn()>,
+    ) -> TabChip {
+        let chip = self.strip.insert_tab(index, title);
+        chip.title_button.set_on_click(on_select);
+        chip.close_button.set_on_click(on_close);
+        chip
+    }
+
+    pub fn remove_tab(&self, chip: &TabChip) {
+        self.strip.remove_tab(chip);
+    }
+
+    /// Swaps the single visible document pane for the currently selected tab.
+    pub fn set_content(&self, view: AnyView) {
+        if let Some(old) = self.current_content.borrow_mut().take() {
+            let old_view = old.as_nsview();
+            self.content_area.removeArrangedSubview(&old_view);
+            old_view.removeFromSuperview();
+        }
+        let new_view = view.as_nsview();
+        self.content_area.addArrangedSubview(&new_view);
+        *self.current_content.borrow_mut() = Some(view);
+    }
+}
+
+/// See docs/elwindui_builtins_spec.md 付録X. A single application-wide `NSMenu` (top menu bar
+/// item / `File`, `Edit`, ...), reusing `MenuItem` for its leaf entries.
+#[derive(Clone)]
+pub struct MenuItem {
+    ns: Retained<NSMenuItem>,
+    target_storage: Rc<RefCell<Option<Retained<MenuItemTarget>>>>,
+}
+
+impl MenuItem {
+    pub fn new(title: &str) -> Self {
+        let m = mtm();
+        let ns = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                m.alloc::<NSMenuItem>(),
+                &NSString::from_str(title),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        Self { ns, target_storage: Rc::new(RefCell::new(None)) }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.ns.setEnabled(enabled);
+    }
+
+    /// A bare key character (e.g. `"s"`); macOS defaults a menu item's modifier mask to Cmd,
+    /// which matches the common `Cmd+<letter>` shortcuts notepad needs (付録K.2's platform
+    /// conversion rule already reads "Ctrl" as "Cmd" on macOS at the DSL level).
+    pub fn set_shortcut(&self, key_equivalent: &str) {
+        self.ns.setKeyEquivalent(&NSString::from_str(key_equivalent));
+    }
+
+    pub fn set_on_select(&self, callback: Box<dyn Fn()>) {
+        let target = MenuItemTarget::new(MenuItemTargetIvars { callback });
+        unsafe {
+            self.ns.setTarget(Some(&target));
+            self.ns.setAction(Some(sel!(perform:)));
+        }
+        *self.target_storage.borrow_mut() = Some(target);
+    }
+}
+
+struct MenuItemTargetIvars {
+    callback: Box<dyn Fn()>,
+}
+
+define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[ivars = MenuItemTargetIvars]
+    struct MenuItemTarget;
+
+    unsafe impl NSObjectProtocol for MenuItemTarget {}
+
+    impl MenuItemTarget {
+        #[unsafe(method(perform:))]
+        fn perform(&self, _sender: &AnyObject) {
+            (self.ivars().callback)();
+        }
+    }
+);
+
+impl MenuItemTarget {
+    fn new(ivars: MenuItemTargetIvars) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(ivars);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// A dropdown attached to a `MenuBarItem` (or, per 付録M, a right-click context menu — not used
+/// that way here, but the same type covers both).
+#[derive(Clone)]
+pub struct Menu {
+    ns: Retained<NSMenu>,
+}
+
+impl Menu {
+    pub fn new(items: Vec<MenuItem>) -> Self {
+        let m = mtm();
+        let ns = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
+        for item in &items {
+            ns.addItem(&item.ns);
+        }
+        Self { ns }
+    }
+}
+
+/// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `Menu`.
+#[derive(Clone)]
+pub struct MenuBarItem {
+    ns: Retained<NSMenuItem>,
+}
+
+impl MenuBarItem {
+    pub fn new(title: &str, submenu: Menu) -> Self {
+        let m = mtm();
+        let ns = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                m.alloc::<NSMenuItem>(),
+                &NSString::from_str(title),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        ns.setSubmenu(Some(&submenu.ns));
+        Self { ns }
+    }
+}
+
+/// The whole top menu bar, installed via `Window::set_menu_bar`.
+#[derive(Clone)]
+pub struct MenuBar {
+    ns: Retained<NSMenu>,
+}
+
+impl MenuBar {
+    pub fn new(items: Vec<MenuBarItem>) -> Self {
+        let m = mtm();
+        let ns = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
+
+        // macOS convention: `mainMenu`'s *first* item is always displayed as the bold app name
+        // (whatever title it's given is ignored/overridden by the OS) and its submenu is "the app
+        // menu". Without one, the DSL's first real top-level item (e.g. "File") gets silently
+        // absorbed into that slot instead of showing up as its own menu — so this app-menu slot,
+        // with at minimum a working Quit item, is provided here rather than asked of the DSL
+        // author, since it's a platform detail of `NSApp.mainMenu`, not something 付録X's
+        // `MenuBar`/`MenuBarItem` DSL shape should need to know about.
+        let app_menu_item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                m.alloc::<NSMenuItem>(),
+                &NSString::from_str(""),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        let app_menu = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
+        let quit_item = unsafe {
+            // No target: leaving it nil dispatches through the responder chain to
+            // `NSApplication`, which implements `terminate:` itself — the standard way to wire a
+            // Quit item without the app needing to be its own `NSApplicationDelegate`.
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                m.alloc::<NSMenuItem>(),
+                &NSString::from_str("Quit"),
+                Some(sel!(terminate:)),
+                &NSString::from_str("q"),
+            )
+        };
+        app_menu.addItem(&quit_item);
+        app_menu_item.setSubmenu(Some(&app_menu));
+        ns.addItem(&app_menu_item);
+
+        for item in &items {
+            ns.addItem(&item.ns);
+        }
+        Self { ns }
     }
 }
 

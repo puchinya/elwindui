@@ -202,13 +202,22 @@ impl<'a> Parser<'a> {
             // `command!(async || { ... })` (付録P.4): the `async` marker itself is only tracked
             // via `#[command(async, ...)]` (see `parse_field_def`), so it's simply skipped here.
             let block_src = block_src.strip_prefix("async").map(str::trim).unwrap_or(block_src);
+            // `||` (no params) or `|name: Type|` (single typed param, e.g. `close_tab`'s index).
             let block_src = block_src
                 .strip_prefix("||")
-                .ok_or_else(|| self.err("expected `||` in command!(...)"))?
-                .trim();
-            let block = syn::parse_str::<syn::Block>(block_src)
+                .map(|rest| (Vec::new(), rest))
+                .or_else(|| {
+                    let rest = block_src.strip_prefix('|')?;
+                    let (param_src, rest) = rest.split_once('|')?;
+                    let (name, ty_src) = param_src.split_once(':')?;
+                    let ty = syn::parse_str::<syn::Type>(ty_src.trim()).ok()?;
+                    Some((vec![(name.trim().to_string(), ty)], rest))
+                });
+            let (params, block_src) = block_src
+                .ok_or_else(|| self.err("expected `||` or `|name: Type|` in command!(...)"))?;
+            let block = syn::parse_str::<syn::Block>(block_src.trim())
                 .map_err(|e| format!("invalid command! body: {e}"))?;
-            return Ok(Initializer::Command(block));
+            return Ok(Initializer::Command { params, body: block });
         }
 
         let expr_src = self.take_balanced_until(&[',', '}'])?;
@@ -539,7 +548,7 @@ viewmodel NotepadViewModel {
 
         assert_eq!(vm.fields[5].name, "save");
         assert_eq!(vm.fields[5].kind, FieldKind::Command);
-        assert!(matches!(vm.fields[5].initializer, Some(Initializer::Command(_))));
+        assert!(matches!(vm.fields[5].initializer, Some(Initializer::Command { .. })));
         let has_can_execute = vm.fields[5]
             .attrs
             .iter()

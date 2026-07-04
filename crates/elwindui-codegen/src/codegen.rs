@@ -73,7 +73,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
     for item in &module.items {
         out.extend(match item {
             Item::Enum(e) => generate_enum(e),
-            Item::ViewModel(v) => generate_viewmodel(v),
+            Item::ViewModel(v) => generate_viewmodel(v, table),
             Item::Component(c) if view_targets.contains(c.name.as_str()) => TokenStream::new(),
             Item::Component(c) => generate_component(c, table),
             Item::View(v) => generate_view(v, table),
@@ -163,7 +163,22 @@ fn is_copy_type(ty: &str) -> bool {
     }
 }
 
-fn generate_viewmodel(v: &ViewModelDef) -> TokenStream {
+/// `Vec<Document>` where `Document` is itself a known `component`/`viewmodel` in this compilation
+/// unit: such a field needs `Rc`-wrapped elements (`Vec<Rc<Document>>`) rather than the generic
+/// `is_copy_type`-driven wrapping, because cloning a plain `Vec<Document>` on every getter call
+/// (as every other `#[observable]` field does) would clone each `Document`'s `Cell`/`RefCell`
+/// fields into independent copies — mutating one through the getter's clone would silently not
+/// persist. `Rc` cloning is cheap (a refcount bump) and every clone still refers to the same
+/// shared `Document`, so e.g. a `TabView`'s per-tab `TextArea` edits reach the real stored
+/// document. This is what lets a `viewmodel` hold a dynamic list of independently-reactive
+/// sub-viewmodels (needed for notepad's real multi-document tabs) without a general nested-list
+/// compiler feature; see docs/elwindui_builtins_spec.md 付録Y.2.
+fn nested_vec_item_type(ty: &str, table: &SymbolTable) -> Option<String> {
+    let inner = ty.strip_prefix("Vec<")?.strip_suffix(">")?.trim();
+    table.types.contains_key(inner).then(|| inner.to_string())
+}
+
+fn generate_viewmodel(v: &ViewModelDef, table: &SymbolTable) -> TokenStream {
     let struct_name = format_ident!("{}", v.name);
     let field_names: HashSet<&str> = v.fields.iter().map(|f| f.name.as_str()).collect();
 
@@ -200,6 +215,43 @@ fn generate_viewmodel(v: &ViewModelDef) -> TokenStream {
 
     for f in &v.fields {
         match f.kind {
+            FieldKind::Observable if nested_vec_item_type(&f.ty, table).is_some() => {
+                let field_ident = format_ident!("{}", f.name);
+                let item_ty: syn::Type = syn::parse_str(&nested_vec_item_type(&f.ty, table).unwrap())
+                    .expect("nested viewmodel type name must parse");
+
+                struct_fields.extend(quote! {
+                    #field_ident: std::cell::RefCell<Vec<std::rc::Rc<#item_ty>>>,
+                });
+                ctor_fields.extend(quote! { #field_ident: std::cell::RefCell::new(Vec::new()), });
+
+                let getter = format_ident!("{}", f.name);
+                let pusher = format_ident!("{}_push", f.name);
+                let remover = format_ident!("{}_remove", f.name);
+                let recompute_calls: Vec<_> = dependents_of
+                    .get(&f.name)
+                    .into_iter()
+                    .flatten()
+                    .map(|dep| {
+                        let recompute = format_ident!("recompute_{}", dep);
+                        quote! { self.#recompute(); }
+                    })
+                    .collect();
+
+                accessors.extend(quote! {
+                    pub fn #getter(&self) -> Vec<std::rc::Rc<#item_ty>> {
+                        self.#field_ident.borrow().clone()
+                    }
+                    pub fn #pusher(&self, item: std::rc::Rc<#item_ty>) {
+                        self.#field_ident.borrow_mut().push(item);
+                        #(#recompute_calls)*
+                    }
+                    pub fn #remover(&self, index: usize) {
+                        self.#field_ident.borrow_mut().remove(index);
+                        #(#recompute_calls)*
+                    }
+                });
+            }
             FieldKind::Observable => {
                 let field_ident = format_ident!("{}", f.name);
                 let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
@@ -329,25 +381,31 @@ fn generate_viewmodel(v: &ViewModelDef) -> TokenStream {
                 });
                 recompute_calls_after_new.extend(quote! { instance.#recompute_can_execute(); });
 
-                let Some(Initializer::Command(block)) = &f.initializer else {
+                let Some(Initializer::Command { params, body: block }) = &f.initializer else {
                     panic!("#[command] field `{}` needs a command!(...) initializer", f.name);
                 };
                 let execute_ident = format_ident!("{}_execute", f.name);
                 let rewritten_block = rewrite_command_body(block.clone(), &field_names);
+                let param_decls = params.iter().map(|(name, ty)| {
+                    let ident = format_ident!("{}", name);
+                    quote! { #ident: #ty }
+                });
                 if is_async {
                     // See docs/elwindui_spec.md 付録P.4. `block_on_ready` (emitted once per file,
                     // see `emit_block_on_ready_helper`) only actually supports futures that
                     // resolve on their first poll (e.g. a modal file dialog's `.await`, which
                     // never really suspends) — see that helper's doc comment for what a genuine
-                    // non-blocking `#[command(async)]` still needs.
+                    // non-blocking `#[command(async)]` still needs. `async move` (rather than
+                    // plain `async`) so a parameterized command's argument is captured by value
+                    // into the block, matching 付録O.4's parameterized-command extension.
                     accessors.extend(quote! {
-                        pub fn #execute_ident(&self) {
-                            __elwindui_block_on_ready(async #rewritten_block);
+                        pub fn #execute_ident(&self, #(#param_decls),*) {
+                            __elwindui_block_on_ready(async move #rewritten_block);
                         }
                     });
                 } else {
                     accessors.extend(quote! {
-                        pub fn #execute_ident(&self) #rewritten_block
+                        pub fn #execute_ident(&self, #(#param_decls),*) #rewritten_block
                     });
                 }
             }
@@ -404,8 +462,13 @@ fn referenced_fields(expr: &syn::Expr, field_names: &HashSet<&str>) -> Vec<Strin
         fn visit_expr_macro(&mut self, node: &'a syn::ExprMacro) {
             if node.mac.path.is_ident("t") {
                 if let Ok((_, args)) = parse_t_macro_tokens(&node.mac.tokens) {
+                    // `args`' values are owned locally (parsed fresh from the macro's token
+                    // stream), so they can't be visited via `self.visit_expr` — that requires a
+                    // reference living as long as the outer AST's `'a`. Recurse into the
+                    // free function instead, which is happy to build its own short-lived
+                    // `Collector` over these owned exprs.
                     for (_, value) in &args {
-                        self.visit_expr(value);
+                        self.found.extend(referenced_fields(value, self.field_names));
                     }
                 }
             }
@@ -522,6 +585,30 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>) -> T
                     }
                 }
             }
+            // `documents.push(doc)` / `documents.remove(index)` on a sibling `Vec<NestedVM>`
+            // field: must be special-cased *before* the generic `Expr::Path` fallback below would
+            // otherwise rewrite just the receiver to `self.documents()` (a *cloned* Vec — pushing
+            // to or removing from that clone wouldn't persist). Rewrites the whole call to the
+            // dedicated `documents_push`/`documents_remove` methods `generate_viewmodel` generates
+            // for `Vec<NestedViewModel>` fields (see `nested_vec_item_type`).
+            if let syn::Expr::MethodCall(call) = node {
+                if let syn::Expr::Path(p) = call.receiver.as_ref() {
+                    if let Some(ident) = p.path.get_ident() {
+                        let method = call.method.to_string();
+                        if self.field_names.contains(ident.to_string().as_str())
+                            && (method == "push" || method == "remove")
+                        {
+                            let helper = format_ident!("{}_{}", ident, method);
+                            let mut args = call.args.clone();
+                            for arg in args.iter_mut() {
+                                self.visit_expr_mut(arg);
+                            }
+                            *node = syn::parse_quote! { self.#helper(#args) };
+                            return;
+                        }
+                    }
+                }
+            }
             // `t!(...)` inside a command body: `syn::visit_mut` never descends into a macro's
             // token stream, so this has to be special-cased the same way as
             // `rewrite_t_macro`/`rewrite_t_call` (used for `#[computed]` initializers).
@@ -582,7 +669,7 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                     pub fn #set_name(&self, value: #ty) { self.#owner_ident.#setter(value); }
                 });
             }
-            Some(Initializer::Expr(_)) | Some(Initializer::Command(_)) => {
+            Some(Initializer::Expr(_)) | Some(Initializer::Command { .. }) => {
                 panic!("component field `{}` initializer form not supported yet", f.name);
             }
         }
@@ -653,6 +740,22 @@ fn generate_view(view: &ViewDef, table: &SymbolTable) -> TokenStream {
             struct_fields.extend(quote! { #binding: elwindui_backend_appkit::#ty, });
             field_inits.extend(quote! { #binding: #binding.clone(), });
         }
+        // 付録Y: a `TabView` needs two extra bookkeeping fields beyond the widget handle itself —
+        // see `emit_tabview_resync`'s doc comment for why (chip-rebuild tracking, and remembering
+        // which tab is currently materialized as the content pane so typing doesn't rebuild it).
+        if node.type_path == "TabView" {
+            let binding = &node.binding;
+            let chips_field = format_ident!("{}_chips", binding);
+            let active_field = format_ident!("{}_active", binding);
+            struct_fields.extend(quote! {
+                #chips_field: std::cell::RefCell<Vec<elwindui_backend_appkit::TabChip>>,
+                #active_field: std::cell::RefCell<Option<usize>>,
+            });
+            field_inits.extend(quote! {
+                #chips_field: std::cell::RefCell::new(Vec::new()),
+                #active_field: std::cell::RefCell::new(None),
+            });
+        }
     }
     for node in &plan {
         emit_wiring(node, &ctx, &mut wiring_stmts);
@@ -662,12 +765,35 @@ fn generate_view(view: &ViewDef, table: &SymbolTable) -> TokenStream {
     // `plan_element` pushes children before their parent (post-order), so the root is always last.
     let root_binding = &plan.last().expect("view must have a root element").binding;
 
+    // `resync()` takes `&self`, but `emit_tabview_resync` needs an `Rc<Self>` to hand fresh
+    // per-tab closures a clone to call back into (`this.resync()`) — the standard
+    // weak-self-reference pattern for self-referential callback wiring. Only wired up when a
+    // `TabView` is actually present, so views without one are unaffected.
+    let needs_weak_self = plan.iter().any(|n| n.type_path == "TabView");
+    let (weak_self_field, weak_self_init, weak_self_set) = if needs_weak_self {
+        (
+            quote! { __weak_self: std::cell::RefCell<std::rc::Weak<Self>>, },
+            quote! { __weak_self: std::cell::RefCell::new(std::rc::Weak::new()), },
+            quote! { *this.__weak_self.borrow_mut() = std::rc::Rc::downgrade(&this); },
+        )
+    } else {
+        (TokenStream::new(), TokenStream::new(), TokenStream::new())
+    };
+
     quote! {
         impl #target {
             pub fn new(vm: NotepadViewModel) -> std::rc::Rc<Self> {
                 #construct_stmts
-                let this = std::rc::Rc::new(Self { vm, #field_inits });
+                let this = std::rc::Rc::new(Self { vm, #field_inits #weak_self_init });
+                #weak_self_set
                 #wiring_stmts
+                // Most widgets already read live model state at construction time (e.g.
+                // `TextArea::new(&(vm.content()))`), so this is a no-op for them. `TabView` is the
+                // exception — its actual tab widgets are only ever materialized in `resync()` (see
+                // `emit_tabview_resync`), so without this call a `documents` list populated before
+                // the window existed (as `main.rs` does, calling `new_tab_execute()` first) would
+                // never appear until the first unrelated user interaction.
+                this.resync();
                 this
             }
 
@@ -683,6 +809,7 @@ fn generate_view(view: &ViewDef, table: &SymbolTable) -> TokenStream {
         pub struct #target {
             vm: NotepadViewModel,
             #struct_fields
+            #weak_self_field
         }
     }
 }
@@ -697,6 +824,11 @@ struct PlannedNode {
     type_path: String,
     attributes: Vec<(String, ViewExpr)>,
     child_bindings: Vec<syn::Ident>,
+    /// Parallel to `child_bindings`: each child's `type_path`. Needed by `Window`'s construction
+    /// to tell an optional `MenuBar` child apart from its one required content child (children
+    /// are otherwise only reachable here as opaque bindings, having already been flattened out of
+    /// the original tree).
+    child_types: Vec<String>,
     /// Has a callback and/or a value that can change after construction, so it needs a struct
     /// field (rather than being a construction-time-only local).
     stored: bool,
@@ -710,20 +842,26 @@ impl PlannedNode {
 
 fn plan_element(node: &ElementNode, ctx: &ViewCtx, out: &mut Vec<PlannedNode>, is_root: bool) -> syn::Ident {
     let mut child_bindings = Vec::new();
+    let mut child_types = Vec::new();
     for child in &node.children {
         child_bindings.push(plan_element(child, ctx, out, false));
+        child_types.push(child.type_path.clone());
     }
 
     let binding = format_ident!("__{}_{}", node.type_path.to_lowercase(), out.len());
     // Every interactive/dynamic leaf is stored on `self` so callbacks and `resync()` can reach it
-    // later; `Row`/`Column` are pure containers and never need to be revisited after construction.
-    let stored = is_root || matches!(node.type_path.as_str(), "TextArea" | "Button" | "Text");
+    // later; `Row`/`Column`/`MenuBar`/`MenuBarItem`/`Menu` are pure containers and never need to
+    // be revisited after construction. `MenuItem` needs `on_select` wiring and `enabled` resync,
+    // same as `Button`. `TabView` is dynamic (tabs come and go at runtime), so it's stored too.
+    let stored = is_root
+        || matches!(node.type_path.as_str(), "TextArea" | "Button" | "Text" | "MenuItem" | "TabView");
 
     out.push(PlannedNode {
         binding: binding.clone(),
         type_path: node.type_path.clone(),
         attributes: node.attributes.clone(),
         child_bindings,
+        child_types,
         stored,
     });
     binding
@@ -739,10 +877,25 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, out: &mut TokenStream) {
     match node.type_path.as_str() {
         "Window" => {
             let title = emit_expr(find_attr(node, "title").expect("Window requires `title`"), ctx, &EmitMode::Construction);
-            let child = &children[0];
+            // A `MenuBar` child (付録X) is optional and, unlike the rest of `Window`'s children,
+            // isn't the content view — it's told apart from the one required content child by
+            // type, since `children` only gives us opaque bindings at this point.
+            let menu_bar_binding = node
+                .child_types
+                .iter()
+                .position(|t| t == "MenuBar")
+                .map(|i| &children[i]);
+            let content_binding = node
+                .child_types
+                .iter()
+                .position(|t| t != "MenuBar")
+                .map(|i| &children[i])
+                .expect("Window requires exactly one non-MenuBar content child");
+            let set_menu_bar = menu_bar_binding.map(|mb| quote! { #binding.set_menu_bar(&#mb); });
             out.extend(quote! {
                 let #binding = elwindui_backend_appkit::Window::new(&(#title));
-                #binding.set_content(#child.clone().into());
+                #binding.set_content(#content_binding.clone().into());
+                #set_menu_bar
             });
         }
         "Column" => out.extend(quote! {
@@ -773,6 +926,41 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, out: &mut TokenStream) {
                 let #binding = elwindui_backend_appkit::Text::new(&(#text));
             });
         }
+        // 付録X: static structure (a fixed set of File/Edit/... items known at compile time), so
+        // `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` go through the same construction/wiring/resync
+        // pipeline as any other builtin rather than needing a specialized codegen path.
+        "MenuBar" => out.extend(quote! {
+            let #binding = elwindui_backend_appkit::MenuBar::new(vec![ #(#children.clone()),* ]);
+        }),
+        "MenuBarItem" => {
+            let text = emit_expr(find_attr(node, "text").expect("MenuBarItem requires `text`"), ctx, &EmitMode::Construction);
+            let submenu = &children[0];
+            out.extend(quote! {
+                let #binding = elwindui_backend_appkit::MenuBarItem::new(&(#text), #submenu.clone());
+            });
+        }
+        "Menu" => out.extend(quote! {
+            let #binding = elwindui_backend_appkit::Menu::new(vec![ #(#children.clone()),* ]);
+        }),
+        "MenuItem" => {
+            let text = emit_expr(find_attr(node, "text").expect("MenuItem requires `text`"), ctx, &EmitMode::Construction);
+            out.extend(quote! {
+                let #binding = elwindui_backend_appkit::MenuItem::new(&(#text));
+            });
+            if let Some(shortcut_expr) = find_attr(node, "shortcut") {
+                let shortcut = emit_expr(shortcut_expr, ctx, &EmitMode::Construction);
+                out.extend(quote! { #binding.set_shortcut(&(#shortcut)); });
+            }
+            if let Some(enabled_expr) = find_attr(node, "enabled") {
+                let enabled = emit_expr(enabled_expr, ctx, &EmitMode::Construction);
+                out.extend(quote! { #binding.set_enabled(#enabled); });
+            }
+        }
+        // 付録Y: dynamic (tabs come and go at runtime), constructed empty here; the observable
+        // `tabs` list is materialized into actual per-tab widgets in `resync()` — see `emit_resync`.
+        "TabView" => out.extend(quote! {
+            let #binding = elwindui_backend_appkit::TabView::new();
+        }),
         other => panic!("unknown builtin element `{other}`"),
     }
 }
@@ -820,6 +1008,42 @@ fn emit_wiring(node: &PlannedNode, ctx: &ViewCtx, out: &mut TokenStream) {
             });
         }
     }
+
+    // 付録X: `MenuItem`'s dropdown-select callback — same shape as `on_click`, different backend
+    // method name (`set_on_select` vs `set_on_click`).
+    if node.type_path == "MenuItem" {
+        if let Some(on_select) = find_attr(node, "on_select") {
+            let call = emit_expr(on_select, ctx, &self_mode);
+            out.extend(quote! {
+                {
+                    let widget = this.#binding.clone();
+                    let this = std::rc::Rc::clone(&this);
+                    widget.set_on_select(Box::new(move || {
+                        #call;
+                        this.resync();
+                    }));
+                }
+            });
+        }
+    }
+
+    // 付録Y: the "+" button's callback. Per-tab select/close callbacks are wired individually as
+    // each tab widget is created/destroyed in `emit_resync`'s `TabView` diffing, not here.
+    if node.type_path == "TabView" {
+        if let Some(on_new_tab) = find_attr(node, "on_new_tab") {
+            let call = emit_expr(on_new_tab, ctx, &self_mode);
+            out.extend(quote! {
+                {
+                    let widget = this.#binding.clone();
+                    let this = std::rc::Rc::clone(&this);
+                    widget.set_on_new_tab(Box::new(move || {
+                        #call;
+                        this.resync();
+                    }));
+                }
+            });
+        }
+    }
 }
 
 /// Re-pushes every dynamic attribute of every stored widget from current model state. See the
@@ -856,8 +1080,112 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, out: &mut TokenStream) {
                 out.extend(quote! { self.#binding.set_text(&(#value)); });
             }
         }
+        "MenuItem" => {
+            if let Some(enabled_expr) = find_attr(node, "enabled") {
+                let value = emit_expr(enabled_expr, ctx, &self_mode);
+                out.extend(quote! { self.#binding.set_enabled(#value); });
+            }
+        }
+        "TabView" => emit_tabview_resync(node, ctx, out),
         _ => {}
     }
+}
+
+/// See docs/elwindui_builtins_spec.md 付録Y.2's scope note: this is a specialized codegen path,
+/// not a generalization of `emit_resync`'s normal one-attribute-at-a-time dispatch. Every resync:
+///
+/// 1. Fully rebuilds the tab chip strip from the current `tabs` list (chips hold no state worth
+///    preserving across a rebuild — just a title and a close button — so a full rebuild each time
+///    is simpler than incrementally diffing, and cheap at notepad's scale).
+/// 2. Only swaps the content pane's `TextArea` when the *selected* tab actually changed. Doing
+///    this unconditionally (like the chip strip) would destroy and recreate the native text view
+///    on every keystroke — since typing itself triggers a resync — losing cursor position/focus
+///    each time. `self.#binding_active_tab` remembers which tab is currently materialized so a
+///    same-tab resync (the common case, triggered by typing) is a no-op here.
+fn emit_tabview_resync(node: &PlannedNode, ctx: &ViewCtx, out: &mut TokenStream) {
+    let binding = &node.binding;
+    let self_mode = EmitMode::WithSelf(quote! { self });
+    let chips_field = format_ident!("{}_chips", binding);
+    let active_field = format_ident!("{}_active", binding);
+
+    let tabs = emit_expr(find_attr(node, "tabs").expect("TabView requires `tabs`"), ctx, &self_mode);
+    let selected = emit_expr(find_attr(node, "selected").expect("TabView requires `selected`"), ctx, &self_mode);
+
+    // These two calls are emitted *inside* `Box::new(move || { ... })` closures below, which need
+    // to be `'static` — they must go through `this` (the upgraded `Rc<Self>` moved into the
+    // closure), not `self` (a `&self` borrow tied to this `resync()` call's own stack frame).
+    let this_mode = EmitMode::WithSelf(quote! { this });
+    let select_execute = command_execute_call(node, "on_select", ctx, &this_mode, quote! { __index });
+    let close_execute = command_execute_call(node, "on_close", ctx, &this_mode, quote! { __index });
+
+    out.extend(quote! {
+        {
+            let this = self.__weak_self.borrow().upgrade().expect("elwindui: component dropped while resyncing TabView");
+            let __docs = #tabs;
+            let __selected: usize = #selected;
+
+            for __chip in self.#chips_field.borrow_mut().drain(..) {
+                self.#binding.remove_tab(&__chip);
+            }
+            let mut __new_chips = Vec::new();
+            for (__index, __doc) in __docs.iter().enumerate() {
+                let __label = __doc.file_name();
+                // Each callback gets its own `{ }` block so `let this = ...` shadows only within
+                // it — both blocks clone the same *outer* `this`, rather than the second cloning
+                // (and thus depending on the lifetime of) the first's already-moved-into-a-closure
+                // copy.
+                let __on_select: Box<dyn Fn()> = {
+                    let this = std::rc::Rc::clone(&this);
+                    Box::new(move || { #select_execute; this.resync(); })
+                };
+                let __on_close: Box<dyn Fn()> = {
+                    let this = std::rc::Rc::clone(&this);
+                    Box::new(move || { #close_execute; this.resync(); })
+                };
+                let __chip = self.#binding.insert_tab(__index, &__label, __on_select, __on_close);
+                __new_chips.push(__chip);
+            }
+            *self.#chips_field.borrow_mut() = __new_chips;
+
+            let already_showing = *self.#active_field.borrow() == Some(__selected);
+            if !already_showing {
+                if let Some(__doc) = __docs.get(__selected) {
+                    let __text_area = elwindui_backend_appkit::TextArea::new(&__doc.content());
+                    let __doc_for_change = std::rc::Rc::clone(__doc);
+                    let __this_for_change = std::rc::Rc::clone(&this);
+                    __text_area.set_on_change(Box::new(move |__new_text: String| {
+                        __doc_for_change.set_content(__new_text);
+                        __this_for_change.resync();
+                    }));
+                    self.#binding.set_content(elwindui_backend_appkit::AnyView::TextArea(__text_area));
+                }
+                *self.#active_field.borrow_mut() = Some(__selected);
+            }
+        }
+    });
+}
+
+/// Resolves a `TabView` callback attribute (`on_select`/`on_close`) — a bare 2-segment path to a
+/// `Command` (e.g. `vm.select_tab`, *not* a `.execute()` call, since the call itself needs to
+/// happen later with a concrete per-tab index that isn't known until `emit_tabview_resync` is
+/// building that specific tab's widgets) — into a call expression against that command's
+/// generated `_execute` method, passing `index_arg` (usually the loop-local tab index).
+fn command_execute_call(
+    node: &PlannedNode,
+    attr_name: &str,
+    ctx: &ViewCtx,
+    mode: &EmitMode,
+    index_arg: TokenStream,
+) -> TokenStream {
+    let Some(ViewExpr::Path(path)) = find_attr(node, attr_name) else {
+        panic!("TabView's `{attr_name}` must be a bare command path, e.g. `vm.select_tab`");
+    };
+    let resolved = resolve_bind(path, &ctx.binds);
+    let (owner_path, command) = resolved.split_at(resolved.len() - 1);
+    let owner = owner_path.last().cloned().unwrap_or_else(|| "vm".to_string());
+    let base = mode.owner_tokens(&owner);
+    let execute = format_ident!("{}_execute", command[0]);
+    quote! { #base.#execute(#index_arg) }
 }
 
 /// Resolves the DSL's bare-field bind sugar: `content` (a `component` field defined as
@@ -1026,6 +1354,97 @@ view NotepadWindow {
         assert!(window_str.contains("fn resync"));
         assert!(window_str.contains("save_execute"));
         assert!(window_str.contains("save_can_execute"));
+    }
+
+    #[test]
+    fn generates_valid_rust_for_menubar_and_tabview() {
+        let viewmodel_src = r#"
+viewmodel Document {
+    #[observable]
+    content: String = String::new(),
+
+    #[observable]
+    file_name: String = "untitled.txt",
+}
+
+viewmodel NotepadViewModel {
+    #[observable]
+    documents: Vec<Document> = Vec::new(),
+
+    #[observable]
+    active_tab: usize = 0,
+
+    #[command]
+    new_tab: Command = command!(|| {
+        documents.push(std::rc::Rc::new(Document::new()));
+        active_tab = documents.len() - 1;
+    }),
+
+    #[command]
+    close_tab: Command = command!(|index: usize| {
+        documents.remove(index);
+    }),
+
+    #[command]
+    select_tab: Command = command!(|index: usize| {
+        active_tab = index;
+    }),
+}
+"#;
+        let window_src = r#"
+use elwindui::viewmodel::NotepadViewModel;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+}
+
+view NotepadWindow {
+    Window {
+        title: t!("notepad-window-title")
+
+        MenuBar {
+            MenuBarItem {
+                text: t!("menu-file")
+                Menu {
+                    MenuItem { text: t!("menu-new"), shortcut: "n", on_select: vm.new_tab.execute() }
+                }
+            }
+        }
+
+        TabView {
+            tabs: vm.documents
+            selected: vm.active_tab
+            on_select: vm.select_tab
+            on_close: vm.close_tab
+            on_new_tab: vm.new_tab.execute()
+            closable: true
+        }
+    }
+}
+"#;
+        let viewmodel_module = parse_module(viewmodel_src).expect("viewmodel should parse");
+        let window_module = parse_module(window_src).expect("window should parse");
+        let table = build_symbol_table(&[viewmodel_module.clone(), window_module.clone()]);
+
+        let viewmodel_code = generate_module(&viewmodel_module, &table);
+        assert_valid_rust("menubar_tabview_viewmodel", &viewmodel_code);
+        let viewmodel_str = viewmodel_code.to_string();
+        assert!(viewmodel_str.contains("documents_push"));
+        assert!(viewmodel_str.contains("documents_remove"));
+        assert!(viewmodel_str.contains("Rc < Document >"));
+        assert!(viewmodel_str.contains("fn close_tab_execute (& self , index : usize)"));
+
+        let window_code = generate_module(&window_module, &table);
+        assert_valid_rust("menubar_tabview_window", &window_code);
+        let window_str = window_code.to_string();
+        assert!(window_str.contains("MenuBar :: new"));
+        assert!(window_str.contains("MenuItem :: new"));
+        assert!(window_str.contains("set_shortcut"));
+        assert!(window_str.contains("TabView :: new"));
+        assert!(window_str.contains("insert_tab"));
+        assert!(window_str.contains("__weak_self"));
     }
 
     #[test]

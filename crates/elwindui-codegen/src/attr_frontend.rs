@@ -11,6 +11,38 @@
 //! work: it just has to produce the same shape of AST parser.rs already produces.
 
 use crate::ast::{Attr, FieldDef, FieldKind, Initializer, ViewModelDef};
+use std::path::Path;
+
+/// Finds every `#[elwindui::viewmodel] mod foo { ... }` at the top level of a `.rs` file and builds
+/// a `ViewModelDef` for each — **without** actually expanding the attribute macro. This is `syn`
+/// parsing the file's *source text* as data, the same way `viewmodel_def_from_item_mod` reads a
+/// macro's input; it never runs `elwindui-macros`, so there's no dependency on Rust's proc-macro
+/// expansion order (which matters here: `build.rs` — the caller of `compile_dir_with_extra_viewmodels`,
+/// `lib.rs` — always runs *before* the crate's own source, including this file, gets compiled and
+/// macro-expanded, so waiting for the real macro to run is not an option).
+pub fn viewmodel_defs_from_rs_file(path: impl AsRef<Path>) -> Result<Vec<ViewModelDef>, String> {
+    let path = path.as_ref();
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let file: syn::File = syn::parse_file(&src)
+        .map_err(|e| format!("parsing {} as Rust: {e}", path.display()))?;
+
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(m) if has_viewmodel_attr(m) => Some(m),
+            _ => None,
+        })
+        .map(|m| viewmodel_def_from_item_mod(m).map_err(|e| format!("{} (in {})", e, path.display())))
+        .collect()
+}
+
+fn has_viewmodel_attr(item_mod: &syn::ItemMod) -> bool {
+    item_mod
+        .attrs
+        .iter()
+        .any(|attr| attr.path().segments.last().is_some_and(|seg| seg.ident == "viewmodel"))
+}
 
 /// `#[elwindui::viewmodel] mod foo { struct Foo { ... } impl Foo { ... } }` — the `struct` supplies
 /// field declarations (`#[observable(default = expr)]` etc.), the `impl`'s `fn`s supply each
@@ -346,5 +378,46 @@ viewmodel Counter {
         let dsl_generated = generate_viewmodel(def, &table).to_string();
 
         assert_eq!(attr_generated, dsl_generated);
+    }
+
+    #[test]
+    fn viewmodel_defs_from_rs_file_finds_top_level_viewmodel_mods() {
+        let src = r#"
+            use elwindui::platform;
+
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            enum Status { Idle, Busy }
+
+            #[elwindui::viewmodel]
+            mod counter_vm {
+                struct Counter {
+                    #[observable(default = 0i32)]
+                    count: i32,
+
+                    #[command]
+                    increment: Command,
+                }
+
+                impl Counter {
+                    fn increment(&self) {
+                        count = count + 1;
+                    }
+                }
+            }
+
+            fn main() {}
+        "#;
+        let path = std::env::temp_dir().join(format!(
+            "elwindui_attr_frontend_test_{}.rs",
+            std::process::id()
+        ));
+        std::fs::write(&path, src).expect("write temp file");
+        let defs = viewmodel_defs_from_rs_file(&path).expect("should find the viewmodel mod");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "Counter");
+        assert!(defs[0].fields.iter().any(|f| f.name == "count"));
+        assert!(defs[0].fields.iter().any(|f| f.name == "increment"));
     }
 }

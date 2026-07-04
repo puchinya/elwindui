@@ -40,6 +40,45 @@ pub fn generate_viewmodel_from_item_mod(item_mod: &syn::ItemMod) -> Result<proc_
 /// `i18n_support.rs` (fluent-bundle-backed `t()` helper, §11) that the generated files call into.
 /// Intended to be called from a crate's `build.rs`. See docs/elwindui_spec.md 付録B.1.
 pub fn compile_dir(src: impl AsRef<Path>, out_dir: impl AsRef<Path>) -> io::Result<()> {
+    compile_dir_impl(src, out_dir, Vec::new())
+}
+
+/// Like `compile_dir`, but also folds `ViewModelDef`s found in `extra_rs_files` — plain `.rs` files
+/// containing top-level `#[elwindui::viewmodel] mod foo { ... }` blocks, read via
+/// `attr_frontend::viewmodel_defs_from_rs_file` — into the `SymbolTable`/`field_tables` used to
+/// validate the `.elwind` files' `component`/`view` definitions. This is how `vm.field` /
+/// `vm.command.execute()` / `vm.command.can_execute` references in a `view { ... }` tree get
+/// checked against a viewmodel that's actually defined as ordinary Rust elsewhere in the crate
+/// (`examples/notepad`'s `NotepadViewModel`/`Document`, for instance) rather than in another
+/// `.elwind` file.
+///
+/// The extra viewmodels are **not** code-generated here — that already happens for real when the
+/// crate compiles and `#[elwindui::viewmodel]` actually expands; this only reads their *shape* for
+/// validation, the same static, no-macro-expansion-needed trick `viewmodel_defs_from_rs_file` uses
+/// (necessary because `build.rs`, which calls this, always runs before the crate's own source is
+/// compiled/macro-expanded — there is no "wait for the macro to run first" option).
+pub fn compile_dir_with_extra_viewmodels(
+    src: impl AsRef<Path>,
+    out_dir: impl AsRef<Path>,
+    extra_rs_files: &[impl AsRef<Path>],
+) -> io::Result<()> {
+    let mut extra_modules = Vec::new();
+    for path in extra_rs_files {
+        let defs = attr_frontend::viewmodel_defs_from_rs_file(path.as_ref())
+            .unwrap_or_else(|e| panic!("scanning {} for #[elwindui::viewmodel] mods: {e}", path.as_ref().display()));
+        extra_modules.extend(
+            defs.into_iter()
+                .map(|def| ast::Module { uses: Vec::new(), items: vec![ast::Item::ViewModel(def)] }),
+        );
+    }
+    compile_dir_impl(src, out_dir, extra_modules)
+}
+
+fn compile_dir_impl(
+    src: impl AsRef<Path>,
+    out_dir: impl AsRef<Path>,
+    extra_modules: Vec<ast::Module>,
+) -> io::Result<()> {
     let src = src.as_ref();
     let out_dir = out_dir.as_ref();
 
@@ -55,7 +94,7 @@ pub fn compile_dir(src: impl AsRef<Path>, out_dir: impl AsRef<Path>) -> io::Resu
         sources.push((entry.path(), text));
     }
 
-    let modules: Vec<_> = sources
+    let elwind_modules: Vec<_> = sources
         .iter()
         .map(|(path, text)| {
             parser::parse_module(text)
@@ -63,13 +102,19 @@ pub fn compile_dir(src: impl AsRef<Path>, out_dir: impl AsRef<Path>) -> io::Resu
         })
         .collect();
 
-    if let Err(errors) = validate::validate(&modules) {
+    // `extra_modules` (Rust-attribute-macro viewmodels, if any) join in for validation/symbol-table
+    // visibility only — see `compile_dir_with_extra_viewmodels`'s doc comment for why they must
+    // not be code-generated again in the loop below.
+    let all_modules: Vec<_> =
+        elwind_modules.iter().cloned().chain(extra_modules.iter().cloned()).collect();
+
+    if let Err(errors) = validate::validate(&all_modules) {
         panic!("elwind validation failed:\n{}", errors.join("\n"));
     }
 
-    let table = codegen::build_symbol_table(&modules);
+    let table = codegen::build_symbol_table(&all_modules);
 
-    for ((path, _), module) in sources.iter().zip(&modules) {
+    for ((path, _), module) in sources.iter().zip(&elwind_modules) {
         let generated = codegen::generate_module(module, &table);
         let file: syn::File = syn::parse2(generated.clone()).unwrap_or_else(|e| {
             panic!(

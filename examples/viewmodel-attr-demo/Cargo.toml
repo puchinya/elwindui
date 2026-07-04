@@ -1,0 +1,7 @@
+[package]
+name = "viewmodel-attr-demo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+elwindui = { path = "../../crates/elwindui" }

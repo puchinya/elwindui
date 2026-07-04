@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod attr_frontend;
 pub mod codegen;
 pub mod parser;
 pub mod validate;
@@ -15,6 +16,21 @@ use std::path::Path;
 /// docs/elwindui_spec.md 付録B.1.
 pub fn generate_from_source(src: &str) -> Result<proc_macro2::TokenStream, String> {
     let module = parser::parse_module(src)?;
+    validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
+    let table = codegen::build_symbol_table(std::slice::from_ref(&module));
+    Ok(codegen::generate_module(&module, &table))
+}
+
+/// The attribute-macro counterpart to `generate_from_source`: takes a `#[elwindui::viewmodel] mod
+/// foo { struct Foo { ... } impl Foo { ... } }` (already parsed as a `syn::ItemMod` by the
+/// `elwindui-macros` proc-macro), builds the same `ViewModelDef` AST `parser.rs` would from
+/// equivalent `.elwind` text (see `attr_frontend`), and feeds it through `generate_module` (not
+/// `generate_viewmodel` directly — `generate_module` is also what conditionally emits the
+/// `__elwindui_block_on_ready` helper an async `#[command]` needs, and there's no reason to
+/// duplicate that check here).
+pub fn generate_viewmodel_from_item_mod(item_mod: &syn::ItemMod) -> Result<proc_macro2::TokenStream, String> {
+    let def = attr_frontend::viewmodel_def_from_item_mod(item_mod)?;
+    let module = ast::Module { uses: Vec::new(), items: vec![ast::Item::ViewModel(def)] };
     validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(std::slice::from_ref(&module));
     Ok(codegen::generate_module(&module, &table))

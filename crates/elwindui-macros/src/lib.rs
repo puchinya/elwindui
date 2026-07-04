@@ -21,3 +21,33 @@ pub fn component(input: TokenStream) -> TokenStream {
         }
     }
 }
+
+/// `#[elwindui::viewmodel] mod foo { struct Foo { #[observable(default = ...)] field: Ty, ... }
+/// impl Foo { fn some_command(&self) { ... } } }` — lets a `viewmodel` be written as ordinary Rust
+/// (a real `struct` + a real `impl` with real attributes and real `fn` bodies) instead of the
+/// `.elwind` DSL's `viewmodel Name { ... }` block, matching how WPF-style MVVM frameworks keep the
+/// ViewModel in the host language and reserve markup (here, `.elwind`'s `view { ... }`) for the
+/// View. See docs/elwindui_spec.md 付録O.2, and `elwindui_codegen::attr_frontend` for why the
+/// `struct`+`impl` have to be wrapped in one `mod` (a single attribute-macro invocation only ever
+/// sees one annotated item, so both need to arrive together for command fields to be matched up
+/// with their `impl` bodies).
+///
+/// The `mod` wrapper itself doesn't survive expansion — the generated `struct`/`impl` appear
+/// unwrapped at the scope where the `mod` was written, the same way `component!`'s output does.
+#[proc_macro_attribute]
+pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item_mod = match syn::parse::<syn::ItemMod>(item) {
+        Ok(item_mod) => item_mod,
+        Err(e) => {
+            let msg = format!("#[elwindui::viewmodel]: expected `mod name {{ struct ... impl ... }}`: {e}");
+            return quote::quote! { compile_error!(#msg); }.into();
+        }
+    };
+    match elwindui_codegen::generate_viewmodel_from_item_mod(&item_mod) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => {
+            let msg = format!("#[elwindui::viewmodel]: {e}");
+            quote::quote! { compile_error!(#msg); }.into()
+        }
+    }
+}

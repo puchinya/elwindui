@@ -1,9 +1,17 @@
-//! Same notepad UI as `examples/notepad`, but using the proc-macro embedding path
-//! (`elwindui::component! { ... }`) instead of build.rs + separate `.elwind` files — the
-//! Slint-`slint!`-style alternative described in docs/elwindui_gui_framework_design.md §1 /
-//! docs/elwindui_spec.md 付録B.1.
+//! Same notepad UI as `examples/notepad`, but with everything embedded inline instead of build.rs
+//! + separate `.elwind` files: the viewmodel via `#[elwindui::viewmodel]` (a real Rust
+//! `struct`+`impl`, see docs/elwindui_spec.md 付録O.2 and `elwindui_codegen::attr_frontend`), and
+//! the view via `elwindui::component! { ... }` (still needed for `view { ... }` element trees,
+//! which aren't valid Rust expression syntax — that half can't move to plain Rust).
 
 use elwindui::platform;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveState {
+    Unsaved,
+    Saving,
+    Saved,
+}
 
 mod elwindui_i18n {
     pub use fluent_bundle::FluentValue;
@@ -40,31 +48,37 @@ mod elwindui_i18n {
     }
 }
 
-elwindui::component! {
-    enum SaveState { Unsaved, Saving, Saved }
-
-    viewmodel NotepadViewModel {
-        #[observable]
+#[elwindui::viewmodel]
+mod notepad_view_model {
+    struct NotepadViewModel {
+        #[observable(default = String::new())]
         #[length(0..=100000)]
-        content: String = String::new(),
+        content: String,
 
-        #[observable]
-        file_name: String = "untitled.txt",
+        #[observable(default = "untitled.txt")]
+        file_name: String,
 
-        #[observable]
-        current_path: String = String::new(),
+        #[observable(default = String::new())]
+        current_path: String,
 
-        #[observable]
-        state: SaveState = SaveState::Unsaved,
+        #[observable(default = SaveState::Unsaved)]
+        state: SaveState,
 
-        #[computed]
-        char_count: i32 = content.chars().count() as i32,
+        #[computed(expr = content.chars().count() as i32)]
+        char_count: i32,
 
-        #[computed]
-        window_title: String = t!("notepad-window-title", file_name: file_name),
+        #[computed(expr = t!("notepad-window-title", file_name: file_name))]
+        window_title: String,
 
-        #[command(async, can_execute: state != SaveState::Saving)]
-        save: Command = command!(async || {
+        #[command(can_execute = state != SaveState::Saving)]
+        save: Command,
+
+        #[command]
+        open: Command,
+    }
+
+    impl NotepadViewModel {
+        async fn save(&self) {
             state = SaveState::Saving;
             let path = if current_path.is_empty() {
                 platform::file_dialog::save().await
@@ -82,25 +96,24 @@ elwindui::component! {
                     state = SaveState::Unsaved;
                 }
             }
-        }),
+        }
 
-        #[command(async)]
-        open: Command = command!(async || {
+        async fn open(&self) {
             if let Some(path) = platform::file_dialog::open().await {
                 content = std::fs::read_to_string(&path).unwrap_or_default();
                 file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 current_path = path.to_string_lossy().to_string();
                 state = SaveState::Unsaved;
             }
-        }),
+        }
     }
+}
 
+elwindui::component! {
     component NotepadWindow {
         #[param]
         #[inject]
         vm: NotepadViewModel,
-
-        content: String = bind!(vm.content, TwoWay),
     }
 
     view NotepadWindow {
@@ -120,7 +133,7 @@ elwindui::component! {
                     }
                 }
 
-                TextArea { text: content }
+                TextArea { text: vm.content }
 
                 Row {
                     Text { text: t!("notepad-status-chars", count: vm.char_count) }

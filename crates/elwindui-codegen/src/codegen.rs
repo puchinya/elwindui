@@ -106,7 +106,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
 /// (e.g. real non-blocking I/O, a timer) will panic here. That needs `elwindui-core`'s planned
 /// `Dispatcher`/`spawn` (docs/elwindui_gui_framework_design.md §7.3), which bridges to each
 /// backend's actual event loop/async runtime — not yet implemented.
-fn block_on_ready_helper() -> TokenStream {
+pub fn block_on_ready_helper() -> TokenStream {
     quote! {
         fn __elwindui_block_on_ready<F: std::future::Future>(fut: F) -> F::Output {
             use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -175,10 +175,18 @@ fn is_copy_type(ty: &str) -> bool {
 /// compiler feature; see docs/elwindui_builtins_spec.md 付録Y.2.
 fn nested_vec_item_type(ty: &str, table: &SymbolTable) -> Option<String> {
     let inner = ty.strip_prefix("Vec<")?.strip_suffix(">")?.trim();
-    table.types.contains_key(inner).then(|| inner.to_string())
+    // The `.elwind`/`compile_dir` path builds one `SymbolTable` spanning every file, so a lookup
+    // there is exact. The attribute-macro frontend (`attr_frontend.rs`) expands each
+    // `#[elwindui::viewmodel] mod { ... }` in isolation — it has no way to see a *different* mod's
+    // struct, so it always calls this with an empty table and relies entirely on the heuristic
+    // below, same idea as `is_copy_type`'s "capitalized and not a known scalar" guess.
+    let known = table.types.contains_key(inner);
+    let looks_nested = inner.chars().next().is_some_and(|c| c.is_uppercase())
+        && !matches!(inner, "String" | "Command");
+    (known || looks_nested).then(|| inner.to_string())
 }
 
-fn generate_viewmodel(v: &ViewModelDef, table: &SymbolTable) -> TokenStream {
+pub fn generate_viewmodel(v: &ViewModelDef, table: &SymbolTable) -> TokenStream {
     let struct_name = format_ident!("{}", v.name);
     let field_names: HashSet<&str> = v.fields.iter().map(|f| f.name.as_str()).collect();
 

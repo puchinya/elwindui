@@ -1,26 +1,29 @@
 //! Incremental parse/diagnostics/hover and preview-instance generation for `.elwind` files.
 //! See docs/elwindui_tool_languageserver_design.md.
 //!
-//! Phase 1 (this crate, currently): real-time diagnostics only (付録B.2 item 1), reusing
-//! `elwindui_codegen::{parser, validate}` as-is via the `diagnostics` module. Generated-code
-//! preview, hover (付録B.2 items 2/3), and the offscreen-rendering pipeline (付録B.3) are later
-//! phases, not attempted here.
+//! Phase 1 (this crate, currently): real-time diagnostics (付録B.2 item 1, reusing
+//! `elwindui_codegen::{parser, validate}` as-is via the `diagnostics` module), syntax highlighting
+//! (`semantic_tokens`), and `vm.field`/`vm.command.execute()`/`vm.command.can_execute` member
+//! completion (`completion`, built on `elwindui_codegen::codegen::SymbolTable::resolve`). Generated-
+//! code preview and hover (付録B.2 items 2/3) and the offscreen-rendering pipeline (付録B.3) are
+//! later phases, not attempted here.
 
+pub mod completion;
 pub mod diagnostics;
 pub mod semantic_tokens;
 
-use lsp_server::{Connection, Message, Notification as ServerNotification, Request as ServerRequest, Response};
+use lsp_server::{Connection, Message, Notification as ServerNotification, Request as ServerRequest, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidOpenTextDocument, DidSaveTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Request as _, SemanticTokensFullRequest};
+use lsp_types::request::{Completion, Request as _, SemanticTokensFullRequest};
 use lsp_types::{
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    PublishDiagnosticsParams, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri,
+    CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, PublishDiagnosticsParams,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -40,6 +43,10 @@ pub fn run() {
                 ..Default::default()
             },
         )),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_string()]),
+            ..Default::default()
+        }),
         ..Default::default()
     })
     .expect("ServerCapabilities always serializes");
@@ -77,10 +84,15 @@ fn main_loop(connection: &Connection) {
 }
 
 fn handle_request(connection: &Connection, req: ServerRequest) {
-    if req.method != SemanticTokensFullRequest::METHOD {
-        // Phase 1 handles no other requests (no hover/completion/etc. yet).
-        return;
+    match req.method.as_str() {
+        SemanticTokensFullRequest::METHOD => handle_semantic_tokens_request(connection, req),
+        Completion::METHOD => handle_completion_request(connection, req),
+        // Phase 1 handles no other requests (no hover/etc. yet).
+        _ => {}
     }
+}
+
+fn handle_semantic_tokens_request(connection: &Connection, req: ServerRequest) {
     let Ok(params) = serde_json::from_value::<SemanticTokensParams>(req.params) else {
         return;
     };
@@ -92,9 +104,26 @@ fn handle_request(connection: &Connection, req: ServerRequest) {
                 data: semantic_tokens::semantic_tokens_for_source(&src),
             })
         });
+    send_response(connection, req.id, serde_json::to_value(result));
+}
+
+fn handle_completion_request(connection: &Connection, req: ServerRequest) {
+    let Ok(params) = serde_json::from_value::<CompletionParams>(req.params) else {
+        return;
+    };
+    let position = params.text_document_position.position;
+    let result = uri_to_path(&params.text_document_position.text_document.uri).and_then(|path| {
+        let dir = path.parent()?;
+        let src = std::fs::read_to_string(&path).ok()?;
+        Some(CompletionResponse::Array(completion::completions_at(dir, &path, &src, position)))
+    });
+    send_response(connection, req.id, serde_json::to_value(result));
+}
+
+fn send_response(connection: &Connection, id: RequestId, result: serde_json::Result<serde_json::Value>) {
     let response = Response {
-        id: req.id,
-        result: Some(serde_json::to_value(result).unwrap_or(serde_json::Value::Null)),
+        id,
+        result: Some(result.unwrap_or(serde_json::Value::Null)),
         error: None,
     };
     connection.sender.send(Message::Response(response)).ok();

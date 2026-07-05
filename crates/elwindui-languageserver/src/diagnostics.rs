@@ -2,9 +2,48 @@
 //! separate from the protocol plumbing (`lib.rs`) so it's testable without a real
 //! `lsp_server::Connection`. See docs/elwindui_tool_languageserver_design.md §3.1.
 
+use elwindui_codegen::ast::Module;
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Lists every `.elwind` file directly inside `dir` (sorted for deterministic output) and reads
+/// each one's source text. Shared by `diagnostics_for_dir` (which additionally needs per-file parse
+/// errors) and `parse_dir_modules` (which just wants the parsed `Module`s, e.g. for `completion.rs`).
+fn elwind_file_sources(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "elwind"))
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort();
+
+    entries
+        .into_iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            (path, text)
+        })
+        .collect()
+}
+
+/// Parses every `.elwind` file in `dir` — the same unit `elwindui_codegen::compile_dir` processes,
+/// since cross-file `bind!`/`vm.field`/`use` references need every file in the directory visible at
+/// once for `codegen::build_symbol_table` to resolve them. Files that fail to parse are silently
+/// skipped (best-effort: a syntax error in one sibling file shouldn't block completion/lookups in
+/// another) — callers that need to report parse errors themselves (`diagnostics_for_dir`) don't use
+/// this and parse each file themselves instead.
+pub fn parse_dir_modules(dir: impl AsRef<Path>) -> Vec<(PathBuf, Module)> {
+    elwind_file_sources(dir.as_ref())
+        .into_iter()
+        .filter_map(|(path, text)| {
+            elwindui_codegen::parser::parse_module(&text).ok().map(|module| (path, module))
+        })
+        .collect()
+}
 
 /// Parses and validates every `.elwind` file in `dir` — the same unit `elwindui_codegen::
 /// compile_dir` processes, since cross-file `bind!`/`vm.field` references need every file in the
@@ -22,20 +61,8 @@ pub fn diagnostics_for_dir(dir: impl AsRef<Path>) -> HashMap<PathBuf, Vec<Diagno
     let dir = dir.as_ref();
     let mut out: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
 
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|ext| ext == "elwind"))
-                .collect()
-        })
-        .unwrap_or_default();
-    entries.sort();
-
-    let mut sources = Vec::new();
-    for path in &entries {
-        let text = std::fs::read_to_string(path).unwrap_or_default();
-        sources.push((path.clone(), text));
+    let sources = elwind_file_sources(dir);
+    for (path, _) in &sources {
         out.entry(path.clone()).or_default();
     }
 

@@ -22,7 +22,7 @@ view NotepadWindow {
         }
 
         TabView {
-            tabs: vm.documents
+            tabs: vm.documents()
             selected: vm.active_tab
             on_select: vm.select_tab
             on_close: vm.close_tab

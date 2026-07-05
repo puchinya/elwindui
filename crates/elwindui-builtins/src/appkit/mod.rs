@@ -30,8 +30,8 @@ impl Window {
         self.inner.set_title(title);
     }
 
-    pub fn show_and_run(&self) {
-        self.inner.show_and_run();
+    pub fn show(&self) {
+        self.inner.show();
     }
 }
 

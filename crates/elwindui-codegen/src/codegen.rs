@@ -47,6 +47,13 @@ pub struct TypeInfo {
     /// `on_*` rule, not passed to `Target::new(...)` — so it never appears in `param_fields`, but
     /// still needs its declared type visible here for the arity check.
     pub field_types: HashMap<String, String>,
+    /// Whether this type is a `viewmodel` (`generate_viewmodel`'s output, which carries a
+    /// `subscribe(impl Fn())` method) as opposed to a `component` (`generate_component`/
+    /// `generate_view`'s output, which doesn't). `bind!`'s owner may resolve to either kind
+    /// (`validate_bind_path` calls it "any bindable owner"), so callers that want to auto-subscribe
+    /// to a `bind!` source (see `generate_view`'s `bind_owners`) must check this first — emitting a
+    /// `.subscribe(...)` call against a plain `component` type would be a compile error.
+    pub is_viewmodel: bool,
 }
 
 impl SymbolTable {
@@ -74,13 +81,27 @@ impl SymbolTable {
     }
 }
 
+/// Strips a single `Rc<...>`/`std::rc::Rc<...>` wrapper so a `#[param] #[inject]` field declared
+/// as `doc: std::rc::Rc<DocumentViewModel>` still resolves against the bare `DocumentViewModel`
+/// entry in the symbol table — fields are commonly `Rc`-wrapped since `#[inject]`'s whole purpose
+/// is sharing one instance across owners (付録J.5/O.4). Leaves any other type string unchanged.
+pub(crate) fn strip_rc_wrapper(ty: &str) -> &str {
+    let ty = ty.trim();
+    for prefix in ["std::rc::Rc<", "rc::Rc<", "Rc<"] {
+        if let Some(inner) = ty.strip_prefix(prefix).and_then(|s| s.strip_suffix('>')) {
+            return inner.trim();
+        }
+    }
+    ty
+}
+
 pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     let mut types = HashMap::new();
     for module in modules {
         for item in &module.items {
-            let (name, fields) = match item {
-                Item::Component(c) => (c.name.clone(), &c.fields),
-                Item::ViewModel(v) => (v.name.clone(), &v.fields),
+            let (name, fields, is_viewmodel) = match item {
+                Item::Component(c) => (c.name.clone(), &c.fields, false),
+                Item::ViewModel(v) => (v.name.clone(), &v.fields, true),
                 Item::Enum(_) | Item::View(_) => continue,
             };
             let field_kinds = fields.iter().map(|f| (f.name.clone(), f.kind)).collect();
@@ -113,7 +134,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                 .collect();
             types.insert(
                 (module.path.clone(), name),
-                TypeInfo { fields: field_kinds, binds, param_fields, two_way_fields, field_types },
+                TypeInfo { fields: field_kinds, binds, param_fields, two_way_fields, field_types, is_viewmodel },
             );
         }
     }
@@ -158,54 +179,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
         });
     }
 
-    let has_async_command = module.items.iter().any(|item| {
-        let fields = match item {
-            Item::ViewModel(v) => &v.fields,
-            Item::Component(c) => &c.fields,
-            Item::Enum(_) | Item::View(_) => return false,
-        };
-        fields.iter().any(|f| {
-            f.attrs
-                .iter()
-                .any(|a| matches!(a, Attr::CommandMeta { is_async: true, .. }))
-        })
-    });
-    if has_async_command {
-        out.extend(block_on_ready_helper());
-    }
-
     out
-}
-
-/// A future that resolves on its very first `poll` (never returns `Pending`) completes here
-/// without ever needing a real waker/executor — which covers `#[command(async)]` bodies that only
-/// `.await` a modal dialog (docs/elwindui_spec.md 付録T.2), since AppKit's `runModal` is itself
-/// synchronous. It is **not** a general-purpose async executor: a future that returns `Pending`
-/// (e.g. real non-blocking I/O, a timer) will panic here. That needs `elwindui-core`'s planned
-/// `Dispatcher`/`spawn` (docs/elwindui_gui_framework_design.md §7.3), which bridges to each
-/// backend's actual event loop/async runtime — not yet implemented.
-pub fn block_on_ready_helper() -> TokenStream {
-    quote! {
-        fn __elwindui_block_on_ready<F: std::future::Future>(fut: F) -> F::Output {
-            use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-            fn noop(_: *const ()) {}
-            fn clone(_: *const ()) -> RawWaker {
-                RawWaker::new(std::ptr::null(), &VTABLE)
-            }
-            static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-            let raw_waker = RawWaker::new(std::ptr::null(), &VTABLE);
-            let waker = unsafe { Waker::from_raw(raw_waker) };
-            let mut cx = Context::from_waker(&waker);
-            let mut fut = Box::pin(fut);
-            match fut.as_mut().poll(&mut cx) {
-                Poll::Ready(value) => value,
-                Poll::Pending => panic!(
-                    "elwindui: #[command(async)] future did not resolve on its first poll \
-                     (a real async executor/Dispatcher is not yet implemented)"
-                ),
-            }
-        }
-    }
 }
 
 fn generate_enum(e: &EnumDef) -> TokenStream {
@@ -267,6 +241,13 @@ fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<
 pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) -> TokenStream {
     let struct_name = format_ident!("{}", v.name);
     let field_names: HashSet<&str> = v.fields.iter().map(|f| f.name.as_str()).collect();
+
+    // Every viewmodel is `Rc::new_cyclic`-constructed (see `new()` below) and carries a
+    // `__self_weak: Weak<Self>` so a `#[command(async)]` body can upgrade to an owned `Rc<Self>`
+    // before spawning — `elwindui_core::task::spawn_local` requires its future to be `'static`,
+    // which a body referencing sibling fields through a borrowed `&self` can't satisfy (the future
+    // may genuinely outlive this call, unlike the old poll-once `__elwindui_block_on_ready`). See
+    // the `FieldKind::Command` `is_async` arm below and docs/elwindui_spec.md 付録P.5.
 
     // `#[computed]` fields and `#[command(can_execute: ...)]` both need a dependency list so that
     // each observable's setter can call exactly the recompute functions that depend on it,
@@ -331,10 +312,12 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     pub fn #pusher(&self, item: std::rc::Rc<#item_ty>) {
                         self.#field_ident.borrow_mut().push(item);
                         #(#recompute_calls)*
+                        for f in self.__resync_subscribers.borrow().iter() { f(); }
                     }
                     pub fn #remover(&self, index: usize) {
                         self.#field_ident.borrow_mut().remove(index);
                         #(#recompute_calls)*
+                        for f in self.__resync_subscribers.borrow().iter() { f(); }
                     }
                 });
             }
@@ -343,7 +326,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
                 let init_expr = match &f.initializer {
                     Some(Initializer::Expr(e)) => {
-                        rewrite_field_refs(coerce_to_owned_string(&f.ty, e.clone()), &field_names)
+                        rewrite_field_refs(coerce_to_owned_string(&f.ty, e.clone()), &field_names, &format_ident!("self"))
                     }
                     _ => panic!("observable field `{}` needs a plain initializer expr", f.name),
                 };
@@ -388,6 +371,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     pub fn #setter(&self, value: #ty) {
                         #set_body
                         #(#recompute_calls)*
+                        for f in self.__resync_subscribers.borrow().iter() { f(); }
                     }
                 });
             }
@@ -399,8 +383,9 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     panic!("#[computed] field `{}` needs an initializer expr", f.name);
                 };
                 let compute_expr = rewrite_t_macro(
-                    rewrite_field_refs(raw_expr.clone(), &field_names),
+                    rewrite_field_refs(raw_expr.clone(), &field_names, &format_ident!("self")),
                     &field_names,
+                    &format_ident!("self"),
                 );
 
                 let (cell_ty, get_body, set_cache): (TokenStream, TokenStream, TokenStream) =
@@ -450,7 +435,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 let can_execute_ident = format_ident!("{}_can_execute", f.name);
                 let can_execute_cache = format_ident!("{}_can_execute_cache", f.name);
                 let can_execute_expr_ts = match &can_execute_expr {
-                    Some(expr) => rewrite_field_refs(expr.clone(), &field_names),
+                    Some(expr) => rewrite_field_refs(expr.clone(), &field_names, &format_ident!("self")),
                     None => quote! { true },
                 };
 
@@ -471,25 +456,36 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     panic!("#[command] field `{}` needs a command!(...) initializer", f.name);
                 };
                 let execute_ident = format_ident!("{}_execute", f.name);
-                let rewritten_block = rewrite_command_body(block.clone(), &field_names);
                 let param_decls = params.iter().map(|(name, ty)| {
                     let ident = format_ident!("{}", name);
                     quote! { #ident: #ty }
                 });
                 if is_async {
-                    // See docs/elwindui_spec.md 付録P.4. `block_on_ready` (emitted once per file,
-                    // see `emit_block_on_ready_helper`) only actually supports futures that
-                    // resolve on their first poll (e.g. a modal file dialog's `.await`, which
-                    // never really suspends) — see that helper's doc comment for what a genuine
-                    // non-blocking `#[command(async)]` still needs. `async move` (rather than
-                    // plain `async`) so a parameterized command's argument is captured by value
-                    // into the block, matching 付録O.4's parameterized-command extension.
+                    // See docs/elwindui_spec.md 付録P.4/P.5. `elwindui_core::task::spawn_local`
+                    // requires a `'static` future, which a body referencing sibling fields through
+                    // a borrowed `&self` can't provide (the future may genuinely outlive this
+                    // call, unlike the old poll-once `__elwindui_block_on_ready`) — so the body is
+                    // rewritten against an owned `__self: Rc<Self>` (upgraded from `__self_weak`)
+                    // instead of `self`. `spawn_local` polls the future once immediately (covering
+                    // today's modal-dialog `.await`s, which never really suspend, at no extra
+                    // cost) and, if it genuinely suspends, resumes it later on this same (UI)
+                    // thread via the active backend's `Dispatcher` — see `elwindui-core/src/task.rs`.
+                    // `async move` (rather than plain `async`) so a parameterized command's
+                    // argument is captured by value, matching 付録O.4's parameterized-command
+                    // extension.
+                    let self_ident = format_ident!("__self");
+                    let rewritten_block = rewrite_command_body(block.clone(), &field_names, &self_ident);
                     accessors.extend(quote! {
                         pub fn #execute_ident(&self, #(#param_decls),*) {
-                            __elwindui_block_on_ready(async move #rewritten_block);
+                            let __self = self.__self_weak.upgrade().expect(
+                                "elwindui: viewmodel was dropped while a #[command(async)] was still pending"
+                            );
+                            elwindui_core::task::spawn_local(async move #rewritten_block);
                         }
                     });
                 } else {
+                    let self_ident = format_ident!("self");
+                    let rewritten_block = rewrite_command_body(block.clone(), &field_names, &self_ident);
                     accessors.extend(quote! {
                         pub fn #execute_ident(&self, #(#param_decls),*) #rewritten_block
                     });
@@ -504,20 +500,48 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
     quote! {
         pub struct #struct_name {
             #struct_fields
+            // A dynamic subscriber list, unlike `dependents_of` above: the *number* of components
+            // that end up `bind!`-ing to this viewmodel instance (e.g. one `DocumentView` per open
+            // notepad tab) isn't known at compile time, so it can't be resolved into a static
+            // per-field recompute call the way `#[computed]`/`#[command(can_execute)]` dependents
+            // are (付録O.5). See docs/elwindui_spec.md §10/付録J.3: any mutation of a field reachable
+            // through `bind!` must propagate to every subscribing `prop`, not just ones reached via
+            // that same component's own wired `on_*` callbacks.
+            __resync_subscribers: std::cell::RefCell<Vec<Box<dyn Fn()>>>,
+            // Lets an async `#[command(async)]` body upgrade to an owned `Rc<Self>` before
+            // spawning (see the `FieldKind::Command` `is_async` arm) instead of capturing a
+            // borrowed `&self` that can't outlive this call. Unused (and so `#[allow(dead_code)]`)
+            // on a viewmodel with no async command.
+            #[allow(dead_code)]
+            __self_weak: std::rc::Weak<Self>,
         }
 
         impl #struct_name {
-            pub fn new() -> Self {
-                let instance = Self { #ctor_fields };
-                #recompute_calls_after_new
-                instance
+            /// Every viewmodel is always `Rc`-allocated from construction on (`Rc::new_cyclic`,
+            /// not a plain `Self` a caller wraps later) — both so `#[command(async)]` bodies always
+            /// have `__self_weak` to upgrade, and so a `Vec<NestedViewModel>` field's
+            /// `documents_push(item: Rc<NestedViewModel>)` never needs a redundant caller-side
+            /// `Rc::new(..)` around `NestedViewModel::new()`'s result.
+            pub fn new() -> std::rc::Rc<Self> {
+                std::rc::Rc::new_cyclic(|__self_weak| {
+                    let instance = Self {
+                        #ctor_fields
+                        __resync_subscribers: std::cell::RefCell::new(Vec::new()),
+                        __self_weak: __self_weak.clone(),
+                    };
+                    #recompute_calls_after_new
+                    instance
+                })
+            }
+
+            /// Registers `f` to run after any `#[observable]` field on this instance changes.
+            /// Called by a `bind!`-ing component's generated `new()` so its `resync()` re-fires
+            /// whenever this viewmodel changes, regardless of which code path mutated it.
+            pub fn subscribe(&self, f: impl Fn() + 'static) {
+                self.__resync_subscribers.borrow_mut().push(Box::new(f));
             }
 
             #accessors
-        }
-
-        impl Default for #struct_name {
-            fn default() -> Self { Self::new() }
         }
     }
 }
@@ -571,16 +595,18 @@ fn referenced_fields(expr: &syn::Expr, field_names: &HashSet<&str>) -> Vec<Strin
 /// Rewrites bare identifier reads that name a sibling field (`content` inside a `#[computed]`
 /// initializer) into accessor calls (`self.content()`). Does not touch assignment targets —
 /// `command!` bodies use [`rewrite_command_body`] for that.
-fn rewrite_field_refs(mut expr: syn::Expr, field_names: &HashSet<&str>) -> TokenStream {
+fn rewrite_field_refs(mut expr: syn::Expr, field_names: &HashSet<&str>, receiver: &syn::Ident) -> TokenStream {
     struct Rewriter<'a> {
         field_names: &'a HashSet<&'a str>,
+        receiver: &'a syn::Ident,
     }
     impl<'a> VisitMut for Rewriter<'a> {
         fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
             if let syn::Expr::Path(p) = node {
                 if let Some(ident) = p.path.get_ident() {
                     if self.field_names.contains(ident.to_string().as_str()) {
-                        let call: syn::Expr = syn::parse_quote! { self.#ident() };
+                        let receiver = self.receiver;
+                        let call: syn::Expr = syn::parse_quote! { #receiver.#ident() };
                         *node = call;
                         return;
                     }
@@ -589,7 +615,7 @@ fn rewrite_field_refs(mut expr: syn::Expr, field_names: &HashSet<&str>) -> Token
             syn::visit_mut::visit_expr_mut(self, node);
         }
     }
-    let mut rewriter = Rewriter { field_names };
+    let mut rewriter = Rewriter { field_names, receiver };
     rewriter.visit_expr_mut(&mut expr);
     quote! { #expr }
 }
@@ -601,11 +627,11 @@ fn rewrite_field_refs(mut expr: syn::Expr, field_names: &HashSet<&str>) -> Token
 /// `syn::visit_mut` never descends into a macro's token stream (it has no structure to visit), so
 /// [`rewrite_field_refs`] alone can't see field references nested inside `t!(...)`'s arguments —
 /// each argument value is re-rewritten here once it's been pulled out as a real `syn::Expr`.
-fn rewrite_t_macro(expr: TokenStream, field_names: &HashSet<&str>) -> TokenStream {
+fn rewrite_t_macro(expr: TokenStream, field_names: &HashSet<&str>, receiver: &syn::Ident) -> TokenStream {
     let expr: syn::Expr = syn::parse2(expr).expect("rewrite_field_refs always yields valid Expr");
     if let syn::Expr::Macro(m) = &expr {
         if m.mac.path.is_ident("t") {
-            return rewrite_t_call(&m.mac.tokens, field_names);
+            return rewrite_t_call(&m.mac.tokens, field_names, receiver);
         }
     }
     quote! { #expr }
@@ -633,13 +659,13 @@ fn parse_t_macro_tokens(tokens: &TokenStream) -> syn::Result<(syn::LitStr, Vec<(
     syn::parse::Parser::parse2(parser, tokens.clone())
 }
 
-fn rewrite_t_call(tokens: &TokenStream, field_names: &HashSet<&str>) -> TokenStream {
+fn rewrite_t_call(tokens: &TokenStream, field_names: &HashSet<&str>, receiver: &syn::Ident) -> TokenStream {
     // Tokens look like: "key", name1: expr1, name2: expr2
     let (key, args) = parse_t_macro_tokens(tokens)
         .expect("t!(...) arguments must be `\"key\", name: expr, ...`");
     let arg_pairs = args.iter().map(|(name, value)| {
         let name_str = name.to_string();
-        let value = rewrite_field_refs(value.clone(), field_names);
+        let value = rewrite_field_refs(value.clone(), field_names, receiver);
         quote! { (#name_str, elwindui_i18n::FluentValue::from(#value)) }
     });
     quote! { elwindui_i18n::t(#key, &[ #(#arg_pairs),* ]) }
@@ -647,10 +673,13 @@ fn rewrite_t_call(tokens: &TokenStream, field_names: &HashSet<&str>) -> TokenStr
 
 /// Rewrites a `command!(|| { ... })` body: assignments to a sibling field (`state = expr`) become
 /// setter calls, bare reads of a sibling field become getter calls, and the whole thing becomes a
-/// method body (`fn f(&self) { ... }`) rather than a closure.
-fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>) -> TokenStream {
+/// method body (`fn f(&self) { ... }`) rather than a closure. `receiver` is `self` for a plain
+/// (synchronous) command, or an owned local (`__self: Rc<Self>`) for an async one — see the
+/// `FieldKind::Command` `is_async` arm for why a borrowed `self` won't do there.
+fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>, receiver: &syn::Ident) -> TokenStream {
     struct Rewriter<'a> {
         field_names: &'a HashSet<&'a str>,
+        receiver: &'a syn::Ident,
     }
     impl<'a> VisitMut for Rewriter<'a> {
         fn visit_stmt_mut(&mut self, stmt: &mut syn::Stmt) {
@@ -658,6 +687,7 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>) -> T
         }
 
         fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+            let receiver = self.receiver;
             if let syn::Expr::Assign(assign) = node {
                 if let syn::Expr::Path(p) = assign.left.as_ref() {
                     if let Some(ident) = p.path.get_ident() {
@@ -665,7 +695,7 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>) -> T
                             let setter = format_ident!("set_{}", ident);
                             let mut value = (*assign.right).clone();
                             self.visit_expr_mut(&mut value);
-                            *node = syn::parse_quote! { self.#setter(#value) };
+                            *node = syn::parse_quote! { #receiver.#setter(#value) };
                             return;
                         }
                     }
@@ -689,7 +719,7 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>) -> T
                             for arg in args.iter_mut() {
                                 self.visit_expr_mut(arg);
                             }
-                            *node = syn::parse_quote! { self.#helper(#args) };
+                            *node = syn::parse_quote! { #receiver.#helper(#args) };
                             return;
                         }
                     }
@@ -700,7 +730,7 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>) -> T
             // `rewrite_t_macro`/`rewrite_t_call` (used for `#[computed]` initializers).
             if let syn::Expr::Macro(m) = node {
                 if m.mac.path.is_ident("t") {
-                    let rewritten = rewrite_t_call(&m.mac.tokens, self.field_names);
+                    let rewritten = rewrite_t_call(&m.mac.tokens, self.field_names, self.receiver);
                     *node = syn::parse2(rewritten).expect("rewrite_t_call always yields a valid Expr");
                     return;
                 }
@@ -708,7 +738,7 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>) -> T
             if let syn::Expr::Path(p) = node {
                 if let Some(ident) = p.path.get_ident() {
                     if self.field_names.contains(ident.to_string().as_str()) {
-                        *node = syn::parse_quote! { self.#ident() };
+                        *node = syn::parse_quote! { #receiver.#ident() };
                         return;
                     }
                 }
@@ -716,7 +746,7 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>) -> T
             syn::visit_mut::visit_expr_mut(self, node);
         }
     }
-    let mut rewriter = Rewriter { field_names };
+    let mut rewriter = Rewriter { field_names, receiver };
     rewriter.visit_block_mut(&mut block);
     quote! { #block }
 }
@@ -826,6 +856,29 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
         .collect();
 
+    // `bind!(owner.field, mode)` fields whose `owner` is one of this component's own `#[param]`
+    // dependencies and whose `mode` isn't `OneTime` (docs/elwindui_spec.md §10: `OneTime` captures
+    // once at instantiation and stays fixed, so it has nothing to subscribe to). Deduplicated by
+    // owner, since one `resync()` call already re-reads every attribute bound to that owner
+    // (`emit_resync` below), not just the specific field named in the `bind!`. Only owners whose
+    // type is a `viewmodel` are kept — `validate_bind_path` allows `bind!` to target a plain
+    // `component` too, but only `generate_viewmodel`'s output has a `subscribe` method.
+    let mut bind_owners: Vec<syn::Ident> = Vec::new();
+    for f in &component.fields {
+        let Some(Initializer::Bind { path, mode }) = &f.initializer else { continue };
+        if mode == "OneTime" {
+            continue;
+        }
+        let [owner, _target] = path.as_slice() else { continue };
+        let Some(owner_field) = component.fields.iter().find(|of| &of.name == owner) else { continue };
+        let is_viewmodel = table
+            .resolve(from, strip_rc_wrapper(&owner_field.ty))
+            .is_some_and(|info| info.is_viewmodel);
+        if is_viewmodel && !bind_owners.iter().any(|o| o.to_string() == *owner) {
+            bind_owners.push(format_ident!("{}", owner));
+        }
+    }
+
     // Every node that has a callback or a value that can change after construction gets a
     // generated field name and is stored on the component so `resync`/closures can reach it later.
     let mut plan = Vec::new();
@@ -858,18 +911,22 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // `plan_element` pushes children before their parent (post-order), so the root is always last.
     let root_binding = &plan.last().expect("view must have a root element").binding;
 
-    // `show_and_run` only exists on the `Window` builtin — a component whose view root is
-    // something else (e.g. `DocumentView`'s `Column`) has no top-level window to open, only a
-    // root widget to be embedded by whatever contains it (a `TabView`'s `render_content`, a plain
-    // `Row`/`Column` child, etc.). For those, `into_any_view` is emitted instead — a *local*
-    // inherent method (not a `From`/`Into` impl: `impl From<Rc<#target>> for AnyView` would be
-    // rejected by Rust's orphan rules, since `Rc` isn't "fundamental" and so `#target` nested
-    // inside it counts as covered by a foreign generic — E0117) that `into_any_view_if_needed`
-    // calls from `Column`/`Row`/`Window`/`TabView`'s `render_content` embedding.
+    // `show` only exists on the `Window` builtin — a component whose view root is something else
+    // (e.g. `DocumentView`'s `Column`) has no top-level window to show, only a root widget to be
+    // embedded by whatever contains it (a `TabView`'s `render_content`, a plain `Row`/`Column`
+    // child, etc.). For those, `into_any_view` is emitted instead — a *local* inherent method (not
+    // a `From`/`Into` impl: `impl From<Rc<#target>> for AnyView` would be rejected by Rust's
+    // orphan rules, since `Rc` isn't "fundamental" and so `#target` nested inside it counts as
+    // covered by a foreign generic — E0117) that `into_any_view_if_needed` calls from
+    // `Column`/`Row`/`Window`/`TabView`'s `render_content` embedding.
+    //
+    // Deliberately non-blocking (unlike the old `open`/`show_and_run`): entering the platform
+    // event loop is `elwindui::application::run()`'s job, called once after every top-level
+    // window has been shown — see `elwindui-backend-appkit`'s `application` module.
     let root_embed_method = if view.root.type_path == "Window" {
         quote! {
-            pub fn open(self: std::rc::Rc<Self>) {
-                self.#root_binding.clone().show_and_run();
+            pub fn show(self: std::rc::Rc<Self>) {
+                self.#root_binding.clone().show();
             }
         }
     } else {
@@ -880,6 +937,26 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             }
         }
     };
+
+    // For each `bind!` owner found above: subscribe so this component's `resync()` re-fires
+    // whenever that viewmodel changes through *any* path (a sibling component's callback, an async
+    // command, ...), not just this component's own wired `on_*` closures (`emit_wiring` only
+    // reaches the latter). `Weak` avoids a retain cycle — this component already holds a strong
+    // `Rc` to the owner via its own `#[param]` field, so the subscription closure must not hold a
+    // strong `Rc` back to `this` or the pair would never be dropped.
+    let subscribe_stmts: TokenStream = bind_owners
+        .iter()
+        .map(|owner_ident| {
+            quote! {
+                {
+                    let weak = std::rc::Rc::downgrade(&this);
+                    this.#owner_ident.subscribe(move || {
+                        if let Some(this) = weak.upgrade() { this.resync(); }
+                    });
+                }
+            }
+        })
+        .collect();
 
     quote! {
         impl #target {
@@ -893,6 +970,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 // construction (as `main.rs` does, calling `new_tab_execute()` first) appears
                 // immediately rather than waiting for the first unrelated user interaction.
                 this.resync();
+                #subscribe_stmts
                 this
             }
 
@@ -1630,7 +1708,7 @@ view NotepadWindow {
         assert_valid_rust("document_view", &document_view_code);
         let document_view_str = document_view_code.to_string();
         assert!(document_view_str.contains("fn new (doc : std :: rc :: Rc < Document >)"));
-        assert!(!document_view_str.contains("fn open"), "DocumentView's root isn't `Window` — `open()` shouldn't be generated");
+        assert!(!document_view_str.contains("fn show"), "DocumentView's root isn't `Window` — `show()` shouldn't be generated");
         assert!(document_view_str.contains("fn into_any_view"));
 
         let window_code = generate_module(&window_module, &table);
@@ -1673,8 +1751,8 @@ view Greeting {
         let s = generated.to_string();
         assert!(s.contains("fn new (greeter : Greeter)"), "expected ctor param named `greeter`, got:\n{s}");
         assert!(!s.contains("vm"), "ctor shouldn't hardcode a `vm` field name:\n{s}");
-        // `Greeting`'s view root is `Text`, not `Window` — no top-level window to `open()`.
-        assert!(!s.contains("fn open"));
+        // `Greeting`'s view root is `Text`, not `Window` — no top-level window to `show()`.
+        assert!(!s.contains("fn show"));
         assert!(s.contains("fn into_any_view"));
     }
 
@@ -1703,7 +1781,12 @@ viewmodel FileViewModel {
         assert_valid_rust("async_command", &generated);
 
         let generated_str = generated.to_string();
-        assert!(generated_str.contains("__elwindui_block_on_ready"));
+        assert!(generated_str.contains("elwindui_core :: task :: spawn_local"));
+        assert!(
+            generated_str.contains("__self . content ()"),
+            "t!(...) args inside an async command body must resolve through `__self`, not a \
+             borrowed `self` that can't outlive the call:\n{generated_str}"
+        );
         assert!(generated_str.contains("async"));
         assert!(generated_str.contains("elwindui_i18n :: t"));
         assert!(!generated_str.contains("t !"), "t!(...) should have been rewritten, not left as a macro call");

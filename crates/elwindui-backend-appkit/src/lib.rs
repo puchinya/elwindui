@@ -12,9 +12,10 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSMenu,
-    NSMenuItem, NSScrollView, NSStackView, NSTextDelegate, NSTextField, NSTextView,
-    NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
+    NSButton, NSMenu, NSMenuItem, NSScrollView, NSStackView, NSTextDelegate, NSTextField,
+    NSTextView, NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
 use std::cell::RefCell;
@@ -127,14 +128,15 @@ impl Window {
         NSApplication::sharedApplication(mtm()).setMainMenu(Some(&menu_bar.ns));
     }
 
-    /// Blocking: activates the app and runs the AppKit main loop.
-    pub fn show_and_run(&self) {
+    /// Shows the window and activates the app. Does not block — call `application::run()`
+    /// afterward to actually enter the platform event loop (see that module's doc comment for
+    /// why the two are separate).
+    pub fn show(&self) {
         let mtm = mtm();
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         self.ns.makeKeyAndOrderFront(None);
         app.activate();
-        app.run();
     }
 }
 
@@ -633,5 +635,72 @@ pub mod platform {
             }
             panel.URL().and_then(|url| url.path()).map(|p| PathBuf::from(p.to_string()))
         }
+    }
+}
+
+/// AppKit's `Dispatcher` (docs/elwindui_spec.md 付録P.5): hops back to the main thread via GCD's
+/// main queue, which `NSApplication.run()` (`application::run()` below) actively services as part
+/// of its own event loop — so a job enqueued from any thread (a background `tokio` task
+/// completing, say) is guaranteed to run promptly. See `elwindui_core::task` for how this lets a
+/// suspended `#[command(async)]` body resume back on the UI thread, the same role C#'s
+/// `SynchronizationContext.Post` plays.
+pub struct AppKitDispatcher;
+
+impl elwindui_core::task::Dispatcher for AppKitDispatcher {
+    fn enqueue(&self, job: Box<dyn FnOnce() + Send + 'static>) {
+        dispatch2::DispatchQueue::main().exec_async(job);
+    }
+}
+
+thread_local! {
+    /// `NSApplication.delegate` is an unretained (weak) reference (same situation as
+    /// `TextArea::delegate_storage`), so this keeps it alive for the process's lifetime.
+    static APP_DELEGATE: RefCell<Option<Retained<AppDelegate>>> = const { RefCell::new(None) };
+}
+
+define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = objc2::MainThreadOnly]
+    struct AppDelegate;
+
+    unsafe impl NSObjectProtocol for AppDelegate {}
+
+    unsafe impl NSApplicationDelegate for AppDelegate {
+        /// Without this, AppKit's default behavior leaves the process running after the last
+        /// (only, for `notepad`) window is closed via its close button.
+        #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
+        fn should_terminate_after_last_window_closed(&self, _sender: &NSApplication) -> bool {
+            true
+        }
+    }
+);
+
+impl AppDelegate {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// The single entry point that owns "enter the platform event loop" — kept separate from
+/// `Window::show()` so that there's one well-defined place to install the task executor (see
+/// `elwindui_core::task::set_current`) and the app delegate before any generated code runs. Call
+/// once, after showing the app's window(s).
+pub mod application {
+    use super::{mtm, AppDelegate, AppKitDispatcher, APP_DELEGATE};
+    use elwindui_core::task::LocalExecutor;
+    use objc2_app_kit::NSApplication;
+
+    /// Blocking: enters the AppKit main event loop.
+    pub fn run() {
+        elwindui_core::task::set_current(LocalExecutor::new(AppKitDispatcher));
+
+        let mtm = mtm();
+        let app = NSApplication::sharedApplication(mtm);
+        let delegate = AppDelegate::new(mtm);
+        app.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));
+        APP_DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
+
+        app.run();
     }
 }

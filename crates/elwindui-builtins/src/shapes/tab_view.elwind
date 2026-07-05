@@ -3,13 +3,13 @@ component TabView {
     tabs: Vec<std::rc::Rc<T>>,
 
     #[param]
-    key: Box<dyn Fn(&std::rc::Rc<T>) -> usize>,
+    key: fn(&std::rc::Rc<T>) -> usize,
 
     #[param]
-    render_label: Box<dyn Fn(&std::rc::Rc<T>) -> String>,
+    render_label: fn(&std::rc::Rc<T>) -> String,
 
     #[param]
-    render_content: Box<dyn Fn(&std::rc::Rc<T>) -> AnyView>,
+    render_content: fn(&std::rc::Rc<T>) -> AnyView,
 
     #[param]
     selected: usize,
@@ -17,7 +17,7 @@ component TabView {
     #[param]
     closable: bool,
 
-    on_select: Box<dyn Fn(usize)>,
+    on_select: fn(usize),
 
-    on_close: Box<dyn Fn(usize)>,
+    on_close: fn(usize),
 }

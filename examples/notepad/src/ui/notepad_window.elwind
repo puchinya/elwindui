@@ -3,7 +3,7 @@ use crate::notepad_view_model::NotepadViewModel;
 component NotepadWindow {
     #[param]
     #[inject]
-    vm: NotepadViewModel,
+    vm: std::rc::Rc<NotepadViewModel>,
 }
 
 view NotepadWindow {

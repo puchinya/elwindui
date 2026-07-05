@@ -114,7 +114,7 @@ elwindui::component! {
     component NotepadWindow {
         #[param]
         #[inject]
-        vm: NotepadViewModel,
+        vm: std::rc::Rc<NotepadViewModel>,
     }
 
     view NotepadWindow {
@@ -147,5 +147,6 @@ elwindui::component! {
 fn main() {
     let vm = NotepadViewModel::new();
     let window = NotepadWindow::new(vm);
-    window.open();
+    window.show();
+    elwindui::application::run();
 }

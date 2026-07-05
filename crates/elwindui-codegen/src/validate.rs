@@ -3,7 +3,7 @@
 //! docs/elwindui_gui_framework_design.md §10 for the full rule list.
 
 use crate::ast::{ClosureBody, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
-use crate::codegen::{self, SymbolTable};
+use crate::codegen::{self, strip_rc_wrapper, SymbolTable};
 use std::collections::{HashMap, HashSet};
 
 pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
@@ -120,20 +120,6 @@ fn find_vm_fields<'a>(
         }
     }
     vm_fields
-}
-
-/// Strips a single `Rc<...>`/`std::rc::Rc<...>` wrapper so a `#[param] #[inject]` field declared
-/// as `doc: std::rc::Rc<DocumentViewModel>` still resolves against the bare `DocumentViewModel`
-/// entry in the symbol table — fields are commonly `Rc`-wrapped since `#[inject]`'s whole purpose
-/// is sharing one instance across owners (付録J.5/O.4). Leaves any other type string unchanged.
-fn strip_rc_wrapper(ty: &str) -> &str {
-    let ty = ty.trim();
-    for prefix in ["std::rc::Rc<", "rc::Rc<", "Rc<"] {
-        if let Some(inner) = ty.strip_prefix(prefix).and_then(|s| s.strip_suffix('>')) {
-            return inner.trim();
-        }
-    }
-    ty
 }
 
 /// Walks a `view { ... }` element tree checking every attribute expression's `vm.xxx` references

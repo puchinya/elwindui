@@ -68,7 +68,7 @@ mod notepad_view_model {
 
     impl NotepadViewModel {
         fn new_tab(&self) {
-            documents.push(std::rc::Rc::new(DocumentViewModel::new()));
+            documents.push(DocumentViewModel::new());
             active_tab = documents.len() - 1;
         }
 
@@ -129,5 +129,39 @@ fn main() {
     // least one document exists.
     vm.new_tab_execute();
     let window = NotepadWindow::new(vm);
-    window.open();
+    window.show();
+    elwindui::application::run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression test for the `content`-binding-doesn't-refresh bug: `set_content` (however it's
+    // reached — here, directly, the same way `NotepadViewModel::open()` reaches it) must notify
+    // every `subscribe`r, not just whichever component happened to wire an `on_*` callback to it.
+    #[test]
+    fn observable_setter_notifies_subscribers() {
+        let doc = DocumentViewModel::new();
+        let notified = std::rc::Rc::new(std::cell::Cell::new(false));
+        let notified_handle = notified.clone();
+        doc.subscribe(move || notified_handle.set(true));
+
+        assert!(!notified.get(), "must not fire before any mutation");
+        doc.set_content("loaded from disk".to_string());
+        assert!(notified.get(), "set_content must notify subscribers");
+        assert_eq!(doc.content(), "loaded from disk");
+    }
+
+    #[test]
+    fn multiple_subscribers_all_fire() {
+        let doc = DocumentViewModel::new();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        for _ in 0..3 {
+            let calls = calls.clone();
+            doc.subscribe(move || calls.set(calls.get() + 1));
+        }
+        doc.set_content("x".to_string());
+        assert_eq!(calls.get(), 3);
+    }
 }

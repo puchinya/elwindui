@@ -1,0 +1,4 @@
+component Text {
+    #[param]
+    text: String,
+}

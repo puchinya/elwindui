@@ -5,6 +5,7 @@
 //! which aren't valid Rust expression syntax — that half can't move to plain Rust).
 
 use elwindui::platform;
+use elwindui_builtins::{Button, Column, Row, Text, TextArea, Window};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {
@@ -120,7 +121,7 @@ elwindui::component! {
         Window {
             title: vm.window_title
 
-            Column {
+            content: Column {
                 Row {
                     Button {
                         text: t!("notepad-menu-save")

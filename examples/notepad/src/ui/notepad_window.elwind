@@ -10,7 +10,7 @@ view NotepadWindow {
     Window {
         title: t!("notepad-app-title")
 
-        MenuBar {
+        menu_bar: MenuBar {
             MenuBarItem {
                 text: t!("notepad-menu-file")
                 Menu {
@@ -21,8 +21,11 @@ view NotepadWindow {
             }
         }
 
-        TabView {
-            tabs: vm.documents()
+        content: TabView {
+            tabs: vm.documents
+            key: |doc| std::rc::Rc::as_ptr(doc) as usize
+            render_label: |doc| doc.file_name
+            render_content: |doc| DocumentView { doc: doc }
             selected: vm.active_tab
             on_select: vm.select_tab
             on_close: vm.close_tab

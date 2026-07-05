@@ -1,0 +1,10 @@
+component MenuItem {
+    #[param]
+    text: String,
+
+    #[param]
+    shortcut: Option<String>,
+
+    #[param]
+    enabled: Option<bool>,
+}

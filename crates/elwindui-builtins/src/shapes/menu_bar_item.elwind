@@ -1,0 +1,7 @@
+component MenuBarItem {
+    #[param]
+    text: String,
+
+    #[param]
+    submenu: Menu,
+}

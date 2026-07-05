@@ -243,4 +243,20 @@ mod tests {
         assert_eq!(*t_bang, (3, 0, "t!".len() as u32, MACRO));
         assert!(toks.iter().any(|t| t.3 == STRING));
     }
+
+    /// This scanner is deliberately not built on `elwindui_codegen::parser` (see the module doc
+    /// comment), so it has no idea `|doc| ...` is closure syntax (`ast::ViewExpr::Closure`) — but
+    /// it doesn't need to: `|` isn't alphanumeric/`_`/`"`/digit/`#`, so it falls into the same
+    /// harmless single-char skip as `:`/`{`/`}` (the final `sc.bump()` catch-all), and `doc` is
+    /// just an ordinary lowercase identifier both times it appears. Locks in that this already
+    /// works, so a future rewrite of this tokenizer doesn't regress closure highlighting.
+    #[test]
+    fn closure_syntax_has_no_special_casing_needed() {
+        let toks = decode("render_label: |doc| doc.file_name\n");
+        let doc_tokens: Vec<_> = toks.iter().filter(|t| t.2 == "doc".len() as u32 && t.3 == VARIABLE).collect();
+        assert_eq!(doc_tokens.len(), 2, "expected `doc` to tokenize as VARIABLE both times: {toks:?}");
+        // The two `|`s sit right at columns 14 and 18 (`render_label: ` is 14 chars, `|doc|` is 5
+        // more); no token should start at either position.
+        assert!(!toks.iter().any(|t| t.1 == 14 || t.1 == 18), "expected no token emitted for either `|`: {toks:?}");
+    }
 }

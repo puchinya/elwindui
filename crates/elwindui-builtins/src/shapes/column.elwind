@@ -1,0 +1,4 @@
+component Column {
+    #[param]
+    children: Vec<AnyView>,
+}

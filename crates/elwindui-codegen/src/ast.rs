@@ -68,6 +68,11 @@ pub enum FieldKind {
 pub enum Attr {
     /// `#[inject]`: caller supplies the value at construction (used with `#[param]`). See 付録J.5.
     Inject,
+    /// `#[two_way]`: marks a builtin shape's `#[param]` field as eligible for automatic two-way
+    /// wiring — when an element's value for this attribute is a settable path, codegen wires a
+    /// change callback back into it generically (no per-type `codegen.rs` logic needed). See
+    /// `crates/elwindui-builtins`'s shape declarations (e.g. `TextArea`'s `text` field).
+    TwoWay,
     /// `#[length(start..=end)]` / `#[length(start..end)]`. See §7.
     Length { start: i64, end: i64, inclusive: bool },
     /// `#[command(can_execute: expr)]` / `#[command(async)]` / `#[command(async, can_execute: expr)]`.
@@ -133,4 +138,25 @@ pub enum ViewExpr {
     TFluent(String, Vec<(String, ViewExpr)>),
     /// Any other expression (string/number literals, etc.), parsed via `syn`.
     Expr(syn::Expr),
+    /// `|doc| <body>` — a single untyped bound parameter (no destructuring, no type annotation)
+    /// used by `TabView`'s `key`/`render_label`/`render_content` attributes (付録Y) so a tab's
+    /// per-item label/content can be an arbitrary expression or nested `view`, rather than the
+    /// fixed `TextArea` codegen used to hardcode.
+    Closure { param: String, body: ClosureBody },
+    /// `menu_bar: MenuBar { .. }` — a nested element used as an ordinary (non-closure) attribute
+    /// value, for a builtin shape's "named single-child slot" (e.g. `Window`'s `menu_bar`/
+    /// `content` params instead of positional/type-based child detection). Same shape as
+    /// `ClosureBody::Element`, just not behind a `|param|`.
+    Element(Box<ElementNode>),
+}
+
+/// The body of a `ViewExpr::Closure`. `key`/`render_label` return a plain expression;
+/// `render_content` returns a `view` (an element construction), so the two need different shapes
+/// rather than forcing `render_content`'s `Type { ... }` through `ViewExpr`.
+#[derive(Debug, Clone)]
+pub enum ClosureBody {
+    /// `|doc| doc.file_name`, `|doc| std::rc::Rc::as_ptr(doc) as usize`.
+    Expr(Box<ViewExpr>),
+    /// `|doc| DocumentView { doc: doc }`.
+    Element(Box<ElementNode>),
 }

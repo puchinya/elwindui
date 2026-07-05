@@ -116,6 +116,7 @@ impl<'a> Parser<'a> {
                 "observable" => kind = FieldKind::Observable,
                 "computed" => kind = FieldKind::Computed,
                 "inject" => attrs.push(Attr::Inject),
+                "two_way" => attrs.push(Attr::TwoWay),
                 "command" => {
                     kind = FieldKind::Command;
                     let mut is_async = false;
@@ -274,11 +275,34 @@ impl<'a> Parser<'a> {
     fn parse_view_expr(&mut self) -> Result<ViewExpr, String> {
         self.skip_trivia();
 
+        if self.peek_char() == Some('|') {
+            return self.parse_closure();
+        }
+
         if self.peek_char() == Some('"') {
             let lit_src = self.take_string_literal()?;
             let expr = syn::parse_str::<syn::Expr>(&lit_src)
                 .map_err(|e| format!("invalid string literal: {e}"))?;
             return Ok(ViewExpr::Expr(expr));
+        }
+
+        // `true`/`false` as bool literals — otherwise indistinguishable from an ordinary
+        // dotted-path reference (a bare identifier) by the check below, which would silently
+        // parse them as `ViewExpr::Path(["true"])` and fail (or worse, half-succeed) only once
+        // something actually tries to evaluate the value, e.g. `closable: true` (付録Y).
+        if self.eat_keyword("true") {
+            return Ok(ViewExpr::Expr(syn::parse_quote!(true)));
+        }
+        if self.eat_keyword("false") {
+            return Ok(ViewExpr::Expr(syn::parse_quote!(false)));
+        }
+
+        // Bare `Type { .. }` as an ordinary (non-closure) attribute value — a builtin shape's
+        // "named single-child slot" (e.g. `Window`'s `menu_bar: MenuBar { .. }`), generalizing the
+        // same shape `ClosureBody::Element` already uses inside `|param| Type { .. }` bodies.
+        if self.looks_like_element() {
+            let element = self.parse_element_node()?;
+            return Ok(ViewExpr::Element(Box::new(element)));
         }
 
         if self.peek_keyword_bang("t") {
@@ -319,6 +343,72 @@ impl<'a> Parser<'a> {
             return Ok(ViewExpr::MethodCall(path, method));
         }
         Ok(ViewExpr::Path(path))
+    }
+
+    /// `|doc| <body>` — 付録Y's `key`/`render_label`/`render_content` attributes. Always a single
+    /// untyped bound parameter (no destructuring, no `: Type`); the body is either a nested
+    /// element construction (`render_content: |doc| DocumentView { doc: doc }`) or a plain
+    /// expression (`key`/`render_label`).
+    fn parse_closure(&mut self) -> Result<ViewExpr, String> {
+        self.expect_char('|')?;
+        self.skip_trivia();
+        let param = self.parse_ident()?;
+        self.skip_trivia();
+        self.expect_char('|')?;
+        self.skip_trivia();
+
+        if self.looks_like_element() {
+            let element = self.parse_element_node()?;
+            return Ok(ViewExpr::Closure { param, body: ClosureBody::Element(Box::new(element)) });
+        }
+
+        let body = self.parse_closure_expr_body()?;
+        Ok(ViewExpr::Closure { param, body: ClosureBody::Expr(Box::new(body)) })
+    }
+
+    /// Lookahead-and-rewind (same idiom `parse_element_node` uses at its attribute/child-element
+    /// split) to tell a bare `Type { ... }` (an element construction) apart from a plain
+    /// expression, without consuming anything.
+    fn looks_like_element(&mut self) -> bool {
+        let save = self.pos;
+        let is_type_name = self
+            .parse_ident()
+            .map(|ident| ident.chars().next().is_some_and(|c| c.is_uppercase()))
+            .unwrap_or(false);
+        self.skip_trivia();
+        let followed_by_brace = self.peek_char() == Some('{');
+        self.pos = save;
+        is_type_name && followed_by_brace
+    }
+
+    /// A closure expression body. View attributes have no required separator between them (a
+    /// closure body followed directly by the next attribute on its own line, with no trailing
+    /// `,`, is the DSL's own convention — see `parse_element_node`'s optional `self.eat_char(',')`)
+    /// so the body's extent can't be determined by trying the DSL's own dotted-path grammar
+    /// in-place and inspecting whatever character happens to follow — `parse_view_expr`'s dotted-
+    /// path branch already calls `skip_trivia()` internally before returning, which would silently
+    /// consume the very whitespace boundary being inspected. Instead, first capture the bounded
+    /// span up to end-of-line (via `take_expr_until_line_end_or`), then try the DSL's own
+    /// dotted-path/`t!` sugar on an isolated sub-parser over just that text (so `doc.file_name`
+    /// still gets the "call the getter" treatment every other attribute value gets), falling back
+    /// to a raw `syn::Expr` only if that grammar doesn't consume the whole span — e.g.
+    /// `std::rc::Rc::as_ptr(doc) as usize` (`::` paths, casts) — same "hand off to syn" idiom
+    /// `parse_initializer`'s fallback already uses.
+    fn parse_closure_expr_body(&mut self) -> Result<ViewExpr, String> {
+        let expr_src = self.take_expr_until_line_end_or(&[',', '}'])?;
+        let trimmed = expr_src.trim();
+
+        let mut sub_parser = Parser::new(trimmed);
+        if let Ok(expr) = sub_parser.parse_view_expr() {
+            sub_parser.skip_trivia();
+            if sub_parser.at_eof() {
+                return Ok(expr);
+            }
+        }
+
+        let expr = syn::parse_str::<syn::Expr>(trimmed)
+            .map_err(|e| format!("invalid closure body `{trimmed}`: {e}"))?;
+        Ok(ViewExpr::Expr(expr))
     }
 
     // --- low-level helpers ---
@@ -459,6 +549,38 @@ impl<'a> Parser<'a> {
                     self.take_string_literal()?;
                     continue;
                 }
+                Some(c) if depth == 0 && terminators.contains(&c) => break,
+                Some('(') | Some('[') | Some('{') => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                Some(')') | Some(']') | Some('}') => {
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                Some(c) => self.pos += c.len_utf8(),
+            }
+        }
+        Ok(self.src[start..self.pos].to_string())
+    }
+
+    /// Like `take_balanced_until`, but also stops at an unnested newline — needed for a closure
+    /// body's `syn::Expr` fallback, since view attributes have no required separator between them
+    /// (`parse_element_node`'s trailing `,` is optional; one-attribute-per-line with no comma is
+    /// the DSL's own convention), so only `,`/`}` would otherwise swallow the following attributes'
+    /// text as part of the expression.
+    fn take_expr_until_line_end_or(&mut self, terminators: &[char]) -> Result<String, String> {
+        self.skip_trivia();
+        let start = self.pos;
+        let mut depth: i32 = 0;
+        loop {
+            match self.peek_char() {
+                None => break,
+                Some('"') => {
+                    self.take_string_literal()?;
+                    continue;
+                }
+                Some('\n') if depth == 0 => break,
                 Some(c) if depth == 0 && terminators.contains(&c) => break,
                 Some('(') | Some('[') | Some('{') => {
                     depth += 1;
@@ -640,6 +762,72 @@ view NotepadWindow {
             .unwrap();
         assert!(matches!(on_click, ViewExpr::MethodCall(path, method)
             if path == &vec!["vm".to_string(), "save".to_string()] && method == "execute"));
+    }
+
+    fn parse_closure_attr(attr_src: &str) -> ViewExpr {
+        let src = format!("view V {{ TabView {{ {attr_src} }} }}");
+        let module = parse_module(&src).expect("should parse");
+        let Item::View(view) = &module.items[0] else { panic!("expected view") };
+        let (_, expr) = view.root.attributes.iter().find(|(k, _)| k == "x").expect("attribute `x`").clone();
+        expr
+    }
+
+    #[test]
+    fn parses_closure_with_dotted_path_body() {
+        let expr = parse_closure_attr("x: |doc| doc.file_name");
+        let ViewExpr::Closure { param, body } = expr else { panic!("expected closure, got {expr:?}") };
+        assert_eq!(param, "doc");
+        let ClosureBody::Expr(inner) = body else { panic!("expected expr body") };
+        assert!(matches!(*inner, ViewExpr::Path(p) if p == vec!["doc".to_string(), "file_name".to_string()]));
+    }
+
+    #[test]
+    fn parses_closure_with_syn_fallback_body() {
+        let expr = parse_closure_attr("x: |doc| std::rc::Rc::as_ptr(doc) as usize");
+        let ViewExpr::Closure { param, body } = expr else { panic!("expected closure, got {expr:?}") };
+        assert_eq!(param, "doc");
+        let ClosureBody::Expr(inner) = body else { panic!("expected expr body") };
+        assert!(matches!(*inner, ViewExpr::Expr(_)), "expected a raw syn::Expr fallback, got {inner:?}");
+    }
+
+    #[test]
+    fn parses_closure_with_element_body() {
+        let expr = parse_closure_attr("x: |doc| DocumentView { doc: doc }");
+        let ViewExpr::Closure { param, body } = expr else { panic!("expected closure, got {expr:?}") };
+        assert_eq!(param, "doc");
+        let ClosureBody::Element(elem) = body else { panic!("expected element body") };
+        assert_eq!(elem.type_path, "DocumentView");
+        assert_eq!(elem.attributes.len(), 1);
+        assert_eq!(elem.attributes[0].0, "doc");
+        assert!(matches!(&elem.attributes[0].1, ViewExpr::Path(p) if p == &vec!["doc".to_string()]));
+    }
+
+    /// Multiple closure-bearing attributes with no trailing commas, one per line — the DSL's own
+    /// convention (`parse_element_node`'s `,` is optional) — must each stop at the right boundary
+    /// rather than swallowing the next attribute's text. Regression test for the bug where
+    /// `parse_view_expr`'s dotted-path branch silently consuming trailing trivia via its own
+    /// internal `skip_trivia()` call defeated a naive "peek the next char" boundary check.
+    #[test]
+    fn parses_multiple_closures_without_trailing_commas() {
+        let src = r#"
+view V {
+    TabView {
+        tabs: vm.documents
+        key: |doc| std::rc::Rc::as_ptr(doc) as usize
+        render_label: |doc| doc.file_name
+        render_content: |doc| DocumentView { doc: doc }
+        selected: vm.active_tab
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let Item::View(view) = &module.items[0] else { panic!("expected view") };
+        let attr = |name: &str| view.root.attributes.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+
+        assert!(matches!(attr("key"), Some(ViewExpr::Closure { .. })));
+        assert!(matches!(attr("render_label"), Some(ViewExpr::Closure { body: ClosureBody::Expr(_), .. })));
+        assert!(matches!(attr("render_content"), Some(ViewExpr::Closure { body: ClosureBody::Element(_), .. })));
+        assert!(matches!(attr("selected"), Some(ViewExpr::Path(p)) if p == vec!["vm".to_string(), "active_tab".to_string()]));
     }
 }
 

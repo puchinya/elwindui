@@ -1,4 +1,7 @@
 use elwindui::platform;
+use elwindui_builtins::{
+    Column, Menu, MenuBar, MenuBarItem, MenuItem, Row, TabView, Text, TextArea, Window,
+};
 
 mod elwindui_i18n {
     include!(concat!(env!("OUT_DIR"), "/i18n_support.rs"));
@@ -11,12 +14,12 @@ enum SaveState {
     Saved,
 }
 
-// One open document. Held as `Rc<Document>` inside `NotepadViewModel.documents` (see
+// One open document. Held as `Rc<DocumentViewModel>` inside `NotepadViewModel.documents` (see
 // docs/elwindui_builtins_spec.md 付録Y.2) so each tab's edits reach the same shared instance
 // rather than a throwaway clone.
 #[elwindui::viewmodel]
-mod document_vm {
-    struct Document {
+mod document_view_model {
+    struct DocumentViewModel {
         #[observable(default = String::new())]
         #[length(0..=100000)]
         content: String,
@@ -39,7 +42,7 @@ mod document_vm {
 mod notepad_view_model {
     struct NotepadViewModel {
         #[observable(default = Vec::new())]
-        documents: Vec<Document>,
+        documents: Vec<DocumentViewModel>,
 
         #[observable(default = 0usize)]
         active_tab: usize,
@@ -65,7 +68,7 @@ mod notepad_view_model {
 
     impl NotepadViewModel {
         fn new_tab(&self) {
-            documents.push(std::rc::Rc::new(Document::new()));
+            documents.push(std::rc::Rc::new(DocumentViewModel::new()));
             active_tab = documents.len() - 1;
         }
 
@@ -115,6 +118,7 @@ mod notepad_view_model {
     }
 }
 
+include!(concat!(env!("OUT_DIR"), "/document_view.rs"));
 include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
 
 fn main() {

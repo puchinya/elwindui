@@ -1,0 +1,19 @@
+use crate::document_view_model::DocumentViewModel;
+
+component DocumentView {
+    #[param]
+    #[inject]
+    doc: std::rc::Rc<DocumentViewModel>,
+
+    content: String = bind!(doc.content, TwoWay),
+}
+
+view DocumentView {
+    Column {
+        TextArea { text: content }
+        Row {
+            Text { text: doc.file_name }
+            Text { text: t!("notepad-status-chars", count: doc.char_count) }
+        }
+    }
+}

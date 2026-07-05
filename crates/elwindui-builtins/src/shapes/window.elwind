@@ -1,0 +1,10 @@
+component Window {
+    #[param]
+    title: String,
+
+    #[param]
+    menu_bar: Option<MenuBar>,
+
+    #[param]
+    content: AnyView,
+}

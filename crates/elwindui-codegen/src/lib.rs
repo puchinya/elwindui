@@ -8,6 +8,44 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+/// Every builtin's shape-only `.elwind` declaration (`component Name { #[param] ... }`, no
+/// matching `view`) — embedded via `include_str!` at `elwindui-codegen`'s own compile time (a
+/// plain sibling-file read, not a Cargo dependency edge, so there's no cycle with
+/// `elwindui-builtins`, which itself depends on `elwindui-core`/the backend crates). These exist
+/// purely so `SymbolTable`/`validate` can resolve and check `Window`/`Column`/`TextArea`/etc.
+/// exactly like any other component — `emit_construction`'s only construction mechanism is
+/// "resolve via `SymbolTable`, call `Type::new(args)`", so without these, no builtin would resolve
+/// at all. The real implementations live in `elwindui-builtins` as ordinary hand-written Rust.
+const BUILTIN_SHAPE_SOURCES: &[&str] = &[
+    include_str!("../../elwindui-builtins/src/shapes/window.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/column.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/row.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/text_area.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/button.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/text.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/menu_bar.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/menu_bar_item.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/menu.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/menu_item.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/tab_view.elwind"),
+];
+
+/// Parses every embedded builtin shape into a `Module`. Registered with the same `path: []`
+/// (crate root) every ordinary `.elwind` file compiled by `compile_dir` already uses (付録B.1), so
+/// `Window`/`Column`/etc. resolve via `SymbolTable::resolve`'s plain "defined locally in `from`"
+/// check — the same way two `.elwind` files in the same directory already see each other without
+/// a `use` — rather than needing a separate "implicit visibility" fallback mechanism.
+pub fn builtin_modules() -> Vec<ast::Module> {
+    BUILTIN_SHAPE_SOURCES
+        .iter()
+        .map(|src| {
+            // `parse_module` always defaults a freshly-parsed module's `path` to `[]` already.
+            parser::parse_module(src)
+                .unwrap_or_else(|e| panic!("failed to parse embedded builtin shape: {e}\n---\n{src}"))
+        })
+        .collect()
+}
+
 /// Parses, validates and generates Rust code for a single self-contained `.elwind` source string
 /// (no filesystem access) — the shared core behind both the build.rs path (`compile_dir`, which
 /// additionally builds a symbol table spanning *all* files in a directory for cross-file
@@ -16,8 +54,9 @@ use std::path::Path;
 /// docs/elwindui_spec.md 付録B.1.
 pub fn generate_from_source(src: &str) -> Result<proc_macro2::TokenStream, String> {
     let module = parser::parse_module(src)?;
-    validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
-    let table = codegen::build_symbol_table(std::slice::from_ref(&module));
+    let all_modules: Vec<_> = std::iter::once(module.clone()).chain(builtin_modules()).collect();
+    validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
+    let table = codegen::build_symbol_table(&all_modules);
     Ok(codegen::generate_module(&module, &table))
 }
 
@@ -83,8 +122,9 @@ pub fn compile_dir_with_extra_viewmodels(
 fn compile_dir_impl(
     src: impl AsRef<Path>,
     out_dir: impl AsRef<Path>,
-    extra_modules: Vec<ast::Module>,
+    mut extra_modules: Vec<ast::Module>,
 ) -> io::Result<()> {
+    extra_modules.extend(builtin_modules());
     let src = src.as_ref();
     let out_dir = out_dir.as_ref();
 

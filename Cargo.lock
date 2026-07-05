@@ -111,6 +111,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "elwindui-builtins"
+version = "0.1.0"
+dependencies = [
+ "elwindui-backend-appkit",
+ "elwindui-backend-egui",
+ "elwindui-backend-gtk4",
+ "elwindui-backend-iced",
+ "elwindui-backend-winui3",
+ "elwindui-core",
+]
+
+[[package]]
 name = "elwindui-codegen"
 version = "0.1.0"
 dependencies = [
@@ -391,6 +403,7 @@ version = "0.1.0"
 dependencies = [
  "elwindui",
  "elwindui-backend-appkit",
+ "elwindui-builtins",
  "elwindui-codegen",
  "fluent-bundle",
  "unic-langid",
@@ -402,6 +415,7 @@ version = "0.1.0"
 dependencies = [
  "elwindui",
  "elwindui-backend-appkit",
+ "elwindui-builtins",
  "fluent-bundle",
  "unic-langid",
 ]

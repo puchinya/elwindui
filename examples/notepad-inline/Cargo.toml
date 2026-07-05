@@ -7,5 +7,6 @@ publish = false
 [dependencies]
 elwindui = { path = "../../crates/elwindui", features = ["backend-appkit"] }
 elwindui-backend-appkit = { path = "../../crates/elwindui-backend-appkit" }
+elwindui-builtins = { path = "../../crates/elwindui-builtins", features = ["backend-appkit"] }
 fluent-bundle = "0.15"
 unic-langid = "0.9"

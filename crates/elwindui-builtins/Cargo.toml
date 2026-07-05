@@ -1,0 +1,20 @@
+[package]
+name = "elwindui-builtins"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+elwindui-core = { path = "../elwindui-core" }
+elwindui-backend-appkit = { path = "../elwindui-backend-appkit", optional = true }
+elwindui-backend-egui = { path = "../elwindui-backend-egui", optional = true }
+elwindui-backend-gtk4 = { path = "../elwindui-backend-gtk4", optional = true }
+elwindui-backend-iced = { path = "../elwindui-backend-iced", optional = true }
+elwindui-backend-winui3 = { path = "../elwindui-backend-winui3", optional = true }
+
+[features]
+default = []
+backend-appkit = ["dep:elwindui-backend-appkit"]
+backend-egui = ["dep:elwindui-backend-egui"]
+backend-gtk4 = ["dep:elwindui-backend-gtk4"]
+backend-iced = ["dep:elwindui-backend-iced"]
+backend-winui3 = ["dep:elwindui-backend-winui3"]

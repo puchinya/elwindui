@@ -1,0 +1,4 @@
+component MenuBar {
+    #[param]
+    children: Vec<MenuBarItem>,
+}

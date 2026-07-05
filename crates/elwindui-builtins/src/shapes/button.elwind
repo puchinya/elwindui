@@ -1,0 +1,7 @@
+component Button {
+    #[param]
+    text: String,
+
+    #[param]
+    enabled: Option<bool>,
+}

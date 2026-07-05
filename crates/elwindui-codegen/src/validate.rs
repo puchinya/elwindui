@@ -2,7 +2,7 @@
 //! ones reachable by the constructs the notepad example actually uses. See
 //! docs/elwindui_gui_framework_design.md §10 for the full rule list.
 
-use crate::ast::{ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
+use crate::ast::{ClosureBody, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
 use crate::codegen::{self, SymbolTable};
 use std::collections::{HashMap, HashSet};
 
@@ -106,11 +106,12 @@ fn find_vm_fields<'a>(
 ) -> HashMap<&'a str, &'a str> {
     let mut vm_fields = HashMap::new();
     for f in fields {
-        if !known_type_names.contains(f.ty.as_str()) {
+        let ty = strip_rc_wrapper(&f.ty);
+        if !known_type_names.contains(ty) {
             continue;
         }
-        if table.resolve(from, &f.ty).is_some() {
-            vm_fields.insert(f.name.as_str(), f.ty.as_str());
+        if table.resolve(from, ty).is_some() {
+            vm_fields.insert(f.name.as_str(), ty);
         } else {
             errors.push(format!(
                 "{owner_name}.{}: type `{}` is not in scope here — add a `use` for it (or define it in this file)",
@@ -119,6 +120,20 @@ fn find_vm_fields<'a>(
         }
     }
     vm_fields
+}
+
+/// Strips a single `Rc<...>`/`std::rc::Rc<...>` wrapper so a `#[param] #[inject]` field declared
+/// as `doc: std::rc::Rc<DocumentViewModel>` still resolves against the bare `DocumentViewModel`
+/// entry in the symbol table — fields are commonly `Rc`-wrapped since `#[inject]`'s whole purpose
+/// is sharing one instance across owners (付録J.5/O.4). Leaves any other type string unchanged.
+fn strip_rc_wrapper(ty: &str) -> &str {
+    let ty = ty.trim();
+    for prefix in ["std::rc::Rc<", "rc::Rc<", "Rc<"] {
+        if let Some(inner) = ty.strip_prefix(prefix).and_then(|s| s.strip_suffix('>')) {
+            return inner.trim();
+        }
+    }
+    ty
 }
 
 /// Walks a `view { ... }` element tree checking every attribute expression's `vm.xxx` references
@@ -195,6 +210,118 @@ fn check_vm_expr(
                 check_vm_expr(arg, from, component_name, vm_fields, table, errors);
             }
         }
+        ViewExpr::Closure { param, body } => match body {
+            ClosureBody::Expr(inner) => {
+                check_closure_expr_body(inner, param, from, component_name, vm_fields, table, errors)
+            }
+            ClosureBody::Element(elem) => {
+                check_element_value(elem, Some(param), from, component_name, vm_fields, table, errors)
+            }
+        },
+        ViewExpr::Element(elem) => {
+            check_element_value(elem, None, from, component_name, vm_fields, table, errors)
+        }
+    }
+}
+
+/// Checks a closure body (`key`/`render_label`/`render_content`'s `|param| ...`): a reference is
+/// valid if its first segment is either the closure's own bound parameter (nothing further to
+/// check — the parameter's type isn't a `vm_fields`-tracked component/viewmodel) or a recognized
+/// `vm`-style field (checked the normal way via `check_vm_expr`). Anything else is an error — see
+/// `emit_expr`/`emit_tabview_resync` in `codegen.rs` for why an outer-component reference from
+/// inside a closure body would otherwise silently resolve to a bogus bare identifier instead of
+/// failing to compile.
+fn check_closure_expr_body(
+    expr: &ViewExpr,
+    param: &str,
+    from: &Module,
+    component_name: &str,
+    vm_fields: &HashMap<&str, &str>,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    let first_segment = match expr {
+        ViewExpr::Path(path) => path.first(),
+        ViewExpr::MethodCall(path, _) => path.first(),
+        ViewExpr::TFluent(_, args) => {
+            for (_, arg) in args {
+                check_closure_expr_body(arg, param, from, component_name, vm_fields, table, errors);
+            }
+            return;
+        }
+        // A raw `syn::Expr` (e.g. `std::rc::Rc::as_ptr(doc) as usize`) isn't inspected further,
+        // matching how ordinary (non-closure) `Expr` values are already left unvalidated above.
+        ViewExpr::Expr(_) => return,
+        // The parser never produces a closure directly nested inside another closure's expression
+        // body, nor a bare element there (an element-valued closure body is always
+        // `ClosureBody::Element`, handled separately by `check_vm_expr`'s own `Closure` arm).
+        ViewExpr::Closure { .. } | ViewExpr::Element(_) => return,
+    };
+    match first_segment {
+        Some(first) if first == param => {}
+        Some(first) if vm_fields.contains_key(first.as_str()) => {
+            check_vm_expr(expr, from, component_name, vm_fields, table, errors);
+        }
+        Some(first) => errors.push(format!(
+            "{component_name}: closure body references `{first}`, which is neither the closure's own parameter `{param}` nor a recognized field — a closure may only reference its own bound parameter"
+        )),
+        None => {}
+    }
+}
+
+/// Checks a `Type { attr: value, .. }` element used as a value — either a closure body
+/// (`render_content: |param| Type { .. }`, `param` is `Some`) or an ordinary named-slot attribute
+/// value (`menu_bar: MenuBar { .. }`, `param` is `None`). `Type` must resolve to an in-scope
+/// component, and every one of its required `#[param]`-shaped fields must be satisfiable: by a
+/// matching attribute, by being `Option<..>`-typed (defaults to `None`), by a `children`-named
+/// field (filled from `elem`'s bare nested children, whatever their count), or — mirroring
+/// `emit_construction`'s own positional fallback (e.g. `MenuBarItem`'s single nested `Menu`) — by
+/// an available bare child. Anything left over is reported here instead of `panic!`ing deep in
+/// codegen.
+fn check_element_value(
+    elem: &ElementNode,
+    param: Option<&str>,
+    from: &Module,
+    component_name: &str,
+    vm_fields: &HashMap<&str, &str>,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    match table.resolve(from, &elem.type_path) {
+        Some(info) => {
+            let mut next_positional_child = 0usize;
+            for (name, ty) in &info.param_fields {
+                if name == "children" {
+                    continue;
+                }
+                let (_, is_option) = codegen::strip_option(ty);
+                let has_attr = elem.attributes.iter().any(|(k, _)| k == name);
+                if has_attr || is_option {
+                    continue;
+                }
+                if next_positional_child < elem.children.len() {
+                    next_positional_child += 1;
+                    continue;
+                }
+                errors.push(format!(
+                    "{component_name}: `{}` is missing required attribute `{name}`",
+                    elem.type_path
+                ));
+            }
+        }
+        None => errors.push(format!(
+            "{component_name}: `{}` is an unknown or out-of-scope component — add a `use` for it",
+            elem.type_path
+        )),
+    }
+    for (_, value) in &elem.attributes {
+        match param {
+            Some(param) => check_closure_expr_body(value, param, from, component_name, vm_fields, table, errors),
+            None => check_vm_expr(value, from, component_name, vm_fields, table, errors),
+        }
+    }
+    for child in &elem.children {
+        check_vm_references(child, from, component_name, vm_fields, table, errors);
     }
 }
 
@@ -225,7 +352,7 @@ fn validate_bind_path(
         return;
     };
 
-    match table.resolve(from, &root_field.ty) {
+    match table.resolve(from, strip_rc_wrapper(&root_field.ty)) {
         Some(info) if info.fields.contains_key(target_field.as_str()) => {}
         Some(_) => errors.push(format!(
             "{owner_name}.{field_name}: `{}` has no field `{target_field}`",
@@ -434,6 +561,148 @@ component Window7 {
 view Window7 { Window { TextArea { text: vm.content } } }
 "#;
         let modules = vec![vm_module, parse_module(window_src).unwrap()];
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// `render_content: |doc| Nonexistent { .. }` — the target must resolve via `SymbolTable`
+    /// exactly like a `#[param]` field's type does (`find_vm_fields`), not `panic!` deep inside
+    /// `emit_construction`'s codegen-time fallback.
+    #[test]
+    fn rejects_render_content_targeting_unknown_component() {
+        let src = r#"
+viewmodel Doc {
+    #[observable]
+    documents: String = String::new(),
+}
+
+component Window8 {
+    #[param]
+    #[inject]
+    vm: Doc,
+}
+
+view Window8 {
+    Window {
+        TabView {
+            tabs: vm.documents
+            render_content: |doc| Nonexistent { x: doc }
+            selected: vm.documents
+        }
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("Nonexistent")), "errors: {errs:?}");
+    }
+
+    /// `render_content`'s target component must get every one of its `#[param]`-shaped fields —
+    /// otherwise `emit_construction`'s generated `Target::new(...)` call is missing an argument.
+    #[test]
+    fn rejects_render_content_missing_required_attribute() {
+        let src = r#"
+viewmodel Doc {
+    #[observable]
+    documents: String = String::new(),
+}
+
+component DocumentView {
+    #[param]
+    #[inject]
+    doc: Doc,
+}
+
+component Window9 {
+    #[param]
+    #[inject]
+    vm: Doc,
+}
+
+view Window9 {
+    Window {
+        TabView {
+            tabs: vm.documents
+            render_content: |doc| DocumentView { }
+            selected: vm.documents
+        }
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("missing required attribute") && e.contains("doc")),
+            "errors: {errs:?}"
+        );
+    }
+
+    /// A closure body may only reference its own bound parameter — a reference to some other,
+    /// unrelated name would resolve to a bogus bare identifier under `EmitMode::Construction`
+    /// rather than the enclosing component's actual field, so it must be a validation error
+    /// instead of a silent miscompile (see `emit_tabview_resync`'s doc comment in `codegen.rs`).
+    #[test]
+    fn rejects_closure_body_referencing_unrelated_name() {
+        let src = r#"
+viewmodel Doc {
+    #[observable]
+    documents: String = String::new(),
+}
+
+component Window10 {
+    #[param]
+    #[inject]
+    vm: Doc,
+}
+
+view Window10 {
+    Window {
+        TabView {
+            tabs: vm.documents
+            render_label: |doc| other_thing.file_name
+            selected: vm.documents
+        }
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("other_thing")), "errors: {errs:?}");
+    }
+
+    /// The passthrough case (`doc: doc`) and a well-formed `render_content` must validate cleanly.
+    #[test]
+    fn accepts_well_formed_render_content() {
+        let src = r#"
+viewmodel Doc {
+    #[observable]
+    documents: String = String::new(),
+}
+
+component DocumentView {
+    #[param]
+    #[inject]
+    doc: Doc,
+}
+
+component Window11 {
+    #[param]
+    #[inject]
+    vm: Doc,
+}
+
+view Window11 {
+    Window {
+        TabView {
+            tabs: vm.documents
+            key: |doc| std::rc::Rc::as_ptr(doc) as usize
+            render_label: |doc| doc.file_name
+            render_content: |doc| DocumentView { doc: doc }
+            selected: vm.documents
+        }
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
         assert_eq!(validate(&modules), Ok(()));
     }
 }

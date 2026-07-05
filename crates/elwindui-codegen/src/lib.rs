@@ -30,7 +30,10 @@ pub fn generate_from_source(src: &str) -> Result<proc_macro2::TokenStream, Strin
 /// duplicate that check here).
 pub fn generate_viewmodel_from_item_mod(item_mod: &syn::ItemMod) -> Result<proc_macro2::TokenStream, String> {
     let def = attr_frontend::viewmodel_def_from_item_mod(item_mod)?;
-    let module = ast::Module { uses: Vec::new(), items: vec![ast::Item::ViewModel(def)] };
+    // A single macro invocation has no directory of sibling modules to cross-reference (`use`
+    // resolution is moot with only one module), so the exact real path doesn't matter here — `[]`
+    // (crate root) is as good as any.
+    let module = ast::Module { path: Vec::new(), uses: Vec::new(), items: vec![ast::Item::ViewModel(def)] };
     validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(std::slice::from_ref(&module));
     Ok(codegen::generate_module(&module, &table))
@@ -45,12 +48,14 @@ pub fn compile_dir(src: impl AsRef<Path>, out_dir: impl AsRef<Path>) -> io::Resu
 
 /// Like `compile_dir`, but also folds `ViewModelDef`s found in `extra_rs_files` — plain `.rs` files
 /// containing top-level `#[elwindui::viewmodel] mod foo { ... }` blocks, read via
-/// `attr_frontend::viewmodel_defs_from_rs_file` — into the `SymbolTable`/`field_tables` used to
-/// validate the `.elwind` files' `component`/`view` definitions. This is how `vm.field` /
+/// `attr_frontend::viewmodel_defs_from_rs_file` — into the `SymbolTable` used to validate the
+/// `.elwind` files' `component`/`view` definitions. This is how `vm.field` /
 /// `vm.command.execute()` / `vm.command.can_execute` references in a `view { ... }` tree get
 /// checked against a viewmodel that's actually defined as ordinary Rust elsewhere in the crate
 /// (`examples/notepad`'s `NotepadViewModel`/`Document`, for instance) rather than in another
-/// `.elwind` file.
+/// `.elwind` file — as long as the referencing `.elwind` file actually `use`s its real path
+/// (`crate::<mod name>::<Type>`, using the `mod` name `viewmodel_defs_from_rs_file` returns
+/// alongside each def), matching Rust's own name resolution (§12).
 ///
 /// The extra viewmodels are **not** code-generated here — that already happens for real when the
 /// crate compiles and `#[elwindui::viewmodel]` actually expands; this only reads their *shape* for
@@ -66,10 +71,11 @@ pub fn compile_dir_with_extra_viewmodels(
     for path in extra_rs_files {
         let defs = attr_frontend::viewmodel_defs_from_rs_file(path.as_ref())
             .unwrap_or_else(|e| panic!("scanning {} for #[elwindui::viewmodel] mods: {e}", path.as_ref().display()));
-        extra_modules.extend(
-            defs.into_iter()
-                .map(|def| ast::Module { uses: Vec::new(), items: vec![ast::Item::ViewModel(def)] }),
-        );
+        extra_modules.extend(defs.into_iter().map(|(mod_name, def)| ast::Module {
+            path: vec![mod_name],
+            uses: Vec::new(),
+            items: vec![ast::Item::ViewModel(def)],
+        }));
     }
     compile_dir_impl(src, out_dir, extra_modules)
 }

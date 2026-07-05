@@ -47,7 +47,10 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(Module { uses, items })
+        // `parse_module` only ever sees source text, not a file path — real module paths (付録B.1)
+        // are assigned by the caller (`compile_dir_impl`), which knows where each file actually
+        // lands in the crate. Defaults to `[]` (crate root), matching `Module`'s `Default`.
+        Ok(Module { path: Vec::new(), uses, items })
     }
 
     fn parse_use_decl(&mut self) -> Result<UseDecl, String> {
@@ -559,7 +562,7 @@ viewmodel NotepadViewModel {
     #[test]
     fn parses_notepad_window() {
         let src = r#"
-use elwindui::viewmodel::NotepadViewModel;
+use crate::notepad_view_model::NotepadViewModel;
 
 component NotepadWindow {
     #[param]
@@ -597,7 +600,7 @@ view NotepadWindow {
 "#;
         let module = parse_module(src).expect("should parse");
         assert_eq!(module.uses.len(), 1);
-        assert_eq!(module.uses[0].path, vec!["elwindui", "viewmodel", "NotepadViewModel"]);
+        assert_eq!(module.uses[0].path, vec!["crate", "notepad_view_model", "NotepadViewModel"]);
         assert_eq!(module.items.len(), 2);
 
         let Item::Component(component) = &module.items[0] else {

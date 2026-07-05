@@ -14,13 +14,20 @@ use crate::ast::{Attr, FieldDef, FieldKind, Initializer, ViewModelDef};
 use std::path::Path;
 
 /// Finds every `#[elwindui::viewmodel] mod foo { ... }` at the top level of a `.rs` file and builds
-/// a `ViewModelDef` for each — **without** actually expanding the attribute macro. This is `syn`
-/// parsing the file's *source text* as data, the same way `viewmodel_def_from_item_mod` reads a
-/// macro's input; it never runs `elwindui-macros`, so there's no dependency on Rust's proc-macro
-/// expansion order (which matters here: `build.rs` — the caller of `compile_dir_with_extra_viewmodels`,
-/// `lib.rs` — always runs *before* the crate's own source, including this file, gets compiled and
-/// macro-expanded, so waiting for the real macro to run is not an option).
-pub fn viewmodel_defs_from_rs_file(path: impl AsRef<Path>) -> Result<Vec<ViewModelDef>, String> {
+/// a `ViewModelDef` for each, paired with the enclosing `mod`'s own name (`"foo"`) — **without**
+/// actually expanding the attribute macro. This is `syn` parsing the file's *source text* as data,
+/// the same way `viewmodel_def_from_item_mod` reads a macro's input; it never runs
+/// `elwindui-macros`, so there's no dependency on Rust's proc-macro expansion order (which matters
+/// here: `build.rs` — the caller of `compile_dir_with_extra_viewmodels`, `lib.rs` — always runs
+/// *before* the crate's own source, including this file, gets compiled and macro-expanded, so
+/// waiting for the real macro to run is not an option).
+///
+/// The mod name is what lets a caller build this viewmodel's real, crate-relative path (`Module::path`,
+/// e.g. `["notepad_view_model"]` for `main.rs`'s `mod notepad_view_model { .. }`), so a `.elwind`
+/// file's `use crate::notepad_view_model::NotepadViewModel;` can be resolved against it exactly like
+/// Rust's own name resolution (§12, 付録B.1) — the struct name alone isn't enough to know where it
+/// actually lives.
+pub fn viewmodel_defs_from_rs_file(path: impl AsRef<Path>) -> Result<Vec<(String, ViewModelDef)>, String> {
     let path = path.as_ref();
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("reading {}: {e}", path.display()))?;
@@ -33,7 +40,11 @@ pub fn viewmodel_defs_from_rs_file(path: impl AsRef<Path>) -> Result<Vec<ViewMod
             syn::Item::Mod(m) if has_viewmodel_attr(m) => Some(m),
             _ => None,
         })
-        .map(|m| viewmodel_def_from_item_mod(m).map_err(|e| format!("{} (in {})", e, path.display())))
+        .map(|m| {
+            viewmodel_def_from_item_mod(m)
+                .map(|def| (m.ident.to_string(), def))
+                .map_err(|e| format!("{} (in {})", e, path.display()))
+        })
         .collect()
 }
 
@@ -249,10 +260,14 @@ mod tests {
     fn generate(src: &str) -> proc_macro2::TokenStream {
         let item_mod: syn::ItemMod = syn::parse_str(src).expect("mod should parse as valid Rust");
         let def = viewmodel_def_from_item_mod(&item_mod).expect("should build a ViewModelDef");
-        let module = crate::ast::Module { uses: Vec::new(), items: vec![crate::ast::Item::ViewModel(def)] };
+        let module = crate::ast::Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items: vec![crate::ast::Item::ViewModel(def)],
+        };
         let table = build_symbol_table(std::slice::from_ref(&module));
         let crate::ast::Item::ViewModel(def) = &module.items[0] else { unreachable!() };
-        generate_viewmodel(def, &table)
+        generate_viewmodel(def, &module, &table)
     }
 
     #[test]
@@ -375,7 +390,7 @@ viewmodel Counter {
         let module = crate::parser::parse_module(dsl_src).expect("dsl should parse");
         let table = build_symbol_table(std::slice::from_ref(&module));
         let crate::ast::Item::ViewModel(def) = &module.items[0] else { panic!("expected viewmodel") };
-        let dsl_generated = generate_viewmodel(def, &table).to_string();
+        let dsl_generated = generate_viewmodel(def, &module, &table).to_string();
 
         assert_eq!(attr_generated, dsl_generated);
     }
@@ -416,8 +431,10 @@ viewmodel Counter {
         std::fs::remove_file(&path).ok();
 
         assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].name, "Counter");
-        assert!(defs[0].fields.iter().any(|f| f.name == "count"));
-        assert!(defs[0].fields.iter().any(|f| f.name == "increment"));
+        let (mod_name, def) = &defs[0];
+        assert_eq!(mod_name, "counter_vm");
+        assert_eq!(def.name, "Counter");
+        assert!(def.fields.iter().any(|f| f.name == "count"));
+        assert!(def.fields.iter().any(|f| f.name == "increment"));
     }
 }

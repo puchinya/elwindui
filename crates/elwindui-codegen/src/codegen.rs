@@ -16,8 +16,14 @@ use syn::visit_mut::VisitMut;
 /// What every `component`/`viewmodel` in the whole compilation unit looks like, so that
 /// cross-file references (e.g. `notepad_window.elwind`'s `vm.window_title` referring to a
 /// `#[computed]` field defined in `notepad_viewmodel.elwind`) can be resolved.
+///
+/// Keyed by `(module real path, item name)` — the same address Rust's own name resolution uses
+/// (see `ast::Module::path`) — rather than a bare item name, so two same-named types defined in
+/// different modules never collide, and a lookup must go through `resolve` (i.e. through a `use`,
+/// or be in the same module) instead of being visible from anywhere in the compilation unit. See
+/// docs/elwindui_spec.md §12, 付録B.1.
 pub struct SymbolTable {
-    pub types: HashMap<String, TypeInfo>,
+    types: HashMap<(Vec<String>, String), TypeInfo>,
 }
 
 pub struct TypeInfo {
@@ -26,6 +32,31 @@ pub struct TypeInfo {
     /// Lets the view generator resolve the DSL's bare-field sugar (`content`) straight through to
     /// the field it's actually bound to (`vm.content`) without needing `self` to exist yet.
     pub binds: HashMap<String, (String, String)>,
+}
+
+impl SymbolTable {
+    /// Resolves `name` as seen from `from`: a type defined locally in `from` (same real path), or
+    /// brought into scope by one of `from`'s `use` declarations, matched by real path exactly like
+    /// Rust's own name resolution (`use`'s last path segment is the item name; the segments before
+    /// it — with a leading `crate` keyword stripped, since `Module::path` never includes it — must
+    /// equal some module's real path). Returns `None` if `name` isn't visible from `from` at all —
+    /// an unresolved reference (e.g. a missing `use`), which callers turn into a validation error.
+    pub fn resolve(&self, from: &Module, name: &str) -> Option<&TypeInfo> {
+        if let Some(info) = self.types.get(&(from.path.clone(), name.to_string())) {
+            return Some(info);
+        }
+        from.uses.iter().find_map(|u| {
+            let [prefix @ .., last] = u.path.as_slice() else { return None };
+            if last != name {
+                return None;
+            }
+            let real_prefix = match prefix {
+                [first, rest @ ..] if first == "crate" => rest,
+                other => other,
+            };
+            self.types.get(&(real_prefix.to_vec(), name.to_string()))
+        })
+    }
 }
 
 pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
@@ -50,7 +81,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                     _ => None,
                 })
                 .collect();
-            types.insert(name, TypeInfo { fields: field_kinds, binds });
+            types.insert((module.path.clone(), name), TypeInfo { fields: field_kinds, binds });
         }
     }
     SymbolTable { types }
@@ -73,10 +104,10 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
     for item in &module.items {
         out.extend(match item {
             Item::Enum(e) => generate_enum(e),
-            Item::ViewModel(v) => generate_viewmodel(v, table),
+            Item::ViewModel(v) => generate_viewmodel(v, module, table),
             Item::Component(c) if view_targets.contains(c.name.as_str()) => TokenStream::new(),
             Item::Component(c) => generate_component(c, table),
-            Item::View(v) => generate_view(v, table),
+            Item::View(v) => generate_view(v, module, table),
         });
     }
 
@@ -173,20 +204,20 @@ fn is_copy_type(ty: &str) -> bool {
 /// document. This is what lets a `viewmodel` hold a dynamic list of independently-reactive
 /// sub-viewmodels (needed for notepad's real multi-document tabs) without a general nested-list
 /// compiler feature; see docs/elwindui_builtins_spec.md 付録Y.2.
-fn nested_vec_item_type(ty: &str, table: &SymbolTable) -> Option<String> {
+fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<String> {
     let inner = ty.strip_prefix("Vec<")?.strip_suffix(">")?.trim();
-    // The `.elwind`/`compile_dir` path builds one `SymbolTable` spanning every file, so a lookup
-    // there is exact. The attribute-macro frontend (`attr_frontend.rs`) expands each
+    // `resolve` only finds `inner` if it's locally defined in `from` or reachable through one of
+    // `from`'s `use` declarations. The attribute-macro frontend (`attr_frontend.rs`) expands each
     // `#[elwindui::viewmodel] mod { ... }` in isolation — it has no way to see a *different* mod's
     // struct, so it always calls this with an empty table and relies entirely on the heuristic
     // below, same idea as `is_copy_type`'s "capitalized and not a known scalar" guess.
-    let known = table.types.contains_key(inner);
+    let known = table.resolve(from, inner).is_some();
     let looks_nested = inner.chars().next().is_some_and(|c| c.is_uppercase())
         && !matches!(inner, "String" | "Command");
     (known || looks_nested).then(|| inner.to_string())
 }
 
-pub fn generate_viewmodel(v: &ViewModelDef, table: &SymbolTable) -> TokenStream {
+pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) -> TokenStream {
     let struct_name = format_ident!("{}", v.name);
     let field_names: HashSet<&str> = v.fields.iter().map(|f| f.name.as_str()).collect();
 
@@ -223,9 +254,9 @@ pub fn generate_viewmodel(v: &ViewModelDef, table: &SymbolTable) -> TokenStream 
 
     for f in &v.fields {
         match f.kind {
-            FieldKind::Observable if nested_vec_item_type(&f.ty, table).is_some() => {
+            FieldKind::Observable if nested_vec_item_type(&f.ty, from, table).is_some() => {
                 let field_ident = format_ident!("{}", f.name);
-                let item_ty: syn::Type = syn::parse_str(&nested_vec_item_type(&f.ty, table).unwrap())
+                let item_ty: syn::Type = syn::parse_str(&nested_vec_item_type(&f.ty, from, table).unwrap())
                     .expect("nested viewmodel type name must parse");
 
                 struct_fields.extend(quote! {
@@ -719,12 +750,13 @@ impl EmitMode {
     }
 }
 
-fn generate_view(view: &ViewDef, table: &SymbolTable) -> TokenStream {
+fn generate_view(view: &ViewDef, from: &Module, table: &SymbolTable) -> TokenStream {
     let target_name = view.target.clone();
     let target = format_ident!("{}", target_name);
+    // A `component`/`view` pair always shares one `.elwind` file (`generate_module`'s
+    // `view_targets` check), so the target is always defined locally in `from` — no `use` needed.
     let binds = table
-        .types
-        .get(&target_name)
+        .resolve(from, &target_name)
         .map(|t| t.binds.clone())
         .unwrap_or_default();
     let ctx = ViewCtx { binds };
@@ -1302,7 +1334,7 @@ viewmodel NotepadViewModel {
 "#;
 
     const WINDOW_SRC: &str = r#"
-use elwindui::viewmodel::NotepadViewModel;
+use crate::NotepadViewModel;
 
 component NotepadWindow {
     #[param]
@@ -1400,7 +1432,7 @@ viewmodel NotepadViewModel {
 }
 "#;
         let window_src = r#"
-use elwindui::viewmodel::NotepadViewModel;
+use crate::NotepadViewModel;
 
 component NotepadWindow {
     #[param]

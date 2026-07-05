@@ -374,6 +374,18 @@ use components::card::Card as ProductCard;
 
 - Rustの `use` 構文と完全に一致させる
 - 静的にimportを解決し、循環参照・未解決参照を機械的に検出できる
+- `use` は対象アイテムの**実際のRustパス**へ解決される。ある型名が `.elwind` ファイル内で参照可能なのは、
+  (a) 同じファイル(=同じ実パスを持つモジュール)内でローカルに定義されている場合、または
+  (b) その型の実パスを指す `use` がそのファイルにある場合、のいずれかに限る。ディレクトリ内の他の
+  `.elwind` ファイルに同名の型が存在するというだけでは可視にならない(ただし付録B.1のとおり、複数の
+  `.elwind` ファイルが結局同じRustスコープに`include!`される場合は、その同じスコープ内では通常の
+  Rustのファイル分割同様`use`は不要)。ローカル定義でも`use`解決でもない型参照は、Rustの「見つからない
+  型」エラーと同様、静的検証エラーとなる
+- ViewModelの参照(付録O.2/O.4)も同じ規則に従う。`viewmodel`を`.elwind`内でDSLネイティブに書いた場合も、
+  `#[elwindui::viewmodel] mod foo { .. }`として通常のRustファイルに書いた場合も、参照側は必ずその実パス
+  (前者なら`.elwind`ファイルが実際にコンパイルされ`include!`される先のパス、後者なら`mod foo`が実際に
+  宣言されているRustパス、例: `crate::foo::Foo`)を`use`する。`elwindui::viewmodel::X`のような、どの
+  モジュールにも実在しない架空の名前空間を`use`することはできない
 
 ---
 
@@ -606,6 +618,16 @@ include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
 ```
 
 - `cargo:rerun-if-changed`により、`.elwind`保存後の次回ビルドで自動再生成される(手動コマンド不要)
+- 生成された各`.rs`ファイルは、上記のように`main.rs`(クレートルート)へ`include!`される既定方式では、
+  ディレクトリ構造をmodネストへ写像せず、フラットにクレートルートへ展開される。これは`include!`が
+  ソーステキストをその場に貼り付けるのと同じなので、`src/ui`以下の複数の`.elwind`ファイルを同じ場所へ
+  `include!`した場合、それらが生成する型は実際に同じRustスコープ(クレートルート)に存在することになり、
+  Rust自身の規則どおり、その間で`use`は不要になる(同じファイルに書かれた複数の`struct`同士が
+  `use`なしに参照し合えるのと同じ)。一方、`#[elwindui::viewmodel] mod foo { .. }`のように通常の`.rs`
+  ファイル側に`mod`として宣言されたアイテムは、その`mod`が実際に宣言されている実パス(例:
+  `crate::foo::Foo`)を持つため、`.elwind`側からは`use crate::foo::Foo;`のように実パスを`use`する
+  必要がある(§12)。ディレクトリ構造をmodネストへ対応づける方式へ変更する場合は、この節を合わせて
+  更新すること
 
 **代替方式(proc-macro):**
 
@@ -1473,6 +1495,35 @@ viewmodel NotepadViewModel {
 - `#[observable]`は`prop`に相当する「実行時に変化しView側へ伝播する」フィールドを表す修飾子(既定でstoreのフィールドと同じ扱い)
 - `viewmodel`は`view`ブロックを持てない。ビルトイン要素(`Row`/`Text`等)への参照が内部に出現すると14章ルール19により静的エラーとなり、M/V/VMの分離が構文レベルで強制される
 
+### `viewmodel`の2つの書き方と`use`
+
+`viewmodel`は上記のようにDSLネイティブな`.elwind`構文として書く以外に、WPF/WinUI3のMVVMがViewModelを
+ホスト言語側に置くのと同様、通常のRustファイルに`#[elwindui::viewmodel]`属性付きの`mod`として書くことも
+できる:
+
+```rust
+// main.rs (通常の.rsファイル。.elwindではない)
+#[elwindui::viewmodel]
+mod notepad_view_model {
+    struct NotepadViewModel {
+        #[observable(default = Vec::new())]
+        documents: Vec<Document>,
+
+        #[command(can_execute = documents.len() > 0)]
+        save: Command,
+    }
+
+    impl NotepadViewModel {
+        async fn save(&self) { /* ... */ }
+    }
+}
+```
+
+どちらの書き方でも、Viewからは§12の規則どおり**実際のRustパスを`use`する**。前者(DSLネイティブ)なら
+その`.elwind`ファイルが実際にコンパイル・配置される先のパス、後者(Rust属性マクロ)なら`mod`が実際に
+宣言されているパス(上記の例なら`crate::notepad_view_model::NotepadViewModel`)である。`elwindui::
+viewmodel::X`のような、どちらの実装にも対応しない架空の名前空間は使えない。
+
 ## O.3 Command(操作の抽象化)
 
 WPF/WinUI3の`ICommand`に相当する型を導入する。
@@ -1499,6 +1550,9 @@ save: Command = command!(|| { /* 実行内容 */ }),
 ## O.4 ViewModelとViewの結合
 
 ViewModelはView単位で注入される(付録J.5の`#[scoped]` store + `#[inject]`と同じ仕組みを流用する)。
+`NotepadViewModel`を実際に参照するには、O.2で述べた実パスを`use`しておく必要がある(§12)。例えば
+`NotepadViewModel`がO.2のRust属性マクロ例のように`main.rs`の`mod notepad_view_model`として定義されて
+いるなら、このファイルの先頭で`use crate::notepad_view_model::NotepadViewModel;`とする。
 
 ```rust
 component NotepadWindow {

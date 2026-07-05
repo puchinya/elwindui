@@ -1,6 +1,14 @@
-/// A single `.elwind` file. See docs/elwindui_spec.md §12 (`use`), §1-15 core language.
-#[derive(Debug, Clone)]
+/// A single `.elwind` file (or an equivalent synthetic module built from a plain `.rs` file's
+/// `#[elwindui::viewmodel] mod foo { .. }`, see `attr_frontend.rs`). See docs/elwindui_spec.md §12
+/// (`use`), §1-15 core language, 付録B.1 (how `path` maps to a real Rust module path).
+#[derive(Debug, Clone, Default)]
 pub struct Module {
+    /// This module's real, crate-relative path segments — `[]` for a `.elwind` file compiled by
+    /// `compile_dir` (which lands flat at the crate root via `include!`, 付録B.1) or for a
+    /// standalone proc-macro invocation; `["notepad_view_model"]` for Rust source's
+    /// `mod notepad_view_model { .. }`. `use` declarations (§12) are resolved against these paths
+    /// exactly like Rust's own name resolution — see `codegen::build_symbol_table`/`validate::validate`.
+    pub path: Vec<String>,
     pub uses: Vec<UseDecl>,
     pub items: Vec<Item>,
 }

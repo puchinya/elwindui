@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Communication
+
+When asking the user a question (clarifying questions, `AskUserQuestion`, plan checkpoints, etc.), always ask in Japanese.
+
 ## Project state
 
 This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to multiple backends (egui/iced, or native OS toolkits WinUI 3 / AppKit / GTK4). The project is currently at the **specification stage only** — `src/main.rs` is still the default `cargo new` stub and `Cargo.toml` has no dependencies. There is no parser, codegen, or runtime implemented yet.

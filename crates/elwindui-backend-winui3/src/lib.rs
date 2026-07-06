@@ -1,10 +1,697 @@
-//! WinUI 3 (Windows App SDK) implementation of `elwindui-core`'s backend traits, Windows-only.
-//! See docs/elwindui_spec.md 付録C, docs/elwindui_gui_framework_design.md §3.
+//! WinUI 3 (Windows App SDK) implementation of the widget surface `elwindui-codegen` targets,
+//! mirroring `elwindui-backend-appkit`'s shape (see that crate's doc comment for the overall
+//! native-vs-virtual design this implements: `Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/
+//! `Rectangle`/`Ellipse` have no widget here at all, just `elwindui_core::tree::Node::Virtual`
+//! values `elwindui-codegen` builds directly; only `Window`/`Button`/`TextArea`/`Text`/`MenuBar`/
+//! `MenuBarItem`/`Menu`/`MenuItem`/`TabView` are real native widgets).
 //!
-//! Left as a stub: the mainstream `windows` crate (windows-rs) does not expose XAML UI control
-//! bindings (`Microsoft.UI.Xaml`/`Windows.UI.Xaml.Controls`) — its ~691 features cover Win32 and
-//! WinRT APIs generated from the Windows SDK metadata, but not the separate Windows App SDK/WinUI3
-//! metadata that `Button`/`StackPanel`/`TextBox` etc. come from (confirmed by inspecting the
-//! crate's published feature list; no `UI_Xaml*` feature exists). A real implementation needs
-//! either a dedicated WinUI3 bindings crate or custom `windows-bindgen` metadata for the Windows
-//! App SDK, and can only be built/verified on Windows.
+//! # UNVERIFIED — read before touching
+//!
+//! Written entirely without a Windows machine available in this environment to build or run it
+//! against. The `elwindui_backend_appkit`-mirroring *structure* (which types exist, what methods
+//! they expose, how `TreeHostPanel` reflects a `Node<AnyView>`) is deliberate and should be sound;
+//! the *exact* WinRT/`windows-rs` call shapes (event-handler registration syntax, exact property/
+//! method names on `Microsoft.UI.Xaml` types, `build.rs`'s bindgen invocation) are written from
+//! memory of the general `windows-rs` WinRT-projection pattern and are the most likely things to
+//! need correction once this is actually compiled on Windows with the Windows App SDK installed.
+
+#![cfg(target_os = "windows")]
+
+#[allow(non_snake_case, non_camel_case_types, dead_code, clippy::all)]
+mod bindings {
+    include!(env!("ELWINDUI_WINUI3_BINDINGS"));
+}
+
+use bindings::Microsoft::UI::Dispatching::{DispatcherQueue, DispatcherQueueHandler};
+use bindings::Microsoft::UI::Xaml::Controls::{
+    Button as XamlButton, Canvas, MenuBar as XamlMenuBar, MenuFlyoutItem, MenuFlyoutItemBase, TabView as XamlTabView,
+    TabViewCloseButtonOverlayMode, TabViewItem, TabViewTabCloseRequestedEventArgs, TextBlock, TextBox,
+};
+use bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
+use bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
+use bindings::Microsoft::UI::Xaml::Shapes::{Ellipse as XamlEllipse, Rectangle as XamlRectangle};
+use bindings::Microsoft::UI::Xaml::{
+    FrameworkElement, RoutedEventHandler, SelectionChangedEventArgs, TextChangedEventArgs, UIElement, Window as XamlWindow,
+};
+use bindings::Windows::Foundation::{Size, TypedEventHandler};
+use bindings::Windows::UI::Color;
+use std::cell::RefCell;
+use std::rc::Rc;
+use windows::core::{Interface, Result, HSTRING};
+
+/// Everything the generated code can pass as a `Window`/`TabView` child. `Row`/`Column`/
+/// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have no variant here — they're purely
+/// `elwindui_core::tree::Node::Virtual` values (see `TreeHostPanel` below).
+#[derive(Clone)]
+pub enum AnyView {
+    TextArea(TextArea),
+    Button(Button),
+    Text(Text),
+    TabView(TabView),
+}
+
+impl AnyView {
+    fn as_element(&self) -> FrameworkElement {
+        match self {
+            AnyView::TextArea(v) => v.text_box.clone().into(),
+            AnyView::Button(v) => v.xaml.clone().into(),
+            AnyView::Text(v) => v.xaml.clone().into(),
+            AnyView::TabView(v) => v.xaml.clone().into(),
+        }
+    }
+}
+
+/// Lets `TreeHostPanel` (below) measure/arrange any native leaf uniformly through the base
+/// `FrameworkElement`/`UIElement` API regardless of which concrete widget it wraps. Unlike AppKit
+/// (where `arrange` calls `setFrame` directly), a `Canvas`'s children are still measured/arranged
+/// by the real XAML layout system on every layout pass — `arrange` here only needs to set the
+/// `Width`/`Height` and `Canvas.Left`/`Canvas.Top` attached properties once; `Canvas`'s own
+/// (built-in) `ArrangeOverride` does the rest, unlike AppKit's plain `NSView` which has no
+/// attached-property positioning at all.
+impl elwindui_core::layout::LayoutNode for AnyView {
+    fn measure(&self, available: elwindui_core::layout::Size) -> elwindui_core::layout::Size {
+        let element = self.as_element();
+        let _ = element.Measure(Size { Width: available.width as f32, Height: available.height as f32 });
+        let desired = element.DesiredSize().unwrap_or(Size { Width: 0.0, Height: 0.0 });
+        elwindui_core::layout::Size { width: desired.Width, height: desired.Height }
+    }
+
+    fn arrange(&mut self, final_rect: elwindui_core::layout::Rect) {
+        let element = self.as_element();
+        let _ = element.SetWidth(final_rect.width as f64);
+        let _ = element.SetHeight(final_rect.height as f64);
+        let _ = Canvas::SetLeft(&element, final_rect.x as f64);
+        let _ = Canvas::SetTop(&element, final_rect.y as f64);
+    }
+}
+
+impl From<TextArea> for AnyView {
+    fn from(v: TextArea) -> Self {
+        AnyView::TextArea(v)
+    }
+}
+impl From<Button> for AnyView {
+    fn from(v: Button) -> Self {
+        AnyView::Button(v)
+    }
+}
+impl From<Text> for AnyView {
+    fn from(v: Text) -> Self {
+        AnyView::Text(v)
+    }
+}
+impl From<TabView> for AnyView {
+    fn from(v: TabView) -> Self {
+        AnyView::TabView(v)
+    }
+}
+
+/// The single reusable "reflect an `elwindui_core::tree::Node<AnyView>` into real XAML elements"
+/// host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHostView`. A `Canvas` needs
+/// no custom `MeasureOverride`/`ArrangeOverride` subclass (unlike `TreeHostView`'s `NSView`
+/// subclass) since `Canvas`'s own built-in layout already just measures every child with an
+/// unconstrained size and positions it from the `Canvas.Left`/`Canvas.Top` attached properties —
+/// exactly the "trust `elwindui_core::tree::layout_tree`'s own absolute-rect computation, don't
+/// let the native layout system second-guess it" behavior this needs. `Rectangle`/`Ellipse` paint
+/// nodes become real `Shapes::Rectangle`/`Shapes::Ellipse` elements inserted *before* the native
+/// children in `Canvas.Children` (`Canvas` z-orders by collection order), rather than AppKit's
+/// separate `CAShapeLayer` sublayer mechanism.
+#[derive(Clone)]
+pub struct TreeHostPanel {
+    canvas: Canvas,
+    tree: Rc<RefCell<Option<elwindui_core::tree::Node<AnyView>>>>,
+}
+
+impl TreeHostPanel {
+    pub fn new() -> Self {
+        let canvas = Canvas::new().expect("Canvas::new");
+        let this = Self { canvas, tree: Rc::new(RefCell::new(None)) };
+        let weak = Rc::downgrade(&this.tree);
+        let canvas_for_handler = this.canvas.clone();
+        // `SizeChanged` fires whenever this panel's own allotted space changes (window resize,
+        // or — for a `TabView`'s per-tab content area — the tab strip/window resizing together)
+        // — the same role `layout()` plays for AppKit's `TreeHostView`.
+        let _ = this.canvas.SizeChanged(&TypedEventHandler::new(move |_, _| {
+            if let Some(tree) = weak.upgrade() {
+                Self::relayout_static(&canvas_for_handler, &tree);
+            }
+            Ok(())
+        }));
+        this
+    }
+
+    fn as_element(&self) -> FrameworkElement {
+        self.canvas.clone().into()
+    }
+
+    /// Replaces this host's entire content, discarding whatever native children were there before
+    /// — a full swap rather than a diff, matching `TabView`'s wholesale content swap between tabs
+    /// and `Window::set_content` only ever being called once (see `TreeHostView::set_tree`'s doc
+    /// comment on the AppKit side for the same reasoning; a `Node<H>` isn't `Clone` either way).
+    pub fn set_tree(&self, tree: elwindui_core::tree::Node<AnyView>) {
+        if let Ok(children) = self.canvas.Children() {
+            let _ = children.Clear();
+        }
+        *self.tree.borrow_mut() = Some(tree);
+        Self::relayout_static(&self.canvas, &self.tree);
+    }
+
+    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<elwindui_core::tree::Node<AnyView>>>>) {
+        use elwindui_core::layout::Size as LSize;
+
+        let width = canvas.ActualWidth().unwrap_or(0.0) as f32;
+        let height = canvas.ActualHeight().unwrap_or(0.0) as f32;
+        let available = LSize { width, height };
+
+        let tree_ref = tree.borrow();
+        let Some(tree) = tree_ref.as_ref() else { return };
+        let (natives, paints) = elwindui_core::tree::layout_tree(tree, available);
+
+        let Ok(children) = canvas.Children() else { return };
+
+        // Paint nodes go in first (so they render behind every native leaf added after them —
+        // `Canvas` z-orders by `Children` collection order), then every native leaf.
+        for (paint, rect) in paints {
+            let elwindui_core::tree::PaintKind::Shape { kind, fill, stroke, stroke_width } = paint;
+            let element: UIElement = match kind {
+                elwindui_core::tree::ShapeKind::RoundedRect { corner_radius } => {
+                    let r = XamlRectangle::new().expect("Rectangle::new");
+                    let _ = r.SetRadiusX(corner_radius as f64);
+                    let _ = r.SetRadiusY(corner_radius as f64);
+                    r.into()
+                }
+                elwindui_core::tree::ShapeKind::Oval => XamlEllipse::new().expect("Ellipse::new").into(),
+            };
+            let fe: FrameworkElement = element.clone().into();
+            let _ = fe.SetWidth(rect.width as f64);
+            let _ = fe.SetHeight(rect.height as f64);
+            let _ = Canvas::SetLeft(&fe, rect.x as f64);
+            let _ = Canvas::SetTop(&fe, rect.y as f64);
+            if let Some(fill) = fill {
+                if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&fill)) {
+                    let _ = set_shape_fill(&element, &brush);
+                }
+            }
+            if let Some(stroke) = stroke {
+                if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&stroke)) {
+                    let _ = set_shape_stroke(&element, &brush, stroke_width as f64);
+                }
+            }
+            let _ = children.Append(&element);
+        }
+
+        for (mut view, rect) in natives {
+            view.arrange(elwindui_core::layout::Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+            let _ = children.Append(&view.as_element());
+        }
+    }
+}
+
+/// `Rectangle`/`Ellipse` share `Fill`/`Stroke`/`StrokeThickness` (declared on their common
+/// `Shape` base class), but the generated bindings likely expose them per-concrete-type rather
+/// than through a `Shape` handle directly usable here — dispatching on the `UIElement` avoids
+/// needing a third enum just for this.
+fn set_shape_fill(element: &UIElement, brush: &SolidColorBrush) -> Result<()> {
+    if let Ok(r) = element.cast::<XamlRectangle>() {
+        return r.SetFill(brush);
+    }
+    element.cast::<XamlEllipse>()?.SetFill(brush)
+}
+
+fn set_shape_stroke(element: &UIElement, brush: &SolidColorBrush, thickness: f64) -> Result<()> {
+    if let Ok(r) = element.cast::<XamlRectangle>() {
+        r.SetStroke(brush)?;
+        return r.SetStrokeThickness(thickness);
+    }
+    let e = element.cast::<XamlEllipse>()?;
+    e.SetStroke(brush)?;
+    e.SetStrokeThickness(thickness)
+}
+
+/// Parses a `"#RRGGBB"`/`"#RRGGBBAA"` hex color (the only form `Rectangle`/`Ellipse`'s `fill`/
+/// `stroke` params accept) into a `Windows::UI::Color`. An unparseable string falls back to opaque
+/// black rather than panicking, since this runs during layout, not construction.
+fn parse_color(hex: &str) -> Color {
+    let hex = hex.trim_start_matches('#');
+    let (r, g, b, a) = match (hex.len(), u32::from_str_radix(hex, 16)) {
+        (6, Ok(v)) => (((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8, 255u8),
+        (8, Ok(v)) => (((v >> 24) & 0xFF) as u8, ((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8),
+        _ => (0, 0, 0, 255),
+    };
+    Color { A: a, R: r, G: g, B: b }
+}
+
+#[derive(Clone)]
+pub struct Window {
+    xaml: XamlWindow,
+    content_host: TreeHostPanel,
+}
+
+impl Window {
+    pub fn new(title: &str) -> Self {
+        let xaml = XamlWindow::new().expect("Window::new");
+        let _ = xaml.SetTitle(&HSTRING::from(title));
+        let content_host = TreeHostPanel::new();
+        let _ = xaml.SetContent(&content_host.as_element());
+        Self { xaml, content_host }
+    }
+
+    /// Replaces the window's whole content tree — see `TreeHostPanel` for how a `Node<AnyView>`
+    /// (layouts/shapes mixed freely with native controls, at any nesting depth) gets reflected
+    /// into real XAML elements.
+    pub fn set_content(&self, content: elwindui_core::tree::Node<AnyView>) {
+        self.content_host.set_tree(content);
+    }
+
+    pub fn set_title(&self, title: &str) {
+        let _ = self.xaml.SetTitle(&HSTRING::from(title));
+    }
+
+    /// `Microsoft.UI.Xaml.Controls.MenuBar` is placed as a real element *above* the content host,
+    /// unlike AppKit's single global `NSApplication.mainMenu` — this repacks `Window`'s content
+    /// into a two-row layout (`MenuBar`, then the existing content host) the first time a menu bar
+    /// is set. `Row`/`Column` aren't available here (no backend struct — see the module doc
+    /// comment), so this uses a plain `Canvas`-less stack: a small dedicated host `Grid` with two
+    /// rows would be the idiomatic XAML way to do this; simplified here to stacking two elements
+    /// inside a fresh outer `Canvas` sized/positioned manually, mirroring `TreeHostPanel`'s own
+    /// "don't trust native auto-layout, position everything explicitly" approach.
+    pub fn set_menu_bar(&self, menu_bar: &MenuBar) {
+        let outer = Canvas::new().expect("Canvas::new");
+        if let Ok(children) = outer.Children() {
+            let _ = children.Append(&menu_bar.xaml);
+            let _ = children.Append(&self.content_host.as_element());
+            let _ = Canvas::SetTop(&self.content_host.as_element(), 32.0);
+        }
+        let _ = self.xaml.SetContent(&outer);
+    }
+
+    /// Shows the window. Does not block — call `application::run()` afterward to actually enter
+    /// the platform message loop (see that module's doc comment for why the two are separate).
+    pub fn show(&self) {
+        let _ = self.xaml.Activate();
+    }
+}
+
+#[derive(Clone)]
+pub struct TextArea {
+    text_box: TextBox,
+    on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+}
+
+impl TextArea {
+    pub fn new(initial_text: &str) -> Self {
+        let text_box = TextBox::new().expect("TextBox::new");
+        let _ = text_box.SetAcceptsReturn(true);
+        let _ = text_box.SetTextWrapping(bindings::Microsoft::UI::Xaml::TextWrapping::Wrap);
+        let _ = text_box.SetText(&HSTRING::from(initial_text));
+        let this = Self { text_box, on_change: Rc::new(RefCell::new(None)) };
+        let callback = this.on_change.clone();
+        let text_box_for_handler = this.text_box.clone();
+        let _ = this.text_box.TextChanged(&TypedEventHandler::<TextBox, TextChangedEventArgs>::new(move |_, _| {
+            if let Some(cb) = callback.borrow().as_ref() {
+                let text = text_box_for_handler.Text().map(|s| s.to_string_lossy()).unwrap_or_default();
+                cb(text);
+            }
+            Ok(())
+        }));
+        this
+    }
+
+    pub fn set_text(&self, text: &str) {
+        let _ = self.text_box.SetText(&HSTRING::from(text));
+    }
+
+    pub fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+        *self.on_change.borrow_mut() = Some(callback);
+    }
+}
+
+#[derive(Clone)]
+pub struct Button {
+    xaml: XamlButton,
+    on_click: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+}
+
+impl Button {
+    pub fn new(title: &str) -> Self {
+        let xaml = XamlButton::new().expect("Button::new");
+        let _ = xaml.SetContent(&HSTRING::from(title));
+        let this = Self { xaml, on_click: Rc::new(RefCell::new(None)) };
+        let callback = this.on_click.clone();
+        let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
+            if let Some(cb) = callback.borrow().as_ref() {
+                cb();
+            }
+            Ok(())
+        }));
+        this
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        let _ = self.xaml.SetIsEnabled(enabled);
+    }
+
+    pub fn set_on_click(&self, callback: Box<dyn Fn()>) {
+        *self.on_click.borrow_mut() = Some(callback);
+    }
+
+    /// Used by generic resync when a `Button`'s `text` attribute is a dynamic expression.
+    pub fn set_text(&self, text: &str) {
+        let _ = self.xaml.SetContent(&HSTRING::from(text));
+    }
+}
+
+#[derive(Clone)]
+pub struct Text {
+    xaml: TextBlock,
+}
+
+impl Text {
+    pub fn new(text: &str) -> Self {
+        let xaml = TextBlock::new().expect("TextBlock::new");
+        let _ = xaml.SetText(&HSTRING::from(text));
+        Self { xaml }
+    }
+
+    pub fn set_text(&self, text: &str) {
+        let _ = self.xaml.SetText(&HSTRING::from(text));
+    }
+}
+
+/// `Microsoft.UI.Xaml.Controls.TabView` is a real native tabbed-document control (unlike AppKit,
+/// which has no built-in equivalent — `elwindui-backend-appkit`'s `TabStrip`/`TabChip` hand-roll
+/// one from `Button`s), so this wraps it directly instead of assembling a strip from scratch. Each
+/// tab's `TabViewItem.Content` is a `TreeHostPanel` (see that type) holding that tab's
+/// `Node<AnyView>` — `elwindui-builtins`'s generic wrapper (the `Rc<dyn Any>`-erased per-item type,
+/// mirroring `elwindui-builtins::appkit::tab_view`) owns the tab list and calls the methods below;
+/// this type only knows about "N tabs, each with a title and a content host", the same division
+/// AppKit's `TabView` keeps.
+#[derive(Clone)]
+pub struct TabView {
+    xaml: XamlTabView,
+    on_select: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
+    on_close: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
+    on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+}
+
+impl TabView {
+    pub fn new() -> Self {
+        let xaml = XamlTabView::new().expect("TabView::new");
+        let _ = xaml.SetTabWidthMode(bindings::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent);
+        let _ = xaml.SetCloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Always);
+        let _ = xaml.SetIsAddTabButtonVisible(true);
+
+        let this = Self {
+            xaml,
+            on_select: Rc::new(RefCell::new(None)),
+            on_close: Rc::new(RefCell::new(None)),
+            on_new_tab: Rc::new(RefCell::new(None)),
+        };
+
+        let on_select = this.on_select.clone();
+        let _ = this.xaml.SelectionChanged(&TypedEventHandler::<XamlTabView, SelectionChangedEventArgs>::new(move |sender, _| {
+            if let (Some(sender), Some(cb)) = (sender, on_select.borrow().as_ref()) {
+                let index = sender.SelectedIndex().unwrap_or(-1);
+                if index >= 0 {
+                    cb(index as usize);
+                }
+            }
+            Ok(())
+        }));
+
+        let on_close = this.on_close.clone();
+        let _ = this.xaml.TabCloseRequested(&TypedEventHandler::<XamlTabView, TabViewTabCloseRequestedEventArgs>::new(
+            move |sender, args| {
+                if let (Some(sender), Some(args), Some(cb)) = (sender, args, on_close.borrow().as_ref()) {
+                    if let Ok(items) = sender.TabItems() {
+                        if let Ok(item) = args.Tab() {
+                            if let Ok(index) = items.IndexOf(&item.into()) {
+                                cb(index as usize);
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ));
+
+        let on_new_tab = this.on_new_tab.clone();
+        let _ = this.xaml.AddTabButtonClick(&TypedEventHandler::new(move |_, _| {
+            if let Some(cb) = on_new_tab.borrow().as_ref() {
+                cb();
+            }
+            Ok(())
+        }));
+
+        this
+    }
+
+    pub fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
+        *self.on_select.borrow_mut() = Some(callback);
+    }
+
+    pub fn set_on_close(&self, callback: Box<dyn Fn(usize)>) {
+        *self.on_close.borrow_mut() = Some(callback);
+    }
+
+    pub fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
+        *self.on_new_tab.borrow_mut() = Some(callback);
+    }
+
+    /// Inserts a new tab at `index` with an empty content host, returning that host so the caller
+    /// (`elwindui-builtins`'s generic wrapper) can `set_tree` it — the WinUI3 counterpart of
+    /// AppKit's `insert_tab`, minus the per-chip `on_select`/`on_close` callbacks (WinUI3's
+    /// `TabView` fires those once for the whole control, wired in `new` above, not per item).
+    pub fn insert_tab(&self, index: usize, title: &str, closable: bool) -> TreeHostPanel {
+        let content_host = TreeHostPanel::new();
+        let item = TabViewItem::new().expect("TabViewItem::new");
+        let _ = item.SetHeader(&HSTRING::from(title));
+        let _ = item.SetIsClosable(closable);
+        let _ = item.SetContent(&content_host.as_element());
+        if let Ok(items) = self.xaml.TabItems() {
+            let _ = items.InsertAt(index as u32, &item.into());
+        }
+        content_host
+    }
+
+    pub fn remove_tab_at(&self, index: usize) {
+        if let Ok(items) = self.xaml.TabItems() {
+            let _ = items.RemoveAt(index as u32);
+        }
+    }
+
+    pub fn set_tab_title(&self, index: usize, title: &str) {
+        if let Ok(items) = self.xaml.TabItems() {
+            if let Ok(item) = items.GetAt(index as u32) {
+                if let Ok(item) = item.cast::<TabViewItem>() {
+                    let _ = item.SetHeader(&HSTRING::from(title));
+                }
+            }
+        }
+    }
+
+    pub fn set_selected_index(&self, index: usize) {
+        let _ = self.xaml.SetSelectedIndex(index as i32);
+    }
+}
+
+/// See `elwindui-backend-appkit::MenuItem`'s doc comment — same role, backed by a
+/// `MenuFlyoutItem` (WinUI3's `MenuBarItem.Items` collection holds `MenuFlyoutItemBase`s).
+#[derive(Clone)]
+pub struct MenuItem {
+    xaml: MenuFlyoutItem,
+    on_select: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+}
+
+impl MenuItem {
+    pub fn new(title: &str) -> Self {
+        let xaml = MenuFlyoutItem::new().expect("MenuFlyoutItem::new");
+        let _ = xaml.SetText(&HSTRING::from(title));
+        let this = Self { xaml, on_select: Rc::new(RefCell::new(None)) };
+        let callback = this.on_select.clone();
+        let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
+            if let Some(cb) = callback.borrow().as_ref() {
+                cb();
+            }
+            Ok(())
+        }));
+        this
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        let _ = self.xaml.SetIsEnabled(enabled);
+    }
+
+    /// A bare key character (e.g. `"s"`), matching AppKit's `set_shortcut` convention — mapped to
+    /// a `Ctrl`-modifier `KeyboardAccelerator` (WinUI3 has no single-string key-equivalent setter
+    /// the way `NSMenuItem.keyEquivalent` does).
+    pub fn set_shortcut(&self, key_equivalent: &str) {
+        let Some(key) = key_equivalent.chars().next() else { return };
+        let Ok(accelerator) = KeyboardAccelerator::new() else { return };
+        let _ = accelerator.SetModifiers(bindings::Microsoft::UI::Xaml::Input::VirtualKeyModifiers::Control);
+        let virtual_key = bindings::Windows::System::VirtualKey(key.to_ascii_uppercase() as i32);
+        let _ = accelerator.SetKey(virtual_key);
+        if let Ok(accelerators) = self.xaml.KeyboardAccelerators() {
+            let _ = accelerators.Append(&accelerator);
+        }
+    }
+
+    pub fn set_on_select(&self, callback: Box<dyn Fn()>) {
+        *self.on_select.borrow_mut() = Some(callback);
+    }
+}
+
+/// A dropdown attached to a `MenuBarItem` — see `elwindui-backend-appkit::Menu`'s doc comment.
+#[derive(Clone)]
+pub struct Menu {
+    items: Vec<MenuItem>,
+}
+
+impl Menu {
+    pub fn new(items: Vec<MenuItem>) -> Self {
+        Self { items }
+    }
+}
+
+/// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `Menu`.
+#[derive(Clone)]
+pub struct MenuBarItem {
+    xaml: bindings::Microsoft::UI::Xaml::Controls::MenuBarItem,
+}
+
+impl MenuBarItem {
+    pub fn new(title: &str, submenu: Menu) -> Self {
+        let xaml = bindings::Microsoft::UI::Xaml::Controls::MenuBarItem::new().expect("MenuBarItem::new");
+        let _ = xaml.SetTitle(&HSTRING::from(title));
+        if let Ok(items) = xaml.Items() {
+            for item in &submenu.items {
+                let base: MenuFlyoutItemBase = item.xaml.clone().into();
+                let _ = items.Append(&base);
+            }
+        }
+        Self { xaml }
+    }
+}
+
+/// The whole top menu bar. Unlike AppKit (one global `NSApplication.mainMenu`), WinUI3's
+/// `MenuBar` is a per-window element — installed by `Window::set_menu_bar` above, not a shared
+/// process-wide singleton, so (unlike the AppKit backend) there's no app-menu-slot/Quit-item
+/// special-casing needed here.
+#[derive(Clone)]
+pub struct MenuBar {
+    xaml: XamlMenuBar,
+}
+
+impl MenuBar {
+    pub fn new(items: Vec<MenuBarItem>) -> Self {
+        let xaml = XamlMenuBar::new().expect("MenuBar::new");
+        if let Ok(xaml_items) = xaml.Items() {
+            for item in &items {
+                let _ = xaml_items.Append(&item.xaml);
+            }
+        }
+        Self { xaml }
+    }
+}
+
+/// See docs/elwindui_spec.md 付録T.2 — same async-shaped-but-synchronous-underneath API as
+/// AppKit's `platform::file_dialog` (`IFileOpenDialog`/`IFileSaveDialog::Show` block the calling
+/// thread until the user closes the dialog; there's no genuine suspend point). Uses the classic
+/// Win32 common file dialog COM interfaces (`Win32_UI_Shell` — present in the mainstream `windows`
+/// crate) rather than the WinRT `Windows.Storage.Pickers` pickers, since those need
+/// `IInitializeWithWindow` interop to attach to a non-UWP top-level `HWND`, which is extra
+/// complexity this skips in favor of a path more likely to actually compile as written.
+pub mod platform {
+    pub mod file_dialog {
+        use std::path::PathBuf;
+        use windows::core::Interface;
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::{FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH};
+
+        fn ensure_com_initialized() {
+            unsafe {
+                // Ignore the result: `RPC_E_CHANGED_MODE`/`S_FALSE` both mean COM is already
+                // initialized on this thread (fine — this only ever runs on the UI thread), and
+                // any other failure surfaces later as the dialog itself failing to create.
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            }
+        }
+
+        pub async fn open() -> Option<PathBuf> {
+            ensure_com_initialized();
+            unsafe {
+                let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                dialog.Show(None).ok()?;
+                let item = dialog.GetResult().ok()?;
+                let path = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+                Some(PathBuf::from(path.to_string().ok()?))
+            }
+        }
+
+        pub async fn save() -> Option<PathBuf> {
+            ensure_com_initialized();
+            unsafe {
+                let dialog: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                dialog.Show(None).ok()?;
+                let item = dialog.GetResult().ok()?;
+                let path = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+                Some(PathBuf::from(path.to_string().ok()?))
+            }
+        }
+    }
+}
+
+/// WinUI3's `Dispatcher` (docs/elwindui_spec.md 付録P.5): hops back to the UI thread via the
+/// current thread's `DispatcherQueue` — the WinUI3/WinAppSDK analog of AppKit's
+/// `dispatch2::DispatchQueue::main()`. `application::run()` (below) is what pumps this queue as
+/// part of its own message loop, so a job enqueued from any thread is guaranteed to run promptly.
+pub struct WinUI3Dispatcher {
+    queue: DispatcherQueue,
+}
+
+impl elwindui_core::task::Dispatcher for WinUI3Dispatcher {
+    fn enqueue(&self, job: Box<dyn FnOnce() + Send + 'static>) {
+        let job = std::cell::RefCell::new(Some(job));
+        let _ = self.queue.TryEnqueue(&DispatcherQueueHandler::new(move || {
+            if let Some(job) = job.borrow_mut().take() {
+                job();
+            }
+            Ok(())
+        }));
+    }
+}
+
+/// The single entry point that owns "enter the platform message loop" — kept separate from
+/// `Window::show()` for the same reason as `elwindui-backend-appkit`'s `application::run()` (see
+/// that module's doc comment): it's the one well-defined place to install the task executor before
+/// any generated code runs.
+pub mod application {
+    use super::{DispatcherQueue, WinUI3Dispatcher};
+    use elwindui_core::task::LocalExecutor;
+    use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, TranslateMessage, MSG};
+
+    /// Blocking: enters the classic Win32 message loop. A `DispatcherQueueController` is created
+    /// first (needed so `#[command(async)]` bodies have somewhere to post continuations back to —
+    /// see `WinUI3Dispatcher`), but for an unpackaged Win32 app hosting WinUI3 content (as opposed
+    /// to a packaged UWP-style app whose `Application::Start` owns the whole loop), the actual
+    /// "keep the app alive and pump input/paint messages" loop is still the plain
+    /// `GetMessageW`/`DispatchMessageW` pattern every Win32 app uses — `GetMessageW` returns `0`
+    /// (loop exit) once `PostQuitMessage` has been called, which every top-level `Window` here is
+    /// expected to do when closed (not yet wired — see the module's UNVERIFIED note; a real
+    /// implementation needs a `Window.Closed` handler calling `PostQuitMessage(0)` once the last
+    /// window closes, mirroring AppKit's `applicationShouldTerminateAfterLastWindowClosed`).
+    pub fn run() {
+        let controller = crate::bindings::Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread()
+            .expect("DispatcherQueueController::CreateOnCurrentThread");
+        let queue: DispatcherQueue = controller.DispatcherQueue().expect("DispatcherQueue");
+        elwindui_core::task::set_current(LocalExecutor::new(WinUI3Dispatcher { queue }));
+
+        let mut msg = MSG::default();
+        unsafe {
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+}

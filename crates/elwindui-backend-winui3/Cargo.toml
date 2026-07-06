@@ -3,5 +3,31 @@ name = "elwindui-backend-winui3"
 version.workspace = true
 edition.workspace = true
 
+# UNVERIFIED (best-effort, written without a Windows machine to build/test against — see the
+# doc comment at the top of `build.rs` and `src/lib.rs` for what's uncertain).
 [target.'cfg(target_os = "windows")'.dependencies]
 elwindui-core = { path = "../elwindui-core" }
+# The mainstream `windows` crate covers Win32 + core WinRT (confirmed available: window/message
+# loop primitives, the classic `IFileOpenDialog`/`IFileSaveDialog` COM file pickers, `HSTRING`,
+# `DispatcherQueue` interop). It does NOT cover `Microsoft.UI.Xaml` (WinUI 3) — that comes from the
+# separate Windows App SDK metadata, generated into `src/bindings.rs` by `build.rs` (see its doc
+# comment) rather than from this crate.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_WinRT",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Foundation",
+    "Foundation_Collections",
+    "System",
+] }
+windows-core = "0.58"
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+# Generates `src/bindings.rs` from the Windows App SDK's `Microsoft.UI.Xaml.winmd` metadata (not
+# part of the core Windows SDK metadata the `windows` crate itself ships) — see `build.rs`.
+windows-bindgen = "0.58"

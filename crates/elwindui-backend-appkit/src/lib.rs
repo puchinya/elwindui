@@ -3,7 +3,7 @@
 //!
 //! Only genuinely native leaf widgets (`Window`/`TextArea`/`Button`/`Text`/`MenuBar`/`TabView`,
 //! the "NativeComponent" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
-//! `Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have none: they're
+//! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have none: they're
 //! `elwindui_core::tree::Node::Virtual` values that `elwindui-codegen` builds directly, reflected
 //! into real `NSView`s/`CAShapeLayer`s by `TreeHostView` below (used by both `Window`'s content
 //! view and `TabView`'s per-tab content area).
@@ -30,7 +30,7 @@ fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().expect("elwindui-backend-appkit must run on the main thread")
 }
 
-/// Everything the generated code can pass as a `Window`/`TabView` child. `Row`/`Column`/
+/// Everything the generated code can pass as a `Window`/`TabView` child.
 /// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have no variant here at all — they're
 /// purely `elwindui_core::tree::Node::Virtual` values now (see `TreeHostView` below), never a real
 /// widget of their own.
@@ -186,7 +186,7 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
 
 /// The single reusable "reflect an `elwindui_core::tree::Node<AnyView>` into real `NSView`
 /// subviews/`CAShapeLayer`s" host, replacing the old per-container `StackLayoutView`
-/// (`VerticalLayout`/`HorizontalLayout`) — since `Row`/`Column`/`VerticalLayout`/
+/// (`VerticalLayout`/`HorizontalLayout`) — since `VerticalLayout`/
 /// `HorizontalLayout`/`Rectangle`/`Ellipse` are now all just `Node::Virtual` values with no
 /// backend struct of their own (docs/elwindui_spec.md 付録H.2), one host type is all any native
 /// container needs to accept arbitrary content: `Window`'s content view and `TabView`'s per-tab
@@ -533,8 +533,8 @@ impl TabStrip {
 /// generated code (see `elwindui-codegen`'s specialized `TabView` codegen path) owns the mapping
 /// from the observable tab list to `TabChip`s and calls `set_content` whenever the active tab
 /// changes. This type only holds the two widget areas — it has no notion of "the list of tabs" on
-/// its own, matching how `Row`/`Column` (now purely `elwindui_core::tree::Node::Virtual` values)
-/// don't know about the data their children came from either.
+/// its own, matching how `VerticalLayout`/`HorizontalLayout` (purely `elwindui_core::tree::Node::Virtual`
+/// values) don't know about the data their children came from either.
 #[derive(Clone)]
 pub struct TabView {
     root: Retained<NSStackView>,

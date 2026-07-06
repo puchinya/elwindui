@@ -56,8 +56,8 @@ pub struct TypeInfo {
     pub is_viewmodel: bool,
     /// Whether this type is a genuine native-backed leaf (`Window`/`Button`/`TextArea`/`Text`/
     /// `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView` — the "NativeComponent" family) as
-    /// opposed to a purely elwindui-side virtual node (`Row`/`Column`/`VerticalLayout`/
-    /// `HorizontalLayout`/`Rectangle`/`Ellipse`, or a user-defined `component`+`view` pair whose
+    /// opposed to a purely elwindui-side virtual node (`VerticalLayout`/`HorizontalLayout`/
+    /// `Rectangle`/`Ellipse`, or a user-defined `component`+`view` pair whose
     /// `view` root is itself virtual, e.g. `examples/notepad`'s `DocumentView`). This is a
     /// *structural* property computed recursively from the `view`'s root element type — see
     /// `build_symbol_table`'s `resolve_is_native` — not merely whether `inherits NativeComponent`
@@ -130,7 +130,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     let mut types = HashMap::new();
     // `(module index, #[[inherits]] base name, paired view's root element type)` per `component`
     // key — the raw material `resolve_is_native` (below) needs; not every component has a paired
-    // `view` (native leaf builtins and virtual builtins like `Row`/`Rectangle` are declared
+    // `view` (native leaf builtins and virtual builtins like `VerticalLayout`/`Rectangle` are declared
     // shape-only, see `BUILTIN_SHAPE_SOURCES`) or a `base` (only `inherits`-using components do).
     let mut component_meta: HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>)> = HashMap::new();
 
@@ -222,8 +222,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
 /// A component with **no** `view` of its own (a hand-written builtin, declared shape-only — see
 /// `native_component.elwind`/`BUILTIN_SHAPE_SOURCES`) has no root to recurse through, so it falls
 /// back to its explicit `inherits NativeComponent` declaration: present → native (`Window`/
-/// `Button`/...); absent → virtual (`Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/
-/// `Rectangle`/`Ellipse`).
+/// `Button`/...); absent → virtual (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`).
 fn resolve_is_native(
     key: &(Vec<String>, String),
     component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>)>,
@@ -1222,8 +1221,8 @@ fn plan_element(
 
     let attributes = desugar_command_attr(&node.type_path, node.attributes.clone(), from, table);
     let binding = format_ident!("__{}_{}", node.type_path.to_lowercase(), out.len());
-    // A hand-written virtual builtin (`Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/
-    // `Rectangle`/`Ellipse`) never gets a struct field: its `Node::Virtual` value is built once
+    // A hand-written virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`)
+    // never gets a struct field: its `Node::Virtual` value is built once
     // inline (see `emit_construction`) and immediately moved into whichever `Vec<Node<H>>` it's a
     // child of, or (if it's the view's root) into a one-shot `RefCell` — see `generate_view`. It
     // has no native setter to wire `on_*`/resync against, so it must never be `stored` regardless
@@ -1311,7 +1310,7 @@ pub(crate) fn strip_option(ty: &str) -> (&str, bool) {
 }
 
 /// Converts a constructed child binding into `AnyView` when the resolved shape actually wants one
-/// (its declared type mentions `AnyView` — `Column`/`Row`'s `children: Vec<AnyView>`, `Window`'s
+/// (its declared type mentions `AnyView` — `VerticalLayout`/`HorizontalLayout`'s `children: Vec<AnyView>`, `Window`'s
 /// `content: AnyView`); some containers want a *concrete* child type instead (`MenuBar`'s
 /// `children: Vec<MenuBarItem>`, `MenuBarItem`'s `submenu: Menu`), in which case the binding is
 /// used as-is. `.into_any_view()` (not a `From`/`Into` impl) because `Rc<Target>` can't get one —
@@ -1324,13 +1323,13 @@ fn into_any_view_if_needed(base: TokenStream, ty: &str) -> TokenStream {
     }
 }
 
-/// Whether `type_path` names one of the hand-written *virtual* builtins (`Row`/`Column`/
-/// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`) — these have no backend Rust struct
-/// or `Type::new(args)` constructor at all; `emit_construction` builds an
+/// Whether `type_path` names one of the hand-written *virtual* builtins (`VerticalLayout`/
+/// `HorizontalLayout`/`Rectangle`/`Ellipse`) — these have no backend Rust struct or
+/// `Type::new(args)` constructor at all; `emit_construction` builds an
 /// `elwindui_core::tree::Node::Virtual` value for them directly (see its top-of-function check).
 /// See docs/elwindui_spec.md 付録H.2.
 fn is_virtual_builtin(type_path: &str) -> bool {
-    matches!(type_path, "Row" | "Column" | "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse")
+    matches!(type_path, "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse")
 }
 
 /// Converts a constructed child binding into `elwindui_core::tree::Node<AnyView>` for a slot that
@@ -1492,12 +1491,8 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
 }
 
 /// Builds an `elwindui_core::tree::Node::Virtual` value for a hand-written virtual builtin
-/// (`Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` — see
-/// `is_virtual_builtin`) directly from its own attributes, instead of calling a (nonexistent)
-/// `Type::new(args)`. `Row`/`Column` have no `spacing`/`cross_align` params of their own (unlike
-/// `VerticalLayout`/`HorizontalLayout`), so they get fixed defaults matching their old
-/// `NSStackView`-based behavior as closely as a simple default can (no built-in spacing, leading
-/// alignment).
+/// (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` — see `is_virtual_builtin`) directly
+/// from its own attributes, instead of calling a (nonexistent) `Type::new(args)`.
 fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
     let binding = &node.binding;
 
@@ -1529,20 +1524,6 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
     };
 
     let content = match node.type_path.as_str() {
-        "Row" => quote! {
-            elwindui_core::tree::Stack {
-                orientation: elwindui_core::layout::Orientation::Horizontal,
-                spacing: 0.0,
-                cross_align: elwindui_core::layout::CrossAlign::Start,
-            }
-        },
-        "Column" => quote! {
-            elwindui_core::tree::Stack {
-                orientation: elwindui_core::layout::Orientation::Vertical,
-                spacing: 0.0,
-                cross_align: elwindui_core::layout::CrossAlign::Start,
-            }
-        },
         "VerticalLayout" | "HorizontalLayout" => {
             let orientation = if node.type_path == "VerticalLayout" {
                 quote! { elwindui_core::layout::Orientation::Vertical }
@@ -1843,7 +1824,7 @@ mod tests {
     use super::*;
     use crate::parser::parse_module;
 
-    /// Builtins (`Window`/`Column`/`TextArea`/etc.) only resolve when their shape modules
+    /// Builtins (`Window`/`VerticalLayout`/`TextArea`/etc.) only resolve when their shape modules
     /// (`crate::builtin_modules`) are part of the symbol table — `compile_dir`/`generate_from_source`
     /// do this automatically, but a test building its own table directly needs to opt in explicitly.
     fn build_symbol_table_with_builtins(modules: &[Module]) -> SymbolTable {
@@ -1900,8 +1881,8 @@ view NotepadWindow {
     Window {
         title: vm.window_title
 
-        Column {
-            Row {
+        VerticalLayout {
+            HorizontalLayout {
                 Button {
                     text: t!("notepad-menu-save")
                     on_click: vm.save.execute()
@@ -1915,7 +1896,7 @@ view NotepadWindow {
 
             TextArea { text: content }
 
-            Row {
+            HorizontalLayout {
                 Text { text: t!("notepad-status-chars", count: vm.char_count) }
             }
         }
@@ -1963,7 +1944,7 @@ view NotepadWindow {
     Window {
         title: vm.window_title
 
-        Row {
+        HorizontalLayout {
             Button {
                 text: t!("notepad-menu-save")
                 command: vm.save
@@ -2002,7 +1983,7 @@ view NotepadWindow {
     Window {
         title: vm.window_title
 
-        Row {
+        HorizontalLayout {
             Button {
                 text: t!("notepad-menu-save")
                 command: vm.save
@@ -2174,7 +2155,7 @@ component DocumentView {
 }
 
 view DocumentView {
-    Column {
+    VerticalLayout {
         TextArea { text: content }
     }
 }
@@ -2221,7 +2202,7 @@ view NotepadWindow {
         let document_view_str = document_view_code.to_string();
         assert!(document_view_str.contains("fn new (doc : std :: rc :: Rc < Document >)"));
         assert!(!document_view_str.contains("fn show"), "DocumentView's root isn't `Window` — `show()` shouldn't be generated");
-        // `Column` is a hand-written *virtual* builtin (no backend struct — see
+        // `VerticalLayout` is a hand-written *virtual* builtin (no backend struct — see
         // `is_virtual_builtin`), so `DocumentView`'s root is virtual too (recursively inferred,
         // `build_symbol_table`'s `resolve_is_native`) and it generates `into_node`, not the old
         // `into_any_view`.

@@ -1,4 +1,0 @@
-component Row {
-    #[param]
-    children: Vec<AnyView>,
-}

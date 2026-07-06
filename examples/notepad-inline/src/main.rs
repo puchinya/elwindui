@@ -121,8 +121,8 @@ elwindui::component! {
         Window {
             title: vm.window_title
 
-            content: Column {
-                Row {
+            content: VerticalLayout {
+                HorizontalLayout {
                     Button {
                         text: t!("notepad-menu-save")
                         on_click: vm.save.execute()
@@ -136,7 +136,7 @@ elwindui::component! {
 
                 TextArea { text: vm.content }
 
-                Row {
+                HorizontalLayout {
                     Text { text: t!("notepad-status-chars", count: vm.char_count) }
                 }
             }

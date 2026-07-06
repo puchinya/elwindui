@@ -1,5 +1,5 @@
 //! AppKit-backed implementations of every *native* builtin except `TabView` (see `tab_view.rs` —
-//! it's large enough to warrant its own file). `Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/
+//! it's large enough to warrant its own file). `VerticalLayout`/`HorizontalLayout`/
 //! `Rectangle`/`Ellipse` have no wrapper here at all: `elwindui-codegen` builds their
 //! `elwindui_core::tree::Node::Virtual` values directly (see docs/elwindui_spec.md 付録H.2), so
 //! there's no `Type::new(..)` call site for a wrapper to intercept. Each type below wraps the

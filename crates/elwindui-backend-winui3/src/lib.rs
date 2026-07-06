@@ -1,6 +1,6 @@
 //! WinUI 3 (Windows App SDK) implementation of the widget surface `elwindui-codegen` targets,
 //! mirroring `elwindui-backend-appkit`'s shape (see that crate's doc comment for the overall
-//! native-vs-virtual design this implements: `Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/
+//! native-vs-virtual design this implements: `VerticalLayout`/`HorizontalLayout`/
 //! `Rectangle`/`Ellipse` have no widget here at all, just `elwindui_core::tree::Node::Virtual`
 //! values `elwindui-codegen` builds directly; only `Window`/`Button`/`TextArea`/`Text`/`MenuBar`/
 //! `MenuBarItem`/`Menu`/`MenuItem`/`TabView` are real native widgets).
@@ -39,7 +39,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use windows::core::{Interface, Result, HSTRING};
 
-/// Everything the generated code can pass as a `Window`/`TabView` child. `Row`/`Column`/
+/// Everything the generated code can pass as a `Window`/`TabView` child.
 /// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have no variant here — they're purely
 /// `elwindui_core::tree::Node::Virtual` values (see `TreeHostPanel` below).
 #[derive(Clone)]
@@ -270,8 +270,8 @@ impl Window {
     /// `Microsoft.UI.Xaml.Controls.MenuBar` is placed as a real element *above* the content host,
     /// unlike AppKit's single global `NSApplication.mainMenu` — this repacks `Window`'s content
     /// into a two-row layout (`MenuBar`, then the existing content host) the first time a menu bar
-    /// is set. `Row`/`Column` aren't available here (no backend struct — see the module doc
-    /// comment), so this uses a plain `Canvas`-less stack: a small dedicated host `Grid` with two
+    /// is set. `VerticalLayout`/`HorizontalLayout` aren't available here (no backend struct — see
+    /// the module doc comment), so this uses a plain `Canvas`-less stack: a small dedicated host `Grid` with two
     /// rows would be the idiomatic XAML way to do this; simplified here to stacking two elements
     /// inside a fresh outer `Canvas` sized/positioned manually, mirroring `TreeHostPanel`'s own
     /// "don't trust native auto-layout, position everything explicitly" approach.

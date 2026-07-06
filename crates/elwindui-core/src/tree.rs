@@ -2,7 +2,7 @@
 //! always intended: layout computed centrally here, with backends only ever asked to paint
 //! already-computed absolute rects. Only genuinely native leaf widgets (`Button`/`TextArea`/
 //! `Text`/`MenuBar`/`TabView`, the "NativeComponent" family) carry a real backend handle;
-//! everything else (`Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`, and
+//! everything else (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`, and
 //! anything added later) is a purely elwindui-side `Virtual` node with no native object at all.
 
 use crate::layout::{stack_arrange, stack_natural_size, CrossAlign, LayoutNode, Orientation, Rect, Size};
@@ -21,7 +21,7 @@ pub enum Node<H> {
 }
 
 /// The extension point for adding a new virtual layout or shape kind. `Stack` and `Shape` below
-/// are the first two implementations (backing `Row`/`Column`/`VerticalLayout`/`HorizontalLayout`
+/// are the first two implementations (backing `VerticalLayout`/`HorizontalLayout`
 /// and `Rectangle`/`Ellipse` respectively); a future `Grid` would be a third, with no changes
 /// needed anywhere else in this module.
 pub trait VirtualNode {
@@ -46,9 +46,8 @@ pub enum ShapeKind {
     Oval,
 }
 
-/// `Row`/`Column`/`VerticalLayout`/`HorizontalLayout` — a thin wrapper around the existing
-/// `stack_arrange`/`stack_natural_size` free functions (§H.2's original stack-layout math,
-/// unchanged from earlier this session).
+/// `VerticalLayout`/`HorizontalLayout` — a thin wrapper around the existing
+/// `stack_arrange`/`stack_natural_size` free functions (§H.2's original stack-layout math).
 pub struct Stack {
     pub orientation: Orientation,
     pub spacing: f32,

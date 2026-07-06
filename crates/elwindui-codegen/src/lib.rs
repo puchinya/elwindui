@@ -12,15 +12,13 @@ use std::path::Path;
 /// matching `view`) — embedded via `include_str!` at `elwindui-codegen`'s own compile time (a
 /// plain sibling-file read, not a Cargo dependency edge, so there's no cycle with
 /// `elwindui-builtins`, which itself depends on `elwindui-core`/the backend crates). These exist
-/// purely so `SymbolTable`/`validate` can resolve and check `Window`/`Column`/`TextArea`/etc.
+/// purely so `SymbolTable`/`validate` can resolve and check `Window`/`VerticalLayout`/`TextArea`/etc.
 /// exactly like any other component — `emit_construction`'s only construction mechanism is
 /// "resolve via `SymbolTable`, call `Type::new(args)`", so without these, no builtin would resolve
 /// at all. The real implementations live in `elwindui-builtins` as ordinary hand-written Rust.
 const BUILTIN_SHAPE_SOURCES: &[&str] = &[
     include_str!("../../elwindui-builtins/src/shapes/native_component.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/window.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/column.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/row.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/vertical_layout.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/horizontal_layout.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/rectangle.elwind"),
@@ -37,9 +35,9 @@ const BUILTIN_SHAPE_SOURCES: &[&str] = &[
 
 /// Parses every embedded builtin shape into a `Module`. Registered with the same `path: []`
 /// (crate root) every ordinary `.elwind` file compiled by `compile_dir` already uses (付録B.1), so
-/// `Window`/`Column`/etc. resolve via `SymbolTable::resolve`'s plain "defined locally in `from`"
-/// check — the same way two `.elwind` files in the same directory already see each other without
-/// a `use` — rather than needing a separate "implicit visibility" fallback mechanism.
+/// `Window`/`VerticalLayout`/etc. resolve via `SymbolTable::resolve`'s plain "defined locally in
+/// `from`" check — the same way two `.elwind` files in the same directory already see each other
+/// without a `use` — rather than needing a separate "implicit visibility" fallback mechanism.
 pub fn builtin_modules() -> Vec<ast::Module> {
     BUILTIN_SHAPE_SOURCES
         .iter()
@@ -264,7 +262,7 @@ component NotepadWindow {
 view NotepadWindow {
     Window {
         title: vm.window_title
-        Column {
+        VerticalLayout {
             TextArea { text: content }
         }
     }

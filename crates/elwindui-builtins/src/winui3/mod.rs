@@ -1,7 +1,7 @@
 //! WinUI3-backed implementations of every *native* builtin except `TabView` (see `tab_view.rs`),
 //! mirroring `elwindui-builtins::appkit`'s structure exactly (see that module's doc comment for
 //! the overall convention: `Type::new(..)`/`set_<attr>`/`set_on_<event>`/`set_on_<attr>_change`/
-//! `into_any_view`). `Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have
+//! `into_any_view`). `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have
 //! no wrapper here either, for the same reason as the AppKit side: `elwindui-codegen` builds their
 //! `elwindui_core::tree::Node::Virtual` values directly.
 //!

@@ -10,7 +10,7 @@
 
 # 付録F. 標準ビルトイン部品のリファレンス実装
 
-`Window`, `Column`/`Row`, `Text`, `TextArea`, `Dropdown`/`Option`, `Rect` など、これまで暗黙に使ってきたビルトインプリミティブは、実際には `builtin` 名前空間(付録E参照)に属し、コード生成器が標準で提供する。その内部実装は他のコンポーネントと同じ`component`/`view`構文で表現でき、`match target::backend()`による網羅性検査(付録D)や`native!`エスケープハッチ(付録A・C)がそのまま適用される。
+`Window`, `VerticalLayout`/`HorizontalLayout`, `Text`, `TextArea`, `Dropdown`/`Option` など、これまで暗黙に使ってきたビルトインプリミティブは、実際には `builtin` 名前空間(付録E参照)に属し、コード生成器が標準で提供する。ネイティブな葉ウィジェット(`Window`/`Button`/`TextArea`/`Text`/`MenuBar`/`TabView`等)は他のコンポーネントと同じ`component`/`view`構文で表現でき、`match target::backend()`による網羅性検査(付録D)や`native!`エスケープハッチ(付録A・C)がそのまま適用される。一方`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`のような仮想ビルトインは専用のネイティブ実体を持たず、`elwindui_core::tree::Node::Virtual`として`elwindui-codegen`が直接組み立てる(F.2参照)。
 
 ## F.1 `builtin::Window`
 
@@ -59,57 +59,45 @@ view Window {
 }
 ```
 
-## F.2 `builtin::Column` / `builtin::Row`
+## F.2 `builtin::VerticalLayout` / `builtin::HorizontalLayout`
 
-内部で共通の`Stack`部品に処理を委譲し、`Column`/`Row`はその薄いラッパーとして定義する。
+`VerticalLayout`/`HorizontalLayout`(かつての`Column`/`Row`は機能が完全に重複するため廃止された)は、
+**専用のネイティブ実体を一切持たない**。バックエンドごとの`component`+`view`ペアや`native!`分岐は
+存在せず、`.elwind`側は以下のシェイプ宣言のみで完結する:
+
+```
+component VerticalLayout {
+    #[param]
+    children: Vec<AnyView>,
+    #[param]
+    spacing: Option<f32>,
+    #[param]
+    cross_align: Option<CrossAlign>,
+}
+```
+
+(`HorizontalLayout`も同じ形。実ファイルは`elwindui-builtins/src/shapes/{vertical_layout,horizontal_layout}.elwind`)
+
+`elwindui-codegen`(`is_virtual_builtin`/`emit_virtual_construction`)が、使用箇所ごとに直接
+以下のような値を組み立てる——`Type::new(..)`という関数呼び出しは一切発生しない:
 
 ```rust
-enum Orientation { Vertical, Horizontal }
-
-component Stack {
-    #[param]
-    orientation: Orientation,
-    #[param]
-    spacing: number = 0,
-    children: Vec<Element>,
+elwindui_core::tree::Node::Virtual {
+    content: Box::new(elwindui_core::tree::Stack {
+        orientation: elwindui_core::layout::Orientation::Vertical, // または Horizontal
+        spacing: /* spacing属性、省略時は0.0 */,
+        cross_align: /* cross_align属性、省略時はStretch */,
+    }),
+    children: /* 子要素を同じ規則で再帰的にNode<AnyView>化したもの */,
 }
-
-view Stack {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            let panel = microsoft::ui::xaml::controls::StackPanel::new()?;
-            panel.SetOrientation(orientation)?;
-            panel.SetSpacing(spacing)?;
-            panel.SetChildren(&build_children(children))?;
-            panel
-        }
-        Backend::Appkit => native! {
-            let stack = NSStackView::new();
-            stack.setOrientation(orientation);
-            stack.setSpacing(spacing);
-            stack.addSubviews(&build_children(children));
-            stack
-        }
-        Backend::Gtk4 => native! {
-            let b = gtk::Box::new(orientation.into(), spacing as i32);
-            for child in build_children(children) { b.append(&child); }
-            b
-        }
-        Backend::Egui | Backend::Iced => native! {
-            match orientation {
-                Orientation::Vertical   => ui.vertical(|ui| render_children(ui, &children)),
-                Orientation::Horizontal => ui.horizontal(|ui| render_children(ui, &children)),
-            }
-        }
-    }
-}
-
-component Column { children: Vec<Element> }
-view Column { Stack { orientation: Orientation::Vertical, children } }
-
-component Row { children: Vec<Element> }
-view Row { Stack { orientation: Orientation::Horizontal, children } }
 ```
+
+実際にこの値をネイティブsubviewとして配置するのは、祖先のネイティブコンテナ(`Window`や`TabView`)
+が持つ、任意の`Node<AnyView>`を受け付ける単一の再利用可能なホスト(AppKitの`TreeHostView`、
+WinUI3の`TreeHostPanel`)であり、`VerticalLayout`/`HorizontalLayout`自体はバックエンドコードを
+一切持たない。新しいレイアウト種別(将来の`Grid`等)を追加する際も、
+`elwindui_core::tree::VirtualNode`トレイトの実装を1つ足すだけでよく、バックエンドごとの
+`native!`分岐を増やす必要はない(詳細は`elwindui-core/src/tree.rs`のモジュールコメントを参照)。
 
 ## F.3 `builtin::Text`
 
@@ -232,33 +220,15 @@ view Dropdown {
 }
 ```
 
-## F.6 `builtin::Rect`(ネイティブAPIを持たないbackend向けの基礎要素)
+## F.6 図形プリミティブ(`builtin::Rectangle` / `builtin::Ellipse`)について
 
-`Button`(付録Eの`#[overrides(builtin::Button)]`例)がegui/iced backendで代替表現として利用する、クリック可能な最小コンテナ要素。
+かつてここには`builtin::Rect`(egui/iced backend向けにButtonが代替表現として使っていたクリック可能な
+最小コンテナ)という節があったが、egui/icedバックエンド自体が既に削除されており、この概念に対応する
+実装はコードベースのどこにも存在しない(仕様書にのみ残っていた設計と思われる)ため削除した。
 
-```rust
-component Rect {
-    #[param]
-    enabled: bool = true,
-    on_click: fn()? = None,
-    children: Vec<Element>,
-}
-
-view Rect {
-    match target::backend() {
-        Backend::Egui => native! {
-            let response = ui.add(egui::Button::new(""));
-            if response.clicked() { if let Some(f) = &on_click { f(); } }
-            render_children(ui, &children);
-        }
-        Backend::Iced => native! {
-            iced::widget::container(render_children(&children))
-                .into()
-        }
-        // ネイティブ系backendはButton自身が直接実装を持つため、Rectのこの分岐には到達しない
-        _ => unreachable!()
-    }
-}
+現在の図形プリミティブは`Rectangle`/`Ellipse`であり、F.2の`VerticalLayout`/`HorizontalLayout`と
+全く同じ仕組み(専用のネイティブ実体を持たず、`elwindui-codegen`が`elwindui_core::tree::Node::Virtual{content: Box::new(elwindui_core::tree::Shape{..}), ..}`を直接組み立てる)で実装されている。
+詳細はG章・N章(Canvas/Painterによるカスタム描画)を参照。
 ```
 
 ## F.7 部品の全体依存関係(メモ帳の例)
@@ -266,13 +236,13 @@ view Rect {
 ```
 NotepadWindow
  ├─ Window
- │   └─ Column(Stack)
- │       ├─ Row(Stack)
- │       │   ├─ ToolbarButton → Button(#[overrides]) → Rect(egui/iced時)
+ │   └─ VerticalLayout
+ │       ├─ HorizontalLayout
+ │       │   ├─ ToolbarButton → Button(#[overrides])
  │       │   └─ Dropdown → Option
  │       ├─ TextArea
  │       └─ StatusBar
- │           └─ Row(Stack) → Text
+ │           └─ HorizontalLayout → Text
 ```
 
 ## F.8 各部品で使われている仕様の対応
@@ -280,11 +250,10 @@ NotepadWindow
 | 部品 | 使用している仕様 |
 |---|---|
 | `Window` | `#[param] direction = env::direction()`、`match target::backend()`の網羅性検査 |
-| `Stack`(Column/Row) | 他コンポーネントを呼ぶだけの薄いラッパー(合成による名称分離) |
+| `VerticalLayout`/`HorizontalLayout` | 専用のネイティブ実体を持たない仮想ツリー(`elwindui_core::tree::Node::Virtual` + `VirtualNode`実装の`Stack`) |
 | `Text` | `ColorHex?`(nullable制約)、backendごとのカラー変換 |
 | `TextArea` | `bind!(self.text, TwoWay)`による双方向バインディング |
 | `Dropdown` / `Option` | `Vec<Option>`という複合型プロパティ、backendごとの選択状態同期 |
-| `Rect` | `Backend::Egui`/`Backend::Iced`でのみ到達、他backendでは`unreachable!()` |
 
 これらの標準ビルトイン実装は、通常はコード生成器(`elwindui-codegen`)が内部に持ち利用者が直接編集する必要はないが、`#[overrides(builtin::X)]`(付録E)を使うことで、プロジェクト固有の要件に応じて安全に差し替えられる。
 

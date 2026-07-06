@@ -8,12 +8,15 @@ component DocumentView {
     content: String = bind!(doc.content, TwoWay),
 }
 
+// `spacing`/`cross_align` are omitted here (defaulting to 0.0/Stretch, see
+// `elwindui-builtins`'s `VerticalLayout`/`HorizontalLayout`) since today's view-expression
+// parser has no numeric- or enum-variant-literal syntax to set them explicitly.
 view DocumentView {
-    Column {
+    VerticalLayout {
         TextArea { text: content }
-        Row {
+        HorizontalLayout {
             Text { text: doc.file_name }
-            Text { text: t!("notepad-status-chars", count: doc.char_count) }
+            RoundedPanel { label: t!("notepad-status-chars", count: doc.char_count) }
         }
     }
 }

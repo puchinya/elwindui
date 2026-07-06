@@ -1,0 +1,18 @@
+// Demonstrates a custom component built from a drawing primitive (docs/elwindui_spec.md 付録G/N):
+// `RoundedPanel` has no native backing of its own — like `Rectangle` itself, it's purely an
+// `elwindui_core::tree::Node::Virtual` value assembled at each use site (see
+// `elwindui-codegen`'s `emit_virtual_construction`). `inherits Rectangle` is a structural
+// contract, checked by `validate_inherits`: this view's root element must literally be a
+// `Rectangle`.
+component RoundedPanel inherits Rectangle {
+    #[param]
+    label: String,
+}
+
+view RoundedPanel {
+    Rectangle {
+        fill: "#3a3a3c"
+        corner_radius: 8.0
+        Text { text: label }
+    }
+}

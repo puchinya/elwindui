@@ -1,4 +1,4 @@
-component MenuBarItem {
+component MenuBarItem inherits NativeComponent {
     #[param]
     text: String,
 

@@ -1,4 +1,4 @@
-component Text {
+component Text inherits NativeComponent {
     #[param]
     text: String,
 }

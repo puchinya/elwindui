@@ -28,10 +28,17 @@ pub enum Item {
     View(ViewDef),
 }
 
-/// `component Name { fields }`. See docs/elwindui_spec.md §3.
+/// `component Name inherits Base { fields }`. See docs/elwindui_spec.md §3, 付録H.2.
+///
+/// `base` does *not* merge `Base`'s fields into this component's own (see `validate.rs`'s
+/// `inherits` checks) — it's a structural contract, not field inheritance: either `Base` is the
+/// `NativeComponent` marker (a pure category tag, checked for consistency against the
+/// recursively-inferred `is_native`, see `codegen::build_symbol_table`), or the paired `view`'s
+/// root element must literally construct `Base` (e.g. `RoundedPanel inherits Rectangle`).
 #[derive(Debug, Clone)]
 pub struct ComponentDef {
     pub name: String,
+    pub base: Option<String>,
     pub fields: Vec<FieldDef>,
 }
 

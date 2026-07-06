@@ -2,7 +2,7 @@
 //! ones reachable by the constructs the notepad example actually uses. See
 //! docs/elwindui_gui_framework_design.md §10 for the full rule list.
 
-use crate::ast::{ClosureBody, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
+use crate::ast::{ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
 use crate::codegen::{self, strip_rc_wrapper, SymbolTable};
 use std::collections::{HashMap, HashSet};
 
@@ -48,6 +48,10 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         if let Some(Initializer::Bind { path, .. }) = &f.initializer {
                             validate_bind_path(module, &c.name, &f.name, path, &c.fields, &table, &mut errors);
                         }
+                    }
+
+                    if let Some(base) = &c.base {
+                        validate_inherits(module, c, base, modules, &table, &mut errors);
                     }
 
                     // `vm.field` / `vm.command.execute()` / `vm.command.can_execute` references
@@ -348,6 +352,59 @@ fn validate_bind_path(
             "{owner_name}.{field_name}: unknown type `{}` for bind! target `{root}`",
             root_field.ty
         )),
+    }
+}
+
+/// Checks `component X inherits Base { .. }` (docs/elwindui_spec.md 付録H.2): `Base` must resolve;
+/// if it's the `NativeComponent` marker, `X`'s structurally-inferred `is_native` (see
+/// `codegen::build_symbol_table`'s `resolve_is_native`) must actually be `true` — a consistency
+/// check, since `inherits` is a documentation/contract annotation here, not what *determines*
+/// nativeness. Otherwise (e.g. `RoundedPanel inherits Rectangle`), `X` must have a paired `view`
+/// whose root element is literally `Base` — the shape-composition use case.
+fn validate_inherits(
+    from: &Module,
+    c: &ComponentDef,
+    base: &str,
+    modules: &[Module],
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    if table.resolve(from, base).is_none() {
+        errors.push(format!(
+            "{}: inherits `{base}`, but `{base}` is not a known component/builtin (missing `use`?)",
+            c.name
+        ));
+        return;
+    }
+
+    if base == "NativeComponent" {
+        let is_native = table.resolve(from, &c.name).is_some_and(|info| info.is_native);
+        if !is_native {
+            errors.push(format!(
+                "{}: inherits `NativeComponent`, but its `view` root isn't itself native (or no \
+                 `view` exists) — `NativeComponent` is only a category tag for genuinely \
+                 native-backed components",
+                c.name
+            ));
+        }
+        return;
+    }
+
+    let view = modules.iter().flat_map(|m| &m.items).find_map(|item| match item {
+        Item::View(v) if v.target == c.name => Some(v),
+        _ => None,
+    });
+    match view {
+        None => errors.push(format!(
+            "{}: inherits `{base}`, but has no `view {}` — a component inheriting a \
+             non-`NativeComponent` base must have its view's root element construct `{base}`",
+            c.name, c.name
+        )),
+        Some(v) if v.root.type_path != base => errors.push(format!(
+            "{}: inherits `{base}`, so `view {}`'s root element must be `{base}`, found `{}`",
+            c.name, c.name, v.root.type_path
+        )),
+        Some(_) => {}
     }
 }
 
@@ -690,5 +747,113 @@ view Window11 {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// `inherits`'s shape-composition use case (docs/elwindui_spec.md 付録H.2): a component
+    /// inheriting a non-`NativeComponent` base must have its `view`'s root element literally
+    /// construct that base.
+    #[test]
+    fn accepts_component_inheriting_a_shape_primitive_with_matching_view_root() {
+        let src = r#"
+component RoundedPanel inherits Rectangle {
+    #[param]
+    fill: Option<String>,
+}
+
+view RoundedPanel {
+    Rectangle { fill: fill }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    #[test]
+    fn rejects_inherits_when_view_root_does_not_match_base() {
+        let src = r#"
+component RoundedPanel inherits Rectangle {
+    #[param]
+    fill: Option<String>,
+}
+
+view RoundedPanel {
+    VerticalLayout { }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("must be `Rectangle`")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn rejects_inherits_of_unknown_base() {
+        let src = r#"
+component Foo inherits DoesNotExist {
+}
+
+view Foo {
+    VerticalLayout { }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("not a known component/builtin")), "errors: {errs:?}");
+    }
+
+    /// `inherits NativeComponent` is a pure category tag checked for *consistency* against the
+    /// structurally-inferred `is_native` (see `codegen::build_symbol_table`'s `resolve_is_native`)
+    /// — claiming it while the `view` root is actually virtual is an error.
+    #[test]
+    fn rejects_inherits_native_component_when_view_root_is_virtual() {
+        let src = r#"
+component Foo inherits NativeComponent {
+}
+
+view Foo {
+    VerticalLayout { }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("NativeComponent")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn accepts_inherits_native_component_when_view_root_is_native() {
+        let src = r#"
+component Foo inherits NativeComponent {
+}
+
+view Foo {
+    Window { title: "x", content: Text { text: "hi" } }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// A plain `component`+`view` pair with *no* `inherits` at all is still correctly inferred as
+    /// virtual when its view's root is a virtual builtin — `is_native` is structural, not merely
+    /// "did the author write `inherits`" (mirrors `examples/notepad`'s real `DocumentView`).
+    #[test]
+    fn is_native_is_inferred_recursively_without_requiring_inherits() {
+        let src = r#"
+component DocumentViewLike {
+}
+
+view DocumentViewLike {
+    VerticalLayout { }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let table = codegen::build_symbol_table(&modules);
+        let info = table.resolve(&modules[0], "DocumentViewLike").expect("resolves");
+        assert!(!info.is_native);
+
+        let native_info = table.resolve(&modules[0], "Window").expect("resolves");
+        assert!(native_info.is_native);
+
+        let virtual_builtin_info = table.resolve(&modules[0], "VerticalLayout").expect("resolves");
+        assert!(!virtual_builtin_info.is_native);
     }
 }

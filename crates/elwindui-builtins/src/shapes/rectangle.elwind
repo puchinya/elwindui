@@ -1,0 +1,12 @@
+component Rectangle {
+    #[param]
+    children: Vec<AnyView>,
+    #[param]
+    fill: Option<String>,
+    #[param]
+    stroke: Option<String>,
+    #[param]
+    stroke_width: Option<f32>,
+    #[param]
+    corner_radius: Option<f32>,
+}

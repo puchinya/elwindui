@@ -1,10 +1,13 @@
-//! AppKit-backed implementations of every builtin except `TabView` (see `tab_view.rs` — it's
-//! large enough to warrant its own file). Each type wraps the matching `elwindui_backend_appkit`
-//! widget and exposes exactly the methods `elwindui-codegen`'s generic conventions call:
-//! `Type::new(..)` (construction, args in the paired `src/shapes/*.elwind` declaration's
-//! `#[param]` order), `set_<attr>` (resync / two-way change-back), `set_on_<event>` (an `on_*`
-//! callback), `set_on_<attr>_change` (a `#[two_way]` attribute's change-back), and — for anything
-//! embeddable as a child — `into_any_view`.
+//! AppKit-backed implementations of every *native* builtin except `TabView` (see `tab_view.rs` —
+//! it's large enough to warrant its own file). `Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/
+//! `Rectangle`/`Ellipse` have no wrapper here at all: `elwindui-codegen` builds their
+//! `elwindui_core::tree::Node::Virtual` values directly (see docs/elwindui_spec.md 付録H.2), so
+//! there's no `Type::new(..)` call site for a wrapper to intercept. Each type below wraps the
+//! matching `elwindui_backend_appkit` widget and exposes exactly the methods `elwindui-codegen`'s
+//! generic conventions call: `Type::new(..)` (construction, args in the paired
+//! `src/shapes/*.elwind` declaration's `#[param]` order), `set_<attr>` (resync / two-way
+//! change-back), `set_on_<event>` (an `on_*` callback), `set_on_<attr>_change` (a `#[two_way]`
+//! attribute's change-back), and — for anything embeddable as a child — `into_any_view`.
 
 mod tab_view;
 pub use tab_view::TabView;
@@ -17,7 +20,11 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(title: &str, menu_bar: Option<Rc<MenuBar>>, content: appkit::AnyView) -> Rc<Self> {
+    pub fn new(
+        title: &str,
+        menu_bar: Option<Rc<MenuBar>>,
+        content: elwindui_core::tree::Node<appkit::AnyView>,
+    ) -> Rc<Self> {
         let inner = appkit::Window::new(title);
         inner.set_content(content);
         if let Some(menu_bar) = &menu_bar {
@@ -32,34 +39,6 @@ impl Window {
 
     pub fn show(&self) {
         self.inner.show();
-    }
-}
-
-pub struct Column {
-    inner: appkit::Column,
-}
-
-impl Column {
-    pub fn new(children: Vec<appkit::AnyView>) -> Rc<Self> {
-        Rc::new(Self { inner: appkit::Column::new(children) })
-    }
-
-    pub fn into_any_view(&self) -> appkit::AnyView {
-        appkit::AnyView::from(self.inner.clone())
-    }
-}
-
-pub struct Row {
-    inner: appkit::Row,
-}
-
-impl Row {
-    pub fn new(children: Vec<appkit::AnyView>) -> Rc<Self> {
-        Rc::new(Self { inner: appkit::Row::new(children) })
-    }
-
-    pub fn into_any_view(&self) -> appkit::AnyView {
-        appkit::AnyView::from(self.inner.clone())
     }
 }
 

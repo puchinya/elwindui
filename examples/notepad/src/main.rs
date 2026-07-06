@@ -1,7 +1,5 @@
 use elwindui::platform;
-use elwindui_builtins::{
-    Column, Menu, MenuBar, MenuBarItem, MenuItem, Row, TabView, Text, TextArea, Window,
-};
+use elwindui_builtins::{Menu, MenuBar, MenuBarItem, MenuItem, TabView, Text, TextArea, Window};
 
 mod elwindui_i18n {
     include!(concat!(env!("OUT_DIR"), "/i18n_support.rs"));
@@ -118,6 +116,7 @@ mod notepad_view_model {
     }
 }
 
+include!(concat!(env!("OUT_DIR"), "/rounded_panel.rs"));
 include!(concat!(env!("OUT_DIR"), "/document_view.rs"));
 include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
 

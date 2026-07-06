@@ -33,11 +33,11 @@ impl<'a> Parser<'a> {
             } else if self.eat_keyword("enum") {
                 items.push(Item::Enum(self.parse_enum_def()?));
             } else if self.eat_keyword("component") {
-                items.push(Item::Component(self.parse_fields_block(FieldKind::Prop, |name, fields| {
-                    ComponentDef { name, fields }
+                items.push(Item::Component(self.parse_fields_block(FieldKind::Prop, |name, base, fields| {
+                    ComponentDef { name, base, fields }
                 })?));
             } else if self.eat_keyword("viewmodel") {
-                items.push(Item::ViewModel(self.parse_fields_block(FieldKind::Observable, |name, fields| {
+                items.push(Item::ViewModel(self.parse_fields_block(FieldKind::Observable, |name, _base, fields| {
                     ViewModelDef { name, fields }
                 })?));
             } else if self.eat_keyword("view") {
@@ -78,15 +78,26 @@ impl<'a> Parser<'a> {
         Ok(EnumDef { name, variants })
     }
 
-    /// Parses `Name { field, field, ... }` for both `component` and `viewmodel` (§3, 付録O.2 share
-    /// the same field grammar). `default_kind` is `Prop` for `component`, `Observable` for
-    /// `viewmodel` (a field with no kind attribute defaults to its container's usual kind).
+    /// Parses `Name [inherits Base] { field, field, ... }` for both `component` and `viewmodel`
+    /// (§3, 付録O.2 share the same field grammar). `default_kind` is `Prop` for `component`,
+    /// `Observable` for `viewmodel` (a field with no kind attribute defaults to its container's
+    /// usual kind). `inherits` is only meaningful for `component` (see `ComponentDef::base`'s doc
+    /// comment) — parsed here regardless since the grammar up to `{` is otherwise identical, but
+    /// `viewmodel`'s `build` closure simply discards it.
     fn parse_fields_block<T>(
         &mut self,
         default_kind: FieldKind,
-        build: impl FnOnce(String, Vec<FieldDef>) -> T,
+        build: impl FnOnce(String, Option<String>, Vec<FieldDef>) -> T,
     ) -> Result<T, String> {
         let name = self.parse_ident()?;
+        self.skip_trivia();
+        let base = if self.eat_keyword("inherits") {
+            self.skip_trivia();
+            Some(self.parse_ident()?)
+        } else {
+            None
+        };
+        self.skip_trivia();
         self.expect_char('{')?;
         let mut fields = Vec::new();
         loop {
@@ -96,7 +107,7 @@ impl<'a> Parser<'a> {
             }
             fields.push(self.parse_field_def(default_kind)?);
         }
-        Ok(build(name, fields))
+        Ok(build(name, base, fields))
     }
 
     fn parse_field_def(&mut self, default_kind: FieldKind) -> Result<FieldDef, String> {
@@ -295,6 +306,19 @@ impl<'a> Parser<'a> {
         }
         if self.eat_keyword("false") {
             return Ok(ViewExpr::Expr(syn::parse_quote!(false)));
+        }
+
+        // A number literal (`8`, `8.0`, `-1.5`) — needed for `#[param]` fields like `Rectangle`'s
+        // `corner_radius`/`stroke_width` or `VerticalLayout`'s `spacing`. Must be checked before
+        // the dotted-path branch below (a bare identifier can't start with a digit, but without
+        // this check a leading `-` would otherwise fall through and fail `parse_ident`).
+        if self.peek_char().is_some_and(|c| c.is_ascii_digit())
+            || (self.peek_char() == Some('-') && self.rest()[1..].starts_with(|c: char| c.is_ascii_digit()))
+        {
+            let lit_src = self.take_number_literal()?;
+            let expr = syn::parse_str::<syn::Expr>(&lit_src)
+                .map_err(|e| format!("invalid number literal: {e}"))?;
+            return Ok(ViewExpr::Expr(expr));
         }
 
         // Bare `Type { .. }` as an ordinary (non-closure) attribute value — a builtin shape's
@@ -534,6 +558,46 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(self.src[start..self.pos].to_string())
+    }
+
+    /// An optional leading `-`, digits, and an optional `.` followed by more digits — just enough
+    /// to feed `syn` a valid Rust integer/float literal (no exponents, no suffixes like `8.0f32`,
+    /// which the DSL has never needed so far).
+    fn take_number_literal(&mut self) -> Result<String, String> {
+        self.skip_trivia();
+        let rest = self.rest();
+        let mut len = 0;
+        let mut chars = rest.char_indices().peekable();
+        if let Some((_, '-')) = chars.peek().copied() {
+            len += 1;
+            chars.next();
+        }
+        let mut saw_digit = false;
+        while let Some((_, c)) = chars.peek().copied() {
+            if !c.is_ascii_digit() {
+                break;
+            }
+            saw_digit = true;
+            len += 1;
+            chars.next();
+        }
+        if let Some((_, '.')) = chars.peek().copied() {
+            len += 1;
+            chars.next();
+            while let Some((_, c)) = chars.peek().copied() {
+                if !c.is_ascii_digit() {
+                    break;
+                }
+                len += 1;
+                chars.next();
+            }
+        }
+        if !saw_digit {
+            return Err(self.err("expected number literal"));
+        }
+        let lit = rest[..len].to_string();
+        self.pos += len;
+        Ok(lit)
     }
 
     /// Captures raw source text up to (but not including) the first occurrence of any character

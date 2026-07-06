@@ -1,4 +1,4 @@
-component TabView {
+component TabView inherits NativeComponent {
     #[param]
     tabs: Vec<std::rc::Rc<T>>,
 
@@ -9,7 +9,7 @@ component TabView {
     render_label: fn(&std::rc::Rc<T>) -> String,
 
     #[param]
-    render_content: fn(&std::rc::Rc<T>) -> AnyView,
+    render_content: fn(&std::rc::Rc<T>) -> Node<AnyView>,
 
     #[param]
     selected: usize,

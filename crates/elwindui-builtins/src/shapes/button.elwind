@@ -1,4 +1,4 @@
-component Button {
+component Button inherits NativeComponent {
     #[param]
     text: String,
 

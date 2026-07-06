@@ -7,5 +7,6 @@ pub mod layout;
 pub mod painter;
 pub mod reactive;
 pub mod task;
+pub mod tree;
 
 pub use element::{find_all, find_by_id, Element};

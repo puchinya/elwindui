@@ -1,0 +1,10 @@
+component Ellipse {
+    #[param]
+    children: Vec<AnyView>,
+    #[param]
+    fill: Option<String>,
+    #[param]
+    stroke: Option<String>,
+    #[param]
+    stroke_width: Option<f32>,
+}

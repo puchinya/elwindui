@@ -6,16 +6,12 @@ edition.workspace = true
 [dependencies]
 elwindui-core = { path = "../elwindui-core" }
 elwindui-macros = { path = "../elwindui-macros" }
-elwindui-backend-egui = { path = "../elwindui-backend-egui", optional = true }
-elwindui-backend-iced = { path = "../elwindui-backend-iced", optional = true }
 elwindui-backend-winui3 = { path = "../elwindui-backend-winui3", optional = true }
 elwindui-backend-appkit = { path = "../elwindui-backend-appkit", optional = true }
 elwindui-backend-gtk4 = { path = "../elwindui-backend-gtk4", optional = true }
 
 [features]
 default = []
-backend-egui = ["dep:elwindui-backend-egui"]
-backend-iced = ["dep:elwindui-backend-iced"]
 backend-winui3 = ["dep:elwindui-backend-winui3"]
 backend-appkit = ["dep:elwindui-backend-appkit"]
 backend-gtk4 = ["dep:elwindui-backend-gtk4"]

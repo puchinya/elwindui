@@ -17,9 +17,14 @@ use std::path::Path;
 /// "resolve via `SymbolTable`, call `Type::new(args)`", so without these, no builtin would resolve
 /// at all. The real implementations live in `elwindui-builtins` as ordinary hand-written Rust.
 const BUILTIN_SHAPE_SOURCES: &[&str] = &[
+    include_str!("../../elwindui-builtins/src/shapes/native_component.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/window.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/column.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/row.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/vertical_layout.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/horizontal_layout.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/rectangle.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/ellipse.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/text_area.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/button.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/text.elwind"),

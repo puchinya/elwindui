@@ -1,0 +1,6 @@
+// A field-less category marker, not a real widget. Native leaf builtins (Window/Button/TextArea/
+// Text/MenuBar/MenuBarItem/Menu/MenuItem/TabView) declare `inherits NativeComponent` purely to
+// group themselves under this tag; it carries no fields and is never itself constructed. See
+// docs/elwindui_spec.md 付録H.2 and `elwindui-codegen`'s `is_native` computation.
+component NativeComponent {
+}

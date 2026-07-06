@@ -1,13 +1,16 @@
 //! AppKit implementation of the widget surface `elwindui-codegen` targets for the `notepad`
 //! example. See docs/elwindui_spec.md 付録A, 付録C, docs/elwindui_gui_framework_design.md §3.
 //!
-//! `elwindui-core`'s `Element`/`LayoutNode`/etc. traits aren't implemented against yet (see
-//! docs/elwindui_gui_framework_design.md §3 for that integration, deferred); this crate exposes a
-//! small standalone widget API (`Window`/`Column`/`Row`/`TextArea`/`Button`/`Text`) that the
-//! generated code calls directly.
+//! Only genuinely native leaf widgets (`Window`/`TextArea`/`Button`/`Text`/`MenuBar`/`TabView`,
+//! the "NativeComponent" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
+//! `Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have none: they're
+//! `elwindui_core::tree::Node::Virtual` values that `elwindui-codegen` builds directly, reflected
+//! into real `NSView`s/`CAShapeLayer`s by `TreeHostView` below (used by both `Window`'s content
+//! view and `TabView`'s per-tab content area).
 
 #![cfg(target_os = "macos")]
 
+use elwindui_core::tree::{layout_tree, Node, PaintKind, ShapeKind};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -17,7 +20,9 @@ use objc2_app_kit::{
     NSTextView, NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow,
     NSWindowStyleMask,
 };
+use objc2_core_graphics::{CGColor, CGPath};
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
+use objc2_quartz_core::{CALayer, CAShapeLayer};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -25,11 +30,12 @@ fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().expect("elwindui-backend-appkit must run on the main thread")
 }
 
-/// Everything the generated code can pass as a `Column`/`Row`/`Window` child.
+/// Everything the generated code can pass as a `Window`/`TabView` child. `Row`/`Column`/
+/// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have no variant here at all — they're
+/// purely `elwindui_core::tree::Node::Virtual` values now (see `TreeHostView` below), never a real
+/// widget of their own.
 #[derive(Clone)]
 pub enum AnyView {
-    Column(Column),
-    Row(Row),
     TextArea(TextArea),
     Button(Button),
     Text(Text),
@@ -39,8 +45,6 @@ pub enum AnyView {
 impl AnyView {
     fn as_nsview(&self) -> Retained<NSView> {
         match self {
-            AnyView::Column(v) => Retained::into_super(v.ns.clone()),
-            AnyView::Row(v) => Retained::into_super(v.ns.clone()),
             AnyView::TextArea(v) => Retained::into_super(v.scroll.clone()),
             AnyView::Button(v) => {
                 let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(v.ns.clone());
@@ -57,16 +61,23 @@ impl AnyView {
     }
 }
 
-impl From<Column> for AnyView {
-    fn from(v: Column) -> Self {
-        AnyView::Column(v)
+/// Lets `TreeHostView` (below) measure/arrange any native leaf uniformly through the base `NSView`
+/// API (`fittingSize`/`setFrame`) regardless of which concrete widget it wraps — no per-widget
+/// (`Text`, `Button`, ...) `LayoutNode` impl needed. See docs/elwindui_spec.md 付録H.2.
+impl elwindui_core::layout::LayoutNode for AnyView {
+    fn measure(&self, _available: elwindui_core::layout::Size) -> elwindui_core::layout::Size {
+        let fitting = self.as_nsview().fittingSize();
+        elwindui_core::layout::Size { width: fitting.width as f32, height: fitting.height as f32 }
+    }
+
+    fn arrange(&mut self, final_rect: elwindui_core::layout::Rect) {
+        self.as_nsview().setFrame(NSRect::new(
+            objc2_foundation::NSPoint::new(final_rect.x as f64, final_rect.y as f64),
+            objc2_foundation::NSSize::new(final_rect.width as f64, final_rect.height as f64),
+        ));
     }
 }
-impl From<Row> for AnyView {
-    fn from(v: Row) -> Self {
-        AnyView::Row(v)
-    }
-}
+
 impl From<TextArea> for AnyView {
     fn from(v: TextArea) -> Self {
         AnyView::TextArea(v)
@@ -91,6 +102,7 @@ impl From<TabView> for AnyView {
 #[derive(Clone)]
 pub struct Window {
     ns: Retained<NSWindow>,
+    content_host: Retained<TreeHostView>,
 }
 
 impl Window {
@@ -112,11 +124,16 @@ impl Window {
             )
         };
         ns.setTitle(&NSString::from_str(title));
-        Self { ns }
+        let content_host = TreeHostView::new();
+        ns.setContentView(Some(&content_host));
+        Self { ns, content_host }
     }
 
-    pub fn set_content(&self, view: AnyView) {
-        self.ns.setContentView(Some(&view.as_nsview()));
+    /// Replaces the window's whole content tree — see `TreeHostView` for how a `Node<AnyView>`
+    /// (layouts/shapes mixed freely with native controls, at any nesting depth) gets reflected
+    /// into real `NSView` subviews and `CAShapeLayer` sublayers.
+    pub fn set_content(&self, content: Node<AnyView>) {
+        self.content_host.set_tree(content);
     }
 
     pub fn set_title(&self, title: &str) {
@@ -140,34 +157,165 @@ impl Window {
     }
 }
 
-#[derive(Clone)]
-pub struct Column {
-    ns: Retained<NSStackView>,
-}
-
-impl Column {
-    pub fn new(children: Vec<AnyView>) -> Self {
-        Self { ns: new_stack(children, NSUserInterfaceLayoutOrientation::Vertical) }
-    }
-}
-
-#[derive(Clone)]
-pub struct Row {
-    ns: Retained<NSStackView>,
-}
-
-impl Row {
-    pub fn new(children: Vec<AnyView>) -> Self {
-        Self { ns: new_stack(children, NSUserInterfaceLayoutOrientation::Horizontal) }
-    }
-}
-
 fn new_stack(children: Vec<AnyView>, orientation: NSUserInterfaceLayoutOrientation) -> Retained<NSStackView> {
     let m = mtm();
     let views: Vec<Retained<NSView>> = children.iter().map(AnyView::as_nsview).collect();
     let ns = NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_retained_slice(&views), m);
     ns.setOrientation(orientation);
     ns
+}
+
+/// Parses a `"#RRGGBB"`/`"#RRGGBBAA"` hex color (the only form `Rectangle`/`Ellipse`'s `fill`/
+/// `stroke` params accept — see docs/elwindui_builtins_spec.md 付録N/G) into a `CGColor`. An
+/// unparseable string falls back to opaque black rather than panicking, since this runs during
+/// layout, not construction.
+fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
+    let hex = hex.trim_start_matches('#');
+    let (r, g, b, a) = match (hex.len(), u32::from_str_radix(hex, 16)) {
+        (6, Ok(v)) => (((v >> 16) & 0xFF) as f64, ((v >> 8) & 0xFF) as f64, (v & 0xFF) as f64, 255.0),
+        (8, Ok(v)) => (
+            ((v >> 24) & 0xFF) as f64,
+            ((v >> 16) & 0xFF) as f64,
+            ((v >> 8) & 0xFF) as f64,
+            (v & 0xFF) as f64,
+        ),
+        _ => (0.0, 0.0, 0.0, 255.0),
+    };
+    CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+}
+
+/// The single reusable "reflect an `elwindui_core::tree::Node<AnyView>` into real `NSView`
+/// subviews/`CAShapeLayer`s" host, replacing the old per-container `StackLayoutView`
+/// (`VerticalLayout`/`HorizontalLayout`) — since `Row`/`Column`/`VerticalLayout`/
+/// `HorizontalLayout`/`Rectangle`/`Ellipse` are now all just `Node::Virtual` values with no
+/// backend struct of their own (docs/elwindui_spec.md 付録H.2), one host type is all any native
+/// container needs to accept arbitrary content: `Window`'s content view and `TabView`'s per-tab
+/// content area both are one of these.
+struct TreeHostIvars {
+    tree: RefCell<Option<Node<AnyView>>>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = TreeHostIvars]
+    struct TreeHostView;
+
+    unsafe impl NSObjectProtocol for TreeHostView {}
+
+    impl TreeHostView {
+        /// Overrides `NSView`'s own layout pass instead of adding Auto Layout constraints — the
+        /// hook that makes re-hosting genuinely dynamic (re-run on window resize / tab-strip
+        /// changes), same role `StackLayoutView::layout` used to play for just `VerticalLayout`/
+        /// `HorizontalLayout`.
+        #[unsafe(method(layout))]
+        fn layout(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), layout];
+            }
+            self.relayout();
+        }
+
+        /// Reports this host's current tree's natural size so `fittingSize()` — and therefore an
+        /// *outer* `AnyView::measure()` (this host nested inside another virtual container) or an
+        /// outer `NSStackView` (`TabView`'s content area sits in one) — sees something meaningful
+        /// instead of AppKit's zero-size default for a plain, constraint-free `NSView`.
+        #[unsafe(method(intrinsicContentSize))]
+        fn intrinsic_content_size(&self) -> objc2_foundation::NSSize {
+            let size = self
+                .ivars()
+                .tree
+                .borrow()
+                .as_ref()
+                .map(elwindui_core::tree::natural_size)
+                .unwrap_or(elwindui_core::layout::Size { width: 0.0, height: 0.0 });
+            objc2_foundation::NSSize::new(size.width as f64, size.height as f64)
+        }
+    }
+);
+
+impl TreeHostView {
+    fn new() -> Retained<Self> {
+        let m = mtm();
+        let ivars = TreeHostIvars { tree: RefCell::new(None) };
+        let this = Self::alloc(m).set_ivars(ivars);
+        unsafe { msg_send![super(this), initWithFrame: NSRect::default()] }
+    }
+
+    /// Replaces this host's entire content, discarding whatever native subviews were there before
+    /// — a full swap rather than a diff, matching how `TabView` swaps its content area wholesale
+    /// between tabs (see `TabView::set_content`) and how `Window::set_content` is only ever called
+    /// once (a `Node<AnyView>` isn't `Clone`, so it can only be handed over once anyway).
+    fn set_tree(&self, tree: Node<AnyView>) {
+        for old in self.subviews().iter() {
+            old.removeFromSuperview();
+        }
+        *self.ivars().tree.borrow_mut() = Some(tree);
+        self.invalidateIntrinsicContentSize();
+        self.relayout();
+    }
+
+    /// Re-measures and re-arranges every native leaf, and re-syncs every self-painting node's
+    /// `CAShapeLayer`, against this view's *current* frame — called from `layout()` (above)
+    /// whenever AppKit thinks this view's size may have changed.
+    fn relayout(&self) {
+        use elwindui_core::layout::{LayoutNode, Size};
+
+        let frame = self.frame();
+        let available = Size { width: frame.size.width as f32, height: frame.size.height as f32 };
+        let tree = self.ivars().tree.borrow();
+        let Some(tree) = tree.as_ref() else { return };
+        let (natives, paints) = layout_tree(tree, available);
+
+        for (mut view, rect) in natives {
+            self.addSubview(&view.as_nsview());
+            view.arrange(rect);
+        }
+
+        self.setWantsLayer(true);
+        let layer = self.layer().expect("wantsLayer(true) implies a layer");
+        // Only ever touches sublayers *this* code added (tagged below) — AppKit manages its own
+        // per-subview backing layers alongside these when the view is layer-backed, and those must
+        // be left alone.
+        if let Some(existing) = unsafe { layer.sublayers() } {
+            for sub in existing.iter() {
+                if sub.name().map(|n| n.to_string()).as_deref() == Some("elwindui-shape") {
+                    sub.removeFromSuperlayer();
+                }
+            }
+        }
+        for (paint, rect) in paints {
+            let PaintKind::Shape { kind, fill, stroke, stroke_width } = paint;
+            let shape_layer = CAShapeLayer::new();
+            shape_layer.setName(Some(&NSString::from_str("elwindui-shape")));
+            let cg_rect = NSRect::new(
+                objc2_foundation::NSPoint::new(rect.x as f64, rect.y as f64),
+                objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
+            );
+            let path = unsafe {
+                match kind {
+                    ShapeKind::RoundedRect { corner_radius } => CGPath::with_rounded_rect(
+                        cg_rect,
+                        corner_radius as f64,
+                        corner_radius as f64,
+                        std::ptr::null(),
+                    ),
+                    ShapeKind::Oval => CGPath::with_ellipse_in_rect(cg_rect, std::ptr::null()),
+                }
+            };
+            shape_layer.setPath(Some(&path));
+            match &fill {
+                Some(fill) => shape_layer.setFillColor(Some(&parse_color(fill))),
+                None => shape_layer.setFillColor(None),
+            }
+            if let Some(stroke) = &stroke {
+                shape_layer.setStrokeColor(Some(&parse_color(stroke)));
+            }
+            shape_layer.setLineWidth(stroke_width as f64);
+            let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
+            layer.insertSublayer_atIndex(&shape_layer, 0);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -385,26 +533,24 @@ impl TabStrip {
 /// generated code (see `elwindui-codegen`'s specialized `TabView` codegen path) owns the mapping
 /// from the observable tab list to `TabChip`s and calls `set_content` whenever the active tab
 /// changes. This type only holds the two widget areas — it has no notion of "the list of tabs" on
-/// its own, matching how `Column`/`Row` don't know about the data their children came from either.
+/// its own, matching how `Row`/`Column` (now purely `elwindui_core::tree::Node::Virtual` values)
+/// don't know about the data their children came from either.
 #[derive(Clone)]
 pub struct TabView {
     root: Retained<NSStackView>,
     pub strip: TabStrip,
-    content_area: Retained<NSStackView>,
-    // Stores the whole `AnyView`, not just its extracted `Retained<NSView>` — a `TextArea`'s
-    // change-notification delegate (`delegate_storage`) only stays alive as long as *some* clone
-    // of that `TextArea` value does (see `TextArea::set_on_change`'s doc comment). Keeping only
-    // the bare `NSView` here would drop the last such clone the moment `set_content` returns,
-    // deallocating the delegate — typed characters would still render (native `NSTextView`
-    // behavior needs no delegate) but `on_change` would silently never fire again, so edits would
-    // never reach the model.
-    current_content: Rc<RefCell<Option<AnyView>>>,
+    // A `TreeHostView`, not a plain `NSStackView`, since a tab's content (e.g. `DocumentView`,
+    // whose root is virtual) is a `Node<AnyView>`, not a single `AnyView` — see `set_content`. Its
+    // own `tree` ivar is what now keeps any native leaf's retention concern alive (a `TextArea`'s
+    // change-notification delegate only stays alive as long as *some* clone of that `TextArea`
+    // value does, see `TextArea::set_on_change`'s doc comment) for as long as it's the visible tab.
+    content_area: Retained<TreeHostView>,
 }
 
 impl TabView {
     pub fn new() -> Self {
         let strip = TabStrip::new();
-        let content_area = new_stack(vec![], NSUserInterfaceLayoutOrientation::Vertical);
+        let content_area = TreeHostView::new();
         let strip_view: Retained<NSView> = Retained::into_super(strip.ns.clone());
         let content_view: Retained<NSView> = Retained::into_super(content_area.clone());
         let root = NSStackView::stackViewWithViews(
@@ -412,7 +558,7 @@ impl TabView {
             mtm(),
         );
         root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-        Self { root, strip, content_area, current_content: Rc::new(RefCell::new(None)) }
+        Self { root, strip, content_area }
     }
 
     pub fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
@@ -438,15 +584,8 @@ impl TabView {
     }
 
     /// Swaps the single visible document pane for the currently selected tab.
-    pub fn set_content(&self, view: AnyView) {
-        if let Some(old) = self.current_content.borrow_mut().take() {
-            let old_view = old.as_nsview();
-            self.content_area.removeArrangedSubview(&old_view);
-            old_view.removeFromSuperview();
-        }
-        let new_view = view.as_nsview();
-        self.content_area.addArrangedSubview(&new_view);
-        *self.current_content.borrow_mut() = Some(view);
+    pub fn set_content(&self, content: Node<AnyView>) {
+        self.content_area.set_tree(content);
     }
 }
 

@@ -1,4 +1,4 @@
-component Window {
+component Window inherits NativeComponent {
     #[param]
     title: String,
 
@@ -6,5 +6,5 @@ component Window {
     menu_bar: Option<MenuBar>,
 
     #[param]
-    content: AnyView,
+    content: Node<AnyView>,
 }

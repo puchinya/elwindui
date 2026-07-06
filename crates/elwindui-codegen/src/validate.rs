@@ -2,7 +2,7 @@
 //! ones reachable by the constructs the notepad example actually uses. See
 //! docs/elwindui_gui_framework_design.md §10 for the full rule list.
 
-use crate::ast::{ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
+use crate::ast::{ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
 use crate::codegen::{self, strip_rc_wrapper, SymbolTable};
 use std::collections::{HashMap, HashSet};
 
@@ -65,7 +65,12 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     }) {
                         let vm_fields =
                             find_vm_fields(module, &c.name, &c.fields, &table, &known_type_names, &mut errors);
+                        for let_binding in &view.lets {
+                            check_vm_references(&let_binding.element, module, &c.name, &vm_fields, &table, &mut errors);
+                            check_tab_view_mode(&let_binding.element, &c.name, &mut errors);
+                        }
                         check_vm_references(&view.root, module, &c.name, &vm_fields, &table, &mut errors);
+                        check_tab_view_mode(&view.root, &c.name, &mut errors);
                     }
                 }
                 Item::ViewModel(v) => {
@@ -140,7 +145,11 @@ fn check_vm_references(
         check_vm_expr(expr, from, component_name, vm_fields, table, errors);
     }
     for child in &node.children {
-        check_vm_references(child, from, component_name, vm_fields, table, errors);
+        // A `ChildEntry::Ref` doesn't need its own recursive check here — the `let` binding it
+        // refers to is itself already walked as one of `view.lets` in `validate`'s main loop.
+        if let ChildEntry::Literal(elem) = child {
+            check_vm_references(elem, from, component_name, vm_fields, table, errors);
+        }
     }
 }
 
@@ -214,13 +223,13 @@ fn check_vm_expr(
     }
 }
 
-/// Checks a closure body (`key`/`render_label`/`render_content`'s `|param| ...`): a reference is
-/// valid if its first segment is either the closure's own bound parameter (nothing further to
-/// check — the parameter's type isn't a `vm_fields`-tracked component/viewmodel) or a recognized
-/// `vm`-style field (checked the normal way via `check_vm_expr`). Anything else is an error — see
-/// `emit_expr`/`emit_tabview_resync` in `codegen.rs` for why an outer-component reference from
-/// inside a closure body would otherwise silently resolve to a bogus bare identifier instead of
-/// failing to compile.
+/// Checks a closure body (`header_template`/`item_template`'s `|param| ...`): a reference is
+/// valid if its first segment is either the closure's own bound parameter (or its `data_context`
+/// alias — nothing further to check, the parameter's type isn't a `vm_fields`-tracked
+/// component/viewmodel) or a recognized `vm`-style field (checked the normal way via
+/// `check_vm_expr`). Anything else is an error — see `emit_expr` in `codegen.rs` for why an
+/// outer-component reference from inside a closure body would otherwise silently resolve to a
+/// bogus bare identifier instead of failing to compile.
 fn check_closure_expr_body(
     expr: &ViewExpr,
     param: &str,
@@ -248,7 +257,9 @@ fn check_closure_expr_body(
         ViewExpr::Closure { .. } | ViewExpr::Element(_) => return,
     };
     match first_segment {
-        Some(first) if first == param => {}
+        // `data_context` is `emit_expr`'s sugar for the closure's own bound parameter (see
+        // codegen.rs) — valid wherever `param` itself is.
+        Some(first) if first == param || first == "data_context" => {}
         Some(first) if vm_fields.contains_key(first.as_str()) => {
             check_vm_expr(expr, from, component_name, vm_fields, table, errors);
         }
@@ -256,6 +267,50 @@ fn check_closure_expr_body(
             "{component_name}: closure body references `{first}`, which is neither the closure's own parameter `{param}` nor a recognized field — a closure may only reference its own bound parameter"
         )),
         None => {}
+    }
+}
+
+/// Rule (付録Y): a `TabView` must use *exactly one* of its two mutually exclusive child-declaration
+/// modes — nested `TabViewItem`s written literally in `{}` (static), or `items_source` (+
+/// `header_template`/`item_template`, dynamic). Both or neither is ambiguous/incomplete and is
+/// rejected here rather than left to fail confusingly deep in codegen. Walks the whole `view` tree,
+/// including into element-valued attributes/closure bodies (`menu_bar: MenuBar { .. }`-style named
+/// slots and `header_template`/`item_template` closures), since a `TabView` may appear nested
+/// inside either.
+fn check_tab_view_mode(node: &ElementNode, component_name: &str, errors: &mut Vec<String>) {
+    if node.type_path == "TabView" {
+        let has_children = !node.children.is_empty();
+        let has_items_source = node.attributes.iter().any(|(name, _)| name == "items_source");
+        match (has_children, has_items_source) {
+            (true, true) => errors.push(format!(
+                "{component_name}: `TabView` has both nested `TabViewItem` children and `items_source` — use exactly one (static nesting or `items_source`, not both)"
+            )),
+            (false, false) => errors.push(format!(
+                "{component_name}: `TabView` has neither nested `TabViewItem` children nor `items_source` — must use exactly one"
+            )),
+            _ => {}
+        }
+    }
+    for child in &node.children {
+        if let ChildEntry::Literal(elem) = child {
+            check_tab_view_mode(elem, component_name, errors);
+        }
+    }
+    for (_, expr) in &node.attributes {
+        check_tab_view_mode_in_expr(expr, component_name, errors);
+    }
+}
+
+fn check_tab_view_mode_in_expr(expr: &ViewExpr, component_name: &str, errors: &mut Vec<String>) {
+    match expr {
+        ViewExpr::Element(elem) => check_tab_view_mode(elem, component_name, errors),
+        ViewExpr::Closure { body: ClosureBody::Element(elem), .. } => check_tab_view_mode(elem, component_name, errors),
+        ViewExpr::TFluent(_, args) => {
+            for (_, arg) in args {
+                check_tab_view_mode_in_expr(arg, component_name, errors);
+            }
+        }
+        ViewExpr::Path(_) | ViewExpr::MethodCall(..) | ViewExpr::Expr(_) | ViewExpr::Closure { body: ClosureBody::Expr(_), .. } => {}
     }
 }
 
@@ -311,7 +366,9 @@ fn check_element_value(
         }
     }
     for child in &elem.children {
-        check_vm_references(child, from, component_name, vm_fields, table, errors);
+        if let ChildEntry::Literal(literal) = child {
+            check_vm_references(literal, from, component_name, vm_fields, table, errors);
+        }
     }
 }
 
@@ -712,7 +769,7 @@ view Window10 {
         assert!(errs.iter().any(|e| e.contains("other_thing")), "errors: {errs:?}");
     }
 
-    /// The passthrough case (`doc: doc`) and a well-formed `render_content` must validate cleanly.
+    /// The passthrough case (`doc: doc`) and a well-formed `item_template` must validate cleanly.
     #[test]
     fn accepts_well_formed_render_content() {
         let src = r#"
@@ -736,11 +793,10 @@ component Window11 {
 view Window11 {
     Window {
         TabView {
-            tabs: vm.documents
-            key: |doc| std::rc::Rc::as_ptr(doc) as usize
-            render_label: |doc| doc.file_name
-            render_content: |doc| DocumentView { doc: doc }
-            selected: vm.documents
+            items_source: vm.documents
+            header_template: |doc| doc.file_name
+            item_template: |doc| DocumentView { doc: doc }
+            selected_index: vm.documents
         }
     }
 }

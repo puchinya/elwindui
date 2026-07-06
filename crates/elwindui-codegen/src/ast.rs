@@ -114,11 +114,28 @@ pub enum Initializer {
     Expr(syn::Expr),
 }
 
-/// `view Name { ElementTree }`. See docs/elwindui_spec.md §2.
+/// `view Name { let-bindings... ElementTree }`. See docs/elwindui_spec.md §2, §13.
 #[derive(Debug, Clone)]
 pub struct ViewDef {
     pub target: String,
+    /// Zero or more `#[id("...")]? let name = Element { .. };` statements, in source order,
+    /// preceding `root`. Each introduces a name referenceable later (as a bare `ChildEntry::Ref`)
+    /// within `root` or a later `let`'s own element.
+    pub lets: Vec<LetBinding>,
     pub root: ElementNode,
+}
+
+/// `#[id("editor")] let editor = TextArea { text: content };` — see docs/elwindui_spec.md §13's
+/// "特定要素への名前付きアクセス". `id`, when present, becomes a generated named accessor method
+/// (`self.editor()`) returning that binding's concrete Rust type (`codegen.rs`'s
+/// `emit_named_accessors`) — not a runtime string-keyed lookup (`#[id(...)]` names are always
+/// known at compile time, so a monomorphized accessor is strictly sufficient and matches this
+/// project's avoid-type-erasure/avoid-dyn-dispatch convention, 付録O.5).
+#[derive(Debug, Clone)]
+pub struct LetBinding {
+    pub id: Option<String>,
+    pub name: String,
+    pub element: ElementNode,
 }
 
 /// `Type { key: expr, ChildElement { ... } }`. Attribute values and nested elements share the
@@ -128,7 +145,16 @@ pub struct ViewDef {
 pub struct ElementNode {
     pub type_path: String,
     pub attributes: Vec<(String, ViewExpr)>,
-    pub children: Vec<ElementNode>,
+    pub children: Vec<ChildEntry>,
+}
+
+/// A bare (non-`key:`-prefixed) entry inside an element's `{}` body — either a literal nested
+/// element (`Type { .. }`, as always) or a bare identifier referring to an earlier `let` binding
+/// (e.g. `Column { editor, StatusBar {} }`'s `editor`).
+#[derive(Debug, Clone)]
+pub enum ChildEntry {
+    Literal(ElementNode),
+    Ref(String),
 }
 
 /// Expressions that can appear as an element attribute value. `t!` is recognized directly by the
@@ -146,9 +172,10 @@ pub enum ViewExpr {
     /// Any other expression (string/number literals, etc.), parsed via `syn`.
     Expr(syn::Expr),
     /// `|doc| <body>` — a single untyped bound parameter (no destructuring, no type annotation)
-    /// used by `TabView`'s `key`/`render_label`/`render_content` attributes (付録Y) so a tab's
-    /// per-item label/content can be an arbitrary expression or nested `view`, rather than the
-    /// fixed `TextArea` codegen used to hardcode.
+    /// used by `TabView`'s `header_template`/`item_template` attributes (付録Y) so a tab's
+    /// per-item header/content can be an arbitrary expression or nested `view`, rather than the
+    /// fixed `TextArea` codegen used to hardcode. Also implicitly aliased as `data_context` inside
+    /// the closure body (`emit_expr`'s `data_context` substitution).
     Closure { param: String, body: ClosureBody },
     /// `menu_bar: MenuBar { .. }` — a nested element used as an ordinary (non-closure) attribute
     /// value, for a builtin shape's "named single-child slot" (e.g. `Window`'s `menu_bar`/

@@ -7,6 +7,22 @@ component NotepadWindow {
 }
 
 view NotepadWindow {
+    // `#[id("tabs")]` (§13) generates a `pub fn tabs(&self) -> Rc<elwindui_builtins::...::TabView>`
+    // accessor on `NotepadWindow` — usable from hand-written Rust glue code to call e.g.
+    // `selected_item()`/`selected_container()`, which aren't exposed through the declarative
+    // surface itself (see `tab_view.elwind`'s doc comment).
+    #[id("tabs")]
+    let tabs = TabView {
+        items_source: vm.documents
+        header_template: |doc| doc.file_name
+        item_template: |doc| DocumentView { doc: doc }
+        selected_index: vm.active_tab
+        on_select: vm.select_tab
+        on_close: vm.close_tab
+        on_new_tab: vm.new_tab.execute()
+        closable: true
+    };
+
     Window {
         title: t!("notepad-app-title")
 
@@ -21,16 +37,6 @@ view NotepadWindow {
             }
         }
 
-        content: TabView {
-            tabs: vm.documents
-            key: |doc| std::rc::Rc::as_ptr(doc) as usize
-            render_label: |doc| doc.file_name
-            render_content: |doc| DocumentView { doc: doc }
-            selected: vm.active_tab
-            on_select: vm.select_tab
-            on_close: vm.close_tab
-            on_new_tab: vm.new_tab.execute()
-            closable: true
-        }
+        tabs
     }
 }

@@ -8,9 +8,13 @@ elwindui-core = { path = "../elwindui-core" }
 elwindui-backend-appkit = { path = "../elwindui-backend-appkit", optional = true }
 elwindui-backend-gtk4 = { path = "../elwindui-backend-gtk4", optional = true }
 elwindui-backend-winui3 = { path = "../elwindui-backend-winui3", optional = true }
+# `Retained<elwindui_backend_appkit::TreeHostView>` (a per-`TabViewItem` persistent content host,
+# see `appkit::tab_view`) is held directly as a struct field, so this crate needs `objc2::rc`'s
+# `Retained` type itself, not just whatever `elwindui-backend-appkit` re-exports through `AnyView`.
+objc2 = { version = "0.6", optional = true }
 
 [features]
 default = []
-backend-appkit = ["dep:elwindui-backend-appkit"]
+backend-appkit = ["dep:elwindui-backend-appkit", "dep:objc2"]
 backend-gtk4 = ["dep:elwindui-backend-gtk4"]
 backend-winui3 = ["dep:elwindui-backend-winui3"]

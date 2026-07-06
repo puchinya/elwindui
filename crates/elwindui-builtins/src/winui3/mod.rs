@@ -10,7 +10,7 @@
 //! need little to no correction even if the backend crate's underlying WinRT calls do.
 
 mod tab_view;
-pub use tab_view::TabView;
+pub use tab_view::{TabView, TabViewItem};
 
 use elwindui_backend_winui3 as winui3;
 use std::rc::Rc;

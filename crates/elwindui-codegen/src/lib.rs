@@ -31,6 +31,7 @@ const BUILTIN_SHAPE_SOURCES: &[&str] = &[
     include_str!("../../elwindui-builtins/src/shapes/menu.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/menu_item.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/tab_view.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/tab_view_item.elwind"),
 ];
 
 /// Parses every embedded builtin shape into a `Module`. Registered with the same `path: []`

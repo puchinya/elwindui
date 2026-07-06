@@ -40,16 +40,38 @@ impl<T: Any> AsAny for T {
 /// The fields every `UIElement` carries (WinUI3's `FrameworkElement` base class, via composition
 /// since Rust has no class inheritance — each concrete type embeds one of these and delegates
 /// `UIElement::base`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `data_context` (WinUI3's `FrameworkElement.DataContext`) is `Rc<dyn Any>`-erased like every
+/// other cross-type-parameter value in this crate (see e.g. `elwindui-builtins::appkit::tab_view`'s
+/// `erase_tabs`) — it drops `UIElementBase`'s former `Copy`/`PartialEq` derives (`Rc<dyn Any>`
+/// supports neither), which nothing in the tree relied on.
+#[derive(Clone)]
 pub struct UIElementBase {
     pub margin: f32,
     pub horizontal_alignment: HorizontalAlignment,
     pub vertical_alignment: VerticalAlignment,
+    pub data_context: Option<std::rc::Rc<dyn Any>>,
+}
+
+impl std::fmt::Debug for UIElementBase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UIElementBase")
+            .field("margin", &self.margin)
+            .field("horizontal_alignment", &self.horizontal_alignment)
+            .field("vertical_alignment", &self.vertical_alignment)
+            .field("data_context", &self.data_context.is_some())
+            .finish()
+    }
 }
 
 impl Default for UIElementBase {
     fn default() -> Self {
-        UIElementBase { margin: 0.0, horizontal_alignment: HorizontalAlignment::Stretch, vertical_alignment: VerticalAlignment::Stretch }
+        UIElementBase {
+            margin: 0.0,
+            horizontal_alignment: HorizontalAlignment::Stretch,
+            vertical_alignment: VerticalAlignment::Stretch,
+            data_context: None,
+        }
     }
 }
 
@@ -67,6 +89,12 @@ pub trait UIElement: AsAny {
     }
     fn vertical_alignment(&self) -> VerticalAlignment {
         self.base().vertical_alignment
+    }
+    /// WinUI3's `FrameworkElement.DataContext` — an ambient, type-erased data value an element
+    /// carries (set explicitly via the `data_context:` common attribute, or populated internally by
+    /// `TabView`'s `items_source` mode for each generated `TabViewItem`). `None` when unset.
+    fn data_context(&self) -> Option<&std::rc::Rc<dyn Any>> {
+        self.base().data_context.as_ref()
     }
     /// This element's own children (`&[]` for a leaf like `NativeControl`/`TextBlock`).
     fn children(&self) -> &[Box<dyn UIElement>];
@@ -361,13 +389,13 @@ mod tests {
         // `CrossAlign::Start` behavior this test used to exercise.
         fn leaf(name: &'static str, s: Size) -> Box<dyn UIElement> {
             Box::new(NativeControl {
-                base: UIElementBase { margin: 0.0, horizontal_alignment: HorizontalAlignment::Left, vertical_alignment: VerticalAlignment::Top },
+                base: UIElementBase { margin: 0.0, horizontal_alignment: HorizontalAlignment::Left, vertical_alignment: VerticalAlignment::Top, ..UIElementBase::default() },
                 handle: FakeHandle(name, s),
             })
         }
         fn start_stack(orientation: Orientation, spacing: f32, children: Vec<Box<dyn UIElement>>) -> Box<dyn UIElement> {
             Box::new(Stack {
-                base: UIElementBase { margin: 0.0, horizontal_alignment: HorizontalAlignment::Left, vertical_alignment: VerticalAlignment::Top },
+                base: UIElementBase { margin: 0.0, horizontal_alignment: HorizontalAlignment::Left, vertical_alignment: VerticalAlignment::Top, ..UIElementBase::default() },
                 orientation,
                 spacing,
                 children,
@@ -443,7 +471,7 @@ mod tests {
     #[test]
     fn non_stretch_alignment_keeps_the_elements_own_measured_size() {
         let tree: Box<dyn UIElement> = Box::new(NativeControl {
-            base: UIElementBase { margin: 0.0, horizontal_alignment: HorizontalAlignment::Center, vertical_alignment: VerticalAlignment::Center },
+            base: UIElementBase { margin: 0.0, horizontal_alignment: HorizontalAlignment::Center, vertical_alignment: VerticalAlignment::Center, ..UIElementBase::default() },
             handle: FakeHandle("a", size(10.0, 20.0)),
         });
         let (natives, _) = layout_tree::<FakeHandle>(tree.as_ref(), size(100.0, 100.0));

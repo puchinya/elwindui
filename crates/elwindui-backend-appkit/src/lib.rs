@@ -179,7 +179,7 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
 /// no backend struct of their own (docs/elwindui_spec.md 付録H.2), one host type is all any native
 /// container needs to accept arbitrary content: `Window`'s content view and `TabView`'s per-tab
 /// content area both are one of these.
-struct TreeHostIvars {
+pub struct TreeHostIvars {
     tree: RefCell<Option<Box<dyn UIElement>>>,
 }
 
@@ -187,7 +187,7 @@ define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = objc2::MainThreadOnly]
     #[ivars = TreeHostIvars]
-    struct TreeHostView;
+    pub struct TreeHostView;
 
     unsafe impl NSObjectProtocol for TreeHostView {}
 
@@ -242,10 +242,11 @@ impl TreeHostView {
     }
 
     /// Replaces this host's entire content, discarding whatever native subviews were there before
-    /// — a full swap rather than a diff, matching how `TabView` swaps its content area wholesale
-    /// between tabs (see `TabView::set_content`) and how `Window::set_content` is only ever called
-    /// once (a `Box<dyn UIElement>` isn't `Clone`, so it can only be handed over once anyway).
-    fn set_tree(&self, tree: Box<dyn UIElement>) {
+    /// — a full swap rather than a diff. `pub` (unlike most of this type's methods) since
+    /// `TabView::insert_tab` hands a fresh host straight to its caller (`elwindui-builtins`'s
+    /// wrapper), which calls this exactly once per tab to populate it — see that type's own doc
+    /// comment for why each tab gets its own persistent host instead of sharing one.
+    pub fn set_tree(&self, tree: Box<dyn UIElement>) {
         for old in self.subviews().iter() {
             old.removeFromSuperview();
         }
@@ -547,75 +548,101 @@ impl TabStrip {
     }
 }
 
-/// See docs/elwindui_builtins_spec.md 付録Y. Vertical stack of `[TabStrip, content_area]`; the
-/// generated code (see `elwindui-codegen`'s specialized `TabView` codegen path) owns the mapping
-/// from the observable tab list to `TabChip`s and calls `set_content` whenever the active tab
-/// changes. This type only holds the two widget areas — it has no notion of "the list of tabs" on
-/// its own, matching how `VerticalLayout`/`HorizontalLayout` (purely `elwindui_core::tree::Node::Virtual`
-/// values) don't know about the data their children came from either.
+/// See docs/elwindui_builtins_spec.md 付録Y. Vertical stack of `[TabStrip, content_container]`;
+/// the generated code (via `elwindui-builtins::appkit::tab_view`) owns the mapping from
+/// `items_source`/static `TabViewItem`s to `TabChip`s + content hosts. This type only holds the
+/// widget areas — it has no notion of "the list of tabs" on its own, matching how
+/// `VerticalLayout`/`HorizontalLayout` (purely `elwindui_core::tree::Node::Virtual` values) don't
+/// know about the data their children came from either.
+///
+/// Unlike an earlier version of this type, `content_container` isn't itself a single
+/// `TreeHostView` swapped wholesale on every tab switch — each tab gets its *own* persistent
+/// `TreeHostView` (created once, in `insert_tab`), added as an overlaid subview of
+/// `content_container` and shown/hidden via `set_tab_content_visible` rather than destroyed and
+/// rebuilt. A `Box<dyn UIElement>` isn't `Clone`, so a tab's content can only ever be handed over
+/// once (`TreeHostView::set_tree`) — a single shared pane would have no way to restore a
+/// previously-shown-then-hidden tab's content after switching away from it. Each host tracks its
+/// own `elwindui_core::tree` (keeping any native leaf's retention concern alive, e.g. a
+/// `TextArea`'s change-notification delegate — see `TextArea::set_on_change`'s doc comment — for
+/// as long as its tab exists, not just while it's the visible one).
 #[derive(Clone)]
 pub struct TabView {
     root: Retained<NSStackView>,
     pub strip: TabStrip,
-    // A `TreeHostView`, not a plain `NSStackView`, since a tab's content (e.g. `DocumentView`,
-    // whose root is virtual) is a `Box<dyn UIElement>`, not a single `AnyView` — see
-    // `set_content`. Its
-    // own `tree` ivar is what now keeps any native leaf's retention concern alive (a `TextArea`'s
-    // change-notification delegate only stays alive as long as *some* clone of that `TextArea`
-    // value does, see `TextArea::set_on_change`'s doc comment) for as long as it's the visible tab.
-    content_area: Retained<TreeHostView>,
+    content_container: Retained<NSView>,
 }
 
 impl TabView {
     pub fn new() -> Self {
+        let m = mtm();
         let strip = TabStrip::new();
-        let content_area = TreeHostView::new();
+        let content_container = NSView::initWithFrame(NSView::alloc(m), NSRect::default());
         let strip_view: Retained<NSView> = Retained::into_super(strip.ns.clone());
-        let content_view: Retained<NSView> = Retained::into_super(content_area.clone());
         let root = NSStackView::stackViewWithViews(
-            &objc2_foundation::NSArray::from_retained_slice(&[strip_view, content_view]),
-            mtm(),
+            &objc2_foundation::NSArray::from_retained_slice(&[strip_view, content_container.clone()]),
+            m,
         );
         root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
         // `NSStackView`'s default `distribution` (`GravityAreas`) leaves each arranged subview at
         // its own intrinsic size unless hugging priorities say otherwise — `.Fill` makes the stack
         // actually consume its *entire* stacking-axis extent, matching `TabView`'s expected "chips
-        // row at natural height, content area fills the rest" shape. `content_area`'s own vertical
-        // hugging priority is dropped to (near-)zero so it — not the also-low-priority-by-default
-        // `strip` — is the one that absorbs whatever space `Fill` distributes, since a
-        // `TreeHostView`'s `intrinsicContentSize` (its hosted tree's *natural*, often tiny, size —
-        // e.g. an empty `TextArea`'s `fittingSize()`) is never a meaningful hint for how much room
-        // it should actually get.
-        content_area.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
+        // row at natural height, content area fills the rest" shape. `content_container`'s own
+        // vertical hugging priority is dropped to (near-)zero so it — not the also-low-priority-
+        // by-default `strip` — is the one that absorbs whatever space `Fill` distributes (a plain
+        // `NSView` with no subviews yet has no intrinsic size hint worth respecting anyway).
+        content_container.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
         root.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
-        Self { root, strip, content_area }
+        Self { root, strip, content_container }
     }
 
     pub fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
         self.strip.new_tab_button.set_on_click(callback);
     }
 
-    /// Inserts a new tab chip at `index`, wiring `on_select`/`on_close` to the given callbacks.
+    /// Inserts a new tab chip at `index` (wiring `on_select`/`on_close` to the given callbacks)
+    /// plus a fresh, persistent content host — added to `content_container`, initially hidden.
+    /// `elwindui-builtins`'s wrapper calls `TreeHostView::set_tree` on the returned host exactly
+    /// once (its content never needs to be handed over again — see this type's own doc comment),
+    /// and `set_tab_content_visible` to toggle it on selection.
     pub fn insert_tab(
         &self,
         index: usize,
         title: &str,
         on_select: Box<dyn Fn()>,
         on_close: Box<dyn Fn()>,
-    ) -> TabChip {
+    ) -> (TabChip, Retained<TreeHostView>) {
         let chip = self.strip.insert_tab(index, title);
         chip.title_button.set_on_click(on_select);
         chip.close_button.set_on_click(on_close);
-        chip
+
+        let host = TreeHostView::new();
+        // Classic pre-Auto-Layout "fill the parent" technique instead of `NSLayoutConstraint`s:
+        // `translatesAutoresizingMaskIntoConstraints(true)` (this container has no Auto Layout
+        // constraints of its own — it isn't managed by `NSStackView` — so this is the default
+        // anyway, made explicit) plus a `.width | .height` autoresizing mask makes AppKit stretch
+        // `host` to match `content_container`'s bounds on every resize, with no custom `NSView`
+        // subclass or constraint bookkeeping needed here.
+        host.setTranslatesAutoresizingMaskIntoConstraints(true);
+        host.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        host.setFrame(self.content_container.bounds());
+        host.setHidden(true);
+        self.content_container.addSubview(&host);
+        (chip, host)
     }
 
-    pub fn remove_tab(&self, chip: &TabChip) {
+    /// Removes a tab's chip and its persistent content host together.
+    pub fn remove_tab(&self, chip: &TabChip, host: &TreeHostView) {
         self.strip.remove_tab(chip);
+        host.removeFromSuperview();
     }
 
-    /// Swaps the single visible document pane for the currently selected tab.
-    pub fn set_content(&self, content: Box<dyn UIElement>) {
-        self.content_area.set_tree(content);
+    /// Shows or hides a tab's content host — selecting a tab means showing its host and hiding
+    /// the previously-selected one, never touching either one's actual content.
+    pub fn set_tab_content_visible(&self, host: &TreeHostView, visible: bool) {
+        host.setHidden(!visible);
     }
 }
 

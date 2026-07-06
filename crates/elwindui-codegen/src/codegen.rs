@@ -4,7 +4,7 @@
 //! 依存関係グラフに基づくCell/RefCellベースの更新関数生成は付録O.5に対応する。
 
 use crate::ast::{
-    Attr, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldKind, Initializer, Item, Module,
+    Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldKind, Initializer, Item, Module,
     ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
@@ -1004,13 +1004,34 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // Every node that has a callback or a value that can change after construction gets a
     // generated field name and is stored on the component so `resync`/closures can reach it later.
     let mut plan = Vec::new();
-    plan_element(&view.root, &ctx, from, table, &mut plan, true);
+
+    // `let`-bindings (§13): planned, in source order, *before* `root` so a later `let`'s own
+    // element (or `root` itself) can reference an earlier one via a bare `ChildEntry::Ref`.
+    // `is_root: let_binding.id.is_some()` reuses `plan_element`'s existing "force `stored`" flag —
+    // an `#[id(...)]`-tagged binding must survive past construction the same way a literal root
+    // element already does (`emit_named_accessors` reads `self.<binding>` later), even though it
+    // isn't the view's actual root.
+    let mut lets_map: HashMap<String, (syn::Ident, String)> = HashMap::new();
+    for let_binding in &view.lets {
+        let resolved = plan_element(&let_binding.element, &ctx, from, table, &mut plan, let_binding.id.is_some(), &lets_map);
+        if let_binding.id.is_some() {
+            plan.last_mut().expect("plan_element always pushes its own node").id = let_binding.id.clone();
+        }
+        lets_map.insert(let_binding.name.clone(), resolved);
+    }
+
+    plan_element(&view.root, &ctx, from, table, &mut plan, true, &lets_map);
 
     let mut struct_fields = TokenStream::new();
     let mut construct_stmts = TokenStream::new();
     let mut field_inits = TokenStream::new();
     let mut wiring_stmts = TokenStream::new();
     let mut resync_stmts = TokenStream::new();
+    // `#[id("...")]` bindings (§13) — a monomorphized `pub fn <id>(&self) -> Rc<ConcreteType>`
+    // per binding, not a runtime string-keyed lookup (every `#[id(...)]` name is fixed at compile
+    // time, so a plain accessor is strictly sufficient — see docs/elwindui_spec.md §13 and
+    // 付録O.5's avoid-type-erasure convention).
+    let mut named_accessors = TokenStream::new();
 
     for node in &plan {
         emit_construction(node, &ctx, from, table, &mut construct_stmts);
@@ -1023,6 +1044,14 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             let type_ident = format_ident!("{}", node.type_path);
             struct_fields.extend(quote! { #binding: std::rc::Rc<#type_ident>, });
             field_inits.extend(quote! { #binding: #binding.clone(), });
+            if let Some(id) = &node.id {
+                let accessor = format_ident!("{}", id);
+                named_accessors.extend(quote! {
+                    pub fn #accessor(&self) -> std::rc::Rc<#type_ident> {
+                        self.#binding.clone()
+                    }
+                });
+            }
         }
     }
     for node in &plan {
@@ -1139,6 +1168,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             }
 
             #root_embed_method
+
+            #named_accessors
         }
 
         pub struct #target {
@@ -1197,6 +1228,11 @@ struct PlannedNode {
     /// (rather than being a construction-time-only local). No per-type list to check against
     /// anymore — every resolved type is handled identically.
     stored: bool,
+    /// This node's owning `LetBinding`'s `#[id("...")]`, if any — set by `generate_view` on
+    /// `plan.last_mut()` right after the top-level `plan_element` call for that `let` returns
+    /// (`plan_element` itself has no notion of `id`, only the `LetBinding` wrapping it does), never
+    /// by `plan_element`. Drives `emit_named_accessors`.
+    id: Option<String>,
 }
 
 fn plan_element(
@@ -1206,16 +1242,25 @@ fn plan_element(
     table: &SymbolTable,
     out: &mut Vec<PlannedNode>,
     is_root: bool,
+    lets: &HashMap<String, (syn::Ident, String)>,
 ) -> (syn::Ident, String) {
     let mut child_bindings = Vec::new();
     for child in &node.children {
-        child_bindings.push(plan_element(child, ctx, from, table, out, false));
+        match child {
+            ChildEntry::Literal(elem) => child_bindings.push(plan_element(elem, ctx, from, table, out, false, lets)),
+            ChildEntry::Ref(name) => {
+                let resolved = lets
+                    .get(name)
+                    .unwrap_or_else(|| panic!("`{name}` does not refer to an earlier `let` binding in this view"));
+                child_bindings.push(resolved.clone());
+            }
+        }
     }
 
     let mut element_attr_bindings = HashMap::new();
     for (name, expr) in &node.attributes {
         if let ViewExpr::Element(elem) = expr {
-            element_attr_bindings.insert(name.clone(), plan_element(elem, ctx, from, table, out, false));
+            element_attr_bindings.insert(name.clone(), plan_element(elem, ctx, from, table, out, false, lets));
         }
     }
 
@@ -1237,6 +1282,7 @@ fn plan_element(
         child_bindings,
         element_attr_bindings,
         stored,
+        id: None,
     });
     (binding, node.type_path.clone())
 }
@@ -1377,7 +1423,9 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
         ClosureBody::Expr(expr) => emit_expr(expr, &closure_ctx, &EmitMode::Construction),
         ClosureBody::Element(elem) => {
             let mut plan = Vec::new();
-            plan_element(elem, &closure_ctx, from, table, &mut plan, true);
+            // No outer `let`-bound names are visible inside a template closure body — it runs in a
+            // separate per-item instantiation context, not the enclosing view's own construction.
+            plan_element(elem, &closure_ctx, from, table, &mut plan, true, &HashMap::new());
             let mut construct = TokenStream::new();
             for planned in &plan {
                 emit_construction(planned, &closure_ctx, from, table, &mut construct);
@@ -1537,9 +1585,24 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
     // literal support); the two `Alignment`s have no enum-variant-literal syntax yet, so they
     // stay at `UIElementBase::default()`'s `Stretch` (matching every other element's default).
     let margin = get_attr("margin");
+    // `data_context` (付録Y) is likewise a common `UIElementBase` attribute, settable on any
+    // virtual builtin the same way `margin` is — an omitted one leaves `UIElementBase::default()`'s
+    // `None`. The supplied expression is `Rc<dyn Any>`-erased here (matching every other cross-
+    // type-parameter value in this crate, e.g. `elwindui-builtins::appkit::tab_view`'s
+    // `erase_tabs`) so `UIElementBase` itself stays non-generic.
+    // The expression must already evaluate to an owned `Rc<T>` (matching `items_source`'s own
+    // `Vec<Rc<T>>` requirement) — the cast below relies on that, it doesn't wrap in a fresh `Rc`.
+    let data_context = match find_attr(node, "data_context") {
+        Some(expr) => {
+            let value = emit_expr(expr, ctx, &EmitMode::Construction);
+            quote! { Some((#value) as std::rc::Rc<dyn std::any::Any>) }
+        }
+        None => quote! { None },
+    };
     let base = quote! {
         elwindui_core::tree::UIElementBase {
             margin: (#margin).unwrap_or(0.0),
+            data_context: #data_context,
             ..elwindui_core::tree::UIElementBase::default()
         }
     };
@@ -1770,11 +1833,31 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
     match expr {
         ViewExpr::Expr(e) => quote! { #e },
         ViewExpr::Path(path) => {
+            // `data_context` (WinUI3's `FrameworkElement.DataContext`, 付録Y — lowercased to match
+            // this DSL's snake_case attribute naming, e.g. the `data_context:` attribute itself)
+            // is sugar for the enclosing `header_template`/`item_template` closure's own bound
+            // parameter — substituted for it before any other resolution, so `data_context.field`
+            // behaves exactly like writing the closure's real parameter name (`doc.field`) already
+            // does. Outside such a closure (`ctx.closure_param` is `None`) it's left alone and
+            // falls through to ordinary path resolution, which fails to resolve it (by design —
+            // this sugar is scoped to template closures only, see
+            // docs/elwindui_builtins_spec.md 付録Y).
+            let substituted_path;
+            let path: &[String] = if path.first().map(String::as_str) == Some("data_context") {
+                if let Some(param) = &ctx.closure_param {
+                    substituted_path = std::iter::once(param.clone()).chain(path[1..].iter().cloned()).collect::<Vec<_>>();
+                    &substituted_path
+                } else {
+                    path.as_slice()
+                }
+            } else {
+                path.as_slice()
+            };
             // A bare reference to the closure's own bound parameter (e.g. `doc` in
-            // `render_content: |doc| DocumentView { doc: doc }`) passes the value straight
+            // `item_template: |doc| DocumentView { doc: doc }`) passes the value straight
             // through — it isn't a `vm`-style field with a generated getter, so it must be
             // handled before `resolve_bind`/`emit_path_get` (which has no 1-segment path shape).
-            if let [only] = path.as_slice() {
+            if let [only] = path {
                 if ctx.closure_param.as_deref() == Some(only.as_str()) {
                     // The closure parameter itself is always a reference (`&Rc<T>`, `&_` —
                     // `emit_closure_value`'s deliberately-typed closure param), but a passthrough
@@ -2099,11 +2182,10 @@ view NotepadWindow {
         }
 
         content: TabView {
-            tabs: vm.documents
-            key: |doc| std::rc::Rc::as_ptr(doc) as usize
-            render_label: |doc| doc.file_name
-            render_content: |doc| TextArea { text: doc.content }
-            selected: vm.active_tab
+            items_source: vm.documents
+            header_template: |doc| doc.file_name
+            item_template: |doc| TextArea { text: doc.content }
+            selected_index: vm.active_tab
             on_select: vm.select_tab
             on_close: vm.close_tab
             on_new_tab: vm.new_tab.execute()
@@ -2136,12 +2218,12 @@ view NotepadWindow {
         // reached generically the same way any other resolved type's constructor is.
         assert!(!window_str.contains("insert_tab"));
         assert!(!window_str.contains("__weak_self"));
-        assert!(window_str.contains("set_tabs"));
-        assert!(window_str.contains("set_selected"));
+        assert!(window_str.contains("set_items_source"));
+        assert!(window_str.contains("set_selected_index"));
     }
 
     #[test]
-    fn generates_valid_rust_for_tabview_render_label_and_content() {
+    fn generates_valid_rust_for_tabview_header_template_and_item_template() {
         let viewmodel_src = r#"
 viewmodel Document {
     #[observable]
@@ -2207,11 +2289,10 @@ view NotepadWindow {
         title: t!("notepad-window-title")
 
         TabView {
-            tabs: vm.documents
-            key: |doc| std::rc::Rc::as_ptr(doc) as usize
-            render_label: |doc| doc.file_name
-            render_content: |doc| DocumentView { doc: doc }
-            selected: vm.active_tab
+            items_source: vm.documents
+            header_template: |doc| doc.file_name
+            item_template: |doc| DocumentView { doc: doc }
+            selected_index: vm.active_tab
             on_select: vm.select_tab
             on_close: vm.close_tab
             on_new_tab: vm.new_tab.execute()
@@ -2251,10 +2332,10 @@ view NotepadWindow {
         assert!(window_str.contains(". into_node ()"), "window_str: {window_str}");
         assert!(
             !window_str.contains("TextArea :: new (& __doc . content ())"),
-            "the fixed TextArea fallback shouldn't be emitted once `render_content` is present"
+            "the fixed TextArea fallback shouldn't be emitted once `item_template` is present"
         );
-        // `render_label`'s body must go through the getter-call sugar (`.file_name()`), not a raw
-        // field access — see the `parse_closure_expr_body` bug this test guards against.
+        // `header_template`'s body must go through the getter-call sugar (`.file_name()`), not a
+        // raw field access — see the `parse_closure_expr_body` bug this test guards against.
         assert!(window_str.contains("doc . file_name ()"));
     }
 

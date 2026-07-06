@@ -10,7 +10,7 @@
 //! attribute's change-back), and — for anything embeddable as a child — `into_any_view`.
 
 mod tab_view;
-pub use tab_view::TabView;
+pub use tab_view::{TabView, TabViewItem};
 
 use elwindui_backend_appkit as appkit;
 use std::rc::Rc;

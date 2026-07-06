@@ -136,6 +136,7 @@ dependencies = [
  "elwindui-backend-gtk4",
  "elwindui-backend-winui3",
  "elwindui-core",
+ "objc2",
 ]
 
 [[package]]

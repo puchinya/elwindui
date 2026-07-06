@@ -245,10 +245,50 @@ impl<'a> Parser<'a> {
         let target = self.parse_ident()?;
         self.expect_char('{')?;
         self.skip_trivia();
+
+        let mut lets = Vec::new();
+        loop {
+            self.skip_trivia();
+            let checkpoint = self.pos;
+            let mut id = None;
+            if self.eat_char('#') {
+                self.expect_char('[')?;
+                let attr_name = self.parse_ident()?;
+                if attr_name != "id" {
+                    return Err(self.err(&format!("unknown view-level attribute #[{attr_name}] (only #[id(\"...\")] is supported here)")));
+                }
+                self.expect_char('(')?;
+                self.skip_trivia();
+                let id_src = self.take_string_literal()?;
+                id = Some(id_src.trim_matches('"').to_string());
+                self.skip_trivia();
+                self.expect_char(')')?;
+                self.expect_char(']')?;
+                self.skip_trivia();
+            }
+            if self.eat_keyword("let") {
+                self.skip_trivia();
+                let name = self.parse_ident()?;
+                self.skip_trivia();
+                self.expect_char('=')?;
+                self.skip_trivia();
+                let element = self.parse_element_node()?;
+                self.skip_trivia();
+                self.expect_char(';')?;
+                lets.push(LetBinding { id, name, element });
+            } else if id.is_some() {
+                return Err(self.err("#[id(\"...\")] must be immediately followed by a `let` binding"));
+            } else {
+                self.pos = checkpoint;
+                break;
+            }
+        }
+
+        self.skip_trivia();
         let root = self.parse_element_node()?;
         self.skip_trivia();
         self.expect_char('}')?;
-        Ok(ViewDef { target, root })
+        Ok(ViewDef { target, lets, root })
     }
 
     fn parse_element_node(&mut self) -> Result<ElementNode, String> {
@@ -271,10 +311,15 @@ impl<'a> Parser<'a> {
                 self.skip_trivia();
                 let value = self.parse_view_expr()?;
                 attributes.push((ident, value));
-            } else {
-                // bare `Type { ... }`: this is a child element, `ident` was its type name.
+            } else if self.peek_char() == Some('{') {
+                // bare `Type { ... }`: this is a nested child element, `ident` was its type name.
                 self.pos = ident_start;
-                children.push(self.parse_element_node()?);
+                children.push(ChildEntry::Literal(self.parse_element_node()?));
+            } else {
+                // bare identifier with neither `:` nor `{` following: a reference to an earlier
+                // `#[id(...)]? let <ident> = ...;` binding (see `parse_view_def`), e.g. `Column {
+                // editor, StatusBar {} }`'s `editor`.
+                children.push(ChildEntry::Ref(ident));
             }
             self.skip_trivia();
             self.eat_char(',');
@@ -809,14 +854,14 @@ view NotepadWindow {
         assert_eq!(view.root.type_path, "Window");
         assert_eq!(view.root.children.len(), 1);
 
-        let column = &view.root.children[0];
+        let column = literal(&view.root.children[0]);
         assert_eq!(column.type_path, "Column");
         assert_eq!(column.children.len(), 3);
-        assert_eq!(column.children[0].type_path, "Row");
-        assert_eq!(column.children[1].type_path, "TextArea");
-        assert_eq!(column.children[2].type_path, "Row");
+        assert_eq!(literal(&column.children[0]).type_path, "Row");
+        assert_eq!(literal(&column.children[1]).type_path, "TextArea");
+        assert_eq!(literal(&column.children[2]).type_path, "Row");
 
-        let save_button = &column.children[0].children[0];
+        let save_button = literal(&literal(&column.children[0]).children[0]);
         assert_eq!(save_button.type_path, "Button");
         let on_click = save_button
             .attributes
@@ -826,6 +871,15 @@ view NotepadWindow {
             .unwrap();
         assert!(matches!(on_click, ViewExpr::MethodCall(path, method)
             if path == &vec!["vm".to_string(), "save".to_string()] && method == "execute"));
+    }
+
+    /// Unwraps a test fixture's `ChildEntry`, which is always a literal nested element (none of
+    /// these fixtures reference a `let`-bound name).
+    fn literal(entry: &ChildEntry) -> &ElementNode {
+        match entry {
+            ChildEntry::Literal(elem) => elem,
+            ChildEntry::Ref(name) => panic!("expected a literal child element, found a `let`-ref to `{name}`"),
+        }
     }
 
     fn parse_closure_attr(attr_src: &str) -> ViewExpr {

@@ -1,0 +1,21 @@
+// See docs/elwindui_builtins_spec.md 付録Y. Used two ways: written literally as a `TabView`'s
+// nested static child (WinUI3's XAML `TabViewItem` declaration), or synthesized internally by
+// `TabView` once per element of `items_source` (its `data_context`/`header`/`content` populated
+// from that item via `header_template`/`item_template`).
+component TabViewItem inherits NativeComponent {
+    // Set explicitly in static mode; populated automatically (from the owning `items_source`
+    // element's own `Rc<T>`) in dynamic mode. `None` in static mode unless set.
+    #[param]
+    data_context: Option<std::rc::Rc<T>>,
+
+    #[param]
+    header: String,
+
+    #[param]
+    content: Box<dyn UIElement>,
+
+    #[param]
+    closable: Option<bool>,
+
+    on_close: fn(),
+}

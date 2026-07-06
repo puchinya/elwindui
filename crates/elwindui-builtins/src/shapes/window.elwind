@@ -6,5 +6,5 @@ component Window inherits NativeComponent {
     menu_bar: Option<MenuBar>,
 
     #[param]
-    content: Node<AnyView>,
+    content: Box<dyn UIElement>,
 }

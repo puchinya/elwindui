@@ -32,7 +32,7 @@ pub struct TabView {
     inner: appkit::TabView,
     tabs: RefCell<Vec<Rc<dyn Any>>>,
     render_label: Box<dyn Fn(&Rc<dyn Any>) -> String>,
-    render_content: Box<dyn Fn(&Rc<dyn Any>) -> elwindui_core::tree::Node<appkit::AnyView>>,
+    render_content: Box<dyn Fn(&Rc<dyn Any>) -> Box<dyn elwindui_core::tree::UIElement>>,
     selected: Cell<usize>,
     chips: RefCell<Vec<appkit::TabChip>>,
     // `(selected index, tab count)`, not just the index — closing a tab shifts every later index
@@ -49,7 +49,7 @@ impl TabView {
         tabs: Vec<Rc<T>>,
         _key: Box<dyn Fn(&Rc<T>) -> usize>,
         render_label: Box<dyn Fn(&Rc<T>) -> String>,
-        render_content: Box<dyn Fn(&Rc<T>) -> elwindui_core::tree::Node<appkit::AnyView>>,
+        render_content: Box<dyn Fn(&Rc<T>) -> Box<dyn elwindui_core::tree::UIElement>>,
         selected: usize,
         _closable: bool,
     ) -> Rc<Self> {

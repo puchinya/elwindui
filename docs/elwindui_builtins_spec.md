@@ -10,7 +10,7 @@
 
 # 付録F. 標準ビルトイン部品のリファレンス実装
 
-`Window`, `VerticalLayout`/`HorizontalLayout`, `Text`, `TextArea`, `Dropdown`/`Option` など、これまで暗黙に使ってきたビルトインプリミティブは、実際には `builtin` 名前空間(付録E参照)に属し、コード生成器が標準で提供する。ネイティブな葉ウィジェット(`Window`/`Button`/`TextArea`/`Text`/`MenuBar`/`TabView`等)は他のコンポーネントと同じ`component`/`view`構文で表現でき、`match target::backend()`による網羅性検査(付録D)や`native!`エスケープハッチ(付録A・C)がそのまま適用される。一方`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`のような仮想ビルトインは専用のネイティブ実体を持たず、`elwindui_core::tree::Node::Virtual`として`elwindui-codegen`が直接組み立てる(F.2参照)。
+`Window`, `VerticalLayout`/`HorizontalLayout`, `TextBlock`, `TextArea`, `Dropdown`/`Option` など、これまで暗黙に使ってきたビルトインプリミティブは、実際には `builtin` 名前空間(付録E参照)に属し、コード生成器が標準で提供する。ネイティブな葉ウィジェット(`Window`/`Button`/`TextArea`/`MenuBar`/`TabView`等)は他のコンポーネントと同じ`component`/`view`構文で表現でき、`match target::backend()`による網羅性検査(付録D)や`native!`エスケープハッチ(付録A・C)がそのまま適用される。一方`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`のような仮想ビルトインは専用のネイティブ実体を持たず、`elwindui_core::tree::UIElement`の実装として`elwindui-codegen`が直接組み立てる(F.2参照)。全ての`UIElement`実装は`Margin`(一律`f32`)と`HorizontalAlignment`/`VerticalAlignment`を共通して持つ(付録H.2参照)。
 
 ## F.1 `builtin::Window`
 
@@ -71,70 +71,78 @@ component VerticalLayout {
     children: Vec<AnyView>,
     #[param]
     spacing: Option<f32>,
-    #[param]
-    cross_align: Option<CrossAlign>,
 }
 ```
 
 (`HorizontalLayout`も同じ形。実ファイルは`elwindui-builtins/src/shapes/{vertical_layout,horizontal_layout}.elwind`)
 
+WinUI3の`StackPanel`に倣い、交差軸方向の配置はコンテナ側の一律設定ではなく、**各子要素自身が持つ
+`HorizontalAlignment`/`VerticalAlignment`**(付録H.2)に委ねられる——かつて存在した`cross_align`
+パラメータ(コンテナ全体を一律揃えにする方式)は廃止された。主軸方向のサイズは常に「Auto」
+(各子の自然サイズ)であり、「残り領域を埋める」子を表現する手段は今のところ存在しない(将来の
+`Grid`の`*`比例サイズで対応予定、付録H.2参照)。
+
 `elwindui-codegen`(`is_virtual_builtin`/`emit_virtual_construction`)が、使用箇所ごとに直接
 以下のような値を組み立てる——`Type::new(..)`という関数呼び出しは一切発生しない:
 
 ```rust
-elwindui_core::tree::Node::Virtual {
-    content: Box::new(elwindui_core::tree::Stack {
-        orientation: elwindui_core::layout::Orientation::Vertical, // または Horizontal
-        spacing: /* spacing属性、省略時は0.0 */,
-        cross_align: /* cross_align属性、省略時はStretch */,
-    }),
-    children: /* 子要素を同じ規則で再帰的にNode<AnyView>化したもの */,
-}
+Box::new(elwindui_core::tree::Stack {
+    base: elwindui_core::tree::UIElementBase {
+        margin: /* margin属性、省略時は0.0 */,
+        ..Default::default() // horizontal_alignment/vertical_alignmentは既定でStretch
+    },
+    orientation: elwindui_core::layout::Orientation::Vertical, // または Horizontal
+    spacing: /* spacing属性、省略時は0.0 */,
+    children: /* 子要素を同じ規則で再帰的にBox<dyn UIElement>化したもの */,
+}) as Box<dyn elwindui_core::tree::UIElement>
 ```
 
 実際にこの値をネイティブsubviewとして配置するのは、祖先のネイティブコンテナ(`Window`や`TabView`)
-が持つ、任意の`Node<AnyView>`を受け付ける単一の再利用可能なホスト(AppKitの`TreeHostView`、
+が持つ、任意の`Box<dyn UIElement>`を受け付ける単一の再利用可能なホスト(AppKitの`TreeHostView`、
 WinUI3の`TreeHostPanel`)であり、`VerticalLayout`/`HorizontalLayout`自体はバックエンドコードを
 一切持たない。新しいレイアウト種別(将来の`Grid`等)を追加する際も、
-`elwindui_core::tree::VirtualNode`トレイトの実装を1つ足すだけでよく、バックエンドごとの
+`elwindui_core::tree::UIElement`トレイトの実装を1つ足すだけでよく、バックエンドごとの
 `native!`分岐を増やす必要はない(詳細は`elwindui-core/src/tree.rs`のモジュールコメントを参照)。
 
-## F.3 `builtin::Text`
+## F.3 `builtin::TextBlock`
 
-```rust
-component Text {
+WinUI3の`UIElement`階層(`UIElement => TextBlock (プリミティブ描画(非native))`、付録H.2.1参照)に倣い、`TextBlock`は
+`NSTextField`/WinUI3の`TextBlock`コントロールのようなネイティブウィジェットを一切使わない
+**自前描画のプリミティブ**である。F.2の`VerticalLayout`/`HorizontalLayout`と同じく専用のネイティブ
+実体を持たず、`.elwind`側は以下のシェイプ宣言のみで完結する(実ファイルは
+`elwindui-builtins/src/shapes/text_block.elwind`):
+
+```
+component TextBlock {
+    #[param]
     text: String,
     #[param]
-    color: ColorHex? = None,
-}
-
-view Text {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            let tb = microsoft::ui::xaml::controls::TextBlock::new()?;
-            tb.SetText(&text)?;
-            if let Some(c) = color { tb.SetForeground(&brush_from(c))?; }
-            tb
-        }
-        Backend::Appkit => native! {
-            let label = NSTextField::labelWithString(&text);
-            if let Some(c) = color { label.setTextColor(&nscolor_from(c)); }
-            label
-        }
-        Backend::Gtk4 => native! {
-            let lbl = gtk::Label::new(Some(&text));
-            if let Some(c) = color { apply_css_color(&lbl, c); }
-            lbl
-        }
-        Backend::Egui | Backend::Iced => native! {
-            match color {
-                Some(c) => ui.colored_label(egui_color(c), &text),
-                None    => ui.label(&text),
-            }
-        }
-    }
+    color: Option<String>,
 }
 ```
+
+`elwindui-codegen`が使用箇所ごとに直接組み立てる値は次の通り:
+
+```rust
+Box::new(elwindui_core::tree::TextBlock {
+    base: elwindui_core::tree::UIElementBase { margin: /* ... */, ..Default::default() },
+    content: text.to_string(),
+    color: /* color属性(#RRGGBB[AA]形式)、省略時はNone */,
+}) as Box<dyn elwindui_core::tree::UIElement>
+```
+
+`TextBlock::paint()`は`elwindui_core::tree::PaintKind::Text { content, color }`を返すだけで、
+実際の文字計測・描画は各バックエンドの責務になる(`elwindui-core`はフォントも描画方法も知らない
+——F.6の`Rectangle`/`Ellipse`と同じ役割分担):
+
+| バックエンド | 実装方法 |
+|---|---|
+| AppKit | `CATextLayer`(`NSAttributedString`ではなく`CALayer`ベース)を`TreeHostView`が`CAShapeLayer`と同じ要領で配置・生成 |
+| WinUI3 | 実際のXAML`TextBlock`クラスを、ウィジェットとしてではなく`TreeHostPanel`内の描画プリミティブとしてのみ利用(`Canvas.Left`/`Canvas.Top`で手動配置) |
+
+かつて存在した、ネイティブ実体を持つ`builtin::Text`(`NSTextField`/WinUI3の`TextBlock`コントロールを
+値として保持・`set_text`等のsetterを持つラッパー)は完全に削除された——`Text`という名前自体、
+WinUI3の実際のクラス名に合わせて`TextBlock`に統一されている。
 
 ## F.4 `builtin::TextArea`
 
@@ -227,9 +235,9 @@ view Dropdown {
 実装はコードベースのどこにも存在しない(仕様書にのみ残っていた設計と思われる)ため削除した。
 
 現在の図形プリミティブは`Rectangle`/`Ellipse`であり、F.2の`VerticalLayout`/`HorizontalLayout`と
-全く同じ仕組み(専用のネイティブ実体を持たず、`elwindui-codegen`が`elwindui_core::tree::Node::Virtual{content: Box::new(elwindui_core::tree::Shape{..}), ..}`を直接組み立てる)で実装されている。
-詳細はG章・N章(Canvas/Painterによるカスタム描画)を参照。
-```
+全く同じ仕組み(専用のネイティブ実体を持たず、`elwindui-codegen`が
+`Box::new(elwindui_core::tree::Shape{..}) as Box<dyn elwindui_core::tree::UIElement>`を直接組み立てる)
+で実装されている。詳細はG章・N章(Canvas/Painterによるカスタム描画)を参照。
 
 ## F.7 部品の全体依存関係(メモ帳の例)
 
@@ -242,7 +250,7 @@ NotepadWindow
  │       │   └─ Dropdown → Option
  │       ├─ TextArea
  │       └─ StatusBar
- │           └─ HorizontalLayout → Text
+ │           └─ HorizontalLayout → TextBlock
 ```
 
 ## F.8 各部品で使われている仕様の対応
@@ -250,8 +258,8 @@ NotepadWindow
 | 部品 | 使用している仕様 |
 |---|---|
 | `Window` | `#[param] direction = env::direction()`、`match target::backend()`の網羅性検査 |
-| `VerticalLayout`/`HorizontalLayout` | 専用のネイティブ実体を持たない仮想ツリー(`elwindui_core::tree::Node::Virtual` + `VirtualNode`実装の`Stack`) |
-| `Text` | `ColorHex?`(nullable制約)、backendごとのカラー変換 |
+| `VerticalLayout`/`HorizontalLayout` | 専用のネイティブ実体を持たない仮想ツリー(`elwindui_core::tree::UIElement`実装の`Stack`)、交差軸配置は子ごとの`HorizontalAlignment`/`VerticalAlignment` |
+| `TextBlock` | 自前描画のプリミティブ(非native)、`Option<String>`のカラー指定、backendごとの描画実装(`CATextLayer`/XAML`TextBlock`を描画専用に利用) |
 | `TextArea` | `bind!(self.text, TwoWay)`による双方向バインディング |
 | `Dropdown` / `Option` | `Vec<Option>`という複合型プロパティ、backendごとの選択状態同期 |
 
@@ -451,7 +459,7 @@ view VolumeSlider {
     Row {
         spacing: 12
 
-        Text { text: t!("volume-label") }
+        TextBlock { text: t!("volume-label") }
 
         Canvas {
             width: 60
@@ -461,7 +469,7 @@ view VolumeSlider {
             #[accessible(role: Slider, label: t!("a11y-volume"), value: percent_label)]
         }
 
-        Text { text: percent_label }
+        TextBlock { text: percent_label }
 
         Button {
             text: t!("volume-mute")
@@ -876,7 +884,7 @@ VirtualList {
     items: documents
     key: |doc| doc.id
     item_height: 32
-    render_item: |doc| Row { Text { text: doc.name } }
+    render_item: |doc| Row { TextBlock { text: doc.name } }
 }
 ```
 

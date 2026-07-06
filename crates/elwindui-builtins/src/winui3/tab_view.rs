@@ -20,7 +20,7 @@ pub struct TabView {
     tabs: RefCell<Vec<Rc<dyn Any>>>,
     key: Box<dyn Fn(&Rc<dyn Any>) -> usize>,
     render_label: Box<dyn Fn(&Rc<dyn Any>) -> String>,
-    render_content: Box<dyn Fn(&Rc<dyn Any>) -> elwindui_core::tree::Node<winui3::AnyView>>,
+    render_content: Box<dyn Fn(&Rc<dyn Any>) -> Box<dyn elwindui_core::tree::UIElement>>,
     /// Keys of the tabs currently reflected as real `TabViewItem`s, in display order — the "before"
     /// side of `rebuild`'s diff against `tabs`' current keys (the "after" side).
     displayed_keys: RefCell<Vec<usize>>,
@@ -32,7 +32,7 @@ impl TabView {
         tabs: Vec<Rc<T>>,
         key: Box<dyn Fn(&Rc<T>) -> usize>,
         render_label: Box<dyn Fn(&Rc<T>) -> String>,
-        render_content: Box<dyn Fn(&Rc<T>) -> elwindui_core::tree::Node<winui3::AnyView>>,
+        render_content: Box<dyn Fn(&Rc<T>) -> Box<dyn elwindui_core::tree::UIElement>>,
         selected: usize,
         closable: bool,
     ) -> Rc<Self> {

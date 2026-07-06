@@ -1,28 +1,27 @@
 //! AppKit implementation of the widget surface `elwindui-codegen` targets for the `notepad`
 //! example. See docs/elwindui_spec.md 付録A, 付録C, docs/elwindui_gui_framework_design.md §3.
 //!
-//! Only genuinely native leaf widgets (`Window`/`TextArea`/`Button`/`Text`/`MenuBar`/`TabView`,
-//! the "NativeComponent" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
-//! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have none: they're
-//! `elwindui_core::tree::Node::Virtual` values that `elwindui-codegen` builds directly, reflected
-//! into real `NSView`s/`CAShapeLayer`s by `TreeHostView` below (used by both `Window`'s content
-//! view and `TabView`'s per-tab content area).
+//! Only genuinely native leaf widgets (`Window`/`TextArea`/`Button`/`MenuBar`/`TabView`, the
+//! "NativeComponent" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
+//! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have none: they're
+//! `elwindui_core::tree::UIElement` values that `elwindui-codegen` builds directly, reflected into
+//! real `NSView`s/`CAShapeLayer`s/`CATextLayer`s by `TreeHostView` below (used by both `Window`'s
+//! content view and `TabView`'s per-tab content area).
 
 #![cfg(target_os = "macos")]
 
-use elwindui_core::tree::{layout_tree, Node, PaintKind, ShapeKind};
+use elwindui_core::tree::{layout_tree, PaintKind, ShapeKind, UIElement};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSButton, NSMenu, NSMenuItem, NSScrollView, NSStackView, NSTextDelegate, NSTextField,
-    NSTextView, NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSButton, NSMenu, NSMenuItem, NSScrollView, NSStackView, NSTextDelegate, NSTextView,
+    NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::{CGColor, CGPath};
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
-use objc2_quartz_core::{CALayer, CAShapeLayer};
+use objc2_quartz_core::{CALayer, CAShapeLayer, CATextLayer};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -38,7 +37,6 @@ fn mtm() -> MainThreadMarker {
 pub enum AnyView {
     TextArea(TextArea),
     Button(Button),
-    Text(Text),
     TabView(TabView),
 }
 
@@ -47,11 +45,6 @@ impl AnyView {
         match self {
             AnyView::TextArea(v) => Retained::into_super(v.scroll.clone()),
             AnyView::Button(v) => {
-                let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(v.ns.clone());
-                let view: Retained<NSView> = Retained::into_super(control);
-                view
-            }
-            AnyView::Text(v) => {
                 let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(v.ns.clone());
                 let view: Retained<NSView> = Retained::into_super(control);
                 view
@@ -86,11 +79,6 @@ impl From<TextArea> for AnyView {
 impl From<Button> for AnyView {
     fn from(v: Button) -> Self {
         AnyView::Button(v)
-    }
-}
-impl From<Text> for AnyView {
-    fn from(v: Text) -> Self {
-        AnyView::Text(v)
     }
 }
 impl From<TabView> for AnyView {
@@ -129,10 +117,10 @@ impl Window {
         Self { ns, content_host }
     }
 
-    /// Replaces the window's whole content tree — see `TreeHostView` for how a `Node<AnyView>`
-    /// (layouts/shapes mixed freely with native controls, at any nesting depth) gets reflected
-    /// into real `NSView` subviews and `CAShapeLayer` sublayers.
-    pub fn set_content(&self, content: Node<AnyView>) {
+    /// Replaces the window's whole content tree — see `TreeHostView` for how a `Box<dyn
+    /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
+    /// gets reflected into real `NSView` subviews and `CAShapeLayer`/`CATextLayer` sublayers.
+    pub fn set_content(&self, content: Box<dyn UIElement>) {
         self.content_host.set_tree(content);
     }
 
@@ -184,15 +172,15 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
 }
 
-/// The single reusable "reflect an `elwindui_core::tree::Node<AnyView>` into real `NSView`
-/// subviews/`CAShapeLayer`s" host, replacing the old per-container `StackLayoutView`
-/// (`VerticalLayout`/`HorizontalLayout`) — since `VerticalLayout`/
-/// `HorizontalLayout`/`Rectangle`/`Ellipse` are now all just `Node::Virtual` values with no
-/// backend struct of their own (docs/elwindui_spec.md 付録H.2), one host type is all any native
+/// The single reusable "reflect a `Box<dyn elwindui_core::tree::UIElement>` into real `NSView`
+/// subviews/`CAShapeLayer`/`CATextLayer` sublayers" host, replacing the old per-container
+/// `StackLayoutView` (`VerticalLayout`/`HorizontalLayout`) — since `VerticalLayout`/
+/// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` are now all just `UIElement` values with
+/// no backend struct of their own (docs/elwindui_spec.md 付録H.2), one host type is all any native
 /// container needs to accept arbitrary content: `Window`'s content view and `TabView`'s per-tab
 /// content area both are one of these.
 struct TreeHostIvars {
-    tree: RefCell<Option<Node<AnyView>>>,
+    tree: RefCell<Option<Box<dyn UIElement>>>,
 }
 
 define_class!(
@@ -227,9 +215,20 @@ define_class!(
                 .tree
                 .borrow()
                 .as_ref()
-                .map(elwindui_core::tree::natural_size)
+                .map(|tree| elwindui_core::tree::natural_size(&**tree))
                 .unwrap_or(elwindui_core::layout::Size { width: 0.0, height: 0.0 });
             objc2_foundation::NSSize::new(size.width as f64, size.height as f64)
+        }
+
+        /// `elwindui_core::layout::stack_arrange` (and every other `VirtualNode` arrange
+        /// implementation) computes top-down coordinates (Y increasing downward, origin at the
+        /// top — the same convention WinUI3's `Canvas` uses) — but a plain `NSView`'s default
+        /// coordinate system has its origin at the bottom-left with Y increasing *upward*.
+        /// Without this override, `relayout`'s `setFrame`/`CAShapeLayer` positioning would be
+        /// interpreted bottom-up, effectively flipping every child's vertical position.
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
         }
     }
 );
@@ -245,8 +244,8 @@ impl TreeHostView {
     /// Replaces this host's entire content, discarding whatever native subviews were there before
     /// — a full swap rather than a diff, matching how `TabView` swaps its content area wholesale
     /// between tabs (see `TabView::set_content`) and how `Window::set_content` is only ever called
-    /// once (a `Node<AnyView>` isn't `Clone`, so it can only be handed over once anyway).
-    fn set_tree(&self, tree: Node<AnyView>) {
+    /// once (a `Box<dyn UIElement>` isn't `Clone`, so it can only be handed over once anyway).
+    fn set_tree(&self, tree: Box<dyn UIElement>) {
         for old in self.subviews().iter() {
             old.removeFromSuperview();
         }
@@ -265,10 +264,21 @@ impl TreeHostView {
         let available = Size { width: frame.size.width as f32, height: frame.size.height as f32 };
         let tree = self.ivars().tree.borrow();
         let Some(tree) = tree.as_ref() else { return };
-        let (natives, paints) = layout_tree(tree, available);
+        let (natives, paints): (Vec<(AnyView, elwindui_core::layout::Rect)>, _) =
+            layout_tree(&**tree, available);
 
         for (mut view, rect) in natives {
-            self.addSubview(&view.as_nsview());
+            let nsview = view.as_nsview();
+            self.addSubview(&nsview);
+            // Every native leaf here is positioned purely by manual `setFrame` (via `arrange`
+            // below), never by Auto Layout constraints — but a plain `addSubview:` leaves
+            // `translatesAutoresizingMaskIntoConstraints` at its *class* default, which for an
+            // Auto-Layout-authored view like `NSStackView` (`TabView`'s root) is `NO`. With no
+            // explicit size constraints of its own, such a view gets silently resized back down
+            // to its intrinsic content size on the next layout pass — undoing `arrange`'s
+            // `setFrame` entirely. Forcing this back to `YES` opts every leaf out of the
+            // constraint system so our manual frame actually sticks.
+            nsview.setTranslatesAutoresizingMaskIntoConstraints(true);
             view.arrange(rect);
         }
 
@@ -278,42 +288,67 @@ impl TreeHostView {
         // per-subview backing layers alongside these when the view is layer-backed, and those must
         // be left alone.
         if let Some(existing) = unsafe { layer.sublayers() } {
-            for sub in existing.iter() {
-                if sub.name().map(|n| n.to_string()).as_deref() == Some("elwindui-shape") {
-                    sub.removeFromSuperlayer();
-                }
+            // Collected into a `Vec` first, then removed in a separate pass: `removeFromSuperlayer`
+            // mutates this same array (it's `layer`'s live `sublayers`), and Cocoa's fast
+            // enumeration protocol (which `.iter()` uses) raises "mutation detected during
+            // enumeration" if the backing array changes mid-iteration.
+            let stale: Vec<_> = existing
+                .iter()
+                .filter(|sub| sub.name().map(|n| n.to_string()).as_deref() == Some("elwindui-paint"))
+                .collect();
+            for sub in stale {
+                sub.removeFromSuperlayer();
             }
         }
+        // `addSublayer` (append, not `insertSublayer_atIndex(_, 0)`/prepend): `paints` is in
+        // parent-before-children traversal order (see `tree::arrange`), so appending keeps a
+        // parent's own background behind any child content painted after it (e.g. a `Rectangle`'s
+        // fill staying behind its `TextBlock` child) instead of the two swapping z-order.
         for (paint, rect) in paints {
-            let PaintKind::Shape { kind, fill, stroke, stroke_width } = paint;
-            let shape_layer = CAShapeLayer::new();
-            shape_layer.setName(Some(&NSString::from_str("elwindui-shape")));
             let cg_rect = NSRect::new(
                 objc2_foundation::NSPoint::new(rect.x as f64, rect.y as f64),
                 objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
             );
-            let path = unsafe {
-                match kind {
-                    ShapeKind::RoundedRect { corner_radius } => CGPath::with_rounded_rect(
-                        cg_rect,
-                        corner_radius as f64,
-                        corner_radius as f64,
-                        std::ptr::null(),
-                    ),
-                    ShapeKind::Oval => CGPath::with_ellipse_in_rect(cg_rect, std::ptr::null()),
+            match paint {
+                PaintKind::Shape { kind, fill, stroke, stroke_width } => {
+                    let shape_layer = CAShapeLayer::new();
+                    shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+                    let path = unsafe {
+                        match kind {
+                            ShapeKind::RoundedRect { corner_radius } => CGPath::with_rounded_rect(
+                                cg_rect,
+                                corner_radius as f64,
+                                corner_radius as f64,
+                                std::ptr::null(),
+                            ),
+                            ShapeKind::Oval => CGPath::with_ellipse_in_rect(cg_rect, std::ptr::null()),
+                        }
+                    };
+                    shape_layer.setPath(Some(&path));
+                    match &fill {
+                        Some(fill) => shape_layer.setFillColor(Some(&parse_color(fill))),
+                        None => shape_layer.setFillColor(None),
+                    }
+                    if let Some(stroke) = &stroke {
+                        shape_layer.setStrokeColor(Some(&parse_color(stroke)));
+                    }
+                    shape_layer.setLineWidth(stroke_width as f64);
+                    let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
+                    layer.addSublayer(&shape_layer);
                 }
-            };
-            shape_layer.setPath(Some(&path));
-            match &fill {
-                Some(fill) => shape_layer.setFillColor(Some(&parse_color(fill))),
-                None => shape_layer.setFillColor(None),
+                PaintKind::Text { content, color } => {
+                    let text_layer = CATextLayer::new();
+                    text_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+                    text_layer.setFrame(cg_rect);
+                    text_layer.setFontSize(14.0);
+                    text_layer.setForegroundColor(Some(&parse_color(color.as_deref().unwrap_or("#000000"))));
+                    unsafe {
+                        text_layer.setString(Some(&NSString::from_str(&content)));
+                    }
+                    let text_layer: Retained<CALayer> = Retained::into_super(text_layer);
+                    layer.addSublayer(&text_layer);
+                }
             }
-            if let Some(stroke) = &stroke {
-                shape_layer.setStrokeColor(Some(&parse_color(stroke)));
-            }
-            shape_layer.setLineWidth(stroke_width as f64);
-            let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
-            layer.insertSublayer_atIndex(&shape_layer, 0);
         }
     }
 }
@@ -452,23 +487,6 @@ impl ButtonTarget {
     }
 }
 
-#[derive(Clone)]
-pub struct Text {
-    ns: Retained<NSTextField>,
-}
-
-impl Text {
-    pub fn new(text: &str) -> Self {
-        let m = mtm();
-        let ns = NSTextField::labelWithString(&NSString::from_str(text), m);
-        Self { ns }
-    }
-
-    pub fn set_text(&self, text: &str) {
-        self.ns.setStringValue(&NSString::from_str(text));
-    }
-}
-
 /// See docs/elwindui_builtins_spec.md 付録Y. A single tab's header: a title button (click to
 /// select) plus a small close button, packed into one row so `TabStrip` can insert/remove it as
 /// one unit.
@@ -540,7 +558,8 @@ pub struct TabView {
     root: Retained<NSStackView>,
     pub strip: TabStrip,
     // A `TreeHostView`, not a plain `NSStackView`, since a tab's content (e.g. `DocumentView`,
-    // whose root is virtual) is a `Node<AnyView>`, not a single `AnyView` — see `set_content`. Its
+    // whose root is virtual) is a `Box<dyn UIElement>`, not a single `AnyView` — see
+    // `set_content`. Its
     // own `tree` ivar is what now keeps any native leaf's retention concern alive (a `TextArea`'s
     // change-notification delegate only stays alive as long as *some* clone of that `TextArea`
     // value does, see `TextArea::set_on_change`'s doc comment) for as long as it's the visible tab.
@@ -558,6 +577,17 @@ impl TabView {
             mtm(),
         );
         root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+        // `NSStackView`'s default `distribution` (`GravityAreas`) leaves each arranged subview at
+        // its own intrinsic size unless hugging priorities say otherwise — `.Fill` makes the stack
+        // actually consume its *entire* stacking-axis extent, matching `TabView`'s expected "chips
+        // row at natural height, content area fills the rest" shape. `content_area`'s own vertical
+        // hugging priority is dropped to (near-)zero so it — not the also-low-priority-by-default
+        // `strip` — is the one that absorbs whatever space `Fill` distributes, since a
+        // `TreeHostView`'s `intrinsicContentSize` (its hosted tree's *natural*, often tiny, size —
+        // e.g. an empty `TextArea`'s `fittingSize()`) is never a meaningful hint for how much room
+        // it should actually get.
+        content_area.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
+        root.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
         Self { root, strip, content_area }
     }
 
@@ -584,7 +614,7 @@ impl TabView {
     }
 
     /// Swaps the single visible document pane for the currently selected tab.
-    pub fn set_content(&self, content: Node<AnyView>) {
+    pub fn set_content(&self, content: Box<dyn UIElement>) {
         self.content_area.set_tree(content);
     }
 }

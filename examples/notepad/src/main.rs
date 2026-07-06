@@ -1,5 +1,5 @@
 use elwindui::platform;
-use elwindui_builtins::{Menu, MenuBar, MenuBarItem, MenuItem, TabView, Text, TextArea, Window};
+use elwindui_builtins::{Menu, MenuBar, MenuBarItem, MenuItem, TabView, TextArea, Window};
 
 mod elwindui_i18n {
     include!(concat!(env!("OUT_DIR"), "/i18n_support.rs"));

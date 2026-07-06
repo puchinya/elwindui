@@ -1,15 +1,19 @@
 //! WinUI 3 (Windows App SDK) implementation of the widget surface `elwindui-codegen` targets,
 //! mirroring `elwindui-backend-appkit`'s shape (see that crate's doc comment for the overall
 //! native-vs-virtual design this implements: `VerticalLayout`/`HorizontalLayout`/
-//! `Rectangle`/`Ellipse` have no widget here at all, just `elwindui_core::tree::Node::Virtual`
-//! values `elwindui-codegen` builds directly; only `Window`/`Button`/`TextArea`/`Text`/`MenuBar`/
-//! `MenuBarItem`/`Menu`/`MenuItem`/`TabView` are real native widgets).
+//! `Rectangle`/`Ellipse`/`TextBlock` have no widget here at all, just `elwindui_core::tree::UIElement`
+//! values `elwindui-codegen` builds directly (`TextBlock` is self-drawn, using the real XAML
+//! `TextBlock` class only as a paint primitive inside `TreeHostPanel::relayout_static`, never as a
+//! wrapped builtin widget — see `elwindui-backend-appkit`'s `CATextLayer` use for the same role);
+//! only `Window`/`Button`/`TextArea`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView` are real
+//! native widgets).
 //!
 //! # UNVERIFIED — read before touching
 //!
 //! Written entirely without a Windows machine available in this environment to build or run it
 //! against. The `elwindui_backend_appkit`-mirroring *structure* (which types exist, what methods
-//! they expose, how `TreeHostPanel` reflects a `Node<AnyView>`) is deliberate and should be sound;
+//! they expose, how `TreeHostPanel` reflects a `Box<dyn UIElement>`) is deliberate and should be
+//! sound;
 //! the *exact* WinRT/`windows-rs` call shapes (event-handler registration syntax, exact property/
 //! method names on `Microsoft.UI.Xaml` types, `build.rs`'s bindgen invocation) are written from
 //! memory of the general `windows-rs` WinRT-projection pattern and are the most likely things to
@@ -40,13 +44,12 @@ use std::rc::Rc;
 use windows::core::{Interface, Result, HSTRING};
 
 /// Everything the generated code can pass as a `Window`/`TabView` child.
-/// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have no variant here — they're purely
-/// `elwindui_core::tree::Node::Virtual` values (see `TreeHostPanel` below).
+/// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no variant here —
+/// they're purely `elwindui_core::tree::UIElement` values (see `TreeHostPanel` below).
 #[derive(Clone)]
 pub enum AnyView {
     TextArea(TextArea),
     Button(Button),
-    Text(Text),
     TabView(TabView),
 }
 
@@ -55,7 +58,6 @@ impl AnyView {
         match self {
             AnyView::TextArea(v) => v.text_box.clone().into(),
             AnyView::Button(v) => v.xaml.clone().into(),
-            AnyView::Text(v) => v.xaml.clone().into(),
             AnyView::TabView(v) => v.xaml.clone().into(),
         }
     }
@@ -95,31 +97,27 @@ impl From<Button> for AnyView {
         AnyView::Button(v)
     }
 }
-impl From<Text> for AnyView {
-    fn from(v: Text) -> Self {
-        AnyView::Text(v)
-    }
-}
 impl From<TabView> for AnyView {
     fn from(v: TabView) -> Self {
         AnyView::TabView(v)
     }
 }
 
-/// The single reusable "reflect an `elwindui_core::tree::Node<AnyView>` into real XAML elements"
-/// host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHostView`. A `Canvas` needs
-/// no custom `MeasureOverride`/`ArrangeOverride` subclass (unlike `TreeHostView`'s `NSView`
-/// subclass) since `Canvas`'s own built-in layout already just measures every child with an
-/// unconstrained size and positions it from the `Canvas.Left`/`Canvas.Top` attached properties —
+/// The single reusable "reflect a `Box<dyn elwindui_core::tree::UIElement>` into real XAML
+/// elements" host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHostView`. A
+/// `Canvas` needs no custom `MeasureOverride`/`ArrangeOverride` subclass (unlike `TreeHostView`'s
+/// `NSView` subclass) since `Canvas`'s own built-in layout already just measures every child with
+/// an unconstrained size and positions it from the `Canvas.Left`/`Canvas.Top` attached properties —
 /// exactly the "trust `elwindui_core::tree::layout_tree`'s own absolute-rect computation, don't
-/// let the native layout system second-guess it" behavior this needs. `Rectangle`/`Ellipse` paint
-/// nodes become real `Shapes::Rectangle`/`Shapes::Ellipse` elements inserted *before* the native
-/// children in `Canvas.Children` (`Canvas` z-orders by collection order), rather than AppKit's
-/// separate `CAShapeLayer` sublayer mechanism.
+/// let the native layout system second-guess it" behavior this needs. `Rectangle`/`Ellipse`/
+/// `TextBlock` paint nodes become real `Shapes::Rectangle`/`Shapes::Ellipse`/`Controls::TextBlock`
+/// elements appended to `Canvas.Children` in traversal order (`Canvas` z-orders by collection
+/// order — a parent's own paint is appended before its children's, so it stays behind them),
+/// rather than AppKit's separate `CAShapeLayer`/`CATextLayer` sublayer mechanism.
 #[derive(Clone)]
 pub struct TreeHostPanel {
     canvas: Canvas,
-    tree: Rc<RefCell<Option<elwindui_core::tree::Node<AnyView>>>>,
+    tree: Rc<RefCell<Option<Box<dyn elwindui_core::tree::UIElement>>>>,
 }
 
 impl TreeHostPanel {
@@ -147,8 +145,9 @@ impl TreeHostPanel {
     /// Replaces this host's entire content, discarding whatever native children were there before
     /// — a full swap rather than a diff, matching `TabView`'s wholesale content swap between tabs
     /// and `Window::set_content` only ever being called once (see `TreeHostView::set_tree`'s doc
-    /// comment on the AppKit side for the same reasoning; a `Node<H>` isn't `Clone` either way).
-    pub fn set_tree(&self, tree: elwindui_core::tree::Node<AnyView>) {
+    /// comment on the AppKit side for the same reasoning; a `Box<dyn UIElement>` isn't `Clone`
+    /// either way).
+    pub fn set_tree(&self, tree: Box<dyn elwindui_core::tree::UIElement>) {
         if let Ok(children) = self.canvas.Children() {
             let _ = children.Clear();
         }
@@ -156,7 +155,7 @@ impl TreeHostPanel {
         Self::relayout_static(&self.canvas, &self.tree);
     }
 
-    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<elwindui_core::tree::Node<AnyView>>>>) {
+    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Box<dyn elwindui_core::tree::UIElement>>>>) {
         use elwindui_core::layout::Size as LSize;
 
         let width = canvas.ActualWidth().unwrap_or(0.0) as f32;
@@ -165,39 +164,63 @@ impl TreeHostPanel {
 
         let tree_ref = tree.borrow();
         let Some(tree) = tree_ref.as_ref() else { return };
-        let (natives, paints) = elwindui_core::tree::layout_tree(tree, available);
+        let (natives, paints): (Vec<(AnyView, elwindui_core::layout::Rect)>, _) =
+            elwindui_core::tree::layout_tree(&**tree, available);
 
         let Ok(children) = canvas.Children() else { return };
 
-        // Paint nodes go in first (so they render behind every native leaf added after them —
-        // `Canvas` z-orders by `Children` collection order), then every native leaf.
+        // Paint nodes go in first, in parent-before-children traversal order (see
+        // `tree::arrange`), then every native leaf — `Canvas` z-orders by `Children` collection
+        // order, so appending in this order keeps a parent's own paint (e.g. a `Rectangle`'s fill)
+        // behind both its painted children (e.g. a nested `TextBlock`) and every native leaf.
         for (paint, rect) in paints {
-            let elwindui_core::tree::PaintKind::Shape { kind, fill, stroke, stroke_width } = paint;
-            let element: UIElement = match kind {
-                elwindui_core::tree::ShapeKind::RoundedRect { corner_radius } => {
-                    let r = XamlRectangle::new().expect("Rectangle::new");
-                    let _ = r.SetRadiusX(corner_radius as f64);
-                    let _ = r.SetRadiusY(corner_radius as f64);
-                    r.into()
+            match paint {
+                elwindui_core::tree::PaintKind::Shape { kind, fill, stroke, stroke_width } => {
+                    let element: UIElement = match kind {
+                        elwindui_core::tree::ShapeKind::RoundedRect { corner_radius } => {
+                            let r = XamlRectangle::new().expect("Rectangle::new");
+                            let _ = r.SetRadiusX(corner_radius as f64);
+                            let _ = r.SetRadiusY(corner_radius as f64);
+                            r.into()
+                        }
+                        elwindui_core::tree::ShapeKind::Oval => XamlEllipse::new().expect("Ellipse::new").into(),
+                    };
+                    let fe: FrameworkElement = element.clone().into();
+                    let _ = fe.SetWidth(rect.width as f64);
+                    let _ = fe.SetHeight(rect.height as f64);
+                    let _ = Canvas::SetLeft(&fe, rect.x as f64);
+                    let _ = Canvas::SetTop(&fe, rect.y as f64);
+                    if let Some(fill) = fill {
+                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&fill)) {
+                            let _ = set_shape_fill(&element, &brush);
+                        }
+                    }
+                    if let Some(stroke) = stroke {
+                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&stroke)) {
+                            let _ = set_shape_stroke(&element, &brush, stroke_width as f64);
+                        }
+                    }
+                    let _ = children.Append(&element);
                 }
-                elwindui_core::tree::ShapeKind::Oval => XamlEllipse::new().expect("Ellipse::new").into(),
-            };
-            let fe: FrameworkElement = element.clone().into();
-            let _ = fe.SetWidth(rect.width as f64);
-            let _ = fe.SetHeight(rect.height as f64);
-            let _ = Canvas::SetLeft(&fe, rect.x as f64);
-            let _ = Canvas::SetTop(&fe, rect.y as f64);
-            if let Some(fill) = fill {
-                if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&fill)) {
-                    let _ = set_shape_fill(&element, &brush);
+                elwindui_core::tree::PaintKind::Text { content, color } => {
+                    // Uses the real XAML `TextBlock` class purely as a paint primitive (positioned
+                    // manually via the same `Canvas.Left`/`Canvas.Top`/`Width`/`Height` convention
+                    // as every shape above), never wrapped as a builtin widget with its own
+                    // getter/setter surface — the WinUI3 counterpart of `elwindui-backend-appkit`'s
+                    // `CATextLayer` use.
+                    let text_block = TextBlock::new().expect("TextBlock::new");
+                    let _ = text_block.SetText(&HSTRING::from(content));
+                    if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(color.as_deref().unwrap_or("#000000"))) {
+                        let _ = text_block.SetForeground(&brush);
+                    }
+                    let fe: FrameworkElement = text_block.into();
+                    let _ = fe.SetWidth(rect.width as f64);
+                    let _ = fe.SetHeight(rect.height as f64);
+                    let _ = Canvas::SetLeft(&fe, rect.x as f64);
+                    let _ = Canvas::SetTop(&fe, rect.y as f64);
+                    let _ = children.Append(&fe);
                 }
             }
-            if let Some(stroke) = stroke {
-                if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&stroke)) {
-                    let _ = set_shape_stroke(&element, &brush, stroke_width as f64);
-                }
-            }
-            let _ = children.Append(&element);
         }
 
         for (mut view, rect) in natives {
@@ -256,10 +279,10 @@ impl Window {
         Self { xaml, content_host }
     }
 
-    /// Replaces the window's whole content tree — see `TreeHostPanel` for how a `Node<AnyView>`
-    /// (layouts/shapes mixed freely with native controls, at any nesting depth) gets reflected
-    /// into real XAML elements.
-    pub fn set_content(&self, content: elwindui_core::tree::Node<AnyView>) {
+    /// Replaces the window's whole content tree — see `TreeHostPanel` for how a `Box<dyn
+    /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
+    /// gets reflected into real XAML elements.
+    pub fn set_content(&self, content: Box<dyn elwindui_core::tree::UIElement>) {
         self.content_host.set_tree(content);
     }
 
@@ -361,28 +384,11 @@ impl Button {
     }
 }
 
-#[derive(Clone)]
-pub struct Text {
-    xaml: TextBlock,
-}
-
-impl Text {
-    pub fn new(text: &str) -> Self {
-        let xaml = TextBlock::new().expect("TextBlock::new");
-        let _ = xaml.SetText(&HSTRING::from(text));
-        Self { xaml }
-    }
-
-    pub fn set_text(&self, text: &str) {
-        let _ = self.xaml.SetText(&HSTRING::from(text));
-    }
-}
-
 /// `Microsoft.UI.Xaml.Controls.TabView` is a real native tabbed-document control (unlike AppKit,
 /// which has no built-in equivalent — `elwindui-backend-appkit`'s `TabStrip`/`TabChip` hand-roll
 /// one from `Button`s), so this wraps it directly instead of assembling a strip from scratch. Each
 /// tab's `TabViewItem.Content` is a `TreeHostPanel` (see that type) holding that tab's
-/// `Node<AnyView>` — `elwindui-builtins`'s generic wrapper (the `Rc<dyn Any>`-erased per-item type,
+/// `Box<dyn UIElement>` — `elwindui-builtins`'s generic wrapper (the `Rc<dyn Any>`-erased per-item type,
 /// mirroring `elwindui-builtins::appkit::tab_view`) owns the tab list and calls the methods below;
 /// this type only knows about "N tabs, each with a title and a content host", the same division
 /// AppKit's `TabView` keeps.

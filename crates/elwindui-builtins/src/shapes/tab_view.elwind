@@ -9,7 +9,7 @@ component TabView inherits NativeComponent {
     render_label: fn(&std::rc::Rc<T>) -> String,
 
     #[param]
-    render_content: fn(&std::rc::Rc<T>) -> Node<AnyView>,
+    render_content: fn(&std::rc::Rc<T>) -> Box<dyn UIElement>,
 
     #[param]
     selected: usize,

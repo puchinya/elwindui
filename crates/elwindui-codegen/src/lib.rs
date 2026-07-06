@@ -25,7 +25,7 @@ const BUILTIN_SHAPE_SOURCES: &[&str] = &[
     include_str!("../../elwindui-builtins/src/shapes/ellipse.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/text_area.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/button.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/text.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/text_block.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/menu_bar.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/menu_bar_item.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/menu.elwind"),

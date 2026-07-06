@@ -5,7 +5,7 @@
 //! which aren't valid Rust expression syntax — that half can't move to plain Rust).
 
 use elwindui::platform;
-use elwindui_builtins::{Button, Text, TextArea, Window};
+use elwindui_builtins::{Button, TextArea, Window};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {
@@ -137,7 +137,7 @@ elwindui::component! {
                 TextArea { text: vm.content }
 
                 HorizontalLayout {
-                    Text { text: t!("notepad-status-chars", count: vm.char_count) }
+                    TextBlock { text: t!("notepad-status-chars", count: vm.char_count) }
                 }
             }
         }

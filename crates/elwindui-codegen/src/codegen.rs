@@ -1038,11 +1038,11 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // never `stored` (see `plan_element`), so unlike every other node its value only exists as the
     // bare local `let` binding `emit_construction` produced inside `new()`'s `construct_stmts` —
     // nothing stashes it on `Self` the normal way. Stash it here in a one-shot `RefCell` instead,
-    // since `Node`/`Box<dyn VirtualNode>` isn't `Clone` (unlike every other stored field, which is
-    // a plain `Rc<Type>` clone) — `into_node()` (below) takes it out exactly once.
+    // since `Box<dyn UIElement>` isn't `Clone` (unlike every other stored field, which is a plain
+    // `Rc<Type>` clone) — `into_node()` (below) takes it out exactly once.
     if root_is_virtual_builtin {
         struct_fields.extend(quote! {
-            #root_binding: std::cell::RefCell<Option<elwindui_core::tree::Node<elwindui_backend_appkit::AnyView>>>,
+            #root_binding: std::cell::RefCell<Option<Box<dyn elwindui_core::tree::UIElement>>>,
         });
         field_inits.extend(quote! {
             #root_binding: std::cell::RefCell::new(Some(#root_binding)),
@@ -1065,10 +1065,10 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // (not a `From`/`Into` impl: `impl From<Rc<#target>> for AnyView` would be rejected by Rust's
     // orphan rules, since `Rc` isn't "fundamental" and so `#target` nested inside it counts as
     // covered by a foreign generic — E0117). A virtual root gets `into_node` instead, returning
-    // `elwindui_core::tree::Node<AnyView>` — either the hardcoded-builtin case handled just above
-    // (taken from the one-shot `RefCell`), or (a user-defined component whose own root is itself
-    // virtual — chained `inherits`) delegating to *that* root's own `into_node`/`into_any_view` via
-    // `into_node_if_needed`, exactly like any other embedding site.
+    // `Box<dyn elwindui_core::tree::UIElement>` — either the hardcoded-builtin case handled just
+    // above (taken from the one-shot `RefCell`), or (a user-defined component whose own root is
+    // itself virtual — chained `inherits`) delegating to *that* root's own `into_node`/
+    // `into_any_view` via `into_node_if_needed`, exactly like any other embedding site.
     let root_is_native = table.resolve(from, &view.root.type_path).is_some_and(|info| info.is_native);
     let root_embed_method = if view.root.type_path == "Window" {
         quote! {
@@ -1085,14 +1085,14 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         }
     } else if root_is_virtual_builtin {
         quote! {
-            pub fn into_node(self: std::rc::Rc<Self>) -> elwindui_core::tree::Node<elwindui_backend_appkit::AnyView> {
+            pub fn into_node(self: std::rc::Rc<Self>) -> Box<dyn elwindui_core::tree::UIElement> {
                 self.#root_binding.borrow_mut().take().expect("into_node() called more than once")
             }
         }
     } else {
         let root_expr = into_node_if_needed(quote! { self.#root_binding }, &view.root.type_path, from, table);
         quote! {
-            pub fn into_node(self: std::rc::Rc<Self>) -> elwindui_core::tree::Node<elwindui_backend_appkit::AnyView> {
+            pub fn into_node(self: std::rc::Rc<Self>) -> Box<dyn elwindui_core::tree::UIElement> {
                 #root_expr
             }
         }
@@ -1158,7 +1158,7 @@ struct ViewCtx {
     /// This component's own `#[param]`-shaped fields (no initializer — the same set `generate_view`
     /// turns into `new`'s positional arguments / raw struct fields, see `param_names`). A bare
     /// 1-segment reference to one of these (e.g. `RoundedPanel`'s own `label` used as
-    /// `Text { text: label }`, not `vm.something`) is the field/constructor-parameter itself, not
+    /// `TextBlock { text: label }`, not `vm.something`) is the field/constructor-parameter itself, not
     /// an owner to call a getter on — checked *after* `binds` in `emit_expr`, since a bind-sugar
     /// field (`content: String = bind!(doc.content, TwoWay)`) is also technically one of this
     /// component's own fields but must still resolve through `doc.content()`, not a raw access.
@@ -1310,8 +1310,8 @@ pub(crate) fn strip_option(ty: &str) -> (&str, bool) {
 }
 
 /// Converts a constructed child binding into `AnyView` when the resolved shape actually wants one
-/// (its declared type mentions `AnyView` — `VerticalLayout`/`HorizontalLayout`'s `children: Vec<AnyView>`, `Window`'s
-/// `content: AnyView`); some containers want a *concrete* child type instead (`MenuBar`'s
+/// (its declared type mentions `AnyView` — `VerticalLayout`/`HorizontalLayout`'s
+/// `children: Vec<AnyView>`); some containers want a *concrete* child type instead (`MenuBar`'s
 /// `children: Vec<MenuBarItem>`, `MenuBarItem`'s `submenu: Menu`), in which case the binding is
 /// used as-is. `.into_any_view()` (not a `From`/`Into` impl) because `Rc<Target>` can't get one —
 /// see `generate_view`'s `root_embed_method` doc comment for why (Rust orphan rules).
@@ -1324,32 +1324,40 @@ fn into_any_view_if_needed(base: TokenStream, ty: &str) -> TokenStream {
 }
 
 /// Whether `type_path` names one of the hand-written *virtual* builtins (`VerticalLayout`/
-/// `HorizontalLayout`/`Rectangle`/`Ellipse`) — these have no backend Rust struct or
-/// `Type::new(args)` constructor at all; `emit_construction` builds an
-/// `elwindui_core::tree::Node::Virtual` value for them directly (see its top-of-function check).
+/// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`) — these have no backend Rust struct or
+/// `Type::new(args)` constructor at all; `emit_construction` builds a `Box<dyn
+/// elwindui_core::tree::UIElement>` value for them directly (see its top-of-function check).
 /// See docs/elwindui_spec.md 付録H.2.
 fn is_virtual_builtin(type_path: &str) -> bool {
-    matches!(type_path, "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse")
+    matches!(type_path, "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse" | "TextBlock")
 }
 
-/// Converts a constructed child binding into `elwindui_core::tree::Node<AnyView>` for a slot that
-/// wants one (`Window`'s `content`, `TabView`'s `render_content` return, or a virtual builtin's
-/// own `children: Vec<Node<AnyView>>` — anywhere the declared type mentions `Node<`, checked by
-/// the caller before calling this). Three cases, by `source_type_path`'s resolved `is_native`:
-/// - A hand-written virtual builtin (`is_virtual_builtin`, always `!is_native`): `base` is *already*
-///   a `Node<AnyView>` local value (built by `emit_construction`'s virtual branch) — used as-is.
+/// Converts a constructed child binding into `Box<dyn elwindui_core::tree::UIElement>` for a slot
+/// that wants one (`Window`'s `content`, `TabView`'s `render_content` return, or a virtual
+/// builtin's own `children: Vec<Box<dyn UIElement>>` — anywhere the declared type mentions `dyn
+/// UIElement`, checked by the caller before calling this). Three cases, by `source_type_path`'s
+/// resolved `is_native`:
+/// - A hand-written virtual builtin (`is_virtual_builtin`, always `!is_native`): `base` is
+///   *already* a `Box<dyn UIElement>` local value (built by `emit_construction`'s virtual branch)
+///   — used as-is.
 /// - A user-defined component whose own `view` root is virtual (`!is_native`, e.g. `DocumentView`,
 ///   whose root is `VerticalLayout`): its generated `into_node(self: Rc<Self>)` (see
-///   `generate_view`) produces the `Node<AnyView>` value — same `.clone()` convention as
+///   `generate_view`) produces the `Box<dyn UIElement>` value — same `.clone()` convention as
 ///   `into_any_view_if_needed` so the original binding stays valid for any later reference.
 /// - Anything native (a real leaf widget, or a user component whose own root is native): wrapped
-///   as `Node::Native(handle.into_any_view())`, reusing `into_any_view_if_needed` for the inner
+///   as a `NativeControl` (`UIElementBase::default()` — no way to set `margin`/`alignment` on an
+///   embedding site's own wrapper yet), reusing `into_any_view_if_needed` for the inner handle
 ///   conversion.
 fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module, table: &SymbolTable) -> TokenStream {
     let is_native = table.resolve(from, source_type_path).is_some_and(|info| info.is_native);
     if is_native {
         let view = into_any_view_if_needed(base, "AnyView");
-        quote! { elwindui_core::tree::Node::Native(#view) }
+        quote! {
+            Box::new(elwindui_core::tree::NativeControl {
+                base: elwindui_core::tree::UIElementBase::default(),
+                handle: #view,
+            }) as Box<dyn elwindui_core::tree::UIElement>
+        }
     } else if is_virtual_builtin(source_type_path) {
         quote! { #base }
     } else {
@@ -1375,7 +1383,7 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
                 emit_construction(planned, &closure_ctx, from, table, &mut construct);
             }
             let root = plan.last().expect("closure element body must have a root");
-            // `render_content`'s declared return type is `Node<AnyView>` (`tab_view.elwind`), not
+            // `render_content`'s declared return type is `Box<dyn UIElement>` (`tab_view.elwind`), not
             // a bare `AnyView` — so a per-tab body rooted in a virtual builtin/component (a
             // `VerticalLayout`, or a `DocumentView`-style user component) works exactly like any
             // other embedding slot, via the same `is_native` dispatch `into_node_if_needed` uses
@@ -1422,7 +1430,7 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
     let mut args = Vec::new();
     for (name, ty) in &info.param_fields {
         if name == "children" {
-            let wants_node = ty.contains("Node<");
+            let wants_node = ty.contains("dyn UIElement");
             let items = node.child_bindings.iter().map(|(c, child_ty)| {
                 if wants_node {
                     into_node_if_needed(quote! { #c }, child_ty, from, table)
@@ -1442,7 +1450,7 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
                     .element_attr_bindings
                     .get(name.as_str())
                     .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
-                if inner_ty.contains("Node<") {
+                if inner_ty.contains("dyn UIElement") {
                     into_node_if_needed(quote! { #nested_binding }, nested_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
@@ -1474,7 +1482,7 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
             None if next_positional_child < node.child_bindings.len() => {
                 let (child, child_ty) = &node.child_bindings[next_positional_child];
                 next_positional_child += 1;
-                if inner_ty.contains("Node<") {
+                if inner_ty.contains("dyn UIElement") {
                     into_node_if_needed(quote! { #child }, child_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #child }, inner_ty)
@@ -1490,9 +1498,10 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
     });
 }
 
-/// Builds an `elwindui_core::tree::Node::Virtual` value for a hand-written virtual builtin
-/// (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` — see `is_virtual_builtin`) directly
-/// from its own attributes, instead of calling a (nonexistent) `Type::new(args)`.
+/// Builds a `Box<dyn elwindui_core::tree::UIElement>` value for a hand-written virtual builtin
+/// (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` — see
+/// `is_virtual_builtin`) directly from its own attributes, instead of calling a (nonexistent)
+/// `Type::new(args)`.
 fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
     let binding = &node.binding;
 
@@ -1508,11 +1517,12 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
             None => quote! { None },
         }
     };
-    // Same as `get_attr`, but for the `Option<String>` shapes (`Rectangle`/`Ellipse`'s `fill`/
-    // `stroke`) — `elwindui_core::tree::Shape`'s fields are owned `String`s (they're stored
-    // long-term in the scene tree, not just for the duration of one call), but the DSL expression
-    // supplying them may be a `&'static str` literal (`fill: "#3a3a3c"`) just as easily as an
-    // already-owned `String` (a `t!(...)` result) — `.to_string()` accepts either uniformly.
+    // Same as `get_attr`, but for `Option<String>` shapes (`Rectangle`/`Ellipse`'s `fill`/
+    // `stroke`, `TextBlock`'s `color`) — the corresponding `elwindui_core::tree` fields are owned
+    // `String`s (they're stored long-term in the scene tree, not just for the duration of one
+    // call), but the DSL expression supplying them may be a `&'static str` literal (`fill:
+    // "#3a3a3c"`) just as easily as an already-owned `String` (a `t!(...)` result) —
+    // `.to_string()` accepts either uniformly.
     let get_attr_string = |name: &str| -> TokenStream {
         match find_attr(node, name) {
             Some(expr) => {
@@ -1522,8 +1532,24 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
             None => quote! { None },
         }
     };
+    // Every `UIElement` carries `margin`/`horizontal_alignment`/`vertical_alignment`
+    // (`UIElementBase`) — `margin` is settable today (the view-expression parser has numeric-
+    // literal support); the two `Alignment`s have no enum-variant-literal syntax yet, so they
+    // stay at `UIElementBase::default()`'s `Stretch` (matching every other element's default).
+    let margin = get_attr("margin");
+    let base = quote! {
+        elwindui_core::tree::UIElementBase {
+            margin: (#margin).unwrap_or(0.0),
+            ..elwindui_core::tree::UIElementBase::default()
+        }
+    };
 
-    let content = match node.type_path.as_str() {
+    let children = node
+        .child_bindings
+        .iter()
+        .map(|(child_binding, child_ty)| into_node_if_needed(quote! { #child_binding }, child_ty, from, table));
+
+    let value = match node.type_path.as_str() {
         "VerticalLayout" | "HorizontalLayout" => {
             let orientation = if node.type_path == "VerticalLayout" {
                 quote! { elwindui_core::layout::Orientation::Vertical }
@@ -1531,12 +1557,12 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
                 quote! { elwindui_core::layout::Orientation::Horizontal }
             };
             let spacing = get_attr("spacing");
-            let cross_align = get_attr("cross_align");
             quote! {
                 elwindui_core::tree::Stack {
+                    base: #base,
                     orientation: #orientation,
                     spacing: (#spacing).unwrap_or(0.0),
-                    cross_align: (#cross_align).unwrap_or(elwindui_core::layout::CrossAlign::Stretch),
+                    children: vec![ #(#children),* ],
                 }
             }
         }
@@ -1552,26 +1578,32 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
             let stroke_width = get_attr("stroke_width");
             quote! {
                 elwindui_core::tree::Shape {
+                    base: #base,
                     kind: #kind,
                     fill: #fill,
                     stroke: #stroke,
                     stroke_width: (#stroke_width).unwrap_or(0.0),
+                    children: vec![ #(#children),* ],
+                }
+            }
+        }
+        "TextBlock" => {
+            let text = find_attr(node, "text").unwrap_or_else(|| panic!("`TextBlock` requires attribute `text`"));
+            let text = emit_expr(text, ctx, &EmitMode::Construction);
+            let color = get_attr_string("color");
+            quote! {
+                elwindui_core::tree::TextBlock {
+                    base: #base,
+                    content: (#text).to_string(),
+                    color: #color,
                 }
             }
         }
         other => unreachable!("is_virtual_builtin guards this match, got `{other}`"),
     };
 
-    let children = node
-        .child_bindings
-        .iter()
-        .map(|(child_binding, child_ty)| into_node_if_needed(quote! { #child_binding }, child_ty, from, table));
-
     out.extend(quote! {
-        let #binding = elwindui_core::tree::Node::Virtual {
-            content: Box::new(#content),
-            children: vec![ #(#children),* ],
-        };
+        let #binding: Box<dyn elwindui_core::tree::UIElement> = Box::new(#value);
     });
 }
 
@@ -1752,7 +1784,7 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                     return quote! { #ident.clone() };
                 }
                 // A bare reference to one of this component's own `#[param]` fields, used as a
-                // value in its own right (e.g. `RoundedPanel`'s `Text { text: label }`) rather than
+                // value in its own right (e.g. `RoundedPanel`'s `TextBlock { text: label }`) rather than
                 // as the owner of a `.getter()` call — the field/constructor-parameter itself, not
                 // `resolve_bind`/`emit_path_get`'s `vm.something`-shaped 2-segment machinery. Only
                 // reached when `only` isn't a bind-sugar name (`ctx.binds` doesn't contain it —
@@ -1897,7 +1929,7 @@ view NotepadWindow {
             TextArea { text: content }
 
             HorizontalLayout {
-                Text { text: t!("notepad-status-chars", count: vm.char_count) }
+                TextBlock { text: t!("notepad-status-chars", count: vm.char_count) }
             }
         }
     }
@@ -2241,7 +2273,7 @@ component Greeting {
 }
 
 view Greeting {
-    Text { text: greeter.name }
+    TextBlock { text: greeter.name }
 }
 "#;
         let module = parse_module(src).expect("should parse");
@@ -2252,9 +2284,9 @@ view Greeting {
         let s = generated.to_string();
         assert!(s.contains("fn new (greeter : Greeter)"), "expected ctor param named `greeter`, got:\n{s}");
         assert!(!s.contains("vm"), "ctor shouldn't hardcode a `vm` field name:\n{s}");
-        // `Greeting`'s view root is `Text`, not `Window` — no top-level window to `show()`.
+        // `Greeting`'s view root is `TextBlock`, not `Window` — no top-level window to `show()`.
         assert!(!s.contains("fn show"));
-        assert!(s.contains("fn into_any_view"));
+        assert!(s.contains("fn into_node"));
     }
 
     #[test]

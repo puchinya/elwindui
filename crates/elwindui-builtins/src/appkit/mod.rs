@@ -1,7 +1,7 @@
 //! AppKit-backed implementations of every *native* builtin except `TabView` (see `tab_view.rs` —
 //! it's large enough to warrant its own file). `VerticalLayout`/`HorizontalLayout`/
-//! `Rectangle`/`Ellipse` have no wrapper here at all: `elwindui-codegen` builds their
-//! `elwindui_core::tree::Node::Virtual` values directly (see docs/elwindui_spec.md 付録H.2), so
+//! `Rectangle`/`Ellipse`/`TextBlock` have no wrapper here at all: `elwindui-codegen` builds their
+//! `elwindui_core::tree::UIElement` values directly (see docs/elwindui_spec.md 付録H.2), so
 //! there's no `Type::new(..)` call site for a wrapper to intercept. Each type below wraps the
 //! matching `elwindui_backend_appkit` widget and exposes exactly the methods `elwindui-codegen`'s
 //! generic conventions call: `Type::new(..)` (construction, args in the paired
@@ -23,7 +23,7 @@ impl Window {
     pub fn new(
         title: &str,
         menu_bar: Option<Rc<MenuBar>>,
-        content: elwindui_core::tree::Node<appkit::AnyView>,
+        content: Box<dyn elwindui_core::tree::UIElement>,
     ) -> Rc<Self> {
         let inner = appkit::Window::new(title);
         inner.set_content(content);
@@ -89,24 +89,6 @@ impl Button {
 
     pub fn set_on_click(&self, callback: Box<dyn Fn()>) {
         self.inner.set_on_click(callback);
-    }
-
-    pub fn into_any_view(&self) -> appkit::AnyView {
-        appkit::AnyView::from(self.inner.clone())
-    }
-}
-
-pub struct Text {
-    inner: appkit::Text,
-}
-
-impl Text {
-    pub fn new(text: &str) -> Rc<Self> {
-        Rc::new(Self { inner: appkit::Text::new(text) })
-    }
-
-    pub fn set_text(&self, text: &str) {
-        self.inner.set_text(text);
     }
 
     pub fn into_any_view(&self) -> appkit::AnyView {

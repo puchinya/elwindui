@@ -1,9 +1,9 @@
 //! WinUI3-backed implementations of every *native* builtin except `TabView` (see `tab_view.rs`),
 //! mirroring `elwindui-builtins::appkit`'s structure exactly (see that module's doc comment for
 //! the overall convention: `Type::new(..)`/`set_<attr>`/`set_on_<event>`/`set_on_<attr>_change`/
-//! `into_any_view`). `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have
+//! `into_any_view`). `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have
 //! no wrapper here either, for the same reason as the AppKit side: `elwindui-codegen` builds their
-//! `elwindui_core::tree::Node::Virtual` values directly.
+//! `elwindui_core::tree::UIElement` values directly.
 //!
 //! UNVERIFIED — see `elwindui-backend-winui3`'s crate-level doc comment. This file only calls
 //! that crate's own API (which is under this project's control and self-consistent), so it should
@@ -20,7 +20,7 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(title: &str, menu_bar: Option<Rc<MenuBar>>, content: elwindui_core::tree::Node<winui3::AnyView>) -> Rc<Self> {
+    pub fn new(title: &str, menu_bar: Option<Rc<MenuBar>>, content: Box<dyn elwindui_core::tree::UIElement>) -> Rc<Self> {
         let inner = winui3::Window::new(title);
         inner.set_content(content);
         if let Some(menu_bar) = &menu_bar {
@@ -85,24 +85,6 @@ impl Button {
 
     pub fn set_on_click(&self, callback: Box<dyn Fn()>) {
         self.inner.set_on_click(callback);
-    }
-
-    pub fn into_any_view(&self) -> winui3::AnyView {
-        winui3::AnyView::from(self.inner.clone())
-    }
-}
-
-pub struct Text {
-    inner: winui3::Text,
-}
-
-impl Text {
-    pub fn new(text: &str) -> Rc<Self> {
-        Rc::new(Self { inner: winui3::Text::new(text) })
-    }
-
-    pub fn set_text(&self, text: &str) {
-        self.inner.set_text(text);
     }
 
     pub fn into_any_view(&self) -> winui3::AnyView {

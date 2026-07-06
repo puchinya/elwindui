@@ -512,7 +512,7 @@ component Window3 {
     #[inject]
     vm: Vm,
 }
-view Window3 { Window { Text { text: vm.no_such_field } } }
+view Window3 { Window { TextBlock { text: vm.no_such_field } } }
 "#;
         let modules = vec![parse_module(viewmodel_src).unwrap(), parse_module(window_src).unwrap()];
         let errs = validate(&modules).unwrap_err();
@@ -825,7 +825,7 @@ component Foo inherits NativeComponent {
 }
 
 view Foo {
-    Window { title: "x", content: Text { text: "hi" } }
+    Window { title: "x", content: TextBlock { text: "hi" } }
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();

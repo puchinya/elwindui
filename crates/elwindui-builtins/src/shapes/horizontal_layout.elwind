@@ -3,6 +3,4 @@ component HorizontalLayout {
     children: Vec<AnyView>,
     #[param]
     spacing: Option<f32>,
-    #[param]
-    cross_align: Option<CrossAlign>,
 }

@@ -7,4 +7,6 @@ component MenuItem inherits NativeComponent {
 
     #[param]
     enabled: Option<bool>,
+
+    on_select: fn(),
 }

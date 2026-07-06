@@ -1630,6 +1630,24 @@ view NotepadWindow {
 - 双方向バインディングが必要なフィールド(`TextArea`の`content`等)は、これまで通り`component`側の`prop`として`bind!(vm.field, TwoWay)`で写し取る(J.2と同一パターン)
 - 読み取り専用の表示(`vm.window_title`, `vm.char_count`, `vm.state.label()`)は、`view`式の中で直接参照してよい。これは14章ルール13の対象外である(ルール13は`#[param]`初期化式への直接参照のみを禁止しており、通常の`view`式は元々動的評価が前提のため制限しない)
 
+### O.4.1 `command`属性(WinUI3の`Command`プロパティ相当の糖衣構文)
+
+上記の`on_click`/`enabled`を`Command`ごとに2属性書く代わりに、`command`属性1つで両方をまとめて指定できる:
+
+```
+Button {
+    text: t!("notepad-menu-save")
+    command: vm.save
+}
+```
+
+これは`on_click: vm.save.execute()` + `enabled: vm.save.can_execute`を書いた場合と**完全に同じ**コードを生成する糖衣構文であり、`command`という実体を持つ値やフィールドが新たに導入されるわけではない(O.5の方針どおり、`Command`は各`viewmodel`ごとに単相化された`execute`/`can_execute`メソッドへ静的に展開されるだけで、実行時に受け渡し可能な共通の`Command`型の値は存在しない)。
+
+- 展開先の「トリガーとなるイベント」は、対象の`component`/ビルトインが自前で宣言している**唯一の`on_*`フィールド**から自動的に決まる(`Button`なら`on_click`、`MenuItem`なら`on_select`)。`on_*`フィールドが0個または複数ある場合は展開できず、`command`属性は単に無視される。
+- `enabled`フィールドを持つ対象であれば、`can_execute`への結線も自動的に追加される。持たない対象では`execute`側の結線のみ行われる。
+- 特定のウィジェット名に対するハードコードではなく、「`on_*`フィールドを1つだけ持つ」という構造だけを見て展開されるため、ビルトインに限らずユーザー定義の`component`(ネイティブ・仮想いずれも)が自前で唯一の`on_*`イベントを宣言していれば同様に使える。
+- 同じ要素に`command`と明示的な`on_click`/`enabled`を両方書いた場合、明示的な指定が優先される(`command`側の展開はまだ設定されていない属性を補うだけで、上書きはしない)。
+
 ## O.5 低オーバーヘッドな内部表現
 
 C#のMVVM実装は`INotifyPropertyChanged`イベント+ボックス化されたデリゲートに依存し、実行時のイベント購読・発火コストと動的ディスパッチを伴う。ElwindUILでは以下の方針でこれを避ける。

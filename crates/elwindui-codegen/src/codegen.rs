@@ -1005,7 +1005,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // Every node that has a callback or a value that can change after construction gets a
     // generated field name and is stored on the component so `resync`/closures can reach it later.
     let mut plan = Vec::new();
-    plan_element(&view.root, &ctx, &mut plan, true);
+    plan_element(&view.root, &ctx, from, table, &mut plan, true);
 
     let mut struct_fields = TokenStream::new();
     let mut construct_stmts = TokenStream::new();
@@ -1200,19 +1200,27 @@ struct PlannedNode {
     stored: bool,
 }
 
-fn plan_element(node: &ElementNode, ctx: &ViewCtx, out: &mut Vec<PlannedNode>, is_root: bool) -> (syn::Ident, String) {
+fn plan_element(
+    node: &ElementNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut Vec<PlannedNode>,
+    is_root: bool,
+) -> (syn::Ident, String) {
     let mut child_bindings = Vec::new();
     for child in &node.children {
-        child_bindings.push(plan_element(child, ctx, out, false));
+        child_bindings.push(plan_element(child, ctx, from, table, out, false));
     }
 
     let mut element_attr_bindings = HashMap::new();
     for (name, expr) in &node.attributes {
         if let ViewExpr::Element(elem) = expr {
-            element_attr_bindings.insert(name.clone(), plan_element(elem, ctx, out, false));
+            element_attr_bindings.insert(name.clone(), plan_element(elem, ctx, from, table, out, false));
         }
     }
 
+    let attributes = desugar_command_attr(&node.type_path, node.attributes.clone(), from, table);
     let binding = format_ident!("__{}_{}", node.type_path.to_lowercase(), out.len());
     // A hand-written virtual builtin (`Row`/`Column`/`VerticalLayout`/`HorizontalLayout`/
     // `Rectangle`/`Ellipse`) never gets a struct field: its `Node::Virtual` value is built once
@@ -1221,17 +1229,72 @@ fn plan_element(node: &ElementNode, ctx: &ViewCtx, out: &mut Vec<PlannedNode>, i
     // has no native setter to wire `on_*`/resync against, so it must never be `stored` regardless
     // of `is_root`/its own attributes (which `emit_wiring`/`emit_resync` already skip via their
     // `if !node.stored { return; }` guard — no changes needed there).
-    let stored = !is_virtual_builtin(&node.type_path) && (is_root || !node.attributes.is_empty());
+    let stored = !is_virtual_builtin(&node.type_path) && (is_root || !attributes.is_empty());
 
     out.push(PlannedNode {
         binding: binding.clone(),
         type_path: node.type_path.clone(),
-        attributes: node.attributes.clone(),
+        attributes,
         child_bindings,
         element_attr_bindings,
         stored,
     });
     (binding, node.type_path.clone())
+}
+
+/// `command: <path>` sugar (docs/elwindui_spec.md 付録O.4), WinUI3's `Button.Command`-style
+/// convenience: expands to the equivalent `<sole on_* field>: <path>.execute()` (+
+/// `enabled: <path>.can_execute` if the shape also declares an `enabled` field) — exactly what
+/// writing `on_click: vm.save.execute()` + `enabled: vm.save.can_execute` by hand already
+/// generates. `command` never becomes a real `#[param]` passed to `Type::new(..)` — there's no
+/// single shared `Command` Rust type to pass (付録O.5 monomorphizes each viewmodel's `Command`
+/// field into its own `<field>_execute`/`<field>_can_execute` methods, never a materialized
+/// `Command` value) — this is purely an attribute-level rewrite, run once during planning.
+///
+/// Driven entirely by the resolved shape's own declared fields (which single field name starts
+/// with `on_`), not hardcoded per widget name — so this works identically for a hand-written
+/// builtin (`Button`/`MenuItem`, which declare their `on_click`/`on_select` field the same way
+/// `TabView` already declares `on_select`/`on_close`) or any user-defined component (native or
+/// virtual) with exactly one `on_*` event of its own. A shape with zero or more than one `on_*`
+/// field has no unambiguous trigger, so `command` is left untouched (inert — `emit_construction`
+/// ignores attribute names with no matching declared field, same as any other unrecognized
+/// attribute). Explicit `on_*`/`enabled` attributes on the same element always win — this only
+/// fills in ones the caller didn't already set, so `command` and the older two-attribute style can
+/// be freely mixed on the same element.
+fn desugar_command_attr(
+    type_path: &str,
+    attributes: Vec<(String, ViewExpr)>,
+    from: &Module,
+    table: &SymbolTable,
+) -> Vec<(String, ViewExpr)> {
+    let Some(ViewExpr::Path(command_path)) = attributes.iter().find(|(name, _)| name == "command").map(|(_, v)| v) else {
+        return attributes;
+    };
+    let Some(info) = table.resolve(from, type_path) else {
+        return attributes;
+    };
+    let on_fields: Vec<&String> = info.fields.keys().filter(|name| name.starts_with("on_")).collect();
+    let [trigger] = on_fields.as_slice() else {
+        return attributes;
+    };
+    let trigger = (*trigger).clone();
+    let command_path = command_path.clone();
+    let has_enabled_field = info.field_types.contains_key("enabled");
+
+    // `command` isn't itself a declared field on any target (see this function's doc comment) —
+    // left in place, `emit_resync`'s generic "call `set_<attr>` for every non-callback attribute"
+    // loop would try (and fail to find) a `set_command` method, so it must be removed once
+    // desugared, not just left inert.
+    let mut result: Vec<(String, ViewExpr)> = attributes.into_iter().filter(|(name, _)| name != "command").collect();
+    if !result.iter().any(|(name, _)| *name == trigger) {
+        result.push((trigger, ViewExpr::MethodCall(command_path.clone(), "execute".to_string())));
+    }
+    if has_enabled_field && !result.iter().any(|(name, _)| name == "enabled") {
+        let mut can_execute_path = command_path;
+        can_execute_path.push("can_execute".to_string());
+        result.push(("enabled".to_string(), ViewExpr::Path(can_execute_path)));
+    }
+    result
 }
 
 fn find_attr<'a>(node: &'a PlannedNode, name: &str) -> Option<&'a ViewExpr> {
@@ -1307,7 +1370,7 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
         ClosureBody::Expr(expr) => emit_expr(expr, &closure_ctx, &EmitMode::Construction),
         ClosureBody::Element(elem) => {
             let mut plan = Vec::new();
-            plan_element(elem, &closure_ctx, &mut plan, true);
+            plan_element(elem, &closure_ctx, from, table, &mut plan, true);
             let mut construct = TokenStream::new();
             for planned in &plan {
                 emit_construction(planned, &closure_ctx, from, table, &mut construct);
@@ -1882,6 +1945,86 @@ view NotepadWindow {
         assert!(window_str.contains("struct NotepadWindow"));
         assert!(window_str.contains("fn resync"));
         assert!(window_str.contains("save_execute"));
+        assert!(window_str.contains("save_can_execute"));
+    }
+
+    #[test]
+    fn command_attr_desugars_to_execute_wiring_and_enabled_resync() {
+        let window_src = r#"
+use crate::NotepadViewModel;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+}
+
+view NotepadWindow {
+    Window {
+        title: vm.window_title
+
+        Row {
+            Button {
+                text: t!("notepad-menu-save")
+                command: vm.save
+            }
+        }
+    }
+}
+"#;
+        let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
+        let window_module = parse_module(window_src).unwrap();
+        let table = build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+
+        let window_code = generate_module(&window_module, &table);
+        assert_valid_rust("command_attr_window", &window_code);
+
+        let window_str = window_code.to_string();
+        // `command: vm.save` must desugar to exactly what `on_click: vm.save.execute()` +
+        // `enabled: vm.save.can_execute` generate by hand (see `desugar_command_attr`).
+        assert!(window_str.contains("set_on_click"));
+        assert!(window_str.contains("save_execute"));
+        assert!(window_str.contains("save_can_execute"));
+    }
+
+    #[test]
+    fn command_attr_does_not_override_an_explicit_on_click() {
+        let window_src = r#"
+use crate::NotepadViewModel;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+}
+
+view NotepadWindow {
+    Window {
+        title: vm.window_title
+
+        Row {
+            Button {
+                text: t!("notepad-menu-save")
+                command: vm.save
+                on_click: vm.open.execute()
+            }
+        }
+    }
+}
+"#;
+        let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
+        let window_module = parse_module(window_src).unwrap();
+        let table = build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+
+        let window_code = generate_module(&window_module, &table);
+        assert_valid_rust("command_attr_explicit_on_click_window", &window_code);
+
+        let window_str = window_code.to_string();
+        // The explicit `on_click` wins — `command`'s own execute-wiring is not also emitted, so
+        // `save_execute` never appears (only `open_execute`, from the explicit `on_click`), but
+        // `command`'s `enabled` wiring (no explicit `enabled` given) still comes through.
+        assert!(window_str.contains("open_execute"));
+        assert!(!window_str.contains("save_execute"));
         assert!(window_str.contains("save_can_execute"));
     }
 

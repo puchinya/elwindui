@@ -16,7 +16,7 @@ view NotepadWindow {
                 Menu {
                     MenuItem { text: t!("notepad-menu-new"), shortcut: "n", on_select: vm.new_tab.execute() }
                     MenuItem { text: t!("notepad-menu-open"), shortcut: "o", on_select: vm.open.execute() }
-                    MenuItem { text: t!("notepad-menu-save"), shortcut: "s", on_select: vm.save.execute(), enabled: vm.save.can_execute }
+                    MenuItem { text: t!("notepad-menu-save"), shortcut: "s", command: vm.save }
                 }
             }
         }

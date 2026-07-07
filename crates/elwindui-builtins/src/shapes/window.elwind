@@ -6,5 +6,5 @@ component Window inherits NativeComponent {
     menu_bar: Option<MenuBar>,
 
     #[param]
-    content: Box<dyn UIElement>,
+    content: std::rc::Rc<dyn UIElement>,
 }

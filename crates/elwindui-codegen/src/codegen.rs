@@ -39,6 +39,12 @@ pub struct TypeInfo {
     /// Names of `#[param] #[two_way]` fields — a builtin shape's opt-in to automatic two-way
     /// wiring (see `emit_wiring`'s generic two-way rule). Empty for ordinary user components.
     pub two_way_fields: HashSet<String>,
+    /// Names of `#[routed]` fields (docs/elwindui_spec.md 4章) — a callback's opt-in to WinUI3-
+    /// style bubbling via `elwindui_core::tree::dispatch_routed` instead of being called directly.
+    /// Non-empty exactly when this type needs `into_node_if_needed` to share its own
+    /// `routed_handlers()` into the `NativeControl`/virtual-builtin `UIElementBase` wrapping it,
+    /// rather than starting that wrapper with a fresh, empty one.
+    pub routed_fields: HashSet<String>,
     /// Every field with no initializer, `#[param]` or not, mapped to its declared type — used
     /// purely for type-hint lookups (an `on_*` callback's arity, a resync setter's by-value-vs-
     /// by-reference calling convention), independent of whether the field is a constructor
@@ -175,6 +181,11 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                 .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay)))
                 .map(|f| f.name.clone())
                 .collect();
+            let routed_fields = fields
+                .iter()
+                .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::Routed)))
+                .map(|f| f.name.clone())
+                .collect();
             let field_types = fields
                 .iter()
                 .filter(|f| f.initializer.is_none())
@@ -192,6 +203,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                     binds,
                     param_fields,
                     two_way_fields,
+                    routed_fields,
                     field_types,
                     is_viewmodel,
                     is_native: false,
@@ -1066,15 +1078,15 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // A hardcoded virtual builtin root (`VerticalLayout`, say — `DocumentView`'s actual root) is
     // never `stored` (see `plan_element`), so unlike every other node its value only exists as the
     // bare local `let` binding `emit_construction` produced inside `new()`'s `construct_stmts` —
-    // nothing stashes it on `Self` the normal way. Stash it here in a one-shot `RefCell` instead,
-    // since `Box<dyn UIElement>` isn't `Clone` (unlike every other stored field, which is a plain
-    // `Rc<Type>` clone) — `into_node()` (below) takes it out exactly once.
+    // nothing stashes it on `Self` the normal way. Stash it here as a plain `Rc` field instead —
+    // `Rc<dyn UIElement>` (unlike the old `Box`) is `Clone`, so `into_node()` (below) can just
+    // clone it, the same convention every other stored field already uses.
     if root_is_virtual_builtin {
         struct_fields.extend(quote! {
-            #root_binding: std::cell::RefCell<Option<Box<dyn elwindui_core::tree::UIElement>>>,
+            #root_binding: std::rc::Rc<dyn elwindui_core::tree::UIElement>,
         });
         field_inits.extend(quote! {
-            #root_binding: std::cell::RefCell::new(Some(#root_binding)),
+            #root_binding: #root_binding.clone(),
         });
     }
 
@@ -1094,8 +1106,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // (not a `From`/`Into` impl: `impl From<Rc<#target>> for AnyView` would be rejected by Rust's
     // orphan rules, since `Rc` isn't "fundamental" and so `#target` nested inside it counts as
     // covered by a foreign generic — E0117). A virtual root gets `into_node` instead, returning
-    // `Box<dyn elwindui_core::tree::UIElement>` — either the hardcoded-builtin case handled just
-    // above (taken from the one-shot `RefCell`), or (a user-defined component whose own root is
+    // `Rc<dyn elwindui_core::tree::UIElement>` — either the hardcoded-builtin case handled just
+    // above (a plain clone of the stored `Rc`), or (a user-defined component whose own root is
     // itself virtual — chained `inherits`) delegating to *that* root's own `into_node`/
     // `into_any_view` via `into_node_if_needed`, exactly like any other embedding site.
     let root_is_native = table.resolve(from, &view.root.type_path).is_some_and(|info| info.is_native);
@@ -1114,14 +1126,14 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         }
     } else if root_is_virtual_builtin {
         quote! {
-            pub fn into_node(self: std::rc::Rc<Self>) -> Box<dyn elwindui_core::tree::UIElement> {
-                self.#root_binding.borrow_mut().take().expect("into_node() called more than once")
+            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement> {
+                self.#root_binding.clone()
             }
         }
     } else {
         let root_expr = into_node_if_needed(quote! { self.#root_binding }, &view.root.type_path, from, table);
         quote! {
-            pub fn into_node(self: std::rc::Rc<Self>) -> Box<dyn elwindui_core::tree::UIElement> {
+            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement> {
                 #root_expr
             }
         }
@@ -1378,31 +1390,50 @@ fn is_virtual_builtin(type_path: &str) -> bool {
     matches!(type_path, "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse" | "TextBlock")
 }
 
-/// Converts a constructed child binding into `Box<dyn elwindui_core::tree::UIElement>` for a slot
-/// that wants one (`Window`'s `content`, `TabView`'s `render_content` return, or a virtual
-/// builtin's own `children: Vec<Box<dyn UIElement>>` — anywhere the declared type mentions `dyn
+/// Converts a constructed child binding into `Rc<dyn elwindui_core::tree::UIElement>` for a slot
+/// that wants one (`Window`'s `content`, `TabView`'s `item_template` return, or a virtual
+/// builtin's own `children: Vec<Rc<dyn UIElement>>` — anywhere the declared type mentions `dyn
 /// UIElement`, checked by the caller before calling this). Three cases, by `source_type_path`'s
 /// resolved `is_native`:
 /// - A hand-written virtual builtin (`is_virtual_builtin`, always `!is_native`): `base` is
-///   *already* a `Box<dyn UIElement>` local value (built by `emit_construction`'s virtual branch)
-///   — used as-is.
+///   *already* an `Rc<dyn UIElement>` local value (built by `emit_construction`'s virtual branch,
+///   via `elwindui_core::tree::new_element`) — used as-is.
 /// - A user-defined component whose own `view` root is virtual (`!is_native`, e.g. `DocumentView`,
 ///   whose root is `VerticalLayout`): its generated `into_node(self: Rc<Self>)` (see
-///   `generate_view`) produces the `Box<dyn UIElement>` value — same `.clone()` convention as
+///   `generate_view`) produces the `Rc<dyn UIElement>` value — same `.clone()` convention as
 ///   `into_any_view_if_needed` so the original binding stays valid for any later reference.
 /// - Anything native (a real leaf widget, or a user component whose own root is native): wrapped
-///   as a `NativeControl` (`UIElementBase::default()` — no way to set `margin`/`alignment` on an
-///   embedding site's own wrapper yet), reusing `into_any_view_if_needed` for the inner handle
-///   conversion.
+///   as a `NativeControl` via `new_element` (`UIElementBase::default()` — no way to set
+///   `margin`/`alignment` on an embedding site's own wrapper yet — except `routed_handlers`, which
+///   is shared from the widget's own storage when it has any `#[routed]` fields), reusing
+///   `into_any_view_if_needed` for the inner handle conversion.
 fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module, table: &SymbolTable) -> TokenStream {
-    let is_native = table.resolve(from, source_type_path).is_some_and(|info| info.is_native);
+    let info = table.resolve(from, source_type_path);
+    let is_native = info.is_some_and(|i| i.is_native);
     if is_native {
+        // A `#[routed]` field (docs/elwindui_spec.md 4章) registers its handler on the widget's
+        // *own* `routed_handlers()` at its own construction time (see `emit_wiring`) — long before
+        // this `NativeControl` wrapper exists (tree construction is bottom-up: children first).
+        // Sharing that same `Rc` here (instead of `UIElementBase::default()`'s fresh, empty one)
+        // is what makes `dispatch_routed` find it later when bubbling from this node.
+        let has_routed = info.is_some_and(|i| !i.routed_fields.is_empty());
+        let base_expr = base.clone();
         let view = into_any_view_if_needed(base, "AnyView");
+        let ui_base = if has_routed {
+            quote! {
+                elwindui_core::tree::UIElementBase {
+                    routed_handlers: (#base_expr).routed_handlers(),
+                    ..elwindui_core::tree::UIElementBase::default()
+                }
+            }
+        } else {
+            quote! { elwindui_core::tree::UIElementBase::default() }
+        };
         quote! {
-            Box::new(elwindui_core::tree::NativeControl {
-                base: elwindui_core::tree::UIElementBase::default(),
+            elwindui_core::tree::new_element(elwindui_core::tree::NativeControl {
+                base: #ui_base,
                 handle: #view,
-            }) as Box<dyn elwindui_core::tree::UIElement>
+            })
         }
     } else if is_virtual_builtin(source_type_path) {
         quote! { #base }
@@ -1431,7 +1462,7 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
                 emit_construction(planned, &closure_ctx, from, table, &mut construct);
             }
             let root = plan.last().expect("closure element body must have a root");
-            // `render_content`'s declared return type is `Box<dyn UIElement>` (`tab_view.elwind`), not
+            // `item_template`'s declared return type is `Rc<dyn UIElement>` (`tab_view.elwind`), not
             // a bare `AnyView` — so a per-tab body rooted in a virtual builtin/component (a
             // `VerticalLayout`, or a `DocumentView`-style user component) works exactly like any
             // other embedding slot, via the same `is_native` dispatch `into_node_if_needed` uses
@@ -1546,10 +1577,10 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
     });
 }
 
-/// Builds a `Box<dyn elwindui_core::tree::UIElement>` value for a hand-written virtual builtin
-/// (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` — see
-/// `is_virtual_builtin`) directly from its own attributes, instead of calling a (nonexistent)
-/// `Type::new(args)`.
+/// Builds an `Rc<dyn elwindui_core::tree::UIElement>` value (via `elwindui_core::tree::new_element`)
+/// for a hand-written virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/
+/// `TextBlock` — see `is_virtual_builtin`) directly from its own attributes, instead of calling a
+/// (nonexistent) `Type::new(args)`.
 fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
     let binding = &node.binding;
 
@@ -1599,11 +1630,30 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
         }
         None => quote! { None },
     };
+    // `on_click` (docs/elwindui_spec.md 4章, `#[routed]`) is likewise a common attribute settable
+    // on any virtual builtin, not just `Button` (which declares it as a real `#[routed]` field —
+    // see `emit_wiring`'s own handling for that case). Registered onto `base` itself (a block
+    // expression, not a plain struct literal, so there's something to call
+    // `register_routed_handler` on) rather than passed as a field value, since `UIElementBase`
+    // doesn't have an `on_click`-specific field — only the generic `routed_handlers` registry.
+    let routed_on_click = match find_attr(node, "on_click") {
+        Some(expr) => {
+            let call = emit_expr(expr, ctx, &EmitMode::Construction);
+            quote! {
+                base.register_routed_handler::<()>("on_click", Box::new(move |_: &(), _args: &elwindui_core::input::RoutedEventArgs| { #call; }));
+            }
+        }
+        None => quote! {},
+    };
     let base = quote! {
-        elwindui_core::tree::UIElementBase {
-            margin: (#margin).unwrap_or(0.0),
-            data_context: #data_context,
-            ..elwindui_core::tree::UIElementBase::default()
+        {
+            let base = elwindui_core::tree::UIElementBase {
+                margin: (#margin).unwrap_or(0.0),
+                data_context: #data_context,
+                ..elwindui_core::tree::UIElementBase::default()
+            };
+            #routed_on_click
+            base
         }
     };
 
@@ -1666,7 +1716,7 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
     };
 
     out.extend(quote! {
-        let #binding: Box<dyn elwindui_core::tree::UIElement> = Box::new(#value);
+        let #binding: std::rc::Rc<dyn elwindui_core::tree::UIElement> = elwindui_core::tree::new_element(#value);
     });
 }
 
@@ -1691,6 +1741,26 @@ fn emit_wiring(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
     for (name, expr) in &node.attributes {
         if let Some(_event) = name.strip_prefix("on_") {
             let setter = format_ident!("set_{name}");
+            // `#[routed]` (docs/elwindui_spec.md 4章): registered on the widget's own storage
+            // (`Button::register_routed_handler`, delegating to its own `routed_handlers`) instead
+            // of calling `set_<attr>` directly — `dispatch_routed` invokes it later, bubbling
+            // through ancestors too, rather than this being the only thing that ever runs. Zero-
+            // arg only for now (`T = ()`) — see `ast::Attr::Routed`'s doc comment.
+            let is_routed = info.is_some_and(|i| i.routed_fields.contains(name));
+            if is_routed {
+                let call = emit_expr(expr, ctx, &self_mode);
+                out.extend(quote! {
+                    {
+                        let widget = this.#binding.clone();
+                        let this = std::rc::Rc::clone(&this);
+                        widget.register_routed_handler::<()>(#name, Box::new(move |_: &(), _args: &elwindui_core::input::RoutedEventArgs| {
+                            #call;
+                            this.resync();
+                        }));
+                    }
+                });
+                continue;
+            }
             // A callback whose shape declares `Fn(usize)` (e.g. `TabView`'s per-tab `on_select`/
             // `on_close`) is a bare command path that needs an index threaded through
             // (`command_execute_call`, reused as-is from its original TabView-only use); anything
@@ -2077,8 +2147,10 @@ view NotepadWindow {
 
         let window_str = window_code.to_string();
         // `command: vm.save` must desugar to exactly what `on_click: vm.save.execute()` +
-        // `enabled: vm.save.can_execute` generate by hand (see `desugar_command_attr`).
-        assert!(window_str.contains("set_on_click"));
+        // `enabled: vm.save.can_execute` generate by hand (see `desugar_command_attr`). `on_click`
+        // is `#[routed]` (`button.elwind`), so it's wired via `register_routed_handler`, not
+        // `set_on_click` directly — see `emit_wiring`'s `is_routed` branch.
+        assert!(window_str.contains("register_routed_handler"));
         assert!(window_str.contains("save_execute"));
         assert!(window_str.contains("save_can_execute"));
     }

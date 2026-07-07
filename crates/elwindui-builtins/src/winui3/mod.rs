@@ -20,7 +20,7 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(title: &str, menu_bar: Option<Rc<MenuBar>>, content: Box<dyn elwindui_core::tree::UIElement>) -> Rc<Self> {
+    pub fn new(title: &str, menu_bar: Option<Rc<MenuBar>>, content: Rc<dyn elwindui_core::tree::UIElement>) -> Rc<Self> {
         let inner = winui3::Window::new(title);
         inner.set_content(content);
         if let Some(menu_bar) = &menu_bar {

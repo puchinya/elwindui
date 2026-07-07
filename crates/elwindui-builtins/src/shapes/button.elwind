@@ -5,5 +5,6 @@ component Button inherits NativeComponent {
     #[param]
     enabled: Option<bool>,
 
+    #[routed]
     on_click: fn(),
 }

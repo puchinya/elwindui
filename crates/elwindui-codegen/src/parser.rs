@@ -128,6 +128,7 @@ impl<'a> Parser<'a> {
                 "computed" => kind = FieldKind::Computed,
                 "inject" => attrs.push(Attr::Inject),
                 "two_way" => attrs.push(Attr::TwoWay),
+                "routed" => attrs.push(Attr::Routed),
                 "command" => {
                     kind = FieldKind::Command;
                     let mut is_async = false;

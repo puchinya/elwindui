@@ -23,7 +23,7 @@ impl Window {
     pub fn new(
         title: &str,
         menu_bar: Option<Rc<MenuBar>>,
-        content: Box<dyn elwindui_core::tree::UIElement>,
+        content: Rc<dyn elwindui_core::tree::UIElement>,
     ) -> Rc<Self> {
         let inner = appkit::Window::new(title);
         inner.set_content(content);
@@ -68,6 +68,15 @@ impl TextArea {
 
 pub struct Button {
     inner: appkit::Button,
+    /// `#[routed] on_click` (`src/shapes/button.elwind`) is registered here at `Button`'s own
+    /// construction/wiring time — long before the `NativeControl` tree node wrapping it exists
+    /// (tree construction is bottom-up: children before parents). `elwindui-codegen`'s
+    /// `into_node_if_needed` shares this same `Rc` into that node's `UIElementBase.routed_handlers`
+    /// once it's built, so `dispatch_routed` finds these handlers when bubbling starts here. The
+    /// real `NSButton` click itself isn't wired to call them directly — see
+    /// `elwindui_backend_appkit::TreeHostView::relayout`, which wires the real click to
+    /// `dispatch_routed` starting at this element's own tree node once that node exists.
+    routed_handlers: elwindui_core::tree::RoutedHandlers,
 }
 
 impl Button {
@@ -76,7 +85,7 @@ impl Button {
         if let Some(enabled) = enabled {
             inner.set_enabled(enabled);
         }
-        Rc::new(Self { inner })
+        Rc::new(Self { inner, routed_handlers: Default::default() })
     }
 
     pub fn set_text(&self, text: &str) {
@@ -87,8 +96,15 @@ impl Button {
         self.inner.set_enabled(enabled);
     }
 
-    pub fn set_on_click(&self, callback: Box<dyn Fn()>) {
-        self.inner.set_on_click(callback);
+    /// See `routed_handlers`'s own doc comment.
+    pub fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &elwindui_core::input::RoutedEventArgs)>) {
+        elwindui_core::tree::register_routed_handler(&self.routed_handlers, name, handler);
+    }
+
+    /// See `routed_handlers`'s own doc comment — shared into the `NativeControl` wrapping this
+    /// `Button` by `elwindui-codegen`'s `into_node_if_needed`.
+    pub fn routed_handlers(&self) -> elwindui_core::tree::RoutedHandlers {
+        self.routed_handlers.clone()
     }
 
     pub fn into_any_view(&self) -> appkit::AnyView {

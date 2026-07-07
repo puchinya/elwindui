@@ -12,7 +12,7 @@ component TabViewItem inherits NativeComponent {
     header: String,
 
     #[param]
-    content: Box<dyn UIElement>,
+    content: std::rc::Rc<dyn UIElement>,
 
     #[param]
     closable: Option<bool>,

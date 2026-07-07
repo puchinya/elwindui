@@ -15,8 +15,7 @@
 //! Each entry gets its own persistent `elwindui_backend_appkit::TreeHostView` (created once, the
 //! first time that entry — identified by `Rc::as_ptr` pointer identity, the same key
 //! `sync_dynamic_entries` reconciles by — appears in `entries`), shown/hidden on selection rather
-//! than destroyed and rebuilt: a `Box<dyn UIElement>` isn't `Clone`, so a tab's `content` can only
-//! ever be handed over once, and a single shared content pane (this type's earlier design) had no
+//! than destroyed and rebuilt — a single shared content pane (this type's earlier design) had no
 //! way to restore an already-shown-then-hidden tab's content after switching away from it. Tab
 //! chips are reconciled the same way (by the same key), not fully rebuilt every resync, since a
 //! chip and its host are always created/destroyed together (`appkit::TabView::insert_tab`/
@@ -33,9 +32,11 @@ use std::rc::{Rc, Weak};
 pub struct TabViewItem {
     data_context: Option<Rc<dyn Any>>,
     header: RefCell<String>,
-    // Taken (moved into this entry's persistent content host) the first time it's actually
-    // inserted as a real tab; `None` afterward.
-    content: RefCell<Option<Box<dyn elwindui_core::tree::UIElement>>>,
+    // Handed to this entry's persistent content host (`TreeHostView::set_tree`) the first time
+    // it's actually inserted as a real tab — an `Rc`, so (unlike the `Box` this used to be) it
+    // stays readable afterward too, not that anything currently needs to re-read it (the host, not
+    // this field, is what keeps the tab's content alive and visible thereafter).
+    content: RefCell<Option<std::rc::Rc<dyn elwindui_core::tree::UIElement>>>,
     closable: Cell<bool>,
     on_close: RefCell<Option<Box<dyn Fn()>>>,
 }
@@ -44,7 +45,7 @@ impl TabViewItem {
     pub fn new<T: 'static>(
         data_context: Option<Rc<T>>,
         header: &str,
-        content: Box<dyn elwindui_core::tree::UIElement>,
+        content: std::rc::Rc<dyn elwindui_core::tree::UIElement>,
         closable: Option<bool>,
     ) -> Rc<Self> {
         Self::new_erased(data_context.map(|dc| dc as Rc<dyn Any>), header, content, closable)
@@ -56,7 +57,7 @@ impl TabViewItem {
     fn new_erased(
         data_context: Option<Rc<dyn Any>>,
         header: &str,
-        content: Box<dyn elwindui_core::tree::UIElement>,
+        content: std::rc::Rc<dyn elwindui_core::tree::UIElement>,
         closable: Option<bool>,
     ) -> Rc<Self> {
         Rc::new(Self {
@@ -72,7 +73,7 @@ impl TabViewItem {
         *self.header.borrow_mut() = header.to_string();
     }
 
-    pub fn set_content(&self, content: Box<dyn elwindui_core::tree::UIElement>) {
+    pub fn set_content(&self, content: std::rc::Rc<dyn elwindui_core::tree::UIElement>) {
         *self.content.borrow_mut() = Some(content);
     }
 
@@ -88,7 +89,7 @@ impl TabViewItem {
 /// Only set in dynamic mode — `None` for a `TabView` built from static `TabViewItem` children.
 struct DynamicSource {
     header_template: Box<dyn Fn(&Rc<dyn Any>) -> String>,
-    item_template: Box<dyn Fn(&Rc<dyn Any>) -> Box<dyn elwindui_core::tree::UIElement>>,
+    item_template: Box<dyn Fn(&Rc<dyn Any>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement>>,
     closable_default: bool,
 }
 
@@ -117,7 +118,7 @@ impl TabView {
         children: Vec<Rc<TabViewItem>>,
         items_source: Option<Vec<Rc<T>>>,
         header_template: Option<Box<dyn Fn(&Rc<T>) -> String>>,
-        item_template: Option<Box<dyn Fn(&Rc<T>) -> Box<dyn elwindui_core::tree::UIElement>>>,
+        item_template: Option<Box<dyn Fn(&Rc<T>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement>>>,
         closable: Option<bool>,
         selected_index: usize,
     ) -> Rc<Self> {
@@ -283,7 +284,7 @@ impl TabView {
             };
             let insert_at = target_index.min(displayed.len());
             let (chip, host) = self.inner.insert_tab(insert_at, &label, on_select, on_close);
-            if let Some(content) = entry.content.borrow_mut().take() {
+            if let Some(content) = entry.content.borrow().clone() {
                 host.set_tree(content);
             }
             chips.insert(insert_at, (chip, host));
@@ -329,10 +330,10 @@ fn erase_render_string<T: 'static>(f: Box<dyn Fn(&Rc<T>) -> String>) -> Box<dyn 
     })
 }
 
-/// Same as `erase_render_string`, for `item_template`'s `Box<dyn UIElement>`-returning shape.
+/// Same as `erase_render_string`, for `item_template`'s `Rc<dyn UIElement>`-returning shape.
 fn erase_render<T: 'static>(
-    f: Box<dyn Fn(&Rc<T>) -> Box<dyn elwindui_core::tree::UIElement>>,
-) -> Box<dyn Fn(&Rc<dyn Any>) -> Box<dyn elwindui_core::tree::UIElement>> {
+    f: Box<dyn Fn(&Rc<T>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement>>,
+) -> Box<dyn Fn(&Rc<dyn Any>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement>> {
     Box::new(move |item: &Rc<dyn Any>| {
         let item: Rc<T> = Rc::clone(item).downcast::<T>().unwrap_or_else(|_| panic!("elwindui: TabView item type mismatch"));
         f(&item)

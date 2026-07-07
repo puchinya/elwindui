@@ -397,6 +397,32 @@ src/
 
 §1のクレート一覧を参照。`elwindui-core`が`Element`/`LayoutEngine`/`FocusManager`/`AccessibilityTree`/`InputRouter`/`Painter`という共通・バックエンド非依存な基盤を持ち、各`elwindui-backend-*`クレートがこれを実装してネイティブAPIへ橋渡しする、という構成が全体を貫く設計原則である。
 
+### 5.7 ルーティングイベント(WinUI3スタイル)
+
+WinUI3の`RoutedEvent`に倣い、`#[routed]`属性(`#[two_way]`と同じ、`.elwind`のコールバック型フィールドに付与するアトリビュート)を付けたイベントは、発生元の要素から祖先へバブルする。対象は`on_click`のような入力系イベントに限られ、`TabView`の`on_select(usize)`のようなウィジェット固有の型付きペイロードを持つコールバックはルーティング対象外(既存の直接配線のまま)。
+
+```rust
+// crates/elwindui-builtins/src/shapes/button.elwind
+component Button inherits NativeComponent {
+    #[routed]
+    on_click: fn(),
+}
+```
+
+**木構造は`Box`ではなく`Rc`で、本物の親ポインタを持つ**。`Element`ツリー(`Rc<dyn UIElement>`)の各ノードは`UIElementBase.parent: RefCell<Option<Weak<dyn UIElement>>>`という親への弱参照を持ち、要素が木に組み込まれる瞬間(`elwindui_core::tree::new_element`)に必ず設定される。これにより`dispatch_routed`は要素からルートまで単純に`parent()`を辿るだけでバブルでき、静的な`.elwind`構造でも、`TabView`の`items_source`/`item_template`のように実行時に動的組み立てられた木でも同じように機能する(木を毎回探索し直す必要がない)。
+
+```rust
+// elwindui-core
+pub fn dispatch_routed<T: 'static>(target: &Rc<dyn UIElement>, name: &str, payload: &T, args: &RoutedEventArgs);
+pub fn hit_test(root: &Rc<dyn UIElement>, available: Size, at: Point) -> Option<Rc<dyn UIElement>>;
+```
+
+`hit_test`は座標から最深(最前面)の要素を1つ返すだけで、経路は返さない — バブルは戻り値から`dispatch_routed`するだけで済む(親ポインタが経路計算を代替する)。`RoutedEventArgs { handled: Cell<bool> }`にハンドラが`handled`を立てると、そこで伝播が止まる。
+
+ハンドラ本体は`UIElementBase.routed_handlers`(イベント名で引く型消去レジストリ、`Rc<RefCell<HashMap<&'static str, Vec<Box<dyn Any>>>>>`)に登録される。`Button`のようなネイティブウィジェットは、自分自身の構築時点(まだ`NativeControl`ラッパーが存在しない、木構築はboundary-up)に自分自身の`routed_handlers`へ登録し、`elwindui-codegen`の`into_node_if_needed`がラップ時に同じ`Rc`を共有する。実際のネイティブクリック配線(`NSButton`のtarget-action等)は、木とネイティブハンドルの両方が同時にスコープ内にある唯一の場所である各バックエンドの`relayout`(`TreeHostView`/`TreeHostPanel`)が担う。
+
+現時点の実装範囲は、AppKitバックエンドの`Button`のみ(検証済み)。トンネリング(`Preview*`)、`Canvas`上のポインタイベント、WinUI3バックエンドでの実配線は将来の課題として残る。
+
 ---
 
 ## 6. ライフサイクル

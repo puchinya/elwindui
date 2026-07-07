@@ -117,10 +117,10 @@ impl Window {
         Self { ns, content_host }
     }
 
-    /// Replaces the window's whole content tree — see `TreeHostView` for how a `Box<dyn
+    /// Replaces the window's whole content tree — see `TreeHostView` for how an `Rc<dyn
     /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
     /// gets reflected into real `NSView` subviews and `CAShapeLayer`/`CATextLayer` sublayers.
-    pub fn set_content(&self, content: Box<dyn UIElement>) {
+    pub fn set_content(&self, content: Rc<dyn UIElement>) {
         self.content_host.set_tree(content);
     }
 
@@ -172,7 +172,7 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
 }
 
-/// The single reusable "reflect a `Box<dyn elwindui_core::tree::UIElement>` into real `NSView`
+/// The single reusable "reflect an `Rc<dyn elwindui_core::tree::UIElement>` into real `NSView`
 /// subviews/`CAShapeLayer`/`CATextLayer` sublayers" host, replacing the old per-container
 /// `StackLayoutView` (`VerticalLayout`/`HorizontalLayout`) — since `VerticalLayout`/
 /// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` are now all just `UIElement` values with
@@ -180,7 +180,7 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
 /// container needs to accept arbitrary content: `Window`'s content view and `TabView`'s per-tab
 /// content area both are one of these.
 pub struct TreeHostIvars {
-    tree: RefCell<Option<Box<dyn UIElement>>>,
+    tree: RefCell<Option<Rc<dyn UIElement>>>,
 }
 
 define_class!(
@@ -246,7 +246,7 @@ impl TreeHostView {
     /// `TabView::insert_tab` hands a fresh host straight to its caller (`elwindui-builtins`'s
     /// wrapper), which calls this exactly once per tab to populate it — see that type's own doc
     /// comment for why each tab gets its own persistent host instead of sharing one.
-    pub fn set_tree(&self, tree: Box<dyn UIElement>) {
+    pub fn set_tree(&self, tree: Rc<dyn UIElement>) {
         for old in self.subviews().iter() {
             old.removeFromSuperview();
         }
@@ -265,10 +265,10 @@ impl TreeHostView {
         let available = Size { width: frame.size.width as f32, height: frame.size.height as f32 };
         let tree = self.ivars().tree.borrow();
         let Some(tree) = tree.as_ref() else { return };
-        let (natives, paints): (Vec<(AnyView, elwindui_core::layout::Rect)>, _) =
-            layout_tree(&**tree, available);
+        let (natives, paints): (Vec<(AnyView, elwindui_core::layout::Rect, Rc<dyn UIElement>)>, _) =
+            layout_tree(tree, available);
 
-        for (mut view, rect) in natives {
+        for (mut view, rect, node) in natives {
             let nsview = view.as_nsview();
             self.addSubview(&nsview);
             // Every native leaf here is positioned purely by manual `setFrame` (via `arrange`
@@ -281,6 +281,7 @@ impl TreeHostView {
             // constraint system so our manual frame actually sticks.
             nsview.setTranslatesAutoresizingMaskIntoConstraints(true);
             view.arrange(rect);
+            wire_routed_click(&view, &node);
         }
 
         self.setWantsLayer(true);
@@ -352,6 +353,34 @@ impl TreeHostView {
             }
         }
     }
+}
+
+/// Wires a native leaf's real event to WinUI3-style routed dispatch (docs/elwindui_spec.md 4章,
+/// `#[routed]`) — called from `relayout` for every native handle it places, since that's the one
+/// place both the live native handle *and* the `Rc<dyn UIElement>` tree node it corresponds to are
+/// simultaneously in scope. This is deliberately the only place that connects the two: a widget's
+/// own `#[routed]` handler (e.g. `Button`'s `on_click`) is registered onto the *widget's own*
+/// storage at its own construction time (see `elwindui-builtins::appkit::Button`'s doc comment on
+/// its `routed_handlers` field) — long before this `NativeControl` node exists — and
+/// `elwindui-codegen`'s `into_node_if_needed` shares that same storage into the node's
+/// `UIElementBase.routed_handlers` once it's built, so there's no need (and no way, from inside
+/// the widget's own click handler) to match the widget back to its node by identity — `relayout`
+/// already has the exact node reference in hand.
+///
+/// Always re-wires unconditionally on every `relayout` — simpler than tracking "already wired"
+/// per handle, at the cost of a small, harmless amount of redundant closure allocation on a
+/// resize/subview change (not on every keystroke — `relayout` isn't triggered by plain content
+/// resyncs like `set_text`, only by AppKit's own layout invalidation).
+fn wire_routed_click(view: &AnyView, node: &Rc<dyn UIElement>) {
+    let AnyView::Button(button) = view else { return };
+    if !node.base().routed_handlers.borrow().contains_key("on_click") {
+        return;
+    }
+    let node = Rc::clone(node);
+    button.set_on_click(Box::new(move || {
+        let args = elwindui_core::input::RoutedEventArgs::default();
+        elwindui_core::tree::dispatch_routed(&node, "on_click", &(), &args);
+    }));
 }
 
 #[derive(Clone)]

@@ -19,7 +19,7 @@ component TabView inherits NativeComponent {
     header_template: Option<fn(&std::rc::Rc<T>) -> String>,
 
     #[param]
-    item_template: Option<fn(&std::rc::Rc<T>) -> Box<dyn UIElement>>,
+    item_template: Option<fn(&std::rc::Rc<T>) -> std::rc::Rc<dyn UIElement>>,
 
     // Default closability for `items_source`-generated tabs (no literal `TabViewItem` to carry its
     // own `closable` in that mode). Ignored in static mode — each `TabViewItem` carries its own.

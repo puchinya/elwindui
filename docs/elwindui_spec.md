@@ -475,6 +475,27 @@ view Toolbar {
 おり、クロージャの外(通常の`view`式)で使っても解決されない — 付録Yの`TabView`/`TabViewItem`
 参照。
 
+### 共通属性:`#[routed]`(ルーティングイベント、WinUI3スタイル)
+
+コールバック型フィールド(`fn()`等)には`#[routed]`アトリビュートを付けられる。付けたイベントは
+発生元の要素から祖先へバブルする(WinUI3の`RoutedEvent`相当)。対象は`builtin::Button`の
+`on_click`のような入力系イベントに限られ、`TabView`の`on_select(usize)`のような
+ウィジェット固有の型付きペイロードを持つコールバックはルーティング対象外(従来通りの直接配線)。
+
+```rust
+component Button inherits NativeComponent {
+    #[routed]
+    on_click: fn(),
+}
+```
+
+ハンドラは要素自身の型消去レジストリ(`UIElementBase.routed_handlers`)にイベント名で登録され、
+配送(`elwindui_core::tree::dispatch_routed`)は発生元要素から`UIElementBase.parent`(本物の親
+ポインタ、要素が木に組み込まれる際に必ず設定される)を辿って祖先へバブルする。`RoutedEventArgs`の
+`handled`フラグが立てられると、そこで伝播が止まる。親ポインタ方式のため、`TabView`の
+`items_source`/`item_template`のように実行時に動的組み立てられた木でも、静的な`.elwind`構造と
+同様にバブルが機能する(付録H参照)。現時点の実装範囲はAppKitバックエンドの`Button`のみ。
+
 ### 特定要素への名前付きアクセス:`#[id(...)]`
 
 `let` 束縛は同一 `view` 関数内でのみ有効なため、外部(Rustロジック側)から後で要素を参照したい場合は `#[id(...)]` アトリビュートを付与する。

@@ -1,5 +1,7 @@
-use crate::focus::ElementId;
 use crate::painter::Point;
+use crate::tree::UIElement;
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerEventKind {
@@ -16,11 +18,26 @@ pub struct PointerEvent {
     pub handled: bool,
 }
 
-/// Modeled on WinUI3's routed events: hit-testing picks the deepest element, `Preview*` variants
-/// tunnel root-to-target, plain variants bubble target-to-root, and `handled` stops propagation.
-/// Unlike `LayoutNode`, this necessarily dispatches over `dyn Element` since the tree is
-/// heterogeneous by construction (see docs/elwindui_gui_framework_design.md §2.11).
+/// Passed to every handler `elwindui_core::tree::dispatch_routed` calls along a bubble path —
+/// pure propagation control, deliberately without a payload (`dispatch_routed`'s own `payload: &T`
+/// argument carries that, so this stays the same shape for every `#[routed]` field regardless of
+/// its own callback signature). A handler sets `handled` to stop further bubbling — WinUI3's
+/// `RoutedEventArgs.Handled`. See docs/elwindui_spec.md 4章 (`#[routed]`).
+#[derive(Debug, Default)]
+pub struct RoutedEventArgs {
+    pub handled: Cell<bool>,
+}
+
+/// Modeled on WinUI3's routed events: hit-testing picks the deepest element, and bubbling from it
+/// (or from any other known element, e.g. a native leaf's own click) follows real parent
+/// back-references (`UIElement::parent`, WinUI3's `_parent`) up to the root, stopping as soon as a
+/// handler sets `handled` — no tree search needed to bubble, and no dependence on the tree having
+/// been built by a single static `.elwind` traversal (a dynamically-assembled one, e.g. `TabView`'s
+/// `items_source`, works identically). `hit_test`/`dispatch` operate over `UIElement` (not the
+/// separate `Element`/`ElementId` used for `#[id(...)]` name resolution) since only `UIElement`
+/// carries the measured/arranged geometry (`measure_override`/`arrange_override`) hit-testing
+/// needs — see `elwindui_core::tree::hit_test`/`dispatch_routed`, which this trait wraps.
 pub trait InputRouter {
-    fn hit_test(&self, root: &dyn crate::Element, at: Point) -> Option<ElementId>;
-    fn dispatch(&mut self, root: &dyn crate::Element, event: PointerEvent);
+    fn hit_test(&self, root: &Rc<dyn UIElement>, at: Point) -> Option<Rc<dyn UIElement>>;
+    fn dispatch(&mut self, root: &Rc<dyn UIElement>, event: PointerEvent);
 }

@@ -12,7 +12,7 @@
 //!
 //! Written entirely without a Windows machine available in this environment to build or run it
 //! against. The `elwindui_backend_appkit`-mirroring *structure* (which types exist, what methods
-//! they expose, how `TreeHostPanel` reflects a `Box<dyn UIElement>`) is deliberate and should be
+//! they expose, how `TreeHostPanel` reflects an `Rc<dyn UIElement>`) is deliberate and should be
 //! sound;
 //! the *exact* WinRT/`windows-rs` call shapes (event-handler registration syntax, exact property/
 //! method names on `Microsoft.UI.Xaml` types, `build.rs`'s bindgen invocation) are written from
@@ -103,7 +103,7 @@ impl From<TabView> for AnyView {
     }
 }
 
-/// The single reusable "reflect a `Box<dyn elwindui_core::tree::UIElement>` into real XAML
+/// The single reusable "reflect an `Rc<dyn elwindui_core::tree::UIElement>` into real XAML
 /// elements" host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHostView`. A
 /// `Canvas` needs no custom `MeasureOverride`/`ArrangeOverride` subclass (unlike `TreeHostView`'s
 /// `NSView` subclass) since `Canvas`'s own built-in layout already just measures every child with
@@ -117,7 +117,7 @@ impl From<TabView> for AnyView {
 #[derive(Clone)]
 pub struct TreeHostPanel {
     canvas: Canvas,
-    tree: Rc<RefCell<Option<Box<dyn elwindui_core::tree::UIElement>>>>,
+    tree: Rc<RefCell<Option<Rc<dyn elwindui_core::tree::UIElement>>>>,
 }
 
 impl TreeHostPanel {
@@ -145,9 +145,8 @@ impl TreeHostPanel {
     /// Replaces this host's entire content, discarding whatever native children were there before
     /// — a full swap rather than a diff, matching `TabView`'s wholesale content swap between tabs
     /// and `Window::set_content` only ever being called once (see `TreeHostView::set_tree`'s doc
-    /// comment on the AppKit side for the same reasoning; a `Box<dyn UIElement>` isn't `Clone`
-    /// either way).
-    pub fn set_tree(&self, tree: Box<dyn elwindui_core::tree::UIElement>) {
+    /// comment on the AppKit side for the same reasoning).
+    pub fn set_tree(&self, tree: Rc<dyn elwindui_core::tree::UIElement>) {
         if let Ok(children) = self.canvas.Children() {
             let _ = children.Clear();
         }
@@ -155,7 +154,7 @@ impl TreeHostPanel {
         Self::relayout_static(&self.canvas, &self.tree);
     }
 
-    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Box<dyn elwindui_core::tree::UIElement>>>>) {
+    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::tree::UIElement>>>>) {
         use elwindui_core::layout::Size as LSize;
 
         let width = canvas.ActualWidth().unwrap_or(0.0) as f32;
@@ -164,8 +163,8 @@ impl TreeHostPanel {
 
         let tree_ref = tree.borrow();
         let Some(tree) = tree_ref.as_ref() else { return };
-        let (natives, paints): (Vec<(AnyView, elwindui_core::layout::Rect)>, _) =
-            elwindui_core::tree::layout_tree(&**tree, available);
+        let (natives, paints): (Vec<(AnyView, elwindui_core::layout::Rect, Rc<dyn elwindui_core::tree::UIElement>)>, _) =
+            elwindui_core::tree::layout_tree(tree, available);
 
         let Ok(children) = canvas.Children() else { return };
 
@@ -223,7 +222,12 @@ impl TreeHostPanel {
             }
         }
 
-        for (mut view, rect) in natives {
+        // The third element (each native's own `Rc<dyn UIElement>` tree node) is what AppKit's
+        // `TreeHostView::relayout` uses to wire routed-event dispatch (docs/elwindui_spec.md 4章,
+        // `#[routed]`) — not done here, since this WinUI3 backend is spec-only/best-effort and
+        // unverified (see this crate's own top doc comment); real click wiring is AppKit-only for
+        // now.
+        for (mut view, rect, _node) in natives {
             view.arrange(elwindui_core::layout::Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
             let _ = children.Append(&view.as_element());
         }
@@ -279,10 +283,10 @@ impl Window {
         Self { xaml, content_host }
     }
 
-    /// Replaces the window's whole content tree — see `TreeHostPanel` for how a `Box<dyn
+    /// Replaces the window's whole content tree — see `TreeHostPanel` for how an `Rc<dyn
     /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
     /// gets reflected into real XAML elements.
-    pub fn set_content(&self, content: Box<dyn elwindui_core::tree::UIElement>) {
+    pub fn set_content(&self, content: Rc<dyn elwindui_core::tree::UIElement>) {
         self.content_host.set_tree(content);
     }
 
@@ -388,7 +392,7 @@ impl Button {
 /// which has no built-in equivalent — `elwindui-backend-appkit`'s `TabStrip`/`TabChip` hand-roll
 /// one from `Button`s), so this wraps it directly instead of assembling a strip from scratch. Each
 /// tab's `TabViewItem.Content` is a `TreeHostPanel` (see that type) holding that tab's
-/// `Box<dyn UIElement>` — `elwindui-builtins`'s generic wrapper (the `Rc<dyn Any>`-erased per-item type,
+/// `Rc<dyn UIElement>` — `elwindui-builtins`'s generic wrapper (the `Rc<dyn Any>`-erased per-item type,
 /// mirroring `elwindui-builtins::appkit::tab_view`) owns the tab list and calls the methods below;
 /// this type only knows about "N tabs, each with a title and a content host", the same division
 /// AppKit's `TabView` keeps.

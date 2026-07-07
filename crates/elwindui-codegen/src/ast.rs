@@ -85,6 +85,13 @@ pub enum Attr {
     /// `#[command(can_execute: expr)]` / `#[command(async)]` / `#[command(async, can_execute: expr)]`.
     /// See 付録O.3, 付録P.4.
     CommandMeta { is_async: bool, can_execute: Option<syn::Expr> },
+    /// `#[routed]`: marks a callback-typed field (`fn()`, `fn(usize)`, ...) as a WinUI3-style
+    /// routed event — dispatched via `elwindui_core::tree::dispatch_routed` (bubbling from the
+    /// element it's declared on up through ancestors' own handlers for the same field name,
+    /// stopping at the first one that sets `RoutedEventArgs::handled`) instead of being called
+    /// directly. Not tied to any specific field name (`on_click` is just the first user of it) —
+    /// see docs/elwindui_spec.md 4章.
+    Routed,
 }
 
 /// A `component`/`viewmodel` field. See docs/elwindui_spec.md §3, 付録O.2.

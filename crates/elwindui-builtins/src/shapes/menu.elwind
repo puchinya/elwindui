@@ -1,4 +1,4 @@
-component Menu inherits NativeComponent {
+component Menu inherits NativeControl {
     #[param]
     children: Vec<MenuItem>,
 }

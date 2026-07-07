@@ -1,4 +1,4 @@
-component TextArea inherits NativeComponent {
+component TextArea inherits NativeControl {
     #[param]
     #[two_way]
     text: String,

@@ -483,7 +483,7 @@ view Toolbar {
 ウィジェット固有の型付きペイロードを持つコールバックはルーティング対象外(従来通りの直接配線)。
 
 ```rust
-component Button inherits NativeComponent {
+component Button inherits NativeControl {
     #[routed]
     on_click: fn(),
 }

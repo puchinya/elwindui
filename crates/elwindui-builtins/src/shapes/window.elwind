@@ -1,4 +1,4 @@
-component Window inherits NativeComponent {
+component Window inherits NativeControl {
     #[param]
     title: String,
 

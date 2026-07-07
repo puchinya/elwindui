@@ -11,7 +11,8 @@
 全ての`builtin::`部品は、実行時には`elwindui_core::tree::UIElement`トレイト(付録H)を実装する
 Rust値としてコード生成器が組み立てる。この階層はDSL側の`inherits`(付録H.2、カテゴリタグに過ぎず
 Rustの実装継承ではない)とは別物で、「どの具象構造体として組み立てられるか」を表す——`.elwind`側で
-`inherits NativeComponent`を宣言する部品はすべて`NativeControl<H>`になり、専用のネイティブ実体を
+`inherits NativeControl`を宣言する部品(DSLのカテゴリタグ、ジェネリック引数を持たない)はすべて
+実ハンドル型`H`でジェネリックなRust構造体`NativeControl<H>`になり、専用のネイティブ実体を
 持たない仮想ビルトインは`Stack`/`Shape`/`TextBlock`/`Control`のいずれかになる。
 
 `elwindui_core::element::Element`トレイト(`id()`/`children()`のみ、§13)は`find_by_id`/`find_all`用の
@@ -24,7 +25,7 @@ UIElement (trait, elwindui-core::tree)
  │  base()/margin()/parent()/children()/measure_override()/arrange_override()/paint()
  │
  ├─ NativeControl<H>   ネイティブハンドル(H)を持つ葉ノード。常にleaf(children()は空)。
- │                      `.elwind`側で`inherits NativeComponent`を宣言する部品はすべてここに属する
+ │                      `.elwind`側で`inherits NativeControl`(DSLタグ)を宣言する部品はすべてここに属する
  │   ├─ Window                    (付録F.1)
  │   ├─ Button                    (付録F.6, #[routed] on_click)
  │   ├─ TextArea                  (付録F.4, #[two_way] text)

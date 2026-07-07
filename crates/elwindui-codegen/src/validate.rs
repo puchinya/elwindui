@@ -413,7 +413,7 @@ fn validate_bind_path(
 }
 
 /// Checks `component X inherits Base { .. }` (docs/elwindui_spec.md 付録H.2): `Base` must resolve;
-/// if it's the `NativeComponent` marker, `X`'s structurally-inferred `is_native` (see
+/// if it's the `NativeControl` marker, `X`'s structurally-inferred `is_native` (see
 /// `codegen::build_symbol_table`'s `resolve_is_native`) must actually be `true` — a consistency
 /// check, since `inherits` is a documentation/contract annotation here, not what *determines*
 /// nativeness. Otherwise (e.g. `RoundedPanel inherits Rectangle`), `X` must have a paired `view`
@@ -434,12 +434,12 @@ fn validate_inherits(
         return;
     }
 
-    if base == "NativeComponent" {
+    if base == "NativeControl" {
         let is_native = table.resolve(from, &c.name).is_some_and(|info| info.is_native);
         if !is_native {
             errors.push(format!(
-                "{}: inherits `NativeComponent`, but its `view` root isn't itself native (or no \
-                 `view` exists) — `NativeComponent` is only a category tag for genuinely \
+                "{}: inherits `NativeControl`, but its `view` root isn't itself native (or no \
+                 `view` exists) — `NativeControl` is only a category tag for genuinely \
                  native-backed components",
                 c.name
             ));
@@ -454,7 +454,7 @@ fn validate_inherits(
     match view {
         None => errors.push(format!(
             "{}: inherits `{base}`, but has no `view {}` — a component inheriting a \
-             non-`NativeComponent` base must have its view's root element construct `{base}`",
+             non-`NativeControl` base must have its view's root element construct `{base}`",
             c.name, c.name
         )),
         Some(v) if v.root.type_path != base => errors.push(format!(
@@ -806,7 +806,7 @@ view Window11 {
     }
 
     /// `inherits`'s shape-composition use case (docs/elwindui_spec.md 付録H.2): a component
-    /// inheriting a non-`NativeComponent` base must have its `view`'s root element literally
+    /// inheriting a non-`NativeControl` base must have its `view`'s root element literally
     /// construct that base.
     #[test]
     fn accepts_component_inheriting_a_shape_primitive_with_matching_view_root() {
@@ -856,13 +856,13 @@ view Foo {
         assert!(errs.iter().any(|e| e.contains("not a known component/builtin")), "errors: {errs:?}");
     }
 
-    /// `inherits NativeComponent` is a pure category tag checked for *consistency* against the
+    /// `inherits NativeControl` is a pure category tag checked for *consistency* against the
     /// structurally-inferred `is_native` (see `codegen::build_symbol_table`'s `resolve_is_native`)
     /// — claiming it while the `view` root is actually virtual is an error.
     #[test]
-    fn rejects_inherits_native_component_when_view_root_is_virtual() {
+    fn rejects_inherits_native_control_when_view_root_is_virtual() {
         let src = r#"
-component Foo inherits NativeComponent {
+component Foo inherits NativeControl {
 }
 
 view Foo {
@@ -871,13 +871,13 @@ view Foo {
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("NativeComponent")), "errors: {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("NativeControl")), "errors: {errs:?}");
     }
 
     #[test]
-    fn accepts_inherits_native_component_when_view_root_is_native() {
+    fn accepts_inherits_native_control_when_view_root_is_native() {
         let src = r#"
-component Foo inherits NativeComponent {
+component Foo inherits NativeControl {
 }
 
 view Foo {

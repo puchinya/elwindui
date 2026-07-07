@@ -2,7 +2,7 @@
 //! example. See docs/elwindui_spec.md 付録A, 付録C, docs/elwindui_gui_framework_design.md §3.
 //!
 //! Only genuinely native leaf widgets (`Window`/`TextArea`/`Button`/`MenuBar`/`TabView`, the
-//! "NativeComponent" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
+//! "NativeControl" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
 //! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have none: they're
 //! `elwindui_core::tree::UIElement` values that `elwindui-codegen` builds directly, reflected into
 //! real `NSView`s/`CAShapeLayer`s/`CATextLayer`s by `TreeHostView` below (used by both `Window`'s

@@ -403,7 +403,7 @@ WinUI3の`RoutedEvent`に倣い、`#[routed]`属性(`#[two_way]`と同じ、`.el
 
 ```rust
 // crates/elwindui-builtins/src/shapes/button.elwind
-component Button inherits NativeComponent {
+component Button inherits NativeControl {
     #[routed]
     on_click: fn(),
 }

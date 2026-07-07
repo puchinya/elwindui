@@ -61,12 +61,12 @@ pub struct TypeInfo {
     /// `.subscribe(...)` call against a plain `component` type would be a compile error.
     pub is_viewmodel: bool,
     /// Whether this type is a genuine native-backed leaf (`Window`/`Button`/`TextArea`/`Text`/
-    /// `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView` — the "NativeComponent" family) as
+    /// `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView` — the "NativeControl" family) as
     /// opposed to a purely elwindui-side virtual node (`VerticalLayout`/`HorizontalLayout`/
     /// `Rectangle`/`Ellipse`, or a user-defined `component`+`view` pair whose
     /// `view` root is itself virtual, e.g. `examples/notepad`'s `DocumentView`). This is a
     /// *structural* property computed recursively from the `view`'s root element type — see
-    /// `build_symbol_table`'s `resolve_is_native` — not merely whether `inherits NativeComponent`
+    /// `build_symbol_table`'s `resolve_is_native` — not merely whether `inherits NativeControl`
     /// was written (that's checked for *consistency* against this in `validate.rs`, but a plain
     /// `component X { .. } view X { VerticalLayout { .. } }` with no `inherits` at all is still
     /// correctly inferred as virtual). See docs/elwindui_spec.md 付録H.2.
@@ -232,8 +232,8 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
 /// own (recursively resolved) nativeness — `inherits` never overrides this for a view-having
 /// component, it's only checked for consistency against it (`validate::validate_inherits`).
 /// A component with **no** `view` of its own (a hand-written builtin, declared shape-only — see
-/// `native_component.elwind`/`BUILTIN_SHAPE_SOURCES`) has no root to recurse through, so it falls
-/// back to its explicit `inherits NativeComponent` declaration: present → native (`Window`/
+/// `native_control.elwind`/`BUILTIN_SHAPE_SOURCES`) has no root to recurse through, so it falls
+/// back to its explicit `inherits NativeControl` declaration: present → native (`Window`/
 /// `Button`/...); absent → virtual (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`).
 fn resolve_is_native(
     key: &(Vec<String>, String),
@@ -259,7 +259,7 @@ fn resolve_is_native(
                     None => false,
                 }
             } else {
-                base.as_deref() == Some("NativeComponent")
+                base.as_deref() == Some("NativeControl")
             }
         }
     };

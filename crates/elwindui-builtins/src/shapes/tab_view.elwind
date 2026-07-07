@@ -1,4 +1,4 @@
-component TabView inherits NativeComponent {
+component TabView inherits NativeControl {
     // Static mode: tabs written literally as nested `TabViewItem { .. }` children (WinUI3's XAML
     // child-declaration style). Mutually exclusive with `items_source` below — see
     // `elwindui-codegen::validate::check_tab_view_mode`.

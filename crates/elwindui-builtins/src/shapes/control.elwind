@@ -1,0 +1,6 @@
+component Control {
+    #[param]
+    children: Vec<AnyView>,
+    #[param]
+    padding: Option<f32>,
+}

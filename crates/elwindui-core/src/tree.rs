@@ -621,6 +621,19 @@ mod tests {
     }
 
     #[test]
+    fn control_padding_shrinks_the_slot_its_children_are_arranged_into() {
+        let tree: Rc<dyn UIElement> = new_element(Control {
+            base: UIElementBase::default(),
+            padding: 10.0,
+            content_horizontal_alignment: HorizontalAlignment::Stretch,
+            content_vertical_alignment: VerticalAlignment::Stretch,
+            children: vec![native("a", size(10.0, 20.0))],
+        });
+        let (natives, _) = layout_tree::<FakeHandle>(&tree, size(100.0, 100.0));
+        assert_eq!(natives[0].1, Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 });
+    }
+
+    #[test]
     fn empty_virtual_node_has_zero_size_and_no_leaves() {
         let tree = stack(Orientation::Vertical, 0.0, vec![]);
         let (natives, paints) = layout_tree::<FakeHandle>(&tree, size(100.0, 100.0));

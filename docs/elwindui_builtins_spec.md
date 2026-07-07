@@ -50,8 +50,16 @@ UIElement (trait, elwindui-core::tree)
  │                       (付録F.3)
  │
  └─ Control             padding付きの汎用複数子要素コンポジション(WinUI3のControl相当)
+     ├─ builtin::Control           (付録F.9, `.elwind`ビルトインとして実装済み)
+     ├─ builtin::ContentControl    (付録F.10, `inherits Control`で合成、単一子要素、実装済み)
      └─ Canvas                    (付録G, Painterで自己描画する内容を持つ ※.elwind未実装・仕様のみ)
 ```
+
+`Control`自体は複数子要素(`children: Vec<AnyView>`)を受け付ける`.elwind`ビルトインとして実装済み。
+`ContentControl`(WinUI3の実際の`ContentControl`——単一の`Content`プロパティを持つ、`Button`/`Window`の
+`Content`の実際の基底)は、`elwindui_core::tree`に別のRust型を増やすのではなく、**DSLの`inherits`
+(シェイプ合成、付録H.2の`RoundedPanel inherits Rectangle`と同じパターン)で`Control`を実際に継承**して
+実現している(付録F.10参照)。
 
 「※.elwind未実装・仕様のみ」と付記した部品は、`crates/elwindui-builtins/src/shapes/`配下に対応する
 `.elwind`ファイルがまだ存在せず、本仕様書に記載された設計のみが正で、コード生成・バックエンド実装は
@@ -319,6 +327,70 @@ NotepadWindow
 | `Dropdown` / `Option` | `Vec<Option>`という複合型プロパティ、backendごとの選択状態同期 |
 
 これらの標準ビルトイン実装は、通常はコード生成器(`elwindui-codegen`)が内部に持ち利用者が直接編集する必要はないが、`#[overrides(builtin::X)]`(付録E)を使うことで、プロジェクト固有の要件に応じて安全に差し替えられる。
+
+## F.9 `builtin::Control`
+
+WinUI3の`Control`(複数パーツからなる汎用コンポジション)に相当する、`padding`付きの複数子要素
+コンテナ。`VerticalLayout`/`Rectangle`と同じ「専用のネイティブ実体を持たない仮想ビルトイン」で、
+`elwindui-codegen`が使用箇所ごとに`elwindui_core::tree::Control`を直接組み立てる:
+
+```
+component Control {
+    #[param]
+    children: Vec<AnyView>,
+    #[param]
+    padding: Option<f32>,
+}
+```
+
+`content_horizontal_alignment`/`content_vertical_alignment`(`elwindui_core::tree::Control`に既存の
+フィールド)は、他の属性(`margin`/`horizontal_alignment`等、付録H.2)と同じ「enumバリアントの
+リテラル構文がまだ存在しない」という制約により、現時点では`.elwind`側の属性として設定できず
+`Default`の`Stretch`のまま据え置かれている。
+
+## F.10 `builtin::ContentControl`
+
+WinUI3の実際の`ContentControl`(単一の`Content`プロパティを持つ、`Button`/`Window`の`Content`の
+実際の基底——`Control`の複数子要素版とは区別される)に相当する。`elwindui_core::tree`に別のRust型を
+増やすのではなく、**DSLの`inherits`によるシェイプ合成**(付録H.2、`RoundedPanel inherits Rectangle`
+と同じパターン)で`Control`を実際に継承し、その`view`が単一の子要素だけを`Control`へ転送する:
+
+```
+component ContentControl inherits Control {
+    #[param]
+    content: std::rc::Rc<dyn UIElement>,
+    #[param]
+    padding: Option<f32>,
+}
+
+view ContentControl {
+    Control {
+        padding: padding,
+        content
+    }
+}
+```
+
+`ContentControl`は(`Rectangle`/`Control`のような仮想ビルトインではなく)`view`を持つ通常の
+`component`+`view`ペアとしてコード生成される——`elwindui-codegen`が実体のある`pub struct
+ContentControl`を生成し、そのコンストラクタは`Control`に単一の子要素として`content`を転送する。
+
+このパターンを実現するにあたり、`elwindui-codegen`に2つの汎用機能を追加した:
+
+- **`#[param]`フィールドを`view`内で裸の子要素として転送する経路**——従来`ChildEntry::Ref`(`{}`内の
+  裸の識別子)は`let`束縛のみを解決していたが、`dyn UIElement`型の`#[param]`フィールドも
+  (`PASSTHROUGH_NODE`という内部センチネル型経由で)解決できるようにした。転送された値は既に
+  構築済みの`Rc<dyn UIElement>`であり、`SymbolTable`で解決すべき具象コンポーネント型を持たないため。
+- **全`#[param]`フィールドへの名前付きアクセサの自動生成**——従来は`#[id(...)]`が付いた`let`束縛
+  だけがアクセサを持てたが、`content()`/`padding()`のように、コンポーネント自身のプロパティにも
+  コードから直接アクセスできるよう一般化した。
+
+## 付録F 補足: `Option<T>`型の自前フィールドをそのまま転送する場合の注意
+
+`ContentControl`の`padding: Option<f32>`のように、既に`Option<T>`型の自分のフィールドを
+`Control { padding: padding }`のようにそのまま転送する場合、`emit_virtual_construction`の
+`get_attr`/`get_attr_string`はこれを検出し、二重に`Some(..)`で包まない(`Option<Option<T>>`に
+なることを防ぐ)。一方、`padding: 8.0`のようなリテラル値は従来通り`Some(8.0)`に包まれる。
 
 ---
 

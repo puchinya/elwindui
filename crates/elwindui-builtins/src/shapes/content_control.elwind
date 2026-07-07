@@ -1,0 +1,22 @@
+// WinUI3's real `ContentControl` (single `Content`, as opposed to `Control`'s N-children form) —
+// composed via `inherits` (docs/elwindui_spec.md 付録H.2's shape-composition use case), not a
+// separate elwindui_core::tree type: its `view` root literally constructs a `Control` with exactly
+// one child. Unlike `Window`/`TabViewItem` (whose own `dyn UIElement`-typed fields never reach
+// `syn::parse_str` since neither has a `view`), this component's generated code embeds `content`'s
+// declared type verbatim in `new(..)`'s signature and the generated `content()` accessor — so any
+// project that ends up compiling this generated code (via its own build.rs, the same way it
+// already needs `use elwindui_builtins::Window;` etc.) must itself have
+// `use elwindui_core::tree::UIElement;` in scope.
+component ContentControl inherits Control {
+    #[param]
+    content: std::rc::Rc<dyn UIElement>,
+    #[param]
+    padding: Option<f32>,
+}
+
+view ContentControl {
+    Control {
+        padding: padding,
+        content
+    }
+}

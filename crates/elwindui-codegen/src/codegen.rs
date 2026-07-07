@@ -969,11 +969,17 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // NotepadViewModel`, or `DocumentView`'s `#[param] #[inject] doc: Rc<DocumentViewModel>`.
     // Bind-sugar fields (`content: String = bind!(doc.content, TwoWay)`) need no storage of their
     // own here — `ctx.binds` already resolves them straight through wherever referenced below.
-    let own_fields: std::collections::HashSet<String> = component
+    // Maps to each field's own declared type string (not just its name) so a virtual builtin's
+    // `get_attr`/`get_attr_string` (`emit_virtual_construction`) can tell "an already-`Option<T>`
+    // own field forwarded as-is" (e.g. `ContentControl`'s `padding: padding` forwarded into
+    // `Control { padding: padding }`) apart from "a plain value that itself needs `Some(..)`
+    // wrapping" (e.g. a literal `padding: 8.0`) — forwarding the former through the latter's
+    // wrapping convention would double-wrap into `Option<Option<T>>`.
+    let own_fields: std::collections::HashMap<String, String> = component
         .fields
         .iter()
         .filter(|f| f.initializer.is_none())
-        .map(|f| f.name.clone())
+        .map(|f| (f.name.clone(), f.ty.clone()))
         .collect();
     let ctx = ViewCtx { binds, closure_param: None, own_fields };
 
@@ -1024,6 +1030,18 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // element already does (`emit_named_accessors` reads `self.<binding>` later), even though it
     // isn't the view's actual root.
     let mut lets_map: HashMap<String, (syn::Ident, String)> = HashMap::new();
+    // A `dyn UIElement`-typed `#[param]` field (e.g. `ContentControl`'s `content`) is already a
+    // fully-constructed `Rc<dyn UIElement>` value by the time it reaches this view's body, with no
+    // component type name of its own left to resolve — unlike a literal nested element or a `let`,
+    // it can't be re-planned via `plan_element`. Seeding `lets_map` with it here lets a bare
+    // reference to it in `{}` (e.g. `ContentControl`'s `Control { content }`) resolve via the
+    // ordinary `ChildEntry::Ref` path, tagged with `PASSTHROUGH_NODE` so `into_node_if_needed` uses
+    // it as-is instead of trying to resolve it via `SymbolTable`.
+    for field in &component.fields {
+        if field.initializer.is_none() && field.ty.contains("dyn UIElement") {
+            lets_map.insert(field.name.clone(), (format_ident!("{}", field.name), PASSTHROUGH_NODE.to_string()));
+        }
+    }
     for let_binding in &view.lets {
         let resolved = plan_element(&let_binding.element, &ctx, from, table, &mut plan, let_binding.id.is_some(), &lets_map);
         if let_binding.id.is_some() {
@@ -1044,6 +1062,20 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // time, so a plain accessor is strictly sufficient — see docs/elwindui_spec.md §13 and
     // 付録O.5's avoid-type-erasure convention).
     let mut named_accessors = TokenStream::new();
+
+    // Every `#[param]` field gets a public `pub fn <name>(&self) -> <Type>` accessor, not just
+    // `#[id(...)]`-tagged lets above — code outside the generated view (and DSL-composed wrappers
+    // like `ContentControl`, whose `content`/`padding` need to be readable the same way any other
+    // component's properties are) needs to reach a component's own properties, not just its named
+    // child elements. Each field is already stored verbatim on `Self` via `new`'s `Self {
+    // #(#param_names,)* .. }` shorthand below, so this only adds the accessor, not new storage.
+    for (name, ty) in param_names.iter().zip(param_types.iter()) {
+        named_accessors.extend(quote! {
+            pub fn #name(&self) -> #ty {
+                self.#name.clone()
+            }
+        });
+    }
 
     for node in &plan {
         emit_construction(node, &ctx, from, table, &mut construct_stmts);
@@ -1199,13 +1231,16 @@ struct ViewCtx {
     /// `resolve_bind`/`emit_path_get`'s `vm`-field machinery. `None` everywhere else.
     closure_param: Option<String>,
     /// This component's own `#[param]`-shaped fields (no initializer — the same set `generate_view`
-    /// turns into `new`'s positional arguments / raw struct fields, see `param_names`). A bare
-    /// 1-segment reference to one of these (e.g. `RoundedPanel`'s own `label` used as
-    /// `TextBlock { text: label }`, not `vm.something`) is the field/constructor-parameter itself, not
-    /// an owner to call a getter on — checked *after* `binds` in `emit_expr`, since a bind-sugar
-    /// field (`content: String = bind!(doc.content, TwoWay)`) is also technically one of this
-    /// component's own fields but must still resolve through `doc.content()`, not a raw access.
-    own_fields: std::collections::HashSet<String>,
+    /// turns into `new`'s positional arguments / raw struct fields, see `param_names`), mapped to
+    /// each field's own declared type string. A bare 1-segment reference to one of these (e.g.
+    /// `RoundedPanel`'s own `label` used as `TextBlock { text: label }`, not `vm.something`) is the
+    /// field/constructor-parameter itself, not an owner to call a getter on — checked *after*
+    /// `binds` in `emit_expr`, since a bind-sugar field (`content: String = bind!(doc.content,
+    /// TwoWay)`) is also technically one of this component's own fields but must still resolve
+    /// through `doc.content()`, not a raw access. The type string additionally lets
+    /// `emit_virtual_construction`'s `get_attr`/`get_attr_string` recognize an already-`Option<T>`
+    /// own field forwarded as-is, so it isn't double-wrapped in another `Some(..)`.
+    own_fields: std::collections::HashMap<String, String>,
 }
 
 impl ViewCtx {
@@ -1382,13 +1417,25 @@ fn into_any_view_if_needed(base: TokenStream, ty: &str) -> TokenStream {
 }
 
 /// Whether `type_path` names one of the hand-written *virtual* builtins (`VerticalLayout`/
-/// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`) — these have no backend Rust struct or
-/// `Type::new(args)` constructor at all; `emit_construction` builds a `Box<dyn
+/// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`/`Control`) — these have no backend Rust
+/// struct or `Type::new(args)` constructor at all; `emit_construction` builds a `Box<dyn
 /// elwindui_core::tree::UIElement>` value for them directly (see its top-of-function check).
+/// `ContentControl` (docs/elwindui_builtins_spec.md 付録F.10) is deliberately *not* here — it's an
+/// ordinary `component`+`view` pair whose view root literally constructs `Control` (the
+/// `inherits`-based shape-composition pattern, docs/elwindui_spec.md 付録H.2, same as
+/// `RoundedPanel inherits Rectangle`), so it goes through the normal `generate_view`/
+/// `emit_construction` path and gets a real generated struct with real accessors.
 /// See docs/elwindui_spec.md 付録H.2.
 fn is_virtual_builtin(type_path: &str) -> bool {
-    matches!(type_path, "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse" | "TextBlock")
+    matches!(type_path, "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse" | "TextBlock" | "Control")
 }
+
+/// Sentinel `source_type_path` passed to `into_node_if_needed` for a value that is *already* an
+/// `Rc<dyn UIElement>` with no associated component type name to resolve (a `#[param]` field of
+/// that type, forwarded as a bare child in the component's own `view` — e.g. `ContentControl`'s
+/// `content` forwarded into `Control { content }`). `into_node_if_needed` treats it as an
+/// unconditional pass-through instead of trying (and failing) to resolve it via `SymbolTable`.
+const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 
 /// Converts a constructed child binding into `Rc<dyn elwindui_core::tree::UIElement>` for a slot
 /// that wants one (`Window`'s `content`, `TabView`'s `item_template` return, or a virtual
@@ -1408,6 +1455,12 @@ fn is_virtual_builtin(type_path: &str) -> bool {
 ///   is shared from the widget's own storage when it has any `#[routed]` fields), reusing
 ///   `into_any_view_if_needed` for the inner handle conversion.
 fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module, table: &SymbolTable) -> TokenStream {
+    if source_type_path == PASSTHROUGH_NODE {
+        // `.clone()` (an `Rc` refcount bump), not a bare move — the same param is also stored
+        // verbatim on `Self` (`generate_view`'s `Self { #(#param_names,)* .. }`), so the original
+        // binding must stay valid for that later use.
+        return quote! { #base.clone() };
+    }
     let info = table.resolve(from, source_type_path);
     let is_native = info.is_some_and(|i| i.is_native);
     if is_native {
@@ -1579,16 +1632,31 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
 
 /// Builds an `Rc<dyn elwindui_core::tree::UIElement>` value (via `elwindui_core::tree::new_element`)
 /// for a hand-written virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/
-/// `TextBlock` — see `is_virtual_builtin`) directly from its own attributes, instead of calling a
-/// (nonexistent) `Type::new(args)`.
+/// `TextBlock`/`Control` — see `is_virtual_builtin`) directly from its own attributes, instead of
+/// calling a (nonexistent) `Type::new(args)`.
 fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
     let binding = &node.binding;
 
+    // Whether `expr` is a bare 1-segment reference to one of *this* component's own `#[param]`
+    // fields that's already `Option<..>`-typed (e.g. `ContentControl`'s own `padding: Option<f32>`
+    // forwarded as `Control { padding: padding }`) — as opposed to a plain value (a literal, a
+    // required field, a `vm.field`-shaped bind path, ...) that still needs `Some(..)` wrapping to
+    // match the `Option<T>` shape `get_attr`/`get_attr_string` produce. Forwarding an already-
+    // `Option` value through that same wrapping would double-wrap it into `Option<Option<T>>`.
+    let is_own_option_field = |expr: &ViewExpr| match expr {
+        ViewExpr::Path(segments) => match segments.as_slice() {
+            [only] => ctx.own_fields.get(only).is_some_and(|ty| ty.starts_with("Option<")),
+            _ => false,
+        },
+        _ => false,
+    };
     // An omitted attribute becomes `None` (matching every other `Option<T>` `#[param]` — see
     // `emit_construction`'s `None if is_option` arm); a supplied one is wrapped in `Some(..)` so
-    // both sides of the `.unwrap_or(..)` calls below agree on `Option<T>`.
+    // both sides of the `.unwrap_or(..)` calls below agree on `Option<T>` — unless it's already an
+    // `Option<T>` own-field forwarded as-is (`is_own_option_field`), which is used verbatim.
     let get_attr = |name: &str| -> TokenStream {
         match find_attr(node, name) {
+            Some(expr) if is_own_option_field(expr) => emit_expr(expr, ctx, &EmitMode::Construction),
             Some(expr) => {
                 let value = emit_expr(expr, ctx, &EmitMode::Construction);
                 quote! { Some(#value) }
@@ -1604,6 +1672,7 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
     // `.to_string()` accepts either uniformly.
     let get_attr_string = |name: &str| -> TokenStream {
         match find_attr(node, name) {
+            Some(expr) if is_own_option_field(expr) => emit_expr(expr, ctx, &EmitMode::Construction),
             Some(expr) => {
                 let value = emit_expr(expr, ctx, &EmitMode::Construction);
                 quote! { Some((#value).to_string()) }
@@ -1709,6 +1778,18 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
                     base: #base,
                     content: (#text).to_string(),
                     color: #color,
+                }
+            }
+        }
+        "Control" => {
+            let padding = get_attr("padding");
+            quote! {
+                elwindui_core::tree::Control {
+                    base: #base,
+                    padding: (#padding).unwrap_or(0.0),
+                    content_horizontal_alignment: elwindui_core::layout::HorizontalAlignment::Stretch,
+                    content_vertical_alignment: elwindui_core::layout::VerticalAlignment::Stretch,
+                    children: vec![ #(#children),* ],
                 }
             }
         }
@@ -1944,7 +2025,7 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                 // `resolve_bind` below would otherwise rewrite it), since a bind-sugar field
                 // (`content: String = bind!(doc.content, TwoWay)`) is also one of `own_fields` but
                 // must still resolve through its bound owner instead of a raw field access.
-                if ctx.own_fields.contains(only) && !ctx.binds.contains_key(only) {
+                if ctx.own_fields.contains_key(only) && !ctx.binds.contains_key(only) {
                     return mode.owner_tokens(only);
                 }
             }
@@ -2476,5 +2557,46 @@ viewmodel FileViewModel {
         assert!(generated_str.contains("async"));
         assert!(generated_str.contains("elwindui_i18n :: t"));
         assert!(!generated_str.contains("t !"), "t!(...) should have been rewritten, not left as a macro call");
+    }
+
+    /// `ContentControl inherits Control` (docs/elwindui_builtins_spec.md 付録F.10) — the
+    /// `#[param] content` field is forwarded as a bare child into `Control`'s own children via the
+    /// `PASSTHROUGH_NODE`-tagged `lets_map` seeding in `generate_view`, and every `#[param]` field
+    /// (not just `#[id(...)]` lets) gets a generated named accessor.
+    #[test]
+    fn generates_valid_rust_for_content_control() {
+        let src = r#"
+component Foo {
+}
+
+view Foo {
+    ContentControl {
+        padding: 8.0
+        TextBlock { text: "hi" }
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("content_control", &generated);
+
+        let generated_str = generated.to_string();
+        assert!(generated_str.contains("ContentControl :: new"));
+
+        // `ContentControl`'s own generated code (produced when `builtin_modules()` is fed through
+        // `generate_module` directly, mirroring how a real consumer's `content_control.elwind`
+        // would be generated) forwards `content` into `Control`'s children and exposes both
+        // `#[param]` fields as public accessors.
+        let content_control_module = crate::builtin_modules()
+            .into_iter()
+            .find(|m| m.items.iter().any(|i| matches!(i, Item::Component(c) if c.name == "ContentControl")))
+            .expect("content_control.elwind should be a registered builtin");
+        let content_control_code = generate_module(&content_control_module, &table);
+        assert_valid_rust("content_control_impl", &content_control_code);
+        let content_control_str = content_control_code.to_string();
+        assert!(content_control_str.contains("elwindui_core :: tree :: Control"));
+        assert!(content_control_str.contains("pub fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
+        assert!(content_control_str.contains("pub fn padding (& self) -> Option < f32 >"));
     }
 }

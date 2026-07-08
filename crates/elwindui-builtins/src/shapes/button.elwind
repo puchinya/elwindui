@@ -1,3 +1,5 @@
+#[embedded]
+#[sealed]
 component Button inherits NativeControl {
     #[param]
     text: String,

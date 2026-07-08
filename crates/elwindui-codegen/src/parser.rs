@@ -28,19 +28,24 @@ impl<'a> Parser<'a> {
             if self.at_eof() {
                 break;
             }
+            let (embedded, sealed) = self.parse_item_attrs()?;
             if self.eat_keyword("use") {
+                self.reject_item_attrs(embedded, sealed, "use")?;
                 uses.push(self.parse_use_decl()?);
             } else if self.eat_keyword("enum") {
+                self.reject_item_attrs(embedded, sealed, "enum")?;
                 items.push(Item::Enum(self.parse_enum_def()?));
             } else if self.eat_keyword("component") {
                 items.push(Item::Component(self.parse_fields_block(FieldKind::Prop, |name, base, fields, methods| {
-                    ComponentDef { name, base, fields, methods }
+                    ComponentDef { name, base, fields, methods, embedded, sealed }
                 })?));
             } else if self.eat_keyword("viewmodel") {
+                self.reject_item_attrs(embedded, sealed, "viewmodel")?;
                 items.push(Item::ViewModel(self.parse_fields_block(FieldKind::Observable, |name, _base, fields, _methods| {
                     ViewModelDef { name, fields }
                 })?));
             } else if self.eat_keyword("view") {
+                self.reject_item_attrs(embedded, sealed, "view")?;
                 items.push(Item::View(self.parse_view_def()?));
             } else {
                 return Err(self.err("expected `use`/`enum`/`component`/`viewmodel`/`view`"));
@@ -50,7 +55,41 @@ impl<'a> Parser<'a> {
         // `parse_module` only ever sees source text, not a file path — real module paths (付録B.1)
         // are assigned by the caller (`compile_dir_impl`), which knows where each file actually
         // lands in the crate. Defaults to `[]` (crate root), matching `Module`'s `Default`.
-        Ok(Module { path: Vec::new(), uses, items })
+        Ok(Module { path: Vec::new(), uses, items, ..Default::default() })
+    }
+
+    /// `#[embedded]`/`#[sealed]` (docs/elwindui_spec.md 付録E), written immediately before a
+    /// top-level item — only meaningful on `component` (see `reject_item_attrs`). Zero or more, any
+    /// order; unknown attribute names are a parse error just like the field-level `#[...]` loop
+    /// (`parse_field_def`) this mirrors.
+    fn parse_item_attrs(&mut self) -> Result<(bool, bool), String> {
+        let mut embedded = false;
+        let mut sealed = false;
+        loop {
+            self.skip_trivia();
+            if !self.eat_char('#') {
+                break;
+            }
+            self.expect_char('[')?;
+            let attr_name = self.parse_ident()?;
+            match attr_name.as_str() {
+                "embedded" => embedded = true,
+                "sealed" => sealed = true,
+                other => return Err(self.err(&format!("unknown item attribute #[{other}] (expected `embedded` or `sealed`)"))),
+            }
+            self.expect_char(']')?;
+            self.skip_trivia();
+        }
+        Ok((embedded, sealed))
+    }
+
+    /// `#[embedded]`/`#[sealed]` only make sense on `component` — reject them (with a clear error
+    /// naming the offending keyword) if `parse_item_attrs` found either ahead of anything else.
+    fn reject_item_attrs(&self, embedded: bool, sealed: bool, keyword: &str) -> Result<(), String> {
+        if embedded || sealed {
+            return Err(self.err(&format!("`#[embedded]`/`#[sealed]` may only precede `component`, not `{keyword}`")));
+        }
+        Ok(())
     }
 
     fn parse_use_decl(&mut self) -> Result<UseDecl, String> {
@@ -541,6 +580,20 @@ impl<'a> Parser<'a> {
             return Ok(ViewExpr::Element(Box::new(element)));
         }
 
+        // A `::`-qualified path (`elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: .. }`,
+        // an enum struct/tuple-variant construction, or any other multi-segment Rust path) — none
+        // of this parser's other sugars understand `::` (the dotted-path fallback below only
+        // consumes `.`-separated segments, for `vm.content`-style bind references), so hand the raw
+        // text to `syn` directly instead, the same fallback the array-literal case above uses.
+        // Detected via lookahead (parse one identifier, see if `::` immediately follows) so a plain
+        // bind reference or bare identifier is never mistaken for one.
+        if self.looks_like_qualified_path() {
+            let expr_src = self.take_expr_until_line_end_or(&[',', '}'])?;
+            let expr = syn::parse_str::<syn::Expr>(expr_src.trim())
+                .map_err(|e| format!("invalid expression `{}`: {e}", expr_src.trim()))?;
+            return Ok(ViewExpr::Expr(expr));
+        }
+
         if self.peek_keyword_bang("t") {
             self.pos += "t!".len();
             self.expect_char('(')?;
@@ -615,6 +668,19 @@ impl<'a> Parser<'a> {
         let followed_by_brace = self.peek_char() == Some('{');
         self.pos = save;
         is_type_name && followed_by_brace
+    }
+
+    /// Lookahead-and-rewind (same idiom as `looks_like_element`) for a `::`-qualified path value —
+    /// parses one identifier and checks whether `::` immediately follows, without consuming
+    /// anything. See `parse_view_expr`'s own doc comment on why this needs its own sugar.
+    fn looks_like_qualified_path(&mut self) -> bool {
+        let save = self.pos;
+        let ok = self.parse_ident().is_ok() && {
+            self.skip_trivia();
+            self.eat_str("::")
+        };
+        self.pos = save;
+        ok
     }
 
     /// A closure expression body. View attributes have no required separator between them (a

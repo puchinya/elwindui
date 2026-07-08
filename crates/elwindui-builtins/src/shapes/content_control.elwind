@@ -18,6 +18,7 @@
 // project that ends up compiling this generated code (via its own build.rs, the same way it
 // already needs `use elwindui_builtins::Window;` etc.) must itself have
 // `use elwindui_core::tree::UIElement;` in scope.
+#[embedded]
 component ContentControl inherits Control {
     #[param]
     content: std::rc::Rc<dyn UIElement>,

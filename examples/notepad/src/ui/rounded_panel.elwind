@@ -1,24 +1,29 @@
-// Demonstrates a custom component built from a drawing primitive (docs/elwindui_spec.md 付録G/N):
-// `RoundedPanel` has no native backing of its own — like `Rectangle` itself, it's purely an
-// `elwindui_core::tree::UIElement` value assembled at each use site (see `elwindui-codegen`'s
-// `emit_virtual_construction`). `inherits Rectangle` is a structural contract, checked by
-// `validate_inherits`: this view's root element must literally be a `Rectangle`. Because of that
-// match, `elwindui-codegen` generates the real struct as `RoundedPanelImpl` (the bare `RoundedPanel`
-// name becomes a real `pub trait RoundedPanel: UIElement + Shape` instead) with a
-// `base: elwindui_core::tree::ShapeImpl` field composing over `Rectangle`'s own construction,
-// implementing `UIElement`/`Shape` by delegating to it — real trait+`Impl`+`base` composition
-// (docs/elwindui_spec.md 付録H.2.1a), not a wrapper around a separately-erased `Rc<dyn UIElement>`.
-// `document_view.elwind`'s own `RoundedPanel { ... }` reference still compiles unchanged —
-// `emit_construction`'s `concrete_type_ident` resolves it to `RoundedPanelImpl::new(..)`.
-component RoundedPanel inherits Rectangle {
+// Demonstrates a custom component built by composing over another already-composed DSL component
+// (docs/elwindui_spec.md 付録G/N, 付録H.2.1a) — `RoundedPanel inherits ContentControl`, own `view`
+// root literally `ContentControl`, with a `Grid` overlaying a background `Rectangle` and the
+// `TextBlock` label in the same (default `(0, 0)`) cell. Because the root matches the base exactly,
+// `elwindui-codegen` generates the real struct as `RoundedPanelImpl` (the bare `RoundedPanel` name
+// becomes a real `pub trait RoundedPanel: UIElement + Control` instead) with a
+// `base: ContentControlImpl` field, delegating to it one hop further than `ContentControl` itself
+// delegates to `Control` — `self` *is* the tree node at any composition depth (`into_node()` just
+// returns `self`), not a wrapper around a separately-erased `Rc<dyn UIElement>`. `document_view.elwind`'s
+// own `RoundedPanel { ... }` reference still compiles unchanged — `emit_construction`'s
+// `concrete_type_ident` resolves it to `RoundedPanelImpl::new(..)`.
+component RoundedPanel inherits ContentControl {
     #[param]
     label: String,
 }
 
 view RoundedPanel {
-    Rectangle {
-        fill: "#3a3a3c"
-        corner_radius: 8.0
-        TextBlock { text: label }
+    ContentControl {
+        Grid {
+            rows: [elwindui_core::layout::GridLength::Star(1.0)]
+            columns: [elwindui_core::layout::GridLength::Star(1.0)]
+            Rectangle {
+                fill: "#3a3a3c"
+                corner_radius: 8.0
+            }
+            TextBlock { text: label }
+        }
     }
 }

@@ -1,3 +1,4 @@
+#[embedded]
 component Window inherits NativeControl {
     #[param]
     title: String,

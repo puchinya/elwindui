@@ -1,3 +1,4 @@
+#[embedded]
 component HorizontalLayout {
     #[param]
     children: Vec<AnyView>,

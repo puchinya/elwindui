@@ -1,12 +1,28 @@
-component Rectangle {
-    #[param]
-    children: Vec<AnyView>,
-    #[param]
-    fill: Option<String>,
-    #[param]
-    stroke: Option<String>,
-    #[param]
-    stroke_width: Option<f32>,
+// A concrete `Shape` leaf (docs/elwindui_spec.md 付録H.2.1a): inherits `Shape` via
+// shape-composition (`ContentControl inherits Control`'s pattern) instead of being a virtual
+// builtin itself — `fill`/`stroke`/`stroke_width` are inherited unchanged (bare-forwarded below),
+// `corner_radius` is `Rectangle`'s own field, and `kind` (not bare-forwardable — there's nothing to
+// forward *from*, each leaf computes its own) is set from it. `Shape`'s own `children` is
+// deliberately *not* forwarded here — unlike a plain `Vec<AnyView>` `#[param]` that only ever needs
+// to be read (`fill`/`stroke`/...), forwarding a `children`-named field bare through an `inherits`
+// chain has no real backing (`AnyView` is a backend-specific type, never a literal Rust parameter
+// type outside a virtual builtin's own inline construction) — and no real usage here ever nests a
+// child inside `Rectangle` (see `RoundedPanel`, which overlays its background `Rectangle` and label
+// as `Grid` siblings instead). `#[sealed]`: a further `component X inherits Rectangle` has no more
+// structure to add here — compose over `Shape` itself instead (see `Rectangle`'s own relationship
+// to it).
+#[embedded]
+#[sealed]
+component Rectangle inherits Shape {
     #[param]
     corner_radius: Option<f32>,
+}
+
+view Rectangle {
+    Shape {
+        kind: elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) }
+        fill: fill
+        stroke: stroke
+        stroke_width: stroke_width
+    }
 }

@@ -21,6 +21,7 @@ const BUILTIN_SHAPE_SOURCES: &[&str] = &[
     include_str!("../../elwindui-builtins/src/shapes/window.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/vertical_layout.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/horizontal_layout.elwind"),
+    include_str!("../../elwindui-builtins/src/shapes/shape.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/rectangle.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/ellipse.elwind"),
     include_str!("../../elwindui-builtins/src/shapes/control.elwind"),
@@ -47,8 +48,12 @@ pub fn builtin_modules() -> Vec<ast::Module> {
         .iter()
         .map(|src| {
             // `parse_module` always defaults a freshly-parsed module's `path` to `[]` already.
-            parser::parse_module(src)
-                .unwrap_or_else(|e| panic!("failed to parse embedded builtin shape: {e}\n---\n{src}"))
+            let mut module = parser::parse_module(src)
+                .unwrap_or_else(|e| panic!("failed to parse embedded builtin shape: {e}\n---\n{src}"));
+            // Marks every component parsed from here as eligible for `#[embedded]` — see
+            // `ast::Module::is_builtin`'s doc comment and `validate::validate`'s check.
+            module.is_builtin = true;
+            module
         })
         .collect()
 }
@@ -79,7 +84,7 @@ pub fn generate_viewmodel_from_item_mod(item_mod: &syn::ItemMod) -> Result<proc_
     // A single macro invocation has no directory of sibling modules to cross-reference (`use`
     // resolution is moot with only one module), so the exact real path doesn't matter here — `[]`
     // (crate root) is as good as any.
-    let module = ast::Module { path: Vec::new(), uses: Vec::new(), items: vec![ast::Item::ViewModel(def)] };
+    let module = ast::Module { path: Vec::new(), uses: Vec::new(), items: vec![ast::Item::ViewModel(def)], ..Default::default() };
     validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(std::slice::from_ref(&module));
     Ok(codegen::generate_module(&module, &table))
@@ -121,6 +126,7 @@ pub fn compile_dir_with_extra_viewmodels(
             path: vec![mod_name],
             uses: Vec::new(),
             items: vec![ast::Item::ViewModel(def)],
+            ..Default::default()
         }));
     }
     compile_dir_impl(src, out_dir, extra_modules)
@@ -181,6 +187,32 @@ fn compile_dir_impl(
         let out_name = path.file_stem().unwrap().to_string_lossy().to_string();
         fs::write(out_dir.join(format!("{out_name}.rs")), pretty)?;
     }
+
+    // A builtin with its own `view` (a *composed* logical component like `ContentControl`/
+    // `Rectangle`/`Ellipse`, docs/elwindui_spec.md 付録H.2.1a) needs real generated Rust just like
+    // any consumer's own component — unlike a shape-only builtin (`has_view == false`: either a
+    // hand-written native leaf implemented directly in `elwindui-builtins`, or a virtual builtin
+    // constructed inline at each use site via `emit_virtual_construction`, neither of which is ever
+    // referenced by a generated `Type::new(..)` call). `elwindui-builtins` itself has no `build.rs`
+    // to emit this once centrally, so every consumer generates its own copy here instead, into one
+    // shared output file every consumer's own generated files can already see unqualified (付録B.1's
+    // flat crate-root `include!` convention).
+    let mut builtins_generated = proc_macro2::TokenStream::new();
+    for module in builtin_modules() {
+        let has_composed_component = module.items.iter().any(|item| {
+            matches!(item, ast::Item::Component(c) if table.resolve(&module, &c.name).is_some_and(|info| info.has_view))
+        });
+        if has_composed_component {
+            builtins_generated.extend(codegen::generate_module(&module, &table));
+        }
+    }
+    // Always written (even if empty) — every consumer's own generated `main.rs`/etc.
+    // unconditionally `include!`s this file, since which builtins actually need one can change over
+    // time as `elwindui-builtins` evolves.
+    let file: syn::File = syn::parse2(builtins_generated.clone()).unwrap_or_else(|e| {
+        panic!("generated code for elwindui-builtins' composed components is not valid Rust: {e}\n---\n{builtins_generated}")
+    });
+    fs::write(out_dir.join("elwindui_builtins_generated.rs"), prettyplease::unparse(&file))?;
 
     fs::write(out_dir.join("i18n_support.rs"), I18N_SUPPORT_SRC)?;
 

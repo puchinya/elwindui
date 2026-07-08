@@ -37,6 +37,17 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
         for item in &module.items {
             match item {
                 Item::Component(c) => {
+                    // `#[embedded]` (docs/elwindui_spec.md 付録E) claims this component is one of
+                    // `elwindui-builtins`'own — reject it on anything parsed from a consumer's own
+                    // `.elwind` directory (`Module::is_builtin`, set only by `builtin_modules()`).
+                    if c.embedded && !module.is_builtin {
+                        errors.push(format!(
+                            "{}: #[embedded] can only be used on a component from elwindui-builtins' own \
+                             BUILTIN_SHAPE_SOURCES, not a consumer's own `.elwind` file",
+                            c.name
+                        ));
+                    }
+
                     for f in &c.fields {
                         // Rule 18: `#[command]` field type must be `Command`.
                         if f.kind == FieldKind::Command && f.ty != "Command" {
@@ -499,6 +510,11 @@ fn validate_inherits(
         return;
     };
 
+    if base_info.sealed {
+        errors.push(format!("{}: inherits `{base}`, but `{base}` is #[sealed] and cannot be inherited from", c.name));
+        return;
+    }
+
     if base == "NativeControl" {
         let is_native = table.resolve(from, &c.name).is_some_and(|info| info.is_native);
         if !is_native {
@@ -778,6 +794,7 @@ view Window5 { Window { Button { text: "x", enabled: vm.no_such_command.can_exec
             items: parse_module("viewmodel Vm { #[observable] content: String = String::new(), }")
                 .unwrap()
                 .items,
+            ..Default::default()
         };
         let window_src = r#"
 component Window6 {
@@ -802,6 +819,7 @@ view Window6 { Window { TextArea { text: vm.content } } }
             items: parse_module("viewmodel Vm { #[observable] content: String = String::new(), }")
                 .unwrap()
                 .items,
+            ..Default::default()
         };
         let window_src = r#"
 use crate::some_vm_mod::Vm;
@@ -965,13 +983,13 @@ view Window11 {
     #[test]
     fn accepts_component_inheriting_a_shape_primitive_with_matching_view_root() {
         let src = r#"
-component RoundedPanel inherits Rectangle {
+component RoundedPanel inherits Shape {
     #[param]
     corner_style: Option<String>,
 }
 
 view RoundedPanel {
-    Rectangle { fill: fill }
+    Shape { kind: elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
@@ -981,7 +999,7 @@ view RoundedPanel {
     #[test]
     fn rejects_inherits_when_view_root_does_not_match_base() {
         let src = r#"
-component RoundedPanel inherits Rectangle {
+component RoundedPanel inherits Shape {
     #[param]
     corner_style: Option<String>,
 }
@@ -992,7 +1010,7 @@ view RoundedPanel {
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("must be `Rectangle`")), "errors: {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("must be `Shape`")), "errors: {errs:?}");
     }
 
     /// Redeclaring a field already inherited from a non-`NativeControl` base (without
@@ -1001,13 +1019,13 @@ view RoundedPanel {
     #[test]
     fn rejects_redeclaring_an_inherited_field() {
         let src = r#"
-component RoundedPanel inherits Rectangle {
+component RoundedPanel inherits Shape {
     #[param]
     fill: Option<String>,
 }
 
 view RoundedPanel {
-    Rectangle { fill: fill }
+    Shape { kind: elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
@@ -1087,17 +1105,35 @@ view DocumentViewLike {
         assert!(!virtual_builtin_info.is_native);
     }
 
-    /// A native-backed leaf (`Button`, `has_view == false && is_native == true`) has no generated
-    /// Rust to inherit from — only `NativeControl` may be used as a pure category tag.
+    /// A native-backed leaf (`Window`, `has_view == false && is_native == true`) has no generated
+    /// Rust to inherit from — only `NativeControl` may be used as a pure category tag. `Window`
+    /// (not `Button`, unlike before `#[sealed]` existed) is used here because it isn't itself
+    /// `#[sealed]` — `Button` now gets rejected for that reason first instead (see
+    /// `rejects_inherits_of_a_sealed_component`), which would no longer exercise this underlying
+    /// native-leaf rejection path.
     #[test]
     fn rejects_inherits_of_a_native_leaf() {
+        let src = r#"
+component MyWindow inherits Window {
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("native-backed leaf")), "errors: {errs:?}");
+    }
+
+    /// `Button` is `#[sealed]` (docs/elwindui_spec.md 付録E) — `validate_inherits` must reject a
+    /// further `inherits Button` for that reason specifically, not just the more general
+    /// native-backed-leaf rejection `rejects_inherits_of_a_native_leaf` covers.
+    #[test]
+    fn rejects_inherits_of_a_sealed_component() {
         let src = r#"
 component MyButton inherits Button {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("native-backed leaf")), "errors: {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("Button") && e.contains("sealed")), "errors: {errs:?}");
     }
 
     /// A logical component (`has_view == true`, e.g. `ContentControl`) may be inherited with *no*

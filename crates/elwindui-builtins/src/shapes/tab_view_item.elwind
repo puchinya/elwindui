@@ -2,6 +2,8 @@
 // nested static child (WinUI3's XAML `TabViewItem` declaration), or synthesized internally by
 // `TabView` once per element of `items_source` (its `data_context`/`header`/`content` populated
 // from that item via `header_template`/`item_template`).
+#[embedded]
+#[sealed]
 component TabViewItem inherits NativeControl {
     // Set explicitly in static mode; populated automatically (from the owning `items_source`
     // element's own `Rc<T>`) in dynamic mode. `None` in static mode unless set.

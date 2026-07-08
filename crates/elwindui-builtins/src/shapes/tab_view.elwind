@@ -1,3 +1,5 @@
+#[embedded]
+#[sealed]
 component TabView inherits NativeControl {
     // Static mode: tabs written literally as nested `TabViewItem { .. }` children (WinUI3's XAML
     // child-declaration style). Mutually exclusive with `items_source` below — see

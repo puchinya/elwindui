@@ -1,3 +1,4 @@
+#[embedded]
 component MenuItem inherits NativeControl {
     #[param]
     text: String,

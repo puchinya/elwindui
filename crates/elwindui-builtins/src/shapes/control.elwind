@@ -1,3 +1,4 @@
+#[embedded]
 component Control {
     #[param]
     children: Vec<AnyView>,

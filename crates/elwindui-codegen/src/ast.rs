@@ -11,6 +11,11 @@ pub struct Module {
     pub path: Vec<String>,
     pub uses: Vec<UseDecl>,
     pub items: Vec<Item>,
+    /// Whether this module came from `elwindui-codegen`'s own `BUILTIN_SHAPE_SOURCES`
+    /// (`builtin_modules()`, set there) rather than a consumer's own `.elwind` directory —
+    /// `validate::validate` uses this to reject a `#[embedded]` component declared outside the
+    /// actual builtin sources (docs/elwindui_spec.md 付録E).
+    pub is_builtin: bool,
 }
 
 /// `use components::card::Card;` / `use a::b::{C, D};` (§12). Only the flat form is needed for
@@ -76,6 +81,17 @@ pub struct ComponentDef {
     pub base: Option<String>,
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
+    /// `#[embedded]` (written immediately before `component`, docs/elwindui_spec.md 付録E): marks
+    /// this component as one of `elwindui-builtins`'own — `validate::validate` rejects it on a
+    /// component whose `Module::is_builtin` is `false` (i.e. a consumer's own `.elwind` file
+    /// falsely claiming to be a builtin).
+    pub embedded: bool,
+    /// `#[sealed]` (same position): marks this component as unable to be named as a `base` in
+    /// `component X inherits Y` — `validate::validate_inherits` rejects `inherits` naming a sealed
+    /// component. Used on concrete leaves that shouldn't be extended further (`Rectangle`/`Ellipse`
+    /// — extend the composable `Shape` instead; `Button`/`TextArea`/`TabView`/`TabViewItem` — already
+    /// implied by their native-leaf-with-no-view shape, but stated explicitly here for clarity).
+    pub sealed: bool,
 }
 
 /// `#[virtual] fn name(&self, params) -> RetTy { body }` / `#[override] fn name(...) { body }`.

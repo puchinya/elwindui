@@ -6,6 +6,7 @@
 // anywhere via `Grid::row: <expr>` / `Grid::column: <expr>`, not just this component's own direct
 // children (see docs/elwindui_spec.md §3's attached-property section). Unset on a given element,
 // they default to `0` (the top-left cell), matching `elwindui_core::layout::GridCell::default()`.
+#[embedded]
 component Grid {
     #[param]
     rows: Vec<GridLength>,

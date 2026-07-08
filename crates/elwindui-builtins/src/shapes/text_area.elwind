@@ -1,3 +1,5 @@
+#[embedded]
+#[sealed]
 component TextArea inherits NativeControl {
     #[param]
     #[two_way]

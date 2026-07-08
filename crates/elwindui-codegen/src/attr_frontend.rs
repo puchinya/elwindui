@@ -264,6 +264,7 @@ mod tests {
             path: Vec::new(),
             uses: Vec::new(),
             items: vec![crate::ast::Item::ViewModel(def)],
+            ..Default::default()
         };
         let table = build_symbol_table(std::slice::from_ref(&module));
         let crate::ast::Item::ViewModel(def) = &module.items[0] else { unreachable!() };

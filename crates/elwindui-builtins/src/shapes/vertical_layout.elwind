@@ -1,3 +1,4 @@
+#[embedded]
 component VerticalLayout {
     #[param]
     children: Vec<AnyView>,

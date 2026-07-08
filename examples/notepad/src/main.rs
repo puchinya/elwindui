@@ -1,5 +1,8 @@
 use elwindui::platform;
 use elwindui_builtins::{Menu, MenuBar, MenuBarItem, MenuItem, TabView, TextArea, Window};
+// Required by `ContentControl`'s generated code (`content: Rc<dyn UIElement>` — see
+// `content_control.elwind`'s own doc comment, docs/elwindui_spec.md 付録H.2.1a).
+use elwindui_core::tree::UIElement;
 
 mod elwindui_i18n {
     include!(concat!(env!("OUT_DIR"), "/i18n_support.rs"));
@@ -115,6 +118,12 @@ mod notepad_view_model {
         }
     }
 }
+
+// Real generated Rust for any `elwindui-builtins` component composed via its own `view`
+// (`ContentControl`/`Rectangle`/`Ellipse` — docs/elwindui_spec.md 付録H.2.1a) — `elwindui-builtins`
+// has no `build.rs` of its own to emit this centrally, so `elwindui-codegen`'s `compile_dir_impl`
+// generates it here for every consumer that needs it (`RoundedPanel` below is the first one to).
+include!(concat!(env!("OUT_DIR"), "/elwindui_builtins_generated.rs"));
 
 include!(concat!(env!("OUT_DIR"), "/rounded_panel.rs"));
 include!(concat!(env!("OUT_DIR"), "/document_view.rs"));

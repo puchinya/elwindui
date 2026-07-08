@@ -1,3 +1,4 @@
+#[embedded]
 component TextBlock {
     #[param]
     text: String,

@@ -1,3 +1,4 @@
+#[embedded]
 component Menu inherits NativeControl {
     #[param]
     children: Vec<MenuItem>,

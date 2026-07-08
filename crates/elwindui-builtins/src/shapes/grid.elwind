@@ -1,0 +1,21 @@
+// WPF/WinUI3-style row/column layout (docs/elwindui_spec.md §3) — a virtual builtin like `Control`/
+// `Rectangle` (no backend Rust struct; `elwindui-codegen`'s `emit_virtual_construction` builds an
+// `elwindui_core::tree::Grid` directly at each use site). `rows`/`columns` are ordinary `#[param]`s
+// (an array literal of `elwindui_core::layout::GridLength::Auto`/`Fixed(px)`/`Star(weight)`);
+// `row`/`column` are `#[attached]` properties — declared here, but settable on *any* element
+// anywhere via `Grid::row: <expr>` / `Grid::column: <expr>`, not just this component's own direct
+// children (see docs/elwindui_spec.md §3's attached-property section). Unset on a given element,
+// they default to `0` (the top-left cell), matching `elwindui_core::layout::GridCell::default()`.
+component Grid {
+    #[param]
+    rows: Vec<GridLength>,
+    #[param]
+    columns: Vec<GridLength>,
+    #[param]
+    children: Vec<AnyView>,
+
+    #[attached]
+    row: i32 = 0,
+    #[attached]
+    column: i32 = 0,
+}

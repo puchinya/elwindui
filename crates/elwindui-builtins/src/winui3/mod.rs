@@ -13,6 +13,7 @@ mod tab_view;
 pub use tab_view::{TabView, TabViewItem};
 
 use elwindui_backend_winui3 as winui3;
+use elwindui_backend_winui3::{Button as _, MenuItem as _, TextArea as _};
 use std::rc::Rc;
 
 pub struct Window {
@@ -39,12 +40,12 @@ impl Window {
 }
 
 pub struct TextArea {
-    inner: winui3::TextArea,
+    inner: winui3::TextAreaImpl,
 }
 
 impl TextArea {
     pub fn new(text: &str) -> Rc<Self> {
-        Rc::new(Self { inner: winui3::TextArea::new(text) })
+        Rc::new(Self { inner: winui3::create_text_area(text) })
     }
 
     pub fn set_text(&self, text: &str) {
@@ -63,12 +64,12 @@ impl TextArea {
 }
 
 pub struct Button {
-    inner: winui3::Button,
+    inner: winui3::ButtonImpl,
 }
 
 impl Button {
     pub fn new(text: &str, enabled: Option<bool>) -> Rc<Self> {
-        let inner = winui3::Button::new(text);
+        let inner = winui3::create_button(text);
         if let Some(enabled) = enabled {
             inner.set_enabled(enabled);
         }
@@ -93,46 +94,46 @@ impl Button {
 }
 
 pub struct MenuBar {
-    inner: winui3::MenuBar,
+    inner: winui3::MenuBarImpl,
 }
 
 impl MenuBar {
     pub fn new(children: Vec<Rc<MenuBarItem>>) -> Rc<Self> {
         let items = children.iter().map(|c| c.inner.clone()).collect();
-        Rc::new(Self { inner: winui3::MenuBar::new(items) })
+        Rc::new(Self { inner: winui3::create_menu_bar(items) })
     }
 }
 
 pub struct MenuBarItem {
-    inner: winui3::MenuBarItem,
+    inner: winui3::MenuBarItemImpl,
 }
 
 impl MenuBarItem {
     pub fn new(text: &str, submenu: Rc<Menu>) -> Rc<Self> {
-        Rc::new(Self { inner: winui3::MenuBarItem::new(text, submenu.inner.clone()) })
+        Rc::new(Self { inner: winui3::create_menu_bar_item(text, submenu.inner.clone()) })
     }
 
     pub fn set_text(&self, _text: &str) {}
 }
 
 pub struct Menu {
-    inner: winui3::Menu,
+    inner: winui3::MenuImpl,
 }
 
 impl Menu {
     pub fn new(children: Vec<Rc<MenuItem>>) -> Rc<Self> {
         let items = children.iter().map(|c| c.inner.clone()).collect();
-        Rc::new(Self { inner: winui3::Menu::new(items) })
+        Rc::new(Self { inner: winui3::create_menu(items) })
     }
 }
 
 pub struct MenuItem {
-    inner: winui3::MenuItem,
+    inner: winui3::MenuItemImpl,
 }
 
 impl MenuItem {
     pub fn new(text: &str, shortcut: Option<&str>, enabled: Option<bool>) -> Rc<Self> {
-        let inner = winui3::MenuItem::new(text);
+        let inner = winui3::create_menu_item(text);
         if let Some(shortcut) = shortcut {
             inner.set_shortcut(shortcut);
         }

@@ -22,6 +22,7 @@
 //! `remove_tab`).
 
 use elwindui_backend_appkit as appkit;
+use elwindui_backend_appkit::TabView as _;
 use objc2::rc::Retained;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -94,13 +95,13 @@ struct DynamicSource {
 }
 
 pub struct TabView {
-    inner: appkit::TabView,
+    inner: appkit::TabViewImpl,
     entries: RefCell<Vec<Rc<TabViewItem>>>,
     dynamic: RefCell<Option<DynamicSource>>,
     selected_index: Cell<usize>,
     /// Parallel to `displayed` below — each currently-displayed entry's chip + persistent content
     /// host, in the same order.
-    chips: RefCell<Vec<(appkit::TabChip, Retained<appkit::TreeHostView>)>>,
+    chips: RefCell<Vec<(appkit::TabChipImpl, Retained<appkit::TreeHostView>)>>,
     /// Pointer identities (`Rc::as_ptr`, as `usize`) of the entries currently reflected as real
     /// chips/hosts, in display order — the "before" side of `rebuild`'s diff against `entries`'
     /// current pointers (the "after" side). Mirrors `winui3::tab_view`'s `displayed`.
@@ -123,7 +124,7 @@ impl TabView {
         selected_index: usize,
     ) -> Rc<Self> {
         let this = Rc::new(Self {
-            inner: appkit::TabView::new(),
+            inner: appkit::create_tab_view(),
             entries: RefCell::new(Vec::new()),
             dynamic: RefCell::new(None),
             selected_index: Cell::new(selected_index),

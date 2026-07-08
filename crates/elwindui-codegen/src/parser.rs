@@ -33,11 +33,11 @@ impl<'a> Parser<'a> {
             } else if self.eat_keyword("enum") {
                 items.push(Item::Enum(self.parse_enum_def()?));
             } else if self.eat_keyword("component") {
-                items.push(Item::Component(self.parse_fields_block(FieldKind::Prop, |name, base, fields| {
-                    ComponentDef { name, base, fields }
+                items.push(Item::Component(self.parse_fields_block(FieldKind::Prop, |name, base, fields, methods| {
+                    ComponentDef { name, base, fields, methods }
                 })?));
             } else if self.eat_keyword("viewmodel") {
-                items.push(Item::ViewModel(self.parse_fields_block(FieldKind::Observable, |name, _base, fields| {
+                items.push(Item::ViewModel(self.parse_fields_block(FieldKind::Observable, |name, _base, fields, _methods| {
                     ViewModelDef { name, fields }
                 })?));
             } else if self.eat_keyword("view") {
@@ -78,16 +78,17 @@ impl<'a> Parser<'a> {
         Ok(EnumDef { name, variants })
     }
 
-    /// Parses `Name [inherits Base] { field, field, ... }` for both `component` and `viewmodel`
+    /// Parses `Name [inherits Base] { field/method, ... }` for both `component` and `viewmodel`
     /// (§3, 付録O.2 share the same field grammar). `default_kind` is `Prop` for `component`,
     /// `Observable` for `viewmodel` (a field with no kind attribute defaults to its container's
     /// usual kind). `inherits` is only meaningful for `component` (see `ComponentDef::base`'s doc
     /// comment) — parsed here regardless since the grammar up to `{` is otherwise identical, but
-    /// `viewmodel`'s `build` closure simply discards it.
+    /// `viewmodel`'s `build` closure simply discards it and `methods` (`fn`-shaped entries, §3's
+    /// `#[virtual]`/`#[override]` hooks — only meaningful for `component`).
     fn parse_fields_block<T>(
         &mut self,
         default_kind: FieldKind,
-        build: impl FnOnce(String, Option<String>, Vec<FieldDef>) -> T,
+        build: impl FnOnce(String, Option<String>, Vec<FieldDef>, Vec<MethodDef>) -> T,
     ) -> Result<T, String> {
         let name = self.parse_ident()?;
         self.skip_trivia();
@@ -100,14 +101,122 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.expect_char('{')?;
         let mut fields = Vec::new();
+        let mut methods = Vec::new();
         loop {
             self.skip_trivia();
             if self.eat_char('}') {
                 break;
             }
-            fields.push(self.parse_field_def(default_kind)?);
+            if self.looks_like_method() {
+                methods.push(self.parse_method_def()?);
+            } else {
+                fields.push(self.parse_field_def(default_kind)?);
+            }
         }
-        Ok(build(name, base, fields))
+        Ok(build(name, base, fields, methods))
+    }
+
+    /// Lookahead-and-rewind: a field/method entry both start with zero or more `#[...]`
+    /// attributes; the entry is a method iff `fn` follows them (a field name can never be the
+    /// literal identifier `fn`, since it's a reserved Rust keyword).
+    fn looks_like_method(&mut self) -> bool {
+        let save = self.pos;
+        let is_method = self.try_skip_attrs_and_check_fn();
+        self.pos = save;
+        is_method
+    }
+
+    fn try_skip_attrs_and_check_fn(&mut self) -> bool {
+        loop {
+            self.skip_trivia();
+            if !self.eat_char('#') {
+                break;
+            }
+            if self.expect_char('[').is_err() {
+                return false;
+            }
+            if self.take_balanced_until(&[']']).is_err() {
+                return false;
+            }
+            if self.expect_char(']').is_err() {
+                return false;
+            }
+        }
+        self.eat_keyword("fn")
+    }
+
+    /// `[#[virtual]|#[override]]? fn name(&self, param: Type, ...) [-> RetTy] { body }` (§3).
+    fn parse_method_def(&mut self) -> Result<MethodDef, String> {
+        let mut is_virtual = false;
+        let mut is_override = false;
+        loop {
+            self.skip_trivia();
+            if !self.eat_char('#') {
+                break;
+            }
+            self.expect_char('[')?;
+            let attr_name = self.parse_ident()?;
+            match attr_name.as_str() {
+                "virtual" => is_virtual = true,
+                "override" => is_override = true,
+                other => return Err(self.err(&format!("unknown method attribute #[{other}]"))),
+            }
+            self.expect_char(']')?;
+        }
+
+        self.skip_trivia();
+        if !self.eat_keyword("fn") {
+            return Err(self.err("expected `fn`"));
+        }
+        self.skip_trivia();
+        let name = self.parse_ident()?;
+        self.skip_trivia();
+        self.expect_char('(')?;
+        self.skip_trivia();
+        if !self.eat_str("&self") {
+            return Err(self.err("expected `&self` as a method's first parameter"));
+        }
+        self.skip_trivia();
+        self.eat_char(',');
+
+        let mut params = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.eat_char(')') {
+                break;
+            }
+            let param_name = self.parse_ident()?;
+            self.skip_trivia();
+            self.expect_char(':')?;
+            let ty_src = self.take_balanced_until(&[',', ')'])?;
+            let ty = syn::parse_str::<syn::Type>(ty_src.trim())
+                .map_err(|e| format!("invalid method param type: {e}"))?;
+            params.push((param_name, ty));
+            self.skip_trivia();
+            self.eat_char(',');
+        }
+
+        self.skip_trivia();
+        let return_ty = if self.eat_str("->") {
+            self.skip_trivia();
+            let ty_src = self.take_balanced_until(&['{'])?;
+            Some(
+                syn::parse_str::<syn::Type>(ty_src.trim())
+                    .map_err(|e| format!("invalid method return type: {e}"))?,
+            )
+        } else {
+            None
+        };
+
+        self.skip_trivia();
+        let body_src = self.take_block_src()?;
+        let body = syn::parse_str::<syn::Block>(&body_src)
+            .map_err(|e| format!("invalid method body: {e}"))?;
+
+        self.skip_trivia();
+        self.eat_char(',');
+
+        Ok(MethodDef { name, is_virtual, is_override, params, return_ty, body })
     }
 
     fn parse_field_def(&mut self, default_kind: FieldKind) -> Result<FieldDef, String> {
@@ -126,9 +235,11 @@ impl<'a> Parser<'a> {
                 "prop" => kind = FieldKind::Prop,
                 "observable" => kind = FieldKind::Observable,
                 "computed" => kind = FieldKind::Computed,
+                "attached" => kind = FieldKind::Attached,
                 "inject" => attrs.push(Attr::Inject),
                 "two_way" => attrs.push(Attr::TwoWay),
                 "routed" => attrs.push(Attr::Routed),
+                "override" => attrs.push(Attr::Override),
                 "command" => {
                     kind = FieldKind::Command;
                     let mut is_async = false;
@@ -247,6 +358,33 @@ impl<'a> Parser<'a> {
         self.expect_char('{')?;
         self.skip_trivia();
 
+        let mut on_mount = None;
+        let mut on_unmount = None;
+        loop {
+            self.skip_trivia();
+            if self.eat_keyword("on_mount") {
+                self.skip_trivia();
+                self.eat_char(':'); // 付録I.1's `on_mount: { .. }` — the `:` is optional sugar.
+                self.skip_trivia();
+                let block_src = self.take_block_src()?;
+                on_mount = Some(
+                    syn::parse_str::<syn::Block>(&block_src)
+                        .map_err(|e| format!("invalid on_mount body: {e}"))?,
+                );
+            } else if self.eat_keyword("on_unmount") {
+                self.skip_trivia();
+                self.eat_char(':');
+                self.skip_trivia();
+                let block_src = self.take_block_src()?;
+                on_unmount = Some(
+                    syn::parse_str::<syn::Block>(&block_src)
+                        .map_err(|e| format!("invalid on_unmount body: {e}"))?,
+                );
+            } else {
+                break;
+            }
+        }
+
         let mut lets = Vec::new();
         loop {
             self.skip_trivia();
@@ -289,7 +427,7 @@ impl<'a> Parser<'a> {
         let root = self.parse_element_node()?;
         self.skip_trivia();
         self.expect_char('}')?;
-        Ok(ViewDef { target, lets, root })
+        Ok(ViewDef { target, on_mount, on_unmount, lets, root })
     }
 
     fn parse_element_node(&mut self) -> Result<ElementNode, String> {
@@ -298,6 +436,7 @@ impl<'a> Parser<'a> {
         self.expect_char('{')?;
 
         let mut attributes = Vec::new();
+        let mut attached = Vec::new();
         let mut children = Vec::new();
 
         loop {
@@ -308,7 +447,18 @@ impl<'a> Parser<'a> {
             let ident_start = self.pos;
             let ident = self.parse_ident()?;
             self.skip_trivia();
-            if self.eat_char(':') {
+            if self.eat_str("::") {
+                // `Owner::field: value` — an attached-property setter (§3), checked *before* the
+                // single-`:` attribute case below (`eat_str("::")` only matches the literal 2-char
+                // sequence, so plain `ident:` is unaffected).
+                self.skip_trivia();
+                let field = self.parse_ident()?;
+                self.skip_trivia();
+                self.expect_char(':')?;
+                self.skip_trivia();
+                let value = self.parse_view_expr()?;
+                attached.push((ident, field, value));
+            } else if self.eat_char(':') {
                 self.skip_trivia();
                 let value = self.parse_view_expr()?;
                 attributes.push((ident, value));
@@ -326,7 +476,7 @@ impl<'a> Parser<'a> {
             self.eat_char(',');
         }
 
-        Ok(ElementNode { type_path, attributes, children })
+        Ok(ElementNode { type_path, attributes, attached, children })
     }
 
     fn parse_view_expr(&mut self) -> Result<ViewExpr, String> {
@@ -364,6 +514,22 @@ impl<'a> Parser<'a> {
             let lit_src = self.take_number_literal()?;
             let expr = syn::parse_str::<syn::Expr>(&lit_src)
                 .map_err(|e| format!("invalid number literal: {e}"))?;
+            return Ok(ViewExpr::Expr(expr));
+        }
+
+        // `[GridLength::Auto, GridLength::Star(1.0), GridLength::Fixed(100.0)]` — an array literal
+        // attribute value (`Grid`'s `rows`/`columns`, §3). Captured verbatim and handed to `syn`
+        // directly (same take-then-`syn::parse_str` fallback `parse_initializer` already uses for
+        // a field's default expr) rather than taught to this function's own dotted-path/`t!` sugar,
+        // since a bracketed literal can't be confused with any of those. Uses
+        // `take_expr_until_line_end_or` (not `take_balanced_until`) for the same reason
+        // `parse_closure_expr_body` does — view attributes have no required trailing separator, so
+        // a plain `,`/`}` search would swallow every following attribute's text too once the
+        // array's own closing `]` brings the bracket depth back to 0.
+        if self.peek_char() == Some('[') {
+            let expr_src = self.take_expr_until_line_end_or(&[',', '}'])?;
+            let expr = syn::parse_str::<syn::Expr>(expr_src.trim())
+                .map_err(|e| format!("invalid array literal `{}`: {e}", expr_src.trim()))?;
             return Ok(ViewExpr::Expr(expr));
         }
 
@@ -674,6 +840,40 @@ impl<'a> Parser<'a> {
         Ok(self.src[start..self.pos].to_string())
     }
 
+    /// Captures a full brace-delimited block (`{ ... }`, braces included), respecting nested
+    /// braces/parens/brackets and string literals — for a method/`on_mount`/`on_unmount` body
+    /// handed to `syn::parse_str::<syn::Block>` (which requires the surrounding braces).
+    fn take_block_src(&mut self) -> Result<String, String> {
+        self.skip_trivia();
+        let start = self.pos;
+        if self.peek_char() != Some('{') {
+            return Err(self.err("expected `{`"));
+        }
+        let mut depth: i32 = 0;
+        loop {
+            match self.peek_char() {
+                None => return Err(self.err("unexpected end of input in block")),
+                Some('"') => {
+                    self.take_string_literal()?;
+                    continue;
+                }
+                Some('{') | Some('(') | Some('[') => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                Some('}') | Some(')') | Some(']') => {
+                    depth -= 1;
+                    self.pos += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Some(c) => self.pos += c.len_utf8(),
+            }
+        }
+        Ok(self.src[start..self.pos].to_string())
+    }
+
     /// Like `take_balanced_until`, but also stops at an unnested newline — needed for a closure
     /// body's `syn::Expr` fallback, since view attributes have no required separator between them
     /// (`parse_element_node`'s trailing `,` is optional; one-attribute-per-line with no comma is
@@ -947,6 +1147,118 @@ view V {
         assert!(matches!(attr("render_label"), Some(ViewExpr::Closure { body: ClosureBody::Expr(_), .. })));
         assert!(matches!(attr("render_content"), Some(ViewExpr::Closure { body: ClosureBody::Element(_), .. })));
         assert!(matches!(attr("selected"), Some(ViewExpr::Path(p)) if p == vec!["vm".to_string(), "active_tab".to_string()]));
+    }
+
+    #[test]
+    fn parses_virtual_and_override_methods() {
+        let src = r#"
+component Control {
+    #[param]
+    padding: Option<f32>,
+
+    #[virtual]
+    fn label(&self) -> String {
+        "control".to_string()
+    }
+}
+
+component ContentControl inherits Control {
+    #[param]
+    content: std::rc::Rc<dyn UIElement>,
+
+    #[override]
+    fn label(&self, suffix: i32) -> String {
+        format!("{}!{}", base::label(), suffix)
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let Item::Component(control) = &module.items[0] else { panic!("expected component") };
+        assert_eq!(control.fields.len(), 1);
+        assert_eq!(control.methods.len(), 1);
+        assert_eq!(control.methods[0].name, "label");
+        assert!(control.methods[0].is_virtual);
+        assert!(!control.methods[0].is_override);
+        assert!(control.methods[0].params.is_empty());
+
+        let Item::Component(content_control) = &module.items[1] else { panic!("expected component") };
+        assert_eq!(content_control.fields.len(), 1);
+        assert_eq!(content_control.methods.len(), 1);
+        assert_eq!(content_control.methods[0].name, "label");
+        assert!(content_control.methods[0].is_override);
+        assert_eq!(content_control.methods[0].params.len(), 1);
+        assert_eq!(content_control.methods[0].params[0].0, "suffix");
+    }
+
+    #[test]
+    fn parses_on_mount_and_on_unmount() {
+        let src = r#"
+view Widget {
+    on_mount {
+        base::on_mount();
+        println!("mounted");
+    }
+    on_unmount {
+        println!("unmounted");
+    }
+
+    Text { text: "hi" }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let Item::View(view) = &module.items[0] else { panic!("expected view") };
+        assert!(view.on_mount.is_some());
+        assert!(view.on_unmount.is_some());
+        assert_eq!(view.root.type_path, "Text");
+    }
+
+    #[test]
+    fn parses_attached_property_field() {
+        let src = r#"
+component Grid {
+    #[attached]
+    row: i32 = 0,
+    #[attached]
+    column: i32 = 0,
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let Item::Component(grid) = &module.items[0] else { panic!("expected component") };
+        assert_eq!(grid.fields.len(), 2);
+        assert_eq!(grid.fields[0].kind, FieldKind::Attached);
+        assert_eq!(grid.fields[1].kind, FieldKind::Attached);
+    }
+
+    #[test]
+    fn parses_owner_colon_colon_field_attached_setter() {
+        let src = r#"
+view MainGrid {
+    Grid {
+        rows: [GridLength::Auto, GridLength::Star(1.0)]
+        columns: [GridLength::Fixed(120.0), GridLength::Star(1.0)]
+        TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
+        Button { text: "Click", Grid::row: 1, Grid::column: 1 }
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let Item::View(view) = &module.items[0] else { panic!("expected view") };
+        assert_eq!(view.root.type_path, "Grid");
+        assert!(matches!(&view.root.attributes[0].1, ViewExpr::Expr(syn::Expr::Array(_))));
+        assert!(matches!(&view.root.attributes[1].1, ViewExpr::Expr(syn::Expr::Array(_))));
+
+        let header = literal(&view.root.children[0]);
+        assert_eq!(header.type_path, "TextBlock");
+        assert_eq!(header.attributes.len(), 1);
+        assert_eq!(header.attached.len(), 2);
+        assert_eq!((header.attached[0].0.as_str(), header.attached[0].1.as_str()), ("Grid", "row"));
+        assert_eq!((header.attached[1].0.as_str(), header.attached[1].1.as_str()), ("Grid", "column"));
+        assert!(matches!(&header.attached[0].2, ViewExpr::Expr(syn::Expr::Lit(_))));
+
+        let button = literal(&view.root.children[1]);
+        assert_eq!(button.attached.len(), 2);
+        assert_eq!(button.attached[0].0, "Grid");
+        assert_eq!(button.attached[0].1, "row");
     }
 }
 

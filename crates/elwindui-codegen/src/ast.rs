@@ -30,16 +30,66 @@ pub enum Item {
 
 /// `component Name inherits Base { fields }`. See docs/elwindui_spec.md §3, 付録H.2.
 ///
-/// `base` does *not* merge `Base`'s fields into this component's own (see `validate.rs`'s
-/// `inherits` checks) — it's a structural contract, not field inheritance: either `Base` is the
-/// `NativeControl` marker (a pure category tag, checked for consistency against the
-/// recursively-inferred `is_native`, see `codegen::build_symbol_table`), or the paired `view`'s
-/// root element must literally construct `Base` (e.g. `RoundedPanel inherits Rectangle`).
+/// `base` resolves to one of four cases (see `validate.rs`'s `validate_inherits` and
+/// `codegen.rs`'s `resolve_effective_fields`/`resolve_view_for`):
+/// - `Base` is the `NativeControl` marker: a pure category tag, checked for consistency against
+///   the recursively-inferred `is_native` (see `codegen::build_symbol_table`) — no fields/methods
+///   to inherit.
+/// - `Base` is a `has_view == false` primitive shape (e.g. `Control`/`Rectangle`, `is_virtual_builtin`):
+///   `Name` must write its own `view` whose root literally constructs `Base` (checked by
+///   `validate_inherits`; there is no view-synthesis fallback for an omitted one). `Name` inherits
+///   `Base`'s fields the usual bare-reference way (`resolve_effective_fields`), and — because the
+///   root construction matches `Base` exactly — `codegen.rs`'s `generate_view` additionally
+///   generates `Name`'s struct with a real `base: <BaseImpl>` field (`elwindui_core::tree`'s own
+///   trait+`Impl`+`base` convention, docs/elwindui_spec.md 付録H.2.1a) and a direct
+///   `impl UIElement`/`impl <Base's own trait>` delegating to it, instead of the generic "wrapper
+///   owning a separately-`Rc`-erased root" every other `view`-having component uses. See
+///   `codegen.rs`'s `generate_view` `is_shape_composition` doc comment for why this is deliberately
+///   narrow (`RoundedPanel inherits Rectangle`, `ContentControl inherits Control`).
+/// - `Base` has its own `view` (a logical component, builtin or user-defined) that isn't one of the
+///   virtual-builtin shapes above: `Name` inherits `Base`'s fields *and* its `view` as a default
+///   template — if `Name` defines its own `view`, that's a full override (no constraint on its root
+///   element; see the *code*-reuse sub-case below), otherwise `Base`'s `view` is cloned with the
+///   target renamed to `Name`. That template-reuse (no-own-`view`) sub-case gets real `base`
+///   composition too, transitively, whenever `Base` is itself already composed (`LabeledPanel
+///   inherits ContentControl`, `TypeInfo::composed_shape`/`codegen.rs`'s `resolve_composed_shape`):
+///   `Name`'s struct embeds a real `base: Base` field, built by calling `Base`'s own
+///   `create_<snake case>(..)` factory (which every composed component exposes, precisely so a
+///   *further* derived one can call it directly — see `generate_view`'s `is_template_composition`).
+///   A `Name` that instead defines its *own* `view` reusing `Base`'s *code* rather than its structure
+///   (`Derived inherits Base`, both independently rooted, `#[override] fn`/`base::name(...)`) keeps
+///   the original field-flattening/`__base_<name>` shadow-method mechanism unchanged — there's no
+///   live `Base` instance to compose over there, only its method *bodies* to reuse (no different from
+///   `super.method()` in a mainstream OOP language never needing a freestanding `super` object).
+/// - `Base` is a native-backed leaf with no generated Rust (e.g. `Button`) — inheriting it is a
+///   validation error; there's nothing to delegate to.
+///
+/// `Name`'s own `fields`/`methods` may redeclare a same-named inherited `#[computed]` field or
+/// `#[virtual]` method only when marked `#[override]` (`Attr::Override`) — see
+/// `validate::validate_field_overrides`. Overriding bodies may call the base implementation via
+/// `base::name(...)`, rewritten by `codegen.rs`'s `rewrite_base_calls` to a generated `__base_name`
+/// method carrying the base's original body (the shape-composition case above has no `#[override]`
+/// use today, but would still go through this same mechanism if it ever did).
 #[derive(Debug, Clone)]
 pub struct ComponentDef {
     pub name: String,
     pub base: Option<String>,
     pub fields: Vec<FieldDef>,
+    pub methods: Vec<MethodDef>,
+}
+
+/// `#[virtual] fn name(&self, params) -> RetTy { body }` / `#[override] fn name(...) { body }`.
+/// Deliberately narrow — not a general Rust-method escape hatch, just enough to give components a
+/// WinUI3-style overridable hook (e.g. a lifecycle hook) with a `base::name(...)` call to chain
+/// into the base implementation. See docs/elwindui_spec.md §3.
+#[derive(Debug, Clone)]
+pub struct MethodDef {
+    pub name: String,
+    pub is_virtual: bool,
+    pub is_override: bool,
+    pub params: Vec<(String, syn::Type)>,
+    pub return_ty: Option<syn::Type>,
+    pub body: syn::Block,
 }
 
 /// `viewmodel Name { fields }`, reusing the same field syntax as `component`/`store`.
@@ -69,6 +119,16 @@ pub enum FieldKind {
     Computed,
     /// `#[command(...)]`, backed by `command!(...)`. See 付録O.3.
     Command,
+    /// `#[attached]`: a WPF/WinUI3-style attached property (§3) — declares a property that any
+    /// *other* element in the tree may set on itself via `Owner::field: value` (e.g. `Grid`'s
+    /// `row`/`column`, settable on any child anywhere, not just `Grid`'s own direct children).
+    /// Unlike every other kind, a field of this kind is *not* instance data of the component that
+    /// declares it (`Grid` doesn't itself have a `row`/`column`) — it's a schema declaration only,
+    /// excluded from the declaring component's own generated struct/constructor (`codegen.rs`'s
+    /// `build_symbol_table` already filters `param_fields`/etc. by `FieldKind::Param`, so this kind
+    /// is excluded there for free). Requires an initializer (a default value) — see
+    /// `validate::validate`.
+    Attached,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +152,12 @@ pub enum Attr {
     /// directly. Not tied to any specific field name (`on_click` is just the first user of it) —
     /// see docs/elwindui_spec.md 4章.
     Routed,
+    /// `#[override]`: on a `#[computed]` field, marks an intentional override of a same-named
+    /// inherited `#[computed]` field (vs. an accidental name collision, which is a validation
+    /// error). Declared types must match; the base's original initializer is preserved under a
+    /// generated `__base_name` accessor, reachable from the override's body via `base::name()`.
+    /// See docs/elwindui_spec.md §3, `validate::validate_field_overrides`.
+    Override,
 }
 
 /// A `component`/`viewmodel` field. See docs/elwindui_spec.md §3, 付録O.2.
@@ -121,10 +187,21 @@ pub enum Initializer {
     Expr(syn::Expr),
 }
 
-/// `view Name { let-bindings... ElementTree }`. See docs/elwindui_spec.md §2, §13.
+/// `view Name { on_mount { .. } on_unmount { .. } let-bindings... ElementTree }`. See
+/// docs/elwindui_spec.md §2, §13, 付録I.1.
 #[derive(Debug, Clone)]
 pub struct ViewDef {
     pub target: String,
+    /// `on_mount { .. }`, run once right after construction (spliced into generated `new()` after
+    /// `resync()`). When `Name` inherits a base with its own `view` and `Name` provides its own
+    /// `view`, an `on_mount` here may call `base::on_mount()` to chain into the base's block
+    /// (rewritten by `codegen.rs`'s `rewrite_base_calls`, same as `#[override]` methods). See
+    /// docs/elwindui_spec.md 付録I.1/I.3 (param-immutability during `on_mount` is still enforced).
+    pub on_mount: Option<syn::Block>,
+    /// `on_unmount { .. }`, parsed/validated/codegen'd (as an inert `__run_on_unmount` method) but
+    /// not yet wired to any runtime teardown trigger — `elwindui_core::tree` has no detach/removal
+    /// hook today. See docs/elwindui_spec.md 付録I.1.
+    pub on_unmount: Option<syn::Block>,
     /// Zero or more `#[id("...")]? let name = Element { .. };` statements, in source order,
     /// preceding `root`. Each introduces a name referenceable later (as a bare `ChildEntry::Ref`)
     /// within `root` or a later `let`'s own element.
@@ -145,13 +222,19 @@ pub struct LetBinding {
     pub element: ElementNode,
 }
 
-/// `Type { key: expr, ChildElement { ... } }`. Attribute values and nested elements share the
-/// same `{}` body; the parser splits them by whether an entry looks like `key: value` or a bare
-/// `Type { ... }`.
+/// `Type { key: expr, Owner::attached_field: expr, ChildElement { ... } }`. Attribute values and
+/// nested elements share the same `{}` body; the parser splits them by whether an entry looks like
+/// `key: value`, `Owner::field: value` (an attached-property setter, §3), or a bare `Type { ... }`.
 #[derive(Debug, Clone)]
 pub struct ElementNode {
     pub type_path: String,
     pub attributes: Vec<(String, ViewExpr)>,
+    /// `Grid::row: 1` etc. — `(owner type name, attached field name, value)`. `owner` need not be
+    /// (and isn't checked to be) an actual ancestor of this element anywhere in the tree — like
+    /// WPF's own attached properties, an unconsumed one is simply inert, not a static error. See
+    /// `validate::validate` and `codegen.rs`'s `PlannedNode`/wherever a child's `UIElementBase` is
+    /// constructed.
+    pub attached: Vec<(String, String, ViewExpr)>,
     pub children: Vec<ChildEntry>,
 }
 

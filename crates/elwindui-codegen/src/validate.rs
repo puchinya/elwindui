@@ -2,7 +2,7 @@
 //! ones reachable by the constructs the notepad example actually uses. See
 //! docs/elwindui_gui_framework_design.md §10 for the full rule list.
 
-use crate::ast::{ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
+use crate::ast::{Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
 use crate::codegen::{self, strip_rc_wrapper, SymbolTable};
 use std::collections::{HashMap, HashSet};
 
@@ -45,6 +45,15 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 c.name, f.name, f.ty
                             ));
                         }
+                        // `#[attached]` (§3) declares a property other elements set on
+                        // *themselves* via `Owner::field: value` — it needs a default value for
+                        // whichever of them never set it explicitly (see `check_attached_properties`).
+                        if f.kind == FieldKind::Attached && f.initializer.is_none() {
+                            errors.push(format!(
+                                "{}.{}: #[attached] field needs a default value (e.g. `= 0`)",
+                                c.name, f.name
+                            ));
+                        }
                         if let Some(Initializer::Bind { path, .. }) = &f.initializer {
                             validate_bind_path(module, &c.name, &f.name, path, &c.fields, &table, &mut errors);
                         }
@@ -52,6 +61,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
 
                     if let Some(base) = &c.base {
                         validate_inherits(module, c, base, modules, &table, &mut errors);
+                        validate_field_overrides(module, c, base, &table, &mut errors);
                     }
 
                     // `vm.field` / `vm.command.execute()` / `vm.command.can_execute` references
@@ -68,9 +78,11 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         for let_binding in &view.lets {
                             check_vm_references(&let_binding.element, module, &c.name, &vm_fields, &table, &mut errors);
                             check_tab_view_mode(&let_binding.element, &c.name, &mut errors);
+                            check_attached_properties(&let_binding.element, module, &c.name, &table, &mut errors);
                         }
                         check_vm_references(&view.root, module, &c.name, &vm_fields, &table, &mut errors);
                         check_tab_view_mode(&view.root, &c.name, &mut errors);
+                        check_attached_properties(&view.root, module, &c.name, &table, &mut errors);
                     }
                 }
                 Item::ViewModel(v) => {
@@ -314,6 +326,47 @@ fn check_tab_view_mode_in_expr(expr: &ViewExpr, component_name: &str, errors: &m
     }
 }
 
+/// Checks every `Owner::field: value` attached-property setter (§3) on `node` and its descendants:
+/// `Owner` must resolve to a known component/builtin, and that component must declare `field` as
+/// an `#[attached]`-kind field. Deliberately does *not* check whether `node` is actually a
+/// descendant of an `Owner` element anywhere in the tree — like WPF's own attached properties, one
+/// set on an element that never ends up under a matching container is simply inert at runtime, not
+/// a static error (see `ElementNode::attached`'s doc comment).
+fn check_attached_properties(node: &ElementNode, from: &Module, component_name: &str, table: &SymbolTable, errors: &mut Vec<String>) {
+    for (owner, field, _value) in &node.attached {
+        match table.resolve(from, owner) {
+            Some(info) if info.fields.get(field.as_str()) == Some(&FieldKind::Attached) => {}
+            Some(_) => errors.push(format!(
+                "{component_name}: `{owner}::{field}` — `{owner}` has no #[attached] property named `{field}`"
+            )),
+            None => errors.push(format!(
+                "{component_name}: `{owner}::{field}` — `{owner}` is not a known component/builtin (missing `use`?)"
+            )),
+        }
+    }
+    for child in &node.children {
+        if let ChildEntry::Literal(elem) = child {
+            check_attached_properties(elem, from, component_name, table, errors);
+        }
+    }
+    for (_, expr) in &node.attributes {
+        check_attached_properties_in_expr(expr, from, component_name, table, errors);
+    }
+}
+
+fn check_attached_properties_in_expr(expr: &ViewExpr, from: &Module, component_name: &str, table: &SymbolTable, errors: &mut Vec<String>) {
+    match expr {
+        ViewExpr::Element(elem) => check_attached_properties(elem, from, component_name, table, errors),
+        ViewExpr::Closure { body: ClosureBody::Element(elem), .. } => check_attached_properties(elem, from, component_name, table, errors),
+        ViewExpr::TFluent(_, args) => {
+            for (_, arg) in args {
+                check_attached_properties_in_expr(arg, from, component_name, table, errors);
+            }
+        }
+        ViewExpr::Path(_) | ViewExpr::MethodCall(..) | ViewExpr::Expr(_) | ViewExpr::Closure { body: ClosureBody::Expr(_), .. } => {}
+    }
+}
+
 /// Checks a `Type { attr: value, .. }` element used as a value — either a closure body
 /// (`render_content: |param| Type { .. }`, `param` is `Some`) or an ordinary named-slot attribute
 /// value (`menu_bar: MenuBar { .. }`, `param` is `None`). `Type` must resolve to an in-scope
@@ -412,12 +465,24 @@ fn validate_bind_path(
     }
 }
 
-/// Checks `component X inherits Base { .. }` (docs/elwindui_spec.md 付録H.2): `Base` must resolve;
-/// if it's the `NativeControl` marker, `X`'s structurally-inferred `is_native` (see
-/// `codegen::build_symbol_table`'s `resolve_is_native`) must actually be `true` — a consistency
-/// check, since `inherits` is a documentation/contract annotation here, not what *determines*
-/// nativeness. Otherwise (e.g. `RoundedPanel inherits Rectangle`), `X` must have a paired `view`
-/// whose root element is literally `Base` — the shape-composition use case.
+/// Checks `component X inherits Base { .. }` (docs/elwindui_spec.md §3): `Base` must resolve, then
+/// branches on what kind of base it is:
+/// - `NativeControl`: unchanged pure-category-tag consistency check against `X`'s
+///   structurally-inferred `is_native` (see `codegen::build_symbol_table`'s `resolve_is_native`) —
+///   `inherits NativeControl` doesn't itself *determine* nativeness.
+/// - A native-backed leaf with no generated Rust to inherit from (`has_view == false && is_native
+///   == true`, e.g. `Button`) — inheriting one is rejected; there's nothing to delegate to (see
+///   `codegen::resolve_effective_fields`'s doc comment).
+/// - A primitive shape family with no `view` of its own (`has_view == false && !is_native`, e.g.
+///   `Control`/`Rectangle`) — unchanged from before real field inheritance: `X` must have its own
+///   `view` whose root element is literally `Base` (the shape-composition use case,
+///   `codegen::resolve_view_for` doesn't attempt to auto-synthesize this one). Fields are now
+///   inherited automatically either way (`X` no longer needs to redeclare `Base`'s fields to
+///   forward them).
+/// - A logical component with its own `view` (`has_view == true`, builtin or user-defined) — `X`'s
+///   `view` is now optional (omitted: inherits `Base`'s template wholesale, WinUI3-style — see
+///   `codegen::resolve_view_for`); if present, no constraint on its root element (a full template
+///   override, unlike the primitive-shape case above).
 fn validate_inherits(
     from: &Module,
     c: &ComponentDef,
@@ -426,13 +491,13 @@ fn validate_inherits(
     table: &SymbolTable,
     errors: &mut Vec<String>,
 ) {
-    if table.resolve(from, base).is_none() {
+    let Some(base_info) = table.resolve(from, base) else {
         errors.push(format!(
             "{}: inherits `{base}`, but `{base}` is not a known component/builtin (missing `use`?)",
             c.name
         ));
         return;
-    }
+    };
 
     if base == "NativeControl" {
         let is_native = table.resolve(from, &c.name).is_some_and(|info| info.is_native);
@@ -447,14 +512,31 @@ fn validate_inherits(
         return;
     }
 
+    if !base_info.has_view && base_info.is_native {
+        errors.push(format!(
+            "{}: inherits `{base}`, but `{base}` is a native-backed leaf with no generated Rust to \
+             inherit from — only `NativeControl` may be used as a pure category tag here",
+            c.name
+        ));
+        return;
+    }
+
+    if base_info.has_view {
+        // A logical component base: `X`'s own `view`, if any, is a full template override — no
+        // root-element constraint (unlike the primitive-shape case below).
+        return;
+    }
+
+    // A primitive shape family (`has_view == false`, not native): `X` must have its own `view`
+    // whose root element is literally `Base` — unchanged shape-composition contract.
     let view = modules.iter().flat_map(|m| &m.items).find_map(|item| match item {
         Item::View(v) if v.target == c.name => Some(v),
         _ => None,
     });
     match view {
         None => errors.push(format!(
-            "{}: inherits `{base}`, but has no `view {}` — a component inheriting a \
-             non-`NativeControl` base must have its view's root element construct `{base}`",
+            "{}: inherits `{base}`, but has no `view {}` — a component inheriting a shape \
+             primitive with no `view` of its own must have its view's root element construct `{base}`",
             c.name, c.name
         )),
         Some(v) if v.root.type_path != base => errors.push(format!(
@@ -462,6 +544,77 @@ fn validate_inherits(
             c.name, c.name, v.root.type_path
         )),
         Some(_) => {}
+    }
+}
+
+/// Checks field-level `inherits` overrides (§3): a field this component redeclares that's already
+/// present on `base` (its effective, recursively-flattened field list) must either match kind
+/// exactly and be `#[computed]` with `#[override]` (an intentional override — codegen's
+/// `resolve_effective_fields`/`resolve_effective_methods` shadow-copies `base`'s original body
+/// under `__base_name`, reachable via `base::name(...)`), or not be redeclared at all (it's already
+/// inherited — remove the redeclaration). Also checks `#[override] fn` methods the same way against
+/// `base`'s effective `#[virtual]` methods.
+fn validate_field_overrides(from: &Module, c: &ComponentDef, base: &str, table: &SymbolTable, errors: &mut Vec<String>) {
+    if base == "NativeControl" {
+        return;
+    }
+    let Some(base_info) = table.resolve(from, base) else { return };
+
+    for f in &c.fields {
+        let Some(&base_kind) = base_info.fields.get(f.name.as_str()) else { continue };
+        let is_override = f.attrs.iter().any(|a| matches!(a, Attr::Override));
+        if base_kind != f.kind {
+            errors.push(format!(
+                "{}.{}: redeclares a field already inherited from `{base}` with a different kind \
+                 ({:?} here, {:?} in `{base}`) — an inherited field's kind can't change",
+                c.name, f.name, f.kind, base_kind
+            ));
+        } else if f.kind != FieldKind::Computed {
+            errors.push(format!(
+                "{}.{}: is already inherited from `{base}` — remove the redeclaration",
+                c.name, f.name
+            ));
+        } else if !is_override {
+            errors.push(format!(
+                "{}.{}: is inherited as #[computed] from `{base}` — add #[override] to intentionally override it",
+                c.name, f.name
+            ));
+        }
+    }
+
+    let base_virtual_methods: HashMap<&str, &crate::ast::MethodDef> = base_info
+        .effective_methods
+        .iter()
+        .filter(|m| m.is_virtual)
+        .map(|m| (m.name.as_str(), m))
+        .collect();
+    for m in &c.methods {
+        if !m.is_override {
+            continue;
+        }
+        let Some(base_method) = base_virtual_methods.get(m.name.as_str()) else {
+            errors.push(format!(
+                "{}: #[override] fn {} has no matching #[virtual] method named `{}` on `{base}`",
+                c.name, m.name, m.name
+            ));
+            continue;
+        };
+        let same_params = m.params.len() == base_method.params.len()
+            && m.params
+                .iter()
+                .zip(base_method.params.iter())
+                .all(|((_, ty), (_, base_ty))| quote::quote!(#ty).to_string() == quote::quote!(#base_ty).to_string());
+        let same_return = match (&m.return_ty, &base_method.return_ty) {
+            (Some(ty), Some(base_ty)) => quote::quote!(#ty).to_string() == quote::quote!(#base_ty).to_string(),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_params || !same_return {
+            errors.push(format!(
+                "{}: #[override] fn {} has a different signature than `{base}`'s #[virtual] fn {}",
+                c.name, m.name, m.name
+            ));
+        }
     }
 }
 
@@ -805,15 +958,16 @@ view Window11 {
         assert_eq!(validate(&modules), Ok(()));
     }
 
-    /// `inherits`'s shape-composition use case (docs/elwindui_spec.md 付録H.2): a component
-    /// inheriting a non-`NativeControl` base must have its `view`'s root element literally
-    /// construct that base.
+    /// `inherits`'s shape-composition use case (docs/elwindui_spec.md §3): a component inheriting a
+    /// primitive shape family with no `view` of its own must have its own `view`'s root element
+    /// literally construct that base — `fill` is inherited from `Rectangle` automatically, with no
+    /// redeclaration needed, and `corner_style` is `RoundedPanel`'s own genuinely new field.
     #[test]
     fn accepts_component_inheriting_a_shape_primitive_with_matching_view_root() {
         let src = r#"
 component RoundedPanel inherits Rectangle {
     #[param]
-    fill: Option<String>,
+    corner_style: Option<String>,
 }
 
 view RoundedPanel {
@@ -829,7 +983,7 @@ view RoundedPanel {
         let src = r#"
 component RoundedPanel inherits Rectangle {
     #[param]
-    fill: Option<String>,
+    corner_style: Option<String>,
 }
 
 view RoundedPanel {
@@ -839,6 +993,26 @@ view RoundedPanel {
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
         let errs = validate(&modules).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("must be `Rectangle`")), "errors: {errs:?}");
+    }
+
+    /// Redeclaring a field already inherited from a non-`NativeControl` base (without
+    /// `#[computed]`+`#[override]`) is an error — real field inheritance means it's already
+    /// available via `self`, so redeclaring it is either a mistake or dead weight.
+    #[test]
+    fn rejects_redeclaring_an_inherited_field() {
+        let src = r#"
+component RoundedPanel inherits Rectangle {
+    #[param]
+    fill: Option<String>,
+}
+
+view RoundedPanel {
+    Rectangle { fill: fill }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("already inherited")), "errors: {errs:?}");
     }
 
     #[test]
@@ -911,5 +1085,236 @@ view DocumentViewLike {
 
         let virtual_builtin_info = table.resolve(&modules[0], "VerticalLayout").expect("resolves");
         assert!(!virtual_builtin_info.is_native);
+    }
+
+    /// A native-backed leaf (`Button`, `has_view == false && is_native == true`) has no generated
+    /// Rust to inherit from — only `NativeControl` may be used as a pure category tag.
+    #[test]
+    fn rejects_inherits_of_a_native_leaf() {
+        let src = r#"
+component MyButton inherits Button {
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("native-backed leaf")), "errors: {errs:?}");
+    }
+
+    /// A logical component (`has_view == true`, e.g. `ContentControl`) may be inherited with *no*
+    /// `view` of its own at all — WinUI3-style template inheritance (`codegen::resolve_view_for`).
+    #[test]
+    fn accepts_inheriting_a_logical_component_with_no_own_view() {
+        let src = r#"
+component LabeledPanel inherits ContentControl {
+    #[param]
+    label: String,
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// A logical component base's `view` is a full template override when the derived writes its
+    /// own — unlike the primitive-shape-family case, there's no constraint that the root element
+    /// literally construct `Base`.
+    #[test]
+    fn accepts_full_view_override_of_a_logical_component_base() {
+        let src = r#"
+component LabeledPanel inherits ContentControl {
+    #[param]
+    label: String,
+}
+
+view LabeledPanel {
+    VerticalLayout { TextBlock { text: label } }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// A redeclared `#[computed]` field matching an inherited one is an intentional override only
+    /// when marked `#[override]` — otherwise it's an accidental-shadowing error.
+    #[test]
+    fn rejects_computed_field_override_without_override_attr() {
+        let src = r#"
+component Base {
+    #[computed]
+    label: String = "base".to_string(),
+}
+
+component Derived inherits Base {
+    #[computed]
+    label: String = "derived".to_string(),
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("add #[override]")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn accepts_computed_field_override_with_override_attr() {
+        let src = r#"
+component Base {
+    #[computed]
+    label: String = "base".to_string(),
+}
+
+view Base { VerticalLayout { } }
+
+component Derived inherits Base {
+    #[override]
+    #[computed]
+    label: String = "derived".to_string(),
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// `#[override] fn` must name-match a base `#[virtual]` method with the same signature.
+    #[test]
+    fn rejects_override_method_with_no_matching_virtual_base_method() {
+        let src = r#"
+component Base {
+    #[virtual]
+    fn label(&self) -> String {
+        "base".to_string()
+    }
+}
+
+component Derived inherits Base {
+    #[override]
+    fn not_label(&self) -> String {
+        "derived".to_string()
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("no matching #[virtual] method")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn rejects_override_method_with_mismatched_signature() {
+        let src = r#"
+component Base {
+    #[virtual]
+    fn label(&self) -> String {
+        "base".to_string()
+    }
+}
+
+component Derived inherits Base {
+    #[override]
+    fn label(&self, suffix: i32) -> String {
+        format!("derived{}", suffix)
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("different signature")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn accepts_override_method_with_matching_signature() {
+        let src = r#"
+component Base {
+    #[virtual]
+    fn label(&self) -> String {
+        "base".to_string()
+    }
+}
+
+view Base { VerticalLayout { } }
+
+component Derived inherits Base {
+    #[override]
+    fn label(&self) -> String {
+        format!("{}!", base::label())
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    #[test]
+    fn rejects_attached_field_without_default_value() {
+        let src = r#"
+component Grid {
+    #[attached]
+    row: i32,
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("default value")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn rejects_unknown_attached_property() {
+        let src = r#"
+component MyGrid {
+    #[attached]
+    row: i32 = 0,
+}
+
+component Foo {
+}
+
+view Foo {
+    VerticalLayout {
+        TextBlock { text: "hi", MyGrid::column: 1 }
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("no #[attached] property named `column`")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn rejects_attached_property_on_unknown_owner() {
+        let src = r#"
+component Foo {
+}
+
+view Foo {
+    VerticalLayout {
+        TextBlock { text: "hi", NoSuchOwner::row: 1 }
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("not a known component/builtin")), "errors: {errs:?}");
+    }
+
+    /// An attached property may be set on an element that isn't actually nested under a matching
+    /// owner anywhere — like WPF, this is inert at runtime, not a static error.
+    #[test]
+    fn accepts_attached_property_even_when_not_nested_under_its_owner() {
+        let src = r#"
+component MyGrid {
+    #[attached]
+    row: i32 = 0,
+    #[attached]
+    column: i32 = 0,
+}
+
+component Foo {
+}
+
+view Foo {
+    VerticalLayout {
+        TextBlock { text: "hi", MyGrid::row: 1, MyGrid::column: 0 }
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        assert_eq!(validate(&modules), Ok(()));
     }
 }

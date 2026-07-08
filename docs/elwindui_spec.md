@@ -90,6 +90,100 @@ let sales_card = Card { title: "売上", value: 12000 };
 Card { title, value }   // title: title, value: value の省略形
 ```
 
+### `inherits`:WinUI3方式のクラス継承
+
+`component Name inherits Base { ... }` は `Base` を4通りに解決する(単なる構造的契約ではなく、WinUI3/C#の`Control → ContentControl → Button`と同じ実継承):
+
+1. **`Base`が`NativeControl`マーカー** — 純粋なカテゴリタグ(フィールド継承なし)。ネイティブ実装を持つ末端要素(`Button`等)であることを示すのみ。
+2. **`Base`が`view`を持たないプリミティブ形状ファミリー**(例:`builtin::Control`/`builtin::Rectangle`) — `Base`の`#[param]`/propフィールドを**再宣言なしに自動継承**する。ただし`Name`自身の`view`は引き続き必須で、そのルート要素は文字通り`Base`を構築しなければならない(シェイプ合成、後述の付録F.10参照)。
+3. **`Base`が自前の`view`を持つ論理コンポーネント**(builtinでもユーザー定義でも) — フィールドに加えて`view`(テンプレート)も継承する。`Name`が独自の`view`を書かなければ`Base`のテンプレートをそのまま(WinUI3の既定`ControlTemplate`のように)引き継ぎ、書けば**完全なテンプレート上書き**になる(ルート要素の型に制約はない)。
+4. **`Base`がネイティブ実装のみの末端要素**(例:`Button`) — 継承不可。生成されるRustコードを持たないため、委譲先が存在しない。
+
+```rust
+component ContentControl inherits Control {
+    #[param]
+    content: std::rc::Rc<dyn UIElement>,
+    // padding は Control から自動的に継承される — 再宣言不要、self.padding() がそのまま使える
+}
+
+view ContentControl {
+    Control { padding: padding, content }
+}
+```
+
+継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
+
+**メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当):
+
+```rust
+component Control {
+    #[virtual]
+    fn label(&self) -> String {
+        "control".to_string()
+    }
+}
+
+component ContentControl inherits Control {
+    #[override]
+    fn label(&self) -> String {
+        format!("{}!", base::label())
+    }
+}
+```
+
+- `#[virtual] fn name(&self, ...) -> T { ... }` — 派生componentがオーバーライド可能なメソッドを宣言する
+- `#[override] fn name(...) { ... }` — 基底の同名`#[virtual]`メソッドと同じシグネチャで上書きする(シグネチャ不一致は静的エラー)
+- `base::name(...)` — オーバーライドした本体から基底実装を呼び出す(C#の`base.Method()`相当)。同じ書き方で`on_mount`/`on_unmount`(付録I.1)内から基底のライフサイクルフックを呼ぶこともできる
+- 継承・オーバーライドは1階層(直接の`inherits`先)のみ保証される。2階層以上に渡る`base::`連鎖は現時点では未対応
+
+`#[computed]`フィールドも同様に、基底の同名フィールドを`#[override]`なしで再宣言するとエラーになり、`#[override]`を付けると上書きとして扱われる(型は基底と一致していなければならない)。
+
+`#[overrides(builtin::X)]`(付録E)は`inherits`とは別の、無関係な仕組みである — 前者は同名builtinの明示的なシャドーイング、後者はクラス階層の構築であり、混同しないこと。
+
+### 添付プロパティ(`#[attached]`):WPF/WinUI3方式
+
+あるcomponentが宣言し、**任意の別要素が自分自身に設定できる**プロパティ(WPFの`Grid.Row`/`Grid.Column`相当)。
+宣言したcomponent自身のインスタンスデータにはならない——スキーマ宣言のみで、宣言したcomponent自身の
+コンストラクタ/生成structには一切現れない。
+
+```rust
+component Grid {
+    #[param]
+    rows: Vec<GridLength>,
+    #[param]
+    columns: Vec<GridLength>,
+    #[param]
+    children: Vec<AnyView>,
+
+    #[attached]
+    row: i32 = 0,
+    #[attached]
+    column: i32 = 0,
+}
+```
+
+```rust
+Grid {
+    rows: [GridLength::Auto, GridLength::Star(1.0)]
+    columns: [GridLength::Fixed(120.0), GridLength::Star(1.0)]
+    TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
+    Button { text: "Click", Grid::row: 1, Grid::column: 1 }
+}
+```
+
+- `#[attached]`フィールドは初期値(デフォルト)必須——設定しなかった要素に適用される既定値を表す
+- 設定側の構文は`Owner::field: value`(Rustのパス区切り`::`)——`{}`内で通常の属性と自由に混在できる
+- `Owner`は静的には「`field`という名前の`#[attached]`フィールドを持つ既知のcomponentか」だけを検証する。
+  設定先の要素が実際に`Owner`(例:`Grid`)の子孫であるかどうかは**検証しない**——WPF同様、対応する
+  コンテナの外で設定しても静的エラーにはならず、単に無視される
+- 現状の実装は`builtin::Grid`の`row`/`column`のみ(具象フィールドとして`UIElementBase`に追加)。
+  将来別のcomponentが独自の添付プロパティを持つ場合は、同じ仕組み(具象フィールドの追加)で拡張する
+  ——型消去された汎用プロパティバッグではない
+- 現状、添付プロパティが実際にレイアウトへ反映されるのは子要素が仮想ビルトインそのもの(`TextBlock`/
+  `Rectangle`/`Ellipse`/`Stack`/`Control`/入れ子の`Grid`)の場合のみ。ネイティブリーフ(`Button`/
+  `TextArea`等)や、ユーザー定義の`component`+`view`ペアへの設定は現時点では検証は通るが値は反映
+  されない(既定セルのまま)——将来の拡張課題
+
 ---
 
 ## 4. param と prop(実体化時固定 vs 実行時可変)
@@ -1206,62 +1300,108 @@ trait LayoutNode {
 ## H.2.1 `UIElement`階層(WinUI3方式)
 
 要素ツリー(Visualツリー、H.2.2参照)は、WinUI3が実際に`UIElement`派生クラスの木として要素ツリーを
-表現しているのに倣い、`Box<dyn UIElement>`というトレイトオブジェクトの木そのものとして表現される
-(別途「ツリー型」というラッパーは存在しない)。
+表現しているのに倣い、`Rc<dyn UIElement>`というトレイトオブジェクトの木そのものとして表現される
+(別途「ツリー型」というラッパーは存在しない)。子から親への逆参照(`parent()`)を持つため`Box`ではなく
+`Rc`で所有する(付録H.2.1a参照)。
+
+### H.2.1a Rustコードでのクラス階層表現規約
+
+elwindui本体(コード生成・手書きランタイム双方)でRustに“クラス”階層を実装する際は、以下の規約に従う
+(Rustには実装継承がないため、trait(振る舞いの契約)と構造体合成(データの委譲)を組み合わせて疑似的に
+表現する):
+
+- コンポーネント(クラス)名を`Class`とすると:
+  - **トレイト名**: `Class`。親クラスが`SuperClass`なら`trait Class: SuperClass`と宣言し、Rustのtrait境界で
+    継承関係を表現する。
+  - **構造体名**: `ClassImpl`。先頭のフィールドとして`base`という名前で親クラスの構造体を保持する:
+    ```rust
+    struct ClassImpl {
+        base: SuperClassImpl,
+        // Class自身が宣言したフィールドはこの後に続く
+    }
+    ```
+  - 親を持たない既定(ルート)クラス(例: `UIElement`)は`base`フィールドを持たない。
+  - `ClassImpl`は`Class`自身のトレイトに加えて、既定クラスまでの祖先トレイトを**すべて**実装する
+    (`UIElement => Control => ContentControl`の継承チェーンなら、`ContentControlImpl`は`UIElement`・
+    `Control`・`ContentControl`の3つのトレイトすべてを実装する)。祖先トレイトの各メソッドは
+    `self.base.method(...)`へ委譲するだけの薄い実装になる。
+  - 構造体の生成は構造体リテラルを直接書かず、ファクトリー関数`create_class(...)`を経由する
+    (例: `Button`なら`create_button(...)`)。
+- コード生成器(`elwindui-codegen`)が`component X inherits Y`から生成するコードも同じ形を取る——
+  かつてのように親の実効フィールド/メソッドを1つのstructへ畳み込む(フラット化する)のではなく、
+  `XImpl { base: YImpl, /* Xの宣言分のみ */ }`という実体合成にする。これにより`base::method(...)`
+  (§3)は名前を変えたシャドーメソッドを介さず、文字通り`self.base.method(...)`に書き換えるだけで済む。
+  合成済み(is_shape_composition/is_template_composition)の`.elwind` `component`は、実体のある
+  構造体を`XImpl`(例: `ContentControlImpl`)へリネームし、空いた`X`という裸名を本物の
+  `pub trait X: UIElement + <祖先の実トレイト>`として使う——手書きランタイム層とまったく同じ
+  命名規約が両立する。`.elwind`のDSL構文や、他コンポーネントが`X { ... }`と書く箇所は一切変更不要
+  ——`X`という名前を実際にRustの型として解決してコードを生成するのは`elwindui-codegen`の
+  `emit_construction`(`concrete_type_ident`)だけであり、そこが常に`X::new(args)`を
+  `XImpl::new(args)`へ書き換えて生成するため、外部から見た`X::new(args)`という既存の呼び出し規約は
+  変わらず成立する。
 
 ```rust
 pub trait UIElement: AsAny {
-    fn base(&self) -> &UIElementBase;
+    fn base(&self) -> &UIElementImpl;
     fn margin(&self) -> f32 { self.base().margin }
     fn horizontal_alignment(&self) -> HorizontalAlignment { self.base().horizontal_alignment }
     fn vertical_alignment(&self) -> VerticalAlignment { self.base().vertical_alignment }
-    fn children(&self) -> &[Box<dyn UIElement>];
+    fn children(&self) -> &[Rc<dyn UIElement>];
     fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size;
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect>;
     fn paint(&self) -> Option<PaintKind> { None }
 }
 
-pub struct UIElementBase {
+pub struct UIElementImpl {
     pub margin: f32, // 一律のMargin。Thickness(上下左右個別)は未対応
     pub horizontal_alignment: HorizontalAlignment, // Left | Center | Right | Stretch(既定)
     pub vertical_alignment: VerticalAlignment,     // Top | Center | Bottom | Stretch(既定)
 }
 ```
 
+`UIElement`はこの階層の既定(ルート)クラスなので`UIElementImpl`は`base`フィールドを持たない。
 `UIElement`トレイト自体はハンドル型`H`について非ジェネリックである。実ネイティブハンドルを持つのは
-`NativeControl<H>`(下記)だけであり、木を歩く汎用関数(`measure`/`arrange::<H>`/`layout_tree::<H>`)の
+`NativeControlImpl<H>`(下記)だけであり、木を歩く汎用関数(`measure`/`arrange::<H>`/`layout_tree::<H>`)の
 方がハンドル型`H`についてジェネリックになっている。
 
 ```
-UIElement (トレイト、Margin/Alignment共通実装)
+UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseなしの既定クラス)
  ├─ NativeControl<H> => Button, TextArea, MenuBar, TabView, ... (実ハンドルHを保持する唯一の型)
  ├─ TextBlock            (プリミティブ描画・非native、付録F.3)
  ├─ Shape => Rectangle, Ellipse (プリミティブ図形、付録F.6)
- ├─ Control              (Padding + ContentAlignmentを持つ、複数の小部品からなる複合部品。今回は
- │                         最小構成のみ導入、テンプレート差し替え等は将来拡張)
+ ├─ Control              (Padding + ContentAlignmentを持つ、複数の小部品からなる複合部品)
+ │   └─ ContentControl   (Content1つだけを持つ複合部品、`inherits`によるDSL合成の実例。付録E)
  └─ Stack => VerticalLayout, HorizontalLayout (付録F.2)
 ```
 
-`NativeControl<H>`の判定は`native_handle()`のような専用メソッドを`UIElement`に生やすのではなく、
-`AsAny`(`impl<T: Any> AsAny for T`というブランケット実装1つ)経由の`downcast_ref::<NativeControl<H>>()`
+いずれも実装型は`XxxImpl`(`StackImpl`/`ShapeImpl`/`TextBlockImpl`/`ControlImpl`/`GridImpl`/
+`NativeControlImpl<H>`)で、対応する`create_xxx(...)`ファクトリー関数(`elwindui_core::tree`)経由で
+生成し、`new_element(...)`で親子ポインタを配線した`Rc<dyn UIElement>`として木に組み込む。
+
+`NativeControlImpl<H>`の判定は`native_handle()`のような専用メソッドを`UIElement`に生やすのではなく、
+`AsAny`(`impl<T: Any> AsAny for T`というブランケット実装1つ)経由の`downcast_ref::<NativeControlImpl<H>>()`
 で行う——「実ハンドルを持つ」という概念を持たない大多数の実装(`Stack`/`Shape`/`TextBlock`/`Control`)
 に不要なボイラープレートを背負わせないための設計。
 
 `Window`は`UIElement`を派生しない。WinUI3の`Window`が`UIElement`ではなく独立したトップレベルの
-ホストであるのと同様、`Window`は`content: Box<dyn UIElement>`を保持し自身のクライアント領域に
+ホストであるのと同様、`Window`は`content: Rc<dyn UIElement>`を保持し自身のクライアント領域に
 対して`measure`/`arrange`を呼び出す**ホスト**である(AppKitの`TreeHostView`/WinUI3の
 `TreeHostPanel`がこの役割を実装する)。
 
 `Stack`(`VerticalLayout`/`HorizontalLayout`)は交差軸方向の配置を一律設定として持たない
 (かつての`CrossAlign`パラメータは廃止)——各子要素自身の`horizontal_alignment`/
 `vertical_alignment`が交差軸配置を決める、WinUI3の`StackPanel`と同じ設計である。主軸方向は
-常に「Auto」(子の自然サイズ)であり、「残り領域を埋める」子を表現する手段は将来の`Grid`
-(`*`比例サイズ)まで存在しない。
+常に「Auto」(子の自然サイズ)である。
+
+`Grid`(実装済み、docs/elwindui_builtins_spec.md参照)は行/列ベースのレイアウトで、`Stack`にはない
+「残り領域を`*`比例配分で埋める」手段(`GridLength::Star`)を提供する。各子の行/列位置は§3の添付
+プロパティ(`Grid::row`/`Grid::column`)で指定し、`UIElementImpl.grid_cell`(既定`(0, 0)`)として
+子要素自身が保持する——`Grid`自身が子ごとの別テーブルを持つわけではない。
 
 ## H.2.2 Logical/Visualツリーの分離
 
 WinUI3に倣い、「`.elwind`で書かれた見た目上の参照関係」(Logicalツリー)と
-「実際にlayoutされる`Box<dyn UIElement>`の木」(Visualツリー)を区別する。既存の
+「実際にlayoutされる`Rc<dyn UIElement>`の木」(Visualツリー)を区別する。既存の
 `component`+`view`パターン(例:`DocumentView`)は、実質的に既に「1つの論理ノード →
 展開された`UIElement`木」というLogical/Visual構造を持っている。
 
@@ -1372,6 +1512,8 @@ elwindui-backend-iced   # 同上 + accesskitでa11y補完
 # 付録I. ライフサイクルフック
 
 コンポーネントの生成時・破棄時・更新後に副作用のあるコードを挟むための仕組み。`view`ブロック内の先頭に宣言する。
+
+**実装状況**: `on_mount`は実装済み(生成される`new()`の中、`resync()`直後にそのまま展開される)。`on_unmount`はパース・検証・コード生成は実装済みだが、`elwindui_core::tree`に要素の破棄(detach/teardown)通知が現状存在しないため、実行時に呼び出されるトリガーはまだない(`__run_on_unmount`という到達可能なメソッドとしては生成される)。`on_update`(I.2)、およびI.3の`#[param]`不変性の静的検証は未実装。§3で述べた`inherits`の`base::on_mount()`/`base::on_unmount()`呼び出しは実装済み(1階層のみ)。
 
 ## I.1 `on_mount` / `on_unmount`
 

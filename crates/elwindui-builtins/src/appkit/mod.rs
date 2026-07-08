@@ -13,6 +13,7 @@ mod tab_view;
 pub use tab_view::{TabView, TabViewItem};
 
 use elwindui_backend_appkit as appkit;
+use elwindui_backend_appkit::{Button as _, MenuItem as _, TextArea as _};
 use std::rc::Rc;
 
 pub struct Window {
@@ -43,12 +44,12 @@ impl Window {
 }
 
 pub struct TextArea {
-    inner: appkit::TextArea,
+    inner: appkit::TextAreaImpl,
 }
 
 impl TextArea {
     pub fn new(text: &str) -> Rc<Self> {
-        Rc::new(Self { inner: appkit::TextArea::new(text) })
+        Rc::new(Self { inner: appkit::create_text_area(text) })
     }
 
     pub fn set_text(&self, text: &str) {
@@ -67,7 +68,7 @@ impl TextArea {
 }
 
 pub struct Button {
-    inner: appkit::Button,
+    inner: appkit::ButtonImpl,
     /// `#[routed] on_click` (`src/shapes/button.elwind`) is registered here at `Button`'s own
     /// construction/wiring time — long before the `NativeControl` tree node wrapping it exists
     /// (tree construction is bottom-up: children before parents). `elwindui-codegen`'s
@@ -81,7 +82,7 @@ pub struct Button {
 
 impl Button {
     pub fn new(text: &str, enabled: Option<bool>) -> Rc<Self> {
-        let inner = appkit::Button::new(text);
+        let inner = appkit::create_button(text);
         if let Some(enabled) = enabled {
             inner.set_enabled(enabled);
         }
@@ -113,23 +114,23 @@ impl Button {
 }
 
 pub struct MenuBar {
-    inner: appkit::MenuBar,
+    inner: appkit::MenuBarImpl,
 }
 
 impl MenuBar {
     pub fn new(children: Vec<Rc<MenuBarItem>>) -> Rc<Self> {
         let items = children.iter().map(|c| c.inner.clone()).collect();
-        Rc::new(Self { inner: appkit::MenuBar::new(items) })
+        Rc::new(Self { inner: appkit::create_menu_bar(items) })
     }
 }
 
 pub struct MenuBarItem {
-    inner: appkit::MenuBarItem,
+    inner: appkit::MenuBarItemImpl,
 }
 
 impl MenuBarItem {
     pub fn new(text: &str, submenu: Rc<Menu>) -> Rc<Self> {
-        Rc::new(Self { inner: appkit::MenuBarItem::new(text, submenu.inner.clone()) })
+        Rc::new(Self { inner: appkit::create_menu_bar_item(text, submenu.inner.clone()) })
     }
 
     /// See `MenuItem::set_text`'s doc comment — same reason (no title setter in
@@ -139,23 +140,23 @@ impl MenuBarItem {
 }
 
 pub struct Menu {
-    inner: appkit::Menu,
+    inner: appkit::MenuImpl,
 }
 
 impl Menu {
     pub fn new(children: Vec<Rc<MenuItem>>) -> Rc<Self> {
         let items = children.iter().map(|c| c.inner.clone()).collect();
-        Rc::new(Self { inner: appkit::Menu::new(items) })
+        Rc::new(Self { inner: appkit::create_menu(items) })
     }
 }
 
 pub struct MenuItem {
-    inner: appkit::MenuItem,
+    inner: appkit::MenuItemImpl,
 }
 
 impl MenuItem {
     pub fn new(text: &str, shortcut: Option<&str>, enabled: Option<bool>) -> Rc<Self> {
-        let inner = appkit::MenuItem::new(text);
+        let inner = appkit::create_menu_item(text);
         if let Some(shortcut) = shortcut {
             inner.set_shortcut(shortcut);
         }

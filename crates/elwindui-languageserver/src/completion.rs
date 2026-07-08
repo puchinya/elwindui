@@ -105,7 +105,7 @@ pub fn completions_at(
 fn field_completion_item(name: &str, kind: FieldKind) -> CompletionItem {
     let item_kind = match kind {
         FieldKind::Command => CompletionItemKind::METHOD,
-        FieldKind::Computed => CompletionItemKind::PROPERTY,
+        FieldKind::Computed | FieldKind::Attached => CompletionItemKind::PROPERTY,
         FieldKind::Observable | FieldKind::Prop | FieldKind::Param => CompletionItemKind::FIELD,
     };
     CompletionItem { label: name.to_string(), kind: Some(item_kind), ..Default::default() }

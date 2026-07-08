@@ -4,8 +4,8 @@
 //! 依存関係グラフに基づくCell/RefCellベースの更新関数生成は付録O.5に対応する。
 
 use crate::ast::{
-    Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldKind, Initializer, Item, Module,
-    ViewDef, ViewExpr, ViewModelDef,
+    Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef, FieldKind, Initializer, Item,
+    MethodDef, Module, ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -78,8 +78,43 @@ pub struct TypeInfo {
     /// `&(..)`-wrapping) — but a `view`-having component's *generated* `new(..)` takes the field's
     /// literal declared type verbatim (`generate_view`'s `param_types`), which for a plain
     /// `#[param] label: String` is an owned `String`, not `&str`. This flag is what lets
-    /// `emit_construction` tell the two conventions apart at a call site.
+    /// `emit_construction` tell the two conventions apart at a call site. `true` whenever
+    /// `effective_view` is `Some` — including a component with no `view` text of its own that
+    /// inherits one from its base (see `resolve_view_for`), since that's still generated via
+    /// `generate_view`, not `generate_component`.
     pub has_view: bool,
+    /// This component's fully-flattened field list (`inherits`'s base fields, recursively, minus
+    /// any legitimately `#[override]`n `#[computed]` field, followed by this component's own new
+    /// fields) — see `resolve_effective_fields`. Empty for a `viewmodel` (which never inherits).
+    /// What `generate_module` actually feeds to `generate_component`/`generate_view` instead of a
+    /// component's raw, un-flattened `ComponentDef::fields`.
+    pub effective_fields: Vec<FieldDef>,
+    /// This component's fully-flattened method list — see `resolve_effective_methods`. Empty for a
+    /// `viewmodel`.
+    pub effective_methods: Vec<MethodDef>,
+    /// This component's effective `view` — its own, if it wrote one, otherwise its base's
+    /// (recursively), retargeted to this component's name — see `resolve_view_for`. `None` for a
+    /// component with no view anywhere in its `inherits` chain (a plain data component, or one
+    /// inheriting a primitive shape family with no `view` of its own, e.g. `Control`/`Rectangle`).
+    pub effective_view: Option<ViewDef>,
+    /// This component's own literal `view`'s `on_mount`/`on_unmount` blocks (not inherited/cloned —
+    /// see `find_view`), used by `generate_view` to emit `__base_on_mount`/`__base_on_unmount`
+    /// shadow methods for a *directly* derived component's `base::on_mount()`/`base::on_unmount()`
+    /// calls. Deliberately only one level deep (not `effective_view`'s recursively-resolved hook) —
+    /// see `generate_view`'s doc comment on the scope limit this implies for `base::` chains longer
+    /// than one `inherits` hop.
+    pub own_on_mount: Option<syn::Block>,
+    pub own_on_unmount: Option<syn::Block>,
+    /// The DSL name of the virtual-builtin shape (`Control`/`Rectangle`/`Ellipse`/`TextBlock`/`Grid`/
+    /// `VerticalLayout`/`HorizontalLayout`) this component's generated struct ultimately composes
+    /// over via a real `base: <Impl>` field (docs/elwindui_spec.md 付録H.2.1a), if any — see
+    /// `resolve_composed_shape`. `Some` in two cases: *directly* (this component's own `view` root
+    /// literally constructs that shape, e.g. `ContentControl inherits Control`) or *transitively*
+    /// (this component has no `view` of its own and inherits an already-composed component, e.g.
+    /// `LabeledPanel inherits ContentControl`). `None` for a plain component, one inheriting
+    /// `NativeControl`, or one inheriting another component's *code* (a `#[virtual]`/`#[override]`
+    /// method-hook base like `Derived inherits Base`) rather than its composed structure.
+    pub composed_shape: Option<String>,
 }
 
 impl SymbolTable {
@@ -134,82 +169,150 @@ pub(crate) fn strip_rc_wrapper(ty: &str) -> &str {
 
 pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     let mut types = HashMap::new();
-    // `(module index, #[[inherits]] base name, paired view's root element type)` per `component`
-    // key — the raw material `resolve_is_native` (below) needs; not every component has a paired
-    // `view` (native leaf builtins and virtual builtins like `VerticalLayout`/`Rectangle` are declared
-    // shape-only, see `BUILTIN_SHAPE_SOURCES`) or a `base` (only `inherits`-using components do).
+    // `(module index, #[[inherits]] base name, effective view's root element type)` per `component`
+    // key — the raw material `resolve_is_native` (below) needs; not every component has an
+    // effective `view` (native leaf builtins and virtual builtins like `VerticalLayout`/`Rectangle`
+    // are declared shape-only, see `BUILTIN_SHAPE_SOURCES`) or a `base` (only `inherits`-using
+    // components do). The root is the *effective* one (`resolve_view_for` — own view, or inherited
+    // from `base`), not just a literal same-module `Item::View`, so a component with no `view` of
+    // its own that inherits a logical base's template is still inferred native/virtual correctly.
     let mut component_meta: HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>)> = HashMap::new();
 
     for (module_index, module) in modules.iter().enumerate() {
         for item in &module.items {
             let Item::Component(c) = item else { continue };
-            // A `component`/`view` pair always shares one module (付録B.1), so the paired `view`
-            // (if any) is always found locally here, never through a `use`.
-            let view_root = module.items.iter().find_map(|i| match i {
-                Item::View(v) if v.target == c.name => Some(v.root.type_path.clone()),
-                _ => None,
-            });
+            let view_root = resolve_view_for(module, c, modules).map(|v| v.root.type_path.clone());
             component_meta.insert((module.path.clone(), c.name.clone()), (module_index, c.base.clone(), view_root));
         }
 
         for item in &module.items {
-            let (name, fields, is_viewmodel) = match item {
-                Item::Component(c) => (c.name.clone(), &c.fields, false),
-                Item::ViewModel(v) => (v.name.clone(), &v.fields, true),
-                Item::Enum(_) | Item::View(_) => continue,
-            };
-            let field_kinds = fields.iter().map(|f| (f.name.clone(), f.kind)).collect();
-            let binds = fields
-                .iter()
-                .filter_map(|f| match &f.initializer {
-                    Some(Initializer::Bind { path, .. }) => {
-                        let [owner, target] = path.as_slice() else {
-                            return None;
-                        };
-                        Some((f.name.clone(), (owner.clone(), target.clone())))
-                    }
-                    _ => None,
-                })
-                .collect();
-            let param_fields = fields
-                .iter()
-                .filter(|f| f.kind == FieldKind::Param && f.initializer.is_none())
-                .map(|f| (f.name.clone(), f.ty.clone()))
-                .collect();
-            let two_way_fields = fields
-                .iter()
-                .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay)))
-                .map(|f| f.name.clone())
-                .collect();
-            let routed_fields = fields
-                .iter()
-                .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::Routed)))
-                .map(|f| f.name.clone())
-                .collect();
-            let field_types = fields
-                .iter()
-                .filter(|f| f.initializer.is_none())
-                .map(|f| (f.name.clone(), f.ty.clone()))
-                .collect();
-            let has_view = matches!(item, Item::Component(_))
-                && module.items.iter().any(|i| matches!(i, Item::View(v) if v.target == name));
-            // `is_native` is finalized in the second pass below, once every type is present in
-            // `table` to recurse through (a component's `view` root may be defined later in
-            // iteration order, or in another module entirely).
-            types.insert(
-                (module.path.clone(), name),
-                TypeInfo {
-                    fields: field_kinds,
-                    binds,
-                    param_fields,
-                    two_way_fields,
-                    routed_fields,
-                    field_types,
-                    is_viewmodel,
-                    is_native: false,
-                    has_view,
-                },
-            );
+            match item {
+                Item::Component(c) => {
+                    let effective_fields = resolve_effective_fields(module, c, modules);
+                    let effective_methods = resolve_effective_methods(module, c, modules);
+                    let effective_view = resolve_view_for(module, c, modules);
+                    let own_view = find_view(module, &c.name);
+                    let field_kinds = effective_fields.iter().map(|f| (f.name.clone(), f.kind)).collect();
+                    let binds = effective_fields
+                        .iter()
+                        .filter_map(|f| match &f.initializer {
+                            Some(Initializer::Bind { path, .. }) => {
+                                let [owner, target] = path.as_slice() else {
+                                    return None;
+                                };
+                                Some((f.name.clone(), (owner.clone(), target.clone())))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let param_fields = effective_fields
+                        .iter()
+                        .filter(|f| f.kind == FieldKind::Param && f.initializer.is_none())
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
+                    let two_way_fields = effective_fields
+                        .iter()
+                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay)))
+                        .map(|f| f.name.clone())
+                        .collect();
+                    let routed_fields = effective_fields
+                        .iter()
+                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::Routed)))
+                        .map(|f| f.name.clone())
+                        .collect();
+                    let field_types = effective_fields
+                        .iter()
+                        .filter(|f| f.initializer.is_none())
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
+                    let has_view = effective_view.is_some();
+                    // `is_native` is finalized in the second pass below, once every type is present
+                    // in `table` to recurse through (a component's `view` root may be defined later
+                    // in iteration order, or in another module entirely).
+                    types.insert(
+                        (module.path.clone(), c.name.clone()),
+                        TypeInfo {
+                            fields: field_kinds,
+                            binds,
+                            param_fields,
+                            two_way_fields,
+                            routed_fields,
+                            field_types,
+                            is_viewmodel: false,
+                            is_native: false,
+                            has_view,
+                            effective_fields,
+                            effective_methods,
+                            effective_view,
+                            own_on_mount: own_view.and_then(|v| v.on_mount.clone()),
+                            own_on_unmount: own_view.and_then(|v| v.on_unmount.clone()),
+                            // Finalized in the same later pass as `is_native`, for the same reason.
+                            composed_shape: None,
+                        },
+                    );
+                }
+                Item::ViewModel(v) => {
+                    let field_kinds = v.fields.iter().map(|f| (f.name.clone(), f.kind)).collect();
+                    let binds = v
+                        .fields
+                        .iter()
+                        .filter_map(|f| match &f.initializer {
+                            Some(Initializer::Bind { path, .. }) => {
+                                let [owner, target] = path.as_slice() else {
+                                    return None;
+                                };
+                                Some((f.name.clone(), (owner.clone(), target.clone())))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let param_fields = v
+                        .fields
+                        .iter()
+                        .filter(|f| f.kind == FieldKind::Param && f.initializer.is_none())
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
+                    let two_way_fields = v
+                        .fields
+                        .iter()
+                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay)))
+                        .map(|f| f.name.clone())
+                        .collect();
+                    let routed_fields = v
+                        .fields
+                        .iter()
+                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::Routed)))
+                        .map(|f| f.name.clone())
+                        .collect();
+                    let field_types = v
+                        .fields
+                        .iter()
+                        .filter(|f| f.initializer.is_none())
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
+                    types.insert(
+                        (module.path.clone(), v.name.clone()),
+                        TypeInfo {
+                            fields: field_kinds,
+                            binds,
+                            param_fields,
+                            two_way_fields,
+                            routed_fields,
+                            field_types,
+                            is_viewmodel: true,
+                            is_native: false,
+                            has_view: false,
+                            effective_fields: Vec::new(),
+                            effective_methods: Vec::new(),
+                            effective_view: None,
+                            own_on_mount: None,
+                            own_on_unmount: None,
+                            composed_shape: None,
+                        },
+                    );
+                }
+                Item::Enum(_) | Item::View(_) => {}
+            }
         }
     }
 
@@ -220,11 +323,223 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
         resolve_is_native(key, &component_meta, modules, &table, &mut memo);
     }
 
+    let mut composed_shape_memo: HashMap<(Vec<String>, String), Option<String>> = HashMap::new();
+    for key in &keys {
+        resolve_composed_shape(key, &component_meta, modules, &table, &mut composed_shape_memo);
+    }
+
     let mut types = table.types;
     for (key, info) in types.iter_mut() {
         info.is_native = memo.get(key).copied().unwrap_or(false);
+        info.composed_shape = composed_shape_memo.get(key).cloned().flatten();
     }
     SymbolTable { types }
+}
+
+/// Resolves `name` as seen from `from` directly against `modules`' raw AST (no `SymbolTable`
+/// needed — this is what `build_symbol_table` itself uses to resolve an `inherits` base while
+/// still building the table), mirroring `SymbolTable::resolve_key`'s own name-resolution rule:
+/// defined locally — in *any* module sharing `from`'s real path, not just `from` itself, since
+/// every builtin shape lives in its own same-path (`[]`), `use`-less `.elwind` file and they must
+/// still see each other (`builtin_modules`'s own doc comment: "the same way two `.elwind` files in
+/// the same directory already see each other without a `use`") — or brought into scope by one of
+/// `from`'s `use` declarations.
+fn find_component_and_module<'m>(
+    from: &'m Module,
+    name: &str,
+    modules: &'m [Module],
+) -> Option<(&'m Module, &'m ComponentDef)> {
+    if let Some(found) = modules.iter().filter(|m| m.path == from.path).find_map(|m| {
+        m.items.iter().find_map(|i| match i {
+            Item::Component(c) if c.name == name => Some((m, c)),
+            _ => None,
+        })
+    }) {
+        return Some(found);
+    }
+    for u in &from.uses {
+        let [prefix @ .., last] = u.path.as_slice() else { continue };
+        if last != name {
+            continue;
+        }
+        let real_prefix: &[String] = match prefix {
+            [first, rest @ ..] if first == "crate" => rest,
+            other => other,
+        };
+        if let Some(m) = modules.iter().find(|m| m.path == real_prefix) {
+            if let Some(c) = m.items.iter().find_map(|i| match i {
+                Item::Component(c) if c.name == name => Some(c),
+                _ => None,
+            }) {
+                return Some((m, c));
+            }
+        }
+    }
+    None
+}
+
+/// A component's own literal `view` (not inherited/cloned from a base) — `None` for a shape-only
+/// declaration (`Control`/`Rectangle`/every native leaf).
+fn find_view<'m>(module: &'m Module, target: &str) -> Option<&'m ViewDef> {
+    module.items.iter().find_map(|i| match i {
+        Item::View(v) if v.target == target => Some(v),
+        _ => None,
+    })
+}
+
+/// Recursively flattens `c`'s effective field list: its (non-`NativeControl`) base's own effective
+/// fields, minus any this component legitimately redeclares (an `#[override]`n `#[computed]` field
+/// — validated by `validate::validate_field_overrides`; codegen trusts that here rather than
+/// re-checking), followed by `c`'s own newly-declared fields. See `ComponentDef`'s doc comment.
+///
+/// A component with its own `view` only inherits the specific base fields that view actually
+/// forwards by a bare same-name reference (e.g. `ContentControl`'s `Control { padding: padding }`)
+/// — one it hardcodes with a literal/expression instead (`RoundedPanel`'s `Rectangle { fill:
+/// "#3a3a3c" }`) or never mentions at all (`RoundedPanel` never sets `Rectangle`'s `stroke`) stays
+/// invisible and keeps its own default, exactly like the pre-inheritance hand-written model — a
+/// hardcoded/unset base field becoming a new required constructor parameter on the derived
+/// component (with no way for its own view to ever use the caller's value) would be a silent API
+/// break, not real inheritance. A component with *no* own view (pure template inheritance, see
+/// `resolve_view_for`) gets every one of base's fields unconditionally, since the entire inherited
+/// view already references them all the normal way.
+pub(crate) fn resolve_effective_fields<'m>(from: &'m Module, c: &ComponentDef, modules: &'m [Module]) -> Vec<FieldDef> {
+    let Some(base) = c.base.as_deref() else {
+        return c.fields.clone();
+    };
+    if base == "NativeControl" {
+        return c.fields.clone();
+    }
+    let Some((base_module, base_c)) = find_component_and_module(from, base, modules) else {
+        return c.fields.clone();
+    };
+    let base_fields = resolve_effective_fields(base_module, base_c, modules);
+    let base_fields: Vec<FieldDef> = match find_view(from, &c.name) {
+        Some(view) => base_fields.into_iter().filter(|f| view_references_bare_name(view, &f.name)).collect(),
+        None => base_fields,
+    };
+    let own_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
+    let mut result: Vec<FieldDef> =
+        base_fields.into_iter().filter(|f| !own_names.contains(f.name.as_str())).collect();
+    result.extend(c.fields.iter().cloned());
+    result
+}
+
+/// Whether `view`'s element tree references `name` as a *bare* value anywhere — a 1-segment
+/// `ViewExpr::Path` (`padding: padding`) or a bare `ChildEntry::Ref` (`Control { content }`) — as
+/// opposed to a literal/computed value (`fill: "#3a3a3c"`) or no mention at all. See
+/// `resolve_effective_fields`'s doc comment.
+fn view_references_bare_name(view: &ViewDef, name: &str) -> bool {
+    view.lets.iter().any(|l| element_references_bare_name(&l.element, name))
+        || element_references_bare_name(&view.root, name)
+}
+
+fn element_references_bare_name(node: &ElementNode, name: &str) -> bool {
+    if node.attributes.iter().any(|(_, expr)| view_expr_references_bare_name(expr, name)) {
+        return true;
+    }
+    node.children.iter().any(|child| match child {
+        ChildEntry::Literal(elem) => element_references_bare_name(elem, name),
+        ChildEntry::Ref(n) => n == name,
+    })
+}
+
+fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
+    match expr {
+        ViewExpr::Path(path) => path.len() == 1 && path[0] == name,
+        ViewExpr::Element(elem) => element_references_bare_name(elem, name),
+        ViewExpr::Closure { body: ClosureBody::Element(elem), .. } => element_references_bare_name(elem, name),
+        ViewExpr::TFluent(_, args) => args.iter().any(|(_, v)| view_expr_references_bare_name(v, name)),
+        ViewExpr::MethodCall(..) | ViewExpr::Expr(_) | ViewExpr::Closure { body: ClosureBody::Expr(_), .. } => false,
+    }
+}
+
+/// Recursively flattens `c`'s effective method list: its base's own effective methods (an
+/// `#[override]`n one is kept alongside under a mangled `__base_<name>` so the override's body can
+/// still reach it via `base::name(...)`, rewritten by `rewrite_base_calls`), followed by `c`'s own
+/// methods (an override's body rewritten the same way). See `ComponentDef`'s doc comment. Only one
+/// `inherits` hop's worth of `base::` chaining is guaranteed correct — see `generate_view`'s doc
+/// comment on `own_on_mount`/`own_on_unmount` for the same limitation applied to lifecycle hooks.
+pub(crate) fn resolve_effective_methods<'m>(from: &'m Module, c: &ComponentDef, modules: &'m [Module]) -> Vec<MethodDef> {
+    let mut result = Vec::new();
+    if let Some(base) = c.base.as_deref() {
+        if base != "NativeControl" {
+            if let Some((base_module, base_c)) = find_component_and_module(from, base, modules) {
+                let base_methods = resolve_effective_methods(base_module, base_c, modules);
+                let overridden: HashSet<&str> =
+                    c.methods.iter().filter(|m| m.is_override).map(|m| m.name.as_str()).collect();
+                for bm in base_methods {
+                    if overridden.contains(bm.name.as_str()) {
+                        let mut shadow = bm.clone();
+                        shadow.name = format!("__base_{}", bm.name);
+                        shadow.is_virtual = false;
+                        shadow.is_override = false;
+                        result.push(shadow);
+                    }
+                    result.push(bm);
+                }
+            }
+        }
+    }
+    for m in &c.methods {
+        let mut m = m.clone();
+        if m.is_override {
+            m.body = rewrite_base_calls(m.body, &format_ident!("self"));
+        }
+        result.push(m);
+    }
+    result
+}
+
+/// Resolves `c`'s effective `view`: its own literal `view` if it wrote one (a full template
+/// override — no constraint on its root element beyond what `validate::validate_inherits` already
+/// checks), otherwise its base's effective `view` (recursively), retargeted to `c.name`. Returns
+/// `None` when there's no `view` anywhere in the chain — a plain data component, or one inheriting
+/// a primitive shape family with no `view` of its own (`Control`/`Rectangle`; those still require
+/// an explicit hand-written `view`, unchanged from before this feature — see
+/// `validate::validate_inherits`).
+pub(crate) fn resolve_view_for<'m>(from: &'m Module, c: &ComponentDef, modules: &'m [Module]) -> Option<ViewDef> {
+    if let Some(own) = find_view(from, &c.name) {
+        return Some(own.clone());
+    }
+    let base = c.base.as_deref()?;
+    if base == "NativeControl" {
+        return None;
+    }
+    let (base_module, base_c) = find_component_and_module(from, base, modules)?;
+    let base_view = resolve_view_for(base_module, base_c, modules)?;
+    Some(ViewDef { target: c.name.clone(), ..base_view })
+}
+
+/// Rewrites `base::name(args)` — a method/`#[computed]`-initializer/`on_mount`/`on_unmount` body's
+/// call into its immediate base's implementation of the same name (§3) — to `#receiver.__base_name
+/// (args)`, the shadow copy `resolve_effective_methods`/`generate_view` emit alongside an
+/// `#[override]`. Structurally identical to `rewrite_field_refs`'s own `VisitMut` idiom.
+fn rewrite_base_calls(mut block: syn::Block, receiver: &syn::Ident) -> syn::Block {
+    struct Rewriter<'a> {
+        receiver: &'a syn::Ident,
+    }
+    impl VisitMut for Rewriter<'_> {
+        fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+            if let syn::Expr::Call(call) = node {
+                if let syn::Expr::Path(p) = &*call.func {
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    if let [base_seg, name] = segs.as_slice() {
+                        if base_seg == "base" {
+                            let receiver = self.receiver;
+                            let method = format_ident!("__base_{}", name);
+                            let args = &call.args;
+                            *node = syn::parse_quote! { #receiver.#method(#args) };
+                            return;
+                        }
+                    }
+                }
+            }
+            syn::visit_mut::visit_expr_mut(self, node);
+        }
+    }
+    let mut rewriter = Rewriter { receiver };
+    rewriter.visit_block_mut(&mut block);
+    block
 }
 
 /// Recursively resolves whether the component at `key` is native (see `TypeInfo::is_native`'s doc
@@ -268,41 +583,82 @@ fn resolve_is_native(
     is_native
 }
 
+/// Recursively resolves the virtual-builtin shape (if any) the component at `key` composes over via
+/// a real `base: <Impl>` field — see `TypeInfo::composed_shape`'s doc comment and
+/// `codegen::generate_view`'s `composed_shape`-driven branch.
+fn resolve_composed_shape(
+    key: &(Vec<String>, String),
+    component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>)>,
+    modules: &[Module],
+    table: &SymbolTable,
+    memo: &mut HashMap<(Vec<String>, String), Option<String>>,
+) -> Option<String> {
+    if let Some(cached) = memo.get(key) {
+        return cached.clone();
+    }
+    // Guards against a cyclic `inherits` chain (shouldn't occur in valid programs) recursing
+    // forever — provisionally `None` while this key is being resolved.
+    memo.insert(key.clone(), None);
+
+    let result = (|| {
+        let (module_index, base, view_root) = component_meta.get(key)?;
+        let base = base.as_deref()?;
+        if base == "NativeControl" {
+            return None;
+        }
+        if is_virtual_builtin(base) {
+            // Direct shape composition (`ContentControl inherits Control`): this component's own
+            // (or, if it has none, its base's) effective root must be exactly `base` — matching
+            // `validate::validate_inherits`'s own requirement that an explicit `view` is needed here.
+            return (view_root.as_deref() == Some(base)).then(|| base.to_string());
+        }
+        // Template composition (`LabeledPanel inherits ContentControl`): only eligible when this
+        // component writes no `view` of its own (a full override has an independent tree — see
+        // `generate_view`'s own `is_shape_composition`/`is_template_composition` doc comments for why
+        // that case keeps the `resolve_effective_fields`/`__base_<name>` mechanism instead), and only
+        // if the base itself is already composed.
+        let from = &modules[*module_index];
+        if find_view(from, &key.1).is_some() {
+            return None;
+        }
+        let base_key = table.resolve_key(from, base)?;
+        resolve_composed_shape(&base_key, component_meta, modules, table, memo)
+    })();
+
+    memo.insert(key.clone(), result.clone());
+    result
+}
+
 pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
-    // A `component`/`view` pair sharing a name is generated as a single struct+impl (by
-    // `generate_view`, which also owns the widget fields); a bare `component` with no matching
-    // `view` falls back to `generate_component`'s plain struct+accessors.
-    let view_targets: HashSet<&str> = module
-        .items
-        .iter()
-        .filter_map(|i| match i {
-            Item::View(v) => Some(v.target.as_str()),
-            _ => None,
-        })
-        .collect();
-
-    let components: HashMap<&str, &ComponentDef> = module
-        .items
-        .iter()
-        .filter_map(|i| match i {
-            Item::Component(c) => Some((c.name.as_str(), c)),
-            _ => None,
-        })
-        .collect();
-
+    // A component with an effective `view` (its own, or inherited from its `inherits` base — see
+    // `resolve_view_for`) is generated as a single struct+impl by `generate_view`, which also owns
+    // the widget fields; one with no `view` anywhere in its chain falls back to
+    // `generate_component`'s plain struct+accessors. Both are fed a *synthetic* `ComponentDef`
+    // carrying `TypeInfo`'s already-flattened `effective_fields`/`effective_methods`, not the
+    // literal (un-flattened) `ComponentDef` parsed from source — see `ComponentDef`'s doc comment.
     let mut out = TokenStream::new();
     for item in &module.items {
         out.extend(match item {
             Item::Enum(e) => generate_enum(e),
             Item::ViewModel(v) => generate_viewmodel(v, module, table),
-            Item::Component(c) if view_targets.contains(c.name.as_str()) => TokenStream::new(),
-            Item::Component(c) => generate_component(c, table),
-            Item::View(v) => {
-                let component = components
-                    .get(v.target.as_str())
-                    .unwrap_or_else(|| panic!("view `{}` has no matching `component`", v.target));
-                generate_view(v, component, module, table)
+            Item::Component(c) => {
+                let info = table
+                    .resolve(module, &c.name)
+                    .unwrap_or_else(|| panic!("component `{}` missing from its own symbol table", c.name));
+                let synthetic = ComponentDef {
+                    name: c.name.clone(),
+                    base: c.base.clone(),
+                    fields: info.effective_fields.clone(),
+                    methods: info.effective_methods.clone(),
+                };
+                match &info.effective_view {
+                    Some(view) => generate_view(view, &synthetic, module, table),
+                    None => generate_component(&synthetic, table),
+                }
             }
+            // Always handled above, via the paired `Item::Component`'s effective view (own or
+            // inherited) — see `resolve_view_for`.
+            Item::View(_) => TokenStream::new(),
         });
     }
 
@@ -618,7 +974,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     });
                 }
             }
-            FieldKind::Prop | FieldKind::Param => {
+            FieldKind::Prop | FieldKind::Param | FieldKind::Attached => {
                 panic!("viewmodel field `{}` must be #[observable]/#[computed]/#[command]", f.name);
             }
         }
@@ -919,6 +1275,7 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
     }
 
     let _ = table; // reserved for future cross-component validation
+    let methods = emit_methods(&c.methods);
     quote! {
         pub struct #struct_name {
             #struct_fields
@@ -930,8 +1287,34 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
             }
 
             #accessors
+            #methods
         }
     }
+}
+
+/// Emits every `MethodDef` (§3's `#[virtual]`/`#[override]` hooks, plus their `__base_<name>`
+/// shadow copies — see `resolve_effective_methods`) as an ordinary inherent method. A shadow copy
+/// (its mangled name starting with `__base_`) is kept private — it exists only to be called via a
+/// `base::name(...)`-rewritten `self.__base_name(...)`, never part of the type's public surface.
+fn emit_methods(methods: &[MethodDef]) -> TokenStream {
+    let mut out = TokenStream::new();
+    for m in methods {
+        let name = format_ident!("{}", m.name);
+        let vis = if m.name.starts_with("__base_") { quote! {} } else { quote! { pub } };
+        let params = m.params.iter().map(|(n, ty)| {
+            let ident = format_ident!("{}", n);
+            quote! { #ident: #ty }
+        });
+        let ret = match &m.return_ty {
+            Some(ty) => quote! { -> #ty },
+            None => quote! {},
+        };
+        let body = &m.body;
+        out.extend(quote! {
+            #vis fn #name(&self, #(#params),*) #ret #body
+        });
+    }
+    out
 }
 
 /// Where a path/method-call expression is being emitted: during initial widget construction
@@ -957,6 +1340,41 @@ impl EmitMode {
 fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table: &SymbolTable) -> TokenStream {
     let target_name = view.target.clone();
     let target = format_ident!("{}", target_name);
+    let has_own_view = find_view(from, &target_name).is_some();
+
+    // `component X inherits Y` where `Y` is a virtual-builtin shape primitive (`Control`/
+    // `Rectangle`/`Ellipse`/`TextBlock`/`Grid`/`VerticalLayout`/`HorizontalLayout` —
+    // `is_virtual_builtin`) and `X`'s own view root is literally a construction of `Y`
+    // (`validate::validate_inherits` already enforces this) — the real, load-bearing case of
+    // docs/elwindui_spec.md 付録H.2.1a's `struct XImpl { base: YImpl, .. }` composition: `X`'s
+    // generated struct embeds `Y`'s real `elwindui_core::tree` `YImpl` as its own `base` field and
+    // implements `UIElement` (and `Y`'s own trait) by delegating to it, instead of the ordinary
+    // "wrapper owns a separately-`Rc`-erased root" shape every other `view`-having component uses
+    // (see this function's tail `quote!`).
+    let composed_shape = table.resolve(from, &target_name).and_then(|i| i.composed_shape.clone());
+    let is_shape_composition = has_own_view && composed_shape.is_some();
+    // `component X inherits Y` where `Y` is itself already composed (either directly, like
+    // `ContentControl`, or transitively) and `X` writes no `view` of its own — pure template reuse
+    // (`LabeledPanel inherits ContentControl`): `X`'s struct embeds `Y`'s own (unwrapped) value as
+    // its `base` field, built by calling `Y`'s own `create_<snake_case Y>(..)` plain factory (see
+    // `snake_case_ident`/the `param_forward_split` below) instead of `build_virtual_value`.
+    // Deliberately excludes a component with its *own* `view` that merely inherits another
+    // component's *code* rather than its structure (`Derived inherits Base`, both independently
+    // `VerticalLayout`-rooted) — there `base::name(...)`/`base::on_mount()` only ever need to reach
+    // the base's method *bodies*, not a live base *instance* (no different from `super.method()` in
+    // a mainstream OOP language never requiring a separate freestanding `super` object to exist), so
+    // the original `resolve_effective_fields`/`resolve_effective_methods`/`__base_<name>` mechanism
+    // already does exactly the right thing and is left unchanged.
+    let is_template_composition = !has_own_view && composed_shape.is_some();
+    let is_composed = composed_shape.is_some();
+    // A composed component's real struct is `XImpl`, not the bare DSL name `target`/`X` — that bare
+    // name becomes a real `pub trait X: UIElement + ..` instead (docs/elwindui_spec.md 付録H.2.1a),
+    // and Rust's shared type/trait namespace means the two can't coexist under one identifier.
+    // External construction sites still write/generate `X::new(args)` unchanged — `emit_construction`
+    // (via `concrete_type_ident`) is the one place that resolves `X` to this real `XImpl` struct name
+    // before emitting the call, so nothing outside this function needs to know about the suffix.
+    let struct_ident = if is_composed { format_ident!("{}Impl", target_name) } else { target.clone() };
+
     // A `component`/`view` pair always shares one `.elwind` file (`generate_module`'s
     // `view_targets` check), so the target is always defined locally in `from` — no `use` needed.
     let binds = table
@@ -995,6 +1413,32 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         .filter(|f| f.initializer.is_none())
         .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
         .collect();
+
+    // Only meaningful when `is_template_composition`: `resolve_effective_fields` gives this
+    // component *every* field of its (already-composed) base unconditionally when it writes no
+    // `view` of its own, in the base's own declaration order, followed by any genuinely new field
+    // this component adds on top — so the base's own params are always exactly `param_names`'s
+    // leading slice. Forwarded verbatim to the base's own `create_<snake case>(..)` factory to build
+    // this component's `base` field; the (usually empty) remainder are this component's own extra
+    // struct fields, unrelated to the base.
+    let base_param_count = component
+        .base
+        .as_deref()
+        .and_then(|base| table.resolve(from, base))
+        .map(|info| info.param_fields.len())
+        .unwrap_or(0);
+    let forward_param_names = &param_names[..base_param_count.min(param_names.len())];
+    // For `is_template_composition`: the forwarded params above are fully consumed building `base`
+    // (`field_inits`'s `base: create_<base>(..)`) — storing them *again* as this component's own
+    // top-level struct fields (the ordinary, non-composed shape every other component uses) would
+    // both duplicate the data pointlessly and, since they're passed by value (not `.clone()`d) into
+    // the base factory, be a use-after-move compile error. Only the genuinely-new fields this
+    // component adds beyond its base (rare — empty for `LabeledPanel`) become its own struct fields;
+    // reads of a forwarded name instead delegate to `self.base.<name>()` (`named_accessors`, below).
+    let own_struct_param_names: &[syn::Ident] =
+        if is_template_composition { &param_names[base_param_count.min(param_names.len())..] } else { &param_names };
+    let own_struct_param_types: &[syn::Type] =
+        if is_template_composition { &param_types[base_param_count.min(param_types.len())..] } else { &param_types };
 
     // `bind!(owner.field, mode)` fields whose `owner` is one of this component's own `#[param]`
     // dependencies and whose `mode` isn't `OneTime` (docs/elwindui_spec.md §10: `OneTime` captures
@@ -1068,44 +1512,69 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // like `ContentControl`, whose `content`/`padding` need to be readable the same way any other
     // component's properties are) needs to reach a component's own properties, not just its named
     // child elements. Each field is already stored verbatim on `Self` via `new`'s `Self {
-    // #(#param_names,)* .. }` shorthand below, so this only adds the accessor, not new storage.
+    // #(#param_names,)* .. }` shorthand below, so this only adds the accessor, not new storage —
+    // except a `is_template_composition` forwarded name (`own_struct_param_names` doesn't include
+    // it, see that binding's doc comment), which has no field of its own to read and instead
+    // delegates to the base's own already-generated accessor of the same name.
     for (name, ty) in param_names.iter().zip(param_types.iter()) {
+        let is_forwarded = is_template_composition && !own_struct_param_names.contains(name);
+        let body = if is_forwarded { quote! { self.base.#name() } } else { quote! { self.#name.clone() } };
         named_accessors.extend(quote! {
             pub fn #name(&self) -> #ty {
-                self.#name.clone()
+                #body
             }
         });
     }
 
-    for node in &plan {
-        emit_construction(node, &ctx, from, table, &mut construct_stmts);
-        if node.stored {
-            let binding = &node.binding;
-            // Every resolved type (a `component`/`view` pair or a hand-written builtin in
-            // `elwindui-builtins`) is constructed as `Rc<Self>` uniformly (see `emit_construction`
-            // and this same convention below in `root_embed_method`), so a stored handle is always
-            // just `Rc<Type>` — no backend-crate-qualified path, no per-type bookkeeping fields.
-            let type_ident = format_ident!("{}", node.type_path);
-            struct_fields.extend(quote! { #binding: std::rc::Rc<#type_ident>, });
-            field_inits.extend(quote! { #binding: #binding.clone(), });
-            if let Some(id) = &node.id {
-                let accessor = format_ident!("{}", id);
-                named_accessors.extend(quote! {
-                    pub fn #accessor(&self) -> std::rc::Rc<#type_ident> {
-                        self.#binding.clone()
-                    }
-                });
+    // `is_template_composition`'s `plan`/`view` are the *base's* own (cloned, `resolve_view_for`)
+    // tree, not this component's — its only real construction step is calling the base's own
+    // `create_<snake case>(..)` factory (below), so none of `plan`'s nodes are constructed or wired
+    // here at all.
+    let root_index = plan.len() - 1;
+    if !is_template_composition {
+        for (i, node) in plan.iter().enumerate() {
+            // The shape-composition root (see `is_shape_composition`'s doc comment) is built as a
+            // plain, unwrapped `elwindui_core::tree::create_xxx(...)` value under its own
+            // `node.binding` name — not `new_element`-wrapped/erased into `Rc<dyn UIElement>` like
+            // every other node — so it can be moved into `Self`'s own `base` field as-is (see the
+            // `struct_fields`/`field_inits` branch below and this function's tail `quote!`).
+            if is_shape_composition && i == root_index {
+                let value = build_virtual_value(node, &ctx, from, table);
+                let binding = &node.binding;
+                let (base_impl_ty, _) = shape_composition_base_types(&view.root.type_path);
+                construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
+                continue;
+            }
+            emit_construction(node, &ctx, from, table, &mut construct_stmts);
+            if node.stored {
+                let binding = &node.binding;
+                // Every resolved type (a `component`/`view` pair or a hand-written builtin in
+                // `elwindui-builtins`) is constructed as `Rc<Self>` uniformly (see `emit_construction`
+                // and this same convention below in `root_embed_method`), so a stored handle is always
+                // just `Rc<Type>` — no backend-crate-qualified path, no per-type bookkeeping fields.
+                let type_ident = concrete_type_ident(&node.type_path, table.resolve(from, &node.type_path));
+                struct_fields.extend(quote! { #binding: std::rc::Rc<#type_ident>, });
+                field_inits.extend(quote! { #binding: #binding.clone(), });
+                if let Some(id) = &node.id {
+                    let accessor = format_ident!("{}", id);
+                    named_accessors.extend(quote! {
+                        pub fn #accessor(&self) -> std::rc::Rc<#type_ident> {
+                            self.#binding.clone()
+                        }
+                    });
+                }
             }
         }
-    }
-    for node in &plan {
-        emit_wiring(node, &ctx, from, table, &mut wiring_stmts);
-        emit_resync(node, &ctx, from, table, &mut resync_stmts);
+        for node in &plan {
+            emit_wiring(node, &ctx, from, table, &mut wiring_stmts);
+            emit_resync(node, &ctx, from, table, &mut resync_stmts);
+        }
     }
 
     // `plan_element` pushes children before their parent (post-order), so the root is always last.
+    // Irrelevant (the base's own root, not this component's) when `is_template_composition`.
     let root_binding = &plan.last().expect("view must have a root element").binding;
-    let root_is_virtual_builtin = is_virtual_builtin(&view.root.type_path);
+    let root_is_virtual_builtin = !is_template_composition && is_virtual_builtin(&view.root.type_path);
 
     // A hardcoded virtual builtin root (`VerticalLayout`, say — `DocumentView`'s actual root) is
     // never `stored` (see `plan_element`), so unlike every other node its value only exists as the
@@ -1113,7 +1582,28 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // nothing stashes it on `Self` the normal way. Stash it here as a plain `Rc` field instead —
     // `Rc<dyn UIElement>` (unlike the old `Box`) is `Clone`, so `into_node()` (below) can just
     // clone it, the same convention every other stored field already uses.
-    if root_is_virtual_builtin {
+    //
+    // The shape-composition case (`is_shape_composition`) stashes it differently: as a real `base`
+    // field of the shape's own `elwindui_core::tree` `YImpl` type (built unwrapped, above), not a
+    // type-erased `Rc<dyn UIElement>` — see this function's tail `quote!` for the accompanying
+    // `impl UIElement for #target` that makes `#target` itself usable as a tree node. Template
+    // composition (`is_template_composition`) is the same idea one level up: `base`'s type is the
+    // immediate DSL base's own struct (not an `elwindui_core::tree` type), built by calling that
+    // base's own `create_<snake case>(..)` factory directly rather than constructing anything itself.
+    if is_template_composition {
+        let base_name = component.base.as_deref().expect("is_template_composition implies a base");
+        // `base_name` (bare) is itself a composed component, so it's a real *trait* now, not a
+        // struct (see `struct_ident`'s doc comment) — the field's concrete type must be its `Impl`
+        // struct, exactly like `concrete_type_ident` resolves for any other reference to it.
+        let base_ty = concrete_type_ident(base_name, table.resolve(from, base_name));
+        let base_create_fn = composed_create_fn_ident(base_name);
+        struct_fields.extend(quote! { base: #base_ty, });
+        field_inits.extend(quote! { base: #base_create_fn(#(#forward_param_names),*), });
+    } else if is_shape_composition {
+        let (base_impl_ty, _) = shape_composition_base_types(&view.root.type_path);
+        struct_fields.extend(quote! { base: #base_impl_ty, });
+        field_inits.extend(quote! { base: #root_binding, });
+    } else if root_is_virtual_builtin {
         struct_fields.extend(quote! {
             #root_binding: std::rc::Rc<dyn elwindui_core::tree::UIElement>,
         });
@@ -1142,8 +1632,17 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // above (a plain clone of the stored `Rc`), or (a user-defined component whose own root is
     // itself virtual — chained `inherits`) delegating to *that* root's own `into_node`/
     // `into_any_view` via `into_node_if_needed`, exactly like any other embedding site.
-    let root_is_native = table.resolve(from, &view.root.type_path).is_some_and(|info| info.is_native);
-    let root_embed_method = if view.root.type_path == "Window" {
+    let root_is_native = !is_template_composition && table.resolve(from, &view.root.type_path).is_some_and(|info| info.is_native);
+    let root_embed_method = if is_template_composition || is_shape_composition {
+        // `#target` implements `UIElement` itself now (see this function's tail `quote!`), so
+        // `self` — not a separately-stored root field — already *is* the tree node; `Rc<Self>`
+        // unsizes to `Rc<dyn UIElement>` directly.
+        quote! {
+            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement> {
+                self
+            }
+        }
+    } else if view.root.type_path == "Window" {
         quote! {
             pub fn show(self: std::rc::Rc<Self>) {
                 self.#root_binding.clone().show();
@@ -1191,11 +1690,141 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         })
         .collect();
 
-    quote! {
-        impl #target {
-            pub fn new(#(#param_names: #param_types),*) -> std::rc::Rc<Self> {
+    // §3/付録I.1's lifecycle hooks. `on_mount` is spliced directly into `new()` (against the local
+    // `this: Rc<Self>`, the same receiver `base::on_mount()` rewrites to — see below); `on_unmount`
+    // is codegen'd as a real (if presently uncalled) `__run_on_unmount` method — `elwindui_core::tree`
+    // has no detach/teardown hook yet to wire it to, see docs/elwindui_spec.md 付録I.1.
+    //
+    // A `base::on_mount()`/`base::on_unmount()` call is only meaningful when *this* component wrote
+    // its own `view` (an override of an inherited template) — a component with no `view` of its own
+    // just inherited `view` wholesale (already containing its base's `on_mount`/`on_unmount`
+    // verbatim, spliced in below with nothing further to rewrite). Only one `inherits` hop's worth
+    // of `base::` chaining is guaranteed correct here — a base whose own `on_mount` itself calls
+    // *its* base's `on_mount` would need multi-level shadow-name mangling this doesn't attempt.
+    let (base_on_mount_block, base_on_unmount_block) = if has_own_view {
+        component
+            .base
+            .as_deref()
+            .filter(|b| *b != "NativeControl")
+            .and_then(|base| table.resolve(from, base))
+            .map(|info| (info.own_on_mount.clone(), info.own_on_unmount.clone()))
+            .unwrap_or((None, None))
+    } else {
+        (None, None)
+    };
+
+    let this_ident = format_ident!("this");
+    let on_mount_stmt = view.on_mount.as_ref().map(|block| rewrite_base_calls(block.clone(), &this_ident));
+
+    let mut shadow_hooks = TokenStream::new();
+    if let Some(block) = &base_on_mount_block {
+        shadow_hooks.extend(quote! { #[allow(dead_code)] fn __base_on_mount(&self) #block });
+    }
+    if let Some(block) = &base_on_unmount_block {
+        shadow_hooks.extend(quote! { #[allow(dead_code)] fn __base_on_unmount(&self) #block });
+    }
+    let on_unmount_method = view.on_unmount.as_ref().map(|block| {
+        let rewritten = rewrite_base_calls(block.clone(), &format_ident!("self"));
+        quote! { #[allow(dead_code)] fn __run_on_unmount(&self) #rewritten }
+    });
+
+    let methods = emit_methods(&component.methods);
+
+    // Meaningful whenever `#target` is composed at all (`is_shape_composition`/
+    // `is_template_composition`, docs/elwindui_spec.md 付録H.2.1a): wires every child of `#target`'s
+    // own `base` (delegated through `UIElement::children`, regardless of how many composition levels
+    // deep `base` itself goes) to point its `parent` back at `this` — the same job
+    // `elwindui_core::tree::new_element` does for every other construction site, reproduced here
+    // because `this` (not `self.base` alone) is the real tree node now, and `new_element` is never
+    // called on `self.base` in isolation (built as a plain, unwrapped value instead — see
+    // `construct_stmts`/`field_inits` above).
+    let parent_wiring_stmt = if is_shape_composition || is_template_composition {
+        quote! {
+            {
+                use elwindui_core::tree::UIElement as _;
+                let __erased: std::rc::Rc<dyn elwindui_core::tree::UIElement> = this.clone();
+                for child in this.children() {
+                    *child.base().parent.borrow_mut() = Some(std::rc::Rc::downgrade(&__erased));
+                }
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
+
+    // `#struct_ident`'s own composition impls (docs/elwindui_spec.md 付録H.2.1a): the bare-named
+    // `pub trait X: UIElement + <base's own trait>` (now free to exist — the real struct moved to
+    // `XImpl` above, so there's no `struct X`/`trait X` namespace clash), `UIElement` itself
+    // (delegating every method to `self.base`), and the ultimately-composed-over shape's own trait
+    // (`Control`'s real accessors, or an empty marker for `Shape`/`Grid`/`Stack`/`TextBlock`) —
+    // `composed_shape` already resolved this transitively, so `LabeledPanel` (composing over
+    // `ContentControl`, which itself composes over `Control`) implements `Control` exactly like
+    // `ContentControl` does, one delegation hop further out.
+    let composition_impls = if let Some(shape) = &composed_shape {
+        let (_, base_trait_path) = shape_composition_base_types(shape);
+        let base_trait_impl = shape_composition_base_trait_impl(shape, &struct_ident);
+        quote! {
+            pub trait #target: elwindui_core::tree::UIElement + #base_trait_path {}
+            impl #target for #struct_ident {}
+
+            impl elwindui_core::tree::UIElement for #struct_ident {
+                fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+                    elwindui_core::tree::UIElement::base(&self.base)
+                }
+                fn children(&self) -> &[std::rc::Rc<dyn elwindui_core::tree::UIElement>] {
+                    elwindui_core::tree::UIElement::children(&self.base)
+                }
+                fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
+                    elwindui_core::tree::UIElement::measure_override(&self.base, available, child_sizes)
+                }
+                fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
+                    elwindui_core::tree::UIElement::arrange_override(&self.base, final_size, child_sizes)
+                }
+                fn paint(&self) -> Option<elwindui_core::tree::PaintKind> {
+                    elwindui_core::tree::UIElement::paint(&self.base)
+                }
+            }
+            #base_trait_impl
+        }
+    } else {
+        TokenStream::new()
+    };
+
+    // Whenever `#struct_ident` is composed (`is_shape_composition`/`is_template_composition`), its
+    // plain (not-yet-`Rc`-wrapped) construction is split out into its own callable `pub fn
+    // create_<snake case>(..)` — mirroring `elwindui_core::tree`'s `create_control`/`create_shape`/
+    // etc. — instead of being inlined into `new()` only, so a *further* derived component's own
+    // `is_template_composition` case (`LabeledPanel inherits ContentControl`) can call `#struct_ident`'s
+    // own factory directly to build its `base` field (see this function's `field_inits` branch
+    // above). An ordinary (non-composed) component keeps building `Self {..}` inline in `new()`,
+    // unchanged — nothing else ever needs its bare, unwrapped value.
+    let create_fn_ident = composed_create_fn_ident(&target_name);
+    let create_fn = if is_composed {
+        quote! {
+            pub fn #create_fn_ident(#(#param_names: #param_types),*) -> #struct_ident {
                 #construct_stmts
-                let this = std::rc::Rc::new(Self { #(#param_names,)* #field_inits });
+                #struct_ident { #(#own_struct_param_names,)* #field_inits }
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
+    let new_construct_stmt = if is_composed {
+        quote! { let this = std::rc::Rc::new(#create_fn_ident(#(#param_names),*)); }
+    } else {
+        quote! {
+            #construct_stmts
+            let this = std::rc::Rc::new(Self { #(#own_struct_param_names,)* #field_inits });
+        }
+    };
+
+    quote! {
+        #create_fn
+
+        impl #struct_ident {
+            pub fn new(#(#param_names: #param_types),*) -> std::rc::Rc<Self> {
+                #new_construct_stmt
+                #parent_wiring_stmt
                 #wiring_stmts
                 // Most widgets already read live model state at construction time, so this is a
                 // no-op for them. A widget whose own state only ever appears in `resync()` (e.g. a
@@ -1204,6 +1833,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 // immediately rather than waiting for the first unrelated user interaction.
                 this.resync();
                 #subscribe_stmts
+                #on_mount_stmt
                 this
             }
 
@@ -1214,12 +1844,17 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             #root_embed_method
 
             #named_accessors
+            #methods
+            #shadow_hooks
+            #on_unmount_method
         }
 
-        pub struct #target {
-            #(#param_names: #param_types,)*
+        pub struct #struct_ident {
+            #(#own_struct_param_names: #own_struct_param_types,)*
             #struct_fields
         }
+
+        #composition_impls
     }
 }
 
@@ -1267,6 +1902,10 @@ struct PlannedNode {
     /// (a virtual builtin/component) or a real native handle needing `Node::Native(..)`/
     /// `.into_any_view()` wrapping — see `into_node_if_needed`/`into_any_view_if_needed`.
     child_bindings: Vec<(syn::Ident, String)>,
+    /// `Owner::field: value` attached-property setters written directly on this element (§3) —
+    /// copied verbatim from `ElementNode::attached`. Consulted only when constructing this node's
+    /// own `UIElementBase` (see `grid_cell_expr`); a node with none gets `GridCell::default()`.
+    attached: Vec<(String, String, ViewExpr)>,
     /// Bindings of `ViewExpr::Element`-valued *attributes* (a "named single-child slot", e.g.
     /// `menu_bar: MenuBar { .. }`), keyed by attribute name — planned/constructed the same way
     /// `child_bindings` are, just addressed by name instead of position.
@@ -1326,6 +1965,7 @@ fn plan_element(
         binding: binding.clone(),
         type_path: node.type_path.clone(),
         attributes,
+        attached: node.attached.clone(),
         child_bindings,
         element_attr_bindings,
         stored,
@@ -1393,6 +2033,45 @@ fn find_attr<'a>(node: &'a PlannedNode, name: &str) -> Option<&'a ViewExpr> {
     node.attributes.iter().find(|(k, _)| k == name).map(|(_, v)| v)
 }
 
+/// Builds `node`'s own `elwindui_core::layout::GridCell { row: ..., column: ... }` from whatever
+/// `Owner::row`/`Owner::column`-shaped attached setters it has (§3) — any field not set falls back
+/// to `0`, matching `GridCell::default()` (and `builtin::Grid`'s own declared attached-field
+/// defaults, which is why no evaluation of those defaults is ever needed here).
+///
+/// Deliberately keyed by field name alone (`row`/`column`), not by `(owner, field)` — this crate
+/// has exactly one attached-property owner today (`Grid`), and `GridCell` is a concrete, hand-
+/// curated struct (not a type-erased per-owner bag, matching `UIElementBase`'s existing evolution
+/// pattern — see its own `grid_cell` field's doc comment). A future second attached-property owner
+/// reusing the `row`/`column` names would collide here; a genuinely distinct future property would
+/// get its own field name and its own branch, the same way `row`/`column` were added.
+///
+/// Scope note: only ever called from `emit_virtual_construction`, so this only takes effect for a
+/// `Grid` child that is itself one of codegen's hardcoded virtual builtins (`TextBlock`/
+/// `Rectangle`/`Ellipse`/`Stack`/`Control`/a nested `Grid`) — verified end-to-end by launching the
+/// notepad example with a temporary `Grid` in its status bar (Fixed/Star/Fixed columns rendered
+/// with correct proportional widths). A native-leaf child (`Button`/`TextArea`/..., wrapped via
+/// `into_node_if_needed`) or a user-defined `component`+`view` child (e.g. `RoundedPanel`, which
+/// builds its own root's `UIElementBase` inside its own generated `new()`) doesn't have this
+/// specific child's `attached` list threaded to wherever *its* `UIElementBase` gets built, without
+/// further plumbing; such a child's `Grid::row`/`Grid::column` setters still validate successfully
+/// but are inert (default `(0, 0)`) until that's added.
+fn grid_cell_expr(node: &PlannedNode, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
+    if node.attached.is_empty() {
+        return quote! { elwindui_core::layout::GridCell::default() };
+    }
+    let mut row = quote! { 0 };
+    let mut column = quote! { 0 };
+    for (_owner, field, value) in &node.attached {
+        let value_ts = emit_expr(value, ctx, mode);
+        match field.as_str() {
+            "row" => row = value_ts,
+            "column" => column = value_ts,
+            _ => {}
+        }
+    }
+    quote! { elwindui_core::layout::GridCell { row: #row, column: #column } }
+}
+
 /// `Option<Foo>` -> `("Foo", true)`; anything else -> `(ty, false)` unchanged.
 pub(crate) fn strip_option(ty: &str) -> (&str, bool) {
     let trimmed = ty.trim();
@@ -1417,17 +2096,20 @@ fn into_any_view_if_needed(base: TokenStream, ty: &str) -> TokenStream {
 }
 
 /// Whether `type_path` names one of the hand-written *virtual* builtins (`VerticalLayout`/
-/// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`/`Control`) — these have no backend Rust
-/// struct or `Type::new(args)` constructor at all; `emit_construction` builds a `Box<dyn
+/// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`/`Control`/`Grid`) — these have no backend
+/// Rust struct or `Type::new(args)` constructor at all; `emit_construction` builds a `Box<dyn
 /// elwindui_core::tree::UIElement>` value for them directly (see its top-of-function check).
 /// `ContentControl` (docs/elwindui_builtins_spec.md 付録F.10) is deliberately *not* here — it's an
 /// ordinary `component`+`view` pair whose view root literally constructs `Control` (the
-/// `inherits`-based shape-composition pattern, docs/elwindui_spec.md 付録H.2, same as
-/// `RoundedPanel inherits Rectangle`), so it goes through the normal `generate_view`/
-/// `emit_construction` path and gets a real generated struct with real accessors.
+/// `inherits`-based shape-composition pattern, docs/elwindui_spec.md §3, same as `RoundedPanel
+/// inherits Rectangle`), so it goes through the normal `generate_view`/`emit_construction` path and
+/// gets a real generated struct with real accessors.
 /// See docs/elwindui_spec.md 付録H.2.
 fn is_virtual_builtin(type_path: &str) -> bool {
-    matches!(type_path, "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse" | "TextBlock" | "Control")
+    matches!(
+        type_path,
+        "VerticalLayout" | "HorizontalLayout" | "Rectangle" | "Ellipse" | "TextBlock" | "Control" | "Grid"
+    )
 }
 
 /// Sentinel `source_type_path` passed to `into_node_if_needed` for a value that is *already* an
@@ -1474,19 +2156,16 @@ fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module,
         let view = into_any_view_if_needed(base, "AnyView");
         let ui_base = if has_routed {
             quote! {
-                elwindui_core::tree::UIElementBase {
+                elwindui_core::tree::UIElementImpl {
                     routed_handlers: (#base_expr).routed_handlers(),
-                    ..elwindui_core::tree::UIElementBase::default()
+                    ..elwindui_core::tree::UIElementImpl::default()
                 }
             }
         } else {
-            quote! { elwindui_core::tree::UIElementBase::default() }
+            quote! { elwindui_core::tree::UIElementImpl::default() }
         };
         quote! {
-            elwindui_core::tree::new_element(elwindui_core::tree::NativeControl {
-                base: #ui_base,
-                handle: #view,
-            })
+            elwindui_core::tree::new_element(elwindui_core::tree::create_native_control(#ui_base, #view))
         }
     } else if is_virtual_builtin(source_type_path) {
         quote! { #base }
@@ -1556,7 +2235,7 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
     let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
         panic!("unknown or out-of-scope element `{}` — is a `use` for it missing?", node.type_path)
     });
-    let type_ident = format_ident!("{}", node.type_path);
+    let type_ident = concrete_type_ident(&node.type_path, Some(info));
 
     let mut next_positional_child = 0usize;
     let mut args = Vec::new();
@@ -1636,7 +2315,18 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
 /// calling a (nonexistent) `Type::new(args)`.
 fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
     let binding = &node.binding;
+    let value = build_virtual_value(node, ctx, from, table);
+    out.extend(quote! {
+        let #binding: std::rc::Rc<dyn elwindui_core::tree::UIElement> = elwindui_core::tree::new_element(#value);
+    });
+}
 
+/// Builds the plain (not yet `new_element`-wrapped) `elwindui_core::tree::create_xxx(...)` call for
+/// a virtual builtin node — the value `emit_virtual_construction` normally wraps immediately, but
+/// which a `component X inherits Y` shape-composition root (docs/elwindui_spec.md 付録H.2.1a) needs
+/// unwrapped so it can be embedded directly as `X`'s own `base` field instead of erased into
+/// `Rc<dyn UIElement>` (see `generate_view`'s `is_shape_composition` branch).
+fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
     // Whether `expr` is a bare 1-segment reference to one of *this* component's own `#[param]`
     // fields that's already `Option<..>`-typed (e.g. `ContentControl`'s own `padding: Option<f32>`
     // forwarded as `Control { padding: padding }`) — as opposed to a plain value (a literal, a
@@ -1714,12 +2404,14 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
         }
         None => quote! {},
     };
+    let grid_cell = grid_cell_expr(node, ctx, &EmitMode::Construction);
     let base = quote! {
         {
-            let base = elwindui_core::tree::UIElementBase {
+            let base = elwindui_core::tree::UIElementImpl {
                 margin: (#margin).unwrap_or(0.0),
                 data_context: #data_context,
-                ..elwindui_core::tree::UIElementBase::default()
+                grid_cell: #grid_cell,
+                ..elwindui_core::tree::UIElementImpl::default()
             };
             #routed_on_click
             base
@@ -1740,12 +2432,7 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
             };
             let spacing = get_attr("spacing");
             quote! {
-                elwindui_core::tree::Stack {
-                    base: #base,
-                    orientation: #orientation,
-                    spacing: (#spacing).unwrap_or(0.0),
-                    children: vec![ #(#children),* ],
-                }
+                elwindui_core::tree::create_stack(#base, #orientation, (#spacing).unwrap_or(0.0), vec![ #(#children),* ])
             }
         }
         "Rectangle" | "Ellipse" => {
@@ -1759,14 +2446,7 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
             let stroke = get_attr_string("stroke");
             let stroke_width = get_attr("stroke_width");
             quote! {
-                elwindui_core::tree::Shape {
-                    base: #base,
-                    kind: #kind,
-                    fill: #fill,
-                    stroke: #stroke,
-                    stroke_width: (#stroke_width).unwrap_or(0.0),
-                    children: vec![ #(#children),* ],
-                }
+                elwindui_core::tree::create_shape(#base, #kind, #fill, #stroke, (#stroke_width).unwrap_or(0.0), vec![ #(#children),* ])
             }
         }
         "TextBlock" => {
@@ -1774,31 +2454,120 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
             let text = emit_expr(text, ctx, &EmitMode::Construction);
             let color = get_attr_string("color");
             quote! {
-                elwindui_core::tree::TextBlock {
-                    base: #base,
-                    content: (#text).to_string(),
-                    color: #color,
-                }
+                elwindui_core::tree::create_text_block(#base, (#text).to_string(), #color)
             }
         }
         "Control" => {
             let padding = get_attr("padding");
             quote! {
-                elwindui_core::tree::Control {
-                    base: #base,
-                    padding: (#padding).unwrap_or(0.0),
-                    content_horizontal_alignment: elwindui_core::layout::HorizontalAlignment::Stretch,
-                    content_vertical_alignment: elwindui_core::layout::VerticalAlignment::Stretch,
-                    children: vec![ #(#children),* ],
-                }
+                elwindui_core::tree::create_control(
+                    #base,
+                    (#padding).unwrap_or(0.0),
+                    elwindui_core::layout::HorizontalAlignment::Stretch,
+                    elwindui_core::layout::VerticalAlignment::Stretch,
+                    vec![ #(#children),* ],
+                )
+            }
+        }
+        "Grid" => {
+            let rows = find_attr(node, "rows").unwrap_or_else(|| panic!("`Grid` requires attribute `rows`"));
+            let rows = emit_expr(rows, ctx, &EmitMode::Construction);
+            let columns = find_attr(node, "columns").unwrap_or_else(|| panic!("`Grid` requires attribute `columns`"));
+            let columns = emit_expr(columns, ctx, &EmitMode::Construction);
+            quote! {
+                elwindui_core::tree::create_grid(#base, (#rows).to_vec(), (#columns).to_vec(), vec![ #(#children),* ])
             }
         }
         other => unreachable!("is_virtual_builtin guards this match, got `{other}`"),
     };
 
-    out.extend(quote! {
-        let #binding: std::rc::Rc<dyn elwindui_core::tree::UIElement> = elwindui_core::tree::new_element(#value);
-    });
+    value
+}
+
+/// The concrete Rust struct to construct/store for a resolved component named `type_path` — plain
+/// `format_ident!("{type_path}")`, *except* when `info` says it's composed
+/// (`TypeInfo::composed_shape`, docs/elwindui_spec.md 付録H.2.1a), in which case the bare DSL name
+/// is a real `trait` there (`pub trait ContentControl: UIElement + Control`), not a struct — so any
+/// site that needs a concrete, `Sized`, constructible/storable type (a `Type::new(..)` call, a
+/// `#[id]`-tagged accessor's `Rc<Type>` return type) must reach for `format_ident!("{type_path}Impl")`
+/// instead. Every composed component's own `generate_view` call names its struct this way and mints
+/// the bare-named trait alongside (see that function's `is_composed`/`composition_impls`) —
+/// `X::new(args)` still works unchanged for *callers* (`emit_construction` is the one place that
+/// resolves `X` to its real `XImpl` struct before emitting the call), so no hand-written or `.elwind`
+/// source ever needs to know about the `Impl` suffix.
+fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> syn::Ident {
+    if info.is_some_and(|i| i.composed_shape.is_some()) {
+        format_ident!("{}Impl", type_path)
+    } else {
+        format_ident!("{}", type_path)
+    }
+}
+
+/// `"ContentControl"` -> `"create_content_control"` — the free-function factory name a composed
+/// component's own struct pairs with (docs/elwindui_spec.md 付録H.2.1a), mirroring
+/// `elwindui_core::tree`'s `create_control`/`create_shape`/etc. naming. Only ever called with a
+/// PascalCase component name, so no acronym/consecutive-uppercase handling is needed.
+fn composed_create_fn_ident(name: &str) -> syn::Ident {
+    let mut snake = String::new();
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if i != 0 {
+                snake.push('_');
+            }
+            snake.extend(ch.to_lowercase());
+        } else {
+            snake.push(ch);
+        }
+    }
+    format_ident!("create_{}", snake)
+}
+
+/// Maps a virtual-builtin shape name (`is_virtual_builtin`) that some `component X inherits Y`
+/// names as `Y` (docs/elwindui_spec.md 付録H.2.1a) to the `elwindui_core::tree` `YImpl` struct type
+/// and `Y` trait path that `X`'s generated struct composes over as its own `base` field — see
+/// `generate_view`'s `is_shape_composition` branch.
+fn shape_composition_base_types(base: &str) -> (TokenStream, TokenStream) {
+    match base {
+        "Control" => (quote! { elwindui_core::tree::ControlImpl }, quote! { elwindui_core::tree::Control }),
+        "Rectangle" | "Ellipse" => (quote! { elwindui_core::tree::ShapeImpl }, quote! { elwindui_core::tree::Shape }),
+        "TextBlock" => (quote! { elwindui_core::tree::TextBlockImpl }, quote! { elwindui_core::tree::TextBlock }),
+        "Grid" => (quote! { elwindui_core::tree::GridImpl }, quote! { elwindui_core::tree::Grid }),
+        "VerticalLayout" | "HorizontalLayout" => (quote! { elwindui_core::tree::StackImpl }, quote! { elwindui_core::tree::Stack }),
+        other => unreachable!("shape_composition_base_types called with non-virtual-builtin `{other}`"),
+    }
+}
+
+/// `#target`'s delegating impl of its shape-composition base's own trait (docs/elwindui_spec.md
+/// 付録H.2.1a) — every base method forwards to `self.base`. Empty for every shape family except
+/// `Control`, whose trait declares real accessor methods (`elwindui_core::tree::Control`).
+fn shape_composition_base_trait_impl(base: &str, target: &syn::Ident) -> TokenStream {
+    let (_, base_trait) = shape_composition_base_types(base);
+    if base == "Control" {
+        // Fully-qualified (`#base_trait::padding(&self.base)`), not `self.base.padding()`: for a
+        // *template*-composed `#target` (`is_template_composition`), `self.base` is itself another
+        // DSL component (e.g. `LabeledPanel`'s `base: ContentControl`), which already has its own
+        // *inherent* `padding()` accessor (the DSL-level `Option<f32>` — `named_accessors`, unrelated
+        // to this trait) — plain method-call syntax would resolve to that inherent method instead of
+        // this trait's `f32`-returning one (inherent methods win method resolution over same-named
+        // trait methods), a type mismatch. The fully-qualified form always reaches the *trait* impl
+        // (`self.base`'s own `impl Control`, itself delegating one hop further), correct at any
+        // composition depth.
+        quote! {
+            impl #base_trait for #target {
+                fn padding(&self) -> f32 {
+                    #base_trait::padding(&self.base)
+                }
+                fn content_horizontal_alignment(&self) -> elwindui_core::layout::HorizontalAlignment {
+                    #base_trait::content_horizontal_alignment(&self.base)
+                }
+                fn content_vertical_alignment(&self) -> elwindui_core::layout::VerticalAlignment {
+                    #base_trait::content_vertical_alignment(&self.base)
+                }
+            }
+        }
+    } else {
+        quote! { impl #base_trait for #target {} }
+    }
 }
 
 /// Attaches callbacks (`on_*`) and two-way change-back wiring to widgets that were stored on
@@ -2582,7 +3351,11 @@ view Foo {
         assert_valid_rust("content_control", &generated);
 
         let generated_str = generated.to_string();
-        assert!(generated_str.contains("ContentControl :: new"));
+        // `ContentControl` is composed (docs/elwindui_spec.md 付録H.2.1a) — its real struct is
+        // `ContentControlImpl` (the bare `ContentControl` is now a real trait), so `Foo`'s own
+        // generated code, resolving `ContentControl` as a child element, must construct that
+        // concrete type (`emit_construction`'s `concrete_type_ident`).
+        assert!(generated_str.contains("ContentControlImpl :: new"), "{generated_str}");
 
         // `ContentControl`'s own generated code (produced when `builtin_modules()` is fed through
         // `generate_module` directly, mirroring how a real consumer's `content_control.elwind`
@@ -2595,8 +3368,128 @@ view Foo {
         let content_control_code = generate_module(&content_control_module, &table);
         assert_valid_rust("content_control_impl", &content_control_code);
         let content_control_str = content_control_code.to_string();
-        assert!(content_control_str.contains("elwindui_core :: tree :: Control"));
+        assert!(content_control_str.contains("elwindui_core :: tree :: create_control"));
         assert!(content_control_str.contains("pub fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
         assert!(content_control_str.contains("pub fn padding (& self) -> Option < f32 >"));
+        // Real struct is `ContentControlImpl`; the bare `ContentControl` is a real trait instead
+        // (docs/elwindui_spec.md 付録H.2.1a) — no `struct`/`trait` namespace clash since they're
+        // different identifiers.
+        assert!(content_control_str.contains("struct ContentControlImpl"), "{content_control_str}");
+        assert!(content_control_str.contains("pub trait ContentControl"), "{content_control_str}");
+        assert!(content_control_str.contains("impl ContentControl for ContentControlImpl"), "{content_control_str}");
+    }
+
+    /// A component inheriting a logical, `has_view`-having base (`ContentControl`) with *no* `view`
+    /// of its own — WinUI3-style template inheritance (`resolve_view_for`): the generated code is a
+    /// full `generate_view`-style struct+impl (not `generate_component`'s plain struct), targeting
+    /// the derived component's own name, with `ContentControl`'s inherited template underneath.
+    #[test]
+    fn generates_valid_rust_for_template_inheritance_with_no_own_view() {
+        let src = r#"
+component LabeledPanel inherits ContentControl {
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("labeled_panel_template_inheritance", &generated);
+
+        let generated_str = generated.to_string();
+        // Real struct is `LabeledPanelImpl`; the bare `LabeledPanel` is a real trait instead
+        // (docs/elwindui_spec.md 付録H.2.1a) — same reasoning as `ContentControl`/`ContentControlImpl`.
+        assert!(generated_str.contains("struct LabeledPanelImpl"), "{generated_str}");
+        assert!(generated_str.contains("pub trait LabeledPanel"), "{generated_str}");
+        // Real base composition one level deeper than `ContentControl` itself: `LabeledPanelImpl`
+        // embeds a real `base: ContentControlImpl` (built by calling `ContentControl`'s own
+        // `create_content_control(..)` factory), not a copy of `Control`'s construction —
+        // `elwindui_core::tree::create_control` only ever appears in `ContentControl`'s *own*
+        // generated code (not exercised by this test, which only generates `LabeledPanel`).
+        assert!(generated_str.contains("base : ContentControlImpl"), "{generated_str}");
+        assert!(generated_str.contains("create_content_control"), "{generated_str}");
+        assert!(generated_str.contains("impl elwindui_core :: tree :: UIElement for LabeledPanelImpl"), "{generated_str}");
+        assert!(generated_str.contains("impl elwindui_core :: tree :: Control for LabeledPanelImpl"), "{generated_str}");
+        assert!(generated_str.contains("impl LabeledPanel for LabeledPanelImpl"), "{generated_str}");
+        assert!(
+            generated_str.contains("pub fn content (& self) -> std :: rc :: Rc < dyn UIElement > { self . base . content () }"),
+            "{generated_str}"
+        );
+    }
+
+    /// `#[override] fn` + `base::name(...)` (§3): the derived's override calls into a
+    /// `__base_<name>`-shadowed copy of the base's original body, and `on_mount { base::on_mount(); }`
+    /// is spliced into `new()` chaining into the base's own `on_mount`.
+    #[test]
+    fn generates_valid_rust_for_method_override_and_on_mount_base_call() {
+        let src = r#"
+component Base {
+    #[virtual]
+    fn label(&self) -> String {
+        "base".to_string()
+    }
+}
+
+view Base {
+    on_mount {
+        println!("base mounted");
+    }
+    VerticalLayout { }
+}
+
+component Derived inherits Base {
+    #[override]
+    fn label(&self) -> String {
+        format!("{}!", base::label())
+    }
+}
+
+view Derived {
+    on_mount {
+        base::on_mount();
+        println!("derived mounted");
+    }
+    VerticalLayout { }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("method_override_and_on_mount", &generated);
+
+        let generated_str = generated.to_string();
+        assert!(generated_str.contains("fn __base_label"), "{generated_str}");
+        assert!(generated_str.contains("fn __base_on_mount"), "{generated_str}");
+        assert!(generated_str.contains("this . __base_on_mount"), "{generated_str}");
+    }
+
+    /// `Grid` (§3) + attached properties (`Grid::row`/`Grid::column`, §3) end to end: a `view`
+    /// using `Grid` with `rows`/`columns` array-literal params and attached setters on its children
+    /// must generate valid Rust, constructing `elwindui_core::tree::Grid` directly (a virtual
+    /// builtin, like `Control`/`Rectangle`) with each virtual child's own `grid_cell` populated.
+    #[test]
+    fn generates_valid_rust_for_grid_with_attached_properties() {
+        let src = r#"
+component Foo {
+}
+
+view Foo {
+    Grid {
+        rows: [elwindui_core::layout::GridLength::Auto, elwindui_core::layout::GridLength::Star(1.0)]
+        columns: [elwindui_core::layout::GridLength::Fixed(120.0), elwindui_core::layout::GridLength::Star(1.0)]
+        TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
+        Rectangle { fill: "black", Grid::row: 1, Grid::column: 1 }
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("grid_with_attached_properties", &generated);
+
+        let generated_str = generated.to_string();
+        assert!(generated_str.contains("elwindui_core :: tree :: create_grid"), "{generated_str}");
+        assert!(generated_str.contains("GridLength :: Auto"), "{generated_str}");
+        assert!(generated_str.contains("GridLength :: Fixed (120.0)"), "{generated_str}");
+        assert!(generated_str.contains("GridCell { row : 0 , column : 0 }"), "{generated_str}");
+        assert!(generated_str.contains("GridCell { row : 1 , column : 1 }"), "{generated_str}");
     }
 }

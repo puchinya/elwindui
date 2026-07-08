@@ -14,6 +14,7 @@
 //! natively), so there's nothing to restore.
 
 use elwindui_backend_winui3 as winui3;
+use elwindui_backend_winui3::TabView as _;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -84,7 +85,7 @@ struct DynamicSource {
 }
 
 pub struct TabView {
-    inner: winui3::TabView,
+    inner: winui3::TabViewImpl,
     entries: RefCell<Vec<Rc<TabViewItem>>>,
     dynamic: RefCell<Option<DynamicSource>>,
     /// Pointer identities (`Rc::as_ptr`, as `usize`) of the `TabViewItem`s currently reflected as
@@ -110,7 +111,7 @@ impl TabView {
         selected_index: usize,
     ) -> Rc<Self> {
         let this = Rc::new(Self {
-            inner: winui3::TabView::new(),
+            inner: winui3::create_tab_view(),
             entries: RefCell::new(Vec::new()),
             dynamic: RefCell::new(None),
             displayed: RefCell::new(Vec::new()),

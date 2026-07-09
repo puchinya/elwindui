@@ -1,7 +1,0 @@
-#[embedded]
-component TextBlock {
-    #[param]
-    text: String,
-    #[param]
-    color: Option<String>,
-}

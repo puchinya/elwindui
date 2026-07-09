@@ -43,7 +43,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     if c.embedded && !module.is_builtin {
                         errors.push(format!(
                             "{}: #[embedded] can only be used on a component from elwindui-builtins' own \
-                             BUILTIN_SHAPE_SOURCES, not a consumer's own `.elwind` file",
+                             BUILTIN_SHAPE_SOURCE, not a consumer's own `.elwind` file",
                             c.name
                         ));
                     }
@@ -59,7 +59,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         if !module.is_builtin {
                             errors.push(format!(
                                 "{}: #[native] can only be used on a component from elwindui-builtins' own \
-                                 BUILTIN_SHAPE_SOURCES, not a consumer's own `.elwind` file",
+                                 BUILTIN_SHAPE_SOURCE, not a consumer's own `.elwind` file",
                                 c.name
                             ));
                         }
@@ -1245,7 +1245,7 @@ component Foo {
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("BUILTIN_SHAPE_SOURCES")), "errors: {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("BUILTIN_SHAPE_SOURCE")), "errors: {errs:?}");
     }
 
     /// A native-backed leaf (`Window`, `has_view == false && is_native == true`) has no generated

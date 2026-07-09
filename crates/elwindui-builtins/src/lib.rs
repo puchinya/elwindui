@@ -1,6 +1,6 @@
 //! Hand-written Rust implementations of every native `builtin::` DSL element (`Window`/`TextArea`/
 //! `Button`/`Text`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`), paired with
-//! shape-only `.elwind` declarations under `src/shapes/` (embedded into `elwindui-codegen` via
+//! shape-only `.elwind` declarations in `src/builtins.elwind` (embedded into `elwindui-codegen` via
 //! `include_str!` so any `.elwind` file can resolve/validate against them without a `use`).
 //!
 //! `elwindui-codegen`'s `emit_construction`/`emit_wiring`/`emit_resync` no longer know these types

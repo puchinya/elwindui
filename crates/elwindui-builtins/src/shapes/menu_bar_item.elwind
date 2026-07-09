@@ -1,9 +1,0 @@
-#[embedded]
-#[content(submenu)]
-component MenuBarItem inherits NativeControl {
-    #[param]
-    text: String,
-
-    #[param]
-    submenu: Menu,
-}

@@ -5,7 +5,7 @@
 //! there's no `Type::new(..)` call site for a wrapper to intercept. Each type below wraps the
 //! matching `elwindui_backend_appkit` widget and exposes exactly the methods `elwindui-codegen`'s
 //! generic conventions call: `Type::new(..)` (construction, args in the paired
-//! `src/shapes/*.elwind` declaration's `#[param]` order), `set_<attr>` (resync / two-way
+//! `src/builtins.elwind` declaration's `#[param]` order), `set_<attr>` (resync / two-way
 //! change-back), `set_on_<event>` (an `on_*` callback), `set_on_<attr>_change` (a `#[two_way]`
 //! attribute's change-back), and — for anything embeddable as a child — `into_any_view`.
 
@@ -56,7 +56,7 @@ impl TextArea {
         self.inner.set_text(text);
     }
 
-    /// `#[two_way] text` (`src/shapes/text_area.elwind`) — the change-back half of the binding;
+    /// `#[two_way] text` (`TextArea` in `src/builtins.elwind`) — the change-back half of the binding;
     /// `set_text` above is the model→widget half.
     pub fn set_on_text_change(&self, callback: Box<dyn Fn(String)>) {
         self.inner.set_on_change(callback);
@@ -69,7 +69,7 @@ impl TextArea {
 
 pub struct Button {
     inner: appkit::ButtonImpl,
-    /// `#[routed] on_click` (`src/shapes/button.elwind`) is registered here at `Button`'s own
+    /// `#[routed] on_click` (`Button` in `src/builtins.elwind`) is registered here at `Button`'s own
     /// construction/wiring time — long before the `NativeControl` tree node wrapping it exists
     /// (tree construction is bottom-up: children before parents). `elwindui-codegen`'s
     /// `into_node_if_needed` shares this same `Rc` into that node's `UIElementBase.routed_handlers`

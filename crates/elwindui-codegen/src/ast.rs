@@ -11,7 +11,7 @@ pub struct Module {
     pub path: Vec<String>,
     pub uses: Vec<UseDecl>,
     pub items: Vec<Item>,
-    /// Whether this module came from `elwindui-codegen`'s own `BUILTIN_SHAPE_SOURCES`
+    /// Whether this module came from `elwindui-codegen`'s own `BUILTIN_SHAPE_SOURCE`
     /// (`builtin_modules()`, set there) rather than a consumer's own `.elwind` directory —
     /// `validate::validate` uses this to reject a `#[embedded]` component declared outside the
     /// actual builtin sources (docs/elwindui_spec.md 付録E).
@@ -100,7 +100,7 @@ pub struct ComponentDef {
     /// `Control` family every other native leaf (`Button`/`TextArea`/...) shares via `NativeControl`
     /// — declaring `inherits NativeControl` for it would suggest a shared ancestry that doesn't
     /// exist. `validate::validate` rejects `#[native]` combined with an explicit `base` or an own
-    /// `view`, and (like `#[embedded]`) outside `elwindui-builtins`' own `BUILTIN_SHAPE_SOURCES`.
+    /// `view`, and (like `#[embedded]`) outside `elwindui-builtins`' own `BUILTIN_SHAPE_SOURCE`.
     pub native: bool,
     /// `#[content(field_name)]` (same position, docs/elwindui_spec.md 付録E): WinUI3's
     /// `ContentPropertyAttribute` equivalent — names which of this component's own fields a bare

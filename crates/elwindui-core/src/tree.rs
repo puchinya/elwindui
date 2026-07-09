@@ -424,7 +424,7 @@ impl UIElement for ControlImpl {
 
 /// `ControlImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — exposes the fields a
 /// DSL-level subclass composed via `base: ControlImpl` (e.g. `builtin::ContentControl`,
-/// `crates/elwindui-builtins/src/shapes/content_control.elwind`) delegates to.
+/// `crates/elwindui-builtins/src/builtins.elwind`) delegates to.
 pub trait Control: UIElement {
     fn padding(&self) -> f32;
     fn content_horizontal_alignment(&self) -> HorizontalAlignment;

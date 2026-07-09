@@ -9,53 +9,30 @@ use std::io;
 use std::path::Path;
 
 /// Every builtin's shape-only `.elwind` declaration (`component Name { #[param] ... }`, no
-/// matching `view`) — embedded via `include_str!` at `elwindui-codegen`'s own compile time (a
-/// plain sibling-file read, not a Cargo dependency edge, so there's no cycle with
+/// matching `view`), all in one file — embedded via `include_str!` at `elwindui-codegen`'s own
+/// compile time (a plain sibling-file read, not a Cargo dependency edge, so there's no cycle with
 /// `elwindui-builtins`, which itself depends on `elwindui-core`/the backend crates). These exist
 /// purely so `SymbolTable`/`validate` can resolve and check `Window`/`VerticalLayout`/`TextArea`/etc.
 /// exactly like any other component — `emit_construction`'s only construction mechanism is
 /// "resolve via `SymbolTable`, call `Type::new(args)`", so without these, no builtin would resolve
 /// at all. The real implementations live in `elwindui-builtins` as ordinary hand-written Rust.
-const BUILTIN_SHAPE_SOURCES: &[&str] = &[
-    include_str!("../../elwindui-builtins/src/shapes/native_control.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/window.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/vertical_layout.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/horizontal_layout.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/shape.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/rectangle.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/ellipse.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/control.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/content_control.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/grid.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/text_area.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/button.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/text_block.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/menu_bar.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/menu_bar_item.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/menu.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/menu_item.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/tab_view.elwind"),
-    include_str!("../../elwindui-builtins/src/shapes/tab_view_item.elwind"),
-];
+/// Adding a new builtin shape only ever means appending a `component` to that one file — nothing
+/// here needs to change to pick it up.
+const BUILTIN_SHAPE_SOURCE: &str = include_str!("../../elwindui-builtins/src/builtins.elwind");
 
-/// Parses every embedded builtin shape into a `Module`. Registered with the same `path: []`
+/// Parses the embedded builtin shape file into a `Module`. Registered with the same `path: []`
 /// (crate root) every ordinary `.elwind` file compiled by `compile_dir` already uses (付録B.1), so
 /// `Window`/`VerticalLayout`/etc. resolve via `SymbolTable::resolve`'s plain "defined locally in
 /// `from`" check — the same way two `.elwind` files in the same directory already see each other
 /// without a `use` — rather than needing a separate "implicit visibility" fallback mechanism.
 pub fn builtin_modules() -> Vec<ast::Module> {
-    BUILTIN_SHAPE_SOURCES
-        .iter()
-        .map(|src| {
-            // `parse_module` always defaults a freshly-parsed module's `path` to `[]` already.
-            let mut module = parser::parse_module(src)
-                .unwrap_or_else(|e| panic!("failed to parse embedded builtin shape: {e}\n---\n{src}"));
-            // Marks every component parsed from here as eligible for `#[embedded]` — see
-            // `ast::Module::is_builtin`'s doc comment and `validate::validate`'s check.
-            module.is_builtin = true;
-            module
-        })
-        .collect()
+    // `parse_module` always defaults a freshly-parsed module's `path` to `[]` already.
+    let mut module = parser::parse_module(BUILTIN_SHAPE_SOURCE)
+        .unwrap_or_else(|e| panic!("failed to parse embedded builtin shapes: {e}\n---\n{BUILTIN_SHAPE_SOURCE}"));
+    // Marks every component parsed from here as eligible for `#[embedded]` — see
+    // `ast::Module::is_builtin`'s doc comment and `validate::validate`'s check.
+    module.is_builtin = true;
+    vec![module]
 }
 
 /// Parses, validates and generates Rust code for a single self-contained `.elwind` source string
@@ -199,11 +176,36 @@ fn compile_dir_impl(
     // flat crate-root `include!` convention).
     let mut builtins_generated = proc_macro2::TokenStream::new();
     for module in builtin_modules() {
-        let has_composed_component = module.items.iter().any(|item| {
-            matches!(item, ast::Item::Component(c) if table.resolve(&module, &c.name).is_some_and(|info| info.has_view))
-        });
-        if has_composed_component {
-            builtins_generated.extend(codegen::generate_module(&module, &table));
+        // Only the composed components (`ContentControl`/`Rectangle`/`Ellipse`, ...) need real
+        // generated Rust here — filtered out of the module rather than generating it whole, since
+        // `builtins.elwind` bundles every shape-only builtin (virtual and native leaves included)
+        // into this same module, and `generate_module` would otherwise also try (and fail) to
+        // generate plain-struct code for those via `generate_component`. Each composed component's
+        // own `Item::View` must be kept alongside its `Item::Component` — `generate_view` looks it
+        // up via `find_view` against this same filtered module, not just the symbol table.
+        let composed_names: std::collections::HashSet<&str> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ast::Item::Component(c) if table.resolve(&module, &c.name).is_some_and(|info| info.has_view) => {
+                    Some(c.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        let composed_items: Vec<_> = module
+            .items
+            .iter()
+            .filter(|item| match item {
+                ast::Item::Component(c) => composed_names.contains(c.name.as_str()),
+                ast::Item::View(v) => composed_names.contains(v.target.as_str()),
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        if !composed_items.is_empty() {
+            let composed_module = ast::Module { items: composed_items, ..module.clone() };
+            builtins_generated.extend(codegen::generate_module(&composed_module, &table));
         }
     }
     // Always written (even if empty) — every consumer's own generated `main.rs`/etc.

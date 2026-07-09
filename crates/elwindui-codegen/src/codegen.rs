@@ -193,7 +193,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     // `(module index, #[[inherits]] base name, effective view's root element type, #[native])` per
     // `component` key — the raw material `resolve_is_native` (below) needs; not every component has
     // an effective `view` (native leaf builtins and virtual builtins like `VerticalLayout`/`Rectangle`
-    // are declared shape-only, see `BUILTIN_SHAPE_SOURCES`) or a `base` (only `inherits`-using
+    // are declared shape-only, see `BUILTIN_SHAPE_SOURCE`) or a `base` (only `inherits`-using
     // components do — `#[native]` components, e.g. `Window`, deliberately have neither). The root is
     // the *effective* one (`resolve_view_for` — own view, or inherited from `base`), not just a
     // literal same-module `Item::View`, so a component with no `view` of its own that inherits a
@@ -366,10 +366,9 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
 /// needed — this is what `build_symbol_table` itself uses to resolve an `inherits` base while
 /// still building the table), mirroring `SymbolTable::resolve_key`'s own name-resolution rule:
 /// defined locally — in *any* module sharing `from`'s real path, not just `from` itself, since
-/// every builtin shape lives in its own same-path (`[]`), `use`-less `.elwind` file and they must
-/// still see each other (`builtin_modules`'s own doc comment: "the same way two `.elwind` files in
-/// the same directory already see each other without a `use`") — or brought into scope by one of
-/// `from`'s `use` declarations.
+/// every builtin shape lives in the same same-path (`[]`), `use`-less `builtins.elwind` file
+/// (`builtin_modules`'s own doc comment) — or brought into scope by one of `from`'s `use`
+/// declarations.
 fn find_component_and_module<'m>(
     from: &'m Module,
     name: &str,
@@ -573,7 +572,7 @@ fn rewrite_base_calls(mut block: syn::Block, receiver: &syn::Ident) -> syn::Bloc
 /// own (recursively resolved) nativeness — `inherits` never overrides this for a view-having
 /// component, it's only checked for consistency against it (`validate::validate_inherits`).
 /// A component with **no** `view` of its own (a hand-written builtin, declared shape-only — see
-/// `native_control.elwind`/`BUILTIN_SHAPE_SOURCES`) has no root to recurse through, so it falls
+/// `NativeControl`/`BUILTIN_SHAPE_SOURCE`) has no root to recurse through, so it falls
 /// back to either its explicit `inherits NativeControl` declaration (`Button`/...) or its own
 /// `#[native]` attribute (`Window` — a native leaf with no meaningful `inherits` base at all, see
 /// `ComponentDef::native`'s doc comment): either present → native; both absent → virtual
@@ -2311,11 +2310,11 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
                 emit_construction(planned, &closure_ctx, from, table, &mut construct);
             }
             let root = plan.last().expect("closure element body must have a root");
-            // `item_template`'s declared return type is `Rc<dyn UIElement>` (`tab_view.elwind`), not
-            // a bare `AnyView` — so a per-tab body rooted in a virtual builtin/component (a
-            // `VerticalLayout`, or a `DocumentView`-style user component) works exactly like any
-            // other embedding slot, via the same `is_native` dispatch `into_node_if_needed` uses
-            // elsewhere.
+            // `item_template`'s declared return type is `Rc<dyn UIElement>` (`TabView` in
+            // `builtins.elwind`), not a bare `AnyView` — so a per-tab body rooted in a virtual
+            // builtin/component (a `VerticalLayout`, or a `DocumentView`-style user component)
+            // works exactly like any other embedding slot, via the same `is_native` dispatch
+            // `into_node_if_needed` uses elsewhere.
             let root_binding = &root.binding;
             let converted = into_node_if_needed(quote! { #root_binding }, &root.type_path, from, table);
             quote! { { #construct #converted } }
@@ -2415,7 +2414,7 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
             Some(other) => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
                 // A `String`-shaped param takes `&str` in every *hand-written* builtin (matching
-                // the shape declaration's `String`/`Option<String>` — see `src/shapes/*.elwind` in
+                // the shape declaration's `String`/`Option<String>` — see `src/builtins.elwind` in
                 // `elwindui-builtins`), so the value is wrapped in `&(..)` here regardless of
                 // whether the DSL expression itself is a `&str` literal or a computed `String`
                 // (e.g. `t!(...)`) — Rust's deref coercion accepts either as `&str` at the call
@@ -3163,8 +3162,9 @@ view NotepadWindow {
         let window_str = window_code.to_string();
         // `command: vm.save` must desugar to exactly what `on_click: vm.save.execute()` +
         // `enabled: vm.save.can_execute` generate by hand (see `desugar_command_attr`). `on_click`
-        // is `#[routed]` (`button.elwind`), so it's wired via `register_routed_handler`, not
-        // `set_on_click` directly — see `emit_wiring`'s `is_routed` branch.
+        // is `#[routed]` (`Button` in `builtins.elwind`), so it's wired via
+        // `register_routed_handler`, not `set_on_click` directly — see `emit_wiring`'s `is_routed`
+        // branch.
         assert!(window_str.contains("register_routed_handler"));
         assert!(window_str.contains("save_execute"));
         assert!(window_str.contains("save_can_execute"));
@@ -3523,13 +3523,25 @@ view Foo {
         assert!(generated_str.contains("ContentControlImpl :: new"), "{generated_str}");
 
         // `ContentControl`'s own generated code (produced when `builtin_modules()` is fed through
-        // `generate_module` directly, mirroring how a real consumer's `content_control.elwind`
+        // `generate_module` directly, mirroring how a real consumer's own `.elwind` component
         // would be generated) forwards `content` into `Control`'s children and exposes both
-        // `#[param]` fields as public accessors.
-        let content_control_module = crate::builtin_modules()
+        // `#[param]` fields as public accessors. `builtins.elwind` bundles every builtin into one
+        // module, so only `ContentControl`'s own `Item::Component`/`Item::View` pair is kept —
+        // `generate_module` would otherwise also try (and fail) to generate every shape-only
+        // builtin sharing that module (mirroring `compile_dir_impl`'s own filtering in `lib.rs`).
+        let builtins_module = crate::builtin_modules()
             .into_iter()
             .find(|m| m.items.iter().any(|i| matches!(i, Item::Component(c) if c.name == "ContentControl")))
-            .expect("content_control.elwind should be a registered builtin");
+            .expect("ContentControl should be a registered builtin");
+        let content_control_module = Module {
+            items: builtins_module
+                .items
+                .iter()
+                .filter(|i| matches!(i, Item::Component(c) if c.name == "ContentControl") || matches!(i, Item::View(v) if v.target == "ContentControl"))
+                .cloned()
+                .collect(),
+            ..builtins_module
+        };
         let content_control_code = generate_module(&content_control_module, &table);
         assert_valid_rust("content_control_impl", &content_control_code);
         let content_control_str = content_control_code.to_string();

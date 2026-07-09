@@ -1,5 +1,0 @@
-#[embedded]
-component MenuBar inherits NativeControl {
-    #[param]
-    children: Vec<MenuBarItem>,
-}

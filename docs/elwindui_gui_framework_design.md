@@ -402,7 +402,7 @@ src/
 WinUI3の`RoutedEvent`に倣い、`#[routed]`属性(`#[two_way]`と同じ、`.elwind`のコールバック型フィールドに付与するアトリビュート)を付けたイベントは、発生元の要素から祖先へバブルする。対象は`on_click`のような入力系イベントに限られ、`TabView`の`on_select(usize)`のようなウィジェット固有の型付きペイロードを持つコールバックはルーティング対象外(既存の直接配線のまま)。
 
 ```rust
-// crates/elwindui-builtins/src/shapes/button.elwind
+// crates/elwindui-builtins/src/builtins.elwind (Button)
 component Button inherits NativeControl {
     #[routed]
     on_click: fn(),

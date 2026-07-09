@@ -52,7 +52,7 @@ impl TextArea {
         self.inner.set_text(text);
     }
 
-    /// `#[two_way] text` (`src/shapes/text_area.elwind`) — the change-back half of the binding;
+    /// `#[two_way] text` (`TextArea` in `src/builtins.elwind`) — the change-back half of the binding;
     /// `set_text` above is the model→widget half.
     pub fn set_on_text_change(&self, callback: Box<dyn Fn(String)>) {
         self.inner.set_on_change(callback);

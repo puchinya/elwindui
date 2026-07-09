@@ -1,7 +1,0 @@
-#[embedded]
-component HorizontalLayout {
-    #[param]
-    children: Vec<AnyView>,
-    #[param]
-    spacing: Option<f32>,
-}

@@ -145,7 +145,7 @@ impl TabView {
     }
 
     /// WinUI3's `SelectedItem` concept — not threaded through `on_select` (see
-    /// `src/shapes/tab_view.elwind`'s doc comment on why), so exposed as a plain accessor for
+    /// `TabView` in `src/builtins.elwind`'s doc comment on why), so exposed as a plain accessor for
     /// advanced/manual use from hand-written Rust glue code instead.
     pub fn selected_item(&self) -> Option<Rc<dyn Any>> {
         self.entries.borrow().get(self.selected_index.get()).and_then(|e| e.data_context.clone())

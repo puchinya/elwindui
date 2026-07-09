@@ -1,0 +1,313 @@
+// A field-less category marker, not a real widget. Native leaf builtins that share a real
+// `Control`-family ancestry in WinUI3 (Button/TextArea/Text/MenuBar/MenuBarItem/Menu/MenuItem/
+// TabView) declare `inherits NativeControl` purely to group themselves under this tag; it carries
+// no fields and is never itself constructed. `Window` (below) is the one native leaf that does
+// *not* use this tag — real WinUI3's `Window` has no meaningful `Control`-family ancestor at all
+// (it derives directly from `Object`), so it declares `#[native]` directly instead rather than
+// implying a shared ancestry that doesn't exist. See docs/elwindui_spec.md 付録H.2 and
+// `elwindui-codegen`'s `is_native` computation.
+#[embedded]
+component NativeControl {
+}
+
+// `Window` has no meaningful `Control`-family ancestor (see `NativeControl` above), so it declares
+// `#[native]` (docs/elwindui_spec.md 付録E) directly: base-less, `view`-less, hand-written per
+// backend crate — exactly like an `inherits NativeControl` leaf as far as `is_native`/codegen are
+// concerned (`codegen::resolve_is_native`), just without the (here, inaccurate) shared-ancestor tag.
+// `content` is a single slot (WinUI3's own `Window.Content`, WinUI3's `ContentPropertyAttribute`
+// equivalent — see `#[content(content)]` below), not a children list.
+#[embedded]
+#[native]
+#[content(content)]
+component Window {
+    #[param]
+    title: String,
+
+    #[param]
+    menu_bar: Option<MenuBar>,
+
+    #[param]
+    content: std::rc::Rc<dyn UIElement>,
+}
+
+#[embedded]
+component VerticalLayout {
+    #[param]
+    children: Vec<AnyView>,
+    #[param]
+    spacing: Option<f32>,
+}
+
+#[embedded]
+component HorizontalLayout {
+    #[param]
+    children: Vec<AnyView>,
+    #[param]
+    spacing: Option<f32>,
+}
+
+// The composable drawing primitive `Rectangle`/`Ellipse` (below) shape-compose over
+// (docs/elwindui_spec.md 付録H.2.1a), mirroring `Control`'s role for `ContentControl`: a virtual
+// builtin (no backend Rust struct of its own — `elwindui-codegen`'s `emit_virtual_construction`
+// builds an `elwindui_core::tree::ShapeImpl` directly at each use site) that concrete leaves
+// inherit from and forward their own `kind` into. `kind` is the one field a leaf never
+// bare-forwards — each leaf computes its own `elwindui_core::tree::ShapeKind` value instead
+// (`Rectangle`'s `RoundedRect { corner_radius }`, `Ellipse`'s fixed `Oval`).
+#[embedded]
+component Shape {
+    #[param]
+    kind: elwindui_core::tree::ShapeKind,
+    #[param]
+    fill: Option<String>,
+    #[param]
+    stroke: Option<String>,
+    #[param]
+    stroke_width: Option<f32>,
+    #[param]
+    children: Vec<AnyView>,
+}
+
+// A concrete `Shape` leaf: inherits `Shape` via shape-composition (`ContentControl inherits
+// Control`'s pattern) instead of being a virtual builtin itself — `fill`/`stroke`/`stroke_width`
+// are inherited unchanged (bare-forwarded below), `corner_radius` is `Rectangle`'s own field, and
+// `kind` (not bare-forwardable — there's nothing to forward *from*, each leaf computes its own) is
+// set from it. `Shape`'s own `children` is deliberately *not* forwarded here — unlike a plain
+// `Vec<AnyView>` `#[param]` that only ever needs to be read (`fill`/`stroke`/...), forwarding a
+// `children`-named field bare through an `inherits` chain has no real backing (`AnyView` is a
+// backend-specific type, never a literal Rust parameter type outside a virtual builtin's own
+// inline construction) — and no real usage here ever nests a child inside `Rectangle` (see
+// `RoundedPanel`, which overlays its background `Rectangle` and label as `Grid` siblings instead).
+// `#[sealed]`: a further `component X inherits Rectangle` has no more structure to add here —
+// compose over `Shape` itself instead (see `Rectangle`'s own relationship to it).
+#[embedded]
+#[sealed]
+component Rectangle inherits Shape {
+    #[param]
+    corner_radius: Option<f32>,
+}
+
+view Rectangle {
+    Shape {
+        kind: elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) }
+        fill: fill
+        stroke: stroke
+        stroke_width: stroke_width
+    }
+}
+
+// A concrete `Shape` leaf — see `Rectangle` above for the shape-composition rationale (including
+// why `children` isn't forwarded). No fields of its own beyond what `Shape` already provides;
+// `kind` is always the fixed `Oval` variant.
+#[embedded]
+#[sealed]
+component Ellipse inherits Shape {
+}
+
+view Ellipse {
+    Shape {
+        kind: elwindui_core::tree::ShapeKind::Oval
+        fill: fill
+        stroke: stroke
+        stroke_width: stroke_width
+    }
+}
+
+#[embedded]
+component Control {
+    #[param]
+    children: Vec<AnyView>,
+    #[param]
+    padding: Option<f32>,
+}
+
+// WinUI3's real `ContentControl` (single `Content`, as opposed to `Control`'s N-children form) —
+// composed via `inherits` (docs/elwindui_spec.md §3, 付録H.2.1a): its `view` root literally
+// constructs a `Control` with exactly one child, so `elwindui-codegen` generates the real struct as
+// `ContentControlImpl` (the bare `ContentControl` name becomes a real
+// `pub trait ContentControl: UIElement + Control` instead — Rust's shared type/trait namespace
+// means the two can't share a name) with a `base: elwindui_core::tree::ControlImpl` field and a
+// direct `impl elwindui_core::tree::UIElement`/`Control for ContentControlImpl` delegating to it —
+// `self` *is* the tree node (`into_node()` just returns `self`), not a wrapper holding a
+// separately-`Rc`-erased `Control` value. Every other `.elwind` reference to `ContentControl` still
+// compiles unchanged — `emit_construction`'s `concrete_type_ident` is the one place that resolves it
+// to the real `ContentControlImpl::new(..)` call. `padding` is inherited from `Control`
+// automatically (no redeclaration needed — `self.padding()`/the bare `padding` reference below both
+// just work) and forwarded through unchanged. Unlike `Window`/`TabViewItem` (whose own
+// `dyn UIElement`-typed fields never reach `syn::parse_str` since neither has a `view`), this
+// component's generated code embeds `content`'s declared type verbatim in `new(..)`'s signature and
+// the generated `content()` accessor — so any project that ends up compiling this generated code
+// (via its own build.rs, the same way it already needs `use elwindui_builtins::Window;` etc.) must
+// itself have `use elwindui_core::tree::UIElement;` in scope.
+#[embedded]
+#[content(content)]
+component ContentControl inherits Control {
+    #[param]
+    content: std::rc::Rc<dyn UIElement>,
+}
+
+view ContentControl {
+    Control {
+        padding: padding,
+        content
+    }
+}
+
+// WPF/WinUI3-style row/column layout (docs/elwindui_spec.md §3) — a virtual builtin like `Control`/
+// `Rectangle` (no backend Rust struct; `elwindui-codegen`'s `emit_virtual_construction` builds an
+// `elwindui_core::tree::Grid` directly at each use site). `rows`/`columns` are ordinary `#[param]`s
+// (an array literal of `elwindui_core::layout::GridLength::Auto`/`Fixed(px)`/`Star(weight)`);
+// `row`/`column` are `#[attached]` properties — declared here, but settable on *any* element
+// anywhere via `Grid::row: <expr>` / `Grid::column: <expr>`, not just this component's own direct
+// children (see docs/elwindui_spec.md §3's attached-property section). Unset on a given element,
+// they default to `0` (the top-left cell), matching `elwindui_core::layout::GridCell::default()`.
+#[embedded]
+component Grid {
+    #[param]
+    rows: Vec<GridLength>,
+    #[param]
+    columns: Vec<GridLength>,
+    #[param]
+    children: Vec<AnyView>,
+
+    #[attached]
+    row: i32 = 0,
+    #[attached]
+    column: i32 = 0,
+}
+
+#[embedded]
+#[sealed]
+component TextArea inherits NativeControl {
+    #[param]
+    #[two_way]
+    text: String,
+}
+
+#[embedded]
+#[sealed]
+component Button inherits NativeControl {
+    #[param]
+    text: String,
+
+    #[param]
+    enabled: Option<bool>,
+
+    #[routed]
+    on_click: fn(),
+}
+
+#[embedded]
+component TextBlock {
+    #[param]
+    text: String,
+    #[param]
+    color: Option<String>,
+}
+
+#[embedded]
+component MenuBar inherits NativeControl {
+    #[param]
+    children: Vec<MenuBarItem>,
+}
+
+#[embedded]
+#[content(submenu)]
+component MenuBarItem inherits NativeControl {
+    #[param]
+    text: String,
+
+    #[param]
+    submenu: Menu,
+}
+
+#[embedded]
+component Menu inherits NativeControl {
+    #[param]
+    children: Vec<MenuItem>,
+}
+
+#[embedded]
+component MenuItem inherits NativeControl {
+    #[param]
+    text: String,
+
+    #[param]
+    shortcut: Option<String>,
+
+    #[param]
+    enabled: Option<bool>,
+
+    on_select: fn(),
+}
+
+#[embedded]
+#[sealed]
+component TabView inherits NativeControl {
+    // Static mode: tabs written literally as nested `TabViewItem { .. }` children (WinUI3's XAML
+    // child-declaration style). Mutually exclusive with `items_source` below — see
+    // `elwindui-codegen::validate::check_tab_view_mode`.
+    #[param]
+    children: Vec<TabViewItem>,
+
+    // Dynamic mode: a data-bound collection + templates (WinUI3's `TabItemsSource`/
+    // `TabItemTemplate`/`HeaderTemplate`). Each item's `Rc<T>` pointer identity is used directly
+    // for add/remove reconciliation — no separate `key` closure (see appkit/winui3 backends).
+    #[param]
+    items_source: Option<Vec<std::rc::Rc<T>>>,
+
+    // Returns a plain string (not `Box<dyn UIElement>`): both `elwindui-backend-appkit`'s
+    // `TabChip` and `elwindui-backend-winui3`'s `insert_tab` only accept a `&str` title today —
+    // arbitrary-content tab headers (real WinUI3's `TabViewItem.HeaderTemplate` can hold anything)
+    // would need those lower backend crates extended first, out of scope here.
+    #[param]
+    header_template: Option<fn(&std::rc::Rc<T>) -> String>,
+
+    #[param]
+    item_template: Option<fn(&std::rc::Rc<T>) -> std::rc::Rc<dyn UIElement>>,
+
+    // Default closability for `items_source`-generated tabs (no literal `TabViewItem` to carry its
+    // own `closable` in that mode). Ignored in static mode — each `TabViewItem` carries its own.
+    #[param]
+    closable: Option<bool>,
+
+    #[param]
+    selected_index: usize,
+
+    // `emit_wiring`'s generic `on_*` wiring threads a single `usize` index through for any
+    // callback field whose declared type contains `usize` (originally special-cased just for
+    // this field) — so this stays single-argument. The newly-selected item's `data_context`/
+    // container aren't threaded through it; use the backend struct's own `selected_item()`/
+    // `selected_container()` methods instead (WinUI3's `SelectedItem`/container concept, exposed
+    // as plain Rust accessors rather than `.elwind`-declarative props/callback args — see 付録Y).
+    on_select: fn(usize),
+
+    // `items_source` mode only — a static `TabViewItem`'s own `on_close` (below) is used instead.
+    on_close: fn(usize),
+
+    on_new_tab: fn(),
+}
+
+// See docs/elwindui_builtins_spec.md 付録Y. Used two ways: written literally as a `TabView`'s
+// nested static child (WinUI3's XAML `TabViewItem` declaration), or synthesized internally by
+// `TabView` once per element of `items_source` (its `data_context`/`header`/`content` populated
+// from that item via `header_template`/`item_template`).
+#[embedded]
+#[sealed]
+#[content(content)]
+component TabViewItem inherits NativeControl {
+    // Set explicitly in static mode; populated automatically (from the owning `items_source`
+    // element's own `Rc<T>`) in dynamic mode. `None` in static mode unless set.
+    #[param]
+    data_context: Option<std::rc::Rc<T>>,
+
+    #[param]
+    header: String,
+
+    #[param]
+    content: std::rc::Rc<dyn UIElement>,
+
+    #[param]
+    closable: Option<bool>,
+
+    on_close: fn(),
+}

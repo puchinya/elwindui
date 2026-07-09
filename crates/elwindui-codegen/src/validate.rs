@@ -38,11 +38,12 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
             match item {
                 Item::Component(c) => {
                     // `#[embedded]` (docs/elwindui_spec.md 付録E) claims this component is one of
-                    // `elwindui-builtins`'own — reject it on anything parsed from a consumer's own
-                    // `.elwind` directory (`Module::is_builtin`, set only by `builtin_modules()`).
+                    // this crate's own builtin shape declarations — reject it on anything parsed
+                    // from a consumer's own `.elwind` directory (`Module::is_builtin`, set only by
+                    // `builtin_modules()`).
                     if c.embedded && !module.is_builtin {
                         errors.push(format!(
-                            "{}: #[embedded] can only be used on a component from elwindui-builtins' own \
+                            "{}: #[embedded] can only be used on a component from elwindui-codegen's own \
                              BUILTIN_SHAPE_SOURCE, not a consumer's own `.elwind` file",
                             c.name
                         ));
@@ -58,7 +59,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     if c.native {
                         if !module.is_builtin {
                             errors.push(format!(
-                                "{}: #[native] can only be used on a component from elwindui-builtins' own \
+                                "{}: #[native] can only be used on a component from elwindui-codegen's own \
                                  BUILTIN_SHAPE_SOURCE, not a consumer's own `.elwind` file",
                                 c.name
                             ));
@@ -1233,7 +1234,7 @@ view Foo {
         assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("view")), "errors: {errs:?}");
     }
 
-    /// `#[native]`, like `#[embedded]`, only makes sense on one of `elwindui-builtins`' own
+    /// `#[native]`, like `#[embedded]`, only makes sense on one of this crate's own builtin shape
     /// components — a consumer's own `.elwind` file has no way to actually provide a hand-written
     /// per-backend implementation for it.
     #[test]

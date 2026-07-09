@@ -9,16 +9,16 @@ use std::io;
 use std::path::Path;
 
 /// Every builtin's shape-only `.elwind` declaration (`component Name { #[param] ... }`, no
-/// matching `view`), all in one file — embedded via `include_str!` at `elwindui-codegen`'s own
-/// compile time (a plain sibling-file read, not a Cargo dependency edge, so there's no cycle with
-/// `elwindui-builtins`, which itself depends on `elwindui-core`/the backend crates). These exist
-/// purely so `SymbolTable`/`validate` can resolve and check `Window`/`VerticalLayout`/`TextArea`/etc.
-/// exactly like any other component — `emit_construction`'s only construction mechanism is
-/// "resolve via `SymbolTable`, call `Type::new(args)`", so without these, no builtin would resolve
-/// at all. The real implementations live in `elwindui-builtins` as ordinary hand-written Rust.
-/// Adding a new builtin shape only ever means appending a `component` to that one file — nothing
-/// here needs to change to pick it up.
-const BUILTIN_SHAPE_SOURCE: &str = include_str!("../../elwindui-builtins/src/builtins.elwind");
+/// matching `view`), all in one file — embedded via `include_str!` from this same crate's own
+/// source directory (backend-agnostic compiler metadata, so it lives beside the compiler rather
+/// than beside any particular backend). These exist purely so `SymbolTable`/`validate` can resolve
+/// and check `Window`/`VerticalLayout`/`TextArea`/etc. exactly like any other component —
+/// `emit_construction`'s only construction mechanism is "resolve via `SymbolTable`, call
+/// `Type::new(args)`", so without these, no builtin would resolve at all. The real implementations
+/// live in each `elwindui-backend-*` crate as ordinary hand-written Rust. Adding a new builtin
+/// shape only ever means appending a `component` to that one file — nothing here needs to change
+/// to pick it up.
+const BUILTIN_SHAPE_SOURCE: &str = include_str!("builtins.elwind");
 
 /// Parses the embedded builtin shape file into a `Module`. Registered with the same `path: []`
 /// (crate root) every ordinary `.elwind` file compiled by `compile_dir` already uses (付録B.1), so

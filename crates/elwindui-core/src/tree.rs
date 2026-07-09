@@ -35,7 +35,7 @@ use crate::layout::{
 };
 use crate::painter::Point;
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
@@ -57,28 +57,36 @@ impl<T: Any> AsAny for T {
 /// since Rust has no class inheritance — each concrete type embeds one of these and delegates
 /// `UIElement::base`).
 ///
+/// Every field here is interior-mutable (`Cell`/`RefCell`, matching `routed_handlers`/`parent`,
+/// which already were) — every `create_xxx(...)` factory in this crate (and every hand-written
+/// backend's `create_button`/etc.) builds its own `UIElementImpl::default()` internally, taking no
+/// `base` parameter at all; `elwindui-codegen`'s generated code instead calls `set_margin`/
+/// `set_horizontal_alignment`/`set_vertical_alignment`/`set_data_context`/`set_grid_cell` (and
+/// `register_routed_handler`, already `Rc<RefCell<..>>`-based) through `&self` right after
+/// construction, for whichever of these this specific use site actually specified. This is what
+/// lets a native leaf (`Button`/`TextArea`/`TabView`, whose own `Type::new(..)` signature is fixed
+/// by `elwindui-codegen`'s `Type::new(args)` calling convention) still have its use-site margin/
+/// alignment/data_context applied, without threading them through every factory's constructor
+/// argument list.
+///
 /// `data_context` (WinUI3's `FrameworkElement.DataContext`) is `Rc<dyn Any>`-erased like every
-/// other cross-type-parameter value in this crate (see e.g. `elwindui-builtins::appkit::tab_view`'s
-/// `erase_tabs`) — it drops `UIElementImpl`'s former `Copy`/`PartialEq` derives (`Rc<dyn Any>`
-/// supports neither), which nothing in the tree relied on.
-#[derive(Clone)]
+/// other cross-type-parameter value in this crate (see e.g. `elwindui_backend_appkit::builtins::tab_view`'s
+/// `erase_items`/`erase_render`).
 pub struct UIElementImpl {
-    pub margin: f32,
-    pub horizontal_alignment: HorizontalAlignment,
-    pub vertical_alignment: VerticalAlignment,
-    pub data_context: Option<Rc<dyn Any>>,
+    pub margin: Cell<f32>,
+    pub horizontal_alignment: Cell<HorizontalAlignment>,
+    pub vertical_alignment: Cell<VerticalAlignment>,
+    pub data_context: RefCell<Option<Rc<dyn Any>>>,
     /// `#[routed]`-tagged callback fields (`on_click`, and any future one — see
     /// `docs/elwindui_spec.md` 4章), keyed by field name. Each value is a
     /// `Box<dyn Fn(&T, &RoutedEventArgs)>` erased to `Box<dyn Any>` (`T` is that field's own
     /// payload type — `()` for `on_click`, `usize` for a hypothetical routed `on_select`, ...);
     /// generated call sites know `T` statically from the `.elwind` declaration, so the downcast in
     /// `dispatch_routed` always succeeds (same erasure pattern as `data_context`/
-    /// `elwindui-builtins::appkit::tab_view`'s `items_source`). `Rc<RefCell<..>>` for the same
-    /// reason `data_context` needs `Rc`, not a plain field: `UIElementImpl: Clone` must hold, and
-    /// `Box<dyn Any>` isn't `Clone`.
+    /// `elwindui-builtins::appkit::tab_view`'s `items_source`).
     pub routed_handlers: RoutedHandlers,
     /// This element's `GridImpl::row`/`GridImpl::column` attached-property values (docs/elwindui_spec.md
-    /// §3の添付プロパティ), set at construction time from whatever the `.elwind` source wrote on
+    /// §3の添付プロパティ), set right after construction from whatever the `.elwind` source wrote on
     /// this specific element (`elwindui-codegen`'s `plan_element`/`emit_construction`) —
     /// `GridCell::default()` (0, 0) for any element that set neither, which happens to coincide
     /// with `GridImpl`'s own declared attached-field defaults so no evaluation of those defaults is
@@ -87,7 +95,7 @@ pub struct UIElementImpl {
     /// actually a child of a `GridImpl`, exactly like WPF's own attached properties. A future attached
     /// property from a different owner component would get its own field here, the same way this
     /// one was added — see this struct's own doc comment.
-    pub grid_cell: GridCell,
+    pub grid_cell: Cell<GridCell>,
     /// WinUI3's `_parent` — set once by `new_element` for every child of the element being
     /// constructed. `Weak` (not `Rc`) since the parent already owns its children via `Rc` in its
     /// own `children()` list; a strong back-reference would create a cycle nothing could ever
@@ -100,12 +108,12 @@ pub struct UIElementImpl {
 impl std::fmt::Debug for UIElementImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UIElementImpl")
-            .field("margin", &self.margin)
-            .field("horizontal_alignment", &self.horizontal_alignment)
-            .field("vertical_alignment", &self.vertical_alignment)
-            .field("data_context", &self.data_context.is_some())
+            .field("margin", &self.margin.get())
+            .field("horizontal_alignment", &self.horizontal_alignment.get())
+            .field("vertical_alignment", &self.vertical_alignment.get())
+            .field("data_context", &self.data_context.borrow().is_some())
             .field("routed_handlers", &self.routed_handlers.borrow().keys().collect::<Vec<_>>())
-            .field("grid_cell", &self.grid_cell)
+            .field("grid_cell", &self.grid_cell.get())
             .field("has_parent", &self.parent.borrow().as_ref().is_some_and(|p| p.upgrade().is_some()))
             .finish()
     }
@@ -114,12 +122,12 @@ impl std::fmt::Debug for UIElementImpl {
 impl Default for UIElementImpl {
     fn default() -> Self {
         UIElementImpl {
-            margin: 0.0,
-            horizontal_alignment: HorizontalAlignment::Stretch,
-            vertical_alignment: VerticalAlignment::Stretch,
-            data_context: None,
+            margin: Cell::new(0.0),
+            horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
+            vertical_alignment: Cell::new(VerticalAlignment::Stretch),
+            data_context: RefCell::new(None),
             routed_handlers: Rc::new(RefCell::new(HashMap::new())),
-            grid_cell: GridCell::default(),
+            grid_cell: Cell::new(GridCell::default()),
             parent: RefCell::new(None),
         }
     }
@@ -130,6 +138,23 @@ impl UIElementImpl {
     /// struct's own `routed_handlers` doc comment for the erasure convention.
     pub fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &RoutedEventArgs)>) {
         register_routed_handler(&self.routed_handlers, name, handler);
+    }
+    /// See this struct's own doc comment for why every one of these is a post-construction `&self`
+    /// setter rather than a constructor argument.
+    pub fn set_margin(&self, margin: f32) {
+        self.margin.set(margin);
+    }
+    pub fn set_horizontal_alignment(&self, alignment: HorizontalAlignment) {
+        self.horizontal_alignment.set(alignment);
+    }
+    pub fn set_vertical_alignment(&self, alignment: VerticalAlignment) {
+        self.vertical_alignment.set(alignment);
+    }
+    pub fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
+        *self.data_context.borrow_mut() = data_context;
+    }
+    pub fn set_grid_cell(&self, grid_cell: GridCell) {
+        self.grid_cell.set(grid_cell);
     }
 }
 
@@ -156,19 +181,19 @@ pub fn register_routed_handler<T: 'static>(handlers: &RoutedHandlers, name: &'st
 pub trait UIElement: AsAny {
     fn base(&self) -> &UIElementImpl;
     fn margin(&self) -> f32 {
-        self.base().margin
+        self.base().margin.get()
     }
     fn horizontal_alignment(&self) -> HorizontalAlignment {
-        self.base().horizontal_alignment
+        self.base().horizontal_alignment.get()
     }
     fn vertical_alignment(&self) -> VerticalAlignment {
-        self.base().vertical_alignment
+        self.base().vertical_alignment.get()
     }
     /// WinUI3's `FrameworkElement.DataContext` — an ambient, type-erased data value an element
     /// carries (set explicitly via the `data_context:` common attribute, or populated internally by
     /// `TabView`'s `items_source` mode for each generated `TabViewItem`). `None` when unset.
-    fn data_context(&self) -> Option<&Rc<dyn Any>> {
-        self.base().data_context.as_ref()
+    fn data_context(&self) -> Option<Rc<dyn Any>> {
+        self.base().data_context.borrow().clone()
     }
     /// WinUI3's `VisualTreeHelper.GetParent` — `None` for the root of whatever tree this element
     /// is currently part of. See `UIElementImpl::parent`'s doc comment.
@@ -186,6 +211,17 @@ pub trait UIElement: AsAny {
     /// Content this element paints for itself, if any (`None` for pure layout containers like
     /// `StackImpl`, which only position children and draw nothing on their own account).
     fn paint(&self) -> Option<PaintKind> {
+        None
+    }
+    /// `Some(self)` for `NativeControlImpl<H>` itself, and for any type that composes one as its own
+    /// `base` field (docs/elwindui_spec.md 付録H.2.1a — e.g. a backend's `ButtonImpl { base:
+    /// NativeControlImpl<AnyView>, .. }` overrides this to return `Some(&self.base)`); `None` for
+    /// every other `UIElement` (the default). `arrange`'s own downcast goes through this instead of
+    /// downcasting `self` directly, since `Any::downcast_ref` only ever succeeds against the exact
+    /// concrete type placed in the tree — without this indirection, a composing type's *own*
+    /// concrete type (not `NativeControlImpl<H>` itself) would never be recognized as carrying a
+    /// real native handle.
+    fn as_native_control(&self) -> Option<&dyn Any> {
         None
     }
 }
@@ -252,6 +288,9 @@ impl<H: LayoutNode + 'static> UIElement for NativeControlImpl<H> {
     fn arrange_override(&self, _final_size: Size, _child_sizes: &[Size]) -> Vec<Rect> {
         Vec::new()
     }
+    fn as_native_control(&self) -> Option<&dyn Any> {
+        Some(self)
+    }
 }
 
 /// `NativeControlImpl<H>`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — no methods beyond
@@ -260,8 +299,8 @@ impl<H: LayoutNode + 'static> UIElement for NativeControlImpl<H> {
 pub trait NativeControl<H>: UIElement {}
 impl<H: LayoutNode + 'static> NativeControl<H> for NativeControlImpl<H> {}
 
-pub fn create_native_control<H>(base: UIElementImpl, handle: H) -> NativeControlImpl<H> {
-    NativeControlImpl { base, handle }
+pub fn create_native_control<H>(handle: H) -> NativeControlImpl<H> {
+    NativeControlImpl { base: UIElementImpl::default(), handle }
 }
 
 /// `VerticalLayout`/`HorizontalLayout` — a thin wrapper around `elwindui_core::layout`'s
@@ -293,8 +332,8 @@ impl UIElement for StackImpl {
 pub trait Stack: UIElement {}
 impl Stack for StackImpl {}
 
-pub fn create_stack(base: UIElementImpl, orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> StackImpl {
-    StackImpl { base, orientation, spacing, children }
+pub fn create_stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> StackImpl {
+    StackImpl { base: UIElementImpl::default(), orientation, spacing, children }
 }
 
 /// `Rectangle`/`Ellipse`. Has no intrinsic size of its own — its natural size is the bounding box
@@ -336,14 +375,13 @@ pub trait Shape: UIElement {}
 impl Shape for ShapeImpl {}
 
 pub fn create_shape(
-    base: UIElementImpl,
     kind: ShapeKind,
     fill: Option<String>,
     stroke: Option<String>,
     stroke_width: f32,
     children: Vec<Rc<dyn UIElement>>,
 ) -> ShapeImpl {
-    ShapeImpl { base, kind, fill, stroke, stroke_width, children }
+    ShapeImpl { base: UIElementImpl::default(), kind, fill, stroke, stroke_width, children }
 }
 
 /// Self-drawn primitive text (WinUI3's `TextBlockImpl`) — no native widget, unlike the native `Text`
@@ -381,8 +419,8 @@ impl UIElement for TextBlockImpl {
 pub trait TextBlock: UIElement {}
 impl TextBlock for TextBlockImpl {}
 
-pub fn create_text_block(base: UIElementImpl, content: String, color: Option<String>) -> TextBlockImpl {
-    TextBlockImpl { base, content, color }
+pub fn create_text_block(content: String, color: Option<String>) -> TextBlockImpl {
+    TextBlockImpl { base: UIElementImpl::default(), content, color }
 }
 
 /// A composable, multi-part component (WinUI3's `ControlImpl`) — Visually built from any number of
@@ -443,13 +481,12 @@ impl Control for ControlImpl {
 }
 
 pub fn create_control(
-    base: UIElementImpl,
     padding: f32,
     content_horizontal_alignment: HorizontalAlignment,
     content_vertical_alignment: VerticalAlignment,
     children: Vec<Rc<dyn UIElement>>,
 ) -> ControlImpl {
-    ControlImpl { base, padding, content_horizontal_alignment, content_vertical_alignment, children }
+    ControlImpl { base: UIElementImpl::default(), padding, content_horizontal_alignment, content_vertical_alignment, children }
 }
 
 /// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/elwindui_spec.md §3). Each child's
@@ -475,11 +512,11 @@ impl UIElement for GridImpl {
         &self.children
     }
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
-        let cells: Vec<GridCell> = self.children.iter().map(|c| c.base().grid_cell).collect();
+        let cells: Vec<GridCell> = self.children.iter().map(|c| c.base().grid_cell.get()).collect();
         grid_natural_size(&self.row_definitions, &self.column_definitions, &cells, child_sizes)
     }
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-        let cells: Vec<GridCell> = self.children.iter().map(|c| c.base().grid_cell).collect();
+        let cells: Vec<GridCell> = self.children.iter().map(|c| c.base().grid_cell.get()).collect();
         grid_arrange(final_size, &self.row_definitions, &self.column_definitions, &cells, child_sizes)
     }
 }
@@ -490,12 +527,11 @@ pub trait Grid: UIElement {}
 impl Grid for GridImpl {}
 
 pub fn create_grid(
-    base: UIElementImpl,
     row_definitions: Vec<GridLength>,
     column_definitions: Vec<GridLength>,
     children: Vec<Rc<dyn UIElement>>,
 ) -> GridImpl {
-    GridImpl { base, row_definitions, column_definitions, children }
+    GridImpl { base: UIElementImpl::default(), row_definitions, column_definitions, children }
 }
 
 /// The tree of component *references* as authored in `.elwind` (WinUI3's Logical tree) — distinct
@@ -530,11 +566,12 @@ fn arrange<H: Clone + 'static>(elem: &Rc<dyn UIElement>, allotted: Rect, out: &m
     let final_rect = measure_and_align(elem.as_ref(), allotted);
     let final_size = Size { width: final_rect.width, height: final_rect.height };
 
-    // `elem.as_ref()` forces resolving `as_any` on the pointee (`dyn UIElement`'s own trait
-    // method) rather than on `Rc<dyn UIElement>` itself — `Rc<T>` is blanket-`AsAny` too (it's
-    // `Any`-eligible, being `'static`), so a bare `elem.as_any()` here would silently downcast the
-    // wrong thing (the `Rc` box, never a `NativeControlImpl<H>`) instead of deref-coercing first.
-    if let Some(native) = elem.as_ref().as_any().downcast_ref::<NativeControlImpl<H>>() {
+    // `as_native_control` (not a direct `as_any().downcast_ref` on `elem` itself) so a type that
+    // *composes* a `NativeControlImpl<H>` as its own `base` field (e.g. a backend's `ButtonImpl`)
+    // is recognized too — `Any::downcast_ref` only succeeds against the exact concrete type placed
+    // in the tree, which for such a type is never literally `NativeControlImpl<H>` itself. See
+    // `UIElement::as_native_control`'s own doc comment.
+    if let Some(native) = elem.as_ref().as_native_control().and_then(|a| a.downcast_ref::<NativeControlImpl<H>>()) {
         out.push(RenderItem::Native(native.handle.clone(), final_rect, Rc::clone(elem)));
     }
     if let Some(paint) = elem.paint() {
@@ -672,11 +709,11 @@ mod tests {
     }
 
     fn native(name: &'static str, size: Size) -> Rc<dyn UIElement> {
-        new_element(create_native_control(UIElementImpl::default(), FakeHandle(name, size)))
+        new_element(create_native_control(FakeHandle(name, size)))
     }
 
     fn stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
-        new_element(create_stack(UIElementImpl::default(), orientation, spacing, children))
+        new_element(create_stack(orientation, spacing, children))
     }
 
     // Splits `layout_tree`'s single interleaved `Vec<RenderItem<H>>` back into the pre-`RenderItem`
@@ -716,18 +753,16 @@ mod tests {
         // size instead of filling its stack-allocated cross-axis slot — matching the old
         // `CrossAlign::Start` behavior this test used to exercise.
         fn leaf(name: &'static str, s: Size) -> Rc<dyn UIElement> {
-            new_element(create_native_control(
-                UIElementImpl { margin: 0.0, horizontal_alignment: HorizontalAlignment::Left, vertical_alignment: VerticalAlignment::Top, ..UIElementImpl::default() },
-                FakeHandle(name, s),
-            ))
+            let node = new_element(create_native_control(FakeHandle(name, s)));
+            node.base().set_horizontal_alignment(HorizontalAlignment::Left);
+            node.base().set_vertical_alignment(VerticalAlignment::Top);
+            node
         }
         fn start_stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
-            new_element(create_stack(
-                UIElementImpl { margin: 0.0, horizontal_alignment: HorizontalAlignment::Left, vertical_alignment: VerticalAlignment::Top, ..UIElementImpl::default() },
-                orientation,
-                spacing,
-                children,
-            ))
+            let node = new_element(create_stack(orientation, spacing, children));
+            node.base().set_horizontal_alignment(HorizontalAlignment::Left);
+            node.base().set_vertical_alignment(VerticalAlignment::Top);
+            node
         }
 
         let tree = start_stack(
@@ -761,7 +796,6 @@ mod tests {
     #[test]
     fn shape_reports_paint_and_overlays_children_at_its_own_absolute_rect() {
         let tree: Rc<dyn UIElement> = new_element(create_shape(
-            UIElementImpl::default(),
             ShapeKind::RoundedRect { corner_radius: 8.0 },
             Some("#3498db".to_string()),
             None,
@@ -781,7 +815,6 @@ mod tests {
     #[test]
     fn control_padding_shrinks_the_slot_its_children_are_arranged_into() {
         let tree: Rc<dyn UIElement> = new_element(create_control(
-            UIElementImpl::default(),
             10.0,
             HorizontalAlignment::Stretch,
             VerticalAlignment::Stretch,
@@ -801,20 +834,17 @@ mod tests {
 
     #[test]
     fn margin_shrinks_the_slot_an_element_is_arranged_into() {
-        let tree: Rc<dyn UIElement> = new_element(create_native_control(
-            UIElementImpl { margin: 10.0, ..UIElementImpl::default() },
-            FakeHandle("a", size(10.0, 20.0)),
-        ));
+        let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
+        tree.base().set_margin(10.0);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert_eq!(natives[0].1, Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 });
     }
 
     #[test]
     fn non_stretch_alignment_keeps_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElement> = new_element(create_native_control(
-            UIElementImpl { margin: 0.0, horizontal_alignment: HorizontalAlignment::Center, vertical_alignment: VerticalAlignment::Center, ..UIElementImpl::default() },
-            FakeHandle("a", size(10.0, 20.0)),
-        ));
+        let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
+        tree.base().set_horizontal_alignment(HorizontalAlignment::Center);
+        tree.base().set_vertical_alignment(VerticalAlignment::Center);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert_eq!(natives[0].1, Rect { x: 45.0, y: 40.0, width: 10.0, height: 20.0 });
     }
@@ -828,7 +858,6 @@ mod tests {
         // source tree's parent-then-child nesting instead of an accidental "all natives first" or
         // "all paints first" batching.
         let tree: Rc<dyn UIElement> = new_element(create_shape(
-            UIElementImpl::default(),
             ShapeKind::RoundedRect { corner_radius: 4.0 },
             Some("#000000".to_string()),
             None,

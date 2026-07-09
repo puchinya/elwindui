@@ -1,5 +1,5 @@
-//! See docs/elwindui_builtins_spec.md 付録Y and `elwindui-builtins::appkit::tab_view`'s doc
-//! comment for the overall two-mode convention (static `TabViewItem` children vs. `items_source` +
+//! See docs/elwindui_builtins_spec.md 付録Y and `elwindui_backend_appkit::builtins::tab_view`'s
+//! doc comment for the overall two-mode convention (static `TabViewItem` children vs. `items_source` +
 //! `header_template`/`item_template`) and why `TabViewItem` — not a bespoke per-mode
 //! representation — is the thing both modes normalize into. This isn't a line-for-line port of
 //! that file, though: WinUI3's `Microsoft.UI.Xaml.Controls.TabView` is a real native tabbed-
@@ -13,8 +13,9 @@
 //! by selecting a different tab (`Controls::TabView` shows/hides each item's own `Content`
 //! natively), so there's nothing to restore.
 
-use elwindui_backend_winui3 as winui3;
-use elwindui_backend_winui3::TabView as _;
+use crate as winui3;
+use crate::TabView as _;
+use elwindui_core::tree::UIElement;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -99,6 +100,24 @@ pub struct TabView {
     selected_index: Cell<usize>,
     on_close: RefCell<Option<Box<dyn Fn(usize)>>>,
     weak_self: RefCell<Weak<TabView>>,
+}
+
+impl UIElement for TabView {
+    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+        self.inner.base()
+    }
+    fn children(&self) -> &[Rc<dyn UIElement>] {
+        self.inner.children()
+    }
+    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
+        self.inner.measure_override(available, child_sizes)
+    }
+    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
+        self.inner.arrange_override(final_size, child_sizes)
+    }
+    fn as_native_control(&self) -> Option<&dyn Any> {
+        self.inner.as_native_control()
+    }
 }
 
 impl TabView {
@@ -210,7 +229,7 @@ impl TabView {
     }
 
     pub fn into_any_view(&self) -> winui3::AnyView {
-        winui3::AnyView::from(self.inner.clone())
+        self.inner.base.handle.clone()
     }
 
     fn sync_dynamic_entries(&self, items: Vec<Rc<dyn Any>>) {

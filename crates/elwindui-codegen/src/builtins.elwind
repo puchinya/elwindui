@@ -1,11 +1,17 @@
-// A field-less category marker, not a real widget. Native leaf builtins that share a real
-// `Control`-family ancestry in WinUI3 (Button/TextArea/Text/MenuBar/MenuBarItem/Menu/MenuItem/
-// TabView) declare `inherits NativeControl` purely to group themselves under this tag; it carries
-// no fields and is never itself constructed. `Window` (below) is the one native leaf that does
-// *not* use this tag — real WinUI3's `Window` has no meaningful `Control`-family ancestor at all
-// (it derives directly from `Object`), so it declares `#[native]` directly instead rather than
-// implying a shared ancestry that doesn't exist. See docs/elwindui_spec.md 付録H.2 and
-// `elwindui-codegen`'s `is_native` computation.
+// A field-less category marker, not a real widget. Only native leaves that actually get embedded
+// as a real `Rc<dyn elwindui_core::tree::UIElement>` node in the visual tree (`Button`/`TextArea`/
+// `TabView`/`TabViewItem`) declare `inherits NativeControl` — their backend `XxxImpl` struct holds
+// a real `base: elwindui_core::tree::NativeControlImpl<H>` and implements `NativeControl<H>`/
+// `UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a). `MenuBar`/`MenuBarItem`/
+// `Menu`/`MenuItem` never enter the visual tree (they attach to the platform menu bar directly, no
+// `into_any_view`/measure/arrange ever happens for them) — despite sharing a real `Control`-family
+// ancestry in WinUI3, implementing `NativeControl<H>` for them would have no real handle `H` to
+// hold and no caller that ever exercises it, so they declare `#[native]` directly instead, exactly
+// like `Window` below (real WinUI3's `Window` likewise has no meaningful `Control`-family ancestor
+// at all — it derives directly from `Object`). See docs/elwindui_spec.md 付録H.2 and
+// `elwindui-codegen`'s `is_native` computation (`#[native]` and `inherits NativeControl` are
+// equivalent for `is_native` purposes; they differ only in whether a real Rust `NativeControl<H>`
+// base is expected).
 #[embedded]
 component NativeControl {
 }
@@ -205,14 +211,16 @@ component TextBlock {
 }
 
 #[embedded]
-component MenuBar inherits NativeControl {
+#[native]
+component MenuBar {
     #[param]
     children: Vec<MenuBarItem>,
 }
 
 #[embedded]
+#[native]
 #[content(submenu)]
-component MenuBarItem inherits NativeControl {
+component MenuBarItem {
     #[param]
     text: String,
 
@@ -221,13 +229,15 @@ component MenuBarItem inherits NativeControl {
 }
 
 #[embedded]
-component Menu inherits NativeControl {
+#[native]
+component Menu {
     #[param]
     children: Vec<MenuItem>,
 }
 
 #[embedded]
-component MenuItem inherits NativeControl {
+#[native]
+component MenuItem {
     #[param]
     text: String,
 
@@ -290,11 +300,14 @@ component TabView inherits NativeControl {
 // See docs/elwindui_builtins_spec.md 付録Y. Used two ways: written literally as a `TabView`'s
 // nested static child (WinUI3's XAML `TabViewItem` declaration), or synthesized internally by
 // `TabView` once per element of `items_source` (its `data_context`/`header`/`content` populated
-// from that item via `header_template`/`item_template`).
+// from that item via `header_template`/`item_template`). Never itself embedded as a real
+// `Rc<dyn UIElement>` node (its own `content` is what gets mounted into a per-tab host) — like
+// `MenuBar`/`MenuItem`, declares `#[native]` directly rather than `inherits NativeControl`.
 #[embedded]
 #[sealed]
+#[native]
 #[content(content)]
-component TabViewItem inherits NativeControl {
+component TabViewItem {
     // Set explicitly in static mode; populated automatically (from the owning `items_source`
     // element's own `Rc<T>`) in dynamic mode. `None` in static mode unless set.
     #[param]

@@ -82,9 +82,9 @@ pub struct ComponentDef {
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
     /// `#[embedded]` (written immediately before `component`, docs/elwindui_spec.md 付録E): marks
-    /// this component as one of `elwindui-builtins`'own — `validate::validate` rejects it on a
-    /// component whose `Module::is_builtin` is `false` (i.e. a consumer's own `.elwind` file
-    /// falsely claiming to be a builtin).
+    /// this component as one of the builtin shape declarations (`BUILTIN_SHAPE_SOURCE`) — `validate::validate`
+    /// rejects it on a component whose `Module::is_builtin` is `false` (i.e. a consumer's own
+    /// `.elwind` file falsely claiming to be a builtin).
     pub embedded: bool,
     /// `#[sealed]` (same position): marks this component as unable to be named as a `base` in
     /// `component X inherits Y` — `validate::validate_inherits` rejects `inherits` naming a sealed
@@ -100,7 +100,7 @@ pub struct ComponentDef {
     /// `Control` family every other native leaf (`Button`/`TextArea`/...) shares via `NativeControl`
     /// — declaring `inherits NativeControl` for it would suggest a shared ancestry that doesn't
     /// exist. `validate::validate` rejects `#[native]` combined with an explicit `base` or an own
-    /// `view`, and (like `#[embedded]`) outside `elwindui-builtins`' own `BUILTIN_SHAPE_SOURCE`.
+    /// `view`, and (like `#[embedded]`) outside this crate's own `BUILTIN_SHAPE_SOURCE`.
     pub native: bool,
     /// `#[content(field_name)]` (same position, docs/elwindui_spec.md 付録E): WinUI3's
     /// `ContentPropertyAttribute` equivalent — names which of this component's own fields a bare
@@ -174,7 +174,7 @@ pub enum Attr {
     /// `#[two_way]`: marks a builtin shape's `#[param]` field as eligible for automatic two-way
     /// wiring — when an element's value for this attribute is a settable path, codegen wires a
     /// change callback back into it generically (no per-type `codegen.rs` logic needed). See
-    /// `crates/elwindui-builtins`'s shape declarations (e.g. `TextArea`'s `text` field).
+    /// this crate's own `builtins.elwind` shape declarations (e.g. `TextArea`'s `text` field).
     TwoWay,
     /// `#[length(start..=end)]` / `#[length(start..end)]`. See §7.
     Length { start: i64, end: i64, inclusive: bool },

@@ -21,8 +21,9 @@
 //! chip and its host are always created/destroyed together (`appkit::TabView::insert_tab`/
 //! `remove_tab`).
 
-use elwindui_backend_appkit as appkit;
-use elwindui_backend_appkit::TabView as _;
+use crate as appkit;
+use crate::TabView as _;
+use elwindui_core::tree::UIElement;
 use objc2::rc::Retained;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -114,6 +115,24 @@ pub struct TabView {
     weak_self: RefCell<Weak<TabView>>,
 }
 
+impl UIElement for TabView {
+    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+        self.inner.base()
+    }
+    fn children(&self) -> &[Rc<dyn UIElement>] {
+        self.inner.children()
+    }
+    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
+        self.inner.measure_override(available, child_sizes)
+    }
+    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
+        self.inner.arrange_override(final_size, child_sizes)
+    }
+    fn as_native_control(&self) -> Option<&dyn Any> {
+        self.inner.as_native_control()
+    }
+}
+
 impl TabView {
     pub fn new<T: 'static>(
         children: Vec<Rc<TabViewItem>>,
@@ -199,7 +218,7 @@ impl TabView {
     pub fn set_closable(&self, _closable: bool) {}
 
     pub fn into_any_view(&self) -> appkit::AnyView {
-        appkit::AnyView::from(self.inner.clone())
+        self.inner.base.handle.clone()
     }
 
     fn sync_dynamic_entries(&self, items: Vec<Rc<dyn Any>>) {

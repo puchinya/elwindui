@@ -1241,11 +1241,11 @@ view Foo {
 
 ## E.9 `component`宣言レベルの属性:`#[embedded]`/`#[sealed]`/`#[native]`/`#[content(field_name)]`
 
-`#[overrides(builtin::X)]`(E.4)がユーザー定義コンポーネント側に付ける属性なのに対し、`#[embedded]`/`#[sealed]`/`#[native]`は`elwindui-builtins`自身の`.elwind`ソース(`BUILTIN_SHAPE_SOURCE`、`crates/elwindui-builtins/src/builtins.elwind`)が自分自身に付ける属性。`#[content(field_name)]`だけはビルトイン限定ではなく、ユーザー定義コンポーネントでも使える。いずれも`component`宣言の直前に、`inherits`の有無に関わらず0個以上任意の順序で書ける(`enum`/`viewmodel`/`view`には付けられない)。
+`#[overrides(builtin::X)]`(E.4)がユーザー定義コンポーネント側に付ける属性なのに対し、`#[embedded]`/`#[sealed]`/`#[native]`は`elwindui-codegen`自身の`.elwind`ソース(`BUILTIN_SHAPE_SOURCE`、`crates/elwindui-codegen/src/builtins.elwind`)が自分自身に付ける属性。`#[content(field_name)]`だけはビルトイン限定ではなく、ユーザー定義コンポーネントでも使える。いずれも`component`宣言の直前に、`inherits`の有無に関わらず0個以上任意の順序で書ける(`enum`/`viewmodel`/`view`には付けられない)。
 
-- **`#[embedded]`** — このコンポーネントが`elwindui-builtins`自身の組み込み部品であることを明示する。`elwindui-codegen`は`BUILTIN_SHAPE_SOURCE`由来のモジュールを内部的に`is_builtin`フラグ付きで扱っており、`#[embedded]`が付いたコンポーネントがそれ以外の場所(利用者自身の`.elwind`ファイル)から来ていれば静的エラーになる。
+- **`#[embedded]`** — このコンポーネントが`BUILTIN_SHAPE_SOURCE`自身の組み込み部品であることを明示する。`elwindui-codegen`は`BUILTIN_SHAPE_SOURCE`由来のモジュールを内部的に`is_builtin`フラグ付きで扱っており、`#[embedded]`が付いたコンポーネントがそれ以外の場所(利用者自身の`.elwind`ファイル)から来ていれば静的エラーになる。
 - **`#[sealed]`** — このコンポーネントを`component X inherits Y`の`Y`(継承元)として指定できないようにする。具象的な末端形状(`Rectangle`/`Ellipse` — 継承したければ合成可能な`Shape`を使う)や、そもそも継承先を持たないネイティブ末端要素(`Button`/`TextArea`/`TabView`/`TabViewItem`)に付与する。
-- **`#[native]`** — `inherits`元を持たず(base-less)、かつ`view`も持たないコンポーネントに、「実Rust実装は各バックエンドクレートが手書きする」ことを明示する。`inherits NativeControl`(E.1の1.)と効果は同じ(`is_native == true`として扱われる)だが、`NativeControl`という共有タグを経由しない — `Window`が唯一の使用例で、実際のWinUI3の`Window`が`Control`ファミリーを経由せず`Object`を直接継承するのに対応する。`#[native]`は`base`を持つコンポーネントや自前の`view`を持つコンポーネントには付けられず、`#[embedded]`と同様`elwindui-builtins`自身の宣言以外では使えない。
+- **`#[native]`** — `inherits`元を持たず(base-less)、かつ`view`も持たないコンポーネントに、「実Rust実装は各バックエンドクレートが手書きする」ことを明示する。`inherits NativeControl`(E.1の1.)と`is_native == true`として扱われる点は同じだが、`NativeControl`という共有タグを経由しない——2つの使い分けは「実際にビジュアルツリーに`Rc<dyn UIElement>`として埋め込まれ、`elwindui_core::tree::NativeControlImpl<H>`をバックエンド構造体の`base`として合成するか」で決まる(付録H.2.1a)。`Window`(実際のWinUI3の`Window`が`Control`ファミリーを経由せず`Object`を直接継承するのに対応)に加え、ビジュアルツリーに参加しない`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem`もこちらを使う。`#[native]`は`base`を持つコンポーネントや自前の`view`を持つコンポーネントには付けられず、`#[embedded]`と同様`BUILTIN_SHAPE_SOURCE`自身の宣言以外では使えない。
 - **`#[content(field_name)]`** — WinUI3の`ContentPropertyAttribute`相当。ある要素の`view`本体に「属性名を書かない裸のネスト子要素」(`Type { .. }`を`name: value`形式でなく直接`{}`内に書く)を渡した際、それがどのフィールドに束縛されるかを明示する。例:`MenuBarItem`は`#[content(submenu)]`を宣言しており、`MenuBarItem { text: "File", Menu { .. } }`の`Menu { .. }`は`submenu`フィールドに束縛される(`Window`/`ContentControl`/`TabViewItem`の`content`フィールドも同様に`#[content(content)]`を宣言している)。`field_name`は実在するフィールド名でなければならず(静的検証)、componentにつき最大1個。裸のネスト子要素があるのに`#[content(..)]`(または`children: Vec<..>`のようなリストフィールド)が無いcomponentにそれを渡すのはコード生成時エラーになる。
 
 ---
@@ -1335,7 +1335,12 @@ elwindui本体(コード生成・手書きランタイム双方)でRustに“ク
     `Control`・`ContentControl`の3つのトレイトすべてを実装する)。祖先トレイトの各メソッドは
     `self.base.method(...)`へ委譲するだけの薄い実装になる。
   - 構造体の生成は構造体リテラルを直接書かず、ファクトリー関数`create_class(...)`を経由する
-    (例: `Button`なら`create_button(...)`)。
+    (例: `Button`なら`create_button(...)`)。`margin`/`horizontal_alignment`/`vertical_alignment`/
+    `data_context`/`grid_cell`(`UIElementImpl`が持つ共通フィールド)は`create_class(...)`の引数には
+    ならない——`UIElementImpl`は(`routed_handlers`/`parent`が元からそうだったのと同じく)全フィールド
+    が`Cell`/`RefCell`による内部可変性を持ち、`create_class(...)`は内部で`UIElementImpl::default()`
+    を組み立てるだけ。使用箇所ごとのmargin等は、構築**後**に`binding.base().set_margin(..)`のような
+    呼び出しで反映する(`elwindui-codegen`の`emit_common_ui_element_setters`)。
 - コード生成器(`elwindui-codegen`)が`component X inherits Y`から生成するコードも同じ形を取る——
   かつてのように親の実効フィールド/メソッドを1つのstructへ畳み込む(フラット化する)のではなく、
   `XImpl { base: YImpl, /* Xの宣言分のみ */ }`という実体合成にする。これにより`base::method(...)`
@@ -1352,19 +1357,25 @@ elwindui本体(コード生成・手書きランタイム双方)でRustに“ク
 ```rust
 pub trait UIElement: AsAny {
     fn base(&self) -> &UIElementImpl;
-    fn margin(&self) -> f32 { self.base().margin }
-    fn horizontal_alignment(&self) -> HorizontalAlignment { self.base().horizontal_alignment }
-    fn vertical_alignment(&self) -> VerticalAlignment { self.base().vertical_alignment }
+    fn margin(&self) -> f32 { self.base().margin.get() }
+    fn horizontal_alignment(&self) -> HorizontalAlignment { self.base().horizontal_alignment.get() }
+    fn vertical_alignment(&self) -> VerticalAlignment { self.base().vertical_alignment.get() }
     fn children(&self) -> &[Rc<dyn UIElement>];
     fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size;
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect>;
     fn paint(&self) -> Option<PaintKind> { None }
+    // `NativeControlImpl<H>`自身は`Some(self)`を返し、それを`base`として合成する型
+    // (`ButtonImpl`等)は`Some(&self.base)`を返す——既定は`None`。付録H.2.1a参照。
+    fn as_native_control(&self) -> Option<&dyn Any> { None }
 }
 
+// margin/alignment/data_context/grid_cellは全て内部可変(`Cell`/`RefCell`) — `create_xxx(...)`は
+// 常に`UIElementImpl::default()`を組み立てるだけで、使用箇所ごとの値は構築後に
+// `set_margin(..)`等のセッターで反映する(前掲の規約説明参照)。
 pub struct UIElementImpl {
-    pub margin: f32, // 一律のMargin。Thickness(上下左右個別)は未対応
-    pub horizontal_alignment: HorizontalAlignment, // Left | Center | Right | Stretch(既定)
-    pub vertical_alignment: VerticalAlignment,     // Top | Center | Bottom | Stretch(既定)
+    pub margin: Cell<f32>, // 一律のMargin。Thickness(上下左右個別)は未対応
+    pub horizontal_alignment: Cell<HorizontalAlignment>, // Left | Center | Right | Stretch(既定)
+    pub vertical_alignment: Cell<VerticalAlignment>,     // Top | Center | Bottom | Stretch(既定)
 }
 ```
 
@@ -1375,7 +1386,11 @@ pub struct UIElementImpl {
 
 ```
 UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseなしの既定クラス)
- ├─ NativeControl<H> => Button, TextArea, MenuBar, TabView, ... (実ハンドルHを保持する唯一の型)
+ ├─ NativeControl<H> => Button, TextArea, TabView, ... (実ハンドルHを保持する、ビジュアルツリーに
+ │                       実際に埋め込まれる型のみ。MenuBar/MenuBarItem/Menu/MenuItem/TabViewItemは
+ │                       ツリーに参加しない(measure/arrangeが呼ばれない)ため`#[native]`直接指定で
+ │                       この枝に入らない——`Window`と同じ扱い、付録H.2.1a・builtins.elwindの
+ │                       `NativeControl`マーカー自身のコメント参照)
  ├─ TextBlock            (プリミティブ描画・非native、付録F.3)
  ├─ Shape => Rectangle, Ellipse (プリミティブ図形、付録F.6)
  ├─ Control              (Padding + ContentAlignmentを持つ、複数の小部品からなる複合部品)
@@ -1387,10 +1402,15 @@ UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseな
 `NativeControlImpl<H>`)で、対応する`create_xxx(...)`ファクトリー関数(`elwindui_core::tree`)経由で
 生成し、`new_element(...)`で親子ポインタを配線した`Rc<dyn UIElement>`として木に組み込む。
 
-`NativeControlImpl<H>`の判定は`native_handle()`のような専用メソッドを`UIElement`に生やすのではなく、
-`AsAny`(`impl<T: Any> AsAny for T`というブランケット実装1つ)経由の`downcast_ref::<NativeControlImpl<H>>()`
-で行う——「実ハンドルを持つ」という概念を持たない大多数の実装(`Stack`/`Shape`/`TextBlock`/`Control`)
-に不要なボイラープレートを背負わせないための設計。
+`NativeControlImpl<H>`の判定は`UIElement`の`as_native_control(&self) -> Option<&dyn Any>`という
+デフォルト`None`のメソッド経由で行う(`NativeControlImpl<H>`自身が`Some(self)`を返す)。単純な
+`AsAny`経由の`downcast_ref::<NativeControlImpl<H>>()`ではなく、この一段の間接参照を挟むのは、
+`ButtonImpl`のように`base: NativeControlImpl<H>`を**自分自身のフィールドとして合成する型**
+(付録H.2.1a)がある場合、木に置かれる実際の具象型は`ButtonImpl`であって`NativeControlImpl<H>`
+そのものではなく、`Any::downcast_ref`は実際の具象型に対してしか成功しないため——`ButtonImpl`は
+`as_native_control`を`Some(&self.base)`とオーバーライドして委譲する。「実ハンドルを持つ」という
+概念を持たない大多数の実装(`Stack`/`Shape`/`TextBlock`/`Control`)は既定の`None`のままでよく、
+不要なボイラープレートを背負わない。
 
 `Window`は`UIElement`を派生しない。WinUI3の`Window`が`UIElement`ではなく独立したトップレベルの
 ホストであるのと同様、`Window`は`content: Rc<dyn UIElement>`を保持し自身のクライアント領域に

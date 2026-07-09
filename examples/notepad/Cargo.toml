@@ -9,7 +9,6 @@ build = "build.rs"
 elwindui = { path = "../../crates/elwindui", features = ["backend-appkit"] }
 elwindui-core = { path = "../../crates/elwindui-core" }
 elwindui-backend-appkit = { path = "../../crates/elwindui-backend-appkit" }
-elwindui-builtins = { path = "../../crates/elwindui-builtins", features = ["backend-appkit"] }
 fluent-bundle = "0.15"
 unic-langid = "0.9"
 

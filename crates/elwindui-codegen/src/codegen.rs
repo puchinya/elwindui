@@ -72,8 +72,21 @@ pub struct TypeInfo {
     /// but a plain `component X { .. } view X { VerticalLayout { .. } }` with no `inherits` at all is
     /// still correctly inferred as virtual). See docs/elwindui_spec.md 付録H.2.
     pub is_native: bool,
+    /// Whether this component's own declaration literally reads `inherits NativeControl`
+    /// (`Button`/`TextArea`/`TabView` — as opposed to `#[native]` directly, e.g. `Window` or
+    /// `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem`, which never enter the visual tree).
+    /// Unlike `is_native` (a recursively-inferred structural property), this is purely a shape-only
+    /// declaration flag — only ever `true` for a hand-written builtin whose backend `XxxImpl` struct
+    /// owns a real `base: elwindui_core::tree::NativeControlImpl<H>` and implements
+    /// `NativeControl<H>`/`UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a).
+    /// `emit_construction` uses this to pass a use-site `base: UIElementImpl` as this type's
+    /// `Type::new(..)`'s leading argument (mirroring `emit_virtual_construction`'s own `base` — see
+    /// `build_ui_element_base`), and `into_node_if_needed` uses it to skip the external
+    /// `NativeControlImpl` wrapping it used to build, since the value already implements
+    /// `UIElement` on its own.
+    pub is_native_control_leaf: bool,
     /// Whether this type has a paired `view` (i.e. is `generate_view`'s output) as opposed to a
-    /// hand-written `elwindui-builtins` widget declared shape-only for the symbol table (every
+    /// hand-written `elwindui-backend-*` widget declared shape-only for the symbol table (every
     /// native leaf, and every virtual builtin like `Rectangle`). Every hand-written builtin's real
     /// `new(..)` takes `&str` for a `String`-shaped param by convention (see `emit_construction`'s
     /// `&(..)`-wrapping) — but a `view`-having component's *generated* `new(..)` takes the field's
@@ -262,6 +275,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             field_types,
                             is_viewmodel: false,
                             is_native: false,
+                            is_native_control_leaf: c.base.as_deref() == Some("NativeControl"),
                             has_view,
                             effective_fields,
                             effective_methods,
@@ -325,6 +339,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             field_types,
                             is_viewmodel: true,
                             is_native: false,
+                            is_native_control_leaf: false,
                             has_view: false,
                             effective_fields: Vec::new(),
                             effective_methods: Vec::new(),
@@ -1662,7 +1677,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             if node.stored {
                 let binding = &node.binding;
                 // Every resolved type (a `component`/`view` pair or a hand-written builtin in
-                // `elwindui-builtins`) is constructed as `Rc<Self>` uniformly (see `emit_construction`
+                // an `elwindui-backend-*` crate) is constructed as `Rc<Self>` uniformly (see `emit_construction`
                 // and this same convention below in `root_embed_method`), so a stored handle is always
                 // just `Rc<Type>` — no backend-crate-qualified path, no per-type bookkeeping fields.
                 let type_ident = concrete_type_ident(&node.type_path, table.resolve(from, &node.type_path));
@@ -2238,8 +2253,8 @@ const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 /// Converts a constructed child binding into `Rc<dyn elwindui_core::tree::UIElement>` for a slot
 /// that wants one (`Window`'s `content`, `TabView`'s `item_template` return, or a virtual
 /// builtin's own `children: Vec<Rc<dyn UIElement>>` — anywhere the declared type mentions `dyn
-/// UIElement`, checked by the caller before calling this). Three cases, by `source_type_path`'s
-/// resolved `is_native`:
+/// UIElement`, checked by the caller before calling this). Four cases, by `source_type_path`'s
+/// resolved `is_native`/`is_native_control_leaf`:
 /// - A hand-written virtual builtin (`is_virtual_builtin`, always `!is_native`): `base` is
 ///   *already* an `Rc<dyn UIElement>` local value (built by `emit_construction`'s virtual branch,
 ///   via `elwindui_core::tree::new_element`) — used as-is.
@@ -2247,11 +2262,20 @@ const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 ///   whose root is `VerticalLayout`): its generated `into_node(self: Rc<Self>)` (see
 ///   `generate_view`) produces the `Rc<dyn UIElement>` value — same `.clone()` convention as
 ///   `into_any_view_if_needed` so the original binding stays valid for any later reference.
-/// - Anything native (a real leaf widget, or a user component whose own root is native): wrapped
-///   as a `NativeControl` via `new_element` (`UIElementBase::default()` — no way to set
-///   `margin`/`alignment` on an embedding site's own wrapper yet — except `routed_handlers`, which
-///   is shared from the widget's own storage when it has any `#[routed]` fields), reusing
-///   `into_any_view_if_needed` for the inner handle conversion.
+/// - `Button`/`TextArea`/`TabView` (`TypeInfo::is_native_control_leaf`): already implements
+///   `UIElement` directly — its own `base: elwindui_core::tree::NativeControlImpl<H>` was already
+///   built at construction time from *this exact use site*'s margin/alignment/data_context/
+///   `routed_handlers` (see `emit_construction`'s `build_ui_element_base` argument) — so this is a
+///   plain upcast, no fresh wrapper needed.
+/// - Anything else native (`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`, or a user component
+///   whose own root is native): wrapped as a `NativeControl` via `new_element`
+///   (`UIElementBase::default()` — no way to set `margin`/`alignment` on an embedding site's own
+///   wrapper here — except `routed_handlers`, which is shared from the widget's own storage when it
+///   has any `#[routed]` fields), reusing `into_any_view_if_needed` for the inner handle conversion.
+///   In practice this branch is never actually reached for `MenuBar`-family types today (none of
+///   their own child slots are `dyn UIElement`-typed), kept only for a hypothetical user component
+///   whose own root resolves native without being one of the three real `is_native_control_leaf`
+///   leaves above.
 fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module, table: &SymbolTable) -> TokenStream {
     if source_type_path == PASSTHROUGH_NODE {
         // `.clone()` (an `Rc` refcount bump), not a bare move — the same param is also stored
@@ -2261,7 +2285,15 @@ fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module,
     }
     let info = table.resolve(from, source_type_path);
     let is_native = info.is_some_and(|i| i.is_native);
-    if is_native {
+    let is_native_control_leaf = info.is_some_and(|i| i.is_native_control_leaf);
+    if is_native_control_leaf {
+        quote! {
+            {
+                let __node: std::rc::Rc<dyn elwindui_core::tree::UIElement> = #base.clone();
+                __node
+            }
+        }
+    } else if is_native {
         // A `#[routed]` field (docs/elwindui_spec.md 4章) registers its handler on the widget's
         // *own* `routed_handlers()` at its own construction time (see `emit_wiring`) — long before
         // this `NativeControl` wrapper exists (tree construction is bottom-up: children first).
@@ -2330,7 +2362,7 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
 
 /// The only construction mechanism left: resolve `node.type_path` via `SymbolTable` (every
 /// resolved type — a plain user component, a component-with-view, or a builtin shape backed by
-/// hand-written Rust in `elwindui-builtins` — is treated identically) and call `Type::new(args)`,
+/// hand-written Rust in an `elwindui-backend-*` crate — is treated identically) and call `Type::new(args)`,
 /// `args` built from `info.param_fields` in declaration order:
 /// - a param named `children` is filled from the element's bare nested children (a `Vec`,
 ///   `AnyView`-converted per element only if the declared type says `AnyView`);
@@ -2358,6 +2390,22 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
     out.extend(quote! {
         let #binding = #type_ident::new(#(#args),*);
     });
+    // `Button`/`TextArea`/`TabView` (`inherits NativeControl`, `TypeInfo::is_native_control_leaf`)
+    // own a real `base: elwindui_core::tree::NativeControlImpl<H>` field (docs/elwindui_spec.md
+    // 付録H.2.1a) — this use site's margin/data_context/grid_cell are applied to it right here,
+    // post-construction, exactly like `emit_virtual_construction` does for virtual builtins (see
+    // `emit_common_ui_element_setters`). `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`
+    // (`#[native]` directly, never entering the `UIElement` tree) don't get this at all.
+    if info.is_native_control_leaf {
+        let binding_ts = quote! { #binding };
+        out.extend(emit_common_ui_element_setters(node, ctx, &binding_ts));
+        // `Button`'s own `on_click` is a real `#[routed]` field (`info.routed_fields`), already
+        // wired by `emit_wiring`'s dedicated `is_routed` branch — applying the generic mechanism
+        // here too would register the same callback twice.
+        if !info.routed_fields.contains("on_click") {
+            out.extend(emit_generic_on_click_routing(node, ctx, &binding_ts));
+        }
+    }
 }
 
 /// Evaluates a resolved user-component node's own attributes into the positional argument list its
@@ -2414,8 +2462,8 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
             Some(other) => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
                 // A `String`-shaped param takes `&str` in every *hand-written* builtin (matching
-                // the shape declaration's `String`/`Option<String>` — see `src/builtins.elwind` in
-                // `elwindui-builtins`), so the value is wrapped in `&(..)` here regardless of
+                // the shape declaration's `String`/`Option<String>` — see this crate's own
+                // `src/builtins.elwind`), so the value is wrapped in `&(..)` here regardless of
                 // whether the DSL expression itself is a `&str` literal or a computed `String`
                 // (e.g. `t!(...)`) — Rust's deref coercion accepts either as `&str` at the call
                 // site, the same trick the old hardcoded `emit_construction` arms already relied on
@@ -2477,6 +2525,78 @@ fn build_component_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table
     quote! { #create_fn(#(#args),*) }
 }
 
+/// Emits post-construction `binding.base().set_margin(..)`/`set_data_context(..)`/`set_grid_cell(..)`
+/// calls (docs/elwindui_spec.md 付録H.2.1a) for whichever of these common attributes `node` actually
+/// specifies — shared by `emit_virtual_construction` (virtual builtins) and `emit_construction`'s
+/// native-control-leaf branch (`Button`/`TextArea`/`TabView` — see `TypeInfo::is_native_control_leaf`).
+/// `UIElementImpl`'s fields are all interior-mutable (`Cell`/`RefCell`) precisely so this can run
+/// *after* `Type::new(..)` returns rather than needing every `create_xxx`/hand-written builtin
+/// constructor to accept a `base: UIElementImpl` argument — a use site left with none of these
+/// attributes emits nothing at all, leaving `UIElementImpl::default()` in place. Deliberately does
+/// *not* handle the generic "any element can catch a routed `on_click`" attribute — see
+/// `emit_generic_on_click_routing`, a separate step for exactly that.
+fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, binding: &TokenStream) -> TokenStream {
+    // Whether `expr` is a bare 1-segment reference to one of *this* component's own `#[param]`
+    // fields that's already `Option<..>`-typed (e.g. `ContentControl`'s own `padding: Option<f32>`
+    // forwarded as `Control { padding: padding }`) — as opposed to a plain value (a literal, a
+    // required field, a `vm.field`-shaped bind path, ...) that's already the setter's own plain
+    // argument type as-is.
+    let is_own_option_field = |expr: &ViewExpr| match expr {
+        ViewExpr::Path(segments) => match segments.as_slice() {
+            [only] => ctx.own_fields.get(only).is_some_and(|ty| ty.starts_with("Option<")),
+            _ => false,
+        },
+        _ => false,
+    };
+    let mut out = TokenStream::new();
+    // `margin` is settable today (the view-expression parser has numeric-literal support);
+    // `horizontal_alignment`/`vertical_alignment` have no enum-variant-literal syntax yet, so they
+    // stay at `UIElementImpl::default()`'s `Stretch` (matching every other element's default).
+    if let Some(expr) = find_attr(node, "margin") {
+        let value = if is_own_option_field(expr) {
+            let inner = emit_expr(expr, ctx, &EmitMode::Construction);
+            quote! { (#inner).unwrap_or(0.0) }
+        } else {
+            emit_expr(expr, ctx, &EmitMode::Construction)
+        };
+        out.extend(quote! { #binding.base().set_margin(#value); });
+    }
+    // `data_context` (付録Y) is likewise a common attribute, settable the same way `margin` is —
+    // an omitted one leaves `UIElementImpl::default()`'s `None`. The supplied expression is
+    // `Rc<dyn Any>`-erased here (matching every other cross-type-parameter value in this crate,
+    // e.g. `elwindui-backend-appkit`'s `tab_view` module's `erase_items`/`erase_render`) so
+    // `UIElementImpl` itself stays non-generic. The expression must already evaluate to an owned
+    // `Rc<T>` (matching `items_source`'s own `Vec<Rc<T>>` requirement) — the cast relies on that,
+    // it doesn't wrap in a fresh `Rc`.
+    if let Some(expr) = find_attr(node, "data_context") {
+        let value = emit_expr(expr, ctx, &EmitMode::Construction);
+        out.extend(quote! { #binding.base().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
+    }
+    if !node.attached.is_empty() {
+        let grid_cell = grid_cell_expr(node, ctx, &EmitMode::Construction);
+        out.extend(quote! { #binding.base().set_grid_cell(#grid_cell); });
+    }
+    out
+}
+
+/// Emits `binding.base().register_routed_handler::<()>("on_click", ..)` for the generic "any
+/// element can catch a routed `on_click`" common attribute (docs/elwindui_spec.md 4章) — used by
+/// `emit_virtual_construction` unconditionally, and by `emit_construction`'s native-control-leaf
+/// branch only when the type doesn't *already* declare `on_click` as a real `#[routed]` field of
+/// its own (`Button` — wired instead by `emit_wiring`'s dedicated `is_routed` branch; applying this
+/// generic mechanism too would register the same callback twice).
+fn emit_generic_on_click_routing(node: &PlannedNode, ctx: &ViewCtx, binding: &TokenStream) -> TokenStream {
+    match find_attr(node, "on_click") {
+        Some(expr) => {
+            let call = emit_expr(expr, ctx, &EmitMode::Construction);
+            quote! {
+                #binding.base().register_routed_handler::<()>("on_click", Box::new(move |_: &(), _args: &elwindui_core::input::RoutedEventArgs| { #call; }));
+            }
+        }
+        None => quote! {},
+    }
+}
+
 /// Builds an `Rc<dyn elwindui_core::tree::UIElement>` value (via `elwindui_core::tree::new_element`)
 /// for a hand-written virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/
 /// `TextBlock`/`Control` — see `is_virtual_builtin`) directly from its own attributes, instead of
@@ -2487,6 +2607,9 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
     out.extend(quote! {
         let #binding: std::rc::Rc<dyn elwindui_core::tree::UIElement> = elwindui_core::tree::new_element(#value);
     });
+    let binding_ts = quote! { #binding };
+    out.extend(emit_common_ui_element_setters(node, ctx, &binding_ts));
+    out.extend(emit_generic_on_click_routing(node, ctx, &binding_ts));
 }
 
 /// Builds the plain (not yet `new_element`-wrapped) `elwindui_core::tree::create_xxx(...)` call for
@@ -2495,12 +2618,12 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
 /// unwrapped so it can be embedded directly as `X`'s own `base` field instead of erased into
 /// `Rc<dyn UIElement>` (see `generate_view`'s `is_shape_composition` branch).
 fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
-    // Whether `expr` is a bare 1-segment reference to one of *this* component's own `#[param]`
-    // fields that's already `Option<..>`-typed (e.g. `ContentControl`'s own `padding: Option<f32>`
-    // forwarded as `Control { padding: padding }`) — as opposed to a plain value (a literal, a
-    // required field, a `vm.field`-shaped bind path, ...) that still needs `Some(..)` wrapping to
-    // match the `Option<T>` shape `get_attr`/`get_attr_string` produce. Forwarding an already-
-    // `Option` value through that same wrapping would double-wrap it into `Option<Option<T>>`.
+    // Same as `build_ui_element_base`'s own `get_attr`, but for `Option<String>` shapes
+    // (`Rectangle`/`Ellipse`'s `fill`/`stroke`, `TextBlock`'s `color`) — the corresponding
+    // `elwindui_core::tree` fields are owned `String`s (they're stored long-term in the scene
+    // tree, not just for the duration of one call), but the DSL expression supplying them may be a
+    // `&'static str` literal (`fill: "#3a3a3c"`) just as easily as an already-owned `String` (a
+    // `t!(...)` result) — `.to_string()` accepts either uniformly.
     let is_own_option_field = |expr: &ViewExpr| match expr {
         ViewExpr::Path(segments) => match segments.as_slice() {
             [only] => ctx.own_fields.get(only).is_some_and(|ty| ty.starts_with("Option<")),
@@ -2508,10 +2631,6 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
         },
         _ => false,
     };
-    // An omitted attribute becomes `None` (matching every other `Option<T>` `#[param]` — see
-    // `emit_construction`'s `None if is_option` arm); a supplied one is wrapped in `Some(..)` so
-    // both sides of the `.unwrap_or(..)` calls below agree on `Option<T>` — unless it's already an
-    // `Option<T>` own-field forwarded as-is (`is_own_option_field`), which is used verbatim.
     let get_attr = |name: &str| -> TokenStream {
         match find_attr(node, name) {
             Some(expr) if is_own_option_field(expr) => emit_expr(expr, ctx, &EmitMode::Construction),
@@ -2522,12 +2641,6 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             None => quote! { None },
         }
     };
-    // Same as `get_attr`, but for `Option<String>` shapes (`Rectangle`/`Ellipse`'s `fill`/
-    // `stroke`, `TextBlock`'s `color`) — the corresponding `elwindui_core::tree` fields are owned
-    // `String`s (they're stored long-term in the scene tree, not just for the duration of one
-    // call), but the DSL expression supplying them may be a `&'static str` literal (`fill:
-    // "#3a3a3c"`) just as easily as an already-owned `String` (a `t!(...)` result) —
-    // `.to_string()` accepts either uniformly.
     let get_attr_string = |name: &str| -> TokenStream {
         match find_attr(node, name) {
             Some(expr) if is_own_option_field(expr) => emit_expr(expr, ctx, &EmitMode::Construction),
@@ -2538,60 +2651,13 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             None => quote! { None },
         }
     };
-    // Every `UIElement` carries `margin`/`horizontal_alignment`/`vertical_alignment`
-    // (`UIElementBase`) — `margin` is settable today (the view-expression parser has numeric-
-    // literal support); the two `Alignment`s have no enum-variant-literal syntax yet, so they
-    // stay at `UIElementBase::default()`'s `Stretch` (matching every other element's default).
-    let margin = get_attr("margin");
-    // `data_context` (付録Y) is likewise a common `UIElementBase` attribute, settable on any
-    // virtual builtin the same way `margin` is — an omitted one leaves `UIElementBase::default()`'s
-    // `None`. The supplied expression is `Rc<dyn Any>`-erased here (matching every other cross-
-    // type-parameter value in this crate, e.g. `elwindui-builtins::appkit::tab_view`'s
-    // `erase_tabs`) so `UIElementBase` itself stays non-generic.
-    // The expression must already evaluate to an owned `Rc<T>` (matching `items_source`'s own
-    // `Vec<Rc<T>>` requirement) — the cast below relies on that, it doesn't wrap in a fresh `Rc`.
-    let data_context = match find_attr(node, "data_context") {
-        Some(expr) => {
-            let value = emit_expr(expr, ctx, &EmitMode::Construction);
-            quote! { Some((#value) as std::rc::Rc<dyn std::any::Any>) }
-        }
-        None => quote! { None },
-    };
-    // `on_click` (docs/elwindui_spec.md 4章, `#[routed]`) is likewise a common attribute settable
-    // on any virtual builtin, not just `Button` (which declares it as a real `#[routed]` field —
-    // see `emit_wiring`'s own handling for that case). Registered onto `base` itself (a block
-    // expression, not a plain struct literal, so there's something to call
-    // `register_routed_handler` on) rather than passed as a field value, since `UIElementBase`
-    // doesn't have an `on_click`-specific field — only the generic `routed_handlers` registry.
-    let routed_on_click = match find_attr(node, "on_click") {
-        Some(expr) => {
-            let call = emit_expr(expr, ctx, &EmitMode::Construction);
-            quote! {
-                base.register_routed_handler::<()>("on_click", Box::new(move |_: &(), _args: &elwindui_core::input::RoutedEventArgs| { #call; }));
-            }
-        }
-        None => quote! {},
-    };
-    let grid_cell = grid_cell_expr(node, ctx, &EmitMode::Construction);
-    let base = quote! {
-        {
-            let base = elwindui_core::tree::UIElementImpl {
-                margin: (#margin).unwrap_or(0.0),
-                data_context: #data_context,
-                grid_cell: #grid_cell,
-                ..elwindui_core::tree::UIElementImpl::default()
-            };
-            #routed_on_click
-            base
-        }
-    };
 
     let children = node
         .child_bindings
         .iter()
         .map(|(child_binding, child_ty)| into_node_if_needed(quote! { #child_binding }, child_ty, from, table));
 
-    let value = match node.type_path.as_str() {
+    match node.type_path.as_str() {
         "VerticalLayout" | "HorizontalLayout" => {
             let orientation = if node.type_path == "VerticalLayout" {
                 quote! { elwindui_core::layout::Orientation::Vertical }
@@ -2600,7 +2666,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             };
             let spacing = get_attr("spacing");
             quote! {
-                elwindui_core::tree::create_stack(#base, #orientation, (#spacing).unwrap_or(0.0), vec![ #(#children),* ])
+                elwindui_core::tree::create_stack(#orientation, (#spacing).unwrap_or(0.0), vec![ #(#children),* ])
             }
         }
         "Shape" => {
@@ -2610,7 +2676,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let stroke = get_attr_string("stroke");
             let stroke_width = get_attr("stroke_width");
             quote! {
-                elwindui_core::tree::create_shape(#base, #kind, #fill, #stroke, (#stroke_width).unwrap_or(0.0), vec![ #(#children),* ])
+                elwindui_core::tree::create_shape(#kind, #fill, #stroke, (#stroke_width).unwrap_or(0.0), vec![ #(#children),* ])
             }
         }
         "TextBlock" => {
@@ -2618,14 +2684,13 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let text = emit_expr(text, ctx, &EmitMode::Construction);
             let color = get_attr_string("color");
             quote! {
-                elwindui_core::tree::create_text_block(#base, (#text).to_string(), #color)
+                elwindui_core::tree::create_text_block((#text).to_string(), #color)
             }
         }
         "Control" => {
             let padding = get_attr("padding");
             quote! {
                 elwindui_core::tree::create_control(
-                    #base,
                     (#padding).unwrap_or(0.0),
                     elwindui_core::layout::HorizontalAlignment::Stretch,
                     elwindui_core::layout::VerticalAlignment::Stretch,
@@ -2639,13 +2704,11 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let columns = find_attr(node, "columns").unwrap_or_else(|| panic!("`Grid` requires attribute `columns`"));
             let columns = emit_expr(columns, ctx, &EmitMode::Construction);
             quote! {
-                elwindui_core::tree::create_grid(#base, (#rows).to_vec(), (#columns).to_vec(), vec![ #(#children),* ])
+                elwindui_core::tree::create_grid((#rows).to_vec(), (#columns).to_vec(), vec![ #(#children),* ])
             }
         }
         other => unreachable!("is_virtual_builtin guards this match, got `{other}`"),
-    };
-
-    value
+    }
 }
 
 /// The concrete Rust struct to construct/store for a resolved component named `type_path` — plain
@@ -3301,8 +3364,9 @@ view NotepadWindow {
         assert!(window_str.contains("set_shortcut"));
         assert!(window_str.contains("TabView :: new"));
         // `TabView`'s per-tab chip/content materialization (`insert_tab`, `__weak_self`) is no
-        // longer generated here at all — it's hand-written Rust inside `elwindui-builtins` now,
-        // reached generically the same way any other resolved type's constructor is.
+        // longer generated here at all — it's hand-written Rust inside the corresponding
+        // `elwindui-backend-*` crate now, reached generically the same way any other resolved
+        // type's constructor is.
         assert!(!window_str.contains("insert_tab"));
         assert!(!window_str.contains("__weak_self"));
         assert!(window_str.contains("set_items_source"));
@@ -3412,10 +3476,12 @@ view NotepadWindow {
         assert_valid_rust("tabview_render_content_window", &window_code);
         let window_str = window_code.to_string();
         assert!(window_str.contains("DocumentView :: new"));
-        // `TabView` is native, so embedding it as `Window`'s `content` still goes through
-        // `into_any_view` (wrapped in `Node::Native(..)`); `DocumentView` itself is virtual, so
-        // `render_content`'s body calls `.into_node()` on it instead.
-        assert!(window_str.contains("into_any_view"));
+        // `TabView` is a native-control leaf (`TypeInfo::is_native_control_leaf`) — it already
+        // implements `UIElement` on its own construction-time `base`, so embedding it as `Window`'s
+        // `content` is a plain upcast, not the old `.into_any_view()`-based wrapping.
+        // `DocumentView` itself is virtual, so `render_content`'s body calls `.into_node()` on it
+        // instead.
+        assert!(!window_str.contains("into_any_view"), "window_str: {window_str}");
         assert!(window_str.contains(". into_node ()"), "window_str: {window_str}");
         assert!(
             !window_str.contains("TextArea :: new (& __doc . content ())"),

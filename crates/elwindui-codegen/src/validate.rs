@@ -48,6 +48,58 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         ));
                     }
 
+                    // `#[native]` (docs/elwindui_spec.md 付録E, `ComponentDef::native`'s doc
+                    // comment) marks a base-less, `view`-less leaf whose real implementation is
+                    // hand-written per backend crate — `Window` is the motivating case (WinUI3's
+                    // `Window` has no meaningful `Control`-family ancestor, unlike `Button`/
+                    // `TextArea`/... which share `inherits NativeControl`). All three misuses below
+                    // mirror the reasoning `#[embedded]` already applies, plus the two invariants
+                    // `resolve_is_native`'s `#[native]` fallback assumes (no `base`, no own `view`).
+                    if c.native {
+                        if !module.is_builtin {
+                            errors.push(format!(
+                                "{}: #[native] can only be used on a component from elwindui-builtins' own \
+                                 BUILTIN_SHAPE_SOURCES, not a consumer's own `.elwind` file",
+                                c.name
+                            ));
+                        }
+                        if c.base.is_some() {
+                            errors.push(format!(
+                                "{}: #[native] components must have no `inherits` base — it marks a leaf \
+                                 with no meaningful inheritance ancestor at all (e.g. WinUI3's `Window : \
+                                 Object`); use `inherits NativeControl` instead if `{}` does share a real \
+                                 native-leaf family",
+                                c.name, c.name
+                            ));
+                        }
+                        let has_own_view = module.items.iter().any(|item| matches!(item, Item::View(v) if v.target == c.name));
+                        if has_own_view {
+                            errors.push(format!(
+                                "{}: #[native] components must have no `view` of its own — each backend \
+                                 crate hand-writes the real Rust implementation directly",
+                                c.name
+                            ));
+                        }
+                    }
+
+                    // `#[content(field_name)]` (docs/elwindui_spec.md 付録E, WinUI3's
+                    // `ContentPropertyAttribute` equivalent, `ComponentDef::content_field`'s doc
+                    // comment) must actually name one of this component's own effective fields
+                    // (`codegen::resolve_effective_fields` — includes inherited ones, matching how
+                    // `build_component_args` looks the name up against `info.param_fields`, itself
+                    // built from the same effective list) — a typo'd name would otherwise silently
+                    // mean "no field ever claims a bare nested child", caught only at codegen time
+                    // (or not at all, if the component happens to never receive one).
+                    if let Some(name) = &c.content_field {
+                        let effective_fields = codegen::resolve_effective_fields(module, c, modules);
+                        if !effective_fields.iter().any(|f| &f.name == name) {
+                            errors.push(format!(
+                                "{}: #[content({name})] names a field that doesn't exist on `{}`",
+                                c.name, c.name
+                            ));
+                        }
+                    }
+
                     for f in &c.fields {
                         // Rule 18: `#[command]` field type must be `Command`.
                         if f.kind == FieldKind::Command && f.ty != "Command" {
@@ -1103,6 +1155,97 @@ view DocumentViewLike {
 
         let virtual_builtin_info = table.resolve(&modules[0], "VerticalLayout").expect("resolves");
         assert!(!virtual_builtin_info.is_native);
+    }
+
+    /// `Window` declares `#[native]` with **no** `inherits` at all (unlike `Button`/`TextArea`/...,
+    /// which reach `is_native` via `inherits NativeControl` — see `window.elwind`'s own doc comment
+    /// for why `Window` deliberately doesn't share that tag). `resolve_is_native`'s `#[native]`
+    /// fallback must still resolve it to native.
+    #[test]
+    fn window_is_native_via_native_attribute_without_inherits() {
+        let modules = crate::builtin_modules();
+        let window_module = modules.iter().find(|m| m.items.iter().any(|i| matches!(i, Item::Component(c) if c.name == "Window"))).expect("Window's module");
+        let Item::Component(window_def) =
+            window_module.items.iter().find(|i| matches!(i, Item::Component(c) if c.name == "Window")).unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(window_def.base.is_none(), "Window must have no `inherits` base");
+        assert!(window_def.native, "Window must be #[native]");
+
+        let table = codegen::build_symbol_table(&modules);
+        let info = table.resolve(window_module, "Window").expect("resolves");
+        assert!(info.is_native);
+        assert!(!info.has_view);
+        assert_eq!(info.content_field.as_deref(), Some("content"));
+    }
+
+    /// `#[content(field_name)]` (WinUI3's `ContentPropertyAttribute` equivalent) must name a real
+    /// field of the component it's declared on — a typo here would otherwise silently mean "no bare
+    /// nested child ever binds anywhere", so it's checked statically instead of only surfacing (if
+    /// at all) as a `build_component_args` codegen panic the first time someone actually nests a
+    /// bare child under it.
+    #[test]
+    fn rejects_content_attribute_naming_an_unknown_field() {
+        let src = r#"
+#[content(no_such_field)]
+component Foo {
+    #[param]
+    label: String,
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("#[content(no_such_field)]")), "errors: {errs:?}");
+    }
+
+    /// `#[native]` requires a `base`-less declaration — `resolve_is_native`'s fallback only checks
+    /// `#[native]` when there's no `inherits` base to begin with (`validate_inherits` is never even
+    /// reached for a base-less component), so combining both is a static error instead of silently
+    /// ignoring one.
+    #[test]
+    fn rejects_native_attribute_combined_with_inherits() {
+        let src = r#"
+#[native]
+component Foo inherits NativeControl {
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("inherits")), "errors: {errs:?}");
+    }
+
+    /// `#[native]` means "hand-written per backend crate" — a component that also writes its own
+    /// `view` contradicts that (there'd be generated Rust *and* a claimed hand-written one).
+    #[test]
+    fn rejects_native_attribute_combined_with_own_view() {
+        let src = r#"
+#[native]
+component Foo {
+}
+
+view Foo {
+    VerticalLayout { }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("view")), "errors: {errs:?}");
+    }
+
+    /// `#[native]`, like `#[embedded]`, only makes sense on one of `elwindui-builtins`' own
+    /// components — a consumer's own `.elwind` file has no way to actually provide a hand-written
+    /// per-backend implementation for it.
+    #[test]
+    fn rejects_native_attribute_outside_builtin_module() {
+        let src = r#"
+#[native]
+component Foo {
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("BUILTIN_SHAPE_SOURCES")), "errors: {errs:?}");
     }
 
     /// A native-backed leaf (`Window`, `has_view == false && is_native == true`) has no generated

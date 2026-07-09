@@ -92,6 +92,26 @@ pub struct ComponentDef {
     /// — extend the composable `Shape` instead; `Button`/`TextArea`/`TabView`/`TabViewItem` — already
     /// implied by their native-leaf-with-no-view shape, but stated explicitly here for clarity).
     pub sealed: bool,
+    /// `#[native]` (same position): marks a **base-less, `view`-less** component whose real Rust
+    /// implementation is hand-written per backend crate (`elwindui-backend-appkit`/`-winui3`/...),
+    /// exactly like an `inherits NativeControl` leaf (`codegen::resolve_is_native` treats either as
+    /// native) — but for a leaf with no meaningful `inherits` base at all. `Window` is the
+    /// motivating case: real WinUI3's `Window` derives directly from `Object`, not through the
+    /// `Control` family every other native leaf (`Button`/`TextArea`/...) shares via `NativeControl`
+    /// — declaring `inherits NativeControl` for it would suggest a shared ancestry that doesn't
+    /// exist. `validate::validate` rejects `#[native]` combined with an explicit `base` or an own
+    /// `view`, and (like `#[embedded]`) outside `elwindui-builtins`' own `BUILTIN_SHAPE_SOURCES`.
+    pub native: bool,
+    /// `#[content(field_name)]` (same position, docs/elwindui_spec.md 付録E): WinUI3's
+    /// `ContentPropertyAttribute` equivalent — names which of this component's own fields a bare
+    /// nested child element (`Type { .. }` written directly inside `{}`, no `name:` attribute)
+    /// binds to. `codegen::build_component_args` reads this (via `TypeInfo::content_field`) instead
+    /// of the field-order-dependent "first still-unclaimed non-`Option` field" fallback it used
+    /// before this attribute existed. `validate::validate` checks `field_name` actually names one of
+    /// this component's effective fields. `None` for a component with no bare-nested-child
+    /// convention at all (a bare child anywhere in its `view` usage is then a hard codegen error,
+    /// see `build_component_args`'s trailing check).
+    pub content_field: Option<String>,
 }
 
 /// `#[virtual] fn name(&self, params) -> RetTy { body }` / `#[override] fn name(...) { body }`.

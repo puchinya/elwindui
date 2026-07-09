@@ -4,6 +4,7 @@
 // from that item via `header_template`/`item_template`).
 #[embedded]
 #[sealed]
+#[content(content)]
 component TabViewItem inherits NativeControl {
     // Set explicitly in static mode; populated automatically (from the owning `items_source`
     // element's own `Rc<T>`) in dynamic mode. `None` in static mode unless set.

@@ -94,7 +94,7 @@ Card { title, value }   // title: title, value: value の省略形
 
 `component Name inherits Base { ... }` は `Base` を4通りに解決する(単なる構造的契約ではなく、WinUI3/C#の`Control → ContentControl → Button`と同じ実継承):
 
-1. **`Base`が`NativeControl`マーカー** — 純粋なカテゴリタグ(フィールド継承なし)。ネイティブ実装を持つ末端要素(`Button`等)であることを示すのみ。
+1. **`Base`が`NativeControl`マーカー** — 純粋なカテゴリタグ(フィールド継承なし)。ネイティブ実装を持つ末端要素(`Button`等)であることを示すのみ。意味のある継承元を持たない末端要素(例:`Window` — 実際のWinUI3では`Control`ファミリーを経由せず`Object`を直接継承する)は、`inherits NativeControl`で存在しない共通の祖先を示唆する代わりに`inherits`自体を省略し、`#[native]`属性(付録E)を直接付与する。
 2. **`Base`が`view`を持たないプリミティブ形状ファミリー**(例:`builtin::Control`/`builtin::Rectangle`) — `Base`の`#[param]`/propフィールドを**再宣言なしに自動継承**する。ただし`Name`自身の`view`は引き続き必須で、そのルート要素は文字通り`Base`を構築しなければならない(シェイプ合成、後述の付録F.10参照)。
 3. **`Base`が自前の`view`を持つ論理コンポーネント**(builtinでもユーザー定義でも) — フィールドに加えて`view`(テンプレート)も継承する。`Name`が独自の`view`を書かなければ`Base`のテンプレートをそのまま(WinUI3の既定`ControlTemplate`のように)引き継ぎ、書けば**完全なテンプレート上書き**になる(ルート要素の型に制約はない)。
 4. **`Base`がネイティブ実装のみの末端要素**(例:`Button`) — 継承不可。生成されるRustコードを持たないため、委譲先が存在しない。
@@ -1238,6 +1238,15 @@ view Foo {
 | 同名だが`#[overrides]`なし | 静的エラー(曖昧参照として拒否) |
 | 同名で`#[overrides(builtin::X)]`あり | そのスコープ内でユーザー定義が優先、ビルトインは`builtin::X`で明示的にのみ参照可能 |
 | シグネチャ不一致 | 静的エラー |
+
+## E.9 `component`宣言レベルの属性:`#[embedded]`/`#[sealed]`/`#[native]`/`#[content(field_name)]`
+
+`#[overrides(builtin::X)]`(E.4)がユーザー定義コンポーネント側に付ける属性なのに対し、`#[embedded]`/`#[sealed]`/`#[native]`は`elwindui-builtins`自身の`.elwind`ソース(`BUILTIN_SHAPE_SOURCES`)が自分自身に付ける属性。`#[content(field_name)]`だけはビルトイン限定ではなく、ユーザー定義コンポーネントでも使える。いずれも`component`宣言の直前に、`inherits`の有無に関わらず0個以上任意の順序で書ける(`enum`/`viewmodel`/`view`には付けられない)。
+
+- **`#[embedded]`** — このコンポーネントが`elwindui-builtins`自身の組み込み部品であることを明示する。`elwindui-codegen`は`BUILTIN_SHAPE_SOURCES`由来のモジュールを内部的に`is_builtin`フラグ付きで扱っており、`#[embedded]`が付いたコンポーネントがそれ以外の場所(利用者自身の`.elwind`ファイル)から来ていれば静的エラーになる。
+- **`#[sealed]`** — このコンポーネントを`component X inherits Y`の`Y`(継承元)として指定できないようにする。具象的な末端形状(`Rectangle`/`Ellipse` — 継承したければ合成可能な`Shape`を使う)や、そもそも継承先を持たないネイティブ末端要素(`Button`/`TextArea`/`TabView`/`TabViewItem`)に付与する。
+- **`#[native]`** — `inherits`元を持たず(base-less)、かつ`view`も持たないコンポーネントに、「実Rust実装は各バックエンドクレートが手書きする」ことを明示する。`inherits NativeControl`(E.1の1.)と効果は同じ(`is_native == true`として扱われる)だが、`NativeControl`という共有タグを経由しない — `Window`が唯一の使用例で、実際のWinUI3の`Window`が`Control`ファミリーを経由せず`Object`を直接継承するのに対応する。`#[native]`は`base`を持つコンポーネントや自前の`view`を持つコンポーネントには付けられず、`#[embedded]`と同様`elwindui-builtins`自身の宣言以外では使えない。
+- **`#[content(field_name)]`** — WinUI3の`ContentPropertyAttribute`相当。ある要素の`view`本体に「属性名を書かない裸のネスト子要素」(`Type { .. }`を`name: value`形式でなく直接`{}`内に書く)を渡した際、それがどのフィールドに束縛されるかを明示する。例:`MenuBarItem`は`#[content(submenu)]`を宣言しており、`MenuBarItem { text: "File", Menu { .. } }`の`Menu { .. }`は`submenu`フィールドに束縛される(`Window`/`ContentControl`/`TabViewItem`の`content`フィールドも同様に`#[content(content)]`を宣言している)。`field_name`は実在するフィールド名でなければならず(静的検証)、componentにつき最大1個。裸のネスト子要素があるのに`#[content(..)]`(または`children: Vec<..>`のようなリストフィールド)が無いcomponentにそれを渡すのはコード生成時エラーになる。
 
 ---
 

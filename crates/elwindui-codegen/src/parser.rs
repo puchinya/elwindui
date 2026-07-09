@@ -28,24 +28,24 @@ impl<'a> Parser<'a> {
             if self.at_eof() {
                 break;
             }
-            let (embedded, sealed) = self.parse_item_attrs()?;
+            let (embedded, sealed, native, content_field) = self.parse_item_attrs()?;
             if self.eat_keyword("use") {
-                self.reject_item_attrs(embedded, sealed, "use")?;
+                self.reject_item_attrs(embedded, sealed, native, &content_field, "use")?;
                 uses.push(self.parse_use_decl()?);
             } else if self.eat_keyword("enum") {
-                self.reject_item_attrs(embedded, sealed, "enum")?;
+                self.reject_item_attrs(embedded, sealed, native, &content_field, "enum")?;
                 items.push(Item::Enum(self.parse_enum_def()?));
             } else if self.eat_keyword("component") {
                 items.push(Item::Component(self.parse_fields_block(FieldKind::Prop, |name, base, fields, methods| {
-                    ComponentDef { name, base, fields, methods, embedded, sealed }
+                    ComponentDef { name, base, fields, methods, embedded, sealed, native, content_field }
                 })?));
             } else if self.eat_keyword("viewmodel") {
-                self.reject_item_attrs(embedded, sealed, "viewmodel")?;
+                self.reject_item_attrs(embedded, sealed, native, &content_field, "viewmodel")?;
                 items.push(Item::ViewModel(self.parse_fields_block(FieldKind::Observable, |name, _base, fields, _methods| {
                     ViewModelDef { name, fields }
                 })?));
             } else if self.eat_keyword("view") {
-                self.reject_item_attrs(embedded, sealed, "view")?;
+                self.reject_item_attrs(embedded, sealed, native, &content_field, "view")?;
                 items.push(Item::View(self.parse_view_def()?));
             } else {
                 return Err(self.err("expected `use`/`enum`/`component`/`viewmodel`/`view`"));
@@ -58,13 +58,15 @@ impl<'a> Parser<'a> {
         Ok(Module { path: Vec::new(), uses, items, ..Default::default() })
     }
 
-    /// `#[embedded]`/`#[sealed]` (docs/elwindui_spec.md 付録E), written immediately before a
-    /// top-level item — only meaningful on `component` (see `reject_item_attrs`). Zero or more, any
-    /// order; unknown attribute names are a parse error just like the field-level `#[...]` loop
-    /// (`parse_field_def`) this mirrors.
-    fn parse_item_attrs(&mut self) -> Result<(bool, bool), String> {
+    /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[content(field_name)]` (docs/elwindui_spec.md 付録E),
+    /// written immediately before a top-level item — only meaningful on `component` (see
+    /// `reject_item_attrs`). Zero or more, any order; unknown attribute names are a parse error just
+    /// like the field-level `#[...]` loop (`parse_field_def`) this mirrors.
+    fn parse_item_attrs(&mut self) -> Result<(bool, bool, bool, Option<String>), String> {
         let mut embedded = false;
         let mut sealed = false;
+        let mut native = false;
+        let mut content_field = None;
         loop {
             self.skip_trivia();
             if !self.eat_char('#') {
@@ -75,19 +77,39 @@ impl<'a> Parser<'a> {
             match attr_name.as_str() {
                 "embedded" => embedded = true,
                 "sealed" => sealed = true,
-                other => return Err(self.err(&format!("unknown item attribute #[{other}] (expected `embedded` or `sealed`)"))),
+                "native" => native = true,
+                "content" => {
+                    self.expect_char('(')?;
+                    content_field = Some(self.parse_ident()?);
+                    self.expect_char(')')?;
+                }
+                other => {
+                    return Err(self.err(&format!(
+                        "unknown item attribute #[{other}] (expected `embedded`, `sealed`, `native`, or `content(field_name)`)"
+                    )))
+                }
             }
             self.expect_char(']')?;
             self.skip_trivia();
         }
-        Ok((embedded, sealed))
+        Ok((embedded, sealed, native, content_field))
     }
 
-    /// `#[embedded]`/`#[sealed]` only make sense on `component` — reject them (with a clear error
-    /// naming the offending keyword) if `parse_item_attrs` found either ahead of anything else.
-    fn reject_item_attrs(&self, embedded: bool, sealed: bool, keyword: &str) -> Result<(), String> {
-        if embedded || sealed {
-            return Err(self.err(&format!("`#[embedded]`/`#[sealed]` may only precede `component`, not `{keyword}`")));
+    /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[content(..)]` only make sense on `component` —
+    /// reject them (with a clear error naming the offending keyword) if `parse_item_attrs` found any
+    /// ahead of anything else.
+    fn reject_item_attrs(
+        &self,
+        embedded: bool,
+        sealed: bool,
+        native: bool,
+        content_field: &Option<String>,
+        keyword: &str,
+    ) -> Result<(), String> {
+        if embedded || sealed || native || content_field.is_some() {
+            return Err(self.err(&format!(
+                "`#[embedded]`/`#[sealed]`/`#[native]`/`#[content(..)]` may only precede `component`, not `{keyword}`"
+            )));
         }
         Ok(())
     }

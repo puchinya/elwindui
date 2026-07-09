@@ -60,16 +60,17 @@ pub struct TypeInfo {
     /// to a `bind!` source (see `generate_view`'s `bind_owners`) must check this first — emitting a
     /// `.subscribe(...)` call against a plain `component` type would be a compile error.
     pub is_viewmodel: bool,
-    /// Whether this type is a genuine native-backed leaf (`Window`/`Button`/`TextArea`/`Text`/
-    /// `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView` — the "NativeControl" family) as
-    /// opposed to a purely elwindui-side virtual node (`VerticalLayout`/`HorizontalLayout`/
-    /// `Rectangle`/`Ellipse`, or a user-defined `component`+`view` pair whose
-    /// `view` root is itself virtual, e.g. `examples/notepad`'s `DocumentView`). This is a
-    /// *structural* property computed recursively from the `view`'s root element type — see
-    /// `build_symbol_table`'s `resolve_is_native` — not merely whether `inherits NativeControl`
-    /// was written (that's checked for *consistency* against this in `validate.rs`, but a plain
-    /// `component X { .. } view X { VerticalLayout { .. } }` with no `inherits` at all is still
-    /// correctly inferred as virtual). See docs/elwindui_spec.md 付録H.2.
+    /// Whether this type is a genuine native-backed leaf (`Button`/`TextArea`/`Text`/`MenuBar`/
+    /// `MenuBarItem`/`Menu`/`MenuItem`/`TabView` — the "NativeControl" family; or `Window`, whose
+    /// own `#[native]` attribute marks it native despite having no meaningful `inherits` base at all
+    /// — see `ComponentDef::native`'s doc comment) as opposed to a purely elwindui-side virtual node
+    /// (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`, or a user-defined `component`+
+    /// `view` pair whose `view` root is itself virtual, e.g. `examples/notepad`'s `DocumentView`).
+    /// This is a *structural* property computed recursively from the `view`'s root element type —
+    /// see `build_symbol_table`'s `resolve_is_native` — not merely whether `inherits NativeControl`/
+    /// `#[native]` was written (either is checked for *consistency* against this in `validate.rs`,
+    /// but a plain `component X { .. } view X { VerticalLayout { .. } }` with no `inherits` at all is
+    /// still correctly inferred as virtual). See docs/elwindui_spec.md 付録H.2.
     pub is_native: bool,
     /// Whether this type has a paired `view` (i.e. is `generate_view`'s output) as opposed to a
     /// hand-written `elwindui-builtins` widget declared shape-only for the symbol table (every
@@ -126,6 +127,15 @@ pub struct TypeInfo {
     /// `validate_inherits` rejects `component X inherits Name` when this is `true`. `false` for a
     /// `viewmodel` (never a valid `inherits` target at all).
     pub sealed: bool,
+    /// This component's own `#[content(field_name)]` (docs/elwindui_spec.md 付録E, WinUI3's
+    /// `ContentPropertyAttribute` equivalent), copied verbatim from `ComponentDef::content_field` —
+    /// no recursive resolution needed (unlike `is_native`/`composed_shape`), since a bare nested
+    /// child element only ever binds to *this* component's own declared field, never inherited from
+    /// a base. `build_component_args` reads this to know which field (if any) a bare nested child in
+    /// a `view` construction of this component binds to, replacing the old field-declaration-order
+    /// ("first still-unclaimed non-`Option` field") fallback. `None` for a `viewmodel` and for any
+    /// component that doesn't declare `#[content(..)]`.
+    pub content_field: Option<String>,
 }
 
 impl SymbolTable {
@@ -180,20 +190,21 @@ pub(crate) fn strip_rc_wrapper(ty: &str) -> &str {
 
 pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     let mut types = HashMap::new();
-    // `(module index, #[[inherits]] base name, effective view's root element type)` per `component`
-    // key — the raw material `resolve_is_native` (below) needs; not every component has an
-    // effective `view` (native leaf builtins and virtual builtins like `VerticalLayout`/`Rectangle`
+    // `(module index, #[[inherits]] base name, effective view's root element type, #[native])` per
+    // `component` key — the raw material `resolve_is_native` (below) needs; not every component has
+    // an effective `view` (native leaf builtins and virtual builtins like `VerticalLayout`/`Rectangle`
     // are declared shape-only, see `BUILTIN_SHAPE_SOURCES`) or a `base` (only `inherits`-using
-    // components do). The root is the *effective* one (`resolve_view_for` — own view, or inherited
-    // from `base`), not just a literal same-module `Item::View`, so a component with no `view` of
-    // its own that inherits a logical base's template is still inferred native/virtual correctly.
-    let mut component_meta: HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>)> = HashMap::new();
+    // components do — `#[native]` components, e.g. `Window`, deliberately have neither). The root is
+    // the *effective* one (`resolve_view_for` — own view, or inherited from `base`), not just a
+    // literal same-module `Item::View`, so a component with no `view` of its own that inherits a
+    // logical base's template is still inferred native/virtual correctly.
+    let mut component_meta: HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>, bool)> = HashMap::new();
 
     for (module_index, module) in modules.iter().enumerate() {
         for item in &module.items {
             let Item::Component(c) = item else { continue };
             let view_root = resolve_view_for(module, c, modules).map(|v| v.root.type_path.clone());
-            component_meta.insert((module.path.clone(), c.name.clone()), (module_index, c.base.clone(), view_root));
+            component_meta.insert((module.path.clone(), c.name.clone()), (module_index, c.base.clone(), view_root, c.native));
         }
 
         for item in &module.items {
@@ -260,6 +271,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             // Finalized in the same later pass as `is_native`, for the same reason.
                             composed_shape: None,
                             sealed: c.sealed,
+                            content_field: c.content_field.clone(),
                         },
                     );
                 }
@@ -321,6 +333,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_unmount: None,
                             composed_shape: None,
                             sealed: false,
+                            content_field: None,
                         },
                     );
                 }
@@ -561,11 +574,13 @@ fn rewrite_base_calls(mut block: syn::Block, receiver: &syn::Ident) -> syn::Bloc
 /// component, it's only checked for consistency against it (`validate::validate_inherits`).
 /// A component with **no** `view` of its own (a hand-written builtin, declared shape-only — see
 /// `native_control.elwind`/`BUILTIN_SHAPE_SOURCES`) has no root to recurse through, so it falls
-/// back to its explicit `inherits NativeControl` declaration: present → native (`Window`/
-/// `Button`/...); absent → virtual (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`).
+/// back to either its explicit `inherits NativeControl` declaration (`Button`/...) or its own
+/// `#[native]` attribute (`Window` — a native leaf with no meaningful `inherits` base at all, see
+/// `ComponentDef::native`'s doc comment): either present → native; both absent → virtual
+/// (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`).
 fn resolve_is_native(
     key: &(Vec<String>, String),
-    component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>)>,
+    component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>, bool)>,
     modules: &[Module],
     table: &SymbolTable,
     memo: &mut HashMap<(Vec<String>, String), bool>,
@@ -579,7 +594,7 @@ fn resolve_is_native(
 
     let is_native = match component_meta.get(key) {
         None => false,
-        Some((module_index, base, view_root)) => {
+        Some((module_index, base, view_root, native)) => {
             if let Some(root_name) = view_root {
                 let from = &modules[*module_index];
                 match table.resolve_key(from, root_name) {
@@ -587,7 +602,7 @@ fn resolve_is_native(
                     None => false,
                 }
             } else {
-                base.as_deref() == Some("NativeControl")
+                base.as_deref() == Some("NativeControl") || *native
             }
         }
     };
@@ -601,7 +616,7 @@ fn resolve_is_native(
 /// `codegen::generate_view`'s `composed_shape`-driven branch.
 fn resolve_composed_shape(
     key: &(Vec<String>, String),
-    component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>)>,
+    component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>, bool)>,
     modules: &[Module],
     table: &SymbolTable,
     memo: &mut HashMap<(Vec<String>, String), Option<String>>,
@@ -614,7 +629,7 @@ fn resolve_composed_shape(
     memo.insert(key.clone(), None);
 
     let result = (|| {
-        let (module_index, base, view_root) = component_meta.get(key)?;
+        let (module_index, base, view_root, _native) = component_meta.get(key)?;
         let base = base.as_deref()?;
         if base == "NativeControl" {
             return None;
@@ -678,10 +693,13 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                     fields: info.effective_fields.clone(),
                     methods: info.effective_methods.clone(),
                     // Irrelevant downstream: `generate_component`/`generate_view` never consult
-                    // `embedded`/`sealed` (only `validate::validate`/`TypeInfo::sealed`, both
-                    // already checked against the *original* `c`, do).
+                    // `embedded`/`sealed`/`native`/`content_field` (only `validate::validate`/
+                    // `TypeInfo::sealed`/`TypeInfo::is_native`/`TypeInfo::content_field`, all already
+                    // checked/computed against the *original* `c`, do).
                     embedded: false,
                     sealed: false,
+                    native: false,
+                    content_field: None,
                 };
                 match &info.effective_view {
                     Some(view) => generate_view(view, &synthetic, module, table),
@@ -1996,8 +2014,9 @@ struct PlannedNode {
     attributes: Vec<(String, ViewExpr)>,
     /// Bindings of the element's *bare* nested children (`Type { ... }` written directly inside
     /// `{}`, not as `name: value`). Used to fill a resolved shape's `children`-named `#[param]`
-    /// (an implicit list) or, absent one, a single required param with no matching attribute (a
-    /// positional slot — e.g. `MenuBarItem`'s one nested `Menu`).
+    /// (an implicit list) or, absent one, the single field named by the component's own
+    /// `#[content(field_name)]` (docs/elwindui_spec.md 付録E — e.g. `MenuBarItem`'s one nested
+    /// `Menu`, bound to its `#[content(submenu)]` field; see `build_component_args`).
     /// Paired with each binding's own `type_path`, needed to decide (at the point it's used as
     /// someone else's argument) whether it's already an `elwindui_core::tree::Node<AnyView>` value
     /// (a virtual builtin/component) or a real native handle needing `Node::Native(..)`/
@@ -2320,8 +2339,9 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
 ///   already-planned/constructed binding (`element_attr_bindings`);
 /// - a `ViewExpr::Closure`-valued attribute compiles to a real boxed closure (`emit_closure_value`);
 /// - an `Option<..>`-typed param with no matching attribute becomes `None`;
-/// - a required param with no matching attribute and no more specific rule falls back to the next
-///   unclaimed bare child, positionally (`MenuBarItem`'s single nested `Menu`);
+/// - the param named by the component's own `#[content(field_name)]` (docs/elwindui_spec.md 付録E,
+///   `TypeInfo::content_field`) with no matching attribute binds the element's single bare nested
+///   child (`MenuBarItem`'s single nested `Menu`, bound to its `#[content(submenu)]` field);
 /// - anything else is an ordinary `emit_expr` value.
 fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
     if is_virtual_builtin(&node.type_path) {
@@ -2347,7 +2367,21 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
 /// and `build_component_value` (wraps as `create_<snake case>(args)`, for a shape-composition root
 /// whose base is itself a DSL component rather than a hand-written `elwindui_core::tree` primitive).
 fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, info: &TypeInfo) -> Vec<TokenStream> {
-    let mut next_positional_child = 0usize;
+    // A bare nested child element (no `name:` attribute) only ever has somewhere to go if this
+    // component declares a `children`-named param (a list, consumed in full below) or a
+    // `#[content(field_name)]` (a single slot, consumed further down) — anything else, with no
+    // declared destination at all, is a codegen-time authoring mistake, not a silently-guessed
+    // field-order fallback like this used to be.
+    let has_children_field = info.param_fields.iter().any(|(name, _)| name == "children");
+    if !has_children_field && info.content_field.is_none() && !node.child_bindings.is_empty() {
+        panic!(
+            "`{}` has no `children` field or `#[content(field_name)]` to receive its {} bare nested child element(s) — \
+             add an explicit `name: value` attribute for each, or declare `#[content(field_name)]` on the component",
+            node.type_path,
+            node.child_bindings.len()
+        );
+    }
+
     let mut args = Vec::new();
     for (name, ty) in &info.param_fields {
         if name == "children" {
@@ -2407,9 +2441,15 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
                 args.push(quote! { None });
                 continue;
             }
-            None if next_positional_child < node.child_bindings.len() => {
-                let (child, child_ty) = &node.child_bindings[next_positional_child];
-                next_positional_child += 1;
+            None if info.content_field.as_deref() == Some(name.as_str()) && !node.child_bindings.is_empty() => {
+                if node.child_bindings.len() > 1 {
+                    panic!(
+                        "`{}`'s `#[content({name})]` field can only bind a single nested child element, found {}",
+                        node.type_path,
+                        node.child_bindings.len()
+                    );
+                }
+                let (child, child_ty) = &node.child_bindings[0];
                 if inner_ty.contains("dyn UIElement") {
                     into_node_if_needed(quote! { #child }, child_ty, from, table)
                 } else {
@@ -3502,6 +3542,52 @@ view Foo {
         assert!(content_control_str.contains("struct ContentControlImpl"), "{content_control_str}");
         assert!(content_control_str.contains("pub trait ContentControl"), "{content_control_str}");
         assert!(content_control_str.contains("impl ContentControl for ContentControlImpl"), "{content_control_str}");
+    }
+
+    /// A bare nested child element with nowhere to go (no `children` field, no
+    /// `#[content(field_name)]` on the component being constructed — `Button` has neither) is a hard
+    /// codegen-time error: `build_component_args` no longer falls back to guessing "the first
+    /// still-unclaimed required field" by declaration order the way it used to before
+    /// `#[content(..)]` existed.
+    #[test]
+    #[should_panic(expected = "has no `children` field or `#[content(field_name)]`")]
+    fn panics_on_bare_child_with_no_content_field_declared() {
+        let src = r#"
+component Foo {
+}
+
+view Foo {
+    Button {
+        TextBlock { text: "not a valid Button child" }
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        generate_module(&module, &table);
+    }
+
+    /// `#[content(field_name)]` names a *single* slot — `MenuBarItem`'s `#[content(submenu)]` can
+    /// bind one bare nested `Menu`, but a second one has nowhere to go (unlike a `children: Vec<_>`
+    /// list, which happily takes any number).
+    #[test]
+    #[should_panic(expected = "can only bind a single nested child element")]
+    fn panics_on_multiple_bare_children_for_a_single_content_field() {
+        let src = r#"
+component Foo {
+}
+
+view Foo {
+    MenuBarItem {
+        text: "File"
+        Menu { }
+        Menu { }
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        generate_module(&module, &table);
     }
 
     /// A component inheriting a logical, `has_view`-having base (`ContentControl`) with *no* `view`

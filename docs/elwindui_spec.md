@@ -179,10 +179,13 @@ Grid {
 - 現状の実装は`builtin::Grid`の`row`/`column`のみ(具象フィールドとして`UIElementBase`に追加)。
   将来別のcomponentが独自の添付プロパティを持つ場合は、同じ仕組み(具象フィールドの追加)で拡張する
   ——型消去された汎用プロパティバッグではない
-- 現状、添付プロパティが実際にレイアウトへ反映されるのは子要素が仮想ビルトインそのもの(`TextBlock`/
-  `Rectangle`/`Ellipse`/`Stack`/`Control`/入れ子の`Grid`)の場合のみ。ネイティブリーフ(`Button`/
-  `TextArea`等)や、ユーザー定義の`component`+`view`ペアへの設定は現時点では検証は通るが値は反映
-  されない(既定セルのまま)——将来の拡張課題
+- 添付プロパティが実際にレイアウトへ反映されるのは、子要素が仮想ビルトインそのもの(`TextBlock`/
+  `Rectangle`/`Ellipse`/`Stack`/`Control`/入れ子の`Grid`)の場合と、`inherits NativeControl`で
+  `base: elwindui_core::tree::NativeControlImpl<H>`を合成するネイティブリーフ(`Button`/`TextArea`/
+  `TabView`)の場合——後者は構築直後に`elwindui-codegen`の`emit_common_ui_element_setters`が
+  `binding.base().set_grid_cell(..)`を呼ぶことで反映される(付録H.2.1a)。ユーザー定義の
+  `component`+`view`ペア(その`view`ルート自身に`Grid::row`/`Grid::column`を設定した場合)への
+  設定は現時点では検証は通るが値は反映されない(既定セルのまま)——将来の拡張課題
 
 ---
 

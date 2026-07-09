@@ -1,21 +1,32 @@
 use crate::document_view_model::DocumentViewModel;
 
-component DocumentView {
+// `inherits ContentControl` (docs/elwindui_spec.md 付録H.2.1a, same pattern as `RoundedPanel`
+// below) — own field renamed to `document_text` (not `content`) since `ContentControl` already
+// declares an inherited `content: Rc<dyn UIElement>` field of its own.
+component DocumentView inherits ContentControl {
     #[param]
     #[inject]
     doc: std::rc::Rc<DocumentViewModel>,
 
-    content: String = bind!(doc.content, TwoWay),
+    document_text: String = bind!(doc.content, TwoWay),
 }
 
-// `spacing` is omitted here (defaulting to 0.0, see `elwindui-builtins`'s
-// `VerticalLayout`/`HorizontalLayout`).
+// `Grid` (not `VerticalLayout`) for the outer split: `Stack`'s main axis is always "Auto" (each
+// child's own natural size, docs/elwindui_spec.md 付録H.2.1) — a `TextArea` inside a
+// `VerticalLayout` would only ever get its own small natural height, never the remaining window
+// space. `Grid`'s `GridLength::Star` row does actually fill whatever's left after the status bar's
+// `Auto` row takes its own height.
 view DocumentView {
-    VerticalLayout {
-        TextArea { text: content }
-        HorizontalLayout {
-            TextBlock { text: doc.file_name }
-            RoundedPanel { label: t!("notepad-status-chars", count: doc.char_count) }
+    ContentControl {
+        Grid {
+            rows: [elwindui_core::layout::GridLength::Star(1.0), elwindui_core::layout::GridLength::Auto]
+            columns: [elwindui_core::layout::GridLength::Star(1.0)]
+            TextArea { text: document_text, Grid::row: 0 }
+            HorizontalLayout {
+                Grid::row: 1
+                TextBlock { text: doc.file_name }
+                RoundedPanel { label: t!("notepad-status-chars", count: doc.char_count) }
+            }
         }
     }
 }

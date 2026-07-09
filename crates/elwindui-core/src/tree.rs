@@ -600,11 +600,11 @@ pub fn natural_size(elem: &dyn UIElement) -> Size {
 /// element's content paired with its own absolute rect — interleaved into a single `Vec<RenderItem<H>>`
 /// in `arrange`'s own traversal order (see that type's doc comment for why this must stay one list,
 /// not two). A backend's host (see `elwindui-backend-appkit`'s `TreeHostView`) replays this list in
-/// order: a `RenderItem::Native` gets placed as a native subview (and, the first time it sees a
-/// given native handle, has its real click/etc. wired straight into `dispatch_routed` using the
-/// accompanying tree node — see that type's doc comment), a `RenderItem::Paint` gets added as a
-/// paint layer (e.g. a `CAShapeLayer`) — `elwindui-core` itself knows nothing about
-/// `NSView`/`addSubview`/`CALayer`.
+/// order: a `RenderItem::Native` gets placed as a native subview and positioned via its handle's own
+/// `LayoutNode::arrange` (a real `#[routed]` click/etc. is wired once, at the widget's own
+/// construction time — see e.g. `elwindui_backend_appkit::builtins::Button::new` — not here), a
+/// `RenderItem::Paint` gets added as a paint layer (e.g. a `CAShapeLayer`) — `elwindui-core` itself
+/// knows nothing about `NSView`/`addSubview`/`CALayer`.
 ///
 /// `H` only needs to be named here (and on `NativeControlImpl<H>` itself) — every other `UIElement` is
 /// handle-agnostic. The root's own `horizontal_alignment`/`vertical_alignment` default to

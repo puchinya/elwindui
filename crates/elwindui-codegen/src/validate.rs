@@ -531,15 +531,20 @@ fn validate_bind_path(
 
 /// Checks `component X inherits Base { .. }` (docs/elwindui_spec.md §3): `Base` must resolve, then
 /// branches on what kind of base it is:
-/// - `NativeControl`: unchanged pure-category-tag consistency check against `X`'s
-///   structurally-inferred `is_native` (see `codegen::build_symbol_table`'s `resolve_is_native`) —
-///   `inherits NativeControl` doesn't itself *determine* nativeness.
-/// - A native-backed leaf with no generated Rust to inherit from (`has_view == false && is_native
-///   == true`, e.g. `Button`) — inheriting one is rejected; there's nothing to delegate to (see
-///   `codegen::resolve_effective_fields`'s doc comment).
-/// - A primitive shape family with no `view` of its own (`has_view == false && !is_native`, e.g.
-///   `Control`/`Rectangle`) — unchanged from before real field inheritance: `X` must have its own
-///   `view` whose root element is literally `Base` (the shape-composition use case,
+/// - A pure, field-less category tag (`base_info.effective_fields.is_empty() && !has_view` — e.g.
+///   `UIElement`/`Layout`/`NativeControl`/`Shape`/`Control`/`TextBlock` themselves): nothing to
+///   delegate to structurally, so unconditionally allowed. `NativeControl` alone additionally
+///   requires `X`'s structurally-inferred `is_native` (see `codegen::build_symbol_table`'s
+///   `resolve_is_native`) — `inherits NativeControl` doesn't itself *determine* nativeness, every
+///   other category tag imposes no further requirement.
+/// - A native-backed leaf that *does* carry real fields (`has_view == false && is_native == true`,
+///   e.g. `Button`/`Window`) — falls through to the same "`X`'s own `view` root must literally
+///   construct `Base`" check as the shape-composition case below (this is how a hand-written
+///   native host like `Window` gets inherited — `codegen`'s `host_composition_base` resolution;
+///   docs/elwindui_spec.md 付録H.2.1a).
+/// - A primitive shape family with no `view` of its own (`has_view == false`, has real fields,
+///   e.g. `Control`/`Rectangle`) — unchanged from before real field inheritance: `X` must have its
+///   own `view` whose root element is literally `Base` (the shape-composition use case,
 ///   `codegen::resolve_view_for` doesn't attempt to auto-synthesize this one). Fields are now
 ///   inherited automatically either way (`X` no longer needs to redeclare `Base`'s fields to
 ///   forward them).
@@ -568,25 +573,25 @@ fn validate_inherits(
         return;
     }
 
-    if base == "NativeControl" {
-        let is_native = table.resolve(from, &c.name).is_some_and(|info| info.is_native);
-        if !is_native {
-            errors.push(format!(
-                "{}: inherits `NativeControl`, but its `view` root isn't itself native (or no \
-                 `view` exists) — `NativeControl` is only a category tag for genuinely \
-                 native-backed components",
-                c.name
-            ));
+    // A pure, field-less category tag (`UIElement`/`Layout`/`NativeControl`/`Shape`/`Control`/
+    // `TextBlock` — no fields of its own, no `view`): inheriting one requires no evidence of `view`
+    // constructing `base` (there's nothing to construct — it's a marker trait in
+    // `elwindui_core::tree`, docs/elwindui_spec.md 付録H.2.1a), so it's unconditionally allowed.
+    // `NativeControl` alone carries one extra obligation: the inheritor must actually resolve as
+    // `is_native` (a real backend handle exists) — every other category tag imposes no further
+    // requirement on its own.
+    if base_info.effective_fields.is_empty() && !base_info.has_view {
+        if base == "NativeControl" {
+            let is_native = table.resolve(from, &c.name).is_some_and(|info| info.is_native);
+            if !is_native {
+                errors.push(format!(
+                    "{}: inherits `NativeControl`, but its `view` root isn't itself native (or no \
+                     `view` exists) — `NativeControl` is only a category tag for genuinely \
+                     native-backed components",
+                    c.name
+                ));
+            }
         }
-        return;
-    }
-
-    if !base_info.has_view && base_info.is_native {
-        errors.push(format!(
-            "{}: inherits `{base}`, but `{base}` is a native-backed leaf with no generated Rust to \
-             inherit from — only `NativeControl` may be used as a pure category tag here",
-            c.name
-        ));
         return;
     }
 
@@ -1256,14 +1261,33 @@ component Foo {
     /// `rejects_inherits_of_a_sealed_component`), which would no longer exercise this underlying
     /// native-leaf rejection path.
     #[test]
-    fn rejects_inherits_of_a_native_leaf() {
+    fn rejects_inherits_of_a_native_leaf_with_no_matching_view() {
         let src = r#"
 component MyWindow inherits Window {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("native-backed leaf")), "errors: {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("has no `view MyWindow`")), "errors: {errs:?}");
+    }
+
+    /// `Window` is a hand-written native host with real fields and no `UIElement` implementation of
+    /// its own ("host composition", `codegen::TypeInfo::host_composition_base`) — inheriting it is
+    /// allowed exactly like inheriting a primitive shape family (`Control`/`Rectangle`): the
+    /// inheritor's own `view` root must literally construct it. See `examples/notepad`'s real
+    /// `NotepadWindow inherits Window`.
+    #[test]
+    fn accepts_inherits_of_a_native_host_with_matching_view_root() {
+        let src = r#"
+component MyWindow inherits Window {
+}
+
+view MyWindow {
+    Window { title: "x", content: TextBlock { text: "hi" } }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        assert_eq!(validate(&modules), Ok(()));
     }
 
     /// `Button` is `#[sealed]` (docs/elwindui_spec.md 付録E) — `validate_inherits` must reject a

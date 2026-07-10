@@ -66,8 +66,11 @@ pub enum Item {
 ///   the original field-flattening/`__base_<name>` shadow-method mechanism unchanged — there's no
 ///   live `Base` instance to compose over there, only its method *bodies* to reuse (no different from
 ///   `super.method()` in a mainstream OOP language never needing a freestanding `super` object).
-/// - `Base` is a native-backed leaf with no generated Rust (e.g. `Button`) — inheriting it is a
-///   validation error; there's nothing to delegate to.
+/// - `Base` is a native-backed leaf that carries real fields and has no `view` of its own but *is*
+///   a hand-written Rust type (e.g. `Window`) — same contract as the shape-composition case above:
+///   `Name`'s own `view` root must literally construct `Base` ("host composition",
+///   `TypeInfo::host_composition_base`/`codegen.rs`'s `generate_view`), just without an
+///   `impl UIElement` (`Base` doesn't implement it either).
 ///
 /// `Name`'s own `fields`/`methods` may redeclare a same-named inherited `#[computed]` field or
 /// `#[virtual]` method only when marked `#[override]` (`Attr::Override`) — see

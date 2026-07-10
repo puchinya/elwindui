@@ -5,7 +5,7 @@
 //! which aren't valid Rust expression syntax — that half can't move to plain Rust).
 
 use elwindui::platform;
-use elwindui_backend_appkit::builtins::{Button, TextArea, Window};
+use elwindui_backend_appkit::builtins::{Button, TextArea, Window, WindowImpl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {
@@ -111,7 +111,7 @@ mod notepad_view_model {
 }
 
 elwindui::component! {
-    component NotepadWindow {
+    component NotepadWindow inherits Window {
         #[param]
         #[inject]
         vm: std::rc::Rc<NotepadViewModel>,
@@ -146,7 +146,7 @@ elwindui::component! {
 
 fn main() {
     let vm = NotepadViewModel::new();
-    let window = NotepadWindow::new(vm);
+    let window = NotepadWindowImpl::new(vm);
     window.show();
     elwindui::application::run();
 }

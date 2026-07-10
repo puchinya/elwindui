@@ -1,6 +1,6 @@
 use crate::notepad_view_model::NotepadViewModel;
 
-component NotepadWindow {
+component NotepadWindow inherits Window {
     #[param]
     #[inject]
     vm: std::rc::Rc<NotepadViewModel>,

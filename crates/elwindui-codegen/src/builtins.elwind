@@ -1,3 +1,22 @@
+// The root of every `UIElement`-implementing builtin — a field-less category marker, not a real
+// widget. Every `XxxImpl` struct in `elwindui_core::tree` that actually implements `UIElement`
+// (directly or via delegating to a `base`) corresponds to some `.elwind` component declaring
+// `inherits UIElement` (directly or transitively through `NativeControl`/`Layout`/`Shape`/
+// `Control`/`TextBlock`) — this is the DSL-visible root of that hierarchy (docs/elwindui_spec.md
+// 付録H.2.1a). `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem` do *not* inherit
+// it: none of them implement `elwindui_core::tree::UIElement` at all (see their own comments).
+#[embedded]
+component UIElement {
+}
+
+// Field-less category marker for every layout-container virtual builtin (`VerticalLayout`/
+// `HorizontalLayout`/`Grid`) — mirrors `elwindui_core::tree::Layout`, itself a marker trait over
+// `UIElement` implemented by `VerticalLayoutImpl`/`HorizontalLayoutImpl`/`GridImpl`
+// (docs/elwindui_spec.md 付録H.2.1a).
+#[embedded]
+component Layout inherits UIElement {
+}
+
 // A field-less category marker, not a real widget. Only native leaves that actually get embedded
 // as a real `Rc<dyn elwindui_core::tree::UIElement>` node in the visual tree (`Button`/`TextArea`/
 // `TabView`/`TabViewItem`) declare `inherits NativeControl` — their backend `XxxImpl` struct holds
@@ -13,7 +32,7 @@
 // equivalent for `is_native` purposes; they differ only in whether a real Rust `NativeControl<H>`
 // base is expected).
 #[embedded]
-component NativeControl {
+component NativeControl inherits UIElement {
 }
 
 // `Window` has no meaningful `Control`-family ancestor (see `NativeControl` above), so it declares
@@ -37,17 +56,17 @@ component Window {
 }
 
 #[embedded]
-component VerticalLayout {
+component VerticalLayout inherits Layout {
     #[param]
-    children: Vec<AnyView>,
+    children: Vec<std::rc::Rc<dyn UIElement>>,
     #[param]
     spacing: Option<f32>,
 }
 
 #[embedded]
-component HorizontalLayout {
+component HorizontalLayout inherits Layout {
     #[param]
-    children: Vec<AnyView>,
+    children: Vec<std::rc::Rc<dyn UIElement>>,
     #[param]
     spacing: Option<f32>,
 }
@@ -60,7 +79,7 @@ component HorizontalLayout {
 // bare-forwards — each leaf computes its own `elwindui_core::tree::ShapeKind` value instead
 // (`Rectangle`'s `RoundedRect { corner_radius }`, `Ellipse`'s fixed `Oval`).
 #[embedded]
-component Shape {
+component Shape inherits UIElement {
     #[param]
     kind: elwindui_core::tree::ShapeKind,
     #[param]
@@ -70,7 +89,7 @@ component Shape {
     #[param]
     stroke_width: Option<f32>,
     #[param]
-    children: Vec<AnyView>,
+    children: Vec<std::rc::Rc<dyn UIElement>>,
 }
 
 // A concrete `Shape` leaf: inherits `Shape` via shape-composition (`ContentControl inherits
@@ -78,11 +97,11 @@ component Shape {
 // are inherited unchanged (bare-forwarded below), `corner_radius` is `Rectangle`'s own field, and
 // `kind` (not bare-forwardable — there's nothing to forward *from*, each leaf computes its own) is
 // set from it. `Shape`'s own `children` is deliberately *not* forwarded here — unlike a plain
-// `Vec<AnyView>` `#[param]` that only ever needs to be read (`fill`/`stroke`/...), forwarding a
-// `children`-named field bare through an `inherits` chain has no real backing (`AnyView` is a
-// backend-specific type, never a literal Rust parameter type outside a virtual builtin's own
-// inline construction) — and no real usage here ever nests a child inside `Rectangle` (see
-// `RoundedPanel`, which overlays its background `Rectangle` and label as `Grid` siblings instead).
+// `Option<String>`/`Option<f32>` `#[param]` that only ever needs to be read (`fill`/`stroke`/...),
+// forwarding a `children`-named field bare through an `inherits` chain has no real backing (the
+// bare-forward mechanism only handles ordinary scalar-ish params) — and no real usage here ever
+// nests a child inside `Rectangle` (see `RoundedPanel`, which overlays its background `Rectangle`
+// and label as `Grid` siblings instead).
 // `#[sealed]`: a further `component X inherits Rectangle` has no more structure to add here —
 // compose over `Shape` itself instead (see `Rectangle`'s own relationship to it).
 #[embedded]
@@ -119,9 +138,9 @@ view Ellipse {
 }
 
 #[embedded]
-component Control {
+component Control inherits UIElement {
     #[param]
-    children: Vec<AnyView>,
+    children: Vec<std::rc::Rc<dyn UIElement>>,
     #[param]
     padding: Option<f32>,
 }
@@ -167,13 +186,13 @@ view ContentControl {
 // children (see docs/elwindui_spec.md §3's attached-property section). Unset on a given element,
 // they default to `0` (the top-left cell), matching `elwindui_core::layout::GridCell::default()`.
 #[embedded]
-component Grid {
+component Grid inherits Layout {
     #[param]
     rows: Vec<GridLength>,
     #[param]
     columns: Vec<GridLength>,
     #[param]
-    children: Vec<AnyView>,
+    children: Vec<std::rc::Rc<dyn UIElement>>,
 
     #[attached]
     row: i32 = 0,
@@ -203,7 +222,7 @@ component Button inherits NativeControl {
 }
 
 #[embedded]
-component TextBlock {
+component TextBlock inherits UIElement {
     #[param]
     text: String,
     #[param]

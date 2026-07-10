@@ -1,8 +1,10 @@
 //! The framework-owned Visual tree, following WinUI3's `UIElement` hierarchy: `Rc<dyn UIElement>`
 //! nodes *are* the tree (no separate wrapper/enum type) — `NativeControlImpl<H>` (`Button`/`TextArea`/
 //! `MenuBar`/`TabView`, the "NativeControlImpl" family), `TextBlockImpl` (self-drawn primitive text),
-//! `ShapeImpl` (`Rectangle`/`Ellipse`), `StackImpl` (`VerticalLayout`/`HorizontalLayout`), and `ControlImpl`
-//! (a composable multi-part component) are all peer implementations of the same `UIElement` trait.
+//! `ShapeImpl` (`Rectangle`/`Ellipse`), `VerticalLayoutImpl`/`HorizontalLayoutImpl` (sharing
+//! `StackImpl` as their own common `base`, the same way `Button`/`TextArea`/`TabView` share
+//! `NativeControlImpl<H>`), and `ControlImpl` (a composable multi-part component) are all peer
+//! implementations of the same `UIElement` trait.
 //! `Margin`/`HorizontalAlignment`/`VerticalAlignment` (`UIElementImpl`) are common to every one of
 //! them, applied generically by this module's `measure`/`arrange` (WinUI3's
 //! `UIElement.Measure`/`Arrange` wrapping each type's own `MeasureOverride`/`ArrangeOverride`) —
@@ -11,7 +13,8 @@
 //! `H` (whatever a backend uses as its native widget handle, e.g. `elwindui-backend-appkit`'s
 //! `AnyView`) appears only on `NativeControlImpl<H>` itself and on the functions that walk a tree
 //! looking for one (`layout_tree`) — the `UIElement` trait and every other concrete type
-//! (`StackImpl`/`ShapeImpl`/`TextBlockImpl`/`ControlImpl`) are handle-agnostic, since they never hold one.
+//! (`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`ShapeImpl`/`TextBlockImpl`/`ControlImpl`) are
+//! handle-agnostic, since they never hold one.
 //!
 //! `Window` is deliberately *not* a `UIElement` — like WinUI3's `Window`, it's a separate
 //! top-level host that owns a `Rc<dyn UIElement>` (its content) and drives `layout_tree` against
@@ -175,7 +178,8 @@ pub fn register_routed_handler<T: 'static>(handlers: &RoutedHandlers, name: &'st
 }
 
 /// The common interface every element in the Visual tree implements — `NativeControlImpl<H>`,
-/// `TextBlockImpl`, `ShapeImpl`, `StackImpl`, and `ControlImpl` are all peers here, not variants of some enum.
+/// `TextBlockImpl`, `ShapeImpl`, `VerticalLayoutImpl`/`HorizontalLayoutImpl`, and `ControlImpl` are
+/// all peers here, not variants of some enum.
 /// New kinds (a future `GridImpl`, say) are added by implementing this trait; nothing here or in
 /// `layout_tree` needs to change.
 pub trait UIElement: AsAny {
@@ -303,8 +307,18 @@ pub fn create_native_control<H>(handle: H) -> NativeControlImpl<H> {
     NativeControlImpl { base: UIElementImpl::default(), handle }
 }
 
-/// `VerticalLayout`/`HorizontalLayout` — a thin wrapper around `elwindui_core::layout`'s
-/// `stack_arrange`/`stack_natural_size` free functions.
+/// `Layout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — empty marker over `UIElement`,
+/// implemented by every layout-container virtual builtin (`VerticalLayoutImpl`/
+/// `HorizontalLayoutImpl`/`GridImpl`), the same way `NativeControl<H>` groups every native leaf.
+pub trait Layout: UIElement {}
+
+/// Shared implementation behind `VerticalLayout`/`HorizontalLayout` — a thin wrapper around
+/// `elwindui_core::layout`'s `stack_arrange`/`stack_natural_size` free functions. Not itself a
+/// DSL-facing leaf type (mirrors `NativeControlImpl<H>`'s role for `Button`/`TextArea`/`TabView`):
+/// `VerticalLayoutImpl`/`HorizontalLayoutImpl` each hold one as `base` and delegate `UIElement` to
+/// it, the same trait+Impl+base composition every other builtin follows (docs/elwindui_spec.md
+/// 付録H.2.1a) — `VerticalLayout`/`HorizontalLayout` used to share this struct directly with no
+/// per-orientation type of their own; that was the one remaining exception to the convention.
 pub struct StackImpl {
     pub base: UIElementImpl,
     pub orientation: Orientation,
@@ -327,13 +341,68 @@ impl UIElement for StackImpl {
     }
 }
 
-/// `StackImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `Stack` has no
-/// further DSL-level subclass today.
-pub trait Stack: UIElement {}
-impl Stack for StackImpl {}
+impl Layout for StackImpl {}
 
-pub fn create_stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> StackImpl {
+fn create_stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> StackImpl {
     StackImpl { base: UIElementImpl::default(), orientation, spacing, children }
+}
+
+/// `VerticalLayoutImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a).
+pub trait VerticalLayout: Layout {}
+impl VerticalLayout for VerticalLayoutImpl {}
+
+pub struct VerticalLayoutImpl {
+    pub base: StackImpl,
+}
+
+impl UIElement for VerticalLayoutImpl {
+    fn base(&self) -> &UIElementImpl {
+        self.base.base()
+    }
+    fn children(&self) -> &[Rc<dyn UIElement>] {
+        self.base.children()
+    }
+    fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size {
+        self.base.measure_override(available, child_sizes)
+    }
+    fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
+        self.base.arrange_override(final_size, child_sizes)
+    }
+}
+
+impl Layout for VerticalLayoutImpl {}
+
+pub fn create_vertical_layout(spacing: f32, children: Vec<Rc<dyn UIElement>>) -> VerticalLayoutImpl {
+    VerticalLayoutImpl { base: create_stack(Orientation::Vertical, spacing, children) }
+}
+
+/// `HorizontalLayoutImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a).
+pub trait HorizontalLayout: Layout {}
+impl HorizontalLayout for HorizontalLayoutImpl {}
+
+pub struct HorizontalLayoutImpl {
+    pub base: StackImpl,
+}
+
+impl UIElement for HorizontalLayoutImpl {
+    fn base(&self) -> &UIElementImpl {
+        self.base.base()
+    }
+    fn children(&self) -> &[Rc<dyn UIElement>] {
+        self.base.children()
+    }
+    fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size {
+        self.base.measure_override(available, child_sizes)
+    }
+    fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
+        self.base.arrange_override(final_size, child_sizes)
+    }
+}
+
+impl Layout for HorizontalLayoutImpl {}
+
+pub fn create_horizontal_layout(spacing: f32, children: Vec<Rc<dyn UIElement>>) -> HorizontalLayoutImpl {
+    HorizontalLayoutImpl { base: create_stack(Orientation::Horizontal, spacing, children) }
 }
 
 /// `Rectangle`/`Ellipse`. Has no intrinsic size of its own — its natural size is the bounding box
@@ -424,7 +493,8 @@ pub fn create_text_block(content: String, color: Option<String>) -> TextBlockImp
 }
 
 /// A composable, multi-part component (WinUI3's `ControlImpl`) — Visually built from any number of
-/// other `UIElement`s (`StackImpl`/`ShapeImpl`/`TextBlockImpl`/`NativeControlImpl`/other `ControlImpl`s), unlike
+/// other `UIElement`s (`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`ShapeImpl`/`TextBlockImpl`/
+/// `NativeControlImpl`/other `ControlImpl`s), unlike
 /// `ShapeImpl`'s single decorative content slot. `padding` shrinks the area its children are overlaid
 /// into, the `ControlImpl`-level analog of `margin` on an individual element.
 ///
@@ -521,9 +591,11 @@ impl UIElement for GridImpl {
     }
 }
 
+impl Layout for GridImpl {}
+
 /// `GridImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `Grid` has no
 /// further DSL-level subclass today.
-pub trait Grid: UIElement {}
+pub trait Grid: Layout {}
 impl Grid for GridImpl {}
 
 pub fn create_grid(

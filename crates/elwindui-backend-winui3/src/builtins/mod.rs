@@ -18,11 +18,14 @@ use crate::{Button as _, MenuItem as _, TextArea as _};
 use elwindui_core::tree::UIElement;
 use std::rc::Rc;
 
-pub struct Window {
+/// `component NotepadWindow inherits Window` ("host composition", docs/elwindui_spec.md 付録H.2.1a)
+/// is what actually inherits this — hence the `Impl` rename + paired empty-marker `Window` trait
+/// below, the same trait+Impl+base split every other inherited class in this module follows.
+pub struct WindowImpl {
     inner: winui3::Window,
 }
 
-impl Window {
+impl WindowImpl {
     pub fn new(title: &str, menu_bar: Option<Rc<MenuBar>>, content: Rc<dyn elwindui_core::tree::UIElement>) -> Rc<Self> {
         let inner = winui3::Window::new(title);
         inner.set_content(content);
@@ -40,6 +43,11 @@ impl Window {
         self.inner.show();
     }
 }
+
+/// `WindowImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a), the same shape
+/// as `Menu`/`MenuBar`/`MenuBarItem`/`MenuItem`'s own traits in this crate's root.
+pub trait Window {}
+impl Window for WindowImpl {}
 
 pub struct TextArea {
     inner: winui3::TextAreaImpl,

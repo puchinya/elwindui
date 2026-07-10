@@ -180,7 +180,7 @@ Grid {
   将来別のcomponentが独自の添付プロパティを持つ場合は、同じ仕組み(具象フィールドの追加)で拡張する
   ——型消去された汎用プロパティバッグではない
 - 添付プロパティが実際にレイアウトへ反映されるのは、子要素が仮想ビルトインそのもの(`TextBlock`/
-  `Rectangle`/`Ellipse`/`Stack`/`Control`/入れ子の`Grid`)の場合と、`inherits NativeControl`で
+  `Rectangle`/`Ellipse`/`VerticalLayout`/`HorizontalLayout`/`Control`/入れ子の`Grid`)の場合と、`inherits NativeControl`で
   `base: elwindui_core::tree::NativeControlImpl<H>`を合成するネイティブリーフ(`Button`/`TextArea`/
   `TabView`)の場合——後者は構築直後に`elwindui-codegen`の`emit_common_ui_element_setters`が
   `binding.base().set_grid_cell(..)`を呼ぶことで反映される(付録H.2.1a)。ユーザー定義の
@@ -1388,7 +1388,8 @@ pub struct UIElementImpl {
 方がハンドル型`H`についてジェネリックになっている。
 
 ```
-UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseなしの既定クラス)
+UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseなしの既定クラス。
+ │        `builtins.elwind`上もDSLの`component UIElement {}`として存在する全ての根)
  ├─ NativeControl<H> => Button, TextArea, TabView, ... (実ハンドルHを保持する、ビジュアルツリーに
  │                       実際に埋め込まれる型のみ。MenuBar/MenuBarItem/Menu/MenuItem/TabViewItemは
  │                       ツリーに参加しない(measure/arrangeが呼ばれない)ため`#[native]`直接指定で
@@ -1398,12 +1399,22 @@ UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseな
  ├─ Shape => Rectangle, Ellipse (プリミティブ図形、付録F.6)
  ├─ Control              (Padding + ContentAlignmentを持つ、複数の小部品からなる複合部品)
  │   └─ ContentControl   (Content1つだけを持つ複合部品、`inherits`によるDSL合成の実例。付録E)
- └─ Stack => VerticalLayout, HorizontalLayout (付録F.2)
+ └─ Layout => VerticalLayout, HorizontalLayout, Grid (レイアウトコンテナを束ねるcategory tag。
+                          `builtins.elwind`上もDSLの`component Layout inherits UIElement {}`として
+                          存在する。付録F.2・付録F.11)
 ```
 
-いずれも実装型は`XxxImpl`(`StackImpl`/`ShapeImpl`/`TextBlockImpl`/`ControlImpl`/`GridImpl`/
-`NativeControlImpl<H>`)で、対応する`create_xxx(...)`ファクトリー関数(`elwindui_core::tree`)経由で
-生成し、`new_element(...)`で親子ポインタを配線した`Rc<dyn UIElement>`として木に組み込む。
+`Layout`自身はフィールドを持たないマーカーで、`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`GridImpl`
+がこれを実装する。`VerticalLayoutImpl`/`HorizontalLayoutImpl`はさらに、DSL上には現れない共通の
+内部実装`StackImpl`(`orientation`/`spacing`/`children`を持つ)を`base`フィールドとして共有し、
+`UIElement`をそこへ委譲する——`NativeControlImpl<H>`を`Button`/`TextArea`/`TabView`が共有するのと
+同じ trait+Impl+base の形(付録H.2.1a)。`GridImpl`は`rows`/`columns`/`children`を自前で持ち、
+`StackImpl`は経由しない。
+
+いずれも実装型は`XxxImpl`(`StackImpl`/`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`ShapeImpl`/
+`TextBlockImpl`/`ControlImpl`/`GridImpl`/`NativeControlImpl<H>`)で、対応する`create_xxx(...)`
+ファクトリー関数(`elwindui_core::tree`)経由で生成し、`new_element(...)`で親子ポインタを配線した
+`Rc<dyn UIElement>`として木に組み込む。
 
 `NativeControlImpl<H>`の判定は`UIElement`の`as_native_control(&self) -> Option<&dyn Any>`という
 デフォルト`None`のメソッド経由で行う(`NativeControlImpl<H>`自身が`Some(self)`を返す)。単純な
@@ -1412,7 +1423,8 @@ UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseな
 (付録H.2.1a)がある場合、木に置かれる実際の具象型は`ButtonImpl`であって`NativeControlImpl<H>`
 そのものではなく、`Any::downcast_ref`は実際の具象型に対してしか成功しないため——`ButtonImpl`は
 `as_native_control`を`Some(&self.base)`とオーバーライドして委譲する。「実ハンドルを持つ」という
-概念を持たない大多数の実装(`Stack`/`Shape`/`TextBlock`/`Control`)は既定の`None`のままでよく、
+概念を持たない大多数の実装(`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`GridImpl`/`Shape`/
+`TextBlock`/`Control`)は既定の`None`のままでよく、
 不要なボイラープレートを背負わない。
 
 `Window`は`UIElement`を派生しない。WinUI3の`Window`が`UIElement`ではなく独立したトップレベルの
@@ -1420,13 +1432,14 @@ UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseな
 対して`measure`/`arrange`を呼び出す**ホスト**である(AppKitの`TreeHostView`/WinUI3の
 `TreeHostPanel`がこの役割を実装する)。
 
-`Stack`(`VerticalLayout`/`HorizontalLayout`)は交差軸方向の配置を一律設定として持たない
+`VerticalLayout`/`HorizontalLayout`は交差軸方向の配置を一律設定として持たない
 (かつての`CrossAlign`パラメータは廃止)——各子要素自身の`horizontal_alignment`/
 `vertical_alignment`が交差軸配置を決める、WinUI3の`StackPanel`と同じ設計である。主軸方向は
 常に「Auto」(子の自然サイズ)である。
 
-`Grid`(実装済み、docs/elwindui_builtins_spec.md参照)は行/列ベースのレイアウトで、`Stack`にはない
-「残り領域を`*`比例配分で埋める」手段(`GridLength::Star`)を提供する。各子の行/列位置は§3の添付
+`Grid`(実装済み、docs/elwindui_builtins_spec.md参照)は行/列ベースのレイアウトで、
+`VerticalLayout`/`HorizontalLayout`にはない「残り領域を`*`比例配分で埋める」手段
+(`GridLength::Star`)を提供する。各子の行/列位置は§3の添付
 プロパティ(`Grid::row`/`Grid::column`)で指定し、`UIElementImpl.grid_cell`(既定`(0, 0)`)として
 子要素自身が保持する——`Grid`自身が子ごとの別テーブルを持つわけではない。
 

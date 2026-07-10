@@ -1,5 +1,5 @@
 use elwindui::platform;
-use elwindui_backend_appkit::builtins::{Menu, MenuBar, MenuBarItem, MenuItem, TabView, TextArea, Window};
+use elwindui_backend_appkit::builtins::{Menu, MenuBar, MenuBarItem, MenuItem, TabView, TextArea, Window, WindowImpl};
 // Required by `ContentControl`'s generated code (`content: Rc<dyn UIElement>` — see
 // `content_control.elwind`'s own doc comment, docs/elwindui_spec.md 付録H.2.1a).
 use elwindui_core::tree::UIElement;
@@ -136,7 +136,7 @@ fn main() {
     // expressions (e.g. `save`'s can_execute) as well as `TabView`'s active-tab lookup assume at
     // least one document exists.
     vm.new_tab_execute();
-    let window = NotepadWindow::new(vm);
+    let window = NotepadWindowImpl::new(vm);
     window.show();
     elwindui::application::run();
 }

@@ -136,6 +136,22 @@ pub struct TypeInfo {
     /// component's *code* (a `#[virtual]`/`#[override]` method-hook base like `Derived inherits
     /// Base`) rather than its composed structure.
     pub composed_shape: Option<String>,
+    /// The DSL name of a hand-written native host with no `UIElement` implementation of its own
+    /// (only `Window` today — `is_native && !has_view && !is_native_control_leaf`) this component
+    /// composes over via a real `base: <Impl>` field, "host composition" (docs/elwindui_spec.md
+    /// 付録H.2.1a) — the same `base`-field shape as `composed_shape`, but for a base that isn't a
+    /// `UIElement` at all (so no `impl UIElement` is generated), and kept as a separate resolution
+    /// pass from `composed_shape` since the two bases are structurally distinct categories that
+    /// never overlap. `Some` iff this component's own `view` root literally constructs the base
+    /// (mirroring `resolve_composed_shape`'s own root-match requirement) — see
+    /// `resolve_host_composition_base`.
+    pub host_composition_base: Option<String>,
+    /// Whether *this* type is itself referenced as some other component's `host_composition_base`
+    /// (the base side of that pair, e.g. `Window` once `NotepadWindow inherits Window` exists) —
+    /// `concrete_type_ident` renames such a type to `{Name}Impl` and expects a paired empty-marker
+    /// trait to exist under its bare name, exactly like `composed_shape.is_some()` already does for
+    /// the composing side.
+    pub is_host_composition_base: bool,
     /// Whether this component is `#[sealed]` (docs/elwindui_spec.md 付録E) — `validate.rs`'s
     /// `validate_inherits` rejects `component X inherits Name` when this is `true`. `false` for a
     /// `viewmodel` (never a valid `inherits` target at all).
@@ -284,6 +300,8 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_unmount: own_view.and_then(|v| v.on_unmount.clone()),
                             // Finalized in the same later pass as `is_native`, for the same reason.
                             composed_shape: None,
+                            host_composition_base: None,
+                            is_host_composition_base: false,
                             sealed: c.sealed,
                             content_field: c.content_field.clone(),
                         },
@@ -347,6 +365,8 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_mount: None,
                             own_on_unmount: None,
                             composed_shape: None,
+                            host_composition_base: None,
+                            is_host_composition_base: false,
                             sealed: false,
                             content_field: None,
                         },
@@ -369,10 +389,19 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
         resolve_composed_shape(key, &component_meta, modules, &table, &mut composed_shape_memo);
     }
 
+    let host_composition_memo: HashMap<(Vec<String>, String), Option<(String, (Vec<String>, String))>> = keys
+        .iter()
+        .map(|key| (key.clone(), resolve_host_composition_base(key, &component_meta, modules, &table, &memo)))
+        .collect();
+    let host_composition_base_keys: HashSet<(Vec<String>, String)> =
+        host_composition_memo.values().filter_map(|v| v.as_ref().map(|(_, base_key)| base_key.clone())).collect();
+
     let mut types = table.types;
     for (key, info) in types.iter_mut() {
         info.is_native = memo.get(key).copied().unwrap_or(false);
         info.composed_shape = composed_shape_memo.get(key).cloned().flatten();
+        info.host_composition_base = host_composition_memo.get(key).cloned().flatten().map(|(name, _)| name);
+        info.is_host_composition_base = host_composition_base_keys.contains(key);
     }
     SymbolTable { types }
 }
@@ -683,6 +712,39 @@ fn resolve_composed_shape(
 
     memo.insert(key.clone(), result.clone());
     result
+}
+
+/// Resolves whether the component at `key` inherits a hand-written native host with no `UIElement`
+/// implementation of its own ("host composition" — only `Window` qualifies today, see
+/// `TypeInfo::host_composition_base`'s doc comment): `base` must resolve to a type that's
+/// structurally native (`is_native_memo`, already fully resolved by the time this runs — see
+/// `build_symbol_table`), has no `view`, and isn't itself a `NativeControl`-leaf (that combination
+/// is unique to a hand-written host like `Window`; `Button`/`TextArea`/`TabView` all have
+/// `is_native_control_leaf == true` and so are excluded, and `NativeControl`/virtual-builtin
+/// category tags are excluded up front since they're `resolve_composed_shape`'s territory, not
+/// this one's). Returns the base's DSL name alongside its resolved key (the pair `is_
+/// host_composition_base` needs to mark the *base* side too — see `build_symbol_table`).
+fn resolve_host_composition_base(
+    key: &(Vec<String>, String),
+    component_meta: &HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>, bool)>,
+    modules: &[Module],
+    table: &SymbolTable,
+    is_native_memo: &HashMap<(Vec<String>, String), bool>,
+) -> Option<(String, (Vec<String>, String))> {
+    let (module_index, base, view_root, _native) = component_meta.get(key)?;
+    let base = base.as_deref()?;
+    if base == "NativeControl" || is_virtual_builtin(base) {
+        return None;
+    }
+    let from = &modules[*module_index];
+    let base_key = table.resolve_key(from, base)?;
+    let base_info = table.types.get(&base_key)?;
+    let base_is_native = is_native_memo.get(&base_key).copied().unwrap_or(false);
+    if base_is_native && !base_info.has_view && !base_info.is_native_control_leaf {
+        (view_root.as_deref() == Some(base)).then(|| (base.to_string(), base_key))
+    } else {
+        None
+    }
 }
 
 pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
@@ -1430,7 +1492,15 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // the original `resolve_effective_fields`/`resolve_effective_methods`/`__base_<name>` mechanism
     // already does exactly the right thing and is left unchanged.
     let is_template_composition = !has_own_view && composed_shape.is_some();
-    let is_composed = composed_shape.is_some();
+    // `component X inherits Y` where `Y` is a hand-written native host with no `UIElement`
+    // implementation of its own (only `Window` today) and `X`'s own view root literally constructs
+    // `Y` — "host composition" (docs/elwindui_spec.md 付録H.2.1a, `TypeInfo::host_composition_base`).
+    // Follows the same `base`-field/`XImpl`-rename/synthesized-trait shape as shape composition
+    // below, just without an `impl UIElement` (`Y` doesn't implement it either) — see this
+    // function's dedicated branch further down.
+    let host_composition_base = table.resolve(from, &target_name).and_then(|i| i.host_composition_base.clone());
+    let is_host_composition = host_composition_base.is_some();
+    let is_composed = composed_shape.is_some() || is_host_composition;
     // A composed component's real struct is `XImpl`, not the bare DSL name `target`/`X` — that bare
     // name becomes a real `pub trait X: UIElement + ..` instead (docs/elwindui_spec.md 付録H.2.1a),
     // and Rust's shared type/trait namespace means the two can't coexist under one identifier.
@@ -1560,6 +1630,17 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     }
 
     plan_element(&view.root, &ctx, from, table, &mut plan, true, &lets_map);
+
+    // Host composition (`is_host_composition`'s doc comment): the root's stored field must be
+    // named `base` (the same trait+Impl+base convention `is_shape_composition` follows), not the
+    // generic auto-numbered binding every other stored node gets — renamed here, before anything
+    // below reads `node.binding`, so the ordinary "stored field" path (`struct_fields`/
+    // `field_inits`), `emit_wiring`, and `emit_resync` all naturally reference `self.base` with no
+    // further special-casing (unlike shape composition, the root here is still built by ordinary
+    // `emit_construction`, so there's no separate construction path to intercept — only storage).
+    if is_host_composition {
+        plan.last_mut().expect("plan_element always pushes a node for the root").binding = format_ident!("base");
+    }
 
     // `is_shape_composition`'s own analog of `is_template_composition`'s `forward_param_names`:
     // which of this component's own params are bare-forwarded (`fill: fill`) straight into the
@@ -1775,7 +1856,21 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 self
             }
         }
+    } else if is_host_composition {
+        // Host composition (`is_host_composition`'s doc comment): `self.base` — not a separately
+        // auto-named field — holds the native host instance now, so its own `show()` is reached
+        // through that fixed name (mirroring `is_shape_composition`'s `self.base`-through-`base`
+        // convention just above, minus the `UIElement` delegation Window doesn't participate in).
+        quote! {
+            pub fn show(self: std::rc::Rc<Self>) {
+                self.base.clone().show();
+            }
+        }
     } else if view.root.type_path == "Window" {
+        // A `Window`-rooted view with no `inherits Window` declaration (`is_host_composition` is
+        // `false`) — `inherits` is opt-in for the stricter `base`-named/renamed host-composition
+        // treatment above; a plain `Window` root still gets `show()` the original, structural way
+        // (independent of `inherits`), through its ordinary auto-numbered stored field.
         quote! {
             pub fn show(self: std::rc::Rc<Self>) {
                 self.#root_binding.clone().show();
@@ -1918,6 +2013,19 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 }
             }
             #base_trait_impl
+        }
+    } else if let Some(base_name) = &host_composition_base {
+        // Host composition (`is_host_composition`'s doc comment): `base_name` (e.g. `Window`) is a
+        // real trait now (per `TypeInfo::is_host_composition_base`'s paired `{Base}Impl` rename in
+        // the base's own hand-written crate), so `#target: #base_trait` is a genuine supertrait
+        // bound, exactly like the shape-composition case above — just no `impl UIElement`, since the
+        // base doesn't implement it either (`#struct_ident`'s own `show()` stays an inherent method
+        // on `impl #struct_ident` below, reached through `self.base`, not a trait method).
+        let base_trait = format_ident!("{}", base_name);
+        quote! {
+            pub trait #target: #base_trait {}
+            impl #target for #struct_ident {}
+            impl #base_trait for #struct_ident {}
         }
     } else {
         TokenStream::new()
@@ -2658,15 +2766,16 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
         .map(|(child_binding, child_ty)| into_node_if_needed(quote! { #child_binding }, child_ty, from, table));
 
     match node.type_path.as_str() {
-        "VerticalLayout" | "HorizontalLayout" => {
-            let orientation = if node.type_path == "VerticalLayout" {
-                quote! { elwindui_core::layout::Orientation::Vertical }
-            } else {
-                quote! { elwindui_core::layout::Orientation::Horizontal }
-            };
+        "VerticalLayout" => {
             let spacing = get_attr("spacing");
             quote! {
-                elwindui_core::tree::create_stack(#orientation, (#spacing).unwrap_or(0.0), vec![ #(#children),* ])
+                elwindui_core::tree::create_vertical_layout((#spacing).unwrap_or(0.0), vec![ #(#children),* ])
+            }
+        }
+        "HorizontalLayout" => {
+            let spacing = get_attr("spacing");
+            quote! {
+                elwindui_core::tree::create_horizontal_layout((#spacing).unwrap_or(0.0), vec![ #(#children),* ])
             }
         }
         "Shape" => {
@@ -2723,7 +2832,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
 /// resolves `X` to its real `XImpl` struct before emitting the call), so no hand-written or `.elwind`
 /// source ever needs to know about the `Impl` suffix.
 fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> syn::Ident {
-    if info.is_some_and(|i| i.composed_shape.is_some()) {
+    if info.is_some_and(|i| i.composed_shape.is_some() || i.is_host_composition_base) {
         format_ident!("{}Impl", type_path)
     } else {
         format_ident!("{}", type_path)
@@ -2759,7 +2868,8 @@ fn shape_composition_base_types(base: &str) -> (TokenStream, TokenStream) {
         "Shape" => (quote! { elwindui_core::tree::ShapeImpl }, quote! { elwindui_core::tree::Shape }),
         "TextBlock" => (quote! { elwindui_core::tree::TextBlockImpl }, quote! { elwindui_core::tree::TextBlock }),
         "Grid" => (quote! { elwindui_core::tree::GridImpl }, quote! { elwindui_core::tree::Grid }),
-        "VerticalLayout" | "HorizontalLayout" => (quote! { elwindui_core::tree::StackImpl }, quote! { elwindui_core::tree::Stack }),
+        "VerticalLayout" => (quote! { elwindui_core::tree::VerticalLayoutImpl }, quote! { elwindui_core::tree::VerticalLayout }),
+        "HorizontalLayout" => (quote! { elwindui_core::tree::HorizontalLayoutImpl }, quote! { elwindui_core::tree::HorizontalLayout }),
         other => unreachable!("shape_composition_base_types called with non-virtual-builtin `{other}`"),
     }
 }

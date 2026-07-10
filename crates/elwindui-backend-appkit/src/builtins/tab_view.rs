@@ -32,7 +32,7 @@ use std::rc::{Rc, Weak};
 /// The normalized per-tab representation — written literally in static mode, or synthesized once
 /// per `items_source` element in dynamic mode (see module doc comment).
 pub struct TabViewItem {
-    data_context: Option<Rc<dyn Any>>,
+    data_context: RefCell<Option<Rc<dyn Any>>>,
     header: RefCell<String>,
     // Handed to this entry's persistent content host (`TreeHostView::set_tree`) the first time
     // it's actually inserted as a real tab — an `Rc`, so (unlike the `Box` this used to be) it
@@ -44,18 +44,19 @@ pub struct TabViewItem {
 }
 
 impl TabViewItem {
-    pub fn new<T: 'static>(
-        data_context: Option<Rc<T>>,
-        header: &str,
-        content: std::rc::Rc<dyn elwindui_core::tree::UIElement>,
-        closable: Option<bool>,
-    ) -> Rc<Self> {
-        Self::new_erased(data_context.map(|dc| dc as Rc<dyn Any>), header, content, closable)
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self {
+            data_context: RefCell::new(None),
+            header: RefCell::new(String::new()),
+            content: RefCell::new(None),
+            closable: Cell::new(true),
+            on_close: RefCell::new(None),
+        })
     }
 
-    /// Same as `new`, but for a caller (`TabView::sync_dynamic_entries`) that already holds an
-    /// erased `Rc<dyn Any>` — `new`'s own `T: 'static` (implicitly `Sized`) can't be instantiated
-    /// with the unsized `dyn Any` itself.
+    /// Same shape as `sync_dynamic_entries`'s own erased construction need — kept as a free
+    /// function (not a method) since it builds a whole `Self` from an already-erased
+    /// `Rc<dyn Any>`, unlike `set_data_context<T>` (a real setter, generic over `T`).
     fn new_erased(
         data_context: Option<Rc<dyn Any>>,
         header: &str,
@@ -63,12 +64,16 @@ impl TabViewItem {
         closable: Option<bool>,
     ) -> Rc<Self> {
         Rc::new(Self {
-            data_context,
+            data_context: RefCell::new(data_context),
             header: RefCell::new(header.to_string()),
             content: RefCell::new(Some(content)),
             closable: Cell::new(closable.unwrap_or(true)),
             on_close: RefCell::new(None),
         })
+    }
+
+    pub fn set_data_context<T: 'static>(&self, data_context: Rc<T>) {
+        *self.data_context.borrow_mut() = Some(data_context as Rc<dyn Any>);
     }
 
     pub fn set_header(&self, header: &str) {
@@ -89,10 +94,21 @@ impl TabViewItem {
 }
 
 /// Only set in dynamic mode — `None` for a `TabView` built from static `TabViewItem` children.
+/// `header_template`/`item_template` are themselves `Option` (unlike the old all-at-once
+/// constructor's shape) since `elwindui-codegen`'s setter-based construction (docs/elwindui_spec.md
+/// 付録H.2.1a) now supplies `items_source`/`header_template`/`item_template` via three separate
+/// `set_*` calls rather than one combined argument list — `sync_dynamic_entries` only actually
+/// synthesizes entries once both are present (see that method).
 struct DynamicSource {
-    header_template: Box<dyn Fn(&Rc<dyn Any>) -> String>,
-    item_template: Box<dyn Fn(&Rc<dyn Any>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement>>,
+    header_template: Option<Box<dyn Fn(&Rc<dyn Any>) -> String>>,
+    item_template: Option<Box<dyn Fn(&Rc<dyn Any>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement>>>,
     closable_default: bool,
+}
+
+impl Default for DynamicSource {
+    fn default() -> Self {
+        DynamicSource { header_template: None, item_template: None, closable_default: true }
+    }
 }
 
 pub struct TabView {
@@ -119,8 +135,8 @@ impl UIElement for TabView {
     fn base(&self) -> &elwindui_core::tree::UIElementImpl {
         self.inner.base()
     }
-    fn children(&self) -> &[Rc<dyn UIElement>] {
-        self.inner.children()
+    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
+        self.inner.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
         self.inner.measure_override(available, child_sizes)
@@ -134,19 +150,12 @@ impl UIElement for TabView {
 }
 
 impl TabView {
-    pub fn new<T: 'static>(
-        children: Vec<Rc<TabViewItem>>,
-        items_source: Option<Vec<Rc<T>>>,
-        header_template: Option<Box<dyn Fn(&Rc<T>) -> String>>,
-        item_template: Option<Box<dyn Fn(&Rc<T>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement>>>,
-        closable: Option<bool>,
-        selected_index: usize,
-    ) -> Rc<Self> {
+    pub fn new() -> Rc<Self> {
         let this = Rc::new(Self {
             inner: appkit::create_tab_view(),
             entries: RefCell::new(Vec::new()),
             dynamic: RefCell::new(None),
-            selected_index: Cell::new(selected_index),
+            selected_index: Cell::new(0),
             chips: RefCell::new(Vec::new()),
             displayed: RefCell::new(Vec::new()),
             visible: RefCell::new(None),
@@ -155,23 +164,54 @@ impl TabView {
             weak_self: RefCell::new(Weak::new()),
         });
         *this.weak_self.borrow_mut() = Rc::downgrade(&this);
-
-        if !children.is_empty() {
-            *this.entries.borrow_mut() = children;
-        } else if let (Some(items), Some(header_template), Some(item_template)) = (items_source, header_template, item_template) {
-            *this.dynamic.borrow_mut() = Some(DynamicSource {
-                header_template: erase_render_string(header_template),
-                item_template: erase_render(item_template),
-                closable_default: closable.unwrap_or(true),
-            });
-            this.sync_dynamic_entries(erase_items(items));
-        }
-        // Deliberately doesn't `rebuild()` here — the enclosing generated component's first
-        // `resync()` (called once, right after every widget is constructed and wired) calls
-        // `set_items_source`/`set_selected_index` unconditionally, which triggers it — by which
-        // point `on_select`/`on_close` are also already wired (wiring runs before that first
-        // `resync()` call too).
         this
+    }
+
+    /// Static mode: the literal `TabViewItem { .. }` children (mutually exclusive with
+    /// `set_items_source`'s dynamic mode — see module doc comment). Populates `entries`
+    /// immediately, unlike the dynamic-mode setters below (whose own values only take effect once
+    /// `set_items_source` — always called again by the enclosing generated component's first
+    /// `resync()`, see that method's doc comment — actually reconciles them).
+    pub fn set_children(&self, children: Vec<Rc<TabViewItem>>) {
+        if !children.is_empty() {
+            *self.entries.borrow_mut() = children;
+        }
+    }
+
+    /// Dynamic mode: establishes `self.dynamic`'s `header_template`/`item_template`.
+    /// `elwindui-codegen`'s setter-based construction (docs/elwindui_spec.md 付録H.2.1a) combines
+    /// `items_source`/`header_template`/`item_template` into this one call rather than three
+    /// independent ones — all three share the same generic `T` (the `.elwind` viewmodel's item
+    /// type), and Rust can only infer a generic call's type parameter from *that call*'s own
+    /// arguments; `header_template`/`item_template`'s closure bodies (e.g. `|doc| doc.file_name()`)
+    /// carry no concrete type on their own, so they need `items` (concretely `Vec<Rc<Document>>`,
+    /// say) in the very same call to pin `T` down (see `build_component_setters`'s own doc comment
+    /// for the codegen side of this).
+    ///
+    /// `items` itself is **not** used to populate `entries` here — only `header_template`/
+    /// `item_template` are established. Real population happens on the enclosing generated
+    /// component's first `resync()`, which unconditionally calls `set_items_source` right after
+    /// every dynamic-mode setter (including `set_closable`) has already run — synthesizing entries
+    /// here instead would risk baking in `DynamicSource::default()`'s `closable_default` (`true`)
+    /// before this use site's real `closable:` attribute (if any) has been applied.
+    pub fn set_dynamic_source<T: 'static>(
+        &self,
+        items: Vec<Rc<T>>,
+        header_template: Box<dyn Fn(&Rc<T>) -> String>,
+        item_template: Box<dyn Fn(&Rc<T>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement>>,
+    ) {
+        let mut dynamic = self.dynamic.borrow_mut();
+        let entry = dynamic.get_or_insert_with(DynamicSource::default);
+        entry.header_template = Some(erase_render_string(header_template));
+        entry.item_template = Some(erase_render(item_template));
+        drop(dynamic);
+        let _ = items;
+    }
+
+    /// The default `closable` for a synthesized `TabViewItem` in dynamic mode (static mode's own
+    /// `TabViewItem::set_closable` is what matters there instead — see `set_children`).
+    pub fn set_closable(&self, closable: bool) {
+        self.dynamic.borrow_mut().get_or_insert_with(DynamicSource::default).closable_default = closable;
     }
 
     pub fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
@@ -190,7 +230,7 @@ impl TabView {
     /// `TabView` in `src/builtins.elwind`'s doc comment on why), so exposed as a plain accessor for
     /// advanced/manual use from hand-written Rust glue code instead.
     pub fn selected_item(&self) -> Option<Rc<dyn Any>> {
-        self.entries.borrow().get(self.selected_index.get()).and_then(|e| e.data_context.clone())
+        self.entries.borrow().get(self.selected_index.get()).and_then(|e| e.data_context.borrow().clone())
     }
 
     /// WinUI3's `SelectedContainer` concept — see `selected_item`'s doc comment.
@@ -200,7 +240,12 @@ impl TabView {
 
     /// Dynamic mode only — resyncs `items_source`. Reuses each already-synthesized `TabViewItem`
     /// whose `data_context` is still `Rc::ptr_eq` to the same element (see module doc comment);
-    /// only genuinely new elements call `header_template`/`item_template`.
+    /// only genuinely new elements call `header_template`/`item_template`. Also the construction-
+    /// time trigger in practice (see `set_header_template`'s doc comment): `elwindui-codegen`'s own
+    /// setter-based construction calls this once (before `header_template`/`item_template` are
+    /// necessarily set), then the enclosing generated component's first `resync()` calls it again
+    /// unconditionally — by which point every dynamic-mode setter has run, so `sync_dynamic_entries`
+    /// can actually synthesize entries and `rebuild()` has real content to show.
     pub fn set_items_source<T: 'static>(&self, items: Vec<Rc<T>>) {
         self.sync_dynamic_entries(erase_items(items));
         self.rebuild();
@@ -211,12 +256,6 @@ impl TabView {
         self.rebuild();
     }
 
-    /// Not read by `elwindui_backend_appkit::TabChip` today (a close button always shows) —
-    /// accepted for interface consistency with the generic resync convention. Only meaningful as
-    /// the dynamic-mode default in principle; static mode's per-`TabViewItem` `closable` is what
-    /// actually matters once `TabChip` grows real support.
-    pub fn set_closable(&self, _closable: bool) {}
-
     pub fn into_any_view(&self) -> appkit::AnyView {
         self.inner.base.handle.clone()
     }
@@ -224,17 +263,18 @@ impl TabView {
     fn sync_dynamic_entries(&self, items: Vec<Rc<dyn Any>>) {
         let dynamic = self.dynamic.borrow();
         let Some(dynamic) = dynamic.as_ref() else { return };
+        let (Some(header_template), Some(item_template)) = (&dynamic.header_template, &dynamic.item_template) else { return };
         let mut entries = self.entries.borrow_mut();
         let new_entries: Vec<Rc<TabViewItem>> = items
             .iter()
             .map(|item| {
                 entries
                     .iter()
-                    .find(|e| e.data_context.as_ref().is_some_and(|dc| Rc::ptr_eq(dc, item)))
+                    .find(|e| e.data_context.borrow().as_ref().is_some_and(|dc| Rc::ptr_eq(dc, item)))
                     .cloned()
                     .unwrap_or_else(|| {
-                        let header = (dynamic.header_template)(item);
-                        let content = (dynamic.item_template)(item);
+                        let header = header_template(item);
+                        let content = item_template(item);
                         TabViewItem::new_erased(Some(Rc::clone(item)), &header, content, Some(dynamic.closable_default))
                     })
             })

@@ -113,7 +113,7 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(title: &str) -> Self {
+    pub fn new() -> Self {
         let mtm = mtm();
         let content_rect = NSRect::new(objc2_foundation::NSPoint::new(0.0, 0.0), objc2_foundation::NSSize::new(480.0, 360.0));
         let style = NSWindowStyleMask::Titled
@@ -130,7 +130,6 @@ impl Window {
                 false,
             )
         };
-        ns.setTitle(&NSString::from_str(title));
         let content_host = TreeHostView::new();
         ns.setContentView(Some(&content_host));
         Self { ns, content_host }
@@ -383,6 +382,7 @@ impl TreeHostView {
     }
 }
 
+
 pub struct TextAreaImpl {
     base: elwindui_core::tree::NativeControlImpl<AnyView>,
     text_view: Retained<NSTextView>,
@@ -405,8 +405,8 @@ impl elwindui_core::tree::UIElement for TextAreaImpl {
     fn base(&self) -> &elwindui_core::tree::UIElementImpl {
         self.base.base()
     }
-    fn children(&self) -> &[Rc<dyn UIElement>] {
-        self.base.children()
+    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
+        self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
         self.base.measure_override(available, child_sizes)
@@ -436,7 +436,7 @@ impl TextArea for TextAreaImpl {
     }
 }
 
-pub fn create_text_area(initial_text: &str) -> TextAreaImpl {
+pub fn create_text_area() -> TextAreaImpl {
     let m = mtm();
     let scroll = NSTextView::scrollableTextView(m);
     let text_view = scroll
@@ -444,7 +444,6 @@ pub fn create_text_area(initial_text: &str) -> TextAreaImpl {
         .expect("scrollableTextView always has a document view")
         .downcast::<NSTextView>()
         .expect("scrollableTextView's document view is an NSTextView");
-    text_view.setString(&NSString::from_str(initial_text));
     let handle = AnyView::from(scroll);
     TextAreaImpl {
         base: elwindui_core::tree::create_native_control(handle),
@@ -504,8 +503,8 @@ impl elwindui_core::tree::UIElement for ButtonImpl {
     fn base(&self) -> &elwindui_core::tree::UIElementImpl {
         self.base.base()
     }
-    fn children(&self) -> &[Rc<dyn UIElement>] {
-        self.base.children()
+    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
+        self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
         self.base.measure_override(available, child_sizes)
@@ -538,9 +537,9 @@ impl Button for ButtonImpl {
     }
 }
 
-pub fn create_button(title: &str) -> ButtonImpl {
+pub fn create_button() -> ButtonImpl {
     let m = mtm();
-    let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), None, None, m) };
+    let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m) };
     let handle = AnyView::from(ns.clone());
     ButtonImpl { base: elwindui_core::tree::create_native_control(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
 }
@@ -583,8 +582,10 @@ pub struct TabChipImpl {
 }
 
 fn create_tab_chip(title: &str) -> TabChipImpl {
-    let title_button = create_button(title);
-    let close_button = create_button("×");
+    let title_button = create_button();
+    title_button.set_text(title);
+    let close_button = create_button();
+    close_button.set_text("×");
     let ns = new_stack(
         vec![title_button.base.handle.clone(), close_button.base.handle.clone()],
         NSUserInterfaceLayoutOrientation::Horizontal,
@@ -608,7 +609,8 @@ pub struct TabStripImpl {
 }
 
 fn create_tab_strip() -> TabStripImpl {
-    let new_tab_button = create_button("+");
+    let new_tab_button = create_button();
+    new_tab_button.set_text("+");
     let ns = new_stack(vec![new_tab_button.base.handle.clone()], NSUserInterfaceLayoutOrientation::Horizontal);
     TabStripImpl { ns, new_tab_button }
 }
@@ -656,8 +658,8 @@ impl elwindui_core::tree::UIElement for TabViewImpl {
     fn base(&self) -> &elwindui_core::tree::UIElementImpl {
         self.base.base()
     }
-    fn children(&self) -> &[Rc<dyn UIElement>] {
-        self.base.children()
+    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
+        self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
         self.base.measure_override(available, child_sizes)
@@ -764,6 +766,10 @@ pub struct MenuItemImpl {
 
 /// `MenuItemImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
 pub trait MenuItem {
+    /// A real `NSMenuItem.title` setter (docs/elwindui_spec.md 付録H.2.1a's post-construction
+    /// setter convention) — `create_menu_item()` takes no title argument, so this is the only way
+    /// a menu item's title is ever actually set.
+    fn set_text(&self, text: &str);
     fn set_enabled(&self, enabled: bool);
     /// A bare key character (e.g. `"s"`); macOS defaults a menu item's modifier mask to Cmd,
     /// which matches the common `Cmd+<letter>` shortcuts notepad needs (付録K.2's platform
@@ -773,6 +779,10 @@ pub trait MenuItem {
 }
 
 impl MenuItem for MenuItemImpl {
+    fn set_text(&self, text: &str) {
+        self.ns.setTitle(&NSString::from_str(text));
+    }
+
     fn set_enabled(&self, enabled: bool) {
         self.ns.setEnabled(enabled);
     }
@@ -791,10 +801,10 @@ impl MenuItem for MenuItemImpl {
     }
 }
 
-pub fn create_menu_item(title: &str) -> MenuItemImpl {
+pub fn create_menu_item() -> MenuItemImpl {
     let m = mtm();
     let ns = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(title), None, &NSString::from_str(""))
+        NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(""), None, &NSString::from_str(""))
     };
     MenuItemImpl { ns, target_storage: Rc::new(RefCell::new(None)) }
 }
@@ -832,17 +842,27 @@ pub struct MenuImpl {
     ns: Retained<NSMenu>,
 }
 
-/// `MenuImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `Menu` has no
-/// public methods beyond construction today.
-pub trait Menu {}
-impl Menu for MenuImpl {}
+/// `MenuImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `add_item`/`remove_item` are
+/// real `NSMenu.addItem(_:)`/`.removeItem(_:)` calls (the same API `create_menu` already used to
+/// call in a loop at construction time), now also reachable post-construction so the wrapper's own
+/// `set_children` (`elwindui-backend-appkit::builtins`) can reconcile a changed child list without
+/// rebuilding the native `NSMenu` from scratch.
+pub trait Menu {
+    fn add_item(&self, item: &MenuItemImpl);
+    fn remove_item(&self, item: &MenuItemImpl);
+}
+impl Menu for MenuImpl {
+    fn add_item(&self, item: &MenuItemImpl) {
+        self.ns.addItem(&item.ns);
+    }
+    fn remove_item(&self, item: &MenuItemImpl) {
+        self.ns.removeItem(&item.ns);
+    }
+}
 
-pub fn create_menu(items: Vec<MenuItemImpl>) -> MenuImpl {
+pub fn create_menu() -> MenuImpl {
     let m = mtm();
     let ns = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
-    for item in &items {
-        ns.addItem(&item.ns);
-    }
     MenuImpl { ns }
 }
 
@@ -852,17 +872,27 @@ pub struct MenuBarItemImpl {
     ns: Retained<NSMenuItem>,
 }
 
-/// `MenuBarItemImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a);
-/// `MenuBarItem` has no public methods beyond construction today.
-pub trait MenuBarItem {}
-impl MenuBarItem for MenuBarItemImpl {}
+/// `MenuBarItemImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `set_text`/
+/// `set_submenu` are real post-construction setters (`create_menu_bar_item()` takes neither
+/// argument, so these are the only way a menu bar item's title/submenu are ever actually set).
+pub trait MenuBarItem {
+    fn set_text(&self, text: &str);
+    fn set_submenu(&self, submenu: &MenuImpl);
+}
+impl MenuBarItem for MenuBarItemImpl {
+    fn set_text(&self, text: &str) {
+        self.ns.setTitle(&NSString::from_str(text));
+    }
+    fn set_submenu(&self, submenu: &MenuImpl) {
+        self.ns.setSubmenu(Some(&submenu.ns));
+    }
+}
 
-pub fn create_menu_bar_item(title: &str, submenu: MenuImpl) -> MenuBarItemImpl {
+pub fn create_menu_bar_item() -> MenuBarItemImpl {
     let m = mtm();
     let ns = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(title), None, &NSString::from_str(""))
+        NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(""), None, &NSString::from_str(""))
     };
-    ns.setSubmenu(Some(&submenu.ns));
     MenuBarItemImpl { ns }
 }
 
@@ -872,12 +902,23 @@ pub struct MenuBarImpl {
     ns: Retained<NSMenu>,
 }
 
-/// `MenuBarImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `MenuBar`
-/// has no public methods beyond construction today.
-pub trait MenuBar {}
-impl MenuBar for MenuBarImpl {}
+/// `MenuBarImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `add_item`/`remove_item`
+/// mirror `Menu`'s own (see that trait's doc comment): real `NSMenu.addItem(_:)`/`.removeItem(_:)`
+/// calls, reachable post-construction for `elwindui-backend-appkit::builtins::MenuBar::set_children`.
+pub trait MenuBar {
+    fn add_item(&self, item: &MenuBarItemImpl);
+    fn remove_item(&self, item: &MenuBarItemImpl);
+}
+impl MenuBar for MenuBarImpl {
+    fn add_item(&self, item: &MenuBarItemImpl) {
+        self.ns.addItem(&item.ns);
+    }
+    fn remove_item(&self, item: &MenuBarItemImpl) {
+        self.ns.removeItem(&item.ns);
+    }
+}
 
-pub fn create_menu_bar(items: Vec<MenuBarItemImpl>) -> MenuBarImpl {
+pub fn create_menu_bar() -> MenuBarImpl {
     let m = mtm();
     let ns = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
 
@@ -906,10 +947,6 @@ pub fn create_menu_bar(items: Vec<MenuBarItemImpl>) -> MenuBarImpl {
     app_menu.addItem(&quit_item);
     app_menu_item.setSubmenu(Some(&app_menu));
     ns.addItem(&app_menu_item);
-
-    for item in &items {
-        ns.addItem(&item.ns);
-    }
     MenuBarImpl { ns }
 }
 

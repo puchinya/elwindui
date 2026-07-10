@@ -9,12 +9,19 @@
 component UIElement {
 }
 
-// Field-less category marker for every layout-container virtual builtin (`VerticalLayout`/
-// `HorizontalLayout`/`Grid`) — mirrors `elwindui_core::tree::Layout`, itself a marker trait over
-// `UIElement` implemented by `VerticalLayoutImpl`/`HorizontalLayoutImpl`/`GridImpl`
-// (docs/elwindui_spec.md 付録H.2.1a).
+// Every layout-container virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Grid`) — mirrors
+// `elwindui_core::tree::Layout`, itself a marker trait over `UIElement` implemented by
+// `VerticalLayoutImpl`/`HorizontalLayoutImpl`/`GridImpl` (docs/elwindui_spec.md 付録H.2.1a).
+// `children` is the Logical-tree child list this container declares (`UIElementCollection`,
+// WinUI3's own type, docs/elwindui_spec.md 付録H.2.2) — inherited unconditionally by
+// `VerticalLayout`/`HorizontalLayout`/`Grid` below (none of them have their own `view`, see
+// `resolve_effective_fields`'s doc comment), so it's declared once here rather than on each of
+// them. `#[content(children)]` (WinUI3's `ContentPropertyAttribute`) isn't itself inherited the
+// same way (`ComponentDef::content_field`), so each of the three still redeclares it individually.
 #[embedded]
 component Layout inherits UIElement {
+    #[param]
+    children: UIElementCollection,
 }
 
 // A field-less category marker, not a real widget. Only native leaves that actually get embedded
@@ -56,17 +63,15 @@ component Window {
 }
 
 #[embedded]
+#[content(children)]
 component VerticalLayout inherits Layout {
-    #[param]
-    children: Vec<std::rc::Rc<dyn UIElement>>,
     #[param]
     spacing: Option<f32>,
 }
 
 #[embedded]
+#[content(children)]
 component HorizontalLayout inherits Layout {
-    #[param]
-    children: Vec<std::rc::Rc<dyn UIElement>>,
     #[param]
     spacing: Option<f32>,
 }
@@ -77,7 +82,9 @@ component HorizontalLayout inherits Layout {
 // builds an `elwindui_core::tree::ShapeImpl` directly at each use site) that concrete leaves
 // inherit from and forward their own `kind` into. `kind` is the one field a leaf never
 // bare-forwards — each leaf computes its own `elwindui_core::tree::ShapeKind` value instead
-// (`Rectangle`'s `RoundedRect { corner_radius }`, `Ellipse`'s fixed `Oval`).
+// (`Rectangle`'s `RoundedRect { corner_radius }`, `Ellipse`'s fixed `Oval`). No `children` —
+// matching real WinUI3's `Shape`, a pure leaf with no `Children`/content property of its own
+// (docs/elwindui_spec.md 付録H.2.2).
 #[embedded]
 component Shape inherits UIElement {
     #[param]
@@ -88,20 +95,15 @@ component Shape inherits UIElement {
     stroke: Option<String>,
     #[param]
     stroke_width: Option<f32>,
-    #[param]
-    children: Vec<std::rc::Rc<dyn UIElement>>,
 }
 
 // A concrete `Shape` leaf: inherits `Shape` via shape-composition (`ContentControl inherits
 // Control`'s pattern) instead of being a virtual builtin itself — `fill`/`stroke`/`stroke_width`
 // are inherited unchanged (bare-forwarded below), `corner_radius` is `Rectangle`'s own field, and
 // `kind` (not bare-forwardable — there's nothing to forward *from*, each leaf computes its own) is
-// set from it. `Shape`'s own `children` is deliberately *not* forwarded here — unlike a plain
-// `Option<String>`/`Option<f32>` `#[param]` that only ever needs to be read (`fill`/`stroke`/...),
-// forwarding a `children`-named field bare through an `inherits` chain has no real backing (the
-// bare-forward mechanism only handles ordinary scalar-ish params) — and no real usage here ever
-// nests a child inside `Rectangle` (see `RoundedPanel`, which overlays its background `Rectangle`
-// and label as `Grid` siblings instead).
+// set from it. `Shape` has no `children` to forward at all (see `Shape`'s own doc comment) —
+// nesting a child inside `Rectangle` isn't possible (see `RoundedPanel`, which overlays its
+// background `Rectangle` and label as `Grid` siblings instead).
 // `#[sealed]`: a further `component X inherits Rectangle` has no more structure to add here —
 // compose over `Shape` itself instead (see `Rectangle`'s own relationship to it).
 #[embedded]
@@ -120,9 +122,8 @@ view Rectangle {
     }
 }
 
-// A concrete `Shape` leaf — see `Rectangle` above for the shape-composition rationale (including
-// why `children` isn't forwarded). No fields of its own beyond what `Shape` already provides;
-// `kind` is always the fixed `Oval` variant.
+// A concrete `Shape` leaf — see `Rectangle` above for the shape-composition rationale. No fields
+// of its own beyond what `Shape` already provides; `kind` is always the fixed `Oval` variant.
 #[embedded]
 #[sealed]
 component Ellipse inherits Shape {
@@ -137,10 +138,13 @@ view Ellipse {
     }
 }
 
+// `children` is the Logical-tree child list this component declares (`UIElementCollection`,
+// WinUI3's own type, docs/elwindui_spec.md 付録H.2.2).
 #[embedded]
+#[content(children)]
 component Control inherits UIElement {
     #[param]
-    children: Vec<std::rc::Rc<dyn UIElement>>,
+    children: UIElementCollection,
     #[param]
     padding: Option<f32>,
 }
@@ -186,13 +190,12 @@ view ContentControl {
 // children (see docs/elwindui_spec.md §3's attached-property section). Unset on a given element,
 // they default to `0` (the top-left cell), matching `elwindui_core::layout::GridCell::default()`.
 #[embedded]
+#[content(children)]
 component Grid inherits Layout {
     #[param]
     rows: Vec<GridLength>,
     #[param]
     columns: Vec<GridLength>,
-    #[param]
-    children: Vec<std::rc::Rc<dyn UIElement>>,
 
     #[attached]
     row: i32 = 0,
@@ -271,10 +274,13 @@ component MenuItem {
 
 #[embedded]
 #[sealed]
+#[content(children)]
 component TabView inherits NativeControl {
     // Static mode: tabs written literally as nested `TabViewItem { .. }` children (WinUI3's XAML
     // child-declaration style). Mutually exclusive with `items_source` below — see
-    // `elwindui-codegen::validate::check_tab_view_mode`.
+    // `elwindui-codegen::validate::check_tab_view_mode`. Kept as a plain `Vec<TabViewItem>` (not
+    // `UIElementCollection` — `TabViewItem` never enters the `UIElement` Visual tree, see its own
+    // doc comment below).
     #[param]
     children: Vec<TabViewItem>,
 

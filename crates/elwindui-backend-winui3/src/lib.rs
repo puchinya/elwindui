@@ -300,9 +300,8 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(title: &str) -> Self {
+    pub fn new() -> Self {
         let xaml = XamlWindow::new().expect("Window::new");
-        let _ = xaml.SetTitle(&HSTRING::from(title));
         let content_host = TreeHostPanel::new();
         let _ = xaml.SetContent(&content_host.as_element());
         Self { xaml, content_host }
@@ -363,8 +362,8 @@ impl elwindui_core::tree::UIElement for TextAreaImpl {
     fn base(&self) -> &elwindui_core::tree::UIElementImpl {
         self.base.base()
     }
-    fn children(&self) -> &[Rc<dyn elwindui_core::tree::UIElement>] {
-        self.base.children()
+    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::tree::UIElement>> {
+        self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
         self.base.measure_override(available, child_sizes)
@@ -388,11 +387,10 @@ impl TextArea for TextAreaImpl {
     }
 }
 
-pub fn create_text_area(initial_text: &str) -> TextAreaImpl {
+pub fn create_text_area() -> TextAreaImpl {
     let text_box = TextBox::new().expect("TextBox::new");
     let _ = text_box.SetAcceptsReturn(true);
     let _ = text_box.SetTextWrapping(bindings::Microsoft::UI::Xaml::TextWrapping::Wrap);
-    let _ = text_box.SetText(&HSTRING::from(initial_text));
     let handle = AnyView::from(text_box.clone());
     let this = TextAreaImpl {
         base: elwindui_core::tree::create_native_control(handle),
@@ -432,8 +430,8 @@ impl elwindui_core::tree::UIElement for ButtonImpl {
     fn base(&self) -> &elwindui_core::tree::UIElementImpl {
         self.base.base()
     }
-    fn children(&self) -> &[Rc<dyn elwindui_core::tree::UIElement>] {
-        self.base.children()
+    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::tree::UIElement>> {
+        self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
         self.base.measure_override(available, child_sizes)
@@ -461,9 +459,8 @@ impl Button for ButtonImpl {
     }
 }
 
-pub fn create_button(title: &str) -> ButtonImpl {
+pub fn create_button() -> ButtonImpl {
     let xaml = XamlButton::new().expect("ButtonImpl::new");
-    let _ = xaml.SetContent(&HSTRING::from(title));
     let handle = AnyView::from(xaml.clone());
     let this = ButtonImpl { base: elwindui_core::tree::create_native_control(handle), xaml, on_click: Rc::new(RefCell::new(None)) };
     let callback = this.on_click.clone();
@@ -496,8 +493,8 @@ impl elwindui_core::tree::UIElement for TabViewImpl {
     fn base(&self) -> &elwindui_core::tree::UIElementImpl {
         self.base.base()
     }
-    fn children(&self) -> &[Rc<dyn elwindui_core::tree::UIElement>] {
-        self.base.children()
+    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::tree::UIElement>> {
+        self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
         self.base.measure_override(available, child_sizes)
@@ -637,6 +634,10 @@ pub struct MenuItemImpl {
 /// `MenuItemImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — mirrors
 /// `elwindui-backend-appkit::MenuItem`.
 pub trait MenuItem {
+    /// A real title setter (docs/elwindui_spec.md 付録H.2.1a's post-construction setter
+    /// convention) — `create_menu_item()` takes no title argument, so this is the only way a menu
+    /// item's title is ever actually set.
+    fn set_text(&self, text: &str);
     fn set_enabled(&self, enabled: bool);
     /// A bare key character (e.g. `"s"`), matching AppKit's `set_shortcut` convention — mapped to
     /// a `Ctrl`-modifier `KeyboardAccelerator` (WinUI3 has no single-string key-equivalent setter
@@ -646,6 +647,10 @@ pub trait MenuItem {
 }
 
 impl MenuItem for MenuItemImpl {
+    fn set_text(&self, text: &str) {
+        let _ = self.xaml.SetText(&HSTRING::from(text));
+    }
+
     fn set_enabled(&self, enabled: bool) {
         let _ = self.xaml.SetIsEnabled(enabled);
     }
@@ -666,9 +671,8 @@ impl MenuItem for MenuItemImpl {
     }
 }
 
-pub fn create_menu_item(title: &str) -> MenuItemImpl {
+pub fn create_menu_item() -> MenuItemImpl {
     let xaml = MenuFlyoutItem::new().expect("MenuFlyoutItem::new");
-    let _ = xaml.SetText(&HSTRING::from(title));
     let this = MenuItemImpl { xaml, on_select: Rc::new(RefCell::new(None)) };
     let callback = this.on_select.clone();
     let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
@@ -681,18 +685,49 @@ pub fn create_menu_item(title: &str) -> MenuItemImpl {
 }
 
 /// A dropdown attached to a `MenuBarItem` — see `elwindui-backend-appkit::MenuImpl`'s doc comment.
+/// `items` is a plain `Vec` (not the native `MenuFlyoutItemBase` collection directly) since a
+/// `MenuImpl` only ever becomes real XAML elements once installed into a `MenuBarItemImpl`
+/// (`create_menu_bar_item`/`MenuBarItemImpl::set_submenu`) — `add_item`/`remove_item` mutate this
+/// `Vec` and, if already installed, the live XAML collection too.
 #[derive(Clone)]
 pub struct MenuImpl {
-    items: Vec<MenuItemImpl>,
+    items: Rc<RefCell<Vec<MenuItemImpl>>>,
+    installed_into: Rc<RefCell<Option<bindings::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>>>>,
 }
 
-/// `MenuImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `Menu` has no
-/// public methods beyond construction today.
-pub trait Menu {}
-impl Menu for MenuImpl {}
+/// `MenuImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `add_item`/`remove_item` are
+/// real `IVector<MenuFlyoutItemBase>.Append`/`.RemoveAtEnd`-style calls once this `Menu` is
+/// installed into a `MenuBarItemImpl` (see `installed_into`'s doc comment), reachable
+/// post-construction so `elwindui-backend-winui3::builtins::Menu::set_children` can reconcile a
+/// changed child list without rebuilding the native menu from scratch.
+pub trait Menu {
+    fn add_item(&self, item: &MenuItemImpl);
+    fn remove_item(&self, item: &MenuItemImpl);
+}
+impl Menu for MenuImpl {
+    fn add_item(&self, item: &MenuItemImpl) {
+        self.items.borrow_mut().push(item.clone());
+        if let Some(items) = self.installed_into.borrow().as_ref() {
+            let base: MenuFlyoutItemBase = item.xaml.clone().into();
+            let _ = items.Append(&base);
+        }
+    }
+    fn remove_item(&self, item: &MenuItemImpl) {
+        let mut items = self.items.borrow_mut();
+        if let Some(pos) = items.iter().position(|i| i.xaml == item.xaml) {
+            items.remove(pos);
+        }
+        if let Some(native_items) = self.installed_into.borrow().as_ref() {
+            let base: MenuFlyoutItemBase = item.xaml.clone().into();
+            if let Ok(index) = native_items.IndexOf(&base) {
+                let _ = native_items.RemoveAt(index);
+            }
+        }
+    }
+}
 
-pub fn create_menu(items: Vec<MenuItemImpl>) -> MenuImpl {
-    MenuImpl { items }
+pub fn create_menu() -> MenuImpl {
+    MenuImpl { items: Rc::new(RefCell::new(Vec::new())), installed_into: Rc::new(RefCell::new(None)) }
 }
 
 /// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `MenuImpl`.
@@ -701,20 +736,30 @@ pub struct MenuBarItemImpl {
     xaml: bindings::Microsoft::UI::Xaml::Controls::MenuBarItem,
 }
 
-/// `MenuBarItemImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a);
-/// `MenuBarItem` has no public methods beyond construction today.
-pub trait MenuBarItem {}
-impl MenuBarItem for MenuBarItemImpl {}
-
-pub fn create_menu_bar_item(title: &str, submenu: MenuImpl) -> MenuBarItemImpl {
-    let xaml = bindings::Microsoft::UI::Xaml::Controls::MenuBarItem::new().expect("MenuBarItem::new");
-    let _ = xaml.SetTitle(&HSTRING::from(title));
-    if let Ok(items) = xaml.Items() {
-        for item in &submenu.items {
-            let base: MenuFlyoutItemBase = item.xaml.clone().into();
-            let _ = items.Append(&base);
+/// `MenuBarItemImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `set_text`/
+/// `set_submenu` are real post-construction setters (`create_menu_bar_item()` takes neither
+/// argument, so these are the only way a menu bar item's title/submenu are ever actually set).
+pub trait MenuBarItem {
+    fn set_text(&self, text: &str);
+    fn set_submenu(&self, submenu: &MenuImpl);
+}
+impl MenuBarItem for MenuBarItemImpl {
+    fn set_text(&self, text: &str) {
+        let _ = self.xaml.SetTitle(&HSTRING::from(text));
+    }
+    fn set_submenu(&self, submenu: &MenuImpl) {
+        if let Ok(items) = self.xaml.Items() {
+            for item in submenu.items.borrow().iter() {
+                let base: MenuFlyoutItemBase = item.xaml.clone().into();
+                let _ = items.Append(&base);
+            }
+            *submenu.installed_into.borrow_mut() = Some(items);
         }
     }
+}
+
+pub fn create_menu_bar_item() -> MenuBarItemImpl {
+    let xaml = bindings::Microsoft::UI::Xaml::Controls::MenuBarItem::new().expect("MenuBarItem::new");
     MenuBarItemImpl { xaml }
 }
 
@@ -727,20 +772,32 @@ pub struct MenuBarImpl {
     xaml: XamlMenuBar,
 }
 
-/// `MenuBarImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `MenuBar`
-/// has no public methods beyond construction today.
-pub trait MenuBar {}
-impl MenuBar for MenuBarImpl {}
-
-pub fn create_menu_bar(items: Vec<MenuBarItemImpl>) -> MenuBarImpl {
-    let xaml = XamlMenuBar::new().expect("MenuBarImpl::new");
-    if let Ok(xaml_items) = xaml.Items() {
-        for item in &items {
-            let _ = xaml_items.Append(&item.xaml);
+/// `MenuBarImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `add_item`/`remove_item`
+/// mirror `Menu`'s own (see that trait's doc comment): real `IVector<MenuBarItem>.Append`/
+/// `.RemoveAt` calls, reachable post-construction for
+/// `elwindui-backend-winui3::builtins::MenuBar::set_children`.
+pub trait MenuBar {
+    fn add_item(&self, item: &MenuBarItemImpl);
+    fn remove_item(&self, item: &MenuBarItemImpl);
+}
+impl MenuBar for MenuBarImpl {
+    fn add_item(&self, item: &MenuBarItemImpl) {
+        if let Ok(items) = self.xaml.Items() {
+            let _ = items.Append(&item.xaml);
         }
     }
-    MenuBarImpl { xaml
+    fn remove_item(&self, item: &MenuBarItemImpl) {
+        if let Ok(items) = self.xaml.Items() {
+            if let Ok(index) = items.IndexOf(&item.xaml) {
+                let _ = items.RemoveAt(index);
+            }
+        }
     }
+}
+
+pub fn create_menu_bar() -> MenuBarImpl {
+    let xaml = XamlMenuBar::new().expect("MenuBarImpl::new");
+    MenuBarImpl { xaml }
 }
 
 /// See docs/elwindui_spec.md 付録T.2 — same async-shaped-but-synchronous-underneath API as

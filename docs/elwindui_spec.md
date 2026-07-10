@@ -1338,12 +1338,21 @@ elwindui本体(コード生成・手書きランタイム双方)でRustに“ク
     `Control`・`ContentControl`の3つのトレイトすべてを実装する)。祖先トレイトの各メソッドは
     `self.base.method(...)`へ委譲するだけの薄い実装になる。
   - 構造体の生成は構造体リテラルを直接書かず、ファクトリー関数`create_class(...)`を経由する
-    (例: `Button`なら`create_button(...)`)。`margin`/`horizontal_alignment`/`vertical_alignment`/
-    `data_context`/`grid_cell`(`UIElementImpl`が持つ共通フィールド)は`create_class(...)`の引数には
-    ならない——`UIElementImpl`は(`routed_handlers`/`parent`が元からそうだったのと同じく)全フィールド
-    が`Cell`/`RefCell`による内部可変性を持ち、`create_class(...)`は内部で`UIElementImpl::default()`
-    を組み立てるだけ。使用箇所ごとのmargin等は、構築**後**に`binding.base().set_margin(..)`のような
-    呼び出しで反映する(`elwindui-codegen`の`emit_common_ui_element_setters`)。
+    (例: `Button`なら`create_button()`)。`margin`/`horizontal_alignment`/`vertical_alignment`/
+    `data_context`/`grid_cell`(`UIElementImpl`が持つ共通フィールド)に加えて、**このクラス自身が
+    宣言する`#[param]`フィールドも含めて全プロパティ**が`create_class(...)`の引数にはならない——
+    ネイティブ手書きビルトイン(`Window`/`Button`/`TextArea`/`MenuBar`/`Menu`/`MenuItem`/
+    `MenuBarItem`/`TabView`/`TabViewItem`)と`elwindui-core::tree`の仮想ビルトイン
+    (`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/`Control`/`Grid`)は、`Copy`な
+    フィールドを`Cell`、それ以外を`RefCell`で持ち(付録O.5)、`create_class()`は常に引数なしで
+    `UIElementImpl::default()`相当の既定値を組み立てるだけ。使用箇所ごとの値は、構築**後**に
+    `binding.set_<field>(..)`(margin等の共通属性なら`binding.base().set_margin(..)`)という
+    呼び出しで反映する(`elwindui-codegen`の`emit_common_ui_element_setters`/
+    `build_component_setters`)——`resync()`による値の再反映(二重バインディング等)も同じ
+    `set_<field>(..)`を呼ぶだけで済む、単一の統一された仕組みになる。
+    (`view`を持つコンポーネント——`ContentControl`/`Rectangle`/`Ellipse`のような組み込みでも、
+    ユーザー定義componentでも——の生成`new(args)`は今のところ対象外で、引数どおりに構築する
+    従来の方式のまま。)
 - コード生成器(`elwindui-codegen`)が`component X inherits Y`から生成するコードも同じ形を取る——
   かつてのように親の実効フィールド/メソッドを1つのstructへ畳み込む(フラット化する)のではなく、
   `XImpl { base: YImpl, /* Xの宣言分のみ */ }`という実体合成にする。これにより`base::method(...)`
@@ -1363,7 +1372,7 @@ pub trait UIElement: AsAny {
     fn margin(&self) -> f32 { self.base().margin.get() }
     fn horizontal_alignment(&self) -> HorizontalAlignment { self.base().horizontal_alignment.get() }
     fn vertical_alignment(&self) -> VerticalAlignment { self.base().vertical_alignment.get() }
-    fn children(&self) -> &[Rc<dyn UIElement>];
+    fn visual_children(&self) -> &[Rc<dyn UIElement>];
     fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size;
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect>;
     fn paint(&self) -> Option<PaintKind> { None }
@@ -1396,20 +1405,28 @@ UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseな
  │                       この枝に入らない——`Window`と同じ扱い、付録H.2.1a・builtins.elwindの
  │                       `NativeControl`マーカー自身のコメント参照)
  ├─ TextBlock            (プリミティブ描画・非native、付録F.3)
- ├─ Shape => Rectangle, Ellipse (プリミティブ図形、付録F.6)
- ├─ Control              (Padding + ContentAlignmentを持つ、複数の小部品からなる複合部品)
+ ├─ Shape => Rectangle, Ellipse (プリミティブ図形、子を持たない。付録F.6)
+ ├─ Control              (Padding + ContentAlignmentを持つ、複数の小部品からなる複合部品。
+ │   │                    `children: UIElementCollection`をLogicalツリーとして持つ、付録H.2.2)
  │   └─ ContentControl   (Content1つだけを持つ複合部品、`inherits`によるDSL合成の実例。付録E)
- └─ Layout => VerticalLayout, HorizontalLayout, Grid (レイアウトコンテナを束ねるcategory tag。
-                          `builtins.elwind`上もDSLの`component Layout inherits UIElement {}`として
-                          存在する。付録F.2・付録F.11)
+ └─ Layout => VerticalLayout, HorizontalLayout, Grid (レイアウトコンテナを束ねる共通親。
+                          `builtins.elwind`上もDSLの`component Layout inherits UIElement { children:
+                          UIElementCollection }`として存在し、`children`はVerticalLayout/
+                          HorizontalLayout/Gridへ自動的に継承される(付録H.2.2)。付録F.2・付録F.11)
 ```
 
-`Layout`自身はフィールドを持たないマーカーで、`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`GridImpl`
-がこれを実装する。`VerticalLayoutImpl`/`HorizontalLayoutImpl`はさらに、DSL上には現れない共通の
-内部実装`StackImpl`(`orientation`/`spacing`/`children`を持つ)を`base`フィールドとして共有し、
-`UIElement`をそこへ委譲する——`NativeControlImpl<H>`を`Button`/`TextArea`/`TabView`が共有するのと
-同じ trait+Impl+base の形(付録H.2.1a)。`GridImpl`は`rows`/`columns`/`children`を自前で持ち、
-`StackImpl`は経由しない。
+`Layout`は`children: UIElementCollection`という1フィールドのみを持ち、`VerticalLayoutImpl`/
+`HorizontalLayoutImpl`/`GridImpl`がこれを実装する。`VerticalLayoutImpl`/`HorizontalLayoutImpl`は
+さらに、DSL上には現れない共通の内部実装`StackImpl`(`orientation`/`spacing`/`children`を持つ)を
+`base`フィールドとして共有し、`UIElement`をそこへ委譲する——`NativeControlImpl<H>`を`Button`/
+`TextArea`/`TabView`が共有するのと同じ trait+Impl+base の形(付録H.2.1a)。`GridImpl`は
+`rows`/`columns`/`children`を自前で持ち、`StackImpl`は経由しない。
+
+`VerticalLayout`/`HorizontalLayout`/`Grid`はいずれも自前の`view`を持たない仮想ビルトインなので、
+`Layout`の`children`フィールドを無条件に継承する(`resolve_effective_fields`)——各コンポーネント
+側で`children`を再宣言する必要はない。ただし`#[content(children)]`(WinUI3の
+`ContentPropertyAttribute`相当、下記H.2.2参照)はフィールドと違い継承されないため、3つとも
+個別に宣言している。
 
 いずれも実装型は`XxxImpl`(`StackImpl`/`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`ShapeImpl`/
 `TextBlockImpl`/`ControlImpl`/`GridImpl`/`NativeControlImpl<H>`)で、対応する`create_xxx(...)`
@@ -1453,14 +1470,28 @@ WinUI3に倣い、「`.elwind`で書かれた見た目上の参照関係」(Logi
 - **Logicalツリー**:`.elwind`上の参照関係(例:`NotepadWindow`から見て`DocumentView`は1個の
   ノード)。将来のテンプレート機能・アクセシビリティツリーはこちらを対象にする。今回は
   `LogicalNode { type_name, children }`という最小限の型のみ導入し、コード生成側からはまだ
-  生成されない(将来拡張の受け皿)。
-- **Visualツリー**: 実際にlayoutされる`Box<dyn UIElement>`の木(`Layout`/`Shapes`/`TextBlock`/
-  `NativeControl`/他の`Control`から組み立てられる)。H.2.1・付録Fで説明している木はこちら。
+  生成されない(将来のテンプレート/データバインド機能向けの受け皿として未使用のまま残す)。
+  `Layout`(`VerticalLayout`/`HorizontalLayout`/`Grid`)/`Control`が`.elwind`上で宣言する
+  `children: UIElementCollection`(下記)は、この`LogicalNode`とは別の、より具体的な仕組み——
+  これらのコンテナはテンプレート機構を持たない(1つの`.elwind`宣言がそのまま1つのVisual
+  ノードになる)ため、Logical上の子要素リストが同時にVisual上の子要素そのものでもある。
+- **Visualツリー**: 実際にlayoutされる`Rc<dyn UIElement>`の木(`Layout`/`Shape`/`TextBlock`/
+  `NativeControl`/`Control`から組み立てられる)。H.2.1・付録Fで説明している木はこちら。
+  `UIElement::visual_children(&self) -> &[Rc<dyn UIElement>]`がこの木を歩く汎用関数
+  (`measure`/`arrange`/`hit_test`)から参照される、Visualツリー専用のアクセサ。
+
+`elwindui_core::tree::UIElementCollection`はWinUI3自身の`UIElementCollection`に相当する型で、
+`Layout`/`Control`が`.elwind`上で`#[content(children)]`(WinUI3の`ContentPropertyAttribute`
+相当)付きで宣言するLogicalツリーの子要素リストを表す。`StackImpl`/`ControlImpl`/`GridImpl`は
+これを実フィールドとして保持し、`visual_children()`はそこから`as_slice()`で直接導出される
+(`UIElementCollection::new(Vec<Rc<dyn UIElement>>) -> Self`/`as_slice(&self) ->
+&[Rc<dyn UIElement>]`のみを持つ薄いラッパー)。`Shape`(`Rectangle`/`Ellipse`)は実WinUI3の
+`Shape`同様、子要素を一切持たない純粋なリーフである。
 
 `Control`(H.2.1参照)は「Logical上は1ノード、Visual上は複数の小部品」という構造を体現する型として
 導入された——`Padding: f32`(一律)と`ContentAlignment`(`HorizontalAlignment`/`VerticalAlignment`
-の組)を持ち、WinUI3の`Control`基底クラス(独自描画ではなく複数の小部品を持てるカスタム部品)に
-相当する。
+の組)、および`children: UIElementCollection`を持ち、WinUI3の`Control`基底クラス(独自描画では
+なく複数の小部品を持てるカスタム部品)に相当する。
 
 ## H.3 フォーカス管理
 
@@ -1548,7 +1579,7 @@ elwindui-backend-iced   # 同上 + accesskitでa11y補完
 | レイアウト計算の共通化 | `LayoutNode`(Measure/Arrange)を`elwindui-core`で一元計算し、バックエンド間の見た目のズレを防止 |
 | WinUI3方式の要素階層 | `UIElement`トレイト(非ジェネリック)+ `NativeControl<H>`(実ハンドルを保持する唯一の型)+ `AsAny`によるダウンキャスト(H.2.1) |
 | Margin/Alignment | `UIElementBase`(一律`f32`のMargin、`HorizontalAlignment`/`VerticalAlignment`、既定`Stretch`)を全`UIElement`が共通して持つ(H.2.1) |
-| Logical/Visualツリーの分離 | `.elwind`上の参照関係(Logical)と実際にlayoutされる`Box<dyn UIElement>`の木(Visual)を区別、`Control`がその橋渡し(H.2.2) |
+| Logical/Visualツリーの分離 | `.elwind`上の参照関係(Logical、`UIElementCollection`)と実際にlayoutされる`Rc<dyn UIElement>`の木(Visual、`visual_children()`)を区別、`Control`/`Layout`がその橋渡し(H.2.2) |
 | WinUI3ライクな基盤全体 | `elwindui-core`という共通クレートに集約し、各バックエンドがこれを実装する構成 |
 | 独自部品(付録G)との整合 | `Canvas`ベースの部品は`#[accessible(...)]`の明示を推奨(付けない場合は静的警告) |
 

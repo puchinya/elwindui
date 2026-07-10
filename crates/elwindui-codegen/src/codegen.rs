@@ -522,6 +522,69 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
     }
 }
 
+/// Whether `view`'s element tree references `name` *anywhere at all* — broader than
+/// `view_references_bare_name`'s own notion (a *literal* same-name forward, `padding: padding`):
+/// this also counts `name` appearing as a sub-expression identifier within a larger computed value
+/// (e.g. `Rectangle`'s own `kind: ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or
+/// (0.0) }` — `corner_radius` is not a *bare* forward there, but its value is still read eagerly,
+/// before `Self` exists). Used exclusively to decide whether a field's value is needed at
+/// construction time (docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention, Phase
+/// 2's `is_deferred_field`/`generate_view`'s `is_deferred_own_field`) — deliberately *not* used by
+/// `resolve_effective_fields`'s own inherited-field-forwarding decision, which specifically wants
+/// the narrower "literal forward" notion (a field only *contributing* to some other computed value
+/// isn't being forwarded unchanged, so shouldn't be silently treated as inherited).
+fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
+    view.lets.iter().any(|l| element_references_name_anywhere(&l.element, name))
+        || element_references_name_anywhere(&view.root, name)
+}
+
+fn element_references_name_anywhere(node: &ElementNode, name: &str) -> bool {
+    if node.attributes.iter().any(|(_, expr)| view_expr_references_name_anywhere(expr, name)) {
+        return true;
+    }
+    if node.attached.iter().any(|(_, _, expr)| view_expr_references_name_anywhere(expr, name)) {
+        return true;
+    }
+    node.children.iter().any(|child| match child {
+        ChildEntry::Literal(elem) => element_references_name_anywhere(elem, name),
+        ChildEntry::Ref(n) => n == name,
+    })
+}
+
+fn view_expr_references_name_anywhere(expr: &ViewExpr, name: &str) -> bool {
+    match expr {
+        ViewExpr::Path(path) => path.iter().any(|seg| seg == name),
+        ViewExpr::MethodCall(path, _) => path.iter().any(|seg| seg == name),
+        ViewExpr::Element(elem) => element_references_name_anywhere(elem, name),
+        ViewExpr::Closure { body: ClosureBody::Element(elem), .. } => element_references_name_anywhere(elem, name),
+        ViewExpr::Closure { body: ClosureBody::Expr(e), .. } => view_expr_references_name_anywhere(e, name),
+        ViewExpr::TFluent(_, args) => args.iter().any(|(_, v)| view_expr_references_name_anywhere(v, name)),
+        ViewExpr::Expr(e) => expr_references_ident(e, name),
+    }
+}
+
+/// Whether the raw Rust expression `expr` references a bare identifier `name` anywhere within it
+/// (e.g. `corner_radius` inside `corner_radius.unwrap_or(0.0)`) — a `syn::visit::Visit` walk over
+/// every `syn::Expr::Path` node, since `ViewExpr::Expr` wraps an arbitrary parsed Rust expression
+/// with no DSL-level structure of its own left to pattern-match on.
+fn expr_references_ident(expr: &syn::Expr, name: &str) -> bool {
+    struct Finder<'a> {
+        name: &'a str,
+        found: bool,
+    }
+    impl<'a> syn::visit::Visit<'a> for Finder<'a> {
+        fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
+            if node.path.segments.len() == 1 && node.path.segments[0].ident == self.name {
+                self.found = true;
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+    }
+    let mut finder = Finder { name, found: false };
+    syn::visit::Visit::visit_expr(&mut finder, expr);
+    finder.found
+}
+
 /// Recursively flattens `c`'s effective method list: its base's own effective methods (an
 /// `#[override]`n one is kept alongside under a mangled `__base_<name>` so the override's body can
 /// still reach it via `base::name(...)`, rewritten by `rewrite_base_calls`), followed by `c`'s own
@@ -1373,10 +1436,46 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
 
         match &f.initializer {
             None => {
-                // `#[param] #[inject]` field: supplied by the caller, stored as-is.
-                struct_fields.extend(quote! { pub #field_ident: #ty, });
-                ctor_params.extend(quote! { #field_ident: #ty, });
-                ctor_field_inits.extend(quote! { #field_ident, });
+                // `#[param] #[inject]` field: supplied by the caller. `Option<T>`-typed fields
+                // (docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention,
+                // extended from builtins to plain `component`s) are deferred instead — dropped from
+                // `new(..)`'s own argument list, stored `Cell`/`RefCell`-wrapped (`is_copy_type`)
+                // defaulting to `None`, and given a `set_<name>(&self, value: T)` setter — `None`
+                // is `Option<T>`'s own natural "not yet set" value, so (unlike a required field of
+                // arbitrary, possibly non-`Default` type) there's always a sound value to start
+                // from. A required (non-`Option`) field stays exactly as before: a `new(..)`
+                // argument, plain storage, no setter. Every field is private (not `pub`) either
+                // way — external and internal reads alike go through the accessor below, since a
+                // deferred field's storage type is no longer the field's own declared type.
+                let (inner_ty_str, is_option) = strip_option(&f.ty);
+                if is_option {
+                    let inner_ty: syn::Type = syn::parse_str(inner_ty_str).expect("field inner type must parse");
+                    let cell_ty = if is_copy_type(inner_ty_str) { quote! { std::cell::Cell } } else { quote! { std::cell::RefCell } };
+                    struct_fields.extend(quote! { #field_ident: #cell_ty<Option<#inner_ty>>, });
+                    ctor_field_inits.extend(quote! { #field_ident: #cell_ty::new(None), });
+                    let set_name = format_ident!("set_{}", f.name);
+                    let get_body = if is_copy_type(inner_ty_str) {
+                        quote! { self.#field_ident.get() }
+                    } else {
+                        quote! { self.#field_ident.borrow().clone() }
+                    };
+                    let set_body = if is_copy_type(inner_ty_str) {
+                        quote! { self.#field_ident.set(Some(value)); }
+                    } else {
+                        quote! { *self.#field_ident.borrow_mut() = Some(value); }
+                    };
+                    accessors.extend(quote! {
+                        pub fn #field_ident(&self) -> #ty { #get_body }
+                        pub fn #set_name(&self, value: #inner_ty) { #set_body }
+                    });
+                } else {
+                    struct_fields.extend(quote! { #field_ident: #ty, });
+                    ctor_params.extend(quote! { #field_ident: #ty, });
+                    ctor_field_inits.extend(quote! { #field_ident, });
+                    accessors.extend(quote! {
+                        pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                    });
+                }
             }
             Some(Initializer::Bind { path, mode: _ }) => {
                 // `content: String = bind!(vm.content, TwoWay)`: pure passthrough, no storage of
@@ -1683,6 +1782,80 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         .map(|(_, t)| t.clone())
         .collect();
 
+    // docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention, extended from
+    // builtins (付録H.2.1a's own "Phase 1") to every `view`-having component: an `Option<T>`-typed
+    // own field (never a forwarded one — those are excluded from `own_struct_param_names` above
+    // already, and always consumed eagerly building `base`) whose name is never referenced anywhere
+    // in *this* component's own view construction (`view_references_name_anywhere` — not just a
+    // *bare* forward like `ContentControl`'s `Control { padding: padding }`, but also as a
+    // sub-expression identifier, e.g. `Rectangle`'s own `corner_radius.unwrap_or(0.0)`; either way
+    // the value is needed before `Self` even exists, so it can't be deferred) is dropped from
+    // `new(..)`'s own argument list, stored `Cell`/`RefCell`-wrapped (`is_copy_type`) defaulting to
+    // `None`, and given a `set_<name>(&self, value: T)` setter. Every other own field
+    // (required/non-`Option`, or referenced anywhere in this component's own view regardless of
+    // `Option`-ness) keeps today's exact behavior unchanged: a `new(..)` argument, plain storage, no
+    // setter — there's no sound default to defer a `Default`-less required field to, and a
+    // referenced field's value is needed eagerly at construction time either way.
+    let is_deferred_own_field = |name: &syn::Ident| -> bool {
+        let ty_str = ctx.own_fields.get(&name.to_string()).expect("own_struct_param_names names one of ctx.own_fields' own keys");
+        strip_option(ty_str).1 && !view_references_name_anywhere(view, &name.to_string())
+    };
+    let deferred_own_names: Vec<syn::Ident> = own_struct_param_names.iter().filter(|n| is_deferred_own_field(n)).cloned().collect();
+    let deferred_own_inner_types: Vec<syn::Type> = deferred_own_names
+        .iter()
+        .map(|n| {
+            let ty_str = ctx.own_fields.get(&n.to_string()).expect("own_struct_param_names names one of ctx.own_fields' own keys");
+            syn::parse_str(strip_option(ty_str).0).expect("field inner type must parse")
+        })
+        .collect();
+    let deferred_own_cell_types: Vec<TokenStream> = deferred_own_names
+        .iter()
+        .zip(deferred_own_inner_types.iter())
+        .map(|(n, inner_ty)| {
+            let ty_str = ctx.own_fields.get(&n.to_string()).unwrap();
+            let cell_ty = if is_copy_type(strip_option(ty_str).0) { quote! { std::cell::Cell } } else { quote! { std::cell::RefCell } };
+            quote! { #cell_ty<Option<#inner_ty>> }
+        })
+        .collect();
+    let deferred_own_names_set: HashSet<String> = deferred_own_names.iter().map(|n| n.to_string()).collect();
+    // The `Self { .. }`/`#struct_ident { .. }` construction shorthand (`#(#name,)*`) only works for
+    // a field with a live local variable of the same name — still true for a required own field
+    // (still a `new(..)` argument), but not a deferred one (no argument, no local variable at all),
+    // which instead needs an explicit `#name: #cell_ty::new(None)` initializer built here once and
+    // reused by both `new(..)`'s own inline construction and `create_<snake case>(..)` below.
+    let required_own_names: Vec<syn::Ident> =
+        own_struct_param_names.iter().filter(|n| !deferred_own_names_set.contains(&n.to_string())).cloned().collect();
+    let required_own_types: Vec<syn::Type> = own_struct_param_names
+        .iter()
+        .zip(own_struct_param_types.iter())
+        .filter(|(n, _)| !deferred_own_names_set.contains(&n.to_string()))
+        .map(|(_, t)| t.clone())
+        .collect();
+    let deferred_own_field_decls: TokenStream = deferred_own_names
+        .iter()
+        .zip(deferred_own_cell_types.iter())
+        .map(|(name, cell_ty)| quote! { #name: #cell_ty, })
+        .collect();
+    let deferred_field_inits: TokenStream = deferred_own_names
+        .iter()
+        .zip(deferred_own_cell_types.iter())
+        // `<#cell_ty>::new(..)`, not the bare `#cell_ty::new(..)` — a generic type's own associated
+        // function called in *expression* position needs the qualified-path `<Type>::method()` form
+        // (`Vec<i32>::new()` alone is ambiguous with a chained `<`/`>` comparison at this position;
+        // only a type *annotation* context, e.g. `let x: Vec<i32> = ..`, allows the bare form).
+        .map(|(name, cell_ty)| quote! { #name: <#cell_ty>::new(None), })
+        .collect();
+    // `new(..)`/`create_<snake case>(..)`'s own argument list — `param_names`/`param_types` (which
+    // also includes any `forward_param_names` prefix, never deferred — see above) minus the
+    // deferred subset.
+    let ctor_param_names: Vec<syn::Ident> = param_names.iter().filter(|n| !deferred_own_names_set.contains(&n.to_string())).cloned().collect();
+    let ctor_param_types: Vec<syn::Type> = param_names
+        .iter()
+        .zip(param_types.iter())
+        .filter(|(n, _)| !deferred_own_names_set.contains(&n.to_string()))
+        .map(|(_, t)| t.clone())
+        .collect();
+
     let mut struct_fields = TokenStream::new();
     let mut construct_stmts = TokenStream::new();
     let mut field_inits = TokenStream::new();
@@ -1705,20 +1878,48 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // delegates to the base: a `is_template_composition` forward reads the base's own already-
     // generated accessor method of the same name (`self.base.<name>()`), while a
     // `shape_forwarded_names` one reads the field straight off the base's `elwindui_core::tree`
-    // struct instead (`self.base.<name>.clone()`) — those structs' fields are plain `pub`, not
-    // wrapped in accessor methods, unlike a DSL-composed base.
+    // struct instead — those structs' non-`Copy` fields are `RefCell`-wrapped (docs/elwindui_spec.md
+    // 付録H.2.1a's post-construction setter convention), so this reads `self.base.<name>.borrow()
+    // .clone()`, not a plain `.clone()` (unlike a DSL-composed base's own accessor method).
     for (name, ty) in param_names.iter().zip(param_types.iter()) {
         let is_forwarded = !own_struct_param_names.contains(name);
+        let is_deferred = deferred_own_names_set.contains(&name.to_string());
         let body = if is_template_composition && is_forwarded {
             quote! { self.base.#name() }
         } else if is_forwarded {
-            quote! { self.base.#name.clone() }
+            quote! { self.base.#name.borrow().clone() }
+        } else if is_deferred {
+            let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
+            if is_copy_type(strip_option(ty_str).0) {
+                quote! { self.#name.get() }
+            } else {
+                quote! { self.#name.borrow().clone() }
+            }
         } else {
             quote! { self.#name.clone() }
         };
         named_accessors.extend(quote! {
             pub fn #name(&self) -> #ty {
                 #body
+            }
+        });
+    }
+    // `set_<name>(&self, value: T)` for every deferred own field — the post-construction setter
+    // half of the convention (`deferred_own_names`'s own doc comment). `T` is the field's *inner*
+    // (unwrapped) type, bare — not `Option<T>` — matching Phase 1's builtin setter convention
+    // exactly (`build_component_setters`): an absent value simply never calls this at all, leaving
+    // the field's own `None` default in place, so the setter itself never needs to accept `None`.
+    for (name, inner_ty) in deferred_own_names.iter().zip(deferred_own_inner_types.iter()) {
+        let set_name = format_ident!("set_{}", name);
+        let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
+        let set_body = if is_copy_type(strip_option(ty_str).0) {
+            quote! { self.#name.set(Some(value)); }
+        } else {
+            quote! { *self.#name.borrow_mut() = Some(value); }
+        };
+        named_accessors.extend(quote! {
+            pub fn #set_name(&self, value: #inner_ty) {
+                #set_body
             }
         });
     }
@@ -1971,7 +2172,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             {
                 use elwindui_core::tree::UIElement as _;
                 let __erased: std::rc::Rc<dyn elwindui_core::tree::UIElement> = this.clone();
-                for child in this.children() {
+                for child in this.visual_children() {
                     *child.base().parent.borrow_mut() = Some(std::rc::Rc::downgrade(&__erased));
                 }
             }
@@ -1999,8 +2200,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 fn base(&self) -> &elwindui_core::tree::UIElementImpl {
                     elwindui_core::tree::UIElement::base(&self.base)
                 }
-                fn children(&self) -> &[std::rc::Rc<dyn elwindui_core::tree::UIElement>] {
-                    elwindui_core::tree::UIElement::children(&self.base)
+                fn visual_children(&self) -> Vec<std::rc::Rc<dyn elwindui_core::tree::UIElement>> {
+                    elwindui_core::tree::UIElement::visual_children(&self.base)
                 }
                 fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
                     elwindui_core::tree::UIElement::measure_override(&self.base, available, child_sizes)
@@ -2042,20 +2243,20 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     let create_fn_ident = composed_create_fn_ident(&target_name);
     let create_fn = if is_composed {
         quote! {
-            pub fn #create_fn_ident(#(#param_names: #param_types),*) -> #struct_ident {
+            pub fn #create_fn_ident(#(#ctor_param_names: #ctor_param_types),*) -> #struct_ident {
                 #construct_stmts
-                #struct_ident { #(#own_struct_param_names,)* #field_inits }
+                #struct_ident { #(#required_own_names,)* #deferred_field_inits #field_inits }
             }
         }
     } else {
         TokenStream::new()
     };
     let new_construct_stmt = if is_composed {
-        quote! { let this = std::rc::Rc::new(#create_fn_ident(#(#param_names),*)); }
+        quote! { let this = std::rc::Rc::new(#create_fn_ident(#(#ctor_param_names),*)); }
     } else {
         quote! {
             #construct_stmts
-            let this = std::rc::Rc::new(Self { #(#own_struct_param_names,)* #field_inits });
+            let this = std::rc::Rc::new(Self { #(#required_own_names,)* #deferred_field_inits #field_inits });
         }
     };
 
@@ -2063,7 +2264,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         #create_fn
 
         impl #struct_ident {
-            pub fn new(#(#param_names: #param_types),*) -> std::rc::Rc<Self> {
+            pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                 #new_construct_stmt
                 #parent_wiring_stmt
                 #wiring_stmts
@@ -2091,7 +2292,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         }
 
         pub struct #struct_ident {
-            #(#own_struct_param_names: #own_struct_param_types,)*
+            #(#required_own_names: #required_own_types,)*
+            #deferred_own_field_decls
             #struct_fields
         }
 
@@ -2346,8 +2548,10 @@ fn into_any_view_if_needed(base: TokenStream, ty: &str) -> TokenStream {
 /// `inherits`-based shape-composition pattern, docs/elwindui_spec.md §3, same as `RoundedPanel
 /// inherits Rectangle`), so it goes through the normal `generate_view`/`emit_construction` path and
 /// gets a real generated struct with real accessors.
-/// See docs/elwindui_spec.md 付録H.2.
-fn is_virtual_builtin(type_path: &str) -> bool {
+/// See docs/elwindui_spec.md 付録H.2. `pub(crate)`: `validate.rs`'s `validate_inherits` also
+/// consults this, to exempt a virtual builtin's own `inherits` declaration from the shape-
+/// composition "view root must construct Base" check — see that function's doc comment.
+pub(crate) fn is_virtual_builtin(type_path: &str) -> bool {
     matches!(type_path, "VerticalLayout" | "HorizontalLayout" | "TextBlock" | "Control" | "Grid" | "Shape")
 }
 
@@ -2468,20 +2672,38 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
     quote! { Box::new(move |#param_ident: &_| { #body_expr }) }
 }
 
+/// Whether `info` names a hand-written native type with no generated Rust of its own
+/// (`is_native && !has_view` — `Button`/`TextArea`/`TabView`/`TabViewItem` via `inherits
+/// NativeControl`, and `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` via `#[native]`
+/// directly). These are the only components whose own `Type::new(..)` is hand-written Rust rather
+/// than `generate_view`-produced — `emit_construction` uses this to decide between the
+/// zero-argument-constructor-plus-setters convention (`build_component_setters`, docs/
+/// elwindui_spec.md 付録H.2.1a's post-construction setter convention extended to every builtin
+/// property) and the ordinary positional-argument `Type::new(args)` every `has_view` component
+/// (embedded/composed like `ContentControl`, or a plain user-defined component) still uses —
+/// unchanged, since `generate_view`'s own construction isn't part of this pass (see this crate's
+/// own follow-up plan notes on the deferred, much larger user-component field-storage rewrite).
+fn is_hand_written_native(info: &TypeInfo) -> bool {
+    info.is_native && !info.has_view
+}
+
 /// The only construction mechanism left: resolve `node.type_path` via `SymbolTable` (every
 /// resolved type — a plain user component, a component-with-view, or a builtin shape backed by
-/// hand-written Rust in an `elwindui-backend-*` crate — is treated identically) and call `Type::new(args)`,
-/// `args` built from `info.param_fields` in declaration order:
-/// - a param named `children` is filled from the element's bare nested children (a `Vec`,
-///   `AnyView`-converted per element only if the declared type says `AnyView`);
-/// - a `ViewExpr::Element`-valued attribute (`menu_bar: MenuBar { .. }`) is filled from its own
-///   already-planned/constructed binding (`element_attr_bindings`);
-/// - a `ViewExpr::Closure`-valued attribute compiles to a real boxed closure (`emit_closure_value`);
-/// - an `Option<..>`-typed param with no matching attribute becomes `None`;
-/// - the param named by the component's own `#[content(field_name)]` (docs/elwindui_spec.md 付録E,
-///   `TypeInfo::content_field`) with no matching attribute binds the element's single bare nested
-///   child (`MenuBarItem`'s single nested `Menu`, bound to its `#[content(submenu)]` field);
-/// - anything else is an ordinary `emit_expr` value.
+/// hand-written Rust in an `elwindui-backend-*` crate — is treated identically) and either:
+/// - (`is_hand_written_native`) call `Type::new()` (no arguments) followed by whichever
+///   `set_<field>(..)` calls this use site's own attributes supply (`build_component_setters`); or
+/// - (everything else — `generate_view`-produced, `has_view == true`) call `Type::new(args)`,
+///   `args` built from `info.param_fields` in declaration order (`build_component_args`):
+///   - a param named `children` is filled from the element's bare nested children (a `Vec`,
+///     `AnyView`-converted per element only if the declared type says `AnyView`);
+///   - a `ViewExpr::Element`-valued attribute (`menu_bar: MenuBar { .. }`) is filled from its own
+///     already-planned/constructed binding (`element_attr_bindings`);
+///   - a `ViewExpr::Closure`-valued attribute compiles to a real boxed closure (`emit_closure_value`);
+///   - an `Option<..>`-typed param with no matching attribute becomes `None`;
+///   - the param named by the component's own `#[content(field_name)]` (docs/elwindui_spec.md 付録E,
+///     `TypeInfo::content_field`) with no matching attribute binds the element's single bare nested
+///     child (`MenuBarItem`'s single nested `Menu`, bound to its `#[content(submenu)]` field);
+///   - anything else is an ordinary `emit_expr` value.
 fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
     if is_virtual_builtin(&node.type_path) {
         emit_virtual_construction(node, ctx, from, table, out);
@@ -2493,11 +2715,26 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
         panic!("unknown or out-of-scope element `{}` — is a `use` for it missing?", node.type_path)
     });
     let type_ident = concrete_type_ident(&node.type_path, Some(info));
-    let args = build_component_args(node, ctx, from, table, info);
 
-    out.extend(quote! {
-        let #binding = #type_ident::new(#(#args),*);
-    });
+    if is_hand_written_native(info) {
+        let setters = build_component_setters(node, ctx, from, table, info);
+        out.extend(quote! {
+            let #binding = #type_ident::new();
+            #(#setters)*
+        });
+    } else {
+        // `has_view`/plain-component construction (docs/elwindui_spec.md 付録H.2.1a's
+        // post-construction setter convention, Phase 2): `build_component_args` already omits this
+        // target's own deferred `Option<T>` fields (`is_deferred_field`) from the positional list —
+        // `build_component_optional_setters` supplies the matching trailing `.set_<field>(value)`
+        // calls for whichever of them this use site actually gives a value.
+        let args = build_component_args(node, ctx, from, table, info);
+        let optional_setters = build_component_optional_setters(node, ctx, from, table, info);
+        out.extend(quote! {
+            let #binding = #type_ident::new(#(#args),*);
+            #(#optional_setters)*
+        });
+    }
     // `Button`/`TextArea`/`TabView` (`inherits NativeControl`, `TypeInfo::is_native_control_leaf`)
     // own a real `base: elwindui_core::tree::NativeControlImpl<H>` field (docs/elwindui_spec.md
     // 付録H.2.1a) — this use site's margin/data_context/grid_cell are applied to it right here,
@@ -2516,11 +2753,39 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
     }
 }
 
+/// Whether `name` (declared type `ty`) is a *deferred* field on a `has_view`/plain (non-hand-
+/// written-native) component — `generate_view`'s own `is_deferred_own_field`/`generate_component`'s
+/// matching field split, mirrored here for the calling side so `build_component_args`/
+/// `build_component_optional_setters` agree with what that target's own generated `new(..)`
+/// actually still accepts positionally. `Option<T>`-typed, and (when the target has a `view`) not
+/// referenced anywhere in its own effective view (`view_references_name_anywhere` — not just a
+/// *bare* forward like `ContentControl`'s `padding: padding` into `Control { padding: padding }`,
+/// but also as a sub-expression identifier, e.g. `Rectangle`'s own
+/// `corner_radius.unwrap_or(0.0)`) — either way the value is needed eagerly, before that target's
+/// own `Self` exists, so it can't be deferred to a setter. A `None` effective view (a plain
+/// component with no `view` at all) has no such construction-time reference to worry about, so
+/// `Option`-ness alone decides. Never true for a hand-written native (`is_hand_written_native`) —
+/// that family defers *every* field unconditionally via the separate, older
+/// `build_component_setters` path, not this one.
+fn is_deferred_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
+    if is_hand_written_native(info) || !strip_option(ty).1 {
+        return false;
+    }
+    match &info.effective_view {
+        Some(view) => !view_references_name_anywhere(view, name),
+        None => true,
+    }
+}
+
 /// Evaluates a resolved user-component node's own attributes into the positional argument list its
 /// generated `new(..)`/`create_<snake case>(..)` (docs/elwindui_spec.md 付録H.2.1a) expects, in
 /// `info.param_fields`'s declared order — shared by `emit_construction` (wraps as `Type::new(args)`)
 /// and `build_component_value` (wraps as `create_<snake case>(args)`, for a shape-composition root
 /// whose base is itself a DSL component rather than a hand-written `elwindui_core::tree` primitive).
+/// Skips a deferred field (`is_deferred_field`) entirely — no positional slot at all, not even a
+/// placeholder `None` — since that target's own `new(..)` no longer declares one; the matching
+/// value (if this use site supplies one) is applied afterward instead, via
+/// `build_component_optional_setters`.
 fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, info: &TypeInfo) -> Vec<TokenStream> {
     // A bare nested child element (no `name:` attribute) only ever has somewhere to go if this
     // component declares a `children`-named param (a list, consumed in full below) or a
@@ -2539,6 +2804,9 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
 
     let mut args = Vec::new();
     for (name, ty) in &info.param_fields {
+        if is_deferred_field(info, name, ty) {
+            continue;
+        }
         if name == "children" {
             let wants_node = ty.contains("dyn UIElement");
             let items = node.child_bindings.iter().map(|(c, child_ty)| {
@@ -2618,12 +2886,195 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
     args
 }
 
+/// The post-construction-setter analog of `build_component_args` — used by `emit_construction`'s
+/// `is_hand_written_native` branch instead of positional constructor args (docs/elwindui_spec.md
+/// 付録H.2.1a's post-construction setter convention, extended to every builtin's own declared
+/// `#[param]`s, the same way `emit_common_ui_element_setters` already applies it to
+/// margin/data_context/grid_cell). Mirrors `build_component_args`'s field-by-field value
+/// computation exactly (same bare-children/`ViewExpr::Element`/`ViewExpr::Closure`/
+/// `#[content(field_name)]` handling), except:
+/// - an absent `Option<..>`-typed attribute emits **no call at all** (the zero-argument
+///   constructor's own default already applies) rather than a placeholder `None`;
+/// - an `Option<..>`-typed attribute that *is* present is passed to the setter **unwrapped**
+///   (its inner type), never `Some(..)`-wrapped — matching `emit_resync`'s own pre-existing
+///   convention for these same hand-written setters ("the resync value itself is never
+///   `Option`-wrapped, only construction-time *positional* args were" — see that function's doc
+///   comment). Every hand-written builtin setter (`Button::set_enabled`, `MenuItem::set_shortcut`,
+///   `TabView::set_items_source`, ...) already exists to serve `emit_resync`'s calls with this bare
+///   shape, so construction must call the very same setters the very same way, not the old
+///   positional-constructor's own `Some(..)`-wrapping convention (that convention lives only in
+///   `build_component_args`, still used for `has_view` components' *actual* constructor
+///   parameters, an entirely different call site);
+/// - a `String`-shaped param still takes `&str` at the hand-written setter (unlike
+///   `build_component_args`'s `has_view`-conditional `.to_string()`, which never applies here
+///   since `is_hand_written_native` implies `!info.has_view`);
+/// - `TabView`'s `items_source`/`header_template`/`item_template` trio (all generic over the same
+///   `T`) is combined into a single `set_dynamic_source(items, header_template, item_template)`
+///   call instead of three independent ones — Rust can only unify a generic method call's type
+///   parameter across *that one call*'s own arguments; `header_template`/`item_template`'s closure
+///   bodies (`|doc| doc.file_name()`) carry no concrete type of their own to infer `T` from in
+///   isolation, so they must share a call with `items_source` (whose *value*, e.g.
+///   `vm.documents()`, is concretely `Vec<Rc<Document>>`) the same way the old single positional
+///   constructor let all of `Type::new(..)`'s arguments unify one shared `T`. `set_items_source`
+///   itself stays a separate, single-argument method (unaffected) — `emit_resync` already calls it
+///   alone (its own value is concrete, no closure involved, so no inference problem there).
+fn build_component_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, info: &TypeInfo) -> Vec<TokenStream> {
+    let has_children_field = info.param_fields.iter().any(|(name, _)| name == "children");
+    if !has_children_field && info.content_field.is_none() && !node.child_bindings.is_empty() {
+        panic!(
+            "`{}` has no `children` field or `#[content(field_name)]` to receive its {} bare nested child element(s) — \
+             add an explicit `name: value` attribute for each, or declare `#[content(field_name)]` on the component",
+            node.type_path,
+            node.child_bindings.len()
+        );
+    }
+
+    let binding = &node.binding;
+    let mut setters = Vec::new();
+    // See this function's own doc comment's `TabView` bullet — `header_template`/`item_template`
+    // are consumed together with `items_source` (whichever of the three is encountered first in
+    // `info.param_fields`' declared order), so encountering either of the other two afterward must
+    // be a no-op rather than emitting its own (uninferrable) call.
+    let mut dynamic_source_handled = false;
+    for (name, ty) in &info.param_fields {
+        if (name == "header_template" || name == "item_template") && dynamic_source_handled {
+            continue;
+        }
+        if name == "items_source" && info.param_fields.iter().any(|(n, _)| n == "header_template") {
+            let Some(items) = find_attr(node, "items_source") else { continue };
+            let Some(ViewExpr::Closure { param: header_param, body: header_body }) = find_attr(node, "header_template") else { continue };
+            let Some(ViewExpr::Closure { param: item_param, body: item_body }) = find_attr(node, "item_template") else { continue };
+            let items = emit_expr(items, ctx, &EmitMode::Construction);
+            let header_template = emit_closure_value(header_param, header_body, ctx, from, table);
+            let item_template = emit_closure_value(item_param, item_body, ctx, from, table);
+            setters.push(quote! { #binding.set_dynamic_source(#items, #header_template, #item_template); });
+            dynamic_source_handled = true;
+            continue;
+        }
+
+        let setter_ident = format_ident!("set_{}", name);
+        if name == "children" {
+            let wants_node = ty.contains("dyn UIElement");
+            let items = node.child_bindings.iter().map(|(c, child_ty)| {
+                if wants_node {
+                    into_node_if_needed(quote! { #c }, child_ty, from, table)
+                } else {
+                    into_any_view_if_needed(quote! { #c }, ty)
+                }
+            });
+            setters.push(quote! { #binding.#setter_ident(vec![ #(#items),* ]); });
+            continue;
+        }
+
+        let (inner_ty, is_option) = strip_option(ty);
+        let attr = find_attr(node, name);
+        let value = match attr {
+            Some(ViewExpr::Element(_)) => {
+                let (nested_binding, nested_ty) = node
+                    .element_attr_bindings
+                    .get(name.as_str())
+                    .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
+                if inner_ty.contains("dyn UIElement") {
+                    into_node_if_needed(quote! { #nested_binding }, nested_ty, from, table)
+                } else {
+                    into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
+                }
+            }
+            Some(ViewExpr::Closure { param, body }) => emit_closure_value(param, body, ctx, from, table),
+            Some(other) => {
+                let value = emit_expr(other, ctx, &EmitMode::Construction);
+                if inner_ty == "String" {
+                    quote! { &(#value) }
+                } else {
+                    value
+                }
+            }
+            None if is_option => continue,
+            None if info.content_field.as_deref() == Some(name.as_str()) && !node.child_bindings.is_empty() => {
+                if node.child_bindings.len() > 1 {
+                    panic!(
+                        "`{}`'s `#[content({name})]` field can only bind a single nested child element, found {}",
+                        node.type_path,
+                        node.child_bindings.len()
+                    );
+                }
+                let (child, child_ty) = &node.child_bindings[0];
+                if inner_ty.contains("dyn UIElement") {
+                    into_node_if_needed(quote! { #child }, child_ty, from, table)
+                } else {
+                    into_any_view_if_needed(quote! { #child }, inner_ty)
+                }
+            }
+            None => panic!("`{}` requires attribute `{name}`", node.type_path),
+        };
+        setters.push(quote! { #binding.#setter_ident(#value); });
+    }
+    setters
+}
+
+/// The Phase 2 counterpart of `build_component_setters` — trailing `.set_<field>(value)` calls for
+/// a `has_view`/plain component's own *deferred* `Option<T>` fields (`is_deferred_field`), used
+/// alongside `build_component_args`'s now-shrunk positional list (see `emit_construction`'s
+/// non-`is_hand_written_native` branch). Only ever emits a call when this use site actually
+/// supplies a value for the field — an absent one leaves that field's own
+/// `RefCell::new(None)`/`Cell::new(None)` default in place (`generate_view`/`generate_component`'s
+/// own field-splitting doc comment).
+fn build_component_optional_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, info: &TypeInfo) -> Vec<TokenStream> {
+    let binding = &node.binding;
+    let mut setters = Vec::new();
+    for (name, ty) in &info.param_fields {
+        if !is_deferred_field(info, name, ty) {
+            continue;
+        }
+        let setter_ident = format_ident!("set_{}", name);
+        // `is_deferred_field` only ever returns `true` for an `Option<..>`-typed field, so
+        // `inner_ty` here is always the unwrapped inner type.
+        let (inner_ty, _) = strip_option(ty);
+        let value = match find_attr(node, name) {
+            Some(ViewExpr::Element(_)) => {
+                let (nested_binding, nested_ty) = node
+                    .element_attr_bindings
+                    .get(name.as_str())
+                    .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
+                if inner_ty.contains("dyn UIElement") {
+                    into_node_if_needed(quote! { #nested_binding }, nested_ty, from, table)
+                } else {
+                    into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
+                }
+            }
+            Some(ViewExpr::Closure { param, body }) => emit_closure_value(param, body, ctx, from, table),
+            Some(other) => {
+                let value = emit_expr(other, ctx, &EmitMode::Construction);
+                // The generated `set_<field>` setter takes the field's own declared (owned) inner
+                // type, e.g. `String` — not `&str` the way a hand-written builtin's setter does
+                // (`build_component_setters`) — matching `build_component_args`'s own
+                // `has_view`-conditional `.to_string()` convention.
+                if inner_ty == "String" {
+                    quote! { (#value).to_string() }
+                } else {
+                    value
+                }
+            }
+            None => continue,
+        };
+        setters.push(quote! { #binding.#setter_ident(#value); });
+    }
+    setters
+}
+
 /// Builds the plain (not yet `Rc`-wrapped) `create_<snake case>(args)` call for a shape-composition
 /// root whose base is a resolved DSL component (rather than a hand-written `elwindui_core::tree`
 /// primitive — see `build_virtual_value` for that case) — e.g. `RoundedPanel inherits ContentControl`,
 /// whose own `view` root literally constructs `ContentControl`. Mirrors `emit_construction`'s
 /// `Type::new(args)` shape exactly, just calling the base's own plain factory instead (see
 /// `generate_view`'s `is_shape_composition` branch).
+///
+/// Known gap (Phase 2, docs/elwindui_spec.md 付録H.2.1a): `build_component_args` already omits any
+/// of the base's own *deferred* `Option<T>` fields from this positional call (`is_deferred_field`),
+/// but unlike `emit_construction` this single-expression call site has no room to append the
+/// matching trailing `.set_<field>(value)` calls (`build_component_optional_setters`) afterward —
+/// so a value supplied here for such a field is currently silently dropped. Doesn't affect any
+/// `#[embedded]` base today (none has a deferred field); revisit if a future one does.
 fn build_component_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
     let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
         panic!("unknown or out-of-scope element `{}` — is a `use` for it missing?", node.type_path)
@@ -2720,9 +3171,12 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
     out.extend(emit_generic_on_click_routing(node, ctx, &binding_ts));
 }
 
-/// Builds the plain (not yet `new_element`-wrapped) `elwindui_core::tree::create_xxx(...)` call for
-/// a virtual builtin node — the value `emit_virtual_construction` normally wraps immediately, but
-/// which a `component X inherits Y` shape-composition root (docs/elwindui_spec.md 付録H.2.1a) needs
+/// Builds the plain (not yet `new_element`-wrapped) `elwindui_core::tree::create_xxx()` (empty
+/// argument — docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention, extended to
+/// every builtin property) followed by whichever `set_<field>(..)` calls this use site's own
+/// attributes supply, as a single block expression evaluating to the fully-configured value — the
+/// value `emit_virtual_construction` normally wraps immediately in `new_element(..)`, but which a
+/// `component X inherits Y` shape-composition root (docs/elwindui_spec.md 付録H.2.1a) needs
 /// unwrapped so it can be embedded directly as `X`'s own `base` field instead of erased into
 /// `Rc<dyn UIElement>` (see `generate_view`'s `is_shape_composition` branch).
 fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
@@ -2769,13 +3223,23 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
         "VerticalLayout" => {
             let spacing = get_attr("spacing");
             quote! {
-                elwindui_core::tree::create_vertical_layout((#spacing).unwrap_or(0.0), vec![ #(#children),* ])
+                {
+                    let __v = elwindui_core::tree::create_vertical_layout();
+                    __v.set_spacing((#spacing).unwrap_or(0.0));
+                    __v.set_children(elwindui_core::tree::UIElementCollection::new(vec![ #(#children),* ]));
+                    __v
+                }
             }
         }
         "HorizontalLayout" => {
             let spacing = get_attr("spacing");
             quote! {
-                elwindui_core::tree::create_horizontal_layout((#spacing).unwrap_or(0.0), vec![ #(#children),* ])
+                {
+                    let __v = elwindui_core::tree::create_horizontal_layout();
+                    __v.set_spacing((#spacing).unwrap_or(0.0));
+                    __v.set_children(elwindui_core::tree::UIElementCollection::new(vec![ #(#children),* ]));
+                    __v
+                }
             }
         }
         "Shape" => {
@@ -2785,7 +3249,14 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let stroke = get_attr_string("stroke");
             let stroke_width = get_attr("stroke_width");
             quote! {
-                elwindui_core::tree::create_shape(#kind, #fill, #stroke, (#stroke_width).unwrap_or(0.0), vec![ #(#children),* ])
+                {
+                    let __v = elwindui_core::tree::create_shape();
+                    __v.set_kind(#kind);
+                    __v.set_fill(#fill);
+                    __v.set_stroke(#stroke);
+                    __v.set_stroke_width((#stroke_width).unwrap_or(0.0));
+                    __v
+                }
             }
         }
         "TextBlock" => {
@@ -2793,18 +3264,23 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let text = emit_expr(text, ctx, &EmitMode::Construction);
             let color = get_attr_string("color");
             quote! {
-                elwindui_core::tree::create_text_block((#text).to_string(), #color)
+                {
+                    let __v = elwindui_core::tree::create_text_block();
+                    __v.set_text((#text).to_string());
+                    __v.set_color(#color);
+                    __v
+                }
             }
         }
         "Control" => {
             let padding = get_attr("padding");
             quote! {
-                elwindui_core::tree::create_control(
-                    (#padding).unwrap_or(0.0),
-                    elwindui_core::layout::HorizontalAlignment::Stretch,
-                    elwindui_core::layout::VerticalAlignment::Stretch,
-                    vec![ #(#children),* ],
-                )
+                {
+                    let __v = elwindui_core::tree::create_control();
+                    __v.set_padding((#padding).unwrap_or(0.0));
+                    __v.set_children(elwindui_core::tree::UIElementCollection::new(vec![ #(#children),* ]));
+                    __v
+                }
             }
         }
         "Grid" => {
@@ -2813,7 +3289,13 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let columns = find_attr(node, "columns").unwrap_or_else(|| panic!("`Grid` requires attribute `columns`"));
             let columns = emit_expr(columns, ctx, &EmitMode::Construction);
             quote! {
-                elwindui_core::tree::create_grid((#rows).to_vec(), (#columns).to_vec(), vec![ #(#children),* ])
+                {
+                    let __v = elwindui_core::tree::create_grid();
+                    __v.set_rows((#rows).to_vec());
+                    __v.set_columns((#columns).to_vec());
+                    __v.set_children(elwindui_core::tree::UIElementCollection::new(vec![ #(#children),* ]));
+                    __v
+                }
             }
         }
         other => unreachable!("is_virtual_builtin guards this match, got `{other}`"),

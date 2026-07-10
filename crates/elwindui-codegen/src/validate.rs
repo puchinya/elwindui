@@ -531,12 +531,20 @@ fn validate_bind_path(
 
 /// Checks `component X inherits Base { .. }` (docs/elwindui_spec.md §3): `Base` must resolve, then
 /// branches on what kind of base it is:
+/// - `X` itself is a hand-written virtual builtin (`codegen::is_virtual_builtin` —
+///   `VerticalLayout`/`HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`): unconditionally
+///   allowed regardless of `Base`'s own shape. A virtual builtin is constructed entirely by
+///   `codegen::build_virtual_value`'s per-type-name `match`, never through a `view` — it's
+///   structurally incapable of having one, so none of the `view`-based checks below apply (this is
+///   what lets `Layout` carry a real `children: UIElementCollection` field — see that component's
+///   own doc comment in `builtins.elwind` — without breaking `VerticalLayout`/`HorizontalLayout`/
+///   `Grid`'s own `inherits Layout`).
 /// - A pure, field-less category tag (`base_info.effective_fields.is_empty() && !has_view` — e.g.
-///   `UIElement`/`Layout`/`NativeControl`/`Shape`/`Control`/`TextBlock` themselves): nothing to
-///   delegate to structurally, so unconditionally allowed. `NativeControl` alone additionally
-///   requires `X`'s structurally-inferred `is_native` (see `codegen::build_symbol_table`'s
-///   `resolve_is_native`) — `inherits NativeControl` doesn't itself *determine* nativeness, every
-///   other category tag imposes no further requirement.
+///   `UIElement`/`NativeControl`/`TextBlock` themselves): nothing to delegate to structurally, so
+///   unconditionally allowed. `NativeControl` alone additionally requires `X`'s
+///   structurally-inferred `is_native` (see `codegen::build_symbol_table`'s `resolve_is_native`) —
+///   `inherits NativeControl` doesn't itself *determine* nativeness, every other category tag
+///   imposes no further requirement.
 /// - A native-backed leaf that *does* carry real fields (`has_view == false && is_native == true`,
 ///   e.g. `Button`/`Window`) — falls through to the same "`X`'s own `view` root must literally
 ///   construct `Base`" check as the shape-composition case below (this is how a hand-written
@@ -570,6 +578,17 @@ fn validate_inherits(
 
     if base_info.sealed {
         errors.push(format!("{}: inherits `{base}`, but `{base}` is #[sealed] and cannot be inherited from", c.name));
+        return;
+    }
+
+    // A hand-written virtual builtin (`codegen::is_virtual_builtin` — `VerticalLayout`/
+    // `HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`) is constructed entirely by
+    // `codegen::build_virtual_value`'s own per-type-name `match`, never through a `view` — it's
+    // structurally incapable of having one (`#[embedded]` with no `Item::View`). The "`X`'s own
+    // `view` root must literally construct `Base`" shape-composition contract below therefore
+    // doesn't apply to it, regardless of whether `Base` (e.g. `Layout`, once it carries a real
+    // `children: UIElementCollection` field) happens to have fields of its own.
+    if codegen::is_virtual_builtin(&c.name) {
         return;
     }
 

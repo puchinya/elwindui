@@ -1,10 +1,10 @@
 //! The framework-owned Visual tree, following WinUI3's `UIElement` hierarchy: `Rc<dyn UIElement>`
 //! nodes *are* the tree (no separate wrapper/enum type) — `NativeControlImpl<H>` (`Button`/`TextArea`/
 //! `MenuBar`/`TabView`, the "NativeControlImpl" family), `TextBlockImpl` (self-drawn primitive text),
-//! `ShapeImpl` (`Rectangle`/`Ellipse`), `VerticalLayoutImpl`/`HorizontalLayoutImpl` (sharing
-//! `StackImpl` as their own common `base`, the same way `Button`/`TextArea`/`TabView` share
-//! `NativeControlImpl<H>`), and `ControlImpl` (a composable multi-part component) are all peer
-//! implementations of the same `UIElement` trait.
+//! `ShapeImpl` (`Rectangle`/`Ellipse`), `VerticalLayoutImpl`/`HorizontalLayoutImpl` (each embedding
+//! shared `LayoutImpl` fields as their own `base`, but doing their own orientation-specific layout
+//! math directly rather than delegating it to that base), and `ControlImpl` (a composable
+//! multi-part component) are all peer implementations of the same `UIElement` trait.
 //! `Margin`/`HorizontalAlignment`/`VerticalAlignment` (`UIElementImpl`) are common to every one of
 //! them, applied generically by this module's `measure`/`arrange` (WinUI3's
 //! `UIElement.Measure`/`Arrange` wrapping each type's own `MeasureOverride`/`ArrangeOverride`) —
@@ -130,7 +130,7 @@ pub struct UIElementImpl {
     /// `UIElement`'s `visual_children()` reads this generically (`UIElement`'s own default trait
     /// method), so no concrete type implements that method itself anymore. Empty (and never
     /// populated) for a leaf like `NativeControlImpl`/`ShapeImpl`/`TextBlockImpl`. A container
-    /// (`StackImpl`/`ControlImpl`/`GridImpl`) shares this same storage with its own
+    /// (`LayoutImpl`/`ControlImpl`/`GridImpl`) shares this same storage with its own
     /// `UIElementCollection` (WinUI3's `Panel.Children`) via `children_collection` below - adding
     /// or removing through that Logical-tree-facing handle is what actually mutates this field.
     pub visual_children: VisualCollection,
@@ -233,7 +233,7 @@ impl UIElementImpl {
         self.max_height.set(max_height);
     }
     /// Hands out a `UIElementCollection` (WinUI3's `Panel.Children`) sharing this same
-    /// `UIElementImpl`'s `visual_children`/`self_handle` — a container (`StackImpl`/`ControlImpl`/
+    /// `UIElementImpl`'s `visual_children`/`self_handle` — a container (`LayoutImpl`/`ControlImpl`/
     /// `GridImpl`) calls this once, at construction time, to build its own Logical-tree-facing
     /// `children` field. See `UIElementCollection`'s own doc comment.
     pub fn children_collection(&self) -> UIElementCollection {
@@ -358,7 +358,7 @@ pub trait UIElement: AsAny {
     /// Logical-tree-shaped children of their own — see `UIElementCollection`). A default method,
     /// not overridden by any concrete type: it reads `self.base().visual_children` directly, which
     /// is empty for a leaf like `NativeControlImpl`/`TextBlockImpl`/`ShapeImpl` and populated for a
-    /// container (`StackImpl`/`ControlImpl`/`GridImpl`) via that same `UIElementImpl`'s
+    /// container (`LayoutImpl`/`ControlImpl`/`GridImpl`) via that same `UIElementImpl`'s
     /// `children_collection()`-derived `UIElementCollection`. Returns an owned `Vec` (each
     /// `Rc<dyn UIElement>` cheaply cloned, a refcount bump), not `&[..]`: the underlying storage is
     /// `RefCell`-backed (mutable at any time via `UIElementCollection`'s `add`/`remove`/etc.), and a
@@ -373,7 +373,7 @@ pub trait UIElement: AsAny {
     /// final size this element itself was assigned (WinUI3's `ArrangeOverride`).
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect>;
     /// Content this element paints for itself, if any (`None` for pure layout containers like
-    /// `StackImpl`, which only position children and draw nothing on their own account).
+    /// `LayoutImpl`, which only position children and draw nothing on their own account).
     fn paint(&self) -> Option<PaintKind> {
         None
     }
@@ -652,18 +652,16 @@ pub trait MenuBarItem<M> {
 /// `HorizontalLayoutImpl`/`GridImpl`), the same way `NativeControl<H>` groups every native leaf.
 pub trait Layout: UIElement {}
 
-/// Shared implementation behind `VerticalLayout`/`HorizontalLayout` — a thin wrapper around
-/// `elwindui_core::layout`'s `stack_arrange`/`stack_natural_size` free functions. Not itself a
-/// DSL-facing leaf type (mirrors `NativeControlImpl<H>`'s role for `Button`/`TextArea`/`TabView`):
-/// `VerticalLayoutImpl`/`HorizontalLayoutImpl` each hold one as `base` and delegate `UIElement` to
-/// it, the same trait+Impl+base composition every other builtin follows (docs/elwindui_spec.md
-/// 付録H.2.1a) — `VerticalLayout`/`HorizontalLayout` used to share this struct directly with no
-/// per-orientation type of their own; that was the one remaining exception to the convention.
-pub struct StackImpl {
+/// Shared fields behind `VerticalLayout`/`HorizontalLayout` — analogous to `UIElementImpl` itself
+/// (a plain data holder, not a `UIElement` implementor of its own). `VerticalLayoutImpl`/
+/// `HorizontalLayoutImpl` each embed one as `base`, but implement `UIElement`/`Layout` themselves,
+/// doing their own layout math directly against `elwindui_core::layout`'s `stack_arrange`/
+/// `stack_natural_size` free functions with their own fixed `Orientation` literal — neither
+/// delegates its `measure_override`/`arrange_override` to this struct, since the orientation (and
+/// so the entire layout algorithm) is a property of *which concrete type this is*, not of shared
+/// state a common base could hold.
+pub struct LayoutImpl {
     pub base: UIElementImpl,
-    /// Fixed for the lifetime of the value (which concrete factory built it — `create_stack`'s own
-    /// caller — not a `.elwind`-settable `#[param]`), so plain, not `Cell`-wrapped.
-    pub orientation: Orientation,
     pub spacing: Cell<f32>,
     /// Shares its storage with `base.visual_children` (`UIElementImpl::children_collection`) —
     /// `UIElement::visual_children()`'s default implementation already reads that storage directly,
@@ -671,30 +669,16 @@ pub struct StackImpl {
     pub children: UIElementCollection,
 }
 
-impl UIElement for StackImpl {
-    fn base(&self) -> &UIElementImpl {
-        &self.base
-    }
-    fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
-        stack_natural_size(self.orientation, self.spacing.get(), child_sizes)
-    }
-    fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-        stack_arrange(final_size, self.orientation, self.spacing.get(), child_sizes)
-    }
-}
-
-impl Layout for StackImpl {}
-
-impl StackImpl {
+impl LayoutImpl {
     pub fn set_spacing(&self, spacing: f32) {
         self.spacing.set(spacing);
     }
 }
 
-fn create_stack(orientation: Orientation) -> StackImpl {
+fn create_layout() -> LayoutImpl {
     let base = UIElementImpl::default();
     let children = base.children_collection();
-    StackImpl { base, orientation, spacing: Cell::new(0.0), children }
+    LayoutImpl { base, spacing: Cell::new(0.0), children }
 }
 
 /// `VerticalLayoutImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
@@ -708,18 +692,18 @@ impl VerticalLayout for VerticalLayoutImpl {
 }
 
 pub struct VerticalLayoutImpl {
-    pub base: StackImpl,
+    pub base: LayoutImpl,
 }
 
 impl UIElement for VerticalLayoutImpl {
     fn base(&self) -> &UIElementImpl {
-        self.base.base()
+        &self.base.base
     }
-    fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size {
-        self.base.measure_override(available, child_sizes)
+    fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
+        stack_natural_size(Orientation::Vertical, self.base.spacing.get(), child_sizes)
     }
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-        self.base.arrange_override(final_size, child_sizes)
+        stack_arrange(final_size, Orientation::Vertical, self.base.spacing.get(), child_sizes)
     }
 }
 
@@ -732,7 +716,7 @@ impl VerticalLayoutImpl {
 }
 
 pub fn create_vertical_layout() -> VerticalLayoutImpl {
-    VerticalLayoutImpl { base: create_stack(Orientation::Vertical) }
+    VerticalLayoutImpl { base: create_layout() }
 }
 
 /// `HorizontalLayoutImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
@@ -746,18 +730,18 @@ impl HorizontalLayout for HorizontalLayoutImpl {
 }
 
 pub struct HorizontalLayoutImpl {
-    pub base: StackImpl,
+    pub base: LayoutImpl,
 }
 
 impl UIElement for HorizontalLayoutImpl {
     fn base(&self) -> &UIElementImpl {
-        self.base.base()
+        &self.base.base
     }
-    fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size {
-        self.base.measure_override(available, child_sizes)
+    fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
+        stack_natural_size(Orientation::Horizontal, self.base.spacing.get(), child_sizes)
     }
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-        self.base.arrange_override(final_size, child_sizes)
+        stack_arrange(final_size, Orientation::Horizontal, self.base.spacing.get(), child_sizes)
     }
 }
 
@@ -770,7 +754,7 @@ impl HorizontalLayoutImpl {
 }
 
 pub fn create_horizontal_layout() -> HorizontalLayoutImpl {
-    HorizontalLayoutImpl { base: create_stack(Orientation::Horizontal) }
+    HorizontalLayoutImpl { base: create_layout() }
 }
 
 /// `Rectangle`/`Ellipse`. A pure leaf, like `TextBlockImpl` — no children of its own (matching real
@@ -904,7 +888,7 @@ pub struct ControlImpl {
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
     pub content_vertical_alignment: Cell<VerticalAlignment>,
     /// Shares its storage with `base.visual_children` (`UIElementImpl::children_collection`) — see
-    /// `StackImpl::children`'s own doc comment.
+    /// `LayoutImpl::children`'s own doc comment.
     pub children: UIElementCollection,
 }
 
@@ -984,7 +968,7 @@ pub struct GridImpl {
     pub rows: RefCell<Vec<GridLength>>,
     pub columns: RefCell<Vec<GridLength>>,
     /// Shares its storage with `base.visual_children` (`UIElementImpl::children_collection`) — see
-    /// `StackImpl::children`'s own doc comment.
+    /// `LayoutImpl::children`'s own doc comment.
     pub children: UIElementCollection,
 }
 
@@ -1213,12 +1197,24 @@ mod tests {
     }
 
     fn stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
-        let node = create_stack(orientation);
-        node.set_spacing(spacing);
-        for child in children {
-            node.children.add(child);
+        match orientation {
+            Orientation::Vertical => {
+                let node = create_vertical_layout();
+                node.set_spacing(spacing);
+                for child in children {
+                    node.children().add(child);
+                }
+                new_element(node)
+            }
+            Orientation::Horizontal => {
+                let node = create_horizontal_layout();
+                node.set_spacing(spacing);
+                for child in children {
+                    node.children().add(child);
+                }
+                new_element(node)
+            }
         }
-        new_element(node)
     }
 
     // Splits `layout_tree`'s single interleaved `Vec<RenderItem<H>>` back into the pre-`RenderItem`
@@ -1264,12 +1260,24 @@ mod tests {
             node
         }
         fn start_stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
-            let stack = create_stack(orientation);
-            stack.set_spacing(spacing);
-            for child in children {
-                stack.children.add(child);
-            }
-            let node = new_element(stack);
+            let node = match orientation {
+                Orientation::Vertical => {
+                    let stack = create_vertical_layout();
+                    stack.set_spacing(spacing);
+                    for child in children {
+                        stack.children().add(child);
+                    }
+                    new_element(stack)
+                }
+                Orientation::Horizontal => {
+                    let stack = create_horizontal_layout();
+                    stack.set_spacing(spacing);
+                    for child in children {
+                        stack.children().add(child);
+                    }
+                    new_element(stack)
+                }
+            };
             node.base().set_horizontal_alignment(HorizontalAlignment::Left);
             node.base().set_vertical_alignment(VerticalAlignment::Top);
             node
@@ -1400,7 +1408,7 @@ mod tests {
     }
 
     /// A minimal test-only fixture that both paints itself *and* has children — no real builtin
-    /// combines the two today (`ShapeImpl` is a childless leaf; `StackImpl`/`ControlImpl`/`GridImpl`
+    /// combines the two today (`ShapeImpl` is a childless leaf; `LayoutImpl`/`ControlImpl`/`GridImpl`
     /// never paint), so `render_item_ordering_preserves_traversal_order_across_native_and_paint`
     /// (below) needs its own local type to exercise the paint-then-child traversal order.
     struct PaintingContainer {

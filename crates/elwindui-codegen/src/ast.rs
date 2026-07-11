@@ -105,6 +105,15 @@ pub struct ComponentDef {
     /// exist. `validate::validate` rejects `#[native]` combined with an explicit `base` or an own
     /// `view`, and (like `#[embedded]`) outside this crate's own `BUILTIN_SHAPE_SOURCE`.
     pub native: bool,
+    /// `#[abstract]` (same position): marks this component as a pure category tag that cannot be
+    /// instantiated directly in a `view` — only named as a `base` in `component X inherits Y` or
+    /// (for a shape-composition base like `Shape`) as the root of another component's own `view`.
+    /// `validate::check_element_value` rejects any `Type { .. }`/bare-child use site naming an
+    /// `#[abstract]` component; `codegen::generate_module` skips it entirely (no `create_<snake
+    /// case>(..)`/`new(..)` is ever generated for it). Used on `builtins.elwind`'s pure markers
+    /// (`UIElement`/`NativeControl`/`Layout`/`Shape`) — a concrete virtual builtin meant to be used
+    /// directly (`VerticalLayout`/`HorizontalLayout`/`Control`/`Grid`/`TextBlock`) does not set this.
+    pub is_abstract: bool,
     /// `#[content(field_name)]` (same position, docs/elwindui_spec.md 付録E): WinUI3's
     /// `ContentPropertyAttribute` equivalent — names which of this component's own fields a bare
     /// nested child element (`Type { .. }` written directly inside `{}`, no `name:` attribute)

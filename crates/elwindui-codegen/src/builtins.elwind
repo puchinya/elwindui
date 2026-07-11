@@ -6,6 +6,7 @@
 // 付録H.2.1a). `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem` do *not* inherit
 // it: none of them implement `elwindui_core::ui::UIElement` at all (see their own comments).
 #[embedded]
+#[abstract]
 component UIElement {
 }
 
@@ -19,6 +20,7 @@ component UIElement {
 // them. `#[content(children)]` (WinUI3's `ContentPropertyAttribute`) isn't itself inherited the
 // same way (`ComponentDef::content_field`), so each of the three still redeclares it individually.
 #[embedded]
+#[abstract]
 component Layout inherits UIElement {
     children: UIElementCollection,
 }
@@ -38,6 +40,7 @@ component Layout inherits UIElement {
 // equivalent for `is_native` purposes; they differ only in whether a real Rust `NativeControl<H>`
 // base is expected).
 #[embedded]
+#[abstract]
 component NativeControl inherits UIElement {
 }
 
@@ -80,6 +83,7 @@ component HorizontalLayout inherits Layout {
 // matching real WinUI3's `Shape`, a pure leaf with no `Children`/content property of its own
 // (docs/elwindui_spec.md 付録H.2.2).
 #[embedded]
+#[abstract]
 component Shape inherits UIElement {
     kind: elwindui_core::ui::ShapeKind,
     fill: Option<String>,

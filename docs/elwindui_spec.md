@@ -1241,13 +1241,14 @@ view Foo {
 | 同名で`#[overrides(builtin::X)]`あり | そのスコープ内でユーザー定義が優先、ビルトインは`builtin::X`で明示的にのみ参照可能 |
 | シグネチャ不一致 | 静的エラー |
 
-## E.9 `component`宣言レベルの属性:`#[embedded]`/`#[sealed]`/`#[native]`/`#[content(field_name)]`
+## E.9 `component`宣言レベルの属性:`#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[content(field_name)]`
 
-`#[overrides(builtin::X)]`(E.4)がユーザー定義コンポーネント側に付ける属性なのに対し、`#[embedded]`/`#[sealed]`/`#[native]`は`elwindui-codegen`自身の`.elwind`ソース(`BUILTIN_SHAPE_SOURCE`、`crates/elwindui-codegen/src/builtins.elwind`)が自分自身に付ける属性。`#[content(field_name)]`だけはビルトイン限定ではなく、ユーザー定義コンポーネントでも使える。いずれも`component`宣言の直前に、`inherits`の有無に関わらず0個以上任意の順序で書ける(`enum`/`viewmodel`/`view`には付けられない)。
+`#[overrides(builtin::X)]`(E.4)がユーザー定義コンポーネント側に付ける属性なのに対し、`#[embedded]`/`#[sealed]`/`#[native]`は`elwindui-codegen`自身の`.elwind`ソース(`BUILTIN_SHAPE_SOURCE`、`crates/elwindui-codegen/src/builtins.elwind`)が自分自身に付ける属性。`#[content(field_name)]`だけはビルトイン限定ではなく、ユーザー定義コンポーネントでも使える。`#[abstract]`もビルトイン限定ではない一般属性。いずれも`component`宣言の直前に、`inherits`の有無に関わらず0個以上任意の順序で書ける(`enum`/`viewmodel`/`view`には付けられない)。
 
 - **`#[embedded]`** — このコンポーネントが`BUILTIN_SHAPE_SOURCE`自身の組み込み部品であることを明示する。`elwindui-codegen`は`BUILTIN_SHAPE_SOURCE`由来のモジュールを内部的に`is_builtin`フラグ付きで扱っており、`#[embedded]`が付いたコンポーネントがそれ以外の場所(利用者自身の`.elwind`ファイル)から来ていれば静的エラーになる。
 - **`#[sealed]`** — このコンポーネントを`component X inherits Y`の`Y`(継承元)として指定できないようにする。具象的な末端形状(`Rectangle`/`Ellipse` — 継承したければ合成可能な`Shape`を使う)や、そもそも継承先を持たないネイティブ末端要素(`Button`/`TextArea`/`TabView`/`TabViewItem`)に付与する。
 - **`#[native]`** — `inherits`元を持たず(base-less)、かつ`view`も持たないコンポーネントに、「実Rust実装は各バックエンドクレートが手書きする」ことを明示する。`inherits NativeControl`(E.1の1.)と`is_native == true`として扱われる点は同じだが、`NativeControl`という共有タグを経由しない——2つの使い分けは「実際にビジュアルツリーに`Rc<dyn UIElement>`として埋め込まれ、`elwindui_core::ui::NativeControlImpl<H>`をバックエンド構造体の`base`として合成するか」で決まる(付録H.2.1a)。`Window`(実際のWinUI3の`Window`が`Control`ファミリーを経由せず`Object`を直接継承するのに対応)に加え、ビジュアルツリーに参加しない`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem`もこちらを使う。`#[native]`は`base`を持つコンポーネントや自前の`view`を持つコンポーネントには付けられず、`#[embedded]`と同様`BUILTIN_SHAPE_SOURCE`自身の宣言以外では使えない。
+- **`#[abstract]`** — このコンポーネントを`view`内で直接インスタンス化できないようにする(`Type { .. }`という形で、属性値・クロージャ本体・裸のネスト子要素・単体の`view`ルートのどこに書いても静的エラー)。`component X inherits Y`の`Y`として指定するのは引き続き可能——むしろそれが本来の使い道で、`#[sealed]`のちょうど逆に位置する。唯一の例外は、`X`自身が`inherits`で名指ししている`#[abstract]`な`base`を、`X`自身の`view`の**ルート要素として**構築する場合(シェイプ合成、E.9の`Shape`の例。`validate::validate_inherits`が「ルート要素は`base`と一致しなければならない」を既に強制しているので、この一箇所だけ安全に許可される)。`builtins.elwind`の`UIElement`/`NativeControl`/`Layout`/`Shape`(いずれも「フィールドを持たない純粋なカテゴリタグ」、もしくは`Rectangle`/`Ellipse`が合成する土台)に付いており、直接使うことを意図した具象virtual builtin(`VerticalLayout`/`HorizontalLayout`/`Control`/`Grid`/`TextBlock`)には付かない。`codegen::generate_module`も`#[abstract]`なコンポーネントには`create_<snake case>(..)`/`new(..)`を一切生成しない。
 - **`#[content(field_name)]`** — WinUI3の`ContentPropertyAttribute`相当。ある要素の`view`本体に「属性名を書かない裸のネスト子要素」(`Type { .. }`を`name: value`形式でなく直接`{}`内に書く)を渡した際、それがどのフィールドに束縛されるかを明示する。例:`MenuBarItem`は`#[content(submenu)]`を宣言しており、`MenuBarItem { text: "File", Menu { .. } }`の`Menu { .. }`は`submenu`フィールドに束縛される(`Window`/`ContentControl`/`TabViewItem`の`content`フィールドも同様に`#[content(content)]`を宣言している)。`field_name`は実在するフィールド名でなければならず(静的検証)、componentにつき最大1個。裸のネスト子要素があるのに`#[content(..)]`(または`children: Vec<..>`のようなリストフィールド)が無いcomponentにそれを渡すのはコード生成時エラーになる。
 
 ---

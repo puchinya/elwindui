@@ -140,11 +140,11 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         let vm_fields =
                             find_vm_fields(module, &c.name, &c.fields, &table, &known_type_names, &mut errors);
                         for let_binding in &view.lets {
-                            check_vm_references(&let_binding.element, module, &c.name, &vm_fields, &table, &mut errors);
+                            check_vm_references(&let_binding.element, module, &c.name, &vm_fields, &table, None, &mut errors);
                             check_tab_view_mode(&let_binding.element, &c.name, &mut errors);
                             check_attached_properties(&let_binding.element, module, &c.name, &table, &mut errors);
                         }
-                        check_vm_references(&view.root, module, &c.name, &vm_fields, &table, &mut errors);
+                        check_vm_references(&view.root, module, &c.name, &vm_fields, &table, c.base.as_deref(), &mut errors);
                         check_tab_view_mode(&view.root, &c.name, &mut errors);
                         check_attached_properties(&view.root, module, &c.name, &table, &mut errors);
                     }
@@ -209,14 +209,27 @@ fn find_vm_fields<'a>(
 
 /// Walks a `view { ... }` element tree checking every attribute expression's `vm.xxx` references
 /// (see `check_vm_expr`) against `table`, resolved from `from`'s scope, recursing into children.
+/// Also rejects `node` itself naming an `#[abstract]` component (docs/elwindui_spec.md 付録E) —
+/// except when `node` is *this* call's own `exempt_root_type` (only ever set by the top-level
+/// `view.root` call in `validate`'s main loop, to exactly the enclosing component's own `base`):
+/// shape/host composition (`Rectangle inherits Shape`, `NotepadWindow inherits Window`) legitimately
+/// constructs an otherwise-abstract base as its own view's literal root — `validate_inherits`
+/// already enforces that the root must match `base` exactly, so this exemption only ever fires for
+/// that one, already-validated case. Recursive children are never exempted (`None` is passed down),
+/// so `Shape { .. }` written anywhere *else* in a view (a nested child, a let-binding, an attribute
+/// value) is still rejected.
 fn check_vm_references(
     node: &ElementNode,
     from: &Module,
     component_name: &str,
     vm_fields: &HashMap<&str, &str>,
     table: &SymbolTable,
+    exempt_root_type: Option<&str>,
     errors: &mut Vec<String>,
 ) {
+    if exempt_root_type != Some(node.type_path.as_str()) {
+        check_not_abstract(node, from, component_name, table, errors);
+    }
     for (_, expr) in &node.attributes {
         check_vm_expr(expr, from, component_name, vm_fields, table, errors);
     }
@@ -224,8 +237,22 @@ fn check_vm_references(
         // A `ChildEntry::Ref` doesn't need its own recursive check here — the `let` binding it
         // refers to is itself already walked as one of `view.lets` in `validate`'s main loop.
         if let ChildEntry::Literal(elem) = child {
-            check_vm_references(elem, from, component_name, vm_fields, table, errors);
+            check_vm_references(elem, from, component_name, vm_fields, table, None, errors);
         }
+    }
+}
+
+/// `#[abstract]` (docs/elwindui_spec.md 付録E): a pure category tag (`UIElement`/`NativeControl`/
+/// `Layout`/`Shape` in `builtins.elwind`) cannot be instantiated directly — only named as an
+/// `inherits` base, or (for a shape-composition base) as a component's own view root (see
+/// `check_vm_references`'s `exempt_root_type`). An unresolvable `node.type_path` is left to
+/// `check_element_value`'s own "unknown component" error, not reported again here.
+fn check_not_abstract(node: &ElementNode, from: &Module, component_name: &str, table: &SymbolTable, errors: &mut Vec<String>) {
+    if table.resolve(from, &node.type_path).is_some_and(|info| info.is_abstract) {
+        errors.push(format!(
+            "{component_name}: `{}` is #[abstract] and cannot be instantiated directly — use a concrete subtype instead",
+            node.type_path
+        ));
     }
 }
 
@@ -451,6 +478,13 @@ fn check_element_value(
 ) {
     match table.resolve(from, &elem.type_path) {
         Some(info) => {
+            if info.is_abstract {
+                errors.push(format!(
+                    "{component_name}: `{}` is #[abstract] and cannot be instantiated directly — use a concrete subtype instead",
+                    elem.type_path
+                ));
+                return;
+            }
             let mut next_positional_child = 0usize;
             for (name, ty) in &info.param_fields {
                 if name == "children" {
@@ -484,7 +518,7 @@ fn check_element_value(
     }
     for child in &elem.children {
         if let ChildEntry::Literal(literal) = child {
-            check_vm_references(literal, from, component_name, vm_fields, table, errors);
+            check_vm_references(literal, from, component_name, vm_fields, table, None, errors);
         }
     }
 }
@@ -1071,6 +1105,45 @@ view RoundedPanel {
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
         assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// `#[abstract]` (docs/elwindui_spec.md 付録E): `Shape` is a pure category tag that `Rectangle`/
+    /// `Ellipse` shape-compose over — using it directly as a view root *without* declaring
+    /// `inherits Shape` is not legitimate composition, so it's rejected the same as any other bare
+    /// use (unlike `accepts_component_inheriting_a_shape_primitive_with_matching_view_root`, which
+    /// *does* declare `inherits Shape` and must keep working).
+    #[test]
+    fn rejects_abstract_component_used_as_a_bare_view_root_without_inherits() {
+        let src = r#"
+component Foo {
+}
+
+view Foo {
+    Shape { kind: elwindui_core::ui::ShapeKind::Oval }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("Shape") && e.contains("abstract")), "errors: {errs:?}");
+    }
+
+    /// Same rule, but for a nested (non-root) use — `NativeControl` (another `#[abstract]` category
+    /// tag) written as a bare child inside an ordinary container.
+    #[test]
+    fn rejects_abstract_component_used_as_a_nested_child() {
+        let src = r#"
+component Foo {
+}
+
+view Foo {
+    VerticalLayout {
+        NativeControl { }
+    }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("NativeControl") && e.contains("abstract")), "errors: {errs:?}");
     }
 
     #[test]

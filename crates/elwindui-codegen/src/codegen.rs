@@ -156,6 +156,12 @@ pub struct TypeInfo {
     /// `validate_inherits` rejects `component X inherits Name` when this is `true`. `false` for a
     /// `viewmodel` (never a valid `inherits` target at all).
     pub sealed: bool,
+    /// Whether this component is `#[abstract]` (docs/elwindui_spec.md 付録E) — a pure category tag
+    /// (`UIElement`/`NativeControl`/`Layout`/`Shape` in `builtins.elwind`) that cannot be
+    /// instantiated directly. `validate::check_element_value` rejects any `Type { .. }`/bare-child
+    /// use site naming one; `generate_module` skips generating a `create_<snake case>(..)`/`new(..)`
+    /// for it entirely. `false` for a `viewmodel`.
+    pub is_abstract: bool,
     /// This component's own `#[content(field_name)]` (docs/elwindui_spec.md 付録E, WinUI3's
     /// `ContentPropertyAttribute` equivalent), copied verbatim from `ComponentDef::content_field` —
     /// no recursive resolution needed (unlike `is_native`/`composed_shape`), since a bare nested
@@ -317,6 +323,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             host_composition_base: None,
                             is_host_composition_base: false,
                             sealed: c.sealed,
+                            is_abstract: c.is_abstract,
                             content_field: c.content_field.clone(),
                         },
                     );
@@ -384,6 +391,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             host_composition_base: None,
                             is_host_composition_base: false,
                             sealed: false,
+                            is_abstract: false,
                             content_field: None,
                         },
                     );
@@ -842,18 +850,28 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                 let info = table
                     .resolve(module, &c.name)
                     .unwrap_or_else(|| panic!("component `{}` missing from its own symbol table", c.name));
+                // `#[abstract]` (docs/elwindui_spec.md 付録E): a pure category tag
+                // (`UIElement`/`NativeControl`/`Layout`/`Shape`) never gets a `create_<snake
+                // case>(..)`/`new(..)` of its own — `validate::check_element_value` already rejects
+                // any DSL use site that would need one, so this is a second, codegen-level guarantee
+                // that holds even if this function is ever called on unvalidated input.
+                if info.is_abstract {
+                    continue;
+                }
                 let synthetic = ComponentDef {
                     name: c.name.clone(),
                     base: c.base.clone(),
                     fields: info.effective_fields.clone(),
                     methods: info.effective_methods.clone(),
                     // Irrelevant downstream: `generate_component`/`generate_view` never consult
-                    // `embedded`/`sealed`/`native`/`content_field` (only `validate::validate`/
-                    // `TypeInfo::sealed`/`TypeInfo::is_native`/`TypeInfo::content_field`, all already
-                    // checked/computed against the *original* `c`, do).
+                    // `embedded`/`sealed`/`native`/`is_abstract`/`content_field` (only
+                    // `validate::validate`/`TypeInfo::sealed`/`TypeInfo::is_native`/
+                    // `TypeInfo::is_abstract`/`TypeInfo::content_field`, all already checked/computed
+                    // against the *original* `c`, do).
                     embedded: false,
                     sealed: false,
                     native: false,
+                    is_abstract: false,
                     content_field: None,
                 };
                 match &info.effective_view {

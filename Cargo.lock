@@ -103,6 +103,7 @@ version = "0.1.0"
 dependencies = [
  "dispatch2",
  "elwindui-core",
+ "elwindui-macros",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
@@ -123,6 +124,7 @@ name = "elwindui-backend-winui3"
 version = "0.1.0"
 dependencies = [
  "elwindui-core",
+ "elwindui-macros",
  "windows",
  "windows-bindgen",
  "windows-core",
@@ -141,6 +143,9 @@ dependencies = [
 [[package]]
 name = "elwindui-core"
 version = "0.1.0"
+dependencies = [
+ "elwindui-macros",
+]
 
 [[package]]
 name = "elwindui-hotreload"
@@ -162,6 +167,7 @@ name = "elwindui-macros"
 version = "0.1.0"
 dependencies = [
  "elwindui-codegen",
+ "proc-macro2",
  "quote",
  "syn",
 ]

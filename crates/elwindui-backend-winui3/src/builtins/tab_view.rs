@@ -15,7 +15,6 @@
 
 use crate as winui3;
 use crate::TabView as _;
-use elwindui_core::ui::UIElement;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -101,8 +100,8 @@ impl Default for DynamicSource {
     }
 }
 
+#[elwindui_macros::class(inherits = winui3::TabViewImpl)]
 pub struct TabViewImpl {
-    inner: winui3::TabViewImpl,
     entries: RefCell<Vec<Rc<TabViewItemImpl>>>,
     dynamic: RefCell<Option<DynamicSource>>,
     /// Pointer identities (`Rc::as_ptr`, as `usize`) of the `TabViewItem`s currently reflected as
@@ -118,28 +117,12 @@ pub struct TabViewImpl {
     weak_self: RefCell<Weak<TabViewImpl>>,
 }
 
-impl UIElement for TabViewImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.inner.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
-        self.inner.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.inner.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.inner.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn Any> {
-        self.inner.as_native_control()
-    }
-}
-
+#[elwindui_macros::class(inherits = winui3::TabViewImpl)]
 impl TabViewImpl {
+    #[inherent]
     pub fn new() -> Rc<Self> {
         let this = Rc::new(Self {
-            inner: winui3::create_tab_view(),
+            base: winui3::create_tab_view(),
             entries: RefCell::new(Vec::new()),
             dynamic: RefCell::new(None),
             displayed: RefCell::new(Vec::new()),
@@ -153,6 +136,7 @@ impl TabViewImpl {
 
     /// Static mode: the literal `TabViewItem { .. }` children (mutually exclusive with
     /// `set_items_source`'s dynamic mode — see module doc comment).
+    #[inherent]
     pub fn set_children(&self, children: Vec<Rc<TabViewItemImpl>>) {
         if !children.is_empty() {
             *self.entries.borrow_mut() = children;
@@ -164,6 +148,7 @@ impl TabViewImpl {
     /// why `items_source`/`header_template`/`item_template` are combined into this one call rather
     /// than three independent ones (shared generic `T`, and `items` itself isn't used to populate
     /// `entries` here — that happens on the enclosing component's first `resync()` instead).
+    #[inherent]
     pub fn set_dynamic_source<T: 'static>(
         &self,
         items: Vec<Rc<T>>,
@@ -178,18 +163,21 @@ impl TabViewImpl {
         let _ = items;
     }
 
+    #[inherent]
     pub fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
-        self.inner.set_on_select(callback);
+        self.base.set_on_select(callback);
     }
 
     /// WinUI3's `SelectedItem` concept — not threaded through `on_select` (see
     /// `TabView` in `src/builtins.elwind`'s doc comment on why), so exposed as a plain accessor for
     /// advanced/manual use from hand-written Rust glue code instead.
+    #[inherent]
     pub fn selected_item(&self) -> Option<Rc<dyn Any>> {
         self.entries.borrow().get(self.selected_index.get()).and_then(|e| e.data_context.borrow().clone())
     }
 
     /// WinUI3's `SelectedContainer` concept — see `selected_item`'s doc comment.
+    #[inherent]
     pub fn selected_container(&self) -> Option<Rc<TabViewItemImpl>> {
         self.entries.borrow().get(self.selected_index.get()).cloned()
     }
@@ -197,10 +185,11 @@ impl TabViewImpl {
     /// A static `TabViewItem`'s own `on_close` (if set) takes precedence — it's the per-item
     /// declaration in that mode; dynamic mode has none, so its `TabView`-level `on_close(index)`
     /// is used instead (same precedence as `elwindui-builtins::appkit::tab_view`).
+    #[inherent]
     pub fn set_on_close(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_close.borrow_mut() = Some(callback);
         let this = self.weak_self.borrow().clone();
-        self.inner.set_on_close(Box::new(move |index| {
+        self.base.set_on_close(Box::new(move |index| {
             let Some(this) = this.upgrade() else { return };
             let entry = this.entries.borrow().get(index).cloned();
             let handled = entry.is_some_and(|e| {
@@ -219,13 +208,15 @@ impl TabViewImpl {
         }));
     }
 
+    #[inherent]
     pub fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
-        self.inner.set_on_new_tab(callback);
+        self.base.set_on_new_tab(callback);
     }
 
     /// Dynamic mode only — resyncs `items_source`. Reuses each already-synthesized `TabViewItem`
     /// whose `data_context` is still `Rc::ptr_eq` to the same element (see module doc comment);
     /// only genuinely new elements call `header_template`/`item_template`.
+    #[inherent]
     pub fn set_items_source<T: 'static>(&self, items: Vec<Rc<T>>) {
         self.sync_dynamic_entries(erase_items(items));
         self.rebuild();
@@ -235,22 +226,26 @@ impl TabViewImpl {
     /// the single visible content pane, done inside `rebuild`), `Controls::TabView` already shows/
     /// hides each `TabViewItem`'s own persistent `Content` based on `SelectedIndex` natively — so
     /// this is just a straight passthrough, no rebuild needed.
+    #[inherent]
     pub fn set_selected_index(&self, selected_index: usize) {
         self.selected_index.set(selected_index);
-        self.inner.set_selected_index(selected_index);
+        self.base.set_selected_index(selected_index);
     }
 
     /// Dynamic mode, part 3 of 3 — the default `closable` for a synthesized `TabViewItem` (static
     /// mode's own `TabViewItem::set_closable` is what matters there instead). See
     /// `set_header_template`'s doc comment.
+    #[inherent]
     pub fn set_closable(&self, closable: bool) {
         self.dynamic.borrow_mut().get_or_insert_with(DynamicSource::default).closable_default = closable;
     }
 
+    #[inherent]
     pub fn into_any_view(&self) -> winui3::AnyView {
-        self.inner.base.handle.clone()
+        self.base.base.handle.clone()
     }
 
+    #[inherent]
     fn sync_dynamic_entries(&self, items: Vec<Rc<dyn Any>>) {
         let dynamic = self.dynamic.borrow();
         let Some(dynamic) = dynamic.as_ref() else { return };
@@ -281,6 +276,7 @@ impl TabViewImpl {
     /// notepad's command set reorders tabs today — only appends/removes) — an already-displayed
     /// tab is left in its current slot rather than physically moved to match `entries`' exact
     /// order.
+    #[inherent]
     fn rebuild(&self) {
         let entries = self.entries.borrow();
         let new_keys: Vec<usize> = entries.iter().map(|e| Rc::as_ptr(e) as usize).collect();
@@ -288,7 +284,7 @@ impl TabViewImpl {
 
         for i in (0..displayed.len()).rev() {
             if !new_keys.contains(&displayed[i]) {
-                self.inner.remove_tab_at(i);
+                self.base.remove_tab_at(i);
                 displayed.remove(i);
             }
         }
@@ -297,7 +293,7 @@ impl TabViewImpl {
             if !displayed.contains(key) {
                 let label = entry.header.borrow().clone();
                 let closable = entry.closable.get();
-                let content_host = self.inner.insert_tab(target_index.min(displayed.len()), &label, closable);
+                let content_host = self.base.insert_tab(target_index.min(displayed.len()), &label, closable);
                 if let Some(content) = entry.content.borrow_mut().take() {
                     content_host.set_tree(content);
                 }
@@ -307,7 +303,7 @@ impl TabViewImpl {
         drop(displayed);
 
         for (index, entry) in entries.iter().enumerate() {
-            self.inner.set_tab_title(index, &entry.header.borrow());
+            self.base.set_tab_title(index, &entry.header.borrow());
         }
     }
 }

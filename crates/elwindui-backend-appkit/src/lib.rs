@@ -486,34 +486,16 @@ impl TreeHostView {
 }
 
 
-pub struct TextAreaImpl {
-    base: elwindui_core::ui::NativeControlImpl<AnyView>,
+#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+pub struct TextArea {
     text_view: Retained<NSTextView>,
     delegate_storage: Rc<RefCell<Option<Retained<TextViewDelegate>>>>,
 }
 
-impl elwindui_core::ui::UIElement for TextAreaImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.base.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
-        self.base.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.base.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.base.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn std::any::Any> {
-        Some(&self.base)
-    }
-}
-impl elwindui_core::ui::NativeControl<AnyView> for TextAreaImpl {}
-
 /// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are AppKit-specific.
-impl elwindui_core::ui::TextArea for TextAreaImpl {
+#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+impl TextArea {
     /// `NSTextView.setString:` unconditionally resets the caret/selection to the start, even when
     /// the text it's given is identical to what's already there. The two-way `#[two_way] text`
     /// binding (`TextArea` in `builtins.elwind`) re-syncs *every* bound field on *every* model
@@ -540,22 +522,26 @@ impl elwindui_core::ui::TextArea for TextAreaImpl {
         self.text_view.setDelegate(Some(protocol_obj));
         *self.delegate_storage.borrow_mut() = Some(delegate);
     }
+
+    fn new() -> Self {
+        let m = mtm();
+        let scroll = NSTextView::scrollableTextView(m);
+        let text_view = scroll
+            .documentView()
+            .expect("scrollableTextView always has a document view")
+            .downcast::<NSTextView>()
+            .expect("scrollableTextView's document view is an NSTextView");
+        let handle = AnyView::from(scroll);
+        Self {
+            base: elwindui_core::ui::create_native_control(handle),
+            text_view,
+            delegate_storage: Rc::new(RefCell::new(None)),
+        }
+    }
 }
 
 pub fn create_text_area() -> TextAreaImpl {
-    let m = mtm();
-    let scroll = NSTextView::scrollableTextView(m);
-    let text_view = scroll
-        .documentView()
-        .expect("scrollableTextView always has a document view")
-        .downcast::<NSTextView>()
-        .expect("scrollableTextView's document view is an NSTextView");
-    let handle = AnyView::from(scroll);
-    TextAreaImpl {
-        base: elwindui_core::ui::create_native_control(handle),
-        text_view,
-        delegate_storage: Rc::new(RefCell::new(None)),
-    }
+    TextAreaImpl::new()
 }
 
 struct TextDelegateIvars {
@@ -589,34 +575,16 @@ impl TextViewDelegate {
     }
 }
 
-pub struct ButtonImpl {
-    base: elwindui_core::ui::NativeControlImpl<AnyView>,
+#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+pub struct Button {
     ns: Retained<NSButton>,
     target_storage: Rc<RefCell<Option<Retained<ButtonTarget>>>>,
 }
 
-impl elwindui_core::ui::UIElement for ButtonImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.base.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
-        self.base.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.base.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.base.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn std::any::Any> {
-        Some(&self.base)
-    }
-}
-impl elwindui_core::ui::NativeControl<AnyView> for ButtonImpl {}
-
 /// `elwindui_core::ui::Button`'s shape is common to every backend — see that trait's own doc
 /// comment; only these method bodies are AppKit-specific.
-impl elwindui_core::ui::Button for ButtonImpl {
+#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+impl Button {
     fn set_enabled(&self, enabled: bool) {
         self.ns.setEnabled(enabled);
     }
@@ -634,13 +602,17 @@ impl elwindui_core::ui::Button for ButtonImpl {
     fn set_text(&self, text: &str) {
         self.ns.setTitle(&NSString::from_str(text));
     }
+
+    fn new() -> Self {
+        let m = mtm();
+        let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m) };
+        let handle = AnyView::from(ns.clone());
+        Self { base: elwindui_core::ui::create_native_control(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
+    }
 }
 
 pub fn create_button() -> ButtonImpl {
-    let m = mtm();
-    let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m) };
-    let handle = AnyView::from(ns.clone());
-    ButtonImpl { base: elwindui_core::ui::create_native_control(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
+    ButtonImpl::new()
 }
 
 struct ButtonTargetIvars {
@@ -747,31 +719,6 @@ impl TabStripImpl {
 /// own `elwindui_core::ui` (keeping any native leaf's retention concern alive, e.g. a
 /// `TextAreaImpl`'s change-notification delegate — see `TextAreaImpl::set_on_change`'s doc comment — for
 /// as long as its tab exists, not just while it's the visible one).
-pub struct TabViewImpl {
-    base: elwindui_core::ui::NativeControlImpl<AnyView>,
-    pub strip: TabStripImpl,
-    content_container: Retained<NSView>,
-}
-
-impl elwindui_core::ui::UIElement for TabViewImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.base.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
-        self.base.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.base.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.base.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn std::any::Any> {
-        Some(&self.base)
-    }
-}
-impl elwindui_core::ui::NativeControl<AnyView> for TabViewImpl {}
-
 /// `TabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
 /// since a real `AnyView` handle (`self.base.handle`, wrapping the outer `NSStackView`) is what
 /// makes this leaf embeddable in the visual tree at all.
@@ -790,7 +737,14 @@ pub trait TabView: elwindui_core::ui::NativeControl<AnyView> {
     fn set_tab_content_visible(&self, host: &TreeHostView, visible: bool);
 }
 
-impl TabView for TabViewImpl {
+#[elwindui_macros::class(implements = TabView, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+pub struct TabViewImpl {
+    pub strip: TabStripImpl,
+    content_container: Retained<NSView>,
+}
+
+#[elwindui_macros::class(implements = TabView, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+impl TabViewImpl {
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
         self.strip.new_tab_button.set_on_click(callback);
     }
@@ -832,27 +786,31 @@ impl TabView for TabViewImpl {
     fn set_tab_content_visible(&self, host: &TreeHostView, visible: bool) {
         host.setHidden(!visible);
     }
+
+    fn new() -> Self {
+        let m = mtm();
+        let strip = create_tab_strip();
+        let content_container = NSView::initWithFrame(NSView::alloc(m), NSRect::default());
+        let strip_view: Retained<NSView> = Retained::into_super(strip.ns.clone());
+        let root =
+            NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_retained_slice(&[strip_view, content_container.clone()]), m);
+        root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+        // `NSStackView`'s default `distribution` (`GravityAreas`) leaves each arranged subview at
+        // its own intrinsic size unless hugging priorities say otherwise — `.Fill` makes the stack
+        // actually consume its *entire* stacking-axis extent, matching `TabViewImpl`'s expected "chips
+        // row at natural height, content area fills the rest" shape. `content_container`'s own
+        // vertical hugging priority is dropped to (near-)zero so it — not the also-low-priority-
+        // by-default `strip` — is the one that absorbs whatever space `Fill` distributes (a plain
+        // `NSView` with no subviews yet has no intrinsic size hint worth respecting anyway).
+        content_container.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
+        root.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
+        let handle = AnyView::from(root);
+        Self { base: elwindui_core::ui::create_native_control(handle), strip, content_container }
+    }
 }
 
 pub fn create_tab_view() -> TabViewImpl {
-    let m = mtm();
-    let strip = create_tab_strip();
-    let content_container = NSView::initWithFrame(NSView::alloc(m), NSRect::default());
-    let strip_view: Retained<NSView> = Retained::into_super(strip.ns.clone());
-    let root =
-        NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_retained_slice(&[strip_view, content_container.clone()]), m);
-    root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-    // `NSStackView`'s default `distribution` (`GravityAreas`) leaves each arranged subview at
-    // its own intrinsic size unless hugging priorities say otherwise — `.Fill` makes the stack
-    // actually consume its *entire* stacking-axis extent, matching `TabViewImpl`'s expected "chips
-    // row at natural height, content area fills the rest" shape. `content_container`'s own
-    // vertical hugging priority is dropped to (near-)zero so it — not the also-low-priority-
-    // by-default `strip` — is the one that absorbs whatever space `Fill` distributes (a plain
-    // `NSView` with no subviews yet has no intrinsic size hint worth respecting anyway).
-    content_container.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
-    root.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
-    let handle = AnyView::from(root);
-    TabViewImpl { base: elwindui_core::ui::create_native_control(handle), strip, content_container }
+    TabViewImpl::new()
 }
 
 /// See docs/elwindui_builtins_spec.md 付録X. A single application-wide `NSMenu` (top menu bar

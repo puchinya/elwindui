@@ -86,79 +86,66 @@ impl WindowImpl {
 
 impl elwindui_core::ui::Window for WindowImpl {}
 
-pub struct TextAreaImpl {
-    inner: winui3::TextAreaImpl,
-}
+#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = winui3::TextAreaImpl)]
+pub struct TextAreaImpl {}
 
-impl UIElement for TextAreaImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.inner.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
-        self.inner.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.inner.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.inner.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn std::any::Any> {
-        self.inner.as_native_control()
-    }
-}
-
+#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = winui3::TextAreaImpl)]
 impl TextAreaImpl {
-    pub fn new() -> Rc<Self> {
-        Rc::new(Self { inner: winui3::create_text_area() })
-    }
-
     /// `#[two_way] text` (`TextArea` in `builtins.elwind`) — the change-back half of the binding;
     /// `elwindui_core::ui::TextArea::set_text` is the model→widget half.
+    #[inherent]
     pub fn set_on_text_change(&self, callback: Box<dyn Fn(String)>) {
-        self.inner.set_on_change(callback);
+        self.base.set_on_change(callback);
     }
 
+    #[inherent]
     pub fn into_any_view(&self) -> winui3::AnyView {
-        self.inner.base.handle.clone()
+        self.base.base.handle.clone()
     }
-}
 
-impl elwindui_core::ui::TextArea for TextAreaImpl {
     fn set_text(&self, text: &str) {
-        self.inner.set_text(text);
+        self.base.set_text(text);
     }
     fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
-        self.inner.set_on_change(callback);
+        self.base.set_on_change(callback);
+    }
+
+    fn new() -> Rc<Self> {
+        Rc::new(Self { base: winui3::create_text_area() })
     }
 }
 
-pub struct ButtonImpl {
-    inner: winui3::ButtonImpl,
-}
+#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = winui3::ButtonImpl)]
+pub struct ButtonImpl {}
 
-impl UIElement for ButtonImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.inner.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
-        self.inner.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.inner.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.inner.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn std::any::Any> {
-        self.inner.as_native_control()
-    }
-}
-
+#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = winui3::ButtonImpl)]
 impl ButtonImpl {
-    pub fn new() -> Rc<Self> {
-        let inner = winui3::create_button();
-        let this = Rc::new(Self { inner });
+    /// `#[routed] on_click` (`Button` in `builtins.elwind`) is registered directly onto this
+    /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)
+    /// to fire `dispatch_routed` starting at this same node.
+    #[inherent]
+    pub fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &elwindui_core::input::RoutedEventArgs)>) {
+        self.base.base().register_routed_handler(name, handler);
+    }
+
+    #[inherent]
+    pub fn into_any_view(&self) -> winui3::AnyView {
+        self.base.base.handle.clone()
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.base.set_enabled(enabled);
+    }
+    fn set_on_click(&self, callback: Box<dyn Fn()>) {
+        self.base.set_on_click(callback);
+    }
+    fn set_text(&self, text: &str) {
+        self.base.set_text(text);
+    }
+
+    fn new() -> Rc<Self> {
+        let base = winui3::create_button();
+        let this = Rc::new(Self { base });
         // Wires the real XAML click directly to `dispatch_routed`, once, right here — mirrors
         // `elwindui_backend_appkit::builtins::ButtonImpl::new`'s own doc comment for the rationale.
         // Unconditional — `dispatch_routed` already no-ops gracefully when nothing is registered
@@ -167,35 +154,12 @@ impl ButtonImpl {
         // below, right after this constructor returns).
         {
             let node: Rc<dyn UIElement> = this.clone();
-            this.inner.set_on_click(Box::new(move || {
+            this.base.set_on_click(Box::new(move || {
                 let args = elwindui_core::input::RoutedEventArgs::default();
                 elwindui_core::ui::dispatch_routed(&node, "on_click", &(), &args);
             }));
         }
         this
-    }
-
-    /// `#[routed] on_click` (`Button` in `builtins.elwind`) is registered directly onto this
-    /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)
-    /// to fire `dispatch_routed` starting at this same node.
-    pub fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &elwindui_core::input::RoutedEventArgs)>) {
-        self.inner.base().register_routed_handler(name, handler);
-    }
-
-    pub fn into_any_view(&self) -> winui3::AnyView {
-        self.inner.base.handle.clone()
-    }
-}
-
-impl elwindui_core::ui::Button for ButtonImpl {
-    fn set_enabled(&self, enabled: bool) {
-        self.inner.set_enabled(enabled);
-    }
-    fn set_on_click(&self, callback: Box<dyn Fn()>) {
-        self.inner.set_on_click(callback);
-    }
-    fn set_text(&self, text: &str) {
-        self.inner.set_text(text);
     }
 }
 

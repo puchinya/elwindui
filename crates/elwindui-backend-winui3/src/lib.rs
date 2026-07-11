@@ -440,34 +440,16 @@ impl Window {
     }
 }
 
-pub struct TextAreaImpl {
-    base: elwindui_core::ui::NativeControlImpl<AnyView>,
+#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+pub struct TextArea {
     text_box: TextBox,
     on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
 }
 
-impl elwindui_core::ui::UIElement for TextAreaImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.base.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::ui::UIElement>> {
-        self.base.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.base.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.base.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn std::any::Any> {
-        Some(&self.base)
-    }
-}
-impl elwindui_core::ui::NativeControl<AnyView> for TextAreaImpl {}
-
 /// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are WinUI3-specific.
-impl elwindui_core::ui::TextArea for TextAreaImpl {
+#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+impl TextArea {
     /// `TextBox.Text` assigned programmatically resets the caret/selection to the start, even when
     /// the text given is identical to what's already there — same issue as AppKit's
     /// `NSTextView.setString:` (see that backend's own `TextAreaImpl::set_text` doc comment for the
@@ -486,58 +468,44 @@ impl elwindui_core::ui::TextArea for TextAreaImpl {
     fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
         *self.on_change.borrow_mut() = Some(callback);
     }
+
+    fn new() -> Self {
+        let text_box = TextBox::new().expect("TextBox::new");
+        let _ = text_box.SetAcceptsReturn(true);
+        let _ = text_box.SetTextWrapping(bindings::Microsoft::UI::Xaml::TextWrapping::Wrap);
+        let handle = AnyView::from(text_box.clone());
+        let this = Self {
+            base: elwindui_core::ui::create_native_control(handle),
+            text_box,
+            on_change: Rc::new(RefCell::new(None)),
+        };
+        let callback = this.on_change.clone();
+        let text_box_for_handler = this.text_box.clone();
+        let _ = this.text_box.TextChanged(&TypedEventHandler::<TextBox, TextChangedEventArgs>::new(move |_, _| {
+            if let Some(cb) = callback.borrow().as_ref() {
+                let text = text_box_for_handler.Text().map(|s| s.to_string_lossy()).unwrap_or_default();
+                cb(text);
+            }
+            Ok(())
+        }));
+        this
+    }
 }
 
 pub fn create_text_area() -> TextAreaImpl {
-    let text_box = TextBox::new().expect("TextBox::new");
-    let _ = text_box.SetAcceptsReturn(true);
-    let _ = text_box.SetTextWrapping(bindings::Microsoft::UI::Xaml::TextWrapping::Wrap);
-    let handle = AnyView::from(text_box.clone());
-    let this = TextAreaImpl {
-        base: elwindui_core::ui::create_native_control(handle),
-        text_box,
-        on_change: Rc::new(RefCell::new(None)),
-    };
-    let callback = this.on_change.clone();
-    let text_box_for_handler = this.text_box.clone();
-    let _ = this.text_box.TextChanged(&TypedEventHandler::<TextBox, TextChangedEventArgs>::new(move |_, _| {
-        if let Some(cb) = callback.borrow().as_ref() {
-            let text = text_box_for_handler.Text().map(|s| s.to_string_lossy()).unwrap_or_default();
-            cb(text);
-        }
-        Ok(())
-    }));
-    this
+    TextAreaImpl::new()
 }
 
-pub struct ButtonImpl {
-    base: elwindui_core::ui::NativeControlImpl<AnyView>,
+#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+pub struct Button {
     xaml: XamlButton,
     on_click: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
-impl elwindui_core::ui::UIElement for ButtonImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.base.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::ui::UIElement>> {
-        self.base.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.base.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.base.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn std::any::Any> {
-        Some(&self.base)
-    }
-}
-impl elwindui_core::ui::NativeControl<AnyView> for ButtonImpl {}
-
 /// `elwindui_core::ui::Button`'s shape is common to every backend — see that trait's own doc
 /// comment; only these method bodies are WinUI3-specific.
-impl elwindui_core::ui::Button for ButtonImpl {
+#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+impl Button {
     fn set_enabled(&self, enabled: bool) {
         let _ = self.xaml.SetIsEnabled(enabled);
     }
@@ -550,20 +518,24 @@ impl elwindui_core::ui::Button for ButtonImpl {
     fn set_text(&self, text: &str) {
         let _ = self.xaml.SetContent(&HSTRING::from(text));
     }
+
+    fn new() -> Self {
+        let xaml = XamlButton::new().expect("ButtonImpl::new");
+        let handle = AnyView::from(xaml.clone());
+        let this = Self { base: elwindui_core::ui::create_native_control(handle), xaml, on_click: Rc::new(RefCell::new(None)) };
+        let callback = this.on_click.clone();
+        let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
+            if let Some(cb) = callback.borrow().as_ref() {
+                cb();
+            }
+            Ok(())
+        }));
+        this
+    }
 }
 
 pub fn create_button() -> ButtonImpl {
-    let xaml = XamlButton::new().expect("ButtonImpl::new");
-    let handle = AnyView::from(xaml.clone());
-    let this = ButtonImpl { base: elwindui_core::ui::create_native_control(handle), xaml, on_click: Rc::new(RefCell::new(None)) };
-    let callback = this.on_click.clone();
-    let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
-        if let Some(cb) = callback.borrow().as_ref() {
-            cb();
-        }
-        Ok(())
-    }));
-    this
+    ButtonImpl::new()
 }
 
 /// `Microsoft.UI.Xaml.Controls.TabView` is a real native tabbed-document control (unlike AppKit,
@@ -574,33 +546,6 @@ pub fn create_button() -> ButtonImpl {
 /// mirroring `elwindui-builtins::appkit::tab_view`) owns the tab list and calls the methods below;
 /// this type only knows about "N tabs, each with a title and a content host", the same division
 /// AppKit's `TabViewImpl` keeps.
-pub struct TabViewImpl {
-    base: elwindui_core::ui::NativeControlImpl<AnyView>,
-    xaml: XamlTabView,
-    on_select: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
-    on_close: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
-    on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
-}
-
-impl elwindui_core::ui::UIElement for TabViewImpl {
-    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
-        self.base.base()
-    }
-    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::ui::UIElement>> {
-        self.base.visual_children()
-    }
-    fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-        self.base.measure_override(available, child_sizes)
-    }
-    fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-        self.base.arrange_override(final_size, child_sizes)
-    }
-    fn as_native_control(&self) -> Option<&dyn std::any::Any> {
-        Some(&self.base)
-    }
-}
-impl elwindui_core::ui::NativeControl<AnyView> for TabViewImpl {}
-
 /// `TabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — mirrors
 /// `elwindui-backend-appkit::TabView`, extending `NativeControl<AnyView>` since a real `AnyView`
 /// handle (`self.base.handle`, wrapping `self.xaml`) is what makes this leaf embeddable in the
@@ -619,7 +564,16 @@ pub trait TabView: elwindui_core::ui::NativeControl<AnyView> {
     fn set_selected_index(&self, index: usize);
 }
 
-impl TabView for TabViewImpl {
+#[elwindui_macros::class(implements = TabView, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+pub struct TabViewImpl {
+    xaml: XamlTabView,
+    on_select: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
+    on_close: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
+    on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+}
+
+#[elwindui_macros::class(implements = TabView, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+impl TabViewImpl {
     fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_select.borrow_mut() = Some(callback);
     }
@@ -663,24 +617,23 @@ impl TabView for TabViewImpl {
     fn set_selected_index(&self, index: usize) {
         let _ = self.xaml.SetSelectedIndex(index as i32);
     }
-}
 
-pub fn create_tab_view() -> TabViewImpl {
-    let xaml = XamlTabView::new().expect("TabViewImpl::new");
-    let _ = xaml.SetTabWidthMode(bindings::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent);
-    let _ = xaml.SetCloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Always);
-    let _ = xaml.SetIsAddTabButtonVisible(true);
+    fn new() -> Self {
+        let xaml = XamlTabView::new().expect("TabViewImpl::new");
+        let _ = xaml.SetTabWidthMode(bindings::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent);
+        let _ = xaml.SetCloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Always);
+        let _ = xaml.SetIsAddTabButtonVisible(true);
 
-    let handle = AnyView::from(xaml.clone());
-    let this = TabViewImpl {
-        base: elwindui_core::ui::create_native_control(handle),
-        xaml,
-        on_select: Rc::new(RefCell::new(None)),
-        on_close: Rc::new(RefCell::new(None)),
-        on_new_tab: Rc::new(RefCell::new(None)),
-    };
+        let handle = AnyView::from(xaml.clone());
+        let this = Self {
+            base: elwindui_core::ui::create_native_control(handle),
+            xaml,
+            on_select: Rc::new(RefCell::new(None)),
+            on_close: Rc::new(RefCell::new(None)),
+            on_new_tab: Rc::new(RefCell::new(None)),
+        };
 
-    let on_select = this.on_select.clone();
+        let on_select = this.on_select.clone();
     let _ = this.xaml.SelectionChanged(&TypedEventHandler::<XamlTabView, SelectionChangedEventArgs>::new(move |sender, _| {
         if let (Some(sender), Some(cb)) = (sender, on_select.borrow().as_ref()) {
             let index = sender.SelectedIndex().unwrap_or(-1);
@@ -705,15 +658,20 @@ pub fn create_tab_view() -> TabViewImpl {
         Ok(())
     }));
 
-    let on_new_tab = this.on_new_tab.clone();
-    let _ = this.xaml.AddTabButtonClick(&TypedEventHandler::new(move |_, _| {
-        if let Some(cb) = on_new_tab.borrow().as_ref() {
-            cb();
-        }
-        Ok(())
-    }));
+        let on_new_tab = this.on_new_tab.clone();
+        let _ = this.xaml.AddTabButtonClick(&TypedEventHandler::new(move |_, _| {
+            if let Some(cb) = on_new_tab.borrow().as_ref() {
+                cb();
+            }
+            Ok(())
+        }));
 
-    this
+        this
+    }
+}
+
+pub fn create_tab_view() -> TabViewImpl {
+    TabViewImpl::new()
 }
 
 /// See `elwindui-backend-appkit::MenuItemImpl`'s doc comment — same role, backed by a

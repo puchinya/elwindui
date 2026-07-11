@@ -90,7 +90,20 @@ pub trait RelayoutHost {
 /// `data_context` (WinUI3's `FrameworkElement.DataContext`) is `Rc<dyn Any>`-erased like every
 /// other cross-type-parameter value in this crate (see e.g. `elwindui_backend_appkit::builtins::tab_view`'s
 /// `erase_items`/`erase_render`).
-pub struct UIElementImpl {
+/// The common interface every element in the Visual tree implements — `NativeControlImpl<H>`,
+/// `TextBlockImpl`, `ShapeImpl`, `VerticalLayoutImpl`/`HorizontalLayoutImpl`, and `ControlImpl` are
+/// all peers here, not variants of some enum.
+/// New kinds (a future `GridImpl`, say) are added by implementing this trait; nothing here or in
+/// `layout_tree` needs to change.
+///
+/// `UIElementImpl` is the root of the class hierarchy (docs/elwindui_spec.md 付録H.2.1a) —
+/// `#[elwindui_macros::class]`'s "root class mode" (no `inherits`): every method on the paired
+/// `impl UIElement { .. }` below becomes a *default* method here, embedded body and all, so every
+/// other `#[class(inherits = ..)]`-managed subclass inherits all of them for free via Rust's own
+/// default-method dispatch — only `base` (synthesized by the macro; its concrete location differs
+/// per implementor) is a genuinely required method.
+#[elwindui_macros::class]
+pub struct UIElement {
     pub margin: Cell<f32>,
     pub horizontal_alignment: Cell<HorizontalAlignment>,
     pub vertical_alignment: Cell<VerticalAlignment>,
@@ -296,13 +309,19 @@ pub fn register_routed_handler<T: 'static>(handlers: &RoutedHandlers, name: &'st
     handlers.borrow_mut().entry(name).or_default().push(Box::new(handler));
 }
 
-/// The common interface every element in the Visual tree implements — `NativeControlImpl<H>`,
-/// `TextBlockImpl`, `ShapeImpl`, `VerticalLayoutImpl`/`HorizontalLayoutImpl`, and `ControlImpl` are
-/// all peers here, not variants of some enum.
-/// New kinds (a future `GridImpl`, say) are added by implementing this trait; nothing here or in
-/// `layout_tree` needs to change.
-pub trait UIElement: AsAny {
-    fn base(&self) -> &UIElementImpl;
+/// `UIElementImpl` is a genuine `UIElement` implementor itself — trivially, since `base` is the
+/// identity function here — which is what lets every other `#[class(inherits = ..)]`-managed
+/// subclass's ancestor delegation reduce to a single uniform `self.base.method(..)` forward
+/// (`elwindui_macros::class`'s `uielement_blind_forward`), regardless of how many `base` hops it
+/// has to pass through to reach the root (docs/elwindui_spec.md 付録H.2.1a).
+impl UIElement for UIElementImpl {
+    fn base(&self) -> &UIElementImpl {
+        self
+    }
+}
+
+#[elwindui_macros::class(supertrait = AsAny)]
+impl UIElement {
     fn margin(&self) -> f32 {
         self.base().margin.get()
     }
@@ -384,6 +403,13 @@ pub trait UIElement: AsAny {
     fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
         self.base().set_data_context(data_context);
     }
+    /// `GridImpl::row`/`GridImpl::column`'s attached-property value for this element — see
+    /// `UIElementImpl::grid_cell`'s own doc comment. Previously had no trait-level getter (only
+    /// `set_grid_cell`), unlike every other property field here — fixed as part of converting this
+    /// trait to `#[elwindui_macros::class]`'s root class mode.
+    fn grid_cell(&self) -> GridCell {
+        self.base().grid_cell.get()
+    }
     fn set_grid_cell(&self, grid_cell: GridCell) {
         self.base().set_grid_cell(grid_cell);
     }
@@ -413,11 +439,18 @@ pub trait UIElement: AsAny {
         self.base().visual_children.to_vec()
     }
     /// This element's own desired size, given `available` (margin already excluded by the caller)
-    /// and its children's already-measured sizes (WinUI3's `MeasureOverride`).
-    fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size;
+    /// and its children's already-measured sizes (WinUI3's `MeasureOverride`). Defaults to taking
+    /// no space at all — every concrete leaf/container overrides this with real logic; nothing
+    /// currently relies on this default actually being invoked.
+    fn measure_override(&self, _available: Size, _child_sizes: &[Size]) -> Size {
+        Size { width: 0.0, height: 0.0 }
+    }
     /// The rect to assign each child (in this element's own local coordinate space), given the
-    /// final size this element itself was assigned (WinUI3's `ArrangeOverride`).
-    fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect>;
+    /// final size this element itself was assigned (WinUI3's `ArrangeOverride`). Defaults to no
+    /// children — see `measure_override`'s own doc comment.
+    fn arrange_override(&self, _final_size: Size, _child_sizes: &[Size]) -> Vec<Rect> {
+        Vec::new()
+    }
     /// Content this element paints for itself, if any (`None` for pure layout containers like
     /// `LayoutImpl`, which only position children and draw nothing on their own account).
     fn paint(&self) -> Option<PaintKind> {
@@ -656,15 +689,16 @@ pub enum TextAlignment {
 /// `Button`/`TextArea`/`MenuBar`/`TabView` (the "NativeControlImpl" family) — the only `UIElement`
 /// with a real backend handle. Always a leaf as far as this tree is concerned: whatever lives
 /// beneath it in its own backend-managed hierarchy (e.g. `TabView`'s tab-switching) is opaque here.
-pub struct NativeControlImpl<H> {
-    pub base: UIElementImpl,
+/// `NativeControl<H>`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) has no methods beyond
+/// `UIElement` today — declared via `#[elwindui_macros::class]` purely so the type participates in
+/// the trait+`Impl`+`base` convention like every other class in this hierarchy.
+#[elwindui_macros::class(inherits = UIElement)]
+pub struct NativeControl<H> {
     pub handle: H,
 }
 
-impl<H: LayoutNode + 'static> UIElement for NativeControlImpl<H> {
-    fn base(&self) -> &UIElementImpl {
-        &self.base
-    }
+#[elwindui_macros::class(inherits = UIElement)]
+impl<H: LayoutNode + 'static> NativeControl<H> {
     fn measure_override(&self, available: Size, _child_sizes: &[Size]) -> Size {
         self.handle.measure(available)
     }
@@ -674,16 +708,13 @@ impl<H: LayoutNode + 'static> UIElement for NativeControlImpl<H> {
     fn as_native_control(&self) -> Option<&dyn Any> {
         Some(self)
     }
+    pub fn new(handle: H) -> Self {
+        Self { base: UIElementImpl::default(), handle }
+    }
 }
 
-/// `NativeControlImpl<H>`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — no methods beyond
-/// `UIElement` today; exists so the type participates in the trait+`Impl`+`base` convention like
-/// every other class in this hierarchy.
-pub trait NativeControl<H>: UIElement {}
-impl<H: LayoutNode + 'static> NativeControl<H> for NativeControlImpl<H> {}
-
-pub fn create_native_control<H>(handle: H) -> NativeControlImpl<H> {
-    NativeControlImpl { base: UIElementImpl::default(), handle }
+pub fn create_native_control<H: LayoutNode + 'static>(handle: H) -> NativeControlImpl<H> {
+    NativeControlImpl::new(handle)
 }
 
 /// `Window`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — empty marker, exactly like
@@ -754,14 +785,14 @@ pub trait MenuBarItem<M> {
 /// `HorizontalLayoutImpl`/`GridImpl`), the same way `NativeControl<H>` groups every native leaf.
 pub trait Layout: UIElement {}
 
-/// Shared fields behind `VerticalLayout`/`HorizontalLayout` — analogous to `UIElementImpl` itself
-/// (a plain data holder, not a `UIElement` implementor of its own). `VerticalLayoutImpl`/
-/// `HorizontalLayoutImpl` each embed one as `base`, but implement `UIElement`/`Layout` themselves,
+/// Shared fields behind `VerticalLayout`/`HorizontalLayout`. `VerticalLayoutImpl`/
+/// `HorizontalLayoutImpl` each embed one as `base` and implement `UIElement`/`Layout` themselves,
 /// doing their own layout math directly against `elwindui_core::layout`'s `stack_arrange`/
 /// `stack_natural_size` free functions with their own fixed `Orientation` literal — neither
-/// delegates its `measure_override`/`arrange_override` to this struct, since the orientation (and
-/// so the entire layout algorithm) is a property of *which concrete type this is*, not of shared
-/// state a common base could hold.
+/// delegates its `measure_override`/`arrange_override` to this struct's own (trivial, "take no
+/// space" — see `UIElement::measure_override`'s own doc comment) default, since the orientation
+/// (and so the entire layout algorithm) is a property of *which concrete type this is*, not of
+/// shared state a common base could hold.
 pub struct LayoutImpl {
     pub base: UIElementImpl,
     pub spacing: Cell<f32>,
@@ -777,6 +808,18 @@ impl LayoutImpl {
     }
 }
 
+/// `LayoutImpl` is a genuine `UIElement` implementor itself (trivially delegating to its own
+/// `base: UIElementImpl`, which is one too — see that type's own `impl UIElement` doc comment) —
+/// this is what lets `#[class(inherits = Layout)]`'s ancestor delegation
+/// (`VerticalLayoutImpl`/`HorizontalLayoutImpl`) reduce to the same uniform `self.base.method(..)`
+/// forward every other `inherits = ..` target uses, rather than needing a special "drill an extra
+/// field access" case.
+impl UIElement for LayoutImpl {
+    fn base(&self) -> &UIElementImpl {
+        self.base.base()
+    }
+}
+
 fn create_layout() -> LayoutImpl {
     let base = UIElementImpl::default();
     let children = base.children_collection();
@@ -784,96 +827,74 @@ fn create_layout() -> LayoutImpl {
 }
 
 /// `VerticalLayoutImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
-pub trait VerticalLayout: Layout {
-    fn set_spacing(&self, spacing: f32);
-}
-impl VerticalLayout for VerticalLayoutImpl {
-    fn set_spacing(&self, spacing: f32) {
-        self.base.set_spacing(spacing);
-    }
-}
+#[elwindui_macros::class(inherits = Layout)]
+pub struct VerticalLayout {}
 
-pub struct VerticalLayoutImpl {
-    pub base: LayoutImpl,
-}
-
-impl UIElement for VerticalLayoutImpl {
-    fn base(&self) -> &UIElementImpl {
-        &self.base.base
-    }
+#[elwindui_macros::class(inherits = Layout)]
+impl VerticalLayout {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
         stack_natural_size(Orientation::Vertical, self.base.spacing.get(), child_sizes)
     }
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
         stack_arrange(final_size, Orientation::Vertical, self.base.spacing.get(), child_sizes)
     }
-}
-
-impl Layout for VerticalLayoutImpl {}
-
-impl VerticalLayoutImpl {
+    fn set_spacing(&self, spacing: f32) {
+        self.base.set_spacing(spacing);
+    }
     pub fn children(&self) -> &UIElementCollection {
         &self.base.children
+    }
+    fn new(base: LayoutImpl) -> Self {
+        Self { base }
     }
 }
 
 pub fn create_vertical_layout() -> VerticalLayoutImpl {
-    VerticalLayoutImpl { base: create_layout() }
+    VerticalLayoutImpl::new(create_layout())
 }
 
 /// `HorizontalLayoutImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
-pub trait HorizontalLayout: Layout {
-    fn set_spacing(&self, spacing: f32);
-}
-impl HorizontalLayout for HorizontalLayoutImpl {
-    fn set_spacing(&self, spacing: f32) {
-        self.base.set_spacing(spacing);
-    }
-}
+#[elwindui_macros::class(inherits = Layout)]
+pub struct HorizontalLayout {}
 
-pub struct HorizontalLayoutImpl {
-    pub base: LayoutImpl,
-}
-
-impl UIElement for HorizontalLayoutImpl {
-    fn base(&self) -> &UIElementImpl {
-        &self.base.base
-    }
+#[elwindui_macros::class(inherits = Layout)]
+impl HorizontalLayout {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
         stack_natural_size(Orientation::Horizontal, self.base.spacing.get(), child_sizes)
     }
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
         stack_arrange(final_size, Orientation::Horizontal, self.base.spacing.get(), child_sizes)
     }
-}
-
-impl Layout for HorizontalLayoutImpl {}
-
-impl HorizontalLayoutImpl {
+    fn set_spacing(&self, spacing: f32) {
+        self.base.set_spacing(spacing);
+    }
     pub fn children(&self) -> &UIElementCollection {
         &self.base.children
+    }
+    fn new(base: LayoutImpl) -> Self {
+        Self { base }
     }
 }
 
 pub fn create_horizontal_layout() -> HorizontalLayoutImpl {
-    HorizontalLayoutImpl { base: create_layout() }
+    HorizontalLayoutImpl::new(create_layout())
 }
 
 /// `Rectangle`/`Ellipse`. A pure leaf, like `TextBlockImpl` — no children of its own (matching real
 /// WinUI3's `Shape`, which likewise has no `Children`/content property; see docs/elwindui_spec.md
 /// 付録H.2.2), so its natural size is just its own drawn bounds.
-pub struct ShapeImpl {
-    pub base: UIElementImpl,
+/// `ShapeImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `Shape` has no further
+/// DSL-level subclass today.
+#[elwindui_macros::class(inherits = UIElement)]
+pub struct Shape {
     pub kind: Cell<ShapeKind>,
     pub fill: RefCell<Option<String>>,
     pub stroke: RefCell<Option<String>>,
     pub stroke_width: Cell<f32>,
 }
 
-impl UIElement for ShapeImpl {
-    fn base(&self) -> &UIElementImpl {
-        &self.base
-    }
+#[elwindui_macros::class(inherits = UIElement)]
+impl Shape {
     fn measure_override(&self, _available: Size, _child_sizes: &[Size]) -> Size {
         Size { width: 0.0, height: 0.0 }
     }
@@ -888,17 +909,6 @@ impl UIElement for ShapeImpl {
             stroke_width: self.stroke_width.get(),
         })
     }
-}
-
-/// `ShapeImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `Shape` has no further
-/// DSL-level subclass today.
-pub trait Shape: UIElement {
-    fn set_kind(&self, kind: ShapeKind);
-    fn set_fill(&self, fill: Option<String>);
-    fn set_stroke(&self, stroke: Option<String>);
-    fn set_stroke_width(&self, stroke_width: f32);
-}
-impl Shape for ShapeImpl {
     fn set_kind(&self, kind: ShapeKind) {
         self.kind.set(kind);
     }
@@ -911,16 +921,19 @@ impl Shape for ShapeImpl {
     fn set_stroke_width(&self, stroke_width: f32) {
         self.stroke_width.set(stroke_width);
     }
+    fn new() -> Self {
+        Self {
+            base: UIElementImpl::default(),
+            kind: Cell::new(ShapeKind::RoundedRect { corner_radius: 0.0 }),
+            fill: RefCell::new(None),
+            stroke: RefCell::new(None),
+            stroke_width: Cell::new(0.0),
+        }
+    }
 }
 
 pub fn create_shape() -> ShapeImpl {
-    ShapeImpl {
-        base: UIElementImpl::default(),
-        kind: Cell::new(ShapeKind::RoundedRect { corner_radius: 0.0 }),
-        fill: RefCell::new(None),
-        stroke: RefCell::new(None),
-        stroke_width: Cell::new(0.0),
-    }
+    ShapeImpl::new()
 }
 
 /// Self-drawn primitive text (WinUI3's `TextBlockImpl`) — no native widget, unlike the native `Text`
@@ -928,17 +941,17 @@ pub fn create_shape() -> ShapeImpl {
 /// `PaintKind::Text`'s own field of the same meaning) to match `builtin::TextBlock`'s own `#[param]
 /// text` name — `elwindui-codegen`'s setter-based construction calls `.set_{param name}(..)`
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
-pub struct TextBlockImpl {
-    pub base: UIElementImpl,
+/// `TextBlockImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `TextBlock` has no
+/// further DSL-level subclass today.
+#[elwindui_macros::class(inherits = UIElement)]
+pub struct TextBlock {
     pub text: RefCell<String>,
     pub color: RefCell<Option<String>>,
     pub alignment: Cell<TextAlignment>,
 }
 
-impl UIElement for TextBlockImpl {
-    fn base(&self) -> &UIElementImpl {
-        &self.base
-    }
+#[elwindui_macros::class(inherits = UIElement)]
+impl TextBlock {
     fn measure_override(&self, _available: Size, _child_sizes: &[Size]) -> Size {
         // `elwindui-core` has no font metrics of its own (measurement, like painting, is a
         // backend concern for self-drawn content — see `ShapeImpl`'s same split) — a rough per-
@@ -952,16 +965,6 @@ impl UIElement for TextBlockImpl {
     fn paint(&self) -> Option<PaintKind> {
         Some(PaintKind::Text { content: self.text.borrow().clone(), color: self.color.borrow().clone(), alignment: self.alignment.get() })
     }
-}
-
-/// `TextBlockImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `TextBlock` has no
-/// further DSL-level subclass today.
-pub trait TextBlock: UIElement {
-    fn set_text(&self, text: String);
-    fn set_color(&self, color: Option<String>);
-    fn set_text_alignment(&self, alignment: TextAlignment);
-}
-impl TextBlock for TextBlockImpl {
     fn set_text(&self, text: String) {
         *self.text.borrow_mut() = text;
     }
@@ -971,15 +974,18 @@ impl TextBlock for TextBlockImpl {
     fn set_text_alignment(&self, alignment: TextAlignment) {
         self.alignment.set(alignment);
     }
+    fn new() -> Self {
+        Self {
+            base: UIElementImpl::default(),
+            text: RefCell::new(String::new()),
+            color: RefCell::new(None),
+            alignment: Cell::new(TextAlignment::Left),
+        }
+    }
 }
 
 pub fn create_text_block() -> TextBlockImpl {
-    TextBlockImpl {
-        base: UIElementImpl::default(),
-        text: RefCell::new(String::new()),
-        color: RefCell::new(None),
-        alignment: Cell::new(TextAlignment::Left),
-    }
+    TextBlockImpl::new()
 }
 
 /// A composable, multi-part component (WinUI3's `ControlImpl`) — Visually built from any number of
@@ -994,8 +1000,11 @@ pub fn create_text_block() -> TextBlockImpl {
 /// child's *own* `horizontal_alignment`/`vertical_alignment`, applied generically by `arrange`
 /// below, already governs its placement within the padded content area); template
 /// replacement is future work.
-pub struct ControlImpl {
-    pub base: UIElementImpl,
+/// `ControlImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — exposes the fields a
+/// DSL-level subclass composed via `base: ControlImpl` (e.g. `builtin::ContentControl`,
+/// `crates/elwindui-builtins/src/builtins.elwind`) delegates to.
+#[elwindui_macros::class(inherits = UIElement)]
+pub struct Control {
     pub padding: Cell<f32>,
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
     pub content_vertical_alignment: Cell<VerticalAlignment>,
@@ -1004,10 +1013,8 @@ pub struct ControlImpl {
     pub children: UIElementCollection,
 }
 
-impl UIElement for ControlImpl {
-    fn base(&self) -> &UIElementImpl {
-        &self.base
-    }
+#[elwindui_macros::class(inherits = UIElement)]
+impl Control {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
         let inner = child_sizes
             .iter()
@@ -1018,20 +1025,6 @@ impl UIElement for ControlImpl {
         let full = Rect { x: 0.0, y: 0.0, width: final_size.width, height: final_size.height };
         vec![shrink_rect_by_margin(full, self.padding.get()); child_sizes.len()]
     }
-}
-
-/// `ControlImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — exposes the fields a
-/// DSL-level subclass composed via `base: ControlImpl` (e.g. `builtin::ContentControl`,
-/// `crates/elwindui-builtins/src/builtins.elwind`) delegates to.
-pub trait Control: UIElement {
-    fn padding(&self) -> f32;
-    fn content_horizontal_alignment(&self) -> HorizontalAlignment;
-    fn content_vertical_alignment(&self) -> VerticalAlignment;
-    fn set_padding(&self, padding: f32);
-    fn set_content_horizontal_alignment(&self, alignment: HorizontalAlignment);
-    fn set_content_vertical_alignment(&self, alignment: VerticalAlignment);
-}
-impl Control for ControlImpl {
     fn padding(&self) -> f32 {
         self.padding.get()
     }
@@ -1050,18 +1043,21 @@ impl Control for ControlImpl {
     fn set_content_vertical_alignment(&self, alignment: VerticalAlignment) {
         self.content_vertical_alignment.set(alignment);
     }
+    fn new() -> Self {
+        let base = UIElementImpl::default();
+        let children = base.children_collection();
+        Self {
+            base,
+            padding: Cell::new(0.0),
+            content_horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
+            content_vertical_alignment: Cell::new(VerticalAlignment::Stretch),
+            children,
+        }
+    }
 }
 
 pub fn create_control() -> ControlImpl {
-    let base = UIElementImpl::default();
-    let children = base.children_collection();
-    ControlImpl {
-        base,
-        padding: Cell::new(0.0),
-        content_horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
-        content_vertical_alignment: Cell::new(VerticalAlignment::Stretch),
-        children,
-    }
+    ControlImpl::new()
 }
 
 /// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/elwindui_spec.md §3). Each child's
@@ -1075,8 +1071,10 @@ pub fn create_control() -> ControlImpl {
 /// `rows`/`columns` (not `row_definitions`/`column_definitions`) to match `builtin::Grid`'s own
 /// `#[param] rows`/`#[param] columns` names — `elwindui-codegen`'s setter-based construction calls
 /// `.set_{param name}(..)` generically, so the Rust field/setter name must agree with the DSL's.
-pub struct GridImpl {
-    pub base: UIElementImpl,
+/// `GridImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `Grid` has no
+/// further DSL-level subclass today.
+#[elwindui_macros::class(inherits = UIElement)]
+pub struct Grid {
     pub rows: RefCell<Vec<GridLength>>,
     pub columns: RefCell<Vec<GridLength>>,
     /// Shares its storage with `base.visual_children` (`UIElementImpl::children_collection`) — see
@@ -1084,10 +1082,8 @@ pub struct GridImpl {
     pub children: UIElementCollection,
 }
 
-impl UIElement for GridImpl {
-    fn base(&self) -> &UIElementImpl {
-        &self.base
-    }
+#[elwindui_macros::class(inherits = UIElement)]
+impl Grid {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
         let cells: Vec<GridCell> = self.children.to_vec().iter().map(|c| c.base().grid_cell.get()).collect();
         grid_natural_size(&self.rows.borrow(), &self.columns.borrow(), &cells, child_sizes)
@@ -1096,29 +1092,26 @@ impl UIElement for GridImpl {
         let cells: Vec<GridCell> = self.children.to_vec().iter().map(|c| c.base().grid_cell.get()).collect();
         grid_arrange(final_size, &self.rows.borrow(), &self.columns.borrow(), &cells, child_sizes)
     }
-}
-
-impl Layout for GridImpl {}
-
-/// `GridImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `Grid` has no
-/// further DSL-level subclass today.
-pub trait Grid: Layout {
-    fn set_rows(&self, rows: Vec<GridLength>);
-    fn set_columns(&self, columns: Vec<GridLength>);
-}
-impl Grid for GridImpl {
     fn set_rows(&self, rows: Vec<GridLength>) {
         *self.rows.borrow_mut() = rows;
     }
     fn set_columns(&self, columns: Vec<GridLength>) {
         *self.columns.borrow_mut() = columns;
     }
+    fn new() -> Self {
+        let base = UIElementImpl::default();
+        let children = base.children_collection();
+        Self { base, rows: RefCell::new(Vec::new()), columns: RefCell::new(Vec::new()), children }
+    }
 }
 
+// `Grid`'s `base` is `UIElementImpl` directly (it has no `spacing`, so it skips `LayoutImpl`
+// entirely, unlike `VerticalLayout`/`HorizontalLayout`) — `#[class(inherits = UIElement)]` above
+// doesn't know to also mark it as a `Layout`, so that one-line empty marker stays hand-written.
+impl Layout for GridImpl {}
+
 pub fn create_grid() -> GridImpl {
-    let base = UIElementImpl::default();
-    let children = base.children_collection();
-    GridImpl { base, rows: RefCell::new(Vec::new()), columns: RefCell::new(Vec::new()), children }
+    GridImpl::new()
 }
 
 /// WinUI3's `FrameworkElement.MeasureCore`-style constraint step, shared by `measure`/

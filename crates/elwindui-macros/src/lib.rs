@@ -1,5 +1,7 @@
 use proc_macro::TokenStream;
 
+mod class;
+
 /// `elwindui::component! { component NotepadWindow { ... } view NotepadWindow { ... } }`, the
 /// proc-macro alternative to the build.rs codegen path (`elwindui_codegen::compile_dir`) — lets
 /// `component`/`viewmodel`/`enum`/`view` items be written inline in a `.rs` file instead of in a
@@ -50,4 +52,14 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
             quote::quote! { compile_error!(#msg); }.into()
         }
     }
+}
+
+/// `#[elwindui_macros::class(inherits = SuperClass, implements = existing::TraitPath, abstract_class, sealed)]`
+/// applied to a bare `struct ClassName { .. }` and, separately, a bare `impl ClassName { .. }`
+/// (no `for`) — automates the H.2.1a class-hierarchy convention (docs/elwindui_spec.md 付録H.2.1a).
+/// See `class::expand`'s own doc comment for the full design and its deliberate simplifications
+/// versus a fully generic cross-crate manifest system.
+#[proc_macro_attribute]
+pub fn class(attr: TokenStream, item: TokenStream) -> TokenStream {
+    class::expand(attr.into(), item.into()).into()
 }

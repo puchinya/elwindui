@@ -7,6 +7,7 @@ edition.workspace = true
 # doc comment at the top of `build.rs` and `src/lib.rs` for what's uncertain).
 [target.'cfg(target_os = "windows")'.dependencies]
 elwindui-core = { path = "../elwindui-core" }
+elwindui-macros = { path = "../elwindui-macros" }
 # The mainstream `windows` crate covers Win32 + core WinRT (confirmed available: window/message
 # loop primitives, the classic `IFileOpenDialog`/`IFileSaveDialog` COM file pickers, `HSTRING`,
 # `DispatcherQueue` interop). It does NOT cover `Microsoft.UI.Xaml` (WinUI 3) — that comes from the

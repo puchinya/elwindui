@@ -8,5 +8,6 @@ proc-macro = true
 
 [dependencies]
 elwindui-codegen = { path = "../elwindui-codegen" }
+proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }

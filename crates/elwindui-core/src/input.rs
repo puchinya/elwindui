@@ -1,5 +1,5 @@
 use crate::painter::Point;
-use crate::tree::UIElement;
+use crate::ui::UIElement;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -18,7 +18,7 @@ pub struct PointerEvent {
     pub handled: bool,
 }
 
-/// Passed to every handler `elwindui_core::tree::dispatch_routed` calls along a bubble path —
+/// Passed to every handler `elwindui_core::ui::dispatch_routed` calls along a bubble path —
 /// pure propagation control, deliberately without a payload (`dispatch_routed`'s own `payload: &T`
 /// argument carries that, so this stays the same shape for every `#[routed]` field regardless of
 /// its own callback signature). A handler sets `handled` to stop further bubbling — WinUI3's
@@ -36,7 +36,7 @@ pub struct RoutedEventArgs {
 /// `items_source`, works identically). `hit_test`/`dispatch` operate over `UIElement` (not the
 /// separate `Element`/`ElementId` used for `#[id(...)]` name resolution) since only `UIElement`
 /// carries the measured/arranged geometry (`measure_override`/`arrange_override`) hit-testing
-/// needs — see `elwindui_core::tree::hit_test`/`dispatch_routed`, which this trait wraps.
+/// needs — see `elwindui_core::ui::hit_test`/`dispatch_routed`, which this trait wraps.
 pub trait InputRouter {
     fn hit_test(&self, root: &Rc<dyn UIElement>, at: Point) -> Option<Rc<dyn UIElement>>;
     fn dispatch(&mut self, root: &Rc<dyn UIElement>, event: PointerEvent);

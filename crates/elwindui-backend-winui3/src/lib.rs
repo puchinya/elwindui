@@ -1,7 +1,7 @@
 //! WinUI 3 (Windows App SDK) implementation of the widget surface `elwindui-codegen` targets,
 //! mirroring `elwindui-backend-appkit`'s shape (see that crate's doc comment for the overall
 //! native-vs-virtual design this implements: `VerticalLayout`/`HorizontalLayout`/
-//! `Rectangle`/`Ellipse`/`TextBlock` have no widget here at all, just `elwindui_core::tree::UIElement`
+//! `Rectangle`/`Ellipse`/`TextBlock` have no widget here at all, just `elwindui_core::ui::UIElement`
 //! values `elwindui-codegen` builds directly (`TextBlock` is self-drawn, using the real XAML
 //! `TextBlock` class only as a paint primitive inside `TreeHostPanel::relayout_static`, never as a
 //! wrapped builtin widget — see `elwindui-backend-appkit`'s `CATextLayer` use for the same role);
@@ -57,11 +57,11 @@ use windows::core::{Interface, Result, HSTRING};
 ///
 /// Implemented on the raw XAML element type itself (a foreign type — allowed since `WinUiHandle` is
 /// a local trait) rather than on `TextAreaImpl`/`ButtonImpl`/`TabViewImpl`, since those now each
-/// compose an `elwindui_core::tree::NativeControlImpl<AnyView>` as their own `base` field
+/// compose an `elwindui_core::ui::NativeControlImpl<AnyView>` as their own `base` field
 /// (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed widget
 /// itself would be a self-reference. Wrapping just the raw element instead lets `base.handle` be
 /// built (`AnyView::from(xaml.clone())`) before the rest of the widget struct exists.
-trait WinUiHandle: elwindui_core::tree::AsAny {
+trait WinUiHandle: elwindui_core::ui::AsAny {
     fn as_element(&self) -> FrameworkElement;
 }
 
@@ -83,7 +83,7 @@ impl WinUiHandle for XamlTabView {
 
 /// Everything the generated code can pass as a `Window`/`TabViewImpl` child.
 /// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no variant here —
-/// they're purely `elwindui_core::tree::UIElement` values (see `TreeHostPanel` below). An
+/// they're purely `elwindui_core::ui::UIElement` values (see `TreeHostPanel` below). An
 /// `Rc<dyn WinUiHandle>` (not a closed `enum`) so adding a new native leaf never requires touching
 /// this type — see `WinUiHandle`'s own doc comment.
 #[derive(Clone)]
@@ -125,12 +125,12 @@ impl<T: WinUiHandle + 'static> From<T> for AnyView {
     }
 }
 
-/// The single reusable "reflect an `Rc<dyn elwindui_core::tree::UIElement>` into real XAML
+/// The single reusable "reflect an `Rc<dyn elwindui_core::ui::UIElement>` into real XAML
 /// elements" host — the WinUI3 counterpart of `elwindui-backend-appkit`'s `TreeHostView`. A
 /// `Canvas` needs no custom `MeasureOverride`/`ArrangeOverride` subclass (unlike `TreeHostView`'s
 /// `NSView` subclass) since `Canvas`'s own built-in layout already just measures every child with
 /// an unconstrained size and positions it from the `Canvas.Left`/`Canvas.Top` attached properties —
-/// exactly the "trust `elwindui_core::tree::layout_tree`'s own absolute-rect computation, don't
+/// exactly the "trust `elwindui_core::ui::layout_tree`'s own absolute-rect computation, don't
 /// let the native layout system second-guess it" behavior this needs. `Rectangle`/`Ellipse`/
 /// `TextBlock` paint nodes become real `Shapes::Rectangle`/`Shapes::Ellipse`/`Controls::TextBlock`
 /// elements appended to `Canvas.Children` in traversal order (`Canvas` z-orders by collection
@@ -139,7 +139,7 @@ impl<T: WinUiHandle + 'static> From<T> for AnyView {
 #[derive(Clone)]
 pub struct TreeHostPanel {
     canvas: Canvas,
-    tree: Rc<RefCell<Option<Rc<dyn elwindui_core::tree::UIElement>>>>,
+    tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>,
 }
 
 impl TreeHostPanel {
@@ -168,7 +168,7 @@ impl TreeHostPanel {
     /// — a full swap rather than a diff, matching `TabViewImpl`'s wholesale content swap between tabs
     /// and `Window::set_content` only ever being called once (see `TreeHostView::set_tree`'s doc
     /// comment on the AppKit side for the same reasoning).
-    pub fn set_tree(&self, tree: Rc<dyn elwindui_core::tree::UIElement>) {
+    pub fn set_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElement>) {
         if let Ok(children) = self.canvas.Children() {
             let _ = children.Clear();
         }
@@ -176,7 +176,7 @@ impl TreeHostPanel {
         Self::relayout_static(&self.canvas, &self.tree);
     }
 
-    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::tree::UIElement>>>>) {
+    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>) {
         use elwindui_core::layout::Size as LSize;
 
         let width = canvas.ActualWidth().unwrap_or(0.0) as f32;
@@ -185,7 +185,7 @@ impl TreeHostPanel {
 
         let tree_ref = tree.borrow();
         let Some(tree) = tree_ref.as_ref() else { return };
-        let items: Vec<elwindui_core::tree::RenderItem<AnyView>> = elwindui_core::tree::layout_tree(tree, available);
+        let items: Vec<elwindui_core::ui::RenderItem<AnyView>> = elwindui_core::ui::layout_tree(tree, available);
 
         let Ok(children) = canvas.Children() else { return };
 
@@ -198,16 +198,16 @@ impl TreeHostPanel {
         // batches, which threw the relative ordering between the two away.
         for item in items {
             match item {
-                elwindui_core::tree::RenderItem::Paint(paint, rect) => match paint {
-                    elwindui_core::tree::PaintKind::Shape { kind, fill, stroke, stroke_width } => {
+                elwindui_core::ui::RenderItem::Paint(paint, rect) => match paint {
+                    elwindui_core::ui::PaintKind::Shape { kind, fill, stroke, stroke_width } => {
                         let element: UIElement = match kind {
-                            elwindui_core::tree::ShapeKind::RoundedRect { corner_radius } => {
+                            elwindui_core::ui::ShapeKind::RoundedRect { corner_radius } => {
                                 let r = XamlRectangle::new().expect("Rectangle::new");
                                 let _ = r.SetRadiusX(corner_radius as f64);
                                 let _ = r.SetRadiusY(corner_radius as f64);
                                 r.into()
                             }
-                            elwindui_core::tree::ShapeKind::Oval => XamlEllipse::new().expect("Ellipse::new").into(),
+                            elwindui_core::ui::ShapeKind::Oval => XamlEllipse::new().expect("Ellipse::new").into(),
                         };
                         let fe: FrameworkElement = element.clone().into();
                         let _ = fe.SetWidth(rect.width as f64);
@@ -226,7 +226,7 @@ impl TreeHostPanel {
                         }
                         let _ = children.Append(&element);
                     }
-                    elwindui_core::tree::PaintKind::Text { content, color } => {
+                    elwindui_core::ui::PaintKind::Text { content, color } => {
                         // Uses the real XAML `TextBlock` class purely as a paint primitive
                         // (positioned manually via the same `Canvas.Left`/`Canvas.Top`/`Width`/
                         // `Height` convention as every shape above), never wrapped as a builtin
@@ -250,7 +250,7 @@ impl TreeHostPanel {
                 // (docs/elwindui_spec.md 4章, `#[routed]`) — not done here, since this WinUI3
                 // backend is spec-only/best-effort and unverified (see this crate's own top doc
                 // comment); real click wiring is AppKit-only for now.
-                elwindui_core::tree::RenderItem::Native(mut view, rect, _node) => {
+                elwindui_core::ui::RenderItem::Native(mut view, rect, _node) => {
                     view.arrange(elwindui_core::layout::Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
                     let _ = children.Append(&view.as_element());
                 }
@@ -310,7 +310,7 @@ impl Window {
     /// Replaces the window's whole content tree — see `TreeHostPanel` for how an `Rc<dyn
     /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
     /// gets reflected into real XAML elements.
-    pub fn set_content(&self, content: Rc<dyn elwindui_core::tree::UIElement>) {
+    pub fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
         self.content_host.set_tree(content);
     }
 
@@ -344,7 +344,7 @@ impl Window {
 }
 
 pub struct TextAreaImpl {
-    base: elwindui_core::tree::NativeControlImpl<AnyView>,
+    base: elwindui_core::ui::NativeControlImpl<AnyView>,
     text_box: TextBox,
     on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
 }
@@ -353,16 +353,16 @@ pub struct TextAreaImpl {
 /// `elwindui-backend-appkit::TextArea`, extending `NativeControl<AnyView>` since a real `AnyView`
 /// handle (`self.base.handle`, wrapping `self.text_box`) is what makes this leaf embeddable in the
 /// visual tree at all.
-pub trait TextArea: elwindui_core::tree::NativeControl<AnyView> {
+pub trait TextArea: elwindui_core::ui::NativeControl<AnyView> {
     fn set_text(&self, text: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
 }
 
-impl elwindui_core::tree::UIElement for TextAreaImpl {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+impl elwindui_core::ui::UIElement for TextAreaImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
     }
-    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::tree::UIElement>> {
+    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::ui::UIElement>> {
         self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
@@ -375,7 +375,7 @@ impl elwindui_core::tree::UIElement for TextAreaImpl {
         Some(&self.base)
     }
 }
-impl elwindui_core::tree::NativeControl<AnyView> for TextAreaImpl {}
+impl elwindui_core::ui::NativeControl<AnyView> for TextAreaImpl {}
 
 impl TextArea for TextAreaImpl {
     fn set_text(&self, text: &str) {
@@ -393,7 +393,7 @@ pub fn create_text_area() -> TextAreaImpl {
     let _ = text_box.SetTextWrapping(bindings::Microsoft::UI::Xaml::TextWrapping::Wrap);
     let handle = AnyView::from(text_box.clone());
     let this = TextAreaImpl {
-        base: elwindui_core::tree::create_native_control(handle),
+        base: elwindui_core::ui::create_native_control(handle),
         text_box,
         on_change: Rc::new(RefCell::new(None)),
     };
@@ -410,7 +410,7 @@ pub fn create_text_area() -> TextAreaImpl {
 }
 
 pub struct ButtonImpl {
-    base: elwindui_core::tree::NativeControlImpl<AnyView>,
+    base: elwindui_core::ui::NativeControlImpl<AnyView>,
     xaml: XamlButton,
     on_click: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
@@ -419,18 +419,18 @@ pub struct ButtonImpl {
 /// `elwindui-backend-appkit::Button`, extending `NativeControl<AnyView>` since a real `AnyView`
 /// handle (`self.base.handle`, wrapping `self.xaml`) is what makes this leaf embeddable in the
 /// visual tree at all.
-pub trait Button: elwindui_core::tree::NativeControl<AnyView> {
+pub trait Button: elwindui_core::ui::NativeControl<AnyView> {
     fn set_enabled(&self, enabled: bool);
     fn set_on_click(&self, callback: Box<dyn Fn()>);
     /// Used by generic resync when a `ButtonImpl`'s `text` attribute is a dynamic expression.
     fn set_text(&self, text: &str);
 }
 
-impl elwindui_core::tree::UIElement for ButtonImpl {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+impl elwindui_core::ui::UIElement for ButtonImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
     }
-    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::tree::UIElement>> {
+    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::ui::UIElement>> {
         self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
@@ -443,7 +443,7 @@ impl elwindui_core::tree::UIElement for ButtonImpl {
         Some(&self.base)
     }
 }
-impl elwindui_core::tree::NativeControl<AnyView> for ButtonImpl {}
+impl elwindui_core::ui::NativeControl<AnyView> for ButtonImpl {}
 
 impl Button for ButtonImpl {
     fn set_enabled(&self, enabled: bool) {
@@ -462,7 +462,7 @@ impl Button for ButtonImpl {
 pub fn create_button() -> ButtonImpl {
     let xaml = XamlButton::new().expect("ButtonImpl::new");
     let handle = AnyView::from(xaml.clone());
-    let this = ButtonImpl { base: elwindui_core::tree::create_native_control(handle), xaml, on_click: Rc::new(RefCell::new(None)) };
+    let this = ButtonImpl { base: elwindui_core::ui::create_native_control(handle), xaml, on_click: Rc::new(RefCell::new(None)) };
     let callback = this.on_click.clone();
     let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
         if let Some(cb) = callback.borrow().as_ref() {
@@ -482,18 +482,18 @@ pub fn create_button() -> ButtonImpl {
 /// this type only knows about "N tabs, each with a title and a content host", the same division
 /// AppKit's `TabViewImpl` keeps.
 pub struct TabViewImpl {
-    base: elwindui_core::tree::NativeControlImpl<AnyView>,
+    base: elwindui_core::ui::NativeControlImpl<AnyView>,
     xaml: XamlTabView,
     on_select: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
     on_close: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
     on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
-impl elwindui_core::tree::UIElement for TabViewImpl {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+impl elwindui_core::ui::UIElement for TabViewImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
     }
-    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::tree::UIElement>> {
+    fn visual_children(&self) -> Vec<Rc<dyn elwindui_core::ui::UIElement>> {
         self.base.visual_children()
     }
     fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
@@ -506,13 +506,13 @@ impl elwindui_core::tree::UIElement for TabViewImpl {
         Some(&self.base)
     }
 }
-impl elwindui_core::tree::NativeControl<AnyView> for TabViewImpl {}
+impl elwindui_core::ui::NativeControl<AnyView> for TabViewImpl {}
 
 /// `TabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — mirrors
 /// `elwindui-backend-appkit::TabView`, extending `NativeControl<AnyView>` since a real `AnyView`
 /// handle (`self.base.handle`, wrapping `self.xaml`) is what makes this leaf embeddable in the
 /// visual tree at all.
-pub trait TabView: elwindui_core::tree::NativeControl<AnyView> {
+pub trait TabView: elwindui_core::ui::NativeControl<AnyView> {
     fn set_on_select(&self, callback: Box<dyn Fn(usize)>);
     fn set_on_close(&self, callback: Box<dyn Fn(usize)>);
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>);
@@ -580,7 +580,7 @@ pub fn create_tab_view() -> TabViewImpl {
 
     let handle = AnyView::from(xaml.clone());
     let this = TabViewImpl {
-        base: elwindui_core::tree::create_native_control(handle),
+        base: elwindui_core::ui::create_native_control(handle),
         xaml,
         on_select: Rc::new(RefCell::new(None)),
         on_close: Rc::new(RefCell::new(None)),

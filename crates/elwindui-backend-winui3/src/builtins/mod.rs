@@ -4,7 +4,7 @@
 //! `set_on_<event>`/`set_on_<attr>_change`/`into_any_view`, and for why this lives in its own
 //! `builtins` module rather than at this crate's root). `VerticalLayout`/`HorizontalLayout`/
 //! `Rectangle`/`Ellipse`/`TextBlock` have no wrapper here either, for the same reason as the
-//! AppKit side: `elwindui-codegen` builds their `elwindui_core::tree::UIElement` values directly.
+//! AppKit side: `elwindui-codegen` builds their `elwindui_core::ui::UIElement` values directly.
 //!
 //! UNVERIFIED — see `elwindui-backend-winui3`'s crate-level doc comment. This file only calls
 //! that crate's own API (which is under this project's control and self-consistent), so it should
@@ -15,7 +15,7 @@ pub use tab_view::{TabView, TabViewItem};
 
 use crate as winui3;
 use crate::{Button as _, Menu as _, MenuBar as _, MenuBarItem as _, MenuItem as _, TextArea as _};
-use elwindui_core::tree::UIElement;
+use elwindui_core::ui::UIElement;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -39,7 +39,7 @@ impl WindowImpl {
         self.inner.set_menu_bar(&menu_bar.inner);
     }
 
-    pub fn set_content(&self, content: Rc<dyn elwindui_core::tree::UIElement>) {
+    pub fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
         self.inner.set_content(content);
     }
 
@@ -58,7 +58,7 @@ pub struct TextArea {
 }
 
 impl UIElement for TextArea {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.inner.base()
     }
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
@@ -100,7 +100,7 @@ pub struct Button {
 }
 
 impl UIElement for Button {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.inner.base()
     }
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
@@ -131,7 +131,7 @@ impl Button {
             let node: Rc<dyn UIElement> = this.clone();
             this.inner.set_on_click(Box::new(move || {
                 let args = elwindui_core::input::RoutedEventArgs::default();
-                elwindui_core::tree::dispatch_routed(&node, "on_click", &(), &args);
+                elwindui_core::ui::dispatch_routed(&node, "on_click", &(), &args);
             }));
         }
         this

@@ -1,7 +1,7 @@
 //! AppKit-backed DSL-facing wrappers for every *native* builtin except `TabView` (see `tab_view.rs`
 //! — it's large enough to warrant its own file). `VerticalLayout`/`HorizontalLayout`/
 //! `Rectangle`/`Ellipse`/`TextBlock` have no wrapper here at all: `elwindui-codegen` builds their
-//! `elwindui_core::tree::UIElement` values directly (see docs/elwindui_spec.md 付録H.2), so
+//! `elwindui_core::ui::UIElement` values directly (see docs/elwindui_spec.md 付録H.2), so
 //! there's no `Type::new(..)` call site for a wrapper to intercept. Each type below wraps the
 //! matching `crate::` (this same crate's raw AppKit) widget and exposes exactly the methods
 //! `elwindui-codegen`'s generic conventions call: `Type::new(..)` (construction, args in the paired
@@ -28,7 +28,7 @@ pub use tab_view::{TabView, TabViewItem};
 
 use crate as appkit;
 use crate::{Button as _, Menu as _, MenuBar as _, MenuBarItem as _, MenuItem as _, TextArea as _};
-use elwindui_core::tree::UIElement;
+use elwindui_core::ui::UIElement;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -52,7 +52,7 @@ impl WindowImpl {
         self.inner.set_menu_bar(&menu_bar.inner);
     }
 
-    pub fn set_content(&self, content: Rc<dyn elwindui_core::tree::UIElement>) {
+    pub fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
         self.inner.set_content(content);
     }
 
@@ -71,7 +71,7 @@ pub struct TextArea {
 }
 
 impl UIElement for TextArea {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.inner.base()
     }
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
@@ -113,7 +113,7 @@ pub struct Button {
 }
 
 impl UIElement for Button {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.inner.base()
     }
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
@@ -145,7 +145,7 @@ impl Button {
             let node: Rc<dyn UIElement> = this.clone();
             this.inner.set_on_click(Box::new(move || {
                 let args = elwindui_core::input::RoutedEventArgs::default();
-                elwindui_core::tree::dispatch_routed(&node, "on_click", &(), &args);
+                elwindui_core::ui::dispatch_routed(&node, "on_click", &(), &args);
             }));
         }
         this

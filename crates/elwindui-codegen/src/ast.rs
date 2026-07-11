@@ -45,7 +45,7 @@ pub enum Item {
 ///   `validate_inherits`; there is no view-synthesis fallback for an omitted one). `Name` inherits
 ///   `Base`'s fields the usual bare-reference way (`resolve_effective_fields`), and — because the
 ///   root construction matches `Base` exactly — `codegen.rs`'s `generate_view` additionally
-///   generates `Name`'s struct with a real `base: <BaseImpl>` field (`elwindui_core::tree`'s own
+///   generates `Name`'s struct with a real `base: <BaseImpl>` field (`elwindui_core::ui`'s own
 ///   trait+`Impl`+`base` convention, docs/elwindui_spec.md 付録H.2.1a) and a direct
 ///   `impl UIElement`/`impl <Base's own trait>` delegating to it, instead of the generic "wrapper
 ///   owning a separately-`Rc`-erased root" every other `view`-having component uses. See
@@ -184,7 +184,7 @@ pub enum Attr {
     /// See 付録O.3, 付録P.4.
     CommandMeta { is_async: bool, can_execute: Option<syn::Expr> },
     /// `#[routed]`: marks a callback-typed field (`fn()`, `fn(usize)`, ...) as a WinUI3-style
-    /// routed event — dispatched via `elwindui_core::tree::dispatch_routed` (bubbling from the
+    /// routed event — dispatched via `elwindui_core::ui::dispatch_routed` (bubbling from the
     /// element it's declared on up through ancestors' own handlers for the same field name,
     /// stopping at the first one that sets `RoutedEventArgs::handled`) instead of being called
     /// directly. Not tied to any specific field name (`on_click` is just the first user of it) —
@@ -237,7 +237,7 @@ pub struct ViewDef {
     /// docs/elwindui_spec.md 付録I.1/I.3 (param-immutability during `on_mount` is still enforced).
     pub on_mount: Option<syn::Block>,
     /// `on_unmount { .. }`, parsed/validated/codegen'd (as an inert `__run_on_unmount` method) but
-    /// not yet wired to any runtime teardown trigger — `elwindui_core::tree` has no detach/removal
+    /// not yet wired to any runtime teardown trigger — `elwindui_core::ui` has no detach/removal
     /// hook today. See docs/elwindui_spec.md 付録I.1.
     pub on_unmount: Option<syn::Block>,
     /// Zero or more `#[id("...")]? let name = Element { .. };` statements, in source order,

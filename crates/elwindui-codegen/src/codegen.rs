@@ -40,7 +40,7 @@ pub struct TypeInfo {
     /// wiring (see `emit_wiring`'s generic two-way rule). Empty for ordinary user components.
     pub two_way_fields: HashSet<String>,
     /// Names of `#[routed]` fields (docs/elwindui_spec.md 4章) — a callback's opt-in to WinUI3-
-    /// style bubbling via `elwindui_core::tree::dispatch_routed` instead of being called directly.
+    /// style bubbling via `elwindui_core::ui::dispatch_routed` instead of being called directly.
     /// Non-empty exactly when this type needs `into_node_if_needed` to share its own
     /// `routed_handlers()` into the `NativeControl`/virtual-builtin `UIElementBase` wrapping it,
     /// rather than starting that wrapper with a fresh, empty one.
@@ -77,7 +77,7 @@ pub struct TypeInfo {
     /// `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem`, which never enter the visual tree).
     /// Unlike `is_native` (a recursively-inferred structural property), this is purely a shape-only
     /// declaration flag — only ever `true` for a hand-written builtin whose backend `XxxImpl` struct
-    /// owns a real `base: elwindui_core::tree::NativeControlImpl<H>` and implements
+    /// owns a real `base: elwindui_core::ui::NativeControlImpl<H>` and implements
     /// `NativeControl<H>`/`UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a).
     /// `emit_construction` uses this to pass a use-site `base: UIElementImpl` as this type's
     /// `Type::new(..)`'s leading argument (mirroring `emit_virtual_construction`'s own `base` — see
@@ -124,7 +124,7 @@ pub struct TypeInfo {
     /// over via a real `base: <Impl>` field (docs/elwindui_spec.md 付録H.2.1a), if any — see
     /// `resolve_composed_shape`. `Some` in three cases, all "direct" ones collapsing into the same
     /// generated shape (`generate_view`'s `is_shape_composition` doesn't distinguish them):
-    /// - Directly against a hand-written `elwindui_core::tree` primitive: this component's own
+    /// - Directly against a hand-written `elwindui_core::ui` primitive: this component's own
     ///   `view` root literally constructs that shape (`ContentControl inherits Control`).
     /// - Directly against another *already-composed* DSL component: same as above, one delegation
     ///   hop further out (`RoundedPanel inherits ContentControl`, own `view` root literally
@@ -760,7 +760,7 @@ fn resolve_composed_shape(
         let has_own_view = find_view(from, &key.1).is_some();
 
         if is_virtual_builtin(base) {
-            // Direct shape composition against a hand-written `elwindui_core::tree` primitive
+            // Direct shape composition against a hand-written `elwindui_core::ui` primitive
             // (`ContentControl inherits Control`): this component's own effective root must be
             // exactly `base` — matching `validate::validate_inherits`'s own requirement that an
             // explicit `view` is needed here.
@@ -1588,7 +1588,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // `is_virtual_builtin`) and `X`'s own view root is literally a construction of `Y`
     // (`validate::validate_inherits` already enforces this) — the real, load-bearing case of
     // docs/elwindui_spec.md 付録H.2.1a's `struct XImpl { base: YImpl, .. }` composition: `X`'s
-    // generated struct embeds `Y`'s real `elwindui_core::tree` `YImpl` as its own `base` field and
+    // generated struct embeds `Y`'s real `elwindui_core::ui` `YImpl` as its own `base` field and
     // implements `UIElement` (and `Y`'s own trait) by delegating to it, instead of the ordinary
     // "wrapper owns a separately-`Rc`-erased root" shape every other `view`-having component uses
     // (see this function's tail `quote!`).
@@ -1770,7 +1770,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // equal to the param's own name), but only for non-`Copy` fields (`Option<String>`'s `fill`/
     // `stroke`, say) — a `Copy` field forwarded the same way (`stroke_width: Option<f32>`,
     // `padding: Option<f32>`) is harmless to also keep as its own struct field (no move to avoid),
-    // and *must* be kept: the underlying `elwindui_core::tree` base field it forwards into is often
+    // and *must* be kept: the underlying `elwindui_core::ui` base field it forwards into is often
     // a narrower stored shape (`ShapeImpl::stroke_width`/`ControlImpl::padding` are plain `f32`, not
     // `Option<f32>` — `build_virtual_value`'s `get_attr` unwraps via `.unwrap_or(0.0)` before
     // storing), so delegating its accessor to `self.base.<name>` would return the wrong type.
@@ -1893,7 +1893,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // comment and `shape_forwarded_names`'s), which has no field of its own to read and instead
     // delegates to the base: a `is_template_composition` forward reads the base's own already-
     // generated accessor method of the same name (`self.base.<name>()`), while a
-    // `shape_forwarded_names` one reads the field straight off the base's `elwindui_core::tree`
+    // `shape_forwarded_names` one reads the field straight off the base's `elwindui_core::ui`
     // struct instead — those structs' non-`Copy` fields are `RefCell`-wrapped (docs/elwindui_spec.md
     // 付録H.2.1a's post-construction setter convention), so this reads `self.base.<name>.borrow()
     // .clone()`, not a plain `.clone()` (unlike a DSL-composed base's own accessor method).
@@ -1948,13 +1948,13 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     if !is_template_composition {
         for (i, node) in plan.iter().enumerate() {
             // The shape-composition root (see `is_shape_composition`'s doc comment) is built as a
-            // plain, unwrapped `elwindui_core::tree::create_xxx(...)` value under its own
+            // plain, unwrapped `elwindui_core::ui::create_xxx(...)` value under its own
             // `node.binding` name — not `new_element`-wrapped/erased into `Rc<dyn UIElement>` like
             // every other node — so it can be moved into `Self`'s own `base` field as-is (see the
             // `struct_fields`/`field_inits` branch below and this function's tail `quote!`).
             if is_shape_composition && i == root_index {
                 let binding = &node.binding;
-                // The base may be a hand-written `elwindui_core::tree` primitive (`Control`/`Shape`/
+                // The base may be a hand-written `elwindui_core::ui` primitive (`Control`/`Shape`/
                 // ...) or itself a resolved DSL component (`ContentControl`, for `RoundedPanel
                 // inherits ContentControl`) — either way the result is a plain, unwrapped value
                 // moved into `Self`'s own `base` field as-is (see the `struct_fields`/`field_inits`
@@ -2010,11 +2010,11 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // clone it, the same convention every other stored field already uses.
     //
     // The shape-composition case (`is_shape_composition`) stashes it differently: as a real `base`
-    // field of the shape's own `elwindui_core::tree` `YImpl` type (built unwrapped, above), not a
+    // field of the shape's own `elwindui_core::ui` `YImpl` type (built unwrapped, above), not a
     // type-erased `Rc<dyn UIElement>` — see this function's tail `quote!` for the accompanying
     // `impl UIElement for #target` that makes `#target` itself usable as a tree node. Template
     // composition (`is_template_composition`) is the same idea one level up: `base`'s type is the
-    // immediate DSL base's own struct (not an `elwindui_core::tree` type), built by calling that
+    // immediate DSL base's own struct (not an `elwindui_core::ui` type), built by calling that
     // base's own `create_<snake case>(..)` factory directly rather than constructing anything itself.
     if is_template_composition {
         let base_name = component.base.as_deref().expect("is_template_composition implies a base");
@@ -2036,7 +2036,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         field_inits.extend(quote! { base: #root_binding, });
     } else if root_is_virtual_builtin {
         struct_fields.extend(quote! {
-            #root_binding: std::rc::Rc<dyn elwindui_core::tree::UIElement>,
+            #root_binding: std::rc::Rc<dyn elwindui_core::ui::UIElement>,
         });
         field_inits.extend(quote! {
             #root_binding: #root_binding.clone(),
@@ -2059,7 +2059,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // (not a `From`/`Into` impl: `impl From<Rc<#target>> for AnyView` would be rejected by Rust's
     // orphan rules, since `Rc` isn't "fundamental" and so `#target` nested inside it counts as
     // covered by a foreign generic — E0117). A virtual root gets `into_node` instead, returning
-    // `Rc<dyn elwindui_core::tree::UIElement>` — either the hardcoded-builtin case handled just
+    // `Rc<dyn elwindui_core::ui::UIElement>` — either the hardcoded-builtin case handled just
     // above (a plain clone of the stored `Rc`), or (a user-defined component whose own root is
     // itself virtual — chained `inherits`) delegating to *that* root's own `into_node`/
     // `into_any_view` via `into_node_if_needed`, exactly like any other embedding site.
@@ -2069,7 +2069,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         // `self` — not a separately-stored root field — already *is* the tree node; `Rc<Self>`
         // unsizes to `Rc<dyn UIElement>` directly.
         quote! {
-            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement> {
+            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::ui::UIElement> {
                 self
             }
         }
@@ -2102,14 +2102,14 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         }
     } else if root_is_virtual_builtin {
         quote! {
-            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement> {
+            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::ui::UIElement> {
                 self.#root_binding.clone()
             }
         }
     } else {
         let root_expr = into_node_if_needed(quote! { self.#root_binding }, &view.root.type_path, from, table);
         quote! {
-            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::tree::UIElement> {
+            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui_core::ui::UIElement> {
                 #root_expr
             }
         }
@@ -2137,7 +2137,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
 
     // §3/付録I.1's lifecycle hooks. `on_mount` is spliced directly into `new()` (against the local
     // `this: Rc<Self>`, the same receiver `base::on_mount()` rewrites to — see below); `on_unmount`
-    // is codegen'd as a real (if presently uncalled) `__run_on_unmount` method — `elwindui_core::tree`
+    // is codegen'd as a real (if presently uncalled) `__run_on_unmount` method — `elwindui_core::ui`
     // has no detach/teardown hook yet to wire it to, see docs/elwindui_spec.md 付録I.1.
     //
     // A `base::on_mount()`/`base::on_unmount()` call is only meaningful when *this* component wrote
@@ -2179,15 +2179,15 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // `is_template_composition`, docs/elwindui_spec.md 付録H.2.1a): wires every child of `#target`'s
     // own `base` (delegated through `UIElement::children`, regardless of how many composition levels
     // deep `base` itself goes) to point its `parent` back at `this` — the same job
-    // `elwindui_core::tree::new_element` does for every other construction site, reproduced here
+    // `elwindui_core::ui::new_element` does for every other construction site, reproduced here
     // because `this` (not `self.base` alone) is the real tree node now, and `new_element` is never
     // called on `self.base` in isolation (built as a plain, unwrapped value instead — see
     // `construct_stmts`/`field_inits` above).
     let parent_wiring_stmt = if is_shape_composition || is_template_composition {
         quote! {
             {
-                use elwindui_core::tree::UIElement as _;
-                let __erased: std::rc::Rc<dyn elwindui_core::tree::UIElement> = this.clone();
+                use elwindui_core::ui::UIElement as _;
+                let __erased: std::rc::Rc<dyn elwindui_core::ui::UIElement> = this.clone();
                 for child in this.visual_children() {
                     *child.base().parent.borrow_mut() = Some(std::rc::Rc::downgrade(&__erased));
                 }
@@ -2209,24 +2209,24 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         let (_, base_trait_path) = shape_composition_base_types(shape);
         let base_trait_impl = shape_composition_base_trait_impl(shape, &struct_ident);
         quote! {
-            pub trait #target: elwindui_core::tree::UIElement + #base_trait_path {}
+            pub trait #target: elwindui_core::ui::UIElement + #base_trait_path {}
             impl #target for #struct_ident {}
 
-            impl elwindui_core::tree::UIElement for #struct_ident {
-                fn base(&self) -> &elwindui_core::tree::UIElementImpl {
-                    elwindui_core::tree::UIElement::base(&self.base)
+            impl elwindui_core::ui::UIElement for #struct_ident {
+                fn base(&self) -> &elwindui_core::ui::UIElementImpl {
+                    elwindui_core::ui::UIElement::base(&self.base)
                 }
-                fn visual_children(&self) -> Vec<std::rc::Rc<dyn elwindui_core::tree::UIElement>> {
-                    elwindui_core::tree::UIElement::visual_children(&self.base)
+                fn visual_children(&self) -> Vec<std::rc::Rc<dyn elwindui_core::ui::UIElement>> {
+                    elwindui_core::ui::UIElement::visual_children(&self.base)
                 }
                 fn measure_override(&self, available: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> elwindui_core::layout::Size {
-                    elwindui_core::tree::UIElement::measure_override(&self.base, available, child_sizes)
+                    elwindui_core::ui::UIElement::measure_override(&self.base, available, child_sizes)
                 }
                 fn arrange_override(&self, final_size: elwindui_core::layout::Size, child_sizes: &[elwindui_core::layout::Size]) -> Vec<elwindui_core::layout::Rect> {
-                    elwindui_core::tree::UIElement::arrange_override(&self.base, final_size, child_sizes)
+                    elwindui_core::ui::UIElement::arrange_override(&self.base, final_size, child_sizes)
                 }
-                fn paint(&self) -> Option<elwindui_core::tree::PaintKind> {
-                    elwindui_core::tree::UIElement::paint(&self.base)
+                fn paint(&self) -> Option<elwindui_core::ui::PaintKind> {
+                    elwindui_core::ui::UIElement::paint(&self.base)
                 }
             }
             #base_trait_impl
@@ -2250,7 +2250,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
 
     // Whenever `#struct_ident` is composed (`is_shape_composition`/`is_template_composition`), its
     // plain (not-yet-`Rc`-wrapped) construction is split out into its own callable `pub fn
-    // create_<snake case>(..)` — mirroring `elwindui_core::tree`'s `create_control`/`create_shape`/
+    // create_<snake case>(..)` — mirroring `elwindui_core::ui`'s `create_control`/`create_shape`/
     // etc. — instead of being inlined into `new()` only, so a *further* derived component's own
     // `is_template_composition` case (`LabeledPanel inherits ContentControl`) can call `#struct_ident`'s
     // own factory directly to build its `base` field (see this function's `field_inits` branch
@@ -2358,7 +2358,7 @@ struct PlannedNode {
     /// `#[content(field_name)]` (docs/elwindui_spec.md 付録E — e.g. `MenuBarItem`'s one nested
     /// `Menu`, bound to its `#[content(submenu)]` field; see `build_component_args`).
     /// Paired with each binding's own `type_path`, needed to decide (at the point it's used as
-    /// someone else's argument) whether it's already an `elwindui_core::tree::Node<AnyView>` value
+    /// someone else's argument) whether it's already an `elwindui_core::ui::Node<AnyView>` value
     /// (a virtual builtin/component) or a real native handle needing `Node::Native(..)`/
     /// `.into_any_view()` wrapping — see `into_node_if_needed`/`into_any_view_if_needed`.
     child_bindings: Vec<(syn::Ident, String)>,
@@ -2558,7 +2558,7 @@ fn into_any_view_if_needed(base: TokenStream, ty: &str) -> TokenStream {
 /// Whether `type_path` names one of the hand-written *virtual* builtins (`VerticalLayout`/
 /// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`/`Control`/`Grid`) — these have no backend
 /// Rust struct or `Type::new(args)` constructor at all; `emit_construction` builds a `Box<dyn
-/// elwindui_core::tree::UIElement>` value for them directly (see its top-of-function check).
+/// elwindui_core::ui::UIElement>` value for them directly (see its top-of-function check).
 /// `ContentControl` (docs/elwindui_builtins_spec.md 付録F.10) is deliberately *not* here — it's an
 /// ordinary `component`+`view` pair whose view root literally constructs `Control` (the
 /// `inherits`-based shape-composition pattern, docs/elwindui_spec.md §3, same as `RoundedPanel
@@ -2578,20 +2578,20 @@ pub(crate) fn is_virtual_builtin(type_path: &str) -> bool {
 /// unconditional pass-through instead of trying (and failing) to resolve it via `SymbolTable`.
 const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 
-/// Converts a constructed child binding into `Rc<dyn elwindui_core::tree::UIElement>` for a slot
+/// Converts a constructed child binding into `Rc<dyn elwindui_core::ui::UIElement>` for a slot
 /// that wants one (`Window`'s `content`, `TabView`'s `item_template` return, or a virtual
 /// builtin's own `children: Vec<Rc<dyn UIElement>>` — anywhere the declared type mentions `dyn
 /// UIElement`, checked by the caller before calling this). Four cases, by `source_type_path`'s
 /// resolved `is_native`/`is_native_control_leaf`:
 /// - A hand-written virtual builtin (`is_virtual_builtin`, always `!is_native`): `base` is
 ///   *already* an `Rc<dyn UIElement>` local value (built by `emit_construction`'s virtual branch,
-///   via `elwindui_core::tree::new_element`) — used as-is.
+///   via `elwindui_core::ui::new_element`) — used as-is.
 /// - A user-defined component whose own `view` root is virtual (`!is_native`, e.g. `DocumentView`,
 ///   whose root is `VerticalLayout`): its generated `into_node(self: Rc<Self>)` (see
 ///   `generate_view`) produces the `Rc<dyn UIElement>` value — same `.clone()` convention as
 ///   `into_any_view_if_needed` so the original binding stays valid for any later reference.
 /// - `Button`/`TextArea`/`TabView` (`TypeInfo::is_native_control_leaf`): already implements
-///   `UIElement` directly — its own `base: elwindui_core::tree::NativeControlImpl<H>` was already
+///   `UIElement` directly — its own `base: elwindui_core::ui::NativeControlImpl<H>` was already
 ///   built at construction time from *this exact use site*'s margin/alignment/data_context/
 ///   `routed_handlers` (see `emit_construction`'s `build_ui_element_base` argument) — so this is a
 ///   plain upcast, no fresh wrapper needed.
@@ -2617,7 +2617,7 @@ fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module,
     if is_native_control_leaf {
         quote! {
             {
-                let __node: std::rc::Rc<dyn elwindui_core::tree::UIElement> = #base.clone();
+                let __node: std::rc::Rc<dyn elwindui_core::ui::UIElement> = #base.clone();
                 __node
             }
         }
@@ -2632,16 +2632,16 @@ fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module,
         let view = into_any_view_if_needed(base, "AnyView");
         let ui_base = if has_routed {
             quote! {
-                elwindui_core::tree::UIElementImpl {
+                elwindui_core::ui::UIElementImpl {
                     routed_handlers: (#base_expr).routed_handlers(),
-                    ..elwindui_core::tree::UIElementImpl::default()
+                    ..elwindui_core::ui::UIElementImpl::default()
                 }
             }
         } else {
-            quote! { elwindui_core::tree::UIElementImpl::default() }
+            quote! { elwindui_core::ui::UIElementImpl::default() }
         };
         quote! {
-            elwindui_core::tree::new_element(elwindui_core::tree::create_native_control(#ui_base, #view))
+            elwindui_core::ui::new_element(elwindui_core::ui::create_native_control(#ui_base, #view))
         }
     } else if is_virtual_builtin(source_type_path) {
         quote! { #base }
@@ -2752,7 +2752,7 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
         });
     }
     // `Button`/`TextArea`/`TabView` (`inherits NativeControl`, `TypeInfo::is_native_control_leaf`)
-    // own a real `base: elwindui_core::tree::NativeControlImpl<H>` field (docs/elwindui_spec.md
+    // own a real `base: elwindui_core::ui::NativeControlImpl<H>` field (docs/elwindui_spec.md
     // 付録H.2.1a) — this use site's margin/data_context/grid_cell are applied to it right here,
     // post-construction, exactly like `emit_virtual_construction` does for virtual builtins (see
     // `emit_common_ui_element_setters`). `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`
@@ -2797,7 +2797,7 @@ fn is_deferred_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
 /// generated `new(..)`/`create_<snake case>(..)` (docs/elwindui_spec.md 付録H.2.1a) expects, in
 /// `info.param_fields`'s declared order — shared by `emit_construction` (wraps as `Type::new(args)`)
 /// and `build_component_value` (wraps as `create_<snake case>(args)`, for a shape-composition root
-/// whose base is itself a DSL component rather than a hand-written `elwindui_core::tree` primitive).
+/// whose base is itself a DSL component rather than a hand-written `elwindui_core::ui` primitive).
 /// Skips a deferred field (`is_deferred_field`) entirely — no positional slot at all, not even a
 /// placeholder `None` — since that target's own `new(..)` no longer declares one; the matching
 /// value (if this use site supplies one) is applied afterward instead, via
@@ -3079,7 +3079,7 @@ fn build_component_optional_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Mo
 }
 
 /// Builds the plain (not yet `Rc`-wrapped) `create_<snake case>(args)` call for a shape-composition
-/// root whose base is a resolved DSL component (rather than a hand-written `elwindui_core::tree`
+/// root whose base is a resolved DSL component (rather than a hand-written `elwindui_core::ui`
 /// primitive — see `build_virtual_value` for that case) — e.g. `RoundedPanel inherits ContentControl`,
 /// whose own `view` root literally constructs `ContentControl`. Mirrors `emit_construction`'s
 /// `Type::new(args)` shape exactly, just calling the base's own plain factory instead (see
@@ -3172,7 +3172,7 @@ fn emit_generic_on_click_routing(node: &PlannedNode, ctx: &ViewCtx, binding: &To
     }
 }
 
-/// Builds an `Rc<dyn elwindui_core::tree::UIElement>` value (via `elwindui_core::tree::new_element`)
+/// Builds an `Rc<dyn elwindui_core::ui::UIElement>` value (via `elwindui_core::ui::new_element`)
 /// for a hand-written virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/
 /// `TextBlock`/`Control` — see `is_virtual_builtin`) directly from its own attributes, instead of
 /// calling a (nonexistent) `Type::new(args)`.
@@ -3180,14 +3180,14 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
     let binding = &node.binding;
     let value = build_virtual_value(node, ctx, from, table);
     out.extend(quote! {
-        let #binding: std::rc::Rc<dyn elwindui_core::tree::UIElement> = elwindui_core::tree::new_element(#value);
+        let #binding: std::rc::Rc<dyn elwindui_core::ui::UIElement> = elwindui_core::ui::new_element(#value);
     });
     let binding_ts = quote! { #binding };
     out.extend(emit_common_ui_element_setters(node, ctx, &binding_ts));
     out.extend(emit_generic_on_click_routing(node, ctx, &binding_ts));
 }
 
-/// Builds the plain (not yet `new_element`-wrapped) `elwindui_core::tree::create_xxx()` (empty
+/// Builds the plain (not yet `new_element`-wrapped) `elwindui_core::ui::create_xxx()` (empty
 /// argument — docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention, extended to
 /// every builtin property) followed by whichever `set_<field>(..)` calls this use site's own
 /// attributes supply, as a single block expression evaluating to the fully-configured value — the
@@ -3198,7 +3198,7 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
 fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
     // Same as `build_ui_element_base`'s own `get_attr`, but for `Option<String>` shapes
     // (`Rectangle`/`Ellipse`'s `fill`/`stroke`, `TextBlock`'s `color`) — the corresponding
-    // `elwindui_core::tree` fields are owned `String`s (they're stored long-term in the scene
+    // `elwindui_core::ui` fields are owned `String`s (they're stored long-term in the scene
     // tree, not just for the duration of one call), but the DSL expression supplying them may be a
     // `&'static str` literal (`fill: "#3a3a3c"`) just as easily as an already-owned `String` (a
     // `t!(...)` result) — `.to_string()` accepts either uniformly.
@@ -3240,9 +3240,9 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let spacing = get_attr("spacing");
             quote! {
                 {
-                    let __v = elwindui_core::tree::create_vertical_layout();
+                    let __v = elwindui_core::ui::create_vertical_layout();
                     __v.set_spacing((#spacing).unwrap_or(0.0));
-                    __v.set_children(elwindui_core::tree::UIElementCollection::new(vec![ #(#children),* ]));
+                    __v.set_children(elwindui_core::ui::UIElementCollection::new(vec![ #(#children),* ]));
                     __v
                 }
             }
@@ -3251,9 +3251,9 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let spacing = get_attr("spacing");
             quote! {
                 {
-                    let __v = elwindui_core::tree::create_horizontal_layout();
+                    let __v = elwindui_core::ui::create_horizontal_layout();
                     __v.set_spacing((#spacing).unwrap_or(0.0));
-                    __v.set_children(elwindui_core::tree::UIElementCollection::new(vec![ #(#children),* ]));
+                    __v.set_children(elwindui_core::ui::UIElementCollection::new(vec![ #(#children),* ]));
                     __v
                 }
             }
@@ -3266,7 +3266,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let stroke_width = get_attr("stroke_width");
             quote! {
                 {
-                    let __v = elwindui_core::tree::create_shape();
+                    let __v = elwindui_core::ui::create_shape();
                     __v.set_kind(#kind);
                     __v.set_fill(#fill);
                     __v.set_stroke(#stroke);
@@ -3281,7 +3281,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let color = get_attr_string("color");
             quote! {
                 {
-                    let __v = elwindui_core::tree::create_text_block();
+                    let __v = elwindui_core::ui::create_text_block();
                     __v.set_text((#text).to_string());
                     __v.set_color(#color);
                     __v
@@ -3292,9 +3292,9 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let padding = get_attr("padding");
             quote! {
                 {
-                    let __v = elwindui_core::tree::create_control();
+                    let __v = elwindui_core::ui::create_control();
                     __v.set_padding((#padding).unwrap_or(0.0));
-                    __v.set_children(elwindui_core::tree::UIElementCollection::new(vec![ #(#children),* ]));
+                    __v.set_children(elwindui_core::ui::UIElementCollection::new(vec![ #(#children),* ]));
                     __v
                 }
             }
@@ -3306,10 +3306,10 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let columns = emit_expr(columns, ctx, &EmitMode::Construction);
             quote! {
                 {
-                    let __v = elwindui_core::tree::create_grid();
+                    let __v = elwindui_core::ui::create_grid();
                     __v.set_rows((#rows).to_vec());
                     __v.set_columns((#columns).to_vec());
-                    __v.set_children(elwindui_core::tree::UIElementCollection::new(vec![ #(#children),* ]));
+                    __v.set_children(elwindui_core::ui::UIElementCollection::new(vec![ #(#children),* ]));
                     __v
                 }
             }
@@ -3339,7 +3339,7 @@ fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> syn::Ident {
 
 /// `"ContentControl"` -> `"create_content_control"` — the free-function factory name a composed
 /// component's own struct pairs with (docs/elwindui_spec.md 付録H.2.1a), mirroring
-/// `elwindui_core::tree`'s `create_control`/`create_shape`/etc. naming. Only ever called with a
+/// `elwindui_core::ui`'s `create_control`/`create_shape`/etc. naming. Only ever called with a
 /// PascalCase component name, so no acronym/consecutive-uppercase handling is needed.
 fn composed_create_fn_ident(name: &str) -> syn::Ident {
     let mut snake = String::new();
@@ -3357,24 +3357,24 @@ fn composed_create_fn_ident(name: &str) -> syn::Ident {
 }
 
 /// Maps a virtual-builtin shape name (`is_virtual_builtin`) that some `component X inherits Y`
-/// names as `Y` (docs/elwindui_spec.md 付録H.2.1a) to the `elwindui_core::tree` `YImpl` struct type
+/// names as `Y` (docs/elwindui_spec.md 付録H.2.1a) to the `elwindui_core::ui` `YImpl` struct type
 /// and `Y` trait path that `X`'s generated struct composes over as its own `base` field — see
 /// `generate_view`'s `is_shape_composition` branch.
 fn shape_composition_base_types(base: &str) -> (TokenStream, TokenStream) {
     match base {
-        "Control" => (quote! { elwindui_core::tree::ControlImpl }, quote! { elwindui_core::tree::Control }),
-        "Shape" => (quote! { elwindui_core::tree::ShapeImpl }, quote! { elwindui_core::tree::Shape }),
-        "TextBlock" => (quote! { elwindui_core::tree::TextBlockImpl }, quote! { elwindui_core::tree::TextBlock }),
-        "Grid" => (quote! { elwindui_core::tree::GridImpl }, quote! { elwindui_core::tree::Grid }),
-        "VerticalLayout" => (quote! { elwindui_core::tree::VerticalLayoutImpl }, quote! { elwindui_core::tree::VerticalLayout }),
-        "HorizontalLayout" => (quote! { elwindui_core::tree::HorizontalLayoutImpl }, quote! { elwindui_core::tree::HorizontalLayout }),
+        "Control" => (quote! { elwindui_core::ui::ControlImpl }, quote! { elwindui_core::ui::Control }),
+        "Shape" => (quote! { elwindui_core::ui::ShapeImpl }, quote! { elwindui_core::ui::Shape }),
+        "TextBlock" => (quote! { elwindui_core::ui::TextBlockImpl }, quote! { elwindui_core::ui::TextBlock }),
+        "Grid" => (quote! { elwindui_core::ui::GridImpl }, quote! { elwindui_core::ui::Grid }),
+        "VerticalLayout" => (quote! { elwindui_core::ui::VerticalLayoutImpl }, quote! { elwindui_core::ui::VerticalLayout }),
+        "HorizontalLayout" => (quote! { elwindui_core::ui::HorizontalLayoutImpl }, quote! { elwindui_core::ui::HorizontalLayout }),
         other => unreachable!("shape_composition_base_types called with non-virtual-builtin `{other}`"),
     }
 }
 
 /// `#target`'s delegating impl of its shape-composition base's own trait (docs/elwindui_spec.md
 /// 付録H.2.1a) — every base method forwards to `self.base`. Empty for every shape family except
-/// `Control`, whose trait declares real accessor methods (`elwindui_core::tree::Control`).
+/// `Control`, whose trait declares real accessor methods (`elwindui_core::ui::Control`).
 fn shape_composition_base_trait_impl(base: &str, target: &syn::Ident) -> TokenStream {
     let (_, base_trait) = shape_composition_base_types(base);
     if base == "Control" {
@@ -4219,7 +4219,7 @@ view Foo {
         let content_control_code = generate_module(&content_control_module, &table);
         assert_valid_rust("content_control_impl", &content_control_code);
         let content_control_str = content_control_code.to_string();
-        assert!(content_control_str.contains("elwindui_core :: tree :: create_control"));
+        assert!(content_control_str.contains("elwindui_core :: ui :: create_control"));
         assert!(content_control_str.contains("pub fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
         assert!(content_control_str.contains("pub fn padding (& self) -> Option < f32 >"));
         // Real struct is `ContentControlImpl`; the bare `ContentControl` is a real trait instead
@@ -4299,12 +4299,12 @@ component LabeledPanel inherits ContentControl {
         // Real base composition one level deeper than `ContentControl` itself: `LabeledPanelImpl`
         // embeds a real `base: ContentControlImpl` (built by calling `ContentControl`'s own
         // `create_content_control(..)` factory), not a copy of `Control`'s construction —
-        // `elwindui_core::tree::create_control` only ever appears in `ContentControl`'s *own*
+        // `elwindui_core::ui::create_control` only ever appears in `ContentControl`'s *own*
         // generated code (not exercised by this test, which only generates `LabeledPanel`).
         assert!(generated_str.contains("base : ContentControlImpl"), "{generated_str}");
         assert!(generated_str.contains("create_content_control"), "{generated_str}");
-        assert!(generated_str.contains("impl elwindui_core :: tree :: UIElement for LabeledPanelImpl"), "{generated_str}");
-        assert!(generated_str.contains("impl elwindui_core :: tree :: Control for LabeledPanelImpl"), "{generated_str}");
+        assert!(generated_str.contains("impl elwindui_core :: ui :: UIElement for LabeledPanelImpl"), "{generated_str}");
+        assert!(generated_str.contains("impl elwindui_core :: ui :: Control for LabeledPanelImpl"), "{generated_str}");
         assert!(generated_str.contains("impl LabeledPanel for LabeledPanelImpl"), "{generated_str}");
         assert!(
             generated_str.contains("pub fn content (& self) -> std :: rc :: Rc < dyn UIElement > { self . base . content () }"),
@@ -4360,7 +4360,7 @@ view Derived {
 
     /// `Grid` (§3) + attached properties (`Grid::row`/`Grid::column`, §3) end to end: a `view`
     /// using `Grid` with `rows`/`columns` array-literal params and attached setters on its children
-    /// must generate valid Rust, constructing `elwindui_core::tree::Grid` directly (a virtual
+    /// must generate valid Rust, constructing `elwindui_core::ui::Grid` directly (a virtual
     /// builtin, like `Control`/`Shape`) with each virtual child's own `grid_cell` populated.
     #[test]
     fn generates_valid_rust_for_grid_with_attached_properties() {
@@ -4373,7 +4373,7 @@ view Foo {
         rows: [elwindui_core::layout::GridLength::Auto, elwindui_core::layout::GridLength::Star(1.0)]
         columns: [elwindui_core::layout::GridLength::Fixed(120.0), elwindui_core::layout::GridLength::Star(1.0)]
         TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
-        Shape { kind: elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: "black", Grid::row: 1, Grid::column: 1 }
+        Shape { kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: "black", Grid::row: 1, Grid::column: 1 }
     }
 }
 "#;
@@ -4383,7 +4383,7 @@ view Foo {
         assert_valid_rust("grid_with_attached_properties", &generated);
 
         let generated_str = generated.to_string();
-        assert!(generated_str.contains("elwindui_core :: tree :: create_grid"), "{generated_str}");
+        assert!(generated_str.contains("elwindui_core :: ui :: create_grid"), "{generated_str}");
         assert!(generated_str.contains("GridLength :: Auto"), "{generated_str}");
         assert!(generated_str.contains("GridLength :: Fixed (120.0)"), "{generated_str}");
         assert!(generated_str.contains("GridCell { row : 0 , column : 0 }"), "{generated_str}");

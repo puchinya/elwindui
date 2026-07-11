@@ -595,7 +595,7 @@ fn validate_inherits(
     // A pure, field-less category tag (`UIElement`/`Layout`/`NativeControl`/`Shape`/`Control`/
     // `TextBlock` — no fields of its own, no `view`): inheriting one requires no evidence of `view`
     // constructing `base` (there's nothing to construct — it's a marker trait in
-    // `elwindui_core::tree`, docs/elwindui_spec.md 付録H.2.1a), so it's unconditionally allowed.
+    // `elwindui_core::ui`, docs/elwindui_spec.md 付録H.2.1a), so it's unconditionally allowed.
     // `NativeControl` alone carries one extra obligation: the inheritor must actually resolve as
     // `is_native` (a real backend handle exists) — every other category tag imposes no further
     // requirement on its own.
@@ -1066,7 +1066,7 @@ component RoundedPanel inherits Shape {
 }
 
 view RoundedPanel {
-    Shape { kind: elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
+    Shape { kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
@@ -1102,7 +1102,7 @@ component RoundedPanel inherits Shape {
 }
 
 view RoundedPanel {
-    Shape { kind: elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
+    Shape { kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();

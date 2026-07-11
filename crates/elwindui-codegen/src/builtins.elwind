@@ -1,16 +1,16 @@
 // The root of every `UIElement`-implementing builtin — a field-less category marker, not a real
-// widget. Every `XxxImpl` struct in `elwindui_core::tree` that actually implements `UIElement`
+// widget. Every `XxxImpl` struct in `elwindui_core::ui` that actually implements `UIElement`
 // (directly or via delegating to a `base`) corresponds to some `.elwind` component declaring
 // `inherits UIElement` (directly or transitively through `NativeControl`/`Layout`/`Shape`/
 // `Control`/`TextBlock`) — this is the DSL-visible root of that hierarchy (docs/elwindui_spec.md
 // 付録H.2.1a). `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem` do *not* inherit
-// it: none of them implement `elwindui_core::tree::UIElement` at all (see their own comments).
+// it: none of them implement `elwindui_core::ui::UIElement` at all (see their own comments).
 #[embedded]
 component UIElement {
 }
 
 // Every layout-container virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Grid`) — mirrors
-// `elwindui_core::tree::Layout`, itself a marker trait over `UIElement` implemented by
+// `elwindui_core::ui::Layout`, itself a marker trait over `UIElement` implemented by
 // `VerticalLayoutImpl`/`HorizontalLayoutImpl`/`GridImpl` (docs/elwindui_spec.md 付録H.2.1a).
 // `children` is the Logical-tree child list this container declares (`UIElementCollection`,
 // WinUI3's own type, docs/elwindui_spec.md 付録H.2.2) — inherited unconditionally by
@@ -24,9 +24,9 @@ component Layout inherits UIElement {
 }
 
 // A field-less category marker, not a real widget. Only native leaves that actually get embedded
-// as a real `Rc<dyn elwindui_core::tree::UIElement>` node in the visual tree (`Button`/`TextArea`/
+// as a real `Rc<dyn elwindui_core::ui::UIElement>` node in the visual tree (`Button`/`TextArea`/
 // `TabView`/`TabViewItem`) declare `inherits NativeControl` — their backend `XxxImpl` struct holds
-// a real `base: elwindui_core::tree::NativeControlImpl<H>` and implements `NativeControl<H>`/
+// a real `base: elwindui_core::ui::NativeControlImpl<H>` and implements `NativeControl<H>`/
 // `UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a). `MenuBar`/`MenuBarItem`/
 // `Menu`/`MenuItem` never enter the visual tree (they attach to the platform menu bar directly, no
 // `into_any_view`/measure/arrange ever happens for them) — despite sharing a real `Control`-family
@@ -73,15 +73,15 @@ component HorizontalLayout inherits Layout {
 // The composable drawing primitive `Rectangle`/`Ellipse` (below) shape-compose over
 // (docs/elwindui_spec.md 付録H.2.1a), mirroring `Control`'s role for `ContentControl`: a virtual
 // builtin (no backend Rust struct of its own — `elwindui-codegen`'s `emit_virtual_construction`
-// builds an `elwindui_core::tree::ShapeImpl` directly at each use site) that concrete leaves
+// builds an `elwindui_core::ui::ShapeImpl` directly at each use site) that concrete leaves
 // inherit from and forward their own `kind` into. `kind` is the one field a leaf never
-// bare-forwards — each leaf computes its own `elwindui_core::tree::ShapeKind` value instead
+// bare-forwards — each leaf computes its own `elwindui_core::ui::ShapeKind` value instead
 // (`Rectangle`'s `RoundedRect { corner_radius }`, `Ellipse`'s fixed `Oval`). No `children` —
 // matching real WinUI3's `Shape`, a pure leaf with no `Children`/content property of its own
 // (docs/elwindui_spec.md 付録H.2.2).
 #[embedded]
 component Shape inherits UIElement {
-    kind: elwindui_core::tree::ShapeKind,
+    kind: elwindui_core::ui::ShapeKind,
     fill: Option<String>,
     stroke: Option<String>,
     stroke_width: Option<f32>,
@@ -104,7 +104,7 @@ component Rectangle inherits Shape {
 
 view Rectangle {
     Shape {
-        kind: elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) }
+        kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) }
         fill: fill
         stroke: stroke
         stroke_width: stroke_width
@@ -120,7 +120,7 @@ component Ellipse inherits Shape {
 
 view Ellipse {
     Shape {
-        kind: elwindui_core::tree::ShapeKind::Oval
+        kind: elwindui_core::ui::ShapeKind::Oval
         fill: fill
         stroke: stroke
         stroke_width: stroke_width
@@ -141,8 +141,8 @@ component Control inherits UIElement {
 // constructs a `Control` with exactly one child, so `elwindui-codegen` generates the real struct as
 // `ContentControlImpl` (the bare `ContentControl` name becomes a real
 // `pub trait ContentControl: UIElement + Control` instead — Rust's shared type/trait namespace
-// means the two can't share a name) with a `base: elwindui_core::tree::ControlImpl` field and a
-// direct `impl elwindui_core::tree::UIElement`/`Control for ContentControlImpl` delegating to it —
+// means the two can't share a name) with a `base: elwindui_core::ui::ControlImpl` field and a
+// direct `impl elwindui_core::ui::UIElement`/`Control for ContentControlImpl` delegating to it —
 // `self` *is* the tree node (`into_node()` just returns `self`), not a wrapper holding a
 // separately-`Rc`-erased `Control` value. Every other `.elwind` reference to `ContentControl` still
 // compiles unchanged — `emit_construction`'s `concrete_type_ident` is the one place that resolves it
@@ -153,7 +153,7 @@ component Control inherits UIElement {
 // component's generated code embeds `content`'s declared type verbatim in `new(..)`'s signature and
 // the generated `content()` accessor — so any project that ends up compiling this generated code
 // (via its own build.rs, the same way it already needs `use elwindui_builtins::Window;` etc.) must
-// itself have `use elwindui_core::tree::UIElement;` in scope.
+// itself have `use elwindui_core::ui::UIElement;` in scope.
 #[embedded]
 #[content(content)]
 component ContentControl inherits Control {
@@ -169,7 +169,7 @@ view ContentControl {
 
 // WPF/WinUI3-style row/column layout (docs/elwindui_spec.md §3) — a virtual builtin like `Control`/
 // `Rectangle` (no backend Rust struct; `elwindui-codegen`'s `emit_virtual_construction` builds an
-// `elwindui_core::tree::Grid` directly at each use site). `rows`/`columns` are ordinary required
+// `elwindui_core::ui::Grid` directly at each use site). `rows`/`columns` are ordinary required
 // fields (an array literal of `elwindui_core::layout::GridLength::Auto`/`Fixed(px)`/`Star(weight)`);
 // `row`/`column` are `#[attached]` properties — declared here, but settable on *any* element
 // anywhere via `Grid::row: <expr>` / `Grid::column: <expr>`, not just this component's own direct

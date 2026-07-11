@@ -14,7 +14,7 @@ pub struct Rect {
 }
 
 /// Measure/Arrange two-pass layout, implemented by every backend native handle. See
-/// docs/elwindui_spec.md 付録H.2. `elwindui_core::tree`'s generic `measure`/`arrange` (the
+/// docs/elwindui_spec.md 付録H.2. `elwindui_core::ui`'s generic `measure`/`arrange` (the
 /// `UIElement<H>`-wide Margin/Alignment wrapper) delegates to this for `NativeControl<H>`
 /// specifically; every other `UIElement` kind (`Stack`/`Shape`/`TextBlock`/`Control`) implements
 /// `measure_override`/`arrange_override` instead.
@@ -30,7 +30,7 @@ pub enum Orientation {
 }
 
 /// WinUI3's `HorizontalAlignment` — a property of the *element itself* (via `UIElementBase`), not
-/// of whatever container it happens to sit in (see `elwindui_core::tree`'s `UIElement` trait).
+/// of whatever container it happens to sit in (see `elwindui_core::ui`'s `UIElement` trait).
 /// `Stretch` is every element's default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HorizontalAlignment {
@@ -76,7 +76,7 @@ pub fn shrink_rect_by_margin(rect: Rect, margin: f32) -> Rect {
 /// (the space its parent granted it, margin already excluded) — `Stretch` on an axis uses `slot`'s
 /// full extent on that axis; any other value keeps `desired`'s size on that axis, positioned at
 /// the corresponding edge/center of `slot`. This is `UIElement`'s generic per-element Arrange
-/// step (see `elwindui_core::tree`), applied uniformly regardless of element kind — not specific
+/// step (see `elwindui_core::ui`), applied uniformly regardless of element kind — not specific
 /// to `Stack` children the way the old `cross_align`-on-the-container design was.
 pub fn align_within(slot: Rect, desired: Size, h_align: HorizontalAlignment, v_align: VerticalAlignment) -> Rect {
     let width = match h_align {
@@ -108,7 +108,7 @@ pub fn align_within(slot: Rect, desired: Size, h_align: HorizontalAlignment, v_a
 /// `Grid`-style per-child fixed/`*`-proportional sizing yet (planned as a future `Grid` element).
 /// Cross-axis: unlike the old container-level `cross_align`, this returns each child's "slot"
 /// spanning the *entire* cross-axis extent of `available` — actually aligning/sizing a child
-/// within its slot (`Stretch` vs `Start`/`Center`/`End`) is `elwindui_core::tree`'s generic
+/// within its slot (`Stretch` vs `Start`/`Center`/`End`) is `elwindui_core::ui`'s generic
 /// per-element `arrange` wrapper's job now, driven by that *child's own*
 /// `HorizontalAlignment`/`VerticalAlignment`, not a single setting the container applies to every
 /// child uniformly.
@@ -174,7 +174,7 @@ pub enum GridLength {
 /// A `Grid`-child's attached `Grid::row`/`Grid::column` position (docs/elwindui_spec.md §3) —
 /// 0-indexed, defaulting to the top-left cell (`0, 0`) like WPF's own `Grid.Row`/`Grid.Column`
 /// defaults. Row/column spanning isn't implemented yet (each cell holds exactly one child) —
-/// `elwindui_core::tree::UIElementImpl::grid_cell` carries one of these for every element.
+/// `elwindui_core::ui::UIElementImpl::grid_cell` carries one of these for every element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GridCell {
     pub row: i32,
@@ -365,7 +365,7 @@ mod tests {
         let rects = stack_arrange(size(1000.0, 1000.0), Orientation::Horizontal, 5.0, &sizes);
 
         // Cross-axis (height) is now each child's *slot* spanning the full available height —
-        // alignment/sizing within it is applied by `elwindui_core::tree`'s generic wrapper, not
+        // alignment/sizing within it is applied by `elwindui_core::ui`'s generic wrapper, not
         // this function — so both rects report `available`'s full height (1000), not their own
         // measured height.
         assert_eq!(rects[0], Rect { x: 0.0, y: 0.0, width: 10.0, height: 1000.0 });

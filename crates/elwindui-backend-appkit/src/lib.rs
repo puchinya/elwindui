@@ -4,7 +4,7 @@
 //! Only genuinely native leaf widgets (`Window`/`TextAreaImpl`/`ButtonImpl`/`MenuBarImpl`/`TabViewImpl`, the
 //! "NativeControl" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
 //! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have none: they're
-//! `elwindui_core::tree::UIElement` values that `elwindui-codegen` builds directly, reflected into
+//! `elwindui_core::ui::UIElement` values that `elwindui-codegen` builds directly, reflected into
 //! real `NSView`s/`CAShapeLayer`s/`CATextLayer`s by `TreeHostView` below (used by both `Window`'s
 //! content view and `TabViewImpl`'s per-tab content area).
 
@@ -16,7 +16,7 @@
 /// their names at this crate's root.
 pub mod builtins;
 
-use elwindui_core::tree::{layout_tree, AsAny, PaintKind, RenderItem, ShapeKind, UIElement};
+use elwindui_core::ui::{layout_tree, AsAny, PaintKind, RenderItem, ShapeKind, UIElement};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -39,12 +39,12 @@ fn mtm() -> MainThreadMarker {
 /// type (`Retained<NSScrollView>`/`Retained<NSButton>`/`Retained<NSStackView>`) instead of matched
 /// on centrally, so a future native leaf (`Dialog`, `VirtualList`, ...) only needs its own `impl
 /// AppKitHandle`, never a change to `AnyView` itself or to any `match` over it — the same open-set
-/// extensibility `elwindui_core::tree::UIElement` already has over `NativeControl`/`Stack`/`Shape`/
+/// extensibility `elwindui_core::ui::UIElement` already has over `NativeControl`/`Stack`/`Shape`/
 /// etc. (see that trait's own doc comment), now applied to the handle side too.
 ///
 /// Implemented on the raw `Retained<T>` view type itself (a foreign type — allowed since
 /// `AppKitHandle` is a local trait) rather than on `TextAreaImpl`/`ButtonImpl`/`TabViewImpl`, since
-/// those now each compose an `elwindui_core::tree::NativeControlImpl<AnyView>` as their own `base`
+/// those now each compose an `elwindui_core::ui::NativeControlImpl<AnyView>` as their own `base`
 /// field (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed
 /// widget itself would be a self-reference. Wrapping just the raw view instead lets `base.handle`
 /// be built (`AnyView::from(ns.clone())`) before the rest of the widget struct exists.
@@ -71,7 +71,7 @@ impl AppKitHandle for Retained<NSStackView> {
 
 /// Everything the generated code can pass as a `Window`/`TabViewImpl` child.
 /// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have no variant here at all — they're
-/// purely `elwindui_core::tree::Node::Virtual` values now (see `TreeHostView` below), never a real
+/// purely `elwindui_core::ui::Node::Virtual` values now (see `TreeHostView` below), never a real
 /// widget of their own. An `Rc<dyn AppKitHandle>` (not a closed `enum`) so adding a new native leaf
 /// never requires touching this type — see `AppKitHandle`'s own doc comment.
 #[derive(Clone)]
@@ -190,7 +190,7 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
 }
 
-/// The single reusable "reflect an `Rc<dyn elwindui_core::tree::UIElement>` into real `NSView`
+/// The single reusable "reflect an `Rc<dyn elwindui_core::ui::UIElement>` into real `NSView`
 /// subviews/`CAShapeLayer`/`CATextLayer` sublayers" host, replacing the old per-container
 /// `StackLayoutView` (`VerticalLayout`/`HorizontalLayout`) — since `VerticalLayout`/
 /// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` are now all just `UIElement` values with
@@ -233,7 +233,7 @@ define_class!(
                 .tree
                 .borrow()
                 .as_ref()
-                .map(|tree| elwindui_core::tree::natural_size(&**tree))
+                .map(|tree| elwindui_core::ui::natural_size(&**tree))
                 .unwrap_or(elwindui_core::layout::Size { width: 0.0, height: 0.0 });
             objc2_foundation::NSSize::new(size.width as f64, size.height as f64)
         }
@@ -384,7 +384,7 @@ impl TreeHostView {
 
 
 pub struct TextAreaImpl {
-    base: elwindui_core::tree::NativeControlImpl<AnyView>,
+    base: elwindui_core::ui::NativeControlImpl<AnyView>,
     text_view: Retained<NSTextView>,
     delegate_storage: Rc<RefCell<Option<Retained<TextViewDelegate>>>>,
 }
@@ -392,7 +392,7 @@ pub struct TextAreaImpl {
 /// `TextAreaImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
 /// since a real `AnyView` handle (`self.base.handle`, wrapping the outer `NSScrollView`) is what
 /// makes this leaf embeddable in the visual tree at all.
-pub trait TextArea: elwindui_core::tree::NativeControl<AnyView> {
+pub trait TextArea: elwindui_core::ui::NativeControl<AnyView> {
     fn set_text(&self, text: &str);
     /// `NSTextView.delegate` is an unretained (weak) reference, so the delegate this creates is
     /// only kept alive by `self.delegate_storage`. Found via `TabViewImpl`'s content pane, which
@@ -401,8 +401,8 @@ pub trait TextArea: elwindui_core::tree::NativeControl<AnyView> {
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
 }
 
-impl elwindui_core::tree::UIElement for TextAreaImpl {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+impl elwindui_core::ui::UIElement for TextAreaImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
     }
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
@@ -418,7 +418,7 @@ impl elwindui_core::tree::UIElement for TextAreaImpl {
         Some(&self.base)
     }
 }
-impl elwindui_core::tree::NativeControl<AnyView> for TextAreaImpl {}
+impl elwindui_core::ui::NativeControl<AnyView> for TextAreaImpl {}
 
 impl TextArea for TextAreaImpl {
     fn set_text(&self, text: &str) {
@@ -446,7 +446,7 @@ pub fn create_text_area() -> TextAreaImpl {
         .expect("scrollableTextView's document view is an NSTextView");
     let handle = AnyView::from(scroll);
     TextAreaImpl {
-        base: elwindui_core::tree::create_native_control(handle),
+        base: elwindui_core::ui::create_native_control(handle),
         text_view,
         delegate_storage: Rc::new(RefCell::new(None)),
     }
@@ -484,7 +484,7 @@ impl TextViewDelegate {
 }
 
 pub struct ButtonImpl {
-    base: elwindui_core::tree::NativeControlImpl<AnyView>,
+    base: elwindui_core::ui::NativeControlImpl<AnyView>,
     ns: Retained<NSButton>,
     target_storage: Rc<RefCell<Option<Retained<ButtonTarget>>>>,
 }
@@ -492,15 +492,15 @@ pub struct ButtonImpl {
 /// `ButtonImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
 /// since a real `AnyView` handle (`self.ns`) is what makes this leaf embeddable in the visual tree
 /// at all.
-pub trait Button: elwindui_core::tree::NativeControl<AnyView> {
+pub trait Button: elwindui_core::ui::NativeControl<AnyView> {
     fn set_enabled(&self, enabled: bool);
     fn set_on_click(&self, callback: Box<dyn Fn()>);
     /// Used by `TabChipImpl` to rename a tab's title button when its document's file name changes.
     fn set_text(&self, text: &str);
 }
 
-impl elwindui_core::tree::UIElement for ButtonImpl {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+impl elwindui_core::ui::UIElement for ButtonImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
     }
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
@@ -516,7 +516,7 @@ impl elwindui_core::tree::UIElement for ButtonImpl {
         Some(&self.base)
     }
 }
-impl elwindui_core::tree::NativeControl<AnyView> for ButtonImpl {}
+impl elwindui_core::ui::NativeControl<AnyView> for ButtonImpl {}
 
 impl Button for ButtonImpl {
     fn set_enabled(&self, enabled: bool) {
@@ -541,7 +541,7 @@ pub fn create_button() -> ButtonImpl {
     let m = mtm();
     let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m) };
     let handle = AnyView::from(ns.clone());
-    ButtonImpl { base: elwindui_core::tree::create_native_control(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
+    ButtonImpl { base: elwindui_core::ui::create_native_control(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
 }
 
 struct ButtonTargetIvars {
@@ -635,7 +635,7 @@ impl TabStripImpl {
 /// the generated code (via `elwindui-builtins::appkit::tab_view`) owns the mapping from
 /// `items_source`/static `TabViewItem`s to `TabChipImpl`s + content hosts. This type only holds the
 /// widget areas — it has no notion of "the list of tabs" on its own, matching how
-/// `VerticalLayout`/`HorizontalLayout` (purely `elwindui_core::tree::Node::Virtual` values) don't
+/// `VerticalLayout`/`HorizontalLayout` (purely `elwindui_core::ui::Node::Virtual` values) don't
 /// know about the data their children came from either.
 ///
 /// Unlike an earlier version of this type, `content_container` isn't itself a single
@@ -645,17 +645,17 @@ impl TabStripImpl {
 /// rebuilt. A `Box<dyn UIElement>` isn't `Clone`, so a tab's content can only ever be handed over
 /// once (`TreeHostView::set_tree`) — a single shared pane would have no way to restore a
 /// previously-shown-then-hidden tab's content after switching away from it. Each host tracks its
-/// own `elwindui_core::tree` (keeping any native leaf's retention concern alive, e.g. a
+/// own `elwindui_core::ui` (keeping any native leaf's retention concern alive, e.g. a
 /// `TextAreaImpl`'s change-notification delegate — see `TextAreaImpl::set_on_change`'s doc comment — for
 /// as long as its tab exists, not just while it's the visible one).
 pub struct TabViewImpl {
-    base: elwindui_core::tree::NativeControlImpl<AnyView>,
+    base: elwindui_core::ui::NativeControlImpl<AnyView>,
     pub strip: TabStripImpl,
     content_container: Retained<NSView>,
 }
 
-impl elwindui_core::tree::UIElement for TabViewImpl {
-    fn base(&self) -> &elwindui_core::tree::UIElementImpl {
+impl elwindui_core::ui::UIElement for TabViewImpl {
+    fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
     }
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
@@ -671,12 +671,12 @@ impl elwindui_core::tree::UIElement for TabViewImpl {
         Some(&self.base)
     }
 }
-impl elwindui_core::tree::NativeControl<AnyView> for TabViewImpl {}
+impl elwindui_core::ui::NativeControl<AnyView> for TabViewImpl {}
 
 /// `TabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
 /// since a real `AnyView` handle (`self.base.handle`, wrapping the outer `NSStackView`) is what
 /// makes this leaf embeddable in the visual tree at all.
-pub trait TabView: elwindui_core::tree::NativeControl<AnyView> {
+pub trait TabView: elwindui_core::ui::NativeControl<AnyView> {
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>);
     /// Inserts a new tab chip at `index` (wiring `on_select`/`on_close` to the given callbacks)
     /// plus a fresh, persistent content host — added to `content_container`, initially hidden.
@@ -753,7 +753,7 @@ pub fn create_tab_view() -> TabViewImpl {
     content_container.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
     root.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
     let handle = AnyView::from(root);
-    TabViewImpl { base: elwindui_core::tree::create_native_control(handle), strip, content_container }
+    TabViewImpl { base: elwindui_core::ui::create_native_control(handle), strip, content_container }
 }
 
 /// See docs/elwindui_builtins_spec.md 付録X. A single application-wide `NSMenu` (top menu bar

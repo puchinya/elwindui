@@ -602,7 +602,7 @@ impl<'a> Parser<'a> {
             return Ok(ViewExpr::Element(Box::new(element)));
         }
 
-        // A `::`-qualified path (`elwindui_core::tree::ShapeKind::RoundedRect { corner_radius: .. }`,
+        // A `::`-qualified path (`elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: .. }`,
         // an enum struct/tuple-variant construction, or any other multi-segment Rust path) — none
         // of this parser's other sugars understand `::` (the dotted-path fallback below only
         // consumes `.`-separated segments, for `vm.content`-style bind references), so hand the raw

@@ -180,7 +180,7 @@ Grid {
   ——型消去された汎用プロパティバッグではない
 - 添付プロパティが実際にレイアウトへ反映されるのは、子要素が仮想ビルトインそのもの(`TextBlock`/
   `Rectangle`/`Ellipse`/`VerticalLayout`/`HorizontalLayout`/`Control`/入れ子の`Grid`)の場合と、`inherits NativeControl`で
-  `base: elwindui_core::tree::NativeControlImpl<H>`を合成するネイティブリーフ(`Button`/`TextArea`/
+  `base: elwindui_core::ui::NativeControlImpl<H>`を合成するネイティブリーフ(`Button`/`TextArea`/
   `TabView`)の場合——後者は構築直後に`elwindui-codegen`の`emit_common_ui_element_setters`が
   `binding.base().set_grid_cell(..)`を呼ぶことで反映される(付録H.2.1a)。ユーザー定義の
   `component`+`view`ペア(その`view`ルート自身に`Grid::row`/`Grid::column`を設定した場合)への
@@ -586,7 +586,7 @@ component Button inherits NativeControl {
 ```
 
 ハンドラは要素自身の型消去レジストリ(`UIElementBase.routed_handlers`)にイベント名で登録され、
-配送(`elwindui_core::tree::dispatch_routed`)は発生元要素から`UIElementBase.parent`(本物の親
+配送(`elwindui_core::ui::dispatch_routed`)は発生元要素から`UIElementBase.parent`(本物の親
 ポインタ、要素が木に組み込まれる際に必ず設定される)を辿って祖先へバブルする。`RoutedEventArgs`の
 `handled`フラグが立てられると、そこで伝播が止まる。親ポインタ方式のため、`TabView`の
 `items_source`/`item_template`のように実行時に動的組み立てられた木でも、静的な`.elwind`構造と
@@ -1247,7 +1247,7 @@ view Foo {
 
 - **`#[embedded]`** — このコンポーネントが`BUILTIN_SHAPE_SOURCE`自身の組み込み部品であることを明示する。`elwindui-codegen`は`BUILTIN_SHAPE_SOURCE`由来のモジュールを内部的に`is_builtin`フラグ付きで扱っており、`#[embedded]`が付いたコンポーネントがそれ以外の場所(利用者自身の`.elwind`ファイル)から来ていれば静的エラーになる。
 - **`#[sealed]`** — このコンポーネントを`component X inherits Y`の`Y`(継承元)として指定できないようにする。具象的な末端形状(`Rectangle`/`Ellipse` — 継承したければ合成可能な`Shape`を使う)や、そもそも継承先を持たないネイティブ末端要素(`Button`/`TextArea`/`TabView`/`TabViewItem`)に付与する。
-- **`#[native]`** — `inherits`元を持たず(base-less)、かつ`view`も持たないコンポーネントに、「実Rust実装は各バックエンドクレートが手書きする」ことを明示する。`inherits NativeControl`(E.1の1.)と`is_native == true`として扱われる点は同じだが、`NativeControl`という共有タグを経由しない——2つの使い分けは「実際にビジュアルツリーに`Rc<dyn UIElement>`として埋め込まれ、`elwindui_core::tree::NativeControlImpl<H>`をバックエンド構造体の`base`として合成するか」で決まる(付録H.2.1a)。`Window`(実際のWinUI3の`Window`が`Control`ファミリーを経由せず`Object`を直接継承するのに対応)に加え、ビジュアルツリーに参加しない`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem`もこちらを使う。`#[native]`は`base`を持つコンポーネントや自前の`view`を持つコンポーネントには付けられず、`#[embedded]`と同様`BUILTIN_SHAPE_SOURCE`自身の宣言以外では使えない。
+- **`#[native]`** — `inherits`元を持たず(base-less)、かつ`view`も持たないコンポーネントに、「実Rust実装は各バックエンドクレートが手書きする」ことを明示する。`inherits NativeControl`(E.1の1.)と`is_native == true`として扱われる点は同じだが、`NativeControl`という共有タグを経由しない——2つの使い分けは「実際にビジュアルツリーに`Rc<dyn UIElement>`として埋め込まれ、`elwindui_core::ui::NativeControlImpl<H>`をバックエンド構造体の`base`として合成するか」で決まる(付録H.2.1a)。`Window`(実際のWinUI3の`Window`が`Control`ファミリーを経由せず`Object`を直接継承するのに対応)に加え、ビジュアルツリーに参加しない`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem`もこちらを使う。`#[native]`は`base`を持つコンポーネントや自前の`view`を持つコンポーネントには付けられず、`#[embedded]`と同様`BUILTIN_SHAPE_SOURCE`自身の宣言以外では使えない。
 - **`#[content(field_name)]`** — WinUI3の`ContentPropertyAttribute`相当。ある要素の`view`本体に「属性名を書かない裸のネスト子要素」(`Type { .. }`を`name: value`形式でなく直接`{}`内に書く)を渡した際、それがどのフィールドに束縛されるかを明示する。例:`MenuBarItem`は`#[content(submenu)]`を宣言しており、`MenuBarItem { text: "File", Menu { .. } }`の`Menu { .. }`は`submenu`フィールドに束縛される(`Window`/`ContentControl`/`TabViewItem`の`content`フィールドも同様に`#[content(content)]`を宣言している)。`field_name`は実在するフィールド名でなければならず(静的検証)、componentにつき最大1個。裸のネスト子要素があるのに`#[content(..)]`(または`children: Vec<..>`のようなリストフィールド)が無いcomponentにそれを渡すのはコード生成時エラーになる。
 
 ---
@@ -1341,7 +1341,7 @@ elwindui本体(コード生成・手書きランタイム双方)でRustに“ク
     `data_context`/`grid_cell`(`UIElementImpl`が持つ共通フィールド)に加えて、**このクラス自身が
     宣言する`#[param]`フィールドも含めて全プロパティ**が`create_class(...)`の引数にはならない——
     ネイティブ手書きビルトイン(`Window`/`Button`/`TextArea`/`MenuBar`/`Menu`/`MenuItem`/
-    `MenuBarItem`/`TabView`/`TabViewItem`)と`elwindui-core::tree`の仮想ビルトイン
+    `MenuBarItem`/`TabView`/`TabViewItem`)と`elwindui-core::ui`の仮想ビルトイン
     (`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/`Control`/`Grid`)は、`Copy`な
     フィールドを`Cell`、それ以外を`RefCell`で持ち(付録O.5)、`create_class()`は常に引数なしで
     `UIElementImpl::default()`相当の既定値を組み立てるだけ。使用箇所ごとの値は、構築**後**に
@@ -1429,7 +1429,7 @@ UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseな
 
 いずれも実装型は`XxxImpl`(`StackImpl`/`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`ShapeImpl`/
 `TextBlockImpl`/`ControlImpl`/`GridImpl`/`NativeControlImpl<H>`)で、対応する`create_xxx(...)`
-ファクトリー関数(`elwindui_core::tree`)経由で生成し、`new_element(...)`で親子ポインタを配線した
+ファクトリー関数(`elwindui_core::ui`)経由で生成し、`new_element(...)`で親子ポインタを配線した
 `Rc<dyn UIElement>`として木に組み込む。
 
 `NativeControlImpl<H>`の判定は`UIElement`の`as_native_control(&self) -> Option<&dyn Any>`という
@@ -1479,7 +1479,7 @@ WinUI3に倣い、「`.elwind`で書かれた見た目上の参照関係」(Logi
   `UIElement::visual_children(&self) -> &[Rc<dyn UIElement>]`がこの木を歩く汎用関数
   (`measure`/`arrange`/`hit_test`)から参照される、Visualツリー専用のアクセサ。
 
-`elwindui_core::tree::UIElementCollection`はWinUI3自身の`UIElementCollection`に相当する型で、
+`elwindui_core::ui::UIElementCollection`はWinUI3自身の`UIElementCollection`に相当する型で、
 `Layout`/`Control`が`.elwind`上で`#[content(children)]`(WinUI3の`ContentPropertyAttribute`
 相当)付きで宣言するLogicalツリーの子要素リストを表す。`StackImpl`/`ControlImpl`/`GridImpl`は
 これを実フィールドとして保持し、`visual_children()`はそこから`as_slice()`で直接導出される
@@ -1588,7 +1588,7 @@ elwindui-backend-iced   # 同上 + accesskitでa11y補完
 
 コンポーネントの生成時・破棄時・更新後に副作用のあるコードを挟むための仕組み。`view`ブロック内の先頭に宣言する。
 
-**実装状況**: `on_mount`は実装済み(生成される`new()`の中、`resync()`直後にそのまま展開される)。`on_unmount`はパース・検証・コード生成は実装済みだが、`elwindui_core::tree`に要素の破棄(detach/teardown)通知が現状存在しないため、実行時に呼び出されるトリガーはまだない(`__run_on_unmount`という到達可能なメソッドとしては生成される)。`on_update`(I.2)、およびI.3の`#[param]`不変性の静的検証は未実装。§3で述べた`inherits`の`base::on_mount()`/`base::on_unmount()`呼び出しは実装済み(1階層のみ)。
+**実装状況**: `on_mount`は実装済み(生成される`new()`の中、`resync()`直後にそのまま展開される)。`on_unmount`はパース・検証・コード生成は実装済みだが、`elwindui_core::ui`に要素の破棄(detach/teardown)通知が現状存在しないため、実行時に呼び出されるトリガーはまだない(`__run_on_unmount`という到達可能なメソッドとしては生成される)。`on_update`(I.2)、およびI.3の`#[param]`不変性の静的検証は未実装。§3で述べた`inherits`の`base::on_mount()`/`base::on_unmount()`呼び出しは実装済み(1階層のみ)。
 
 ## I.1 `on_mount` / `on_unmount`
 

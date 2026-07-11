@@ -349,15 +349,6 @@ pub struct TextAreaImpl {
     on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
 }
 
-/// `TextAreaImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — mirrors
-/// `elwindui-backend-appkit::TextArea`, extending `NativeControl<AnyView>` since a real `AnyView`
-/// handle (`self.base.handle`, wrapping `self.text_box`) is what makes this leaf embeddable in the
-/// visual tree at all.
-pub trait TextArea: elwindui_core::ui::NativeControl<AnyView> {
-    fn set_text(&self, text: &str);
-    fn set_on_change(&self, callback: Box<dyn Fn(String)>);
-}
-
 impl elwindui_core::ui::UIElement for TextAreaImpl {
     fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
@@ -377,7 +368,9 @@ impl elwindui_core::ui::UIElement for TextAreaImpl {
 }
 impl elwindui_core::ui::NativeControl<AnyView> for TextAreaImpl {}
 
-impl TextArea for TextAreaImpl {
+/// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
+/// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are WinUI3-specific.
+impl elwindui_core::ui::TextArea for TextAreaImpl {
     fn set_text(&self, text: &str) {
         let _ = self.text_box.SetText(&HSTRING::from(text));
     }
@@ -415,17 +408,6 @@ pub struct ButtonImpl {
     on_click: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
-/// `ButtonImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — mirrors
-/// `elwindui-backend-appkit::Button`, extending `NativeControl<AnyView>` since a real `AnyView`
-/// handle (`self.base.handle`, wrapping `self.xaml`) is what makes this leaf embeddable in the
-/// visual tree at all.
-pub trait Button: elwindui_core::ui::NativeControl<AnyView> {
-    fn set_enabled(&self, enabled: bool);
-    fn set_on_click(&self, callback: Box<dyn Fn()>);
-    /// Used by generic resync when a `ButtonImpl`'s `text` attribute is a dynamic expression.
-    fn set_text(&self, text: &str);
-}
-
 impl elwindui_core::ui::UIElement for ButtonImpl {
     fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
@@ -445,7 +427,9 @@ impl elwindui_core::ui::UIElement for ButtonImpl {
 }
 impl elwindui_core::ui::NativeControl<AnyView> for ButtonImpl {}
 
-impl Button for ButtonImpl {
+/// `elwindui_core::ui::Button`'s shape is common to every backend — see that trait's own doc
+/// comment; only these method bodies are WinUI3-specific.
+impl elwindui_core::ui::Button for ButtonImpl {
     fn set_enabled(&self, enabled: bool) {
         let _ = self.xaml.SetIsEnabled(enabled);
     }
@@ -454,6 +438,7 @@ impl Button for ButtonImpl {
         *self.on_click.borrow_mut() = Some(callback);
     }
 
+    /// Used by generic resync when a `ButtonImpl`'s `text` attribute is a dynamic expression.
     fn set_text(&self, text: &str) {
         let _ = self.xaml.SetContent(&HSTRING::from(text));
     }
@@ -631,22 +616,11 @@ pub struct MenuItemImpl {
     on_select: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
-/// `MenuItemImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — mirrors
-/// `elwindui-backend-appkit::MenuItem`.
-pub trait MenuItem {
-    /// A real title setter (docs/elwindui_spec.md 付録H.2.1a's post-construction setter
-    /// convention) — `create_menu_item()` takes no title argument, so this is the only way a menu
-    /// item's title is ever actually set.
-    fn set_text(&self, text: &str);
-    fn set_enabled(&self, enabled: bool);
-    /// A bare key character (e.g. `"s"`), matching AppKit's `set_shortcut` convention — mapped to
-    /// a `Ctrl`-modifier `KeyboardAccelerator` (WinUI3 has no single-string key-equivalent setter
-    /// the way `NSMenuItem.keyEquivalent` does).
-    fn set_shortcut(&self, key_equivalent: &str);
-    fn set_on_select(&self, callback: Box<dyn Fn()>);
-}
-
-impl MenuItem for MenuItemImpl {
+/// `elwindui_core::ui::MenuItem`'s shape is common to every backend — see that trait's own doc
+/// comment; only these method bodies are WinUI3-specific.
+impl elwindui_core::ui::MenuItem for MenuItemImpl {
+    /// A real title setter — `create_menu_item()` takes no title argument, so this is the only way
+    /// a menu item's title is ever actually set.
     fn set_text(&self, text: &str) {
         let _ = self.xaml.SetText(&HSTRING::from(text));
     }
@@ -655,6 +629,9 @@ impl MenuItem for MenuItemImpl {
         let _ = self.xaml.SetIsEnabled(enabled);
     }
 
+    /// A bare key character (e.g. `"s"`), matching AppKit's `set_shortcut` convention — mapped to
+    /// a `Ctrl`-modifier `KeyboardAccelerator` (WinUI3 has no single-string key-equivalent setter
+    /// the way `NSMenuItem.keyEquivalent` does).
     fn set_shortcut(&self, key_equivalent: &str) {
         let Some(key) = key_equivalent.chars().next() else { return };
         let Ok(accelerator) = KeyboardAccelerator::new() else { return };
@@ -695,16 +672,13 @@ pub struct MenuImpl {
     installed_into: Rc<RefCell<Option<bindings::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>>>>,
 }
 
-/// `MenuImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `add_item`/`remove_item` are
-/// real `IVector<MenuFlyoutItemBase>.Append`/`.RemoveAtEnd`-style calls once this `Menu` is
-/// installed into a `MenuBarItemImpl` (see `installed_into`'s doc comment), reachable
-/// post-construction so `elwindui-backend-winui3::builtins::Menu::set_children` can reconcile a
-/// changed child list without rebuilding the native menu from scratch.
-pub trait Menu {
-    fn add_item(&self, item: &MenuItemImpl);
-    fn remove_item(&self, item: &MenuItemImpl);
-}
-impl Menu for MenuImpl {
+/// `elwindui_core::ui::Menu<MenuItemImpl>`'s shape is common to every backend — see that trait's
+/// own doc comment. `add_item`/`remove_item` are real `IVector<MenuFlyoutItemBase>.Append`/
+/// `.RemoveAtEnd`-style calls once this `Menu` is installed into a `MenuBarItemImpl` (see
+/// `installed_into`'s doc comment), reachable post-construction so
+/// `elwindui-backend-winui3::builtins::MenuImpl::set_children` can reconcile a changed child list
+/// without rebuilding the native menu from scratch.
+impl elwindui_core::ui::Menu<MenuItemImpl> for MenuImpl {
     fn add_item(&self, item: &MenuItemImpl) {
         self.items.borrow_mut().push(item.clone());
         if let Some(items) = self.installed_into.borrow().as_ref() {
@@ -736,14 +710,11 @@ pub struct MenuBarItemImpl {
     xaml: bindings::Microsoft::UI::Xaml::Controls::MenuBarItem,
 }
 
-/// `MenuBarItemImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `set_text`/
-/// `set_submenu` are real post-construction setters (`create_menu_bar_item()` takes neither
-/// argument, so these are the only way a menu bar item's title/submenu are ever actually set).
-pub trait MenuBarItem {
-    fn set_text(&self, text: &str);
-    fn set_submenu(&self, submenu: &MenuImpl);
-}
-impl MenuBarItem for MenuBarItemImpl {
+/// `elwindui_core::ui::MenuBarItem<MenuImpl>`'s shape is common to every backend — see that
+/// trait's own doc comment. `set_text`/`set_submenu` are real post-construction setters
+/// (`create_menu_bar_item()` takes neither argument, so these are the only way a menu bar item's
+/// title/submenu are ever actually set).
+impl elwindui_core::ui::MenuBarItem<MenuImpl> for MenuBarItemImpl {
     fn set_text(&self, text: &str) {
         let _ = self.xaml.SetTitle(&HSTRING::from(text));
     }
@@ -772,15 +743,11 @@ pub struct MenuBarImpl {
     xaml: XamlMenuBar,
 }
 
-/// `MenuBarImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `add_item`/`remove_item`
-/// mirror `Menu`'s own (see that trait's doc comment): real `IVector<MenuBarItem>.Append`/
-/// `.RemoveAt` calls, reachable post-construction for
-/// `elwindui-backend-winui3::builtins::MenuBar::set_children`.
-pub trait MenuBar {
-    fn add_item(&self, item: &MenuBarItemImpl);
-    fn remove_item(&self, item: &MenuBarItemImpl);
-}
-impl MenuBar for MenuBarImpl {
+/// `elwindui_core::ui::MenuBar<MenuBarItemImpl>`'s shape is common to every backend — see that
+/// trait's own doc comment. `add_item`/`remove_item` mirror `Menu`'s own: real
+/// `IVector<MenuBarItem>.Append`/`.RemoveAt` calls, reachable post-construction for
+/// `elwindui-backend-winui3::builtins::MenuBarImpl::set_children`.
+impl elwindui_core::ui::MenuBar<MenuBarItemImpl> for MenuBarImpl {
     fn add_item(&self, item: &MenuBarItemImpl) {
         if let Ok(items) = self.xaml.Items() {
             let _ = items.Append(&item.xaml);

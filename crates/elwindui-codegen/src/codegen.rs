@@ -1882,6 +1882,13 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // time, so a plain accessor is strictly sufficient — see docs/elwindui_spec.md §13 and
     // 付録O.5's avoid-type-erasure convention).
     let mut named_accessors = TokenStream::new();
+    // Populated instead of `named_accessors` for a composed target's own `#[param]`
+    // getters/deferred setters (below) — `#[id(...)]`-tagged child accessors never move here (they
+    // return a concrete `Rc<ConcreteType>` specific to this component's own view structure, not
+    // part of the base class's shared interface), so `named_accessors` alone still covers those
+    // regardless of `is_composed`. See `composition_impls`'s own use of these two.
+    let mut trait_sigs = TokenStream::new();
+    let mut trait_impl_bodies = TokenStream::new();
 
     // Every `#[param]` field gets a public `pub fn <name>(&self) -> <Type>` accessor, not just
     // `#[id(...)]`-tagged lets above — code outside the generated view (and DSL-composed wrappers
@@ -1914,11 +1921,25 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         } else {
             quote! { self.#name.clone() }
         };
-        named_accessors.extend(quote! {
-            pub fn #name(&self) -> #ty {
-                #body
-            }
-        });
+        // A composed target's own class trait (docs/elwindui_spec.md 付録H.2.1a) gets this getter
+        // as a real trait method (signature in the trait, body in `impl #target for
+        // #struct_ident` — see `composition_impls`) rather than a plain inherent one, so it's
+        // reachable generically through `dyn #target`/any bound on it — not just non-composed
+        // (plain) components stay purely inherent (no trait to move into).
+        if is_composed {
+            trait_sigs.extend(quote! { fn #name(&self) -> #ty; });
+            trait_impl_bodies.extend(quote! {
+                fn #name(&self) -> #ty {
+                    #body
+                }
+            });
+        } else {
+            named_accessors.extend(quote! {
+                pub fn #name(&self) -> #ty {
+                    #body
+                }
+            });
+        }
     }
     // `set_<name>(&self, value: T)` for every deferred own field — the post-construction setter
     // half of the convention (`deferred_own_names`'s own doc comment). `T` is the field's *inner*
@@ -1933,11 +1954,20 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         } else {
             quote! { *self.#name.borrow_mut() = Some(value); }
         };
-        named_accessors.extend(quote! {
-            pub fn #set_name(&self, value: #inner_ty) {
-                #set_body
-            }
-        });
+        if is_composed {
+            trait_sigs.extend(quote! { fn #set_name(&self, value: #inner_ty); });
+            trait_impl_bodies.extend(quote! {
+                fn #set_name(&self, value: #inner_ty) {
+                    #set_body
+                }
+            });
+        } else {
+            named_accessors.extend(quote! {
+                pub fn #set_name(&self, value: #inner_ty) {
+                    #set_body
+                }
+            });
+        }
     }
 
     // `is_template_composition`'s `plan`/`view` are the *base's* own (cloned, `resolve_view_for`)
@@ -2209,8 +2239,12 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         let (_, base_trait_path) = shape_composition_base_types(shape);
         let base_trait_impl = shape_composition_base_trait_impl(shape, &struct_ident);
         quote! {
-            pub trait #target: elwindui_core::ui::UIElement + #base_trait_path {}
-            impl #target for #struct_ident {}
+            pub trait #target: elwindui_core::ui::UIElement + #base_trait_path {
+                #trait_sigs
+            }
+            impl #target for #struct_ident {
+                #trait_impl_bodies
+            }
 
             impl elwindui_core::ui::UIElement for #struct_ident {
                 fn base(&self) -> &elwindui_core::ui::UIElementImpl {
@@ -2240,8 +2274,12 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         // on `impl #struct_ident` below, reached through `self.base`, not a trait method).
         let base_trait = format_ident!("{}", base_name);
         quote! {
-            pub trait #target: #base_trait {}
-            impl #target for #struct_ident {}
+            pub trait #target: #base_trait {
+                #trait_sigs
+            }
+            impl #target for #struct_ident {
+                #trait_impl_bodies
+            }
             impl #base_trait for #struct_ident {}
         }
     } else {
@@ -2703,6 +2741,27 @@ fn is_hand_written_native(info: &TypeInfo) -> bool {
     info.is_native && !info.has_view
 }
 
+/// A hand-written native's own DSL-attribute-driven setters (`build_component_setters`) may call
+/// one of `elwindui_core::ui`'s shared property-setter traits' methods via dot-syntax — declared
+/// there (docs/elwindui_spec.md 付録H.2.1a) rather than as a wrapper-only inherent method, so the
+/// trait needs to be in scope wherever that dot-call happens. Emitted as an anonymous `use ... as
+/// _;` (never binds a name of its own, so repeating it for multiple bindings of the same type in
+/// one function is harmless) right alongside `#binding`'s own `let` in `emit_construction`, which
+/// keeps it in scope for `emit_wiring`'s later calls on the same binding too (both live in the same
+/// enclosing function body). Only `Button`/`TextArea`/`MenuItem`/`MenuBarItem` actually route any
+/// of their own DSL properties through a shared trait method this way — `Window`/`TabView`/
+/// `TabViewItem`'s own properties, and `Menu`/`MenuBar`'s `children`, are all wrapper-only inherent
+/// methods (no shared trait involved), so nothing needs importing for those.
+fn hand_written_native_trait_use(type_path: &str) -> TokenStream {
+    match type_path {
+        "Button" => quote! { use elwindui_core::ui::Button as _; },
+        "TextArea" => quote! { use elwindui_core::ui::TextArea as _; },
+        "MenuItem" => quote! { use elwindui_core::ui::MenuItem as _; },
+        "MenuBarItem" => quote! { use elwindui_core::ui::MenuBarItem as _; },
+        _ => TokenStream::new(),
+    }
+}
+
 /// The only construction mechanism left: resolve `node.type_path` via `SymbolTable` (every
 /// resolved type — a plain user component, a component-with-view, or a builtin shape backed by
 /// hand-written Rust in an `elwindui-backend-*` crate — is treated identically) and either:
@@ -2734,7 +2793,9 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
 
     if is_hand_written_native(info) {
         let setters = build_component_setters(node, ctx, from, table, info);
+        let trait_use = hand_written_native_trait_use(&node.type_path);
         out.extend(quote! {
+            #trait_use
             let #binding = #type_ident::new();
             #(#setters)*
         });
@@ -3240,9 +3301,10 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let spacing = get_attr("spacing");
             quote! {
                 {
+                    use elwindui_core::ui::VerticalLayout as _;
                     let __v = elwindui_core::ui::create_vertical_layout();
                     __v.set_spacing((#spacing).unwrap_or(0.0));
-                    __v.set_children(elwindui_core::ui::UIElementCollection::new(vec![ #(#children),* ]));
+                    for __c in vec![ #(#children),* ] { __v.children().add(__c); }
                     __v
                 }
             }
@@ -3251,9 +3313,10 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let spacing = get_attr("spacing");
             quote! {
                 {
+                    use elwindui_core::ui::HorizontalLayout as _;
                     let __v = elwindui_core::ui::create_horizontal_layout();
                     __v.set_spacing((#spacing).unwrap_or(0.0));
-                    __v.set_children(elwindui_core::ui::UIElementCollection::new(vec![ #(#children),* ]));
+                    for __c in vec![ #(#children),* ] { __v.children().add(__c); }
                     __v
                 }
             }
@@ -3266,6 +3329,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let stroke_width = get_attr("stroke_width");
             quote! {
                 {
+                    use elwindui_core::ui::Shape as _;
                     let __v = elwindui_core::ui::create_shape();
                     __v.set_kind(#kind);
                     __v.set_fill(#fill);
@@ -3281,6 +3345,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let color = get_attr_string("color");
             quote! {
                 {
+                    use elwindui_core::ui::TextBlock as _;
                     let __v = elwindui_core::ui::create_text_block();
                     __v.set_text((#text).to_string());
                     __v.set_color(#color);
@@ -3292,9 +3357,10 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let padding = get_attr("padding");
             quote! {
                 {
+                    use elwindui_core::ui::Control as _;
                     let __v = elwindui_core::ui::create_control();
                     __v.set_padding((#padding).unwrap_or(0.0));
-                    __v.set_children(elwindui_core::ui::UIElementCollection::new(vec![ #(#children),* ]));
+                    for __c in vec![ #(#children),* ] { __v.children.add(__c); }
                     __v
                 }
             }
@@ -3306,10 +3372,11 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let columns = emit_expr(columns, ctx, &EmitMode::Construction);
             quote! {
                 {
+                    use elwindui_core::ui::Grid as _;
                     let __v = elwindui_core::ui::create_grid();
                     __v.set_rows((#rows).to_vec());
                     __v.set_columns((#columns).to_vec());
-                    __v.set_children(elwindui_core::ui::UIElementCollection::new(vec![ #(#children),* ]));
+                    for __c in vec![ #(#children),* ] { __v.children.add(__c); }
                     __v
                 }
             }
@@ -3320,17 +3387,22 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
 
 /// The concrete Rust struct to construct/store for a resolved component named `type_path` — plain
 /// `format_ident!("{type_path}")`, *except* when `info` says it's composed
-/// (`TypeInfo::composed_shape`, docs/elwindui_spec.md 付録H.2.1a), in which case the bare DSL name
-/// is a real `trait` there (`pub trait ContentControl: UIElement + Control`), not a struct — so any
-/// site that needs a concrete, `Sized`, constructible/storable type (a `Type::new(..)` call, a
-/// `#[id]`-tagged accessor's `Rc<Type>` return type) must reach for `format_ident!("{type_path}Impl")`
-/// instead. Every composed component's own `generate_view` call names its struct this way and mints
-/// the bare-named trait alongside (see that function's `is_composed`/`composition_impls`) —
-/// `X::new(args)` still works unchanged for *callers* (`emit_construction` is the one place that
-/// resolves `X` to its real `XImpl` struct before emitting the call), so no hand-written or `.elwind`
-/// source ever needs to know about the `Impl` suffix.
+/// (`TypeInfo::composed_shape`, docs/elwindui_spec.md 付録H.2.1a) or a hand-written native
+/// (`is_hand_written_native` — `Button`/`TextArea`/`Window`/`MenuBar`/`MenuBarItem`/`Menu`/
+/// `MenuItem`/`TabView`/`TabViewItem`), in which case the bare DSL name is a real `trait` there
+/// (`pub trait ContentControl: UIElement + Control`, or — for the hand-written natives — one of
+/// `elwindui_core::ui`'s shared property-setter traits, docs/elwindui_spec.md 付録H.2.1a), not a
+/// struct — so any site that needs a concrete, `Sized`, constructible/storable type (a
+/// `Type::new(..)` call, a `#[id]`-tagged accessor's `Rc<Type>` return type) must reach for
+/// `format_ident!("{type_path}Impl")` instead. Every composed component's own `generate_view` call
+/// names its struct this way and mints the bare-named trait alongside (see that function's
+/// `is_composed`/`composition_impls`); every backend's own `builtins` module does the same by hand
+/// for its hand-written natives — `X::new(args)` still works unchanged for *callers*
+/// (`emit_construction` is the one place that resolves `X` to its real `XImpl` struct before
+/// emitting the call), so no hand-written or `.elwind` source ever needs to know about the `Impl`
+/// suffix.
 fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> syn::Ident {
-    if info.is_some_and(|i| i.composed_shape.is_some() || i.is_host_composition_base) {
+    if info.is_some_and(|i| i.composed_shape.is_some() || i.is_host_composition_base || is_hand_written_native(i)) {
         format_ident!("{}Impl", type_path)
     } else {
         format_ident!("{}", type_path)
@@ -3377,17 +3449,17 @@ fn shape_composition_base_types(base: &str) -> (TokenStream, TokenStream) {
 /// `Control`, whose trait declares real accessor methods (`elwindui_core::ui::Control`).
 fn shape_composition_base_trait_impl(base: &str, target: &syn::Ident) -> TokenStream {
     let (_, base_trait) = shape_composition_base_types(base);
-    if base == "Control" {
-        // Fully-qualified (`#base_trait::padding(&self.base)`), not `self.base.padding()`: for a
-        // *template*-composed `#target` (`is_template_composition`), `self.base` is itself another
-        // DSL component (e.g. `LabeledPanel`'s `base: ContentControl`), which already has its own
-        // *inherent* `padding()` accessor (the DSL-level `Option<f32>` — `named_accessors`, unrelated
-        // to this trait) — plain method-call syntax would resolve to that inherent method instead of
-        // this trait's `f32`-returning one (inherent methods win method resolution over same-named
-        // trait methods), a type mismatch. The fully-qualified form always reaches the *trait* impl
-        // (`self.base`'s own `impl Control`, itself delegating one hop further), correct at any
-        // composition depth.
-        quote! {
+    // Fully-qualified (`#base_trait::method(&self.base, ..)`), not `self.base.method(..)`: for a
+    // *template*-composed `#target` (`is_template_composition`), `self.base` is itself another DSL
+    // component (e.g. `LabeledPanel`'s `base: ContentControl`), which may already have its own
+    // *inherent* same-named accessor/setter (`named_accessors`, unrelated to this trait — e.g. a
+    // deferred `Option<f32>` field's own `set_padding`) — plain method-call syntax would resolve to
+    // that inherent method instead of this trait's own (inherent methods win method resolution over
+    // same-named trait methods), a type mismatch. The fully-qualified form always reaches the
+    // *trait* impl (`self.base`'s own `impl #base_trait`, itself delegating one hop further),
+    // correct at any composition depth.
+    match base {
+        "Control" => quote! {
             impl #base_trait for #target {
                 fn padding(&self) -> f32 {
                     #base_trait::padding(&self.base)
@@ -3398,10 +3470,61 @@ fn shape_composition_base_trait_impl(base: &str, target: &syn::Ident) -> TokenSt
                 fn content_vertical_alignment(&self) -> elwindui_core::layout::VerticalAlignment {
                     #base_trait::content_vertical_alignment(&self.base)
                 }
+                fn set_padding(&self, padding: f32) {
+                    #base_trait::set_padding(&self.base, padding)
+                }
+                fn set_content_horizontal_alignment(&self, alignment: elwindui_core::layout::HorizontalAlignment) {
+                    #base_trait::set_content_horizontal_alignment(&self.base, alignment)
+                }
+                fn set_content_vertical_alignment(&self, alignment: elwindui_core::layout::VerticalAlignment) {
+                    #base_trait::set_content_vertical_alignment(&self.base, alignment)
+                }
             }
-        }
-    } else {
-        quote! { impl #base_trait for #target {} }
+        },
+        "Shape" => quote! {
+            impl #base_trait for #target {
+                fn set_kind(&self, kind: elwindui_core::ui::ShapeKind) {
+                    #base_trait::set_kind(&self.base, kind)
+                }
+                fn set_fill(&self, fill: Option<String>) {
+                    #base_trait::set_fill(&self.base, fill)
+                }
+                fn set_stroke(&self, stroke: Option<String>) {
+                    #base_trait::set_stroke(&self.base, stroke)
+                }
+                fn set_stroke_width(&self, stroke_width: f32) {
+                    #base_trait::set_stroke_width(&self.base, stroke_width)
+                }
+            }
+        },
+        "TextBlock" => quote! {
+            impl #base_trait for #target {
+                fn set_text(&self, text: String) {
+                    #base_trait::set_text(&self.base, text)
+                }
+                fn set_color(&self, color: Option<String>) {
+                    #base_trait::set_color(&self.base, color)
+                }
+            }
+        },
+        "Grid" => quote! {
+            impl #base_trait for #target {
+                fn set_rows(&self, rows: Vec<elwindui_core::layout::GridLength>) {
+                    #base_trait::set_rows(&self.base, rows)
+                }
+                fn set_columns(&self, columns: Vec<elwindui_core::layout::GridLength>) {
+                    #base_trait::set_columns(&self.base, columns)
+                }
+            }
+        },
+        "VerticalLayout" | "HorizontalLayout" => quote! {
+            impl #base_trait for #target {
+                fn set_spacing(&self, spacing: f32) {
+                    #base_trait::set_spacing(&self.base, spacing)
+                }
+            }
+        },
+        other => unreachable!("shape_composition_base_types called with non-virtual-builtin `{other}`"),
     }
 }
 
@@ -3418,6 +3541,12 @@ fn emit_wiring(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
     let binding = &node.binding;
     let self_mode = EmitMode::WithSelf(quote! { this });
     let info = table.resolve(from, &node.type_path);
+    // `emit_wiring`'s own output lands in `NotepadWindowImpl::new()`, a *different* function from
+    // wherever `emit_construction` ran (for a composed/host-composed target, that's the separate
+    // `create_<snake case>(..)` free function — see `generate_view`'s `create_fn`/
+    // `new_construct_stmt` split) — so the `use` injected there doesn't carry over here. See
+    // `emit_resync`'s own copy of this same comment.
+    out.extend(hand_written_native_trait_use(&node.type_path));
 
     // The widget handle is cloned out to its own binding *before* `this` is cloned into the
     // closure: `this.#binding.set_on_click(Box::new(move || { ...this... }))` would try to
@@ -3516,6 +3645,12 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
     let binding = &node.binding;
     let self_mode = EmitMode::WithSelf(quote! { self });
     let info = table.resolve(from, &node.type_path);
+    // `resync()` is its own function, a separate lexical scope from `new()` — the `use` already
+    // injected alongside construction (`emit_construction`'s `hand_written_native_trait_use`)
+    // doesn't carry over here, so any hand-written native whose setters are shared-trait-only
+    // needs its own copy of the same import for this function's own `self.#binding.#setter(..)`
+    // calls below.
+    out.extend(hand_written_native_trait_use(&node.type_path));
 
     for (name, expr) in &node.attributes {
         if name.starts_with("on_") {
@@ -3967,10 +4102,10 @@ view NotepadWindow {
         let window_code = generate_module(&window_module, &table);
         assert_valid_rust("menubar_tabview_window", &window_code);
         let window_str = window_code.to_string();
-        assert!(window_str.contains("MenuBar :: new"));
-        assert!(window_str.contains("MenuItem :: new"));
+        assert!(window_str.contains("MenuBarImpl :: new"));
+        assert!(window_str.contains("MenuItemImpl :: new"));
         assert!(window_str.contains("set_shortcut"));
-        assert!(window_str.contains("TabView :: new"));
+        assert!(window_str.contains("TabViewImpl :: new"));
         // `TabView`'s per-tab chip/content materialization (`insert_tab`, `__weak_self`) is no
         // longer generated here at all — it's hand-written Rust inside the corresponding
         // `elwindui-backend-*` crate now, reached generically the same way any other resolved
@@ -4220,8 +4355,11 @@ view Foo {
         assert_valid_rust("content_control_impl", &content_control_code);
         let content_control_str = content_control_code.to_string();
         assert!(content_control_str.contains("elwindui_core :: ui :: create_control"));
-        assert!(content_control_str.contains("pub fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
-        assert!(content_control_str.contains("pub fn padding (& self) -> Option < f32 >"));
+        // `content`/`padding` are now trait methods (Phase E, docs/elwindui_spec.md 付録H.2.1a) —
+        // no `pub` (trait methods have no visibility modifier of their own), declared in the trait
+        // and implemented in `impl ContentControl for ContentControlImpl` below.
+        assert!(content_control_str.contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
+        assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
         // Real struct is `ContentControlImpl`; the bare `ContentControl` is a real trait instead
         // (docs/elwindui_spec.md 付録H.2.1a) — no `struct`/`trait` namespace clash since they're
         // different identifiers.
@@ -4306,8 +4444,10 @@ component LabeledPanel inherits ContentControl {
         assert!(generated_str.contains("impl elwindui_core :: ui :: UIElement for LabeledPanelImpl"), "{generated_str}");
         assert!(generated_str.contains("impl elwindui_core :: ui :: Control for LabeledPanelImpl"), "{generated_str}");
         assert!(generated_str.contains("impl LabeledPanel for LabeledPanelImpl"), "{generated_str}");
+        // No `pub` — `content` is now a trait method (Phase E, docs/elwindui_spec.md 付録H.2.1a),
+        // not a plain inherent one.
         assert!(
-            generated_str.contains("pub fn content (& self) -> std :: rc :: Rc < dyn UIElement > { self . base . content () }"),
+            generated_str.contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement > { self . base . content () }"),
             "{generated_str}"
         );
     }

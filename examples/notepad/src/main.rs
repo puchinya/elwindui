@@ -1,5 +1,7 @@
 use elwindui::platform;
-use elwindui_backend_appkit::builtins::{Menu, MenuBar, MenuBarItem, MenuItem, TabView, TextArea, Window, WindowImpl};
+use elwindui_backend_appkit::builtins::{
+    MenuBarImpl, MenuBarItemImpl, MenuImpl, MenuItemImpl, TabViewImpl, TextAreaImpl, Window, WindowImpl,
+};
 // Required by `ContentControl`'s generated code (`content: Rc<dyn UIElement>` — see
 // `content_control.elwind`'s own doc comment, docs/elwindui_spec.md 付録H.2.1a).
 use elwindui_core::ui::UIElement;

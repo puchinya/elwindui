@@ -49,6 +49,20 @@ pub enum VerticalAlignment {
     Stretch,
 }
 
+/// WinUI3's `FrameworkElement.MeasureCore`-style constraint application: clamps `size` to
+/// `min`/`max` on each axis independently (an unset bound imposes no clamp on that side —
+/// `elwindui_core::ui::UIElementImpl`'s `min_width`/`max_width`/etc. are `Option<f32>`, WinUI3's
+/// own `NaN`-sentinel equivalent). Used twice per `measure` call (`elwindui_core::ui`'s `measure`/
+/// `measure_and_align`): once on the space handed down to `measure_override`, once on its
+/// returned desired size.
+pub fn apply_size_constraints(size: Size, min_width: Option<f32>, max_width: Option<f32>, min_height: Option<f32>, max_height: Option<f32>) -> Size {
+    let clamp = |value: f32, min: Option<f32>, max: Option<f32>| -> f32 {
+        let value = min.map_or(value, |min| value.max(min));
+        max.map_or(value, |max| value.min(max))
+    };
+    Size { width: clamp(size.width, min_width, max_width), height: clamp(size.height, min_height, max_height) }
+}
+
 /// Shrinks `size` by a uniform `margin` on every side (never below zero) — the "how much room is
 /// actually left for me to measure into" half of `UIElement`'s generic Margin handling.
 pub fn shrink_by_margin(size: Size, margin: f32) -> Size {
@@ -425,6 +439,14 @@ mod tests {
         let desired = size(20.0, 10.0);
         let rect = align_within(slot, desired, HorizontalAlignment::Right, VerticalAlignment::Bottom);
         assert_eq!(rect, Rect { x: 80.0, y: 90.0, width: 20.0, height: 10.0 });
+    }
+
+    #[test]
+    fn apply_size_constraints_clamps_only_the_bounds_that_are_set() {
+        let s = size(50.0, 5.0);
+        assert_eq!(apply_size_constraints(s, Some(100.0), None, None, Some(4.0)), size(100.0, 4.0));
+        assert_eq!(apply_size_constraints(s, None, Some(20.0), None, None), size(20.0, 5.0));
+        assert_eq!(apply_size_constraints(s, None, None, None, None), s);
     }
 
     #[test]

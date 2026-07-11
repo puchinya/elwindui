@@ -8,7 +8,7 @@
 //!   thus its already-built `content` tree) across `set_items_source` resyncs, instead of a
 //!   separate `key` closure.
 //!
-//! Both modes funnel into the same `entries: Vec<Rc<TabViewItem>>` that `rebuild()` operates over
+//! Both modes funnel into the same `entries: Vec<Rc<TabViewItemImpl>>` that `rebuild()` operates over
 //! uniformly — `TabViewItem` itself *is* the normalized per-tab representation, not just the
 //! static-mode surface syntax.
 //!
@@ -31,7 +31,7 @@ use std::rc::{Rc, Weak};
 
 /// The normalized per-tab representation — written literally in static mode, or synthesized once
 /// per `items_source` element in dynamic mode (see module doc comment).
-pub struct TabViewItem {
+pub struct TabViewItemImpl {
     data_context: RefCell<Option<Rc<dyn Any>>>,
     header: RefCell<String>,
     // Handed to this entry's persistent content host (`TreeHostView::set_tree`) the first time
@@ -43,7 +43,7 @@ pub struct TabViewItem {
     on_close: RefCell<Option<Box<dyn Fn()>>>,
 }
 
-impl TabViewItem {
+impl TabViewItemImpl {
     pub fn new() -> Rc<Self> {
         Rc::new(Self {
             data_context: RefCell::new(None),
@@ -111,9 +111,9 @@ impl Default for DynamicSource {
     }
 }
 
-pub struct TabView {
+pub struct TabViewImpl {
     inner: appkit::TabViewImpl,
-    entries: RefCell<Vec<Rc<TabViewItem>>>,
+    entries: RefCell<Vec<Rc<TabViewItemImpl>>>,
     dynamic: RefCell<Option<DynamicSource>>,
     selected_index: Cell<usize>,
     /// Parallel to `displayed` below — each currently-displayed entry's chip + persistent content
@@ -128,10 +128,10 @@ pub struct TabView {
     visible: RefCell<Option<usize>>,
     on_select: RefCell<Option<Box<dyn Fn(usize)>>>,
     on_close: RefCell<Option<Box<dyn Fn(usize)>>>,
-    weak_self: RefCell<Weak<TabView>>,
+    weak_self: RefCell<Weak<TabViewImpl>>,
 }
 
-impl UIElement for TabView {
+impl UIElement for TabViewImpl {
     fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.inner.base()
     }
@@ -149,7 +149,7 @@ impl UIElement for TabView {
     }
 }
 
-impl TabView {
+impl TabViewImpl {
     pub fn new() -> Rc<Self> {
         let this = Rc::new(Self {
             inner: appkit::create_tab_view(),
@@ -172,7 +172,7 @@ impl TabView {
     /// immediately, unlike the dynamic-mode setters below (whose own values only take effect once
     /// `set_items_source` — always called again by the enclosing generated component's first
     /// `resync()`, see that method's doc comment — actually reconciles them).
-    pub fn set_children(&self, children: Vec<Rc<TabViewItem>>) {
+    pub fn set_children(&self, children: Vec<Rc<TabViewItemImpl>>) {
         if !children.is_empty() {
             *self.entries.borrow_mut() = children;
         }
@@ -234,7 +234,7 @@ impl TabView {
     }
 
     /// WinUI3's `SelectedContainer` concept — see `selected_item`'s doc comment.
-    pub fn selected_container(&self) -> Option<Rc<TabViewItem>> {
+    pub fn selected_container(&self) -> Option<Rc<TabViewItemImpl>> {
         self.entries.borrow().get(self.selected_index.get()).cloned()
     }
 
@@ -265,7 +265,7 @@ impl TabView {
         let Some(dynamic) = dynamic.as_ref() else { return };
         let (Some(header_template), Some(item_template)) = (&dynamic.header_template, &dynamic.item_template) else { return };
         let mut entries = self.entries.borrow_mut();
-        let new_entries: Vec<Rc<TabViewItem>> = items
+        let new_entries: Vec<Rc<TabViewItemImpl>> = items
             .iter()
             .map(|item| {
                 entries
@@ -275,7 +275,7 @@ impl TabView {
                     .unwrap_or_else(|| {
                         let header = header_template(item);
                         let content = item_template(item);
-                        TabViewItem::new_erased(Some(Rc::clone(item)), &header, content, Some(dynamic.closable_default))
+                        TabViewItemImpl::new_erased(Some(Rc::clone(item)), &header, content, Some(dynamic.closable_default))
                     })
             })
             .collect();

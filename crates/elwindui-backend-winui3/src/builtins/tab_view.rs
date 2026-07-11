@@ -22,7 +22,7 @@ use std::rc::{Rc, Weak};
 
 /// The normalized per-tab representation — written literally in static mode, or synthesized once
 /// per `items_source` element in dynamic mode (see module doc comment).
-pub struct TabViewItem {
+pub struct TabViewItemImpl {
     data_context: RefCell<Option<Rc<dyn Any>>>,
     header: RefCell<String>,
     // Taken (moved into a real `TreeHostPanel`) the first time this `TabViewItem` is inserted as a
@@ -33,7 +33,7 @@ pub struct TabViewItem {
     on_close: RefCell<Option<Box<dyn Fn()>>>,
 }
 
-impl TabViewItem {
+impl TabViewItemImpl {
     pub fn new() -> Rc<Self> {
         Rc::new(Self {
             data_context: RefCell::new(None),
@@ -101,9 +101,9 @@ impl Default for DynamicSource {
     }
 }
 
-pub struct TabView {
+pub struct TabViewImpl {
     inner: winui3::TabViewImpl,
-    entries: RefCell<Vec<Rc<TabViewItem>>>,
+    entries: RefCell<Vec<Rc<TabViewItemImpl>>>,
     dynamic: RefCell<Option<DynamicSource>>,
     /// Pointer identities (`Rc::as_ptr`, as `usize`) of the `TabViewItem`s currently reflected as
     /// real `TabViewItem`s, in display order — the "before" side of `rebuild`'s diff against
@@ -115,10 +115,10 @@ pub struct TabView {
     /// so `selected_item`/`selected_container` can read it back.
     selected_index: Cell<usize>,
     on_close: RefCell<Option<Box<dyn Fn(usize)>>>,
-    weak_self: RefCell<Weak<TabView>>,
+    weak_self: RefCell<Weak<TabViewImpl>>,
 }
 
-impl UIElement for TabView {
+impl UIElement for TabViewImpl {
     fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.inner.base()
     }
@@ -136,7 +136,7 @@ impl UIElement for TabView {
     }
 }
 
-impl TabView {
+impl TabViewImpl {
     pub fn new() -> Rc<Self> {
         let this = Rc::new(Self {
             inner: winui3::create_tab_view(),
@@ -153,7 +153,7 @@ impl TabView {
 
     /// Static mode: the literal `TabViewItem { .. }` children (mutually exclusive with
     /// `set_items_source`'s dynamic mode — see module doc comment).
-    pub fn set_children(&self, children: Vec<Rc<TabViewItem>>) {
+    pub fn set_children(&self, children: Vec<Rc<TabViewItemImpl>>) {
         if !children.is_empty() {
             *self.entries.borrow_mut() = children;
         }
@@ -190,7 +190,7 @@ impl TabView {
     }
 
     /// WinUI3's `SelectedContainer` concept — see `selected_item`'s doc comment.
-    pub fn selected_container(&self) -> Option<Rc<TabViewItem>> {
+    pub fn selected_container(&self) -> Option<Rc<TabViewItemImpl>> {
         self.entries.borrow().get(self.selected_index.get()).cloned()
     }
 
@@ -256,7 +256,7 @@ impl TabView {
         let Some(dynamic) = dynamic.as_ref() else { return };
         let (Some(header_template), Some(item_template)) = (&dynamic.header_template, &dynamic.item_template) else { return };
         let mut entries = self.entries.borrow_mut();
-        let new_entries: Vec<Rc<TabViewItem>> = items
+        let new_entries: Vec<Rc<TabViewItemImpl>> = items
             .iter()
             .map(|item| {
                 entries
@@ -266,7 +266,7 @@ impl TabView {
                     .unwrap_or_else(|| {
                         let header = header_template(item);
                         let content = item_template(item);
-                        TabViewItem::new_erased(Some(Rc::clone(item)), &header, content, Some(dynamic.closable_default))
+                        TabViewItemImpl::new_erased(Some(Rc::clone(item)), &header, content, Some(dynamic.closable_default))
                     })
             })
             .collect();

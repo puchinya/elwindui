@@ -16,7 +16,7 @@
 /// their names at this crate's root.
 pub mod builtins;
 
-use elwindui_core::ui::{layout_tree, AsAny, PaintKind, RenderItem, ShapeKind, UIElement};
+use elwindui_core::ui::{layout_tree, AsAny, Button as _, PaintKind, RenderItem, ShapeKind, UIElement};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -389,18 +389,6 @@ pub struct TextAreaImpl {
     delegate_storage: Rc<RefCell<Option<Retained<TextViewDelegate>>>>,
 }
 
-/// `TextAreaImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
-/// since a real `AnyView` handle (`self.base.handle`, wrapping the outer `NSScrollView`) is what
-/// makes this leaf embeddable in the visual tree at all.
-pub trait TextArea: elwindui_core::ui::NativeControl<AnyView> {
-    fn set_text(&self, text: &str);
-    /// `NSTextView.delegate` is an unretained (weak) reference, so the delegate this creates is
-    /// only kept alive by `self.delegate_storage`. Found via `TabViewImpl`'s content pane, which
-    /// used to hand over just the raw `NSView` and discard the owning `TextAreaImpl` — see
-    /// `TabViewImpl::set_content`'s doc comment.
-    fn set_on_change(&self, callback: Box<dyn Fn(String)>);
-}
-
 impl elwindui_core::ui::UIElement for TextAreaImpl {
     fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
@@ -420,11 +408,15 @@ impl elwindui_core::ui::UIElement for TextAreaImpl {
 }
 impl elwindui_core::ui::NativeControl<AnyView> for TextAreaImpl {}
 
-impl TextArea for TextAreaImpl {
+/// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
+/// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are AppKit-specific.
+impl elwindui_core::ui::TextArea for TextAreaImpl {
     fn set_text(&self, text: &str) {
         self.text_view.setString(&NSString::from_str(text));
     }
 
+    /// `NSTextView.delegate` is an unretained (weak) reference, so the delegate this creates is
+    /// only kept alive by `self.delegate_storage`.
     fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
         let m = mtm();
         let ivars = TextDelegateIvars { text_view: self.text_view.clone(), callback };
@@ -489,16 +481,6 @@ pub struct ButtonImpl {
     target_storage: Rc<RefCell<Option<Retained<ButtonTarget>>>>,
 }
 
-/// `ButtonImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
-/// since a real `AnyView` handle (`self.ns`) is what makes this leaf embeddable in the visual tree
-/// at all.
-pub trait Button: elwindui_core::ui::NativeControl<AnyView> {
-    fn set_enabled(&self, enabled: bool);
-    fn set_on_click(&self, callback: Box<dyn Fn()>);
-    /// Used by `TabChipImpl` to rename a tab's title button when its document's file name changes.
-    fn set_text(&self, text: &str);
-}
-
 impl elwindui_core::ui::UIElement for ButtonImpl {
     fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.base.base()
@@ -518,7 +500,9 @@ impl elwindui_core::ui::UIElement for ButtonImpl {
 }
 impl elwindui_core::ui::NativeControl<AnyView> for ButtonImpl {}
 
-impl Button for ButtonImpl {
+/// `elwindui_core::ui::Button`'s shape is common to every backend — see that trait's own doc
+/// comment; only these method bodies are AppKit-specific.
+impl elwindui_core::ui::Button for ButtonImpl {
     fn set_enabled(&self, enabled: bool) {
         self.ns.setEnabled(enabled);
     }
@@ -532,6 +516,7 @@ impl Button for ButtonImpl {
         *self.target_storage.borrow_mut() = Some(target);
     }
 
+    /// Used by `TabChipImpl` to rename a tab's title button when its document's file name changes.
     fn set_text(&self, text: &str) {
         self.ns.setTitle(&NSString::from_str(text));
     }
@@ -764,21 +749,11 @@ pub struct MenuItemImpl {
     target_storage: Rc<RefCell<Option<Retained<MenuItemTarget>>>>,
 }
 
-/// `MenuItemImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
-pub trait MenuItem {
-    /// A real `NSMenuItem.title` setter (docs/elwindui_spec.md 付録H.2.1a's post-construction
-    /// setter convention) — `create_menu_item()` takes no title argument, so this is the only way
-    /// a menu item's title is ever actually set.
-    fn set_text(&self, text: &str);
-    fn set_enabled(&self, enabled: bool);
-    /// A bare key character (e.g. `"s"`); macOS defaults a menu item's modifier mask to Cmd,
-    /// which matches the common `Cmd+<letter>` shortcuts notepad needs (付録K.2's platform
-    /// conversion rule already reads "Ctrl" as "Cmd" on macOS at the DSL level).
-    fn set_shortcut(&self, key_equivalent: &str);
-    fn set_on_select(&self, callback: Box<dyn Fn()>);
-}
-
-impl MenuItem for MenuItemImpl {
+/// `elwindui_core::ui::MenuItem`'s shape is common to every backend — see that trait's own doc
+/// comment; only these method bodies are AppKit-specific.
+impl elwindui_core::ui::MenuItem for MenuItemImpl {
+    /// A real `NSMenuItem.title` setter — `create_menu_item()` takes no title argument, so this is
+    /// the only way a menu item's title is ever actually set.
     fn set_text(&self, text: &str) {
         self.ns.setTitle(&NSString::from_str(text));
     }
@@ -787,6 +762,9 @@ impl MenuItem for MenuItemImpl {
         self.ns.setEnabled(enabled);
     }
 
+    /// A bare key character (e.g. `"s"`); macOS defaults a menu item's modifier mask to Cmd,
+    /// which matches the common `Cmd+<letter>` shortcuts notepad needs (付録K.2's platform
+    /// conversion rule already reads "Ctrl" as "Cmd" on macOS at the DSL level).
     fn set_shortcut(&self, key_equivalent: &str) {
         self.ns.setKeyEquivalent(&NSString::from_str(key_equivalent));
     }
@@ -842,16 +820,12 @@ pub struct MenuImpl {
     ns: Retained<NSMenu>,
 }
 
-/// `MenuImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `add_item`/`remove_item` are
-/// real `NSMenu.addItem(_:)`/`.removeItem(_:)` calls (the same API `create_menu` already used to
-/// call in a loop at construction time), now also reachable post-construction so the wrapper's own
-/// `set_children` (`elwindui-backend-appkit::builtins`) can reconcile a changed child list without
-/// rebuilding the native `NSMenu` from scratch.
-pub trait Menu {
-    fn add_item(&self, item: &MenuItemImpl);
-    fn remove_item(&self, item: &MenuItemImpl);
-}
-impl Menu for MenuImpl {
+/// `elwindui_core::ui::Menu<Item>`'s shape is common to every backend — see that trait's own doc
+/// comment. `add_item`/`remove_item` are real `NSMenu.addItem(_:)`/`.removeItem(_:)` calls (the
+/// same API `create_menu` already used to call in a loop at construction time), now also reachable
+/// post-construction so the wrapper's own `set_children` (`elwindui-backend-appkit::builtins`) can
+/// reconcile a changed child list without rebuilding the native `NSMenu` from scratch.
+impl elwindui_core::ui::Menu<MenuItemImpl> for MenuImpl {
     fn add_item(&self, item: &MenuItemImpl) {
         self.ns.addItem(&item.ns);
     }
@@ -872,14 +846,11 @@ pub struct MenuBarItemImpl {
     ns: Retained<NSMenuItem>,
 }
 
-/// `MenuBarItemImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `set_text`/
-/// `set_submenu` are real post-construction setters (`create_menu_bar_item()` takes neither
-/// argument, so these are the only way a menu bar item's title/submenu are ever actually set).
-pub trait MenuBarItem {
-    fn set_text(&self, text: &str);
-    fn set_submenu(&self, submenu: &MenuImpl);
-}
-impl MenuBarItem for MenuBarItemImpl {
+/// `elwindui_core::ui::MenuBarItem<M>`'s shape is common to every backend — see that trait's own
+/// doc comment. `set_text`/`set_submenu` are real post-construction setters (`create_menu_bar_item()`
+/// takes neither argument, so these are the only way a menu bar item's title/submenu are ever
+/// actually set).
+impl elwindui_core::ui::MenuBarItem<MenuImpl> for MenuBarItemImpl {
     fn set_text(&self, text: &str) {
         self.ns.setTitle(&NSString::from_str(text));
     }
@@ -902,14 +873,11 @@ pub struct MenuBarImpl {
     ns: Retained<NSMenu>,
 }
 
-/// `MenuBarImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — `add_item`/`remove_item`
-/// mirror `Menu`'s own (see that trait's doc comment): real `NSMenu.addItem(_:)`/`.removeItem(_:)`
-/// calls, reachable post-construction for `elwindui-backend-appkit::builtins::MenuBar::set_children`.
-pub trait MenuBar {
-    fn add_item(&self, item: &MenuBarItemImpl);
-    fn remove_item(&self, item: &MenuBarItemImpl);
-}
-impl MenuBar for MenuBarImpl {
+/// `elwindui_core::ui::MenuBar<Item>`'s shape is common to every backend — see that trait's own
+/// doc comment. `add_item`/`remove_item` mirror `Menu`'s own: real `NSMenu.addItem(_:)`/
+/// `.removeItem(_:)` calls, reachable post-construction for
+/// `elwindui-backend-appkit::builtins::MenuBar::set_children`.
+impl elwindui_core::ui::MenuBar<MenuBarItemImpl> for MenuBarImpl {
     fn add_item(&self, item: &MenuBarItemImpl) {
         self.ns.addItem(&item.ns);
     }

@@ -5,7 +5,7 @@
 //! which aren't valid Rust expression syntax — that half can't move to plain Rust).
 
 use elwindui::platform;
-use elwindui_backend_appkit::builtins::{Button, TextArea, Window, WindowImpl};
+use elwindui_backend_appkit::builtins::{ButtonImpl, TextAreaImpl, Window, WindowImpl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {

@@ -1,27 +1,31 @@
 //! WinUI3-backed DSL-facing wrappers for every *native* builtin except `TabView` (see
 //! `tab_view.rs`), mirroring `elwindui_backend_appkit::builtins`'s structure exactly (see that
 //! module's doc comment for the overall convention: `Type::new(..)`/`set_<attr>`/
-//! `set_on_<event>`/`set_on_<attr>_change`/`into_any_view`, and for why this lives in its own
-//! `builtins` module rather than at this crate's root). `VerticalLayout`/`HorizontalLayout`/
-//! `Rectangle`/`Ellipse`/`TextBlock` have no wrapper here either, for the same reason as the
-//! AppKit side: `elwindui-codegen` builds their `elwindui_core::ui::UIElement` values directly.
+//! `set_on_<event>`/`set_on_<attr>_change`/`into_any_view`, why this lives in its own `builtins`
+//! module rather than at this crate's root, and why every struct here is named `XImpl`).
+//! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no wrapper here
+//! either, for the same reason as the AppKit side: `elwindui-codegen` builds their
+//! `elwindui_core::ui::UIElement` values directly.
 //!
 //! UNVERIFIED — see `elwindui-backend-winui3`'s crate-level doc comment. This file only calls
 //! that crate's own API (which is under this project's control and self-consistent), so it should
 //! need little to no correction even if the backend crate's underlying WinRT calls do.
 
 mod tab_view;
-pub use tab_view::{TabView, TabViewItem};
+pub use tab_view::{TabViewImpl, TabViewItemImpl};
 
 use crate as winui3;
-use crate::{Button as _, Menu as _, MenuBar as _, MenuBarItem as _, MenuItem as _, TextArea as _};
-use elwindui_core::ui::UIElement;
+// Re-exported so `component X inherits Window` call sites can keep importing `Window` from this
+// same `builtins` module alongside `WindowImpl`, rather than needing a separate `elwindui_core`
+// import just for the (now-shared) marker trait.
+pub use elwindui_core::ui::Window;
+use elwindui_core::ui::{Button as _, Menu as _, MenuBar as _, MenuBarItem as _, MenuItem as _, TextArea as _, UIElement};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 /// `component NotepadWindow inherits Window` ("host composition", docs/elwindui_spec.md 付録H.2.1a)
-/// is what actually inherits this — hence the `Impl` rename + paired empty-marker `Window` trait
-/// below, the same trait+Impl+base split every other inherited class in this module follows.
+/// is what actually inherits this — hence the `Impl` rename + paired empty-marker
+/// `elwindui_core::ui::Window` trait.
 pub struct WindowImpl {
     inner: winui3::Window,
 }
@@ -35,7 +39,7 @@ impl WindowImpl {
         self.inner.set_title(title);
     }
 
-    pub fn set_menu_bar(&self, menu_bar: Rc<MenuBar>) {
+    pub fn set_menu_bar(&self, menu_bar: Rc<MenuBarImpl>) {
         self.inner.set_menu_bar(&menu_bar.inner);
     }
 
@@ -48,16 +52,13 @@ impl WindowImpl {
     }
 }
 
-/// `WindowImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a), the same shape
-/// as `Menu`/`MenuBar`/`MenuBarItem`/`MenuItem`'s own traits in this crate's root.
-pub trait Window {}
-impl Window for WindowImpl {}
+impl elwindui_core::ui::Window for WindowImpl {}
 
-pub struct TextArea {
+pub struct TextAreaImpl {
     inner: winui3::TextAreaImpl,
 }
 
-impl UIElement for TextArea {
+impl UIElement for TextAreaImpl {
     fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.inner.base()
     }
@@ -75,17 +76,13 @@ impl UIElement for TextArea {
     }
 }
 
-impl TextArea {
+impl TextAreaImpl {
     pub fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_text_area() })
     }
 
-    pub fn set_text(&self, text: &str) {
-        self.inner.set_text(text);
-    }
-
     /// `#[two_way] text` (`TextArea` in `builtins.elwind`) — the change-back half of the binding;
-    /// `set_text` above is the model→widget half.
+    /// `elwindui_core::ui::TextArea::set_text` is the model→widget half.
     pub fn set_on_text_change(&self, callback: Box<dyn Fn(String)>) {
         self.inner.set_on_change(callback);
     }
@@ -95,11 +92,20 @@ impl TextArea {
     }
 }
 
-pub struct Button {
+impl elwindui_core::ui::TextArea for TextAreaImpl {
+    fn set_text(&self, text: &str) {
+        self.inner.set_text(text);
+    }
+    fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+        self.inner.set_on_change(callback);
+    }
+}
+
+pub struct ButtonImpl {
     inner: winui3::ButtonImpl,
 }
 
-impl UIElement for Button {
+impl UIElement for ButtonImpl {
     fn base(&self) -> &elwindui_core::ui::UIElementImpl {
         self.inner.base()
     }
@@ -117,12 +123,12 @@ impl UIElement for Button {
     }
 }
 
-impl Button {
+impl ButtonImpl {
     pub fn new() -> Rc<Self> {
         let inner = winui3::create_button();
         let this = Rc::new(Self { inner });
         // Wires the real XAML click directly to `dispatch_routed`, once, right here — mirrors
-        // `elwindui_backend_appkit::builtins::Button::new`'s own doc comment for the rationale.
+        // `elwindui_backend_appkit::builtins::ButtonImpl::new`'s own doc comment for the rationale.
         // Unconditional — `dispatch_routed` already no-ops gracefully when nothing is registered
         // for `"on_click"` at this node or any ancestor (`elwindui-codegen`'s `emit_wiring`
         // registers the actual `#[routed] on_click` handler here, via `register_routed_handler`
@@ -137,14 +143,6 @@ impl Button {
         this
     }
 
-    pub fn set_text(&self, text: &str) {
-        self.inner.set_text(text);
-    }
-
-    pub fn set_enabled(&self, enabled: bool) {
-        self.inner.set_enabled(enabled);
-    }
-
     /// `#[routed] on_click` (`Button` in `builtins.elwind`) is registered directly onto this
     /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)
     /// to fire `dispatch_routed` starting at this same node.
@@ -157,21 +155,33 @@ impl Button {
     }
 }
 
-pub struct MenuBar {
-    inner: winui3::MenuBarImpl,
-    /// See `elwindui_backend_appkit::builtins::MenuBar::children`'s doc comment — same
-    /// reconciliation pattern.
-    children: RefCell<Vec<Rc<MenuBarItem>>>,
+impl elwindui_core::ui::Button for ButtonImpl {
+    fn set_enabled(&self, enabled: bool) {
+        self.inner.set_enabled(enabled);
+    }
+    fn set_on_click(&self, callback: Box<dyn Fn()>) {
+        self.inner.set_on_click(callback);
+    }
+    fn set_text(&self, text: &str) {
+        self.inner.set_text(text);
+    }
 }
 
-impl MenuBar {
+pub struct MenuBarImpl {
+    inner: winui3::MenuBarImpl,
+    /// See `elwindui_backend_appkit::builtins::MenuBarImpl::children`'s doc comment — same
+    /// reconciliation pattern.
+    children: RefCell<Vec<Rc<MenuBarItemImpl>>>,
+}
+
+impl MenuBarImpl {
     pub fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_menu_bar(), children: RefCell::new(Vec::new()) })
     }
 
-    /// See `elwindui_backend_appkit::builtins::MenuBar::set_children`'s doc comment — same
+    /// See `elwindui_backend_appkit::builtins::MenuBarImpl::set_children`'s doc comment — same
     /// reconciliation pattern.
-    pub fn set_children(&self, children: Vec<Rc<MenuBarItem>>) {
+    pub fn set_children(&self, children: Vec<Rc<MenuBarItemImpl>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
             let keep = children.iter().any(|new| Rc::ptr_eq(old, new));
@@ -189,39 +199,46 @@ impl MenuBar {
     }
 }
 
-pub struct MenuBarItem {
+pub struct MenuBarItemImpl {
     inner: winui3::MenuBarItemImpl,
 }
 
-impl MenuBarItem {
+impl MenuBarItemImpl {
     pub fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_menu_bar_item() })
     }
 
-    pub fn set_text(&self, text: &str) {
-        self.inner.set_text(text);
-    }
-
-    pub fn set_submenu(&self, submenu: Rc<Menu>) {
+    pub fn set_submenu(&self, submenu: Rc<MenuImpl>) {
+        // `submenu` itself is dropped at the end of this call — the underlying native menu stays
+        // alive regardless (retained by whatever it gets installed into).
         self.inner.set_submenu(&submenu.inner);
     }
 }
 
-pub struct Menu {
-    inner: winui3::MenuImpl,
-    /// See `elwindui_backend_appkit::builtins::MenuBar::children`'s doc comment — same
-    /// reconciliation pattern.
-    children: RefCell<Vec<Rc<MenuItem>>>,
+impl elwindui_core::ui::MenuBarItem<MenuImpl> for MenuBarItemImpl {
+    fn set_text(&self, text: &str) {
+        self.inner.set_text(text);
+    }
+    fn set_submenu(&self, submenu: &MenuImpl) {
+        self.inner.set_submenu(&submenu.inner);
+    }
 }
 
-impl Menu {
+pub struct MenuImpl {
+    inner: winui3::MenuImpl,
+    /// See `elwindui_backend_appkit::builtins::MenuBarImpl::children`'s doc comment — same
+    /// reconciliation pattern.
+    children: RefCell<Vec<Rc<MenuItemImpl>>>,
+}
+
+impl MenuImpl {
     pub fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_menu(), children: RefCell::new(Vec::new()) })
     }
 
-    /// See `elwindui_backend_appkit::builtins::MenuBar::set_children`'s doc comment — same
+    /// See `elwindui_backend_appkit::builtins::MenuBarImpl::set_children`'s doc comment — same
     /// reconciliation pattern.
-    pub fn set_children(&self, children: Vec<Rc<MenuItem>>) {
+    pub fn set_children(&self, children: Vec<Rc<MenuItemImpl>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
             let keep = children.iter().any(|new| Rc::ptr_eq(old, new));
@@ -239,28 +256,27 @@ impl Menu {
     }
 }
 
-pub struct MenuItem {
+pub struct MenuItemImpl {
     inner: winui3::MenuItemImpl,
 }
 
-impl MenuItem {
+impl MenuItemImpl {
     pub fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_menu_item() })
     }
+}
 
-    pub fn set_text(&self, text: &str) {
+impl elwindui_core::ui::MenuItem for MenuItemImpl {
+    fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
-
-    pub fn set_shortcut(&self, shortcut: &str) {
-        self.inner.set_shortcut(shortcut);
-    }
-
-    pub fn set_enabled(&self, enabled: bool) {
+    fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
     }
-
-    pub fn set_on_select(&self, callback: Box<dyn Fn()>) {
+    fn set_shortcut(&self, key_equivalent: &str) {
+        self.inner.set_shortcut(key_equivalent);
+    }
+    fn set_on_select(&self, callback: Box<dyn Fn()>) {
         self.inner.set_on_select(callback);
     }
 }

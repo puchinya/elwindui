@@ -615,13 +615,27 @@ pub enum PaintKind {
     /// backend measures/renders the string itself (e.g. AppKit via `NSAttributedString`/
     /// `CATextLayer`), the same "elwindui-core doesn't know how to actually draw" split `ShapeImpl`
     /// already has with `CAShapeLayer`.
-    Text { content: String, color: Option<String> },
+    Text { content: String, color: Option<String>, alignment: TextAlignment },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ShapeKind {
     RoundedRect { corner_radius: f32 },
     Oval,
+}
+
+/// WinUI3's `TextBlock.TextAlignment` — how `TextBlockImpl`'s own content is aligned *within its
+/// own drawn bounds*, independent of `UIElement::horizontal_alignment` (which positions the
+/// `TextBlock` element itself within whatever slot its parent allotted it). Deliberately a separate
+/// enum from `crate::layout::HorizontalAlignment` rather than reused: WinUI3 itself keeps these as
+/// two distinct types (`Microsoft.UI.Xaml.TextAlignment` vs `HorizontalAlignment`), and
+/// `HorizontalAlignment::Stretch` has no meaningful counterpart for text alignment. Only `Left`/
+/// `Center`/`Right` are modeled — WinUI3's `Justify`/`DetectFromContent` are out of scope for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlignment {
+    Left,
+    Center,
+    Right,
 }
 
 /// `Button`/`TextArea`/`MenuBar`/`TabView` (the "NativeControlImpl" family) — the only `UIElement`
@@ -903,6 +917,7 @@ pub struct TextBlockImpl {
     pub base: UIElementImpl,
     pub text: RefCell<String>,
     pub color: RefCell<Option<String>>,
+    pub alignment: Cell<TextAlignment>,
 }
 
 impl UIElement for TextBlockImpl {
@@ -920,7 +935,7 @@ impl UIElement for TextBlockImpl {
         Vec::new()
     }
     fn paint(&self) -> Option<PaintKind> {
-        Some(PaintKind::Text { content: self.text.borrow().clone(), color: self.color.borrow().clone() })
+        Some(PaintKind::Text { content: self.text.borrow().clone(), color: self.color.borrow().clone(), alignment: self.alignment.get() })
     }
 }
 
@@ -929,6 +944,7 @@ impl UIElement for TextBlockImpl {
 pub trait TextBlock: UIElement {
     fn set_text(&self, text: String);
     fn set_color(&self, color: Option<String>);
+    fn set_text_alignment(&self, alignment: TextAlignment);
 }
 impl TextBlock for TextBlockImpl {
     fn set_text(&self, text: String) {
@@ -937,10 +953,18 @@ impl TextBlock for TextBlockImpl {
     fn set_color(&self, color: Option<String>) {
         *self.color.borrow_mut() = color;
     }
+    fn set_text_alignment(&self, alignment: TextAlignment) {
+        self.alignment.set(alignment);
+    }
 }
 
 pub fn create_text_block() -> TextBlockImpl {
-    TextBlockImpl { base: UIElementImpl::default(), text: RefCell::new(String::new()), color: RefCell::new(None) }
+    TextBlockImpl {
+        base: UIElementImpl::default(),
+        text: RefCell::new(String::new()),
+        color: RefCell::new(None),
+        alignment: Cell::new(TextAlignment::Left),
+    }
 }
 
 /// A composable, multi-part component (WinUI3's `ControlImpl`) — Visually built from any number of
@@ -1518,6 +1542,22 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(matches!(items[0], RenderItem::Paint(..)));
         assert!(matches!(items[1], RenderItem::Native(..)));
+    }
+
+    #[test]
+    fn text_block_defaults_to_left_alignment_and_set_text_alignment_updates_paint() {
+        let text_block = create_text_block();
+        assert_eq!(text_block.alignment.get(), TextAlignment::Left);
+        match text_block.paint() {
+            Some(PaintKind::Text { alignment, .. }) => assert_eq!(alignment, TextAlignment::Left),
+            other => panic!("expected PaintKind::Text, got {other:?}"),
+        }
+
+        text_block.set_text_alignment(TextAlignment::Center);
+        match text_block.paint() {
+            Some(PaintKind::Text { alignment, .. }) => assert_eq!(alignment, TextAlignment::Center),
+            other => panic!("expected PaintKind::Text, got {other:?}"),
+        }
     }
 
     #[test]

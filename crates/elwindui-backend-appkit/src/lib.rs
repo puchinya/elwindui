@@ -27,7 +27,7 @@ use objc2_app_kit::{
 };
 use objc2_core_graphics::{CGColor, CGPath};
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
-use objc2_quartz_core::{CALayer, CAShapeLayer, CATextLayer};
+use objc2_quartz_core::{kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight, CALayer, CAShapeLayer, CATextLayer, CATextLayerAlignmentMode};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -188,6 +188,19 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
         _ => (0.0, 0.0, 0.0, 255.0),
     };
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+}
+
+/// `elwindui_core::ui::TextAlignment` -> `CATextLayer.alignmentMode` — the `kCAAlignment*` values
+/// are `extern "C"` globals (`&'static NSString`), hence the `unsafe` read.
+fn ca_alignment_mode(alignment: elwindui_core::ui::TextAlignment) -> &'static CATextLayerAlignmentMode {
+    use elwindui_core::ui::TextAlignment;
+    unsafe {
+        match alignment {
+            TextAlignment::Left => kCAAlignmentLeft,
+            TextAlignment::Center => kCAAlignmentCenter,
+            TextAlignment::Right => kCAAlignmentRight,
+        }
+    }
 }
 
 /// The single reusable "reflect an `Rc<dyn elwindui_core::ui::UIElement>` into real `NSView`
@@ -390,12 +403,13 @@ impl TreeHostView {
                             let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
                             layer.addSublayer(&shape_layer);
                         }
-                        PaintKind::Text { content, color } => {
+                        PaintKind::Text { content, color, alignment } => {
                             let text_layer = CATextLayer::new();
                             text_layer.setName(Some(&NSString::from_str("elwindui-paint")));
                             text_layer.setFrame(cg_rect);
                             text_layer.setFontSize(14.0);
                             text_layer.setForegroundColor(Some(&parse_color(color.as_deref().unwrap_or("#000000"))));
+                            text_layer.setAlignmentMode(ca_alignment_mode(alignment));
                             unsafe {
                                 text_layer.setString(Some(&NSString::from_str(&content)));
                             }
@@ -438,7 +452,18 @@ impl elwindui_core::ui::NativeControl<AnyView> for TextAreaImpl {}
 /// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are AppKit-specific.
 impl elwindui_core::ui::TextArea for TextAreaImpl {
+    /// `NSTextView.setString:` unconditionally resets the caret/selection to the start, even when
+    /// the text it's given is identical to what's already there. The two-way `#[two_way] text`
+    /// binding (`TextArea` in `builtins.elwind`) re-syncs *every* bound field on *every* model
+    /// change — including the one this exact edit just caused — so without this guard, typing a
+    /// single character would immediately call this with that same character already applied,
+    /// yanking the caret away mid-keystroke. Skipping the no-op case leaves the user's own edit
+    /// (and the caret AppKit already placed for it) untouched; only a *genuine* external change
+    /// (e.g. loading a different document) still goes through `setString:`.
     fn set_text(&self, text: &str) {
+        if self.text_view.string().to_string() == text {
+            return;
+        }
         self.text_view.setString(&NSString::from_str(text));
     }
 

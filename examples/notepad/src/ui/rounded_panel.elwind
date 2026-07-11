@@ -23,7 +23,10 @@ view RoundedPanel {
                 fill: "#3a3a3c"
                 corner_radius: 8.0
             }
-            TextBlock { text: label }
+            TextBlock {
+                text: label
+                text_alignment: elwindui_core::ui::TextAlignment::Center
+                }
         }
     }
 }

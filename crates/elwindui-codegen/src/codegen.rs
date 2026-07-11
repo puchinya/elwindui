@@ -3361,12 +3361,15 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             let text = find_attr(node, "text").unwrap_or_else(|| panic!("`TextBlock` requires attribute `text`"));
             let text = emit_expr(text, ctx, &EmitMode::Construction);
             let color = get_attr_string("color");
+            let text_alignment = get_attr("text_alignment");
             quote! {
                 {
                     use elwindui_core::ui::TextBlock as _;
+                    use elwindui_core::ui::TextAlignment;
                     let __v = elwindui_core::ui::create_text_block();
                     __v.set_text((#text).to_string());
                     __v.set_color(#color);
+                    __v.set_text_alignment((#text_alignment).unwrap_or(TextAlignment::Left));
                     __v
                 }
             }

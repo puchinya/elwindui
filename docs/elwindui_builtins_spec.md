@@ -205,8 +205,14 @@ WinUI3の`UIElement`階層(`UIElement => TextBlock (プリミティブ描画(非
 component TextBlock {
     text: String,
     color: Option<String>,
+    text_alignment: Option<TextAlignment>,
 }
 ```
+
+`text_alignment`(`elwindui_core::ui::TextAlignment` — `Left`/`Center`/`Right`、省略時は`Left`)は
+テキスト自身が自分の描画領域内でどう揃うかを指定する。要素自体を親の割り当て領域内でどう配置するか
+を指定する`horizontal_alignment`(`elwindui_core::layout::HorizontalAlignment`)とは独立した別概念
+——WinUI3でも`TextBlock.TextAlignment`は`HorizontalAlignment`とは別の列挙型になっている。
 
 `elwindui-codegen`が使用箇所ごとに直接組み立てる値は次の通り:
 
@@ -215,17 +221,18 @@ elwindui_core::ui::new_element(elwindui_core::ui::TextBlock {
     base: elwindui_core::ui::UIElementBase { margin: /* ... */, ..Default::default() },
     content: text.to_string(),
     color: /* color属性(#RRGGBB[AA]形式)、省略時はNone */,
+    alignment: /* text_alignment属性、省略時はTextAlignment::Left */,
 })
 ```
 
-`TextBlock::paint()`は`elwindui_core::ui::PaintKind::Text { content, color }`を返すだけで、
+`TextBlock::paint()`は`elwindui_core::ui::PaintKind::Text { content, color, alignment }`を返すだけで、
 実際の文字計測・描画は各バックエンドの責務になる(`elwindui-core`はフォントも描画方法も知らない
 ——F.6の`Rectangle`/`Ellipse`と同じ役割分担):
 
 | バックエンド | 実装方法 |
 |---|---|
-| AppKit | `CATextLayer`(`NSAttributedString`ではなく`CALayer`ベース)を`TreeHostView`が`CAShapeLayer`と同じ要領で配置・生成 |
-| WinUI3 | 実際のXAML`TextBlock`クラスを、ウィジェットとしてではなく`TreeHostPanel`内の描画プリミティブとしてのみ利用(`Canvas.Left`/`Canvas.Top`で手動配置) |
+| AppKit | `CATextLayer`(`NSAttributedString`ではなく`CALayer`ベース)を`TreeHostView`が`CAShapeLayer`と同じ要領で配置・生成。`alignment`は`CATextLayer.alignmentMode`(`kCAAlignmentLeft`/`Center`/`Right`)に反映 |
+| WinUI3 | 実際のXAML`TextBlock`クラスを、ウィジェットとしてではなく`TreeHostPanel`内の描画プリミティブとしてのみ利用(`Canvas.Left`/`Canvas.Top`で手動配置)。`alignment`は`TextBlock.TextAlignment`(`Microsoft.UI.Xaml.TextAlignment`)に反映 |
 
 かつて存在した、ネイティブ実体を持つ`builtin::Text`(`NSTextField`/WinUI3の`TextBlock`コントロールを
 値として保持・`set_text`等のsetterを持つラッパー)は完全に削除された——`Text`という名前自体、

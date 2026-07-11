@@ -24,7 +24,10 @@ view DocumentView {
             TextArea { text: document_text, Grid::row: 0 }
             HorizontalLayout {
                 Grid::row: 1
-                TextBlock { text: doc.file_name }
+                TextBlock {
+                    text: doc.file_name
+                    margin: 4.0
+                    }
                 RoundedPanel { label: t!("notepad-status-chars", count: doc.char_count) }
             }
         }

@@ -253,7 +253,7 @@ impl TreeHostPanel {
                         }
                         let _ = children.Append(&element);
                     }
-                    elwindui_core::ui::PaintKind::Text { content, color } => {
+                    elwindui_core::ui::PaintKind::Text { content, color, alignment } => {
                         // Uses the real XAML `TextBlock` class purely as a paint primitive
                         // (positioned manually via the same `Canvas.Left`/`Canvas.Top`/`Width`/
                         // `Height` convention as every shape above), never wrapped as a builtin
@@ -264,6 +264,7 @@ impl TreeHostPanel {
                         if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(color.as_deref().unwrap_or("#000000"))) {
                             let _ = text_block.SetForeground(&brush);
                         }
+                        let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
                         let fe: FrameworkElement = text_block.into();
                         let _ = fe.SetWidth(rect.width as f64);
                         let _ = fe.SetHeight(rect.height as f64);
@@ -318,6 +319,15 @@ fn parse_color(hex: &str) -> Color {
         _ => (0, 0, 0, 255),
     };
     Color { A: a, R: r, G: g, B: b }
+}
+
+/// `elwindui_core::ui::TextAlignment` -> `Microsoft.UI.Xaml.TextAlignment`.
+fn xaml_text_alignment(alignment: elwindui_core::ui::TextAlignment) -> bindings::Microsoft::UI::Xaml::TextAlignment {
+    match alignment {
+        elwindui_core::ui::TextAlignment::Left => bindings::Microsoft::UI::Xaml::TextAlignment::Left,
+        elwindui_core::ui::TextAlignment::Center => bindings::Microsoft::UI::Xaml::TextAlignment::Center,
+        elwindui_core::ui::TextAlignment::Right => bindings::Microsoft::UI::Xaml::TextAlignment::Right,
+    }
 }
 
 #[derive(Clone)]
@@ -398,7 +408,18 @@ impl elwindui_core::ui::NativeControl<AnyView> for TextAreaImpl {}
 /// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are WinUI3-specific.
 impl elwindui_core::ui::TextArea for TextAreaImpl {
+    /// `TextBox.Text` assigned programmatically resets the caret/selection to the start, even when
+    /// the text given is identical to what's already there — same issue as AppKit's
+    /// `NSTextView.setString:` (see that backend's own `TextAreaImpl::set_text` doc comment for the
+    /// full rationale). The two-way `#[two_way] text` binding re-syncs *every* bound field on
+    /// *every* model change, including the one this exact edit just caused, so without this guard
+    /// typing a single character would immediately call this with that same character already
+    /// applied, yanking the caret away mid-keystroke.
     fn set_text(&self, text: &str) {
+        let current = self.text_box.Text().map(|s| s.to_string_lossy()).unwrap_or_default();
+        if current == text {
+            return;
+        }
         let _ = self.text_box.SetText(&HSTRING::from(text));
     }
 

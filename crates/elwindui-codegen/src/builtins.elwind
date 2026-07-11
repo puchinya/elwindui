@@ -213,6 +213,7 @@ component Button inherits NativeControl {
 component TextBlock inherits UIElement {
     text: String,
     color: Option<String>,
+    text_alignment: Option<TextAlignment>,
 }
 
 #[embedded]

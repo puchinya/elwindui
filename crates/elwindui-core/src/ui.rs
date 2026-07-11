@@ -56,6 +56,21 @@ impl<T: Any> AsAny for T {
     }
 }
 
+/// The backend-agnostic handle to whatever native host (`elwindui-backend-appkit`'s `TreeHostView`,
+/// `elwindui-backend-winui3`'s `TreeHostPanel`) currently owns a given tree — the thing
+/// `UIElement::invalidate`/`invalidate_arrange`/`invalidate_measure` (see that trait) ultimately
+/// call to ask for a fresh `layout_tree` pass. Declared here (not a raw `Rc<dyn Fn()>`) so backends
+/// provide an `impl RelayoutHost for XHost` the same way they already provide `impl
+/// elwindui_core::ui::Button for ButtonImpl`/etc. — this crate's own established "shared trait in
+/// core, impl per backend" convention (see this module's own doc comment on `TextArea`/`Button`/...
+/// just below `NativeControl<H>`). Each backend's own `impl` should wrap a *weak* handle back to its
+/// host (see e.g. `elwindui-backend-appkit`'s `AppKitRelayoutHost`) — a strong one would create a
+/// reference cycle, since the host itself holds the tree that (via `UIElementImpl::invalidate_host`
+/// on that tree's root) holds this `Rc<dyn RelayoutHost>` right back.
+pub trait RelayoutHost {
+    fn request_relayout(&self);
+}
+
 /// The fields every `UIElement` carries (WinUI3's `FrameworkElement` base class, via composition
 /// since Rust has no class inheritance — each concrete type embeds one of these and delegates
 /// `UIElement::base`).
@@ -140,6 +155,14 @@ pub struct UIElementImpl {
     /// can set a newly (post-construction) added child's `parent` to the right value, even though
     /// `UIElementCollection` itself has no other way to reach "the Rc that owns me".
     pub self_handle: Rc<RefCell<Option<Weak<dyn UIElement>>>>,
+    /// Set only on whichever element a backend host currently owns as the root of a hosted tree
+    /// (`elwindui-backend-appkit`'s `TreeHostView::set_tree`/`elwindui-backend-winui3`'s
+    /// `TreeHostPanel::set_tree`) — `None` on every other element, including every one of that
+    /// root's own descendants. `UIElement::invalidate`/`invalidate_arrange`/`invalidate_measure`
+    /// (see that trait) reach this by walking `parent()` up to the root, not by reading this field
+    /// on `self` directly. See `RelayoutHost`'s own doc comment for why this is a trait object
+    /// rather than a raw closure.
+    pub invalidate_host: RefCell<Option<Rc<dyn RelayoutHost>>>,
 }
 
 impl std::fmt::Debug for UIElementImpl {
@@ -162,6 +185,7 @@ impl std::fmt::Debug for UIElementImpl {
             .field("grid_cell", &self.grid_cell.get())
             .field("has_parent", &self.parent.borrow().as_ref().is_some_and(|p| p.upgrade().is_some()))
             .field("visual_children_len", &self.visual_children.len())
+            .field("invalidate_host", &self.invalidate_host.borrow().is_some())
             .finish()
     }
 }
@@ -187,6 +211,7 @@ impl Default for UIElementImpl {
             parent: RefCell::new(None),
             visual_children: VisualCollection::new(),
             self_handle: Rc::new(RefCell::new(None)),
+            invalidate_host: RefCell::new(None),
         }
     }
 }
@@ -231,6 +256,12 @@ impl UIElementImpl {
     }
     pub fn set_max_height(&self, max_height: Option<f32>) {
         self.max_height.set(max_height);
+    }
+    /// Called by whatever backend host (`TreeHostView::set_tree`/`TreeHostPanel::set_tree`) is
+    /// about to own this element as the root of a hosted tree — see `invalidate_host`'s own doc
+    /// comment. `None` un-registers (e.g. a host discarding a tree it no longer owns).
+    pub fn set_invalidate_host(&self, host: Option<Rc<dyn RelayoutHost>>) {
+        *self.invalidate_host.borrow_mut() = host;
     }
     /// Hands out a `UIElementCollection` (WinUI3's `Panel.Children`) sharing this same
     /// `UIElementImpl`'s `visual_children`/`self_handle` — a container (`LayoutImpl`/`ControlImpl`/
@@ -387,6 +418,48 @@ pub trait UIElement: AsAny {
     /// real native handle.
     fn as_native_control(&self) -> Option<&dyn Any> {
         None
+    }
+    /// WinUI3's `UIElement.InvalidateVisual`-equivalent — asks whatever host owns this element's
+    /// tree to redraw. `invalidate`/`invalidate_arrange`/`invalidate_measure` are kept as three
+    /// separate WinUI3-shaped entry points, but this crate's layout engine has no per-element
+    /// measure/arrange cache yet (`layout_tree` always recomputes the whole tree from scratch — see
+    /// its own doc comment), so all three currently resolve to the exact same action: a full
+    /// re-`layout_tree` pass via `request_relayout`. Splitting them for real (e.g. skipping
+    /// `measure_override` when only `arrange` is dirty) is future work once such a cache exists.
+    /// A no-op if this element isn't (yet, or anymore) part of a hosted tree.
+    fn invalidate(&self) {
+        request_relayout(self.base());
+    }
+    /// WinUI3's `UIElement.InvalidateArrange` — see `invalidate`'s own doc comment for why this
+    /// currently triggers the same full relayout as the other two methods here.
+    fn invalidate_arrange(&self) {
+        request_relayout(self.base());
+    }
+    /// WinUI3's `UIElement.InvalidateMeasure` — see `invalidate`'s own doc comment for why this
+    /// currently triggers the same full relayout as the other two methods here.
+    fn invalidate_measure(&self) {
+        request_relayout(self.base());
+    }
+}
+
+/// Shared implementation for `UIElement::invalidate`/`invalidate_arrange`/`invalidate_measure` —
+/// walks from `base`'s own element up to the root of whatever tree it's currently part of
+/// (`UIElement::parent`, repeated until `None`) and, if that root has a `RelayoutHost` registered
+/// (see `UIElementImpl::invalidate_host`), asks it for a fresh layout pass. Takes `&UIElementImpl`
+/// (not `&dyn UIElement`) so the caller — a default trait method, where `Self` isn't known to be
+/// `Sized` — never needs to unsize-coerce `self` itself; `base.self_handle` already stores a
+/// pre-erased `Weak<dyn UIElement>` for exactly this reason. A no-op if `base`'s owner hasn't gone
+/// through `new_element` yet (no `self_handle` to start the walk from) or if the root it finds has
+/// no registered host (e.g. a standalone tree built for a test, never handed to a real backend).
+fn request_relayout(base: &UIElementImpl) {
+    let Some(mut current) = base.self_handle.borrow().as_ref().and_then(|w| w.upgrade()) else {
+        return;
+    };
+    while let Some(parent) = current.parent() {
+        current = parent;
+    }
+    if let Some(host) = current.base().invalidate_host.borrow().as_ref() {
+        host.request_relayout();
     }
 }
 
@@ -1477,6 +1550,43 @@ mod tests {
         assert!(children.remove(&child));
         assert!(root.visual_children().is_empty());
         assert!(child.parent().is_none(), "remove should clear the child's parent");
+    }
+
+    #[test]
+    fn invalidate_family_reaches_a_relayout_host_registered_on_the_root() {
+        struct CountingHost {
+            calls: Rc<RefCell<usize>>,
+        }
+        impl RelayoutHost for CountingHost {
+            fn request_relayout(&self) {
+                *self.calls.borrow_mut() += 1;
+            }
+        }
+
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+
+        let calls = Rc::new(RefCell::new(0));
+        root.base().set_invalidate_host(Some(Rc::new(CountingHost { calls: Rc::clone(&calls) })));
+
+        // Called from the *leaf*, not the root — must walk `parent()` up to find the registered host.
+        leaf.invalidate();
+        leaf.invalidate_arrange();
+        leaf.invalidate_measure();
+        assert_eq!(*calls.borrow(), 3);
+
+        root.base().set_invalidate_host(None);
+        leaf.invalidate();
+        assert_eq!(*calls.borrow(), 3, "un-registering the host should make invalidate a no-op again");
+    }
+
+    #[test]
+    fn invalidate_on_an_unhosted_tree_is_a_no_op() {
+        // No `RelayoutHost` registered anywhere on this tree — must not panic.
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        leaf.invalidate();
+        root.invalidate_arrange();
     }
 
     #[test]

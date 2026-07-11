@@ -46,8 +46,14 @@ use bindings::Microsoft::UI::Xaml::{
 use bindings::Windows::Foundation::{Size, TypedEventHandler};
 use bindings::Windows::UI::Color;
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use windows::core::{Interface, Result, HSTRING};
+
+// `elwindui_core::ui::UIElement` (not `use`d by name — `UIElement` above is XAML's own native type)
+// brought into scope anonymously so `.base()` dot-call syntax resolves on `Rc<dyn
+// elwindui_core::ui::UIElement>`/composed values, matching the `Button as _`/`TextArea as _`-style
+// anonymous imports `elwindui-backend-appkit` already uses for this exact purpose.
+use elwindui_core::ui::UIElement as _;
 
 /// The capability a type needs to be usable as an `AnyView` — implemented once per raw XAML element
 /// type (`TextBox`/`XamlButton`/`XamlTabView`) instead of matched on centrally, so a future native
@@ -142,6 +148,25 @@ pub struct TreeHostPanel {
     tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>,
 }
 
+/// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
+/// panel's own tree storage (not a full owned `TreeHostPanel` clone) since a strong one would
+/// create a reference cycle: this panel's own `tree` strongly holds the hosted tree's root, and
+/// that root's own `UIElementImpl::invalidate_host` would then strongly hold this, right back to
+/// the panel. `canvas` is captured strongly, matching `TreeHostPanel::new`'s own `SizeChanged`
+/// handler below, which uses the exact same capture split (strong `canvas`, weak `tree`).
+struct WinUI3RelayoutHost {
+    canvas: Canvas,
+    tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>,
+}
+
+impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
+    fn request_relayout(&self) {
+        if let Some(tree) = self.tree.upgrade() {
+            TreeHostPanel::relayout_static(&self.canvas, &tree);
+        }
+    }
+}
+
 impl TreeHostPanel {
     pub fn new() -> Self {
         let canvas = Canvas::new().expect("Canvas::new");
@@ -172,6 +197,8 @@ impl TreeHostPanel {
         if let Ok(children) = self.canvas.Children() {
             let _ = children.Clear();
         }
+        let host = WinUI3RelayoutHost { canvas: self.canvas.clone(), tree: Rc::downgrade(&self.tree) };
+        tree.base().set_invalidate_host(Some(Rc::new(host)));
         *self.tree.borrow_mut() = Some(tree);
         Self::relayout_static(&self.canvas, &self.tree);
     }

@@ -16,7 +16,7 @@
 /// their names at this crate's root.
 pub mod builtins;
 
-use elwindui_core::ui::{layout_tree, AsAny, Button as _, PaintKind, RenderItem, ShapeKind, UIElement};
+use elwindui_core::ui::{layout_tree, AsAny, Button as _, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElement};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -199,6 +199,29 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
 /// content area both are one of these.
 pub struct TreeHostIvars {
     tree: RefCell<Option<Rc<dyn UIElement>>>,
+    /// Set once, right after construction (see `TreeHostView::new`) — lets `set_tree` hand out an
+    /// `AppKitRelayoutHost` wrapping a weak reference back to this same view, without needing a
+    /// `Retained<Self>` in hand at that point. See `AppKitRelayoutHost`'s own doc comment for why
+    /// weak, not strong (retain cycle).
+    weak_self: RefCell<objc2::rc::Weak<TreeHostView>>,
+}
+
+/// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
+/// (not the view itself) since a strong one would create a reference cycle: this view's own
+/// `ivars().tree` strongly holds the hosted tree's root, and that root's own `UIElementImpl::
+/// invalidate_host` would then strongly hold this, right back to the view. `request_relayout`
+/// silently does nothing if the view has since been deallocated (`load()` returns `None`).
+struct AppKitRelayoutHost(objc2::rc::Weak<TreeHostView>);
+
+impl RelayoutHost for AppKitRelayoutHost {
+    fn request_relayout(&self) {
+        if let Some(view) = self.0.load() {
+            // Schedules AppKit's normal deferred layout pass (this view's own `layout()` override,
+            // above, runs at the next display cycle) rather than calling `relayout()` synchronously
+            // — the same standard AppKit idiom already driving window-resize-triggered relayout.
+            view.setNeedsLayout(true);
+        }
+    }
 }
 
 define_class!(
@@ -254,9 +277,11 @@ define_class!(
 impl TreeHostView {
     fn new() -> Retained<Self> {
         let m = mtm();
-        let ivars = TreeHostIvars { tree: RefCell::new(None) };
+        let ivars = TreeHostIvars { tree: RefCell::new(None), weak_self: RefCell::new(objc2::rc::Weak::default()) };
         let this = Self::alloc(m).set_ivars(ivars);
-        unsafe { msg_send![super(this), initWithFrame: NSRect::default()] }
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
+        *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
+        this
     }
 
     /// Replaces this host's entire content, discarding whatever native subviews were there before
@@ -268,6 +293,8 @@ impl TreeHostView {
         for old in self.subviews().iter() {
             old.removeFromSuperview();
         }
+        let weak_self = self.ivars().weak_self.borrow().clone();
+        tree.base().set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self))));
         *self.ivars().tree.borrow_mut() = Some(tree);
         self.invalidateIntrinsicContentSize();
         self.relayout();

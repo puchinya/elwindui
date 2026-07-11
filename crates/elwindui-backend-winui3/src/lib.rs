@@ -33,6 +33,7 @@ mod bindings {
 }
 
 use bindings::Microsoft::UI::Dispatching::{DispatcherQueue, DispatcherQueueHandler};
+use bindings::Microsoft::UI::Windowing::AppWindow;
 use bindings::Microsoft::UI::Xaml::Controls::{
     Button as XamlButton, Canvas, MenuBar as XamlMenuBar, MenuFlyoutItem, MenuFlyoutItemBase, TabView as XamlTabView,
     TabViewCloseButtonOverlayMode, TabViewItem, TabViewTabCloseRequestedEventArgs, TextBlock, TextBox,
@@ -44,6 +45,7 @@ use bindings::Microsoft::UI::Xaml::{
     FrameworkElement, RoutedEventHandler, SelectionChangedEventArgs, TextChangedEventArgs, UIElement, Window as XamlWindow,
 };
 use bindings::Windows::Foundation::{Size, TypedEventHandler};
+use bindings::Windows::Graphics::{PointInt32, SizeInt32};
 use bindings::Windows::UI::Color;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -377,6 +379,64 @@ impl Window {
     /// the platform message loop (see that module's doc comment for why the two are separate).
     pub fn show(&self) {
         let _ = self.xaml.Activate();
+    }
+
+    /// `Window.AppWindow` (Windows App SDK 1.3+) already handles the `WinRT.Interop.WindowNative`/
+    /// `Win32Interop.GetWindowIdFromWindow` dance internally, so no manual interop is needed here.
+    fn app_window(&self) -> Option<AppWindow> {
+        self.xaml.AppWindow().ok()
+    }
+
+    /// WinUI3's `AppWindow.Position.X`/`.Y` and `AppWindow.Size.Width`/`.Height` are already
+    /// top-left-origin, Y increasing downward — unlike `elwindui-backend-appkit`'s `Window`, no
+    /// coordinate conversion is needed here. `None` (no `AppWindow` yet, e.g. before the window has
+    /// ever been shown) reads back as `0.0`.
+    pub fn left(&self) -> f32 {
+        self.app_window().and_then(|w| w.Position().ok()).map(|p| p.X as f32).unwrap_or(0.0)
+    }
+
+    pub fn set_left(&self, left: f32) {
+        if let Some(app_window) = self.app_window() {
+            if let Ok(position) = app_window.Position() {
+                let _ = app_window.Move(PointInt32 { X: left as i32, Y: position.Y });
+            }
+        }
+    }
+
+    pub fn top(&self) -> f32 {
+        self.app_window().and_then(|w| w.Position().ok()).map(|p| p.Y as f32).unwrap_or(0.0)
+    }
+
+    pub fn set_top(&self, top: f32) {
+        if let Some(app_window) = self.app_window() {
+            if let Ok(position) = app_window.Position() {
+                let _ = app_window.Move(PointInt32 { X: position.X, Y: top as i32 });
+            }
+        }
+    }
+
+    pub fn width(&self) -> f32 {
+        self.app_window().and_then(|w| w.Size().ok()).map(|s| s.Width as f32).unwrap_or(0.0)
+    }
+
+    pub fn set_width(&self, width: f32) {
+        if let Some(app_window) = self.app_window() {
+            if let Ok(size) = app_window.Size() {
+                let _ = app_window.Resize(SizeInt32 { Width: width as i32, Height: size.Height });
+            }
+        }
+    }
+
+    pub fn height(&self) -> f32 {
+        self.app_window().and_then(|w| w.Size().ok()).map(|s| s.Height as f32).unwrap_or(0.0)
+    }
+
+    pub fn set_height(&self, height: f32) {
+        if let Some(app_window) = self.app_window() {
+            if let Ok(size) = app_window.Size() {
+                let _ = app_window.Resize(SizeInt32 { Width: size.Width, Height: height as i32 });
+            }
+        }
     }
 }
 

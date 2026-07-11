@@ -49,6 +49,17 @@ pub enum VerticalAlignment {
     Stretch,
 }
 
+/// WinUI3's `Visibility` — only `Visible` (the default) and `Collapsed` exist (unlike WPF, which
+/// also has a `Hidden` value). `Collapsed` is handled by `elwindui_core::ui`'s `measure`/
+/// `measure_and_align`/`arrange`/`hit_test_at`: a `Collapsed` element takes no space in its
+/// parent's layout and is skipped entirely during rendering and hit-testing, along with its whole
+/// subtree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Visible,
+    Collapsed,
+}
+
 /// WinUI3's `FrameworkElement.MeasureCore`-style constraint application: clamps `size` to
 /// `min`/`max` on each axis independently (an unset bound imposes no clamp on that side —
 /// `elwindui_core::ui::UIElementImpl`'s `min_width`/`max_width`/etc. are `Option<f32>`, WinUI3's

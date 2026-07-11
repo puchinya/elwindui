@@ -59,6 +59,18 @@ component Window {
     menu_bar: Option<MenuBar>,
 
     content: std::rc::Rc<dyn UIElement>,
+
+    // WinUI3-style position/size — top-left-origin, Y increasing downward. Each backend's own
+    // `WindowImpl` also exposes these as plain getters (`left()`/`top()`/`width()`/`height()`,
+    // querying the live native window state), not just these construction-time setters — see
+    // docs/elwindui_builtins_spec.md 付録F.1.
+    left: Option<f32>,
+
+    top: Option<f32>,
+
+    width: Option<f32>,
+
+    height: Option<f32>,
 }
 
 #[embedded]

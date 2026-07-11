@@ -50,6 +50,10 @@ fn generate_bindings() {
         "--filter",
         "Microsoft.UI.Xaml",
         "Microsoft.UI.Dispatching",
+        // `AppWindow` (`Window.left`/`top`/`width`/`height` — see `elwindui_backend_winui3::Window`)
+        // and its `PointInt32`/`SizeInt32` argument types.
+        "Microsoft.UI.Windowing",
+        "Windows.Graphics",
         "Windows.Storage.Pickers",
         "Windows.Storage",
     ]);

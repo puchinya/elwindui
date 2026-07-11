@@ -50,6 +50,38 @@ impl WindowImpl {
     pub fn show(&self) {
         self.inner.show();
     }
+
+    pub fn left(&self) -> f32 {
+        self.inner.left()
+    }
+
+    pub fn set_left(&self, left: f32) {
+        self.inner.set_left(left);
+    }
+
+    pub fn top(&self) -> f32 {
+        self.inner.top()
+    }
+
+    pub fn set_top(&self, top: f32) {
+        self.inner.set_top(top);
+    }
+
+    pub fn width(&self) -> f32 {
+        self.inner.width()
+    }
+
+    pub fn set_width(&self, width: f32) {
+        self.inner.set_width(width);
+    }
+
+    pub fn height(&self) -> f32 {
+        self.inner.height()
+    }
+
+    pub fn set_height(&self, height: f32) {
+        self.inner.set_height(height);
+    }
 }
 
 impl elwindui_core::ui::Window for WindowImpl {}

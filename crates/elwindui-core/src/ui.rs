@@ -34,7 +34,7 @@ use crate::input::RoutedEventArgs;
 use crate::layout::{
     align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin, shrink_by_margin,
     shrink_rect_by_margin, stack_arrange, stack_natural_size, GridCell, GridLength, HorizontalAlignment, LayoutNode,
-    Orientation, Rect, Size, VerticalAlignment,
+    Orientation, Rect, Size, VerticalAlignment, Visibility,
 };
 use crate::painter::Point;
 use std::any::Any;
@@ -94,6 +94,9 @@ pub struct UIElementImpl {
     pub margin: Cell<f32>,
     pub horizontal_alignment: Cell<HorizontalAlignment>,
     pub vertical_alignment: Cell<VerticalAlignment>,
+    /// WinUI3's `UIElement.Visibility` — `Visible` (default) or `Collapsed`. See `Visibility`'s own
+    /// doc comment for how `Collapsed` is handled by the layout/render/hit-test traversals.
+    pub visibility: Cell<Visibility>,
     /// WinUI3's `FrameworkElement.Width`/`Height`/`MinWidth`/`MinHeight`/`MaxWidth`/`MaxHeight` —
     /// `None` is WinUI3's `NaN` sentinel ("unset", i.e. auto-sized). Applied generically by this
     /// module's `measure`/`measure_and_align` (`crate::layout::apply_size_constraints`), the same
@@ -171,6 +174,7 @@ impl std::fmt::Debug for UIElementImpl {
             .field("margin", &self.margin.get())
             .field("horizontal_alignment", &self.horizontal_alignment.get())
             .field("vertical_alignment", &self.vertical_alignment.get())
+            .field("visibility", &self.visibility.get())
             .field("width", &self.width.get())
             .field("height", &self.height.get())
             .field("min_width", &self.min_width.get())
@@ -196,6 +200,7 @@ impl Default for UIElementImpl {
             margin: Cell::new(0.0),
             horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
             vertical_alignment: Cell::new(VerticalAlignment::Stretch),
+            visibility: Cell::new(Visibility::Visible),
             width: Cell::new(None),
             height: Cell::new(None),
             min_width: Cell::new(None),
@@ -232,6 +237,9 @@ impl UIElementImpl {
     }
     pub fn set_vertical_alignment(&self, alignment: VerticalAlignment) {
         self.vertical_alignment.set(alignment);
+    }
+    pub fn set_visibility(&self, visibility: Visibility) {
+        self.visibility.set(visibility);
     }
     pub fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
         *self.data_context.borrow_mut() = data_context;
@@ -304,6 +312,10 @@ pub trait UIElement: AsAny {
     fn vertical_alignment(&self) -> VerticalAlignment {
         self.base().vertical_alignment.get()
     }
+    /// WinUI3's `UIElement.Visibility` — see `Visibility`'s own doc comment.
+    fn visibility(&self) -> Visibility {
+        self.base().visibility.get()
+    }
     /// WinUI3's `FrameworkElement.Width`/`Height`/`MinWidth`/`MinHeight`/`MaxWidth`/`MaxHeight` —
     /// see `UIElementImpl`'s own doc comment for these six fields.
     fn width(&self) -> Option<f32> {
@@ -347,6 +359,9 @@ pub trait UIElement: AsAny {
     }
     fn set_vertical_alignment(&self, alignment: VerticalAlignment) {
         self.base().set_vertical_alignment(alignment);
+    }
+    fn set_visibility(&self, visibility: Visibility) {
+        self.base().set_visibility(visibility);
     }
     fn set_width(&self, width: Option<f32>) {
         self.base().set_width(width);
@@ -1119,6 +1134,14 @@ fn constrain(elem: &dyn UIElement, size: Size) -> Size {
 }
 
 fn measure(elem: &dyn UIElement, available: Size) -> Size {
+    // WinUI3's `Collapsed`: `DesiredSize` is unconditionally `(0, 0)`, ignoring margin/children/
+    // explicit `Width`/`Height` entirely — see `Visibility`'s own doc comment. Known limitation:
+    // `stack_arrange` (`elwindui_core::layout`) still reserves a full `spacing` gap on either side
+    // of a zero-sized `Collapsed` child, unlike WinUI3's `StackPanel.Spacing`, which only counts
+    // visible children — out of scope for now.
+    if elem.visibility() == Visibility::Collapsed {
+        return Size { width: 0.0, height: 0.0 };
+    }
     let inner_available = constrain(elem, shrink_by_margin(available, elem.margin()));
     let child_sizes: Vec<Size> = elem.visual_children().iter().map(|c| measure(c.as_ref(), inner_available)).collect();
     let desired = constrain(elem, elem.measure_override(inner_available, &child_sizes));
@@ -1129,6 +1152,11 @@ fn measure(elem: &dyn UIElement, available: Size) -> Size {
 /// `arrange` below — factored out so `hit_test_at` (coordinate-only, no native handle) and
 /// `arrange` (handle-collecting) can share the measure/align math without duplicating it.
 fn measure_and_align(elem: &dyn UIElement, allotted: Rect) -> Rect {
+    // See `measure`'s own `Collapsed` comment — same zero-size treatment, kept at `allotted`'s
+    // own origin since there's no `desired`/alignment computation to run at all.
+    if elem.visibility() == Visibility::Collapsed {
+        return Rect { x: allotted.x, y: allotted.y, width: 0.0, height: 0.0 };
+    }
     let slot = shrink_rect_by_margin(allotted, elem.margin());
     let slot_size = constrain(elem, Size { width: slot.width, height: slot.height });
     let child_sizes_for_measure: Vec<Size> = elem.visual_children().iter().map(|c| measure(c.as_ref(), slot_size)).collect();
@@ -1137,6 +1165,15 @@ fn measure_and_align(elem: &dyn UIElement, allotted: Rect) -> Rect {
 }
 
 fn arrange<H: Clone + 'static>(elem: &Rc<dyn UIElement>, allotted: Rect, out: &mut Vec<RenderItem<H>>) {
+    // A `Collapsed` element neither renders itself nor recurses into its children — its whole
+    // subtree is skipped, matching WinUI3 (a `Collapsed` parent hides its descendants too). See
+    // `Visibility`'s own doc comment. `actual_offset` was already set by the parent's own loop
+    // (below) before this call, so only the size needs zeroing here.
+    if elem.visibility() == Visibility::Collapsed {
+        elem.base().actual_width.set(0.0);
+        elem.base().actual_height.set(0.0);
+        return;
+    }
     let final_rect = measure_and_align(elem.as_ref(), allotted);
     let final_size = Size { width: final_rect.width, height: final_rect.height };
     // WinUI3's `ActualWidth`/`ActualHeight` — the result of this element's own just-completed
@@ -1210,6 +1247,11 @@ fn rect_contains(rect: Rect, at: Point) -> bool {
 /// comment (modeled on WinUI3's routed events) — bubbling from the returned element is then just
 /// `dispatch_routed` following `parent()`, no path/ancestor computation needed here.
 fn hit_test_at(elem: &Rc<dyn UIElement>, allotted: Rect, at: Point) -> Option<Rc<dyn UIElement>> {
+    // A `Collapsed` element (and its whole subtree) is excluded from hit-testing, matching
+    // `arrange`'s own treatment — see `Visibility`'s own doc comment.
+    if elem.visibility() == Visibility::Collapsed {
+        return None;
+    }
     let final_rect = measure_and_align(elem.as_ref(), allotted);
     if !rect_contains(final_rect, at) {
         return None;
@@ -1653,5 +1695,51 @@ mod tests {
         assert_eq!(*leaf_calls.borrow(), 1);
         assert_eq!(*root_calls.borrow(), 1);
         assert!(args.handled.get());
+    }
+
+    #[test]
+    fn collapsed_leaf_has_zero_size_and_produces_no_render_item() {
+        let tree = native("a", size(10.0, 20.0));
+        tree.base().set_visibility(Visibility::Collapsed);
+        let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
+        assert!(natives.is_empty());
+        assert!(paints.is_empty());
+        assert_eq!(tree.actual_width(), 0.0);
+        assert_eq!(tree.actual_height(), 0.0);
+    }
+
+    #[test]
+    fn collapsed_child_is_excluded_from_stack_layout() {
+        let collapsed = native("collapsed", size(50.0, 50.0));
+        collapsed.base().set_visibility(Visibility::Collapsed);
+        let visible = native("visible", size(30.0, 10.0));
+        visible.base().set_horizontal_alignment(HorizontalAlignment::Left);
+        visible.base().set_vertical_alignment(VerticalAlignment::Top);
+        let tree = stack(Orientation::Vertical, 5.0, vec![Rc::clone(&collapsed), Rc::clone(&visible)]);
+
+        let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
+        // Known limitation (see `Visibility`'s own doc comment / the layout engine's own comment
+        // above `measure`): `stack_arrange` still reserves the 5.0 `spacing` gap around the
+        // zero-sized collapsed child, so `visible` starts at y = 5.0, not y = 0.0.
+        assert_eq!(natives, vec![(FakeHandle("visible", size(30.0, 10.0)), Rect { x: 0.0, y: 5.0, width: 30.0, height: 10.0 })]);
+    }
+
+    #[test]
+    fn collapsed_containers_subtree_is_entirely_excluded() {
+        let leaf = native("child", size(10.0, 10.0));
+        let container = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        container.base().set_visibility(Visibility::Collapsed);
+
+        let (natives, paints) = split(layout_tree::<FakeHandle>(&container, size(100.0, 100.0)));
+        assert!(natives.is_empty());
+        assert!(paints.is_empty());
+        assert_eq!(leaf.visibility(), Visibility::Visible, "the child itself was never made Collapsed");
+    }
+
+    #[test]
+    fn collapsed_element_is_excluded_from_hit_test() {
+        let tree = native("a", size(10.0, 20.0));
+        tree.base().set_visibility(Visibility::Collapsed);
+        assert!(hit_test(&tree, size(100.0, 100.0), Point { x: 5.0, y: 5.0 }).is_none());
     }
 }

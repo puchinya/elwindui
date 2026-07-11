@@ -1381,15 +1381,23 @@ pub trait UIElement: AsAny {
     fn as_native_control(&self) -> Option<&dyn Any> { None }
 }
 
-// margin/alignment/data_context/grid_cellは全て内部可変(`Cell`/`RefCell`) — `create_xxx(...)`は
-// 常に`UIElementImpl::default()`を組み立てるだけで、使用箇所ごとの値は構築後に
+// margin/alignment/visibility/data_context/grid_cellは全て内部可変(`Cell`/`RefCell`) —
+// `create_xxx(...)`は常に`UIElementImpl::default()`を組み立てるだけで、使用箇所ごとの値は構築後に
 // `set_margin(..)`等のセッターで反映する(前掲の規約説明参照)。
 pub struct UIElementImpl {
     pub margin: Cell<f32>, // 一律のMargin。Thickness(上下左右個別)は未対応
     pub horizontal_alignment: Cell<HorizontalAlignment>, // Left | Center | Right | Stretch(既定)
     pub vertical_alignment: Cell<VerticalAlignment>,     // Top | Center | Bottom | Stretch(既定)
+    pub visibility: Cell<Visibility>,                    // Visible(既定) | Collapsed
 }
 ```
+
+`Visibility`はWinUI3の`UIElement.Visibility`と同じく`Visible`(既定)/`Collapsed`の2値のみ(WPFの
+`Hidden`相当は無い)。`Collapsed`な要素はレイアウト上スペースを一切取らず(`measure`が常に
+`(0, 0)`を返す——自身の`Width`/`Height`指定も無視する)、`arrange`/`hit_test`の対象からもその
+子孫ごと除外される(描画されず、ヒットテストにも当たらない)。`margin`/`horizontal_alignment`と
+同じ共通属性だが、`.elwind`側の`margin`のような即値配線(`emit_common_ui_element_setters`)はまだ
+無く、`set_visibility(..)`をRustから直接呼ぶ形にとどまる。
 
 `UIElement`はこの階層の既定(ルート)クラスなので`UIElementImpl`は`base`フィールドを持たない。
 `UIElement`トレイト自体はハンドル型`H`について非ジェネリックである。実ネイティブハンドルを持つのは

@@ -22,7 +22,7 @@ use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSButton, NSMenu, NSMenuItem, NSScrollView, NSStackView, NSTextDelegate, NSTextView,
+    NSButton, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView, NSTextDelegate, NSTextView,
     NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::{CGColor, CGPath};
@@ -160,6 +160,68 @@ impl Window {
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         self.ns.makeKeyAndOrderFront(None);
         app.activate();
+    }
+
+    /// The height (in points) of the screen `top`/`set_top`/`set_height` convert against — the
+    /// window's own current screen if it has one (it may not yet, before the first `show`), else
+    /// the main screen, else `0.0` (no screen at all, e.g. headless test environment).
+    fn screen_height(&self) -> f64 {
+        self.ns
+            .screen()
+            .or_else(|| NSScreen::mainScreen(mtm()))
+            .map(|screen| screen.frame().size.height)
+            .unwrap_or(0.0)
+    }
+
+    /// WinUI3's `AppWindow.Position.X` — AppKit's own `NSWindow.frame.origin.x` needs no
+    /// conversion (both are left-origin).
+    pub fn left(&self) -> f32 {
+        self.ns.frame().origin.x as f32
+    }
+
+    pub fn set_left(&self, left: f32) {
+        let mut frame = self.ns.frame();
+        frame.origin.x = left as f64;
+        self.ns.setFrame_display(frame, true);
+    }
+
+    /// WinUI3's `AppWindow.Position.Y` — top-left-origin, Y increasing downward, unlike AppKit's
+    /// own bottom-left-origin `NSWindow.frame.origin.y` (Y increasing upward), so this converts
+    /// via the window's own screen height (see `screen_height`).
+    pub fn top(&self) -> f32 {
+        let frame = self.ns.frame();
+        (self.screen_height() - (frame.origin.y + frame.size.height)) as f32
+    }
+
+    pub fn set_top(&self, top: f32) {
+        let screen_height = self.screen_height();
+        let mut frame = self.ns.frame();
+        frame.origin.y = screen_height - top as f64 - frame.size.height;
+        self.ns.setFrame_display(frame, true);
+    }
+
+    pub fn width(&self) -> f32 {
+        self.ns.frame().size.width as f32
+    }
+
+    pub fn set_width(&self, width: f32) {
+        let mut frame = self.ns.frame();
+        frame.size.width = width as f64;
+        self.ns.setFrame_display(frame, true);
+    }
+
+    pub fn height(&self) -> f32 {
+        self.ns.frame().size.height as f32
+    }
+
+    /// Keeps `top` (not AppKit's own bottom-left `origin.y`) fixed as the height changes — matching
+    /// WinUI3's `AppWindow.Resize`, which grows/shrinks a window downward from its current `Top`.
+    pub fn set_height(&self, height: f32) {
+        let mut frame = self.ns.frame();
+        let old_height = frame.size.height;
+        frame.size.height = height as f64;
+        frame.origin.y -= height as f64 - old_height;
+        self.ns.setFrame_display(frame, true);
     }
 }
 

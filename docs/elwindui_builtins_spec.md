@@ -143,6 +143,20 @@ view Window {
 }
 ```
 
+上記は`native!`分岐を使う説明用のサンプルで、実装(`crates/elwindui-codegen/src/builtins.elwind`の
+`#[native]`宣言、各バックエンドクレートの手書き`WindowImpl`)とは既に構文が異なる。実際の`Window`は
+`title`/`menu_bar`/`content`に加え、WinUI3の`AppWindow.Position`/`Size`と同じ意味を持つ
+`left`/`top`/`width`/`height`(いずれも`Option<f32>`、省略時はOS/バックエンドの既定位置・既定
+サイズのまま)も持つ。他の`#[native]`フィールドと同様、値が指定された場合のみ構築後に
+`set_left`/`set_top`/`set_width`/`set_height`が呼ばれる。加えて、各バックエンドの`WindowImpl`は
+これらの値を**取得**する`left()`/`top()`/`width()`/`height()`も素のRustアクセサとして公開する
+(`.elwind`の宣言的propsを経由しない、`TabView`の`selected_item()`/`selected_container()`と同じ
+パターン)——ユーザーがウィンドウを動かした/リサイズした後の実際の位置・サイズを都度OSへ問い合わせる。
+AppKitは`NSWindow.frame`が画面左下原点・Y上向きなため、`top`/`height`の読み書きでは
+`NSScreen`の高さを使って「画面上端からの距離、Y下向き」というWinUI3の`AppWindow.Position`の
+意味に変換する(`left`/`width`はそのままAppKitの座標系と一致するため変換不要)。WinUI3自身は
+`AppWindow.Position`/`Size`が最初からトップレフト原点・Y下向きなので変換は不要。
+
 ## F.2 `builtin::VerticalLayout` / `builtin::HorizontalLayout`
 
 `VerticalLayout`/`HorizontalLayout`(かつての`Column`/`Row`は機能が完全に重複するため廃止された)は、

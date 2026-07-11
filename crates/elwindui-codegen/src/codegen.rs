@@ -256,9 +256,23 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             _ => None,
                         })
                         .collect();
+                    // Kind-agnostic (not `f.kind == FieldKind::Param`): now that builtins.elwind's
+                    // own fields are plain (unattributed) `prop`s rather than `#[param]` (their
+                    // backing Rust types are all zero-arg-constructed with post-construction
+                    // `set_<field>` setters regardless — docs/elwindui_spec.md 付録H.2.1a — so
+                    // `#[param]`'s "fixed at instantiation" no longer reflects reality there), this
+                    // must select construction-time fields the same way `generate_view`'s own
+                    // `param_names` already does (`f.initializer.is_none()`, kind-independent) for
+                    // caller/callee agreement (`base_param_count`, `build_component_args`/
+                    // `build_component_setters`/`build_component_optional_setters`, validate.rs's
+                    // `check_element_value`). `on_*`-named fields are excluded explicitly — they're
+                    // event callbacks routed entirely through `emit_wiring`/`emit_resync` (which
+                    // already key off this exact same `on_` name prefix, not `FieldKind`), never
+                    // construction-time values, and never had a matching `set_on_<x>` on
+                    // hand-written natives (only `register_routed_handler` for `#[routed]` ones).
                     let param_fields = effective_fields
                         .iter()
-                        .filter(|f| f.kind == FieldKind::Param && f.initializer.is_none())
+                        .filter(|f| f.initializer.is_none() && !f.name.starts_with("on_"))
                         .map(|f| (f.name.clone(), f.ty.clone()))
                         .collect();
                     let two_way_fields = effective_fields
@@ -322,10 +336,12 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             _ => None,
                         })
                         .collect();
+                    // Kind-agnostic — see the matching `Item::Component` arm's `param_fields`
+                    // above for why.
                     let param_fields = v
                         .fields
                         .iter()
-                        .filter(|f| f.kind == FieldKind::Param && f.initializer.is_none())
+                        .filter(|f| f.initializer.is_none() && !f.name.starts_with("on_"))
                         .map(|f| (f.name.clone(), f.ty.clone()))
                         .collect();
                     let two_way_fields = v

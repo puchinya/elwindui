@@ -101,7 +101,6 @@ Card { title, value }   // title: title, value: value の省略形
 
 ```rust
 component ContentControl inherits Control {
-    #[param]
     content: std::rc::Rc<dyn UIElement>,
     // padding は Control から自動的に継承される — 再宣言不要、self.padding() がそのまま使える
 }

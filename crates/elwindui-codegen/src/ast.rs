@@ -164,9 +164,8 @@ pub enum FieldKind {
     /// Unlike every other kind, a field of this kind is *not* instance data of the component that
     /// declares it (`Grid` doesn't itself have a `row`/`column`) — it's a schema declaration only,
     /// excluded from the declaring component's own generated struct/constructor (`codegen.rs`'s
-    /// `build_symbol_table` already filters `param_fields`/etc. by `FieldKind::Param`, so this kind
-    /// is excluded there for free). Requires an initializer (a default value) — see
-    /// `validate::validate`.
+    /// `build_symbol_table` filters `param_fields`/etc. by `f.initializer.is_none()`, and this kind
+    /// requires an initializer — see `validate::validate` — so it's excluded there for free).
     Attached,
 }
 

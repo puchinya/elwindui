@@ -17,6 +17,8 @@
 - `.elwind`保存イベントの検知・増分パースの起点(LSP側) — `docs/elwindui_tool_languageserver_design.md`
 - プレビューレベル③(実行中アプリへの反映)におけるユーザー体験・WebView連携 — `docs/elwindui_tool_preview_design.md`(本書のホットリロード機構を裏側で利用する)
 
+**実装状況の注**: 現時点の`elwindui-hotreload`クレート(`crates/elwindui-hotreload/src/lib.rs`)は32行のみで、§3「更新粒度の判定ロジック」に相当する`ReloadAction` enum(`Remount`/`Patch`)と`decide_reload_action(any_param_field_changed: bool) -> ReloadAction`という純粋関数、およびその単体テストのみを実装している。dylib差し替えの仕組み(§2の処理フロー全体、§4の`hot-lib-reloader`統合)は未実装であり、本書の残りの内容はすべてフォワードルッキングな設計である。
+
 ## 2. 全体の処理フロー
 
 付録B.5の全体アーキテクチャにおいて、本機構は最終段に位置する。

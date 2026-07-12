@@ -12,9 +12,11 @@
 
 - `.elwind`ソースの構文解析・共通AST構築
 - 言語仕様(1〜15章・付録A/C/D/E/F等)に定義された静的検証(14章の検証ルール一覧)の実行
-- `#![backend(...)]` 指定・ビルドターゲットに基づく `target::backend()` の定数畳み込みと、非該当バックエンド分岐の静的除去
-- バックエンド別(egui/iced、WinUI 3/AppKit/GTK4)Rustソースの生成
+- `#![backend(...)]` 指定・ビルドターゲットに基づく `target::backend()` の定数畳み込みと、非該当バックエンド分岐の静的除去(設計のみ、**未実装** — 下記実装状況の注を参照)
+- バックエンド(WinUI 3/AppKit/GTK4)向けRustソースの生成
 - 2つの起動方式(build.rs方式 / proc-macro方式)の提供
+
+**実装状況の注**: 現時点の`elwindui-codegen`(`crates/elwindui-codegen/src/`)には`enum Backend`・`target::backend()`・`#![backend(...)]`属性のいずれも実装されていない。生成されるRustソースはバックエンド非依存(同一のソースがどのバックエンドクレートにもリンクできる)であり、実際にどのバックエンドを使うかは`elwindui`ファサードクレートのCargoフィーチャ(`backend-appkit`/`backend-winui3`/`backend-gtk4`)がどの`elwindui-backend-*`クレートをリンクするかだけで決まる(各バックエンドクレートが同名のビルトイン型を実装するため、コード生成器側でバックエンドごとに分岐する必要がない)。付録Dが定義する定数畳み込み・分岐除去の仕組みは将来のフォワードルッキング設計であり、以下の記述はその設計を示すものである。
 
 ### 1.2 非責務(他ツールが担当)
 
@@ -49,18 +51,18 @@
    │ ② 静的検証(言語仕様14章のルール一覧)
    ▼
 検証済みAST
-   │ ③ target::backend() の定数畳み込み・非該当分岐の除去
+   │ ③ (設計上)target::backend() の定数畳み込み・非該当分岐の除去 ※未実装、下記参照
    ▼
-バックエンド確定AST
-   │ ④ バックエンド別コード生成
+バックエンド非依存AST
+   │ ④ Rustコード生成(バックエンド非依存)
    ▼
-Rustソース(egui / iced / WinUI3 / AppKit / GTK4 いずれか)
+Rustソース(WinUI3/AppKit/GTK4のいずれのバックエンドクレートにもリンク可能)
 ```
 
 - **①構文解析**: Rust構文に似た `.elwind` の字句・構文解析を行い、共通ASTを構築する。`use`宣言(12章)による他コンポーネントのインポートもこの段階で解決し、循環参照・未解決参照を検出する。
 - **②静的検証**: 言語仕様14章に列挙された検証ルール(`#[param]`初期化式への`bind!`混入禁止、enum網羅性検査、制約違反の検出、`native!`の出現位置制限など)をASTに対して実行する。違反はビルド時エラーとしてコンパイルを停止させる。
-- **③定数畳み込み**: `target::backend()`(付録D)はビルド設定(Cargoのfeature/target triple)から一意に確定するため、コンパイル時にコード生成器が値を確定し、該当しない `match target::backend() { ... }` の腕や `#[cfg(backend = "...")]` 付き `native!` ブロックを生成対象から静的に除去する(付録D.4、付録C.4)。実行バイナリに不要な分岐コードが残らないことを保証する。
-- **④バックエンド別コード生成**: 確定したASTから、選択されたバックエンド(付録A・C)向けのRustコードを生成する。ビルトイン要素(`builtin::Window`/`Row`/`Text`等、付録F)は他コンポーネントと同じ`component`/`view`構文で書かれたリファレンス実装として同一パイプラインで処理される。
+- **③定数畳み込み(未実装)**: 付録Dは、`target::backend()`をビルド設定(Cargoのfeature/target triple)から一意に確定し、該当しない `match target::backend() { ... }` の腕や `#[cfg(backend = "...")]` 付き `native!` ブロックを生成対象から静的に除去する設計を定めているが、現在の`elwindui-codegen`にはこの段階が存在しない(`enum Backend`/`target::backend()`はコード中どこにも実装されていない)。実際には生成コードはバックエンドを問わず同一であり、この段階は素通りする。
+- **④コード生成**: 検証済みASTから、バックエンドを問わず同一のRustコードを生成する。ビルトイン要素(`builtin::Window`/`Row`/`Text`等、付録F)は他コンポーネントと同じ`component`/`view`構文で書かれたリファレンス実装として同一パイプラインで処理される。生成コードが実際にどのバックエンドで動くかは、リンクされる`elwindui-backend-*`クレート(各バックエンドクレートが同名のビルトイン型を実装している)によって決まる——付録A・Cが想定する「バックエンドごとに異なるコードを生成する」段階は現状ここには存在しない。
 
 ---
 
@@ -106,6 +108,8 @@ elwindui::component! {
 
 いずれの方式でも②〜④のパイプライン(静的検証・定数畳み込み・コード生成)は共通の内部実装(`elwindui-codegen`本体)を呼び出すのみとし、起動方式の違いによってコンパイラの検証結果や生成コードの意味が変わることはない。
 
+**実装状況の注**: 両方式とも実装済みで、実サンプルで検証されている。build.rs方式は`elwindui_codegen::compile_dir`/`compile_dir_with_extra_viewmodels`(`crates/elwindui-codegen/src/lib.rs`)として実装され、`examples/notepad`が利用する。proc-macro方式は`elwindui_macros::component!`/`#[elwindui_macros::viewmodel]`(`crates/elwindui-macros/src/lib.rs`、`elwindui::component!`/`#[elwindui::viewmodel]`として再エクスポート)として実装され、`examples/notepad-inline`(view+viewmodel両方)と`examples/viewmodel-attr-demo`(`#[elwindui::viewmodel]`のみ、view層無し)が利用する。
+
 ---
 
 ## 5. 他ツールとの連携点
@@ -123,5 +127,5 @@ elwindui::component! {
 | `.elwind` → Rust変換 | 構文解析→共通AST→静的検証→定数畳み込み→バックエンド別コード生成の4段パイプライン |
 | 起動方式 | build.rs方式(IDE補完重視)/ proc-macro方式(シンプルさ重視)の2方式を提供 |
 | 静的検証 | 言語仕様14章のルール一覧をASTに対して実行し、違反はビルド時エラー |
-| バックエンド分岐の除去 | `target::backend()`の定数畳み込みにより非該当分岐を静的除去 |
+| バックエンド分岐の除去 | `target::backend()`の定数畳み込みにより非該当分岐を静的除去(**未実装**。現状は生成コードがバックエンド非依存で、リンクする`elwindui-backend-*`クレートの選択のみでバックエンドが決まる) |
 | 他ツールとの関係 | LanguageServer/preview/hotreloadは本コンパイラの解析結果・生成コードを利用する側であり、検証ロジックの二重実装を避ける |

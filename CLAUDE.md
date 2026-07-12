@@ -8,7 +8,7 @@ When asking the user a question (clarifying questions, `AskUserQuestion`, plan c
 
 ## Project state
 
-This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to multiple backends (egui/iced, or native OS toolkits WinUI 3 / AppKit / GTK4). The project is currently at the **specification stage only** — `src/main.rs` is still the default `cargo new` stub and `Cargo.toml` has no dependencies. There is no parser, codegen, or runtime implemented yet.
+This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to native OS toolkit backends (WinUI 3 / AppKit / GTK4). This is a Cargo workspace (`crates/*` + `examples/*`, no root `src/`) with a real, substantial implementation — not just a spec: `elwindui-codegen` (the `.elwind` → Rust compiler, both a `build.rs`-driven path and a `component!`/`#[viewmodel]` proc-macro path), `elwindui-core` (the `UIElement` runtime), `elwindui-macros`, `elwindui-i18n`, `elwindui-languageserver`, and `elwindui-backend-appkit` (built, run, and screenshot-verified on this machine) are all real. `elwindui-backend-winui3` has code but is unverified (no Windows environment); `elwindui-backend-gtk4` and hot reload (`elwindui-hotreload`) are stubs; there is no preview-tool crate at all yet. See `docs/elwindui_implementation_status.md` for the full, regularly-stale-prone breakdown of what's implemented vs. still just spec — check it, and re-verify against `crates/` directly, before assuming a feature described in the spec docs actually exists.
 
 The authoritative source of truth is `docs/elwindui_spec.md` (written in Japanese, core language:
 `component`/`view`, `param`/`prop`, control flow, static verification rules, etc.), plus
@@ -26,7 +26,7 @@ headers):
 - 付録I/J/K/O/P/R/S/U/V/W — lifecycle hooks, `store` (global/scoped shared state), keyboard shortcut *attribute*, `viewmodel`/`Command` (MVVM), async, theme/design tokens, error boundaries, undo/redo, snapshot testing, mobile lifecycle.
 
 `docs/elwindui_builtins_spec.md` (every concrete `builtin::`/`platform::` element):
-- 付録F — reference implementations of `Window`/`Row`/`Column`/`Text`/`TextArea`/`Dropdown`.
+- 付録F — reference implementations of `Window`/`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`TextArea`/`Dropdown` (the layout containers are named `VerticalLayout`/`HorizontalLayout`, not `Row`/`Column`; text display is `TextBlock`, not `Text`).
 - 付録G/N — custom drawing (`Canvas`/`Painter`) and its Composition-style extensions (gradients/shadows/transforms/animation).
 - 付録L — `NavigationHost`/`Route` screen navigation.
 - 付録M — `Dialog`/`Menu`/`MenuItem`/`Tooltip` (dialogs, context menus, tooltips).
@@ -37,17 +37,17 @@ headers):
 ## Core architectural rules to preserve when implementing
 
 - **`param` vs `prop`**: `#[param]` fields are fixed at instantiation and may only use static-evaluable expressions (literals, other params, pure builtins, `env::*`, `once` values) — never `bind!`, prop references, or impure calls. Default (`prop`) fields are runtime-mutable and support `bind!`/`#[computed]`. This split is what the §14 rules exist to enforce; don't weaken it for convenience.
-- **Enums are the only value-set mechanism** — no anonymous unions. `match` over an enum (including the built-in `Backend` and `Route` enums) must be exhaustive; missing arms are a compile error by design (e.g. adding a `Backend` variant should break every non-exhaustive builtin `match target::backend()`).
-- **`native!` and `target::backend()` are restricted**: only reachable from `#[overrides(builtin::X)]` components or other builtins — arbitrary user components must not call into backend-specific code directly (rules 9/15).
+- **Enums are the only value-set mechanism** — no anonymous unions. `match` over an enum must be exhaustive; missing arms are a compile error by design. Note: the spec's built-in `Backend` and `Route` enums (and `target::backend()`/`NavigationHost` themselves) are **not implemented yet** — see `docs/elwindui_implementation_status.md` — so this exhaustiveness rule currently only bites for user-defined enums, not those two.
+- **`native!` and `target::backend()` are restricted**: only reachable from `#[overrides(builtin::X)]` components or other builtins — arbitrary user components must not call into backend-specific code directly (rules 9/15). This is a forward-looking rule: `target::backend()` itself doesn't exist in code yet (backend selection today is Cargo feature flags — `backend-appkit`/`backend-winui3`/`backend-gtk4` on the `elwindui` facade crate), so there's nothing to enforce this against currently.
 - **`store`/`viewmodel` are never read directly from `#[param]`** — access always goes through `prop` + `bind!` (rule 12/13), and `viewmodel` internals aren't reachable from builtin view elements (rule 19), keeping MVVM's V/VM separation statically enforced.
 - **Builtin shadowing must be explicit** — a user `component` sharing a name with a `builtin::` element is a static ambiguity error unless annotated `#[overrides(builtin::X)]`; there is no implicit shadowing.
 - **Rust class-hierarchy convention (both codegen output and hand-written runtime code)**: for a class `Class` (with parent `SuperClass`), define `trait Class: SuperClass` + `struct ClassImpl { base: SuperClassImpl, /* own fields */ }`, with `ClassImpl` implementing `Class` and every ancestor trait (each ancestor method delegating to `self.base.method(...)`). The root class (no parent) has no `base` field. Construct via a `create_class(...)` factory function, never a bare struct literal. See docs/elwindui_spec.md 付録H.2.1a for the full rule and `elwindui-core::ui`'s `UIElement`/`Control`/etc. hierarchy for the reference implementation.
 
 ## Commands
 
-- `cargo build` / `cargo run` — build/run the current stub binary.
-- `cargo test` — no tests exist yet.
-- Edition 2024; no dependencies declared yet in `Cargo.toml`.
+- `cargo build --workspace` / `cargo test --workspace` — build/test every crate and example.
+- `cargo run -p notepad` / `cargo run -p notepad-inline` — run the example apps (AppKit backend on macOS; see the screenshot section below).
+- Edition 2024. Root `Cargo.toml` is workspace-only (`members = ["crates/*", "examples/*"]`) — there is no root `src/`.
 
 ## Taking screenshots of a running example app (AppKit backend etc.)
 

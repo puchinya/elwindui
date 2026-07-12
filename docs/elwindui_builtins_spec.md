@@ -134,11 +134,6 @@ view Window {
             win.set_child(Some(&build_children(children)));
             win
         }
-        Backend::Egui | Backend::Iced => native! {
-            egui::Window::new(&title)
-                .default_size([width, height])
-                .show(ctx, |ui| { render_children(ui, &children); })
-        }
     }
 }
 ```
@@ -285,9 +280,6 @@ view TextArea {
             buf.connect_changed(move |b| { text = b.text(&b.start_iter(), &b.end_iter(), false).to_string(); });
             tv
         }
-        Backend::Egui | Backend::Iced => native! {
-            ui.add(egui::TextEdit::multiline(&mut text))
-        }
     }
 }
 ```
@@ -325,22 +317,15 @@ view Dropdown {
             dd.set_selected(find_selected_index(&options) as u32);
             dd
         }
-        Backend::Egui | Backend::Iced => native! {
-            egui::ComboBox::from_id_source("dropdown")
-                .selected_text(current_selected_text(&options))
-                .show_ui(ui, |ui| {
-                    for opt in &options { ui.selectable_label(opt.selected, &opt.text); }
-                })
-        }
     }
 }
 ```
 
 ## F.6 図形プリミティブ(`builtin::Rectangle` / `builtin::Ellipse`)について
 
-かつてここには`builtin::Rect`(egui/iced backend向けにButtonが代替表現として使っていたクリック可能な
-最小コンテナ)という節があったが、egui/icedバックエンド自体が既に削除されており、この概念に対応する
-実装はコードベースのどこにも存在しない(仕様書にのみ残っていた設計と思われる)ため削除した。
+かつてここには`builtin::Rect`(ネイティブAPIを持たないbackend向けにButtonが代替表現として使っていた
+クリック可能な最小コンテナ)という節があったが、その対象だったbackend自体が既に削除されており、この
+概念に対応する実装はコードベースのどこにも存在しない(仕様書にのみ残っていた設計と思われる)ため削除した。
 
 現在の図形プリミティブは`Rectangle`/`Ellipse`であり、F.2の`VerticalLayout`/`HorizontalLayout`と
 同じ仕組み(専用のネイティブ実体を持たず、`elwindui-codegen`が
@@ -540,7 +525,7 @@ Grid {
 
 - レイアウト(どこに何を置くか)は引き続き宣言的な`.elwind`で書く
 - 描画内容(何をどう塗るか)は宣言的に書かず、`Painter`という抽象描画APIを受け取るRust関数として書く
-- `Painter`はバックエンドごとの実描画API(Direct2D/Win2D, Core Graphics, Cairo, egui::Painter等)を裏で呼ぶ薄い抽象化層であり、`elwindui-core`(付録H参照)に属する
+- `Painter`はバックエンドごとの実描画API(Direct2D/Win2D, Core Graphics, Cairo等)を裏で呼ぶ薄い抽象化層であり、`elwindui-core`(付録H参照)に属する
 
 ```rust
 use painters::volume_meter::draw_meter;
@@ -575,11 +560,11 @@ trait Painter {
 
 上記は基本図形のみの最小セットである。グラデーション・シャドウ・変形・アニメーション等、WinUI3の`Composition`/`Win2D`相当の機能一式は付録Nで`Painter`を拡張する形で定義する。
 
-| Painterメソッド | WinUI 3 | AppKit | GTK4 | egui |
-|---|---|---|---|---|
-| `fill_rect` | Win2D `CanvasDrawingSession::FillRectangle` | Core Graphics `CGContextFillRect` | Cairo `cairo_rectangle`+`fill` | `egui::Painter::rect_filled` |
-| `draw_line` | Win2D `DrawLine` | `CGContextStrokeLineSegments` | `cairo_move_to`/`line_to` | `Painter::line_segment` |
-| `draw_text` | `CanvasTextLayout` | `NSAttributedString::draw` | Pango経由 | `Painter::text` |
+| Painterメソッド | WinUI 3 | AppKit | GTK4 |
+|---|---|---|---|
+| `fill_rect` | Win2D `CanvasDrawingSession::FillRectangle` | Core Graphics `CGContextFillRect` | Cairo `cairo_rectangle`+`fill` |
+| `draw_line` | Win2D `DrawLine` | `CGContextStrokeLineSegments` | `cairo_move_to`/`line_to` |
+| `draw_text` | `CanvasTextLayout` | `NSAttributedString::draw` | Pango経由 |
 
 `builtin::Canvas`自身は付録Fの他部品と同様、`match target::backend()`で各バックエンドのネイティブ描画コンテキストを`Painter`実装でラップして`on_paint`に渡す(バックエンド分岐が許されるのは`builtin`定義のみという原則はここでも維持される)。
 
@@ -601,11 +586,6 @@ view Canvas {
                 on_paint(&mut p);
             }))?;
             ctrl
-        }
-        Backend::Egui => native! {
-            let (response, mut painter) = ui.allocate_painter(egui::vec2(width, height), egui::Sense::hover());
-            let mut p = EguiPainter::wrap(&mut painter);
-            on_paint(&mut p);
         }
         _ => native! { /* Appkit / Gtk4 も同様にラップ */ }
     }
@@ -813,7 +793,6 @@ view App {
 | WinUI3 | `Microsoft::UI::Xaml::Controls::Frame`によるページ遷移 |
 | AppKit | `NSWindow`の`contentViewController`差し替え、またはシート/ウィンドウ切り替え |
 | GTK4 | `gtk::Stack` + `gtk::StackTransitionType` |
-| egui / iced | 内部状態による表示切り替え(単一ウィンドウ内でツリーの入れ替え) |
 
 ## L.3 遷移操作
 
@@ -847,7 +826,7 @@ fn go_back() {
 
 メインウィンドウの外に浮く一時的なUI(モーダルダイアログ、コンテキストメニュー、ツールチップ)のためのビルトイン部品。
 
-## M.1 `Dialog`(モーダル)
+## M.1 `Dialog`(モーダル、未実装・仕様のみ)
 
 ```rust
 component App {
@@ -877,9 +856,8 @@ view App {
 | WinUI3 | `Microsoft::UI::Xaml::Controls::ContentDialog` |
 | AppKit | `NSAlert`またはシート(`beginSheet`) |
 | GTK4 | `gtk::Dialog` |
-| egui / iced | 半透明オーバーレイ上に浮かせた`Window`/`Modal`表現 |
 
-## M.2 `Menu` / `MenuItem`(コンテキストメニュー)
+## M.2 `Menu` / `MenuItem`(コンテキストメニュー、`Menu`/`MenuItem`自体は実装済み・`context_menu`属性は未実装)
 
 ```rust
 Menu {
@@ -900,7 +878,9 @@ TextArea {
 }
 ```
 
-## M.3 `Tooltip`
+`Menu`/`MenuItem`自体は`builtins.elwind`に実装済み(現状は`MenuBarItem`の`submenu`経由でアプリメインメニューに使われている、付録X参照)。一方、上記の`context_menu`のように**任意のビルトイン要素に汎用属性として付けられる**仕組みはまだ実装されていない(`TextArea`をはじめ、どの`.elwind`宣言にも`context_menu`フィールドは存在しない)。
+
+## M.3 `Tooltip`(未実装・仕様のみ)
 
 ```rust
 Button {
@@ -910,20 +890,20 @@ Button {
 }
 ```
 
-- `tooltip`は任意のビルトイン要素が持てる共通属性として提供し、ホバー時に各OS標準のツールチップ表示を行う
+- `tooltip`は任意のビルトイン要素が持てる共通属性として提供し、ホバー時に各OS標準のツールチップ表示を行う、という設計。現状どの`.elwind`宣言にも`tooltip`フィールドは存在せず、対応するバックエンド実装もない。
 
 ## M.4 制約の継承
 
-`Dialog`/`Menu`/`Tooltip`はいずれもビルトインであり、内部で`match target::backend()`を持つ。通常の`component`側でこれらを利用する際は、他のビルトイン同様バックエンド分岐を意識する必要はなく、独自部品からこれらを組み合わせて使う場合もG.3の「バックエンド分岐禁止」原則がそのまま適用される(14章ルール15)。
+`Menu`(実装済み)、`Dialog`/`Tooltip`/汎用`context_menu`属性(いずれも未実装・仕様のみ)は、実装された暁にはいずれもビルトインとして内部でバックエンド別実装を持つ設計である。通常の`component`側でこれらを利用する際は、他のビルトイン同様バックエンド分岐を意識する必要はなく、独自部品からこれらを組み合わせて使う場合もG.3の「バックエンド分岐禁止」原則がそのまま適用される(14章ルール15)。
 
 ## M.5 まとめ
 
-| 要件 | 対応 |
-|---|---|
-| モーダルダイアログ | `Dialog { on_dismiss, ... }`、フォーカストラップを自動適用 |
-| コンテキストメニュー | `Menu` / `MenuItem`、`context_menu`属性での紐付け |
-| ツールチップ | 任意要素が持てる共通属性`tooltip` |
-| バックエンドごとの実装差 | ビルトイン内部にのみ分岐を許可し、独自部品からの利用時は分岐禁止原則を維持(14章ルール15) |
+| 要件 | 対応 | 実装状況 |
+|---|---|---|
+| モーダルダイアログ | `Dialog { on_dismiss, ... }`、フォーカストラップを自動適用 | 未実装・仕様のみ |
+| コンテキストメニュー | `Menu` / `MenuItem`、`context_menu`属性での紐付け | `Menu`/`MenuItem`自体は実装済み、`context_menu`属性は未実装 |
+| ツールチップ | 任意要素が持てる共通属性`tooltip` | 未実装・仕様のみ |
+| バックエンドごとの実装差 | ビルトイン内部にのみ分岐を許可し、独自部品からの利用時は分岐禁止原則を維持(14章ルール15) | (原則自体はコード生成器の設計方針) |
 
 ---
 
@@ -955,10 +935,10 @@ trait Painter {
 }
 ```
 
-| Brush種別 | WinUI 3 | AppKit | GTK4 | egui |
-|---|---|---|---|---|
-| `LinearGradient` | `LinearGradientBrush` | `CGGradient` + `drawLinearGradient` | Cairo `LinearGradient` | `egui::Mesh`によるグラデーション三角形 |
-| `Acrylic` | `AcrylicBrush`(ネイティブサポート) | `NSVisualEffectView`重畳で近似 | 非対応(単色フォールバック、17番ルールで警告) | 非対応(単色フォールバック) |
+| Brush種別 | WinUI 3 | AppKit | GTK4 |
+|---|---|---|---|
+| `LinearGradient` | `LinearGradientBrush` | `CGGradient` + `drawLinearGradient` | Cairo `LinearGradient` |
+| `Acrylic` | `AcrylicBrush`(ネイティブサポート) | `NSVisualEffectView`重畳で近似 | 非対応(単色フォールバック、17番ルールで警告) |
 
 ## N.2 図形・パス(Geometry)
 
@@ -1007,10 +987,10 @@ Canvas {
 }
 ```
 
-| Effect種別 | WinUI 3 | AppKit | GTK4 | egui |
-|---|---|---|---|---|
-| `DropShadow` | `Compositor.CreateDropShadow` | `CALayer.shadowOffset/shadowRadius` | Cairo手動合成 | 手動でオフセット矩形を追加描画して近似 |
-| `Blur` | `GaussianBlurEffect`(Win2D) | `CIGaussianBlur` | 非対応(17番ルールで警告、フォールバックはブラー無し) | 非対応(同上) |
+| Effect種別 | WinUI 3 | AppKit | GTK4 |
+|---|---|---|---|
+| `DropShadow` | `Compositor.CreateDropShadow` | `CALayer.shadowOffset/shadowRadius` | Cairo手動合成 |
+| `Blur` | `GaussianBlurEffect`(Win2D) | `CIGaussianBlur` | 非対応(17番ルールで警告、フォールバックはブラー無し) |
 
 `#[effect(...)]`が付与された`Canvas`は、内部で`Painter`が返す描画結果をオフスクリーンサーフェスに一度レンダリングしてからエフェクトを適用する(N.5のレイヤー合成の仕組みを利用する)。
 
@@ -1061,10 +1041,10 @@ enum BlendMode { Normal, Multiply, Screen, Overlay, Darken, Lighten }
 - `begin_layer`/`end_layer`は一時的なオフスクリーンサーフェスへの描画を開始・確定する(WinUI3の`Compositor.CreateContainerVisual`相当)。N.3のエフェクトはこの仕組みの上に実装される
 - `clip_rect`/`clip_path`は以降の描画を指定領域内にクリップする(スタック方式でネスト可能)
 
-| 機能 | WinUI 3 | AppKit | GTK4 | egui |
-|---|---|---|---|---|
-| レイヤー合成 | `ContainerVisual` + `CompositionEffectBrush` | `CALayer`の階層合成 | Cairoの`push_group`/`pop_group` | オフスクリーン`egui::Painter`への描画 → テクスチャ合成 |
-| クリップ | `Visual.Clip` | `CGContextClip` | `cairo_clip` | `egui::Painter::with_clip_rect` |
+| 機能 | WinUI 3 | AppKit | GTK4 |
+|---|---|---|---|
+| レイヤー合成 | `ContainerVisual` + `CompositionEffectBrush` | `CALayer`の階層合成 | Cairoの`push_group`/`pop_group` |
+| クリップ | `Visual.Clip` | `CGContextClip` | `cairo_clip` |
 
 ## N.6 アニメーション(Transition / KeyframeAnimation)
 
@@ -1187,7 +1167,6 @@ VirtualList {
 | WinUI3 | `ItemsRepeater` + `VirtualizingLayout` |
 | AppKit | `NSTableView` / `NSCollectionView`(セル再利用機構をそのまま利用) |
 | GTK4 | `gtk::ListView` + `GListModel`(GTK4は元々仮想化前提の設計) |
-| egui / iced | `elwindui-core`の`LayoutEngine`(付録H.2)がビューポート情報を持ち、表示範囲外の`render_item`呼び出し自体をスキップする |
 
 ## Q.6 まとめ
 
@@ -1205,27 +1184,30 @@ VirtualList {
 
 OS機能へのアクセスを、GUI要素ではなく`platform::`名前空間の関数として提供する(9章の`env::*`、5章で触れた`external::*`と同じ「明示的な入口」の考え方)。
 
-## T.1 クリップボード
+## T.1 クリップボード(未実装・仕様のみ)
 
 ```rust
 platform::clipboard::write_text(&content);
 let text: Option<String> = platform::clipboard::read_text();
 ```
 
-## T.2 ファイルダイアログ(非同期)
+`platform::clipboard`は`crates/elwindui-backend-appkit`/`elwindui-backend-winui3`のいずれにも存在せず(`platform`モジュールが持つのは`file_dialog`のみ)、コードベースに実装はまだない。
+
+## T.2 ファイルダイアログ(非同期、実装済み・AppKit/WinUI3)
 
 ```rust
 #[command(async)]
 open: Command = command!(async || {
-    if let Some(path) = platform::file_dialog::open(FileFilter::new(t!("filter-text"), &["txt"])).await {
+    if let Some(path) = platform::file_dialog::open().await {
         content = fs::read_to_string(&path).await.unwrap_or_default();
     }
 }),
 ```
 
 - ファイルダイアログは本質的に非同期(ユーザーの操作待ち)であるため、常に`Future`を返し、付録Pの`#[command(async)]`パターンと組み合わせて使う
+- 実装(`crates/elwindui-backend-appkit/src/lib.rs`の`platform::file_dialog`、`elwindui-backend-winui3`側も同型)は`open() -> Option<PathBuf>`/`save() -> Option<PathBuf>`のみで、`FileFilter`引数など拡張フィルタリングはまだ持たない。`examples/notepad`が実際にこの2関数を使用している(AppKit側で動作確認済み、WinUI3側は未検証)。GTK4は`platform`モジュール自体が存在しないため未対応。
 
-## T.3 ドラッグ&ドロップ
+## T.3 ドラッグ&ドロップ(未実装・仕様のみ)
 
 ```rust
 TextArea {
@@ -1235,15 +1217,15 @@ TextArea {
 }
 ```
 
-- `on_drag_start` / `on_drop` / `draggable: bool` は任意のビルトイン要素が持てる共通属性として提供する(付録Mの`tooltip`/`context_menu`と同じ位置づけ)
+- `on_drag_start` / `on_drop` / `draggable: bool` は任意のビルトイン要素が持てる共通属性として提供する(付録Mの`tooltip`/`context_menu`と同じ位置づけ)という設計だが、`builtins.elwind`側にこれらの属性は未宣言で、対応するバックエンド実装も存在しない。
 
 ## T.4 バックエンド対応
 
-| 機能 | WinUI3 | AppKit | GTK4 | egui / iced |
-|---|---|---|---|---|
-| クリップボード | `Clipboard`/`DataPackage` | `NSPasteboard` | `Gdk::Clipboard` | `arboard`クレート経由 |
-| ファイルダイアログ | `FileOpenPicker`/`FileSavePicker` | `NSOpenPanel`/`NSSavePanel` | `gtk::FileChooserNative` | `rfd`クレート経由 |
-| ドラッグ&ドロップ | `DragDrop`イベント | `NSDraggingDestination` | `Gtk::DropTarget` | Canvas内ヒットテストで独自実装 |
+| 機能 | WinUI3 | AppKit | GTK4 |
+|---|---|---|---|
+| クリップボード | 未実装 | 未実装 | 未実装 |
+| ファイルダイアログ | 実装あり(`FileOpenPicker`/`FileSavePicker`相当、未検証) | 実装済み・検証済み(`NSOpenPanel`/`NSSavePanel`) | 未実装(`platform`モジュール自体が存在しない) |
+| ドラッグ&ドロップ | 未実装 | 未実装 | 未実装 |
 
 ## T.5 まとめ
 
@@ -1301,7 +1283,6 @@ view NotepadWindow {
 | AppKit | `NSMenu`ツリーを構築し`NSApplication.mainMenu`に設定。`MenuItem`ごとに`NSMenuItem` + target/action | 実装済み |
 | WinUI3 | `Microsoft::UI::Xaml::Controls::MenuBar` / `MenuFlyoutItem` | 未実装(仕様のみ。他バックエンドスタブと同じ方針) |
 | GTK4 | `gtk::PopoverMenuBar` + `gio::Menu` | 未実装 |
-| egui / iced | ウィンドウ内メニュー行相当のウィジェットで代替 | 未実装 |
 
 ## X.3 まとめ
 
@@ -1393,7 +1374,6 @@ view NotepadWindow {
 | AppKit | `NSStackView`によるタブ見出し行(タイトル + 閉じるボタン + 末尾の"+"ボタン)、選択に応じてコンテンツ領域を差し替え。単一の共有コンテンツ領域を使い回すため、静的モードの`TabViewItem`は一度表示されるとその`content`を消費する — 別タブに切り替えた後に再度選択し直しても、コンテンツ領域は更新されない既知の制限がある(`items_source`モードは影響を受けない;`item_template`で合成された`TabViewItem`はタブが存在する限り選択され続けるまで再表示されないため) | 実装済み・検証済み |
 | WinUI3 | `Microsoft::UI::Xaml::Controls::TabView`。各`TabViewItem`の`Content`は独立して生き続ける`TreeHostPanel`であり、AppKitのような制限はない | 実装済み(ベストエフォート、未検証) |
 | GTK4 | `gtk::Notebook` | 未実装 |
-| egui / iced | 内部状態によるタブ見出し行の描画 + 選択中コンテンツの切り替え | 未実装 |
 
 ## Y.4 まとめ
 

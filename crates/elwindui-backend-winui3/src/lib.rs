@@ -47,7 +47,7 @@ use bindings::Microsoft::UI::Xaml::{
 use bindings::Windows::Foundation::{Size, TypedEventHandler};
 use bindings::Windows::Graphics::{PointInt32, SizeInt32};
 use bindings::Windows::UI::Color;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use windows::core::{Interface, Result, HSTRING};
 
@@ -156,16 +156,48 @@ pub struct TreeHostPanel {
 /// that root's own `UIElementImpl::invalidate_host` would then strongly hold this, right back to
 /// the panel. `canvas` is captured strongly, matching `TreeHostPanel::new`'s own `SizeChanged`
 /// handler below, which uses the exact same capture split (strong `canvas`, weak `tree`).
+///
+/// Unlike AppKit's `AppKitRelayoutHost` (where `NSView.setNeedsLayout(true)` is itself already
+/// coalesced by AppKit into a single pass per display cycle, no matter how many times it's called),
+/// `relayout_static` here rebuilds `Canvas.Children` synchronously and from scratch — so
+/// `request_relayout` debounces via `pending` + this thread's `DispatcherQueue`, matching
+/// docs/elwindui_spec.md H.2.3's `RelayoutHost` coalescing contract: repeated calls within the same
+/// synchronous burst (e.g. several property setters inside one `resync()`) collapse into a single
+/// deferred relayout pass, not one synchronous pass per call.
 struct WinUI3RelayoutHost {
     canvas: Canvas,
     tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>,
+    /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
+    /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
+    /// (and clears it right before doing so).
+    pending: Cell<bool>,
+    /// Lets `request_relayout` (which only ever sees `&self`) hand an owned `Rc<Self>` to the
+    /// `DispatcherQueueHandler` closure — set once, right after this host is `Rc`-wrapped (see
+    /// `TreeHostPanel::set_tree`), the same self-referential-`Weak` pattern
+    /// `elwindui_backend_appkit::builtins::tab_view::TabViewImpl` uses for the same reason.
+    weak_self: RefCell<Weak<WinUI3RelayoutHost>>,
 }
 
 impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
     fn request_relayout(&self) {
-        if let Some(tree) = self.tree.upgrade() {
-            TreeHostPanel::relayout_static(&self.canvas, &tree);
+        if self.pending.replace(true) {
+            return; // already scheduled — the pending pass will pick up this call's changes too
         }
+        let Some(this) = self.weak_self.borrow().upgrade() else {
+            self.pending.set(false);
+            return;
+        };
+        let Ok(queue) = DispatcherQueue::GetForCurrentThread() else {
+            self.pending.set(false);
+            return;
+        };
+        let _ = queue.TryEnqueue(&DispatcherQueueHandler::new(move || {
+            this.pending.set(false);
+            if let Some(tree) = this.tree.upgrade() {
+                TreeHostPanel::relayout_static(&this.canvas, &tree);
+            }
+            Ok(())
+        }));
     }
 }
 
@@ -199,8 +231,14 @@ impl TreeHostPanel {
         if let Ok(children) = self.canvas.Children() {
             let _ = children.Clear();
         }
-        let host = WinUI3RelayoutHost { canvas: self.canvas.clone(), tree: Rc::downgrade(&self.tree) };
-        tree.base().set_invalidate_host(Some(Rc::new(host)));
+        let host = Rc::new(WinUI3RelayoutHost {
+            canvas: self.canvas.clone(),
+            tree: Rc::downgrade(&self.tree),
+            pending: Cell::new(false),
+            weak_self: RefCell::new(Weak::new()),
+        });
+        *host.weak_self.borrow_mut() = Rc::downgrade(&host);
+        tree.base().set_invalidate_host(Some(host));
         *self.tree.borrow_mut() = Some(tree);
         Self::relayout_static(&self.canvas, &self.tree);
     }

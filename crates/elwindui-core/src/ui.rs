@@ -244,39 +244,50 @@ impl UIElementImpl {
     /// setter rather than a constructor argument.
     pub fn set_margin(&self, margin: f32) {
         self.margin.set(margin);
+        self.invalidate();
     }
     pub fn set_horizontal_alignment(&self, alignment: HorizontalAlignment) {
         self.horizontal_alignment.set(alignment);
+        self.invalidate();
     }
     pub fn set_vertical_alignment(&self, alignment: VerticalAlignment) {
         self.vertical_alignment.set(alignment);
+        self.invalidate();
     }
     pub fn set_visibility(&self, visibility: Visibility) {
         self.visibility.set(visibility);
+        self.invalidate();
     }
     pub fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
         *self.data_context.borrow_mut() = data_context;
     }
     pub fn set_grid_cell(&self, grid_cell: GridCell) {
         self.grid_cell.set(grid_cell);
+        self.invalidate();
     }
     pub fn set_width(&self, width: Option<f32>) {
         self.width.set(width);
+        self.invalidate();
     }
     pub fn set_height(&self, height: Option<f32>) {
         self.height.set(height);
+        self.invalidate();
     }
     pub fn set_min_width(&self, min_width: Option<f32>) {
         self.min_width.set(min_width);
+        self.invalidate();
     }
     pub fn set_min_height(&self, min_height: Option<f32>) {
         self.min_height.set(min_height);
+        self.invalidate();
     }
     pub fn set_max_width(&self, max_width: Option<f32>) {
         self.max_width.set(max_width);
+        self.invalidate();
     }
     pub fn set_max_height(&self, max_height: Option<f32>) {
         self.max_height.set(max_height);
+        self.invalidate();
     }
     /// Called by whatever backend host (`TreeHostView::set_tree`/`TreeHostPanel::set_tree`) is
     /// about to own this element as the root of a hosted tree — see `invalidate_host`'s own doc
@@ -516,10 +527,24 @@ fn request_relayout(base: &UIElementImpl) {
 /// `value`'s own children's `UIElementImpl::parent` back-reference to the freshly-created `Rc`
 /// before handing it back. See this module's own top doc comment.
 pub fn new_element<T: UIElement + 'static>(value: T) -> Rc<dyn UIElement> {
-    let this: Rc<dyn UIElement> = Rc::new(value);
-    *this.base().self_handle.borrow_mut() = Some(Rc::downgrade(&this));
-    for child in this.visual_children() {
-        *child.base().parent.borrow_mut() = Some(Rc::downgrade(&this));
+    new_element_concrete(value)
+}
+
+/// Same wiring as [`new_element`] (`self_handle`/each child's `parent` back-reference), but keeps
+/// the returned `Rc` at its own concrete type `T` instead of erasing it to `Rc<dyn UIElement>` —
+/// needed wherever the caller still wants to call `T`'s own inherent/trait methods on the result
+/// (e.g. a virtual builtin kept on `Self` as a `stored` resync target, docs/elwindui_spec.md
+/// 付録H.2.1a, rather than immediately erased into a parent's child list). **Every** construction
+/// site must go through this (or [`new_element`]) rather than a bare `Rc::new` — skipping it leaves
+/// `self_handle` unset, which makes `invalidate`/`invalidate_measure`/`invalidate_arrange` silent
+/// no-ops on that element (`request_relayout`'s own doc comment) and leaves every child added to it
+/// *before* this call with no `parent` back-reference either.
+pub fn new_element_concrete<T: UIElement + 'static>(value: T) -> Rc<T> {
+    let this = Rc::new(value);
+    let erased: Rc<dyn UIElement> = this.clone();
+    *erased.base().self_handle.borrow_mut() = Some(Rc::downgrade(&erased));
+    for child in erased.visual_children() {
+        *child.base().parent.borrow_mut() = Some(Rc::downgrade(&erased));
     }
     this
 }
@@ -805,6 +830,7 @@ pub struct LayoutImpl {
 impl LayoutImpl {
     pub fn set_spacing(&self, spacing: f32) {
         self.spacing.set(spacing);
+        self.invalidate();
     }
 }
 
@@ -911,15 +937,19 @@ impl Shape {
     }
     fn set_kind(&self, kind: ShapeKind) {
         self.kind.set(kind);
+        self.invalidate();
     }
     fn set_fill(&self, fill: Option<String>) {
         *self.fill.borrow_mut() = fill;
+        self.invalidate();
     }
     fn set_stroke(&self, stroke: Option<String>) {
         *self.stroke.borrow_mut() = stroke;
+        self.invalidate();
     }
     fn set_stroke_width(&self, stroke_width: f32) {
         self.stroke_width.set(stroke_width);
+        self.invalidate();
     }
     fn new() -> Self {
         Self {
@@ -1096,12 +1126,15 @@ impl TextBlock {
     }
     fn set_text(&self, text: String) {
         *self.text.borrow_mut() = text;
+        self.invalidate();
     }
     fn set_color(&self, color: Option<String>) {
         *self.color.borrow_mut() = color;
+        self.invalidate();
     }
     fn set_text_alignment(&self, alignment: TextAlignment) {
         self.alignment.set(alignment);
+        self.invalidate();
     }
     fn new() -> Self {
         Self {
@@ -1165,12 +1198,15 @@ impl Control {
     }
     fn set_padding(&self, padding: f32) {
         self.padding.set(padding);
+        self.invalidate();
     }
     fn set_content_horizontal_alignment(&self, alignment: HorizontalAlignment) {
         self.content_horizontal_alignment.set(alignment);
+        self.invalidate();
     }
     fn set_content_vertical_alignment(&self, alignment: VerticalAlignment) {
         self.content_vertical_alignment.set(alignment);
+        self.invalidate();
     }
     fn new() -> Self {
         let base = UIElementImpl::default();
@@ -1295,9 +1331,11 @@ impl Grid {
     }
     fn set_rows(&self, rows: Vec<GridLength>) {
         *self.rows.borrow_mut() = rows;
+        self.invalidate();
     }
     fn set_columns(&self, columns: Vec<GridLength>) {
         *self.columns.borrow_mut() = columns;
+        self.invalidate();
     }
     fn new() -> Self {
         let base = UIElementImpl::default();

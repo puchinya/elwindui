@@ -603,6 +603,15 @@ impl Button {
         self.ns.setTitle(&NSString::from_str(text));
     }
 
+    /// AppKit-only helper (no `elwindui_core::ui::Button` trait member — WinUI3's real `TabView`
+    /// highlights its selected tab for free, no borderless-button trick needed there): used by
+    /// `create_tab_chip` so `TabChipImpl::set_selected`'s translucent background tint shows through
+    /// instead of being hidden behind the button's own opaque default bezel.
+    #[inherent]
+    fn set_bordered(&self, bordered: bool) {
+        self.ns.setBordered(bordered);
+    }
+
     fn new() -> Self {
         let m = mtm();
         let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m) };
@@ -655,8 +664,12 @@ pub struct TabChipImpl {
 fn create_tab_chip(title: &str) -> TabChipImpl {
     let title_button = create_button();
     title_button.set_text(title);
+    // Borderless: an `NSButton`'s default bezel is opaque and would otherwise cover almost the
+    // entire chip row, hiding `set_selected`'s translucent background tint underneath it.
+    title_button.set_bordered(false);
     let close_button = create_button();
     close_button.set_text("×");
+    close_button.set_bordered(false);
     let ns = new_stack(
         vec![title_button.base.handle.clone(), close_button.base.handle.clone()],
         NSUserInterfaceLayoutOrientation::Horizontal,
@@ -667,6 +680,23 @@ fn create_tab_chip(title: &str) -> TabChipImpl {
 impl TabChipImpl {
     pub fn set_title(&self, title: &str) {
         self.title_button.set_text(title);
+    }
+
+    /// Highlights this chip's own row with a translucent background tint when it's the selected
+    /// tab. AppKit has no native "selected tab" concept to lean on here (unlike WinUI3's real
+    /// `Controls::TabView`, whose `SelectedIndex` gets OS-drawn highlighting for free) — this
+    /// backend hand-rolls its tab strip out of a plain `NSStackView` (see this type's own doc
+    /// comment), so the highlight is drawn the same way `Rectangle`'s own `fill` is: a
+    /// layer-backed background color, applied to `ns` (the chip's whole row) rather than just
+    /// `title_button` so it isn't hidden behind that button's own bezel rendering.
+    pub fn set_selected(&self, selected: bool) {
+        self.ns.setWantsLayer(true);
+        let layer = self.ns.layer().expect("wantsLayer(true) implies a layer");
+        if selected {
+            layer.setBackgroundColor(Some(&parse_color("#7f7f7f40")));
+        } else {
+            layer.setBackgroundColor(None);
+        }
     }
 }
 

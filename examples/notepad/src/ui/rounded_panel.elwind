@@ -10,7 +10,10 @@
 // own `RoundedPanel { ... }` reference still compiles unchanged — `emit_construction`'s
 // `concrete_type_ident` resolves it to `RoundedPanelImpl::new(..)`.
 component RoundedPanel inherits ContentControl {
-    #[param]
+    // Not `#[param]`: the label displays a value (notepad's live character count, via
+    // `document_view.elwind`'s `t!("notepad-status-chars", count: doc.char_count)`) that changes
+    // after construction, so it needs to stay resyncable — a `#[param]` field is fixed at
+    // instantiation and would silently freeze the very first value forever.
     label: String,
 }
 

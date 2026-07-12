@@ -32,9 +32,12 @@ pub struct TypeInfo {
     /// Lets the view generator resolve the DSL's bare-field sugar (`content`) straight through to
     /// the field it's actually bound to (`vm.content`) without needing `self` to exist yet.
     pub binds: HashMap<String, (String, String)>,
-    /// `#[param]`-shaped fields (no initializer), in declaration order — the positional argument
+    /// Every no-initializer field, `#[param]` or plain `prop` alike (kind-agnostic — see
+    /// `build_symbol_table`'s own comment on why), in declaration order — the positional argument
     /// list `Target::new(...)` expects. Used to construct a nested user-defined component from an
-    /// `ElementNode` (e.g. a `render_content` closure's `DocumentView { doc: doc }` body).
+    /// `ElementNode` (e.g. a `render_content` closure's `DocumentView { doc: doc }` body). Despite
+    /// the name, a member can still get a real `set_<name>` setter and stay externally updatable —
+    /// see `is_settable_field`, consulted by `emit_resync`'s own param-skip guard.
     pub param_fields: Vec<(String, String)>,
     /// Names of `#[param] #[two_way]` fields — a builtin shape's opt-in to automatic two-way
     /// wiring (see `emit_wiring`'s generic two-way rule). Empty for ordinary user components.
@@ -926,9 +929,15 @@ fn coerce_to_owned_string(ty: &str, expr: syn::Expr) -> syn::Expr {
 /// Copy-able field types get `Cell<T>`, everything else gets `RefCell<T>` (付録O.5).
 fn is_copy_type(ty: &str) -> bool {
     matches!(ty, "i32" | "i64" | "f32" | "f64" | "bool" | "u32" | "u64" | "usize") || {
-        // A bare, capitalized single-word type that isn't a known non-Copy std type is assumed to
-        // be one of this file's own enums (all generated with `derive(Copy)`, see `generate_enum`).
-        ty.chars().next().is_some_and(|c| c.is_uppercase()) && ty != "String" && ty != "Command"
+        // A bare, capitalized single-*word* type (no generic `<..>`/`::` of its own — `Vec<T>`/
+        // `Box<dyn Fn()>`/`Rc<T>` are never Copy no matter what's inside the brackets) that isn't a
+        // known non-Copy std type is assumed to be one of this file's own enums (all generated with
+        // `derive(Copy)`, see `generate_enum`).
+        ty.chars().next().is_some_and(|c| c.is_uppercase())
+            && ty != "String"
+            && ty != "Command"
+            && !ty.contains('<')
+            && !ty.contains("::")
     }
 }
 
@@ -1027,6 +1036,19 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                         self.#field_ident.borrow().clone()
                     }
                     pub fn #pusher(&self, item: std::rc::Rc<#item_ty>) {
+                        // Bubbles the pushed sub-viewmodel's own changes up to this viewmodel's
+                        // own `__resync_subscribers` — otherwise a component that only reads this
+                        // field's items through plain (non-`bind!`) attribute expressions (e.g. a
+                        // `TabView`'s `items_source`/`header_template`) would never resync when one
+                        // of those items mutates from outside this component's own wired `on_*`
+                        // callbacks (e.g. an `#[command(async)]` body resuming after this
+                        // component's post-callback `resync()` already ran).
+                        let __weak = self.__self_weak.clone();
+                        item.subscribe(move || {
+                            if let Some(__self) = __weak.upgrade() {
+                                for f in __self.__resync_subscribers.borrow().iter() { f(); }
+                            }
+                        });
                         self.#field_ident.borrow_mut().push(item);
                         #(#recompute_calls)*
                         for f in self.__resync_subscribers.borrow().iter() { f(); }
@@ -1677,7 +1699,11 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         .filter(|f| f.initializer.is_none())
         .map(|f| (f.name.clone(), f.ty.clone()))
         .collect();
-    let ctx = ViewCtx { binds, closure_param: None, own_fields };
+    // `mutable_own_fields` is populated below, once `mutable_required_names` is known (it needs
+    // `required_own_names`/`deferred_own_names`, computed further down using `ctx.own_fields`
+    // itself) — every `emit_expr`/`plan_element`/`emit_construction`/`emit_resync` call that could
+    // actually observe it happens later still, so setting it after the fact here is sound.
+    let mut ctx = ViewCtx { binds, closure_param: None, own_fields, mutable_own_fields: HashSet::new() };
 
     let param_names: Vec<syn::Ident> = component
         .fields
@@ -1739,6 +1765,22 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             .is_some_and(|info| info.is_viewmodel);
         if is_viewmodel && !bind_owners.iter().any(|o| o.to_string() == *owner) {
             bind_owners.push(format_ident!("{}", owner));
+        }
+    }
+    // Also subscribe to every component field whose own type is a `viewmodel`, even if this
+    // component never uses `bind!` on it — e.g. `TabView { items_source: vm.documents,
+    // header_template: |doc| doc.file_name, .. }` reads `vm` through plain (non-`bind!`)
+    // attribute expressions only, but `emit_resync` still needs to re-run when `vm` (or, via the
+    // nested-Vec-observable subscription bubbling `generate_viewmodel` sets up — see that
+    // function's `#pusher` — one of `vm`'s own nested sub-viewmodel items) changes. Without this,
+    // a mutation reaching `vm` from *outside* this component's own wired `on_*` callbacks (e.g. an
+    // `#[command(async)]` body that resumes after this component's post-callback `resync()` already
+    // ran) would never be reflected. Harmless to add unconditionally: `resync()`'s blanket re-apply
+    // already tolerates being called for attributes that don't actually depend on this owner.
+    for f in &component.fields {
+        let is_viewmodel = table.resolve(from, strip_rc_wrapper(&f.ty)).is_some_and(|info| info.is_viewmodel);
+        if is_viewmodel && !bind_owners.iter().any(|o| o.to_string() == f.name) {
+            bind_owners.push(format_ident!("{}", f.name));
         }
     }
 
@@ -1901,6 +1943,61 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         .map(|(_, t)| t.clone())
         .collect();
 
+    // A required own field (can't be deferred — `is_deferred_own_field` above already excluded it
+    // because it's referenced somewhere in this component's own view) that's declared a plain
+    // `prop` (not `#[param]`, docs/elwindui_spec.md §4) still needs to stay externally updatable
+    // after construction — a `prop` field is runtime-mutable *by definition*, and "referenced at
+    // construction time" doesn't change that (e.g. `RoundedPanel`'s `label`, used immediately to
+    // build its own internal `TextBlock` but also meant to change on every `resync()` of whichever
+    // *other* component instantiated it — `document_view.elwind`'s `RoundedPanel { label:
+    // t!("notepad-status-chars", count: doc.char_count) }`). Cell/RefCell-wrapped
+    // (`is_copy_type`) like a deferred field's storage, but — unlike a deferred field — stays a
+    // `new(..)` positional argument (its value is needed immediately, before `Self` exists) and its
+    // setter also re-runs `self.resync()` (its own view, being required, is guaranteed to actually
+    // reference it, so the change needs to reach the widgets built from it right away — see the
+    // setter loop below).
+    let mutable_required_names: Vec<syn::Ident> = required_own_names
+        .iter()
+        .filter(|n| component.fields.iter().any(|f| f.name == n.to_string() && f.kind == FieldKind::Prop))
+        .cloned()
+        .collect();
+    let mutable_required_names_set: HashSet<String> = mutable_required_names.iter().map(|n| n.to_string()).collect();
+    ctx.mutable_own_fields = mutable_required_names_set.clone();
+    let mutable_required_types: Vec<syn::Type> = required_own_names
+        .iter()
+        .zip(required_own_types.iter())
+        .filter(|(n, _)| mutable_required_names_set.contains(&n.to_string()))
+        .map(|(_, t)| t.clone())
+        .collect();
+    let mutable_required_cell_types: Vec<TokenStream> = mutable_required_names
+        .iter()
+        .map(|n| {
+            let ty_str = ctx.own_fields.get(&n.to_string()).unwrap();
+            if is_copy_type(ty_str) { quote! { std::cell::Cell } } else { quote! { std::cell::RefCell } }
+        })
+        .collect();
+    let mutable_required_field_decls: TokenStream = mutable_required_names
+        .iter()
+        .zip(mutable_required_types.iter())
+        .zip(mutable_required_cell_types.iter())
+        .map(|((name, ty), cell_ty)| quote! { #name: #cell_ty<#ty>, })
+        .collect();
+    let mutable_required_field_inits: TokenStream = mutable_required_names
+        .iter()
+        .zip(mutable_required_cell_types.iter())
+        .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .collect();
+    // The plain (bare-storage, `Self { #name, .. }`-shorthand-eligible) subset of `required_own_names`
+    // — everything not promoted to Cell/RefCell storage above.
+    let plain_required_names: Vec<syn::Ident> =
+        required_own_names.iter().filter(|n| !mutable_required_names_set.contains(&n.to_string())).cloned().collect();
+    let plain_required_types: Vec<syn::Type> = required_own_names
+        .iter()
+        .zip(required_own_types.iter())
+        .filter(|(n, _)| !mutable_required_names_set.contains(&n.to_string()))
+        .map(|(_, t)| t.clone())
+        .collect();
+
     let mut struct_fields = TokenStream::new();
     let mut construct_stmts = TokenStream::new();
     let mut field_inits = TokenStream::new();
@@ -1935,12 +2032,16 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // .clone()`, not a plain `.clone()` (unlike a DSL-composed base's own accessor method).
     for (name, ty) in param_names.iter().zip(param_types.iter()) {
         let is_forwarded = !own_struct_param_names.contains(name);
-        let is_deferred = deferred_own_names_set.contains(&name.to_string());
+        // A deferred field and a mutable-required one (`mutable_required_names`) are both
+        // Cell/RefCell-backed storage read the same way — `strip_option` is a harmless no-op for
+        // the latter (never `Option<T>`-typed itself), so one branch covers both.
+        let is_cell_backed =
+            deferred_own_names_set.contains(&name.to_string()) || mutable_required_names_set.contains(&name.to_string());
         let body = if is_template_composition && is_forwarded {
             quote! { self.base.#name() }
         } else if is_forwarded {
             quote! { self.base.#name.borrow().clone() }
-        } else if is_deferred {
+        } else if is_cell_backed {
             let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
             if is_copy_type(strip_option(ty_str).0) {
                 quote! { self.#name.get() }
@@ -1994,6 +2095,36 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             named_accessors.extend(quote! {
                 pub fn #set_name(&self, value: #inner_ty) {
                     #set_body
+                }
+            });
+        }
+    }
+    // `set_<name>(&self, value: T)` for every mutable-required own field (`mutable_required_names`'s
+    // own doc comment) — unlike a deferred field's setter above, no `Some(..)` wrap (this storage
+    // is never `Option`-shaped: the field always holds a real value from construction on) and it
+    // re-runs `self.resync()` afterward, since this field — being required — is guaranteed to
+    // actually feed into this component's own view.
+    for (name, ty) in mutable_required_names.iter().zip(mutable_required_types.iter()) {
+        let set_name = format_ident!("set_{}", name);
+        let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
+        let set_body = if is_copy_type(ty_str) {
+            quote! { self.#name.set(value); }
+        } else {
+            quote! { *self.#name.borrow_mut() = value; }
+        };
+        if is_composed {
+            trait_sigs.extend(quote! { fn #set_name(&self, value: #ty); });
+            trait_impl_bodies.extend(quote! {
+                fn #set_name(&self, value: #ty) {
+                    #set_body
+                    self.resync();
+                }
+            });
+        } else {
+            named_accessors.extend(quote! {
+                pub fn #set_name(&self, value: #ty) {
+                    #set_body
+                    self.resync();
                 }
             });
         }
@@ -2059,14 +2190,13 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // `plan_element` pushes children before their parent (post-order), so the root is always last.
     // Irrelevant (the base's own root, not this component's) when `is_template_composition`.
     let root_binding = &plan.last().expect("view must have a root element").binding;
-    let root_is_virtual_builtin = !is_template_composition && is_virtual_builtin(&view.root.type_path);
 
-    // A hardcoded virtual builtin root (`VerticalLayout`, say — `DocumentView`'s actual root) is
-    // never `stored` (see `plan_element`), so unlike every other node its value only exists as the
-    // bare local `let` binding `emit_construction` produced inside `new()`'s `construct_stmts` —
-    // nothing stashes it on `Self` the normal way. Stash it here as a plain `Rc` field instead —
-    // `Rc<dyn UIElement>` (unlike the old `Box`) is `Clone`, so `into_node()` (below) can just
-    // clone it, the same convention every other stored field already uses.
+    // A plain virtual-builtin-rooted view (`VerticalLayout`, say — `DocumentView`'s actual root, if
+    // it weren't wrapped in `ContentControl`) needs no special-casing here anymore: `plan_element`
+    // now stores every root node — virtual builtin or not — under the same rule as any other node
+    // (`is_root || !attributes.is_empty()`), so the generic per-node loop above already gave it a
+    // real `Rc<XxxImpl>` struct field; `root_embed_method` below reaches it via the same
+    // `into_node_if_needed` path any other non-native root uses.
     //
     // The shape-composition case (`is_shape_composition`) stashes it differently: as a real `base`
     // field of the shape's own `elwindui::core::ui` `YImpl` type (built unwrapped, above), not a
@@ -2093,13 +2223,6 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         };
         struct_fields.extend(quote! { base: #base_impl_ty, });
         field_inits.extend(quote! { base: #root_binding, });
-    } else if root_is_virtual_builtin {
-        struct_fields.extend(quote! {
-            #root_binding: std::rc::Rc<dyn elwindui::core::ui::UIElement>,
-        });
-        field_inits.extend(quote! {
-            #root_binding: #root_binding.clone(),
-        });
     }
 
     // `show` only exists on the `Window` builtin — a component whose view root is something else
@@ -2118,10 +2241,10 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // (not a `From`/`Into` impl: `impl From<Rc<#target>> for AnyView` would be rejected by Rust's
     // orphan rules, since `Rc` isn't "fundamental" and so `#target` nested inside it counts as
     // covered by a foreign generic — E0117). A virtual root gets `into_node` instead, returning
-    // `Rc<dyn elwindui::core::ui::UIElement>` — either the hardcoded-builtin case handled just
-    // above (a plain clone of the stored `Rc`), or (a user-defined component whose own root is
-    // itself virtual — chained `inherits`) delegating to *that* root's own `into_node`/
-    // `into_any_view` via `into_node_if_needed`, exactly like any other embedding site.
+    // `Rc<dyn elwindui::core::ui::UIElement>`, via `into_node_if_needed` on its own stored root
+    // field (the same path any other non-native embedding site uses) — whether that root is a
+    // hardcoded virtual builtin or a user-defined component whose own root is itself virtual
+    // (chained `inherits`), `into_node_if_needed` dispatches on the root's resolved type either way.
     let root_is_native = !is_template_composition && table.resolve(from, &view.root.type_path).is_some_and(|info| info.is_native);
     let root_embed_method = if is_template_composition || is_shape_composition {
         // `#target` implements `UIElement` itself now (see this function's tail `quote!`), so
@@ -2157,12 +2280,6 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         quote! {
             pub fn into_any_view(self: std::rc::Rc<Self>) -> elwindui::backend::AnyView {
                 #root_expr
-            }
-        }
-    } else if root_is_virtual_builtin {
-        quote! {
-            pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui::core::ui::UIElement> {
-                self.#root_binding.clone()
             }
         }
     } else {
@@ -2340,7 +2457,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         quote! {
             pub fn #create_fn_ident(#(#ctor_param_names: #ctor_param_types),*) -> #struct_ident {
                 #construct_stmts
-                #struct_ident { #(#required_own_names,)* #deferred_field_inits #field_inits }
+                #struct_ident { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits }
             }
         }
     } else {
@@ -2351,7 +2468,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     } else {
         quote! {
             #construct_stmts
-            let this = std::rc::Rc::new(Self { #(#required_own_names,)* #deferred_field_inits #field_inits });
+            let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits });
         }
     };
 
@@ -2387,7 +2504,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         }
 
         pub struct #struct_ident {
-            #(#required_own_names: #required_own_types,)*
+            #(#plain_required_names: #plain_required_types,)*
+            #mutable_required_field_decls
             #deferred_own_field_decls
             #struct_fields
         }
@@ -2414,6 +2532,12 @@ struct ViewCtx {
     /// `emit_virtual_construction`'s `get_attr`/`get_attr_string` recognize an already-`Option<T>`
     /// own field forwarded as-is, so it isn't double-wrapped in another `Some(..)`.
     own_fields: std::collections::HashMap<String, String>,
+    /// The subset of `own_fields` that's Cell/RefCell-backed (`generate_view`'s
+    /// `mutable_required_names` — a required, non-`#[param]` own field, still needing to be read
+    /// through its Cell/RefCell in `WithSelf` mode instead of the bare `self.<name>` every other
+    /// own field uses). Empty at `Construction` time's own use (`emit_expr`'s `EmitMode::
+    /// Construction` reads the raw constructor-argument local instead, always bare regardless).
+    mutable_own_fields: HashSet<String>,
 }
 
 impl ViewCtx {
@@ -2422,6 +2546,7 @@ impl ViewCtx {
             binds: self.binds.clone(),
             closure_param: Some(param.to_string()),
             own_fields: self.own_fields.clone(),
+            mutable_own_fields: self.mutable_own_fields.clone(),
         }
     }
 }
@@ -2491,14 +2616,13 @@ fn plan_element(
 
     let attributes = desugar_command_attr(&node.type_path, node.attributes.clone(), from, table);
     let binding = format_ident!("__{}_{}", node.type_path.to_lowercase(), out.len());
-    // A hand-written virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`)
-    // never gets a struct field: its `Node::Virtual` value is built once
-    // inline (see `emit_construction`) and immediately moved into whichever `Vec<Node<H>>` it's a
-    // child of, or (if it's the view's root) into a one-shot `RefCell` — see `generate_view`. It
-    // has no native setter to wire `on_*`/resync against, so it must never be `stored` regardless
-    // of `is_root`/its own attributes (which `emit_wiring`/`emit_resync` already skip via their
-    // `if !node.stored { return; }` guard — no changes needed there).
-    let stored = !is_virtual_builtin(&node.type_path) && (is_root || !attributes.is_empty());
+    // A virtual builtin (`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`)
+    // has a real `elwindui_core::ui` struct with real `set_*` setters (`TextBlockImpl::set_text`
+    // etc.) just like any hand-written native or composed builtin — it's stored under the exact
+    // same rule as everything else, so its attributes get resynced too (`emit_wiring`/
+    // `emit_resync` already handle any `stored` node uniformly via their `if !node.stored {
+    // return; }` guard — no changes needed there).
+    let stored = is_root || !attributes.is_empty();
 
     out.push(PlannedNode {
         binding: binding.clone(),
@@ -2662,9 +2786,10 @@ const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 /// builtin's own `children: Vec<Rc<dyn UIElement>>` — anywhere the declared type mentions `dyn
 /// UIElement`, checked by the caller before calling this). Four cases, by `source_type_path`'s
 /// resolved `is_native`/`is_native_control_leaf`:
-/// - A hand-written virtual builtin (`is_virtual_builtin`, always `!is_native`): `base` is
-///   *already* an `Rc<dyn UIElement>` local value (built by `emit_construction`'s virtual branch,
-///   via `elwindui::core::ui::new_element`) — used as-is.
+/// - A virtual builtin (`is_virtual_builtin`, always `!is_native`): `base` is a concrete
+///   `Rc<XxxImpl>` local value (built by `emit_virtual_construction`, kept unerased so a `stored`
+///   node's struct field and `emit_resync`'s `set_*` calls both see the real type) — upcast to
+///   `Rc<dyn UIElement>` the same way the native-control-leaf case below is, via unsized coercion.
 /// - A user-defined component whose own `view` root is virtual (`!is_native`, e.g. `DocumentView`,
 ///   whose root is `VerticalLayout`): its generated `into_node(self: Rc<Self>)` (see
 ///   `generate_view`) produces the `Rc<dyn UIElement>` value — same `.clone()` convention as
@@ -2723,7 +2848,12 @@ fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module,
             elwindui::core::ui::new_element(elwindui::core::ui::create_native_control(#ui_base, #view))
         }
     } else if is_virtual_builtin(source_type_path) {
-        quote! { #base }
+        quote! {
+            {
+                let __node: std::rc::Rc<dyn elwindui::core::ui::UIElement> = #base.clone();
+                __node
+            }
+        }
     } else {
         quote! { #base.clone().into_node() }
     }
@@ -2782,23 +2912,34 @@ fn is_hand_written_native(info: &TypeInfo) -> bool {
     info.is_native && !info.has_view
 }
 
-/// A hand-written native's own DSL-attribute-driven setters (`build_component_setters`) may call
-/// one of `elwindui::core::ui`'s shared property-setter traits' methods via dot-syntax — declared
-/// there (docs/elwindui_spec.md 付録H.2.1a) rather than as a wrapper-only inherent method, so the
-/// trait needs to be in scope wherever that dot-call happens. Emitted as an anonymous `use ... as
-/// _;` (never binds a name of its own, so repeating it for multiple bindings of the same type in
-/// one function is harmless) right alongside `#binding`'s own `let` in `emit_construction`, which
-/// keeps it in scope for `emit_wiring`'s later calls on the same binding too (both live in the same
-/// enclosing function body). Only `Button`/`TextArea`/`MenuItem`/`MenuBarItem` actually route any
-/// of their own DSL properties through a shared trait method this way — `Window`/`TabView`/
-/// `TabViewItem`'s own properties, and `Menu`/`MenuBar`'s `children`, are all wrapper-only inherent
-/// methods (no shared trait involved), so nothing needs importing for those.
-fn hand_written_native_trait_use(type_path: &str) -> TokenStream {
+/// A hand-written native's own DSL-attribute-driven setters (`build_component_setters`), or a
+/// virtual builtin's own `set_*` calls (`build_virtual_value`/`emit_resync`), may call one of
+/// `elwindui::core::ui`'s shared property-setter traits' methods via dot-syntax — declared there
+/// (docs/elwindui_spec.md 付録H.2.1a) rather than as a wrapper-only inherent method, so the trait
+/// needs to be in scope wherever that dot-call happens. Emitted as an anonymous `use ... as _;`
+/// (never binds a name of its own, so repeating it for multiple bindings of the same type in one
+/// function is harmless) right alongside `#binding`'s own `let` in `emit_construction`, which keeps
+/// it in scope for `emit_wiring`'s later calls on the same binding too (both live in the same
+/// enclosing function body) — and again verbatim in `emit_resync`'s own separate function scope
+/// (`emit_resync`'s own doc comment), since a virtual builtin's `set_*` calls there need the same
+/// trait but `build_virtual_value`'s own inline `use` (construction time only) doesn't reach that
+/// far. `Button`/`TextArea`/`MenuItem`/`MenuBarItem` (hand-written natives) and every virtual
+/// builtin (`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`) route their
+/// own DSL properties through a shared trait method this way — `Window`/`TabView`/`TabViewItem`'s
+/// own properties, and `Menu`/`MenuBar`'s `children`, are all wrapper-only inherent methods (no
+/// shared trait involved), so nothing needs importing for those.
+fn builtin_trait_use(type_path: &str) -> TokenStream {
     match type_path {
         "Button" => quote! { use elwindui::core::ui::Button as _; },
         "TextArea" => quote! { use elwindui::core::ui::TextArea as _; },
         "MenuItem" => quote! { use elwindui::core::ui::MenuItem as _; },
         "MenuBarItem" => quote! { use elwindui::core::ui::MenuBarItem as _; },
+        "VerticalLayout" => quote! { use elwindui::core::ui::VerticalLayout as _; },
+        "HorizontalLayout" => quote! { use elwindui::core::ui::HorizontalLayout as _; },
+        "TextBlock" => quote! { use elwindui::core::ui::TextBlock as _; },
+        "Control" => quote! { use elwindui::core::ui::Control as _; },
+        "Grid" => quote! { use elwindui::core::ui::Grid as _; },
+        "Shape" => quote! { use elwindui::core::ui::Shape as _; },
         _ => TokenStream::new(),
     }
 }
@@ -2834,7 +2975,7 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
 
     if is_hand_written_native(info) {
         let setters = build_component_setters(node, ctx, from, table, info);
-        let trait_use = hand_written_native_trait_use(&node.type_path);
+        let trait_use = builtin_trait_use(&node.type_path);
         out.extend(quote! {
             #trait_use
             let #binding = #type_ident::new();
@@ -2893,6 +3034,29 @@ fn is_deferred_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
         Some(view) => !view_references_name_anywhere(view, name),
         None => true,
     }
+}
+
+/// Whether a `has_view` target's own `param_fields` member `name` (no initializer, so ordinarily
+/// construction-only — see `emit_resync`'s param-skip guard) still gets a real generated `set_<name>`
+/// despite that, so `emit_resync` should keep resyncing it rather than skip it. Two independent
+/// reasons a no-initializer field ends up with a setter after all — mirrors `generate_view`'s own
+/// field split, from `TypeInfo` alone (no local `generate_view` state needed):
+/// - It's *deferred* (`is_deferred_field`): `Option<T>`, never referenced in its own view, so
+///   `generate_view` drops it from `new(..)`'s positional args entirely and gives it a setter
+///   instead.
+/// - It's a required `prop` (not `#[param]`) field (`generate_view`'s `mutable_required_names`):
+///   needed eagerly at construction (so it can't be deferred), but declared runtime-mutable per
+///   docs/elwindui_spec.md §4's param/prop split — `generate_view` keeps it a positional `new(..)`
+///   argument *and* gives it a resync-triggering setter. Gated on `!info.is_builtin`: this rule
+///   only holds for a genuinely `generate_view`-generated user component — `elwindui-codegen`'s own
+///   embedded `builtins.elwind` also declares a `view` for `Rectangle`/`Ellipse`/`ContentControl`
+///   (`has_view: true` too), but purely for symbol-table/validation purposes (docs/
+///   elwindui_spec.md 付録H.2.1a) — their real implementation is hand-written directly in
+///   `elwindui_core::ui`, never run through `generate_view`, so a "no `#[param]`" field there
+///   (e.g. `Rectangle::corner_radius`) may have no real setter at all regardless of `FieldKind`.
+fn is_settable_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
+    is_deferred_field(info, name, ty)
+        || (!info.is_builtin && info.effective_fields.iter().any(|f| f.name == name && f.kind == FieldKind::Prop))
 }
 
 /// Evaluates a resolved user-component node's own attributes into the positional argument list its
@@ -3294,15 +3458,23 @@ fn emit_generic_on_click_routing(node: &PlannedNode, ctx: &ViewCtx, binding: &To
     }
 }
 
-/// Builds an `Rc<dyn elwindui::core::ui::UIElement>` value (via `elwindui::core::ui::new_element`)
-/// for a hand-written virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/
-/// `TextBlock`/`Control` — see `is_virtual_builtin`) directly from its own attributes, instead of
-/// calling a (nonexistent) `Type::new(args)`.
+/// Builds an `Rc<ConcreteImpl>` value for a virtual builtin (`VerticalLayout`/`HorizontalLayout`/
+/// `TextBlock`/`Control`/`Grid`/`Shape` — see `is_virtual_builtin`) directly from its own
+/// attributes, instead of calling a (nonexistent) `Type::new(args)`. Kept at its own concrete type
+/// (`new_element_concrete`, not `new_element`'s `Rc<dyn UIElement>` erasure) so a `stored` node can
+/// be kept on `Self` the same way any other builtin's stored field is (`generate_view`'s
+/// `struct_fields`/`field_inits`, which expect `Rc<#type_ident>`) and so `emit_resync` can call its
+/// real `set_*` setters later — erasure into `Rc<dyn UIElement>` happens lazily at whichever use
+/// site actually needs it (`into_node_if_needed`'s own virtual-builtin branch). Still goes through
+/// `new_element_concrete` rather than a bare `Rc::new` — skipping it would leave `self_handle`
+/// unset, silently turning every `invalidate()` call on this element (and thus `emit_resync`'s own
+/// `set_*` calls on it, which all end in one) into a no-op (see that function's own doc comment).
 fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
     let binding = &node.binding;
     let value = build_virtual_value(node, ctx, from, table);
+    let concrete_ty = concrete_type_ident(&node.type_path, table.resolve(from, &node.type_path));
     out.extend(quote! {
-        let #binding: std::rc::Rc<dyn elwindui::core::ui::UIElement> = elwindui::core::ui::new_element(#value);
+        let #binding: std::rc::Rc<#concrete_ty> = elwindui::core::ui::new_element_concrete(#value);
     });
     let binding_ts = quote! { #binding };
     out.extend(emit_common_ui_element_setters(node, ctx, &binding_ts));
@@ -3466,7 +3638,9 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
 /// emitting the call), so no hand-written or `.elwind` source ever needs to know about the `Impl`
 /// suffix.
 fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
-    let ident = if info.is_some_and(|i| i.composed_shape.is_some() || i.is_host_composition_base || is_hand_written_native(i)) {
+    let ident = if info.is_some_and(|i| i.composed_shape.is_some() || i.is_host_composition_base || is_hand_written_native(i))
+        || is_virtual_builtin(type_path)
+    {
         format_ident!("{}Impl", type_path)
     } else {
         format_ident!("{}", type_path)
@@ -3629,7 +3803,7 @@ fn emit_wiring(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
     // `create_<snake case>(..)` free function — see `generate_view`'s `create_fn`/
     // `new_construct_stmt` split) — so the `use` injected there doesn't carry over here. See
     // `emit_resync`'s own copy of this same comment.
-    out.extend(hand_written_native_trait_use(&node.type_path));
+    out.extend(builtin_trait_use(&node.type_path));
 
     // The widget handle is cloned out to its own binding *before* `this` is cloned into the
     // closure: `this.#binding.set_on_click(Box::new(move || { ...this... }))` would try to
@@ -3729,12 +3903,27 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
     let self_mode = EmitMode::WithSelf(quote! { self });
     let info = table.resolve(from, &node.type_path);
     // `resync()` is its own function, a separate lexical scope from `new()` — the `use` already
-    // injected alongside construction (`emit_construction`'s `hand_written_native_trait_use`)
-    // doesn't carry over here, so any hand-written native whose setters are shared-trait-only
-    // needs its own copy of the same import for this function's own `self.#binding.#setter(..)`
-    // calls below.
-    out.extend(hand_written_native_trait_use(&node.type_path));
+    // injected alongside construction (`emit_construction`'s `builtin_trait_use`, or
+    // `build_virtual_value`'s own inline copy for a virtual builtin) doesn't carry over here, so
+    // any hand-written native or virtual builtin whose setters are shared-trait-only needs its own
+    // copy of the same import for this function's own `self.#binding.#setter(..)` calls below.
+    out.extend(builtin_trait_use(&node.type_path));
 
+    // `margin`/`data_context` (§13's common `UIElementBase` attributes, settable on *any* node
+    // regardless of its own type) are handled separately below, not by the generic per-attribute
+    // loop — they aren't part of any type's own `field_types` (so the loop's `is_copy` lookup would
+    // always miss) and their real setters (`UIElement::set_margin`/`set_data_context`) need the
+    // `UIElement` trait imported and take their argument *by value*, unlike this loop's
+    // reference-taking convention.
+    emit_common_ui_element_resync(node, ctx, &self_mode, binding, out);
+
+    // Every codegen-*generated* setter (a virtual builtin's own `elwindui_core::ui` setters, or a
+    // `has_view` component's own generated `set_<name>` — both the deferred and the mutable-
+    // required kind, see `is_settable_field`) takes its non-Copy argument *by value*. Only a
+    // hand-written native's shared-trait setter (`Button`/`TextArea`/`MenuItem`/`MenuBarItem`'s
+    // `&str`-taking `set_text`/etc.) wants the `&(..)`-wrapped reference the `else` branch below
+    // still uses.
+    let node_uses_owned_setters = is_virtual_builtin(&node.type_path) || info.is_some_and(|i| i.has_view);
     for (name, expr) in &node.attributes {
         if name.starts_with("on_") {
             continue;
@@ -3742,12 +3931,21 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
         if matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. }) {
             continue;
         }
-        // A `view`-having (`has_view`) target's own `#[param]` fields are fixed at construction —
-        // `generate_view` never emits a `set_<param>` for them (unlike every hand-written builtin,
-        // which by convention always defines one, even a no-op, for the "blanket resync" rule
-        // above to call generically) — so resyncing one here would be calling a method that simply
-        // doesn't exist (e.g. `RoundedPanel`'s `#[param] label: String`).
-        if info.is_some_and(|i| i.has_view && i.param_fields.iter().any(|(n, _)| n == name)) {
+        if name == "margin" || name == "data_context" {
+            continue;
+        }
+        // A `view`-having (`has_view`) target's own no-initializer field ordinarily has no
+        // `set_<name>` at all (unlike every hand-written builtin, which by convention always
+        // defines one, even a no-op, for the "blanket resync" rule above to call generically) — so
+        // resyncing it here would be calling a method that simply doesn't exist. `is_settable_field`
+        // carves out the two cases that *do* get a real setter despite having no initializer
+        // (deferred `Option<T>` fields, and required `prop` fields — see its own doc comment), which
+        // this loop should keep resyncing normally.
+        if info.is_some_and(|i| {
+            i.has_view
+                && i.param_fields.iter().any(|(n, _)| n == name)
+                && !is_settable_field(i, name, i.field_types.get(name).map(String::as_str).unwrap_or(""))
+        }) {
             continue;
         }
 
@@ -3756,14 +3954,89 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
         // The resync value itself is never `Option`-wrapped (only construction-time args are, per
         // the shape's own `Option<..>` convention for "may be absent"), so copy-ness is judged on
         // the stripped inner type — `Option<String>`'s runtime value here is a plain `String`.
-        let is_copy = info
-            .and_then(|i| i.field_types.get(name))
-            .is_some_and(|ty| is_copy_type(strip_option(ty).0));
+        let field_ty = info.and_then(|i| i.field_types.get(name)).map(String::as_str);
+        let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
         if is_copy {
             out.extend(quote! { self.#binding.#setter(#value); });
+        } else if field_ty.is_some_and(|ty| strip_option(ty).0.starts_with("Vec<")) {
+            // A `Vec<T>` field's real setter always takes it *by value* everywhere in this
+            // framework (`TabViewImpl::set_items_source`, `GridImpl::set_rows`/`set_columns`), so
+            // this isn't gated on `node_uses_owned_setters` — `.to_vec()` coerces a DSL
+            // array-literal value into an owned `Vec<T>` and is a harmless no-op clone when the
+            // value is already one (e.g. `vm.documents()`).
+            out.extend(quote! { self.#binding.#setter((#value).to_vec()); });
+        } else if node_uses_owned_setters {
+            // Every codegen-generated `set_*` setter (a virtual builtin's `TextBlockImpl::set_text`/
+            // `ShapeImpl::set_fill`/..., or a `has_view` component's own generated `set_<name>` —
+            // `is_settable_field`'s two cases) takes its non-Copy argument *by value* — never by
+            // reference like a hand-written native's shared-trait setters (`&str`) — so this
+            // branch derives the right owned shape purely from the field's own declared type
+            // string (`virtual_builtin_resync_value`, despite the name — the conversion rules are
+            // identical for both) instead of the `&(..)`-wrapping the `else` branch below uses.
+            let converted = virtual_builtin_resync_value(field_ty.unwrap_or(""), value);
+            out.extend(quote! { self.#binding.#setter(#converted); });
         } else {
             out.extend(quote! { self.#binding.#setter(&(#value)); });
         }
+    }
+}
+
+/// Re-applies `margin`/`data_context` (§13's common `UIElementBase` attributes) during `resync()`
+/// for *any* stored node, mirroring `emit_common_ui_element_setters`'s own construction-time
+/// conversions (`UIElement::set_margin(&self, margin: f32)`/`set_data_context(&self, data_context:
+/// Option<Rc<dyn Any>>)` — both by-value, needing the `UIElement` trait in scope). Split out from
+/// `emit_resync`'s main per-attribute loop since these two aren't part of any type's own
+/// `field_types`.
+fn emit_common_ui_element_resync(node: &PlannedNode, ctx: &ViewCtx, self_mode: &EmitMode, binding: &syn::Ident, out: &mut TokenStream) {
+    let mut body = TokenStream::new();
+    if let Some(expr) = find_attr(node, "margin") {
+        let value = emit_expr(expr, ctx, self_mode);
+        body.extend(quote! { self.#binding.base().set_margin(#value); });
+    }
+    if let Some(expr) = find_attr(node, "data_context") {
+        let value = emit_expr(expr, ctx, self_mode);
+        body.extend(quote! { self.#binding.base().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
+    }
+    if !body.is_empty() {
+        out.extend(quote! {
+            {
+                use elwindui::core::ui::UIElement as _;
+                #body
+            }
+        });
+    }
+}
+
+/// Converts a resync value into a virtual-builtin setter's by-value parameter shape, derived
+/// purely from the field's own declared type string (`TypeInfo::field_types`, sourced from
+/// `builtins.elwind`) — no per-widget-type or per-field-name table to maintain: any current or
+/// future virtual builtin's non-Copy field is covered automatically as long as its declared type
+/// matches one of these two shapes, mirroring `build_virtual_value`'s own construction-time
+/// conversions (a `Vec<T>`-typed field is handled earlier, by the caller's own type-agnostic
+/// `.to_vec()` branch — see that call site's doc comment):
+/// - `Option<String>` (`Shape::fill`/`stroke`, `TextBlock::color`) — the real setter takes an owned
+///   `Option<String>`, so a supplied (non-absent, since this is only reached when the attribute was
+///   actually given) value is `Some`-wrapped and `.to_string()`-coerced.
+/// - bare `String` (`TextBlock::text`) — the real setter takes an owned `String`.
+///
+/// Every other non-Copy shape that can appear in `field_types` (a `fn(..)` callback, an `Element`/
+/// `Closure` value) never reaches this function — `emit_resync`'s own loop already filters those
+/// out before computing `is_copy`. Any *Copy* field (`f32`/`bool`/an enum, `Option<f32>` included —
+/// see `is_copy_type`'s own doc comment) is handled by the caller's separate `is_copy` branch and
+/// never reaches here either, since a virtual-builtin setter always stores those bare regardless of
+/// whether the field is optional at the DSL level.
+fn virtual_builtin_resync_value(ty: &str, value: TokenStream) -> TokenStream {
+    let ty = ty.trim();
+    if let Some(inner) = ty.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
+        if inner.trim() == "String" {
+            quote! { Some((#value).to_string()) }
+        } else {
+            quote! { Some(#value) }
+        }
+    } else if ty == "String" {
+        quote! { (#value).to_string() }
+    } else {
+        quote! { #value }
     }
 }
 
@@ -3848,6 +4121,23 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                 // (`content: String = bind!(doc.content, TwoWay)`) is also one of `own_fields` but
                 // must still resolve through its bound owner instead of a raw field access.
                 if ctx.own_fields.contains_key(only) && !ctx.binds.contains_key(only) {
+                    // A mutable-required own field (`ViewCtx::mutable_own_fields`,
+                    // `generate_view`'s `mutable_required_names`) is Cell/RefCell-backed, not a
+                    // bare field — `self.<name>` alone would hand back the cell itself, not its
+                    // value. Only matters in `WithSelf` mode (`resync()`/a stored closure); at
+                    // `Construction` time the value is still the raw, not-yet-cell-wrapped
+                    // constructor-argument local, read the ordinary bare way.
+                    if let EmitMode::WithSelf(self_tok) = mode {
+                        if ctx.mutable_own_fields.contains(only) {
+                            let ident = format_ident!("{}", only);
+                            let ty_str = ctx.own_fields.get(only).unwrap();
+                            return if is_copy_type(ty_str) {
+                                quote! { #self_tok.#ident.get() }
+                            } else {
+                                quote! { #self_tok.#ident.borrow().clone() }
+                            };
+                        }
+                    }
                     return mode.owner_tokens(only);
                 }
             }

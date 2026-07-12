@@ -1501,6 +1501,56 @@ WinUI3に倣い、「`.elwind`で書かれた見た目上の参照関係」(Logi
 の組)、および`children: UIElementCollection`を持ち、WinUI3の`Control`基底クラス(独自描画では
 なく複数の小部品を持てるカスタム部品)に相当する。
 
+## H.2.3 再描画要求(`invalidate`)と`RelayoutHost`のコアレシング契約
+
+`UIElement`は`invalidate`/`invalidate_measure`/`invalidate_arrange`(WinUI3の
+`InvalidateVisual`/`InvalidateMeasure`/`InvalidateArrange`相当)を持つ。見た目(サイズ・配置・
+描画内容)に影響する値を変更するプロパティセッター(`TextBlock::set_text`、`Shape::set_fill`、
+`UIElementImpl::set_margin`等)は、値を書き換えた後に必ずこのいずれかを呼び、自分がホストされている
+ツリーへ再レイアウトを要求しなければならない。呼び忘れると、モデル側の値は正しく更新されているのに
+画面には一切反映されない(コード生成が`resync()`から`set_text(...)`等を呼んでも無効化されない)、
+という不具合になる。
+
+```rust
+trait UIElement {
+    fn invalidate(&self);          // 既定実装: request_relayout(self.base())
+    fn invalidate_measure(&self);  // 同上
+    fn invalidate_arrange(&self);  // 同上
+}
+```
+
+`elwindui-core`のレイアウトエンジンは要素ごとのMeasure/Arrangeキャッシュを持たない(H.2の
+`layout_tree`は常にツリー全体を再計算する)ため、上記3メソッドは現状すべて同一の
+`request_relayout`——ホストされているツリーの根まで`parent()`を辿り、そこに登録された
+`RelayoutHost`(`UIElementImpl::invalidate_host`)へ再レイアウトを依頼する——に帰着する。3つを
+分離してあるのは将来Measure/Arrangeを別々にキャッシュ・再計算できるようにするための拡張余地であり、
+現時点で意味の使い分けはない。
+
+**`RelayoutHost::request_relayout()`の契約**: 「呼ばれた**今すぐ**」ではなく「しかるべき
+タイミングで**1回だけ**」ツリー全体の再レイアウトを行うことを、実装する各バックエンドに義務付ける。
+具体的には:
+
+1. 同一の同期実行区間内(例:1回の`resync()`が複数の`set_*`を呼ぶケース)で
+   `request_relayout()`が複数回呼ばれても、実際の再レイアウトは高々1回にまとめる(コアレシング/
+   デバウンス)。
+2. 実際の再レイアウトは、その場で同期的に行うのではなく、ホストのUIイベントループの次のタイミング
+   (次の描画サイクル/次のディスパッチキュー実行)に委ねる。
+3. 「今すぐ全部やり直す」実装(呼ばれるたびに同期的にツリー全体を再構築する実装)はこの契約に
+   違反する——ツリーが大きい場合や1回の`resync()`が複数のセッターを呼ぶ場合に、無駄な再構築が
+   その回数分発生してしまうため。
+
+各バックエンドでの実装方針:
+
+| バックエンド | `request_relayout`の実装 |
+|---|---|
+| AppKit | `NSView.setNeedsLayout(true)`を呼ぶだけでよい——AppKit自身が次の描画サイクルまでに1回へコアレシングする(追加のフラグ管理は不要)。 |
+| WinUI3 | 実ネイティブの`Canvas.Children`を毎回同期的に総入れ替えする実装のため、`pending: Cell<bool>`で多重エンキューを防いだ上で、この`DispatcherQueue.TryEnqueue`で実際の再レイアウトをUIスレッド上で1回だけ実行する(`elwindui_backend_winui3::WinUI3RelayoutHost`参照)。 |
+| GTK4(将来実装時) | `gtk_widget_queue_allocate`/`glib::idle_add_local`等、同種の「次のイベントループ反復まで間引く」機構を使うこと。 |
+| egui/iced(将来実装時) | フレームベースの再描画モデルのため、`invalidate`はダーティフラグを立てるだけで足り、既存の再描画ループが自然に1フレーム1回へ集約する。 |
+
+新しいバックエンドを追加する際・既存バックエンドの`RelayoutHost`実装をレビューする際は、この
+コアレシング契約を満たしているかを確認すること。
+
 ## H.3 フォーカス管理
 
 ```rust
@@ -1991,6 +2041,41 @@ Button {
 - `enabled`フィールドを持つ対象であれば、`can_execute`への結線も自動的に追加される。持たない対象では`execute`側の結線のみ行われる。
 - 特定のウィジェット名に対するハードコードではなく、「`on_*`フィールドを1つだけ持つ」という構造だけを見て展開されるため、ビルトインに限らずユーザー定義の`component`(ネイティブ・仮想いずれも)が自前で唯一の`on_*`イベントを宣言していれば同様に使える。
 - 同じ要素に`command`と明示的な`on_click`/`enabled`を両方書いた場合、明示的な指定が優先される(`command`側の展開はまだ設定されていない属性を補うだけで、上書きはしない)。
+
+### O.4.2 `resync()`と購読(いつ再同期されるか)
+
+`view`内の各属性式は、値が変化したときに自動的に再評価されるわけではない——コード生成器は
+「現在の状態から全属性値を引き直して該当ウィジェットへ再適用する」という1つの`resync()`メソッドを
+コンポーネントごとに生成し(`on_*`イベント属性・`Element`/`Closure`値の属性を除く)、これが
+呼ばれたときにまとめて再反映する(ブランケット方式、依存関係の細かい追跡はしない)。`resync()`が
+いつ呼ばれるかは以下の2つの仕組みで決まる:
+
+1. **自コンポーネントの`on_*`ワイヤリング**: このコンポーネント自身の`view`に書かれた
+   `on_click`/`on_select`等のコールバックが実際に呼ばれた直後、必ず`resync()`が続けて呼ばれる。
+   ただし`#[command(async)]`のように呼び出しが`await`を挟んで中断される場合、この「直後」は
+   コールバックが**同期的に返った時点**を指す——`.await`から先に進んで実際に状態を書き換える処理が
+   走るのは、多くの場合この`resync()`より**後**になる。
+2. **`vm.subscribe(...)`による直接購読**: このコンポーネントの`component`宣言が
+   `bind!(owner.field, mode)`(`OneTime`を除く)を持つ場合、または`#[param]`フィールドの型が
+   そのまま`viewmodel`である場合(例:`vm: Rc<NotepadViewModel>`——`bind!`を介さず`view`内で
+   `vm.foo`のように直接読んでいるだけでもよい)、そのコンポーネントは構築時に一度だけ
+   `owner.subscribe(move || self.resync())`を登録する。これは`owner`(`viewmodel`)自身の
+   `#[observable]`セッターが**どこから**(このコンポーネント自身の`on_*`ワイヤリング経由か、
+   全く別のコンポーネントの`on_*`経由か、`#[command(async)]`が`.await`から再開した後か)呼ばれても
+   等しく発火するため、1.の「同期的に返った直後」という制約を受けない。
+
+さらに、`viewmodel`が`Vec<SubViewModel>`型の`#[observable]`フィールド(付録Y.2の「ネストした
+サブviewmodelの動的リスト」、例:`NotepadViewModel.documents: Vec<DocumentViewModel>`)を持つ場合、
+その`_push`アクセサ(例:`documents_push`)は追加された要素自身の`subscribe(...)`にも登録し、
+その要素が変化したときに**親**の`__resync_subscribers`も発火するようにする(バブリング)。これにより
+「`vm.documents`の各要素を`header_template`のような`bind!`を介さないクロージャで読んでいるだけの
+親コンポーネント」(`TabView`の`items_source`/`header_template`が典型例)も、個々の`document`の
+変更(ファイルの読み込みによる`file_name`/`content`の書き換え等)を見逃さず`resync()`される。
+
+まとめると: あるコンポーネントの`view`が、ある`viewmodel`(または、その`viewmodel`が保持する
+ネストしたサブ`viewmodel`のコレクションの要素)の状態を直接・間接に参照している限り、その変化が
+いつ・どこで(同期的なイベントハンドラからでも、非同期タスクの再開後でも)起きても、最終的に
+そのコンポーネントの`resync()`が呼ばれることが保証される。
 
 ## O.5 低オーバーヘッドな内部表現
 

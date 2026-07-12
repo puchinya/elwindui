@@ -263,15 +263,20 @@ impl TabViewImpl {
         let new_entries: Vec<Rc<TabViewItemImpl>> = items
             .iter()
             .map(|item| {
-                entries
-                    .iter()
-                    .find(|e| e.data_context.borrow().as_ref().is_some_and(|dc| Rc::ptr_eq(dc, item)))
-                    .cloned()
-                    .unwrap_or_else(|| {
+                match entries.iter().find(|e| e.data_context.borrow().as_ref().is_some_and(|dc| Rc::ptr_eq(dc, item))) {
+                    // Re-run `header_template` even for a reused entry — the label (e.g. a
+                    // document's file name) can change independently of the item's own identity,
+                    // and `entry.header` is otherwise never refreshed after construction.
+                    Some(existing) => {
+                        existing.set_header(&header_template(item));
+                        Rc::clone(existing)
+                    }
+                    None => {
                         let header = header_template(item);
                         let content = item_template(item);
                         TabViewItemImpl::new_erased(Some(Rc::clone(item)), &header, content, Some(dynamic.closable_default))
-                    })
+                    }
+                }
             })
             .collect();
         *entries = new_entries;
@@ -347,13 +352,15 @@ impl TabViewImpl {
             displayed.insert(insert_at, key);
         }
 
+        let selected_key = entries.get(selected).map(|e| Rc::as_ptr(e) as usize);
+
         for (i, key) in displayed.iter().enumerate() {
             if let Some(entry) = entries.iter().find(|e| Rc::as_ptr(e) as usize == *key) {
                 chips[i].0.set_title(&entry.header.borrow());
             }
+            chips[i].0.set_selected(Some(*key) == selected_key);
         }
 
-        let selected_key = entries.get(selected).map(|e| Rc::as_ptr(e) as usize);
         let mut visible = self.visible.borrow_mut();
         if *visible != selected_key {
             if let Some(old_key) = *visible {

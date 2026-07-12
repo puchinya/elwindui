@@ -1380,7 +1380,7 @@ view NotepadWindow {
 
 `items_source`の各要素は`key`クロージャなしで自動的にreconcileされる — 各要素の`Rc<T>`ポインタ同一性(`Rc::as_ptr`)がそのまま同一性判定に使われ、`items_source`が更新されても同じ`Rc`インスタンスに対応するタブは同じウィジェットを使い回す(以前のバージョンではこれを`key: |doc| Rc::as_ptr(doc) as usize`のように手書きする必要があったが、今はフレームワーク側が自動的に行う)。
 
-`TabViewItem`は静的ネスト・`items_source`どちらの場合も同じ内部表現として使われる — `items_source`モードでは`header_template`/`item_template`を使って`TabView`が内部的に1件ずつ`TabViewItem`を合成し(初回のみ;同じ`Rc<T>`ポインタが続く限り再合成しない)、静的モードで直接書かれた`TabViewItem`と全く同じしくみで表示される。
+`TabViewItem`は静的ネスト・`items_source`どちらの場合も同じ内部表現として使われる — `items_source`モードでは`header_template`/`item_template`を使って`TabView`が内部的に1件ずつ`TabViewItem`を合成し、静的モードで直接書かれた`TabViewItem`と全く同じしくみで表示される。`header_template`/`item_template`で扱いが異なる点に注意: `item_template`(中身の`view`ツリー)は同じ`Rc<T>`ポインタが続く限り初回のみ合成し、以降は使い回す(タブ切り替えのたびに`TextArea`のカーソル位置・フォーカスを失わないため)。一方`header_template`(タブ見出し文字列)は`Rc<T>`ポインタが既存エントリと一致して`TabViewItem`自体は使い回す場合でも、`items_source`が再同期される(=`resync()`が呼ばれる)たびに毎回呼び直され、見出しの最新値で上書きする — `doc.file_name`のようにタブの同一性とは独立に変化しうる値のため、`item_template`と同じ「初回のみ」ルールを適用すると見出しが更新されなくなる(実際に発生していた不具合、付録H.2.3・O.4.2の`resync()`伝播ルールと合わせて参照)。
 
 `data_context`は`UIElementBase`の共通属性(§13参照)で、`items_source`モードでは各`TabViewItem`に自動的に設定される。`header_template`/`item_template`クロージャ本体の中で`data_context`と書くと、そのクロージャ自身の束縛引数への別名として脱糖される。
 

@@ -20,10 +20,11 @@
 //! Ancestor delegation is **not** implemented as a fully generic cross-crate manifest/token-
 //! accumulator (the `ambassador` crate's technique) — it doesn't need to be, because every
 //! `inherits = ..` target's `base` field type genuinely implements `UIElement` itself
-//! (`UIElementImpl`/`LayoutImpl` included — see their own hand-written one-line `impl UIElement`
-//! blocks in `elwindui-core::ui`), so a single blind `self.base.method(..)` forward
-//! (`uielement_blind_forward`) is always correct; the macro never needs to know *which* ancestor
-//! it is.
+//! (`UIElementImpl` included — its own trivial, identity-function `impl UIElement for
+//! UIElementImpl` is synthesized by this same macro's root-class-mode handling in `expand_impl`,
+//! not hand-written; `LayoutImpl`'s is the ordinary `uielement_blind_forward` case like any other
+//! non-root class), so a single blind `self.base.method(..)` forward (`uielement_blind_forward`) is
+//! always correct; the macro never needs to know *which* ancestor it is.
 //!
 //! That blind forward only covers `UIElement` itself, though — an intermediate `inherits = ..`
 //! trait with *its own* required methods beyond `UIElement`'s (`Shape::set_kind`/
@@ -612,7 +613,17 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                     #(#default_methods)*
                 }
             },
-            TokenStream2::new(),
+            // `ClassNameImpl` is a genuine `ClassName` implementor itself — trivially, since
+            // `as_ui_element` (or whatever the root's own required accessor is) is just the identity
+            // function here. This is what lets every `#[class(inherits = ..)]`-managed subclass's
+            // ancestor delegation reduce to a single uniform `self.base.method(..)` forward
+            // (`uielement_blind_forward`), regardless of how many `base` hops it has to pass through
+            // to reach the root.
+            quote! {
+                impl #impl_generics #class_name #ty_generics for #impl_name #ty_generics #where_clause {
+                    fn as_ui_element(&self) -> &#impl_name { self }
+                }
+            },
         )
     } else if class_name.to_string().ends_with("Impl") {
         // The class's own local name is already `Impl`-suffixed (the "explicit facade type" form

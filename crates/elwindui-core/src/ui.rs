@@ -339,17 +339,6 @@ pub fn register_routed_handler<T: 'static>(handlers: &RoutedHandlers, name: &'st
     handlers.borrow_mut().entry(name).or_default().push(Box::new(handler));
 }
 
-/// `UIElementImpl` is a genuine `UIElement` implementor itself — trivially, since `as_ui_element` is
-/// the identity function here — which is what lets every other `#[class(inherits = ..)]`-managed
-/// subclass's ancestor delegation reduce to a single uniform `self.base.method(..)` forward
-/// (`elwindui_macros::class`'s `uielement_blind_forward`), regardless of how many `base` hops it
-/// has to pass through to reach the root (docs/elwindui_spec.md 付録H.2.1a).
-impl UIElement for UIElementImpl {
-    fn as_ui_element(&self) -> &UIElementImpl {
-        self
-    }
-}
-
 #[elwindui_macros::class]
 impl UIElement {
     fn margin(&self) -> f32 {

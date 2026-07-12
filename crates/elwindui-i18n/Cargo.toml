@@ -1,0 +1,8 @@
+[package]
+name = "elwindui-i18n"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fluent-bundle = "0.15"
+unic-langid = "0.9"

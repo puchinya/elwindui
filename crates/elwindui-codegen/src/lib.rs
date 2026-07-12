@@ -67,9 +67,11 @@ pub fn generate_viewmodel_from_item_mod(item_mod: &syn::ItemMod) -> Result<proc_
     Ok(codegen::generate_module(&module, &table))
 }
 
-/// Compiles every `.elwind` file under `src` into Rust source under `out_dir`, plus a shared
-/// `i18n_support.rs` (fluent-bundle-backed `t()` helper, §11) that the generated files call into.
-/// Intended to be called from a crate's `build.rs`. See docs/elwindui_spec.md 付録B.1.
+/// Compiles every `.elwind` file under `src` into Rust source under `out_dir`. The generated
+/// code's `t!(..)` calls resolve through `elwindui::i18n` (`elwindui-i18n`, §11) — the caller only
+/// needs a one-time `elwindui::i18n::declare!();` (typically at the top of `main()`) for that
+/// crate's own `strings/<lang>.ftl` to be found, no per-crate generated i18n glue. Intended to be
+/// called from a crate's `build.rs`. See docs/elwindui_spec.md 付録B.1.
 pub fn compile_dir(src: impl AsRef<Path>, out_dir: impl AsRef<Path>) -> io::Result<()> {
     compile_dir_impl(src, out_dir, Vec::new())
 }
@@ -165,93 +167,18 @@ fn compile_dir_impl(
         fs::write(out_dir.join(format!("{out_name}.rs")), pretty)?;
     }
 
-    // A builtin with its own `view` (a *composed* logical component like `ContentControl`/
-    // `Rectangle`/`Ellipse`, docs/elwindui_spec.md 付録H.2.1a) needs real generated Rust just like
-    // any consumer's own component — unlike a shape-only builtin (`has_view == false`: either a
-    // hand-written native leaf implemented directly in `elwindui-builtins`, or a virtual builtin
-    // constructed inline at each use site via `emit_virtual_construction`, neither of which is ever
-    // referenced by a generated `Type::new(..)` call). `elwindui-builtins` itself has no `build.rs`
-    // to emit this once centrally, so every consumer generates its own copy here instead, into one
-    // shared output file every consumer's own generated files can already see unqualified (付録B.1's
-    // flat crate-root `include!` convention).
-    let mut builtins_generated = proc_macro2::TokenStream::new();
-    for module in builtin_modules() {
-        // Only the composed components (`ContentControl`/`Rectangle`/`Ellipse`, ...) need real
-        // generated Rust here — filtered out of the module rather than generating it whole, since
-        // `builtins.elwind` bundles every shape-only builtin (virtual and native leaves included)
-        // into this same module, and `generate_module` would otherwise also try (and fail) to
-        // generate plain-struct code for those via `generate_component`. Each composed component's
-        // own `Item::View` must be kept alongside its `Item::Component` — `generate_view` looks it
-        // up via `find_view` against this same filtered module, not just the symbol table.
-        let composed_names: std::collections::HashSet<&str> = module
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                ast::Item::Component(c) if table.resolve(&module, &c.name).is_some_and(|info| info.has_view) => {
-                    Some(c.name.as_str())
-                }
-                _ => None,
-            })
-            .collect();
-        let composed_items: Vec<_> = module
-            .items
-            .iter()
-            .filter(|item| match item {
-                ast::Item::Component(c) => composed_names.contains(c.name.as_str()),
-                ast::Item::View(v) => composed_names.contains(v.target.as_str()),
-                _ => false,
-            })
-            .cloned()
-            .collect();
-        if !composed_items.is_empty() {
-            let composed_module = ast::Module { items: composed_items, ..module.clone() };
-            builtins_generated.extend(codegen::generate_module(&composed_module, &table));
-        }
-    }
-    // Always written (even if empty) — every consumer's own generated `main.rs`/etc.
-    // unconditionally `include!`s this file, since which builtins actually need one can change over
-    // time as `elwindui-builtins` evolves.
-    let file: syn::File = syn::parse2(builtins_generated.clone()).unwrap_or_else(|e| {
-        panic!("generated code for elwindui-builtins' composed components is not valid Rust: {e}\n---\n{builtins_generated}")
-    });
-    fs::write(out_dir.join("elwindui_builtins_generated.rs"), prettyplease::unparse(&file))?;
-
-    fs::write(out_dir.join("i18n_support.rs"), I18N_SUPPORT_SRC)?;
+    // Every composed builtin (`ContentControl`/`Rectangle`/`Ellipse`, `has_view == true` in
+    // `builtins.elwind`) is hand-written directly in `elwindui-core::ui` instead of being
+    // regenerated into each consumer's own `OUT_DIR` — their `view` blocks stay in
+    // `builtins.elwind` purely for `validate`/the symbol table (so use sites like
+    // `Rectangle { fill: .. }` still resolve/type-check), but are never fed to `generate_module`
+    // here. `i18n_support.rs` is likewise no longer generated — `elwindui-codegen`'s own emitted
+    // `t!(..)` calls resolve through `elwindui::i18n` (see `codegen::emit_expr`), which is a real
+    // crate (`elwindui-i18n`, re-exported by the `elwindui` facade) rather than per-consumer
+    // generated code.
 
     Ok(())
 }
-
-const I18N_SUPPORT_SRC: &str = r#"
-pub use fluent_bundle::FluentValue;
-
-fn load_bundle() -> fluent_bundle::FluentBundle<fluent_bundle::FluentResource> {
-    let ftl_string = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/strings/en.ftl")).to_string();
-    let res = fluent_bundle::FluentResource::try_new(ftl_string)
-        .unwrap_or_else(|(_, errors)| panic!("invalid .ftl file: {errors:?}"));
-    let langid: unic_langid::LanguageIdentifier = "en".parse().expect("valid language id");
-    let mut bundle = fluent_bundle::FluentBundle::new(vec![langid]);
-    bundle.add_resource(res).expect("adding ftl resource");
-    bundle
-}
-
-thread_local! {
-    static BUNDLE: fluent_bundle::FluentBundle<fluent_bundle::FluentResource> = load_bundle();
-}
-
-pub fn t(key: &str, args: &[(&str, FluentValue<'_>)]) -> String {
-    BUNDLE.with(|bundle| {
-        let mut fluent_args = fluent_bundle::FluentArgs::new();
-        for (name, value) in args {
-            fluent_args.set(*name, value.clone());
-        }
-        let msg = bundle.get_message(key).unwrap_or_else(|| panic!("missing fluent message `{key}`"));
-        let pattern = msg.value().unwrap_or_else(|| panic!("fluent message `{key}` has no value"));
-        let mut errors = Vec::new();
-        let result = bundle.format_pattern(pattern, Some(&fluent_args), &mut errors);
-        result.into_owned()
-    })
-}
-"#;
 
 #[cfg(test)]
 mod tests {

@@ -19,8 +19,8 @@ component DocumentView inherits ContentControl {
 view DocumentView {
     ContentControl {
         Grid {
-            rows: [elwindui_core::layout::GridLength::Star(1.0), elwindui_core::layout::GridLength::Auto]
-            columns: [elwindui_core::layout::GridLength::Star(1.0)]
+            rows: [elwindui::core::layout::GridLength::Star(1.0), elwindui::core::layout::GridLength::Auto]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
             TextArea { text: document_text, Grid::row: 0 }
             HorizontalLayout {
                 Grid::row: 1

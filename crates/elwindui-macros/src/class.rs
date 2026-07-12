@@ -17,6 +17,15 @@
 //! (`uielement_blind_forward`) is always correct; the macro never needs to know *which* ancestor
 //! it is.
 //!
+//! That blind forward only covers `UIElement` itself, though — an intermediate `inherits = ..`
+//! trait with *its own* required methods beyond `UIElement`'s (`Shape::set_kind`/
+//! `Control::set_padding`, unlike the genuinely empty `Layout`/`NativeControl<H>` marker traits)
+//! has no generic name to blindly forward through. `#[ancestor]` on an `&self` method inside
+//! `impl ClassName { .. }` opts it into that trait's own impl block instead of `UIElement`'s or
+//! `ClassName`'s own (mirroring `#[inherent]`'s same attribute-driven routing, just to a different
+//! bucket) — omitted entirely, the ancestor impl stays the empty `{}` block that's already correct
+//! for a true marker trait.
+//!
 //! `inherits` omitted entirely puts a `struct`/`impl` pair into **root class mode** instead of
 //! declaring an ordinary subclass — used for the one class with no ancestor of its own
 //! (`UIElement`). There, `impl ClassName { .. }` isn't paired with a generated
@@ -245,6 +254,9 @@ fn expand_impl(args: &ClassArgs, item: syn::ItemImpl) -> TokenStream2 {
     // `sync_dynamic_entries` in the appkit `TabView` facade, are deliberately private).
     let mut ctor_methods: Vec<(ImplItemFn, bool)> = Vec::new();
     let mut instance_methods: Vec<ImplItemFn> = Vec::new();
+    // `#[ancestor]`-marked methods (below) collect here instead — routed into the intermediate
+    // `inherits` trait's own impl block rather than `UIElement`'s or `ClassName`'s own.
+    let mut ancestor_methods: Vec<ImplItemFn> = Vec::new();
     for impl_item in item.items {
         match impl_item {
             ImplItem::Fn(mut f) => {
@@ -253,9 +265,23 @@ fn expand_impl(args: &ClassArgs, item: syn::ItemImpl) -> TokenStream2 {
                 // backend facade layer's `into_any_view`/`set_on_text_change`. It lands as a plain
                 // `impl ClassNameImpl { .. }` method, alongside constructors.
                 let is_inherent = f.attrs.iter().any(|a| a.path().is_ident("inherent"));
+                // `#[ancestor]` opts a `&self` method *into* the `inherits` trait's own impl block
+                // (e.g. `Shape::set_kind`/`Control::set_padding` — a real, non-`UIElement` required
+                // method on the immediate ancestor trait, as opposed to `UI_ELEMENT_METHODS`, which
+                // covers `UIElement` itself, or an unmarked method, which lands on `ClassName`'s own
+                // trait). Needed because unlike `Layout`/`NativeControl<H>` (empty marker traits —
+                // see this module's own doc comment), a trait like `Shape`/`Control` has required
+                // methods of its own that a blind `self.base.method(..)` forward can't discover
+                // without a name to key off; `#[ancestor]` is that name.
+                let is_ancestor = f.attrs.iter().any(|a| a.path().is_ident("ancestor"));
                 // `#[overridable]`/`#[overrides]` are accepted and stripped but not yet validated
                 // against an ancestor's virtual-method list — see this module's own doc comment.
-                f.attrs.retain(|a| !(a.path().is_ident("overridable") || a.path().is_ident("overrides") || a.path().is_ident("inherent")));
+                f.attrs.retain(|a| {
+                    !(a.path().is_ident("overridable")
+                        || a.path().is_ident("overrides")
+                        || a.path().is_ident("inherent")
+                        || a.path().is_ident("ancestor"))
+                });
                 if is_inherent {
                     ctor_methods.push((f, false));
                     continue;
@@ -266,7 +292,11 @@ fn expand_impl(args: &ClassArgs, item: syn::ItemImpl) -> TokenStream2 {
                     // `ClassName`'s own) — trait impl items always inherit the trait's own
                     // visibility and reject an explicit qualifier (E0449).
                     f.vis = Visibility::Inherited;
-                    instance_methods.push(f);
+                    if is_ancestor {
+                        ancestor_methods.push(f);
+                    } else {
+                        instance_methods.push(f);
+                    }
                 } else {
                     ctor_methods.push((f, true));
                 }
@@ -276,6 +306,11 @@ fn expand_impl(args: &ClassArgs, item: syn::ItemImpl) -> TokenStream2 {
                     .to_compile_error();
             }
         }
+    }
+    if !ancestor_methods.is_empty() && args.inherits.is_none() {
+        let names: Vec<String> = ancestor_methods.iter().map(|f| f.sig.ident.to_string()).collect();
+        let msg = format!("#[class]: #[ancestor] methods {names:?} require `inherits = ..` (root class mode has no ancestor trait)");
+        return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
     }
 
     // Root-class mode (`inherits` omitted, e.g. `UIElement` itself): there's no ancestor to route
@@ -296,18 +331,28 @@ fn expand_impl(args: &ClassArgs, item: syn::ItemImpl) -> TokenStream2 {
         // genuinely implements `UIElement` — blind `self.base.method(..)` forwarding is always
         // correct, with no need to special-case which ancestor this is.
         ancestor_impls.push(uielement_blind_forward(&core, &impl_name, &impl_generics, &ty_generics, &where_clause, &ui_element_methods));
-        // Any intermediate marker trait between `UIElement` and this class (`Layout`,
-        // `NativeControl<H>`, ...) also needs an (empty, today — every such marker trait declares
-        // no methods of its own) `impl` of its own — skipped for `UIElement` itself (already fully
-        // covered by the blind forward above) and for the "explicit facade type" form (an
-        // already-`Impl`-suffixed concrete struct, not a trait, so there's nothing to `impl`).
+        // Any intermediate trait between `UIElement` and this class (`Layout`, `NativeControl<H>`,
+        // `Shape`, `Control`, ...) also needs an `impl` of its own — skipped for `UIElement` itself
+        // (already fully covered by the blind forward above) and for the "explicit facade type"
+        // form (an already-`Impl`-suffixed concrete struct, not a trait, so there's nothing to
+        // `impl`). Empty for a pure marker trait with no required methods (`Layout`/
+        // `NativeControl<H>`); populated from `#[ancestor]`-marked methods (above) for one with real
+        // required methods of its own (`Shape`/`Control`) — see `#[ancestor]`'s own doc comment.
         if let Type::Path(tp) = inh {
             if let Some(seg) = tp.path.segments.last() {
                 let name = seg.ident.to_string();
                 if name != "UIElement" && !name.ends_with("Impl") {
+                    let bodies = ancestor_methods.iter().map(|f| quote! { #f });
                     ancestor_impls.push(quote! {
-                        impl #impl_generics #inh for #impl_name #ty_generics #where_clause {}
+                        impl #impl_generics #inh for #impl_name #ty_generics #where_clause { #(#bodies)* }
                     });
+                } else if !ancestor_methods.is_empty() {
+                    let names: Vec<String> = ancestor_methods.iter().map(|f| f.sig.ident.to_string()).collect();
+                    let msg = format!(
+                        "#[class]: #[ancestor] methods {names:?} have nowhere to go — `inherits = {name}` has no \
+                         separate ancestor trait to implement"
+                    );
+                    return syn::Error::new_spanned(inh, msg).to_compile_error();
                 }
             }
         }

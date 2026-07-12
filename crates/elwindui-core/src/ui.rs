@@ -936,6 +936,135 @@ pub fn create_shape() -> ShapeImpl {
     ShapeImpl::new()
 }
 
+/// `builtin::Rectangle`(docs/elwindui_builtins_spec.md 付録G/N)— `ShapeKind::RoundedRect` に固定
+/// した `Shape` の薄いラッパー。かつては `elwindui-codegen`(`builtins.elwind`の`view Rectangle`)が
+/// 消費クレートごとに再生成していたが、バックエンド非依存な合成 builtin はここに一度だけ手書きする
+/// 方が二重管理にならない。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
+/// 自身の必須メソッド(`set_kind`等)を`base`委譲として登録している。
+#[elwindui_macros::class(inherits = Shape)]
+pub struct Rectangle {
+    stroke_width: Option<f32>,
+    corner_radius: Option<f32>,
+}
+
+#[elwindui_macros::class(inherits = Shape)]
+impl Rectangle {
+    fn fill(&self) -> Option<String> {
+        self.base.fill.borrow().clone()
+    }
+    fn stroke(&self) -> Option<String> {
+        self.base.stroke.borrow().clone()
+    }
+    fn stroke_width(&self) -> Option<f32> {
+        self.stroke_width.clone()
+    }
+    fn corner_radius(&self) -> Option<f32> {
+        self.corner_radius.clone()
+    }
+    #[ancestor]
+    fn set_kind(&self, kind: ShapeKind) {
+        self.base.set_kind(kind)
+    }
+    #[ancestor]
+    fn set_fill(&self, fill: Option<String>) {
+        self.base.set_fill(fill)
+    }
+    #[ancestor]
+    fn set_stroke(&self, stroke: Option<String>) {
+        self.base.set_stroke(stroke)
+    }
+    #[ancestor]
+    fn set_stroke_width(&self, stroke_width: f32) {
+        self.base.set_stroke_width(stroke_width)
+    }
+    fn paint(&self) -> Option<PaintKind> {
+        self.base.paint()
+    }
+    #[inherent]
+    pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElement> {
+        self
+    }
+    fn new(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>, corner_radius: Option<f32>) -> Rc<Self> {
+        Rc::new(create_rectangle(fill, stroke, stroke_width, corner_radius))
+    }
+}
+
+/// The plain (not `Rc`-wrapped) value `RectangleImpl::new` itself wraps — also what a future
+/// `component X inherits Rectangle` would embed unwrapped as its own `base` field, mirroring
+/// `create_control`/`create_shape`'s own role for `Control`/`Shape` (`Rectangle` is `#[sealed]`
+/// today, so nothing actually reaches this via that path yet, but the shape stays consistent with
+/// every other builtin's `create_xxx`/`XxxImpl::new` split).
+pub fn create_rectangle(
+    fill: Option<String>,
+    stroke: Option<String>,
+    stroke_width: Option<f32>,
+    corner_radius: Option<f32>,
+) -> RectangleImpl {
+    let shape = create_shape();
+    shape.set_kind(ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) });
+    shape.set_fill(fill);
+    shape.set_stroke(stroke);
+    shape.set_stroke_width(stroke_width.unwrap_or(0.0));
+    RectangleImpl { base: shape, stroke_width, corner_radius }
+}
+
+/// `builtin::Ellipse`(docs/elwindui_builtins_spec.md 付録G/N)— `ShapeKind::Oval` に固定した
+/// `Shape` の薄いラッパー。`RectangleImpl`の doc comment 参照。
+#[elwindui_macros::class(inherits = Shape)]
+pub struct Ellipse {
+    stroke_width: Option<f32>,
+}
+
+#[elwindui_macros::class(inherits = Shape)]
+impl Ellipse {
+    fn fill(&self) -> Option<String> {
+        self.base.fill.borrow().clone()
+    }
+    fn stroke(&self) -> Option<String> {
+        self.base.stroke.borrow().clone()
+    }
+    fn stroke_width(&self) -> Option<f32> {
+        self.stroke_width.clone()
+    }
+    #[ancestor]
+    fn set_kind(&self, kind: ShapeKind) {
+        self.base.set_kind(kind)
+    }
+    #[ancestor]
+    fn set_fill(&self, fill: Option<String>) {
+        self.base.set_fill(fill)
+    }
+    #[ancestor]
+    fn set_stroke(&self, stroke: Option<String>) {
+        self.base.set_stroke(stroke)
+    }
+    #[ancestor]
+    fn set_stroke_width(&self, stroke_width: f32) {
+        self.base.set_stroke_width(stroke_width)
+    }
+    fn paint(&self) -> Option<PaintKind> {
+        self.base.paint()
+    }
+    #[inherent]
+    pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElement> {
+        self
+    }
+    fn new(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>) -> Rc<Self> {
+        Rc::new(create_ellipse(fill, stroke, stroke_width))
+    }
+}
+
+/// The plain (not `Rc`-wrapped) value `EllipseImpl::new` itself wraps — see `create_rectangle`'s
+/// own doc comment for why this split exists.
+pub fn create_ellipse(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>) -> EllipseImpl {
+    let shape = create_shape();
+    shape.set_kind(ShapeKind::Oval);
+    shape.set_fill(fill);
+    shape.set_stroke(stroke);
+    shape.set_stroke_width(stroke_width.unwrap_or(0.0));
+    EllipseImpl { base: shape, stroke_width }
+}
+
 /// Self-drawn primitive text (WinUI3's `TextBlockImpl`) — no native widget, unlike the native `Text`
 /// this replaces. A leaf, like `NativeControlImpl`. Field named `text` (not `content`, unlike
 /// `PaintKind::Text`'s own field of the same meaning) to match `builtin::TextBlock`'s own `#[param]
@@ -1058,6 +1187,78 @@ impl Control {
 
 pub fn create_control() -> ControlImpl {
     ControlImpl::new()
+}
+
+/// `builtin::ContentControl`(docs/elwindui_spec.md 付録H.2.1a)— 単一の子(`content`)を持つ
+/// `Control`の薄いラッパー。`RectangleImpl`の doc comment 参照(同じ理由でここに直接手書きする)。
+/// `Control.children`は`UIElementImpl.visual_children`と同一のストレージを共有する
+/// (`Control`構造体の`children`フィールドの doc comment 参照)ため、`Rectangle`/`Ellipse`と違い
+/// `new()`は追加した子の親ポインタを実際に張り直す必要がある。
+#[elwindui_macros::class(inherits = Control)]
+pub struct ContentControl {
+    padding: Option<f32>,
+    content: Rc<dyn UIElement>,
+}
+
+#[elwindui_macros::class(inherits = Control)]
+impl ContentControl {
+    fn padding(&self) -> Option<f32> {
+        self.padding.clone()
+    }
+    fn content(&self) -> Rc<dyn UIElement> {
+        self.content.clone()
+    }
+    #[ancestor]
+    fn padding(&self) -> f32 {
+        self.base.padding()
+    }
+    #[ancestor]
+    fn content_horizontal_alignment(&self) -> HorizontalAlignment {
+        self.base.content_horizontal_alignment()
+    }
+    #[ancestor]
+    fn content_vertical_alignment(&self) -> VerticalAlignment {
+        self.base.content_vertical_alignment()
+    }
+    #[ancestor]
+    fn set_padding(&self, padding: f32) {
+        self.base.set_padding(padding)
+    }
+    #[ancestor]
+    fn set_content_horizontal_alignment(&self, alignment: HorizontalAlignment) {
+        self.base.set_content_horizontal_alignment(alignment)
+    }
+    #[ancestor]
+    fn set_content_vertical_alignment(&self, alignment: VerticalAlignment) {
+        self.base.set_content_vertical_alignment(alignment)
+    }
+    #[inherent]
+    pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElement> {
+        self
+    }
+    fn new(padding: Option<f32>, content: Rc<dyn UIElement>) -> Rc<Self> {
+        let this = Rc::new(create_content_control(padding, content));
+        let erased: Rc<dyn UIElement> = this.clone();
+        for child in this.visual_children() {
+            *child.base().parent.borrow_mut() = Some(Rc::downgrade(&erased));
+        }
+        this
+    }
+}
+
+/// The plain (not `Rc`-wrapped) value `ContentControlImpl::new` itself wraps — also what
+/// `component X inherits ContentControl` (`RoundedPanel`/`DocumentView` in `examples/notepad`)
+/// embeds unwrapped as its own `base` field, mirroring `create_control`/`create_shape`'s own role
+/// for `Control`/`Shape`. Unlike `create_rectangle`/`create_ellipse`, this one genuinely is called
+/// that way today (`ContentControl` isn't `#[sealed]`), by generated code that never goes through
+/// `ContentControlImpl::new` at all — the parent-pointer wiring `new` does on top of this is only
+/// needed when `content` is embedded directly as *this* value's own child; a shape-composing
+/// subclass rewires it again itself once `content` becomes one of *its own* visual children.
+pub fn create_content_control(padding: Option<f32>, content: Rc<dyn UIElement>) -> ContentControlImpl {
+    let control = create_control();
+    control.set_padding(padding.unwrap_or(0.0));
+    control.children.add(content.clone());
+    ContentControlImpl { base: control, padding, content }
 }
 
 /// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/elwindui_spec.md §3). Each child's

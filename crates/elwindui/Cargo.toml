@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 elwindui-core = { path = "../elwindui-core" }
 elwindui-macros = { path = "../elwindui-macros" }
+elwindui-i18n = { path = "../elwindui-i18n" }
 elwindui-backend-winui3 = { path = "../elwindui-backend-winui3", optional = true }
 elwindui-backend-appkit = { path = "../elwindui-backend-appkit", optional = true }
 elwindui-backend-gtk4 = { path = "../elwindui-backend-gtk4", optional = true }

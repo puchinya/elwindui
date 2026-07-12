@@ -5,48 +5,12 @@
 //! which aren't valid Rust expression syntax — that half can't move to plain Rust).
 
 use elwindui::platform;
-use elwindui_backend_appkit::builtins::{ButtonImpl, TextAreaImpl, Window, WindowImpl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {
     Unsaved,
     Saving,
     Saved,
-}
-
-mod elwindui_i18n {
-    pub use fluent_bundle::FluentValue;
-
-    fn load_bundle() -> fluent_bundle::FluentBundle<fluent_bundle::FluentResource> {
-        let ftl_string =
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/strings/en.ftl")).to_string();
-        let res = fluent_bundle::FluentResource::try_new(ftl_string)
-            .unwrap_or_else(|(_, errors)| panic!("invalid .ftl file: {errors:?}"));
-        let langid: unic_langid::LanguageIdentifier = "en".parse().expect("valid language id");
-        let mut bundle = fluent_bundle::FluentBundle::new(vec![langid]);
-        bundle.add_resource(res).expect("adding ftl resource");
-        bundle
-    }
-
-    thread_local! {
-        static BUNDLE: fluent_bundle::FluentBundle<fluent_bundle::FluentResource> = load_bundle();
-    }
-
-    pub fn t(key: &str, args: &[(&str, FluentValue<'_>)]) -> String {
-        BUNDLE.with(|bundle| {
-            let mut fluent_args = fluent_bundle::FluentArgs::new();
-            for (name, value) in args {
-                fluent_args.set(*name, value.clone());
-            }
-            let msg = bundle
-                .get_message(key)
-                .unwrap_or_else(|| panic!("missing fluent message `{key}`"));
-            let pattern = msg.value().unwrap_or_else(|| panic!("fluent message `{key}` has no value"));
-            let mut errors = Vec::new();
-            let result = bundle.format_pattern(pattern, Some(&fluent_args), &mut errors);
-            result.into_owned()
-        })
-    }
 }
 
 #[elwindui::viewmodel]
@@ -145,6 +109,8 @@ elwindui::component! {
 }
 
 fn main() {
+    elwindui::i18n::declare!();
+
     let vm = NotepadViewModel::new();
     let window = NotepadWindowImpl::new(vm);
     window.show();

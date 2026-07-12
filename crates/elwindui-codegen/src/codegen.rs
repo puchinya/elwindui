@@ -3996,6 +3996,16 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
         if name == "margin" || name == "data_context" {
             continue;
         }
+        // `Window`'s own `left`/`top`/`width`/`height` (docs/elwindui_builtins_spec.md 付録F.1) are
+        // one-time initial-placement/size setters, applied once at construction
+        // (`build_component_setters`) — never re-pushed here. Re-applying them on every resync()
+        // would fight the OS window manager, snapping a user-dragged/resized window back to its
+        // originally-declared value the next time *anything else* triggers resync() (e.g. `TabView`'s
+        // `on_select` wiring). The live native frame is available separately via `WindowImpl`'s own
+        // `left()`/`top()`/`width()`/`height()` getters for whoever wants current state.
+        if node.type_path == "Window" && matches!(name.as_str(), "left" | "top" | "width" | "height") {
+            continue;
+        }
         // A `view`-having (`has_view`) target's own no-initializer field ordinarily has no
         // `set_<name>` at all (unlike every hand-written builtin, which by convention always
         // defines one, even a no-op, for the "blanket resync" rule above to call generically) — so

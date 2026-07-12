@@ -776,13 +776,15 @@ pub struct MenuImpl {
     installed_into: Rc<RefCell<Option<bindings::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>>>>,
 }
 
-/// `elwindui_core::ui::Menu<MenuItemImpl>`'s shape is common to every backend — see that trait's
-/// own doc comment. `add_item`/`remove_item` are real `IVector<MenuFlyoutItemBase>.Append`/
-/// `.RemoveAtEnd`-style calls once this `Menu` is installed into a `MenuBarItemImpl` (see
-/// `installed_into`'s doc comment), reachable post-construction so
-/// `elwindui-backend-winui3::builtins::MenuImpl::set_children` can reconcile a changed child list
-/// without rebuilding the native menu from scratch.
-impl elwindui_core::ui::Menu<MenuItemImpl> for MenuImpl {
+/// `add_item`/`remove_item` are real `IVector<MenuFlyoutItemBase>.Append`/`.RemoveAtEnd`-style
+/// calls once this `Menu` is installed into a `MenuBarItemImpl` (see `installed_into`'s doc
+/// comment), reachable post-construction so `elwindui-backend-winui3::builtins::MenuImpl::
+/// set_children` can reconcile a changed child list without rebuilding the native menu from
+/// scratch. Plain inherent methods (not `elwindui_core::ui::Menu`, unlike the DSL-facing wrapper's
+/// own `impl Menu for builtins::MenuImpl`) — this raw layer already knows its own concrete
+/// `MenuItemImpl` argument type, so it has no need for that trait's `&dyn MenuItem`/`AsAny`-downcast
+/// indirection, the same way `Window` above stays plain inherent methods throughout.
+impl MenuImpl {
     fn add_item(&self, item: &MenuItemImpl) {
         self.items.borrow_mut().push(item.clone());
         if let Some(items) = self.installed_into.borrow().as_ref() {
@@ -814,11 +816,11 @@ pub struct MenuBarItemImpl {
     xaml: bindings::Microsoft::UI::Xaml::Controls::MenuBarItem,
 }
 
-/// `elwindui_core::ui::MenuBarItem<MenuImpl>`'s shape is common to every backend — see that
-/// trait's own doc comment. `set_text`/`set_submenu` are real post-construction setters
-/// (`create_menu_bar_item()` takes neither argument, so these are the only way a menu bar item's
-/// title/submenu are ever actually set).
-impl elwindui_core::ui::MenuBarItem<MenuImpl> for MenuBarItemImpl {
+/// `set_text`/`set_submenu` are real post-construction setters (`create_menu_bar_item()` takes
+/// neither argument, so these are the only way a menu bar item's title/submenu are ever actually
+/// set). Plain inherent methods — see `MenuImpl`'s own `add_item`/`remove_item` doc comment for why
+/// this raw layer doesn't implement `elwindui_core::ui::MenuBarItem` itself.
+impl MenuBarItemImpl {
     fn set_text(&self, text: &str) {
         let _ = self.xaml.SetTitle(&HSTRING::from(text));
     }
@@ -847,11 +849,12 @@ pub struct MenuBarImpl {
     xaml: XamlMenuBar,
 }
 
-/// `elwindui_core::ui::MenuBar<MenuBarItemImpl>`'s shape is common to every backend — see that
-/// trait's own doc comment. `add_item`/`remove_item` mirror `Menu`'s own: real
-/// `IVector<MenuBarItem>.Append`/`.RemoveAt` calls, reachable post-construction for
-/// `elwindui-backend-winui3::builtins::MenuBarImpl::set_children`.
-impl elwindui_core::ui::MenuBar<MenuBarItemImpl> for MenuBarImpl {
+/// `add_item`/`remove_item` mirror `MenuImpl`'s own: real `IVector<MenuBarItem>.Append`/
+/// `.RemoveAt` calls, reachable post-construction for `elwindui-backend-winui3::builtins::
+/// MenuBarImpl::set_children`. Plain inherent methods — see `MenuImpl`'s own `add_item`/
+/// `remove_item` doc comment for why this raw layer doesn't implement `elwindui_core::ui::MenuBar`
+/// itself.
+impl MenuBarImpl {
     fn add_item(&self, item: &MenuBarItemImpl) {
         if let Ok(items) = self.xaml.Items() {
             let _ = items.Append(&item.xaml);

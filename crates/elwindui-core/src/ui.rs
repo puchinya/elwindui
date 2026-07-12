@@ -750,26 +750,23 @@ pub fn create_native_control<H: LayoutNode + 'static>(handle: H) -> NativeContro
     NativeControlImpl::new(handle)
 }
 
-/// `Window`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — empty marker, exactly like
-/// `Layout`/`NativeControl<H>` below: `Window` itself has no properties every backend shares (its
-/// `title`/`content`/`menu_bar` setters are plain inherent methods on each backend's own
-/// `WindowImpl`, not declared here), so this exists purely so `component X inherits Window`
-/// (docs/elwindui_spec.md 付録H.2.1a's host-composition case) has a bare `Window` name to bind to
-/// that isn't the same identifier as any backend's own `WindowImpl` struct.
-pub trait Window {}
-
-/// The property-setter traits below (`TextArea`/`Button`/`MenuItem`/`Menu<Item>`/`MenuBar<Item>`/
-/// `MenuBarItem<M>`) are declared once here rather than duplicated per backend crate — every
-/// backend's own hand-written `XImpl` (`elwindui-backend-appkit`/`elwindui-backend-winui3`) had
-/// been independently declaring an identically-shaped trait (same method signatures, same
-/// doc-comment rationale) purely because Rust has no cross-crate trait sharing without a common
-/// home for it; this is that home. Each backend crate now just provides `impl Xxx for
-/// BackendXImpl { .. }` — the property *shape* (what setters exist, what they take) is common to
-/// every backend, only the method *bodies* (the actual platform API calls) differ, exactly the
-/// same split `NativeControl<H>`/`Layout`/`Shape`/`Control`/etc. above already model for the
-/// virtual builtins. Generic over the concrete item type (`Item`/`M`) wherever a method's signature
-/// needs to reference one (`Menu::add_item`/`MenuBarItem::set_submenu`) — `NativeControlImpl<H>`'s
-/// own `H` is the precedent for this same pattern.
+/// The property-setter traits below (`TextArea`/`Button`/`MenuItem`/`Menu`/`MenuBar`/`MenuBarItem`/
+/// `Window`) are declared once here rather than duplicated per backend crate — every backend's own
+/// hand-written `XImpl` (`elwindui-backend-appkit`/`elwindui-backend-winui3`) had been independently
+/// declaring an identically-shaped trait (same method signatures, same doc-comment rationale)
+/// purely because Rust has no cross-crate trait sharing without a common home for it; this is that
+/// home. Each backend crate now just provides `impl Xxx for BackendXImpl { .. }` — the property
+/// *shape* (what setters exist, what they take) is common to every backend, only the method
+/// *bodies* (the actual platform API calls) differ, exactly the same split
+/// `NativeControl<H>`/`Layout`/`Shape`/`Control`/etc. above already model for the virtual builtins.
+///
+/// `Menu`/`MenuBar`/`MenuBarItem`/`Window` are *not* generic over the backend's own concrete
+/// menu-entry/menu-bar-entry/menu/menu-bar type the way `NativeControlImpl<H>`'s `H` is — instead
+/// each such argument is `&dyn` (or `Rc<dyn>`) the matching leaf trait itself (`MenuItem`/`Menu`/
+/// `MenuBarItem`/`MenuBar`), and each backend's own `impl Xxx for BackendXImpl` downcasts it back to
+/// its own concrete type via `AsAny::as_any` (see that trait's own doc comment; already the
+/// established pattern for `UIElement::as_native_control`/`visual_tree::find_all`) before
+/// delegating to its real native handle.
 ///
 /// `TabView`/`TabViewItem` are deliberately **not** included here: their own methods
 /// (`insert_tab`/`remove_tab`/`set_tab_content_visible`, an owned content host handle per platform)
@@ -787,37 +784,52 @@ pub trait Button: UIElement {
     fn set_text(&self, text: &str);
 }
 
-pub trait MenuItem {
+pub trait MenuItem: AsAny {
     fn set_text(&self, text: &str);
     fn set_enabled(&self, enabled: bool);
     fn set_shortcut(&self, key_equivalent: &str);
     fn set_on_select(&self, callback: Box<dyn Fn()>);
 }
 
-/// `Item` is the backend's own concrete menu-entry type (e.g. `elwindui_backend_appkit::MenuItemImpl`).
-pub trait Menu<Item> {
-    fn add_item(&self, item: &Item);
-    fn remove_item(&self, item: &Item);
+pub trait Menu: AsAny {
+    fn add_item(&self, item: &dyn MenuItem);
+    fn remove_item(&self, item: &dyn MenuItem);
 }
 
-/// `Item` is the backend's own concrete menu-bar-entry type (e.g.
-/// `elwindui_backend_appkit::MenuBarItemImpl`).
-pub trait MenuBar<Item> {
-    fn add_item(&self, item: &Item);
-    fn remove_item(&self, item: &Item);
-}
-
-/// `M` is the backend's own concrete dropdown-menu type (e.g. `elwindui_backend_appkit::MenuImpl`).
-pub trait MenuBarItem<M> {
+pub trait MenuBarItem: AsAny {
     fn set_text(&self, text: &str);
-    fn set_submenu(&self, submenu: &M);
+    fn set_submenu(&self, submenu: &dyn Menu);
+}
+
+pub trait MenuBar: AsAny {
+    fn add_item(&self, item: &dyn MenuBarItem);
+    fn remove_item(&self, item: &dyn MenuBarItem);
+}
+
+/// `Window`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — also the `component X inherits
+/// Window` (host-composition) bare name every backend's own `WindowImpl` implements.
+/// `set_menu_bar`'s `Rc<dyn MenuBar>` follows the same trait-object-argument convention as
+/// `Menu`/`MenuBar`/`MenuBarItem` just above (see this module's own doc comment on that group) —
+/// `impl Window for WindowImpl` downcasts it back to its own concrete `MenuBarImpl` internally.
+pub trait Window {
+    fn set_title(&self, title: &str);
+    fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBar>);
+    fn set_content(&self, content: Rc<dyn UIElement>);
+    fn show(&self);
+    fn left(&self) -> f32;
+    fn set_left(&self, left: f32);
+    fn top(&self) -> f32;
+    fn set_top(&self, top: f32);
+    fn width(&self) -> f32;
+    fn set_width(&self, width: f32);
+    fn height(&self) -> f32;
+    fn set_height(&self, height: f32);
 }
 
 /// `Layout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — empty marker over `UIElement`,
 /// implemented by every layout-container virtual builtin (`VerticalLayoutImpl`/
 /// `HorizontalLayoutImpl`/`GridImpl`), the same way `NativeControl<H>` groups every native leaf.
-pub trait Layout: UIElement {}
-
+///
 /// Shared fields behind `VerticalLayout`/`HorizontalLayout`. `VerticalLayoutImpl`/
 /// `HorizontalLayoutImpl` each embed one as `base` and implement `UIElement`/`Layout` themselves,
 /// doing their own layout math directly against `elwindui_core::layout`'s `stack_arrange`/
@@ -826,8 +838,13 @@ pub trait Layout: UIElement {}
 /// space" — see `UIElement::measure_override`'s own doc comment) default, since the orientation
 /// (and so the entire layout algorithm) is a property of *which concrete type this is*, not of
 /// shared state a common base could hold.
-pub struct LayoutImpl {
-    pub base: UIElementImpl,
+///
+/// `abstract_class`: `Layout` itself is never instantiated — only its concrete subclasses
+/// (`VerticalLayout`/`HorizontalLayout`) are, each building its own `LayoutImpl` base inline in its
+/// own `new()`, the same way every other leaf/container builds its own `UIElementImpl::default()`
+/// inline rather than through a shared factory (see e.g. `Shape::new`/`Control::new`).
+#[elwindui_macros::class(inherits = UIElement, abstract_class)]
+pub struct Layout {
     pub spacing: Cell<f32>,
     /// Shares its storage with `base.visual_children` (`UIElementImpl::children_collection`) —
     /// `UIElement::visual_children()`'s default implementation already reads that storage directly,
@@ -835,29 +852,17 @@ pub struct LayoutImpl {
     pub children: UIElementCollection,
 }
 
-impl LayoutImpl {
+#[elwindui_macros::class(inherits = UIElement, abstract_class)]
+impl Layout {
+    /// Kept off the `Layout` trait itself (`#[inherent]`) — `VerticalLayout`/`HorizontalLayout`
+    /// already expose their own `set_spacing` that forwards to this one inherent method, so making
+    /// it a `Layout`-trait-required method too would just duplicate the same signature on both
+    /// levels of the hierarchy.
+    #[inherent]
     pub fn set_spacing(&self, spacing: f32) {
         self.spacing.set(spacing);
         self.invalidate();
     }
-}
-
-/// `LayoutImpl` is a genuine `UIElement` implementor itself (trivially delegating to its own
-/// `base: UIElementImpl`, which is one too — see that type's own `impl UIElement` doc comment) —
-/// this is what lets `#[class(inherits = Layout)]`'s ancestor delegation
-/// (`VerticalLayoutImpl`/`HorizontalLayoutImpl`) reduce to the same uniform `self.base.method(..)`
-/// forward every other `inherits = ..` target uses, rather than needing a special "drill an extra
-/// field access" case.
-impl UIElement for LayoutImpl {
-    fn base(&self) -> &UIElementImpl {
-        self.base.base()
-    }
-}
-
-fn create_layout() -> LayoutImpl {
-    let base = UIElementImpl::default();
-    let children = base.children_collection();
-    LayoutImpl { base, spacing: Cell::new(0.0), children }
 }
 
 /// `VerticalLayoutImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
@@ -878,13 +883,15 @@ impl VerticalLayout {
     pub fn children(&self) -> &UIElementCollection {
         &self.base.children
     }
-    fn new(base: LayoutImpl) -> Self {
-        Self { base }
+    fn new() -> Self {
+        let base = UIElementImpl::default();
+        let children = base.children_collection();
+        Self { base: LayoutImpl { base, spacing: Cell::new(0.0), children } }
     }
 }
 
 pub fn create_vertical_layout() -> VerticalLayoutImpl {
-    VerticalLayoutImpl::new(create_layout())
+    VerticalLayoutImpl::new()
 }
 
 /// `HorizontalLayoutImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
@@ -905,13 +912,15 @@ impl HorizontalLayout {
     pub fn children(&self) -> &UIElementCollection {
         &self.base.children
     }
-    fn new(base: LayoutImpl) -> Self {
-        Self { base }
+    fn new() -> Self {
+        let base = UIElementImpl::default();
+        let children = base.children_collection();
+        Self { base: LayoutImpl { base, spacing: Cell::new(0.0), children } }
     }
 }
 
 pub fn create_horizontal_layout() -> HorizontalLayoutImpl {
-    HorizontalLayoutImpl::new(create_layout())
+    HorizontalLayoutImpl::new()
 }
 
 /// `Rectangle`/`Ellipse`. A pure leaf, like `TextBlockImpl` — no children of its own (matching real

@@ -17,9 +17,8 @@
 //! Window`), and so `elwindui-codegen`'s `concrete_type_ident` can treat every hand-written native
 //! uniformly (docs/elwindui_spec.md 付録H.2.1a) the same way it already does for composed DSL
 //! components. Each implements the matching property-setter trait from `elwindui_core::ui`
-//! (`Button`/`TextArea`/`MenuBar<MenuBarItemImpl>`/`MenuBarItem<MenuImpl>`/`Menu<MenuItemImpl>`/
-//! `MenuItem`) — see that module's own doc comment for why these traits live there instead of being
-//! declared separately per backend.
+//! (`Button`/`TextArea`/`Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`) — see that module's own
+//! doc comment for why these traits live there instead of being declared separately per backend.
 //!
 //! `Type::new()` takes **no** arguments — every declared `#[param]` is applied afterward via its
 //! own `set_<field>(..)` call (docs/elwindui_spec.md 付録H.2.1a's post-construction setter
@@ -35,7 +34,7 @@ use crate as appkit;
 // same `builtins` module alongside `WindowImpl`, rather than needing a separate `elwindui_core`
 // import just for the (now-shared) marker trait.
 pub use elwindui_core::ui::Window;
-use elwindui_core::ui::{Button as _, Menu as _, MenuBar as _, MenuBarItem as _, MenuItem as _, TextArea as _, UIElement};
+use elwindui_core::ui::{Button as _, TextArea as _, UIElement};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -100,7 +99,48 @@ impl WindowImpl {
     }
 }
 
-impl elwindui_core::ui::Window for WindowImpl {}
+impl elwindui_core::ui::Window for WindowImpl {
+    fn set_title(&self, title: &str) {
+        self.inner.set_title(title);
+    }
+    fn set_menu_bar(&self, menu_bar: Rc<dyn elwindui_core::ui::MenuBar>) {
+        let menu_bar = menu_bar
+            .as_any()
+            .downcast_ref::<MenuBarImpl>()
+            .expect("Window::set_menu_bar: menu_bar must be this backend's MenuBarImpl");
+        self.inner.set_menu_bar(&menu_bar.inner);
+    }
+    fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
+        self.inner.set_content(content);
+    }
+    fn show(&self) {
+        self.inner.show();
+    }
+    fn left(&self) -> f32 {
+        self.inner.left()
+    }
+    fn set_left(&self, left: f32) {
+        self.inner.set_left(left);
+    }
+    fn top(&self) -> f32 {
+        self.inner.top()
+    }
+    fn set_top(&self, top: f32) {
+        self.inner.set_top(top);
+    }
+    fn width(&self) -> f32 {
+        self.inner.width()
+    }
+    fn set_width(&self, width: f32) {
+        self.inner.set_width(width);
+    }
+    fn height(&self) -> f32 {
+        self.inner.height()
+    }
+    fn set_height(&self, height: f32) {
+        self.inner.set_height(height);
+    }
+}
 
 #[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = appkit::TextAreaImpl)]
 pub struct TextAreaImpl {}
@@ -217,6 +257,23 @@ impl MenuBarImpl {
     }
 }
 
+impl elwindui_core::ui::MenuBar for MenuBarImpl {
+    fn add_item(&self, item: &dyn elwindui_core::ui::MenuBarItem) {
+        let item = item
+            .as_any()
+            .downcast_ref::<MenuBarItemImpl>()
+            .expect("MenuBar::add_item: item must be this backend's MenuBarItemImpl");
+        self.inner.add_item(&item.inner);
+    }
+    fn remove_item(&self, item: &dyn elwindui_core::ui::MenuBarItem) {
+        let item = item
+            .as_any()
+            .downcast_ref::<MenuBarItemImpl>()
+            .expect("MenuBar::remove_item: item must be this backend's MenuBarItemImpl");
+        self.inner.remove_item(&item.inner);
+    }
+}
+
 pub struct MenuBarItemImpl {
     inner: appkit::MenuBarItemImpl,
 }
@@ -233,11 +290,15 @@ impl MenuBarItemImpl {
     }
 }
 
-impl elwindui_core::ui::MenuBarItem<MenuImpl> for MenuBarItemImpl {
+impl elwindui_core::ui::MenuBarItem for MenuBarItemImpl {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
-    fn set_submenu(&self, submenu: &MenuImpl) {
+    fn set_submenu(&self, submenu: &dyn elwindui_core::ui::Menu) {
+        let submenu = submenu
+            .as_any()
+            .downcast_ref::<MenuImpl>()
+            .expect("MenuBarItem::set_submenu: submenu must be this backend's MenuImpl");
         self.inner.set_submenu(&submenu.inner);
     }
 }
@@ -269,6 +330,23 @@ impl MenuImpl {
             }
         }
         *current = children;
+    }
+}
+
+impl elwindui_core::ui::Menu for MenuImpl {
+    fn add_item(&self, item: &dyn elwindui_core::ui::MenuItem) {
+        let item = item
+            .as_any()
+            .downcast_ref::<MenuItemImpl>()
+            .expect("Menu::add_item: item must be this backend's MenuItemImpl");
+        self.inner.add_item(&item.inner);
+    }
+    fn remove_item(&self, item: &dyn elwindui_core::ui::MenuItem) {
+        let item = item
+            .as_any()
+            .downcast_ref::<MenuItemImpl>()
+            .expect("Menu::remove_item: item must be this backend's MenuItemImpl");
+        self.inner.remove_item(&item.inner);
     }
 }
 

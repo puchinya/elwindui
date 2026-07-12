@@ -2416,8 +2416,12 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         // real trait now (per `TypeInfo::is_host_composition_base`'s paired `{Base}Impl` rename in
         // the base's own hand-written crate), so `#target: #base_trait` is a genuine supertrait
         // bound, exactly like the shape-composition case above — just no `impl UIElement`, since the
-        // base doesn't implement it either (`#struct_ident`'s own `show()` stays an inherent method
-        // on `impl #struct_ident` below, reached through `self.base`, not a trait method).
+        // base doesn't implement it either. `#struct_ident`'s own primary `show()` (the one every
+        // caller actually uses, `self: Rc<Self>`-shaped) stays an inherent method on `impl
+        // #struct_ident` below, reached through `self.base` — the `&self`-shaped `show()` inside
+        // `impl #base_trait for #struct_ident` (`base_trait_body` below) only exists to satisfy the
+        // trait bound and is a separate, rarely-called method (different receiver shape, so the two
+        // coexist without conflict).
         let base_ident = format_ident!("{}", base_name);
         // A host-composition base (`Window`, ...) is always a builtin (`#[native]`, `has_view ==
         // false` — see `resolve_host_composition_base`) — but resolve `TypeInfo::is_builtin` rather
@@ -2427,6 +2431,36 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         } else {
             quote! { #base_ident }
         };
+        // `Window` is the only host-composition base today, and unlike every other builtin here its
+        // own `elwindui_core::ui::Window` trait has real required methods now (not an empty
+        // marker) — so this `impl #base_trait for #struct_ident` can no longer stay empty. Each
+        // property forwards to `self.base` (the backend's own `WindowImpl`), the same "inherent
+        // method on `self.base`" convention `show()` just above already uses. `set_menu_bar` is the
+        // one exception: `self.base`'s *inherent* `set_menu_bar` takes a concrete `Rc<MenuBarImpl>`
+        // (unrelated to this trait method's `Rc<dyn MenuBar>`), so instead of forwarding to the
+        // inherent method this calls `self.base`'s own `Window::set_menu_bar` *trait* method
+        // (which already downcasts `Rc<dyn MenuBar>` back to `MenuBarImpl` internally) — no need to
+        // downcast the `Rc` itself here.
+        let base_trait_body = if base_name == "Window" {
+            quote! {
+                fn set_title(&self, title: &str) { self.base.set_title(title); }
+                fn set_menu_bar(&self, menu_bar: std::rc::Rc<dyn elwindui::core::ui::MenuBar>) {
+                    elwindui::core::ui::Window::set_menu_bar(&*self.base, menu_bar);
+                }
+                fn set_content(&self, content: std::rc::Rc<dyn elwindui::core::ui::UIElement>) { self.base.set_content(content); }
+                fn show(&self) { self.base.show(); }
+                fn left(&self) -> f32 { self.base.left() }
+                fn set_left(&self, left: f32) { self.base.set_left(left); }
+                fn top(&self) -> f32 { self.base.top() }
+                fn set_top(&self, top: f32) { self.base.set_top(top); }
+                fn width(&self) -> f32 { self.base.width() }
+                fn set_width(&self, width: f32) { self.base.set_width(width); }
+                fn height(&self) -> f32 { self.base.height() }
+                fn set_height(&self, height: f32) { self.base.set_height(height); }
+            }
+        } else {
+            TokenStream::new()
+        };
         quote! {
             pub trait #target: #base_trait {
                 #trait_sigs
@@ -2434,7 +2468,9 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             impl #target for #struct_ident {
                 #trait_impl_bodies
             }
-            impl #base_trait for #struct_ident {}
+            impl #base_trait for #struct_ident {
+                #base_trait_body
+            }
         }
     } else {
         TokenStream::new()

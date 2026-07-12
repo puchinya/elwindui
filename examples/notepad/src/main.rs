@@ -126,6 +126,7 @@ fn main() {
     vm.new_tab_execute();
     let window = NotepadWindowImpl::new(vm);
     window.show();
+    
     elwindui::application::run();
 }
 

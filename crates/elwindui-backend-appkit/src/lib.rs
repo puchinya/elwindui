@@ -922,12 +922,15 @@ pub struct MenuImpl {
     ns: Retained<NSMenu>,
 }
 
-/// `elwindui_core::ui::Menu<Item>`'s shape is common to every backend — see that trait's own doc
-/// comment. `add_item`/`remove_item` are real `NSMenu.addItem(_:)`/`.removeItem(_:)` calls (the
-/// same API `create_menu` already used to call in a loop at construction time), now also reachable
+/// `add_item`/`remove_item` are real `NSMenu.addItem(_:)`/`.removeItem(_:)` calls (the same API
+/// `create_menu` already used to call in a loop at construction time), now also reachable
 /// post-construction so the wrapper's own `set_children` (`elwindui-backend-appkit::builtins`) can
-/// reconcile a changed child list without rebuilding the native `NSMenu` from scratch.
-impl elwindui_core::ui::Menu<MenuItemImpl> for MenuImpl {
+/// reconcile a changed child list without rebuilding the native `NSMenu` from scratch. Plain
+/// inherent methods (not `elwindui_core::ui::Menu`, unlike the DSL-facing wrapper's own `impl Menu
+/// for builtins::MenuImpl`) — this raw layer already knows its own concrete `MenuItemImpl` argument
+/// type, so it has no need for that trait's `&dyn MenuItem`/`AsAny`-downcast indirection, the same
+/// way `Window` above stays plain inherent methods throughout.
+impl MenuImpl {
     fn add_item(&self, item: &MenuItemImpl) {
         self.ns.addItem(&item.ns);
     }
@@ -948,11 +951,11 @@ pub struct MenuBarItemImpl {
     ns: Retained<NSMenuItem>,
 }
 
-/// `elwindui_core::ui::MenuBarItem<M>`'s shape is common to every backend — see that trait's own
-/// doc comment. `set_text`/`set_submenu` are real post-construction setters (`create_menu_bar_item()`
-/// takes neither argument, so these are the only way a menu bar item's title/submenu are ever
-/// actually set).
-impl elwindui_core::ui::MenuBarItem<MenuImpl> for MenuBarItemImpl {
+/// `set_text`/`set_submenu` are real post-construction setters (`create_menu_bar_item()` takes
+/// neither argument, so these are the only way a menu bar item's title/submenu are ever actually
+/// set). Plain inherent methods — see `MenuImpl`'s own `add_item`/`remove_item` doc comment for why
+/// this raw layer doesn't implement `elwindui_core::ui::MenuBarItem` itself.
+impl MenuBarItemImpl {
     fn set_text(&self, text: &str) {
         self.ns.setTitle(&NSString::from_str(text));
     }
@@ -975,11 +978,11 @@ pub struct MenuBarImpl {
     ns: Retained<NSMenu>,
 }
 
-/// `elwindui_core::ui::MenuBar<Item>`'s shape is common to every backend — see that trait's own
-/// doc comment. `add_item`/`remove_item` mirror `Menu`'s own: real `NSMenu.addItem(_:)`/
-/// `.removeItem(_:)` calls, reachable post-construction for
-/// `elwindui-backend-appkit::builtins::MenuBar::set_children`.
-impl elwindui_core::ui::MenuBar<MenuBarItemImpl> for MenuBarImpl {
+/// `add_item`/`remove_item` mirror `MenuImpl`'s own: real `NSMenu.addItem(_:)`/`.removeItem(_:)`
+/// calls, reachable post-construction for `elwindui-backend-appkit::builtins::MenuBarImpl::
+/// set_children`. Plain inherent methods — see `MenuImpl`'s own `add_item`/`remove_item` doc
+/// comment for why this raw layer doesn't implement `elwindui_core::ui::MenuBar` itself.
+impl MenuBarImpl {
     fn add_item(&self, item: &MenuBarItemImpl) {
         self.ns.addItem(&item.ns);
     }

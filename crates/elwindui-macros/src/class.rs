@@ -5,9 +5,17 @@
 //!
 //! Applied to a bare `struct ClassName { .. }` (no `Impl` suffix, no `base` field written by
 //! hand) and, separately, a bare `impl ClassName { .. }` (no `for`) — two independent attribute
-//! invocations rather than one `mod`-wrapped pair, since Rust resolves item names within a module
-//! regardless of declaration order (`struct` must still be written textually before `impl` for
-//! readability, but nothing here requires it).
+//! invocations rather than one `mod`-wrapped pair. `inherits`/`implements`/`supertrait`/
+//! `abstract_class`/`sealed` are declared **once**, on the `struct`, even though several of them
+//! (`implements`/`supertrait`/`abstract_class`) are only ever consumed while expanding the `impl` —
+//! the struct's own expansion (`store_class_args`) stashes a snapshot in a process-global map keyed
+//! by class name, and the paired `impl ClassName { .. }`, written as a bare `#[class]`, reads it
+//! back (`load_class_args`) instead of repeating the args. This makes `struct` before `impl`
+//! textual order a real requirement now (not just a readability convention): the struct's attribute
+//! must expand first so the map entry exists when the impl's attribute looks it up — true within a
+//! single crate's compilation, where outer attribute macros on top-level items expand in source
+//! order in one process. An impl may still pass args explicitly (the pre-existing form) instead of
+//! relying on the store; explicit args always win.
 //!
 //! Ancestor delegation is **not** implemented as a fully generic cross-crate manifest/token-
 //! accumulator (the `ambassador` crate's technique) — it doesn't need to be, because every
@@ -47,6 +55,8 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
@@ -126,6 +136,63 @@ impl Parse for ClassArg {
     }
 }
 
+/// `ClassArgs`, but with `Type`/`Path` fields flattened to their token-string form so a snapshot can
+/// be held in a process-global store between the `struct ClassName`  and `impl ClassName` attribute
+/// invocations (proc-macro types aren't worth threading `Send`/`Sync` bounds through for this).
+struct StoredClassArgs {
+    inherits: Option<String>,
+    implements: Option<String>,
+    supertrait: Option<String>,
+    abstract_class: bool,
+    sealed: bool,
+}
+
+/// Keyed by bare class name (e.g. `"VerticalLayout"`) — populated by `struct ClassName`'s own
+/// `#[class(..)]` invocation, read by the paired `impl ClassName { .. }`'s bare `#[class]` (see
+/// `expand`/`expand_impl`). Relies on the struct's attribute expanding before its paired impl's
+/// within the same crate compilation — see this module's own doc comment.
+///
+/// The bare class name isn't unique crate-wide (e.g. `TabViewImpl` names both
+/// `elwindui-backend-appkit`'s top-level native facade and its unrelated
+/// `builtins::tab_view::TabViewImpl`) — `load_class_args` therefore *removes* the entry it reads
+/// (see its own doc comment) rather than merely reading it, so each struct/impl pair only ever
+/// collides with a same-named pair that's still "open" (pushed but not yet consumed), which the
+/// struct-immediately-followed-by-its-own-impl convention this whole macro depends on never
+/// produces.
+fn class_arg_store() -> &'static Mutex<HashMap<String, StoredClassArgs>> {
+    static STORE: OnceLock<Mutex<HashMap<String, StoredClassArgs>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn store_class_args(class_name: &str, args: &ClassArgs) {
+    let stored = StoredClassArgs {
+        inherits: args.inherits.as_ref().map(|t| quote! { #t }.to_string()),
+        implements: args.implements.as_ref().map(|p| quote! { #p }.to_string()),
+        supertrait: args.supertrait.as_ref().map(|p| quote! { #p }.to_string()),
+        abstract_class: args.abstract_class,
+        sealed: args.sealed,
+    };
+    class_arg_store().lock().unwrap().insert(class_name.to_string(), stored);
+}
+
+/// `None` means no `struct ClassName` has been seen yet under this name — the caller (`expand_impl`)
+/// turns that into a `compile_error!` pointing at the missing/misordered struct declaration. Removes
+/// the entry on success (see `class_arg_store`'s own doc comment for why this must consume, not just
+/// read, the stored snapshot).
+fn load_class_args(class_name: &str) -> Option<ClassArgs> {
+    let mut store = class_arg_store().lock().unwrap();
+    let stored = store.remove(class_name)?;
+    let parse_type = |s: &String| syn::parse_str::<Type>(s).expect("#[class]: internal: failed to reparse stored `inherits` type");
+    let parse_path = |s: &String| syn::parse_str::<Path>(s).expect("#[class]: internal: failed to reparse stored path");
+    Some(ClassArgs {
+        inherits: stored.inherits.as_ref().map(parse_type),
+        implements: stored.implements.as_ref().map(parse_path),
+        supertrait: stored.supertrait.as_ref().map(parse_path),
+        abstract_class: stored.abstract_class,
+        sealed: stored.sealed,
+    })
+}
+
 /// `NativeControl<AnyView>` -> `NativeControlImpl<AnyView>`; `crate::TextAreaImpl` (already
 /// `Impl`-suffixed — the "explicit facade type" form, docs/elwindui_spec.md 付録H.2.1a's
 /// discussion of the backend DSL-facing wrapper layer) -> used as-is.
@@ -152,6 +219,10 @@ fn to_impl_name(class_name: &Ident) -> Ident {
 }
 
 pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
+    // Checked before parsing: a bare `#[class]` on an `impl` block means "reuse the args already
+    // declared on the paired `struct`" (see `expand_impl`) — `ClassArgs::default()` from parsing an
+    // empty token stream would be indistinguishable from that intent otherwise.
+    let attr_is_empty = attr.is_empty();
     let args = match syn::parse2::<ClassArgs>(attr) {
         Ok(args) => args,
         Err(e) => return e.to_compile_error(),
@@ -161,8 +232,11 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
         Err(e) => return e.to_compile_error(),
     };
     match parsed_item {
-        Item::Struct(item_struct) => expand_struct(&args, item_struct),
-        Item::Impl(item_impl) => expand_impl(&args, item_impl),
+        Item::Struct(item_struct) => {
+            store_class_args(&item_struct.ident.to_string(), &args);
+            expand_struct(&args, item_struct)
+        }
+        Item::Impl(item_impl) => expand_impl(args, item_impl, attr_is_empty),
         other => {
             let msg = "#[class]: expected a `struct ClassName { .. }` or `impl ClassName { .. }` item";
             let mut ts = syn::Error::new_spanned(&other, msg).to_compile_error();
@@ -216,7 +290,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     }
 }
 
-fn expand_impl(args: &ClassArgs, item: syn::ItemImpl) -> TokenStream2 {
+fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -> TokenStream2 {
     if item.trait_.is_some() {
         return syn::Error::new_spanned(
             &item,
@@ -232,6 +306,25 @@ fn expand_impl(args: &ClassArgs, item: syn::ItemImpl) -> TokenStream2 {
         },
         other => return syn::Error::new_spanned(other, "#[class]: unsupported `impl` self type").to_compile_error(),
     };
+    // A bare `#[class]` on the impl means "use whatever `#[class(..)]` args the paired `struct
+    // ClassName` declared" (see `store_class_args`/`load_class_args`) — explicit args on the impl
+    // (the old, still-supported form) always win over anything stored.
+    let args = if attr_is_empty {
+        match load_class_args(&class_name.to_string()) {
+            Some(args) => args,
+            None => {
+                let msg = format!(
+                    "#[class]: no matching `struct {class_name}` with #[elwindui_macros::class(..)] found earlier in \
+                     this file — declare the struct (with any inherits/implements/supertrait/... args) before this \
+                     impl block, or pass args explicitly here"
+                );
+                return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
+            }
+        }
+    } else {
+        attr_args
+    };
+    let args = &args;
     let impl_name = to_impl_name(&class_name);
     // `<H>`/`<H: LayoutNode + 'static>`/where-clause, threaded through every generated block below
     // so a generic class (e.g. `NativeControl<H>`) works the same as a non-generic one.

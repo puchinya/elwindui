@@ -486,7 +486,7 @@ pub struct TextArea {
 
 /// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are WinUI3-specific.
-#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class]
 impl TextArea {
     /// `TextBox.Text` assigned programmatically resets the caret/selection to the start, even when
     /// the text given is identical to what's already there — same issue as AppKit's
@@ -542,7 +542,7 @@ pub struct Button {
 
 /// `elwindui_core::ui::Button`'s shape is common to every backend — see that trait's own doc
 /// comment; only these method bodies are WinUI3-specific.
-#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class]
 impl Button {
     fn set_enabled(&self, enabled: bool) {
         let _ = self.xaml.SetIsEnabled(enabled);
@@ -610,7 +610,7 @@ pub struct TabViewImpl {
     on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
-#[elwindui_macros::class(implements = TabView, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class]
 impl TabViewImpl {
     fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_select.borrow_mut() = Some(callback);

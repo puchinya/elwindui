@@ -130,7 +130,7 @@ pub struct TabViewImpl {
     weak_self: RefCell<Weak<TabViewImpl>>,
 }
 
-#[elwindui_macros::class(inherits = appkit::TabViewImpl)]
+#[elwindui_macros::class]
 impl TabViewImpl {
     #[inherent]
     pub fn new() -> Rc<Self> {

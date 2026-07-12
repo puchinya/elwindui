@@ -102,7 +102,7 @@ pub trait RelayoutHost {
 /// other `#[class(inherits = ..)]`-managed subclass inherits all of them for free via Rust's own
 /// default-method dispatch — only `base` (synthesized by the macro; its concrete location differs
 /// per implementor) is a genuinely required method.
-#[elwindui_macros::class]
+#[elwindui_macros::class(supertrait = AsAny)]
 pub struct UIElement {
     pub margin: Cell<f32>,
     pub horizontal_alignment: Cell<HorizontalAlignment>,
@@ -350,7 +350,7 @@ impl UIElement for UIElementImpl {
     }
 }
 
-#[elwindui_macros::class(supertrait = AsAny)]
+#[elwindui_macros::class]
 impl UIElement {
     fn margin(&self) -> f32 {
         self.base().margin.get()
@@ -739,7 +739,7 @@ pub struct NativeControl<H> {
     pub handle: H,
 }
 
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class]
 impl<H: LayoutNode + 'static> NativeControl<H> {
     fn measure_override(&self, available: Size, _child_sizes: &[Size]) -> Size {
         self.handle.measure(available)
@@ -861,7 +861,7 @@ pub struct Layout {
     pub children: UIElementCollection,
 }
 
-#[elwindui_macros::class(inherits = UIElement, abstract_class)]
+#[elwindui_macros::class]
 impl Layout {
     /// Kept off the `Layout` trait itself (`#[inherent]`) — `VerticalLayout`/`HorizontalLayout`
     /// already expose their own `set_spacing` that forwards to this one inherent method, so making
@@ -878,7 +878,7 @@ impl Layout {
 #[elwindui_macros::class(inherits = Layout)]
 pub struct VerticalLayout {}
 
-#[elwindui_macros::class(inherits = Layout)]
+#[elwindui_macros::class]
 impl VerticalLayout {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
         stack_natural_size(Orientation::Vertical, self.base.spacing.get(), child_sizes)
@@ -907,7 +907,7 @@ pub fn create_vertical_layout() -> VerticalLayoutImpl {
 #[elwindui_macros::class(inherits = Layout)]
 pub struct HorizontalLayout {}
 
-#[elwindui_macros::class(inherits = Layout)]
+#[elwindui_macros::class]
 impl HorizontalLayout {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
         stack_natural_size(Orientation::Horizontal, self.base.spacing.get(), child_sizes)
@@ -945,7 +945,7 @@ pub struct Shape {
     pub stroke_width: Cell<f32>,
 }
 
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class]
 impl Shape {
     fn measure_override(&self, _available: Size, _child_sizes: &[Size]) -> Size {
         Size { width: 0.0, height: 0.0 }
@@ -1003,7 +1003,7 @@ pub struct Rectangle {
     corner_radius: Option<f32>,
 }
 
-#[elwindui_macros::class(inherits = Shape)]
+#[elwindui_macros::class]
 impl Rectangle {
     fn fill(&self) -> Option<String> {
         self.base.fill.borrow().clone()
@@ -1071,7 +1071,7 @@ pub struct Ellipse {
     stroke_width: Option<f32>,
 }
 
-#[elwindui_macros::class(inherits = Shape)]
+#[elwindui_macros::class]
 impl Ellipse {
     fn fill(&self) -> Option<String> {
         self.base.fill.borrow().clone()
@@ -1135,7 +1135,7 @@ pub struct TextBlock {
     pub alignment: Cell<TextAlignment>,
 }
 
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class]
 impl TextBlock {
     fn measure_override(&self, _available: Size, _child_sizes: &[Size]) -> Size {
         // `elwindui-core` has no font metrics of its own (measurement, like painting, is a
@@ -1201,7 +1201,7 @@ pub struct Control {
     pub children: UIElementCollection,
 }
 
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class]
 impl Control {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
         let inner = child_sizes
@@ -1262,7 +1262,7 @@ pub struct ContentControl {
     content: Rc<dyn UIElement>,
 }
 
-#[elwindui_macros::class(inherits = Control)]
+#[elwindui_macros::class]
 impl ContentControl {
     fn padding(&self) -> Option<f32> {
         self.padding.clone()
@@ -1358,7 +1358,7 @@ pub struct Grid {
     pub children: UIElementCollection,
 }
 
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class]
 impl Grid {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
         let cells: Vec<GridCell> = self.children.to_vec().iter().map(grid_cell_of).collect();

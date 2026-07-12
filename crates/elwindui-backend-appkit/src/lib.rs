@@ -494,7 +494,7 @@ pub struct TextArea {
 
 /// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are AppKit-specific.
-#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class]
 impl TextArea {
     /// `NSTextView.setString:` unconditionally resets the caret/selection to the start, even when
     /// the text it's given is identical to what's already there. The two-way `#[two_way] text`
@@ -583,7 +583,7 @@ pub struct Button {
 
 /// `elwindui_core::ui::Button`'s shape is common to every backend — see that trait's own doc
 /// comment; only these method bodies are AppKit-specific.
-#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class]
 impl Button {
     fn set_enabled(&self, enabled: bool) {
         self.ns.setEnabled(enabled);
@@ -773,7 +773,7 @@ pub struct TabViewImpl {
     content_container: Retained<NSView>,
 }
 
-#[elwindui_macros::class(implements = TabView, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class]
 impl TabViewImpl {
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
         self.strip.new_tab_button.set_on_click(callback);

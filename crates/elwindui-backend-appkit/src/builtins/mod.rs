@@ -145,7 +145,7 @@ impl elwindui_core::ui::Window for WindowImpl {
 #[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = appkit::TextAreaImpl)]
 pub struct TextAreaImpl {}
 
-#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = appkit::TextAreaImpl)]
+#[elwindui_macros::class]
 impl TextAreaImpl {
     /// `#[two_way] text` (`TextArea` in `builtins.elwind`) — the change-back half of the binding;
     /// `elwindui_core::ui::TextArea::set_text` is the model→widget half.
@@ -174,7 +174,7 @@ impl TextAreaImpl {
 #[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = appkit::ButtonImpl)]
 pub struct ButtonImpl {}
 
-#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = appkit::ButtonImpl)]
+#[elwindui_macros::class]
 impl ButtonImpl {
     /// `#[routed] on_click` (`Button` in `builtins.elwind`) is registered directly onto this
     /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)

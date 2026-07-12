@@ -14,6 +14,7 @@
 //! natively), so there's nothing to restore.
 
 use crate as winui3;
+use crate::AnyView;
 use crate::TabView as _;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -100,7 +101,7 @@ impl Default for DynamicSource {
     }
 }
 
-#[elwindui_macros::class(inherits = winui3::TabViewImpl)]
+#[elwindui_macros::class(inherits = winui3::NativeTabViewImpl)]
 pub struct TabViewImpl {
     entries: RefCell<Vec<Rc<TabViewItemImpl>>>,
     dynamic: RefCell<Option<DynamicSource>>,

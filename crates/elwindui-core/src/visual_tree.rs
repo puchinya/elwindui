@@ -33,7 +33,7 @@ pub fn get_parent(element: &dyn UIElement) -> Option<Rc<dyn UIElement>> {
 /// based counterpart to its child/parent walk (docs/elwindui_spec.md §13's original `find_all`
 /// intent) — useful for e.g. asserting how many `Button`s a generated view produced. Returns each
 /// match still erased as `Rc<dyn UIElement>` (this crate's usual erasure convention, matching
-/// `UIElement::as_native_control`'s own downcast pattern) — call `.as_any().downcast_ref::<T>()` on
+/// `UIElement::try_as_native_control`'s own downcast pattern) — call `.as_any().downcast_ref::<T>()` on
 /// a result to get at `T`'s own fields.
 pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
     let mut out = Vec::new();

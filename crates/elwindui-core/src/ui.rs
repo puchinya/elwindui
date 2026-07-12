@@ -339,13 +339,13 @@ pub fn register_routed_handler<T: 'static>(handlers: &RoutedHandlers, name: &'st
     handlers.borrow_mut().entry(name).or_default().push(Box::new(handler));
 }
 
-/// `UIElementImpl` is a genuine `UIElement` implementor itself — trivially, since `base` is the
-/// identity function here — which is what lets every other `#[class(inherits = ..)]`-managed
+/// `UIElementImpl` is a genuine `UIElement` implementor itself — trivially, since `as_ui_element` is
+/// the identity function here — which is what lets every other `#[class(inherits = ..)]`-managed
 /// subclass's ancestor delegation reduce to a single uniform `self.base.method(..)` forward
 /// (`elwindui_macros::class`'s `uielement_blind_forward`), regardless of how many `base` hops it
 /// has to pass through to reach the root (docs/elwindui_spec.md 付録H.2.1a).
 impl UIElement for UIElementImpl {
-    fn base(&self) -> &UIElementImpl {
+    fn as_ui_element(&self) -> &UIElementImpl {
         self
     }
 }
@@ -353,102 +353,102 @@ impl UIElement for UIElementImpl {
 #[elwindui_macros::class]
 impl UIElement {
     fn margin(&self) -> f32 {
-        self.base().margin.get()
+        self.as_ui_element().margin.get()
     }
     fn horizontal_alignment(&self) -> HorizontalAlignment {
-        self.base().horizontal_alignment.get()
+        self.as_ui_element().horizontal_alignment.get()
     }
     fn vertical_alignment(&self) -> VerticalAlignment {
-        self.base().vertical_alignment.get()
+        self.as_ui_element().vertical_alignment.get()
     }
     /// WinUI3's `UIElement.Visibility` — see `Visibility`'s own doc comment.
     fn visibility(&self) -> Visibility {
-        self.base().visibility.get()
+        self.as_ui_element().visibility.get()
     }
     /// WinUI3's `FrameworkElement.Width`/`Height`/`MinWidth`/`MinHeight`/`MaxWidth`/`MaxHeight` —
     /// see `UIElementImpl`'s own doc comment for these six fields.
     fn width(&self) -> Option<f32> {
-        self.base().width.get()
+        self.as_ui_element().width.get()
     }
     fn height(&self) -> Option<f32> {
-        self.base().height.get()
+        self.as_ui_element().height.get()
     }
     fn min_width(&self) -> Option<f32> {
-        self.base().min_width.get()
+        self.as_ui_element().min_width.get()
     }
     fn min_height(&self) -> Option<f32> {
-        self.base().min_height.get()
+        self.as_ui_element().min_height.get()
     }
     fn max_width(&self) -> Option<f32> {
-        self.base().max_width.get()
+        self.as_ui_element().max_width.get()
     }
     fn max_height(&self) -> Option<f32> {
-        self.base().max_height.get()
+        self.as_ui_element().max_height.get()
     }
     /// WinUI3's `UIElement.ActualWidth`/`ActualHeight`/`ActualOffset` — the result of the most
     /// recent `arrange` pass. See `UIElementImpl`'s own doc comment.
     fn actual_width(&self) -> f32 {
-        self.base().actual_width.get()
+        self.as_ui_element().actual_width.get()
     }
     fn actual_height(&self) -> f32 {
-        self.base().actual_height.get()
+        self.as_ui_element().actual_height.get()
     }
     fn actual_offset(&self) -> Point {
-        self.base().actual_offset.get()
+        self.as_ui_element().actual_offset.get()
     }
     /// Post-construction setters (docs/elwindui_spec.md 付録H.2.1a) for every field this trait
     /// already exposes a getter for — declared here (not just as `UIElementImpl`'s own inherent
     /// methods) so they're reachable generically through `dyn UIElement`/any bound on this trait,
     /// not only through the concrete backing struct.
     fn set_margin(&self, margin: f32) {
-        self.base().set_margin(margin);
+        self.as_ui_element().set_margin(margin);
     }
     fn set_horizontal_alignment(&self, alignment: HorizontalAlignment) {
-        self.base().set_horizontal_alignment(alignment);
+        self.as_ui_element().set_horizontal_alignment(alignment);
     }
     fn set_vertical_alignment(&self, alignment: VerticalAlignment) {
-        self.base().set_vertical_alignment(alignment);
+        self.as_ui_element().set_vertical_alignment(alignment);
     }
     fn set_visibility(&self, visibility: Visibility) {
-        self.base().set_visibility(visibility);
+        self.as_ui_element().set_visibility(visibility);
     }
     fn set_width(&self, width: Option<f32>) {
-        self.base().set_width(width);
+        self.as_ui_element().set_width(width);
     }
     fn set_height(&self, height: Option<f32>) {
-        self.base().set_height(height);
+        self.as_ui_element().set_height(height);
     }
     fn set_min_width(&self, min_width: Option<f32>) {
-        self.base().set_min_width(min_width);
+        self.as_ui_element().set_min_width(min_width);
     }
     fn set_min_height(&self, min_height: Option<f32>) {
-        self.base().set_min_height(min_height);
+        self.as_ui_element().set_min_height(min_height);
     }
     fn set_max_width(&self, max_width: Option<f32>) {
-        self.base().set_max_width(max_width);
+        self.as_ui_element().set_max_width(max_width);
     }
     fn set_max_height(&self, max_height: Option<f32>) {
-        self.base().set_max_height(max_height);
+        self.as_ui_element().set_max_height(max_height);
     }
     fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
-        self.base().set_data_context(data_context);
+        self.as_ui_element().set_data_context(data_context);
     }
     /// WinUI3's `FrameworkElement.DataContext` — an ambient, type-erased data value an element
     /// carries (set explicitly via the `data_context:` common attribute, or populated internally by
     /// `TabView`'s `items_source` mode for each generated `TabViewItem`). `None` when unset.
     fn data_context(&self) -> Option<Rc<dyn Any>> {
-        self.base().data_context.borrow().clone()
+        self.as_ui_element().data_context.borrow().clone()
     }
     /// WinUI3's `VisualTreeHelper.GetParent` — `None` for the root of whatever tree this element
     /// is currently part of. See `UIElementImpl::parent`'s doc comment.
     fn parent(&self) -> Option<Rc<dyn UIElement>> {
-        self.base().parent.borrow().as_ref().and_then(|p| p.upgrade())
+        self.as_ui_element().parent.borrow().as_ref().and_then(|p| p.upgrade())
     }
     /// This element's own children in the **Visual tree** (WinUI3's own Visual-tree children,
     /// docs/elwindui_spec.md 付録H.2.2) — the only tree any code ever actually walks (there is no
     /// separate, generically-traversable Logical tree data structure; some components merely *have*
     /// Logical-tree-shaped children of their own — see `UIElementCollection`). A default method,
-    /// not overridden by any concrete type: it reads `self.base().visual_children` directly, which
+    /// not overridden by any concrete type: it reads `self.as_ui_element().visual_children` directly, which
     /// is empty for a leaf like `NativeControlImpl`/`TextBlockImpl`/`ShapeImpl` and populated for a
     /// container (`LayoutImpl`/`ControlImpl`/`GridImpl`) via that same `UIElementImpl`'s
     /// `children_collection()`-derived `UIElementCollection`. Returns an owned `Vec` (each
@@ -456,7 +456,7 @@ impl UIElement {
     /// `RefCell`-backed (mutable at any time via `UIElementCollection`'s `add`/`remove`/etc.), and a
     /// `std::cell::Ref` guard can't be smuggled out through a bare reference tied to `&self`.
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
-        self.base().visual_children.to_vec()
+        self.as_ui_element().visual_children.to_vec()
     }
     /// WinUI3's `GetType().Name` (via `.NET` reflection), commonly paired with `VisualTreeHelper`
     /// when dumping/debugging a tree — see `crate::visual_tree`. A default method, not overridden by
@@ -492,7 +492,7 @@ impl UIElement {
     /// concrete type placed in the tree — without this indirection, a composing type's *own*
     /// concrete type (not `NativeControlImpl<H>` itself) would never be recognized as carrying a
     /// real native handle.
-    fn as_native_control(&self) -> Option<&dyn Any> {
+    fn try_as_native_control(&self) -> Option<&dyn Any> {
         None
     }
     /// WinUI3's `UIElement.InvalidateVisual`-equivalent — asks whatever host owns this element's
@@ -504,17 +504,17 @@ impl UIElement {
     /// `measure_override` when only `arrange` is dirty) is future work once such a cache exists.
     /// A no-op if this element isn't (yet, or anymore) part of a hosted tree.
     fn invalidate(&self) {
-        request_relayout(self.base());
+        request_relayout(self.as_ui_element());
     }
     /// WinUI3's `UIElement.InvalidateArrange` — see `invalidate`'s own doc comment for why this
     /// currently triggers the same full relayout as the other two methods here.
     fn invalidate_arrange(&self) {
-        request_relayout(self.base());
+        request_relayout(self.as_ui_element());
     }
     /// WinUI3's `UIElement.InvalidateMeasure` — see `invalidate`'s own doc comment for why this
     /// currently triggers the same full relayout as the other two methods here.
     fn invalidate_measure(&self) {
-        request_relayout(self.base());
+        request_relayout(self.as_ui_element());
     }
 }
 
@@ -534,7 +534,7 @@ fn request_relayout(base: &UIElementImpl) {
     while let Some(parent) = current.parent() {
         current = parent;
     }
-    if let Some(host) = current.base().invalidate_host.borrow().as_ref() {
+    if let Some(host) = current.as_ui_element().invalidate_host.borrow().as_ref() {
         host.request_relayout();
     }
 }
@@ -559,9 +559,9 @@ pub fn new_element<T: UIElement + 'static>(value: T) -> Rc<dyn UIElement> {
 pub fn new_element_concrete<T: UIElement + 'static>(value: T) -> Rc<T> {
     let this = Rc::new(value);
     let erased: Rc<dyn UIElement> = this.clone();
-    *erased.base().self_handle.borrow_mut() = Some(Rc::downgrade(&erased));
+    *erased.as_ui_element().self_handle.borrow_mut() = Some(Rc::downgrade(&erased));
     for child in erased.visual_children() {
-        *child.base().parent.borrow_mut() = Some(Rc::downgrade(&erased));
+        *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&erased));
     }
     this
 }
@@ -646,31 +646,31 @@ impl UIElementCollection {
     }
     pub fn add(&self, child: Rc<dyn UIElement>) {
         if let Some(owner) = self.owner_rc() {
-            *child.base().parent.borrow_mut() = Some(Rc::downgrade(&owner));
+            *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
         }
         self.visual.add(child);
     }
     pub fn insert(&self, index: usize, child: Rc<dyn UIElement>) {
         if let Some(owner) = self.owner_rc() {
-            *child.base().parent.borrow_mut() = Some(Rc::downgrade(&owner));
+            *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
         }
         self.visual.insert(index, child);
     }
     pub fn remove(&self, child: &Rc<dyn UIElement>) -> bool {
         let removed = self.visual.remove(child);
         if removed {
-            *child.base().parent.borrow_mut() = None;
+            *child.as_ui_element().parent.borrow_mut() = None;
         }
         removed
     }
     pub fn remove_at(&self, index: usize) -> Rc<dyn UIElement> {
         let child = self.visual.remove_at(index);
-        *child.base().parent.borrow_mut() = None;
+        *child.as_ui_element().parent.borrow_mut() = None;
         child
     }
     pub fn clear(&self) {
         for child in self.visual.to_vec() {
-            *child.base().parent.borrow_mut() = None;
+            *child.as_ui_element().parent.borrow_mut() = None;
         }
         self.visual.clear();
     }
@@ -747,7 +747,7 @@ impl<H: LayoutNode + 'static> NativeControl<H> {
     fn arrange_override(&self, _final_size: Size, _child_sizes: &[Size]) -> Vec<Rect> {
         Vec::new()
     }
-    fn as_native_control(&self) -> Option<&dyn Any> {
+    fn try_as_native_control(&self) -> Option<&dyn Any> {
         Some(self)
     }
     pub fn new(handle: H) -> Self {
@@ -774,7 +774,7 @@ pub fn create_native_control<H: LayoutNode + 'static>(handle: H) -> NativeContro
 /// each such argument is `&dyn` (or `Rc<dyn>`) the matching leaf trait itself (`MenuItem`/`Menu`/
 /// `MenuBarItem`/`MenuBar`), and each backend's own `impl Xxx for BackendXImpl` downcasts it back to
 /// its own concrete type via `AsAny::as_any` (see that trait's own doc comment; already the
-/// established pattern for `UIElement::as_native_control`/`visual_tree::find_all`) before
+/// established pattern for `UIElement::try_as_native_control`/`visual_tree::find_all`) before
 /// delegating to its real native handle.
 ///
 /// `TabView`/`TabViewItem` are deliberately **not** included here: their own methods
@@ -1302,7 +1302,7 @@ impl ContentControl {
         let this = Rc::new(create_content_control(padding, content));
         let erased: Rc<dyn UIElement> = this.clone();
         for child in this.visual_children() {
-            *child.base().parent.borrow_mut() = Some(Rc::downgrade(&erased));
+            *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&erased));
         }
         this
     }
@@ -1344,8 +1344,8 @@ pub fn create_content_control(padding: Option<f32>, content: Rc<dyn UIElement>) 
 /// owner (`Grid`) itself, never `UIElementImpl`.
 fn grid_cell_of(child: &Rc<dyn UIElement>) -> GridCell {
     GridCell {
-        row: child.base().get_attached("Grid", "row", 0i32),
-        column: child.base().get_attached("Grid", "column", 0i32),
+        row: child.as_ui_element().get_attached("Grid", "row", 0i32),
+        column: child.as_ui_element().get_attached("Grid", "column", 0i32),
     }
 }
 
@@ -1441,23 +1441,23 @@ fn arrange<H: Clone + 'static>(elem: &Rc<dyn UIElement>, allotted: Rect, out: &m
     // `Visibility`'s own doc comment. `actual_offset` was already set by the parent's own loop
     // (below) before this call, so only the size needs zeroing here.
     if elem.visibility() == Visibility::Collapsed {
-        elem.base().actual_width.set(0.0);
-        elem.base().actual_height.set(0.0);
+        elem.as_ui_element().actual_width.set(0.0);
+        elem.as_ui_element().actual_height.set(0.0);
         return;
     }
     let final_rect = measure_and_align(elem.as_ref(), allotted);
     let final_size = Size { width: final_rect.width, height: final_rect.height };
     // WinUI3's `ActualWidth`/`ActualHeight` — the result of this element's own just-completed
     // Arrange, readable afterward via `UIElement::actual_width`/`actual_height`.
-    elem.base().actual_width.set(final_size.width);
-    elem.base().actual_height.set(final_size.height);
+    elem.as_ui_element().actual_width.set(final_size.width);
+    elem.as_ui_element().actual_height.set(final_size.height);
 
-    // `as_native_control` (not a direct `as_any().downcast_ref` on `elem` itself) so a type that
+    // `try_as_native_control` (not a direct `as_any().downcast_ref` on `elem` itself) so a type that
     // *composes* a `NativeControlImpl<H>` as its own `base` field (e.g. a backend's `ButtonImpl`)
     // is recognized too — `Any::downcast_ref` only succeeds against the exact concrete type placed
     // in the tree, which for such a type is never literally `NativeControlImpl<H>` itself. See
-    // `UIElement::as_native_control`'s own doc comment.
-    if let Some(native) = elem.as_ref().as_native_control().and_then(|a| a.downcast_ref::<NativeControlImpl<H>>()) {
+    // `UIElement::try_as_native_control`'s own doc comment.
+    if let Some(native) = elem.as_ref().try_as_native_control().and_then(|a| a.downcast_ref::<NativeControlImpl<H>>()) {
         out.push(RenderItem::Native(native.handle.clone(), final_rect, Rc::clone(elem)));
     }
     if let Some(paint) = elem.paint() {
@@ -1469,7 +1469,7 @@ fn arrange<H: Clone + 'static>(elem: &Rc<dyn UIElement>, allotted: Rect, out: &m
     for (child, child_rect) in elem.visual_children().iter().zip(child_rects) {
         // WinUI3's `ActualOffset` — this child's own position relative to `elem` (its parent),
         // set here before its absolute rect (below) is computed for the recursive call.
-        child.base().actual_offset.set(Point { x: child_rect.x, y: child_rect.y });
+        child.as_ui_element().actual_offset.set(Point { x: child_rect.x, y: child_rect.y });
         let absolute_child_rect =
             Rect { x: final_rect.x + child_rect.x, y: final_rect.y + child_rect.y, width: child_rect.width, height: child_rect.height };
         arrange::<H>(child, absolute_child_rect, out);
@@ -1567,7 +1567,7 @@ pub fn hit_test(root: &Rc<dyn UIElement>, available: Size, at: Point) -> Option<
 pub fn dispatch_routed<T: 'static>(target: &Rc<dyn UIElement>, name: &str, payload: &T, args: &RoutedEventArgs) {
     let mut current = Some(Rc::clone(target));
     while let Some(elem) = current {
-        let handlers = elem.base().routed_handlers.borrow();
+        let handlers = elem.as_ui_element().routed_handlers.borrow();
         if let Some(handlers) = handlers.get(name) {
             for handler in handlers {
                 let handler = handler
@@ -1665,8 +1665,8 @@ mod tests {
         // `CrossAlign::Start` behavior this test used to exercise.
         fn leaf(name: &'static str, s: Size) -> Rc<dyn UIElement> {
             let node = new_element(create_native_control(FakeHandle(name, s)));
-            node.base().set_horizontal_alignment(HorizontalAlignment::Left);
-            node.base().set_vertical_alignment(VerticalAlignment::Top);
+            node.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
+            node.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
             node
         }
         fn start_stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
@@ -1688,8 +1688,8 @@ mod tests {
                     new_element(stack)
                 }
             };
-            node.base().set_horizontal_alignment(HorizontalAlignment::Left);
-            node.base().set_vertical_alignment(VerticalAlignment::Top);
+            node.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
+            node.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
             node
         }
 
@@ -1760,7 +1760,7 @@ mod tests {
     #[test]
     fn margin_shrinks_the_slot_an_element_is_arranged_into() {
         let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
-        tree.base().set_margin(10.0);
+        tree.as_ui_element().set_margin(10.0);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert_eq!(natives[0].1, Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 });
     }
@@ -1768,14 +1768,14 @@ mod tests {
     #[test]
     fn explicit_width_and_height_override_the_elements_own_measured_size() {
         let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
-        tree.base().set_width(Some(50.0));
-        tree.base().set_height(Some(5.0));
+        tree.as_ui_element().set_width(Some(50.0));
+        tree.as_ui_element().set_height(Some(5.0));
         // `Stretch` (the default) still governs slot placement; the explicit width/height above
         // constrains what `measure_override`'s own `available`/`desired` see, not the final
         // stretch-to-slot size — a non-`Stretch` alignment (below) is what actually surfaces the
         // explicit size in the arranged rect.
-        tree.base().set_horizontal_alignment(HorizontalAlignment::Left);
-        tree.base().set_vertical_alignment(VerticalAlignment::Top);
+        tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
+        tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
         assert_eq!(natives[0].1, Rect { x: 0.0, y: 0.0, width: 50.0, height: 5.0 });
     }
@@ -1783,10 +1783,10 @@ mod tests {
     #[test]
     fn min_and_max_clamp_the_elements_own_measured_size() {
         let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
-        tree.base().set_min_width(Some(30.0));
-        tree.base().set_max_height(Some(8.0));
-        tree.base().set_horizontal_alignment(HorizontalAlignment::Left);
-        tree.base().set_vertical_alignment(VerticalAlignment::Top);
+        tree.as_ui_element().set_min_width(Some(30.0));
+        tree.as_ui_element().set_max_height(Some(8.0));
+        tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
+        tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
         assert_eq!(natives[0].1, Rect { x: 0.0, y: 0.0, width: 30.0, height: 8.0 });
     }
@@ -1794,8 +1794,8 @@ mod tests {
     #[test]
     fn actual_width_height_and_offset_are_populated_after_layout() {
         let leaf = native("a", size(10.0, 20.0));
-        leaf.base().set_horizontal_alignment(HorizontalAlignment::Left);
-        leaf.base().set_vertical_alignment(VerticalAlignment::Top);
+        leaf.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
+        leaf.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
         let root = stack(Orientation::Vertical, 5.0, vec![native("top", size(50.0, 10.0)), Rc::clone(&leaf)]);
         layout_tree::<FakeHandle>(&root, size(200.0, 200.0));
 
@@ -1811,8 +1811,8 @@ mod tests {
     #[test]
     fn non_stretch_alignment_keeps_the_elements_own_measured_size() {
         let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
-        tree.base().set_horizontal_alignment(HorizontalAlignment::Center);
-        tree.base().set_vertical_alignment(VerticalAlignment::Center);
+        tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Center);
+        tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Center);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert_eq!(natives[0].1, Rect { x: 45.0, y: 40.0, width: 10.0, height: 20.0 });
     }
@@ -1826,7 +1826,7 @@ mod tests {
     }
 
     impl UIElement for PaintingContainer {
-        fn base(&self) -> &UIElementImpl {
+        fn as_ui_element(&self) -> &UIElementImpl {
             &self.base
         }
         fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
@@ -1920,7 +1920,7 @@ mod tests {
         let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
 
         let calls = Rc::new(RefCell::new(0));
-        root.base().set_invalidate_host(Some(Rc::new(CountingHost { calls: Rc::clone(&calls) })));
+        root.as_ui_element().set_invalidate_host(Some(Rc::new(CountingHost { calls: Rc::clone(&calls) })));
 
         // Called from the *leaf*, not the root — must walk `parent()` up to find the registered host.
         leaf.invalidate();
@@ -1928,7 +1928,7 @@ mod tests {
         leaf.invalidate_measure();
         assert_eq!(*calls.borrow(), 3);
 
-        root.base().set_invalidate_host(None);
+        root.as_ui_element().set_invalidate_host(None);
         leaf.invalidate();
         assert_eq!(*calls.borrow(), 3, "un-registering the host should make invalidate a no-op again");
     }
@@ -1951,11 +1951,11 @@ mod tests {
         let root_calls = Rc::new(RefCell::new(0));
         {
             let leaf_calls = Rc::clone(&leaf_calls);
-            leaf.base().register_routed_handler::<()>("on_click", Box::new(move |_, _| *leaf_calls.borrow_mut() += 1));
+            leaf.as_ui_element().register_routed_handler::<()>("on_click", Box::new(move |_, _| *leaf_calls.borrow_mut() += 1));
         }
         {
             let root_calls = Rc::clone(&root_calls);
-            root.base().register_routed_handler::<()>("on_click", Box::new(move |_, args| {
+            root.as_ui_element().register_routed_handler::<()>("on_click", Box::new(move |_, args| {
                 *root_calls.borrow_mut() += 1;
                 args.handled.set(true);
             }));
@@ -1971,7 +1971,7 @@ mod tests {
     #[test]
     fn collapsed_leaf_has_zero_size_and_produces_no_render_item() {
         let tree = native("a", size(10.0, 20.0));
-        tree.base().set_visibility(Visibility::Collapsed);
+        tree.as_ui_element().set_visibility(Visibility::Collapsed);
         let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert!(natives.is_empty());
         assert!(paints.is_empty());
@@ -1982,10 +1982,10 @@ mod tests {
     #[test]
     fn collapsed_child_is_excluded_from_stack_layout() {
         let collapsed = native("collapsed", size(50.0, 50.0));
-        collapsed.base().set_visibility(Visibility::Collapsed);
+        collapsed.as_ui_element().set_visibility(Visibility::Collapsed);
         let visible = native("visible", size(30.0, 10.0));
-        visible.base().set_horizontal_alignment(HorizontalAlignment::Left);
-        visible.base().set_vertical_alignment(VerticalAlignment::Top);
+        visible.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
+        visible.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
         let tree = stack(Orientation::Vertical, 5.0, vec![Rc::clone(&collapsed), Rc::clone(&visible)]);
 
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
@@ -1999,7 +1999,7 @@ mod tests {
     fn collapsed_containers_subtree_is_entirely_excluded() {
         let leaf = native("child", size(10.0, 10.0));
         let container = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
-        container.base().set_visibility(Visibility::Collapsed);
+        container.as_ui_element().set_visibility(Visibility::Collapsed);
 
         let (natives, paints) = split(layout_tree::<FakeHandle>(&container, size(100.0, 100.0)));
         assert!(natives.is_empty());
@@ -2010,7 +2010,7 @@ mod tests {
     #[test]
     fn collapsed_element_is_excluded_from_hit_test() {
         let tree = native("a", size(10.0, 20.0));
-        tree.base().set_visibility(Visibility::Collapsed);
+        tree.as_ui_element().set_visibility(Visibility::Collapsed);
         assert!(hit_test(&tree, size(100.0, 100.0), Point { x: 5.0, y: 5.0 }).is_none());
     }
 }

@@ -22,6 +22,7 @@
 //! `remove_tab`).
 
 use crate as appkit;
+use crate::AnyView;
 use crate::TabView as _;
 use objc2::rc::Retained;
 use std::any::Any;
@@ -110,7 +111,7 @@ impl Default for DynamicSource {
     }
 }
 
-#[elwindui_macros::class(inherits = appkit::TabViewImpl)]
+#[elwindui_macros::class(inherits = appkit::NativeTabViewImpl)]
 pub struct TabViewImpl {
     entries: RefCell<Vec<Rc<TabViewItemImpl>>>,
     dynamic: RefCell<Option<DynamicSource>>,

@@ -2381,7 +2381,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 use elwindui::core::ui::UIElement as _;
                 let __erased: std::rc::Rc<dyn elwindui::core::ui::UIElement> = this.clone();
                 for child in this.visual_children() {
-                    *child.base().parent.borrow_mut() = Some(std::rc::Rc::downgrade(&__erased));
+                    *child.as_ui_element().parent.borrow_mut() = Some(std::rc::Rc::downgrade(&__erased));
                 }
             }
         }
@@ -2409,8 +2409,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             }
 
             impl elwindui::core::ui::UIElement for #struct_ident {
-                fn base(&self) -> &elwindui::core::ui::UIElementImpl {
-                    elwindui::core::ui::UIElement::base(&self.base)
+                fn as_ui_element(&self) -> &elwindui::core::ui::UIElementImpl {
+                    elwindui::core::ui::UIElement::as_ui_element(&self.base)
                 }
                 fn visual_children(&self) -> Vec<std::rc::Rc<dyn elwindui::core::ui::UIElement>> {
                     elwindui::core::ui::UIElement::visual_children(&self.base)
@@ -2748,7 +2748,7 @@ fn find_attr<'a>(node: &'a PlannedNode, name: &str) -> Option<&'a ViewExpr> {
     node.attributes.iter().find(|(k, _)| k == name).map(|(_, v)| v)
 }
 
-/// Emits `binding.base().set_attached::<T>(owner, field, value)` for every `Owner::field: value`
+/// Emits `binding.as_ui_element().set_attached::<T>(owner, field, value)` for every `Owner::field: value`
 /// attached-property setter on `node` (§3) — completely owner/field-name-agnostic on this side,
 /// unlike the old `grid_cell_expr` this replaces: adding a future attached-property owner besides
 /// `Grid` needs no change here at all, only a new `#[attached]` declaration on that owner and a
@@ -2776,7 +2776,7 @@ fn emit_attached_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table
             .unwrap_or_else(|| panic!("`{owner}::{field}` is not a known `#[attached]` field (should have been caught by validation)"));
         let ty: syn::Type = syn::parse_str(ty_str).unwrap_or_else(|e| panic!("invalid attached field type `{ty_str}`: {e}"));
         let value_ts = emit_expr(value, ctx, mode);
-        out.extend(quote! { #binding.base().set_attached::<#ty>(#owner, #field, #value_ts); });
+        out.extend(quote! { #binding.as_ui_element().set_attached::<#ty>(#owner, #field, #value_ts); });
     }
     out
 }
@@ -3430,7 +3430,7 @@ fn build_component_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table
     quote! { #create_fn(#(#args),*) }
 }
 
-/// Emits post-construction `binding.base().set_margin(..)`/`set_data_context(..)`/
+/// Emits post-construction `binding.as_ui_element().set_margin(..)`/`set_data_context(..)`/
 /// `set_attached::<T>(..)` calls (docs/elwindui_spec.md 付録H.2.1a) for whichever of these common
 /// attributes `node` actually specifies — shared by `emit_virtual_construction` (virtual builtins)
 /// and `emit_construction`'s native-control-leaf branch (`Button`/`TextArea`/`TabView` — see
@@ -3465,7 +3465,7 @@ fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Modu
         } else {
             emit_expr(expr, ctx, &EmitMode::Construction)
         };
-        out.extend(quote! { #binding.base().set_margin(#value); });
+        out.extend(quote! { #binding.as_ui_element().set_margin(#value); });
     }
     // `data_context` (付録Y) is likewise a common attribute, settable the same way `margin` is —
     // an omitted one leaves `UIElementImpl::default()`'s `None`. The supplied expression is
@@ -3476,14 +3476,14 @@ fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Modu
     // it doesn't wrap in a fresh `Rc`.
     if let Some(expr) = find_attr(node, "data_context") {
         let value = emit_expr(expr, ctx, &EmitMode::Construction);
-        out.extend(quote! { #binding.base().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
+        out.extend(quote! { #binding.as_ui_element().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
     }
     out.extend(emit_attached_setters(node, ctx, from, table, &EmitMode::Construction, binding));
-    // `.base()` is a trait method (`elwindui::core::ui::UIElement`), not an inherent one — needs
+    // `.as_ui_element()` is a trait method (`elwindui::core::ui::UIElement`), not an inherent one — needs
     // the trait in scope for dot-call resolution wherever `out` ends up spliced, regardless of
     // whatever `use`s the surrounding generated function happens to have (mirrors the parent-wiring
     // `use elwindui::core::ui::UIElement as _;` guard elsewhere in this module). A no-op (empty
-    // `out`) skips it — no `.base()` call to guard.
+    // `out`) skips it — no `.as_ui_element()` call to guard.
     if out.is_empty() {
         out
     } else {
@@ -3496,7 +3496,7 @@ fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Modu
     }
 }
 
-/// Emits `binding.base().register_routed_handler::<()>("on_click", ..)` for the generic "any
+/// Emits `binding.as_ui_element().register_routed_handler::<()>("on_click", ..)` for the generic "any
 /// element can catch a routed `on_click`" common attribute (docs/elwindui_spec.md 4章) — used by
 /// `emit_virtual_construction` unconditionally, and by `emit_construction`'s native-control-leaf
 /// branch only when the type doesn't *already* declare `on_click` as a real `#[routed]` field of
@@ -3506,13 +3506,13 @@ fn emit_generic_on_click_routing(node: &PlannedNode, ctx: &ViewCtx, binding: &To
     match find_attr(node, "on_click") {
         Some(expr) => {
             let call = emit_expr(expr, ctx, &EmitMode::Construction);
-            // `.base()` is a trait method (`elwindui::core::ui::UIElement`) — see
+            // `.as_ui_element()` is a trait method (`elwindui::core::ui::UIElement`) — see
             // `emit_common_ui_element_setters`'s own matching guard for why this needs its own
             // local `use`.
             quote! {
                 {
                     use elwindui::core::ui::UIElement as _;
-                    #binding.base().register_routed_handler::<()>("on_click", Box::new(move |_: &(), _args: &elwindui::core::input::RoutedEventArgs| { #call; }));
+                    #binding.as_ui_element().register_routed_handler::<()>("on_click", Box::new(move |_: &(), _args: &elwindui::core::input::RoutedEventArgs| { #call; }));
                 }
             }
         }
@@ -4063,11 +4063,11 @@ fn emit_common_ui_element_resync(node: &PlannedNode, ctx: &ViewCtx, self_mode: &
     let mut body = TokenStream::new();
     if let Some(expr) = find_attr(node, "margin") {
         let value = emit_expr(expr, ctx, self_mode);
-        body.extend(quote! { self.#binding.base().set_margin(#value); });
+        body.extend(quote! { self.#binding.as_ui_element().set_margin(#value); });
     }
     if let Some(expr) = find_attr(node, "data_context") {
         let value = emit_expr(expr, ctx, self_mode);
-        body.extend(quote! { self.#binding.base().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
+        body.extend(quote! { self.#binding.as_ui_element().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
     }
     if !body.is_empty() {
         out.extend(quote! {

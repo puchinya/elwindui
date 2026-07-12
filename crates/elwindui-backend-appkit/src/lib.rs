@@ -1,20 +1,14 @@
 //! AppKit implementation of the widget surface `elwindui-codegen` targets for the `notepad`
 //! example. See docs/elwindui_spec.md 付録A, 付録C, docs/elwindui_gui_framework_design.md §3.
 //!
-//! Only genuinely native leaf widgets (`Window`/`TextAreaImpl`/`ButtonImpl`/`MenuBarImpl`/`TabViewImpl`, the
+//! Only genuinely native leaf widgets (`Window`/`TextAreaImpl`/`ButtonImpl`/`MenuBarImpl`/`NativeTabViewImpl`, the
 //! "NativeControl" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
 //! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have none: they're
 //! `elwindui_core::ui::UIElement` values that `elwindui-codegen` builds directly, reflected into
 //! real `NSView`s/`CAShapeLayer`s/`CATextLayer`s by `TreeHostView` below (used by both `Window`'s
-//! content view and `TabViewImpl`'s per-tab content area).
+//! content view and `NativeTabViewImpl`'s per-tab content area).
 
 #![cfg(target_os = "macos")]
-
-/// DSL-facing `Window`/`TextArea`/`Button`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/
-/// `TabViewItem` wrappers that `elwindui-codegen`'s generated code actually constructs — see this
-/// module's own doc comment for why it's split out from the raw types above instead of sharing
-/// their names at this crate's root.
-pub mod builtins;
 
 use elwindui_core::ui::{layout_tree, AsAny, Button as _, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElement};
 use objc2::rc::Retained;
@@ -43,7 +37,7 @@ fn mtm() -> MainThreadMarker {
 /// etc. (see that trait's own doc comment), now applied to the handle side too.
 ///
 /// Implemented on the raw `Retained<T>` view type itself (a foreign type — allowed since
-/// `AppKitHandle` is a local trait) rather than on `TextAreaImpl`/`ButtonImpl`/`TabViewImpl`, since
+/// `AppKitHandle` is a local trait) rather than on `TextAreaImpl`/`ButtonImpl`/`NativeTabViewImpl`, since
 /// those now each compose an `elwindui_core::ui::NativeControlImpl<AnyView>` as their own `base`
 /// field (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed
 /// widget itself would be a self-reference. Wrapping just the raw view instead lets `base.handle`
@@ -69,7 +63,7 @@ impl AppKitHandle for Retained<NSStackView> {
     }
 }
 
-/// Everything the generated code can pass as a `Window`/`TabViewImpl` child.
+/// Everything the generated code can pass as a `Window`/`NativeTabViewImpl` child.
 /// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have no variant here at all — they're
 /// purely `elwindui_core::ui::Node::Virtual` values now (see `TreeHostView` below), never a real
 /// widget of their own. An `Rc<dyn AppKitHandle>` (not a closed `enum`) so adding a new native leaf
@@ -270,7 +264,7 @@ fn ca_alignment_mode(alignment: elwindui_core::ui::TextAlignment) -> &'static CA
 /// `StackLayoutView` (`VerticalLayout`/`HorizontalLayout`) — since `VerticalLayout`/
 /// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` are now all just `UIElement` values with
 /// no backend struct of their own (docs/elwindui_spec.md 付録H.2), one host type is all any native
-/// container needs to accept arbitrary content: `Window`'s content view and `TabViewImpl`'s per-tab
+/// container needs to accept arbitrary content: `Window`'s content view and `NativeTabViewImpl`'s per-tab
 /// content area both are one of these.
 pub struct TreeHostIvars {
     tree: RefCell<Option<Rc<dyn UIElement>>>,
@@ -322,7 +316,7 @@ define_class!(
 
         /// Reports this host's current tree's natural size so `fittingSize()` — and therefore an
         /// *outer* `AnyView::measure()` (this host nested inside another virtual container) or an
-        /// outer `NSStackView` (`TabViewImpl`'s content area sits in one) — sees something meaningful
+        /// outer `NSStackView` (`NativeTabViewImpl`'s content area sits in one) — sees something meaningful
         /// instead of AppKit's zero-size default for a plain, constraint-free `NSView`.
         #[unsafe(method(intrinsicContentSize))]
         fn intrinsic_content_size(&self) -> objc2_foundation::NSSize {
@@ -361,7 +355,7 @@ impl TreeHostView {
 
     /// Replaces this host's entire content, discarding whatever native subviews were there before
     /// — a full swap rather than a diff. `pub` (unlike most of this type's methods) since
-    /// `TabViewImpl::insert_tab` hands a fresh host straight to its caller (`elwindui-builtins`'s
+    /// `NativeTabViewImpl::insert_tab` hands a fresh host straight to its caller (`elwindui-builtins`'s
     /// wrapper), which calls this exactly once per tab to populate it — see that type's own doc
     /// comment for why each tab gets its own persistent host instead of sharing one.
     pub fn set_tree(&self, tree: Rc<dyn UIElement>) {
@@ -369,7 +363,7 @@ impl TreeHostView {
             old.removeFromSuperview();
         }
         let weak_self = self.ivars().weak_self.borrow().clone();
-        tree.base().set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self))));
+        tree.as_ui_element().set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self))));
         *self.ivars().tree.borrow_mut() = Some(tree);
         self.invalidateIntrinsicContentSize();
         self.relayout();
@@ -425,7 +419,7 @@ impl TreeHostView {
                     // `arrange` below), never by Auto Layout constraints — but a plain
                     // `addSubview:` leaves `translatesAutoresizingMaskIntoConstraints` at its
                     // *class* default, which for an Auto-Layout-authored view like `NSStackView`
-                    // (`TabViewImpl`'s root) is `NO`. With no explicit size constraints of its own,
+                    // (`NativeTabViewImpl`'s root) is `NO`. With no explicit size constraints of its own,
                     // such a view gets silently resized back down to its intrinsic content size on
                     // the next layout pass — undoing `arrange`'s `setFrame` entirely. Forcing this
                     // back to `YES` opts every leaf out of the constraint system so our manual
@@ -700,7 +694,7 @@ impl TabChipImpl {
     }
 }
 
-/// The row of `TabChipImpl`s plus a trailing "+" button. `TabViewImpl` owns one of these and the content
+/// The row of `TabChipImpl`s plus a trailing "+" button. `NativeTabViewImpl` owns one of these and the content
 /// area below it; kept as a separate type since 付録Y's backend table describes it as its own
 /// piece (a custom `NSStackView`-based strip, not `NSTabViewController`). Purely an internal
 /// composition helper too — see `TabChipImpl`'s own doc comment.
@@ -749,7 +743,7 @@ impl TabStripImpl {
 /// own `elwindui_core::ui` (keeping any native leaf's retention concern alive, e.g. a
 /// `TextAreaImpl`'s change-notification delegate — see `TextAreaImpl::set_on_change`'s doc comment — for
 /// as long as its tab exists, not just while it's the visible one).
-/// `TabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
+/// `NativeTabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
 /// since a real `AnyView` handle (`self.base.handle`, wrapping the outer `NSStackView`) is what
 /// makes this leaf embeddable in the visual tree at all.
 pub trait TabView: elwindui_core::ui::NativeControl<AnyView> {
@@ -768,13 +762,13 @@ pub trait TabView: elwindui_core::ui::NativeControl<AnyView> {
 }
 
 #[elwindui_macros::class(implements = TabView, inherits = elwindui_core::ui::NativeControl<AnyView>)]
-pub struct TabViewImpl {
+pub struct NativeTabViewImpl {
     pub strip: TabStripImpl,
     content_container: Retained<NSView>,
 }
 
 #[elwindui_macros::class]
-impl TabViewImpl {
+impl NativeTabViewImpl {
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
         self.strip.new_tab_button.set_on_click(callback);
     }
@@ -827,7 +821,7 @@ impl TabViewImpl {
         root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
         // `NSStackView`'s default `distribution` (`GravityAreas`) leaves each arranged subview at
         // its own intrinsic size unless hugging priorities say otherwise — `.Fill` makes the stack
-        // actually consume its *entire* stacking-axis extent, matching `TabViewImpl`'s expected "chips
+        // actually consume its *entire* stacking-axis extent, matching `NativeTabViewImpl`'s expected "chips
         // row at natural height, content area fills the rest" shape. `content_container`'s own
         // vertical hugging priority is dropped to (near-)zero so it — not the also-low-priority-
         // by-default `strip` — is the one that absorbs whatever space `Fill` distributes (a plain
@@ -839,8 +833,8 @@ impl TabViewImpl {
     }
 }
 
-pub fn create_tab_view() -> TabViewImpl {
-    TabViewImpl::new()
+pub fn create_tab_view() -> NativeTabViewImpl {
+    NativeTabViewImpl::new()
 }
 
 /// See docs/elwindui_builtins_spec.md 付録X. A single application-wide `NSMenu` (top menu bar
@@ -1022,6 +1016,17 @@ pub fn create_menu_bar() -> MenuBarImpl {
     ns.addItem(&app_menu_item);
     MenuBarImpl { ns }
 }
+
+/// DSL-facing `Window`/`TextArea`/`Button`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/
+/// `TabViewItem` wrappers that `elwindui-codegen`'s generated code actually constructs — see this
+/// module's own doc comment for why it's split out from the raw types above instead of sharing
+/// their names at this crate's root. Declared here (after every native leaf struct above, not near
+/// the top of the file) so `#[elwindui_macros::class]`'s `ancestor_registry` — populated in source
+/// order as each `struct ClassName { .. }` above expands — already has every native leaf class
+/// registered by the time `builtins`' own `#[class(inherits = appkit::XImpl)]` structs expand and
+/// try to chain-walk past their immediate parent (see `crates/elwindui-macros/src/class.rs`'s own
+/// doc comment).
+pub mod builtins;
 
 /// See docs/elwindui_spec.md 付録T.2. Modal file panels (`runModal`) are themselves synchronous
 /// (they block until the user closes the panel), so these `async fn`s never actually suspend —

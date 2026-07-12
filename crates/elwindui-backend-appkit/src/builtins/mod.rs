@@ -30,6 +30,7 @@ mod tab_view;
 pub use tab_view::{TabViewImpl, TabViewItemImpl};
 
 use crate as appkit;
+use crate::AnyView;
 // Re-exported so `component X inherits Window` call sites can keep importing `Window` from this
 // same `builtins` module alongside `WindowImpl`, rather than needing a separate `elwindui_core`
 // import just for the (now-shared) marker trait.
@@ -181,7 +182,7 @@ impl ButtonImpl {
     /// to fire `dispatch_routed` starting at this same node.
     #[inherent]
     pub fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &elwindui_core::input::RoutedEventArgs)>) {
-        self.base.base().register_routed_handler(name, handler);
+        self.base.as_ui_element().register_routed_handler(name, handler);
     }
 
     #[inherent]

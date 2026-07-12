@@ -72,7 +72,7 @@ const SEALED_CLASSES: &[&str] = &["TextArea", "Button"];
 /// inside `impl ClassName { .. }` to the generated `impl elwindui_core::ui::UIElement for
 /// ClassNameImpl` block instead of to `ClassName`'s own trait impl.
 const UI_ELEMENT_METHODS: &[&str] =
-    &["base", "visual_children", "measure_override", "arrange_override", "paint", "as_native_control"];
+    &["as_ui_element", "visual_children", "measure_override", "arrange_override", "paint", "try_as_native_control"];
 
 /// Parsed `#[class(inherits = .., implements = .., supertrait = .., abstract_class, sealed)]`
 /// arguments — every key is optional and any subset/order is accepted.
@@ -193,6 +193,78 @@ fn load_class_args(class_name: &str) -> Option<ClassArgs> {
     })
 }
 
+/// Permanent (never-removed — unlike `class_arg_store`, which is consumed on read) map from a bare,
+/// non-`Impl`-suffixed class name to its own `inherits` type token-string (`None` for root mode).
+/// Populated by every `struct ClassName { .. }` expansion (see `register_ancestor`) and walked by
+/// `expand_impl` (see its own doc comment) to generate `as_<snake(ancestor)>()` accessors reaching
+/// beyond a class's immediate parent.
+fn ancestor_registry() -> &'static Mutex<HashMap<String, Option<String>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The registration key is `Impl`-stripped exactly like `bare_class_name` strips a *lookup* key from
+/// a type reference (same rule, applied to the plain written identifier instead of a `Type`) — an
+/// explicit-facade class's own written name (e.g. `NativeTabViewImpl`) is how *other* classes'
+/// `inherits = ..` references spell it, so the two must normalize the same way or a lookup for it
+/// can never hit.
+///
+/// First-write-wins (`Entry::or_insert`, never overwrites an existing key) rather than always
+/// overwriting: this stripping means an explicit-facade class's key (e.g.
+/// `elwindui-backend-appkit::builtins::TextAreaImpl` stripping to `"TextArea"`) can collide with a
+/// *different*, unrelated class's own genuine bare name (`appkit::TextArea`'s own struct) — but the
+/// genuine bare-named class is always declared, and so always registers, first (native leaf structs
+/// live directly in a backend crate's `lib.rs`; `mod builtins;`, which wraps them, is declared
+/// *after* every one of them specifically so this holds — see `elwindui-backend-appkit`'s own
+/// `lib.rs`). First-write-wins means the later, colliding registration is silently ignored instead
+/// of corrupting the correct entry.
+fn register_ancestor(class_name: &str, inherits: &Option<Type>) {
+    let key = class_name.strip_suffix("Impl").unwrap_or(class_name).to_string();
+    let value = inherits.as_ref().map(|t| quote! { #t }.to_string());
+    ancestor_registry().lock().unwrap().entry(key).or_insert(value);
+}
+
+/// `Some(None)` = `bare_name` is a registered local root (root mode, no further ancestor). `None` =
+/// not found — either a genuinely external/cross-crate type, or not yet registered (this class's
+/// struct hasn't expanded yet — see `register_ancestor`'s own doc comment on why declaration order
+/// matters). Both cases tell `expand_impl` to stop walking the chain there.
+fn lookup_ancestor(bare_name: &str) -> Option<Option<Type>> {
+    let registry = ancestor_registry().lock().unwrap();
+    let entry = registry.get(bare_name)?;
+    Some(entry.as_ref().map(|s| syn::parse_str::<Type>(s).expect("#[class]: internal: failed to reparse stored ancestor type")))
+}
+
+/// `elwindui_core::ui::NativeControl<AnyView>` -> `"NativeControl"`; `appkit::TextAreaImpl` (already
+/// `Impl`-suffixed) -> `"TextArea"` — the bare, un-suffixed display name used both as an
+/// `ancestor_registry` lookup key and to derive an `as_<snake(name)>()` accessor's method name.
+fn bare_class_name(ty: &Type) -> Option<String> {
+    let Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    let name = seg.ident.to_string();
+    Some(name.strip_suffix("Impl").map(str::to_string).unwrap_or(name))
+}
+
+/// `VerticalLayout` -> `"vertical_layout"`; `UIElement` -> `"ui_element"` (a run of uppercase letters
+/// is treated as one unit — the underscore goes before the *last* uppercase letter in the run when
+/// it's followed by a lowercase letter, not before every uppercase letter).
+fn to_snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch.is_uppercase() {
+            let prev_is_lower = i > 0 && chars[i - 1].is_lowercase();
+            let prev_is_upper_and_next_is_lower = i > 0 && chars[i - 1].is_uppercase() && i + 1 < chars.len() && chars[i + 1].is_lowercase();
+            if i > 0 && (prev_is_lower || prev_is_upper_and_next_is_lower) {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// `NativeControl<AnyView>` -> `NativeControlImpl<AnyView>`; `crate::TextAreaImpl` (already
 /// `Impl`-suffixed — the "explicit facade type" form, docs/elwindui_spec.md 付録H.2.1a's
 /// discussion of the backend DSL-facing wrapper layer) -> used as-is.
@@ -234,6 +306,7 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     match parsed_item {
         Item::Struct(item_struct) => {
             store_class_args(&item_struct.ident.to_string(), &args);
+            register_ancestor(&item_struct.ident.to_string(), &args.inherits);
             expand_struct(&args, item_struct)
         }
         Item::Impl(item_impl) => expand_impl(args, item_impl, attr_is_empty),
@@ -275,7 +348,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     };
 
     // `pub` (matching H.2.1a's convention): plenty of call sites reach through `.base` across
-    // module/crate boundaries (`self.base.handle`, `self.base.base()`, ...).
+    // module/crate boundaries (`self.base.handle`, `self.base.as_ui_element()`, ...).
     let base_field = args.inherits.as_ref().map(|ty| {
         let base_ty = base_impl_type(ty);
         quote! { pub base: #base_ty, }
@@ -336,6 +409,60 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 if SEALED_CLASSES.contains(&seg.ident.to_string().as_str()) {
                     let msg = format!("class `{}` is #[sealed] and cannot be inherited", seg.ident);
                     return syn::Error::new_spanned(inh, msg).to_compile_error();
+                }
+            }
+        }
+    }
+
+    // `as_<snake(ancestor)>()` accessors (docs/elwindui_spec.md 付録H.2.1a's `base`-chain convention,
+    // exposed as named methods instead of the ancestor-skipping `base()` trait method they replace —
+    // see `crates/elwindui-macros/src/class.rs`'s own module doc comment). The immediate parent
+    // always gets one (`&self.base`, no registry lookup needed — works across crate boundaries since
+    // it's a plain field access). Deeper ancestors are chain-walked via `ancestor_registry`, one
+    // level at a time, delegating to `self.base`'s own same-named accessor (which that class's own
+    // `#[class]` expansion already generated the same way) — so this reaches every ancestor declared
+    // in the same crate, and exactly one level further into an external crate before the registry
+    // (necessarily local-only) runs out and the walk stops there. `UIElement` itself is always
+    // skipped: `as_ui_element()` is generated unconditionally elsewhere (`uielement_blind_forward`)
+    // regardless of how many hops away the root actually is, so repeating it here would conflict.
+    let mut accessor_methods: Vec<TokenStream2> = Vec::new();
+    if let Some(parent_ty) = &args.inherits {
+        if let Some(mut current_display) = bare_class_name(parent_ty) {
+            let mut current_ty = parent_ty.clone();
+            let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+            visited.insert(class_name.to_string());
+            loop {
+                if current_display == "UIElement" {
+                    break;
+                }
+                if !visited.insert(current_display.clone()) {
+                    // Cycle — almost certainly a same-crate name collision the registry can't tell
+                    // apart (see `register_ancestor`'s doc comment). Stop rather than loop forever or
+                    // generate an accessor built from the wrong ancestor's data.
+                    break;
+                }
+                let current_impl_ty = base_impl_type(&current_ty);
+                let method_name = format_ident!("as_{}", to_snake_case(&current_display));
+                let body = if accessor_methods.is_empty() {
+                    quote! { &self.base }
+                } else {
+                    quote! { self.base.#method_name() }
+                };
+                accessor_methods.push(quote! {
+                    pub fn #method_name(&self) -> &#current_impl_ty { #body }
+                });
+                match lookup_ancestor(&current_display) {
+                    Some(Some(next_ty)) => match bare_class_name(&next_ty) {
+                        Some(next_display) => {
+                            current_ty = next_ty;
+                            current_display = next_display;
+                        }
+                        None => break,
+                    },
+                    // Local root (`inherits` omitted) or not found (external/cross-crate, or an
+                    // explicit-facade class never registered) — stop; the one hop already generated
+                    // above is as far as this walk goes.
+                    _ => break,
                 }
             }
         }
@@ -468,12 +595,12 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         // default-method dispatch) rather than a required method paired with a separate `impl
         // ClassName for ClassNameImpl` — that pairing doesn't apply here since `ClassNameImpl`
         // itself is never meant to implement `ClassName` (descendants embed it as `base` and
-        // implement the trait themselves, exactly like `UIElementImpl` does today). `base` is the
-        // one method every implementor must supply itself (its concrete location differs per
+        // implement the trait themselves, exactly like `UIElementImpl` does today). `as_ui_element`
+        // is the one method every implementor must supply itself (its concrete location differs per
         // type), so the macro synthesizes it as the sole required signature — the user must not
         // define it by hand.
-        if let Some(base_fn) = own_methods.iter().find(|f| f.sig.ident == "base") {
-            let msg = "#[class]: root class's `base` is auto-generated; do not define it";
+        if let Some(base_fn) = own_methods.iter().find(|f| f.sig.ident == "as_ui_element") {
+            let msg = "#[class]: root class's `as_ui_element` is auto-generated; do not define it";
             return syn::Error::new_spanned(&base_fn.sig, msg).to_compile_error();
         }
         let bound = args.supertrait.as_ref().map(|t| quote! { : #t });
@@ -481,7 +608,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         (
             quote! {
                 pub trait #class_name #impl_generics #bound #where_clause {
-                    fn base(&self) -> &#impl_name;
+                    fn as_ui_element(&self) -> &#impl_name;
                     #(#default_methods)*
                 }
             },
@@ -527,7 +654,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     }
 
     let mut ctor_block = TokenStream2::new();
-    if !ctor_methods.is_empty() {
+    if !ctor_methods.is_empty() || !accessor_methods.is_empty() {
         let fns: Vec<TokenStream2> = ctor_methods
             .iter()
             .map(|(f, force_pub)| {
@@ -541,6 +668,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         ctor_block = quote! {
             impl #impl_generics #impl_name #ty_generics #where_clause {
                 #(#fns)*
+                #(#accessor_methods)*
             }
         };
     }
@@ -570,8 +698,8 @@ fn uielement_blind_forward(
     user_methods: &[ImplItemFn],
 ) -> TokenStream2 {
     let find = |name: &str| user_methods.iter().find(|f| f.sig.ident == name).map(|f| quote! { #f });
-    let base = find("base").unwrap_or(quote! {
-        fn base(&self) -> &#core::ui::UIElementImpl { self.base.base() }
+    let as_ui_element = find("as_ui_element").unwrap_or(quote! {
+        fn as_ui_element(&self) -> &#core::ui::UIElementImpl { self.base.as_ui_element() }
     });
     let measure_override = find("measure_override").unwrap_or(quote! {
         fn measure_override(&self, available: #core::layout::Size, child_sizes: &[#core::layout::Size]) -> #core::layout::Size {
@@ -583,17 +711,17 @@ fn uielement_blind_forward(
             self.base.arrange_override(final_size, child_sizes)
         }
     });
-    let as_native_control = find("as_native_control").unwrap_or(quote! {
-        fn as_native_control(&self) -> Option<&dyn std::any::Any> { self.base.as_native_control() }
+    let try_as_native_control = find("try_as_native_control").unwrap_or(quote! {
+        fn try_as_native_control(&self) -> Option<&dyn std::any::Any> { self.base.try_as_native_control() }
     });
     let visual_children = find("visual_children");
     let paint = find("paint");
     quote! {
         impl #impl_generics #core::ui::UIElement for #impl_name #ty_generics #where_clause {
-            #base
+            #as_ui_element
             #measure_override
             #arrange_override
-            #as_native_control
+            #try_as_native_control
             #visual_children
             #paint
         }

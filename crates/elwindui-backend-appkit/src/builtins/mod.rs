@@ -22,8 +22,8 @@
 //!
 //! `Type::new()` takes **no** arguments — every declared `#[param]` is applied afterward via its
 //! own `set_<field>(..)` call (docs/elwindui_spec.md 付録H.2.1a's post-construction setter
-//! convention, extended from the common `margin`/`data_context`/`grid_cell` attributes to every
-//! builtin property), the same generic mechanism `resync`/two-way change-back already relies on —
+//! convention, extended from the common `margin`/`data_context`/attached-property attributes to
+//! every builtin property), the same generic mechanism `resync`/two-way change-back already relies on —
 //! see `elwindui-codegen`'s `build_component_setters`.
 
 mod tab_view;

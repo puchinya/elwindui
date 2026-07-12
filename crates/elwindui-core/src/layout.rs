@@ -198,8 +198,10 @@ pub enum GridLength {
 
 /// A `Grid`-child's attached `Grid::row`/`Grid::column` position (docs/elwindui_spec.md §3) —
 /// 0-indexed, defaulting to the top-left cell (`0, 0`) like WPF's own `Grid.Row`/`Grid.Column`
-/// defaults. Row/column spanning isn't implemented yet (each cell holds exactly one child) —
-/// `elwindui_core::ui::UIElementImpl::grid_cell` carries one of these for every element.
+/// defaults. Row/column spanning isn't implemented yet (each cell holds exactly one child).
+/// Not stored as this shape anywhere — `elwindui_core::ui::UIElementImpl::attached` holds `row`/
+/// `column` independently in its generic type-erased bag, and `elwindui_core::ui::grid_cell_of`
+/// assembles one of these from the two on demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GridCell {
     pub row: i32,

@@ -175,16 +175,24 @@ Grid {
 - `Owner`は静的には「`field`という名前の`#[attached]`フィールドを持つ既知のcomponentか」だけを検証する。
   設定先の要素が実際に`Owner`(例:`Grid`)の子孫であるかどうかは**検証しない**——WPF同様、対応する
   コンテナの外で設定しても静的エラーにはならず、単に無視される
-- 現状の実装は`builtin::Grid`の`row`/`column`のみ(具象フィールドとして`UIElementBase`に追加)。
-  将来別のcomponentが独自の添付プロパティを持つ場合は、同じ仕組み(具象フィールドの追加)で拡張する
-  ——型消去された汎用プロパティバッグではない
+- 実装は`(owner, field) -> Box<dyn Any>`の型消去された汎用バッグ(`UIElementImpl::attached`)——
+  `builtin::Grid`の`row`/`column`もこれ経由で格納される。オーナー自身が自分の宣言した型を知っている
+  ので、書き込み側(`elwindui-codegen`の`emit_attached_setters`、`SymbolTable`の
+  `TypeInfo::attached_field_types`から宣言型を引いて`set_attached::<T>(..)`のターボフィッシュに渡す)
+  と読み出し側(例:`elwindui_core::ui::grid_cell_of`、`get_attached::<i32>(..)`)の双方が
+  そのオーナーの持つスキーマ通りにdowncastする——WPFの添付プロパティも同じ設計。将来別のcomponentが
+  独自の添付プロパティを持つ場合、`UIElementImpl`側・`elwindui-codegen`側とも変更は一切不要で、
+  そのcomponent自身の`#[attached]`宣言と読み出しロジックを追加するだけでよい
 - 添付プロパティが実際にレイアウトへ反映されるのは、子要素が仮想ビルトインそのもの(`TextBlock`/
-  `Rectangle`/`Ellipse`/`VerticalLayout`/`HorizontalLayout`/`Control`/入れ子の`Grid`)の場合と、`inherits NativeControl`で
-  `base: elwindui_core::ui::NativeControlImpl<H>`を合成するネイティブリーフ(`Button`/`TextArea`/
-  `TabView`)の場合——後者は構築直後に`elwindui-codegen`の`emit_common_ui_element_setters`が
-  `binding.base().set_grid_cell(..)`を呼ぶことで反映される(付録H.2.1a)。ユーザー定義の
-  `component`+`view`ペア(その`view`ルート自身に`Grid::row`/`Grid::column`を設定した場合)への
-  設定は現時点では検証は通るが値は反映されない(既定セルのまま)——将来の拡張課題
+  `Rectangle`/`Ellipse`/`VerticalLayout`/`HorizontalLayout`/`Control`/入れ子の`Grid`)の場合、
+  `inherits NativeControl`で`base: elwindui_core::ui::NativeControlImpl<H>`を合成するネイティブ
+  リーフ(`Button`/`TextArea`/`TabView`)の場合、およびユーザー定義の`component`+`view`ペアで
+  その`view`ルートがネイティブでない場合(`into_node()`経由で`Rc<dyn UIElement>`として取り出せる場合)
+  ——いずれも構築直後に`elwindui-codegen`の`emit_common_ui_element_setters`/`emit_construction`が
+  `(erased).base().set_attached::<T>(..)`を呼ぶことで反映される(付録H.2.1a)。`view`ルート自身が
+  ネイティブに解決するユーザー定義component(`inherits NativeControl`を宣言せず`Button`等を
+  ラップするようなケース)への設定は、`.base()`へ到達する手段自体がまだ無く、引き続き未対応
+  ——将来の拡張課題
 
 ---
 

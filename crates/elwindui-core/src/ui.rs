@@ -139,17 +139,17 @@ pub struct UIElement {
     /// `dispatch_routed` always succeeds (same erasure pattern as `data_context`/
     /// `elwindui-builtins::appkit::tab_view`'s `items_source`).
     pub routed_handlers: RoutedHandlers,
-    /// This element's `GridImpl::row`/`GridImpl::column` attached-property values (docs/elwindui_spec.md
-    /// §3の添付プロパティ), set right after construction from whatever the `.elwind` source wrote on
-    /// this specific element (`elwindui-codegen`'s `plan_element`/`emit_construction`) —
-    /// `GridCell::default()` (0, 0) for any element that set neither, which happens to coincide
-    /// with `GridImpl`'s own declared attached-field defaults so no evaluation of those defaults is
-    /// ever needed here. Consulted only by `GridImpl::arrange_override`/`measure_override`
-    /// (`grid_arrange`/`grid_natural_size`) — harmless, unconsulted data on any element that isn't
-    /// actually a child of a `GridImpl`, exactly like WPF's own attached properties. A future attached
-    /// property from a different owner component would get its own field here, the same way this
-    /// one was added — see this struct's own doc comment.
-    pub grid_cell: Cell<GridCell>,
+    /// Generic, type-erased attached-property bag (docs/elwindui_spec.md §3の添付プロパティ), keyed
+    /// by `(owner, field)` — e.g. `("Grid", "row")` — and populated right after construction from
+    /// whatever `Owner::field: value` setters the `.elwind` source wrote on this specific element
+    /// (`elwindui-codegen`'s `plan_element`/`emit_construction`/`emit_attached_setters`). Absent for
+    /// any element that didn't set a given `(owner, field)` — the owner's own reader (e.g.
+    /// `GridImpl`'s `grid_cell_of`) supplies the default in that case, since only the owner knows
+    /// its own attached fields' declared defaults. Harmless, unconsulted data on any element that
+    /// isn't actually a child of the matching owner, exactly like WPF's own attached properties. A
+    /// future attached-property owner needs no changes here at all — it just calls
+    /// `set_attached`/`get_attached` with its own `(owner, field)` keys.
+    pub attached: RefCell<HashMap<(&'static str, &'static str), Box<dyn Any>>>,
     /// WinUI3's `_parent` — set once by `new_element` for every child of the element being
     /// constructed. `Weak` (not `Rc`) since the parent already owns its children via `Rc` in its
     /// own `children()` list; a strong back-reference would create a cycle nothing could ever
@@ -199,7 +199,7 @@ impl std::fmt::Debug for UIElementImpl {
             .field("actual_offset", &self.actual_offset.get())
             .field("data_context", &self.data_context.borrow().is_some())
             .field("routed_handlers", &self.routed_handlers.borrow().keys().collect::<Vec<_>>())
-            .field("grid_cell", &self.grid_cell.get())
+            .field("attached_keys", &self.attached.borrow().keys().cloned().collect::<Vec<_>>())
             .field("has_parent", &self.parent.borrow().as_ref().is_some_and(|p| p.upgrade().is_some()))
             .field("visual_children_len", &self.visual_children.len())
             .field("invalidate_host", &self.invalidate_host.borrow().is_some())
@@ -225,7 +225,7 @@ impl Default for UIElementImpl {
             actual_offset: Cell::new(Point { x: 0.0, y: 0.0 }),
             data_context: RefCell::new(None),
             routed_handlers: Rc::new(RefCell::new(HashMap::new())),
-            grid_cell: Cell::new(GridCell::default()),
+            attached: RefCell::new(HashMap::new()),
             parent: RefCell::new(None),
             visual_children: VisualCollection::new(),
             self_handle: Rc::new(RefCell::new(None)),
@@ -261,9 +261,28 @@ impl UIElementImpl {
     pub fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
         *self.data_context.borrow_mut() = data_context;
     }
-    pub fn set_grid_cell(&self, grid_cell: GridCell) {
-        self.grid_cell.set(grid_cell);
+    /// Stores an attached-property value under `(owner, field)` — e.g. `("Grid", "row")` — type-
+    /// erased into the shared `attached` bag (see that field's own doc comment). `owner`/`field` are
+    /// always compile-time-known string literals from `elwindui-codegen`'s `emit_attached_setters`,
+    /// which also picks `T` via an explicit turbofish matching the `#[attached]` field's declared
+    /// type — never inferred from `value` alone, since a mismatched inferred type here would make
+    /// `get_attached`'s `downcast_ref` silently miss and fall back to its caller's default.
+    pub fn set_attached<T: 'static>(&self, owner: &'static str, field: &'static str, value: T) {
+        self.attached.borrow_mut().insert((owner, field), Box::new(value));
         self.invalidate();
+    }
+    /// Reads an attached-property value previously stored under `(owner, field)`, or `default` if
+    /// absent (never set on this element, or set with a different `T` — the same `downcast_ref`
+    /// miss as an absent key). Callers are the *owner* component's own layout code (e.g. `GridImpl`'s
+    /// `grid_cell_of`), which knows its own attached field's concrete type — see `set_attached`'s
+    /// own doc comment for why the type must agree between writer and reader.
+    pub fn get_attached<T: Clone + 'static>(&self, owner: &'static str, field: &'static str, default: T) -> T {
+        self.attached
+            .borrow()
+            .get(&(owner, field))
+            .and_then(|v| v.downcast_ref::<T>())
+            .cloned()
+            .unwrap_or(default)
     }
     pub fn set_width(&self, width: Option<f32>) {
         self.width.set(width);
@@ -413,16 +432,6 @@ impl UIElement {
     }
     fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
         self.base().set_data_context(data_context);
-    }
-    /// `GridImpl::row`/`GridImpl::column`'s attached-property value for this element — see
-    /// `UIElementImpl::grid_cell`'s own doc comment. Previously had no trait-level getter (only
-    /// `set_grid_cell`), unlike every other property field here — fixed as part of converting this
-    /// trait to `#[elwindui_macros::class]`'s root class mode.
-    fn grid_cell(&self) -> GridCell {
-        self.base().grid_cell.get()
-    }
-    fn set_grid_cell(&self, grid_cell: GridCell) {
-        self.base().set_grid_cell(grid_cell);
     }
     /// WinUI3's `FrameworkElement.DataContext` — an ambient, type-erased data value an element
     /// carries (set explicitly via the `data_context:` common attribute, or populated internally by
@@ -1315,9 +1324,10 @@ pub fn create_content_control(padding: Option<f32>, content: Rc<dyn UIElement>) 
 }
 
 /// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/elwindui_spec.md §3). Each child's
-/// cell placement comes from its own `UIElementImpl::grid_cell` (the `Grid::row`/`Grid::column`
-/// attached properties it was constructed with), not a field on `GridImpl` itself — see `GridCell`'s
-/// doc comment. A child whose `grid_cell` falls outside `row_definitions`/`column_definitions`'
+/// cell placement comes from its own `UIElementImpl::attached` bag (the `Grid::row`/`Grid::column`
+/// attached properties it was constructed with, read back via `grid_cell_of` since only `Grid`
+/// itself knows those two fields are `i32`), not a field on `GridImpl` itself — see `attached`'s
+/// own doc comment. A child whose cell falls outside `row_definitions`/`column_definitions`'
 /// bounds is clamped to the last row/column, mirroring `grid_arrange`'s own clamping. Row/column
 /// spanning is out of scope for this pass (one child per cell) — a future `#[attached]
 /// row_span`/`column_span` pair on `builtin::Grid` would extend this the same way `row`/`column`
@@ -1327,6 +1337,18 @@ pub fn create_content_control(padding: Option<f32>, content: Rc<dyn UIElement>) 
 /// `.set_{param name}(..)` generically, so the Rust field/setter name must agree with the DSL's.
 /// `GridImpl`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `Grid` has no
 /// further DSL-level subclass today.
+/// Reads a child's `Grid::row`/`Grid::column` attached-property values back out of its
+/// `UIElementImpl::attached` bag — `Grid` is the only thing that knows those two fields are `i32`
+/// and default to `0`, so it (not `UIElementImpl`) owns this downcast, mirroring how
+/// `elwindui-codegen`'s `emit_attached_setters` also resolves the field's declared type from the
+/// owner (`Grid`) itself, never `UIElementImpl`.
+fn grid_cell_of(child: &Rc<dyn UIElement>) -> GridCell {
+    GridCell {
+        row: child.base().get_attached("Grid", "row", 0i32),
+        column: child.base().get_attached("Grid", "column", 0i32),
+    }
+}
+
 #[elwindui_macros::class(inherits = UIElement)]
 pub struct Grid {
     pub rows: RefCell<Vec<GridLength>>,
@@ -1339,11 +1361,11 @@ pub struct Grid {
 #[elwindui_macros::class(inherits = UIElement)]
 impl Grid {
     fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
-        let cells: Vec<GridCell> = self.children.to_vec().iter().map(|c| c.base().grid_cell.get()).collect();
+        let cells: Vec<GridCell> = self.children.to_vec().iter().map(grid_cell_of).collect();
         grid_natural_size(&self.rows.borrow(), &self.columns.borrow(), &cells, child_sizes)
     }
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-        let cells: Vec<GridCell> = self.children.to_vec().iter().map(|c| c.base().grid_cell.get()).collect();
+        let cells: Vec<GridCell> = self.children.to_vec().iter().map(grid_cell_of).collect();
         grid_arrange(final_size, &self.rows.borrow(), &self.columns.borrow(), &cells, child_sizes)
     }
     fn set_rows(&self, rows: Vec<GridLength>) {

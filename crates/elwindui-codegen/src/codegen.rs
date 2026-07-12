@@ -56,6 +56,15 @@ pub struct TypeInfo {
     /// `on_*` rule, not passed to `Target::new(...)` — so it never appears in `param_fields`, but
     /// still needs its declared type visible here for the arity check.
     pub field_types: HashMap<String, String>,
+    /// `#[attached]` fields declared by this type (docs/elwindui_spec.md §3の添付プロパティ), mapped
+    /// to their declared type — e.g. `Grid`'s own `{"row": "i32", "column": "i32"}`. Kept separate
+    /// from `field_types` (rather than folded in) because that map filters out every field *with* an
+    /// initializer, and `#[attached]` fields always have one (their required default value) —
+    /// `validate.rs`'s `rejects_attached_field_without_default_value`. Consulted only by
+    /// `emit_attached_setters`, which needs an owner's field's exact declared type to pick the right
+    /// turbofish for `UIElementImpl::set_attached::<T>` — see that function's own doc comment for why
+    /// guessing the type from the value expression alone isn't safe.
+    pub attached_field_types: HashMap<String, String>,
     /// Whether this type is a `viewmodel` (`generate_viewmodel`'s output, which carries a
     /// `subscribe(impl Fn())` method) as opposed to a `component` (`generate_component`/
     /// `generate_view`'s output, which doesn't). `bind!`'s owner may resolve to either kind
@@ -308,6 +317,11 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         .filter(|f| f.initializer.is_none())
                         .map(|f| (f.name.clone(), f.ty.clone()))
                         .collect();
+                    let attached_field_types = effective_fields
+                        .iter()
+                        .filter(|f| f.kind == FieldKind::Attached)
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
                     let has_view = effective_view.is_some();
                     // `is_native` is finalized in the second pass below, once every type is present
                     // in `table` to recurse through (a component's `view` root may be defined later
@@ -321,6 +335,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             two_way_fields,
                             routed_fields,
                             field_types,
+                            attached_field_types,
                             is_viewmodel: false,
                             is_native: false,
                             is_native_control_leaf: c.base.as_deref() == Some("NativeControl"),
@@ -391,6 +406,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             two_way_fields,
                             routed_fields,
                             field_types,
+                            attached_field_types: HashMap::new(),
                             is_viewmodel: true,
                             is_native: false,
                             is_native_control_leaf: false,
@@ -2732,43 +2748,37 @@ fn find_attr<'a>(node: &'a PlannedNode, name: &str) -> Option<&'a ViewExpr> {
     node.attributes.iter().find(|(k, _)| k == name).map(|(_, v)| v)
 }
 
-/// Builds `node`'s own `elwindui::core::layout::GridCell { row: ..., column: ... }` from whatever
-/// `Owner::row`/`Owner::column`-shaped attached setters it has (§3) — any field not set falls back
-/// to `0`, matching `GridCell::default()` (and `builtin::Grid`'s own declared attached-field
-/// defaults, which is why no evaluation of those defaults is ever needed here).
+/// Emits `binding.base().set_attached::<T>(owner, field, value)` for every `Owner::field: value`
+/// attached-property setter on `node` (§3) — completely owner/field-name-agnostic on this side,
+/// unlike the old `grid_cell_expr` this replaces: adding a future attached-property owner besides
+/// `Grid` needs no change here at all, only a new `#[attached]` declaration on that owner and a
+/// reader on it analogous to `elwindui_core::ui::grid_cell_of`.
 ///
-/// Deliberately keyed by field name alone (`row`/`column`), not by `(owner, field)` — this crate
-/// has exactly one attached-property owner today (`Grid`), and `GridCell` is a concrete, hand-
-/// curated struct (not a type-erased per-owner bag, matching `UIElementBase`'s existing evolution
-/// pattern — see its own `grid_cell` field's doc comment). A future second attached-property owner
-/// reusing the `row`/`column` names would collide here; a genuinely distinct future property would
-/// get its own field name and its own branch, the same way `row`/`column` were added.
+/// `T` is picked via an explicit turbofish from `owner`'s own declared field type
+/// (`TypeInfo::attached_field_types`), never inferred from `value` alone — `UIElementImpl::
+/// set_attached`'s own doc comment explains why an inferred mismatch here would silently corrupt
+/// the read side (`get_attached`'s `downcast_ref` would just miss and fall back to its caller's
+/// default). `owner`/`field` are validated to refer to a real `#[attached]` field already (§14,
+/// `validate.rs`), so the `unwrap_or_else` panics here are unreachable in practice, not user-facing
+/// error paths.
 ///
-/// Scope note: only ever called from `emit_virtual_construction`, so this only takes effect for a
-/// `Grid` child that is itself one of codegen's hardcoded virtual builtins (`TextBlock`/
-/// `Rectangle`/`Ellipse`/`Stack`/`Control`/a nested `Grid`) — verified end-to-end by launching the
-/// notepad example with a temporary `Grid` in its status bar (Fixed/Star/Fixed columns rendered
-/// with correct proportional widths). A native-leaf child (`Button`/`TextArea`/..., wrapped via
-/// `into_node_if_needed`) or a user-defined `component`+`view` child (e.g. `RoundedPanel`, which
-/// builds its own root's `UIElementBase` inside its own generated `new()`) doesn't have this
-/// specific child's `attached` list threaded to wherever *its* `UIElementBase` gets built, without
-/// further plumbing; such a child's `Grid::row`/`Grid::column` setters still validate successfully
-/// but are inert (default `(0, 0)`) until that's added.
-fn grid_cell_expr(node: &PlannedNode, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
-    if node.attached.is_empty() {
-        return quote! { elwindui::core::layout::GridCell::default() };
-    }
-    let mut row = quote! { 0 };
-    let mut column = quote! { 0 };
-    for (_owner, field, value) in &node.attached {
+/// Scope note: only ever called from `emit_virtual_construction`, `emit_construction`'s
+/// `is_native_control_leaf` branch, and (for non-native-rooted `has_view` components) its plain-
+/// component branch — see those call sites' own doc comments for exactly which child kinds this
+/// reaches. Verified end-to-end by launching the notepad example with a temporary `Grid` in its
+/// status bar (Fixed/Star/Fixed columns rendered with correct proportional widths).
+fn emit_attached_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, mode: &EmitMode, binding: &TokenStream) -> TokenStream {
+    let mut out = TokenStream::new();
+    for (owner, field, value) in &node.attached {
+        let ty_str = table
+            .resolve(from, owner)
+            .and_then(|info| info.attached_field_types.get(field))
+            .unwrap_or_else(|| panic!("`{owner}::{field}` is not a known `#[attached]` field (should have been caught by validation)"));
+        let ty: syn::Type = syn::parse_str(ty_str).unwrap_or_else(|e| panic!("invalid attached field type `{ty_str}`: {e}"));
         let value_ts = emit_expr(value, ctx, mode);
-        match field.as_str() {
-            "row" => row = value_ts,
-            "column" => column = value_ts,
-            _ => {}
-        }
+        out.extend(quote! { #binding.base().set_attached::<#ty>(#owner, #field, #value_ts); });
     }
-    quote! { elwindui::core::layout::GridCell { row: #row, column: #column } }
+    out
 }
 
 /// `Option<Foo>` -> `("Foo", true)`; anything else -> `(ty, false)` unchanged.
@@ -3029,16 +3039,34 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
             let #binding = #type_ident::new(#(#args),*);
             #(#optional_setters)*
         });
+        // Attached-property gap (docs/elwindui_spec.md §3): a `has_view`/plain component whose own
+        // `view` root isn't native (`!info.is_native`) exposes a real `into_node()` returning
+        // `Rc<dyn UIElement>` (`generate_view`'s `root_embed_method`) even when `#binding` itself
+        // (its own generated `XImpl`) doesn't implement `UIElement` directly (only shape/template
+        // composition does) — so `Owner::field: value` setters written on *this* use site can still
+        // reach that root's own `UIElementImpl` through `into_node()`, closing what was previously a
+        // silently-inert setter. `info.is_native` true (the view root itself resolves native, e.g. a
+        // component wrapping `Button` without `inherits NativeControl`) has no `into_node()` at all —
+        // out of scope here, same as before this change.
+        if !info.is_native && !node.attached.is_empty() {
+            let erased = format_ident!("{}_erased", binding);
+            let erased_ts = quote! { #erased };
+            let setters = emit_attached_setters(node, ctx, from, table, &EmitMode::Construction, &erased_ts);
+            out.extend(quote! {
+                let #erased: std::rc::Rc<dyn elwindui::core::ui::UIElement> = #binding.clone().into_node();
+                #setters
+            });
+        }
     }
     // `Button`/`TextArea`/`TabView` (`inherits NativeControl`, `TypeInfo::is_native_control_leaf`)
     // own a real `base: elwindui::core::ui::NativeControlImpl<H>` field (docs/elwindui_spec.md
-    // 付録H.2.1a) — this use site's margin/data_context/grid_cell are applied to it right here,
-    // post-construction, exactly like `emit_virtual_construction` does for virtual builtins (see
-    // `emit_common_ui_element_setters`). `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`
+    // 付録H.2.1a) — this use site's margin/data_context/attached properties are applied to it right
+    // here, post-construction, exactly like `emit_virtual_construction` does for virtual builtins
+    // (see `emit_common_ui_element_setters`). `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`
     // (`#[native]` directly, never entering the `UIElement` tree) don't get this at all.
     if info.is_native_control_leaf {
         let binding_ts = quote! { #binding };
-        out.extend(emit_common_ui_element_setters(node, ctx, &binding_ts));
+        out.extend(emit_common_ui_element_setters(node, ctx, from, table, &binding_ts));
         // `Button`'s own `on_click` is a real `#[routed]` field (`info.routed_fields`), already
         // wired by `emit_wiring`'s dedicated `is_routed` branch — applying the generic mechanism
         // here too would register the same callback twice.
@@ -3402,17 +3430,18 @@ fn build_component_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table
     quote! { #create_fn(#(#args),*) }
 }
 
-/// Emits post-construction `binding.base().set_margin(..)`/`set_data_context(..)`/`set_grid_cell(..)`
-/// calls (docs/elwindui_spec.md 付録H.2.1a) for whichever of these common attributes `node` actually
-/// specifies — shared by `emit_virtual_construction` (virtual builtins) and `emit_construction`'s
-/// native-control-leaf branch (`Button`/`TextArea`/`TabView` — see `TypeInfo::is_native_control_leaf`).
-/// `UIElementImpl`'s fields are all interior-mutable (`Cell`/`RefCell`) precisely so this can run
-/// *after* `Type::new(..)` returns rather than needing every `create_xxx`/hand-written builtin
-/// constructor to accept a `base: UIElementImpl` argument — a use site left with none of these
-/// attributes emits nothing at all, leaving `UIElementImpl::default()` in place. Deliberately does
-/// *not* handle the generic "any element can catch a routed `on_click`" attribute — see
-/// `emit_generic_on_click_routing`, a separate step for exactly that.
-fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, binding: &TokenStream) -> TokenStream {
+/// Emits post-construction `binding.base().set_margin(..)`/`set_data_context(..)`/
+/// `set_attached::<T>(..)` calls (docs/elwindui_spec.md 付録H.2.1a) for whichever of these common
+/// attributes `node` actually specifies — shared by `emit_virtual_construction` (virtual builtins)
+/// and `emit_construction`'s native-control-leaf branch (`Button`/`TextArea`/`TabView` — see
+/// `TypeInfo::is_native_control_leaf`). `UIElementImpl`'s fields are all interior-mutable
+/// (`Cell`/`RefCell`) precisely so this can run *after* `Type::new(..)` returns rather than needing
+/// every `create_xxx`/hand-written builtin constructor to accept a `base: UIElementImpl` argument —
+/// a use site left with none of these attributes emits nothing at all, leaving
+/// `UIElementImpl::default()` in place. Deliberately does *not* handle the generic "any element can
+/// catch a routed `on_click`" attribute — see `emit_generic_on_click_routing`, a separate step for
+/// exactly that.
+fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, binding: &TokenStream) -> TokenStream {
     // Whether `expr` is a bare 1-segment reference to one of *this* component's own `#[param]`
     // fields that's already `Option<..>`-typed (e.g. `ContentControl`'s own `padding: Option<f32>`
     // forwarded as `Control { padding: padding }`) — as opposed to a plain value (a literal, a
@@ -3449,10 +3478,7 @@ fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, binding: &T
         let value = emit_expr(expr, ctx, &EmitMode::Construction);
         out.extend(quote! { #binding.base().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
     }
-    if !node.attached.is_empty() {
-        let grid_cell = grid_cell_expr(node, ctx, &EmitMode::Construction);
-        out.extend(quote! { #binding.base().set_grid_cell(#grid_cell); });
-    }
+    out.extend(emit_attached_setters(node, ctx, from, table, &EmitMode::Construction, binding));
     // `.base()` is a trait method (`elwindui::core::ui::UIElement`), not an inherent one — needs
     // the trait in scope for dot-call resolution wherever `out` ends up spliced, regardless of
     // whatever `use`s the surrounding generated function happens to have (mirrors the parent-wiring
@@ -3513,7 +3539,7 @@ fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, t
         let #binding: std::rc::Rc<#concrete_ty> = elwindui::core::ui::new_element_concrete(#value);
     });
     let binding_ts = quote! { #binding };
-    out.extend(emit_common_ui_element_setters(node, ctx, &binding_ts));
+    out.extend(emit_common_ui_element_setters(node, ctx, from, table, &binding_ts));
     out.extend(emit_generic_on_click_routing(node, ctx, &binding_ts));
 }
 
@@ -4935,7 +4961,45 @@ view Foo {
         assert!(generated_str.contains("elwindui :: core :: ui :: create_grid"), "{generated_str}");
         assert!(generated_str.contains("GridLength :: Auto"), "{generated_str}");
         assert!(generated_str.contains("GridLength :: Fixed (120.0)"), "{generated_str}");
-        assert!(generated_str.contains("GridCell { row : 0 , column : 0 }"), "{generated_str}");
-        assert!(generated_str.contains("GridCell { row : 1 , column : 1 }"), "{generated_str}");
+        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 0)"#), "{generated_str}");
+        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 0)"#), "{generated_str}");
+        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 1)"#), "{generated_str}");
+        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 1)"#), "{generated_str}");
+    }
+
+    /// Closes the attached-property gap docs/elwindui_spec.md §3 used to document as unresolved:
+    /// a `has_view`/plain user-defined `component`+`view` pair (non-native-rooted, so it has a real
+    /// `into_node()`) used as a `Grid` child must still have its `Grid::row`/`Grid::column` reach
+    /// that child's own view-root `UIElementImpl`, not be silently dropped.
+    #[test]
+    fn generates_valid_rust_for_grid_child_that_is_a_user_component() {
+        let src = r#"
+component Cell {
+}
+
+view Cell {
+    TextBlock { text: "x" }
+}
+
+component Foo {
+}
+
+view Foo {
+    Grid {
+        rows: [elwindui::core::layout::GridLength::Auto]
+        columns: [elwindui::core::layout::GridLength::Auto]
+        Cell { Grid::row: 1, Grid::column: 2 }
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("grid_child_that_is_a_user_component", &generated);
+
+        let generated_str = generated.to_string();
+        assert!(generated_str.contains("into_node ()"), "{generated_str}");
+        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 1)"#), "{generated_str}");
+        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 2)"#), "{generated_str}");
     }
 }

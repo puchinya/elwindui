@@ -234,95 +234,6 @@ impl Default for UIElementImpl {
     }
 }
 
-impl UIElementImpl {
-    /// Registers a handler for a `#[routed]`-tagged field named `name` on this element — see this
-    /// struct's own `routed_handlers` doc comment for the erasure convention.
-    pub fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &RoutedEventArgs)>) {
-        register_routed_handler(&self.routed_handlers, name, handler);
-    }
-    /// See this struct's own doc comment for why every one of these is a post-construction `&self`
-    /// setter rather than a constructor argument.
-    pub fn set_margin(&self, margin: f32) {
-        self.margin.set(margin);
-        self.invalidate();
-    }
-    pub fn set_horizontal_alignment(&self, alignment: HorizontalAlignment) {
-        self.horizontal_alignment.set(alignment);
-        self.invalidate();
-    }
-    pub fn set_vertical_alignment(&self, alignment: VerticalAlignment) {
-        self.vertical_alignment.set(alignment);
-        self.invalidate();
-    }
-    pub fn set_visibility(&self, visibility: Visibility) {
-        self.visibility.set(visibility);
-        self.invalidate();
-    }
-    pub fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
-        *self.data_context.borrow_mut() = data_context;
-    }
-    /// Stores an attached-property value under `(owner, field)` — e.g. `("Grid", "row")` — type-
-    /// erased into the shared `attached` bag (see that field's own doc comment). `owner`/`field` are
-    /// always compile-time-known string literals from `elwindui-codegen`'s `emit_attached_setters`,
-    /// which also picks `T` via an explicit turbofish matching the `#[attached]` field's declared
-    /// type — never inferred from `value` alone, since a mismatched inferred type here would make
-    /// `get_attached`'s `downcast_ref` silently miss and fall back to its caller's default.
-    pub fn set_attached<T: 'static>(&self, owner: &'static str, field: &'static str, value: T) {
-        self.attached.borrow_mut().insert((owner, field), Box::new(value));
-        self.invalidate();
-    }
-    /// Reads an attached-property value previously stored under `(owner, field)`, or `default` if
-    /// absent (never set on this element, or set with a different `T` — the same `downcast_ref`
-    /// miss as an absent key). Callers are the *owner* component's own layout code (e.g. `GridImpl`'s
-    /// `grid_cell_of`), which knows its own attached field's concrete type — see `set_attached`'s
-    /// own doc comment for why the type must agree between writer and reader.
-    pub fn get_attached<T: Clone + 'static>(&self, owner: &'static str, field: &'static str, default: T) -> T {
-        self.attached
-            .borrow()
-            .get(&(owner, field))
-            .and_then(|v| v.downcast_ref::<T>())
-            .cloned()
-            .unwrap_or(default)
-    }
-    pub fn set_width(&self, width: Option<f32>) {
-        self.width.set(width);
-        self.invalidate();
-    }
-    pub fn set_height(&self, height: Option<f32>) {
-        self.height.set(height);
-        self.invalidate();
-    }
-    pub fn set_min_width(&self, min_width: Option<f32>) {
-        self.min_width.set(min_width);
-        self.invalidate();
-    }
-    pub fn set_min_height(&self, min_height: Option<f32>) {
-        self.min_height.set(min_height);
-        self.invalidate();
-    }
-    pub fn set_max_width(&self, max_width: Option<f32>) {
-        self.max_width.set(max_width);
-        self.invalidate();
-    }
-    pub fn set_max_height(&self, max_height: Option<f32>) {
-        self.max_height.set(max_height);
-        self.invalidate();
-    }
-    /// Called by whatever backend host (`TreeHostView::set_tree`/`TreeHostPanel::set_tree`) is
-    /// about to own this element as the root of a hosted tree — see `invalidate_host`'s own doc
-    /// comment. `None` un-registers (e.g. a host discarding a tree it no longer owns).
-    pub fn set_invalidate_host(&self, host: Option<Rc<dyn RelayoutHost>>) {
-        *self.invalidate_host.borrow_mut() = host;
-    }
-    /// Hands out a `UIElementCollection` (WinUI3's `Panel.Children`) sharing this same
-    /// `UIElementImpl`'s `visual_children`/`self_handle` — a container (`LayoutImpl`/`ControlImpl`/
-    /// `GridImpl`) calls this once, at construction time, to build its own Logical-tree-facing
-    /// `children` field. See `UIElementCollection`'s own doc comment.
-    pub fn children_collection(&self) -> UIElementCollection {
-        UIElementCollection { visual: self.visual_children.clone(), owner: self.self_handle.clone() }
-    }
-}
-
 /// The type every widget wrapper wanting `#[routed]` support (not just `UIElementImpl`, which
 /// every `UIElement` already carries one of — a hand-written builtin like
 /// `elwindui-builtins::appkit::Button` needs its *own* copy too, registered into at its own
@@ -390,37 +301,47 @@ impl UIElement {
     /// methods) so they're reachable generically through `dyn UIElement`/any bound on this trait,
     /// not only through the concrete backing struct.
     fn set_margin(&self, margin: f32) {
-        self.as_ui_element().set_margin(margin);
+        self.as_ui_element().margin.set(margin);
+        self.invalidate();
     }
     fn set_horizontal_alignment(&self, alignment: HorizontalAlignment) {
-        self.as_ui_element().set_horizontal_alignment(alignment);
+        self.as_ui_element().horizontal_alignment.set(alignment);
+        self.invalidate();
     }
     fn set_vertical_alignment(&self, alignment: VerticalAlignment) {
-        self.as_ui_element().set_vertical_alignment(alignment);
+        self.as_ui_element().vertical_alignment.set(alignment);
+        self.invalidate();
     }
     fn set_visibility(&self, visibility: Visibility) {
-        self.as_ui_element().set_visibility(visibility);
+        self.as_ui_element().visibility.set(visibility);
+        self.invalidate();
     }
     fn set_width(&self, width: Option<f32>) {
-        self.as_ui_element().set_width(width);
+        self.as_ui_element().width.set(width);
+        self.invalidate();
     }
     fn set_height(&self, height: Option<f32>) {
-        self.as_ui_element().set_height(height);
+        self.as_ui_element().height.set(height);
+        self.invalidate();
     }
     fn set_min_width(&self, min_width: Option<f32>) {
-        self.as_ui_element().set_min_width(min_width);
+        self.as_ui_element().min_width.set(min_width);
+        self.invalidate();
     }
     fn set_min_height(&self, min_height: Option<f32>) {
-        self.as_ui_element().set_min_height(min_height);
+        self.as_ui_element().min_height.set(min_height);
+        self.invalidate();
     }
     fn set_max_width(&self, max_width: Option<f32>) {
-        self.as_ui_element().set_max_width(max_width);
+        self.as_ui_element().max_width.set(max_width);
+        self.invalidate();
     }
     fn set_max_height(&self, max_height: Option<f32>) {
-        self.as_ui_element().set_max_height(max_height);
+        self.as_ui_element().max_height.set(max_height);
+        self.invalidate();
     }
     fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
-        self.as_ui_element().set_data_context(data_context);
+        *self.as_ui_element().data_context.borrow_mut() = data_context;
     }
     /// WinUI3's `FrameworkElement.DataContext` — an ambient, type-erased data value an element
     /// carries (set explicitly via the `data_context:` common attribute, or populated internally by
@@ -504,6 +425,57 @@ impl UIElement {
     /// currently triggers the same full relayout as the other two methods here.
     fn invalidate_measure(&self) {
         request_relayout(self.as_ui_element());
+    }
+    /// Registers a handler for a `#[routed]`-tagged field named `name` on this element — see this
+    /// struct's own `routed_handlers` doc comment for the erasure convention.
+    fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &RoutedEventArgs)>)
+    where
+        Self: Sized,
+    {
+        register_routed_handler(&self.as_ui_element().routed_handlers, name, handler);
+    }
+    /// Stores an attached-property value under `(owner, field)` — e.g. `("Grid", "row")` — type-
+    /// erased into the shared `attached` bag (see that field's own doc comment). `owner`/`field` are
+    /// always compile-time-known string literals from `elwindui-codegen`'s `emit_attached_setters`,
+    /// which also picks `T` via an explicit turbofish matching the `#[attached]` field's declared
+    /// type — never inferred from `value` alone, since a mismatched inferred type here would make
+    /// `get_attached`'s `downcast_ref` silently miss and fall back to its caller's default.
+    fn set_attached<T: 'static>(&self, owner: &'static str, field: &'static str, value: T)
+    where
+        Self: Sized,
+    {
+        self.as_ui_element().attached.borrow_mut().insert((owner, field), Box::new(value));
+        self.invalidate();
+    }
+    /// Reads an attached-property value previously stored under `(owner, field)`, or `default` if
+    /// absent (never set on this element, or set with a different `T` — the same `downcast_ref`
+    /// miss as an absent key). Callers are the *owner* component's own layout code (e.g. `GridImpl`'s
+    /// `grid_cell_of`), which knows its own attached field's concrete type — see `set_attached`'s
+    /// own doc comment for why the type must agree between writer and reader.
+    fn get_attached<T: Clone + 'static>(&self, owner: &'static str, field: &'static str, default: T) -> T
+    where
+        Self: Sized,
+    {
+        self.as_ui_element()
+            .attached
+            .borrow()
+            .get(&(owner, field))
+            .and_then(|v| v.downcast_ref::<T>())
+            .cloned()
+            .unwrap_or(default)
+    }
+    /// Called by whatever backend host (`TreeHostView::set_tree`/`TreeHostPanel::set_tree`) is
+    /// about to own this element as the root of a hosted tree — see `invalidate_host`'s own doc
+    /// comment. `None` un-registers (e.g. a host discarding a tree it no longer owns).
+    fn set_invalidate_host(&self, host: Option<Rc<dyn RelayoutHost>>) {
+        *self.as_ui_element().invalidate_host.borrow_mut() = host;
+    }
+    /// Hands out a `UIElementCollection` (WinUI3's `Panel.Children`) sharing this same
+    /// `UIElementImpl`'s `visual_children`/`self_handle` — a container (`LayoutImpl`/`ControlImpl`/
+    /// `GridImpl`) calls this once, at construction time, to build its own Logical-tree-facing
+    /// `children` field. See `UIElementCollection`'s own doc comment.
+    fn children_collection(&self) -> UIElementCollection {
+        UIElementCollection { visual: self.as_ui_element().visual_children.clone(), owner: self.as_ui_element().self_handle.clone() }
     }
 }
 

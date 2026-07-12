@@ -16,7 +16,7 @@
 | `elwindui-i18n` | 58行+マクロ | 実装済み。Fluentベースのランタイム(`t!`, `declare!`マクロ)。ただしビルド時の`.ftl`静的検証(未翻訳キー検出・引数名整合性チェック)は`elwindui-codegen`側に存在せず未実装 |
 | `elwindui-languageserver` | 約990行 | 部分実装。診断(`elwindui-codegen`の`parser`/`validate`を再利用)、シンタックスハイライト(semantic tokens)、メンバー補完(`vm.field`/`vm.command.*`)が実働。hover、生成コードプレビュー、オフスクリーンレンダリングと連携したインスタンス生成パイプラインは未実装 |
 | `elwindui-hotreload` | 32行 | スタブのみ。`param`/`prop`差分からremount/patchを判定する純粋関数(`decide_reload_action`)だけが存在し、`hot-lib-reloader`統合・実際のdylib差し替えは未実装 |
-| `elwindui-test` | 79行 | 部分実装。`render_tree`(`Element`ツリーのインデントダンプ)のみ実装。`render_canvas_snapshot`/`assert_image_snapshot!`は未実装(`canvas.rs`はdocコメントのみのスタブ) |
+| `elwindui-test` | 79行 | 部分実装。`render_tree`(`UIElement`ツリーの、各ノードを`type_name()`でラベル付けしたインデントダンプ)のみ実装。`render_canvas_snapshot`/`assert_image_snapshot!`は未実装(`canvas.rs`はdocコメントのみのスタブ) |
 | `elwindui-backend-appkit` | 約1800行 | 実装済み・実機検証済み。本機で`cargo build`/実行/スクリーンショット確認済みの唯一のバックエンド |
 | `elwindui-backend-winui3` | 約1600行 | 実装コードあり・未検証。appkitと同等の`builtins`モジュール構成を持つが、Windows環境が無いためビルド・動作とも未確認 |
 | `elwindui-backend-gtk4` | 2行 | 未着手。`src/lib.rs`が2行のみのスタブで、`builtins`/`platform`/`application`モジュールが一切存在しない |
@@ -80,7 +80,7 @@
 | `command!` | 実装済み(`Initializer::Command`) |
 | i18n(Fluent、`t!`) | ランタイム(`elwindui-i18n`)は実装済み。ビルド時の`.ftl`静的検証(未翻訳キー検出・引数名整合性チェック)は未実装 |
 | モジュール(`use`) | 生成先が実際のRustコードのため`use`解決自体はRustコンパイラに委譲される。循環参照・未解決パスの独自の機械的検出は未確認 |
-| `Element`トレイト(`children()`/`id()`/`find_by_id`/`find_all`) | 実装済み |
+| `visual_tree`モジュール(WinUI3の`VisualTreeHelper`相当。`get_children_count`/`get_child`/`get_parent`/`find_all`) | 実装済み。`UIElement::visual_children()`/`parent()`が本体の走査を担い、ランタイム文字列idによる検索(`find_by_id`相当)は`#[id(...)]`(静的アクセサ)と役割が重複するため未提供・提供予定なし |
 | 14章 静的検証ルール(全25項目) | 部分実装。`crates/elwindui-codegen/src/validate.rs`(約1600行)がルール18(`#[command]`フィールド型)・19(`viewmodel`内`view`参照禁止)を含む多くの言語機能バリデーションを実装しているが、ルール番号がソース上に明示されているのはルール18・19のみで、前提機能自体が未実装のルール(9・14・15など、`target::backend()`依存)は検証不能 |
 
 ---

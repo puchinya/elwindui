@@ -8,7 +8,7 @@
 //! below regardless of how many crates deep `elwindui` itself pulls them in from.
 
 pub use elwindui_core as core;
-pub use elwindui_core::{find_all, find_by_id, Element};
+pub use elwindui_core::visual_tree;
 pub use elwindui_i18n as i18n;
 pub use elwindui_macros::{component, viewmodel};
 

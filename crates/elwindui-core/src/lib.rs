@@ -1,5 +1,4 @@
 pub mod accessibility;
-pub mod element;
 pub mod error;
 pub mod focus;
 pub mod input;
@@ -8,5 +7,4 @@ pub mod painter;
 pub mod reactive;
 pub mod task;
 pub mod ui;
-
-pub use element::{find_all, find_by_id, Element};
+pub mod visual_tree;

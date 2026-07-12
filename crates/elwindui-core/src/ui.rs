@@ -449,6 +449,14 @@ impl UIElement {
     fn visual_children(&self) -> Vec<Rc<dyn UIElement>> {
         self.base().visual_children.to_vec()
     }
+    /// WinUI3's `GetType().Name` (via `.NET` reflection), commonly paired with `VisualTreeHelper`
+    /// when dumping/debugging a tree — see `crate::visual_tree`. A default method, not overridden by
+    /// any concrete type: `std::any::type_name::<Self>()` is monomorphized per implementor, so this
+    /// resolves to the real concrete type (`ButtonImpl`/`TextBlockImpl`/...) even when called through
+    /// `dyn UIElement`.
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
     /// This element's own desired size, given `available` (margin already excluded by the caller)
     /// and its children's already-measured sizes (WinUI3's `MeasureOverride`). Defaults to taking
     /// no space at all — every concrete leaf/container overrides this with real logic; nothing

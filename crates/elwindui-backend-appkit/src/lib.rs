@@ -881,15 +881,17 @@ pub fn create_tab_view() -> NativeTabViewImpl {
 
 /// See docs/elwindui_builtins_spec.md 付録X. A single application-wide `NSMenu` (top menu bar
 /// item / `File`, `Edit`, ...), reusing `MenuItemImpl` for its leaf entries.
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItem)]
 #[derive(Clone)]
-pub struct MenuItemImpl {
+pub struct MenuItem {
     ns: Retained<NSMenuItem>,
     target_storage: Rc<RefCell<Option<Retained<MenuItemTarget>>>>,
 }
 
 /// `elwindui_core::ui::MenuItem`'s shape is common to every backend — see that trait's own doc
 /// comment; only these method bodies are AppKit-specific.
-impl elwindui_core::ui::MenuItem for MenuItemImpl {
+#[elwindui_macros::class]
+impl MenuItem {
     /// A real `NSMenuItem.title` setter — `create_menu_item()` takes no title argument, so this is
     /// the only way a menu item's title is ever actually set.
     fn set_text(&self, text: &str) {

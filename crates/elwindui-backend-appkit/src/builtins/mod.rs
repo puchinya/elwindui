@@ -10,15 +10,19 @@
 //! `#[two_way]` attribute's change-back), and — for anything embeddable as a child —
 //! `into_any_view`.
 //!
-//! Every DSL-facing struct here is named `XImpl` (`WindowImpl`/`ButtonImpl`/`TextAreaImpl`/
-//! `MenuBarImpl`/`MenuBarItemImpl`/`MenuImpl`/`MenuItemImpl`) rather than bare `X`, for two reasons:
-//! avoiding a name collision with this crate's own root (which already declares a same-named raw
-//! type, e.g. `crate::ButtonImpl`, or — for `Window` specifically — a same-named `pub struct
-//! Window`), and so `elwindui-codegen`'s `concrete_type_ident` can treat every hand-written native
-//! uniformly (docs/elwindui_spec.md 付録H.2.1a) the same way it already does for composed DSL
-//! components. Each implements the matching property-setter trait from `elwindui_core::ui`
-//! (`Button`/`TextArea`/`Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`) — see that module's own
-//! doc comment for why these traits live there instead of being declared separately per backend.
+//! Every DSL-facing struct here is declared under its bare class name (`Window`/`MenuBar`/
+//! `MenuBarItem`/`Menu`/`MenuItem`/`TextArea`(as `TextAreaImpl`, already `Impl`-suffixed since its
+//! own bare name collides with the `TextArea` trait re-exported here)/`Button`(same, as
+//! `ButtonImpl`)) via `#[elwindui_macros::class(struct_only = elwindui_core::ui::X)]` — the macro
+//! mechanically appends `Impl` (`to_impl_name`/`base_impl_type` in
+//! `crates/elwindui-macros/src/class.rs`) so the actually-compiled struct is always `XImpl`
+//! (`WindowImpl`/`MenuBarImpl`/`MenuBarItemImpl`/`MenuImpl`/`MenuItemImpl`) regardless of which
+//! spelling the source uses — `elwindui-codegen`'s `concrete_type_ident` relies on that `XImpl`
+//! shape to treat every hand-written native uniformly (docs/elwindui_spec.md 付録H.2.1a) the same
+//! way it already does for composed DSL components. Each implements the matching property-setter
+//! trait from `elwindui_core::ui` (`Button`/`TextArea`/`Window`/`MenuBar`/`MenuBarItem`/`Menu`/
+//! `MenuItem`) — see that module's own doc comment for why these traits live there instead of being
+//! declared separately per backend.
 //!
 //! `Type::new()` takes **no** arguments — every declared `#[param]` is applied afterward via its
 //! own `set_<field>(..)` call (docs/elwindui_spec.md 付録H.2.1a's post-construction setter
@@ -47,70 +51,25 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// `component NotepadWindow inherits Window` ("host composition", docs/elwindui_spec.md 付録H.2.1a)
-/// is what actually inherits this — hence the `Impl` rename + paired empty-marker
-/// `elwindui_core::ui::Window` trait.
-pub struct WindowImpl {
+/// is what actually inherits this — hence `struct_only`'s target being `elwindui_core::ui::Window`
+/// itself (the module doc comment above explains why this struct's own bare-name source spelling,
+/// `Window`, still compiles to `WindowImpl` and never collides with the `Window` trait re-exported
+/// just above).
+#[elwindui_macros::class(struct_only = elwindui_core::ui::Window)]
+pub struct Window {
     inner: appkit::Window,
 }
 
-impl WindowImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl Window {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: appkit::Window::new() })
     }
 
-    pub fn set_title(&self, title: &str) {
-        self.inner.set_title(title);
-    }
-
-    pub fn set_menu_bar(&self, menu_bar: Rc<MenuBarImpl>) {
-        self.inner.set_menu_bar(&menu_bar.inner);
-    }
-
-    pub fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
-        self.inner.set_content(content);
-    }
-
-    pub fn show(&self) {
-        self.inner.show();
-    }
-
-    pub fn left(&self) -> f32 {
-        self.inner.left()
-    }
-
-    pub fn set_left(&self, left: f32) {
-        self.inner.set_left(left);
-    }
-
-    pub fn top(&self) -> f32 {
-        self.inner.top()
-    }
-
-    pub fn set_top(&self, top: f32) {
-        self.inner.set_top(top);
-    }
-
-    pub fn width(&self) -> f32 {
-        self.inner.width()
-    }
-
-    pub fn set_width(&self, width: f32) {
-        self.inner.set_width(width);
-    }
-
-    pub fn height(&self) -> f32 {
-        self.inner.height()
-    }
-
-    pub fn set_height(&self, height: f32) {
-        self.inner.set_height(height);
-    }
-}
-
-impl elwindui_core::ui::Window for WindowImpl {
     fn set_title(&self, title: &str) {
         self.inner.set_title(title);
     }
+
     fn set_menu_bar(&self, menu_bar: Rc<dyn elwindui_core::ui::MenuBar>) {
         let menu_bar = menu_bar
             .as_any()
@@ -118,33 +77,43 @@ impl elwindui_core::ui::Window for WindowImpl {
             .expect("Window::set_menu_bar: menu_bar must be this backend's MenuBarImpl");
         self.inner.set_menu_bar(&menu_bar.inner);
     }
+
     fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
         self.inner.set_content(content);
     }
+
     fn show(&self) {
         self.inner.show();
     }
+
     fn left(&self) -> f32 {
         self.inner.left()
     }
+
     fn set_left(&self, left: f32) {
         self.inner.set_left(left);
     }
+
     fn top(&self) -> f32 {
         self.inner.top()
     }
+
     fn set_top(&self, top: f32) {
         self.inner.set_top(top);
     }
+
     fn width(&self) -> f32 {
         self.inner.width()
     }
+
     fn set_width(&self, width: f32) {
         self.inner.set_width(width);
     }
+
     fn height(&self) -> f32 {
         self.inner.height()
     }
+
     fn set_height(&self, height: f32) {
         self.inner.set_height(height);
     }
@@ -228,7 +197,8 @@ impl ButtonImpl {
     }
 }
 
-pub struct MenuBarImpl {
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBar)]
+pub struct MenuBar {
     inner: appkit::MenuBarImpl,
     /// The currently-installed children, in display order — the "before" side of `set_children`'s
     /// diff against its own new `children` argument (the "after" side), mirroring `TabView`'s own
@@ -236,8 +206,9 @@ pub struct MenuBarImpl {
     children: RefCell<Vec<Rc<MenuBarItemImpl>>>,
 }
 
-impl MenuBarImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl MenuBar {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: appkit::create_menu_bar(), children: RefCell::new(Vec::new()) })
     }
 
@@ -247,6 +218,7 @@ impl MenuBarImpl {
     /// (`elwindui_core::ui::MenuBar::remove_item`); one only in the new list is added
     /// (`add_item`). Safe to call more than once (e.g. a future dynamic menu bar), though today's
     /// only caller (`elwindui-codegen`'s generated construction) calls it exactly once.
+    #[inherent]
     pub fn set_children(&self, children: Vec<Rc<MenuBarItemImpl>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
@@ -263,9 +235,7 @@ impl MenuBarImpl {
         }
         *current = children;
     }
-}
 
-impl elwindui_core::ui::MenuBar for MenuBarImpl {
     fn add_item(&self, item: &dyn elwindui_core::ui::MenuBarItem) {
         let item = item
             .as_any()
@@ -282,27 +252,23 @@ impl elwindui_core::ui::MenuBar for MenuBarImpl {
     }
 }
 
-pub struct MenuBarItemImpl {
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBarItem)]
+pub struct MenuBarItem {
     inner: appkit::MenuBarItemImpl,
 }
 
-impl MenuBarItemImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl MenuBarItem {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: appkit::create_menu_bar_item() })
     }
 
-    pub fn set_submenu(&self, submenu: Rc<MenuImpl>) {
-        // `submenu` itself is dropped at the end of this call — the underlying `NSMenu` stays
-        // alive regardless, retained by AppKit itself once `NSMenuItem.setSubmenu` runs.
-        self.inner.set_submenu(&submenu.inner);
-    }
-}
-
-impl elwindui_core::ui::MenuBarItem for MenuBarItemImpl {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
-    fn set_submenu(&self, submenu: &dyn elwindui_core::ui::Menu) {
+    fn set_submenu(&self, submenu: Rc<dyn elwindui_core::ui::Menu>) {
+        // `submenu` itself is dropped at the end of this call — the underlying `NSMenu` stays
+        // alive regardless, retained by AppKit itself once `NSMenuItem.setSubmenu` runs.
         let submenu = submenu
             .as_any()
             .downcast_ref::<MenuImpl>()
@@ -311,18 +277,21 @@ impl elwindui_core::ui::MenuBarItem for MenuBarItemImpl {
     }
 }
 
-pub struct MenuImpl {
+#[elwindui_macros::class(struct_only = elwindui_core::ui::Menu)]
+pub struct Menu {
     inner: appkit::MenuImpl,
-    /// See `MenuBarImpl::children`'s doc comment — same reconciliation pattern.
+    /// See `MenuBar::children`'s doc comment — same reconciliation pattern.
     children: RefCell<Vec<Rc<MenuItemImpl>>>,
 }
 
-impl MenuImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl Menu {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: appkit::create_menu(), children: RefCell::new(Vec::new()) })
     }
 
-    /// See `MenuBarImpl::set_children`'s doc comment — same reconciliation pattern.
+    /// See `MenuBar::set_children`'s doc comment — same reconciliation pattern.
+    #[inherent]
     pub fn set_children(&self, children: Vec<Rc<MenuItemImpl>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
@@ -339,9 +308,7 @@ impl MenuImpl {
         }
         *current = children;
     }
-}
 
-impl elwindui_core::ui::Menu for MenuImpl {
     fn add_item(&self, item: &dyn elwindui_core::ui::MenuItem) {
         let item = item
             .as_any()
@@ -358,17 +325,17 @@ impl elwindui_core::ui::Menu for MenuImpl {
     }
 }
 
-pub struct MenuItemImpl {
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItem)]
+pub struct MenuItem {
     inner: appkit::MenuItemImpl,
 }
 
-impl MenuItemImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl MenuItem {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: appkit::create_menu_item() })
     }
-}
 
-impl elwindui_core::ui::MenuItem for MenuItemImpl {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }

@@ -758,15 +758,17 @@ pub fn create_tab_view() -> NativeTabViewImpl {
 
 /// See `elwindui-backend-appkit::MenuItemImpl`'s doc comment — same role, backed by a
 /// `MenuFlyoutItem` (WinUI3's `MenuBarItem.Items` collection holds `MenuFlyoutItemBase`s).
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItem)]
 #[derive(Clone)]
-pub struct MenuItemImpl {
+pub struct MenuItem {
     xaml: MenuFlyoutItem,
     on_select: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 /// `elwindui_core::ui::MenuItem`'s shape is common to every backend — see that trait's own doc
 /// comment; only these method bodies are WinUI3-specific.
-impl elwindui_core::ui::MenuItem for MenuItemImpl {
+#[elwindui_macros::class]
+impl MenuItem {
     /// A real title setter — `create_menu_item()` takes no title argument, so this is the only way
     /// a menu item's title is ever actually set.
     fn set_text(&self, text: &str) {

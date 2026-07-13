@@ -2276,19 +2276,24 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         // auto-named field — holds the native host instance now, so its own `show()` is reached
         // through that fixed name (mirroring `is_shape_composition`'s `self.base`-through-`base`
         // convention just above, minus the `UIElement` delegation Window doesn't participate in).
+        // Fully-qualified (`elwindui::core::ui::Window::show(..)`), not a bare `.show()` dot-call —
+        // the backend's own `WindowImpl` only implements the `Window` *trait* now (no inherent
+        // duplicate of the same name — see `composition_impls`'s own doc comment just below), so a
+        // dot-call would need that trait in scope to resolve at all.
         quote! {
             pub fn show(self: std::rc::Rc<Self>) {
-                self.base.clone().show();
+                elwindui::core::ui::Window::show(&*self.base);
             }
         }
     } else if view.root.type_path == "Window" {
         // A `Window`-rooted view with no `inherits Window` declaration (`is_host_composition` is
         // `false`) — `inherits` is opt-in for the stricter `base`-named/renamed host-composition
         // treatment above; a plain `Window` root still gets `show()` the original, structural way
-        // (independent of `inherits`), through its ordinary auto-numbered stored field.
+        // (independent of `inherits`), through its ordinary auto-numbered stored field. Fully-
+        // qualified for the same reason as the `is_host_composition` branch just above.
         quote! {
             pub fn show(self: std::rc::Rc<Self>) {
-                self.#root_binding.clone().show();
+                elwindui::core::ui::Window::show(&*self.#root_binding);
             }
         }
     } else if root_is_native {
@@ -2449,30 +2454,34 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         };
         // `Window` is the only host-composition base today, and unlike every other builtin here its
         // own `elwindui_core::ui::Window` trait has real required methods now (not an empty
-        // marker) — so this `impl #base_trait for #struct_ident` can no longer stay empty. Each
-        // property forwards to `self.base` (the backend's own `WindowImpl`), the same "inherent
-        // method on `self.base`" convention `show()` just above already uses. `set_menu_bar` is the
-        // one exception: `self.base`'s *inherent* `set_menu_bar` takes a concrete `Rc<MenuBarImpl>`
-        // (unrelated to this trait method's `Rc<dyn MenuBar>`), so instead of forwarding to the
-        // inherent method this calls `self.base`'s own `Window::set_menu_bar` *trait* method
-        // (which already downcasts `Rc<dyn MenuBar>` back to `MenuBarImpl` internally) — no need to
-        // downcast the `Rc` itself here.
+        // marker) — so this `impl #base_trait for #struct_ident` can no longer stay empty. Every
+        // method here forwards to `self.base` (the backend's own `WindowImpl`) via a fully-qualified
+        // `elwindui::core::ui::Window::method(&*self.base, ..)` call rather than a plain
+        // `self.base.method(..)` dot-call: the backend's own `WindowImpl` only implements the
+        // `Window` *trait* now (no more duplicate inherent methods with the same names — see
+        // `elwindui-backend-appkit::builtins::Window`'s own doc comment), so a bare dot-call would
+        // need that trait in scope to resolve at all; the fully-qualified form sidesteps that
+        // entirely (this is also, generally, the convention generated code should follow — see this
+        // function's own module for other `elwindui::core::..`/`elwindui::backend::..` full-path
+        // references).
         let base_trait_body = if base_name == "Window" {
             quote! {
-                fn set_title(&self, title: &str) { self.base.set_title(title); }
+                fn set_title(&self, title: &str) { elwindui::core::ui::Window::set_title(&*self.base, title); }
                 fn set_menu_bar(&self, menu_bar: std::rc::Rc<dyn elwindui::core::ui::MenuBar>) {
                     elwindui::core::ui::Window::set_menu_bar(&*self.base, menu_bar);
                 }
-                fn set_content(&self, content: std::rc::Rc<dyn elwindui::core::ui::UIElement>) { self.base.set_content(content); }
-                fn show(&self) { self.base.show(); }
-                fn left(&self) -> f32 { self.base.left() }
-                fn set_left(&self, left: f32) { self.base.set_left(left); }
-                fn top(&self) -> f32 { self.base.top() }
-                fn set_top(&self, top: f32) { self.base.set_top(top); }
-                fn width(&self) -> f32 { self.base.width() }
-                fn set_width(&self, width: f32) { self.base.set_width(width); }
-                fn height(&self) -> f32 { self.base.height() }
-                fn set_height(&self, height: f32) { self.base.set_height(height); }
+                fn set_content(&self, content: std::rc::Rc<dyn elwindui::core::ui::UIElement>) {
+                    elwindui::core::ui::Window::set_content(&*self.base, content);
+                }
+                fn show(&self) { elwindui::core::ui::Window::show(&*self.base); }
+                fn left(&self) -> f32 { elwindui::core::ui::Window::left(&*self.base) }
+                fn set_left(&self, left: f32) { elwindui::core::ui::Window::set_left(&*self.base, left); }
+                fn top(&self) -> f32 { elwindui::core::ui::Window::top(&*self.base) }
+                fn set_top(&self, top: f32) { elwindui::core::ui::Window::set_top(&*self.base, top); }
+                fn width(&self) -> f32 { elwindui::core::ui::Window::width(&*self.base) }
+                fn set_width(&self, width: f32) { elwindui::core::ui::Window::set_width(&*self.base, width); }
+                fn height(&self) -> f32 { elwindui::core::ui::Window::height(&*self.base) }
+                fn set_height(&self, height: f32) { elwindui::core::ui::Window::set_height(&*self.base, height); }
             }
         } else {
             TokenStream::new()
@@ -2961,17 +2970,18 @@ fn is_hand_written_native(info: &TypeInfo) -> bool {
 /// enclosing function body) — and again verbatim in `emit_resync`'s own separate function scope
 /// (`emit_resync`'s own doc comment), since a virtual builtin's `set_*` calls there need the same
 /// trait but `build_virtual_value`'s own inline `use` (construction time only) doesn't reach that
-/// far. `Button`/`TextArea`/`MenuItem`/`MenuBarItem` (hand-written natives) and every virtual
-/// builtin (`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`) route their
-/// own DSL properties through a shared trait method this way — `Window`/`TabView`/`TabViewItem`'s
-/// own properties, and `Menu`/`MenuBar`'s `children`, are all wrapper-only inherent methods (no
-/// shared trait involved), so nothing needs importing for those.
+/// far. `Button`/`TextArea`/`MenuItem`/`MenuBarItem`/`Window` (hand-written natives) and every
+/// virtual builtin (`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`) route
+/// their own DSL properties through a shared trait method this way — `TabView`/`TabViewItem`'s own
+/// properties, and `Menu`/`MenuBar`'s `children`, are all wrapper-only inherent methods (no shared
+/// trait involved), so nothing needs importing for those.
 fn builtin_trait_use(type_path: &str) -> TokenStream {
     match type_path {
         "Button" => quote! { use elwindui::core::ui::Button as _; },
         "TextArea" => quote! { use elwindui::core::ui::TextArea as _; },
         "MenuItem" => quote! { use elwindui::core::ui::MenuItem as _; },
         "MenuBarItem" => quote! { use elwindui::core::ui::MenuBarItem as _; },
+        "Window" => quote! { use elwindui::core::ui::Window as _; },
         "VerticalLayout" => quote! { use elwindui::core::ui::VerticalLayout as _; },
         "HorizontalLayout" => quote! { use elwindui::core::ui::HorizontalLayout as _; },
         "TextBlock" => quote! { use elwindui::core::ui::TextBlock as _; },

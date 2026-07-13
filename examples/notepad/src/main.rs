@@ -1,5 +1,5 @@
 use elwindui::platform;
-use elwindui::ui::ContentControlImpl;
+use elwindui::ui;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {

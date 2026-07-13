@@ -2,7 +2,8 @@
 //! `tab_view.rs`), mirroring `elwindui_backend_appkit::builtins`'s structure exactly (see that
 //! module's doc comment for the overall convention: `Type::new(..)`/`set_<attr>`/
 //! `set_on_<event>`/`set_on_<attr>_change`/`into_any_view`, why this lives in its own `builtins`
-//! module rather than at this crate's root, and why every struct here is named `XImpl`).
+//! module rather than at this crate's root, and why every struct here compiles to `XImpl`
+//! regardless of its bare source-level class name).
 //! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no wrapper here
 //! either, for the same reason as the AppKit side: `elwindui-codegen` builds their
 //! `elwindui_core::ui::UIElement` values directly.
@@ -33,70 +34,25 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// `component NotepadWindow inherits Window` ("host composition", docs/elwindui_spec.md 付録H.2.1a)
-/// is what actually inherits this — hence the `Impl` rename + paired empty-marker
-/// `elwindui_core::ui::Window` trait.
-pub struct WindowImpl {
+/// is what actually inherits this — hence `struct_only`'s target being `elwindui_core::ui::Window`
+/// itself (see `elwindui_backend_appkit::builtins`'s matching struct for why this bare-name source
+/// spelling still compiles to `WindowImpl` and never collides with the `Window` trait re-exported
+/// just above).
+#[elwindui_macros::class(struct_only = elwindui_core::ui::Window)]
+pub struct Window {
     inner: winui3::Window,
 }
 
-impl WindowImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl Window {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::Window::new() })
     }
 
-    pub fn set_title(&self, title: &str) {
-        self.inner.set_title(title);
-    }
-
-    pub fn set_menu_bar(&self, menu_bar: Rc<MenuBarImpl>) {
-        self.inner.set_menu_bar(&menu_bar.inner);
-    }
-
-    pub fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
-        self.inner.set_content(content);
-    }
-
-    pub fn show(&self) {
-        self.inner.show();
-    }
-
-    pub fn left(&self) -> f32 {
-        self.inner.left()
-    }
-
-    pub fn set_left(&self, left: f32) {
-        self.inner.set_left(left);
-    }
-
-    pub fn top(&self) -> f32 {
-        self.inner.top()
-    }
-
-    pub fn set_top(&self, top: f32) {
-        self.inner.set_top(top);
-    }
-
-    pub fn width(&self) -> f32 {
-        self.inner.width()
-    }
-
-    pub fn set_width(&self, width: f32) {
-        self.inner.set_width(width);
-    }
-
-    pub fn height(&self) -> f32 {
-        self.inner.height()
-    }
-
-    pub fn set_height(&self, height: f32) {
-        self.inner.set_height(height);
-    }
-}
-
-impl elwindui_core::ui::Window for WindowImpl {
     fn set_title(&self, title: &str) {
         self.inner.set_title(title);
     }
+
     fn set_menu_bar(&self, menu_bar: Rc<dyn elwindui_core::ui::MenuBar>) {
         let menu_bar = menu_bar
             .as_any()
@@ -104,33 +60,43 @@ impl elwindui_core::ui::Window for WindowImpl {
             .expect("Window::set_menu_bar: menu_bar must be this backend's MenuBarImpl");
         self.inner.set_menu_bar(&menu_bar.inner);
     }
+
     fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
         self.inner.set_content(content);
     }
+
     fn show(&self) {
         self.inner.show();
     }
+
     fn left(&self) -> f32 {
         self.inner.left()
     }
+
     fn set_left(&self, left: f32) {
         self.inner.set_left(left);
     }
+
     fn top(&self) -> f32 {
         self.inner.top()
     }
+
     fn set_top(&self, top: f32) {
         self.inner.set_top(top);
     }
+
     fn width(&self) -> f32 {
         self.inner.width()
     }
+
     fn set_width(&self, width: f32) {
         self.inner.set_width(width);
     }
+
     fn height(&self) -> f32 {
         self.inner.height()
     }
+
     fn set_height(&self, height: f32) {
         self.inner.set_height(height);
     }
@@ -213,20 +179,23 @@ impl ButtonImpl {
     }
 }
 
-pub struct MenuBarImpl {
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBar)]
+pub struct MenuBar {
     inner: winui3::MenuBarImpl,
-    /// See `elwindui_backend_appkit::builtins::MenuBarImpl::children`'s doc comment — same
+    /// See `elwindui_backend_appkit::builtins::MenuBar::children`'s doc comment — same
     /// reconciliation pattern.
     children: RefCell<Vec<Rc<MenuBarItemImpl>>>,
 }
 
-impl MenuBarImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl MenuBar {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_menu_bar(), children: RefCell::new(Vec::new()) })
     }
 
-    /// See `elwindui_backend_appkit::builtins::MenuBarImpl::set_children`'s doc comment — same
+    /// See `elwindui_backend_appkit::builtins::MenuBar::set_children`'s doc comment — same
     /// reconciliation pattern.
+    #[inherent]
     pub fn set_children(&self, children: Vec<Rc<MenuBarItemImpl>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
@@ -243,9 +212,7 @@ impl MenuBarImpl {
         }
         *current = children;
     }
-}
 
-impl elwindui_core::ui::MenuBar for MenuBarImpl {
     fn add_item(&self, item: &dyn elwindui_core::ui::MenuBarItem) {
         let item = item
             .as_any()
@@ -262,27 +229,23 @@ impl elwindui_core::ui::MenuBar for MenuBarImpl {
     }
 }
 
-pub struct MenuBarItemImpl {
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBarItem)]
+pub struct MenuBarItem {
     inner: winui3::MenuBarItemImpl,
 }
 
-impl MenuBarItemImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl MenuBarItem {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_menu_bar_item() })
     }
 
-    pub fn set_submenu(&self, submenu: Rc<MenuImpl>) {
-        // `submenu` itself is dropped at the end of this call — the underlying native menu stays
-        // alive regardless (retained by whatever it gets installed into).
-        self.inner.set_submenu(&submenu.inner);
-    }
-}
-
-impl elwindui_core::ui::MenuBarItem for MenuBarItemImpl {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
-    fn set_submenu(&self, submenu: &dyn elwindui_core::ui::Menu) {
+    fn set_submenu(&self, submenu: Rc<dyn elwindui_core::ui::Menu>) {
+        // `submenu` itself is dropped at the end of this call — the underlying native menu stays
+        // alive regardless (retained by whatever it gets installed into).
         let submenu = submenu
             .as_any()
             .downcast_ref::<MenuImpl>()
@@ -291,20 +254,23 @@ impl elwindui_core::ui::MenuBarItem for MenuBarItemImpl {
     }
 }
 
-pub struct MenuImpl {
+#[elwindui_macros::class(struct_only = elwindui_core::ui::Menu)]
+pub struct Menu {
     inner: winui3::MenuImpl,
-    /// See `elwindui_backend_appkit::builtins::MenuBarImpl::children`'s doc comment — same
+    /// See `elwindui_backend_appkit::builtins::MenuBar::children`'s doc comment — same
     /// reconciliation pattern.
     children: RefCell<Vec<Rc<MenuItemImpl>>>,
 }
 
-impl MenuImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl Menu {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_menu(), children: RefCell::new(Vec::new()) })
     }
 
-    /// See `elwindui_backend_appkit::builtins::MenuBarImpl::set_children`'s doc comment — same
+    /// See `elwindui_backend_appkit::builtins::MenuBar::set_children`'s doc comment — same
     /// reconciliation pattern.
+    #[inherent]
     pub fn set_children(&self, children: Vec<Rc<MenuItemImpl>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
@@ -321,9 +287,7 @@ impl MenuImpl {
         }
         *current = children;
     }
-}
 
-impl elwindui_core::ui::Menu for MenuImpl {
     fn add_item(&self, item: &dyn elwindui_core::ui::MenuItem) {
         let item = item
             .as_any()
@@ -340,17 +304,17 @@ impl elwindui_core::ui::Menu for MenuImpl {
     }
 }
 
-pub struct MenuItemImpl {
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItem)]
+pub struct MenuItem {
     inner: winui3::MenuItemImpl,
 }
 
-impl MenuItemImpl {
-    pub fn new() -> Rc<Self> {
+#[elwindui_macros::class]
+impl MenuItem {
+    fn new() -> Rc<Self> {
         Rc::new(Self { inner: winui3::create_menu_item() })
     }
-}
 
-impl elwindui_core::ui::MenuItem for MenuItemImpl {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }

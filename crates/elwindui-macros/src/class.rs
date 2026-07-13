@@ -6,7 +6,7 @@
 //! Applied to a bare `struct ClassName { .. }` (no `Impl` suffix, no `base` field written by
 //! hand) and, separately, a bare `impl ClassName { .. }` (no `for`) — two independent attribute
 //! invocations rather than one `mod`-wrapped pair. `inherits`/`struct_only`/
-//! `abstract_class`/`sealed`/`trait_only` are declared **once**, on the `struct`, even though
+//! `abstract_class`/`sealed` are declared **once**, on the `struct`, even though
 //! several of them (`struct_only`/`abstract_class`) are only ever consumed while
 //! expanding the `impl` —
 //! the struct's own expansion (`store_class_args`) stashes a snapshot in a process-global map keyed
@@ -17,6 +17,10 @@
 //! single crate's compilation, where outer attribute macros on top-level items expand in source
 //! order in one process. An impl may still pass args explicitly (the pre-existing form) instead of
 //! relying on the store; explicit args always win.
+//!
+//! `trait_only` is a different shape entirely (see its own paragraph below): it attaches to a bare
+//! `trait ClassName { .. }` item directly, in a *single* self-contained invocation — no paired
+//! `struct`/`impl`, no store/load round-trip.
 //!
 //! Ancestor delegation is **not** implemented as a fully generic cross-crate manifest/token-
 //! accumulator (the `ambassador` crate's technique) — it doesn't need to be, because every
@@ -55,6 +59,19 @@
 //! setters stay hand-written in `impl ClassName { .. }`, exactly as today; they are typically one
 //! line each and the real win here is eliminating the `ClassNameImpl`/trait declaration and the
 //! ancestor delegation boilerplate.
+//!
+//! `trait_only` declares a pure interface/marker trait with no backing `ClassNameImpl` anywhere in
+//! *this* crate at all — every concrete implementor (in this crate or a backend crate) provides its
+//! own struct via `struct_only = ..` instead (e.g. `elwindui_core::ui::MenuItem`, implemented by
+//! each backend's own `MenuItemImpl`). It attaches directly to a real `pub trait ClassName { .. }`
+//! item (`expand_trait_only`) — not a `struct`, since a `struct` has nowhere to put the trait's own
+//! method signatures, and the alternative (a paired `impl` block) would need meaningless dummy
+//! bodies just to satisfy Rust's impl-block syntax, only to have those bodies thrown away. The
+//! user's own trait items (already bodyless, ordinary trait-method syntax) pass through unchanged;
+//! the macro's only job is to add the supertrait bound — `inherits = ..` if given, or `base::AsAny`
+//! automatically otherwise, the same "no ancestor -> `AsAny`" rule root class mode uses above. No
+//! paired `impl ClassName { .. }` is expected or consumed — this is a single, self-contained
+//! invocation, unlike every other shape this macro supports.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -91,11 +108,11 @@ struct ClassArgs {
     abstract_class: bool,
     sealed: bool,
     /// Declares `ClassName` a pure trait — no `ClassNameImpl` struct, no `base` field, no `impl
-    /// ClassName for ClassNameImpl` at all. The paired `struct ClassName { .. }` body must be empty
-    /// (there's nowhere for fields to go); no paired `impl ClassName { .. }` is needed either (there
-    /// are no methods to attach anywhere). Used for a marker ancestor trait with no real backing
-    /// implementation of its own in this crate (e.g. `elwindui_core::ui::NativeControl` — each
-    /// backend provides its own concrete implementor instead). See `NativeControl`'s own doc comment.
+    /// ClassName for ClassNameImpl` at all. Attaches to a bare `trait ClassName { .. }` item
+    /// directly (`expand_trait_only`), not a `struct` — see this module's own doc comment. Used for
+    /// a marker/interface trait with no real backing implementation of its own in this crate (e.g.
+    /// `elwindui_core::ui::NativeControl`/`MenuItem` — each concrete implementor provides its own
+    /// `struct_only = ..` struct instead).
     trait_only: bool,
 }
 
@@ -321,13 +338,21 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     };
     match parsed_item {
         Item::Struct(item_struct) => {
+            if args.trait_only {
+                let msg = "#[class]: `trait_only` attaches to a `trait ClassName { .. }` item directly (its own \
+                           method signatures live in it, ordinary bodyless trait syntax) — declare `pub trait \
+                           ClassName { .. }` here instead of `struct ClassName {}`";
+                return syn::Error::new_spanned(&item_struct, msg).to_compile_error();
+            }
             store_class_args(&item_struct.ident.to_string(), &args);
             register_ancestor(&item_struct.ident.to_string(), &args.inherits);
             expand_struct(&args, item_struct)
         }
         Item::Impl(item_impl) => expand_impl(args, item_impl, attr_is_empty),
+        Item::Trait(item_trait) => expand_trait_only(&args, item_trait),
         other => {
-            let msg = "#[class]: expected a `struct ClassName { .. }` or `impl ClassName { .. }` item";
+            let msg = "#[class]: expected a `struct ClassName { .. }`, `impl ClassName { .. }`, or (with \
+                       `trait_only`) `trait ClassName { .. }` item";
             let mut ts = syn::Error::new_spanned(&other, msg).to_compile_error();
             ts.extend(quote! { #other });
             ts
@@ -363,23 +388,6 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
         }
     };
 
-    if args.trait_only {
-        if !existing_fields.is_empty() {
-            let msg = "#[class]: `trait_only` classes have no backing struct — `struct ClassName { .. }` must be \
-                       empty (there's nowhere for fields to go)";
-            return syn::Error::new_spanned(&item, msg).to_compile_error();
-        }
-        // No `ClassNameImpl`, no `base` field, no `impl ClassName for ClassNameImpl` — just the bare
-        // trait declaration. A concrete implementor (each backend's own `NativeControlImpl`, for
-        // `NativeControl`) provides everything else. No paired `impl ClassName { .. }` is expected —
-        // there are no methods to attach anywhere in `trait_only` mode.
-        let bound = args.inherits.as_ref().map(|t| quote! { : #t });
-        return quote! {
-            #(#attrs)*
-            #vis trait #class_name #generics #bound {}
-        };
-    }
-
     // `pub` (matching H.2.1a's convention): plenty of call sites reach through `.base` across
     // module/crate boundaries (`self.base.handle`, `self.base.as_ui_element()`, ...).
     let base_field = args.inherits.as_ref().map(|ty| {
@@ -392,6 +400,41 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
         #vis struct #impl_name #generics {
             #base_field
             #(#existing_fields,)*
+        }
+    }
+}
+
+/// `trait_only` (see this module's own doc comment): a single, self-contained invocation on a bare
+/// `trait ClassName { .. }` item — the user's own trait items (already ordinary, bodyless trait
+/// methods) pass through unchanged; the only thing this adds is the supertrait bound (`inherits =
+/// ..` if given, or `base::AsAny` automatically otherwise, mirroring root class mode's own "no
+/// ancestor -> `AsAny`" rule in `expand_impl`). No paired `struct`/`impl` is expected — there's no
+/// `store_class_args`/`load_class_args` round-trip here at all.
+fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
+    if !args.trait_only {
+        let msg = "#[class]: a bare `trait ClassName { .. }` item is only valid with `trait_only` — declare a \
+                   `struct ClassName { .. }` for an ordinary class, or add `trait_only` here for a pure \
+                   marker/interface trait";
+        return syn::Error::new_spanned(&item, msg).to_compile_error();
+    }
+    let class_name = &item.ident;
+    let vis = &item.vis;
+    let attrs = &item.attrs;
+    let generics = &item.generics;
+    let where_clause = &item.generics.where_clause;
+    let items = &item.items;
+    let user_supertraits = &item.supertraits;
+    let core = core_path();
+    let bound = match &args.inherits {
+        Some(t) => quote! { #t },
+        None => quote! { #core::base::AsAny },
+    };
+    let colon_bound = if user_supertraits.is_empty() { quote! { : #bound } } else { quote! { : #user_supertraits + #bound } };
+    register_ancestor(&class_name.to_string(), &args.inherits);
+    quote! {
+        #(#attrs)*
+        #vis trait #class_name #generics #colon_bound #where_clause {
+            #(#items)*
         }
     }
 }

@@ -32,7 +32,7 @@
 //! (`elwindui-codegen`'s generated code, and any hand-written builtin) goes through it instead of
 //! calling `Rc::new` directly.
 
-use crate::base::{AsAny, Point, Rect, Size};
+use crate::base::{Point, Rect, Size};
 use crate::input::RoutedEventArgs;
 use crate::layout::{
     align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin, shrink_by_margin,
@@ -767,7 +767,7 @@ pub enum TextAlignment {
 /// `try_as_native_control()` result directly to `H` (see that trait method's own doc comment) — no
 /// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
 #[elwindui_macros::class(trait_only, inherits = UIElement)]
-pub struct NativeControl {}
+pub trait NativeControl {}
 
 /// The property-setter traits below (`TextArea`/`Button`/`MenuItem`/`Menu`/`MenuBar`/`MenuBarItem`/
 /// `Window`) are declared once here rather than duplicated per backend crate — every backend's own
@@ -793,35 +793,41 @@ pub struct NativeControl {}
 /// are genuinely different in shape per backend (AppKit's `Retained<TreeHostView>`/`TabChipImpl` vs
 /// WinUI3's own equivalents have no common signature to share without associated types this crate
 /// doesn't need yet) — each backend keeps declaring its own local `TabView` trait.
-pub trait TextArea: UIElement + NativeControl {
+#[elwindui_macros::class(trait_only, inherits = NativeControl)]
+pub trait TextArea {
     fn set_text(&self, text: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
 }
 
-pub trait Button: UIElement + NativeControl {
+#[elwindui_macros::class(trait_only, inherits = NativeControl)]
+pub trait Button {
     fn set_enabled(&self, enabled: bool);
     fn set_on_click(&self, callback: Box<dyn Fn()>);
     fn set_text(&self, text: &str);
 }
 
-pub trait MenuItem: AsAny {
+#[elwindui_macros::class(trait_only)]
+pub trait MenuItem {
     fn set_text(&self, text: &str);
     fn set_enabled(&self, enabled: bool);
     fn set_shortcut(&self, key_equivalent: &str);
     fn set_on_select(&self, callback: Box<dyn Fn()>);
 }
 
-pub trait Menu: AsAny {
+#[elwindui_macros::class(trait_only)]
+pub trait Menu {
     fn add_item(&self, item: &dyn MenuItem);
     fn remove_item(&self, item: &dyn MenuItem);
 }
 
-pub trait MenuBarItem: AsAny {
+#[elwindui_macros::class(trait_only)]
+pub trait MenuBarItem {
     fn set_text(&self, text: &str);
-    fn set_submenu(&self, submenu: &dyn Menu);
+    fn set_submenu(&self, submenu: Rc<dyn Menu>);
 }
 
-pub trait MenuBar: AsAny {
+#[elwindui_macros::class(trait_only)]
+pub trait MenuBar {
     fn add_item(&self, item: &dyn MenuBarItem);
     fn remove_item(&self, item: &dyn MenuBarItem);
 }
@@ -831,6 +837,7 @@ pub trait MenuBar: AsAny {
 /// `set_menu_bar`'s `Rc<dyn MenuBar>` follows the same trait-object-argument convention as
 /// `Menu`/`MenuBar`/`MenuBarItem` just above (see this module's own doc comment on that group) —
 /// `impl Window for WindowImpl` downcasts it back to its own concrete `MenuBarImpl` internally.
+#[elwindui_macros::class(trait_only)]
 pub trait Window {
     fn set_title(&self, title: &str);
     fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBar>);

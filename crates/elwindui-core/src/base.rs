@@ -1,3 +1,19 @@
+use std::any::Any;
+
+/// Lets the generic tree-walker (`layout_tree`) downcast a `&dyn UIElement` to a concrete
+/// `H` to pull out its handle — the *only* place `native_handle`-style access
+/// exists (deliberately not a method on `UIElement` itself: every other implementor would have to
+/// carry a meaningless default for a concept that doesn't apply to it). Blanket-implemented for
+/// every `'static` type, so no concrete `UIElement` impl needs its own boilerplate.
+pub trait AsAny: Any {
+    fn as_any(&self) -> &dyn Any;
+}
+impl<T: Any> AsAny for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// See docs/elwindui_spec.md 付録H.2. Common geometry primitives shared across layout
 /// (`elwindui_core::layout`), painting (`elwindui_core::painter`), input
 /// (`elwindui_core::input`), and every backend crate — kept in their own module rather than

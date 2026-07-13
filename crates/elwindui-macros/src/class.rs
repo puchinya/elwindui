@@ -5,9 +5,9 @@
 //!
 //! Applied to a bare `struct ClassName { .. }` (no `Impl` suffix, no `base` field written by
 //! hand) and, separately, a bare `impl ClassName { .. }` (no `for`) — two independent attribute
-//! invocations rather than one `mod`-wrapped pair. `inherits`/`struct_only`/`supertrait`/
+//! invocations rather than one `mod`-wrapped pair. `inherits`/`struct_only`/
 //! `abstract_class`/`sealed`/`trait_only` are declared **once**, on the `struct`, even though
-//! several of them (`struct_only`/`supertrait`/`abstract_class`) are only ever consumed while
+//! several of them (`struct_only`/`abstract_class`) are only ever consumed while
 //! expanding the `impl` —
 //! the struct's own expansion (`store_class_args`) stashes a snapshot in a process-global map keyed
 //! by class name, and the paired `impl ClassName { .. }`, written as a bare `#[class]`, reads it
@@ -46,9 +46,10 @@
 //! method, inherited for free by every descendant via Rust's own default-method dispatch. The one
 //! exception is `base` itself, whose concrete location differs per implementor and so can't have a
 //! shared default — the macro synthesizes its (required, body-less) signature itself, and errors
-//! if the user tries to define it by hand. `supertrait = ..` adds any extra bound this root class
-//! needs (e.g. `UIElement: AsAny`) — a different concept from `inherits`, which additionally drives
-//! `base`-field insertion that a root class (having no ancestor) never wants.
+//! if the user tries to define it by hand. A root class's generated trait always carries `:
+//! base::AsAny` as a supertrait bound (e.g. `UIElement: AsAny`) — a different concept from
+//! `inherits`, which additionally drives `base`-field insertion that a root class (having no
+//! ancestor) never wants.
 //!
 //! Field-driven `Cell`/`RefCell` accessor generation is likewise not implemented — those getters/
 //! setters stay hand-written in `impl ClassName { .. }`, exactly as today; they are typically one
@@ -76,7 +77,7 @@ const SEALED_CLASSES: &[&str] = &["TextArea", "Button"];
 const UI_ELEMENT_METHODS: &[&str] =
     &["as_ui_element", "visual_children", "measure_override", "arrange_override", "paint", "try_as_native_control"];
 
-/// Parsed `#[class(inherits = .., struct_only = .., supertrait = .., abstract_class, sealed)]`
+/// Parsed `#[class(inherits = .., struct_only = .., abstract_class, sealed)]`
 /// arguments — every key is optional and any subset/order is accepted.
 #[derive(Default)]
 struct ClassArgs {
@@ -87,10 +88,6 @@ struct ClassArgs {
     /// in separate files/crates: `trait_only` declares the trait (no backing struct), `struct_only`
     /// declares a concrete struct implementing a trait declared elsewhere (no new trait of its own).
     struct_only: Option<Path>,
-    /// A supertrait bound unrelated to the H.2.1a "class hierarchy" concept `inherits` models
-    /// (no `base` field is inserted for it) — e.g. `UIElement: AsAny`. Only meaningful in "root
-    /// class mode" (`inherits` omitted): see `expand_impl`'s own doc comment.
-    supertrait: Option<Path>,
     abstract_class: bool,
     sealed: bool,
     /// Declares `ClassName` a pure trait — no `ClassNameImpl` struct, no `base` field, no `impl
@@ -110,7 +107,6 @@ impl Parse for ClassArgs {
             match item {
                 ClassArg::Inherits(ty) => args.inherits = Some(ty),
                 ClassArg::StructOnly(path) => args.struct_only = Some(path),
-                ClassArg::Supertrait(path) => args.supertrait = Some(path),
                 ClassArg::AbstractClass => args.abstract_class = true,
                 ClassArg::Sealed => args.sealed = true,
                 ClassArg::TraitOnly => args.trait_only = true,
@@ -123,7 +119,6 @@ impl Parse for ClassArgs {
 enum ClassArg {
     Inherits(Type),
     StructOnly(Path),
-    Supertrait(Path),
     AbstractClass,
     Sealed,
     TraitOnly,
@@ -141,10 +136,6 @@ impl Parse for ClassArg {
                 input.parse::<Token![=]>()?;
                 Ok(ClassArg::StructOnly(input.parse()?))
             }
-            "supertrait" => {
-                input.parse::<Token![=]>()?;
-                Ok(ClassArg::Supertrait(input.parse()?))
-            }
             "abstract_class" => Ok(ClassArg::AbstractClass),
             "sealed" => Ok(ClassArg::Sealed),
             "trait_only" => Ok(ClassArg::TraitOnly),
@@ -159,7 +150,6 @@ impl Parse for ClassArg {
 struct StoredClassArgs {
     inherits: Option<String>,
     struct_only: Option<String>,
-    supertrait: Option<String>,
     abstract_class: bool,
     sealed: bool,
     trait_only: bool,
@@ -186,7 +176,6 @@ fn store_class_args(class_name: &str, args: &ClassArgs) {
     let stored = StoredClassArgs {
         inherits: args.inherits.as_ref().map(|t| quote! { #t }.to_string()),
         struct_only: args.struct_only.as_ref().map(|p| quote! { #p }.to_string()),
-        supertrait: args.supertrait.as_ref().map(|p| quote! { #p }.to_string()),
         abstract_class: args.abstract_class,
         sealed: args.sealed,
         trait_only: args.trait_only,
@@ -206,7 +195,6 @@ fn load_class_args(class_name: &str) -> Option<ClassArgs> {
     Some(ClassArgs {
         inherits: stored.inherits.as_ref().map(parse_type),
         struct_only: stored.struct_only.as_ref().map(parse_path),
-        supertrait: stored.supertrait.as_ref().map(parse_path),
         abstract_class: stored.abstract_class,
         sealed: stored.sealed,
         trait_only: stored.trait_only,
@@ -433,7 +421,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             None => {
                 let msg = format!(
                     "#[class]: no matching `struct {class_name}` with #[elwindui_macros::class(..)] found earlier in \
-                     this file — declare the struct (with any inherits/struct_only/supertrait/... args) before this \
+                     this file — declare the struct (with any inherits/struct_only/... args) before this \
                      impl block, or pass args explicitly here"
                 );
                 return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
@@ -673,7 +661,9 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             let msg = "#[class]: root class's `as_ui_element` is auto-generated; do not define it";
             return syn::Error::new_spanned(&base_fn.sig, msg).to_compile_error();
         }
-        let bound = args.supertrait.as_ref().map(|t| quote! { : #t });
+        // Every root class implicitly needs `AsAny` (e.g. `UIElement: AsAny`) — see this function's
+        // own doc comment on root class mode.
+        let bound = quote! { : #core::base::AsAny };
         let default_methods = own_methods.iter().map(|f| quote! { #f });
         (
             quote! {

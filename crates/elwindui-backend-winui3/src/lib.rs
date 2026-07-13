@@ -69,7 +69,7 @@ use std::any::Any;
 /// (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed widget
 /// itself would be a self-reference. Wrapping just the raw element instead lets `base.handle` be
 /// built (`AnyView::from(xaml.clone())`) before the rest of the widget struct exists.
-trait WinUiHandle: elwindui_core::ui::AsAny {
+trait WinUiHandle: elwindui_core::base::AsAny {
     fn as_element(&self) -> FrameworkElement;
 }
 

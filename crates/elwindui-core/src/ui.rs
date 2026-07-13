@@ -32,7 +32,7 @@
 //! (`elwindui-codegen`'s generated code, and any hand-written builtin) goes through it instead of
 //! calling `Rc::new` directly.
 
-use crate::base::{Point, Rect, Size};
+use crate::base::{AsAny, Point, Rect, Size};
 use crate::input::RoutedEventArgs;
 use crate::layout::{
     align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin, shrink_by_margin,
@@ -43,20 +43,6 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-
-/// Lets the generic tree-walker (`layout_tree`) downcast a `&dyn UIElement` to a concrete
-/// `H` to pull out its handle — the *only* place `native_handle`-style access
-/// exists (deliberately not a method on `UIElement` itself: every other implementor would have to
-/// carry a meaningless default for a concept that doesn't apply to it). Blanket-implemented for
-/// every `'static` type, so no concrete `UIElement` impl needs its own boilerplate.
-pub trait AsAny: Any {
-    fn as_any(&self) -> &dyn Any;
-}
-impl<T: Any> AsAny for T {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
 
 /// The backend-agnostic handle to whatever native host (`elwindui-backend-appkit`'s `TreeHostView`,
 /// `elwindui-backend-winui3`'s `TreeHostPanel`) currently owns a given tree — the thing
@@ -104,7 +90,7 @@ pub trait RelayoutHost {
 /// other `#[class(inherits = ..)]`-managed subclass inherits all of them for free via Rust's own
 /// default-method dispatch — only `base` (synthesized by the macro; its concrete location differs
 /// per implementor) is a genuinely required method.
-#[elwindui_macros::class(supertrait = AsAny)]
+#[elwindui_macros::class]
 pub struct UIElement {
     pub margin: Cell<f32>,
     pub horizontal_alignment: Cell<HorizontalAlignment>,

@@ -10,7 +10,8 @@
 
 #![cfg(target_os = "macos")]
 
-use elwindui_core::ui::{layout_tree, AsAny, Button as _, NativeControl, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElement, UIElementImpl};
+use elwindui_core::base::AsAny;
+use elwindui_core::ui::{layout_tree, Button as _, NativeControl, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElement, UIElementImpl};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};

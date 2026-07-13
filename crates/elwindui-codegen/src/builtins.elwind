@@ -28,17 +28,19 @@ component Layout inherits UIElement {
 // A field-less category marker, not a real widget. Only native leaves that actually get embedded
 // as a real `Rc<dyn elwindui_core::ui::UIElement>` node in the visual tree (`Button`/`TextArea`/
 // `TabView`/`TabViewItem`) declare `inherits NativeControl` — their backend `XxxImpl` struct holds
-// a real `base: elwindui_core::ui::NativeControlImpl<H>` and implements `NativeControl<H>`/
+// a real `base` (a backend-owned `NativeControlImpl`, composed via `inherits = NativeControl` —
+// `elwindui_core::ui::NativeControl` itself is a pure marker trait with no shared, generic
+// `elwindui-core`-owned struct; see that trait's own doc comment) and implements `NativeControl`/
 // `UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a). `MenuBar`/`MenuBarItem`/
 // `Menu`/`MenuItem` never enter the visual tree (they attach to the platform menu bar directly, no
 // `into_any_view`/measure/arrange ever happens for them) — despite sharing a real `Control`-family
-// ancestry in WinUI3, implementing `NativeControl<H>` for them would have no real handle `H` to
-// hold and no caller that ever exercises it, so they declare `#[native]` directly instead, exactly
-// like `Window` below (real WinUI3's `Window` likewise has no meaningful `Control`-family ancestor
-// at all — it derives directly from `Object`). See docs/elwindui_spec.md 付録H.2 and
+// ancestry in WinUI3, implementing `NativeControl` for them would have no real handle to hold and
+// no caller that ever exercises it, so they declare `#[native]` directly instead, exactly like
+// `Window` below (real WinUI3's `Window` likewise has no meaningful `Control`-family ancestor at
+// all — it derives directly from `Object`). See docs/elwindui_spec.md 付録H.2 and
 // `elwindui-codegen`'s `is_native` computation (`#[native]` and `inherits NativeControl` are
-// equivalent for `is_native` purposes; they differ only in whether a real Rust `NativeControl<H>`
-// base is expected).
+// equivalent for `is_native` purposes; they differ only in whether a real Rust `NativeControl`
+// backend-owned base is expected).
 #[embedded]
 #[abstract]
 component NativeControl inherits UIElement {

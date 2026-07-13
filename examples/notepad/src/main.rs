@@ -1,4 +1,5 @@
 use elwindui::platform;
+use elwindui::ui::ContentControlImpl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {
@@ -126,7 +127,7 @@ fn main() {
     vm.new_tab_execute();
     let window = NotepadWindowImpl::new(vm);
     window.show();
-    
+
     elwindui::application::run();
 }
 

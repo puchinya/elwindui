@@ -89,8 +89,8 @@ pub struct TypeInfo {
     /// `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem`, which never enter the visual tree).
     /// Unlike `is_native` (a recursively-inferred structural property), this is purely a shape-only
     /// declaration flag — only ever `true` for a hand-written builtin whose backend `XxxImpl` struct
-    /// owns a real `base: elwindui::core::ui::NativeControlImpl<H>` and implements
-    /// `NativeControl<H>`/`UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a).
+    /// owns a real `base` (a backend-owned `NativeControlImpl`) and implements
+    /// `NativeControl`/`UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a).
     /// `emit_construction` uses this to pass a use-site `base: UIElementImpl` as this type's
     /// `Type::new(..)`'s leading argument (mirroring `emit_virtual_construction`'s own `base` — see
     /// `build_ui_element_base`), and `into_node_if_needed` uses it to skip the external
@@ -2841,19 +2841,19 @@ const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 ///   `generate_view`) produces the `Rc<dyn UIElement>` value — same `.clone()` convention as
 ///   `into_any_view_if_needed` so the original binding stays valid for any later reference.
 /// - `Button`/`TextArea`/`TabView` (`TypeInfo::is_native_control_leaf`): already implements
-///   `UIElement` directly — its own `base: elwindui::core::ui::NativeControlImpl<H>` was already
-///   built at construction time from *this exact use site*'s margin/alignment/data_context/
+///   `UIElement` directly — its own `base` (a backend-owned `NativeControlImpl`, composed via
+///   `inherits = NativeControl` — see `elwindui_core::ui::NativeControl`'s own doc comment) was
+///   already built at construction time from *this exact use site*'s margin/alignment/data_context/
 ///   `routed_handlers` (see `emit_construction`'s `build_ui_element_base` argument) — so this is a
 ///   plain upcast, no fresh wrapper needed.
 /// - Anything else native (`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`, or a user component
-///   whose own root is native): wrapped as a `NativeControl` via `new_element`
-///   (`UIElementBase::default()` — no way to set `margin`/`alignment` on an embedding site's own
-///   wrapper here — except `routed_handlers`, which is shared from the widget's own storage when it
-///   has any `#[routed]` fields), reusing `into_any_view_if_needed` for the inner handle conversion.
-///   In practice this branch is never actually reached for `MenuBar`-family types today (none of
-///   their own child slots are `dyn UIElement`-typed), kept only for a hypothetical user component
-///   whose own root resolves native without being one of the three real `is_native_control_leaf`
-///   leaves above.
+///   whose own root is native): **not implemented** — `panic!`s if actually reached. In practice
+///   this branch is never actually reached for `MenuBar`-family types today (none of their own
+///   child slots are `dyn UIElement`-typed); it was previously kept as a real (if untested)
+///   implementation for the hypothetical user-component case, but relied on
+///   `elwindui_core::ui::create_native_control`, which no longer exists now that `NativeControl` is
+///   a pure marker trait with no shared, generically constructible wrapper — see the `panic!`'s own
+///   message for what a real implementation would need.
 fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module, table: &SymbolTable) -> TokenStream {
     if source_type_path == PASSTHROUGH_NODE {
         // `.clone()` (an `Rc` refcount bump), not a bare move — the same param is also stored
@@ -2872,27 +2872,19 @@ fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module,
             }
         }
     } else if is_native {
-        // A `#[routed]` field (docs/elwindui_spec.md 4章) registers its handler on the widget's
-        // *own* `routed_handlers()` at its own construction time (see `emit_wiring`) — long before
-        // this `NativeControl` wrapper exists (tree construction is bottom-up: children first).
-        // Sharing that same `Rc` here (instead of `UIElementBase::default()`'s fresh, empty one)
-        // is what makes `dispatch_routed` find it later when bubbling from this node.
-        let has_routed = info.is_some_and(|i| !i.routed_fields.is_empty());
-        let base_expr = base.clone();
-        let view = into_any_view_if_needed(base, "AnyView");
-        let ui_base = if has_routed {
-            quote! {
-                elwindui::core::ui::UIElementImpl {
-                    routed_handlers: (#base_expr).routed_handlers(),
-                    ..elwindui::core::ui::UIElementImpl::default()
-                }
-            }
-        } else {
-            quote! { elwindui::core::ui::UIElementImpl::default() }
-        };
-        quote! {
-            elwindui::core::ui::new_element(elwindui::core::ui::create_native_control(#ui_base, #view))
-        }
+        // Never actually reached today (see this function's own doc comment: no `MenuBar`-family
+        // type has a `dyn UIElement`-typed child slot, and this is otherwise only hypothetical) —
+        // `elwindui_core::ui::create_native_control` (which this branch used to call) no longer
+        // exists, now that `NativeControl` is a pure marker trait implemented per-backend (see
+        // `elwindui_core::ui::NativeControl`'s own doc comment) with no shared, generically
+        // constructible wrapper struct. If a real `.elwind` file ever hits this — a `dyn
+        // UIElement`-typed slot filled with something `is_native` but not `is_native_control_leaf`
+        // — this needs a real implementation at that point, built against whatever backend-specific
+        // wrapper shape makes sense then.
+        panic!(
+            "`{source_type_path}`: native-but-not-NativeControl-leaf child (e.g. `MenuBar`/`Window`) in a `dyn \
+             UIElement` slot isn't supported yet — this codegen path has no real implementation"
+        )
     } else if is_virtual_builtin(source_type_path) {
         quote! {
             {
@@ -3059,7 +3051,7 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
         }
     }
     // `Button`/`TextArea`/`TabView` (`inherits NativeControl`, `TypeInfo::is_native_control_leaf`)
-    // own a real `base: elwindui::core::ui::NativeControlImpl<H>` field (docs/elwindui_spec.md
+    // own a real `base` (a backend-owned `NativeControlImpl`) field (docs/elwindui_spec.md
     // 付録H.2.1a) — this use site's margin/data_context/attached properties are applied to it right
     // here, post-construction, exactly like `emit_virtual_construction` does for virtual builtins
     // (see `emit_common_ui_element_setters`). `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`

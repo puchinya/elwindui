@@ -31,6 +31,13 @@ pub use tab_view::{TabViewImpl, TabViewItemImpl};
 
 use crate as appkit;
 use crate::AnyView;
+// Bare names needed for the transitive ancestor-chain walk `#[elwindui_macros::class]` performs
+// below (`appkit::TextAreaImpl`/`appkit::ButtonImpl` → `appkit::TextArea`/`appkit::Button`'s own
+// registered `inherits = NativeControl` → `appkit::NativeControl`'s own `NativeControlImpl`):
+// `NativeControlImpl` (the struct — the walk's `as_native_control()` accessor return type) and
+// `NativeControl` (the trait — the walk's auto-generated `impl NativeControl for TextAreaImpl {}`/
+// `for ButtonImpl {}`, replacing what used to be a hand-written empty impl here).
+use crate::{NativeControl, NativeControlImpl};
 // Re-exported so `component X inherits Window` call sites can keep importing `Window` from this
 // same `builtins` module alongside `WindowImpl`, rather than needing a separate `elwindui_core`
 // import just for the (now-shared) marker trait.
@@ -143,7 +150,7 @@ impl elwindui_core::ui::Window for WindowImpl {
     }
 }
 
-#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = appkit::TextAreaImpl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TextArea, inherits = appkit::TextAreaImpl)]
 pub struct TextAreaImpl {}
 
 #[elwindui_macros::class]
@@ -172,7 +179,7 @@ impl TextAreaImpl {
     }
 }
 
-#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = appkit::ButtonImpl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::Button, inherits = appkit::ButtonImpl)]
 pub struct ButtonImpl {}
 
 #[elwindui_macros::class]

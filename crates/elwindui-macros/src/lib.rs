@@ -54,7 +54,7 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[elwindui_macros::class(inherits = SuperClass, implements = existing::TraitPath, abstract_class, sealed)]`
+/// `#[elwindui_macros::class(inherits = SuperClass, struct_only = existing::TraitPath, trait_only, abstract_class, sealed)]`
 /// applied to a bare `struct ClassName { .. }` and, separately, a bare `impl ClassName { .. }`
 /// (no `for`) — automates the H.2.1a class-hierarchy convention (docs/elwindui_spec.md 付録H.2.1a).
 /// See `class::expand`'s own doc comment for the full design and its deliberate simplifications

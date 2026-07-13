@@ -1,6 +1,7 @@
 //! The framework-owned Visual tree, following WinUI3's `UIElement` hierarchy: `Rc<dyn UIElement>`
-//! nodes *are* the tree (no separate wrapper/enum type) — `NativeControlImpl<H>` (`Button`/`TextArea`/
-//! `MenuBar`/`TabView`, the "NativeControlImpl" family), `TextBlockImpl` (self-drawn primitive text),
+//! nodes *are* the tree (no separate wrapper/enum type) — a backend's own `NativeControlImpl`
+//! (`Button`/`TextArea`/`TabView`, the `NativeControl`-implementing family — see that trait's own
+//! doc comment), `TextBlockImpl` (self-drawn primitive text),
 //! `ShapeImpl` (`Rectangle`/`Ellipse`), `VerticalLayoutImpl`/`HorizontalLayoutImpl` (each embedding
 //! shared `LayoutImpl` fields as their own `base`, but doing their own orientation-specific layout
 //! math directly rather than delegating it to that base), and `ControlImpl` (a composable
@@ -11,8 +12,9 @@
 //! see docs/elwindui_spec.md 付録H.2.
 //!
 //! `H` (whatever a backend uses as its native widget handle, e.g. `elwindui-backend-appkit`'s
-//! `AnyView`) appears only on `NativeControlImpl<H>` itself and on the functions that walk a tree
-//! looking for one (`layout_tree`) — the `UIElement` trait and every other concrete type
+//! `AnyView`) appears only on the functions that walk a tree looking for one (`layout_tree`,
+//! `collect_render_items<H>`, downcasting a leaf's `try_as_native_control()` result straight to `H`)
+//! — the `UIElement` trait and every other concrete type
 //! (`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`ShapeImpl`/`TextBlockImpl`/`ControlImpl`) are
 //! handle-agnostic, since they never hold one.
 //!
@@ -43,7 +45,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 /// Lets the generic tree-walker (`layout_tree`) downcast a `&dyn UIElement` to a concrete
-/// `NativeControlImpl<H>` to pull out its handle — the *only* place `native_handle`-style access
+/// `H` to pull out its handle — the *only* place `native_handle`-style access
 /// exists (deliberately not a method on `UIElement` itself: every other implementor would have to
 /// carry a meaningless default for a concept that doesn't apply to it). Blanket-implemented for
 /// every `'static` type, so no concrete `UIElement` impl needs its own boilerplate.
@@ -63,7 +65,7 @@ impl<T: Any> AsAny for T {
 /// provide an `impl RelayoutHost for XHost` the same way they already provide `impl
 /// elwindui_core::ui::Button for ButtonImpl`/etc. — this crate's own established "shared trait in
 /// core, impl per backend" convention (see this module's own doc comment on `TextArea`/`Button`/...
-/// just below `NativeControl<H>`). Each backend's own `impl` should wrap a *weak* handle back to its
+/// just below `NativeControl`). Each backend's own `impl` should wrap a *weak* handle back to its
 /// host (see e.g. `elwindui-backend-appkit`'s `AppKitRelayoutHost`) — a strong one would create a
 /// reference cycle, since the host itself holds the tree that (via `UIElementImpl::invalidate_host`
 /// on that tree's root) holds this `Rc<dyn RelayoutHost>` right back.
@@ -90,9 +92,9 @@ pub trait RelayoutHost {
 /// `data_context` (WinUI3's `FrameworkElement.DataContext`) is `Rc<dyn Any>`-erased like every
 /// other cross-type-parameter value in this crate (see e.g. `elwindui_backend_appkit::builtins::tab_view`'s
 /// `erase_items`/`erase_render`).
-/// The common interface every element in the Visual tree implements — `NativeControlImpl<H>`,
-/// `TextBlockImpl`, `ShapeImpl`, `VerticalLayoutImpl`/`HorizontalLayoutImpl`, and `ControlImpl` are
-/// all peers here, not variants of some enum.
+/// The common interface every element in the Visual tree implements — a backend's own
+/// `NativeControlImpl`, `TextBlockImpl`, `ShapeImpl`, `VerticalLayoutImpl`/`HorizontalLayoutImpl`, and
+/// `ControlImpl` are all peers here, not variants of some enum.
 /// New kinds (a future `GridImpl`, say) are added by implementing this trait; nothing here or in
 /// `layout_tree` needs to change.
 ///
@@ -413,14 +415,15 @@ impl UIElement {
     fn paint(&self) -> Option<PaintKind> {
         None
     }
-    /// `Some(self)` for `NativeControlImpl<H>` itself, and for any type that composes one as its own
+    /// `Some(&self.handle)` (the raw native handle itself, erased to `&dyn Any`) for a backend's own
+    /// `NativeControlImpl { handle: AnyView, .. }` and for any type that composes one as its own
     /// `base` field (docs/elwindui_spec.md 付録H.2.1a — e.g. a backend's `ButtonImpl { base:
-    /// NativeControlImpl<AnyView>, .. }` overrides this to return `Some(&self.base)`); `None` for
-    /// every other `UIElement` (the default). `arrange`'s own downcast goes through this instead of
-    /// downcasting `self` directly, since `Any::downcast_ref` only ever succeeds against the exact
-    /// concrete type placed in the tree — without this indirection, a composing type's *own*
-    /// concrete type (not `NativeControlImpl<H>` itself) would never be recognized as carrying a
-    /// real native handle.
+    /// NativeControlImpl, .. }` overrides this to return `Some(&self.base.handle)`); `None` for every
+    /// other `UIElement` (the default). `collect_render_items<H>` downcasts this directly to `H`
+    /// (`downcast_ref::<H>()`), not to any `elwindui-core`-defined wrapper struct — measuring/placing
+    /// a native handle is entirely backend-specific, so `elwindui_core::ui::NativeControl` (the
+    /// marker trait every real native leaf implements) doesn't define one; see that trait's own doc
+    /// comment.
     fn try_as_native_control(&self) -> Option<&dyn Any> {
         None
     }
@@ -764,39 +767,21 @@ pub enum TextAlignment {
     Right,
 }
 
-/// `Button`/`TextArea`/`MenuBar`/`TabView` (the "NativeControlImpl" family) — the only `UIElement`
-/// with a real backend handle. Always a leaf as far as this tree is concerned: whatever lives
-/// beneath it in its own backend-managed hierarchy (e.g. `TabView`'s tab-switching) is opaque here.
-/// `NativeControl<H>`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) has no methods beyond
-/// `UIElement` today — declared via `#[elwindui_macros::class]` purely so the type participates in
-/// the trait+`Impl`+`base` convention like every other class in this hierarchy.
-#[elwindui_macros::class(inherits = UIElement)]
-pub struct NativeControl<H> {
-    pub handle: H,
-}
-
-#[elwindui_macros::class]
-impl<H: 'static> NativeControl<H> {
-    // Deliberately no `measure_override`/`arrange_override` here — measuring and placing a native
-    // handle is backend-specific (e.g. AppKit's `NSView.fittingSize()`/`setFrame:`), so instead of
-    // requiring `H` to implement a shared `elwindui-core`-defined trait just to plug that in, each
-    // concrete derived widget (`elwindui-backend-appkit::TextArea`/`Button`/`TabView`, and their
-    // winui3 equivalents) writes its own `measure_override` calling into its own handle however it
-    // likes — the same way `VerticalLayout`/`Control`/`Grid` above each write their own, not
-    // through any shared "MeasureNode" abstraction. Falling back to the root `UIElement`'s default
-    // `measure_override` (`Size::default()`) here would be wrong for a real widget, but is never
-    // reached in practice since every real `NativeControl<H>` user overrides it.
-    fn try_as_native_control(&self) -> Option<&dyn Any> {
-        Some(self)
-    }
-    pub fn new(handle: H) -> Self {
-        Self { base: UIElementImpl::default(), handle }
-    }
-}
-
-pub fn create_native_control<H: 'static>(handle: H) -> NativeControlImpl<H> {
-    NativeControlImpl::new(handle)
-}
+/// `Button`/`TextArea`/`TabView` — the only `UIElement`s with a real backend handle. Always a leaf as
+/// far as this tree is concerned: whatever lives beneath it in its own backend-managed hierarchy
+/// (e.g. `TabView`'s tab-switching) is opaque here. A pure marker trait (`trait_only` — no
+/// `NativeControlImpl`/`<H>` here at all): measuring/placing a native handle is entirely
+/// backend-specific (e.g. AppKit's `NSView.fittingSize()`/`setFrame:`), so instead of `elwindui-core`
+/// owning a shared generic `NativeControlImpl<H>` that every backend's `H` would need to plug into,
+/// each backend defines its own concrete, non-generic implementor (e.g.
+/// `elwindui-backend-appkit::NativeControlImpl { handle: AnyView, .. }`, and its winui3 equivalent)
+/// that `TextArea`/`Button`/`TabView` (that backend's own leaf widgets) inherit from — the same way
+/// `VerticalLayout`/`Control`/`Grid` above each write their own `measure_override`, not through any
+/// shared "MeasureNode" abstraction. `collect_render_items<H>` downcasts a leaf's
+/// `try_as_native_control()` result directly to `H` (see that trait method's own doc comment) — no
+/// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
+#[elwindui_macros::class(trait_only, inherits = UIElement)]
+pub struct NativeControl {}
 
 /// The property-setter traits below (`TextArea`/`Button`/`MenuItem`/`Menu`/`MenuBar`/`MenuBarItem`/
 /// `Window`) are declared once here rather than duplicated per backend crate — every backend's own
@@ -806,11 +791,12 @@ pub fn create_native_control<H: 'static>(handle: H) -> NativeControlImpl<H> {
 /// home. Each backend crate now just provides `impl Xxx for BackendXImpl { .. }` — the property
 /// *shape* (what setters exist, what they take) is common to every backend, only the method
 /// *bodies* (the actual platform API calls) differ, exactly the same split
-/// `NativeControl<H>`/`Layout`/`Shape`/`Control`/etc. above already model for the virtual builtins.
+/// `NativeControl`/`Layout`/`Shape`/`Control`/etc. above already model for the virtual builtins.
 ///
 /// `Menu`/`MenuBar`/`MenuBarItem`/`Window` are *not* generic over the backend's own concrete
-/// menu-entry/menu-bar-entry/menu/menu-bar type the way `NativeControlImpl<H>`'s `H` is — instead
-/// each such argument is `&dyn` (or `Rc<dyn>`) the matching leaf trait itself (`MenuItem`/`Menu`/
+/// menu-entry/menu-bar-entry/menu/menu-bar type the way a backend's own `NativeControlImpl`'s
+/// `handle` is — instead each such argument is `&dyn` (or `Rc<dyn>`) the matching leaf trait itself
+/// (`MenuItem`/`Menu`/
 /// `MenuBarItem`/`MenuBar`), and each backend's own `impl Xxx for BackendXImpl` downcasts it back to
 /// its own concrete type via `AsAny::as_any` (see that trait's own doc comment; already the
 /// established pattern for `UIElement::try_as_native_control`/`visual_tree::find_all`) before
@@ -821,12 +807,12 @@ pub fn create_native_control<H: 'static>(handle: H) -> NativeControlImpl<H> {
 /// are genuinely different in shape per backend (AppKit's `Retained<TreeHostView>`/`TabChipImpl` vs
 /// WinUI3's own equivalents have no common signature to share without associated types this crate
 /// doesn't need yet) — each backend keeps declaring its own local `TabView` trait.
-pub trait TextArea: UIElement {
+pub trait TextArea: UIElement + NativeControl {
     fn set_text(&self, text: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
 }
 
-pub trait Button: UIElement {
+pub trait Button: UIElement + NativeControl {
     fn set_enabled(&self, enabled: bool);
     fn set_on_click(&self, callback: Box<dyn Fn()>);
     fn set_text(&self, text: &str);
@@ -876,7 +862,7 @@ pub trait Window {
 
 /// `Layout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — empty marker over `UIElement`,
 /// implemented by every layout-container virtual builtin (`VerticalLayoutImpl`/
-/// `HorizontalLayoutImpl`/`GridImpl`), the same way `NativeControl<H>` groups every native leaf.
+/// `HorizontalLayoutImpl`/`GridImpl`), the same way `NativeControl` groups every native leaf.
 ///
 /// Shared fields behind `VerticalLayout`/`HorizontalLayout`. `VerticalLayoutImpl`/
 /// `HorizontalLayoutImpl` each embed one as `base` and implement `UIElement`/`Layout` themselves,
@@ -1502,7 +1488,7 @@ pub fn natural_size(elem: &dyn UIElement) -> Size {
 
 /// Recursively walks `elem`'s already-`arrange`d subtree (reading the `arranged_width`/
 /// `arranged_height`/`arranged_offset` each element's own `arrange()` set — see that trait
-/// method's own doc comment), collecting every `NativeControlImpl<H>` leaf (its handle cloned —
+/// method's own doc comment), collecting every native leaf's handle (cloned —
 /// cheap for a thin `Retained<NSView>`-style handle) paired with its **absolute** rect and the
 /// `Rc<dyn UIElement>` tree node that owns it, and every self-painting element's content paired
 /// with its own absolute rect — interleaved into a single `Vec<RenderItem<H>>` in traversal order
@@ -1520,12 +1506,12 @@ fn collect_render_items<H: Clone + 'static>(elem: &Rc<dyn UIElement>, absolute_o
     let absolute_rect = Rect { x: absolute_origin.x, y: absolute_origin.y, width, height };
 
     // `try_as_native_control` (not a direct `as_any().downcast_ref` on `elem` itself) so a type that
-    // *composes* a `NativeControlImpl<H>` as its own `base` field (e.g. a backend's `ButtonImpl`)
-    // is recognized too — `Any::downcast_ref` only succeeds against the exact concrete type placed
-    // in the tree, which for such a type is never literally `NativeControlImpl<H>` itself. See
-    // `UIElement::try_as_native_control`'s own doc comment.
-    if let Some(native) = elem.as_ref().try_as_native_control().and_then(|a| a.downcast_ref::<NativeControlImpl<H>>()) {
-        out.push(RenderItem::Native(native.handle.clone(), absolute_rect, Rc::clone(elem)));
+    // *composes* a backend's `NativeControlImpl { handle: H, .. }` as its own `base` field (e.g. a
+    // backend's `ButtonImpl`) is recognized too. Downcasts straight to `H` (the raw handle), not to
+    // any `elwindui-core`-defined wrapper struct — see `UIElement::try_as_native_control`'s own doc
+    // comment.
+    if let Some(native) = elem.as_ref().try_as_native_control().and_then(|a| a.downcast_ref::<H>()) {
+        out.push(RenderItem::Native(native.clone(), absolute_rect, Rc::clone(elem)));
     }
     if let Some(paint) = elem.paint() {
         out.push(RenderItem::Paint(paint, absolute_rect));
@@ -1544,13 +1530,13 @@ fn collect_render_items<H: Clone + 'static>(elem: &Rc<dyn UIElement>, absolute_o
 /// gets placed as a native subview and positioned via its handle's own `arrange` method (a plain
 /// inherent method on that backend's own handle type, not a generic `elwindui-core` trait method —
 /// placing a native handle is entirely backend-specific, same as measuring one, see
-/// `NativeControl<H>`'s own doc comment; a real `#[routed]` click/etc. is wired once, at the
+/// `NativeControl`'s own doc comment; a real `#[routed]` click/etc. is wired once, at the
 /// widget's own construction time — see e.g. `elwindui_backend_appkit::builtins::Button::new` —
 /// not here), a `RenderItem::Paint` gets added as a paint layer (e.g. a `CAShapeLayer`) —
 /// `elwindui-core` itself knows nothing about `NSView`/`addSubview`/`CALayer`.
 ///
-/// `H` only needs to be named here (and on `NativeControlImpl<H>` itself) — every other `UIElement` is
-/// handle-agnostic. The root's own `horizontal_alignment`/`vertical_alignment` default to
+/// `H` only needs to be named here (and on each backend's own `NativeControlImpl`) — every other
+/// `UIElement` is handle-agnostic. The root's own `horizontal_alignment`/`vertical_alignment` default to
 /// `Stretch` (`UIElementImpl::default`), so it fills `available` unless a caller explicitly
 /// overrides them — the same default every mainstream UI framework gives a top-level content
 /// element (`Window.Content`, an HTML `<body>`).
@@ -1661,21 +1647,27 @@ mod tests {
         }
     }
 
-    /// A minimal stand-in for a real backend's own `NativeControl<AnyView>`-derived widget
-    /// (`elwindui-backend-appkit::TextArea`/`Button`/`TabView`) — exercises the same
-    /// "derived class writes its own `measure_override`" pattern those use, instead of relying on
-    /// any generic measuring behavior from `elwindui-core::ui::NativeControl<H>` itself (see that
-    /// type's own doc comment).
-    #[elwindui_macros::class(inherits = NativeControl<FakeHandle>)]
-    struct TestLeaf {}
+    /// A minimal stand-in for a real backend's own `NativeControl`-implementing widget base (e.g.
+    /// `elwindui-backend-appkit::NativeControlImpl { handle: AnyView, .. }`, shared by that backend's
+    /// `TextArea`/`Button`/`TabView`) — exercises the same "concrete implementor writes its own
+    /// `measure_override`/`try_as_native_control`" pattern those use, instead of relying on any
+    /// generic measuring behavior from `elwindui-core::ui::NativeControl` itself (a pure marker trait
+    /// — see that trait's own doc comment).
+    #[elwindui_macros::class(struct_only = NativeControl, inherits = UIElement)]
+    struct NativeControl {
+        handle: FakeHandle,
+    }
 
     #[elwindui_macros::class]
-    impl TestLeaf {
+    impl NativeControl {
         fn measure_override(&self, available: Size) -> Size {
-            self.base.handle.measure(available)
+            self.handle.measure(available)
+        }
+        fn try_as_native_control(&self) -> Option<&dyn Any> {
+            Some(&self.handle)
         }
         fn new(handle: FakeHandle) -> Self {
-            Self { base: create_native_control(handle) }
+            Self { base: UIElementImpl::default(), handle }
         }
     }
 
@@ -1684,7 +1676,7 @@ mod tests {
     }
 
     fn native(name: &'static str, size: Size) -> Rc<dyn UIElement> {
-        new_element(TestLeafImpl::new(FakeHandle(name, size)))
+        new_element(NativeControlImpl::new(FakeHandle(name, size)))
     }
 
     fn stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
@@ -1745,7 +1737,7 @@ mod tests {
         // size instead of filling its stack-allocated cross-axis slot — matching the old
         // `CrossAlign::Start` behavior this test used to exercise.
         fn leaf(name: &'static str, s: Size) -> Rc<dyn UIElement> {
-            let node = new_element(TestLeafImpl::new(FakeHandle(name, s)));
+            let node = new_element(NativeControlImpl::new(FakeHandle(name, s)));
             node.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
             node.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
             node
@@ -1840,7 +1832,7 @@ mod tests {
 
     #[test]
     fn margin_shrinks_the_slot_an_element_is_arranged_into() {
-        let tree: Rc<dyn UIElement> = new_element(TestLeafImpl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElement> = new_element(NativeControlImpl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_margin(10.0);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert_eq!(natives[0].1, Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 });
@@ -1848,7 +1840,7 @@ mod tests {
 
     #[test]
     fn explicit_width_and_height_override_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElement> = new_element(TestLeafImpl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElement> = new_element(NativeControlImpl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_width(Some(50.0));
         tree.as_ui_element().set_height(Some(5.0));
         // `Stretch` (the default) still governs slot placement; the explicit width/height above
@@ -1863,7 +1855,7 @@ mod tests {
 
     #[test]
     fn min_and_max_clamp_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElement> = new_element(TestLeafImpl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElement> = new_element(NativeControlImpl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_min_width(Some(30.0));
         tree.as_ui_element().set_max_height(Some(8.0));
         tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
@@ -1920,7 +1912,7 @@ mod tests {
 
     #[test]
     fn non_stretch_alignment_keeps_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElement> = new_element(TestLeafImpl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElement> = new_element(NativeControlImpl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Center);
         tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Center);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));

@@ -16,6 +16,13 @@
 use crate as winui3;
 use crate::AnyView;
 use crate::TabView as _;
+// Bare names needed for the transitive ancestor-chain walk `#[elwindui_macros::class(inherits =
+// winui3::NativeTabViewImpl)]` below performs (reaching past `winui3::NativeTabViewImpl` →
+// `winui3::TabView`'s own registered `inherits = NativeControl` → `winui3::NativeControl`'s own
+// `NativeControlImpl`): `NativeControlImpl` (the struct — the walk's `as_native_control()` accessor
+// return type) and `NativeControl` (the trait — the walk's auto-generated
+// `impl NativeControl for TabViewImpl {}`).
+use crate::{NativeControl, NativeControlImpl};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};

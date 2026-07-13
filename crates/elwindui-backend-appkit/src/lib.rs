@@ -10,7 +10,7 @@
 
 #![cfg(target_os = "macos")]
 
-use elwindui_core::ui::{layout_tree, AsAny, Button as _, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElement};
+use elwindui_core::ui::{layout_tree, AsAny, Button as _, NativeControl, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElement, UIElementImpl};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -22,6 +22,7 @@ use objc2_app_kit::{
 use objc2_core_graphics::{CGColor, CGPath};
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
 use objc2_quartz_core::{kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight, CALayer, CAShapeLayer, CATextLayer, CATextLayerAlignmentMode};
+use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -38,8 +39,8 @@ fn mtm() -> MainThreadMarker {
 ///
 /// Implemented on the raw `Retained<T>` view type itself (a foreign type — allowed since
 /// `AppKitHandle` is a local trait) rather than on `TextAreaImpl`/`ButtonImpl`/`NativeTabViewImpl`, since
-/// those now each compose an `elwindui_core::ui::NativeControlImpl<AnyView>` as their own `base`
-/// field (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed
+/// those now each compose this crate's own `NativeControlImpl` (below) as their own `base` field
+/// (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed
 /// widget itself would be a self-reference. Wrapping just the raw view instead lets `base.handle`
 /// be built (`AnyView::from(ns.clone())`) before the rest of the widget struct exists.
 trait AppKitHandle: AsAny {
@@ -78,13 +79,13 @@ impl AnyView {
 }
 
 impl AnyView {
-    /// Lets each `elwindui_core::ui::NativeControl<AnyView>`-derived widget's own `measure_override`
-    /// (`TextArea`/`Button`/`TabView` below) measure itself uniformly through the base `NSView` API
+    /// Lets `NativeControlImpl::measure_override` (below — shared by every `TextArea`/`Button`/
+    /// `TabView` leaf) measure any wrapped widget uniformly through the base `NSView` API
     /// (`fittingSize`) regardless of which concrete widget it wraps — no per-widget re-implementation
-    /// of the actual `fittingSize()` call needed, just a one-line `measure_override` per widget that
-    /// calls this. A plain inherent method, not a shared `elwindui-core`-defined trait — measuring a
-    /// native handle is entirely backend-specific, so `elwindui_core::ui::NativeControl<H>` itself
-    /// doesn't know how to do it (see that type's own doc comment). See docs/elwindui_spec.md 付録H.2.
+    /// of the actual `fittingSize()` call needed. A plain inherent method, not a shared
+    /// `elwindui-core`-defined trait — measuring a native handle is entirely backend-specific, so
+    /// `elwindui_core::ui::NativeControl` (a pure marker trait) doesn't know how to do it. See
+    /// docs/elwindui_spec.md 付録H.2.
     fn measure(&self, _available: elwindui_core::base::Size) -> elwindui_core::base::Size {
         let fitting = self.as_nsview().fittingSize();
         elwindui_core::base::Size { width: fitting.width as f32, height: fitting.height as f32 }
@@ -105,6 +106,36 @@ impl AnyView {
 impl<T: AppKitHandle + 'static> From<T> for AnyView {
     fn from(v: T) -> Self {
         AnyView(Rc::new(v))
+    }
+}
+
+/// Shared concrete base for every AppKit native leaf (`TextArea`/`Button`/`NativeTabViewImpl` below)
+/// — the backend-owned counterpart to `elwindui_core::ui::NativeControl` (a pure marker trait with no
+/// backing struct of its own; see that trait's own doc comment for why `elwindui-core` doesn't define
+/// this generically). Holding `handle: AnyView` here once, instead of on each of the three widgets
+/// individually, is what lets `inherits = NativeControl` below resolve `base`'s field type to this
+/// same struct (`#[elwindui_macros::class]`'s `base_impl_type` mechanically appends `Impl` to a
+/// *bare* `inherits = ..` name, landing on the `NativeControlImpl` this ordinary — not
+/// explicit-facade — declaration generates, since `use elwindui_core::ui::NativeControl` above brings
+/// the *trait*, a different identifier, into the same scope) while also picking up an automatic,
+/// empty `impl elwindui_core::ui::NativeControl for TextAreaImpl {}` on every class that (transitively)
+/// inherits from this one (that trait has zero required methods, so there's nothing to write on each
+/// implementor).
+#[elwindui_macros::class(struct_only = elwindui_core::ui::NativeControl, inherits = UIElement)]
+pub struct NativeControl {
+    handle: AnyView,
+}
+
+#[elwindui_macros::class]
+impl NativeControl {
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.handle.measure(available)
+    }
+    fn try_as_native_control(&self) -> Option<&dyn Any> {
+        Some(&self.handle)
+    }
+    pub fn new(handle: AnyView) -> Self {
+        Self { base: UIElementImpl::default(), handle }
     }
 }
 
@@ -488,7 +519,7 @@ impl TreeHostView {
 }
 
 
-#[elwindui_macros::class(implements = elwindui_core::ui::TextArea, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TextArea, inherits = NativeControl)]
 pub struct TextArea {
     text_view: Retained<NSTextView>,
     delegate_storage: Rc<RefCell<Option<Retained<TextViewDelegate>>>>,
@@ -496,12 +527,10 @@ pub struct TextArea {
 
 /// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are AppKit-specific.
+/// No `measure_override`/`try_as_native_control` here — both blind-forward to `NativeControlImpl`
+/// (this class's own `base`) already, since neither is overridden.
 #[elwindui_macros::class]
 impl TextArea {
-    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
-        self.base.handle.measure(available)
-    }
-
     /// `NSTextView.setString:` unconditionally resets the caret/selection to the start, even when
     /// the text it's given is identical to what's already there. The two-way `#[two_way] text`
     /// binding (`TextArea` in `builtins.elwind`) re-syncs *every* bound field on *every* model
@@ -538,11 +567,7 @@ impl TextArea {
             .downcast::<NSTextView>()
             .expect("scrollableTextView's document view is an NSTextView");
         let handle = AnyView::from(scroll);
-        Self {
-            base: elwindui_core::ui::create_native_control(handle),
-            text_view,
-            delegate_storage: Rc::new(RefCell::new(None)),
-        }
+        Self { base: NativeControlImpl::new(handle), text_view, delegate_storage: Rc::new(RefCell::new(None)) }
     }
 }
 
@@ -581,20 +606,18 @@ impl TextViewDelegate {
     }
 }
 
-#[elwindui_macros::class(implements = elwindui_core::ui::Button, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::Button, inherits = NativeControl)]
 pub struct Button {
     ns: Retained<NSButton>,
     target_storage: Rc<RefCell<Option<Retained<ButtonTarget>>>>,
 }
 
 /// `elwindui_core::ui::Button`'s shape is common to every backend — see that trait's own doc
-/// comment; only these method bodies are AppKit-specific.
+/// comment; only these method bodies are AppKit-specific. No `measure_override`/
+/// `try_as_native_control` here — both blind-forward to `NativeControlImpl` (this class's own
+/// `base`) already, since neither is overridden.
 #[elwindui_macros::class]
 impl Button {
-    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
-        self.base.handle.measure(available)
-    }
-
     fn set_enabled(&self, enabled: bool) {
         self.ns.setEnabled(enabled);
     }
@@ -626,7 +649,7 @@ impl Button {
         let m = mtm();
         let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m) };
         let handle = AnyView::from(ns.clone());
-        Self { base: elwindui_core::ui::create_native_control(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
+        Self { base: NativeControlImpl::new(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
     }
 }
 
@@ -759,10 +782,10 @@ impl TabStripImpl {
 /// own `elwindui_core::ui` (keeping any native leaf's retention concern alive, e.g. a
 /// `TextAreaImpl`'s change-notification delegate — see `TextAreaImpl::set_on_change`'s doc comment — for
 /// as long as its tab exists, not just while it's the visible one).
-/// `NativeTabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl<AnyView>`
+/// `NativeTabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl`
 /// since a real `AnyView` handle (`self.base.handle`, wrapping the outer `NSStackView`) is what
 /// makes this leaf embeddable in the visual tree at all.
-pub trait TabView: elwindui_core::ui::NativeControl<AnyView> {
+pub trait TabView: NativeControl {
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>);
     /// Inserts a new tab chip at `index` (wiring `on_select`/`on_close` to the given callbacks)
     /// plus a fresh, persistent content host — added to `content_container`, initially hidden.
@@ -777,18 +800,16 @@ pub trait TabView: elwindui_core::ui::NativeControl<AnyView> {
     fn set_tab_content_visible(&self, host: &TreeHostView, visible: bool);
 }
 
-#[elwindui_macros::class(implements = TabView, inherits = elwindui_core::ui::NativeControl<AnyView>)]
+#[elwindui_macros::class(struct_only = TabView, inherits = NativeControl)]
 pub struct NativeTabViewImpl {
     pub strip: TabStripImpl,
     content_container: Retained<NSView>,
 }
 
+// No `measure_override`/`try_as_native_control` here — both blind-forward to `NativeControlImpl`
+// (this class's own `base`) already, since neither is overridden.
 #[elwindui_macros::class]
 impl NativeTabViewImpl {
-    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
-        self.base.handle.measure(available)
-    }
-
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
         self.strip.new_tab_button.set_on_click(callback);
     }
@@ -849,7 +870,7 @@ impl NativeTabViewImpl {
         content_container.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
         root.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
         let handle = AnyView::from(root);
-        Self { base: elwindui_core::ui::create_native_control(handle), strip, content_container }
+        Self { base: NativeControlImpl::new(handle), strip, content_container }
     }
 }
 

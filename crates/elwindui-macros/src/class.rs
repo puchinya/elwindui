@@ -5,9 +5,10 @@
 //!
 //! Applied to a bare `struct ClassName { .. }` (no `Impl` suffix, no `base` field written by
 //! hand) and, separately, a bare `impl ClassName { .. }` (no `for`) — two independent attribute
-//! invocations rather than one `mod`-wrapped pair. `inherits`/`implements`/`supertrait`/
-//! `abstract_class`/`sealed` are declared **once**, on the `struct`, even though several of them
-//! (`implements`/`supertrait`/`abstract_class`) are only ever consumed while expanding the `impl` —
+//! invocations rather than one `mod`-wrapped pair. `inherits`/`struct_only`/`supertrait`/
+//! `abstract_class`/`sealed`/`trait_only` are declared **once**, on the `struct`, even though
+//! several of them (`struct_only`/`supertrait`/`abstract_class`) are only ever consumed while
+//! expanding the `impl` —
 //! the struct's own expansion (`store_class_args`) stashes a snapshot in a process-global map keyed
 //! by class name, and the paired `impl ClassName { .. }`, written as a bare `#[class]`, reads it
 //! back (`load_class_args`) instead of repeating the args. This makes `struct` before `impl`
@@ -75,18 +76,30 @@ const SEALED_CLASSES: &[&str] = &["TextArea", "Button"];
 const UI_ELEMENT_METHODS: &[&str] =
     &["as_ui_element", "visual_children", "measure_override", "arrange_override", "paint", "try_as_native_control"];
 
-/// Parsed `#[class(inherits = .., implements = .., supertrait = .., abstract_class, sealed)]`
+/// Parsed `#[class(inherits = .., struct_only = .., supertrait = .., abstract_class, sealed)]`
 /// arguments — every key is optional and any subset/order is accepted.
 #[derive(Default)]
 struct ClassArgs {
     inherits: Option<Type>,
-    implements: Option<Path>,
+    /// Declares `ClassName` a pure struct implementor of an *existing* trait — no new `pub trait
+    /// ClassName` is generated; the given path is implemented directly for `ClassNameImpl` instead.
+    /// The `trait_only`/`struct_only` pair mirrors a trait definition and its implementation living
+    /// in separate files/crates: `trait_only` declares the trait (no backing struct), `struct_only`
+    /// declares a concrete struct implementing a trait declared elsewhere (no new trait of its own).
+    struct_only: Option<Path>,
     /// A supertrait bound unrelated to the H.2.1a "class hierarchy" concept `inherits` models
     /// (no `base` field is inserted for it) — e.g. `UIElement: AsAny`. Only meaningful in "root
     /// class mode" (`inherits` omitted): see `expand_impl`'s own doc comment.
     supertrait: Option<Path>,
     abstract_class: bool,
     sealed: bool,
+    /// Declares `ClassName` a pure trait — no `ClassNameImpl` struct, no `base` field, no `impl
+    /// ClassName for ClassNameImpl` at all. The paired `struct ClassName { .. }` body must be empty
+    /// (there's nowhere for fields to go); no paired `impl ClassName { .. }` is needed either (there
+    /// are no methods to attach anywhere). Used for a marker ancestor trait with no real backing
+    /// implementation of its own in this crate (e.g. `elwindui_core::ui::NativeControl` — each
+    /// backend provides its own concrete implementor instead). See `NativeControl`'s own doc comment.
+    trait_only: bool,
 }
 
 impl Parse for ClassArgs {
@@ -96,10 +109,11 @@ impl Parse for ClassArgs {
         for item in items {
             match item {
                 ClassArg::Inherits(ty) => args.inherits = Some(ty),
-                ClassArg::Implements(path) => args.implements = Some(path),
+                ClassArg::StructOnly(path) => args.struct_only = Some(path),
                 ClassArg::Supertrait(path) => args.supertrait = Some(path),
                 ClassArg::AbstractClass => args.abstract_class = true,
                 ClassArg::Sealed => args.sealed = true,
+                ClassArg::TraitOnly => args.trait_only = true,
             }
         }
         Ok(args)
@@ -108,10 +122,11 @@ impl Parse for ClassArgs {
 
 enum ClassArg {
     Inherits(Type),
-    Implements(Path),
+    StructOnly(Path),
     Supertrait(Path),
     AbstractClass,
     Sealed,
+    TraitOnly,
 }
 
 impl Parse for ClassArg {
@@ -122,9 +137,9 @@ impl Parse for ClassArg {
                 input.parse::<Token![=]>()?;
                 Ok(ClassArg::Inherits(input.parse()?))
             }
-            "implements" => {
+            "struct_only" => {
                 input.parse::<Token![=]>()?;
-                Ok(ClassArg::Implements(input.parse()?))
+                Ok(ClassArg::StructOnly(input.parse()?))
             }
             "supertrait" => {
                 input.parse::<Token![=]>()?;
@@ -132,6 +147,7 @@ impl Parse for ClassArg {
             }
             "abstract_class" => Ok(ClassArg::AbstractClass),
             "sealed" => Ok(ClassArg::Sealed),
+            "trait_only" => Ok(ClassArg::TraitOnly),
             other => Err(syn::Error::new(ident.span(), format!("#[class]: unknown argument `{other}`"))),
         }
     }
@@ -142,10 +158,11 @@ impl Parse for ClassArg {
 /// invocations (proc-macro types aren't worth threading `Send`/`Sync` bounds through for this).
 struct StoredClassArgs {
     inherits: Option<String>,
-    implements: Option<String>,
+    struct_only: Option<String>,
     supertrait: Option<String>,
     abstract_class: bool,
     sealed: bool,
+    trait_only: bool,
 }
 
 /// Keyed by bare class name (e.g. `"VerticalLayout"`) — populated by `struct ClassName`'s own
@@ -168,10 +185,11 @@ fn class_arg_store() -> &'static Mutex<HashMap<String, StoredClassArgs>> {
 fn store_class_args(class_name: &str, args: &ClassArgs) {
     let stored = StoredClassArgs {
         inherits: args.inherits.as_ref().map(|t| quote! { #t }.to_string()),
-        implements: args.implements.as_ref().map(|p| quote! { #p }.to_string()),
+        struct_only: args.struct_only.as_ref().map(|p| quote! { #p }.to_string()),
         supertrait: args.supertrait.as_ref().map(|p| quote! { #p }.to_string()),
         abstract_class: args.abstract_class,
         sealed: args.sealed,
+        trait_only: args.trait_only,
     };
     class_arg_store().lock().unwrap().insert(class_name.to_string(), stored);
 }
@@ -187,10 +205,11 @@ fn load_class_args(class_name: &str) -> Option<ClassArgs> {
     let parse_path = |s: &String| syn::parse_str::<Path>(s).expect("#[class]: internal: failed to reparse stored path");
     Some(ClassArgs {
         inherits: stored.inherits.as_ref().map(parse_type),
-        implements: stored.implements.as_ref().map(parse_path),
+        struct_only: stored.struct_only.as_ref().map(parse_path),
         supertrait: stored.supertrait.as_ref().map(parse_path),
         abstract_class: stored.abstract_class,
         sealed: stored.sealed,
+        trait_only: stored.trait_only,
     })
 }
 
@@ -245,6 +264,14 @@ fn bare_class_name(ty: &Type) -> Option<String> {
     Some(name.strip_suffix("Impl").map(str::to_string).unwrap_or(name))
 }
 
+/// Like `bare_class_name`, but *without* stripping a trailing `Impl` — used where the distinction
+/// itself matters (an already-`Impl`-suffixed reference is an "explicit facade type", pure struct
+/// composition with no separate ancestor trait to `impl`; a bare name is a real trait to implement).
+fn raw_last_segment_name(ty: &Type) -> Option<String> {
+    let Type::Path(tp) = ty else { return None };
+    Some(tp.path.segments.last()?.ident.to_string())
+}
+
 /// `VerticalLayout` -> `"vertical_layout"`; `UIElement` -> `"ui_element"` (a run of uppercase letters
 /// is treated as one unit — the underscore goes before the *last* uppercase letter in the run when
 /// it's followed by a lowercase letter, not before every uppercase letter).
@@ -266,9 +293,9 @@ fn to_snake_case(name: &str) -> String {
     out
 }
 
-/// `NativeControl<AnyView>` -> `NativeControlImpl<AnyView>`; `crate::TextAreaImpl` (already
-/// `Impl`-suffixed — the "explicit facade type" form, docs/elwindui_spec.md 付録H.2.1a's
-/// discussion of the backend DSL-facing wrapper layer) -> used as-is.
+/// `NativeControl` -> `NativeControlImpl`; `crate::TextAreaImpl` (already `Impl`-suffixed — the
+/// "explicit facade type" form, docs/elwindui_spec.md 付録H.2.1a's discussion of the backend
+/// DSL-facing wrapper layer) -> used as-is.
 fn base_impl_type(ty: &Type) -> Type {
     let mut ty = ty.clone();
     if let Type::Path(tp) = &mut ty {
@@ -348,6 +375,23 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
         }
     };
 
+    if args.trait_only {
+        if !existing_fields.is_empty() {
+            let msg = "#[class]: `trait_only` classes have no backing struct — `struct ClassName { .. }` must be \
+                       empty (there's nowhere for fields to go)";
+            return syn::Error::new_spanned(&item, msg).to_compile_error();
+        }
+        // No `ClassNameImpl`, no `base` field, no `impl ClassName for ClassNameImpl` — just the bare
+        // trait declaration. A concrete implementor (each backend's own `NativeControlImpl`, for
+        // `NativeControl`) provides everything else. No paired `impl ClassName { .. }` is expected —
+        // there are no methods to attach anywhere in `trait_only` mode.
+        let bound = args.inherits.as_ref().map(|t| quote! { : #t });
+        return quote! {
+            #(#attrs)*
+            #vis trait #class_name #generics #bound {}
+        };
+    }
+
     // `pub` (matching H.2.1a's convention): plenty of call sites reach through `.base` across
     // module/crate boundaries (`self.base.handle`, `self.base.as_ui_element()`, ...).
     let base_field = args.inherits.as_ref().map(|ty| {
@@ -389,7 +433,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             None => {
                 let msg = format!(
                     "#[class]: no matching `struct {class_name}` with #[elwindui_macros::class(..)] found earlier in \
-                     this file — declare the struct (with any inherits/implements/supertrait/... args) before this \
+                     this file — declare the struct (with any inherits/struct_only/supertrait/... args) before this \
                      impl block, or pass args explicitly here"
                 );
                 return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
@@ -427,11 +471,24 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     // skipped: `as_ui_element()` is generated unconditionally elsewhere (`uielement_blind_forward`)
     // regardless of how many hops away the root actually is, so repeating it here would conflict.
     let mut accessor_methods: Vec<TokenStream2> = Vec::new();
+    // Ancestor-trait `impl`s found by continuing the walk *beyond* the immediate `args.inherits`
+    // target (hop 0 — handled separately, below, with `#[ancestor]`-tagged method routing for a
+    // trait that has real required methods). Every further hop found via `ancestor_registry` is a
+    // *bare* trait name reached transitively through however many `Impl`-suffixed "explicit facade
+    // type" links lie in between (e.g. a DSL wrapper composing a hand-written native leaf that itself
+    // composes a shared `NativeControlImpl`) — always given an *empty* body, since there's no
+    // `#[ancestor]`-style mechanism to attach real methods to a hop this deep. Correct as long as
+    // every such transitively-reached trait is a zero-method marker (`NativeControl`, `Layout`, ...);
+    // a trait with real methods found this way would instead surface as a "missing trait items"
+    // compile error right here, which is an acceptable, loud failure mode rather than silently wrong
+    // behavior.
+    let mut transitive_ancestor_impls: Vec<TokenStream2> = Vec::new();
     if let Some(parent_ty) = &args.inherits {
         if let Some(mut current_display) = bare_class_name(parent_ty) {
             let mut current_ty = parent_ty.clone();
             let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
             visited.insert(class_name.to_string());
+            let mut hop_index = 0usize;
             loop {
                 if current_display == "UIElement" {
                     break;
@@ -452,6 +509,15 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 accessor_methods.push(quote! {
                     pub fn #method_name(&self) -> &#current_impl_ty { #body }
                 });
+                if hop_index > 0 {
+                    let raw_name = raw_last_segment_name(&current_ty);
+                    if raw_name.as_deref().is_some_and(|n| n != "UIElement" && !n.ends_with("Impl")) {
+                        transitive_ancestor_impls.push(quote! {
+                            impl #current_ty for #impl_name #ty_generics { }
+                        });
+                    }
+                }
+                hop_index += 1;
                 match lookup_ancestor(&current_display) {
                     Some(Some(next_ty)) => match bare_class_name(&next_ty) {
                         Some(next_display) => {
@@ -578,8 +644,11 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             }
         }
     }
+    // Ancestor traits found beyond the immediate `inherits` target (see `transitive_ancestor_impls`'s
+    // own doc comment above, at the accessor-walk loop that builds it).
+    ancestor_impls.extend(transitive_ancestor_impls);
 
-    let (trait_decl, trait_impl) = if let Some(existing) = &args.implements {
+    let (trait_decl, trait_impl) = if let Some(existing) = &args.struct_only {
         let bodies = own_methods.iter().map(|f| quote! { #f });
         (
             TokenStream2::new(),
@@ -634,7 +703,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             let names: Vec<String> = own_methods.iter().map(|f| f.sig.ident.to_string()).collect();
             let msg = format!(
                 "#[class]: `{class_name}` has no bare class name to declare a trait under (its own name is already \
-                 `Impl`-suffixed) and no `implements = ..` was given, but these methods aren't ancestor methods \
+                 `Impl`-suffixed) and no `struct_only = ..` was given, but these methods aren't ancestor methods \
                  either: {names:?} — mark them `#[inherent]` if they're plain helpers"
             );
             return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();

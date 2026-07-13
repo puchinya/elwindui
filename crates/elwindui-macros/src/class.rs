@@ -400,8 +400,8 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     };
     let args = &args;
     let impl_name = to_impl_name(&class_name);
-    // `<H>`/`<H: NativeLayoutNode + 'static>`/where-clause, threaded through every generated block below
-    // so a generic class (e.g. `NativeControl<H>`) works the same as a non-generic one.
+    // `<H>`/`<H: 'static>`/where-clause, threaded through every generated block below so a generic
+    // class (e.g. `NativeControl<H>`) works the same as a non-generic one.
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
     if let Some(inh) = &args.inherits {

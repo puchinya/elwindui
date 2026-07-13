@@ -77,21 +77,23 @@ impl AnyView {
     }
 }
 
-/// Lets `TreeHostView` (below) measure any native leaf uniformly through the base `NSView` API
-/// (`fittingSize`) regardless of which concrete widget it wraps — no per-widget (`Text`,
-/// `ButtonImpl`, ...) `NativeLayoutNode` impl needed. See docs/elwindui_spec.md 付録H.2.
-impl elwindui_core::ui::NativeLayoutNode for AnyView {
+impl AnyView {
+    /// Lets each `elwindui_core::ui::NativeControl<AnyView>`-derived widget's own `measure_override`
+    /// (`TextArea`/`Button`/`TabView` below) measure itself uniformly through the base `NSView` API
+    /// (`fittingSize`) regardless of which concrete widget it wraps — no per-widget re-implementation
+    /// of the actual `fittingSize()` call needed, just a one-line `measure_override` per widget that
+    /// calls this. A plain inherent method, not a shared `elwindui-core`-defined trait — measuring a
+    /// native handle is entirely backend-specific, so `elwindui_core::ui::NativeControl<H>` itself
+    /// doesn't know how to do it (see that type's own doc comment). See docs/elwindui_spec.md 付録H.2.
     fn measure(&self, _available: elwindui_core::base::Size) -> elwindui_core::base::Size {
         let fitting = self.as_nsview().fittingSize();
         elwindui_core::base::Size { width: fitting.width as f32, height: fitting.height as f32 }
     }
-}
 
-impl AnyView {
-    /// Positions this native leaf via plain `NSView.setFrame` — not part of `NativeLayoutNode`
-    /// (elwindui-core's generic layout code never calls this; see that trait's own doc comment for
-    /// why) — called directly by `TreeHostView`'s own render loop below, once `layout_tree` has
-    /// already handed back a concrete `RenderItem::Native(AnyView, ..)`.
+    /// Positions this native leaf via plain `NSView.setFrame` — like `measure` above, a plain
+    /// inherent method (elwindui-core's generic layout code never calls either) — called directly by
+    /// `TreeHostView`'s own render loop below, once `layout_tree` has already handed back a concrete
+    /// `RenderItem::Native(AnyView, ..)`.
     fn arrange(&mut self, final_rect: elwindui_core::base::Rect) {
         self.as_nsview().setFrame(NSRect::new(
             objc2_foundation::NSPoint::new(final_rect.x as f64, final_rect.y as f64),
@@ -496,6 +498,10 @@ pub struct TextArea {
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are AppKit-specific.
 #[elwindui_macros::class]
 impl TextArea {
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.base.handle.measure(available)
+    }
+
     /// `NSTextView.setString:` unconditionally resets the caret/selection to the start, even when
     /// the text it's given is identical to what's already there. The two-way `#[two_way] text`
     /// binding (`TextArea` in `builtins.elwind`) re-syncs *every* bound field on *every* model
@@ -585,6 +591,10 @@ pub struct Button {
 /// comment; only these method bodies are AppKit-specific.
 #[elwindui_macros::class]
 impl Button {
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.base.handle.measure(available)
+    }
+
     fn set_enabled(&self, enabled: bool) {
         self.ns.setEnabled(enabled);
     }
@@ -775,6 +785,10 @@ pub struct NativeTabViewImpl {
 
 #[elwindui_macros::class]
 impl NativeTabViewImpl {
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.base.handle.measure(available)
+    }
+
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
         self.strip.new_tab_button.set_on_click(callback);
     }

@@ -764,17 +764,6 @@ pub enum TextAlignment {
     Right,
 }
 
-/// Measure, implemented by every backend's own native handle type (appkit's `AnyView`/winui3's
-/// `AnyView`) — the sole abstraction letting this backend-agnostic crate's `NativeControl<H>` measure
-/// a real widget generically. Unlike `measure`, `arrange`ing a native handle is never done generically
-/// from here (`NativeControl<H>::arrange_override` below always returns an empty `Vec` — see its own
-/// doc comment) — each backend calls its own `AnyView::arrange` (a plain inherent method, not part of
-/// this trait) directly, once `layout_tree` has already handed back a concrete `RenderItem::Native(H,
-/// ..)`, a context where genericity buys nothing since `H` is already known.
-pub trait NativeLayoutNode {
-    fn measure(&self, available: Size) -> Size;
-}
-
 /// `Button`/`TextArea`/`MenuBar`/`TabView` (the "NativeControlImpl" family) — the only `UIElement`
 /// with a real backend handle. Always a leaf as far as this tree is concerned: whatever lives
 /// beneath it in its own backend-managed hierarchy (e.g. `TabView`'s tab-switching) is opaque here.
@@ -787,14 +776,16 @@ pub struct NativeControl<H> {
 }
 
 #[elwindui_macros::class]
-impl<H: NativeLayoutNode + 'static> NativeControl<H> {
-    fn measure_override(&self, available: Size) -> Size {
-        self.handle.measure(available)
-    }
-    // `arrange_override` isn't overridden — a native leaf has no children of its own for this
-    // generic tree to place, so the root `UIElement`'s own default (echo `final_size` back
-    // unchanged) is already correct. See `NativeLayoutNode`'s own doc comment for why the native
-    // handle's *own* placement happens entirely outside this generic path instead.
+impl<H: 'static> NativeControl<H> {
+    // Deliberately no `measure_override`/`arrange_override` here — measuring and placing a native
+    // handle is backend-specific (e.g. AppKit's `NSView.fittingSize()`/`setFrame:`), so instead of
+    // requiring `H` to implement a shared `elwindui-core`-defined trait just to plug that in, each
+    // concrete derived widget (`elwindui-backend-appkit::TextArea`/`Button`/`TabView`, and their
+    // winui3 equivalents) writes its own `measure_override` calling into its own handle however it
+    // likes — the same way `VerticalLayout`/`Control`/`Grid` above each write their own, not
+    // through any shared "MeasureNode" abstraction. Falling back to the root `UIElement`'s default
+    // `measure_override` (`Size::default()`) here would be wrong for a real widget, but is never
+    // reached in practice since every real `NativeControl<H>` user overrides it.
     fn try_as_native_control(&self) -> Option<&dyn Any> {
         Some(self)
     }
@@ -803,7 +794,7 @@ impl<H: NativeLayoutNode + 'static> NativeControl<H> {
     }
 }
 
-pub fn create_native_control<H: NativeLayoutNode + 'static>(handle: H) -> NativeControlImpl<H> {
+pub fn create_native_control<H: 'static>(handle: H) -> NativeControlImpl<H> {
     NativeControlImpl::new(handle)
 }
 
@@ -1551,8 +1542,9 @@ fn collect_render_items<H: Clone + 'static>(elem: &Rc<dyn UIElement>, absolute_o
 /// `collect_render_items`'s own doc comment for the returned list's shape. A backend's host (see
 /// `elwindui-backend-appkit`'s `TreeHostView`) replays this list in order: a `RenderItem::Native`
 /// gets placed as a native subview and positioned via its handle's own `arrange` method (a plain
-/// inherent method on that backend's own handle type — see `NativeLayoutNode`'s own doc comment
-/// for why this isn't part of that trait; a real `#[routed]` click/etc. is wired once, at the
+/// inherent method on that backend's own handle type, not a generic `elwindui-core` trait method —
+/// placing a native handle is entirely backend-specific, same as measuring one, see
+/// `NativeControl<H>`'s own doc comment; a real `#[routed]` click/etc. is wired once, at the
 /// widget's own construction time — see e.g. `elwindui_backend_appkit::builtins::Button::new` —
 /// not here), a `RenderItem::Paint` gets added as a paint layer (e.g. a `CAShapeLayer`) —
 /// `elwindui-core` itself knows nothing about `NSView`/`addSubview`/`CALayer`.
@@ -1663,9 +1655,27 @@ mod tests {
     #[derive(Clone, PartialEq, Debug)]
     struct FakeHandle(&'static str, Size);
 
-    impl NativeLayoutNode for FakeHandle {
+    impl FakeHandle {
         fn measure(&self, _available: Size) -> Size {
             self.1
+        }
+    }
+
+    /// A minimal stand-in for a real backend's own `NativeControl<AnyView>`-derived widget
+    /// (`elwindui-backend-appkit::TextArea`/`Button`/`TabView`) — exercises the same
+    /// "derived class writes its own `measure_override`" pattern those use, instead of relying on
+    /// any generic measuring behavior from `elwindui-core::ui::NativeControl<H>` itself (see that
+    /// type's own doc comment).
+    #[elwindui_macros::class(inherits = NativeControl<FakeHandle>)]
+    struct TestLeaf {}
+
+    #[elwindui_macros::class]
+    impl TestLeaf {
+        fn measure_override(&self, available: Size) -> Size {
+            self.base.handle.measure(available)
+        }
+        fn new(handle: FakeHandle) -> Self {
+            Self { base: create_native_control(handle) }
         }
     }
 
@@ -1674,7 +1684,7 @@ mod tests {
     }
 
     fn native(name: &'static str, size: Size) -> Rc<dyn UIElement> {
-        new_element(create_native_control(FakeHandle(name, size)))
+        new_element(TestLeafImpl::new(FakeHandle(name, size)))
     }
 
     fn stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
@@ -1735,7 +1745,7 @@ mod tests {
         // size instead of filling its stack-allocated cross-axis slot — matching the old
         // `CrossAlign::Start` behavior this test used to exercise.
         fn leaf(name: &'static str, s: Size) -> Rc<dyn UIElement> {
-            let node = new_element(create_native_control(FakeHandle(name, s)));
+            let node = new_element(TestLeafImpl::new(FakeHandle(name, s)));
             node.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
             node.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
             node
@@ -1830,7 +1840,7 @@ mod tests {
 
     #[test]
     fn margin_shrinks_the_slot_an_element_is_arranged_into() {
-        let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElement> = new_element(TestLeafImpl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_margin(10.0);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert_eq!(natives[0].1, Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 });
@@ -1838,7 +1848,7 @@ mod tests {
 
     #[test]
     fn explicit_width_and_height_override_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElement> = new_element(TestLeafImpl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_width(Some(50.0));
         tree.as_ui_element().set_height(Some(5.0));
         // `Stretch` (the default) still governs slot placement; the explicit width/height above
@@ -1853,7 +1863,7 @@ mod tests {
 
     #[test]
     fn min_and_max_clamp_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElement> = new_element(TestLeafImpl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_min_width(Some(30.0));
         tree.as_ui_element().set_max_height(Some(8.0));
         tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
@@ -1910,7 +1920,7 @@ mod tests {
 
     #[test]
     fn non_stretch_alignment_keeps_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElement> = new_element(create_native_control(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElement> = new_element(TestLeafImpl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Center);
         tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Center);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));

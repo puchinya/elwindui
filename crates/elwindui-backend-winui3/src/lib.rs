@@ -97,26 +97,30 @@ impl AnyView {
     }
 }
 
-/// Lets `TreeHostPanel` (below) measure any native leaf uniformly through the base
-/// `FrameworkElement`/`UIElement` API regardless of which concrete widget it wraps.
-impl elwindui_core::ui::NativeLayoutNode for AnyView {
+impl AnyView {
+    /// Lets each `elwindui_core::ui::NativeControl<AnyView>`-derived widget's own `measure_override`
+    /// (`TextArea`/`Button`/`TabView` below) measure itself uniformly through the base
+    /// `FrameworkElement`/`UIElement` API regardless of which concrete widget it wraps — no per-widget
+    /// re-implementation of the actual `Measure`/`DesiredSize` calls needed, just a one-line
+    /// `measure_override` per widget that calls this. A plain inherent method, not a shared
+    /// `elwindui-core`-defined trait — measuring a native handle is entirely backend-specific, so
+    /// `elwindui_core::ui::NativeControl<H>` itself doesn't know how to do it (see that type's own doc
+    /// comment).
     fn measure(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
         let element = self.as_element();
         let _ = element.Measure(Size { Width: available.width as f32, Height: available.height as f32 });
         let desired = element.DesiredSize().unwrap_or(Size { Width: 0.0, Height: 0.0 });
         elwindui_core::base::Size { width: desired.Width, height: desired.Height }
     }
-}
 
-impl AnyView {
-    /// Positions this native leaf — not part of `NativeLayoutNode` (elwindui-core's generic layout
-    /// code never calls this; see that trait's own doc comment for why) — called directly by
-    /// `TreeHostPanel`'s own render loop below, once `layout_tree` has already handed back a concrete
-    /// `RenderItem::Native(AnyView, ..)`. Unlike AppKit (where `arrange` calls `setFrame` directly), a
-    /// `Canvas`'s children are still measured/arranged by the real XAML layout system on every layout
-    /// pass — this only needs to set the `Width`/`Height` and `Canvas.Left`/`Canvas.Top` attached
-    /// properties once; `Canvas`'s own (built-in) `ArrangeOverride` does the rest, unlike AppKit's
-    /// plain `NSView` which has no attached-property positioning at all.
+    /// Positions this native leaf — like `measure` above, a plain inherent method (elwindui-core's
+    /// generic layout code never calls either) — called directly by `TreeHostPanel`'s own render loop
+    /// below, once `layout_tree` has already handed back a concrete `RenderItem::Native(AnyView, ..)`.
+    /// Unlike AppKit (where `arrange` calls `setFrame` directly), a `Canvas`'s children are still
+    /// measured/arranged by the real XAML layout system on every layout pass — this only needs to set
+    /// the `Width`/`Height` and `Canvas.Left`/`Canvas.Top` attached properties once; `Canvas`'s own
+    /// (built-in) `ArrangeOverride` does the rest, unlike AppKit's plain `NSView` which has no
+    /// attached-property positioning at all.
     fn arrange(&mut self, final_rect: elwindui_core::base::Rect) {
         let element = self.as_element();
         let _ = element.SetWidth(final_rect.width as f64);
@@ -487,6 +491,10 @@ pub struct TextArea {
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are WinUI3-specific.
 #[elwindui_macros::class]
 impl TextArea {
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.base.handle.measure(available)
+    }
+
     /// `TextBox.Text` assigned programmatically resets the caret/selection to the start, even when
     /// the text given is identical to what's already there — same issue as AppKit's
     /// `NSTextView.setString:` (see that backend's own `TextAreaImpl::set_text` doc comment for the
@@ -543,6 +551,10 @@ pub struct Button {
 /// comment; only these method bodies are WinUI3-specific.
 #[elwindui_macros::class]
 impl Button {
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.base.handle.measure(available)
+    }
+
     fn set_enabled(&self, enabled: bool) {
         let _ = self.xaml.SetIsEnabled(enabled);
     }
@@ -611,6 +623,10 @@ pub struct NativeTabViewImpl {
 
 #[elwindui_macros::class]
 impl NativeTabViewImpl {
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.base.handle.measure(available)
+    }
+
     fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_select.borrow_mut() = Some(callback);
     }

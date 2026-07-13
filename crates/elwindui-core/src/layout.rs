@@ -13,16 +13,6 @@ pub struct Rect {
     pub height: f32,
 }
 
-/// Measure/Arrange two-pass layout, implemented by every backend native handle. See
-/// docs/elwindui_spec.md 付録H.2. `elwindui_core::ui`'s generic `measure`/`arrange` (the
-/// `UIElement<H>`-wide Margin/Alignment wrapper) delegates to this for `NativeControl<H>`
-/// specifically; every other `UIElement` kind (`Stack`/`Shape`/`TextBlock`/`Control`) implements
-/// `measure_override`/`arrange_override` instead.
-pub trait LayoutNode {
-    fn measure(&self, available: Size) -> Size;
-    fn arrange(&mut self, final_rect: Rect);
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orientation {
     Horizontal,
@@ -340,47 +330,6 @@ pub fn grid_arrange(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct FixedSize {
-        size: Size,
-        arranged: Option<Rect>,
-    }
-
-    impl LayoutNode for FixedSize {
-        fn measure(&self, _available: Size) -> Size {
-            self.size
-        }
-
-        fn arrange(&mut self, final_rect: Rect) {
-            self.arranged = Some(final_rect);
-        }
-    }
-
-    #[test]
-    fn measure_ignores_available_and_arrange_records_final_rect() {
-        let mut node = FixedSize {
-            size: Size {
-                width: 10.0,
-                height: 20.0,
-            },
-            arranged: None,
-        };
-
-        let measured = node.measure(Size {
-            width: 100.0,
-            height: 100.0,
-        });
-        assert_eq!(measured, node.size);
-
-        let rect = Rect {
-            x: 1.0,
-            y: 2.0,
-            width: 10.0,
-            height: 20.0,
-        };
-        node.arrange(rect);
-        assert_eq!(node.arranged, Some(rect));
-    }
 
     fn size(width: f32, height: f32) -> Size {
         Size { width, height }

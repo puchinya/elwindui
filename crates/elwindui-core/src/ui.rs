@@ -33,8 +33,8 @@
 use crate::input::RoutedEventArgs;
 use crate::layout::{
     align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin, shrink_by_margin,
-    shrink_rect_by_margin, stack_arrange, stack_natural_size, GridCell, GridLength, HorizontalAlignment, LayoutNode,
-    Orientation, Rect, Size, VerticalAlignment, Visibility,
+    shrink_rect_by_margin, stack_arrange, stack_natural_size, GridCell, GridLength, HorizontalAlignment, Orientation,
+    Rect, Size, VerticalAlignment, Visibility,
 };
 use crate::painter::Point;
 use std::any::Any;
@@ -689,6 +689,17 @@ pub enum TextAlignment {
     Right,
 }
 
+/// Measure, implemented by every backend's own native handle type (appkit's `AnyView`/winui3's
+/// `AnyView`) — the sole abstraction letting this backend-agnostic crate's `NativeControl<H>` measure
+/// a real widget generically. Unlike `measure`, `arrange`ing a native handle is never done generically
+/// from here (`NativeControl<H>::arrange_override` below always returns an empty `Vec` — see its own
+/// doc comment) — each backend calls its own `AnyView::arrange` (a plain inherent method, not part of
+/// this trait) directly, once `layout_tree` has already handed back a concrete `RenderItem::Native(H,
+/// ..)`, a context where genericity buys nothing since `H` is already known.
+pub trait NativeLayoutNode {
+    fn measure(&self, available: Size) -> Size;
+}
+
 /// `Button`/`TextArea`/`MenuBar`/`TabView` (the "NativeControlImpl" family) — the only `UIElement`
 /// with a real backend handle. Always a leaf as far as this tree is concerned: whatever lives
 /// beneath it in its own backend-managed hierarchy (e.g. `TabView`'s tab-switching) is opaque here.
@@ -701,10 +712,13 @@ pub struct NativeControl<H> {
 }
 
 #[elwindui_macros::class]
-impl<H: LayoutNode + 'static> NativeControl<H> {
+impl<H: NativeLayoutNode + 'static> NativeControl<H> {
     fn measure_override(&self, available: Size, _child_sizes: &[Size]) -> Size {
         self.handle.measure(available)
     }
+    /// Always empty: a native leaf has no children of its own for this generic tree to place — see
+    /// `NativeLayoutNode`'s own doc comment for why the native handle's *own* placement happens
+    /// entirely outside this generic path instead.
     fn arrange_override(&self, _final_size: Size, _child_sizes: &[Size]) -> Vec<Rect> {
         Vec::new()
     }
@@ -716,7 +730,7 @@ impl<H: LayoutNode + 'static> NativeControl<H> {
     }
 }
 
-pub fn create_native_control<H: LayoutNode + 'static>(handle: H) -> NativeControlImpl<H> {
+pub fn create_native_control<H: NativeLayoutNode + 'static>(handle: H) -> NativeControlImpl<H> {
     NativeControlImpl::new(handle)
 }
 
@@ -1451,7 +1465,9 @@ pub fn natural_size(elem: &dyn UIElement) -> Size {
 /// in `arrange`'s own traversal order (see that type's doc comment for why this must stay one list,
 /// not two). A backend's host (see `elwindui-backend-appkit`'s `TreeHostView`) replays this list in
 /// order: a `RenderItem::Native` gets placed as a native subview and positioned via its handle's own
-/// `LayoutNode::arrange` (a real `#[routed]` click/etc. is wired once, at the widget's own
+/// `arrange` method (a plain inherent method on that backend's own handle type — see
+/// `NativeLayoutNode`'s own doc comment for why this isn't part of that trait; a real `#[routed]`
+/// click/etc. is wired once, at the widget's own
 /// construction time — see e.g. `elwindui_backend_appkit::builtins::Button::new` — not here), a
 /// `RenderItem::Paint` gets added as a paint layer (e.g. a `CAShapeLayer`) — `elwindui-core` itself
 /// knows nothing about `NSView`/`addSubview`/`CALayer`.
@@ -1552,11 +1568,10 @@ mod tests {
     #[derive(Clone, PartialEq, Debug)]
     struct FakeHandle(&'static str, Size);
 
-    impl LayoutNode for FakeHandle {
+    impl NativeLayoutNode for FakeHandle {
         fn measure(&self, _available: Size) -> Size {
             self.1
         }
-        fn arrange(&mut self, _final_rect: Rect) {}
     }
 
     fn size(width: f32, height: f32) -> Size {

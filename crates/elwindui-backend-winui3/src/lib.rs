@@ -97,21 +97,26 @@ impl AnyView {
     }
 }
 
-/// Lets `TreeHostPanel` (below) measure/arrange any native leaf uniformly through the base
-/// `FrameworkElement`/`UIElement` API regardless of which concrete widget it wraps. Unlike AppKit
-/// (where `arrange` calls `setFrame` directly), a `Canvas`'s children are still measured/arranged
-/// by the real XAML layout system on every layout pass — `arrange` here only needs to set the
-/// `Width`/`Height` and `Canvas.Left`/`Canvas.Top` attached properties once; `Canvas`'s own
-/// (built-in) `ArrangeOverride` does the rest, unlike AppKit's plain `NSView` which has no
-/// attached-property positioning at all.
-impl elwindui_core::layout::LayoutNode for AnyView {
+/// Lets `TreeHostPanel` (below) measure any native leaf uniformly through the base
+/// `FrameworkElement`/`UIElement` API regardless of which concrete widget it wraps.
+impl elwindui_core::ui::NativeLayoutNode for AnyView {
     fn measure(&self, available: elwindui_core::layout::Size) -> elwindui_core::layout::Size {
         let element = self.as_element();
         let _ = element.Measure(Size { Width: available.width as f32, Height: available.height as f32 });
         let desired = element.DesiredSize().unwrap_or(Size { Width: 0.0, Height: 0.0 });
         elwindui_core::layout::Size { width: desired.Width, height: desired.Height }
     }
+}
 
+impl AnyView {
+    /// Positions this native leaf — not part of `NativeLayoutNode` (elwindui-core's generic layout
+    /// code never calls this; see that trait's own doc comment for why) — called directly by
+    /// `TreeHostPanel`'s own render loop below, once `layout_tree` has already handed back a concrete
+    /// `RenderItem::Native(AnyView, ..)`. Unlike AppKit (where `arrange` calls `setFrame` directly), a
+    /// `Canvas`'s children are still measured/arranged by the real XAML layout system on every layout
+    /// pass — this only needs to set the `Width`/`Height` and `Canvas.Left`/`Canvas.Top` attached
+    /// properties once; `Canvas`'s own (built-in) `ArrangeOverride` does the rest, unlike AppKit's
+    /// plain `NSView` which has no attached-property positioning at all.
     fn arrange(&mut self, final_rect: elwindui_core::layout::Rect) {
         let element = self.as_element();
         let _ = element.SetWidth(final_rect.width as f64);

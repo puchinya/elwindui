@@ -77,15 +77,21 @@ impl AnyView {
     }
 }
 
-/// Lets `TreeHostView` (below) measure/arrange any native leaf uniformly through the base `NSView`
-/// API (`fittingSize`/`setFrame`) regardless of which concrete widget it wraps — no per-widget
-/// (`Text`, `ButtonImpl`, ...) `LayoutNode` impl needed. See docs/elwindui_spec.md 付録H.2.
-impl elwindui_core::layout::LayoutNode for AnyView {
+/// Lets `TreeHostView` (below) measure any native leaf uniformly through the base `NSView` API
+/// (`fittingSize`) regardless of which concrete widget it wraps — no per-widget (`Text`,
+/// `ButtonImpl`, ...) `NativeLayoutNode` impl needed. See docs/elwindui_spec.md 付録H.2.
+impl elwindui_core::ui::NativeLayoutNode for AnyView {
     fn measure(&self, _available: elwindui_core::layout::Size) -> elwindui_core::layout::Size {
         let fitting = self.as_nsview().fittingSize();
         elwindui_core::layout::Size { width: fitting.width as f32, height: fitting.height as f32 }
     }
+}
 
+impl AnyView {
+    /// Positions this native leaf via plain `NSView.setFrame` — not part of `NativeLayoutNode`
+    /// (elwindui-core's generic layout code never calls this; see that trait's own doc comment for
+    /// why) — called directly by `TreeHostView`'s own render loop below, once `layout_tree` has
+    /// already handed back a concrete `RenderItem::Native(AnyView, ..)`.
     fn arrange(&mut self, final_rect: elwindui_core::layout::Rect) {
         self.as_nsview().setFrame(NSRect::new(
             objc2_foundation::NSPoint::new(final_rect.x as f64, final_rect.y as f64),
@@ -373,7 +379,7 @@ impl TreeHostView {
     /// `CAShapeLayer`, against this view's *current* frame — called from `layout()` (above)
     /// whenever AppKit thinks this view's size may have changed.
     fn relayout(&self) {
-        use elwindui_core::layout::{LayoutNode, Size};
+        use elwindui_core::layout::Size;
 
         let frame = self.frame();
         let available = Size { width: frame.size.width as f32, height: frame.size.height as f32 };

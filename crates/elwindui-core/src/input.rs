@@ -1,4 +1,4 @@
-use crate::painter::Point;
+use crate::base::Point;
 use crate::ui::UIElement;
 use std::cell::Cell;
 use std::rc::Rc;

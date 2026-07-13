@@ -1,10 +1,4 @@
-use crate::layout::Rect;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Point {
-    pub x: f32,
-    pub y: f32,
-}
+use crate::base::{Point, Rect};
 
 /// Modeled on WinUI3's `Windows.UI.Color { A, R, G, B }`. See docs/elwindui_spec.md 付録G.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

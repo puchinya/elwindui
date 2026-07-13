@@ -713,13 +713,13 @@ fn uielement_blind_forward(
         fn as_ui_element(&self) -> &#core::ui::UIElementImpl { self.base.as_ui_element() }
     });
     let measure_override = find("measure_override").unwrap_or(quote! {
-        fn measure_override(&self, available: #core::layout::Size, child_sizes: &[#core::layout::Size]) -> #core::layout::Size {
-            self.base.measure_override(available, child_sizes)
+        fn measure_override(&self, available: #core::base::Size) -> #core::base::Size {
+            self.base.measure_override(available)
         }
     });
     let arrange_override = find("arrange_override").unwrap_or(quote! {
-        fn arrange_override(&self, final_size: #core::layout::Size, child_sizes: &[#core::layout::Size]) -> Vec<#core::layout::Rect> {
-            self.base.arrange_override(final_size, child_sizes)
+        fn arrange_override(&self, final_size: #core::base::Size) -> #core::base::Size {
+            self.base.arrange_override(final_size)
         }
     });
     let try_as_native_control = find("try_as_native_control").unwrap_or(quote! {

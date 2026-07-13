@@ -1,4 +1,5 @@
 pub mod accessibility;
+pub mod base;
 pub mod error;
 pub mod focus;
 pub mod input;

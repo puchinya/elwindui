@@ -100,11 +100,11 @@ impl AnyView {
 /// Lets `TreeHostPanel` (below) measure any native leaf uniformly through the base
 /// `FrameworkElement`/`UIElement` API regardless of which concrete widget it wraps.
 impl elwindui_core::ui::NativeLayoutNode for AnyView {
-    fn measure(&self, available: elwindui_core::layout::Size) -> elwindui_core::layout::Size {
+    fn measure(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
         let element = self.as_element();
         let _ = element.Measure(Size { Width: available.width as f32, Height: available.height as f32 });
         let desired = element.DesiredSize().unwrap_or(Size { Width: 0.0, Height: 0.0 });
-        elwindui_core::layout::Size { width: desired.Width, height: desired.Height }
+        elwindui_core::base::Size { width: desired.Width, height: desired.Height }
     }
 }
 
@@ -117,7 +117,7 @@ impl AnyView {
     /// pass — this only needs to set the `Width`/`Height` and `Canvas.Left`/`Canvas.Top` attached
     /// properties once; `Canvas`'s own (built-in) `ArrangeOverride` does the rest, unlike AppKit's
     /// plain `NSView` which has no attached-property positioning at all.
-    fn arrange(&mut self, final_rect: elwindui_core::layout::Rect) {
+    fn arrange(&mut self, final_rect: elwindui_core::base::Rect) {
         let element = self.as_element();
         let _ = element.SetWidth(final_rect.width as f64);
         let _ = element.SetHeight(final_rect.height as f64);
@@ -243,7 +243,7 @@ impl TreeHostPanel {
     }
 
     fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>) {
-        use elwindui_core::layout::Size as LSize;
+        use elwindui_core::base::Size as LSize;
 
         let width = canvas.ActualWidth().unwrap_or(0.0) as f32;
         let height = canvas.ActualHeight().unwrap_or(0.0) as f32;
@@ -318,7 +318,7 @@ impl TreeHostPanel {
                 // backend is spec-only/best-effort and unverified (see this crate's own top doc
                 // comment); real click wiring is AppKit-only for now.
                 elwindui_core::ui::RenderItem::Native(mut view, rect, _node) => {
-                    view.arrange(elwindui_core::layout::Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+                    view.arrange(elwindui_core::base::Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
                     let _ = children.Append(&view.as_element());
                 }
             }

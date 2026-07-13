@@ -30,13 +30,13 @@
 //! (`elwindui-codegen`'s generated code, and any hand-written builtin) goes through it instead of
 //! calling `Rc::new` directly.
 
+use crate::base::{Point, Rect, Size};
 use crate::input::RoutedEventArgs;
 use crate::layout::{
     align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin, shrink_by_margin,
     shrink_rect_by_margin, stack_arrange, stack_natural_size, GridCell, GridLength, HorizontalAlignment, Orientation,
-    Rect, Size, VerticalAlignment, Visibility,
+    VerticalAlignment, Visibility,
 };
-use crate::painter::Point;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -111,25 +111,30 @@ pub struct UIElement {
     /// doc comment for how `Collapsed` is handled by the layout/render/hit-test traversals.
     pub visibility: Cell<Visibility>,
     /// WinUI3's `FrameworkElement.Width`/`Height`/`MinWidth`/`MinHeight`/`MaxWidth`/`MaxHeight` —
-    /// `None` is WinUI3's `NaN` sentinel ("unset", i.e. auto-sized). Applied generically by this
-    /// module's `measure`/`measure_and_align` (`crate::layout::apply_size_constraints`), the same
-    /// way margin/alignment already are — see those functions' own doc comments.
+    /// `None` is WinUI3's `NaN` sentinel ("unset", i.e. auto-sized). Applied generically by
+    /// `UIElement::measure`/`arrange` (`crate::layout::apply_size_constraints`), the same way
+    /// margin/alignment already are.
     pub width: Cell<Option<f32>>,
     pub height: Cell<Option<f32>>,
     pub min_width: Cell<Option<f32>>,
     pub min_height: Cell<Option<f32>>,
     pub max_width: Cell<Option<f32>>,
     pub max_height: Cell<Option<f32>>,
-    /// WinUI3's `UIElement.ActualWidth`/`ActualHeight`/`ActualOffset` — the *result* of the most
-    /// recent `arrange` pass, not an input to it. `actual_width`/`actual_height` are set on `elem`
-    /// itself once its own `final_rect` is known; `actual_offset` (relative to this element's
-    /// *parent*, matching WinUI3's own `ActualOffset`) is set on each *child* by its parent, right
-    /// before that child's own absolute rect is computed. Both default to `0.0`/`Point{0,0}` before
-    /// any layout pass has run, and for the root of whatever tree is being laid out (no parent to
-    /// set its offset — the same reasoning as WinUI3's root `Window.Content`).
-    pub actual_width: Cell<f32>,
-    pub actual_height: Cell<f32>,
-    pub actual_offset: Cell<Point>,
+    /// WinUI3's `UIElement.DesiredSize` — the result of the most recent `UIElement::measure` pass,
+    /// `None` before the first one (or right after `invalidate_measure` — see that method's own doc
+    /// comment) rather than some zero-value placeholder, so a reader can distinguish "not measured
+    /// yet" from "measured to be zero-sized". Written only by `measure` itself — externally
+    /// read-only (the `measured_size()` getter has no paired public setter).
+    pub measured_size: Cell<Option<Size>>,
+    /// WinUI3's `UIElement.ActualWidth`/`ActualHeight`/`ActualOffset` — the *result* of this
+    /// element's own most recent `arrange` pass, not an input to it. All three are set by the
+    /// element itself, from within its own `arrange` call (`arranged_offset` is *not* set by the
+    /// parent — see `UIElement::arrange`'s own doc comment), and are `None` before the first
+    /// `arrange` pass (or right after `invalidate_arrange`/`invalidate_measure`) rather than some
+    /// zero-value placeholder.
+    pub arranged_width: Cell<Option<f32>>,
+    pub arranged_height: Cell<Option<f32>>,
+    pub arranged_offset: Cell<Option<Point>>,
     pub data_context: RefCell<Option<Rc<dyn Any>>>,
     /// `#[routed]`-tagged callback fields (`on_click`, and any future one — see
     /// `docs/elwindui_spec.md` 4章), keyed by field name. Each value is a
@@ -194,9 +199,10 @@ impl std::fmt::Debug for UIElementImpl {
             .field("min_height", &self.min_height.get())
             .field("max_width", &self.max_width.get())
             .field("max_height", &self.max_height.get())
-            .field("actual_width", &self.actual_width.get())
-            .field("actual_height", &self.actual_height.get())
-            .field("actual_offset", &self.actual_offset.get())
+            .field("measured_size", &self.measured_size.get())
+            .field("arranged_width", &self.arranged_width.get())
+            .field("arranged_height", &self.arranged_height.get())
+            .field("arranged_offset", &self.arranged_offset.get())
             .field("data_context", &self.data_context.borrow().is_some())
             .field("routed_handlers", &self.routed_handlers.borrow().keys().collect::<Vec<_>>())
             .field("attached_keys", &self.attached.borrow().keys().cloned().collect::<Vec<_>>())
@@ -220,9 +226,10 @@ impl Default for UIElementImpl {
             min_height: Cell::new(None),
             max_width: Cell::new(None),
             max_height: Cell::new(None),
-            actual_width: Cell::new(0.0),
-            actual_height: Cell::new(0.0),
-            actual_offset: Cell::new(Point { x: 0.0, y: 0.0 }),
+            measured_size: Cell::new(None),
+            arranged_width: Cell::new(None),
+            arranged_height: Cell::new(None),
+            arranged_offset: Cell::new(None),
             data_context: RefCell::new(None),
             routed_handlers: Rc::new(RefCell::new(HashMap::new())),
             attached: RefCell::new(HashMap::new()),
@@ -285,16 +292,23 @@ impl UIElement {
     fn max_height(&self) -> Option<f32> {
         self.as_ui_element().max_height.get()
     }
+    /// WinUI3's `UIElement.DesiredSize` — the result of the most recent `measure` pass, or `None`
+    /// if it hasn't run since construction or the last `invalidate_measure`. See
+    /// `UIElementImpl::measured_size`'s own doc comment.
+    fn measured_size(&self) -> Option<Size> {
+        self.as_ui_element().measured_size.get()
+    }
     /// WinUI3's `UIElement.ActualWidth`/`ActualHeight`/`ActualOffset` — the result of the most
-    /// recent `arrange` pass. See `UIElementImpl`'s own doc comment.
-    fn actual_width(&self) -> f32 {
-        self.as_ui_element().actual_width.get()
+    /// recent `arrange` pass, or `None` if it hasn't run since construction or the last
+    /// `invalidate_arrange`/`invalidate_measure`. See `UIElementImpl`'s own doc comment.
+    fn arranged_width(&self) -> Option<f32> {
+        self.as_ui_element().arranged_width.get()
     }
-    fn actual_height(&self) -> f32 {
-        self.as_ui_element().actual_height.get()
+    fn arranged_height(&self) -> Option<f32> {
+        self.as_ui_element().arranged_height.get()
     }
-    fn actual_offset(&self) -> Point {
-        self.as_ui_element().actual_offset.get()
+    fn arranged_offset(&self) -> Option<Point> {
+        self.as_ui_element().arranged_offset.get()
     }
     /// Post-construction setters (docs/elwindui_spec.md 付録H.2.1a) for every field this trait
     /// already exposes a getter for — declared here (not just as `UIElementImpl`'s own inherent
@@ -302,43 +316,43 @@ impl UIElement {
     /// not only through the concrete backing struct.
     fn set_margin(&self, margin: f32) {
         self.as_ui_element().margin.set(margin);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_horizontal_alignment(&self, alignment: HorizontalAlignment) {
         self.as_ui_element().horizontal_alignment.set(alignment);
-        self.invalidate();
+        self.invalidate_arrange();
     }
     fn set_vertical_alignment(&self, alignment: VerticalAlignment) {
         self.as_ui_element().vertical_alignment.set(alignment);
-        self.invalidate();
+        self.invalidate_arrange();
     }
     fn set_visibility(&self, visibility: Visibility) {
         self.as_ui_element().visibility.set(visibility);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_width(&self, width: Option<f32>) {
         self.as_ui_element().width.set(width);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_height(&self, height: Option<f32>) {
         self.as_ui_element().height.set(height);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_min_width(&self, min_width: Option<f32>) {
         self.as_ui_element().min_width.set(min_width);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_min_height(&self, min_height: Option<f32>) {
         self.as_ui_element().min_height.set(min_height);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_max_width(&self, max_width: Option<f32>) {
         self.as_ui_element().max_width.set(max_width);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_max_height(&self, max_height: Option<f32>) {
         self.as_ui_element().max_height.set(max_height);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
         *self.as_ui_element().data_context.borrow_mut() = data_context;
@@ -376,18 +390,23 @@ impl UIElement {
     fn type_name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
-    /// This element's own desired size, given `available` (margin already excluded by the caller)
-    /// and its children's already-measured sizes (WinUI3's `MeasureOverride`). Defaults to taking
-    /// no space at all — every concrete leaf/container overrides this with real logic; nothing
-    /// currently relies on this default actually being invoked.
-    fn measure_override(&self, _available: Size, _child_sizes: &[Size]) -> Size {
+    /// This element's own desired size, given `available` (margin already excluded by the caller,
+    /// WinUI3's `MeasureOverride`) — measures/positions any children itself (calling
+    /// `child.measure(..)`/reading `child.measured_size()`), rather than being handed a
+    /// pre-computed array. Defaults to taking no space at all — every concrete leaf/container
+    /// overrides this with real logic; nothing currently relies on this default actually being
+    /// invoked.
+    fn measure_override(&self, _available: Size) -> Size {
         Size { width: 0.0, height: 0.0 }
     }
-    /// The rect to assign each child (in this element's own local coordinate space), given the
-    /// final size this element itself was assigned (WinUI3's `ArrangeOverride`). Defaults to no
-    /// children — see `measure_override`'s own doc comment.
-    fn arrange_override(&self, _final_size: Size, _child_sizes: &[Size]) -> Vec<Rect> {
-        Vec::new()
+    /// Arranges this element's own children (in this element's own local coordinate space), given
+    /// the final size this element itself was assigned (WinUI3's `ArrangeOverride`) — calls
+    /// `child.arrange(..)` itself for each child it has, rather than returning a rect list for a
+    /// caller to apply. Returns the size actually used (WinUI3 allows this to differ slightly from
+    /// `final_size`; the default and every override here just echo it back unchanged). Defaults to
+    /// doing nothing (no children) — see `measure_override`'s own doc comment.
+    fn arrange_override(&self, final_size: Size) -> Size {
+        final_size
     }
     /// Content this element paints for itself, if any (`None` for pure layout containers like
     /// `LayoutImpl`, which only position children and draw nothing on their own account).
@@ -406,24 +425,33 @@ impl UIElement {
         None
     }
     /// WinUI3's `UIElement.InvalidateVisual`-equivalent — asks whatever host owns this element's
-    /// tree to redraw. `invalidate`/`invalidate_arrange`/`invalidate_measure` are kept as three
-    /// separate WinUI3-shaped entry points, but this crate's layout engine has no per-element
-    /// measure/arrange cache yet (`layout_tree` always recomputes the whole tree from scratch — see
-    /// its own doc comment), so all three currently resolve to the exact same action: a full
-    /// re-`layout_tree` pass via `request_relayout`. Splitting them for real (e.g. skipping
-    /// `measure_override` when only `arrange` is dirty) is future work once such a cache exists.
-    /// A no-op if this element isn't (yet, or anymore) part of a hosted tree.
+    /// tree to redraw. Redraw only: unlike `invalidate_arrange`/`invalidate_measure`, this does
+    /// *not* clear `measured_size`/`arranged_*` — the most recent measure/arrange results stay
+    /// valid and are simply repainted (matches a `paint()`-only change, e.g. `Shape::set_fill`). A
+    /// no-op if this element isn't (yet, or anymore) part of a hosted tree.
     fn invalidate(&self) {
         request_relayout(self.as_ui_element());
     }
-    /// WinUI3's `UIElement.InvalidateArrange` — see `invalidate`'s own doc comment for why this
-    /// currently triggers the same full relayout as the other two methods here.
+    /// WinUI3's `UIElement.InvalidateArrange` — marks this element's `arranged_width`/
+    /// `arranged_height`/`arranged_offset` `None` (to be recomputed by the next `arrange` pass) and
+    /// asks for a redraw. `measured_size` stays valid — only where this element ends up, not how
+    /// big it wants to be, is in question (e.g. `UIElement::set_horizontal_alignment`).
     fn invalidate_arrange(&self) {
+        self.as_ui_element().arranged_width.set(None);
+        self.as_ui_element().arranged_height.set(None);
+        self.as_ui_element().arranged_offset.set(None);
         request_relayout(self.as_ui_element());
     }
-    /// WinUI3's `UIElement.InvalidateMeasure` — see `invalidate`'s own doc comment for why this
-    /// currently triggers the same full relayout as the other two methods here.
+    /// WinUI3's `UIElement.InvalidateMeasure` — marks this element's `measured_size` *and*
+    /// `arranged_width`/`arranged_height`/`arranged_offset` all `None` (a changed desired size
+    /// can't leave a stale arrangement behind) and asks for a redraw. The strongest of the three —
+    /// use whenever a change could affect `measure_override`'s result (e.g. `UIElement::set_margin`,
+    /// `set_width`).
     fn invalidate_measure(&self) {
+        self.as_ui_element().measured_size.set(None);
+        self.as_ui_element().arranged_width.set(None);
+        self.as_ui_element().arranged_height.set(None);
+        self.as_ui_element().arranged_offset.set(None);
         request_relayout(self.as_ui_element());
     }
     /// Registers a handler for a `#[routed]`-tagged field named `name` on this element — see this
@@ -445,7 +473,7 @@ impl UIElement {
         Self: Sized,
     {
         self.as_ui_element().attached.borrow_mut().insert((owner, field), Box::new(value));
-        self.invalidate();
+        self.invalidate_measure();
     }
     /// Reads an attached-property value previously stored under `(owner, field)`, or `default` if
     /// absent (never set on this element, or set with a different `T` — the same `downcast_ref`
@@ -476,6 +504,53 @@ impl UIElement {
     /// `children` field. See `UIElementCollection`'s own doc comment.
     fn children_collection(&self) -> UIElementCollection {
         UIElementCollection { visual: self.as_ui_element().visual_children.clone(), owner: self.as_ui_element().self_handle.clone() }
+    }
+    /// WinUI3's `UIElement.Measure(Size availableSize)` — computes this element's own desired size
+    /// (margin-inclusive) against `available`, recursing into children as `measure_override` (still
+    /// freely overridable, unlike this method) needs them, and caches the result in
+    /// `measured_size()`. `void` like WinUI3's own `Measure` — callers read the result back via
+    /// `measured_size()` rather than this method's return value (there isn't one). Always
+    /// recomputes when called, regardless of whether `measured_size()` was already `Some` — see
+    /// `UIElementImpl::measured_size`'s own doc comment for why this isn't a memoizing cache.
+    fn measure(&self, available: Size) {
+        let result = if self.visibility() == Visibility::Collapsed {
+            Size { width: 0.0, height: 0.0 }
+        } else {
+            let inner_available = constrain(self, shrink_by_margin(available, self.margin()));
+            let desired = constrain(self, self.measure_override(inner_available));
+            grow_by_margin(desired, self.margin())
+        };
+        self.as_ui_element().measured_size.set(Some(result));
+    }
+    /// WinUI3's `UIElement.Arrange(Rect finalRect)` — `finalRect` is relative to this element's own
+    /// parent (not absolute screen/window coordinates — see `elwindui_core::ui::layout_tree`'s
+    /// `collect_render_items` for where absolute positions actually get computed, by walking down
+    /// accumulating each element's own `arranged_offset`). Applies this element's own margin and
+    /// alignment against `finalRect` to compute its final position+size, caches those into
+    /// `arranged_width`/`arranged_height`/`arranged_offset` (this element sets its *own*
+    /// `arranged_offset` here — it is not set by the parent), then delegates arranging any children
+    /// entirely to `arrange_override` (still freely overridable), which calls `child.arrange(..)`
+    /// itself for each one it has.
+    fn arrange(&self, final_rect: Rect) {
+        if self.visibility() == Visibility::Collapsed {
+            self.as_ui_element().arranged_width.set(Some(0.0));
+            self.as_ui_element().arranged_height.set(Some(0.0));
+            return;
+        }
+        // WinUI3: `Arrange` implicitly re-`Measure`s if `Measure` hasn't run since the last
+        // invalidation — `measured_size()` being `None` here means exactly that.
+        if self.measured_size().is_none() {
+            self.measure(Size { width: final_rect.width, height: final_rect.height });
+        }
+        let desired_with_margin = self.measured_size().unwrap_or_default();
+        let slot = shrink_rect_by_margin(final_rect, self.margin());
+        let desired_without_margin = shrink_by_margin(desired_with_margin, self.margin());
+        let own_rect = align_within(slot, desired_without_margin, self.horizontal_alignment(), self.vertical_alignment());
+        let own_size = Size { width: own_rect.width, height: own_rect.height };
+        self.as_ui_element().arranged_width.set(Some(own_size.width));
+        self.as_ui_element().arranged_height.set(Some(own_size.height));
+        self.as_ui_element().arranged_offset.set(Some(Point { x: own_rect.x, y: own_rect.y }));
+        self.arrange_override(own_size);
     }
 }
 
@@ -713,15 +788,13 @@ pub struct NativeControl<H> {
 
 #[elwindui_macros::class]
 impl<H: NativeLayoutNode + 'static> NativeControl<H> {
-    fn measure_override(&self, available: Size, _child_sizes: &[Size]) -> Size {
+    fn measure_override(&self, available: Size) -> Size {
         self.handle.measure(available)
     }
-    /// Always empty: a native leaf has no children of its own for this generic tree to place — see
-    /// `NativeLayoutNode`'s own doc comment for why the native handle's *own* placement happens
-    /// entirely outside this generic path instead.
-    fn arrange_override(&self, _final_size: Size, _child_sizes: &[Size]) -> Vec<Rect> {
-        Vec::new()
-    }
+    // `arrange_override` isn't overridden — a native leaf has no children of its own for this
+    // generic tree to place, so the root `UIElement`'s own default (echo `final_size` back
+    // unchanged) is already correct. See `NativeLayoutNode`'s own doc comment for why the native
+    // handle's *own* placement happens entirely outside this generic path instead.
     fn try_as_native_control(&self) -> Option<&dyn Any> {
         Some(self)
     }
@@ -845,7 +918,7 @@ impl Layout {
     #[inherent]
     pub fn set_spacing(&self, spacing: f32) {
         self.spacing.set(spacing);
-        self.invalidate();
+        self.invalidate_measure();
     }
 }
 
@@ -855,11 +928,24 @@ pub struct VerticalLayout {}
 
 #[elwindui_macros::class]
 impl VerticalLayout {
-    fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
-        stack_natural_size(Orientation::Vertical, self.base.spacing.get(), child_sizes)
+    fn measure_override(&self, available: Size) -> Size {
+        let child_sizes: Vec<Size> = self
+            .visual_children()
+            .iter()
+            .map(|c| {
+                c.measure(available);
+                c.measured_size().unwrap_or_default()
+            })
+            .collect();
+        stack_natural_size(Orientation::Vertical, self.base.spacing.get(), &child_sizes)
     }
-    fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-        stack_arrange(final_size, Orientation::Vertical, self.base.spacing.get(), child_sizes)
+    fn arrange_override(&self, final_size: Size) -> Size {
+        let child_sizes: Vec<Size> = self.visual_children().iter().map(|c| c.measured_size().unwrap_or_default()).collect();
+        let child_rects = stack_arrange(final_size, Orientation::Vertical, self.base.spacing.get(), &child_sizes);
+        for (child, rect) in self.visual_children().iter().zip(child_rects) {
+            child.arrange(rect);
+        }
+        final_size
     }
     fn set_spacing(&self, spacing: f32) {
         self.base.set_spacing(spacing);
@@ -884,11 +970,24 @@ pub struct HorizontalLayout {}
 
 #[elwindui_macros::class]
 impl HorizontalLayout {
-    fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
-        stack_natural_size(Orientation::Horizontal, self.base.spacing.get(), child_sizes)
+    fn measure_override(&self, available: Size) -> Size {
+        let child_sizes: Vec<Size> = self
+            .visual_children()
+            .iter()
+            .map(|c| {
+                c.measure(available);
+                c.measured_size().unwrap_or_default()
+            })
+            .collect();
+        stack_natural_size(Orientation::Horizontal, self.base.spacing.get(), &child_sizes)
     }
-    fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-        stack_arrange(final_size, Orientation::Horizontal, self.base.spacing.get(), child_sizes)
+    fn arrange_override(&self, final_size: Size) -> Size {
+        let child_sizes: Vec<Size> = self.visual_children().iter().map(|c| c.measured_size().unwrap_or_default()).collect();
+        let child_rects = stack_arrange(final_size, Orientation::Horizontal, self.base.spacing.get(), &child_sizes);
+        for (child, rect) in self.visual_children().iter().zip(child_rects) {
+            child.arrange(rect);
+        }
+        final_size
     }
     fn set_spacing(&self, spacing: f32) {
         self.base.set_spacing(spacing);
@@ -922,11 +1021,11 @@ pub struct Shape {
 
 #[elwindui_macros::class]
 impl Shape {
-    fn measure_override(&self, _available: Size, _child_sizes: &[Size]) -> Size {
+    fn measure_override(&self, _available: Size) -> Size {
         Size { width: 0.0, height: 0.0 }
     }
-    fn arrange_override(&self, _final_size: Size, _child_sizes: &[Size]) -> Vec<Rect> {
-        Vec::new()
+    fn arrange_override(&self, final_size: Size) -> Size {
+        final_size
     }
     fn paint(&self) -> Option<PaintKind> {
         Some(PaintKind::Shape {
@@ -1112,22 +1211,22 @@ pub struct TextBlock {
 
 #[elwindui_macros::class]
 impl TextBlock {
-    fn measure_override(&self, _available: Size, _child_sizes: &[Size]) -> Size {
+    fn measure_override(&self, _available: Size) -> Size {
         // `elwindui-core` has no font metrics of its own (measurement, like painting, is a
         // backend concern for self-drawn content — see `ShapeImpl`'s same split) — a rough per-
         // character estimate is enough to avoid collapsing to zero size; a backend may still
         // render a string that overflows this estimate.
         Size { width: self.text.borrow().chars().count() as f32 * 8.0, height: 16.0 }
     }
-    fn arrange_override(&self, _final_size: Size, _child_sizes: &[Size]) -> Vec<Rect> {
-        Vec::new()
+    fn arrange_override(&self, final_size: Size) -> Size {
+        final_size
     }
     fn paint(&self) -> Option<PaintKind> {
         Some(PaintKind::Text { content: self.text.borrow().clone(), color: self.color.borrow().clone(), alignment: self.alignment.get() })
     }
     fn set_text(&self, text: String) {
         *self.text.borrow_mut() = text;
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_color(&self, color: Option<String>) {
         *self.color.borrow_mut() = color;
@@ -1178,15 +1277,21 @@ pub struct Control {
 
 #[elwindui_macros::class]
 impl Control {
-    fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
-        let inner = child_sizes
-            .iter()
-            .fold(Size { width: 0.0, height: 0.0 }, |acc, s| Size { width: acc.width.max(s.width), height: acc.height.max(s.height) });
+    fn measure_override(&self, available: Size) -> Size {
+        let inner = self.visual_children().iter().fold(Size::default(), |acc, c| {
+            c.measure(available);
+            let s = c.measured_size().unwrap_or_default();
+            Size { width: acc.width.max(s.width), height: acc.height.max(s.height) }
+        });
         grow_by_margin(inner, self.padding.get())
     }
-    fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
+    fn arrange_override(&self, final_size: Size) -> Size {
         let full = Rect { x: 0.0, y: 0.0, width: final_size.width, height: final_size.height };
-        vec![shrink_rect_by_margin(full, self.padding.get()); child_sizes.len()]
+        let content_area = shrink_rect_by_margin(full, self.padding.get());
+        for child in self.visual_children().iter() {
+            child.arrange(content_area);
+        }
+        final_size
     }
     fn padding(&self) -> f32 {
         self.padding.get()
@@ -1199,15 +1304,15 @@ impl Control {
     }
     fn set_padding(&self, padding: f32) {
         self.padding.set(padding);
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_content_horizontal_alignment(&self, alignment: HorizontalAlignment) {
         self.content_horizontal_alignment.set(alignment);
-        self.invalidate();
+        self.invalidate_arrange();
     }
     fn set_content_vertical_alignment(&self, alignment: VerticalAlignment) {
         self.content_vertical_alignment.set(alignment);
-        self.invalidate();
+        self.invalidate_arrange();
     }
     fn new() -> Self {
         let base = UIElementImpl::default();
@@ -1335,21 +1440,35 @@ pub struct Grid {
 
 #[elwindui_macros::class]
 impl Grid {
-    fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
-        let cells: Vec<GridCell> = self.children.to_vec().iter().map(grid_cell_of).collect();
-        grid_natural_size(&self.rows.borrow(), &self.columns.borrow(), &cells, child_sizes)
+    fn measure_override(&self, available: Size) -> Size {
+        let children = self.children.to_vec();
+        let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
+        let child_sizes: Vec<Size> = children
+            .iter()
+            .map(|c| {
+                c.measure(available);
+                c.measured_size().unwrap_or_default()
+            })
+            .collect();
+        grid_natural_size(&self.rows.borrow(), &self.columns.borrow(), &cells, &child_sizes)
     }
-    fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-        let cells: Vec<GridCell> = self.children.to_vec().iter().map(grid_cell_of).collect();
-        grid_arrange(final_size, &self.rows.borrow(), &self.columns.borrow(), &cells, child_sizes)
+    fn arrange_override(&self, final_size: Size) -> Size {
+        let children = self.children.to_vec();
+        let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
+        let child_sizes: Vec<Size> = children.iter().map(|c| c.measured_size().unwrap_or_default()).collect();
+        let child_rects = grid_arrange(final_size, &self.rows.borrow(), &self.columns.borrow(), &cells, &child_sizes);
+        for (child, rect) in children.iter().zip(child_rects) {
+            child.arrange(rect);
+        }
+        final_size
     }
     fn set_rows(&self, rows: Vec<GridLength>) {
         *self.rows.borrow_mut() = rows;
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn set_columns(&self, columns: Vec<GridLength>) {
         *self.columns.borrow_mut() = columns;
-        self.invalidate();
+        self.invalidate_measure();
     }
     fn new() -> Self {
         let base = UIElementImpl::default();
@@ -1367,65 +1486,47 @@ pub fn create_grid() -> GridImpl {
     GridImpl::new()
 }
 
-/// WinUI3's `FrameworkElement.MeasureCore`-style constraint step, shared by `measure`/
-/// `measure_and_align`: an explicit `width`/`height` overrides that axis outright, then both axes
-/// are clamped to `min_width..max_width`/`min_height..max_height` (`crate::layout::
-/// apply_size_constraints`). Applied twice per element per the same WinUI3 algorithm — once to the
-/// space handed down to `measure_override` (a fixed `Width` shouldn't let a container measure
-/// against the parent's *actual* available space), once to `measure_override`'s own returned size
-/// (a container's natural content size shouldn't override an explicit `Width`/`Height`/`Max*`).
-fn constrain(elem: &dyn UIElement, size: Size) -> Size {
+/// WinUI3's `FrameworkElement.MeasureCore`-style constraint step, used by `UIElement::measure`: an
+/// explicit `width`/`height` overrides that axis outright, then both axes are clamped to
+/// `min_width..max_width`/`min_height..max_height` (`crate::layout::apply_size_constraints`).
+/// Applied twice per element per the same WinUI3 algorithm — once to the space handed down to
+/// `measure_override` (a fixed `Width` shouldn't let a container measure against the parent's
+/// *actual* available space), once to `measure_override`'s own returned size (a container's
+/// natural content size shouldn't override an explicit `Width`/`Height`/`Max*`). Generic over
+/// `?Sized` so it can be called with `self: &Self` from inside the `measure` trait default method
+/// (where `Self` isn't known to be `Sized`, since `measure` must stay callable through
+/// `dyn UIElement`) without an unsized coercion.
+fn constrain<T: UIElement + ?Sized>(elem: &T, size: Size) -> Size {
     let overridden = Size { width: elem.width().unwrap_or(size.width), height: elem.height().unwrap_or(size.height) };
     apply_size_constraints(overridden, elem.min_width(), elem.max_width(), elem.min_height(), elem.max_height())
 }
 
-fn measure(elem: &dyn UIElement, available: Size) -> Size {
-    // WinUI3's `Collapsed`: `DesiredSize` is unconditionally `(0, 0)`, ignoring margin/children/
-    // explicit `Width`/`Height` entirely — see `Visibility`'s own doc comment. Known limitation:
-    // `stack_arrange` (`elwindui_core::layout`) still reserves a full `spacing` gap on either side
-    // of a zero-sized `Collapsed` child, unlike WinUI3's `StackPanel.Spacing`, which only counts
-    // visible children — out of scope for now.
-    if elem.visibility() == Visibility::Collapsed {
-        return Size { width: 0.0, height: 0.0 };
-    }
-    let inner_available = constrain(elem, shrink_by_margin(available, elem.margin()));
-    let child_sizes: Vec<Size> = elem.visual_children().iter().map(|c| measure(c.as_ref(), inner_available)).collect();
-    let desired = constrain(elem, elem.measure_override(inner_available, &child_sizes));
-    grow_by_margin(desired, elem.margin())
+/// This element's natural (unconstrained) size — e.g. for a container that must report an
+/// `intrinsicContentSize` to an Auto-Layout-managed ancestor (see `elwindui-backend-appkit`'s
+/// `TreeHostView`) before it has ever actually been given a frame to lay out into.
+pub fn natural_size(elem: &dyn UIElement) -> Size {
+    elem.measure(Size { width: 0.0, height: 0.0 });
+    elem.measured_size().unwrap_or_default()
 }
 
-/// `elem`'s own absolute rect and its children's, threaded through `natives`/`paints` just like
-/// `arrange` below — factored out so `hit_test_at` (coordinate-only, no native handle) and
-/// `arrange` (handle-collecting) can share the measure/align math without duplicating it.
-fn measure_and_align(elem: &dyn UIElement, allotted: Rect) -> Rect {
-    // See `measure`'s own `Collapsed` comment — same zero-size treatment, kept at `allotted`'s
-    // own origin since there's no `desired`/alignment computation to run at all.
-    if elem.visibility() == Visibility::Collapsed {
-        return Rect { x: allotted.x, y: allotted.y, width: 0.0, height: 0.0 };
-    }
-    let slot = shrink_rect_by_margin(allotted, elem.margin());
-    let slot_size = constrain(elem, Size { width: slot.width, height: slot.height });
-    let child_sizes_for_measure: Vec<Size> = elem.visual_children().iter().map(|c| measure(c.as_ref(), slot_size)).collect();
-    let desired = constrain(elem, elem.measure_override(slot_size, &child_sizes_for_measure));
-    align_within(slot, desired, elem.horizontal_alignment(), elem.vertical_alignment())
-}
-
-fn arrange<H: Clone + 'static>(elem: &Rc<dyn UIElement>, allotted: Rect, out: &mut Vec<RenderItem<H>>) {
+/// Recursively walks `elem`'s already-`arrange`d subtree (reading the `arranged_width`/
+/// `arranged_height`/`arranged_offset` each element's own `arrange()` set — see that trait
+/// method's own doc comment), collecting every `NativeControlImpl<H>` leaf (its handle cloned —
+/// cheap for a thin `Retained<NSView>`-style handle) paired with its **absolute** rect and the
+/// `Rc<dyn UIElement>` tree node that owns it, and every self-painting element's content paired
+/// with its own absolute rect — interleaved into a single `Vec<RenderItem<H>>` in traversal order
+/// (see that type's doc comment for why this must stay one list, not two). Does no measuring or
+/// arranging itself — `layout_tree` (below) always runs a real `measure`/`arrange` pass first.
+fn collect_render_items<H: Clone + 'static>(elem: &Rc<dyn UIElement>, absolute_origin: Point, out: &mut Vec<RenderItem<H>>) {
     // A `Collapsed` element neither renders itself nor recurses into its children — its whole
     // subtree is skipped, matching WinUI3 (a `Collapsed` parent hides its descendants too). See
-    // `Visibility`'s own doc comment. `actual_offset` was already set by the parent's own loop
-    // (below) before this call, so only the size needs zeroing here.
+    // `Visibility`'s own doc comment.
     if elem.visibility() == Visibility::Collapsed {
-        elem.as_ui_element().actual_width.set(0.0);
-        elem.as_ui_element().actual_height.set(0.0);
         return;
     }
-    let final_rect = measure_and_align(elem.as_ref(), allotted);
-    let final_size = Size { width: final_rect.width, height: final_rect.height };
-    // WinUI3's `ActualWidth`/`ActualHeight` — the result of this element's own just-completed
-    // Arrange, readable afterward via `UIElement::actual_width`/`actual_height`.
-    elem.as_ui_element().actual_width.set(final_size.width);
-    elem.as_ui_element().actual_height.set(final_size.height);
+    let width = elem.arranged_width().unwrap_or(0.0);
+    let height = elem.arranged_height().unwrap_or(0.0);
+    let absolute_rect = Rect { x: absolute_origin.x, y: absolute_origin.y, width, height };
 
     // `try_as_native_control` (not a direct `as_any().downcast_ref` on `elem` itself) so a type that
     // *composes* a `NativeControlImpl<H>` as its own `base` field (e.g. a backend's `ButtonImpl`)
@@ -1433,44 +1534,28 @@ fn arrange<H: Clone + 'static>(elem: &Rc<dyn UIElement>, allotted: Rect, out: &m
     // in the tree, which for such a type is never literally `NativeControlImpl<H>` itself. See
     // `UIElement::try_as_native_control`'s own doc comment.
     if let Some(native) = elem.as_ref().try_as_native_control().and_then(|a| a.downcast_ref::<NativeControlImpl<H>>()) {
-        out.push(RenderItem::Native(native.handle.clone(), final_rect, Rc::clone(elem)));
+        out.push(RenderItem::Native(native.handle.clone(), absolute_rect, Rc::clone(elem)));
     }
     if let Some(paint) = elem.paint() {
-        out.push(RenderItem::Paint(paint, final_rect));
+        out.push(RenderItem::Paint(paint, absolute_rect));
     }
 
-    let child_sizes: Vec<Size> = elem.visual_children().iter().map(|c| measure(c.as_ref(), final_size)).collect();
-    let child_rects = elem.arrange_override(final_size, &child_sizes);
-    for (child, child_rect) in elem.visual_children().iter().zip(child_rects) {
-        // WinUI3's `ActualOffset` — this child's own position relative to `elem` (its parent),
-        // set here before its absolute rect (below) is computed for the recursive call.
-        child.as_ui_element().actual_offset.set(Point { x: child_rect.x, y: child_rect.y });
-        let absolute_child_rect =
-            Rect { x: final_rect.x + child_rect.x, y: final_rect.y + child_rect.y, width: child_rect.width, height: child_rect.height };
-        arrange::<H>(child, absolute_child_rect, out);
+    for child in elem.visual_children().iter() {
+        let offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+        let child_origin = Point { x: absolute_origin.x + offset.x, y: absolute_origin.y + offset.y };
+        collect_render_items::<H>(child, child_origin, out);
     }
 }
 
-/// This element's natural (unconstrained) size — e.g. for a container that must report an
-/// `intrinsicContentSize` to an Auto-Layout-managed ancestor (see `elwindui-backend-appkit`'s
-/// `TreeHostView`) before it has ever actually been given a frame to lay out into.
-pub fn natural_size(elem: &dyn UIElement) -> Size {
-    measure(elem, Size { width: 0.0, height: 0.0 })
-}
-
-/// Recursively measures and arranges `root` against `available`, returning every `NativeControlImpl<H>`
-/// leaf (its handle cloned — cheap for a thin `Retained<NSView>`-style handle) paired with its
-/// **absolute** rect and the `Rc<dyn UIElement>` tree node that owns it, and every self-painting
-/// element's content paired with its own absolute rect — interleaved into a single `Vec<RenderItem<H>>`
-/// in `arrange`'s own traversal order (see that type's doc comment for why this must stay one list,
-/// not two). A backend's host (see `elwindui-backend-appkit`'s `TreeHostView`) replays this list in
-/// order: a `RenderItem::Native` gets placed as a native subview and positioned via its handle's own
-/// `arrange` method (a plain inherent method on that backend's own handle type — see
-/// `NativeLayoutNode`'s own doc comment for why this isn't part of that trait; a real `#[routed]`
-/// click/etc. is wired once, at the widget's own
-/// construction time — see e.g. `elwindui_backend_appkit::builtins::Button::new` — not here), a
-/// `RenderItem::Paint` gets added as a paint layer (e.g. a `CAShapeLayer`) — `elwindui-core` itself
-/// knows nothing about `NSView`/`addSubview`/`CALayer`.
+/// Measures and arranges `root` against `available`, then collects every render item — see
+/// `collect_render_items`'s own doc comment for the returned list's shape. A backend's host (see
+/// `elwindui-backend-appkit`'s `TreeHostView`) replays this list in order: a `RenderItem::Native`
+/// gets placed as a native subview and positioned via its handle's own `arrange` method (a plain
+/// inherent method on that backend's own handle type — see `NativeLayoutNode`'s own doc comment
+/// for why this isn't part of that trait; a real `#[routed]` click/etc. is wired once, at the
+/// widget's own construction time — see e.g. `elwindui_backend_appkit::builtins::Button::new` —
+/// not here), a `RenderItem::Paint` gets added as a paint layer (e.g. a `CAShapeLayer`) —
+/// `elwindui-core` itself knows nothing about `NSView`/`addSubview`/`CALayer`.
 ///
 /// `H` only needs to be named here (and on `NativeControlImpl<H>` itself) — every other `UIElement` is
 /// handle-agnostic. The root's own `horizontal_alignment`/`vertical_alignment` default to
@@ -1478,9 +1563,16 @@ pub fn natural_size(elem: &dyn UIElement) -> Size {
 /// overrides them — the same default every mainstream UI framework gives a top-level content
 /// element (`Window.Content`, an HTML `<body>`).
 pub fn layout_tree<H: Clone + 'static>(root: &Rc<dyn UIElement>, available: Size) -> Vec<RenderItem<H>> {
-    let mut out = Vec::new();
+    root.measure(available);
     let allotted = Rect { x: 0.0, y: 0.0, width: available.width, height: available.height };
-    arrange::<H>(root, allotted, &mut out);
+    root.arrange(allotted);
+    // `root` has no parent to have offset it via a `child.arrange(rect)` call, but `root.arrange`
+    // still computed its own margin/alignment-driven `arranged_offset` against `allotted` (e.g. a
+    // non-zero margin, or non-Stretch alignment) — fold that in here, exactly as a real parent's
+    // loop would via `collect_render_items`'s own child-offset step.
+    let root_offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+    let mut out = Vec::new();
+    collect_render_items::<H>(root, Point { x: allotted.x + root_offset.x, y: allotted.y + root_offset.y }, &mut out);
     out
 }
 
@@ -1488,34 +1580,33 @@ fn rect_contains(rect: Rect, at: Point) -> bool {
     at.x >= rect.x && at.x <= rect.x + rect.width && at.y >= rect.y && at.y <= rect.y + rect.height
 }
 
-/// Re-runs the same measure/arrange traversal `arrange` (above) does, without needing to know any
-/// backend's native handle type (`H`) — hit-testing only needs each element's own computed rect,
-/// never its handle. Returns the deepest (topmost) element whose rect contains `at`, or `None` if
-/// `at` falls outside `elem`'s own bounds entirely. See `elwindui_core::input::InputRouter`'s doc
-/// comment (modeled on WinUI3's routed events) — bubbling from the returned element is then just
-/// `dispatch_routed` following `parent()`, no path/ancestor computation needed here.
-fn hit_test_at(elem: &Rc<dyn UIElement>, allotted: Rect, at: Point) -> Option<Rc<dyn UIElement>> {
+/// Re-runs the same read-only traversal `collect_render_items` (above) does, without needing to
+/// know any backend's native handle type — hit-testing only needs each element's own already-
+/// `arrange`d rect, never its handle. Returns the deepest (topmost) element whose rect contains
+/// `at`, or `None` if `at` falls outside `elem`'s own bounds entirely. See
+/// `elwindui_core::input::InputRouter`'s doc comment (modeled on WinUI3's routed events) —
+/// bubbling from the returned element is then just `dispatch_routed` following `parent()`, no
+/// path/ancestor computation needed here.
+fn hit_test_at(elem: &Rc<dyn UIElement>, absolute_origin: Point, at: Point) -> Option<Rc<dyn UIElement>> {
     // A `Collapsed` element (and its whole subtree) is excluded from hit-testing, matching
-    // `arrange`'s own treatment — see `Visibility`'s own doc comment.
+    // `collect_render_items`'s own treatment — see `Visibility`'s own doc comment.
     if elem.visibility() == Visibility::Collapsed {
         return None;
     }
-    let final_rect = measure_and_align(elem.as_ref(), allotted);
-    if !rect_contains(final_rect, at) {
+    let width = elem.arranged_width().unwrap_or(0.0);
+    let height = elem.arranged_height().unwrap_or(0.0);
+    let absolute_rect = Rect { x: absolute_origin.x, y: absolute_origin.y, width, height };
+    if !rect_contains(absolute_rect, at) {
         return None;
     }
 
-    let final_size = Size { width: final_rect.width, height: final_rect.height };
-    let child_sizes: Vec<Size> = elem.visual_children().iter().map(|c| measure(c.as_ref(), final_size)).collect();
-    let child_rects = elem.arrange_override(final_size, &child_sizes);
-
-    // Children are searched last-to-first: `arrange`'s own traversal order paints later children
-    // on top of earlier ones (see 付録N's z-order note), so the *last* child whose own rect
-    // contains `at` is the topmost, correctly-hit one.
-    for (child, child_rect) in elem.visual_children().iter().zip(child_rects.iter()).rev() {
-        let absolute_child_rect =
-            Rect { x: final_rect.x + child_rect.x, y: final_rect.y + child_rect.y, width: child_rect.width, height: child_rect.height };
-        if let Some(hit) = hit_test_at(child, absolute_child_rect, at) {
+    // Children are searched last-to-first: traversal order paints later children on top of
+    // earlier ones (see 付録N's z-order note), so the *last* child whose own rect contains `at`
+    // is the topmost, correctly-hit one.
+    for child in elem.visual_children().iter().rev() {
+        let offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+        let child_origin = Point { x: absolute_origin.x + offset.x, y: absolute_origin.y + offset.y };
+        if let Some(hit) = hit_test_at(child, child_origin, at) {
             return Some(hit);
         }
     }
@@ -1523,12 +1614,16 @@ fn hit_test_at(elem: &Rc<dyn UIElement>, allotted: Rect, at: Point) -> Option<Rc
     Some(Rc::clone(elem))
 }
 
-/// Hit-tests `root` at `at` (in `root`'s own available-space coordinates, e.g. the hosting
-/// `TreeHostView`'s current bounds). Returns the deepest (topmost) hit element, or `None` if `at`
-/// falls outside `root`'s own bounds entirely.
-pub fn hit_test(root: &Rc<dyn UIElement>, available: Size, at: Point) -> Option<Rc<dyn UIElement>> {
-    let allotted = Rect { x: 0.0, y: 0.0, width: available.width, height: available.height };
-    hit_test_at(root, allotted, at)
+/// Hit-tests `root` at `at` (absolute coordinates, e.g. the hosting `TreeHostView`'s own local
+/// point). Returns the deepest (topmost) hit element, or `None` if `at` falls outside `root`'s own
+/// bounds entirely. Requires `root` to have already been laid out (e.g. via `layout_tree`) — reads
+/// cached `arranged_width`/`arranged_height`/`arranged_offset`, doesn't recompute them.
+pub fn hit_test(root: &Rc<dyn UIElement>, at: Point) -> Option<Rc<dyn UIElement>> {
+    // See `layout_tree`'s own matching comment — `root`'s own `arranged_offset` (from its margin/
+    // alignment against the original allotted rect) must be folded in here too, so hit-testing
+    // agrees with `collect_render_items`'s rendered coordinates.
+    let root_offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+    hit_test_at(root, root_offset, at)
 }
 
 /// Bubbles a routed event starting at `target` (e.g. `hit_test`'s return value, or a native leaf's
@@ -1768,20 +1863,49 @@ mod tests {
     }
 
     #[test]
-    fn actual_width_height_and_offset_are_populated_after_layout() {
+    fn arranged_width_height_and_offset_are_populated_after_layout() {
         let leaf = native("a", size(10.0, 20.0));
         leaf.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
         leaf.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
         let root = stack(Orientation::Vertical, 5.0, vec![native("top", size(50.0, 10.0)), Rc::clone(&leaf)]);
         layout_tree::<FakeHandle>(&root, size(200.0, 200.0));
 
-        assert_eq!(root.actual_width(), 200.0);
-        assert_eq!(root.actual_height(), 200.0);
-        assert_eq!(root.actual_offset(), Point { x: 0.0, y: 0.0 }, "root has no parent to set its own offset");
+        assert_eq!(root.arranged_width(), Some(200.0));
+        assert_eq!(root.arranged_height(), Some(200.0));
+        assert_eq!(root.arranged_offset(), Some(Point { x: 0.0, y: 0.0 }), "root has no parent to set its own offset");
         // second stack child ("top" is 10 tall, spacing is 5) starts at y = 15, relative to the stack
-        assert_eq!(leaf.actual_offset(), Point { x: 0.0, y: 15.0 });
-        assert_eq!(leaf.actual_width(), 10.0);
-        assert_eq!(leaf.actual_height(), 20.0);
+        assert_eq!(leaf.arranged_offset(), Some(Point { x: 0.0, y: 15.0 }));
+        assert_eq!(leaf.arranged_width(), Some(10.0));
+        assert_eq!(leaf.arranged_height(), Some(20.0));
+    }
+
+    #[test]
+    fn measured_size_and_arranged_state_are_none_before_layout_and_after_invalidate() {
+        let leaf = native("a", size(10.0, 20.0));
+        assert_eq!(leaf.measured_size(), None);
+        assert_eq!(leaf.arranged_width(), None);
+        assert_eq!(leaf.arranged_height(), None);
+        assert_eq!(leaf.arranged_offset(), None);
+
+        leaf.measure(size(200.0, 200.0));
+        assert_eq!(leaf.measured_size(), Some(size(10.0, 20.0)));
+        leaf.arrange(Rect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 });
+        assert!(leaf.arranged_width().is_some());
+        assert!(leaf.arranged_height().is_some());
+        assert!(leaf.arranged_offset().is_some());
+
+        leaf.invalidate_arrange();
+        assert!(leaf.measured_size().is_some(), "invalidate_arrange must not touch measured_size");
+        assert_eq!(leaf.arranged_width(), None);
+        assert_eq!(leaf.arranged_height(), None);
+        assert_eq!(leaf.arranged_offset(), None);
+
+        leaf.arrange(Rect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 });
+        leaf.invalidate_measure();
+        assert_eq!(leaf.measured_size(), None);
+        assert_eq!(leaf.arranged_width(), None);
+        assert_eq!(leaf.arranged_height(), None);
+        assert_eq!(leaf.arranged_offset(), None);
     }
 
     #[test]
@@ -1805,11 +1929,19 @@ mod tests {
         fn as_ui_element(&self) -> &UIElementImpl {
             &self.base
         }
-        fn measure_override(&self, _available: Size, child_sizes: &[Size]) -> Size {
-            child_sizes.iter().fold(Size { width: 0.0, height: 0.0 }, |acc, s| Size { width: acc.width.max(s.width), height: acc.height.max(s.height) })
+        fn measure_override(&self, available: Size) -> Size {
+            self.base.visual_children().iter().fold(Size::default(), |acc, c| {
+                c.measure(available);
+                let s = c.measured_size().unwrap_or_default();
+                Size { width: acc.width.max(s.width), height: acc.height.max(s.height) }
+            })
         }
-        fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect> {
-            vec![Rect { x: 0.0, y: 0.0, width: final_size.width, height: final_size.height }; child_sizes.len()]
+        fn arrange_override(&self, final_size: Size) -> Size {
+            let full = Rect { x: 0.0, y: 0.0, width: final_size.width, height: final_size.height };
+            for child in self.base.visual_children().iter() {
+                child.arrange(full);
+            }
+            final_size
         }
         fn paint(&self) -> Option<PaintKind> {
             Some(PaintKind::Shape { kind: ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: Some("#000000".to_string()), stroke: None, stroke_width: 0.0 })
@@ -1951,8 +2083,8 @@ mod tests {
         let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert!(natives.is_empty());
         assert!(paints.is_empty());
-        assert_eq!(tree.actual_width(), 0.0);
-        assert_eq!(tree.actual_height(), 0.0);
+        assert_eq!(tree.arranged_width(), Some(0.0));
+        assert_eq!(tree.arranged_height(), Some(0.0));
     }
 
     #[test]
@@ -1987,6 +2119,7 @@ mod tests {
     fn collapsed_element_is_excluded_from_hit_test() {
         let tree = native("a", size(10.0, 20.0));
         tree.as_ui_element().set_visibility(Visibility::Collapsed);
-        assert!(hit_test(&tree, size(100.0, 100.0), Point { x: 5.0, y: 5.0 }).is_none());
+        layout_tree::<FakeHandle>(&tree, size(100.0, 100.0));
+        assert!(hit_test(&tree, Point { x: 5.0, y: 5.0 }).is_none());
     }
 }

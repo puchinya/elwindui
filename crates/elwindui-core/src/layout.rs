@@ -1,17 +1,4 @@
-/// See docs/elwindui_spec.md 付録H.2.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Size {
-    pub width: f32,
-    pub height: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
+use crate::base::{Rect, Size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orientation {

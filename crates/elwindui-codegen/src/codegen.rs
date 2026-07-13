@@ -2415,11 +2415,11 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 fn visual_children(&self) -> Vec<std::rc::Rc<dyn elwindui::core::ui::UIElement>> {
                     elwindui::core::ui::UIElement::visual_children(&self.base)
                 }
-                fn measure_override(&self, available: elwindui::core::layout::Size, child_sizes: &[elwindui::core::layout::Size]) -> elwindui::core::layout::Size {
-                    elwindui::core::ui::UIElement::measure_override(&self.base, available, child_sizes)
+                fn measure_override(&self, available: elwindui::core::base::Size) -> elwindui::core::base::Size {
+                    elwindui::core::ui::UIElement::measure_override(&self.base, available)
                 }
-                fn arrange_override(&self, final_size: elwindui::core::layout::Size, child_sizes: &[elwindui::core::layout::Size]) -> Vec<elwindui::core::layout::Rect> {
-                    elwindui::core::ui::UIElement::arrange_override(&self.base, final_size, child_sizes)
+                fn arrange_override(&self, final_size: elwindui::core::base::Size) -> elwindui::core::base::Size {
+                    elwindui::core::ui::UIElement::arrange_override(&self.base, final_size)
                 }
                 fn paint(&self) -> Option<elwindui::core::ui::PaintKind> {
                     elwindui::core::ui::UIElement::paint(&self.base)

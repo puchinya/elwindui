@@ -60,6 +60,21 @@
 //! line each and the real win here is eliminating the `ClassNameImpl`/trait declaration and the
 //! ancestor delegation boilerplate.
 //!
+//! A `&self`-free method literally named `construct` (any signature, returning `Self`) opts a class
+//! into an *auto-generated* `new`: `#[class]` emits a matching `pub fn new(<same params>) ->
+//! std::rc::Rc<Self> { std::rc::Rc::new(Self::construct(<forwarded args>)) }` alongside it, so every
+//! adopting class's constructor uniformly returns `Rc<Self>` (this crate's universal DSL-facing
+//! convention) without hand-maintaining that wrapper — or a separate bare "give me an unwrapped
+//! value" free function (the old `create_x()` pattern) — itself. `construct`'s own body is entirely
+//! hand-written, exactly like the `new() -> Self` it replaces: for an `inherits = Base` class it
+//! typically builds its own `base` field by calling `Base::construct(..)`, recursively, all the way
+//! to the root's `Default::default()`. A class not using this convention (a hand-written `new`
+//! returning `Rc<Self>` directly, the pre-existing form) is entirely unaffected; defining *both*
+//! `construct` and `new` in the same `impl` block is also fine — the hand-written `new` simply wins
+//! (no auto-generation) — for a class whose `new` needs real post-construction work beyond
+//! `Rc::new(Self::construct(..))` itself (e.g. rewiring parent pointers), while `construct` still
+//! exists for other classes to call when they only need the bare, unwrapped value.
+//!
 //! `trait_only` declares a pure interface/marker trait with no backing `ClassNameImpl` anywhere in
 //! *this* crate at all — every concrete implementor (in this crate or a backend crate) provides its
 //! own struct via `struct_only = ..` instead (e.g. `elwindui_core::ui::MenuItem`, implemented by
@@ -94,7 +109,7 @@ const SEALED_CLASSES: &[&str] = &["TextArea", "Button"];
 const UI_ELEMENT_METHODS: &[&str] =
     &["as_ui_element", "visual_children", "measure_override", "arrange_override", "paint", "try_as_native_control"];
 
-/// Parsed `#[class(inherits = .., struct_only = .., abstract_class, sealed)]`
+/// Parsed `#[class(inherits = .., struct_only = .., abstract_class, sealed, no_ui_element)]`
 /// arguments — every key is optional and any subset/order is accepted.
 #[derive(Default)]
 struct ClassArgs {
@@ -114,6 +129,15 @@ struct ClassArgs {
     /// `elwindui_core::ui::NativeControl`/`MenuItem` — each concrete implementor provides its own
     /// `struct_only = ..` struct instead).
     trait_only: bool,
+    /// `inherits = ..`'s target does *not* itself relate to `UIElement` (e.g. `Window`, deliberately
+    /// outside the `UIElement` tree — see `elwindui_core::ui`'s own top doc comment). Without this,
+    /// `expand_impl` unconditionally assumes any `inherits = ..` target's `base` field implements
+    /// `UIElement` and blind-forwards to it (`uielement_blind_forward`) — which would fail to
+    /// compile against a base with no `as_ui_element`/etc. of its own. Set, this skips that blind
+    /// forward entirely and folds the `UI_ELEMENT_METHODS` partitioning away (every instance method
+    /// becomes an "own" method, the same as root class mode) — the ancestor trait's own required
+    /// methods (`#[ancestor]`-tagged, e.g. `Window`'s `set_title`/..) are unaffected either way.
+    no_ui_element: bool,
 }
 
 impl Parse for ClassArgs {
@@ -127,6 +151,7 @@ impl Parse for ClassArgs {
                 ClassArg::AbstractClass => args.abstract_class = true,
                 ClassArg::Sealed => args.sealed = true,
                 ClassArg::TraitOnly => args.trait_only = true,
+                ClassArg::NoUiElement => args.no_ui_element = true,
             }
         }
         Ok(args)
@@ -139,6 +164,7 @@ enum ClassArg {
     AbstractClass,
     Sealed,
     TraitOnly,
+    NoUiElement,
 }
 
 impl Parse for ClassArg {
@@ -156,6 +182,7 @@ impl Parse for ClassArg {
             "abstract_class" => Ok(ClassArg::AbstractClass),
             "sealed" => Ok(ClassArg::Sealed),
             "trait_only" => Ok(ClassArg::TraitOnly),
+            "no_ui_element" => Ok(ClassArg::NoUiElement),
             other => Err(syn::Error::new(ident.span(), format!("#[class]: unknown argument `{other}`"))),
         }
     }
@@ -170,6 +197,7 @@ struct StoredClassArgs {
     abstract_class: bool,
     sealed: bool,
     trait_only: bool,
+    no_ui_element: bool,
 }
 
 /// Keyed by bare class name (e.g. `"VerticalLayout"`) — populated by `struct ClassName`'s own
@@ -196,6 +224,7 @@ fn store_class_args(class_name: &str, args: &ClassArgs) {
         abstract_class: args.abstract_class,
         sealed: args.sealed,
         trait_only: args.trait_only,
+        no_ui_element: args.no_ui_element,
     };
     class_arg_store().lock().unwrap().insert(class_name.to_string(), stored);
 }
@@ -215,6 +244,7 @@ fn load_class_args(class_name: &str) -> Option<ClassArgs> {
         abstract_class: stored.abstract_class,
         sealed: stored.sealed,
         trait_only: stored.trait_only,
+        no_ui_element: stored.no_ui_element,
     })
 }
 
@@ -360,15 +390,23 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     }
 }
 
-/// `elwindui_core::ui::X` from every other crate, but `crate::ui::X` when `#[class]` is itself
-/// expanding *inside* `elwindui-core` (its own `ui.rs` uses this macro too, e.g. for
-/// `NativeControl<H>`) — a crate cannot refer to itself by its external `extern crate` name.
-/// `CARGO_PKG_NAME` is set by cargo to whichever crate is currently being compiled, i.e. exactly
-/// the crate this macro invocation is expanding within.
+/// Three possible compiling contexts for `#[class]`, distinguished by `CARGO_PKG_NAME` (set by
+/// cargo to whichever crate is currently being compiled, i.e. exactly the crate this macro
+/// invocation is expanding within — a crate cannot refer to itself by its external `extern crate`
+/// name, hence the first case):
+/// - Inside `elwindui-core` itself (its own `ui.rs` uses this macro too, e.g. for
+///   `NativeControl<H>`) -> `crate::ui::X`.
+/// - Inside one of the (hardcoded, like `SEALED_CLASSES` — see this module's own doc comment for why
+///   a manifest-derived list isn't worth it here) backend crates, which depend on `elwindui-core`
+///   directly -> `elwindui_core::ui::X`.
+/// - Anywhere else — a consumer's own crate, where `elwindui-codegen`-generated code (`.elwind` ->
+///   Rust) is the only other place this macro runs, and that consumer only ever has `elwindui`
+///   itself (the facade) as a direct dependency, never `elwindui_core` -> `elwindui::core::ui::X`.
 fn core_path() -> TokenStream2 {
     match std::env::var("CARGO_PKG_NAME").as_deref() {
         Ok("elwindui-core") => quote! { crate },
-        _ => quote! { elwindui_core },
+        Ok("elwindui-backend-appkit" | "elwindui-backend-winui3" | "elwindui-backend-gtk4") => quote! { elwindui_core },
+        _ => quote! { elwindui::core },
     }
 }
 
@@ -634,8 +672,10 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     // Root-class mode (`inherits` omitted, e.g. `UIElement` itself): there's no ancestor to route
     // anything to, so every method the user wrote is an "own" method — no `UI_ELEMENT_METHODS`
     // partitioning happens at all. See `expand_impl`'s own doc comment for the full shape.
+    // `no_ui_element` (e.g. `Window`) folds the same way: its `inherits = ..` target isn't part of
+    // the `UIElement` tree either, so there's no `UIElement`-override bucket to partition into.
     let is_root_mode = args.inherits.is_none();
-    let (ui_element_methods, own_methods): (Vec<ImplItemFn>, Vec<ImplItemFn>) = if is_root_mode {
+    let (ui_element_methods, own_methods): (Vec<ImplItemFn>, Vec<ImplItemFn>) = if is_root_mode || args.no_ui_element {
         (Vec::new(), instance_methods)
     } else {
         instance_methods.into_iter().partition(|f| UI_ELEMENT_METHODS.contains(&f.sig.ident.to_string().as_str()))
@@ -647,8 +687,12 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         // `UIElementImpl` and `LayoutImpl` both implement `UIElement` themselves now (see
         // `expand_impl`'s own doc comment), so *every* `inherits = ..` target's `base` field type
         // genuinely implements `UIElement` — blind `self.base.method(..)` forwarding is always
-        // correct, with no need to special-case which ancestor this is.
-        ancestor_impls.push(uielement_blind_forward(&core, &impl_name, &impl_generics, &ty_generics, &where_clause, &ui_element_methods));
+        // correct, with no need to special-case which ancestor this is — *except* a `no_ui_element`
+        // class (e.g. `Window`), whose `base` genuinely has no `as_ui_element`/etc. of its own to
+        // forward to, so the blind forward is skipped entirely for it.
+        if !args.no_ui_element {
+            ancestor_impls.push(uielement_blind_forward(&core, &impl_name, &impl_generics, &ty_generics, &where_clause, &ui_element_methods));
+        }
         // Any intermediate trait between `UIElement` and this class (`Layout`, `NativeControl<H>`,
         // `Shape`, `Control`, ...) also needs an `impl` of its own — skipped for `UIElement` itself
         // (already fully covered by the blind forward above) and for the "explicit facade type"
@@ -766,8 +810,47 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         }
     }
 
+    // `construct` (a bare-value initializer, typically calling `Base::construct(..)` for its own
+    // `base` field when `inherits = ..`) opts a class into an *auto-generated* `new` — see this
+    // function's own doc comment. A class not using this convention (a hand-written `new` returning
+    // `Rc<Self>` directly, the pre-existing form) is entirely unaffected. If the user hand-writes
+    // *both* `construct` and `new` in the same block, the hand-written `new` simply wins (no
+    // auto-generation, no error) — a legitimate shape for a class whose `new` needs to do real work
+    // beyond `Rc::new(Self::construct(..))` itself (e.g. `ContentControlImpl::new`'s post-
+    // construction parent-pointer rewiring), while `construct` still exists for other classes to
+    // call directly when they only need the bare, unwrapped value. `abstract_class` (e.g. `Layout`)
+    // never gets an auto-generated `new` either way — an abstract class is never meant to be
+    // directly, publicly instantiated as its own `Rc<Self>` — but it can still define `construct`
+    // (and only `construct`) purely so its own concrete subclasses (`VerticalLayout`/
+    // `HorizontalLayout`) have something mechanical to call for their own `base` field, instead of
+    // re-building `LayoutImpl { .. }` by hand in each one.
+    let has_hand_written_new = ctor_methods.iter().any(|(f, _)| f.sig.ident == "new");
+    let construct_fn = if has_hand_written_new || args.abstract_class {
+        None
+    } else {
+        ctor_methods.iter().find(|(f, _)| f.sig.ident == "construct").map(|(f, _)| f.clone())
+    };
+    let auto_new = construct_fn.as_ref().map(|f| {
+        let params = &f.sig.inputs;
+        let arg_names: Vec<TokenStream2> = params
+            .iter()
+            .filter_map(|arg| match arg {
+                FnArg::Typed(pat_type) => {
+                    let pat = &pat_type.pat;
+                    Some(quote! { #pat })
+                }
+                FnArg::Receiver(_) => None,
+            })
+            .collect();
+        quote! {
+            pub fn new(#params) -> std::rc::Rc<Self> {
+                std::rc::Rc::new(Self::construct(#(#arg_names),*))
+            }
+        }
+    });
+
     let mut ctor_block = TokenStream2::new();
-    if !ctor_methods.is_empty() || !accessor_methods.is_empty() {
+    if !ctor_methods.is_empty() || !accessor_methods.is_empty() || auto_new.is_some() {
         let fns: Vec<TokenStream2> = ctor_methods
             .iter()
             .map(|(f, force_pub)| {
@@ -781,6 +864,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         ctor_block = quote! {
             impl #impl_generics #impl_name #ty_generics #where_clause {
                 #(#fns)*
+                #auto_new
                 #(#accessor_methods)*
             }
         };

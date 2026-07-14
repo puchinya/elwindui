@@ -866,10 +866,11 @@ pub trait Window {
 /// (and so the entire layout algorithm) is a property of *which concrete type this is*, not of
 /// shared state a common base could hold.
 ///
-/// `abstract_class`: `Layout` itself is never instantiated — only its concrete subclasses
-/// (`VerticalLayout`/`HorizontalLayout`) are, each building its own `LayoutImpl` base inline in its
-/// own `new()`, the same way every other leaf/container builds its own `UIElementImpl::default()`
-/// inline rather than through a shared factory (see e.g. `Shape::new`/`Control::new`).
+/// `abstract_class`: `Layout` itself is never instantiated (no `new`, and `#[class]`'s
+/// `abstract_class` never auto-generates one even though `Layout` defines `construct` below) — only
+/// its concrete subclasses (`VerticalLayout`/`HorizontalLayout`) are, each calling `LayoutImpl::
+/// construct()` for their own `base` field (see e.g. `Shape::construct`/`Control::construct` for the
+/// same shape one level up the hierarchy, where the base *is* directly instantiable).
 #[elwindui_macros::class(inherits = UIElement, abstract_class)]
 pub struct Layout {
     pub spacing: Cell<f32>,
@@ -889,6 +890,12 @@ impl Layout {
     pub fn set_spacing(&self, spacing: f32) {
         self.spacing.set(spacing);
         self.invalidate_measure();
+    }
+
+    fn construct() -> Self {
+        let base = UIElementImpl::default();
+        let children = base.children_collection();
+        Self { base, spacing: Cell::new(0.0), children }
     }
 }
 
@@ -923,15 +930,9 @@ impl VerticalLayout {
     pub fn children(&self) -> &UIElementCollection {
         &self.base.children
     }
-    fn new() -> Self {
-        let base = UIElementImpl::default();
-        let children = base.children_collection();
-        Self { base: LayoutImpl { base, spacing: Cell::new(0.0), children } }
+    fn construct() -> Self {
+        Self { base: LayoutImpl::construct() }
     }
-}
-
-pub fn create_vertical_layout() -> VerticalLayoutImpl {
-    VerticalLayoutImpl::new()
 }
 
 /// `HorizontalLayoutImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
@@ -965,15 +966,9 @@ impl HorizontalLayout {
     pub fn children(&self) -> &UIElementCollection {
         &self.base.children
     }
-    fn new() -> Self {
-        let base = UIElementImpl::default();
-        let children = base.children_collection();
-        Self { base: LayoutImpl { base, spacing: Cell::new(0.0), children } }
+    fn construct() -> Self {
+        Self { base: LayoutImpl::construct() }
     }
-}
-
-pub fn create_horizontal_layout() -> HorizontalLayoutImpl {
-    HorizontalLayoutImpl::new()
 }
 
 /// `Rectangle`/`Ellipse`. A pure leaf, like `TextBlockImpl` — no children of its own (matching real
@@ -1021,7 +1016,7 @@ impl Shape {
         self.stroke_width.set(stroke_width);
         self.invalidate();
     }
-    fn new() -> Self {
+    fn construct() -> Self {
         Self {
             base: UIElementImpl::default(),
             kind: Cell::new(ShapeKind::RoundedRect { corner_radius: 0.0 }),
@@ -1030,10 +1025,6 @@ impl Shape {
             stroke_width: Cell::new(0.0),
         }
     }
-}
-
-pub fn create_shape() -> ShapeImpl {
-    ShapeImpl::new()
 }
 
 /// `builtin::Rectangle`(docs/elwindui_builtins_spec.md 付録G/N)— `ShapeKind::RoundedRect` に固定
@@ -1084,28 +1075,18 @@ impl Rectangle {
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElement> {
         self
     }
-    fn new(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>, corner_radius: Option<f32>) -> Rc<Self> {
-        Rc::new(create_rectangle(fill, stroke, stroke_width, corner_radius))
+    // The bare (not `Rc`-wrapped) value `#[class]`'s auto-generated `new` wraps — also what a future
+    // `component X inherits Rectangle` would embed unwrapped as its own `base` field, mirroring
+    // `Control`/`Shape`'s own `construct` (`Rectangle` is `#[sealed]` today, so nothing actually
+    // reaches this via that path yet, but the shape stays consistent with every other builtin).
+    fn construct(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>, corner_radius: Option<f32>) -> Self {
+        let shape = ShapeImpl::construct();
+        shape.set_kind(ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) });
+        shape.set_fill(fill);
+        shape.set_stroke(stroke);
+        shape.set_stroke_width(stroke_width.unwrap_or(0.0));
+        Self { base: shape, stroke_width, corner_radius }
     }
-}
-
-/// The plain (not `Rc`-wrapped) value `RectangleImpl::new` itself wraps — also what a future
-/// `component X inherits Rectangle` would embed unwrapped as its own `base` field, mirroring
-/// `create_control`/`create_shape`'s own role for `Control`/`Shape` (`Rectangle` is `#[sealed]`
-/// today, so nothing actually reaches this via that path yet, but the shape stays consistent with
-/// every other builtin's `create_xxx`/`XxxImpl::new` split).
-pub fn create_rectangle(
-    fill: Option<String>,
-    stroke: Option<String>,
-    stroke_width: Option<f32>,
-    corner_radius: Option<f32>,
-) -> RectangleImpl {
-    let shape = create_shape();
-    shape.set_kind(ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) });
-    shape.set_fill(fill);
-    shape.set_stroke(stroke);
-    shape.set_stroke_width(stroke_width.unwrap_or(0.0));
-    RectangleImpl { base: shape, stroke_width, corner_radius }
 }
 
 /// `builtin::Ellipse`(docs/elwindui_builtins_spec.md 付録G/N)— `ShapeKind::Oval` に固定した
@@ -1149,20 +1130,16 @@ impl Ellipse {
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElement> {
         self
     }
-    fn new(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>) -> Rc<Self> {
-        Rc::new(create_ellipse(fill, stroke, stroke_width))
+    // The bare (not `Rc`-wrapped) value `#[class]`'s auto-generated `new` wraps — see `Rectangle`'s
+    // own `construct` doc comment for why this split exists.
+    fn construct(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>) -> Self {
+        let shape = ShapeImpl::construct();
+        shape.set_kind(ShapeKind::Oval);
+        shape.set_fill(fill);
+        shape.set_stroke(stroke);
+        shape.set_stroke_width(stroke_width.unwrap_or(0.0));
+        Self { base: shape, stroke_width }
     }
-}
-
-/// The plain (not `Rc`-wrapped) value `EllipseImpl::new` itself wraps — see `create_rectangle`'s
-/// own doc comment for why this split exists.
-pub fn create_ellipse(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>) -> EllipseImpl {
-    let shape = create_shape();
-    shape.set_kind(ShapeKind::Oval);
-    shape.set_fill(fill);
-    shape.set_stroke(stroke);
-    shape.set_stroke_width(stroke_width.unwrap_or(0.0));
-    EllipseImpl { base: shape, stroke_width }
 }
 
 /// Self-drawn primitive text (WinUI3's `TextBlockImpl`) — no native widget, unlike the native `Text`
@@ -1206,7 +1183,7 @@ impl TextBlock {
         self.alignment.set(alignment);
         self.invalidate();
     }
-    fn new() -> Self {
+    fn construct() -> Self {
         Self {
             base: UIElementImpl::default(),
             text: RefCell::new(String::new()),
@@ -1214,10 +1191,6 @@ impl TextBlock {
             alignment: Cell::new(TextAlignment::Left),
         }
     }
-}
-
-pub fn create_text_block() -> TextBlockImpl {
-    TextBlockImpl::new()
 }
 
 /// A composable, multi-part component (WinUI3's `ControlImpl`) — Visually built from any number of
@@ -1284,7 +1257,7 @@ impl Control {
         self.content_vertical_alignment.set(alignment);
         self.invalidate_arrange();
     }
-    fn new() -> Self {
+    fn construct() -> Self {
         let base = UIElementImpl::default();
         let children = base.children_collection();
         Self {
@@ -1295,10 +1268,6 @@ impl Control {
             children,
         }
     }
-}
-
-pub fn create_control() -> ControlImpl {
-    ControlImpl::new()
 }
 
 /// `builtin::ContentControl`(docs/elwindui_spec.md 付録H.2.1a)— 単一の子(`content`)を持つ
@@ -1348,29 +1317,29 @@ impl ContentControl {
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElement> {
         self
     }
+    // The bare (not `Rc`-wrapped) value `new` below wraps — also what `component X inherits
+    // ContentControl` (`RoundedPanel`/`DocumentView` in `examples/notepad`) embeds unwrapped as its
+    // own `base` field, mirroring `Control`/`Shape`'s own `construct`. Unlike `Rectangle`/`Ellipse`'s
+    // `construct`, this one genuinely is called that way today (`ContentControl` isn't `#[sealed]`),
+    // by generated code that never goes through `ContentControlImpl::new` at all — the parent-
+    // pointer wiring `new` does on top of this is only needed when `content` is embedded directly as
+    // *this* value's own child; a shape-composing subclass rewires it again itself once `content`
+    // becomes one of *its own* visual children. `new` is hand-written (not `#[class]`-auto-generated
+    // from `construct`) precisely because of that extra wiring step.
+    fn construct(padding: Option<f32>, content: Rc<dyn UIElement>) -> Self {
+        let control = ControlImpl::construct();
+        control.set_padding(padding.unwrap_or(0.0));
+        control.children.add(content.clone());
+        Self { base: control, padding, content }
+    }
     fn new(padding: Option<f32>, content: Rc<dyn UIElement>) -> Rc<Self> {
-        let this = Rc::new(create_content_control(padding, content));
+        let this = Rc::new(Self::construct(padding, content));
         let erased: Rc<dyn UIElement> = this.clone();
         for child in this.visual_children() {
             *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&erased));
         }
         this
     }
-}
-
-/// The plain (not `Rc`-wrapped) value `ContentControlImpl::new` itself wraps — also what
-/// `component X inherits ContentControl` (`RoundedPanel`/`DocumentView` in `examples/notepad`)
-/// embeds unwrapped as its own `base` field, mirroring `create_control`/`create_shape`'s own role
-/// for `Control`/`Shape`. Unlike `create_rectangle`/`create_ellipse`, this one genuinely is called
-/// that way today (`ContentControl` isn't `#[sealed]`), by generated code that never goes through
-/// `ContentControlImpl::new` at all — the parent-pointer wiring `new` does on top of this is only
-/// needed when `content` is embedded directly as *this* value's own child; a shape-composing
-/// subclass rewires it again itself once `content` becomes one of *its own* visual children.
-pub fn create_content_control(padding: Option<f32>, content: Rc<dyn UIElement>) -> ContentControlImpl {
-    let control = create_control();
-    control.set_padding(padding.unwrap_or(0.0));
-    control.children.add(content.clone());
-    ContentControlImpl { base: control, padding, content }
 }
 
 /// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/elwindui_spec.md §3). Each child's
@@ -1440,7 +1409,7 @@ impl Grid {
         *self.columns.borrow_mut() = columns;
         self.invalidate_measure();
     }
-    fn new() -> Self {
+    fn construct() -> Self {
         let base = UIElementImpl::default();
         let children = base.children_collection();
         Self { base, rows: RefCell::new(Vec::new()), columns: RefCell::new(Vec::new()), children }
@@ -1451,10 +1420,6 @@ impl Grid {
 // entirely, unlike `VerticalLayout`/`HorizontalLayout`) — `#[class(inherits = UIElement)]` above
 // doesn't know to also mark it as a `Layout`, so that one-line empty marker stays hand-written.
 impl Layout for GridImpl {}
-
-pub fn create_grid() -> GridImpl {
-    GridImpl::new()
-}
 
 /// WinUI3's `FrameworkElement.MeasureCore`-style constraint step, used by `UIElement::measure`: an
 /// explicit `width`/`height` overrides that axis outright, then both axes are clamped to
@@ -1675,7 +1640,7 @@ mod tests {
     fn stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
         match orientation {
             Orientation::Vertical => {
-                let node = create_vertical_layout();
+                let node = VerticalLayoutImpl::construct();
                 node.set_spacing(spacing);
                 for child in children {
                     node.children().add(child);
@@ -1683,7 +1648,7 @@ mod tests {
                 new_element(node)
             }
             Orientation::Horizontal => {
-                let node = create_horizontal_layout();
+                let node = HorizontalLayoutImpl::construct();
                 node.set_spacing(spacing);
                 for child in children {
                     node.children().add(child);
@@ -1738,7 +1703,7 @@ mod tests {
         fn start_stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElement>>) -> Rc<dyn UIElement> {
             let node = match orientation {
                 Orientation::Vertical => {
-                    let stack = create_vertical_layout();
+                    let stack = VerticalLayoutImpl::construct();
                     stack.set_spacing(spacing);
                     for child in children {
                         stack.children().add(child);
@@ -1746,7 +1711,7 @@ mod tests {
                     new_element(stack)
                 }
                 Orientation::Horizontal => {
-                    let stack = create_horizontal_layout();
+                    let stack = HorizontalLayoutImpl::construct();
                     stack.set_spacing(spacing);
                     for child in children {
                         stack.children().add(child);
@@ -1791,7 +1756,7 @@ mod tests {
     fn shape_reports_paint_and_has_no_children() {
         // `Shape` (matching real WinUI3's `Shape`) is a pure leaf: no `Children`/content property
         // of its own — see `ShapeImpl`'s own doc comment.
-        let shape = create_shape();
+        let shape = ShapeImpl::construct();
         shape.set_kind(ShapeKind::RoundedRect { corner_radius: 8.0 });
         shape.set_fill(Some("#3498db".to_string()));
         let tree: Rc<dyn UIElement> = new_element(shape);
@@ -1807,7 +1772,7 @@ mod tests {
 
     #[test]
     fn control_padding_shrinks_the_slot_its_children_are_arranged_into() {
-        let control = create_control();
+        let control = ControlImpl::construct();
         control.set_padding(10.0);
         control.children.add(native("a", size(10.0, 20.0)));
         let tree: Rc<dyn UIElement> = new_element(control);
@@ -1962,7 +1927,7 @@ mod tests {
 
     #[test]
     fn text_block_defaults_to_left_alignment_and_set_text_alignment_updates_paint() {
-        let text_block = create_text_block();
+        let text_block = TextBlockImpl::construct();
         assert_eq!(text_block.alignment.get(), TextAlignment::Left);
         match text_block.paint() {
             Some(PaintKind::Text { alignment, .. }) => assert_eq!(alignment, TextAlignment::Left),
@@ -1992,7 +1957,7 @@ mod tests {
         // `children` is cloned out *before* `new_element` erases the concrete `ControlImpl` into
         // `Rc<dyn UIElement>` — a cheap clone (two shared `Rc`s), and it keeps sharing the exact
         // same underlying storage as the erased value's own `base.visual_children` afterward.
-        let control = create_control();
+        let control = ControlImpl::construct();
         let children = control.children.clone();
         let root: Rc<dyn UIElement> = new_element(control);
         assert!(root.visual_children().is_empty());

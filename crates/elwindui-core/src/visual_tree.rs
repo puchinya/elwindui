@@ -53,13 +53,13 @@ fn collect_all<T: 'static>(node: &dyn UIElement, out: &mut Vec<Rc<dyn UIElement>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{create_text_block, create_vertical_layout, new_element, TextBlockImpl, VerticalLayout as _};
+    use crate::ui::{new_element, TextBlockImpl, VerticalLayout as _, VerticalLayoutImpl};
 
     #[test]
     fn children_count_and_get_child_match_visual_children() {
-        let layout = create_vertical_layout();
-        layout.children().add(new_element(create_text_block()));
-        layout.children().add(new_element(create_text_block()));
+        let layout = VerticalLayoutImpl::construct();
+        layout.children().add(new_element(TextBlockImpl::construct()));
+        layout.children().add(new_element(TextBlockImpl::construct()));
         let tree: Rc<dyn UIElement> = new_element(layout);
 
         assert_eq!(get_children_count(tree.as_ref()), 2);
@@ -69,8 +69,8 @@ mod tests {
 
     #[test]
     fn get_parent_walks_back_up() {
-        let layout = create_vertical_layout();
-        let text = new_element(create_text_block());
+        let layout = VerticalLayoutImpl::construct();
+        let text = new_element(TextBlockImpl::construct());
         layout.children().add(text.clone());
         let tree: Rc<dyn UIElement> = new_element(layout);
 
@@ -81,11 +81,11 @@ mod tests {
 
     #[test]
     fn find_all_collects_matching_type_across_tree() {
-        let outer = create_vertical_layout();
-        let inner = create_vertical_layout();
-        inner.children().add(new_element(create_text_block()));
+        let outer = VerticalLayoutImpl::construct();
+        let inner = VerticalLayoutImpl::construct();
+        inner.children().add(new_element(TextBlockImpl::construct()));
         outer.children().add(new_element(inner));
-        outer.children().add(new_element(create_text_block()));
+        outer.children().add(new_element(TextBlockImpl::construct()));
         let tree: Rc<dyn UIElement> = new_element(outer);
 
         let texts = find_all::<TextBlockImpl>(tree.as_ref());

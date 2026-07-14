@@ -125,7 +125,7 @@ fn main() {
     // expressions (e.g. `save`'s can_execute) as well as `TabView`'s active-tab lookup assume at
     // least one document exists.
     vm.new_tab_execute();
-    let window = NotepadWindowImpl::new(vm);
+    let window = elwindui::new!(<NotepadWindow>(vm));
     window.show();
 
     elwindui::application::run();

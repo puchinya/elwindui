@@ -10,7 +10,7 @@
 pub use elwindui_core as core;
 pub use elwindui_core::visual_tree;
 pub use elwindui_i18n as i18n;
-pub use elwindui_macros::{component, viewmodel};
+pub use elwindui_macros::{class, component, new, viewmodel};
 
 /// See the `backend-appkit`/`backend-winui3` re-export below — `elwindui-backend-gtk4` is still an
 /// empty stub (no `builtins`/`platform`/`application` of its own yet), so there is no

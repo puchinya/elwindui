@@ -45,8 +45,12 @@ pub struct Window {
 
 #[elwindui_macros::class]
 impl Window {
-    fn new() -> Rc<Self> {
-        Rc::new(Self { inner: winui3::Window::new() })
+    // The bare (not `Rc`-wrapped) value `#[class]`'s auto-generated `new` wraps — this is also what
+    // lets a `component X inherits Window` (host composition) embed a real `WindowImpl` directly as
+    // its own `base` field, matching `#[class(inherits = elwindui::ui::Window)]`'s default `base`
+    // field shape.
+    fn construct() -> Self {
+        Self { inner: winui3::Window::new() }
     }
 
     fn set_title(&self, title: &str) {

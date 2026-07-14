@@ -45,9 +45,9 @@ pub enum Item {
 ///   `validate_inherits`; there is no view-synthesis fallback for an omitted one). `Name` inherits
 ///   `Base`'s fields the usual bare-reference way (`resolve_effective_fields`), and — because the
 ///   root construction matches `Base` exactly — `codegen.rs`'s `generate_view` additionally
-///   generates `Name`'s struct with a real `base: <BaseImpl>` field (`elwindui_core::ui`'s own
-///   trait+`Impl`+`base` convention, docs/elwindui_spec.md 付録H.2.1a) and a direct
-///   `impl UIElement`/`impl <Base's own trait>` delegating to it, instead of the generic "wrapper
+///   generates `Name`'s struct with a real `base: <Base>` field (`elwindui_core::ui`'s own
+///   struct/`Ext`-trait/`base` convention, docs/elwindui_spec.md 付録H.2.1a) and a direct
+///   `impl UIElementExt`/`impl <Base's own Ext trait>` delegating to it, instead of the generic "wrapper
 ///   owning a separately-`Rc`-erased root" every other `view`-having component uses. See
 ///   `codegen.rs`'s `generate_view` `is_shape_composition` doc comment for why this is deliberately
 ///   narrow (`RoundedPanel inherits Rectangle`, `ContentControl inherits Control`).

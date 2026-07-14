@@ -1,5 +1,5 @@
 use crate::base::Point;
-use crate::ui::UIElement;
+use crate::ui::UIElementExt;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -38,6 +38,6 @@ pub struct RoutedEventArgs {
 /// carries the measured/arranged geometry (`measure_override`/`arrange_override`) hit-testing
 /// needs — see `elwindui_core::ui::hit_test`/`dispatch_routed`, which this trait wraps.
 pub trait InputRouter {
-    fn hit_test(&self, root: &Rc<dyn UIElement>, at: Point) -> Option<Rc<dyn UIElement>>;
-    fn dispatch(&mut self, root: &Rc<dyn UIElement>, event: PointerEvent);
+    fn hit_test(&self, root: &Rc<dyn UIElementExt>, at: Point) -> Option<Rc<dyn UIElementExt>>;
+    fn dispatch(&mut self, root: &Rc<dyn UIElementExt>, event: PointerEvent);
 }

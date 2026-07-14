@@ -1,5 +1,4 @@
 use elwindui::platform;
-use elwindui::ui;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {
@@ -125,7 +124,7 @@ fn main() {
     // expressions (e.g. `save`'s can_execute) as well as `TabView`'s active-tab lookup assume at
     // least one document exists.
     vm.new_tab_execute();
-    let window = elwindui::new!(<NotepadWindow>(vm));
+    let window = NotepadWindow::new(vm);
     window.show();
 
     elwindui::application::run();

@@ -5,7 +5,7 @@
 //! values `elwindui-codegen` builds directly (`TextBlock` is self-drawn, using the real XAML
 //! `TextBlock` class only as a paint primitive inside `TreeHostPanel::relayout_static`, never as a
 //! wrapped builtin widget — see `elwindui-backend-appkit`'s `CATextLayer` use for the same role);
-//! only `Window`/`ButtonImpl`/`TextAreaImpl`/`MenuBarImpl`/`MenuBarItemImpl`/`MenuImpl`/`MenuItemImpl`/`NativeTabViewImpl` are real
+//! only `Window`/`Button`/`TextArea`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`NativeTabView` are real
 //! native widgets).
 //!
 //! # UNVERIFIED — read before touching
@@ -49,12 +49,12 @@ use windows::core::{Interface, Result, HSTRING};
 // brought into scope anonymously so `.as_ui_element()` dot-call syntax resolves on `Rc<dyn
 // elwindui_core::ui::UIElement>`/composed values, matching the `Button as _`/`TextArea as _`-style
 // anonymous imports `elwindui-backend-appkit` already uses for this exact purpose.
-use elwindui_core::ui::UIElement as _;
-// Bare (not anonymous): `#[elwindui_macros::class]`'s `inherits = NativeControl` below needs the
-// actual type name in scope — `base_impl_type` mechanically appends `Impl` to a *bare* `inherits`
-// name, landing on this crate's own `NativeControlImpl` (below) since it's in scope under that exact
-// name. See `elwindui-backend-appkit`'s matching import for the full rationale.
-use elwindui_core::ui::NativeControl;
+use elwindui_core::ui::UIElementExt as _;
+// Bare (not anonymous): the hand-written `TabView: NativeControlExt` trait below needs the name in
+// scope directly (`inherits = NativeControl` on the `#[class]`-managed structs further down instead
+// resolves to this crate's own `NativeControl` struct, declared later in this same module — no
+// import needed for that).
+use elwindui_core::ui::NativeControlExt;
 use std::any::Any;
 
 /// The capability a type needs to be usable as an `AnyView` — implemented once per raw XAML element
@@ -64,8 +64,8 @@ use std::any::Any;
 /// (see that trait's own doc comment for the rationale).
 ///
 /// Implemented on the raw XAML element type itself (a foreign type — allowed since `WinUiHandle` is
-/// a local trait) rather than on `TextAreaImpl`/`ButtonImpl`/`NativeTabViewImpl`, since those now each
-/// compose this crate's own `NativeControlImpl` (below) as their own `base` field
+/// a local trait) rather than on `TextArea`/`Button`/`NativeTabView`, since those now each
+/// compose this crate's own `NativeControl` (below) as their own `base` field
 /// (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed widget
 /// itself would be a self-reference. Wrapping just the raw element instead lets `base.handle` be
 /// built (`AnyView::from(xaml.clone())`) before the rest of the widget struct exists.
@@ -89,7 +89,7 @@ impl WinUiHandle for XamlTabView {
     }
 }
 
-/// Everything the generated code can pass as a `Window`/`NativeTabViewImpl` child.
+/// Everything the generated code can pass as a `Window`/`NativeTabView` child.
 /// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no variant here —
 /// they're purely `elwindui_core::ui::UIElement` values (see `TreeHostPanel` below). An
 /// `Rc<dyn WinUiHandle>` (not a closed `enum`) so adding a new native leaf never requires touching
@@ -104,7 +104,7 @@ impl AnyView {
 }
 
 impl AnyView {
-    /// Lets `NativeControlImpl::measure_override` (below — shared by every `TextArea`/`Button`/
+    /// Lets `NativeControl::measure_override` (below — shared by every `TextArea`/`Button`/
     /// `TabView` leaf) measure any wrapped widget uniformly through the base `FrameworkElement`/
     /// `UIElement` API regardless of which concrete widget it wraps — no per-widget
     /// re-implementation of the actual `Measure`/`DesiredSize` calls needed. A plain inherent method,
@@ -141,23 +141,23 @@ impl<T: WinUiHandle + 'static> From<T> for AnyView {
     }
 }
 
-/// Shared concrete base for every WinUI3 native leaf (`TextArea`/`Button`/`NativeTabViewImpl` below)
+/// Shared concrete base for every WinUI3 native leaf (`TextArea`/`Button`/`NativeTabView` below)
 /// — the backend-owned counterpart to `elwindui_core::ui::NativeControl` (a pure marker trait with no
 /// backing struct of its own; see that trait's own doc comment for why `elwindui-core` doesn't define
 /// this generically). Holding `handle: AnyView` here once, instead of on each of the three widgets
 /// individually, is what lets `inherits = NativeControl` below resolve `base`'s field type to this
 /// same struct (`#[elwindui_macros::class]`'s `base_impl_type` mechanically appends `Impl` to a
-/// *bare* `inherits = ..` name, landing on the `NativeControlImpl` this ordinary — not
+/// *bare* `inherits = ..` name, landing on the `NativeControl` this ordinary — not
 /// explicit-facade — declaration generates, since `use elwindui_core::ui::NativeControl` above brings
 /// the *trait*, a different identifier, into the same scope) while also picking up an automatic,
-/// empty `impl elwindui_core::ui::NativeControl for TextAreaImpl {}` on every class that (transitively)
+/// empty `impl elwindui_core::ui::NativeControl for TextArea {}` on every class that (transitively)
 /// inherits from this one (that trait has zero required methods, so there's nothing to write on each
 /// implementor).
 // `inherits = elwindui_core::ui::UIElement` (fully qualified, not bare `UIElement`) — this file's
 // bare `UIElement` already names XAML's own native type (see the `use bindings::...::UIElement`
 // import above); `base_impl_type` only inspects the *last path segment* ("UIElement") when deciding
 // the root case, so the extra qualification doesn't change `base`'s resolved field type.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::NativeControl, inherits = elwindui_core::ui::UIElement)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::NativeControlExt, inherits = elwindui_core::ui::UIElement)]
 pub struct NativeControl {
     handle: AnyView,
 }
@@ -171,7 +171,7 @@ impl NativeControl {
         Some(&self.handle)
     }
     pub fn new(handle: AnyView) -> Self {
-        Self { base: elwindui_core::ui::UIElementImpl::default(), handle }
+        Self { base: elwindui_core::ui::UIElement::default(), handle }
     }
 }
 
@@ -189,7 +189,7 @@ impl NativeControl {
 #[derive(Clone)]
 pub struct TreeHostPanel {
     canvas: Canvas,
-    tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>,
+    tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
@@ -208,7 +208,7 @@ pub struct TreeHostPanel {
 /// deferred relayout pass, not one synchronous pass per call.
 struct WinUI3RelayoutHost {
     canvas: Canvas,
-    tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>,
+    tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
     /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
     /// (and clears it right before doing so).
@@ -216,7 +216,7 @@ struct WinUI3RelayoutHost {
     /// Lets `request_relayout` (which only ever sees `&self`) hand an owned `Rc<Self>` to the
     /// `DispatcherQueueHandler` closure — set once, right after this host is `Rc`-wrapped (see
     /// `TreeHostPanel::set_tree`), the same self-referential-`Weak` pattern
-    /// `elwindui_backend_appkit::builtins::tab_view::NativeTabViewImpl` uses for the same reason.
+    /// `elwindui_backend_appkit::builtins::tab_view::NativeTabView` uses for the same reason.
     weak_self: RefCell<Weak<WinUI3RelayoutHost>>,
 }
 
@@ -250,7 +250,7 @@ impl TreeHostPanel {
         let weak = Rc::downgrade(&this.tree);
         let canvas_for_handler = this.canvas.clone();
         // `SizeChanged` fires whenever this panel's own allotted space changes (window resize,
-        // or — for a `NativeTabViewImpl`'s per-tab content area — the tab strip/window resizing together)
+        // or — for a `NativeTabView`'s per-tab content area — the tab strip/window resizing together)
         // — the same role `layout()` plays for AppKit's `TreeHostView`.
         let _ = this.canvas.SizeChanged(&TypedEventHandler::new(move |_, _| {
             if let Some(tree) = weak.upgrade() {
@@ -266,10 +266,10 @@ impl TreeHostPanel {
     }
 
     /// Replaces this host's entire content, discarding whatever native children were there before
-    /// — a full swap rather than a diff, matching `NativeTabViewImpl`'s wholesale content swap between tabs
+    /// — a full swap rather than a diff, matching `NativeTabView`'s wholesale content swap between tabs
     /// and `Window::set_content` only ever being called once (see `TreeHostView::set_tree`'s doc
     /// comment on the AppKit side for the same reasoning).
-    pub fn set_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElement>) {
+    pub fn set_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElementExt>) {
         if let Ok(children) = self.canvas.Children() {
             let _ = children.Clear();
         }
@@ -285,7 +285,7 @@ impl TreeHostPanel {
         Self::relayout_static(&self.canvas, &self.tree);
     }
 
-    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElement>>>>) {
+    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>) {
         use elwindui_core::base::Size as LSize;
 
         let width = canvas.ActualWidth().unwrap_or(0.0) as f32;
@@ -302,7 +302,7 @@ impl TreeHostPanel {
         // children traversal order (see `RenderItem`'s doc comment) — replayed here in one pass so
         // `Children.Append` happens in the exact order encountered. `Canvas` z-orders by `Children`
         // collection order, so this makes document order the z-order for native leaves and
-        // self-painted content alike (e.g. a `Rectangle`'s fill staying behind a `ButtonImpl` child
+        // self-painted content alike (e.g. a `Rectangle`'s fill staying behind a `Button` child
         // placed after it), instead of appending "all paints" then "all natives" as two separate
         // batches, which threw the relative ordering between the two away.
         for item in items {
@@ -429,7 +429,7 @@ impl Window {
     /// Replaces the window's whole content tree — see `TreeHostPanel` for how an `Rc<dyn
     /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
     /// gets reflected into real XAML elements.
-    pub fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
+    pub fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
         self.content_host.set_tree(content);
     }
 
@@ -439,13 +439,13 @@ impl Window {
 
     /// `Microsoft.UI.Xaml.Controls.MenuBar` is placed as a real element *above* the content host,
     /// unlike AppKit's single global `NSApplication.mainMenu` — this repacks `Window`'s content
-    /// into a two-row layout (`MenuBarImpl`, then the existing content host) the first time a menu bar
+    /// into a two-row layout (`MenuBar`, then the existing content host) the first time a menu bar
     /// is set. `VerticalLayout`/`HorizontalLayout` aren't available here (no backend struct — see
     /// the module doc comment), so this uses a plain `Canvas`-less stack: a small dedicated host `Grid` with two
     /// rows would be the idiomatic XAML way to do this; simplified here to stacking two elements
     /// inside a fresh outer `Canvas` sized/positioned manually, mirroring `TreeHostPanel`'s own
     /// "don't trust native auto-layout, position everything explicitly" approach.
-    pub fn set_menu_bar(&self, menu_bar: &MenuBarImpl) {
+    pub fn set_menu_bar(&self, menu_bar: &MenuBar) {
         let outer = Canvas::new().expect("Canvas::new");
         if let Ok(children) = outer.Children() {
             let _ = children.Append(&menu_bar.xaml);
@@ -520,7 +520,7 @@ impl Window {
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TextArea, inherits = NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = NativeControl)]
 pub struct TextArea {
     text_box: TextBox,
     on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
@@ -528,13 +528,13 @@ pub struct TextArea {
 
 /// `elwindui_core::ui::TextArea`'s shape is common to every backend (docs/elwindui_spec.md
 /// 付録H.2.1a) — see that trait's own doc comment; only these method bodies are WinUI3-specific.
-/// No `measure_override`/`try_as_native_control` here — both blind-forward to `NativeControlImpl`
+/// No `measure_override`/`try_as_native_control` here — both blind-forward to `NativeControl`
 /// (this class's own `base`) already, since neither is overridden.
 #[elwindui_macros::class]
 impl TextArea {
     /// `TextBox.Text` assigned programmatically resets the caret/selection to the start, even when
     /// the text given is identical to what's already there — same issue as AppKit's
-    /// `NSTextView.setString:` (see that backend's own `TextAreaImpl::set_text` doc comment for the
+    /// `NSTextView.setString:` (see that backend's own `TextArea::set_text` doc comment for the
     /// full rationale). The two-way `#[two_way] text` binding re-syncs *every* bound field on
     /// *every* model change, including the one this exact edit just caused, so without this guard
     /// typing a single character would immediately call this with that same character already
@@ -556,7 +556,7 @@ impl TextArea {
         let _ = text_box.SetAcceptsReturn(true);
         let _ = text_box.SetTextWrapping(bindings::Microsoft::UI::Xaml::TextWrapping::Wrap);
         let handle = AnyView::from(text_box.clone());
-        let this = Self { base: NativeControlImpl::new(handle), text_box, on_change: Rc::new(RefCell::new(None)) };
+        let this = Self { base: NativeControl::new(handle), text_box, on_change: Rc::new(RefCell::new(None)) };
         let callback = this.on_change.clone();
         let text_box_for_handler = this.text_box.clone();
         let _ = this.text_box.TextChanged(&TypedEventHandler::<TextBox, TextChangedEventArgs>::new(move |_, _| {
@@ -570,11 +570,11 @@ impl TextArea {
     }
 }
 
-pub fn create_text_area() -> TextAreaImpl {
-    TextAreaImpl::new()
+pub fn create_text_area() -> TextArea {
+    TextArea::new()
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::Button, inherits = NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::ButtonExt, inherits = NativeControl)]
 pub struct Button {
     xaml: XamlButton,
     on_click: Rc<RefCell<Option<Box<dyn Fn()>>>>,
@@ -582,7 +582,7 @@ pub struct Button {
 
 /// `elwindui_core::ui::Button`'s shape is common to every backend — see that trait's own doc
 /// comment; only these method bodies are WinUI3-specific. No `measure_override`/
-/// `try_as_native_control` here — both blind-forward to `NativeControlImpl` (this class's own
+/// `try_as_native_control` here — both blind-forward to `NativeControl` (this class's own
 /// `base`) already, since neither is overridden.
 #[elwindui_macros::class]
 impl Button {
@@ -594,15 +594,15 @@ impl Button {
         *self.on_click.borrow_mut() = Some(callback);
     }
 
-    /// Used by generic resync when a `ButtonImpl`'s `text` attribute is a dynamic expression.
+    /// Used by generic resync when a `Button`'s `text` attribute is a dynamic expression.
     fn set_text(&self, text: &str) {
         let _ = self.xaml.SetContent(&HSTRING::from(text));
     }
 
     fn new() -> Self {
-        let xaml = XamlButton::new().expect("ButtonImpl::new");
+        let xaml = XamlButton::new().expect("Button::new");
         let handle = AnyView::from(xaml.clone());
-        let this = Self { base: NativeControlImpl::new(handle), xaml, on_click: Rc::new(RefCell::new(None)) };
+        let this = Self { base: NativeControl::new(handle), xaml, on_click: Rc::new(RefCell::new(None)) };
         let callback = this.on_click.clone();
         let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
             if let Some(cb) = callback.borrow().as_ref() {
@@ -614,48 +614,48 @@ impl Button {
     }
 }
 
-pub fn create_button() -> ButtonImpl {
-    ButtonImpl::new()
+pub fn create_button() -> Button {
+    Button::new()
 }
 
 /// `Microsoft.UI.Xaml.Controls.TabView` is a real native tabbed-document control (unlike AppKit,
 /// which has no built-in equivalent — `elwindui-backend-appkit`'s `TabStrip`/`TabChip` hand-roll
-/// one from `ButtonImpl`s), so this wraps it directly instead of assembling a strip from scratch. Each
+/// one from `Button`s), so this wraps it directly instead of assembling a strip from scratch. Each
 /// tab's `TabViewItem.Content` is a `TreeHostPanel` (see that type) holding that tab's
 /// `Rc<dyn UIElement>` — `elwindui-builtins`'s generic wrapper (the `Rc<dyn Any>`-erased per-item type,
 /// mirroring `elwindui-builtins::appkit::tab_view`) owns the tab list and calls the methods below;
 /// this type only knows about "N tabs, each with a title and a content host", the same division
-/// AppKit's `NativeTabViewImpl` keeps.
-/// `NativeTabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — mirrors
+/// AppKit's `NativeTabView` keeps.
+/// `NativeTabView`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — mirrors
 /// `elwindui-backend-appkit::TabView`, extending `NativeControl` since a real `AnyView`
 /// handle (`self.base.handle`, wrapping `self.xaml`) is what makes this leaf embeddable in the
 /// visual tree at all.
-pub trait TabView: NativeControl {
+pub trait TabView: NativeControlExt {
     fn set_on_select(&self, callback: Box<dyn Fn(usize)>);
     fn set_on_close(&self, callback: Box<dyn Fn(usize)>);
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>);
     /// Inserts a new tab at `index` with an empty content host, returning that host so the caller
     /// (`elwindui-builtins`'s generic wrapper) can `set_tree` it — the WinUI3 counterpart of
     /// AppKit's `insert_tab`, minus the per-chip `on_select`/`on_close` callbacks (WinUI3's
-    /// `NativeTabViewImpl` fires those once for the whole control, wired in `new` above, not per item).
+    /// `NativeTabView` fires those once for the whole control, wired in `new` above, not per item).
     fn insert_tab(&self, index: usize, title: &str, closable: bool) -> TreeHostPanel;
     fn remove_tab_at(&self, index: usize);
     fn set_tab_title(&self, index: usize, title: &str);
     fn set_selected_index(&self, index: usize);
 }
 
-#[elwindui_macros::class(struct_only = TabView, inherits = NativeControl)]
-pub struct NativeTabViewImpl {
+#[elwindui_macros::class(struct_only = TabView, inherits = NativeControl, no_ancestor_forward)]
+pub struct NativeTabView {
     xaml: XamlTabView,
     on_select: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
     on_close: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
     on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
-// No `measure_override`/`try_as_native_control` here — both blind-forward to `NativeControlImpl`
+// No `measure_override`/`try_as_native_control` here — both blind-forward to `NativeControl`
 // (this class's own `base`) already, since neither is overridden.
 #[elwindui_macros::class]
-impl NativeTabViewImpl {
+impl NativeTabView {
     fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_select.borrow_mut() = Some(callback);
     }
@@ -701,14 +701,14 @@ impl NativeTabViewImpl {
     }
 
     fn new() -> Self {
-        let xaml = XamlTabView::new().expect("NativeTabViewImpl::new");
+        let xaml = XamlTabView::new().expect("NativeTabView::new");
         let _ = xaml.SetTabWidthMode(bindings::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent);
         let _ = xaml.SetCloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Always);
         let _ = xaml.SetIsAddTabButtonVisible(true);
 
         let handle = AnyView::from(xaml.clone());
         let this = Self {
-            base: NativeControlImpl::new(handle),
+            base: NativeControl::new(handle),
             xaml,
             on_select: Rc::new(RefCell::new(None)),
             on_close: Rc::new(RefCell::new(None)),
@@ -752,13 +752,13 @@ impl NativeTabViewImpl {
     }
 }
 
-pub fn create_tab_view() -> NativeTabViewImpl {
-    NativeTabViewImpl::new()
+pub fn create_tab_view() -> NativeTabView {
+    NativeTabView::new()
 }
 
-/// See `elwindui-backend-appkit::MenuItemImpl`'s doc comment — same role, backed by a
+/// See `elwindui-backend-appkit::MenuItem`'s doc comment — same role, backed by a
 /// `MenuFlyoutItem` (WinUI3's `MenuBarItem.Items` collection holds `MenuFlyoutItemBase`s).
-#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItem)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItemExt)]
 #[derive(Clone)]
 pub struct MenuItem {
     xaml: MenuFlyoutItem,
@@ -798,9 +798,9 @@ impl MenuItem {
     }
 }
 
-pub fn create_menu_item() -> MenuItemImpl {
+pub fn create_menu_item() -> MenuItem {
     let xaml = MenuFlyoutItem::new().expect("MenuFlyoutItem::new");
-    let this = MenuItemImpl { xaml, on_select: Rc::new(RefCell::new(None)) };
+    let this = MenuItem { xaml, on_select: Rc::new(RefCell::new(None)) };
     let callback = this.on_select.clone();
     let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
         if let Some(cb) = callback.borrow().as_ref() {
@@ -811,34 +811,34 @@ pub fn create_menu_item() -> MenuItemImpl {
     this
 }
 
-/// A dropdown attached to a `MenuBarItem` — see `elwindui-backend-appkit::MenuImpl`'s doc comment.
+/// A dropdown attached to a `MenuBarItem` — see `elwindui-backend-appkit::Menu`'s doc comment.
 /// `items` is a plain `Vec` (not the native `MenuFlyoutItemBase` collection directly) since a
-/// `MenuImpl` only ever becomes real XAML elements once installed into a `MenuBarItemImpl`
-/// (`create_menu_bar_item`/`MenuBarItemImpl::set_submenu`) — `add_item`/`remove_item` mutate this
+/// `Menu` only ever becomes real XAML elements once installed into a `MenuBarItem`
+/// (`create_menu_bar_item`/`MenuBarItem::set_submenu`) — `add_item`/`remove_item` mutate this
 /// `Vec` and, if already installed, the live XAML collection too.
 #[derive(Clone)]
-pub struct MenuImpl {
-    items: Rc<RefCell<Vec<MenuItemImpl>>>,
+pub struct Menu {
+    items: Rc<RefCell<Vec<MenuItem>>>,
     installed_into: Rc<RefCell<Option<bindings::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>>>>,
 }
 
 /// `add_item`/`remove_item` are real `IVector<MenuFlyoutItemBase>.Append`/`.RemoveAtEnd`-style
-/// calls once this `Menu` is installed into a `MenuBarItemImpl` (see `installed_into`'s doc
-/// comment), reachable post-construction so `elwindui-backend-winui3::builtins::MenuImpl::
+/// calls once this `Menu` is installed into a `MenuBarItem` (see `installed_into`'s doc
+/// comment), reachable post-construction so `elwindui-backend-winui3::builtins::Menu::
 /// set_children` can reconcile a changed child list without rebuilding the native menu from
 /// scratch. Plain inherent methods (not `elwindui_core::ui::Menu`, unlike the DSL-facing wrapper's
-/// own `impl Menu for builtins::MenuImpl`) — this raw layer already knows its own concrete
-/// `MenuItemImpl` argument type, so it has no need for that trait's `&dyn MenuItem`/`AsAny`-downcast
+/// own `impl Menu for builtins::Menu`) — this raw layer already knows its own concrete
+/// `MenuItem` argument type, so it has no need for that trait's `&dyn MenuItem`/`AsAny`-downcast
 /// indirection, the same way `Window` above stays plain inherent methods throughout.
-impl MenuImpl {
-    fn add_item(&self, item: &MenuItemImpl) {
+impl Menu {
+    fn add_item(&self, item: &MenuItem) {
         self.items.borrow_mut().push(item.clone());
         if let Some(items) = self.installed_into.borrow().as_ref() {
             let base: MenuFlyoutItemBase = item.xaml.clone().into();
             let _ = items.Append(&base);
         }
     }
-    fn remove_item(&self, item: &MenuItemImpl) {
+    fn remove_item(&self, item: &MenuItem) {
         let mut items = self.items.borrow_mut();
         if let Some(pos) = items.iter().position(|i| i.xaml == item.xaml) {
             items.remove(pos);
@@ -852,25 +852,25 @@ impl MenuImpl {
     }
 }
 
-pub fn create_menu() -> MenuImpl {
-    MenuImpl { items: Rc::new(RefCell::new(Vec::new())), installed_into: Rc::new(RefCell::new(None)) }
+pub fn create_menu() -> Menu {
+    Menu { items: Rc::new(RefCell::new(Vec::new())), installed_into: Rc::new(RefCell::new(None)) }
 }
 
-/// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `MenuImpl`.
+/// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `Menu`.
 #[derive(Clone)]
-pub struct MenuBarItemImpl {
+pub struct MenuBarItem {
     xaml: bindings::Microsoft::UI::Xaml::Controls::MenuBarItem,
 }
 
 /// `set_text`/`set_submenu` are real post-construction setters (`create_menu_bar_item()` takes
 /// neither argument, so these are the only way a menu bar item's title/submenu are ever actually
-/// set). Plain inherent methods — see `MenuImpl`'s own `add_item`/`remove_item` doc comment for why
+/// set). Plain inherent methods — see `Menu`'s own `add_item`/`remove_item` doc comment for why
 /// this raw layer doesn't implement `elwindui_core::ui::MenuBarItem` itself.
-impl MenuBarItemImpl {
+impl MenuBarItem {
     fn set_text(&self, text: &str) {
         let _ = self.xaml.SetTitle(&HSTRING::from(text));
     }
-    fn set_submenu(&self, submenu: &MenuImpl) {
+    fn set_submenu(&self, submenu: &Menu) {
         if let Ok(items) = self.xaml.Items() {
             for item in submenu.items.borrow().iter() {
                 let base: MenuFlyoutItemBase = item.xaml.clone().into();
@@ -881,32 +881,32 @@ impl MenuBarItemImpl {
     }
 }
 
-pub fn create_menu_bar_item() -> MenuBarItemImpl {
+pub fn create_menu_bar_item() -> MenuBarItem {
     let xaml = bindings::Microsoft::UI::Xaml::Controls::MenuBarItem::new().expect("MenuBarItem::new");
-    MenuBarItemImpl { xaml }
+    MenuBarItem { xaml }
 }
 
 /// The whole top menu bar. Unlike AppKit (one global `NSApplication.mainMenu`), WinUI3's
-/// `MenuBarImpl` is a per-window element — installed by `Window::set_menu_bar` above, not a shared
+/// `MenuBar` is a per-window element — installed by `Window::set_menu_bar` above, not a shared
 /// process-wide singleton, so (unlike the AppKit backend) there's no app-menu-slot/Quit-item
 /// special-casing needed here.
 #[derive(Clone)]
-pub struct MenuBarImpl {
+pub struct MenuBar {
     xaml: XamlMenuBar,
 }
 
-/// `add_item`/`remove_item` mirror `MenuImpl`'s own: real `IVector<MenuBarItem>.Append`/
+/// `add_item`/`remove_item` mirror `Menu`'s own: real `IVector<MenuBarItem>.Append`/
 /// `.RemoveAt` calls, reachable post-construction for `elwindui-backend-winui3::builtins::
-/// MenuBarImpl::set_children`. Plain inherent methods — see `MenuImpl`'s own `add_item`/
+/// MenuBar::set_children`. Plain inherent methods — see `Menu`'s own `add_item`/
 /// `remove_item` doc comment for why this raw layer doesn't implement `elwindui_core::ui::MenuBar`
 /// itself.
-impl MenuBarImpl {
-    fn add_item(&self, item: &MenuBarItemImpl) {
+impl MenuBar {
+    fn add_item(&self, item: &MenuBarItem) {
         if let Ok(items) = self.xaml.Items() {
             let _ = items.Append(&item.xaml);
         }
     }
-    fn remove_item(&self, item: &MenuBarItemImpl) {
+    fn remove_item(&self, item: &MenuBarItem) {
         if let Ok(items) = self.xaml.Items() {
             if let Ok(index) = items.IndexOf(&item.xaml) {
                 let _ = items.RemoveAt(index);
@@ -915,9 +915,9 @@ impl MenuBarImpl {
     }
 }
 
-pub fn create_menu_bar() -> MenuBarImpl {
-    let xaml = XamlMenuBar::new().expect("MenuBarImpl::new");
-    MenuBarImpl { xaml }
+pub fn create_menu_bar() -> MenuBar {
+    let xaml = XamlMenuBar::new().expect("MenuBar::new");
+    MenuBar { xaml }
 }
 
 /// DSL-facing `Window`/`TextArea`/`Button`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/

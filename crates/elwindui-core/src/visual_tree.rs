@@ -9,22 +9,22 @@
 //! `#[id(...)]` (docs/elwindui_spec.md §13), resolved entirely at compile time via a generated
 //! typed accessor — there is no runtime element-id concept to search by.
 
-use crate::ui::UIElement;
+use crate::ui::UIElementExt;
 use std::rc::Rc;
 
 /// WinUI3's `VisualTreeHelper.GetChildrenCount`.
-pub fn get_children_count(element: &dyn UIElement) -> usize {
+pub fn get_children_count(element: &dyn UIElementExt) -> usize {
     element.visual_children().len()
 }
 
 /// WinUI3's `VisualTreeHelper.GetChild`.
-pub fn get_child(element: &dyn UIElement, index: usize) -> Option<Rc<dyn UIElement>> {
+pub fn get_child(element: &dyn UIElementExt, index: usize) -> Option<Rc<dyn UIElementExt>> {
     element.visual_children().into_iter().nth(index)
 }
 
 /// WinUI3's `VisualTreeHelper.GetParent` — thin wrapper over `UIElement::parent` for call-site
 /// symmetry with the other functions here.
-pub fn get_parent(element: &dyn UIElement) -> Option<Rc<dyn UIElement>> {
+pub fn get_parent(element: &dyn UIElementExt) -> Option<Rc<dyn UIElementExt>> {
     element.parent()
 }
 
@@ -35,13 +35,13 @@ pub fn get_parent(element: &dyn UIElement) -> Option<Rc<dyn UIElement>> {
 /// match still erased as `Rc<dyn UIElement>` (this crate's usual erasure convention, matching
 /// `UIElement::try_as_native_control`'s own downcast pattern) — call `.as_any().downcast_ref::<T>()` on
 /// a result to get at `T`'s own fields.
-pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
+pub fn find_all<T: 'static>(root: &dyn UIElementExt) -> Vec<Rc<dyn UIElementExt>> {
     let mut out = Vec::new();
     collect_all::<T>(root, &mut out);
     out
 }
 
-fn collect_all<T: 'static>(node: &dyn UIElement, out: &mut Vec<Rc<dyn UIElement>>) {
+fn collect_all<T: 'static>(node: &dyn UIElementExt, out: &mut Vec<Rc<dyn UIElementExt>>) {
     for child in node.visual_children() {
         if child.as_any().downcast_ref::<T>().is_some() {
             out.push(child.clone());
@@ -53,14 +53,14 @@ fn collect_all<T: 'static>(node: &dyn UIElement, out: &mut Vec<Rc<dyn UIElement>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{new_element, TextBlockImpl, VerticalLayout as _, VerticalLayoutImpl};
+    use crate::ui::{new_element, TextBlock, VerticalLayoutExt as _, VerticalLayout};
 
     #[test]
     fn children_count_and_get_child_match_visual_children() {
-        let layout = VerticalLayoutImpl::construct();
-        layout.children().add(new_element(TextBlockImpl::construct()));
-        layout.children().add(new_element(TextBlockImpl::construct()));
-        let tree: Rc<dyn UIElement> = new_element(layout);
+        let layout = VerticalLayout::construct();
+        layout.children().add(new_element(TextBlock::construct()));
+        layout.children().add(new_element(TextBlock::construct()));
+        let tree: Rc<dyn UIElementExt> = new_element(layout);
 
         assert_eq!(get_children_count(tree.as_ref()), 2);
         assert!(get_child(tree.as_ref(), 0).is_some());
@@ -69,10 +69,10 @@ mod tests {
 
     #[test]
     fn get_parent_walks_back_up() {
-        let layout = VerticalLayoutImpl::construct();
-        let text = new_element(TextBlockImpl::construct());
+        let layout = VerticalLayout::construct();
+        let text = new_element(TextBlock::construct());
         layout.children().add(text.clone());
-        let tree: Rc<dyn UIElement> = new_element(layout);
+        let tree: Rc<dyn UIElementExt> = new_element(layout);
 
         let parent = get_parent(text.as_ref()).expect("child has a parent");
         assert!(Rc::ptr_eq(&parent, &tree));
@@ -81,14 +81,14 @@ mod tests {
 
     #[test]
     fn find_all_collects_matching_type_across_tree() {
-        let outer = VerticalLayoutImpl::construct();
-        let inner = VerticalLayoutImpl::construct();
-        inner.children().add(new_element(TextBlockImpl::construct()));
+        let outer = VerticalLayout::construct();
+        let inner = VerticalLayout::construct();
+        inner.children().add(new_element(TextBlock::construct()));
         outer.children().add(new_element(inner));
-        outer.children().add(new_element(TextBlockImpl::construct()));
-        let tree: Rc<dyn UIElement> = new_element(outer);
+        outer.children().add(new_element(TextBlock::construct()));
+        let tree: Rc<dyn UIElementExt> = new_element(outer);
 
-        let texts = find_all::<TextBlockImpl>(tree.as_ref());
+        let texts = find_all::<TextBlock>(tree.as_ref());
         assert_eq!(texts.len(), 2);
     }
 }

@@ -2,13 +2,13 @@
 // (docs/elwindui_spec.md 付録G/N, 付録H.2.1a) — `RoundedPanel inherits ContentControl`, own `view`
 // root literally `ContentControl`, with a `Grid` overlaying a background `Rectangle` and the
 // `TextBlock` label in the same (default `(0, 0)`) cell. Because the root matches the base exactly,
-// `elwindui-codegen` generates the real struct as `RoundedPanelImpl` (the bare `RoundedPanel` name
-// becomes a real `pub trait RoundedPanel: UIElement + Control` instead) with a
-// `base: ContentControlImpl` field, delegating to it one hop further than `ContentControl` itself
+// `elwindui-codegen` generates the real struct as the bare `RoundedPanel` name itself (its
+// auto-derived `pub trait RoundedPanelExt: UIElementExt + ControlExt` lives alongside it) with a
+// `base: ContentControl` field, delegating to it one hop further than `ContentControl` itself
 // delegates to `Control` — `self` *is* the tree node at any composition depth (`into_node()` just
 // returns `self`), not a wrapper around a separately-erased `Rc<dyn UIElement>`. `document_view.elwind`'s
 // own `RoundedPanel { ... }` reference still compiles unchanged — `emit_construction`'s
-// `concrete_type_ident` resolves it to `RoundedPanelImpl::new(..)`.
+// `concrete_type_ident` resolves it to `RoundedPanel::new(..)`.
 component RoundedPanel inherits ContentControl {
     // Not `#[param]`: the label displays a value (notepad's live character count, via
     // `document_view.elwind`'s `t!("notepad-status-chars", count: doc.char_count)`) that changes

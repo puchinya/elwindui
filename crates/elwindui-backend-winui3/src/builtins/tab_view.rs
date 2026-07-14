@@ -14,15 +14,12 @@
 //! natively), so there's nothing to restore.
 
 use crate as winui3;
-use crate::AnyView;
 use crate::TabView as _;
-// Bare names needed for the transitive ancestor-chain walk `#[elwindui_macros::class(inherits =
-// winui3::NativeTabViewImpl)]` below performs (reaching past `winui3::NativeTabViewImpl` →
-// `winui3::TabView`'s own registered `inherits = NativeControl` → `winui3::NativeControl`'s own
-// `NativeControlImpl`): `NativeControlImpl` (the struct — the walk's `as_native_control()` accessor
-// return type) and `NativeControl` (the trait — the walk's auto-generated
-// `impl NativeControl for TabViewImpl {}`).
-use crate::{NativeControl, NativeControlImpl};
+// `NativeControl` (the struct) needed unqualified: the `as_native_control()` accessor
+// `#[elwindui_macros::class(inherits = winui3::NativeTabView)]` generates below is built from
+// `NativeTabView`'s own registered `inherits = NativeControl` (stored, and so replayed here, exactly
+// as written in `winui3`'s `lib.rs` — bare, not `winui3::`-qualified).
+use crate::NativeControl;
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -35,7 +32,7 @@ pub struct TabViewItemImpl {
     // Taken (moved into a real `TreeHostPanel`) the first time this `TabViewItem` is inserted as a
     // displayed tab; `None` afterward — see the module doc comment for why that's never a problem
     // here (unlike AppKit's single shared content pane).
-    content: RefCell<Option<std::rc::Rc<dyn elwindui_core::ui::UIElement>>>,
+    content: RefCell<Option<std::rc::Rc<dyn elwindui_core::ui::UIElementExt>>>,
     closable: Cell<bool>,
     on_close: RefCell<Option<Box<dyn Fn()>>>,
 }
@@ -57,7 +54,7 @@ impl TabViewItemImpl {
     fn new_erased(
         data_context: Option<Rc<dyn Any>>,
         header: &str,
-        content: std::rc::Rc<dyn elwindui_core::ui::UIElement>,
+        content: std::rc::Rc<dyn elwindui_core::ui::UIElementExt>,
         closable: Option<bool>,
     ) -> Rc<Self> {
         Rc::new(Self {
@@ -77,7 +74,7 @@ impl TabViewItemImpl {
         *self.header.borrow_mut() = header.to_string();
     }
 
-    pub fn set_content(&self, content: std::rc::Rc<dyn elwindui_core::ui::UIElement>) {
+    pub fn set_content(&self, content: std::rc::Rc<dyn elwindui_core::ui::UIElementExt>) {
         *self.content.borrow_mut() = Some(content);
     }
 
@@ -98,7 +95,7 @@ impl TabViewItemImpl {
 /// synthesizes entries once both are present (see that method).
 struct DynamicSource {
     header_template: Option<Box<dyn Fn(&Rc<dyn Any>) -> String>>,
-    item_template: Option<Box<dyn Fn(&Rc<dyn Any>) -> std::rc::Rc<dyn elwindui_core::ui::UIElement>>>,
+    item_template: Option<Box<dyn Fn(&Rc<dyn Any>) -> std::rc::Rc<dyn elwindui_core::ui::UIElementExt>>>,
     closable_default: bool,
 }
 
@@ -108,8 +105,8 @@ impl Default for DynamicSource {
     }
 }
 
-#[elwindui_macros::class(inherits = winui3::NativeTabViewImpl)]
-pub struct TabViewImpl {
+#[elwindui_macros::class(inherits = winui3::NativeTabView)]
+pub struct TabView {
     entries: RefCell<Vec<Rc<TabViewItemImpl>>>,
     dynamic: RefCell<Option<DynamicSource>>,
     /// Pointer identities (`Rc::as_ptr`, as `usize`) of the `TabViewItem`s currently reflected as
@@ -122,11 +119,11 @@ pub struct TabViewImpl {
     /// so `selected_item`/`selected_container` can read it back.
     selected_index: Cell<usize>,
     on_close: RefCell<Option<Box<dyn Fn(usize)>>>,
-    weak_self: RefCell<Weak<TabViewImpl>>,
+    weak_self: RefCell<Weak<TabView>>,
 }
 
 #[elwindui_macros::class]
-impl TabViewImpl {
+impl TabView {
     #[inherent]
     pub fn new() -> Rc<Self> {
         let this = Rc::new(Self {
@@ -161,7 +158,7 @@ impl TabViewImpl {
         &self,
         items: Vec<Rc<T>>,
         header_template: Box<dyn Fn(&Rc<T>) -> String>,
-        item_template: Box<dyn Fn(&Rc<T>) -> std::rc::Rc<dyn elwindui_core::ui::UIElement>>,
+        item_template: Box<dyn Fn(&Rc<T>) -> std::rc::Rc<dyn elwindui_core::ui::UIElementExt>>,
     ) {
         let mut dynamic = self.dynamic.borrow_mut();
         let entry = dynamic.get_or_insert_with(DynamicSource::default);
@@ -338,8 +335,8 @@ fn erase_render_string<T: 'static>(f: Box<dyn Fn(&Rc<T>) -> String>) -> Box<dyn 
 
 /// Same as `erase_render_string`, for `item_template`'s `Rc<dyn UIElement>`-returning shape.
 fn erase_render<T: 'static>(
-    f: Box<dyn Fn(&Rc<T>) -> std::rc::Rc<dyn elwindui_core::ui::UIElement>>,
-) -> Box<dyn Fn(&Rc<dyn Any>) -> std::rc::Rc<dyn elwindui_core::ui::UIElement>> {
+    f: Box<dyn Fn(&Rc<T>) -> std::rc::Rc<dyn elwindui_core::ui::UIElementExt>>,
+) -> Box<dyn Fn(&Rc<dyn Any>) -> std::rc::Rc<dyn elwindui_core::ui::UIElementExt>> {
     Box::new(move |item: &Rc<dyn Any>| {
         let item: Rc<T> = Rc::clone(item).downcast::<T>().unwrap_or_else(|_| panic!("elwindui: TabView item type mismatch"));
         f(&item)

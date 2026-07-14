@@ -39,7 +39,7 @@ pub enum Visibility {
 
 /// WinUI3's `FrameworkElement.MeasureCore`-style constraint application: clamps `size` to
 /// `min`/`max` on each axis independently (an unset bound imposes no clamp on that side —
-/// `elwindui_core::ui::UIElementImpl`'s `min_width`/`max_width`/etc. are `Option<f32>`, WinUI3's
+/// `elwindui_core::ui::UIElement`'s `min_width`/`max_width`/etc. are `Option<f32>`, WinUI3's
 /// own `NaN`-sentinel equivalent). Used twice per `measure` call (`elwindui_core::ui`'s `measure`/
 /// `measure_and_align`): once on the space handed down to `measure_override`, once on its
 /// returned desired size.
@@ -176,7 +176,7 @@ pub enum GridLength {
 /// A `Grid`-child's attached `Grid::row`/`Grid::column` position (docs/elwindui_spec.md §3) —
 /// 0-indexed, defaulting to the top-left cell (`0, 0`) like WPF's own `Grid.Row`/`Grid.Column`
 /// defaults. Row/column spanning isn't implemented yet (each cell holds exactly one child).
-/// Not stored as this shape anywhere — `elwindui_core::ui::UIElementImpl::attached` holds `row`/
+/// Not stored as this shape anywhere — `elwindui_core::ui::UIElement::attached` holds `row`/
 /// `column` independently in its generic type-erased bag, and `elwindui_core::ui::grid_cell_of`
 /// assembles one of these from the two on demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

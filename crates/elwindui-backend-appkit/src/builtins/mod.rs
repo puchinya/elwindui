@@ -31,22 +31,19 @@
 //! see `elwindui-codegen`'s `build_component_setters`.
 
 mod tab_view;
-pub use tab_view::{TabViewImpl, TabViewItemImpl};
+pub use tab_view::{TabView, TabViewItemImpl};
 
 use crate as appkit;
-use crate::AnyView;
-// Bare names needed for the transitive ancestor-chain walk `#[elwindui_macros::class]` performs
-// below (`appkit::TextAreaImpl`/`appkit::ButtonImpl` → `appkit::TextArea`/`appkit::Button`'s own
-// registered `inherits = NativeControl` → `appkit::NativeControl`'s own `NativeControlImpl`):
-// `NativeControlImpl` (the struct — the walk's `as_native_control()` accessor return type) and
-// `NativeControl` (the trait — the walk's auto-generated `impl NativeControl for TextAreaImpl {}`/
-// `for ButtonImpl {}`, replacing what used to be a hand-written empty impl here).
-use crate::{NativeControl, NativeControlImpl};
-// Re-exported so `component X inherits Window` call sites can keep importing `Window` from this
-// same `builtins` module alongside `WindowImpl`, rather than needing a separate `elwindui_core`
-// import just for the (now-shared) marker trait.
-pub use elwindui_core::ui::Window;
-use elwindui_core::ui::{Button as _, TextArea as _, UIElement};
+// `NativeControl` (the struct) needed unqualified: `TextArea`/`Button` below both `inherits =
+// appkit::TextArea`/`appkit::Button`, whose own registered `inherits = NativeControl` (stored, and
+// so replayed here, exactly as written in `appkit`'s `lib.rs` — bare, not `appkit::`-qualified) is
+// what the transitive `as_native_control()` accessor these two generate is built from.
+use crate::NativeControl;
+// Re-exported so `component X inherits Window` call sites can keep importing `WindowExt` from this
+// same `builtins` module, rather than needing a separate `elwindui_core` import just for the
+// (now-shared) marker trait.
+pub use elwindui_core::ui::WindowExt;
+use elwindui_core::ui::{ButtonExt as _, TextAreaExt as _, UIElementExt};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -55,7 +52,7 @@ use std::rc::Rc;
 /// itself (the module doc comment above explains why this struct's own bare-name source spelling,
 /// `Window`, still compiles to `WindowImpl` and never collides with the `Window` trait re-exported
 /// just above).
-#[elwindui_macros::class(struct_only = elwindui_core::ui::Window)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::WindowExt)]
 pub struct Window {
     inner: appkit::Window,
 }
@@ -74,15 +71,15 @@ impl Window {
         self.inner.set_title(title);
     }
 
-    fn set_menu_bar(&self, menu_bar: Rc<dyn elwindui_core::ui::MenuBar>) {
+    fn set_menu_bar(&self, menu_bar: Rc<dyn elwindui_core::ui::MenuBarExt>) {
         let menu_bar = menu_bar
             .as_any()
-            .downcast_ref::<MenuBarImpl>()
-            .expect("Window::set_menu_bar: menu_bar must be this backend's MenuBarImpl");
+            .downcast_ref::<MenuBar>()
+            .expect("WindowExt::set_menu_bar: menu_bar must be this backend's MenuBar");
         self.inner.set_menu_bar(&menu_bar.inner);
     }
 
-    fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElement>) {
+    fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
         self.inner.set_content(content);
     }
 
@@ -123,11 +120,11 @@ impl Window {
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TextArea, inherits = appkit::TextAreaImpl)]
-pub struct TextAreaImpl {}
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = appkit::TextArea)]
+pub struct TextArea {}
 
 #[elwindui_macros::class]
-impl TextAreaImpl {
+impl TextArea {
     /// `#[two_way] text` (`TextArea` in `builtins.elwind`) — the change-back half of the binding;
     /// `elwindui_core::ui::TextArea::set_text` is the model→widget half.
     #[inherent]
@@ -152,11 +149,11 @@ impl TextAreaImpl {
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::Button, inherits = appkit::ButtonImpl)]
-pub struct ButtonImpl {}
+#[elwindui_macros::class(struct_only = elwindui_core::ui::ButtonExt, inherits = appkit::Button)]
+pub struct Button {}
 
 #[elwindui_macros::class]
-impl ButtonImpl {
+impl Button {
     /// `#[routed] on_click` (`Button` in `builtins.elwind`) is registered directly onto this
     /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)
     /// to fire `dispatch_routed` starting at this same node.
@@ -191,7 +188,7 @@ impl ButtonImpl {
         // (`elwindui-codegen`'s `emit_wiring` registers the actual `#[routed] on_click` handler
         // here, via `register_routed_handler` below, right after this constructor returns).
         {
-            let node: Rc<dyn UIElement> = this.clone();
+            let node: Rc<dyn UIElementExt> = this.clone();
             this.base.set_on_click(Box::new(move || {
                 let args = elwindui_core::input::RoutedEventArgs::default();
                 elwindui_core::ui::dispatch_routed(&node, "on_click", &(), &args);
@@ -201,13 +198,13 @@ impl ButtonImpl {
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBar)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBarExt)]
 pub struct MenuBar {
-    inner: appkit::MenuBarImpl,
+    inner: appkit::MenuBar,
     /// The currently-installed children, in display order — the "before" side of `set_children`'s
     /// diff against its own new `children` argument (the "after" side), mirroring `TabView`'s own
     /// `entries`/reconciliation pattern.
-    children: RefCell<Vec<Rc<MenuBarItemImpl>>>,
+    children: RefCell<Vec<Rc<MenuBarItem>>>,
 }
 
 #[elwindui_macros::class]
@@ -223,7 +220,7 @@ impl MenuBar {
     /// (`add_item`). Safe to call more than once (e.g. a future dynamic menu bar), though today's
     /// only caller (`elwindui-codegen`'s generated construction) calls it exactly once.
     #[inherent]
-    pub fn set_children(&self, children: Vec<Rc<MenuBarItemImpl>>) {
+    pub fn set_children(&self, children: Vec<Rc<MenuBarItem>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
             let keep = children.iter().any(|new| Rc::ptr_eq(old, new));
@@ -240,25 +237,25 @@ impl MenuBar {
         *current = children;
     }
 
-    fn add_item(&self, item: &dyn elwindui_core::ui::MenuBarItem) {
+    fn add_item(&self, item: &dyn elwindui_core::ui::MenuBarItemExt) {
         let item = item
             .as_any()
-            .downcast_ref::<MenuBarItemImpl>()
-            .expect("MenuBar::add_item: item must be this backend's MenuBarItemImpl");
+            .downcast_ref::<MenuBarItem>()
+            .expect("MenuBarExt::add_item: item must be this backend's MenuBarItem");
         self.inner.add_item(&item.inner);
     }
-    fn remove_item(&self, item: &dyn elwindui_core::ui::MenuBarItem) {
+    fn remove_item(&self, item: &dyn elwindui_core::ui::MenuBarItemExt) {
         let item = item
             .as_any()
-            .downcast_ref::<MenuBarItemImpl>()
-            .expect("MenuBar::remove_item: item must be this backend's MenuBarItemImpl");
+            .downcast_ref::<MenuBarItem>()
+            .expect("MenuBarExt::remove_item: item must be this backend's MenuBarItem");
         self.inner.remove_item(&item.inner);
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBarItem)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBarItemExt)]
 pub struct MenuBarItem {
-    inner: appkit::MenuBarItemImpl,
+    inner: appkit::MenuBarItem,
 }
 
 #[elwindui_macros::class]
@@ -270,22 +267,22 @@ impl MenuBarItem {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
-    fn set_submenu(&self, submenu: Rc<dyn elwindui_core::ui::Menu>) {
+    fn set_submenu(&self, submenu: Rc<dyn elwindui_core::ui::MenuExt>) {
         // `submenu` itself is dropped at the end of this call — the underlying `NSMenu` stays
         // alive regardless, retained by AppKit itself once `NSMenuItem.setSubmenu` runs.
         let submenu = submenu
             .as_any()
-            .downcast_ref::<MenuImpl>()
-            .expect("MenuBarItem::set_submenu: submenu must be this backend's MenuImpl");
+            .downcast_ref::<Menu>()
+            .expect("MenuBarItemExt::set_submenu: submenu must be this backend's Menu");
         self.inner.set_submenu(&submenu.inner);
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::Menu)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuExt)]
 pub struct Menu {
-    inner: appkit::MenuImpl,
+    inner: appkit::Menu,
     /// See `MenuBar::children`'s doc comment — same reconciliation pattern.
-    children: RefCell<Vec<Rc<MenuItemImpl>>>,
+    children: RefCell<Vec<Rc<MenuItem>>>,
 }
 
 #[elwindui_macros::class]
@@ -296,7 +293,7 @@ impl Menu {
 
     /// See `MenuBar::set_children`'s doc comment — same reconciliation pattern.
     #[inherent]
-    pub fn set_children(&self, children: Vec<Rc<MenuItemImpl>>) {
+    pub fn set_children(&self, children: Vec<Rc<MenuItem>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
             let keep = children.iter().any(|new| Rc::ptr_eq(old, new));
@@ -313,25 +310,25 @@ impl Menu {
         *current = children;
     }
 
-    fn add_item(&self, item: &dyn elwindui_core::ui::MenuItem) {
+    fn add_item(&self, item: &dyn elwindui_core::ui::MenuItemExt) {
         let item = item
             .as_any()
-            .downcast_ref::<MenuItemImpl>()
-            .expect("Menu::add_item: item must be this backend's MenuItemImpl");
+            .downcast_ref::<MenuItem>()
+            .expect("MenuExt::add_item: item must be this backend's MenuItem");
         self.inner.add_item(&item.inner);
     }
-    fn remove_item(&self, item: &dyn elwindui_core::ui::MenuItem) {
+    fn remove_item(&self, item: &dyn elwindui_core::ui::MenuItemExt) {
         let item = item
             .as_any()
-            .downcast_ref::<MenuItemImpl>()
-            .expect("Menu::remove_item: item must be this backend's MenuItemImpl");
+            .downcast_ref::<MenuItem>()
+            .expect("MenuExt::remove_item: item must be this backend's MenuItem");
         self.inner.remove_item(&item.inner);
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItem)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItemExt)]
 pub struct MenuItem {
-    inner: appkit::MenuItemImpl,
+    inner: appkit::MenuItem,
 }
 
 #[elwindui_macros::class]

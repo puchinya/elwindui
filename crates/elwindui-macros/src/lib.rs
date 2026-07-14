@@ -1,7 +1,6 @@
 use proc_macro::TokenStream;
 
 mod class;
-mod new_call;
 
 /// `elwindui::component! { component NotepadWindow { ... } view NotepadWindow { ... } }`, the
 /// proc-macro alternative to the build.rs codegen path (`elwindui_codegen::compile_dir`) — lets
@@ -63,11 +62,4 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn class(attr: TokenStream, item: TokenStream) -> TokenStream {
     class::expand(attr.into(), item.into()).into()
-}
-
-/// `elwindui::new!<ClassName>(args)` -> `ClassNameImpl::new(args)` — sugar for hand-written user code
-/// (not used by codegen). See `new_call::expand`'s own doc comment.
-#[proc_macro]
-pub fn new(input: TokenStream) -> TokenStream {
-    new_call::expand(input.into()).into()
 }

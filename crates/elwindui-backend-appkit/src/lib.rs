@@ -1,17 +1,17 @@
 //! AppKit implementation of the widget surface `elwindui-codegen` targets for the `notepad`
 //! example. See docs/elwindui_spec.md 付録A, 付録C, docs/elwindui_gui_framework_design.md §3.
 //!
-//! Only genuinely native leaf widgets (`Window`/`TextAreaImpl`/`ButtonImpl`/`MenuBarImpl`/`NativeTabViewImpl`, the
+//! Only genuinely native leaf widgets (`Window`/`TextAreaImpl`/`ButtonImpl`/`MenuBarImpl`/`NativeTabView`, the
 //! "NativeControl" family — see docs/elwindui_spec.md 付録E) have a Rust struct here at all.
 //! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have none: they're
 //! `elwindui_core::ui::UIElement` values that `elwindui-codegen` builds directly, reflected into
 //! real `NSView`s/`CAShapeLayer`s/`CATextLayer`s by `TreeHostView` below (used by both `Window`'s
-//! content view and `NativeTabViewImpl`'s per-tab content area).
+//! content view and `NativeTabView`'s per-tab content area).
 
 #![cfg(target_os = "macos")]
 
 use elwindui_core::base::AsAny;
-use elwindui_core::ui::{layout_tree, Button as _, NativeControl, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElement, UIElementImpl};
+use elwindui_core::ui::{layout_tree, ButtonExt as _, NativeControlExt, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElementExt, UIElement};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -39,7 +39,7 @@ fn mtm() -> MainThreadMarker {
 /// etc. (see that trait's own doc comment), now applied to the handle side too.
 ///
 /// Implemented on the raw `Retained<T>` view type itself (a foreign type — allowed since
-/// `AppKitHandle` is a local trait) rather than on `TextAreaImpl`/`ButtonImpl`/`NativeTabViewImpl`, since
+/// `AppKitHandle` is a local trait) rather than on `TextAreaImpl`/`ButtonImpl`/`NativeTabView`, since
 /// those now each compose this crate's own `NativeControlImpl` (below) as their own `base` field
 /// (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed
 /// widget itself would be a self-reference. Wrapping just the raw view instead lets `base.handle`
@@ -65,7 +65,7 @@ impl AppKitHandle for Retained<NSStackView> {
     }
 }
 
-/// Everything the generated code can pass as a `Window`/`NativeTabViewImpl` child.
+/// Everything the generated code can pass as a `Window`/`NativeTabView` child.
 /// `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse` have no variant here at all — they're
 /// purely `elwindui_core::ui::Node::Virtual` values now (see `TreeHostView` below), never a real
 /// widget of their own. An `Rc<dyn AppKitHandle>` (not a closed `enum`) so adding a new native leaf
@@ -110,7 +110,7 @@ impl<T: AppKitHandle + 'static> From<T> for AnyView {
     }
 }
 
-/// Shared concrete base for every AppKit native leaf (`TextArea`/`Button`/`NativeTabViewImpl` below)
+/// Shared concrete base for every AppKit native leaf (`TextArea`/`Button`/`NativeTabView` below)
 /// — the backend-owned counterpart to `elwindui_core::ui::NativeControl` (a pure marker trait with no
 /// backing struct of its own; see that trait's own doc comment for why `elwindui-core` doesn't define
 /// this generically). Holding `handle: AnyView` here once, instead of on each of the three widgets
@@ -122,7 +122,7 @@ impl<T: AppKitHandle + 'static> From<T> for AnyView {
 /// empty `impl elwindui_core::ui::NativeControl for TextAreaImpl {}` on every class that (transitively)
 /// inherits from this one (that trait has zero required methods, so there's nothing to write on each
 /// implementor).
-#[elwindui_macros::class(struct_only = elwindui_core::ui::NativeControl, inherits = UIElement)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::NativeControlExt, inherits = UIElement)]
 pub struct NativeControl {
     handle: AnyView,
 }
@@ -136,7 +136,7 @@ impl NativeControl {
         Some(&self.handle)
     }
     pub fn new(handle: AnyView) -> Self {
-        Self { base: UIElementImpl::default(), handle }
+        Self { base: UIElement::default(), handle }
     }
 }
 
@@ -172,7 +172,7 @@ impl Window {
     /// Replaces the window's whole content tree — see `TreeHostView` for how an `Rc<dyn
     /// UIElement>` (layouts/shapes/text mixed freely with native controls, at any nesting depth)
     /// gets reflected into real `NSView` subviews and `CAShapeLayer`/`CATextLayer` sublayers.
-    pub fn set_content(&self, content: Rc<dyn UIElement>) {
+    pub fn set_content(&self, content: Rc<dyn UIElementExt>) {
         self.content_host.set_tree(content);
     }
 
@@ -181,7 +181,7 @@ impl Window {
     }
 
     /// Sets `NSApplication.mainMenu` (macOS has one global top menu bar, not a per-window one).
-    pub fn set_menu_bar(&self, menu_bar: &MenuBarImpl) {
+    pub fn set_menu_bar(&self, menu_bar: &MenuBar) {
         NSApplication::sharedApplication(mtm()).setMainMenu(Some(&menu_bar.ns));
     }
 
@@ -304,10 +304,10 @@ fn ca_alignment_mode(alignment: elwindui_core::ui::TextAlignment) -> &'static CA
 /// `StackLayoutView` (`VerticalLayout`/`HorizontalLayout`) — since `VerticalLayout`/
 /// `HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` are now all just `UIElement` values with
 /// no backend struct of their own (docs/elwindui_spec.md 付録H.2), one host type is all any native
-/// container needs to accept arbitrary content: `Window`'s content view and `NativeTabViewImpl`'s per-tab
+/// container needs to accept arbitrary content: `Window`'s content view and `NativeTabView`'s per-tab
 /// content area both are one of these.
 pub struct TreeHostIvars {
-    tree: RefCell<Option<Rc<dyn UIElement>>>,
+    tree: RefCell<Option<Rc<dyn UIElementExt>>>,
     /// Set once, right after construction (see `TreeHostView::new`) — lets `set_tree` hand out an
     /// `AppKitRelayoutHost` wrapping a weak reference back to this same view, without needing a
     /// `Retained<Self>` in hand at that point. See `AppKitRelayoutHost`'s own doc comment for why
@@ -356,7 +356,7 @@ define_class!(
 
         /// Reports this host's current tree's natural size so `fittingSize()` — and therefore an
         /// *outer* `AnyView::measure()` (this host nested inside another virtual container) or an
-        /// outer `NSStackView` (`NativeTabViewImpl`'s content area sits in one) — sees something meaningful
+        /// outer `NSStackView` (`NativeTabView`'s content area sits in one) — sees something meaningful
         /// instead of AppKit's zero-size default for a plain, constraint-free `NSView`.
         #[unsafe(method(intrinsicContentSize))]
         fn intrinsic_content_size(&self) -> objc2_foundation::NSSize {
@@ -395,10 +395,10 @@ impl TreeHostView {
 
     /// Replaces this host's entire content, discarding whatever native subviews were there before
     /// — a full swap rather than a diff. `pub` (unlike most of this type's methods) since
-    /// `NativeTabViewImpl::insert_tab` hands a fresh host straight to its caller (`elwindui-builtins`'s
+    /// `NativeTabView::insert_tab` hands a fresh host straight to its caller (`elwindui-builtins`'s
     /// wrapper), which calls this exactly once per tab to populate it — see that type's own doc
     /// comment for why each tab gets its own persistent host instead of sharing one.
-    pub fn set_tree(&self, tree: Rc<dyn UIElement>) {
+    pub fn set_tree(&self, tree: Rc<dyn UIElementExt>) {
         for old in self.subviews().iter() {
             old.removeFromSuperview();
         }
@@ -459,7 +459,7 @@ impl TreeHostView {
                     // `arrange` below), never by Auto Layout constraints — but a plain
                     // `addSubview:` leaves `translatesAutoresizingMaskIntoConstraints` at its
                     // *class* default, which for an Auto-Layout-authored view like `NSStackView`
-                    // (`NativeTabViewImpl`'s root) is `NO`. With no explicit size constraints of its own,
+                    // (`NativeTabView`'s root) is `NO`. With no explicit size constraints of its own,
                     // such a view gets silently resized back down to its intrinsic content size on
                     // the next layout pass — undoing `arrange`'s `setFrame` entirely. Forcing this
                     // back to `YES` opts every leaf out of the constraint system so our manual
@@ -473,7 +473,7 @@ impl TreeHostView {
                         objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
                     );
                     match paint {
-                        PaintKind::Shape { kind, fill, stroke, stroke_width } => {
+                        PaintKind::ShapeExt { kind, fill, stroke, stroke_width } => {
                             let shape_layer = CAShapeLayer::new();
                             shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
                             let path = unsafe {
@@ -520,7 +520,7 @@ impl TreeHostView {
 }
 
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::TextArea, inherits = NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = NativeControl)]
 pub struct TextArea {
     text_view: Retained<NSTextView>,
     delegate_storage: Rc<RefCell<Option<Retained<TextViewDelegate>>>>,
@@ -568,12 +568,12 @@ impl TextArea {
             .downcast::<NSTextView>()
             .expect("scrollableTextView's document view is an NSTextView");
         let handle = AnyView::from(scroll);
-        Self { base: NativeControlImpl::new(handle), text_view, delegate_storage: Rc::new(RefCell::new(None)) }
+        Self { base: NativeControl::new(handle), text_view, delegate_storage: Rc::new(RefCell::new(None)) }
     }
 }
 
-pub fn create_text_area() -> TextAreaImpl {
-    TextAreaImpl::new()
+pub fn create_text_area() -> TextArea {
+    TextArea::new()
 }
 
 struct TextDelegateIvars {
@@ -607,7 +607,7 @@ impl TextViewDelegate {
     }
 }
 
-#[elwindui_macros::class(struct_only = elwindui_core::ui::Button, inherits = NativeControl)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::ButtonExt, inherits = NativeControl)]
 pub struct Button {
     ns: Retained<NSButton>,
     target_storage: Rc<RefCell<Option<Retained<ButtonTarget>>>>,
@@ -650,12 +650,12 @@ impl Button {
         let m = mtm();
         let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m) };
         let handle = AnyView::from(ns.clone());
-        Self { base: NativeControlImpl::new(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
+        Self { base: NativeControl::new(handle), ns, target_storage: Rc::new(RefCell::new(None)) }
     }
 }
 
-pub fn create_button() -> ButtonImpl {
-    ButtonImpl::new()
+pub fn create_button() -> Button {
+    Button::new()
 }
 
 struct ButtonTargetIvars {
@@ -691,8 +691,8 @@ impl ButtonTarget {
 /// applies to them.
 pub struct TabChipImpl {
     ns: Retained<NSStackView>,
-    pub title_button: ButtonImpl,
-    pub close_button: ButtonImpl,
+    pub title_button: Button,
+    pub close_button: Button,
 }
 
 fn create_tab_chip(title: &str) -> TabChipImpl {
@@ -734,13 +734,13 @@ impl TabChipImpl {
     }
 }
 
-/// The row of `TabChipImpl`s plus a trailing "+" button. `NativeTabViewImpl` owns one of these and the content
+/// The row of `TabChipImpl`s plus a trailing "+" button. `NativeTabView` owns one of these and the content
 /// area below it; kept as a separate type since 付録Y's backend table describes it as its own
 /// piece (a custom `NSStackView`-based strip, not `NSTabViewController`). Purely an internal
 /// composition helper too — see `TabChipImpl`'s own doc comment.
 pub struct TabStripImpl {
     ns: Retained<NSStackView>,
-    pub new_tab_button: ButtonImpl,
+    pub new_tab_button: Button,
 }
 
 fn create_tab_strip() -> TabStripImpl {
@@ -783,10 +783,10 @@ impl TabStripImpl {
 /// own `elwindui_core::ui` (keeping any native leaf's retention concern alive, e.g. a
 /// `TextAreaImpl`'s change-notification delegate — see `TextAreaImpl::set_on_change`'s doc comment — for
 /// as long as its tab exists, not just while it's the visible one).
-/// `NativeTabViewImpl`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl`
+/// `NativeTabView`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — extends `NativeControl`
 /// since a real `AnyView` handle (`self.base.handle`, wrapping the outer `NSStackView`) is what
 /// makes this leaf embeddable in the visual tree at all.
-pub trait TabView: NativeControl {
+pub trait TabView: NativeControlExt {
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>);
     /// Inserts a new tab chip at `index` (wiring `on_select`/`on_close` to the given callbacks)
     /// plus a fresh, persistent content host — added to `content_container`, initially hidden.
@@ -801,8 +801,8 @@ pub trait TabView: NativeControl {
     fn set_tab_content_visible(&self, host: &TreeHostView, visible: bool);
 }
 
-#[elwindui_macros::class(struct_only = TabView, inherits = NativeControl)]
-pub struct NativeTabViewImpl {
+#[elwindui_macros::class(struct_only = TabView, inherits = NativeControl, no_ancestor_forward)]
+pub struct NativeTabView {
     pub strip: TabStripImpl,
     content_container: Retained<NSView>,
 }
@@ -810,7 +810,7 @@ pub struct NativeTabViewImpl {
 // No `measure_override`/`try_as_native_control` here — both blind-forward to `NativeControlImpl`
 // (this class's own `base`) already, since neither is overridden.
 #[elwindui_macros::class]
-impl NativeTabViewImpl {
+impl NativeTabView {
     fn set_on_new_tab(&self, callback: Box<dyn Fn()>) {
         self.strip.new_tab_button.set_on_click(callback);
     }
@@ -863,7 +863,7 @@ impl NativeTabViewImpl {
         root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
         // `NSStackView`'s default `distribution` (`GravityAreas`) leaves each arranged subview at
         // its own intrinsic size unless hugging priorities say otherwise — `.Fill` makes the stack
-        // actually consume its *entire* stacking-axis extent, matching `NativeTabViewImpl`'s expected "chips
+        // actually consume its *entire* stacking-axis extent, matching `NativeTabView`'s expected "chips
         // row at natural height, content area fills the rest" shape. `content_container`'s own
         // vertical hugging priority is dropped to (near-)zero so it — not the also-low-priority-
         // by-default `strip` — is the one that absorbs whatever space `Fill` distributes (a plain
@@ -871,17 +871,17 @@ impl NativeTabViewImpl {
         content_container.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
         root.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
         let handle = AnyView::from(root);
-        Self { base: NativeControlImpl::new(handle), strip, content_container }
+        Self { base: NativeControl::new(handle), strip, content_container }
     }
 }
 
-pub fn create_tab_view() -> NativeTabViewImpl {
-    NativeTabViewImpl::new()
+pub fn create_tab_view() -> NativeTabView {
+    NativeTabView::new()
 }
 
 /// See docs/elwindui_builtins_spec.md 付録X. A single application-wide `NSMenu` (top menu bar
 /// item / `File`, `Edit`, ...), reusing `MenuItemImpl` for its leaf entries.
-#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItem)]
+#[elwindui_macros::class(struct_only = elwindui_core::ui::MenuItemExt)]
 #[derive(Clone)]
 pub struct MenuItem {
     ns: Retained<NSMenuItem>,
@@ -919,12 +919,12 @@ impl MenuItem {
     }
 }
 
-pub fn create_menu_item() -> MenuItemImpl {
+pub fn create_menu_item() -> MenuItem {
     let m = mtm();
     let ns = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(""), None, &NSString::from_str(""))
     };
-    MenuItemImpl { ns, target_storage: Rc::new(RefCell::new(None)) }
+    MenuItem { ns, target_storage: Rc::new(RefCell::new(None)) }
 }
 
 struct MenuItemTargetIvars {
@@ -956,7 +956,7 @@ impl MenuItemTarget {
 /// A dropdown attached to a `MenuBarItemImpl` (or, per 付録M, a right-click context menu — not used
 /// that way here, but the same type covers both).
 #[derive(Clone)]
-pub struct MenuImpl {
+pub struct Menu {
     ns: Retained<NSMenu>,
 }
 
@@ -968,24 +968,24 @@ pub struct MenuImpl {
 /// for builtins::MenuImpl`) — this raw layer already knows its own concrete `MenuItemImpl` argument
 /// type, so it has no need for that trait's `&dyn MenuItem`/`AsAny`-downcast indirection, the same
 /// way `Window` above stays plain inherent methods throughout.
-impl MenuImpl {
-    fn add_item(&self, item: &MenuItemImpl) {
+impl Menu {
+    fn add_item(&self, item: &MenuItem) {
         self.ns.addItem(&item.ns);
     }
-    fn remove_item(&self, item: &MenuItemImpl) {
+    fn remove_item(&self, item: &MenuItem) {
         self.ns.removeItem(&item.ns);
     }
 }
 
-pub fn create_menu() -> MenuImpl {
+pub fn create_menu() -> Menu {
     let m = mtm();
     let ns = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
-    MenuImpl { ns }
+    Menu { ns }
 }
 
 /// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `MenuImpl`.
 #[derive(Clone)]
-pub struct MenuBarItemImpl {
+pub struct MenuBarItem {
     ns: Retained<NSMenuItem>,
 }
 
@@ -993,26 +993,26 @@ pub struct MenuBarItemImpl {
 /// neither argument, so these are the only way a menu bar item's title/submenu are ever actually
 /// set). Plain inherent methods — see `MenuImpl`'s own `add_item`/`remove_item` doc comment for why
 /// this raw layer doesn't implement `elwindui_core::ui::MenuBarItem` itself.
-impl MenuBarItemImpl {
+impl MenuBarItem {
     fn set_text(&self, text: &str) {
         self.ns.setTitle(&NSString::from_str(text));
     }
-    fn set_submenu(&self, submenu: &MenuImpl) {
+    fn set_submenu(&self, submenu: &Menu) {
         self.ns.setSubmenu(Some(&submenu.ns));
     }
 }
 
-pub fn create_menu_bar_item() -> MenuBarItemImpl {
+pub fn create_menu_bar_item() -> MenuBarItem {
     let m = mtm();
     let ns = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(""), None, &NSString::from_str(""))
     };
-    MenuBarItemImpl { ns }
+    MenuBarItem { ns }
 }
 
 /// The whole top menu bar, installed via `Window::set_menu_bar`.
 #[derive(Clone)]
-pub struct MenuBarImpl {
+pub struct MenuBar {
     ns: Retained<NSMenu>,
 }
 
@@ -1020,16 +1020,16 @@ pub struct MenuBarImpl {
 /// calls, reachable post-construction for `elwindui-backend-appkit::builtins::MenuBarImpl::
 /// set_children`. Plain inherent methods — see `MenuImpl`'s own `add_item`/`remove_item` doc
 /// comment for why this raw layer doesn't implement `elwindui_core::ui::MenuBar` itself.
-impl MenuBarImpl {
-    fn add_item(&self, item: &MenuBarItemImpl) {
+impl MenuBar {
+    fn add_item(&self, item: &MenuBarItem) {
         self.ns.addItem(&item.ns);
     }
-    fn remove_item(&self, item: &MenuBarItemImpl) {
+    fn remove_item(&self, item: &MenuBarItem) {
         self.ns.removeItem(&item.ns);
     }
 }
 
-pub fn create_menu_bar() -> MenuBarImpl {
+pub fn create_menu_bar() -> MenuBar {
     let m = mtm();
     let ns = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
 
@@ -1058,7 +1058,7 @@ pub fn create_menu_bar() -> MenuBarImpl {
     app_menu.addItem(&quit_item);
     app_menu_item.setSubmenu(Some(&app_menu));
     ns.addItem(&app_menu_item);
-    MenuBarImpl { ns }
+    MenuBar { ns }
 }
 
 /// DSL-facing `Window`/`TextArea`/`Button`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/

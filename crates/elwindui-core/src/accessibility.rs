@@ -1,7 +1,7 @@
 /// See docs/elwindui_spec.md 付録H.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessibilityRole {
-    Button,
+    ButtonExt,
     TextInput,
     CheckBox,
     Slider,

@@ -112,7 +112,7 @@ fn main() {
     elwindui::i18n::declare!();
 
     let vm = NotepadViewModel::new();
-    let window = NotepadWindowImpl::new(vm);
+    let window = NotepadWindow::new(vm);
     window.show();
     elwindui::application::run();
 }

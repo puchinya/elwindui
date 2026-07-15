@@ -304,6 +304,7 @@ impl<'a> Parser<'a> {
                 "two_way" => attrs.push(Attr::TwoWay),
                 "routed" => attrs.push(Attr::Routed),
                 "override" => attrs.push(Attr::Override),
+                "onetime" => attrs.push(Attr::Onetime),
                 "command" => {
                     kind = FieldKind::Command;
                     let mut is_async = false;

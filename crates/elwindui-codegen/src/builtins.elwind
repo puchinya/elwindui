@@ -1,18 +1,40 @@
 // The root of every `UIElement`-implementing builtin — a field-less category marker, not a real
-// widget. Every `XxxImpl` struct in `elwindui_core::ui` that actually implements `UIElement`
-// (directly or via delegating to a `base`) corresponds to some `.elwind` component declaring
+// widget. Every concrete struct in `elwindui_core::ui` (bare class name — e.g. `Control`/`Shape` —
+// paired with a `...Ext` trait, per the `#[class]` naming convention) that actually implements
+// `UIElement` (directly or via delegating to a `base`) corresponds to some `.elwind` component declaring
 // `inherits UIElement` (directly or transitively through `NativeControl`/`Layout`/`Shape`/
 // `Control`/`TextBlock`) — this is the DSL-visible root of that hierarchy (docs/elwindui_spec.md
 // 付録H.2.1a). `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem` do *not* inherit
 // it: none of them implement `elwindui_core::ui::UIElement` at all (see their own comments).
+// Common properties every element supports regardless of its own concrete type
+// (`elwindui_core::ui::UIElement`, ui.rs — `margin`/`horizontal_alignment`/`vertical_alignment`/
+// `visibility`/`width`/`height`/`min_width`/`min_height`/`max_width`/`max_height`/`data_context`).
+// Declared here (rather than left for `elwindui-codegen` to special-case by literal attribute name,
+// as `margin`/`data_context` used to be) so every component — builtin or user-defined — picks them
+// up for free through the same inherited-field machinery any other inherited param already uses,
+// with no per-attribute-name hardcoding in the compiler. `horizontal_alignment`/`vertical_alignment`/
+// `visibility` are enum-typed the same way `TextBlock.text_alignment`/`Grid`'s `rows`/`columns`
+// already are — set with a fully-qualified path expression
+// (`elwindui_core::layout::HorizontalAlignment::Center`), no new DSL literal syntax needed.
 #[embedded]
 #[abstract]
 component UIElement {
+    margin: Option<f32>,
+    horizontal_alignment: Option<elwindui_core::layout::HorizontalAlignment>,
+    vertical_alignment: Option<elwindui_core::layout::VerticalAlignment>,
+    visibility: Option<elwindui_core::layout::Visibility>,
+    width: Option<f32>,
+    height: Option<f32>,
+    min_width: Option<f32>,
+    min_height: Option<f32>,
+    max_width: Option<f32>,
+    max_height: Option<f32>,
+    data_context: Option<std::rc::Rc<dyn std::any::Any>>,
 }
 
 // Every layout-container virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Grid`) — mirrors
-// `elwindui_core::ui::Layout`, itself a marker trait over `UIElement` implemented by
-// `VerticalLayoutImpl`/`HorizontalLayoutImpl`/`GridImpl` (docs/elwindui_spec.md 付録H.2.1a).
+// `elwindui_core::ui::Layout`, implemented by the bare `VerticalLayout`/`HorizontalLayout`/`Grid`
+// structs (each paired with its own `...Ext` trait, docs/elwindui_spec.md 付録H.2.1a).
 // `children` is the Logical-tree child list this container declares (`UIElementCollection`,
 // WinUI3's own type, docs/elwindui_spec.md 付録H.2.2) — inherited unconditionally by
 // `VerticalLayout`/`HorizontalLayout`/`Grid` below (none of them have their own `view`, see
@@ -27,8 +49,8 @@ component Layout inherits UIElement {
 
 // A field-less category marker, not a real widget. Only native leaves that actually get embedded
 // as a real `Rc<dyn elwindui_core::ui::UIElement>` node in the visual tree (`Button`/`TextArea`/
-// `TabView`/`TabViewItem`) declare `inherits NativeControl` — their backend `XxxImpl` struct holds
-// a real `base` (a backend-owned `NativeControlImpl`, composed via `inherits = NativeControl` —
+// `TabView`) declare `inherits NativeControl` — their backend struct holds
+// a real `base` (a backend-owned `NativeControl`, composed via `inherits = NativeControl` —
 // `elwindui_core::ui::NativeControl` itself is a pure marker trait with no shared, generic
 // `elwindui-core`-owned struct; see that trait's own doc comment) and implements `NativeControl`/
 // `UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a). `MenuBar`/`MenuBarItem`/
@@ -63,15 +85,23 @@ component Window {
     content: std::rc::Rc<dyn UIElement>,
 
     // WinUI3-style position/size — top-left-origin, Y increasing downward. Each backend's own
-    // `WindowImpl` also exposes these as plain getters (`left()`/`top()`/`width()`/`height()`,
+    // `Window` also exposes these as plain getters (`left()`/`top()`/`width()`/`height()`,
     // querying the live native window state), not just these construction-time setters — see
-    // docs/elwindui_builtins_spec.md 付録F.1.
+    // docs/elwindui_builtins_spec.md 付録F.1. `#[onetime]`: applied once at construction only, never
+    // re-pushed by `resync()` — the OS window manager (not this declaration) owns the live value
+    // once the window exists, so blindly re-applying the originally-declared value on every
+    // unrelated resync would fight a user's subsequent drag/resize. See `Attr::Onetime`'s own doc
+    // comment (ast.rs).
+    #[onetime]
     left: Option<f32>,
 
+    #[onetime]
     top: Option<f32>,
 
+    #[onetime]
     width: Option<f32>,
 
+    #[onetime]
     height: Option<f32>,
 }
 
@@ -88,10 +118,11 @@ component HorizontalLayout inherits Layout {
 }
 
 // The composable drawing primitive `Rectangle`/`Ellipse` (below) shape-compose over
-// (docs/elwindui_spec.md 付録H.2.1a), mirroring `Control`'s role for `ContentControl`: a virtual
-// builtin (no backend Rust struct of its own — `elwindui-codegen`'s `emit_virtual_construction`
-// builds an `elwindui_core::ui::ShapeImpl` directly at each use site) that concrete leaves
-// inherit from and forward their own `kind` into. `kind` is the one field a leaf never
+// (docs/elwindui_spec.md 付録H.2.1a), mirroring `Control`'s role for `ContentControl`. `Shape` does
+// have a real, named backend struct (`elwindui_core::ui::Shape`) — used as `Rectangle`/`Ellipse`'s
+// own `base` field — but no *user-facing* `Shape::new(..)` constructor call is ever generated for
+// it directly (`Shape` is `#[abstract]`): `elwindui-codegen`'s `emit_virtual_construction` assembles
+// a real `elwindui_core::ui::Shape` value inline at each use site instead. `kind` is the one field a leaf never
 // bare-forwards — each leaf computes its own `elwindui_core::ui::ShapeKind` value instead
 // (`Rectangle`'s `RoundedRect { corner_radius }`, `Ellipse`'s fixed `Oval`). No `children` —
 // matching real WinUI3's `Shape`, a pure leaf with no `Children`/content property of its own
@@ -156,15 +187,15 @@ component Control inherits UIElement {
 
 // WinUI3's real `ContentControl` (single `Content`, as opposed to `Control`'s N-children form) —
 // composed via `inherits` (docs/elwindui_spec.md §3, 付録H.2.1a): its `view` root literally
-// constructs a `Control` with exactly one child, so `elwindui-codegen` generates the real struct as
-// `ContentControlImpl` (the bare `ContentControl` name becomes a real
-// `pub trait ContentControl: UIElement + Control` instead — Rust's shared type/trait namespace
-// means the two can't share a name) with a `base: elwindui_core::ui::ControlImpl` field and a
-// direct `impl elwindui_core::ui::UIElement`/`Control for ContentControlImpl` delegating to it —
+// constructs a `Control` with exactly one child. The real implementation is the bare
+// `elwindui_core::ui::ContentControl` struct (paired with its own `ContentControlExt` trait, per
+// the `#[class]` naming convention — struct is always the bare class name, never `...Impl`), with a
+// `base: elwindui_core::ui::Control` field and a direct `impl elwindui_core::ui::UIElement`/
+// `Control for ContentControl` delegating to it —
 // `self` *is* the tree node (`into_node()` just returns `self`), not a wrapper holding a
 // separately-`Rc`-erased `Control` value. Every other `.elwind` reference to `ContentControl` still
 // compiles unchanged — `emit_construction`'s `concrete_type_ident` is the one place that resolves it
-// to the real `ContentControlImpl::new(..)` call. `padding` is inherited from `Control`
+// to the real `ContentControl::new(..)` call. `padding` is inherited from `Control`
 // automatically (no redeclaration needed — `self.padding()`/the bare `padding` reference below both
 // just work) and forwarded through unchanged. Unlike `Window`/`TabViewItem` (whose own
 // `dyn UIElement`-typed fields never reach `syn::parse_str` since neither has a `view`), this
@@ -230,10 +261,18 @@ component TextBlock inherits UIElement {
     text_alignment: Option<TextAlignment>,
 }
 
+// `items` — not a plain `Vec<T>` field like `TabView`'s `children` — is
+// `elwindui_core::ui::ListExt<MenuBarItem>`: a `Vec`-like collection trait (`add`/`insert`/`remove`/
+// `remove_at`/`clear`/`len`/`is_empty`/`to_vec`) each backend implements directly on its own
+// `MenuBar` struct (alongside the pre-existing incremental `add_item`/`remove_item`, unchanged).
+// `#[content(items)]` lets nested `MenuBarItem { .. }` children populate it the same generic,
+// type-driven (list-shaped `content_field`) construction path any other multi-child builtin uses —
+// no `MenuBar`-specific construction branch in `elwindui-codegen`.
 #[embedded]
 #[native]
+#[content(items)]
 component MenuBar {
-    children: Vec<MenuBarItem>,
+    items: elwindui_core::ui::ListExt<MenuBarItem>,
 }
 
 #[embedded]
@@ -245,10 +284,13 @@ component MenuBarItem {
     submenu: Menu,
 }
 
+// See `MenuBar`'s own doc comment — same `items: ListExt<T>` + `#[content(items)]` shape, one level
+// down (`Menu`'s children are `MenuItem`s).
 #[embedded]
 #[native]
+#[content(items)]
 component Menu {
-    children: Vec<MenuItem>,
+    items: elwindui_core::ui::ListExt<MenuItem>,
 }
 
 #[embedded]

@@ -205,6 +205,16 @@ pub enum Attr {
     /// generated `__base_name` accessor, reachable from the override's body via `base::name()`.
     /// See docs/elwindui_spec.md §3, `validate::validate_field_overrides`.
     Override,
+    /// `#[onetime]`: marks a builtin shape's `#[param]` field as construction-time-only — applied
+    /// once when the element is built, never re-applied by `resync()`. For a field whose real
+    /// setter has externally-mutable, backend-owned semantics (e.g. `Window`'s `left`/`top`/
+    /// `width`/`height` — the OS window manager, not the `.elwind` declaration, owns the live
+    /// value once the window exists), blindly re-pushing the originally-declared value on every
+    /// unrelated `resync()` would fight the user's own subsequent interaction (dragging/resizing)
+    /// by snapping it back. Declarative replacement for what used to be a hardcoded
+    /// `node.type_path == "Window" && matches!(name, "left" | "top" | "width" | "height")` check
+    /// in `codegen.rs`'s `emit_resync`.
+    Onetime,
 }
 
 /// A `component`/`viewmodel` field. See docs/elwindui_spec.md §3, 付録O.2.

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo run -p notepad > /tmp/notepad_run.log 2>&1 & *)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
+    ]
+  }
+}

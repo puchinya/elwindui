@@ -615,25 +615,34 @@ fn validate_inherits(
         return;
     }
 
-    // A hand-written virtual builtin (`codegen::is_virtual_builtin` — `VerticalLayout`/
+    // A hand-written virtual builtin (`TypeInfo::is_virtual_builtin` — `VerticalLayout`/
     // `HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`) is constructed entirely by
-    // `codegen::build_virtual_value`'s own per-type-name `match`, never through a `view` — it's
+    // `codegen::build_virtual_value`'s own field-driven construction, never through a `view` — it's
     // structurally incapable of having one (`#[embedded]` with no `Item::View`). The "`X`'s own
     // `view` root must literally construct `Base`" shape-composition contract below therefore
     // doesn't apply to it, regardless of whether `Base` (e.g. `Layout`, once it carries a real
     // `children: UIElementCollection` field) happens to have fields of its own.
-    if codegen::is_virtual_builtin(&c.name) {
+    if table.resolve(from, &c.name).is_some_and(|i| i.is_virtual_builtin) {
         return;
     }
 
-    // A pure, field-less category tag (`UIElement`/`Layout`/`NativeControl`/`Shape`/`Control`/
-    // `TextBlock` — no fields of its own, no `view`): inheriting one requires no evidence of `view`
-    // constructing `base` (there's nothing to construct — it's a marker trait in
-    // `elwindui_core::ui`, docs/elwindui_spec.md 付録H.2.1a), so it's unconditionally allowed.
-    // `NativeControl` alone carries one extra obligation: the inheritor must actually resolve as
-    // `is_native` (a real backend handle exists) — every other category tag imposes no further
-    // requirement on its own.
-    if base_info.effective_fields.is_empty() && !base_info.has_view {
+    // The three root category tags of the whole class hierarchy (docs/elwindui_spec.md 付録
+    // H.2.1a) — `UIElement` (the root), and its two immediate abstract branches `Layout`/
+    // `NativeControl` — are never themselves a `view`'s root anywhere (structurally: nothing
+    // meaningfully "is" a bare `UIElement`/`Layout`/`NativeControl`, as opposed to some concrete
+    // leaf/container beneath them), so inheriting one directly requires no evidence of a `view`
+    // constructing it. This is a closed, stable set by construction — there is exactly one
+    // `UIElement` root and exactly two immediate category branches beneath it — unlike
+    // `is_virtual_builtin`'s own set (which grows with every new concrete virtual builtin), so
+    // naming them explicitly here doesn't reintroduce the kind of per-widget hardcoding this
+    // module was refactored to avoid. Not just `#[abstract]` (also true of `Shape`, which *is*
+    // legitimately used as a view root by `Rectangle`/`Ellipse` and so must NOT be exempted here —
+    // nor "has no fields of its own", the old proxy this used before `UIElement` grew real common
+    // properties like `margin`/`width`/`height`, which broke exactly this way). `NativeControl`
+    // alone carries one extra obligation: the inheritor must actually resolve as `is_native` (a
+    // real backend handle exists) — every other category tag imposes no further requirement on
+    // its own.
+    if matches!(base, "UIElement" | "Layout" | "NativeControl") && !base_info.has_view {
         if base == "NativeControl" {
             let is_native = table.resolve(from, &c.name).is_some_and(|info| info.is_native);
             if !is_native {

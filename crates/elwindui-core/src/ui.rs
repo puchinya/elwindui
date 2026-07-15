@@ -758,6 +758,12 @@ pub enum TextAlignment {
     Right,
 }
 
+impl Default for TextAlignment {
+    fn default() -> Self {
+        Self::Left
+    }
+}
+
 /// `Button`/`TextArea`/`TabView` — the only `UIElement`s with a real backend handle. Always a leaf as
 /// far as this tree is concerned: whatever lives beneath it in its own backend-managed hierarchy
 /// (e.g. `TabView`'s tab-switching) is opaque here. A pure marker trait (`trait_only` — no
@@ -819,10 +825,41 @@ pub trait MenuItem {
     fn set_on_select(&self, callback: Box<dyn Fn()>);
 }
 
+/// A generic, `Vec`-like collection abstraction — `add`/`insert`/`remove`/`remove_at`/`clear`/
+/// `len`/`is_empty`/`to_vec` mirror `UIElementCollection`'s own method set (see that struct's own
+/// doc comment), minus the `UIElement`-tree-specific `parent`-pointer wiring `add`/`insert`/
+/// `remove`/`remove_at` do there — `ListExt<T>` items aren't necessarily `UIElement`s at all (e.g.
+/// `Menu::items`/`MenuBar::items` hold `Rc<dyn MenuItemExt>`/`Rc<dyn MenuBarItemExt>`, neither of
+/// which is part of the `UIElement` visual tree). A plain hand-written trait, not `#[class]`-managed
+/// (the macro's `trait_only`/`struct_only` shapes are for the concrete elwindui class hierarchy;
+/// `ListExt<T>` is a generic utility type, one level below that, the same way `UIElementCollection`
+/// itself is a plain hand-written struct rather than a `#[class]`-managed one). Each backend
+/// provides its own concrete implementor per `Menu`/`MenuBar` (see `Menu::items`/`MenuBar::items`'s
+/// own doc comment) — `elwindui-core` only declares the shape.
+pub trait ListExt<T: ?Sized> {
+    fn add(&self, item: Rc<T>);
+    fn insert(&self, index: usize, item: Rc<T>);
+    fn remove(&self, item: &Rc<T>) -> bool;
+    fn remove_at(&self, index: usize) -> Rc<T>;
+    fn clear(&self);
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
+    fn to_vec(&self) -> Vec<Rc<T>>;
+}
+
 #[elwindui_macros::class(trait_only)]
 pub trait Menu {
     fn add_item(&self, item: &dyn MenuItemExt);
     fn remove_item(&self, item: &dyn MenuItemExt);
+    /// A live handle onto the same backing collection `add_item`/`remove_item` mutate — added
+    /// alongside them (not a replacement) so `.elwind`'s `#[content(items)]` mechanism
+    /// (`builtins.elwind`'s `Menu`, `docs/elwindui_builtins_spec.md` 付録M) can populate `Menu`'s
+    /// nested `MenuItem { .. }` children through the same generic `ListExt`-typed
+    /// content-field path every other multi-child builtin (`VerticalLayout`/`Grid`/`TabView`/...)
+    /// already uses, instead of `elwindui-codegen` needing a `Menu`-specific construction branch.
+    /// A borrow (mirroring `Layout::children`/`Control::children`), not an owned `Rc` — no backend
+    /// needs to hand out an independently-owned handle here.
+    fn items(&self) -> &dyn ListExt<dyn MenuItemExt>;
 }
 
 #[elwindui_macros::class(trait_only)]
@@ -835,7 +872,35 @@ pub trait MenuBarItem {
 pub trait MenuBar {
     fn add_item(&self, item: &dyn MenuBarItemExt);
     fn remove_item(&self, item: &dyn MenuBarItemExt);
+    /// See `Menu::items`'s own doc comment — same rationale, one level up (`MenuBar`'s children are
+    /// `MenuBarItem`s rather than `MenuItem`s).
+    fn items(&self) -> &dyn ListExt<dyn MenuBarItemExt>;
 }
+
+/// `TabView`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). Deliberately empty: every one of
+/// `TabView`'s real `.elwind`-facing setters (`set_children`/`set_dynamic_source`/
+/// `set_items_source`/`set_closable`/`set_selected_index`/`set_on_select`/`set_on_close`/
+/// `set_on_new_tab`) is either generic (`set_dynamic_source<T>`/`set_items_source<T>`, not
+/// dyn-object-safe) or takes a backend-concrete `Rc<TabViewItem>`-shaped argument that has no
+/// common cross-backend signature worth sharing — see each backend's own `TabView`/`TabViewItem`
+/// doc comment. Existing purely so `elwindui_core::ui::TabViewExt` is a real, resolvable path —
+/// `elwindui-codegen`'s `builtin_trait_use` needs every native/virtual builtin (with no exceptions)
+/// to have one, so it can emit `use elwindui::core::ui::{Name}Ext as _;` uniformly instead of
+/// special-casing `TabView`/`TabViewItem` out of an 11-name list (`docs/elwindui_macro_class_spec.md`).
+/// Each backend implements this (empty) trait via `struct_only = elwindui_core::ui::TabViewExt` and
+/// keeps every real setter `#[inherent]`, exactly as it already did before this trait existed (this
+/// only swaps which trait path the backend's own `TabViewExt` resolves to — from a backend-local
+/// auto-generated one to this shared, deliberately-empty one).
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+pub trait TabView {}
+
+/// `TabViewItem`'s own class trait — see `TabView`'s own doc comment for the "why empty" rationale;
+/// same reasoning applies here (`set_header`/`set_content`/`set_closable`/`set_on_close`/
+/// `set_data_context<T>` all stay `#[inherent]` per backend). No `inherits`: like `Window`,
+/// `TabViewItem` is never itself embedded as a real `Rc<dyn UIElement>` node (see its own
+/// `builtins.elwind` doc comment), so it has no meaningful `NativeControl`/`UIElement` ancestor.
+#[elwindui_macros::class(trait_only)]
+pub trait TabViewItem {}
 
 /// `Window`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — also the `component X inherits
 /// Window` (host-composition) bare name every backend's own `WindowImpl` implements.
@@ -1208,6 +1273,13 @@ pub struct Control {
 
 #[elwindui_macros::class]
 impl Control {
+    /// Not `#[inherent]` — mirrors `Layout::children`'s own doc comment: a plain method here
+    /// becomes a default `ControlExt` trait method, so every `Control`-composed component gets
+    /// `self.children()` for free, matching `Layout`-family containers' own `.children()` instead
+    /// of the bare `self.children` field access this used to require.
+    fn children(&self) -> &UIElementCollection {
+        &self.children
+    }
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         let inner = self.visual_children().iter().fold(Size::default(), |acc, c| {

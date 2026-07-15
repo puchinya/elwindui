@@ -367,6 +367,7 @@ impl UIElement {
     /// `Rc<dyn UIElement>` cheaply cloned, a refcount bump), not `&[..]`: the underlying storage is
     /// `RefCell`-backed (mutable at any time via `UIElementCollection`'s `add`/`remove`/etc.), and a
     /// `std::cell::Ref` guard can't be smuggled out through a bare reference tied to `&self`.
+    #[overridable]
     fn visual_children(&self) -> Vec<Rc<dyn UIElementExt>> {
         self.as_ui_element().visual_children.to_vec()
     }
@@ -384,6 +385,7 @@ impl UIElement {
     /// pre-computed array. Defaults to taking no space at all — every concrete leaf/container
     /// overrides this with real logic; nothing currently relies on this default actually being
     /// invoked.
+    #[overridable]
     fn measure_override(&self, _available: Size) -> Size {
         Size { width: 0.0, height: 0.0 }
     }
@@ -393,11 +395,13 @@ impl UIElement {
     /// caller to apply. Returns the size actually used (WinUI3 allows this to differ slightly from
     /// `final_size`; the default and every override here just echo it back unchanged). Defaults to
     /// doing nothing (no children) — see `measure_override`'s own doc comment.
+    #[overridable]
     fn arrange_override(&self, final_size: Size) -> Size {
         final_size
     }
     /// Content this element paints for itself, if any (`None` for pure layout containers like
     /// `Layout`, which only position children and draw nothing on their own account).
+    #[overridable]
     fn paint(&self) -> Option<PaintKind> {
         None
     }
@@ -410,6 +414,7 @@ impl UIElement {
     /// a native handle is entirely backend-specific, so `elwindui_core::ui::NativeControl` (the
     /// marker trait every real native leaf implements) doesn't define one; see that trait's own doc
     /// comment.
+    #[overridable]
     fn try_as_native_control(&self) -> Option<&dyn Any> {
         None
     }
@@ -766,7 +771,7 @@ pub enum TextAlignment {
 /// shared "MeasureNode" abstraction. `collect_render_items<H>` downcasts a leaf's
 /// `try_as_native_control()` result directly to `H` (see that trait method's own doc comment) — no
 /// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
-#[elwindui_macros::class(trait_only, inherits = UIElement)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement)]
 pub trait NativeControl {}
 
 /// The property-setter traits below (`TextArea`/`Button`/`MenuItem`/`Menu`/`MenuBar`/`MenuBarItem`/
@@ -793,13 +798,13 @@ pub trait NativeControl {}
 /// are genuinely different in shape per backend (AppKit's `Retained<TreeHostView>`/`TabChipImpl` vs
 /// WinUI3's own equivalents have no common signature to share without associated types this crate
 /// doesn't need yet) — each backend keeps declaring its own local `TabView` trait.
-#[elwindui_macros::class(trait_only, inherits = NativeControl)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
 pub trait TextArea {
     fn set_text(&self, text: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
 }
 
-#[elwindui_macros::class(trait_only, inherits = NativeControl)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
 pub trait Button {
     fn set_enabled(&self, enabled: bool);
     fn set_on_click(&self, callback: Box<dyn Fn()>);
@@ -871,7 +876,7 @@ pub trait Window {
 /// its concrete subclasses (`VerticalLayout`/`HorizontalLayout`) are, each calling `Layout::
 /// construct()` for their own `base` field (see e.g. `Shape::construct`/`Control::construct` for the
 /// same shape one level up the hierarchy, where the base *is* directly instantiable).
-#[elwindui_macros::class(inherits = UIElement, abstract_class)]
+#[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
 pub struct Layout {
     pub spacing: Cell<f32>,
     /// Shares its storage with `base.visual_children` (`UIElement::children_collection`) —
@@ -900,11 +905,12 @@ impl Layout {
 }
 
 /// `VerticalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
-#[elwindui_macros::class(inherits = Layout)]
+#[elwindui_macros::class(inherits = crate::ui::Layout)]
 pub struct VerticalLayout {}
 
 #[elwindui_macros::class]
 impl VerticalLayout {
+    #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         let child_sizes: Vec<Size> = self
             .visual_children()
@@ -916,6 +922,7 @@ impl VerticalLayout {
             .collect();
         stack_natural_size(Orientation::Vertical, self.base.spacing.get(), &child_sizes)
     }
+    #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         let child_sizes: Vec<Size> = self.visual_children().iter().map(|c| c.measured_size().unwrap_or_default()).collect();
         let child_rects = stack_arrange(final_size, Orientation::Vertical, self.base.spacing.get(), &child_sizes);
@@ -936,11 +943,12 @@ impl VerticalLayout {
 }
 
 /// `HorizontalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
-#[elwindui_macros::class(inherits = Layout)]
+#[elwindui_macros::class(inherits = crate::ui::Layout)]
 pub struct HorizontalLayout {}
 
 #[elwindui_macros::class]
 impl HorizontalLayout {
+    #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         let child_sizes: Vec<Size> = self
             .visual_children()
@@ -952,6 +960,7 @@ impl HorizontalLayout {
             .collect();
         stack_natural_size(Orientation::Horizontal, self.base.spacing.get(), &child_sizes)
     }
+    #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         let child_sizes: Vec<Size> = self.visual_children().iter().map(|c| c.measured_size().unwrap_or_default()).collect();
         let child_rects = stack_arrange(final_size, Orientation::Horizontal, self.base.spacing.get(), &child_sizes);
@@ -976,7 +985,7 @@ impl HorizontalLayout {
 /// 付録H.2.2), so its natural size is just its own drawn bounds.
 /// `Shape`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `Shape` has no further
 /// DSL-level subclass today.
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::UIElement)]
 pub struct Shape {
     pub kind: Cell<ShapeKind>,
     pub fill: RefCell<Option<String>>,
@@ -986,12 +995,15 @@ pub struct Shape {
 
 #[elwindui_macros::class]
 impl Shape {
+    #[overrides]
     fn measure_override(&self, _available: Size) -> Size {
         Size { width: 0.0, height: 0.0 }
     }
+    #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         final_size
     }
+    #[overrides]
     fn paint(&self) -> Option<PaintKind> {
         Some(PaintKind::ShapeExt {
             kind: self.kind.get(),
@@ -1032,7 +1044,7 @@ impl Shape {
 /// 消費クレートごとに再生成していたが、バックエンド非依存な合成 builtin はここに一度だけ手書きする
 /// 方が二重管理にならない。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
 /// 自身の必須メソッド(`set_kind`等)を`base`委譲として登録している。
-#[elwindui_macros::class(inherits = Shape)]
+#[elwindui_macros::class(inherits = crate::ui::Shape)]
 pub struct Rectangle {
     stroke_width: Option<f32>,
     corner_radius: Option<f32>,
@@ -1052,6 +1064,7 @@ impl Rectangle {
     fn corner_radius(&self) -> Option<f32> {
         self.corner_radius.clone()
     }
+    #[overrides]
     fn paint(&self) -> Option<PaintKind> {
         self.base.paint()
     }
@@ -1075,7 +1088,7 @@ impl Rectangle {
 
 /// `builtin::Ellipse`(docs/elwindui_builtins_spec.md 付録G/N)— `ShapeKind::Oval` に固定した
 /// `Shape` の薄いラッパー。`Rectangle`の doc comment 参照。
-#[elwindui_macros::class(inherits = Shape)]
+#[elwindui_macros::class(inherits = crate::ui::Shape)]
 pub struct Ellipse {
     stroke_width: Option<f32>,
 }
@@ -1091,6 +1104,7 @@ impl Ellipse {
     fn stroke_width(&self) -> Option<f32> {
         self.stroke_width.clone()
     }
+    #[overrides]
     fn paint(&self) -> Option<PaintKind> {
         self.base.paint()
     }
@@ -1117,7 +1131,7 @@ impl Ellipse {
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
 /// `TextBlock`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `TextBlock` has no
 /// further DSL-level subclass today.
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::UIElement)]
 pub struct TextBlock {
     pub text: RefCell<String>,
     pub color: RefCell<Option<String>>,
@@ -1126,6 +1140,7 @@ pub struct TextBlock {
 
 #[elwindui_macros::class]
 impl TextBlock {
+    #[overrides]
     fn measure_override(&self, _available: Size) -> Size {
         // `elwindui-core` has no font metrics of its own (measurement, like painting, is a
         // backend concern for self-drawn content — see `Shape`'s same split) — a rough per-
@@ -1133,9 +1148,11 @@ impl TextBlock {
         // render a string that overflows this estimate.
         Size { width: self.text.borrow().chars().count() as f32 * 8.0, height: 16.0 }
     }
+    #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         final_size
     }
+    #[overrides]
     fn paint(&self) -> Option<PaintKind> {
         Some(PaintKind::Text { content: self.text.borrow().clone(), color: self.color.borrow().clone(), alignment: self.alignment.get() })
     }
@@ -1176,7 +1193,7 @@ impl TextBlock {
 /// `Control`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — exposes the fields a
 /// DSL-level subclass composed via `base: Control` (e.g. `builtin::ContentControl`,
 /// `crates/elwindui-builtins/src/builtins.elwind`) delegates to.
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::UIElement)]
 pub struct Control {
     pub padding: Cell<f32>,
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
@@ -1188,6 +1205,7 @@ pub struct Control {
 
 #[elwindui_macros::class]
 impl Control {
+    #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         let inner = self.visual_children().iter().fold(Size::default(), |acc, c| {
             c.measure(available);
@@ -1196,6 +1214,7 @@ impl Control {
         });
         grow_by_margin(inner, self.padding.get())
     }
+    #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         let full = Rect { x: 0.0, y: 0.0, width: final_size.width, height: final_size.height };
         let content_area = shrink_rect_by_margin(full, self.padding.get());
@@ -1243,7 +1262,7 @@ impl Control {
 /// `Control.children`は`UIElement.visual_children`と同一のストレージを共有する
 /// (`Control`構造体の`children`フィールドの doc comment 参照)ため、`Rectangle`/`Ellipse`と違い
 /// `new()`は追加した子の親ポインタを実際に張り直す必要がある。
-#[elwindui_macros::class(inherits = Control)]
+#[elwindui_macros::class(inherits = crate::ui::Control)]
 pub struct ContentControl {
     padding: Option<f32>,
     content: Rc<dyn UIElementExt>,
@@ -1312,7 +1331,7 @@ fn grid_cell_of(child: &Rc<dyn UIElementExt>) -> GridCell {
     }
 }
 
-#[elwindui_macros::class(inherits = UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::UIElement)]
 pub struct Grid {
     pub rows: RefCell<Vec<GridLength>>,
     pub columns: RefCell<Vec<GridLength>>,
@@ -1323,6 +1342,7 @@ pub struct Grid {
 
 #[elwindui_macros::class]
 impl Grid {
+    #[overrides]
     fn measure_override(&self, available: Size) -> Size {
         let children = self.children.to_vec();
         let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
@@ -1335,6 +1355,7 @@ impl Grid {
             .collect();
         grid_natural_size(&self.rows.borrow(), &self.columns.borrow(), &cells, &child_sizes)
     }
+    #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         let children = self.children.to_vec();
         let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
@@ -1559,17 +1580,23 @@ mod tests {
     /// `TextArea`/`Button`/`TabView`) — exercises the same "concrete implementor writes its own
     /// `measure_override`/`try_as_native_control`" pattern those use, instead of relying on any
     /// generic measuring behavior from `elwindui-core::ui::NativeControl` itself (a pure marker trait
-    /// — see that trait's own doc comment).
-    #[elwindui_macros::class(struct_only = NativeControlExt, inherits = UIElement)]
-    struct NativeControl {
+    /// — see that trait's own doc comment). Named `FakeNativeControl`, not the bare `NativeControl`
+    /// that trait already uses, because `#[class]`-generated `__elwindui_inherit_*!` macros share a
+    /// single flat, crate-wide namespace (unlike ordinary Rust items, which can share a bare name
+    /// across different modules) — a same-crate bare-name collision is a real `E0428`, not just a
+    /// registry ambiguity the way it used to be.
+    #[elwindui_macros::class(struct_only = crate::ui::NativeControlExt, inherits = crate::ui::UIElement)]
+    struct FakeNativeControl {
         handle: FakeHandle,
     }
 
     #[elwindui_macros::class]
-    impl NativeControl {
+    impl FakeNativeControl {
+        #[overrides]
         fn measure_override(&self, available: Size) -> Size {
             self.handle.measure(available)
         }
+        #[overrides]
         fn try_as_native_control(&self) -> Option<&dyn Any> {
             Some(&self.handle)
         }
@@ -1578,10 +1605,16 @@ mod tests {
         }
     }
 
-    /// Minimal `#[overridable]`/`#[overrides]` usage example (no real class in this codebase needs it
-    /// yet) — exercises the marker-trait mechanism end to end: `compute` is declared overridable by
-    /// its own class, and a descendant overrides it via `#[ancestor] #[overrides]`.
-    #[elwindui_macros::class(inherits = UIElement)]
+    /// `#[overridable]`/`#[overrides]` usage example, exercised across a genuine 3-hop chain
+    /// (`OverridableBase` -> `OverridableMid` -> `OverridableLeaf`) with two overridable methods —
+    /// `OverridableMid` overrides only `label`, leaving `compute` untouched, and `OverridableLeaf`
+    /// (which itself overrides neither) relies on defaults for both. This is exactly the scenario a
+    /// single shared `#dyn_ident` accessor per trait used to get wrong (always reaching
+    /// `OverridableBase`'s original `compute`/`label`, skipping `OverridableMid`'s own `label`
+    /// override, because the accessor could only be reflexive-for-the-whole-trait or not) — see
+    /// `per_method_accessor_ident`'s own doc comment for the fix (one dedicated accessor per
+    /// `#[overridable]` method, resolved independently).
+    #[elwindui_macros::class(inherits = crate::ui::UIElement)]
     struct OverridableBase {
         value: Cell<i32>,
     }
@@ -1592,36 +1625,62 @@ mod tests {
         fn compute(&self, x: i32) -> i32 {
             x + self.value.get()
         }
+        #[overridable]
+        fn label(&self) -> &'static str {
+            "base"
+        }
         fn new() -> Self {
             Self { base: UIElement::default(), value: Cell::new(1) }
         }
     }
 
-    #[elwindui_macros::class(inherits = OverridableBase)]
-    struct OverridableDerived {}
+    /// hop-1: overrides only `label`, leaves `compute` untouched at `OverridableBase`'s own
+    /// default — the partial-override case.
+    #[elwindui_macros::class(inherits = crate::ui::tests::OverridableBase)]
+    struct OverridableMid {}
 
     #[elwindui_macros::class]
-    impl OverridableDerived {
-        #[ancestor]
+    impl OverridableMid {
         #[overrides]
-        fn compute(&self, x: i32) -> i32 {
-            x * 10
+        fn label(&self) -> &'static str {
+            "mid"
         }
         fn new() -> Self {
             Self { base: OverridableBase::new() }
         }
     }
 
+    /// hop-2: overrides neither method itself — both must resolve via defaults, dispatching
+    /// through `OverridableMid`'s per-method accessors: `label` should stop at `OverridableMid`'s
+    /// own override, `compute` should pass through it to reach `OverridableBase`'s original.
+    #[elwindui_macros::class(inherits = crate::ui::tests::OverridableMid)]
+    struct OverridableLeaf {}
+
+    #[elwindui_macros::class]
+    impl OverridableLeaf {
+        fn new() -> Self {
+            Self { base: OverridableMid::new() }
+        }
+    }
+
     #[test]
-    fn overridable_override_dispatches_through_marker_trait() {
+    fn overridable_override_dispatches_through_inherit_macro() {
         let base = OverridableBase::new();
         assert_eq!(OverridableBaseExt::compute(&base, 5), 6);
+        assert_eq!(OverridableBaseExt::label(&base), "base");
 
-        let derived = OverridableDerived::new();
-        // The ancestor trait's own method resolves to the descendant's override.
-        assert_eq!(OverridableBaseExt::compute(&derived, 5), 50);
-        // The `#[overridable]`-generated marker trait is a real, independently checkable impl too.
-        assert_eq!(__Overridable_OverridableBase_compute::compute(&derived, 5), 50);
+        let mid = OverridableMid::new();
+        // `compute` isn't overridden at this hop — falls back to `OverridableBase`'s own default.
+        assert_eq!(OverridableBaseExt::compute(&mid, 5), 6);
+        assert_eq!(OverridableBaseExt::label(&mid), "mid");
+
+        let leaf = OverridableLeaf::new();
+        // Neither is overridden at `OverridableLeaf` itself: `compute` passes all the way through
+        // `OverridableMid` (which never touched it) to `OverridableBase`'s original, while `label`
+        // stops at `OverridableMid`'s own override — the exact case a single shared accessor got
+        // wrong before the per-method accessor fix.
+        assert_eq!(OverridableBaseExt::compute(&leaf, 5), 6);
+        assert_eq!(OverridableBaseExt::label(&leaf), "mid");
     }
 
     fn size(width: f32, height: f32) -> Size {
@@ -1629,7 +1688,7 @@ mod tests {
     }
 
     fn native(name: &'static str, size: Size) -> Rc<dyn UIElementExt> {
-        new_element(NativeControl::new(FakeHandle(name, size)))
+        new_element(FakeNativeControl::new(FakeHandle(name, size)))
     }
 
     fn stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElementExt>>) -> Rc<dyn UIElementExt> {
@@ -1690,7 +1749,7 @@ mod tests {
         // size instead of filling its stack-allocated cross-axis slot — matching the old
         // `CrossAlign::Start` behavior this test used to exercise.
         fn leaf(name: &'static str, s: Size) -> Rc<dyn UIElementExt> {
-            let node = new_element(NativeControl::new(FakeHandle(name, s)));
+            let node = new_element(FakeNativeControl::new(FakeHandle(name, s)));
             node.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
             node.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
             node
@@ -1785,7 +1844,7 @@ mod tests {
 
     #[test]
     fn margin_shrinks_the_slot_an_element_is_arranged_into() {
-        let tree: Rc<dyn UIElementExt> = new_element(NativeControl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElementExt> = new_element(FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_margin(10.0);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert_eq!(natives[0].1, Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 });
@@ -1793,7 +1852,7 @@ mod tests {
 
     #[test]
     fn explicit_width_and_height_override_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElementExt> = new_element(NativeControl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElementExt> = new_element(FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_width(Some(50.0));
         tree.as_ui_element().set_height(Some(5.0));
         // `Stretch` (the default) still governs slot placement; the explicit width/height above
@@ -1808,7 +1867,7 @@ mod tests {
 
     #[test]
     fn min_and_max_clamp_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElementExt> = new_element(NativeControl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElementExt> = new_element(FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_min_width(Some(30.0));
         tree.as_ui_element().set_max_height(Some(8.0));
         tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
@@ -1865,7 +1924,7 @@ mod tests {
 
     #[test]
     fn non_stretch_alignment_keeps_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElementExt> = new_element(NativeControl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElementExt> = new_element(FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0))));
         tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Center);
         tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Center);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
@@ -1883,6 +1942,33 @@ mod tests {
     impl UIElementExt for PaintingContainer {
         fn as_ui_element(&self) -> &UIElement {
             &self.base
+        }
+        // Forwards to `self.base` (not reflexive `{ self }`) -- unlike `UIElement` itself (the
+        // true declaring class, which explicitly overrides every one of its own `#[overridable]`
+        // methods and so can never recurse through its own default), `PaintingContainer` does NOT
+        // override `visual_children`/`try_as_native_control`, so a reflexive accessor here would
+        // make their trait defaults dispatch straight back to `PaintingContainer` itself forever
+        // (stack overflow) instead of reaching `UIElement`'s own real bodies.
+        fn __dyn_ui_element(&self) -> &dyn UIElementExt {
+            self.base.__dyn_ui_element()
+        }
+        // `visual_children`/`try_as_native_control` aren't overridden here, so their accessors
+        // forward to `self.base` (same reasoning as `__dyn_ui_element` above); `measure_override`/
+        // `arrange_override`/`paint` *are* overridden below, so their accessors are reflexive.
+        fn __dyn_x_for_visual_children(&self) -> &dyn UIElementExt {
+            self.base.__dyn_x_for_visual_children()
+        }
+        fn __dyn_x_for_measure_override(&self) -> &dyn UIElementExt {
+            self
+        }
+        fn __dyn_x_for_arrange_override(&self) -> &dyn UIElementExt {
+            self
+        }
+        fn __dyn_x_for_paint(&self) -> &dyn UIElementExt {
+            self
+        }
+        fn __dyn_x_for_try_as_native_control(&self) -> &dyn UIElementExt {
+            self.base.__dyn_x_for_try_as_native_control()
         }
         fn measure_override(&self, available: Size) -> Size {
             self.base.visual_children().iter().fold(Size::default(), |acc, c| {

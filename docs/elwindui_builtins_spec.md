@@ -1365,7 +1365,7 @@ view NotepadWindow {
 
 `data_context`は`UIElementBase`の共通属性(§13参照)で、`items_source`モードでは各`TabViewItem`に自動的に設定される。`header_template`/`item_template`クロージャ本体の中で`data_context`と書くと、そのクロージャ自身の束縛引数への別名として脱糖される。
 
-`SelectedItem`/`SelectedContainer`(WinUI3の同名概念)は`.elwind`の宣言的プロパティ/`on_select`のコールバック引数としては公開していない — `emit_wiring`の`on_*`汎用配線が「宣言型に`usize`が含まれれば単一引数`Fn(usize)`」という決め打ち機構であるため、2引数化するとこれと噛み合わない。かわりに各バックエンドRust実装(`elwindui-backend-appkit::builtins::tab_view`/`elwindui-backend-winui3::builtins::tab_view`)が`selected_item()`/`selected_container()`という素のメソッドを公開しており、手書きRustグルーコードから直接呼び出せる。
+`SelectedItem`/`SelectedContainer`(WinUI3の同名概念)は`.elwind`の宣言的プロパティ/`on_select`のコールバック引数としては公開していない — `emit_wiring`の`on_*`汎用配線が「宣言型に`usize`が含まれれば単一引数`Fn(usize)`」という決め打ち機構であるため、2引数化するとこれと噛み合わない。かわりに各バックエンドRust実装(`elwindui-backend-appkit::native_ui::TabView`/`elwindui-backend-winui3::native_ui::TabView`)が`selected_item()`/`selected_container()`という素のメソッドを公開しており、手書きRustグルーコードから直接呼び出せる。
 
 ## Y.3 バックエンド対応
 

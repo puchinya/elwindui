@@ -18,7 +18,7 @@
 | `elwindui-hotreload` | 32行 | スタブのみ。`param`/`prop`差分からremount/patchを判定する純粋関数(`decide_reload_action`)だけが存在し、`hot-lib-reloader`統合・実際のdylib差し替えは未実装 |
 | `elwindui-test` | 79行 | 部分実装。`render_tree`(`UIElement`ツリーの、各ノードを`type_name()`でラベル付けしたインデントダンプ)のみ実装。`render_canvas_snapshot`/`assert_image_snapshot!`は未実装(`canvas.rs`はdocコメントのみのスタブ) |
 | `elwindui-backend-appkit` | 約1800行 | 実装済み・実機検証済み。本機で`cargo build`/実行/スクリーンショット確認済みの唯一のバックエンド |
-| `elwindui-backend-winui3` | 約1600行 | 実装コードあり・未検証。appkitと同等の`builtins`モジュール構成を持つが、Windows環境が無いためビルド・動作とも未確認 |
+| `elwindui-backend-winui3` | 約1600行 | 実装コードあり・未検証。appkitと同じ`inner`(非公開・生のWinRT/XAML配線)/`native_ui`(公開・Ext実装)の2ファイル分割構成を持つが、Windows環境が無いためビルド・動作とも未確認 |
 | `elwindui-backend-gtk4` | 2行 | 未着手。`src/lib.rs`が2行のみのスタブで、`builtins`/`platform`/`application`モジュールが一切存在しない |
 | `elwindui`(ファサード) | 61行 | 実装済み。`backend-appkit`/`backend-winui3`/`backend-gtk4`のCargoフィーチャで`core`/`i18n`/`backend`/`ui`を再エクスポートする |
 | プレビューツール(`elwindui-preview`相当) | - | **ワークスペースに存在しない**。`docs/elwindui_tool_preview_design.md`は100%未着手のフォワードルッキング設計 |

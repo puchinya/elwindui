@@ -21,15 +21,16 @@ pub use elwindui_backend_appkit as backend;
 pub use elwindui_backend_winui3 as backend;
 
 /// `elwindui_core::ui`(共通トレイト/仮想 builtin)と、有効化中バックエンドの
-/// `builtins`(ネイティブ builtin の DSL 向けラッパー、`WindowImpl`/`ButtonImpl`等)を1つの
-/// 名前空間にまとめたもの — `builtins::Window`はどのバックエンドでも`elwindui_core::ui::Window`の
-/// 再エクスポートで実体が同一なので、両方の glob import を重ねても衝突しない。
+/// ネイティブ builtin 実装(`Window`/`Button`等)を1つの名前空間にまとめたもの。
+/// `elwindui-backend-appkit`/`elwindui-backend-winui3`はいずれも`native_ui`モジュール(非公開)の
+/// 内容をクレートルート直下に再エクスポートしている(各クレートの`src/lib.rs`参照)ため、
+/// ここではそのクレートルートを丸ごとglobする。
 pub mod ui {
     pub use elwindui_core::ui::*;
     #[cfg(feature = "backend-appkit")]
-    pub use elwindui_backend_appkit::builtins::*;
+    pub use elwindui_backend_appkit::*;
     #[cfg(feature = "backend-winui3")]
-    pub use elwindui_backend_winui3::builtins::*;
+    pub use elwindui_backend_winui3::*;
 }
 
 /// `platform::clipboard`/`platform::file_dialog` etc. See docs/elwindui_spec.md 付録T.

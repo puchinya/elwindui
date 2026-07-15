@@ -3631,6 +3631,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             quote! {
                 {
                     use elwindui::core::ui::VerticalLayoutExt as _;
+                    use elwindui::core::ui::LayoutExt as _;
                     let __v = elwindui::core::ui::VerticalLayout::construct();
                     __v.set_spacing((#spacing).unwrap_or(0.0));
                     for __c in vec![ #(#children),* ] { __v.children().add(__c); }
@@ -3643,6 +3644,7 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             quote! {
                 {
                     use elwindui::core::ui::HorizontalLayoutExt as _;
+                    use elwindui::core::ui::LayoutExt as _;
                     let __v = elwindui::core::ui::HorizontalLayout::construct();
                     __v.set_spacing((#spacing).unwrap_or(0.0));
                     for __c in vec![ #(#children),* ] { __v.children().add(__c); }
@@ -3705,10 +3707,11 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
             quote! {
                 {
                     use elwindui::core::ui::GridExt as _;
+                    use elwindui::core::ui::LayoutExt as _;
                     let __v = elwindui::core::ui::Grid::construct();
                     __v.set_rows((#rows).to_vec());
                     __v.set_columns((#columns).to_vec());
-                    for __c in vec![ #(#children),* ] { __v.children.add(__c); }
+                    for __c in vec![ #(#children),* ] { __v.children().add(__c); }
                     __v
                 }
             }

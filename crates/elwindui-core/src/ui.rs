@@ -862,12 +862,14 @@ pub trait Window {
 /// implemented by every layout-container virtual builtin (`VerticalLayout`/
 /// `HorizontalLayout`/`Grid`), the same way `NativeControl` groups every native leaf.
 ///
-/// Shared fields behind `VerticalLayout`/`HorizontalLayout`. `VerticalLayout`/
-/// `HorizontalLayout` each embed one as `base` and implement `UIElement`/`Layout` themselves,
-/// doing their own layout math directly against `elwindui_core::layout`'s `stack_arrange`/
-/// `stack_natural_size` free functions with their own fixed `Orientation` literal — neither
-/// delegates its `measure_override`/`arrange_override` to this struct's own (trivial, "take no
-/// space" — see `UIElement::measure_override`'s own doc comment) default, since the orientation
+/// Holds only `children` — the one field every layout-container virtual builtin needs
+/// (docs/elwindui_spec.md 1426行目). `spacing` is *not* here: it only means anything to
+/// `VerticalLayout`/`HorizontalLayout` (`Grid` has no use for it), so each of those two declares
+/// its own `spacing` field instead of it living on this shared base. `VerticalLayout`/
+/// `HorizontalLayout` do their own layout math directly against `elwindui_core::layout`'s
+/// `stack_arrange`/`stack_natural_size` free functions with their own fixed `Orientation` literal —
+/// neither delegates its `measure_override`/`arrange_override` to this struct's own (trivial, "take
+/// no space" — see `UIElement::measure_override`'s own doc comment) default, since the orientation
 /// (and so the entire layout algorithm) is a property of *which concrete type this is*, not of
 /// shared state a common base could hold.
 ///
@@ -878,7 +880,6 @@ pub trait Window {
 /// same shape one level up the hierarchy, where the base *is* directly instantiable).
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
 pub struct Layout {
-    pub spacing: Cell<f32>,
     /// Shares its storage with `base.visual_children` (`UIElement::children_collection`) —
     /// `UIElement::visual_children()`'s default implementation already reads that storage directly,
     /// so no override is needed here.
@@ -887,26 +888,29 @@ pub struct Layout {
 
 #[elwindui_macros::class]
 impl Layout {
-    /// Kept off the `Layout` trait itself (`#[inherent]`) — `VerticalLayout`/`HorizontalLayout`
-    /// already expose their own `set_spacing` that forwards to this one inherent method, so making
-    /// it a `Layout`-trait-required method too would just duplicate the same signature on both
-    /// levels of the hierarchy.
-    #[inherent]
-    pub fn set_spacing(&self, spacing: f32) {
-        self.spacing.set(spacing);
-        self.invalidate_measure();
+    /// Not `#[inherent]` — a plain method here becomes a default `LayoutExt` trait method
+    /// (dispatched through `__dyn_layout`, docs/elwindui_macro_class_spec.md), so
+    /// `VerticalLayout`/`HorizontalLayout`/`Grid` all get `self.children()` for free without
+    /// redeclaring it themselves, the same way every `UIElement` (root class) method is inherited
+    /// by every concrete leaf/container for free.
+    fn children(&self) -> &UIElementCollection {
+        &self.children
     }
 
     fn construct() -> Self {
         let base = UIElement::default();
         let children = base.children_collection();
-        Self { base, spacing: Cell::new(0.0), children }
+        Self { base, children }
     }
 }
 
-/// `VerticalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
+/// `VerticalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). `spacing` lives here
+/// (not on `Layout`) since it's meaningless to `Grid`, `Layout`'s other concrete subclass — see
+/// `Layout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
-pub struct VerticalLayout {}
+pub struct VerticalLayout {
+    spacing: Cell<f32>,
+}
 
 #[elwindui_macros::class]
 impl VerticalLayout {
@@ -920,31 +924,32 @@ impl VerticalLayout {
                 c.measured_size().unwrap_or_default()
             })
             .collect();
-        stack_natural_size(Orientation::Vertical, self.base.spacing.get(), &child_sizes)
+        stack_natural_size(Orientation::Vertical, self.spacing.get(), &child_sizes)
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         let child_sizes: Vec<Size> = self.visual_children().iter().map(|c| c.measured_size().unwrap_or_default()).collect();
-        let child_rects = stack_arrange(final_size, Orientation::Vertical, self.base.spacing.get(), &child_sizes);
+        let child_rects = stack_arrange(final_size, Orientation::Vertical, self.spacing.get(), &child_sizes);
         for (child, rect) in self.visual_children().iter().zip(child_rects) {
             child.arrange(rect);
         }
         final_size
     }
     fn set_spacing(&self, spacing: f32) {
-        self.base.set_spacing(spacing);
-    }
-    pub fn children(&self) -> &UIElementCollection {
-        &self.base.children
+        self.spacing.set(spacing);
+        self.invalidate_measure();
     }
     fn construct() -> Self {
-        Self { base: Layout::construct() }
+        Self { base: Layout::construct(), spacing: Cell::new(0.0) }
     }
 }
 
-/// `HorizontalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a).
+/// `HorizontalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). `spacing` lives here
+/// (not on `Layout`) — see `VerticalLayout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
-pub struct HorizontalLayout {}
+pub struct HorizontalLayout {
+    spacing: Cell<f32>,
+}
 
 #[elwindui_macros::class]
 impl HorizontalLayout {
@@ -958,25 +963,23 @@ impl HorizontalLayout {
                 c.measured_size().unwrap_or_default()
             })
             .collect();
-        stack_natural_size(Orientation::Horizontal, self.base.spacing.get(), &child_sizes)
+        stack_natural_size(Orientation::Horizontal, self.spacing.get(), &child_sizes)
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         let child_sizes: Vec<Size> = self.visual_children().iter().map(|c| c.measured_size().unwrap_or_default()).collect();
-        let child_rects = stack_arrange(final_size, Orientation::Horizontal, self.base.spacing.get(), &child_sizes);
+        let child_rects = stack_arrange(final_size, Orientation::Horizontal, self.spacing.get(), &child_sizes);
         for (child, rect) in self.visual_children().iter().zip(child_rects) {
             child.arrange(rect);
         }
         final_size
     }
     fn set_spacing(&self, spacing: f32) {
-        self.base.set_spacing(spacing);
-    }
-    pub fn children(&self) -> &UIElementCollection {
-        &self.base.children
+        self.spacing.set(spacing);
+        self.invalidate_measure();
     }
     fn construct() -> Self {
-        Self { base: Layout::construct() }
+        Self { base: Layout::construct(), spacing: Cell::new(0.0) }
     }
 }
 
@@ -1317,8 +1320,9 @@ impl ContentControl {
 /// `rows`/`columns` (not `row_definitions`/`column_definitions`) to match `builtin::Grid`'s own
 /// `#[param] rows`/`#[param] columns` names — `elwindui-codegen`'s setter-based construction calls
 /// `.set_{param name}(..)` generically, so the Rust field/setter name must agree with the DSL's.
-/// `Grid`'s own class trait — empty marker (docs/elwindui_spec.md 付録H.2.1a); `Grid` has no
-/// further DSL-level subclass today.
+/// `Grid`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — inherits `Layout` (like
+/// `VerticalLayout`/`HorizontalLayout`), so `children` comes from that shared base rather than
+/// being declared on `Grid` itself (docs/elwindui_builtins_spec.md 付録F.11).
 /// Reads a child's `Grid::row`/`Grid::column` attached-property values back out of its
 /// `UIElement::attached` bag — `Grid` is the only thing that knows those two fields are `i32`
 /// and default to `0`, so it (not `UIElement`) owns this downcast, mirroring how
@@ -1331,20 +1335,17 @@ fn grid_cell_of(child: &Rc<dyn UIElementExt>) -> GridCell {
     }
 }
 
-#[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::Layout)]
 pub struct Grid {
     pub rows: RefCell<Vec<GridLength>>,
     pub columns: RefCell<Vec<GridLength>>,
-    /// Shares its storage with `base.visual_children` (`UIElement::children_collection`) — see
-    /// `Layout::children`'s own doc comment.
-    pub children: UIElementCollection,
 }
 
 #[elwindui_macros::class]
 impl Grid {
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
-        let children = self.children.to_vec();
+        let children = self.children().to_vec();
         let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
         let child_sizes: Vec<Size> = children
             .iter()
@@ -1357,7 +1358,7 @@ impl Grid {
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
-        let children = self.children.to_vec();
+        let children = self.children().to_vec();
         let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
         let child_sizes: Vec<Size> = children.iter().map(|c| c.measured_size().unwrap_or_default()).collect();
         let child_rects = grid_arrange(final_size, &self.rows.borrow(), &self.columns.borrow(), &cells, &child_sizes);
@@ -1375,20 +1376,8 @@ impl Grid {
         self.invalidate_measure();
     }
     fn construct() -> Self {
-        let base = UIElement::default();
-        let children = base.children_collection();
-        Self { base, rows: RefCell::new(Vec::new()), columns: RefCell::new(Vec::new()), children }
+        Self { base: Layout::construct(), rows: RefCell::new(Vec::new()), columns: RefCell::new(Vec::new()) }
     }
-}
-
-// `Grid`'s `base` is `UIElement` directly (it has no `spacing`, so it skips `Layout`
-// entirely, unlike `VerticalLayout`/`HorizontalLayout`) — `#[class(inherits = UIElement)]` above
-// doesn't know to also mark it as a `Layout`, so that one-line empty marker stays hand-written.
-// `LayoutExt` has no required methods of its own beyond `__dyn_layout` (`Layout`'s only own method,
-// `set_spacing`, is `#[inherent]` — not part of the trait at all), so the reflexive accessor is all
-// that's needed here.
-impl LayoutExt for Grid {
-    fn __dyn_layout(&self) -> &dyn LayoutExt { self }
 }
 
 /// WinUI3's `FrameworkElement.MeasureCore`-style constraint step, used by `UIElement::measure`: an

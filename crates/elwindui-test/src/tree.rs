@@ -22,7 +22,7 @@ fn write_node(node: &dyn UIElementExt, depth: usize, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elwindui_core::ui::{new_element, TextBlock, VerticalLayout, VerticalLayoutExt as _};
+    use elwindui_core::ui::{new_element, LayoutExt as _, TextBlock, VerticalLayout};
 
     #[test]
     fn dumps_nested_type_names_with_indentation() {

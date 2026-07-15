@@ -53,7 +53,7 @@ fn collect_all<T: 'static>(node: &dyn UIElementExt, out: &mut Vec<Rc<dyn UIEleme
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{new_element, TextBlock, VerticalLayoutExt as _, VerticalLayout};
+    use crate::ui::{new_element, LayoutExt as _, TextBlock, VerticalLayout};
 
     #[test]
     fn children_count_and_get_child_match_visual_children() {

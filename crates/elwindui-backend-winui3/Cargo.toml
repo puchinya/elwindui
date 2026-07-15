@@ -32,3 +32,6 @@ windows-core = "0.58"
 # Generates `src/bindings.rs` from the Windows App SDK's `Microsoft.UI.Xaml.winmd` metadata (not
 # part of the core Windows SDK metadata the `windows` crate itself ships) — see `build.rs`.
 windows-bindgen = "0.58"
+
+[lints]
+workspace = true

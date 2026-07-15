@@ -247,12 +247,34 @@ struct StoredClassArgs {
     owns_inherit_macros: bool,
 }
 
-/// Keyed by class name (e.g. `"VerticalLayout"`) — populated by `struct ClassName`'s own
-/// `#[class(..)]` invocation, read by the paired `impl ClassName { .. }`'s bare `#[class]` (see
-/// `expand`/`expand_impl`). Relies on the struct's attribute expanding before its paired impl's
-/// within the same crate compilation — see this module's own doc comment.
-fn class_arg_store() -> &'static Mutex<HashMap<String, StoredClassArgs>> {
-    static STORE: OnceLock<Mutex<HashMap<String, StoredClassArgs>>> = OnceLock::new();
+/// The identifier of the crate currently being compiled, read fresh from the environment variables
+/// cargo (and, critically, rust-analyzer's own proc-macro-srv — the same protocol, same per-request
+/// env vars) sets for *this* macro-expansion request. Every process-global store in this module
+/// (`class_arg_store`, `same_crate_classes`) is keyed by `(compiling_crate_key(), ..)`, not just
+/// `..`, specifically because a real `cargo build` and rust-analyzer differ in one load-bearing way:
+/// `cargo build` spawns one OS process per crate compilation, so these `OnceLock`s naturally start
+/// empty for each crate; rust-analyzer instead runs *one* persistent proc-macro-srv process for the
+/// entire workspace/session. Without this key, one crate's own bare class names (or its struct/impl
+/// arg hand-off) leak into a *different* crate's analysis the moment both get processed within the
+/// same rust-analyzer session — confirmed empirically via `rust-analyzer diagnostics .` on this
+/// workspace: `notepad`'s legitimate `elwindui::ui::Window` (a cross-crate reference) was rejected
+/// by `validate_fully_qualified_path` as if `Window` were declared in `notepad`'s own crate, purely
+/// because `elwindui-core`'s own analysis (earlier in the same session) had already registered it.
+/// `CARGO_PKG_NAME` is a fallback for the rare case `CARGO_CRATE_NAME` isn't set; empty string
+/// (never a valid crate name) if neither is — degrading to one shared unscoped bucket on a missing
+/// env var would silently reintroduce the exact bug this key exists to prevent.
+fn compiling_crate_key() -> String {
+    std::env::var("CARGO_CRATE_NAME").or_else(|_| std::env::var("CARGO_PKG_NAME")).unwrap_or_default()
+}
+
+/// Keyed by `(compiling_crate_key(), class name)` (e.g. `("elwindui_core", "VerticalLayout")`) —
+/// populated by `struct ClassName`'s own `#[class(..)]` invocation, read by the paired
+/// `impl ClassName { .. }`'s bare `#[class]` (see `expand`/`expand_impl`). Relies on the struct's
+/// attribute expanding before its paired impl's within the same crate compilation — see this
+/// module's own doc comment. See `compiling_crate_key`'s own doc comment for why the crate key is
+/// part of this map's key at all, not just the class name.
+fn class_arg_store() -> &'static Mutex<HashMap<(String, String), StoredClassArgs>> {
+    static STORE: OnceLock<Mutex<HashMap<(String, String), StoredClassArgs>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -266,7 +288,7 @@ fn store_class_args(class_name: &str, args: &ClassArgs, owns_inherit_macros: boo
         no_ancestor_forward: args.no_ancestor_forward,
         owns_inherit_macros,
     };
-    class_arg_store().lock().unwrap().insert(class_name.to_string(), stored);
+    class_arg_store().lock().unwrap().insert((compiling_crate_key(), class_name.to_string()), stored);
 }
 
 /// `None` means no `struct ClassName` has been seen yet under this name — the caller (`expand_impl`)
@@ -279,7 +301,7 @@ fn store_class_args(class_name: &str, args: &ClassArgs, owns_inherit_macros: boo
 /// see `register_same_crate_class`'s own doc comment.
 fn load_class_args(class_name: &str) -> Option<(ClassArgs, bool)> {
     let mut store = class_arg_store().lock().unwrap();
-    let stored = store.remove(class_name)?;
+    let stored = store.remove(&(compiling_crate_key(), class_name.to_string()))?;
     let parse_type = |s: &String| syn::parse_str::<Type>(s).expect("#[class]: internal: failed to reparse stored `inherits` type");
     let parse_path = |s: &String| syn::parse_str::<Path>(s).expect("#[class]: internal: failed to reparse stored path");
     Some((
@@ -330,8 +352,12 @@ struct SameCrateClassInfo {
 ///    raw native leaf it composes are always declared together in the same backend crate).
 /// 3. `ancestor_is_forwardable`: is an `inherits = ..` target's own trait even forwardable at all
 ///    (`SameCrateClassInfo::no_ancestor_forward`, above)?
-fn same_crate_classes() -> &'static Mutex<HashMap<String, SameCrateClassInfo>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, SameCrateClassInfo>>> = OnceLock::new();
+/// Keyed by `(compiling_crate_key(), bare name)`, not just bare name — see `compiling_crate_key`'s
+/// own doc comment for why (rust-analyzer's single persistent proc-macro-srv process, unlike a real
+/// `cargo build`'s one-process-per-crate model, would otherwise leak one crate's registrations into
+/// every other crate's analysis within the same session).
+fn same_crate_classes() -> &'static Mutex<HashMap<(String, String), SameCrateClassInfo>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), SameCrateClassInfo>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -356,7 +382,7 @@ fn validate_fully_qualified_path(path: &Path, arg_name: &str) -> syn::Result<()>
         );
         return Err(syn::Error::new_spanned(path, msg));
     }
-    if same_crate_classes().lock().unwrap().contains_key(&bare_name) {
+    if same_crate_classes().lock().unwrap().contains_key(&(compiling_crate_key(), bare_name.clone())) {
         let first = &path.segments.first().unwrap().ident;
         if first != "crate" {
             let msg = format!(
@@ -380,11 +406,12 @@ fn validate_fully_qualified_path(path: &Path, arg_name: &str) -> syn::Result<()>
 /// deliberately supported naming pattern, see this module's own top doc comment on `struct_only`).
 fn register_same_crate_class(bare_name: &str, struct_only: &Option<Path>, no_ancestor_forward: bool) -> bool {
     let struct_only = struct_only.as_ref().map(|p| quote! { #p }.to_string());
+    let key = (compiling_crate_key(), bare_name.to_string());
     let mut registry = same_crate_classes().lock().unwrap();
-    if registry.contains_key(bare_name) {
+    if registry.contains_key(&key) {
         false
     } else {
-        registry.insert(bare_name.to_string(), SameCrateClassInfo { struct_only, no_ancestor_forward });
+        registry.insert(key, SameCrateClassInfo { struct_only, no_ancestor_forward });
         true
     }
 }
@@ -395,7 +422,11 @@ fn register_same_crate_class(bare_name: &str, struct_only: &Option<Path>, no_anc
 /// composes them) or a not-yet-registered same-crate one (declaration order puts ancestors first,
 /// same as every other same-crate lookup in this module).
 fn ancestor_is_no_ancestor_forward(bare_name: &str) -> bool {
-    same_crate_classes().lock().unwrap().get(bare_name).is_some_and(|info| info.no_ancestor_forward)
+    same_crate_classes()
+        .lock()
+        .unwrap()
+        .get(&(compiling_crate_key(), bare_name.to_string()))
+        .is_some_and(|info| info.no_ancestor_forward)
 }
 
 /// A path type's own leading segments, everything but the final (bare-name) segment, followed by
@@ -428,7 +459,7 @@ fn path_module_prefix(ty: &Type) -> Option<TokenStream2> {
 /// currently compiling (a genuine same-crate declaration), `Some(path_module_prefix(ty))`
 /// otherwise — see that function's own doc comment for why this is always correct.
 fn inherit_macro_prefix(bare_name: &str, ty: &Type) -> Option<TokenStream2> {
-    if same_crate_classes().lock().unwrap().contains_key(bare_name) {
+    if same_crate_classes().lock().unwrap().contains_key(&(compiling_crate_key(), bare_name.to_string())) {
         return None;
     }
     path_module_prefix(ty)
@@ -469,7 +500,7 @@ fn struct_only_collides_with(own_struct_only: &Option<Path>, parent_bare_name: &
     same_crate_classes()
         .lock()
         .unwrap()
-        .get(parent_bare_name)
+        .get(&(compiling_crate_key(), parent_bare_name.to_string()))
         .and_then(|info| info.struct_only.clone())
         .is_some_and(|v| v == own_str)
 }
@@ -484,7 +515,11 @@ fn struct_only_collides_with(own_struct_only: &Option<Path>, parent_bare_name: &
 /// `struct_only` registration, its real recorded target always wins over the naming-convention
 /// guess.
 fn ancestor_own_trait(bare_name: &str, fallback: &Type) -> TokenStream2 {
-    let real = same_crate_classes().lock().unwrap().get(bare_name).and_then(|info| info.struct_only.clone());
+    let real = same_crate_classes()
+        .lock()
+        .unwrap()
+        .get(&(compiling_crate_key(), bare_name.to_string()))
+        .and_then(|info| info.struct_only.clone());
     match real {
         Some(s) => s.parse().expect("#[class]: internal: failed to reparse stored struct_only path"),
         None => {
@@ -1047,6 +1082,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     let vis = &item.vis;
     let attrs = &item.attrs;
     let generics = &item.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let existing_fields: Vec<Field> = match &item.fields {
         Fields::Named(named) => named.named.iter().cloned().collect(),
@@ -1063,12 +1099,33 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     // no suffix transform is needed here.
     let base_field = args.inherits.as_ref().map(|ty| quote! { pub base: #ty, });
 
+    // rust-analyzer-only: gives its autoderef-based method resolution a way to walk the whole
+    // ancestor chain as plain inherent methods (each ancestor class emits this same `Deref` for its
+    // own `base` field in turn), entirely independent of the `{ClassName}Ext` traits/
+    // `__elwindui_inherit_*!` macro chain real builds use for the same purpose — see
+    // `build_rust_analyzer_shadow`'s own doc comment and docs/elwindui_macro_class_spec.md §15 for
+    // why. Unlike `expand_impl`, this function has no cross-invocation (`class_arg_store`)
+    // dependency of its own — it always succeeds from its own single invocation's args alone,
+    // regardless of rust-analyzer's expansion order, so nothing extra is needed to make this part
+    // reliable.
+    let deref_shadow = args.inherits.as_ref().map(|ty| {
+        quote! {
+            #[cfg(rust_analyzer)]
+            #[allow(unexpected_cfgs)]
+            impl #impl_generics std::ops::Deref for #class_name #ty_generics #where_clause {
+                type Target = #ty;
+                fn deref(&self) -> &Self::Target { &self.base }
+            }
+        }
+    });
+
     quote! {
         #(#attrs)*
         #vis struct #class_name #generics {
             #base_field
             #(#existing_fields,)*
         }
+        #deref_shadow
     }
 }
 
@@ -1143,6 +1200,102 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     }
 }
 
+/// Builds a `#[cfg(rust_analyzer)]`-only `impl ClassName { .. }` exposing this class's own
+/// methods/constructor as plain inherent methods — entirely self-contained from this single `impl`
+/// invocation's own `item.items` (`own_methods`/`override_methods`/`ctor_methods`, already
+/// classified by `expand_impl`'s own loop, which never consults `args`/`class_arg_store`), so it
+/// always succeeds regardless of whether/when the paired `struct ClassName`'s attribute has been
+/// expanded.
+///
+/// Only ever called from `expand_impl`'s `class_arg_store` lookup-failure branch — see this
+/// module's own doc comment on that store and docs/elwindui_macro_class_spec.md §15: rust-analyzer's
+/// demand-driven macro expansion doesn't guarantee rustc's "same-crate attribute macros expand in
+/// source order," so this lookup can fail spuriously there even when nothing is really wrong. The
+/// ordinary success path needs no shadow of its own — `trait_decl`/`trait_impl`/`ctor_block` (built
+/// straight from `args`, exactly as before this mechanism existed) already give rust-analyzer full,
+/// accurate information, including the `pub trait {ClassName}Ext` declaration itself; hiding that
+/// declaration behind this cfg too (an earlier version of this function did exactly that, gating the
+/// *entire* real generation unconditionally) was tried and reverted — plenty of hand-written code in
+/// this codebase names `{ClassName}Ext` directly as a *type* (`Rc<dyn UIElementExt>`, `T:
+/// UIElementExt`, ...), not just through method-call completion, and none of that resolves once the
+/// trait itself doesn't exist under `cfg(rust_analyzer)`.
+///
+/// Real (`cfg(not(rust_analyzer))`) builds never see this — it plays no role in actual compiled
+/// behavior, and is never exercised by `cargo build`/`cargo test` (verify with `RUSTFLAGS="--cfg
+/// rust_analyzer" cargo check`, since that cfg is otherwise only ever set by rust-analyzer itself).
+///
+/// `own_methods`/`override_methods` are re-emitted with `pub` visibility (overriding whatever
+/// `expand_impl`'s own classification loop already set on the clones it hands here) — in the real
+/// build they're reachable through the `pub` `{ClassName}Ext` trait, and the shadow's plain
+/// inherent `impl` needs its own explicit `pub` to match that same effective visibility. An
+/// `#[overrides]` method is included alongside `own_methods` here — even though the real build
+/// routes it through the ancestor's own `impl` via the classify muncher — since a class's own
+/// override is exactly the method body that wins at this class's own concrete type, matching the
+/// real dispatch's own "closest override" semantics. `ctor_methods` keep whatever visibility
+/// `expand_impl` already resolved (including deliberately-private `#[inherent]` helpers) — that one
+/// mirrors the real `ctor_block` exactly, so no visibility override happens here.
+///
+/// `new`-synthesis here is a simplified, best-effort version of the real rule in `expand_impl`
+/// (always synthesize from a `construct` method when one exists and no hand-written `new` does) —
+/// `args.abstract_class` (which suppresses this on a real `abstract_class`) isn't available on this
+/// lookup-failure path, and a rare `abstract_class`'s completion surface being slightly over-
+/// approximated is an IDE-only inaccuracy, never observable from a real build.
+fn build_rust_analyzer_shadow(
+    impl_name: &Ident,
+    impl_generics: &syn::ImplGenerics,
+    ty_generics: &syn::TypeGenerics,
+    where_clause: Option<&syn::WhereClause>,
+    own_methods: &[ImplItemFn],
+    override_methods: &[ImplItemFn],
+    ctor_methods: &[(ImplItemFn, bool)],
+) -> TokenStream2 {
+    let has_hand_written_new = ctor_methods.iter().any(|(f, _)| f.sig.ident == "new");
+    let construct_fn = if has_hand_written_new {
+        None
+    } else {
+        ctor_methods.iter().find(|(f, _)| f.sig.ident == "construct").map(|(f, _)| f)
+    };
+    let auto_new = construct_fn.map(|f| {
+        let params = &f.sig.inputs;
+        let arg_names: Vec<TokenStream2> = params
+            .iter()
+            .filter_map(|arg| match arg {
+                FnArg::Typed(pat_type) => {
+                    let pat = &pat_type.pat;
+                    Some(quote! { #pat })
+                }
+                FnArg::Receiver(_) => None,
+            })
+            .collect();
+        quote! {
+            pub fn new(#params) -> std::rc::Rc<Self> {
+                std::rc::Rc::new(Self::construct(#(#arg_names),*))
+            }
+        }
+    });
+    let own_bodies = own_methods.iter().chain(override_methods.iter()).map(|f| {
+        let mut f = f.clone();
+        f.vis = Visibility::Public(Default::default());
+        quote! { #f }
+    });
+    let ctor_bodies = ctor_methods.iter().map(|(f, force_pub)| {
+        let mut f = f.clone();
+        if *force_pub {
+            f.vis = Visibility::Public(Default::default());
+        }
+        quote! { #f }
+    });
+    quote! {
+        #[cfg(rust_analyzer)]
+        #[allow(unexpected_cfgs)]
+        impl #impl_generics #impl_name #ty_generics #where_clause {
+            #(#ctor_bodies)*
+            #(#own_bodies)*
+            #auto_new
+        }
+    }
+}
+
 fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -> TokenStream2 {
     if item.trait_.is_some() {
         return syn::Error::new_spanned(
@@ -1159,30 +1312,6 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         },
         other => return syn::Error::new_spanned(other, "#[class]: unsupported `impl` self type").to_compile_error(),
     };
-    // A bare `#[class]` on the impl means "use whatever `#[class(..)]` args the paired `struct
-    // ClassName` declared" (see `store_class_args`/`load_class_args`) — explicit args on the impl
-    // (the old, still-supported form) always win over anything stored.
-    // `owns_inherit_macros` is `true` unless this bare name collided with an earlier same-crate
-    // declaration (see `register_same_crate_class`'s own doc comment) — explicit args on the impl
-    // (bypassing the struct-args store entirely) have no such information available, so they
-    // default to `true` (assume no collision), matching this rare, pre-existing form's existing
-    // behavior before this check existed.
-    let (args, owns_inherit_macros) = if attr_is_empty {
-        match load_class_args(&class_name.to_string()) {
-            Some(pair) => pair,
-            None => {
-                let msg = format!(
-                    "#[class]: no matching `struct {class_name}` with #[elwindui_macros::class(..)] found earlier in \
-                     this file — declare the struct (with any inherits/struct_only/... args) before this \
-                     impl block, or pass args explicitly here"
-                );
-                return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
-            }
-        }
-    } else {
-        (attr_args, true)
-    };
-    let args = &args;
     let bare_name = class_name.to_string();
     // The compiled struct is always exactly `class_name` — no suffix transform.
     let impl_name = class_name.clone();
@@ -1204,6 +1333,9 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     // invocation; routing to the right ancestor's `impl` is entirely the classify muncher's job
     // (keyed by each method's own name), not something resolved here.
     let mut override_methods: Vec<ImplItemFn> = Vec::new();
+    // This classification pass reads only `item.items`, never `args`/`class_arg_store` — moved
+    // ahead of the store lookup below specifically so `build_rust_analyzer_shadow` (called right
+    // after it) never depends on that lookup's success. See that function's own doc comment.
     for impl_item in item.items {
         match impl_item {
             ImplItem::Fn(mut f) => {
@@ -1250,6 +1382,56 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             }
         }
     }
+    let own_methods = instance_methods;
+
+    // A bare `#[class]` on the impl means "use whatever `#[class(..)]` args the paired `struct
+    // ClassName` declared" (see `store_class_args`/`load_class_args`) — explicit args on the impl
+    // (the old, still-supported form) always win over anything stored.
+    // `owns_inherit_macros` is `true` unless this bare name collided with an earlier same-crate
+    // declaration (see `register_same_crate_class`'s own doc comment) — explicit args on the impl
+    // (bypassing the struct-args store entirely) have no such information available, so they
+    // default to `true` (assume no collision), matching this rare, pre-existing form's existing
+    // behavior before this check existed.
+    let (args, owns_inherit_macros) = if attr_is_empty {
+        match load_class_args(&bare_name) {
+            Some(pair) => pair,
+            None => {
+                // A genuine ordering mistake under rustc (struct declared after its impl, or not at
+                // all) fails here for real — but this lookup can *also* fail spuriously under
+                // rust-analyzer, which never guaranteed this impl's paired struct was expanded
+                // first (see `build_rust_analyzer_shadow`'s own doc comment and
+                // docs/elwindui_macro_class_spec.md §15). So: always emit the self-contained shadow
+                // (built from `item.items` alone, just classified above, no store dependency) for
+                // rust-analyzer's benefit, and keep the `compile_error!` real but gate it to actual
+                // `cargo build`/`cargo check` only, so a spurious lookup failure under
+                // rust-analyzer never blanks out this class's own completion.
+                let shadow = build_rust_analyzer_shadow(
+                    &impl_name,
+                    &impl_generics,
+                    &ty_generics,
+                    where_clause,
+                    &own_methods,
+                    &override_methods,
+                    &ctor_methods,
+                );
+                let msg = format!(
+                    "#[class]: no matching `struct {class_name}` with #[elwindui_macros::class(..)] found earlier in \
+                     this file — declare the struct (with any inherits/struct_only/... args) before this \
+                     impl block, or pass args explicitly here"
+                );
+                let err = syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
+                return quote! {
+                    #shadow
+                    #[cfg(not(rust_analyzer))]
+                    #[allow(unexpected_cfgs)]
+                    #err
+                };
+            }
+        }
+    } else {
+        (attr_args, true)
+    };
+    let args = &args;
 
     // Root-class mode (`inherits` omitted *and* not `struct_only`, i.e. the one class with no
     // ancestor of its own at all — `UIElement`): there's no ancestor to route anything to, so
@@ -1259,7 +1441,6 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     // below (its own struct_only branch, checked first, already handles its trait_decl/trait_impl
     // either way).
     let is_root_mode = args.inherits.is_none() && args.struct_only.is_none();
-    let own_methods = instance_methods;
 
     let core = core_path();
 
@@ -1655,4 +1836,31 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         eprintln!("=== #[class] impl {class_name} expansion ===\n{out}\n===");
     }
     out
+}
+
+#[cfg(test)]
+mod rust_analyzer_shadow_tests {
+    use super::*;
+
+    // `expand_impl`'s `class_arg_store` lookup fails whenever no paired `struct ClassName` has
+    // expanded first — exactly the scenario a bare `#[elwindui_macros::class]` impl with no prior
+    // `store_class_args` call reproduces directly, without needing a real multi-invocation macro
+    // expansion pass. Only a syntactic smoke test (the workspace's own ~25 real `#[class]`-managed
+    // types are the semantic coverage for the shadow's shape, verified with `RUSTFLAGS="--cfg
+    // rust_analyzer" cargo check --workspace` per docs/elwindui_macro_class_spec.md §15) — this
+    // module has no proc-macro test harness capable of actually running the resulting tokens
+    // through rustc.
+    #[test]
+    fn shadow_output_is_syntactically_valid_when_struct_lookup_fails() {
+        let item: syn::ItemImpl = syn::parse_quote! {
+            impl LonelyClass {
+                #[inherent]
+                fn helper_priv(&self) -> i32 { 42 }
+                fn set_value(&self, v: i32) { let _ = v; }
+                fn construct(padding: Option<f32>, name: String) -> Self { Self }
+            }
+        };
+        let out = expand_impl(ClassArgs::default(), item, true);
+        syn::parse2::<syn::File>(out).expect("rust-analyzer shadow output must be valid Rust syntax");
+    }
 }

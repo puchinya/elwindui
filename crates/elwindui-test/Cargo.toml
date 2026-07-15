@@ -5,3 +5,6 @@ edition.workspace = true
 
 [dependencies]
 elwindui-core = { path = "../elwindui-core" }
+
+[lints]
+workspace = true

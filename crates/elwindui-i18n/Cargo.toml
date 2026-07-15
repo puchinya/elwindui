@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 fluent-bundle = "0.15"
 unic-langid = "0.9"
+
+[lints]
+workspace = true

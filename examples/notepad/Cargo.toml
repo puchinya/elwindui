@@ -10,3 +10,6 @@ elwindui = { path = "../../crates/elwindui", features = ["backend-appkit"] }
 
 [build-dependencies]
 elwindui-codegen = { path = "../../crates/elwindui-codegen" }
+
+[lints]
+workspace = true

@@ -6,3 +6,6 @@ publish = false
 
 [dependencies]
 elwindui = { path = "../../crates/elwindui", features = ["backend-appkit"] }
+
+[lints]
+workspace = true

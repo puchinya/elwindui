@@ -16,3 +16,6 @@ default = []
 backend-winui3 = ["dep:elwindui-backend-winui3"]
 backend-appkit = ["dep:elwindui-backend-appkit"]
 backend-gtk4 = ["dep:elwindui-backend-gtk4"]
+
+[lints]
+workspace = true

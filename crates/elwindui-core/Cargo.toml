@@ -5,3 +5,6 @@ edition.workspace = true
 
 [dependencies]
 elwindui-macros = { path = "../elwindui-macros" }
+
+[lints]
+workspace = true

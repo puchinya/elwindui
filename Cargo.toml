@@ -5,3 +5,14 @@ members = ["crates/*", "examples/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# `rust_analyzer` is the cfg rust-analyzer itself sets (true) while evaluating `#[cfg(...)]` on any
+# item it analyzes, including inside proc-macro output — never set by an actual `cargo build`/
+# `cargo check`. `#[elwindui_macros::class]` uses it to emit a self-contained, always-succeeding
+# rust-analyzer-only "shadow" alongside the real (`cfg(not(rust_analyzer))`) generated code, so IDE
+# completion never depends on the real generation's cross-invocation struct/impl ordering (see
+# docs/elwindui_macro_class_spec.md §15). `--check-cfg` doesn't know this name by default, hence the
+# explicit registration here (inherited by every member crate via `[lints] workspace = true`) —
+# without it, every `#[class]`-managed type would otherwise emit an `unexpected_cfgs` warning.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(rust_analyzer)"] }

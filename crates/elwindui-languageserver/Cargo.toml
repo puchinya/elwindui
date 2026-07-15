@@ -13,3 +13,6 @@ serde_json = "1"
 # that well-tested file-path <-> URI conversion (percent-encoding, Windows drive letters, etc.)
 # rather than hand-rolling it against `fluent_uri`'s lower-level API.
 url = "2"
+
+[lints]
+workspace = true

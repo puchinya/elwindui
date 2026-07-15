@@ -139,6 +139,6 @@ fn with_current(f: impl FnOnce(&Rc<dyn ErasedExecutor>)) {
 /// generated `#[command(async)]` bodies call — backend-agnostic, since by the time any component
 /// code runs, `application::run()` has already installed the concrete one.
 pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
-    let fut: LocalFuture = Box::pin(fut);
-    with_current(move |executor| executor.spawn_local_erased(fut));
+    let boxed: LocalFuture = Box::pin(fut);
+    with_current(move |executor| executor.spawn_local_erased(boxed));
 }

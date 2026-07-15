@@ -50,6 +50,10 @@ headers):
 - `cargo run -p notepad` / `cargo run -p notepad-inline` — run the example apps (AppKit backend on macOS; see the screenshot section below).
 - Edition 2024. Root `Cargo.toml` is workspace-only (`members = ["crates/*", "examples/*"]`) — there is no root `src/`.
 
+## Verifying with rust-analyzer after code changes
+
+`cargo build`/`cargo test` passing is not the same as the IDE being clean — this workspace has proc-macros (`#[class]`, `component!`, `#[viewmodel]`) whose generated code can look fine to rustc but still misbehave under rust-analyzer's own (incremental, cross-crate-process-sharing) analysis model; see `docs/elwindui_macro_class_spec.md` §15 for a real example (a bug that only ever showed up via `rust-analyzer diagnostics`, never via `cargo build`). After a code change, run `rust-analyzer diagnostics .` (installed via `rustup component add rust-analyzer` if not already present) from the repo root — it runs the real rust-analyzer engine over the whole workspace with no editor needed and prints every diagnostic (errors and warnings) an IDE session would show. Fix whatever is fixable (real errors, `unused_variables`/similar lints, actionable style suggestions like `remove-unnecessary-else`) the same way you would for a `cargo build` warning. Ignore `"inactive-code"` diagnostics on `#[cfg(test)] mod ...` blocks — that's rust-analyzer correctly showing test code as inactive outside test-analysis mode, not a bug.
+
 ## Taking screenshots of a running example app (AppKit backend etc.)
 
 Always capture the specific window, not the full screen — a full-screen `screencapture` pulls in the menu bar,

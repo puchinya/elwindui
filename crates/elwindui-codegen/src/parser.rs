@@ -479,12 +479,13 @@ impl<'a> Parser<'a> {
                 self.skip_trivia();
                 self.expect_char(';')?;
                 lets.push(LetBinding { id, name, element });
-            } else if id.is_some() {
-                return Err(self.err("#[id(\"...\")] must be immediately followed by a `let` binding"));
-            } else {
-                self.pos = checkpoint;
-                break;
+                continue;
             }
+            if id.is_some() {
+                return Err(self.err("#[id(\"...\")] must be immediately followed by a `let` binding"));
+            }
+            self.pos = checkpoint;
+            break;
         }
 
         self.skip_trivia();

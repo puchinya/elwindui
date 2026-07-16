@@ -12,7 +12,10 @@ pub mod completion;
 pub mod diagnostics;
 pub mod semantic_tokens;
 
-use lsp_server::{Connection, Message, Notification as ServerNotification, Request as ServerRequest, RequestId, Response};
+use lsp_server::{
+    Connection, Message, Notification as ServerNotification, Request as ServerRequest, RequestId,
+    Response,
+};
 use lsp_types::notification::{
     DidChangeTextDocument, DidOpenTextDocument, DidSaveTextDocument, Notification as _,
     PublishDiagnostics,
@@ -20,10 +23,10 @@ use lsp_types::notification::{
 use lsp_types::request::{Completion, Request as _, SemanticTokensFullRequest};
 use lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, PublishDiagnosticsParams,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, PublishDiagnosticsParams, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -115,12 +118,18 @@ fn handle_completion_request(connection: &Connection, req: ServerRequest) {
     let result = uri_to_path(&params.text_document_position.text_document.uri).and_then(|path| {
         let dir = path.parent()?;
         let src = std::fs::read_to_string(&path).ok()?;
-        Some(CompletionResponse::Array(completion::completions_at(dir, &path, &src, position)))
+        Some(CompletionResponse::Array(completion::completions_at(
+            dir, &path, &src, position,
+        )))
     });
     send_response(connection, req.id, serde_json::to_value(result));
 }
 
-fn send_response(connection: &Connection, id: RequestId, result: serde_json::Result<serde_json::Value>) {
+fn send_response(
+    connection: &Connection,
+    id: RequestId,
+    result: serde_json::Result<serde_json::Value>,
+) {
     let response = Response {
         id,
         result: Some(result.unwrap_or(serde_json::Value::Null)),
@@ -166,9 +175,17 @@ fn publish_for_document(connection: &Connection, uri: &Uri) {
         let Some(file_uri) = path_to_uri(&file_path) else {
             continue;
         };
-        let params = PublishDiagnosticsParams { uri: file_uri, diagnostics: diags, version: None };
+        let params = PublishDiagnosticsParams {
+            uri: file_uri,
+            diagnostics: diags,
+            version: None,
+        };
         let notification = ServerNotification::new(PublishDiagnostics::METHOD.to_string(), params);
-        if connection.sender.send(Message::Notification(notification)).is_err() {
+        if connection
+            .sender
+            .send(Message::Notification(notification))
+            .is_err()
+        {
             return; // client disconnected
         }
     }

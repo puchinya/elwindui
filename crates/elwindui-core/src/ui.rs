@@ -27,17 +27,15 @@
 //! from any element up to the root by simply following `parent()` — no tree search needed, and
 //! critically, no dependence on the tree having been built by a single static `.elwind` traversal.
 //! A back-reference requires shared (`Rc`) ownership: `Box<dyn UIElement>`'s old parent-owns-child-
-//! outright model had no room for a child to point back. See `new_element`, the single choke point
-//! that wires a freshly-built element's children's parent pointers — every construction site
-//! (`elwindui-codegen`'s generated code, and any hand-written builtin) goes through it instead of
-//! calling `Rc::new` directly.
+//! outright model had no room for a child to point back. Concrete `new()` constructors establish
+//! their collection owner before any child is added.
 
 use crate::base::{Point, Rect, Size};
 use crate::input::RoutedEventArgs;
 use crate::layout::{
-    align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin, shrink_by_margin,
-    shrink_rect_by_margin, stack_arrange, stack_natural_size, GridCell, GridLength, HorizontalAlignment, Orientation,
-    VerticalAlignment, Visibility,
+    GridCell, GridLength, HorizontalAlignment, Orientation, VerticalAlignment, Visibility,
+    align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin,
+    shrink_by_margin, shrink_rect_by_margin, stack_arrange, stack_natural_size,
 };
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -67,17 +65,14 @@ pub trait RelayoutHost {
 /// which already were) — every `create_xxx(...)` factory in this crate (and every hand-written
 /// backend's `create_button`/etc.) builds its own `UIElement::default()` internally, taking no
 /// `base` parameter at all; `elwindui-codegen`'s generated code instead calls `set_margin`/
-/// `set_horizontal_alignment`/`set_vertical_alignment`/`set_data_context`/`set_grid_cell` (and
+/// `set_horizontal_alignment`/`set_vertical_alignment`/`set_grid_cell` (and
 /// `register_routed_handler`, already `Rc<RefCell<..>>`-based) through `&self` right after
 /// construction, for whichever of these this specific use site actually specified. This is what
 /// lets a native leaf (`Button`/`TextArea`/`TabView`, whose own `Type::new(..)` signature is fixed
 /// by `elwindui-codegen`'s `Type::new(args)` calling convention) still have its use-site margin/
-/// alignment/data_context applied, without threading them through every factory's constructor
+/// alignment applied, without threading them through every factory's constructor
 /// argument list.
 ///
-/// `data_context` (WinUI3's `FrameworkElement.DataContext`) is `Rc<dyn Any>`-erased like every
-/// other cross-type-parameter value in this crate (see e.g. `elwindui_backend_appkit::builtins::tab_view`'s
-/// `erase_items`/`erase_render`).
 /// The common interface every element in the Visual tree implements — a backend's own
 /// `NativeControlImpl`, `TextBlock`, `Shape`, `VerticalLayout`/`HorizontalLayout`, and
 /// `Control` are all peers here, not variants of some enum.
@@ -123,13 +118,12 @@ pub struct UIElement {
     pub arranged_width: Cell<Option<f32>>,
     pub arranged_height: Cell<Option<f32>>,
     pub arranged_offset: Cell<Option<Point>>,
-    pub data_context: RefCell<Option<Rc<dyn Any>>>,
     /// `#[routed]`-tagged callback fields (`on_click`, and any future one — see
     /// `docs/elwindui_spec.md` 4章), keyed by field name. Each value is a
     /// `Box<dyn Fn(&T, &RoutedEventArgs)>` erased to `Box<dyn Any>` (`T` is that field's own
     /// payload type — `()` for `on_click`, `usize` for a hypothetical routed `on_select`, ...);
     /// generated call sites know `T` statically from the `.elwind` declaration, so the downcast in
-    /// `dispatch_routed` always succeeds (same erasure pattern as `data_context`/
+    /// `dispatch_routed` always succeeds (matching the type-erasure pattern used by
     /// `elwindui-builtins::appkit::tab_view`'s `items_source`).
     pub routed_handlers: RoutedHandlers,
     /// Generic, type-erased attached-property bag (docs/elwindui_spec.md §3の添付プロパティ), keyed
@@ -143,27 +137,24 @@ pub struct UIElement {
     /// future attached-property owner needs no changes here at all — it just calls
     /// `set_attached`/`get_attached` with its own `(owner, field)` keys.
     pub attached: RefCell<HashMap<(&'static str, &'static str), Box<dyn Any>>>,
-    /// WinUI3's `_parent` — set once by `new_element` for every child of the element being
-    /// constructed. `Weak` (not `Rc`) since the parent already owns its children via `Rc` in its
-    /// own `children()` list; a strong back-reference would create a cycle nothing could ever
-    /// drop. `None` for the root of whatever tree this element is currently part of (there's no
+    /// The Logical-tree parent. `Weak` (not `Rc`) since its owner already owns its children;
+    /// a strong back-reference would create a cycle nothing could ever drop. `None` for a root
+    /// of whatever logical tree this element is currently part of (there's no
     /// `Weak<dyn UIElement>::new()` — an unsizing coercion needs a concrete `Sized` source — so
     /// this is `Option`-wrapped rather than a permanently-empty `Weak`).
     pub parent: RefCell<Option<Weak<dyn UIElementExt>>>,
-    /// The Visual tree's actual child storage (WinUI3's own `VisualCollection`). Every
+    /// The parent in the rendered Visual tree.  This is deliberately independent from
+    /// `parent`, which is the Logical-tree relationship maintained by
+    /// `UIElementCollection`.
+    pub visual_parent: RefCell<Option<Weak<dyn UIElementExt>>>,
+    /// The Visual tree's actual child storage. Every
     /// `UIElement`'s `visual_children()` reads this generically (`UIElement`'s own default trait
     /// method), so no concrete type implements that method itself anymore. Empty (and never
     /// populated) for a leaf like `NativeControlImpl`/`Shape`/`TextBlock`. A container
     /// (`Layout`/`Control`/`Grid`) shares this same storage with its own
-    /// `UIElementCollection` (WinUI3's `Panel.Children`) via `children_collection` below - adding
-    /// or removing through that Logical-tree-facing handle is what actually mutates this field.
-    pub visual_children: VisualCollection,
-    /// A weak handle to this same element's own `Rc<dyn UIElement>`, populated by `new_element`
-    /// right after construction (the same moment `parent` is wired for this element's children -
-    /// see that function). Exists so a `UIElementCollection` handed out by `children_collection`
-    /// can set a newly (post-construction) added child's `parent` to the right value, even though
-    /// `UIElementCollection` itself has no other way to reach "the Rc that owns me".
-    pub self_handle: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>,
+    /// `UIElementCollection` mutations update this collection, but direct Visual mutations do
+    /// not alter the Logical tree.
+    pub visual_collection: UIElementVisualCollection,
     /// Set only on whichever element a backend host currently owns as the root of a hosted tree
     /// (`elwindui-backend-appkit`'s `TreeHostView::set_tree`/`elwindui-backend-winui3`'s
     /// `TreeHostPanel::set_tree`) — `None` on every other element, including every one of that
@@ -191,11 +182,31 @@ impl std::fmt::Debug for UIElement {
             .field("arranged_width", &self.arranged_width.get())
             .field("arranged_height", &self.arranged_height.get())
             .field("arranged_offset", &self.arranged_offset.get())
-            .field("data_context", &self.data_context.borrow().is_some())
-            .field("routed_handlers", &self.routed_handlers.borrow().keys().collect::<Vec<_>>())
-            .field("attached_keys", &self.attached.borrow().keys().cloned().collect::<Vec<_>>())
-            .field("has_parent", &self.parent.borrow().as_ref().is_some_and(|p| p.upgrade().is_some()))
-            .field("visual_children_len", &self.visual_children.len())
+            .field(
+                "routed_handlers",
+                &self.routed_handlers.borrow().keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "attached_keys",
+                &self.attached.borrow().keys().cloned().collect::<Vec<_>>(),
+            )
+            .field(
+                "has_parent",
+                &self
+                    .parent
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|p| p.upgrade().is_some()),
+            )
+            .field(
+                "has_visual_parent",
+                &self
+                    .visual_parent
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|p| p.upgrade().is_some()),
+            )
+            .field("visual_children_len", &self.visual_collection.len())
             .field("invalidate_host", &self.invalidate_host.borrow().is_some())
             .finish()
     }
@@ -203,6 +214,7 @@ impl std::fmt::Debug for UIElement {
 
 impl Default for UIElement {
     fn default() -> Self {
+        let owner = Rc::new(RefCell::new(None));
         UIElement {
             margin: Cell::new(0.0),
             horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
@@ -218,12 +230,11 @@ impl Default for UIElement {
             arranged_width: Cell::new(None),
             arranged_height: Cell::new(None),
             arranged_offset: Cell::new(None),
-            data_context: RefCell::new(None),
             routed_handlers: Rc::new(RefCell::new(HashMap::new())),
             attached: RefCell::new(HashMap::new()),
             parent: RefCell::new(None),
-            visual_children: VisualCollection::new(),
-            self_handle: Rc::new(RefCell::new(None)),
+            visual_parent: RefCell::new(None),
+            visual_collection: UIElementVisualCollection::new(owner),
             invalidate_host: RefCell::new(None),
         }
     }
@@ -241,8 +252,16 @@ pub type RoutedHandlers = Rc<RefCell<HashMap<&'static str, Vec<Box<dyn Any>>>>>;
 /// `register_routed_handler` method delegates here, and any widget wrapper exposing its own
 /// `register_routed_handler` (see this module's own doc comment) should too, rather than
 /// reimplementing the erasure.
-pub fn register_routed_handler<T: 'static>(handlers: &RoutedHandlers, name: &'static str, handler: Box<dyn Fn(&T, &RoutedEventArgs)>) {
-    handlers.borrow_mut().entry(name).or_default().push(Box::new(handler));
+pub fn register_routed_handler<T: 'static>(
+    handlers: &RoutedHandlers,
+    name: &'static str,
+    handler: Box<dyn Fn(&T, &RoutedEventArgs)>,
+) {
+    handlers
+        .borrow_mut()
+        .entry(name)
+        .or_default()
+        .push(Box::new(handler));
 }
 
 #[elwindui_macros::class]
@@ -342,19 +361,21 @@ impl UIElement {
         self.as_ui_element().max_height.set(max_height);
         self.invalidate_measure();
     }
-    fn set_data_context(&self, data_context: Option<Rc<dyn Any>>) {
-        *self.as_ui_element().data_context.borrow_mut() = data_context;
-    }
-    /// WinUI3's `FrameworkElement.DataContext` — an ambient, type-erased data value an element
-    /// carries (set explicitly via the `data_context:` common attribute, or populated internally by
-    /// `TabView`'s `items_source` mode for each generated `TabViewItem`). `None` when unset.
-    fn data_context(&self) -> Option<Rc<dyn Any>> {
-        self.as_ui_element().data_context.borrow().clone()
-    }
-    /// WinUI3's `VisualTreeHelper.GetParent` — `None` for the root of whatever tree this element
-    /// is currently part of. See `UIElement::parent`'s doc comment.
+    /// The parent in the Logical tree. `UIElementCollection` owns this relationship.
     fn parent(&self) -> Option<Rc<dyn UIElementExt>> {
-        self.as_ui_element().parent.borrow().as_ref().and_then(|p| p.upgrade())
+        self.as_ui_element()
+            .parent
+            .borrow()
+            .as_ref()
+            .and_then(|p| p.upgrade())
+    }
+    /// WinUI3's `VisualTreeHelper.GetParent` — the parent in the rendered Visual tree.
+    fn visual_parent(&self) -> Option<Rc<dyn UIElementExt>> {
+        self.as_ui_element()
+            .visual_parent
+            .borrow()
+            .as_ref()
+            .and_then(|p| p.upgrade())
     }
     /// This element's own children in the **Visual tree** (WinUI3's own Visual-tree children,
     /// docs/elwindui_spec.md 付録H.2.2) — the only tree any code ever actually walks (there is no
@@ -363,13 +384,13 @@ impl UIElement {
     /// not overridden by any concrete type: it reads `self.as_ui_element().visual_children` directly, which
     /// is empty for a leaf like `NativeControlImpl`/`TextBlock`/`Shape` and populated for a
     /// container (`Layout`/`Control`/`Grid`) via that same `UIElement`'s
-    /// `children_collection()`-derived `UIElementCollection`. Returns an owned `Vec` (each
+    /// `UIElementCollection` updates. Returns an owned `Vec` (each
     /// `Rc<dyn UIElement>` cheaply cloned, a refcount bump), not `&[..]`: the underlying storage is
     /// `RefCell`-backed (mutable at any time via `UIElementCollection`'s `add`/`remove`/etc.), and a
     /// `std::cell::Ref` guard can't be smuggled out through a bare reference tied to `&self`.
     #[overridable]
     fn visual_children(&self) -> Vec<Rc<dyn UIElementExt>> {
-        self.as_ui_element().visual_children.to_vec()
+        self.as_ui_element().visual_collection.to_vec()
     }
     /// WinUI3's `GetType().Name` (via `.NET` reflection), commonly paired with `VisualTreeHelper`
     /// when dumping/debugging a tree — see `crate::visual_tree`. A default method, not overridden by
@@ -387,7 +408,10 @@ impl UIElement {
     /// invoked.
     #[overridable]
     fn measure_override(&self, _available: Size) -> Size {
-        Size { width: 0.0, height: 0.0 }
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
     }
     /// Arranges this element's own children (in this element's own local coordinate space), given
     /// the final size this element itself was assigned (WinUI3's `ArrangeOverride`) — calls
@@ -450,8 +474,11 @@ impl UIElement {
     }
     /// Registers a handler for a `#[routed]`-tagged field named `name` on this element — see this
     /// struct's own `routed_handlers` doc comment for the erasure convention.
-    fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &RoutedEventArgs)>)
-    where
+    fn register_routed_handler<T: 'static>(
+        &self,
+        name: &'static str,
+        handler: Box<dyn Fn(&T, &RoutedEventArgs)>,
+    ) where
         Self: Sized,
     {
         register_routed_handler(&self.as_ui_element().routed_handlers, name, handler);
@@ -466,7 +493,10 @@ impl UIElement {
     where
         Self: Sized,
     {
-        self.as_ui_element().attached.borrow_mut().insert((owner, field), Box::new(value));
+        self.as_ui_element()
+            .attached
+            .borrow_mut()
+            .insert((owner, field), Box::new(value));
         self.invalidate_measure();
     }
     /// Reads an attached-property value previously stored under `(owner, field)`, or `default` if
@@ -474,7 +504,12 @@ impl UIElement {
     /// miss as an absent key). Callers are the *owner* component's own layout code (e.g. `Grid`'s
     /// `grid_cell_of`), which knows its own attached field's concrete type — see `set_attached`'s
     /// own doc comment for why the type must agree between writer and reader.
-    fn get_attached<T: Clone + 'static>(&self, owner: &'static str, field: &'static str, default: T) -> T
+    fn get_attached<T: Clone + 'static>(
+        &self,
+        owner: &'static str,
+        field: &'static str,
+        default: T,
+    ) -> T
     where
         Self: Sized,
     {
@@ -492,13 +527,6 @@ impl UIElement {
     fn set_invalidate_host(&self, host: Option<Rc<dyn RelayoutHost>>) {
         *self.as_ui_element().invalidate_host.borrow_mut() = host;
     }
-    /// Hands out a `UIElementCollection` (WinUI3's `Panel.Children`) sharing this same
-    /// `UIElement`'s `visual_children`/`self_handle` — a container (`Layout`/`Control`/
-    /// `Grid`) calls this once, at construction time, to build its own Logical-tree-facing
-    /// `children` field. See `UIElementCollection`'s own doc comment.
-    fn children_collection(&self) -> UIElementCollection {
-        UIElementCollection { visual: self.as_ui_element().visual_children.clone(), owner: self.as_ui_element().self_handle.clone() }
-    }
     /// WinUI3's `UIElement.Measure(Size availableSize)` — computes this element's own desired size
     /// (margin-inclusive) against `available`, recursing into children as `measure_override` (still
     /// freely overridable, unlike this method) needs them, and caches the result in
@@ -508,7 +536,10 @@ impl UIElement {
     /// `UIElement::measured_size`'s own doc comment for why this isn't a memoizing cache.
     fn measure(&self, available: Size) {
         let result = if self.visibility() == Visibility::Collapsed {
-            Size { width: 0.0, height: 0.0 }
+            Size {
+                width: 0.0,
+                height: 0.0,
+            }
         } else {
             let inner_available = constrain(self, shrink_by_margin(available, self.margin()));
             let desired = constrain(self, self.measure_override(inner_available));
@@ -534,16 +565,34 @@ impl UIElement {
         // WinUI3: `Arrange` implicitly re-`Measure`s if `Measure` hasn't run since the last
         // invalidation — `measured_size()` being `None` here means exactly that.
         if self.measured_size().is_none() {
-            self.measure(Size { width: final_rect.width, height: final_rect.height });
+            self.measure(Size {
+                width: final_rect.width,
+                height: final_rect.height,
+            });
         }
         let desired_with_margin = self.measured_size().unwrap_or_default();
         let slot = shrink_rect_by_margin(final_rect, self.margin());
         let desired_without_margin = shrink_by_margin(desired_with_margin, self.margin());
-        let own_rect = align_within(slot, desired_without_margin, self.horizontal_alignment(), self.vertical_alignment());
-        let own_size = Size { width: own_rect.width, height: own_rect.height };
-        self.as_ui_element().arranged_width.set(Some(own_size.width));
-        self.as_ui_element().arranged_height.set(Some(own_size.height));
-        self.as_ui_element().arranged_offset.set(Some(Point { x: own_rect.x, y: own_rect.y }));
+        let own_rect = align_within(
+            slot,
+            desired_without_margin,
+            self.horizontal_alignment(),
+            self.vertical_alignment(),
+        );
+        let own_size = Size {
+            width: own_rect.width,
+            height: own_rect.height,
+        };
+        self.as_ui_element()
+            .arranged_width
+            .set(Some(own_size.width));
+        self.as_ui_element()
+            .arranged_height
+            .set(Some(own_size.height));
+        self.as_ui_element().arranged_offset.set(Some(Point {
+            x: own_rect.x,
+            y: own_rect.y,
+        }));
         self.arrange_override(own_size);
     }
 }
@@ -553,68 +602,78 @@ impl UIElement {
 /// (`UIElement::parent`, repeated until `None`) and, if that root has a `RelayoutHost` registered
 /// (see `UIElement::invalidate_host`), asks it for a fresh layout pass. Takes `&UIElement`
 /// (not `&dyn UIElement`) so the caller — a default trait method, where `Self` isn't known to be
-/// `Sized` — never needs to unsize-coerce `self` itself; `base.self_handle` already stores a
-/// pre-erased `Weak<dyn UIElement>` for exactly this reason. A no-op if `base`'s owner hasn't gone
-/// through `new_element` yet (no `self_handle` to start the walk from) or if the root it finds has
-/// no registered host (e.g. a standalone tree built for a test, never handed to a real backend).
+/// `Sized`. A no-op if the Visual root has no registered host (e.g. a standalone test tree).
 fn request_relayout(base: &UIElement) {
-    let Some(mut current) = base.self_handle.borrow().as_ref().and_then(|w| w.upgrade()) else {
-        return;
-    };
-    while let Some(parent) = current.parent() {
-        current = parent;
+    let mut current = base
+        .visual_parent
+        .borrow()
+        .as_ref()
+        .and_then(|w| w.upgrade());
+    let mut host = base.invalidate_host.borrow().clone();
+    while let Some(element) = current {
+        host = element
+            .as_ui_element()
+            .invalidate_host
+            .borrow()
+            .clone()
+            .or(host);
+        current = element.visual_parent();
     }
-    if let Some(host) = current.as_ui_element().invalidate_host.borrow().as_ref() {
+    if let Some(host) = host {
         host.request_relayout();
     }
 }
 
-/// The single choke point every construction site (`elwindui-codegen`'s generated code, and any
-/// hand-written builtin) goes through instead of calling `Rc::new` directly — wires each of
-/// `value`'s own children's `UIElement::parent` back-reference to the freshly-created `Rc`
-/// before handing it back. See this module's own top doc comment.
-pub fn new_element<T: UIElementExt + 'static>(value: T) -> Rc<dyn UIElementExt> {
-    new_element_concrete(value)
-}
-
-/// Same wiring as [`new_element`] (`self_handle`/each child's `parent` back-reference), but keeps
-/// the returned `Rc` at its own concrete type `T` instead of erasing it to `Rc<dyn UIElement>` —
-/// needed wherever the caller still wants to call `T`'s own inherent/trait methods on the result
-/// (e.g. a virtual builtin kept on `Self` as a `stored` resync target, docs/elwindui_spec.md
-/// 付録H.2.1a, rather than immediately erased into a parent's child list). **Every** construction
-/// site must go through this (or [`new_element`]) rather than a bare `Rc::new` — skipping it leaves
-/// `self_handle` unset, which makes `invalidate`/`invalidate_measure`/`invalidate_arrange` silent
-/// no-ops on that element (`request_relayout`'s own doc comment) and leaves every child added to it
-/// *before* this call with no `parent` back-reference either.
-pub fn new_element_concrete<T: UIElementExt + 'static>(value: T) -> Rc<T> {
-    let this = Rc::new(value);
+/// Binds an already-constructed node to the owner slots used by its collections.  This is called
+/// by each concrete `new()` immediately after it creates its `Rc<Self>`; children are then added
+/// through the collection APIs, which perform all parent wiring.
+pub fn bind_element_owner<T: UIElementExt + 'static>(this: &Rc<T>) {
     let erased: Rc<dyn UIElementExt> = this.clone();
-    *erased.as_ui_element().self_handle.borrow_mut() = Some(Rc::downgrade(&erased));
-    for child in erased.visual_children() {
-        *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&erased));
-    }
-    this
+    erased.as_ui_element().visual_collection.bind_owner(&erased);
 }
 
-/// The Visual tree's actual child storage (WinUI3's own `VisualCollection`, the low-level
+/// The Visual tree's actual child storage (the low-level
 /// counterpart to `Panel.Children`'s `UIElementCollection` below) — a plain, runtime-mutable
 /// `add`/`insert`/`remove`/`remove_at`/`clear` collection. `UIElement::visual_children` holds
 /// one of these directly; `UIElement::visual_children()` (the default trait method) just reads it.
-/// Doesn't itself know about parent-wiring (`UIElementCollection` below adds that) — on its own,
-/// this is nothing more than a shared, interior-mutable `Vec<Rc<dyn UIElement>>`.
+/// Every mutation owns Visual-parent wiring and invalidates its owner.
 #[derive(Clone)]
-pub struct VisualCollection {
+pub struct UIElementVisualCollection {
     storage: Rc<RefCell<Vec<Rc<dyn UIElementExt>>>>,
+    owner: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>,
 }
 
-impl VisualCollection {
-    pub fn new() -> Self {
-        VisualCollection { storage: Rc::new(RefCell::new(Vec::new())) }
+impl UIElementVisualCollection {
+    pub fn new(owner: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>) -> Self {
+        Self {
+            storage: Rc::new(RefCell::new(Vec::new())),
+            owner,
+        }
+    }
+    fn bind_owner(&self, owner: &Rc<dyn UIElementExt>) {
+        *self.owner.borrow_mut() = Some(Rc::downgrade(owner));
+    }
+    fn owner_rc(&self) -> Option<Rc<dyn UIElementExt>> {
+        self.owner
+            .borrow()
+            .as_ref()
+            .and_then(|owner| owner.upgrade())
+    }
+    pub fn owner_handle(&self) -> Rc<RefCell<Option<Weak<dyn UIElementExt>>>> {
+        self.owner.clone()
     }
     pub fn add(&self, child: Rc<dyn UIElementExt>) {
+        if let Some(owner) = self.owner_rc() {
+            *child.as_ui_element().visual_parent.borrow_mut() = Some(Rc::downgrade(&owner));
+            owner.invalidate_measure();
+        }
         self.storage.borrow_mut().push(child);
     }
     pub fn insert(&self, index: usize, child: Rc<dyn UIElementExt>) {
+        if let Some(owner) = self.owner_rc() {
+            *child.as_ui_element().visual_parent.borrow_mut() = Some(Rc::downgrade(&owner));
+            owner.invalidate_measure();
+        }
         self.storage.borrow_mut().insert(index, child);
     }
     /// Removes the first entry pointer-equal to `child`, if any — returns whether one was found.
@@ -622,17 +681,32 @@ impl VisualCollection {
         let mut storage = self.storage.borrow_mut();
         match storage.iter().position(|c| Rc::ptr_eq(c, child)) {
             Some(index) => {
-                storage.remove(index);
+                let removed = storage.remove(index);
+                *removed.as_ui_element().visual_parent.borrow_mut() = None;
+                if let Some(owner) = self.owner_rc() {
+                    owner.invalidate_measure();
+                }
                 true
             }
             None => false,
         }
     }
     pub fn remove_at(&self, index: usize) -> Rc<dyn UIElementExt> {
-        self.storage.borrow_mut().remove(index)
+        let child = self.storage.borrow_mut().remove(index);
+        *child.as_ui_element().visual_parent.borrow_mut() = None;
+        if let Some(owner) = self.owner_rc() {
+            owner.invalidate_measure();
+        }
+        child
     }
     pub fn clear(&self) {
-        self.storage.borrow_mut().clear();
+        let children = std::mem::take(&mut *self.storage.borrow_mut());
+        for child in children {
+            *child.as_ui_element().visual_parent.borrow_mut() = None;
+        }
+        if let Some(owner) = self.owner_rc() {
+            owner.invalidate_measure();
+        }
     }
     pub fn len(&self) -> usize {
         self.storage.borrow().len()
@@ -645,32 +719,28 @@ impl VisualCollection {
     }
 }
 
-impl Default for VisualCollection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// The Logical-tree-shaped child list a container (`Layout`/`Control` family) declares in
 /// `.elwind` — WinUI3's own `UIElementCollection` (docs/elwindui_spec.md 付録H.2.2), e.g.
 /// `Panel.Children`. There is no separate, generically-traversable Logical tree: this is simply the
 /// convenience API a *particular* component exposes for its own children, which automatically stays
 /// in sync with the real Visual tree — `add`/`insert`/`remove`/`remove_at`/`clear` all mutate the
-/// exact same storage `UIElement::visual_children()` reads (`self.visual`, shared with the owning
-/// `UIElement` via `UIElement::children_collection`), and additionally keep each affected
-/// child's own `parent` pointer correct: `add`/`insert` set it to the owner (if the owner has
-/// already been `Rc`-wrapped by `new_element` — otherwise `new_element`'s own initial wiring pass
-/// handles it once construction finishes), `remove`/`remove_at`/`clear` clear it back to `None`.
+/// its own storage and additionally keeps each affected child's Logical `parent` pointer correct.
 /// Deliberately has no way to replace its storage wholesale (no `set_children`) — every mutation
 /// goes through one of these add/remove operations, so the Visual tree can never silently drift out
 /// of sync with whatever a container thinks its own children are.
 #[derive(Clone)]
 pub struct UIElementCollection {
-    visual: VisualCollection,
+    storage: Rc<RefCell<Vec<Rc<dyn UIElementExt>>>>,
     owner: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>,
 }
 
 impl UIElementCollection {
+    pub fn new(owner: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>) -> Self {
+        Self {
+            storage: Rc::new(RefCell::new(Vec::new())),
+            owner,
+        }
+    }
     fn owner_rc(&self) -> Option<Rc<dyn UIElementExt>> {
         self.owner.borrow().as_ref().and_then(|w| w.upgrade())
     }
@@ -678,40 +748,64 @@ impl UIElementCollection {
         if let Some(owner) = self.owner_rc() {
             *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
         }
-        self.visual.add(child);
+        if let Some(owner) = self.owner_rc() {
+            owner.as_ui_element().visual_collection.add(child.clone());
+        }
+        self.storage.borrow_mut().push(child);
     }
     pub fn insert(&self, index: usize, child: Rc<dyn UIElementExt>) {
         if let Some(owner) = self.owner_rc() {
             *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
         }
-        self.visual.insert(index, child);
+        if let Some(owner) = self.owner_rc() {
+            owner
+                .as_ui_element()
+                .visual_collection
+                .insert(index, child.clone());
+        }
+        self.storage.borrow_mut().insert(index, child);
     }
     pub fn remove(&self, child: &Rc<dyn UIElementExt>) -> bool {
-        let removed = self.visual.remove(child);
-        if removed {
+        let mut storage = self.storage.borrow_mut();
+        let removed = storage
+            .iter()
+            .position(|candidate| Rc::ptr_eq(candidate, child))
+            .map(|index| storage.remove(index));
+        if let Some(removed) = removed {
             *child.as_ui_element().parent.borrow_mut() = None;
+            if let Some(owner) = self.owner_rc() {
+                owner.as_ui_element().visual_collection.remove(&removed);
+            }
+            true
+        } else {
+            false
         }
-        removed
     }
     pub fn remove_at(&self, index: usize) -> Rc<dyn UIElementExt> {
-        let child = self.visual.remove_at(index);
+        let child = self.storage.borrow_mut().remove(index);
         *child.as_ui_element().parent.borrow_mut() = None;
+        if let Some(owner) = self.owner_rc() {
+            owner.as_ui_element().visual_collection.remove(&child);
+        }
         child
     }
     pub fn clear(&self) {
-        for child in self.visual.to_vec() {
+        for child in self.to_vec() {
             *child.as_ui_element().parent.borrow_mut() = None;
+            if let Some(owner) = self.owner_rc() {
+                owner.as_ui_element().visual_collection.remove(&child);
+            }
         }
-        self.visual.clear();
+        self.storage.borrow_mut().clear();
     }
     pub fn len(&self) -> usize {
-        self.visual.len()
+        self.storage.borrow().len()
     }
     pub fn is_empty(&self) -> bool {
-        self.visual.is_empty()
+        self.storage.borrow().is_empty()
     }
     pub fn to_vec(&self) -> Vec<Rc<dyn UIElementExt>> {
-        self.visual.to_vec()
+        self.storage.borrow().clone()
     }
 }
 
@@ -730,12 +824,21 @@ pub enum RenderItem<H> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaintKind {
-    ShapeExt { kind: ShapeKind, fill: Option<String>, stroke: Option<String>, stroke_width: f32 },
+    ShapeExt {
+        kind: ShapeKind,
+        fill: Option<String>,
+        stroke: Option<String>,
+        stroke_width: f32,
+    },
     /// `TextBlock`'s self-drawn content. No font/size here yet (kept minimal for this pass) — a
     /// backend measures/renders the string itself (e.g. AppKit via `NSAttributedString`/
     /// `CATextLayer`), the same "elwindui-core doesn't know how to actually draw" split `Shape`
     /// already has with `CAShapeLayer`.
-    Text { content: String, color: Option<String>, alignment: TextAlignment },
+    Text {
+        content: String,
+        color: Option<String>,
+        alignment: TextAlignment,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -896,7 +999,7 @@ pub trait TabView {}
 
 /// `TabViewItem`'s own class trait — see `TabView`'s own doc comment for the "why empty" rationale;
 /// same reasoning applies here (`set_header`/`set_content`/`set_closable`/`set_on_close`/
-/// `set_data_context<T>` all stay `#[inherent]` per backend). No `inherits`: like `Window`,
+/// backend-specific setters all stay `#[inherent]`). No `inherits`: like `Window`,
 /// `TabViewItem` is never itself embedded as a real `Rc<dyn UIElement>` node (see its own
 /// `builtins.elwind` doc comment), so it has no meaningful `NativeControl`/`UIElement` ancestor.
 #[elwindui_macros::class(trait_only)]
@@ -945,9 +1048,7 @@ pub trait Window {
 /// same shape one level up the hierarchy, where the base *is* directly instantiable).
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
 pub struct Layout {
-    /// Shares its storage with `base.visual_children` (`UIElement::children_collection`) —
-    /// `UIElement::visual_children()`'s default implementation already reads that storage directly,
-    /// so no override is needed here.
+    /// Logical children for this layout. Its mutations update the owner's Visual collection.
     pub children: UIElementCollection,
 }
 
@@ -964,7 +1065,7 @@ impl Layout {
 
     fn construct() -> Self {
         let base = UIElement::default();
-        let children = base.children_collection();
+        let children = UIElementCollection::new(base.visual_collection.owner_handle());
         Self { base, children }
     }
 }
@@ -993,8 +1094,17 @@ impl VerticalLayout {
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
-        let child_sizes: Vec<Size> = self.visual_children().iter().map(|c| c.measured_size().unwrap_or_default()).collect();
-        let child_rects = stack_arrange(final_size, Orientation::Vertical, self.spacing.get(), &child_sizes);
+        let child_sizes: Vec<Size> = self
+            .visual_children()
+            .iter()
+            .map(|c| c.measured_size().unwrap_or_default())
+            .collect();
+        let child_rects = stack_arrange(
+            final_size,
+            Orientation::Vertical,
+            self.spacing.get(),
+            &child_sizes,
+        );
         for (child, rect) in self.visual_children().iter().zip(child_rects) {
             child.arrange(rect);
         }
@@ -1005,7 +1115,15 @@ impl VerticalLayout {
         self.invalidate_measure();
     }
     fn construct() -> Self {
-        Self { base: Layout::construct(), spacing: Cell::new(0.0) }
+        Self {
+            base: Layout::construct(),
+            spacing: Cell::new(0.0),
+        }
+    }
+    fn new() -> Rc<Self> {
+        let this = Rc::new(Self::construct());
+        bind_element_owner(&this);
+        this
     }
 }
 
@@ -1032,8 +1150,17 @@ impl HorizontalLayout {
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
-        let child_sizes: Vec<Size> = self.visual_children().iter().map(|c| c.measured_size().unwrap_or_default()).collect();
-        let child_rects = stack_arrange(final_size, Orientation::Horizontal, self.spacing.get(), &child_sizes);
+        let child_sizes: Vec<Size> = self
+            .visual_children()
+            .iter()
+            .map(|c| c.measured_size().unwrap_or_default())
+            .collect();
+        let child_rects = stack_arrange(
+            final_size,
+            Orientation::Horizontal,
+            self.spacing.get(),
+            &child_sizes,
+        );
         for (child, rect) in self.visual_children().iter().zip(child_rects) {
             child.arrange(rect);
         }
@@ -1044,7 +1171,15 @@ impl HorizontalLayout {
         self.invalidate_measure();
     }
     fn construct() -> Self {
-        Self { base: Layout::construct(), spacing: Cell::new(0.0) }
+        Self {
+            base: Layout::construct(),
+            spacing: Cell::new(0.0),
+        }
+    }
+    fn new() -> Rc<Self> {
+        let this = Rc::new(Self::construct());
+        bind_element_owner(&this);
+        this
     }
 }
 
@@ -1065,7 +1200,10 @@ pub struct Shape {
 impl Shape {
     #[overrides]
     fn measure_override(&self, _available: Size) -> Size {
-        Size { width: 0.0, height: 0.0 }
+        Size {
+            width: 0.0,
+            height: 0.0,
+        }
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
@@ -1144,13 +1282,24 @@ impl Rectangle {
     // `component X inherits Rectangle` would embed unwrapped as its own `base` field, mirroring
     // `Control`/`Shape`'s own `construct` (`Rectangle` is `#[sealed]` today, so nothing actually
     // reaches this via that path yet, but the shape stays consistent with every other builtin).
-    fn construct(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>, corner_radius: Option<f32>) -> Self {
+    fn construct(
+        fill: Option<String>,
+        stroke: Option<String>,
+        stroke_width: Option<f32>,
+        corner_radius: Option<f32>,
+    ) -> Self {
         let shape = Shape::construct();
-        shape.set_kind(ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) });
+        shape.set_kind(ShapeKind::RoundedRect {
+            corner_radius: corner_radius.unwrap_or(0.0),
+        });
         shape.set_fill(fill);
         shape.set_stroke(stroke);
         shape.set_stroke_width(stroke_width.unwrap_or(0.0));
-        Self { base: shape, stroke_width, corner_radius }
+        Self {
+            base: shape,
+            stroke_width,
+            corner_radius,
+        }
     }
 }
 
@@ -1188,7 +1337,10 @@ impl Ellipse {
         shape.set_fill(fill);
         shape.set_stroke(stroke);
         shape.set_stroke_width(stroke_width.unwrap_or(0.0));
-        Self { base: shape, stroke_width }
+        Self {
+            base: shape,
+            stroke_width,
+        }
     }
 }
 
@@ -1214,7 +1366,10 @@ impl TextBlock {
         // backend concern for self-drawn content — see `Shape`'s same split) — a rough per-
         // character estimate is enough to avoid collapsing to zero size; a backend may still
         // render a string that overflows this estimate.
-        Size { width: self.text.borrow().chars().count() as f32 * 8.0, height: 16.0 }
+        Size {
+            width: self.text.borrow().chars().count() as f32 * 8.0,
+            height: 16.0,
+        }
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
@@ -1222,7 +1377,11 @@ impl TextBlock {
     }
     #[overrides]
     fn paint(&self) -> Option<PaintKind> {
-        Some(PaintKind::Text { content: self.text.borrow().clone(), color: self.color.borrow().clone(), alignment: self.alignment.get() })
+        Some(PaintKind::Text {
+            content: self.text.borrow().clone(),
+            color: self.color.borrow().clone(),
+            alignment: self.alignment.get(),
+        })
     }
     fn set_text(&self, text: String) {
         *self.text.borrow_mut() = text;
@@ -1266,32 +1425,33 @@ pub struct Control {
     pub padding: Cell<f32>,
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
     pub content_vertical_alignment: Cell<VerticalAlignment>,
-    /// Shares its storage with `base.visual_children` (`UIElement::children_collection`) — see
-    /// `Layout::children`'s own doc comment.
-    pub children: UIElementCollection,
 }
 
 #[elwindui_macros::class]
 impl Control {
-    /// Not `#[inherent]` — mirrors `Layout::children`'s own doc comment: a plain method here
-    /// becomes a default `ControlExt` trait method, so every `Control`-composed component gets
-    /// `self.children()` for free, matching `Layout`-family containers' own `.children()` instead
-    /// of the bare `self.children` field access this used to require.
-    fn children(&self) -> &UIElementCollection {
-        &self.children
-    }
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
-        let inner = self.visual_children().iter().fold(Size::default(), |acc, c| {
-            c.measure(available);
-            let s = c.measured_size().unwrap_or_default();
-            Size { width: acc.width.max(s.width), height: acc.height.max(s.height) }
-        });
+        let inner = self
+            .visual_children()
+            .iter()
+            .fold(Size::default(), |acc, c| {
+                c.measure(available);
+                let s = c.measured_size().unwrap_or_default();
+                Size {
+                    width: acc.width.max(s.width),
+                    height: acc.height.max(s.height),
+                }
+            });
         grow_by_margin(inner, self.padding.get())
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
-        let full = Rect { x: 0.0, y: 0.0, width: final_size.width, height: final_size.height };
+        let full = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: final_size.width,
+            height: final_size.height,
+        };
         let content_area = shrink_rect_by_margin(full, self.padding.get());
         for child in self.visual_children().iter() {
             child.arrange(content_area);
@@ -1320,27 +1480,22 @@ impl Control {
         self.invalidate_arrange();
     }
     fn construct() -> Self {
-        let base = UIElement::default();
-        let children = base.children_collection();
         Self {
-            base,
+            base: UIElement::default(),
             padding: Cell::new(0.0),
             content_horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
             content_vertical_alignment: Cell::new(VerticalAlignment::Stretch),
-            children,
         }
     }
 }
 
 /// `builtin::ContentControl`(docs/elwindui_spec.md 付録H.2.1a)— 単一の子(`content`)を持つ
 /// `Control`の薄いラッパー。`Rectangle`の doc comment 参照(同じ理由でここに直接手書きする)。
-/// `Control.children`は`UIElement.visual_children`と同一のストレージを共有する
-/// (`Control`構造体の`children`フィールドの doc comment 参照)ため、`Rectangle`/`Ellipse`と違い
-/// `new()`は追加した子の親ポインタを実際に張り直す必要がある。
+/// Content is a single Visual child managed directly by this type.
 #[elwindui_macros::class(inherits = crate::ui::Control)]
 pub struct ContentControl {
     padding: Option<f32>,
-    content: Rc<dyn UIElementExt>,
+    content: RefCell<Rc<dyn UIElementExt>>,
 }
 
 #[elwindui_macros::class]
@@ -1349,7 +1504,12 @@ impl ContentControl {
         self.padding.clone()
     }
     fn content(&self) -> Rc<dyn UIElementExt> {
-        self.content.clone()
+        self.content.borrow().clone()
+    }
+    fn set_content(&self, content: Rc<dyn UIElementExt>) {
+        let old = std::mem::replace(&mut *self.content.borrow_mut(), content.clone());
+        self.as_ui_element().visual_collection.remove(&old);
+        self.as_ui_element().visual_collection.add(content);
     }
     #[inherent]
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
@@ -1367,15 +1527,16 @@ impl ContentControl {
     fn construct(padding: Option<f32>, content: Rc<dyn UIElementExt>) -> Self {
         let control = Control::construct();
         control.set_padding(padding.unwrap_or(0.0));
-        control.children.add(content.clone());
-        Self { base: control, padding, content }
+        Self {
+            base: control,
+            padding,
+            content: RefCell::new(content),
+        }
     }
     fn new(padding: Option<f32>, content: Rc<dyn UIElementExt>) -> Rc<Self> {
         let this = Rc::new(Self::construct(padding, content));
-        let erased: Rc<dyn UIElementExt> = this.clone();
-        for child in this.visual_children() {
-            *child.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&erased));
-        }
+        bind_element_owner(&this);
+        this.as_ui_element().visual_collection.add(this.content());
         this
     }
 }
@@ -1426,14 +1587,28 @@ impl Grid {
                 c.measured_size().unwrap_or_default()
             })
             .collect();
-        grid_natural_size(&self.rows.borrow(), &self.columns.borrow(), &cells, &child_sizes)
+        grid_natural_size(
+            &self.rows.borrow(),
+            &self.columns.borrow(),
+            &cells,
+            &child_sizes,
+        )
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         let children = self.children().to_vec();
         let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
-        let child_sizes: Vec<Size> = children.iter().map(|c| c.measured_size().unwrap_or_default()).collect();
-        let child_rects = grid_arrange(final_size, &self.rows.borrow(), &self.columns.borrow(), &cells, &child_sizes);
+        let child_sizes: Vec<Size> = children
+            .iter()
+            .map(|c| c.measured_size().unwrap_or_default())
+            .collect();
+        let child_rects = grid_arrange(
+            final_size,
+            &self.rows.borrow(),
+            &self.columns.borrow(),
+            &cells,
+            &child_sizes,
+        );
         for (child, rect) in children.iter().zip(child_rects) {
             child.arrange(rect);
         }
@@ -1448,7 +1623,16 @@ impl Grid {
         self.invalidate_measure();
     }
     fn construct() -> Self {
-        Self { base: Layout::construct(), rows: RefCell::new(Vec::new()), columns: RefCell::new(Vec::new()) }
+        Self {
+            base: Layout::construct(),
+            rows: RefCell::new(Vec::new()),
+            columns: RefCell::new(Vec::new()),
+        }
+    }
+    fn new() -> Rc<Self> {
+        let this = Rc::new(Self::construct());
+        bind_element_owner(&this);
+        this
     }
 }
 
@@ -1463,15 +1647,27 @@ impl Grid {
 /// (where `Self` isn't known to be `Sized`, since `measure` must stay callable through
 /// `dyn UIElement`) without an unsized coercion.
 fn constrain<T: UIElementExt + ?Sized>(elem: &T, size: Size) -> Size {
-    let overridden = Size { width: elem.width().unwrap_or(size.width), height: elem.height().unwrap_or(size.height) };
-    apply_size_constraints(overridden, elem.min_width(), elem.max_width(), elem.min_height(), elem.max_height())
+    let overridden = Size {
+        width: elem.width().unwrap_or(size.width),
+        height: elem.height().unwrap_or(size.height),
+    };
+    apply_size_constraints(
+        overridden,
+        elem.min_width(),
+        elem.max_width(),
+        elem.min_height(),
+        elem.max_height(),
+    )
 }
 
 /// This element's natural (unconstrained) size — e.g. for a container that must report an
 /// `intrinsicContentSize` to an Auto-Layout-managed ancestor (see `elwindui-backend-appkit`'s
 /// `TreeHostView`) before it has ever actually been given a frame to lay out into.
 pub fn natural_size(elem: &dyn UIElementExt) -> Size {
-    elem.measure(Size { width: 0.0, height: 0.0 });
+    elem.measure(Size {
+        width: 0.0,
+        height: 0.0,
+    });
     elem.measured_size().unwrap_or_default()
 }
 
@@ -1483,7 +1679,11 @@ pub fn natural_size(elem: &dyn UIElementExt) -> Size {
 /// with its own absolute rect — interleaved into a single `Vec<RenderItem<H>>` in traversal order
 /// (see that type's doc comment for why this must stay one list, not two). Does no measuring or
 /// arranging itself — `layout_tree` (below) always runs a real `measure`/`arrange` pass first.
-fn collect_render_items<H: Clone + 'static>(elem: &Rc<dyn UIElementExt>, absolute_origin: Point, out: &mut Vec<RenderItem<H>>) {
+fn collect_render_items<H: Clone + 'static>(
+    elem: &Rc<dyn UIElementExt>,
+    absolute_origin: Point,
+    out: &mut Vec<RenderItem<H>>,
+) {
     // A `Collapsed` element neither renders itself nor recurses into its children — its whole
     // subtree is skipped, matching WinUI3 (a `Collapsed` parent hides its descendants too). See
     // `Visibility`'s own doc comment.
@@ -1492,15 +1692,28 @@ fn collect_render_items<H: Clone + 'static>(elem: &Rc<dyn UIElementExt>, absolut
     }
     let width = elem.arranged_width().unwrap_or(0.0);
     let height = elem.arranged_height().unwrap_or(0.0);
-    let absolute_rect = Rect { x: absolute_origin.x, y: absolute_origin.y, width, height };
+    let absolute_rect = Rect {
+        x: absolute_origin.x,
+        y: absolute_origin.y,
+        width,
+        height,
+    };
 
     // `try_as_native_control` (not a direct `as_any().downcast_ref` on `elem` itself) so a type that
     // *composes* a backend's `NativeControlImpl { handle: H, .. }` as its own `base` field (e.g. a
     // backend's `ButtonImpl`) is recognized too. Downcasts straight to `H` (the raw handle), not to
     // any `elwindui-core`-defined wrapper struct — see `UIElement::try_as_native_control`'s own doc
     // comment.
-    if let Some(native) = elem.as_ref().try_as_native_control().and_then(|a| a.downcast_ref::<H>()) {
-        out.push(RenderItem::Native(native.clone(), absolute_rect, Rc::clone(elem)));
+    if let Some(native) = elem
+        .as_ref()
+        .try_as_native_control()
+        .and_then(|a| a.downcast_ref::<H>())
+    {
+        out.push(RenderItem::Native(
+            native.clone(),
+            absolute_rect,
+            Rc::clone(elem),
+        ));
     }
     if let Some(paint) = elem.paint() {
         out.push(RenderItem::Paint(paint, absolute_rect));
@@ -1508,7 +1721,10 @@ fn collect_render_items<H: Clone + 'static>(elem: &Rc<dyn UIElementExt>, absolut
 
     for child in elem.visual_children().iter() {
         let offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-        let child_origin = Point { x: absolute_origin.x + offset.x, y: absolute_origin.y + offset.y };
+        let child_origin = Point {
+            x: absolute_origin.x + offset.x,
+            y: absolute_origin.y + offset.y,
+        };
         collect_render_items::<H>(child, child_origin, out);
     }
 }
@@ -1529,9 +1745,17 @@ fn collect_render_items<H: Clone + 'static>(elem: &Rc<dyn UIElementExt>, absolut
 /// `Stretch` (`UIElement::default`), so it fills `available` unless a caller explicitly
 /// overrides them — the same default every mainstream UI framework gives a top-level content
 /// element (`Window.Content`, an HTML `<body>`).
-pub fn layout_tree<H: Clone + 'static>(root: &Rc<dyn UIElementExt>, available: Size) -> Vec<RenderItem<H>> {
+pub fn layout_tree<H: Clone + 'static>(
+    root: &Rc<dyn UIElementExt>,
+    available: Size,
+) -> Vec<RenderItem<H>> {
     root.measure(available);
-    let allotted = Rect { x: 0.0, y: 0.0, width: available.width, height: available.height };
+    let allotted = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: available.width,
+        height: available.height,
+    };
     root.arrange(allotted);
     // `root` has no parent to have offset it via a `child.arrange(rect)` call, but `root.arrange`
     // still computed its own margin/alignment-driven `arranged_offset` against `allotted` (e.g. a
@@ -1539,7 +1763,14 @@ pub fn layout_tree<H: Clone + 'static>(root: &Rc<dyn UIElementExt>, available: S
     // loop would via `collect_render_items`'s own child-offset step.
     let root_offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
     let mut out = Vec::new();
-    collect_render_items::<H>(root, Point { x: allotted.x + root_offset.x, y: allotted.y + root_offset.y }, &mut out);
+    collect_render_items::<H>(
+        root,
+        Point {
+            x: allotted.x + root_offset.x,
+            y: allotted.y + root_offset.y,
+        },
+        &mut out,
+    );
     out
 }
 
@@ -1554,7 +1785,11 @@ fn rect_contains(rect: Rect, at: Point) -> bool {
 /// `elwindui_core::input::InputRouter`'s doc comment (modeled on WinUI3's routed events) —
 /// bubbling from the returned element is then just `dispatch_routed` following `parent()`, no
 /// path/ancestor computation needed here.
-fn hit_test_at(elem: &Rc<dyn UIElementExt>, absolute_origin: Point, at: Point) -> Option<Rc<dyn UIElementExt>> {
+fn hit_test_at(
+    elem: &Rc<dyn UIElementExt>,
+    absolute_origin: Point,
+    at: Point,
+) -> Option<Rc<dyn UIElementExt>> {
     // A `Collapsed` element (and its whole subtree) is excluded from hit-testing, matching
     // `collect_render_items`'s own treatment — see `Visibility`'s own doc comment.
     if elem.visibility() == Visibility::Collapsed {
@@ -1562,7 +1797,12 @@ fn hit_test_at(elem: &Rc<dyn UIElementExt>, absolute_origin: Point, at: Point) -
     }
     let width = elem.arranged_width().unwrap_or(0.0);
     let height = elem.arranged_height().unwrap_or(0.0);
-    let absolute_rect = Rect { x: absolute_origin.x, y: absolute_origin.y, width, height };
+    let absolute_rect = Rect {
+        x: absolute_origin.x,
+        y: absolute_origin.y,
+        width,
+        height,
+    };
     if !rect_contains(absolute_rect, at) {
         return None;
     }
@@ -1572,7 +1812,10 @@ fn hit_test_at(elem: &Rc<dyn UIElementExt>, absolute_origin: Point, at: Point) -
     // is the topmost, correctly-hit one.
     for child in elem.visual_children().iter().rev() {
         let offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-        let child_origin = Point { x: absolute_origin.x + offset.x, y: absolute_origin.y + offset.y };
+        let child_origin = Point {
+            x: absolute_origin.x + offset.x,
+            y: absolute_origin.y + offset.y,
+        };
         if let Some(hit) = hit_test_at(child, child_origin, at) {
             return Some(hit);
         }
@@ -1598,12 +1841,16 @@ pub fn hit_test(root: &Rc<dyn UIElementExt>, at: Point) -> Option<Rc<dyn UIEleme
 /// registered under `name` (via `UIElement::register_routed_handler::<T>`), then its parent's,
 /// and so on up to the root (`UIElement::parent`), stopping as soon as one sets `args.handled`.
 /// Works identically whether `target`'s tree was built by a single static `.elwind` traversal or
-/// assembled at runtime (e.g. `TabView`'s `items_source`/`item_template`) — `parent()` only cares
-/// that `new_element` wired it, not how or when. `T` must match the type every handler for `name`
+/// assembled at runtime (e.g. `TabView`'s `items_source`/`item_template`). `T` must match the type every handler for `name`
 /// was registered with — see `UIElement::routed_handlers`'s doc comment for why the downcast
 /// this performs always succeeds in practice (both sides come from the same `.elwind` field
 /// declaration).
-pub fn dispatch_routed<T: 'static>(target: &Rc<dyn UIElementExt>, name: &str, payload: &T, args: &RoutedEventArgs) {
+pub fn dispatch_routed<T: 'static>(
+    target: &Rc<dyn UIElementExt>,
+    name: &str,
+    payload: &T,
+    args: &RoutedEventArgs,
+) {
     let mut current = Some(Rc::clone(target));
     while let Some(elem) = current {
         let handlers = elem.as_ui_element().routed_handlers.borrow();
@@ -1661,8 +1908,13 @@ mod tests {
         fn try_as_native_control(&self) -> Option<&dyn Any> {
             Some(&self.handle)
         }
-        fn new(handle: FakeHandle) -> Self {
-            Self { base: UIElement::default(), handle }
+        fn new(handle: FakeHandle) -> Rc<Self> {
+            let this = Rc::new(Self {
+                base: UIElement::default(),
+                handle,
+            });
+            bind_element_owner(&this);
+            this
         }
     }
 
@@ -1691,7 +1943,10 @@ mod tests {
             "base"
         }
         fn new() -> Self {
-            Self { base: UIElement::default(), value: Cell::new(1) }
+            Self {
+                base: UIElement::default(),
+                value: Cell::new(1),
+            }
         }
     }
 
@@ -1707,7 +1962,9 @@ mod tests {
             "mid"
         }
         fn new() -> Self {
-            Self { base: OverridableBase::new() }
+            Self {
+                base: OverridableBase::new(),
+            }
         }
     }
 
@@ -1720,7 +1977,9 @@ mod tests {
     #[elwindui_macros::class]
     impl OverridableLeaf {
         fn new() -> Self {
-            Self { base: OverridableMid::new() }
+            Self {
+                base: OverridableMid::new(),
+            }
         }
     }
 
@@ -1749,26 +2008,30 @@ mod tests {
     }
 
     fn native(name: &'static str, size: Size) -> Rc<dyn UIElementExt> {
-        new_element(FakeNativeControl::new(FakeHandle(name, size)))
+        FakeNativeControl::new(FakeHandle(name, size))
     }
 
-    fn stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElementExt>>) -> Rc<dyn UIElementExt> {
+    fn stack(
+        orientation: Orientation,
+        spacing: f32,
+        children: Vec<Rc<dyn UIElementExt>>,
+    ) -> Rc<dyn UIElementExt> {
         match orientation {
             Orientation::Vertical => {
-                let node = VerticalLayout::construct();
+                let node = VerticalLayout::new();
                 node.set_spacing(spacing);
                 for child in children {
                     node.children().add(child);
                 }
-                new_element(node)
+                node
             }
             Orientation::Horizontal => {
-                let node = HorizontalLayout::construct();
+                let node = HorizontalLayout::new();
                 node.set_spacing(spacing);
                 for child in children {
                     node.children().add(child);
                 }
-                new_element(node)
+                node
             }
         }
     }
@@ -1797,7 +2060,18 @@ mod tests {
         // content: it must fill the window, not shrink to its own `fittingSize()`.
         let tree = native("a", size(10.0, 20.0));
         let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 100.0)));
-        assert_eq!(natives, vec![(FakeHandle("a", size(10.0, 20.0)), Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 })]);
+        assert_eq!(
+            natives,
+            vec![(
+                FakeHandle("a", size(10.0, 20.0)),
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0
+                }
+            )]
+        );
         assert!(paints.is_empty());
     }
 
@@ -1810,32 +2084,40 @@ mod tests {
         // size instead of filling its stack-allocated cross-axis slot — matching the old
         // `CrossAlign::Start` behavior this test used to exercise.
         fn leaf(name: &'static str, s: Size) -> Rc<dyn UIElementExt> {
-            let node = new_element(FakeNativeControl::new(FakeHandle(name, s)));
-            node.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
-            node.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
+            let node = FakeNativeControl::new(FakeHandle(name, s));
+            node.as_ui_element()
+                .set_horizontal_alignment(HorizontalAlignment::Left);
+            node.as_ui_element()
+                .set_vertical_alignment(VerticalAlignment::Top);
             node
         }
-        fn start_stack(orientation: Orientation, spacing: f32, children: Vec<Rc<dyn UIElementExt>>) -> Rc<dyn UIElementExt> {
-            let node = match orientation {
+        fn start_stack(
+            orientation: Orientation,
+            spacing: f32,
+            children: Vec<Rc<dyn UIElementExt>>,
+        ) -> Rc<dyn UIElementExt> {
+            let node: Rc<dyn UIElementExt> = match orientation {
                 Orientation::Vertical => {
-                    let stack = VerticalLayout::construct();
+                    let stack = VerticalLayout::new();
                     stack.set_spacing(spacing);
                     for child in children {
                         stack.children().add(child);
                     }
-                    new_element(stack)
+                    stack
                 }
                 Orientation::Horizontal => {
-                    let stack = HorizontalLayout::construct();
+                    let stack = HorizontalLayout::new();
                     stack.set_spacing(spacing);
                     for child in children {
                         stack.children().add(child);
                     }
-                    new_element(stack)
+                    stack
                 }
             };
-            node.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
-            node.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
+            node.as_ui_element()
+                .set_horizontal_alignment(HorizontalAlignment::Left);
+            node.as_ui_element()
+                .set_vertical_alignment(VerticalAlignment::Top);
             node
         }
 
@@ -1844,17 +2126,57 @@ mod tests {
             5.0,
             vec![
                 leaf("top", size(50.0, 10.0)),
-                start_stack(Orientation::Horizontal, 2.0, vec![leaf("left", size(20.0, 20.0)), leaf("right", size(30.0, 20.0))]),
+                start_stack(
+                    Orientation::Horizontal,
+                    2.0,
+                    vec![
+                        leaf("left", size(20.0, 20.0)),
+                        leaf("right", size(30.0, 20.0)),
+                    ],
+                ),
             ],
         );
 
         let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
         assert!(paints.is_empty());
         assert_eq!(natives.len(), 3);
-        assert_eq!(natives[0], (FakeHandle("top", size(50.0, 10.0)), Rect { x: 0.0, y: 0.0, width: 50.0, height: 10.0 }));
+        assert_eq!(
+            natives[0],
+            (
+                FakeHandle("top", size(50.0, 10.0)),
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 50.0,
+                    height: 10.0
+                }
+            )
+        );
         // inner stack starts at y = 10 (top's height) + 5 (spacing) = 15
-        assert_eq!(natives[1], (FakeHandle("left", size(20.0, 20.0)), Rect { x: 0.0, y: 15.0, width: 20.0, height: 20.0 }));
-        assert_eq!(natives[2], (FakeHandle("right", size(30.0, 20.0)), Rect { x: 22.0, y: 15.0, width: 30.0, height: 20.0 }));
+        assert_eq!(
+            natives[1],
+            (
+                FakeHandle("left", size(20.0, 20.0)),
+                Rect {
+                    x: 0.0,
+                    y: 15.0,
+                    width: 20.0,
+                    height: 20.0
+                }
+            )
+        );
+        assert_eq!(
+            natives[2],
+            (
+                FakeHandle("right", size(30.0, 20.0)),
+                Rect {
+                    x: 22.0,
+                    y: 15.0,
+                    width: 30.0,
+                    height: 20.0
+                }
+            )
+        );
     }
 
     #[test]
@@ -1862,37 +2184,63 @@ mod tests {
         // Unlike the previous test, this one leaves alignment at its `Stretch` default — each
         // leaf should fill the *entire* stack width (the cross axis, for a vertical stack), not
         // just its own measured width.
-        let tree = stack(Orientation::Vertical, 0.0, vec![native("a", size(10.0, 20.0))]);
+        let tree = stack(
+            Orientation::Vertical,
+            0.0,
+            vec![native("a", size(10.0, 20.0))],
+        );
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 100.0)));
-        assert_eq!(natives[0].1, Rect { x: 0.0, y: 0.0, width: 200.0, height: 20.0 });
+        assert_eq!(
+            natives[0].1,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 20.0
+            }
+        );
     }
 
     #[test]
     fn shape_reports_paint_and_has_no_children() {
         // `Shape` (matching real WinUI3's `Shape`) is a pure leaf: no `Children`/content property
         // of its own — see `Shape`'s own doc comment.
-        let shape = Shape::construct();
+        let shape = Shape::new();
         shape.set_kind(ShapeKind::RoundedRect { corner_radius: 8.0 });
         shape.set_fill(Some("#3498db".to_string()));
-        let tree: Rc<dyn UIElementExt> = new_element(shape);
+        let tree: Rc<dyn UIElementExt> = shape;
 
         assert!(tree.visual_children().is_empty());
         let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 50.0)));
         assert_eq!(paints.len(), 1);
         // As the root, the shape fills `available` (default `Stretch`, not its own zero-sized
         // natural size).
-        assert_eq!(paints[0].1, Rect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 });
+        assert_eq!(
+            paints[0].1,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0
+            }
+        );
         assert!(natives.is_empty());
     }
 
     #[test]
     fn control_padding_shrinks_the_slot_its_children_are_arranged_into() {
-        let control = Control::construct();
-        control.set_padding(10.0);
-        control.children.add(native("a", size(10.0, 20.0)));
-        let tree: Rc<dyn UIElementExt> = new_element(control);
+        let control = ContentControl::new(Some(10.0), native("a", size(10.0, 20.0)));
+        let tree: Rc<dyn UIElementExt> = control;
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
-        assert_eq!(natives[0].1, Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 });
+        assert_eq!(
+            natives[0].1,
+            Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 80.0
+            }
+        );
     }
 
     #[test]
@@ -1905,49 +2253,87 @@ mod tests {
 
     #[test]
     fn margin_shrinks_the_slot_an_element_is_arranged_into() {
-        let tree: Rc<dyn UIElementExt> = new_element(FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElementExt> = FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0)));
         tree.as_ui_element().set_margin(10.0);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
-        assert_eq!(natives[0].1, Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 });
+        assert_eq!(
+            natives[0].1,
+            Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 80.0
+            }
+        );
     }
 
     #[test]
     fn explicit_width_and_height_override_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElementExt> = new_element(FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElementExt> = FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0)));
         tree.as_ui_element().set_width(Some(50.0));
         tree.as_ui_element().set_height(Some(5.0));
         // `Stretch` (the default) still governs slot placement; the explicit width/height above
         // constrains what `measure_override`'s own `available`/`desired` see, not the final
         // stretch-to-slot size — a non-`Stretch` alignment (below) is what actually surfaces the
         // explicit size in the arranged rect.
-        tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
-        tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
+        tree.as_ui_element()
+            .set_horizontal_alignment(HorizontalAlignment::Left);
+        tree.as_ui_element()
+            .set_vertical_alignment(VerticalAlignment::Top);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
-        assert_eq!(natives[0].1, Rect { x: 0.0, y: 0.0, width: 50.0, height: 5.0 });
+        assert_eq!(
+            natives[0].1,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 5.0
+            }
+        );
     }
 
     #[test]
     fn min_and_max_clamp_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElementExt> = new_element(FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0))));
+        let tree: Rc<dyn UIElementExt> = FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0)));
         tree.as_ui_element().set_min_width(Some(30.0));
         tree.as_ui_element().set_max_height(Some(8.0));
-        tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
-        tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
+        tree.as_ui_element()
+            .set_horizontal_alignment(HorizontalAlignment::Left);
+        tree.as_ui_element()
+            .set_vertical_alignment(VerticalAlignment::Top);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
-        assert_eq!(natives[0].1, Rect { x: 0.0, y: 0.0, width: 30.0, height: 8.0 });
+        assert_eq!(
+            natives[0].1,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 30.0,
+                height: 8.0
+            }
+        );
     }
 
     #[test]
     fn arranged_width_height_and_offset_are_populated_after_layout() {
         let leaf = native("a", size(10.0, 20.0));
-        leaf.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
-        leaf.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
-        let root = stack(Orientation::Vertical, 5.0, vec![native("top", size(50.0, 10.0)), Rc::clone(&leaf)]);
+        leaf.as_ui_element()
+            .set_horizontal_alignment(HorizontalAlignment::Left);
+        leaf.as_ui_element()
+            .set_vertical_alignment(VerticalAlignment::Top);
+        let root = stack(
+            Orientation::Vertical,
+            5.0,
+            vec![native("top", size(50.0, 10.0)), Rc::clone(&leaf)],
+        );
         layout_tree::<FakeHandle>(&root, size(200.0, 200.0));
 
         assert_eq!(root.arranged_width(), Some(200.0));
         assert_eq!(root.arranged_height(), Some(200.0));
-        assert_eq!(root.arranged_offset(), Some(Point { x: 0.0, y: 0.0 }), "root has no parent to set its own offset");
+        assert_eq!(
+            root.arranged_offset(),
+            Some(Point { x: 0.0, y: 0.0 }),
+            "root has no parent to set its own offset"
+        );
         // second stack child ("top" is 10 tall, spacing is 5) starts at y = 15, relative to the stack
         assert_eq!(leaf.arranged_offset(), Some(Point { x: 0.0, y: 15.0 }));
         assert_eq!(leaf.arranged_width(), Some(10.0));
@@ -1964,18 +2350,31 @@ mod tests {
 
         leaf.measure(size(200.0, 200.0));
         assert_eq!(leaf.measured_size(), Some(size(10.0, 20.0)));
-        leaf.arrange(Rect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 });
+        leaf.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        });
         assert!(leaf.arranged_width().is_some());
         assert!(leaf.arranged_height().is_some());
         assert!(leaf.arranged_offset().is_some());
 
         leaf.invalidate_arrange();
-        assert!(leaf.measured_size().is_some(), "invalidate_arrange must not touch measured_size");
+        assert!(
+            leaf.measured_size().is_some(),
+            "invalidate_arrange must not touch measured_size"
+        );
         assert_eq!(leaf.arranged_width(), None);
         assert_eq!(leaf.arranged_height(), None);
         assert_eq!(leaf.arranged_offset(), None);
 
-        leaf.arrange(Rect { x: 0.0, y: 0.0, width: 200.0, height: 200.0 });
+        leaf.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        });
         leaf.invalidate_measure();
         assert_eq!(leaf.measured_size(), None);
         assert_eq!(leaf.arranged_width(), None);
@@ -1985,11 +2384,21 @@ mod tests {
 
     #[test]
     fn non_stretch_alignment_keeps_the_elements_own_measured_size() {
-        let tree: Rc<dyn UIElementExt> = new_element(FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0))));
-        tree.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Center);
-        tree.as_ui_element().set_vertical_alignment(VerticalAlignment::Center);
+        let tree: Rc<dyn UIElementExt> = FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0)));
+        tree.as_ui_element()
+            .set_horizontal_alignment(HorizontalAlignment::Center);
+        tree.as_ui_element()
+            .set_vertical_alignment(VerticalAlignment::Center);
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
-        assert_eq!(natives[0].1, Rect { x: 45.0, y: 40.0, width: 10.0, height: 20.0 });
+        assert_eq!(
+            natives[0].1,
+            Rect {
+                x: 45.0,
+                y: 40.0,
+                width: 10.0,
+                height: 20.0
+            }
+        );
     }
 
     /// A minimal test-only fixture that both paints itself *and* has children — no real builtin
@@ -2032,21 +2441,37 @@ mod tests {
             self.base.__dyn_x_for_try_as_native_control()
         }
         fn measure_override(&self, available: Size) -> Size {
-            self.base.visual_children().iter().fold(Size::default(), |acc, c| {
-                c.measure(available);
-                let s = c.measured_size().unwrap_or_default();
-                Size { width: acc.width.max(s.width), height: acc.height.max(s.height) }
-            })
+            self.base
+                .visual_children()
+                .iter()
+                .fold(Size::default(), |acc, c| {
+                    c.measure(available);
+                    let s = c.measured_size().unwrap_or_default();
+                    Size {
+                        width: acc.width.max(s.width),
+                        height: acc.height.max(s.height),
+                    }
+                })
         }
         fn arrange_override(&self, final_size: Size) -> Size {
-            let full = Rect { x: 0.0, y: 0.0, width: final_size.width, height: final_size.height };
+            let full = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: final_size.width,
+                height: final_size.height,
+            };
             for child in self.base.visual_children().iter() {
                 child.arrange(full);
             }
             final_size
         }
         fn paint(&self) -> Option<PaintKind> {
-            Some(PaintKind::ShapeExt { kind: ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: Some("#000000".to_string()), stroke: None, stroke_width: 0.0 })
+            Some(PaintKind::ShapeExt {
+                kind: ShapeKind::RoundedRect { corner_radius: 4.0 },
+                fill: Some("#000000".to_string()),
+                stroke: None,
+                stroke_width: 0.0,
+            })
         }
     }
 
@@ -2058,9 +2483,14 @@ mod tests {
         // this list in order therefore places the native leaf *in front of* the container's own
         // paint, matching the source tree's parent-then-child nesting instead of an accidental
         // "all natives first" or "all paints first" batching.
-        let base = UIElement::default();
-        base.children_collection().add(native("child", size(10.0, 10.0)));
-        let tree: Rc<dyn UIElementExt> = new_element(PaintingContainer { base });
+        let tree = Rc::new(PaintingContainer {
+            base: UIElement::default(),
+        });
+        bind_element_owner(&tree);
+        tree.as_ui_element()
+            .visual_collection
+            .add(native("child", size(10.0, 10.0)));
+        let tree: Rc<dyn UIElementExt> = tree;
         let items = layout_tree::<FakeHandle>(&tree, size(50.0, 50.0));
         assert_eq!(items.len(), 2);
         assert!(matches!(items[0], RenderItem::Paint(..)));
@@ -2084,35 +2514,105 @@ mod tests {
     }
 
     #[test]
-    fn child_parent_pointer_is_set_by_new_element() {
+    fn logical_and_visual_parents_are_set_by_collections() {
         let leaf = native("a", size(10.0, 20.0));
         let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
-        assert!(Rc::ptr_eq(&leaf.parent().expect("leaf should have a parent"), &root));
+        assert!(Rc::ptr_eq(
+            &leaf.parent().expect("leaf should have a logical parent"),
+            &root
+        ));
+        assert!(Rc::ptr_eq(
+            &leaf
+                .visual_parent()
+                .expect("leaf should have a visual parent"),
+            &root
+        ));
         assert!(root.parent().is_none());
     }
 
     #[test]
     fn runtime_add_and_remove_after_construction_wire_parent_and_visual_children() {
         // `UIElementCollection::add`/`remove` must work *after* the owner is already `Rc`-wrapped
-        // (not just at construction time, when `new_element`'s own initial wiring pass would have
-        // covered it) — this is the whole point of not having a wholesale `set_children` anymore.
-        // `children` is cloned out *before* `new_element` erases the concrete `Control` into
-        // `Rc<dyn UIElement>` — a cheap clone (two shared `Rc`s), and it keeps sharing the exact
-        // same underlying storage as the erased value's own `base.visual_children` afterward.
-        let control = Control::construct();
-        let children = control.children.clone();
-        let root: Rc<dyn UIElementExt> = new_element(control);
+        // after the owner is already constructed.
+        let root = VerticalLayout::new();
+        let root_erased: Rc<dyn UIElementExt> = root.clone();
+        let children = root.children().clone();
         assert!(root.visual_children().is_empty());
 
         let child = native("a", size(10.0, 20.0));
         children.add(Rc::clone(&child));
 
         assert_eq!(root.visual_children().len(), 1);
-        assert!(Rc::ptr_eq(&child.parent().expect("add should wire the child's parent"), &root));
+        assert!(Rc::ptr_eq(
+            &child
+                .parent()
+                .expect("add should wire the child's logical parent"),
+            &root_erased
+        ));
+        assert!(Rc::ptr_eq(
+            &child
+                .visual_parent()
+                .expect("add should wire the child's visual parent"),
+            &root_erased
+        ));
 
         assert!(children.remove(&child));
         assert!(root.visual_children().is_empty());
-        assert!(child.parent().is_none(), "remove should clear the child's parent");
+        assert!(
+            child.parent().is_none(),
+            "remove should clear the child's parent"
+        );
+        assert!(
+            child.visual_parent().is_none(),
+            "remove should clear the child's visual parent"
+        );
+    }
+
+    #[test]
+    fn logical_and_visual_collections_keep_their_parent_relationships_separate() {
+        let root = VerticalLayout::new();
+        let root_erased: Rc<dyn UIElementExt> = root.clone();
+
+        let visual_only = TextBlock::new();
+        root.as_ui_element()
+            .visual_collection
+            .add(visual_only.clone());
+        assert!(visual_only.parent().is_none());
+        assert!(Rc::ptr_eq(
+            &visual_only.visual_parent().expect("visual parent"),
+            &root_erased
+        ));
+
+        let logical_child = TextBlock::new();
+        root.children().add(logical_child.clone());
+        assert!(Rc::ptr_eq(
+            &logical_child.parent().expect("logical parent"),
+            &root_erased
+        ));
+        assert!(Rc::ptr_eq(
+            &logical_child.visual_parent().expect("visual parent"),
+            &root_erased
+        ));
+    }
+
+    #[test]
+    fn content_control_replaces_its_visual_child() {
+        let first = TextBlock::new();
+        let content_control = ContentControl::new(None, first.clone());
+        let control: Rc<dyn UIElementExt> = content_control.clone();
+        assert!(Rc::ptr_eq(
+            &first.visual_parent().expect("initial visual parent"),
+            &control
+        ));
+
+        let second = TextBlock::new();
+        content_control.set_content(second.clone());
+        assert!(first.visual_parent().is_none());
+        assert!(Rc::ptr_eq(
+            &second.visual_parent().expect("replacement visual parent"),
+            &control
+        ));
+        assert_eq!(content_control.visual_children().len(), 1);
     }
 
     #[test]
@@ -2130,7 +2630,10 @@ mod tests {
         let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
 
         let calls = Rc::new(RefCell::new(0));
-        root.as_ui_element().set_invalidate_host(Some(Rc::new(CountingHost { calls: Rc::clone(&calls) })));
+        root.as_ui_element()
+            .set_invalidate_host(Some(Rc::new(CountingHost {
+                calls: Rc::clone(&calls),
+            })));
 
         // Called from the *leaf*, not the root — must walk `parent()` up to find the registered host.
         leaf.invalidate();
@@ -2140,7 +2643,11 @@ mod tests {
 
         root.as_ui_element().set_invalidate_host(None);
         leaf.invalidate();
-        assert_eq!(*calls.borrow(), 3, "un-registering the host should make invalidate a no-op again");
+        assert_eq!(
+            *calls.borrow(),
+            3,
+            "un-registering the host should make invalidate a no-op again"
+        );
     }
 
     #[test]
@@ -2161,14 +2668,20 @@ mod tests {
         let root_calls = Rc::new(RefCell::new(0));
         {
             let leaf_calls = Rc::clone(&leaf_calls);
-            leaf.as_ui_element().register_routed_handler::<()>("on_click", Box::new(move |_, _| *leaf_calls.borrow_mut() += 1));
+            leaf.as_ui_element().register_routed_handler::<()>(
+                "on_click",
+                Box::new(move |_, _| *leaf_calls.borrow_mut() += 1),
+            );
         }
         {
             let root_calls = Rc::clone(&root_calls);
-            root.as_ui_element().register_routed_handler::<()>("on_click", Box::new(move |_, args| {
-                *root_calls.borrow_mut() += 1;
-                args.handled.set(true);
-            }));
+            root.as_ui_element().register_routed_handler::<()>(
+                "on_click",
+                Box::new(move |_, args| {
+                    *root_calls.borrow_mut() += 1;
+                    args.handled.set(true);
+                }),
+            );
         }
 
         let args = RoutedEventArgs::default();
@@ -2192,29 +2705,56 @@ mod tests {
     #[test]
     fn collapsed_child_is_excluded_from_stack_layout() {
         let collapsed = native("collapsed", size(50.0, 50.0));
-        collapsed.as_ui_element().set_visibility(Visibility::Collapsed);
+        collapsed
+            .as_ui_element()
+            .set_visibility(Visibility::Collapsed);
         let visible = native("visible", size(30.0, 10.0));
-        visible.as_ui_element().set_horizontal_alignment(HorizontalAlignment::Left);
-        visible.as_ui_element().set_vertical_alignment(VerticalAlignment::Top);
-        let tree = stack(Orientation::Vertical, 5.0, vec![Rc::clone(&collapsed), Rc::clone(&visible)]);
+        visible
+            .as_ui_element()
+            .set_horizontal_alignment(HorizontalAlignment::Left);
+        visible
+            .as_ui_element()
+            .set_vertical_alignment(VerticalAlignment::Top);
+        let tree = stack(
+            Orientation::Vertical,
+            5.0,
+            vec![Rc::clone(&collapsed), Rc::clone(&visible)],
+        );
 
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
         // Known limitation (see `Visibility`'s own doc comment / the layout engine's own comment
         // above `measure`): `stack_arrange` still reserves the 5.0 `spacing` gap around the
         // zero-sized collapsed child, so `visible` starts at y = 5.0, not y = 0.0.
-        assert_eq!(natives, vec![(FakeHandle("visible", size(30.0, 10.0)), Rect { x: 0.0, y: 5.0, width: 30.0, height: 10.0 })]);
+        assert_eq!(
+            natives,
+            vec![(
+                FakeHandle("visible", size(30.0, 10.0)),
+                Rect {
+                    x: 0.0,
+                    y: 5.0,
+                    width: 30.0,
+                    height: 10.0
+                }
+            )]
+        );
     }
 
     #[test]
     fn collapsed_containers_subtree_is_entirely_excluded() {
         let leaf = native("child", size(10.0, 10.0));
         let container = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
-        container.as_ui_element().set_visibility(Visibility::Collapsed);
+        container
+            .as_ui_element()
+            .set_visibility(Visibility::Collapsed);
 
         let (natives, paints) = split(layout_tree::<FakeHandle>(&container, size(100.0, 100.0)));
         assert!(natives.is_empty());
         assert!(paints.is_empty());
-        assert_eq!(leaf.visibility(), Visibility::Visible, "the child itself was never made Collapsed");
+        assert_eq!(
+            leaf.visibility(),
+            Visibility::Visible,
+            "the child itself was never made Collapsed"
+        );
     }
 
     #[test]

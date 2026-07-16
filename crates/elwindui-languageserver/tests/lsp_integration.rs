@@ -6,7 +6,9 @@
 //! instead of hand-rolling `Content-Length` header parsing for the test client.
 
 use lsp_server::{Message, Notification, Request, RequestId};
-use lsp_types::notification::{DidOpenTextDocument, Initialized, Notification as _, PublishDiagnostics};
+use lsp_types::notification::{
+    DidOpenTextDocument, Initialized, Notification as _, PublishDiagnostics,
+};
 use lsp_types::request::{Initialize, Request as _};
 use lsp_types::{
     DidOpenTextDocumentParams, InitializeParams, InitializedParams, PublishDiagnosticsParams,
@@ -40,8 +42,10 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn publishes_diagnostics_for_a_broken_elwind_file() {
-    let dir = std::env::temp_dir()
-        .join(format!("elwindui_lsp_integration_test_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "elwindui_lsp_integration_test_{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let file_path = dir.join("broken.elwind");
     let broken_src = "viewmodel { #[observable] }";
@@ -59,11 +63,18 @@ fn publishes_diagnostics_for_a_broken_elwind_file() {
     let messages = spawn_reader(BufReader::new(stdout));
 
     // 1. initialize
-    let init_req =
-        Request::new(RequestId::from(1), Initialize::METHOD.to_string(), InitializeParams::default());
-    Message::from(init_req).write(&mut stdin).expect("send initialize");
+    let init_req = Request::new(
+        RequestId::from(1),
+        Initialize::METHOD.to_string(),
+        InitializeParams::default(),
+    );
+    Message::from(init_req)
+        .write(&mut stdin)
+        .expect("send initialize");
 
-    let resp = messages.recv_timeout(TIMEOUT).expect("initialize response within timeout");
+    let resp = messages
+        .recv_timeout(TIMEOUT)
+        .expect("initialize response within timeout");
     match resp {
         Message::Response(r) => assert_eq!(r.id, RequestId::from(1), "unexpected response id"),
         other => panic!("expected an initialize response, got {other:?}"),
@@ -71,7 +82,9 @@ fn publishes_diagnostics_for_a_broken_elwind_file() {
 
     // 2. initialized
     let initialized = Notification::new(Initialized::METHOD.to_string(), InitializedParams {});
-    Message::from(initialized).write(&mut stdin).expect("send initialized");
+    Message::from(initialized)
+        .write(&mut stdin)
+        .expect("send initialized");
 
     // 3. didOpen the broken file
     let file_uri = url::Url::from_file_path(&file_path).expect("file:// url");
@@ -87,7 +100,9 @@ fn publishes_diagnostics_for_a_broken_elwind_file() {
             },
         },
     );
-    Message::from(did_open).write(&mut stdin).expect("send didOpen");
+    Message::from(did_open)
+        .write(&mut stdin)
+        .expect("send didOpen");
 
     // 4. wait for a non-empty publishDiagnostics notification, skipping any other messages,
     // within an overall deadline enforced by `recv_timeout` on the channel (not by the blocking
@@ -114,8 +129,11 @@ fn publishes_diagnostics_for_a_broken_elwind_file() {
 
     // Best-effort clean shutdown; the assertion below is what matters, and this must not hang the
     // test if the server doesn't respond as expected.
-    let shutdown_req =
-        Request::new(RequestId::from(2), "shutdown".to_string(), serde_json::Value::Null);
+    let shutdown_req = Request::new(
+        RequestId::from(2),
+        "shutdown".to_string(),
+        serde_json::Value::Null,
+    );
     Message::from(shutdown_req).write(&mut stdin).ok();
     let _ = messages.recv_timeout(TIMEOUT);
     let exit = Notification::new("exit".to_string(), serde_json::Value::Null);
@@ -124,5 +142,8 @@ fn publishes_diagnostics_for_a_broken_elwind_file() {
     child.kill().ok();
     std::fs::remove_dir_all(&dir).ok();
 
-    assert!(found, "expected a non-empty textDocument/publishDiagnostics for the broken .elwind file");
+    assert!(
+        found,
+        "expected a non-empty textDocument/publishDiagnostics for the broken .elwind file"
+    );
 }

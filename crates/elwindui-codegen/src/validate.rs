@@ -2,8 +2,11 @@
 //! ones reachable by the constructs the notepad example actually uses. See
 //! docs/elwindui_gui_framework_design.md §10 for the full rule list.
 
-use crate::ast::{Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer, Item, Module, ViewExpr};
-use crate::codegen::{self, strip_rc_wrapper, SymbolTable};
+use crate::ast::{
+    Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer,
+    Item, Module, ViewExpr,
+};
+use crate::codegen::{self, SymbolTable, strip_rc_wrapper};
 use std::collections::{HashMap, HashSet};
 
 pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
@@ -73,7 +76,10 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 c.name, c.name
                             ));
                         }
-                        let has_own_view = module.items.iter().any(|item| matches!(item, Item::View(v) if v.target == c.name));
+                        let has_own_view = module
+                            .items
+                            .iter()
+                            .any(|item| matches!(item, Item::View(v) if v.target == c.name));
                         if has_own_view {
                             errors.push(format!(
                                 "{}: #[native] components must have no `view` of its own — each backend \
@@ -92,7 +98,8 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     // mean "no field ever claims a bare nested child", caught only at codegen time
                     // (or not at all, if the component happens to never receive one).
                     if let Some(name) = &c.content_field {
-                        let effective_fields = codegen::resolve_effective_fields(module, c, modules);
+                        let effective_fields =
+                            codegen::resolve_effective_fields(module, c, modules);
                         if !effective_fields.iter().any(|f| &f.name == name) {
                             errors.push(format!(
                                 "{}: #[content({name})] names a field that doesn't exist on `{}`",
@@ -119,7 +126,15 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                             ));
                         }
                         if let Some(Initializer::Bind { path, .. }) = &f.initializer {
-                            validate_bind_path(module, &c.name, &f.name, path, &c.fields, &table, &mut errors);
+                            validate_bind_path(
+                                module,
+                                &c.name,
+                                &f.name,
+                                path,
+                                &c.fields,
+                                &table,
+                                &mut errors,
+                            );
                         }
                     }
 
@@ -133,18 +148,51 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     // `#[param]` field's type names a component/viewmodel that's actually in scope
                     // (see `find_vm_fields`). Only applies if a matching `Item::View` exists in this
                     // same `modules` slice — nothing to walk otherwise.
-                    if let Some(view) = modules.iter().flat_map(|m| &m.items).find_map(|item| match item {
-                        Item::View(v) if v.target == c.name => Some(v),
-                        _ => None,
-                    }) {
-                        let vm_fields =
-                            find_vm_fields(module, &c.name, &c.fields, &table, &known_type_names, &mut errors);
+                    if let Some(view) =
+                        modules
+                            .iter()
+                            .flat_map(|m| &m.items)
+                            .find_map(|item| match item {
+                                Item::View(v) if v.target == c.name => Some(v),
+                                _ => None,
+                            })
+                    {
+                        let vm_fields = find_vm_fields(
+                            module,
+                            &c.name,
+                            &c.fields,
+                            &table,
+                            &known_type_names,
+                            &mut errors,
+                        );
                         for let_binding in &view.lets {
-                            check_vm_references(&let_binding.element, module, &c.name, &vm_fields, &table, None, &mut errors);
+                            check_vm_references(
+                                &let_binding.element,
+                                module,
+                                &c.name,
+                                &vm_fields,
+                                &table,
+                                None,
+                                &mut errors,
+                            );
                             check_tab_view_mode(&let_binding.element, &c.name, &mut errors);
-                            check_attached_properties(&let_binding.element, module, &c.name, &table, &mut errors);
+                            check_attached_properties(
+                                &let_binding.element,
+                                module,
+                                &c.name,
+                                &table,
+                                &mut errors,
+                            );
                         }
-                        check_vm_references(&view.root, module, &c.name, &vm_fields, &table, c.base.as_deref(), &mut errors);
+                        check_vm_references(
+                            &view.root,
+                            module,
+                            &c.name,
+                            &vm_fields,
+                            &table,
+                            c.base.as_deref(),
+                            &mut errors,
+                        );
                         check_tab_view_mode(&view.root, &c.name, &mut errors);
                         check_attached_properties(&view.root, module, &c.name, &table, &mut errors);
                     }
@@ -247,8 +295,17 @@ fn check_vm_references(
 /// `inherits` base, or (for a shape-composition base) as a component's own view root (see
 /// `check_vm_references`'s `exempt_root_type`). An unresolvable `node.type_path` is left to
 /// `check_element_value`'s own "unknown component" error, not reported again here.
-fn check_not_abstract(node: &ElementNode, from: &Module, component_name: &str, table: &SymbolTable, errors: &mut Vec<String>) {
-    if table.resolve(from, &node.type_path).is_some_and(|info| info.is_abstract) {
+fn check_not_abstract(
+    node: &ElementNode,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    if table
+        .resolve(from, &node.type_path)
+        .is_some_and(|info| info.is_abstract)
+    {
         errors.push(format!(
             "{component_name}: `{}` is #[abstract] and cannot be instantiated directly — use a concrete subtype instead",
             node.type_path
@@ -268,8 +325,9 @@ fn check_vm_expr(
         ViewExpr::Path(path) => match path.as_slice() {
             [vm_name, field] => {
                 if let Some(&ty) = vm_fields.get(vm_name.as_str()) {
-                    let has_field =
-                        table.resolve(from, ty).is_some_and(|info| info.fields.contains_key(field.as_str()));
+                    let has_field = table
+                        .resolve(from, ty)
+                        .is_some_and(|info| info.fields.contains_key(field.as_str()));
                     if !has_field {
                         errors.push(format!(
                             "{component_name}: `{vm_name}.{field}` — `{ty}` has no field `{field}`"
@@ -280,9 +338,9 @@ fn check_vm_expr(
             // `vm.command.can_execute` (付録O.4's 3-segment special form).
             [vm_name, command, suffix] if suffix == "can_execute" => {
                 if let Some(&ty) = vm_fields.get(vm_name.as_str()) {
-                    let is_command = table
-                        .resolve(from, ty)
-                        .is_some_and(|info| info.fields.get(command.as_str()) == Some(&FieldKind::Command));
+                    let is_command = table.resolve(from, ty).is_some_and(|info| {
+                        info.fields.get(command.as_str()) == Some(&FieldKind::Command)
+                    });
                     if !is_command {
                         errors.push(format!(
                             "{component_name}: `{vm_name}.{command}.can_execute` — `{ty}` has no command `{command}`"
@@ -295,9 +353,9 @@ fn check_vm_expr(
         ViewExpr::MethodCall(path, method) if method == "execute" => {
             if let [vm_name, command] = path.as_slice() {
                 if let Some(&ty) = vm_fields.get(vm_name.as_str()) {
-                    let is_command = table
-                        .resolve(from, ty)
-                        .is_some_and(|info| info.fields.get(command.as_str()) == Some(&FieldKind::Command));
+                    let is_command = table.resolve(from, ty).is_some_and(|info| {
+                        info.fields.get(command.as_str()) == Some(&FieldKind::Command)
+                    });
                     if !is_command {
                         errors.push(format!(
                             "{component_name}: `{vm_name}.{command}.execute()` — `{ty}` has no command `{command}`"
@@ -313,12 +371,24 @@ fn check_vm_expr(
             }
         }
         ViewExpr::Closure { param, body } => match body {
-            ClosureBody::Expr(inner) => {
-                check_closure_expr_body(inner, param, from, component_name, vm_fields, table, errors)
-            }
-            ClosureBody::Element(elem) => {
-                check_element_value(elem, Some(param), from, component_name, vm_fields, table, errors)
-            }
+            ClosureBody::Expr(inner) => check_closure_expr_body(
+                inner,
+                param,
+                from,
+                component_name,
+                vm_fields,
+                table,
+                errors,
+            ),
+            ClosureBody::Element(elem) => check_element_value(
+                elem,
+                Some(param),
+                from,
+                component_name,
+                vm_fields,
+                table,
+                errors,
+            ),
         },
         ViewExpr::Element(elem) => {
             check_element_value(elem, None, from, component_name, vm_fields, table, errors)
@@ -327,8 +397,7 @@ fn check_vm_expr(
 }
 
 /// Checks a closure body (`header_template`/`item_template`'s `|param| ...`): a reference is
-/// valid if its first segment is either the closure's own bound parameter (or its `data_context`
-/// alias — nothing further to check, the parameter's type isn't a `vm_fields`-tracked
+/// valid if its first segment is the closure's own bound parameter (the parameter isn't a `vm_fields`-tracked
 /// component/viewmodel) or a recognized `vm`-style field (checked the normal way via
 /// `check_vm_expr`). Anything else is an error — see `emit_expr` in `codegen.rs` for why an
 /// outer-component reference from inside a closure body would otherwise silently resolve to a
@@ -360,9 +429,7 @@ fn check_closure_expr_body(
         ViewExpr::Closure { .. } | ViewExpr::Element(_) => return,
     };
     match first_segment {
-        // `data_context` is `emit_expr`'s sugar for the closure's own bound parameter (see
-        // codegen.rs) — valid wherever `param` itself is.
-        Some(first) if first == param || first == "data_context" => {}
+        Some(first) if first == param => {}
         Some(first) if vm_fields.contains_key(first.as_str()) => {
             check_vm_expr(expr, from, component_name, vm_fields, table, errors);
         }
@@ -383,7 +450,10 @@ fn check_closure_expr_body(
 fn check_tab_view_mode(node: &ElementNode, component_name: &str, errors: &mut Vec<String>) {
     if node.type_path == "TabView" {
         let has_children = !node.children.is_empty();
-        let has_items_source = node.attributes.iter().any(|(name, _)| name == "items_source");
+        let has_items_source = node
+            .attributes
+            .iter()
+            .any(|(name, _)| name == "items_source");
         match (has_children, has_items_source) {
             (true, true) => errors.push(format!(
                 "{component_name}: `TabView` has both nested `TabViewItem` children and `items_source` — use exactly one (static nesting or `items_source`, not both)"
@@ -407,13 +477,22 @@ fn check_tab_view_mode(node: &ElementNode, component_name: &str, errors: &mut Ve
 fn check_tab_view_mode_in_expr(expr: &ViewExpr, component_name: &str, errors: &mut Vec<String>) {
     match expr {
         ViewExpr::Element(elem) => check_tab_view_mode(elem, component_name, errors),
-        ViewExpr::Closure { body: ClosureBody::Element(elem), .. } => check_tab_view_mode(elem, component_name, errors),
+        ViewExpr::Closure {
+            body: ClosureBody::Element(elem),
+            ..
+        } => check_tab_view_mode(elem, component_name, errors),
         ViewExpr::TFluent(_, args) => {
             for (_, arg) in args {
                 check_tab_view_mode_in_expr(arg, component_name, errors);
             }
         }
-        ViewExpr::Path(_) | ViewExpr::MethodCall(..) | ViewExpr::Expr(_) | ViewExpr::Closure { body: ClosureBody::Expr(_), .. } => {}
+        ViewExpr::Path(_)
+        | ViewExpr::MethodCall(..)
+        | ViewExpr::Expr(_)
+        | ViewExpr::Closure {
+            body: ClosureBody::Expr(_),
+            ..
+        } => {}
     }
 }
 
@@ -423,7 +502,13 @@ fn check_tab_view_mode_in_expr(expr: &ViewExpr, component_name: &str, errors: &m
 /// descendant of an `Owner` element anywhere in the tree — like WPF's own attached properties, one
 /// set on an element that never ends up under a matching container is simply inert at runtime, not
 /// a static error (see `ElementNode::attached`'s doc comment).
-fn check_attached_properties(node: &ElementNode, from: &Module, component_name: &str, table: &SymbolTable, errors: &mut Vec<String>) {
+fn check_attached_properties(
+    node: &ElementNode,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
     for (owner, field, _value) in &node.attached {
         match table.resolve(from, owner) {
             Some(info) if info.fields.get(field.as_str()) == Some(&FieldKind::Attached) => {}
@@ -445,16 +530,33 @@ fn check_attached_properties(node: &ElementNode, from: &Module, component_name: 
     }
 }
 
-fn check_attached_properties_in_expr(expr: &ViewExpr, from: &Module, component_name: &str, table: &SymbolTable, errors: &mut Vec<String>) {
+fn check_attached_properties_in_expr(
+    expr: &ViewExpr,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
     match expr {
-        ViewExpr::Element(elem) => check_attached_properties(elem, from, component_name, table, errors),
-        ViewExpr::Closure { body: ClosureBody::Element(elem), .. } => check_attached_properties(elem, from, component_name, table, errors),
+        ViewExpr::Element(elem) => {
+            check_attached_properties(elem, from, component_name, table, errors)
+        }
+        ViewExpr::Closure {
+            body: ClosureBody::Element(elem),
+            ..
+        } => check_attached_properties(elem, from, component_name, table, errors),
         ViewExpr::TFluent(_, args) => {
             for (_, arg) in args {
                 check_attached_properties_in_expr(arg, from, component_name, table, errors);
             }
         }
-        ViewExpr::Path(_) | ViewExpr::MethodCall(..) | ViewExpr::Expr(_) | ViewExpr::Closure { body: ClosureBody::Expr(_), .. } => {}
+        ViewExpr::Path(_)
+        | ViewExpr::MethodCall(..)
+        | ViewExpr::Expr(_)
+        | ViewExpr::Closure {
+            body: ClosureBody::Expr(_),
+            ..
+        } => {}
     }
 }
 
@@ -512,13 +614,29 @@ fn check_element_value(
     }
     for (_, value) in &elem.attributes {
         match param {
-            Some(param) => check_closure_expr_body(value, param, from, component_name, vm_fields, table, errors),
+            Some(param) => check_closure_expr_body(
+                value,
+                param,
+                from,
+                component_name,
+                vm_fields,
+                table,
+                errors,
+            ),
             None => check_vm_expr(value, from, component_name, vm_fields, table, errors),
         }
     }
     for child in &elem.children {
         if let ChildEntry::Literal(literal) = child {
-            check_vm_references(literal, from, component_name, vm_fields, table, None, errors);
+            check_vm_references(
+                literal,
+                from,
+                component_name,
+                vm_fields,
+                table,
+                None,
+                errors,
+            );
         }
     }
 }
@@ -611,7 +729,10 @@ fn validate_inherits(
     };
 
     if base_info.sealed {
-        errors.push(format!("{}: inherits `{base}`, but `{base}` is #[sealed] and cannot be inherited from", c.name));
+        errors.push(format!(
+            "{}: inherits `{base}`, but `{base}` is #[sealed] and cannot be inherited from",
+            c.name
+        ));
         return;
     }
 
@@ -622,7 +743,10 @@ fn validate_inherits(
     // `view` root must literally construct `Base`" shape-composition contract below therefore
     // doesn't apply to it, regardless of whether `Base` (e.g. `Layout`, once it carries a real
     // `children: UIElementCollection` field) happens to have fields of its own.
-    if table.resolve(from, &c.name).is_some_and(|i| i.is_virtual_builtin) {
+    if table
+        .resolve(from, &c.name)
+        .is_some_and(|i| i.is_virtual_builtin)
+    {
         return;
     }
 
@@ -644,7 +768,9 @@ fn validate_inherits(
     // its own.
     if matches!(base, "UIElement" | "Layout" | "NativeControl") && !base_info.has_view {
         if base == "NativeControl" {
-            let is_native = table.resolve(from, &c.name).is_some_and(|info| info.is_native);
+            let is_native = table
+                .resolve(from, &c.name)
+                .is_some_and(|info| info.is_native);
             if !is_native {
                 errors.push(format!(
                     "{}: inherits `NativeControl`, but its `view` root isn't itself native (or no \
@@ -665,10 +791,13 @@ fn validate_inherits(
 
     // A primitive shape family (`has_view == false`, not native): `X` must have its own `view`
     // whose root element is literally `Base` — unchanged shape-composition contract.
-    let view = modules.iter().flat_map(|m| &m.items).find_map(|item| match item {
-        Item::View(v) if v.target == c.name => Some(v),
-        _ => None,
-    });
+    let view = modules
+        .iter()
+        .flat_map(|m| &m.items)
+        .find_map(|item| match item {
+            Item::View(v) if v.target == c.name => Some(v),
+            _ => None,
+        });
     match view {
         None => errors.push(format!(
             "{}: inherits `{base}`, but has no `view {}` — a component inheriting a shape \
@@ -690,14 +819,24 @@ fn validate_inherits(
 /// under `__base_name`, reachable via `base::name(...)`), or not be redeclared at all (it's already
 /// inherited — remove the redeclaration). Also checks `#[override] fn` methods the same way against
 /// `base`'s effective `#[virtual]` methods.
-fn validate_field_overrides(from: &Module, c: &ComponentDef, base: &str, table: &SymbolTable, errors: &mut Vec<String>) {
+fn validate_field_overrides(
+    from: &Module,
+    c: &ComponentDef,
+    base: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
     if base == "NativeControl" {
         return;
     }
-    let Some(base_info) = table.resolve(from, base) else { return };
+    let Some(base_info) = table.resolve(from, base) else {
+        return;
+    };
 
     for f in &c.fields {
-        let Some(&base_kind) = base_info.fields.get(f.name.as_str()) else { continue };
+        let Some(&base_kind) = base_info.fields.get(f.name.as_str()) else {
+            continue;
+        };
         let is_override = f.attrs.iter().any(|a| matches!(a, Attr::Override));
         if base_kind != f.kind {
             errors.push(format!(
@@ -739,9 +878,13 @@ fn validate_field_overrides(from: &Module, c: &ComponentDef, base: &str, table: 
             && m.params
                 .iter()
                 .zip(base_method.params.iter())
-                .all(|((_, ty), (_, base_ty))| quote::quote!(#ty).to_string() == quote::quote!(#base_ty).to_string());
+                .all(|((_, ty), (_, base_ty))| {
+                    quote::quote!(#ty).to_string() == quote::quote!(#base_ty).to_string()
+                });
         let same_return = match (&m.return_ty, &base_method.return_ty) {
-            (Some(ty), Some(base_ty)) => quote::quote!(#ty).to_string() == quote::quote!(#base_ty).to_string(),
+            (Some(ty), Some(base_ty)) => {
+                quote::quote!(#ty).to_string() == quote::quote!(#base_ty).to_string()
+            }
             (None, None) => true,
             _ => false,
         };
@@ -845,7 +988,10 @@ view NotepadWindow {
     }
 }
 "#;
-        let modules = vec![parse_module(viewmodel_src).unwrap(), parse_module(window_src).unwrap()];
+        let modules = vec![
+            parse_module(viewmodel_src).unwrap(),
+            parse_module(window_src).unwrap(),
+        ];
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -860,9 +1006,15 @@ component Window3 {
 }
 view Window3 { Window { TextBlock { text: vm.no_such_field } } }
 "#;
-        let modules = vec![parse_module(viewmodel_src).unwrap(), parse_module(window_src).unwrap()];
+        let modules = vec![
+            parse_module(viewmodel_src).unwrap(),
+            parse_module(window_src).unwrap(),
+        ];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("no_such_field")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("no_such_field")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -876,9 +1028,15 @@ component Window4 {
 }
 view Window4 { Window { Button { text: "x", on_click: vm.no_such_command.execute() } } }
 "#;
-        let modules = vec![parse_module(viewmodel_src).unwrap(), parse_module(window_src).unwrap()];
+        let modules = vec![
+            parse_module(viewmodel_src).unwrap(),
+            parse_module(window_src).unwrap(),
+        ];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("no_such_command")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("no_such_command")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -892,9 +1050,15 @@ component Window5 {
 }
 view Window5 { Window { Button { text: "x", enabled: vm.no_such_command.can_execute } } }
 "#;
-        let modules = vec![parse_module(viewmodel_src).unwrap(), parse_module(window_src).unwrap()];
+        let modules = vec![
+            parse_module(viewmodel_src).unwrap(),
+            parse_module(window_src).unwrap(),
+        ];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("no_such_command")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("no_such_command")),
+            "errors: {errs:?}"
+        );
     }
 
     /// Simulates a Rust-authored viewmodel (`#[elwindui::viewmodel] mod some_vm_mod { struct Vm {..} }`,
@@ -926,7 +1090,10 @@ view Window6 { Window { TextArea { text: vm.content } } }
 "#;
         let modules = vec![vm_module, parse_module(window_src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("not in scope")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("not in scope")),
+            "errors: {errs:?}"
+        );
     }
 
     /// The same cross-module setup as above, but with the real path actually `use`d — must resolve
@@ -984,7 +1151,10 @@ view Window8 {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("Nonexistent")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("Nonexistent")),
+            "errors: {errs:?}"
+        );
     }
 
     /// `render_content`'s target component must get every one of its `#[param]`-shaped fields —
@@ -1022,7 +1192,8 @@ view Window9 {
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("missing required attribute") && e.contains("doc")),
+            errs.iter()
+                .any(|e| e.contains("missing required attribute") && e.contains("doc")),
             "errors: {errs:?}"
         );
     }
@@ -1057,7 +1228,10 @@ view Window10 {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("other_thing")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("other_thing")),
+            "errors: {errs:?}"
+        );
     }
 
     /// The passthrough case (`doc: doc`) and a well-formed `item_template` must validate cleanly.
@@ -1112,7 +1286,9 @@ view RoundedPanel {
     Shape { kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1131,9 +1307,15 @@ view Foo {
     Shape { kind: elwindui_core::ui::ShapeKind::Oval }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("Shape") && e.contains("abstract")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("Shape") && e.contains("abstract")),
+            "errors: {errs:?}"
+        );
     }
 
     /// Same rule, but for a nested (non-root) use — `NativeControl` (another `#[abstract]` category
@@ -1150,9 +1332,15 @@ view Foo {
     }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("NativeControl") && e.contains("abstract")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("NativeControl") && e.contains("abstract")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1167,9 +1355,14 @@ view RoundedPanel {
     VerticalLayout { }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("must be `Shape`")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("must be `Shape`")),
+            "errors: {errs:?}"
+        );
     }
 
     /// Redeclaring a field already inherited from a non-`NativeControl` base (without
@@ -1187,9 +1380,14 @@ view RoundedPanel {
     Shape { kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("already inherited")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("already inherited")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1202,9 +1400,15 @@ view Foo {
     VerticalLayout { }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("not a known component/builtin")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("not a known component/builtin")),
+            "errors: {errs:?}"
+        );
     }
 
     /// `inherits NativeControl` is a pure category tag checked for *consistency* against the
@@ -1220,9 +1424,14 @@ view Foo {
     VerticalLayout { }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("NativeControl")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("NativeControl")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1235,7 +1444,9 @@ view Foo {
     Window { title: "x", content: TextBlock { text: "hi" } }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1252,15 +1463,21 @@ view DocumentViewLike {
     VerticalLayout { }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let table = codegen::build_symbol_table(&modules);
-        let info = table.resolve(&modules[0], "DocumentViewLike").expect("resolves");
+        let info = table
+            .resolve(&modules[0], "DocumentViewLike")
+            .expect("resolves");
         assert!(!info.is_native);
 
         let native_info = table.resolve(&modules[0], "Window").expect("resolves");
         assert!(native_info.is_native);
 
-        let virtual_builtin_info = table.resolve(&modules[0], "VerticalLayout").expect("resolves");
+        let virtual_builtin_info = table
+            .resolve(&modules[0], "VerticalLayout")
+            .expect("resolves");
         assert!(!virtual_builtin_info.is_native);
     }
 
@@ -1271,13 +1488,26 @@ view DocumentViewLike {
     #[test]
     fn window_is_native_via_native_attribute_without_inherits() {
         let modules = crate::builtin_modules();
-        let window_module = modules.iter().find(|m| m.items.iter().any(|i| matches!(i, Item::Component(c) if c.name == "Window"))).expect("Window's module");
-        let Item::Component(window_def) =
-            window_module.items.iter().find(|i| matches!(i, Item::Component(c) if c.name == "Window")).unwrap()
+        let window_module = modules
+            .iter()
+            .find(|m| {
+                m.items
+                    .iter()
+                    .any(|i| matches!(i, Item::Component(c) if c.name == "Window"))
+            })
+            .expect("Window's module");
+        let Item::Component(window_def) = window_module
+            .items
+            .iter()
+            .find(|i| matches!(i, Item::Component(c) if c.name == "Window"))
+            .unwrap()
         else {
             unreachable!()
         };
-        assert!(window_def.base.is_none(), "Window must have no `inherits` base");
+        assert!(
+            window_def.base.is_none(),
+            "Window must have no `inherits` base"
+        );
         assert!(window_def.native, "Window must be #[native]");
 
         let table = codegen::build_symbol_table(&modules);
@@ -1301,9 +1531,14 @@ component Foo {
     label: String,
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("#[content(no_such_field)]")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("#[content(no_such_field)]")),
+            "errors: {errs:?}"
+        );
     }
 
     /// `#[native]` requires a `base`-less declaration — `resolve_is_native`'s fallback only checks
@@ -1317,9 +1552,15 @@ component Foo {
 component Foo inherits NativeControl {
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("inherits")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("#[native]") && e.contains("inherits")),
+            "errors: {errs:?}"
+        );
     }
 
     /// `#[native]` means "hand-written per backend crate" — a component that also writes its own
@@ -1335,9 +1576,15 @@ view Foo {
     VerticalLayout { }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("view")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("#[native]") && e.contains("view")),
+            "errors: {errs:?}"
+        );
     }
 
     /// `#[native]`, like `#[embedded]`, only makes sense on one of this crate's own builtin shape
@@ -1350,9 +1597,15 @@ view Foo {
 component Foo {
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("#[native]") && e.contains("BUILTIN_SHAPE_SOURCE")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("#[native]") && e.contains("BUILTIN_SHAPE_SOURCE")),
+            "errors: {errs:?}"
+        );
     }
 
     /// A native-backed leaf (`Window`, `has_view == false && is_native == true`) has no generated
@@ -1367,9 +1620,14 @@ component Foo {
 component MyWindow inherits Window {
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("has no `view MyWindow`")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("has no `view MyWindow`")),
+            "errors: {errs:?}"
+        );
     }
 
     /// `Window` is a hand-written native host with real fields and no `UIElement` implementation of
@@ -1387,7 +1645,9 @@ view MyWindow {
     Window { title: "x", content: TextBlock { text: "hi" } }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1400,9 +1660,15 @@ view MyWindow {
 component MyButton inherits Button {
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("Button") && e.contains("sealed")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("Button") && e.contains("sealed")),
+            "errors: {errs:?}"
+        );
     }
 
     /// A logical component (`has_view == true`, e.g. `ContentControl`) may be inherited with *no*
@@ -1415,7 +1681,9 @@ component LabeledPanel inherits ContentControl {
     label: String,
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1434,7 +1702,9 @@ view LabeledPanel {
     VerticalLayout { TextBlock { text: label } }
 }
 "#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap()).chain(crate::builtin_modules()).collect();
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1455,7 +1725,10 @@ component Derived inherits Base {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("add #[override]")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("add #[override]")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1498,7 +1771,11 @@ component Derived inherits Base {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("no matching #[virtual] method")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("no matching #[virtual] method")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1520,7 +1797,10 @@ component Derived inherits Base {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("different signature")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("different signature")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1556,7 +1836,10 @@ component Grid {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("default value")), "errors: {errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("default value")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1578,7 +1861,11 @@ view Foo {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("no #[attached] property named `column`")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("no #[attached] property named `column`")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1595,7 +1882,11 @@ view Foo {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         let errs = validate(&modules).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("not a known component/builtin")), "errors: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("not a known component/builtin")),
+            "errors: {errs:?}"
+        );
     }
 
     /// An attached property may be set on an element that isn't actually nested under a matching

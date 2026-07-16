@@ -41,7 +41,9 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item_mod = match syn::parse::<syn::ItemMod>(item) {
         Ok(item_mod) => item_mod,
         Err(e) => {
-            let msg = format!("#[elwindui::viewmodel]: expected `mod name {{ struct ... impl ... }}`: {e}");
+            let msg = format!(
+                "#[elwindui::viewmodel]: expected `mod name {{ struct ... impl ... }}`: {e}"
+            );
             return quote::quote! { compile_error!(#msg); }.into();
         }
     };

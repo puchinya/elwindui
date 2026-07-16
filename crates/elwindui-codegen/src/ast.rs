@@ -188,10 +188,17 @@ pub enum Attr {
     /// this crate's own `builtins.elwind` shape declarations (e.g. `TextArea`'s `text` field).
     TwoWay,
     /// `#[length(start..=end)]` / `#[length(start..end)]`. See §7.
-    Length { start: i64, end: i64, inclusive: bool },
+    Length {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+    },
     /// `#[command(can_execute: expr)]` / `#[command(async)]` / `#[command(async, can_execute: expr)]`.
     /// See 付録O.3, 付録P.4.
-    CommandMeta { is_async: bool, can_execute: Option<syn::Expr> },
+    CommandMeta {
+        is_async: bool,
+        can_execute: Option<syn::Expr>,
+    },
     /// `#[routed]`: marks a callback-typed field (`fn()`, `fn(usize)`, ...) as a WinUI3-style
     /// routed event — dispatched via `elwindui_core::ui::dispatch_routed` (bubbling from the
     /// element it's declared on up through ancestors' own handlers for the same field name,
@@ -238,7 +245,10 @@ pub enum Initializer {
     /// common zero-arg case; a parameterized command (needed so e.g. `TabView`'s per-tab
     /// close/select callbacks can pass an index through to a `Command`) generates
     /// `pub fn X_execute(&self, index: usize)` instead of the zero-arg form. See 付録O.3.
-    Command { params: Vec<(String, syn::Type)>, body: syn::Block },
+    Command {
+        params: Vec<(String, syn::Type)>,
+        body: syn::Block,
+    },
     /// Any other initializer expression (literals, `String::new()`, `content.chars().count()
     /// as i32`, `t!(...)`, ...), parsed as a real `syn::Expr`.
     Expr(syn::Expr),
@@ -321,8 +331,7 @@ pub enum ViewExpr {
     /// `|doc| <body>` — a single untyped bound parameter (no destructuring, no type annotation)
     /// used by `TabView`'s `header_template`/`item_template` attributes (付録Y) so a tab's
     /// per-item header/content can be an arbitrary expression or nested `view`, rather than the
-    /// fixed `TextArea` codegen used to hardcode. Also implicitly aliased as `data_context` inside
-    /// the closure body (`emit_expr`'s `data_context` substitution).
+    /// fixed `TextArea` codegen used to hardcode.
     Closure { param: String, body: ClosureBody },
     /// `menu_bar: MenuBar { .. }` — a nested element used as an ordinary (non-closure) attribute
     /// value, for a builtin shape's "named single-child slot" (e.g. `Window`'s `menu_bar`/

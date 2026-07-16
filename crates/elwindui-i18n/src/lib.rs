@@ -30,15 +30,19 @@ pub fn init(ftl_source: &str, lang: &str) {
 pub fn t(key: &str, args: &[(&str, FluentValue<'_>)]) -> String {
     BUNDLE.with(|bundle| {
         let bundle = bundle.borrow();
-        let bundle = bundle
-            .as_ref()
-            .unwrap_or_else(|| panic!("elwindui::i18n::t(\"{key}\", ..) called before elwindui::i18n::declare!() ran"));
+        let bundle = bundle.as_ref().unwrap_or_else(|| {
+            panic!("elwindui::i18n::t(\"{key}\", ..) called before elwindui::i18n::declare!() ran")
+        });
         let mut fluent_args = FluentArgs::new();
         for (name, value) in args {
             fluent_args.set(*name, value.clone());
         }
-        let msg = bundle.get_message(key).unwrap_or_else(|| panic!("missing fluent message `{key}`"));
-        let pattern = msg.value().unwrap_or_else(|| panic!("fluent message `{key}` has no value"));
+        let msg = bundle
+            .get_message(key)
+            .unwrap_or_else(|| panic!("missing fluent message `{key}`"));
+        let pattern = msg
+            .value()
+            .unwrap_or_else(|| panic!("fluent message `{key}` has no value"));
         let mut errors = Vec::new();
         let result = bundle.format_pattern(pattern, Some(&fluent_args), &mut errors);
         result.into_owned()
@@ -53,6 +57,9 @@ pub fn t(key: &str, args: &[(&str, FluentValue<'_>)]) -> String {
 #[macro_export]
 macro_rules! declare {
     () => {
-        $crate::init(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/strings/en.ftl")), "en");
+        $crate::init(
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/strings/en.ftl")),
+            "en",
+        );
     };
 }

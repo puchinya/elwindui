@@ -5,17 +5,25 @@
 //! `native_ui.rs` stays a thin, uniform "implement the core-side trait by delegating" layer.
 
 use elwindui_core::base::AsAny;
-use elwindui_core::ui::{layout_tree, PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElementExt};
+use elwindui_core::ui::{
+    PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElementExt, layout_tree,
+};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView,
-    NSTextDelegate, NSTextView, NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSMenu, NSMenuItem,
+    NSScreen, NSScrollView, NSStackView, NSTextDelegate, NSTextView, NSTextViewDelegate,
+    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::{CGColor, CGPath};
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSRect, NSString};
-use objc2_quartz_core::{kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight, CALayer, CAShapeLayer, CATextLayer, CATextLayerAlignmentMode};
+use objc2_quartz_core::{
+    CALayer, CAShapeLayer, CATextLayer, CATextLayerAlignmentMode, kCAAlignmentCenter,
+    kCAAlignmentLeft, kCAAlignmentRight,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -63,9 +71,15 @@ impl AnyView {
     /// Lets every native leaf's `measure_override` (in `native_ui.rs::NativeControl`) measure any
     /// wrapped widget uniformly through the base `NSView` API (`fittingSize`) regardless of which
     /// concrete widget it wraps.
-    pub(crate) fn measure(&self, _available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+    pub(crate) fn measure(
+        &self,
+        _available: elwindui_core::base::Size,
+    ) -> elwindui_core::base::Size {
         let fitting = self.as_nsview().fittingSize();
-        elwindui_core::base::Size { width: fitting.width as f32, height: fitting.height as f32 }
+        elwindui_core::base::Size {
+            width: fitting.width as f32,
+            height: fitting.height as f32,
+        }
     }
 
     /// Positions this native leaf via plain `NSView.setFrame` — called directly by `TreeHostView`'s
@@ -85,10 +99,14 @@ impl<T: AppKitHandle + 'static> From<T> for AnyView {
     }
 }
 
-fn new_stack(children: Vec<AnyView>, orientation: NSUserInterfaceLayoutOrientation) -> Retained<NSStackView> {
+fn new_stack(
+    children: Vec<AnyView>,
+    orientation: NSUserInterfaceLayoutOrientation,
+) -> Retained<NSStackView> {
     let m = mtm();
     let views: Vec<Retained<NSView>> = children.iter().map(AnyView::as_nsview).collect();
-    let ns = NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_retained_slice(&views), m);
+    let ns =
+        NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_retained_slice(&views), m);
     ns.setOrientation(orientation);
     ns
 }
@@ -100,7 +118,12 @@ fn new_stack(children: Vec<AnyView>, orientation: NSUserInterfaceLayoutOrientati
 fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
     let hex = hex.trim_start_matches('#');
     let (r, g, b, a) = match (hex.len(), u32::from_str_radix(hex, 16)) {
-        (6, Ok(v)) => (((v >> 16) & 0xFF) as f64, ((v >> 8) & 0xFF) as f64, (v & 0xFF) as f64, 255.0),
+        (6, Ok(v)) => (
+            ((v >> 16) & 0xFF) as f64,
+            ((v >> 8) & 0xFF) as f64,
+            (v & 0xFF) as f64,
+            255.0,
+        ),
         (8, Ok(v)) => (
             ((v >> 24) & 0xFF) as f64,
             ((v >> 16) & 0xFF) as f64,
@@ -114,7 +137,9 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
 
 /// `elwindui_core::ui::TextAlignment` -> `CATextLayer.alignmentMode` — the `kCAAlignment*` values
 /// are `extern "C"` globals (`&'static NSString`), hence the `unsafe` read.
-fn ca_alignment_mode(alignment: elwindui_core::ui::TextAlignment) -> &'static CATextLayerAlignmentMode {
+fn ca_alignment_mode(
+    alignment: elwindui_core::ui::TextAlignment,
+) -> &'static CATextLayerAlignmentMode {
     use elwindui_core::ui::TextAlignment;
     unsafe {
         match alignment {
@@ -188,9 +213,13 @@ define_class!(
 impl TreeHostView {
     pub(crate) fn new() -> Retained<Self> {
         let m = mtm();
-        let ivars = TreeHostIvars { tree: RefCell::new(None), weak_self: RefCell::new(objc2::rc::Weak::default()) };
+        let ivars = TreeHostIvars {
+            tree: RefCell::new(None),
+            weak_self: RefCell::new(objc2::rc::Weak::default()),
+        };
         let this = Self::alloc(m).set_ivars(ivars);
-        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
+        let this: Retained<Self> =
+            unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
         *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
         this
     }
@@ -201,7 +230,8 @@ impl TreeHostView {
             old.removeFromSuperview();
         }
         let weak_self = self.ivars().weak_self.borrow().clone();
-        tree.as_ui_element().set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self))));
+        tree.as_ui_element()
+            .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self))));
         *self.ivars().tree.borrow_mut() = Some(tree);
         self.invalidateIntrinsicContentSize();
         self.relayout();
@@ -211,7 +241,10 @@ impl TreeHostView {
         use elwindui_core::base::Size;
 
         let frame = self.frame();
-        let available = Size { width: frame.size.width as f32, height: frame.size.height as f32 };
+        let available = Size {
+            width: frame.size.width as f32,
+            height: frame.size.height as f32,
+        };
         let tree = self.ivars().tree.borrow();
         let Some(tree) = tree.as_ref() else { return };
         let items: Vec<RenderItem<AnyView>> = layout_tree(tree, available);
@@ -221,7 +254,9 @@ impl TreeHostView {
         if let Some(existing) = unsafe { layer.sublayers() } {
             let stale: Vec<_> = existing
                 .iter()
-                .filter(|sub| sub.name().map(|n| n.to_string()).as_deref() == Some("elwindui-paint"))
+                .filter(|sub| {
+                    sub.name().map(|n| n.to_string()).as_deref() == Some("elwindui-paint")
+                })
                 .collect();
             for sub in stale {
                 sub.removeFromSuperlayer();
@@ -242,18 +277,27 @@ impl TreeHostView {
                         objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
                     );
                     match paint {
-                        PaintKind::ShapeExt { kind, fill, stroke, stroke_width } => {
+                        PaintKind::ShapeExt {
+                            kind,
+                            fill,
+                            stroke,
+                            stroke_width,
+                        } => {
                             let shape_layer = CAShapeLayer::new();
                             shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
                             let path = unsafe {
                                 match kind {
-                                    ShapeKind::RoundedRect { corner_radius } => CGPath::with_rounded_rect(
-                                        cg_rect,
-                                        corner_radius as f64,
-                                        corner_radius as f64,
-                                        std::ptr::null(),
-                                    ),
-                                    ShapeKind::Oval => CGPath::with_ellipse_in_rect(cg_rect, std::ptr::null()),
+                                    ShapeKind::RoundedRect { corner_radius } => {
+                                        CGPath::with_rounded_rect(
+                                            cg_rect,
+                                            corner_radius as f64,
+                                            corner_radius as f64,
+                                            std::ptr::null(),
+                                        )
+                                    }
+                                    ShapeKind::Oval => {
+                                        CGPath::with_ellipse_in_rect(cg_rect, std::ptr::null())
+                                    }
                                 }
                             };
                             shape_layer.setPath(Some(&path));
@@ -268,12 +312,18 @@ impl TreeHostView {
                             let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
                             layer.addSublayer(&shape_layer);
                         }
-                        PaintKind::Text { content, color, alignment } => {
+                        PaintKind::Text {
+                            content,
+                            color,
+                            alignment,
+                        } => {
                             let text_layer = CATextLayer::new();
                             text_layer.setName(Some(&NSString::from_str("elwindui-paint")));
                             text_layer.setFrame(cg_rect);
                             text_layer.setFontSize(14.0);
-                            text_layer.setForegroundColor(Some(&parse_color(color.as_deref().unwrap_or("#000000"))));
+                            text_layer.setForegroundColor(Some(&parse_color(
+                                color.as_deref().unwrap_or("#000000"),
+                            )));
                             text_layer.setAlignmentMode(ca_alignment_mode(alignment));
                             unsafe {
                                 text_layer.setString(Some(&NSString::from_str(&content)));
@@ -298,7 +348,10 @@ pub(crate) struct InnerWindow {
 impl InnerWindow {
     pub(crate) fn new() -> Self {
         let mtm = mtm();
-        let content_rect = NSRect::new(objc2_foundation::NSPoint::new(0.0, 0.0), objc2_foundation::NSSize::new(480.0, 360.0));
+        let content_rect = NSRect::new(
+            objc2_foundation::NSPoint::new(0.0, 0.0),
+            objc2_foundation::NSSize::new(480.0, 360.0),
+        );
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
@@ -409,7 +462,11 @@ impl InnerTextArea {
             .downcast::<NSTextView>()
             .expect("scrollableTextView's document view is an NSTextView");
         let handle = AnyView::from(scroll);
-        Self { handle, text_view, delegate_storage: Rc::new(RefCell::new(None)) }
+        Self {
+            handle,
+            text_view,
+            delegate_storage: Rc::new(RefCell::new(None)),
+        }
     }
 
     pub(crate) fn handle(&self) -> AnyView {
@@ -432,7 +489,10 @@ impl InnerTextArea {
     /// only kept alive by `self.delegate_storage`.
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
         let m = mtm();
-        let ivars = TextDelegateIvars { text_view: self.text_view.clone(), callback };
+        let ivars = TextDelegateIvars {
+            text_view: self.text_view.clone(),
+            callback,
+        };
         let delegate = TextViewDelegate::new(m, ivars);
         let protocol_obj: &objc2::runtime::ProtocolObject<dyn NSTextViewDelegate> =
             objc2::runtime::ProtocolObject::from_ref(&*delegate);
@@ -484,9 +544,15 @@ pub(crate) struct InnerButton {
 impl InnerButton {
     pub(crate) fn new() -> Self {
         let m = mtm();
-        let ns = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m) };
+        let ns = unsafe {
+            NSButton::buttonWithTitle_target_action(&NSString::from_str(""), None, None, m)
+        };
         let handle = AnyView::from(ns.clone());
-        Self { handle, ns, target_storage: Rc::new(RefCell::new(None)) }
+        Self {
+            handle,
+            ns,
+            target_storage: Rc::new(RefCell::new(None)),
+        }
     }
 
     pub(crate) fn handle(&self) -> AnyView {
@@ -566,8 +632,15 @@ fn create_tab_chip(title: &str) -> TabChipImpl {
     let close_button = InnerButton::new();
     close_button.set_text("×");
     close_button.set_bordered(false);
-    let ns = new_stack(vec![title_button.handle.clone(), close_button.handle.clone()], NSUserInterfaceLayoutOrientation::Horizontal);
-    TabChipImpl { ns, title_button, close_button }
+    let ns = new_stack(
+        vec![title_button.handle.clone(), close_button.handle.clone()],
+        NSUserInterfaceLayoutOrientation::Horizontal,
+    );
+    TabChipImpl {
+        ns,
+        title_button,
+        close_button,
+    }
 }
 
 impl TabChipImpl {
@@ -604,7 +677,10 @@ pub(crate) struct TabStripImpl {
 fn create_tab_strip() -> TabStripImpl {
     let new_tab_button = InnerButton::new();
     new_tab_button.set_text("+");
-    let ns = new_stack(vec![new_tab_button.handle.clone()], NSUserInterfaceLayoutOrientation::Horizontal);
+    let ns = new_stack(
+        vec![new_tab_button.handle.clone()],
+        NSUserInterfaceLayoutOrientation::Horizontal,
+    );
     TabStripImpl { ns, new_tab_button }
 }
 
@@ -645,8 +721,13 @@ impl InnerTabView {
         let strip = create_tab_strip();
         let content_container = NSView::initWithFrame(NSView::alloc(m), NSRect::default());
         let strip_view: Retained<NSView> = Retained::into_super(strip.ns.clone());
-        let root =
-            NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_retained_slice(&[strip_view, content_container.clone()]), m);
+        let root = NSStackView::stackViewWithViews(
+            &objc2_foundation::NSArray::from_retained_slice(&[
+                strip_view,
+                content_container.clone(),
+            ]),
+            m,
+        );
         root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
         // `NSStackView`'s default `distribution` (`GravityAreas`) leaves each arranged subview at
         // its own intrinsic size unless hugging priorities say otherwise — `.Fill` makes the stack
@@ -654,10 +735,17 @@ impl InnerTabView {
         // natural height, content area fills the rest" shape. `content_container`'s own vertical
         // hugging priority is dropped to (near-)zero so it — not the also-low-priority-by-default
         // `strip` — is the one that absorbs whatever space `Fill` distributes.
-        content_container.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
+        content_container.setContentHuggingPriority_forOrientation(
+            1.0,
+            objc2_app_kit::NSLayoutConstraintOrientation::Vertical,
+        );
         root.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
         let handle = AnyView::from(root);
-        Self { handle, strip, content_container }
+        Self {
+            handle,
+            strip,
+            content_container,
+        }
     }
 
     pub(crate) fn handle(&self) -> AnyView {
@@ -724,9 +812,17 @@ impl InnerMenuItem {
     pub(crate) fn new() -> Self {
         let m = mtm();
         let ns = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(""), None, &NSString::from_str(""))
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                m.alloc::<NSMenuItem>(),
+                &NSString::from_str(""),
+                None,
+                &NSString::from_str(""),
+            )
         };
-        Self { ns, target_storage: Rc::new(RefCell::new(None)) }
+        Self {
+            ns,
+            target_storage: Rc::new(RefCell::new(None)),
+        }
     }
 
     /// A real `NSMenuItem.title` setter — construction takes no title argument, so this is the
@@ -742,7 +838,8 @@ impl InnerMenuItem {
     /// A bare key character (e.g. `"s"`); macOS defaults a menu item's modifier mask to Cmd,
     /// which matches the common `Cmd+<letter>` shortcuts notepad needs.
     pub(crate) fn set_shortcut(&self, key_equivalent: &str) {
-        self.ns.setKeyEquivalent(&NSString::from_str(key_equivalent));
+        self.ns
+            .setKeyEquivalent(&NSString::from_str(key_equivalent));
     }
 
     pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
@@ -814,7 +911,12 @@ impl InnerMenuBarItem {
     pub(crate) fn new() -> Self {
         let m = mtm();
         let ns = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(""), None, &NSString::from_str(""))
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                m.alloc::<NSMenuItem>(),
+                &NSString::from_str(""),
+                None,
+                &NSString::from_str(""),
+            )
         };
         Self { ns }
     }
@@ -847,7 +949,12 @@ impl InnerMenuBar {
         // author, since it's a platform detail of `NSApp.mainMenu`, not something 付録X's
         // `MenuBar`/`MenuBarItem` DSL shape should need to know about.
         let app_menu_item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(m.alloc::<NSMenuItem>(), &NSString::from_str(""), None, &NSString::from_str(""))
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                m.alloc::<NSMenuItem>(),
+                &NSString::from_str(""),
+                None,
+                &NSString::from_str(""),
+            )
         };
         let app_menu = NSMenu::initWithTitle(m.alloc::<NSMenu>(), &NSString::from_str(""));
         let quit_item = unsafe {

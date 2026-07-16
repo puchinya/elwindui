@@ -8,9 +8,9 @@
 // it: none of them implement `elwindui_core::ui::UIElement` at all (see their own comments).
 // Common properties every element supports regardless of its own concrete type
 // (`elwindui_core::ui::UIElement`, ui.rs — `margin`/`horizontal_alignment`/`vertical_alignment`/
-// `visibility`/`width`/`height`/`min_width`/`min_height`/`max_width`/`max_height`/`data_context`).
+// `visibility`/`width`/`height`/`min_width`/`min_height`/`max_width`/`max_height`).
 // Declared here (rather than left for `elwindui-codegen` to special-case by literal attribute name,
-// as `margin`/`data_context` used to be) so every component — builtin or user-defined — picks them
+// as `margin` used to be) so every component — builtin or user-defined — picks them
 // up for free through the same inherited-field machinery any other inherited param already uses,
 // with no per-attribute-name hardcoding in the compiler. `horizontal_alignment`/`vertical_alignment`/
 // `visibility` are enum-typed the same way `TextBlock.text_alignment`/`Grid`'s `rows`/`columns`
@@ -29,7 +29,6 @@ component UIElement {
     min_height: Option<f32>,
     max_width: Option<f32>,
     max_height: Option<f32>,
-    data_context: Option<std::rc::Rc<dyn std::any::Any>>,
 }
 
 // Every layout-container virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Grid`) — mirrors
@@ -337,7 +336,7 @@ component TabView inherits NativeControl {
 
     // `emit_wiring`'s generic `on_*` wiring threads a single `usize` index through for any
     // callback field whose declared type contains `usize` (originally special-cased just for
-    // this field) — so this stays single-argument. The newly-selected item's `data_context`/
+    // this field) — so this stays single-argument. The newly-selected item/
     // container aren't threaded through it; use the backend struct's own `selected_item()`/
     // `selected_container()` methods instead (WinUI3's `SelectedItem`/container concept, exposed
     // as plain Rust accessors rather than `.elwind`-declarative props/callback args — see 付録Y).
@@ -351,7 +350,7 @@ component TabView inherits NativeControl {
 
 // See docs/elwindui_builtins_spec.md 付録Y. Used two ways: written literally as a `TabView`'s
 // nested static child (WinUI3's XAML `TabViewItem` declaration), or synthesized internally by
-// `TabView` once per element of `items_source` (its `data_context`/`header`/`content` populated
+// `TabView` once per element of `items_source` (its `header`/`content` populated
 // from that item via `header_template`/`item_template`). Never itself embedded as a real
 // `Rc<dyn UIElement>` node (its own `content` is what gets mounted into a per-tab host) — like
 // `MenuBar`/`MenuItem`, declares `#[native]` directly rather than `inherits NativeControl`.
@@ -360,10 +359,6 @@ component TabView inherits NativeControl {
 #[native]
 #[content(content)]
 component TabViewItem {
-    // Set explicitly in static mode; populated automatically (from the owning `items_source`
-    // element's own `Rc<T>`) in dynamic mode. `None` in static mode unless set.
-    data_context: Option<std::rc::Rc<T>>,
-
     header: String,
 
     content: std::rc::Rc<dyn UIElement>,

@@ -72,14 +72,20 @@ pub fn completions_at(
         })
         .flat_map(|c| &c.fields)
         .filter_map(|f| {
-            table.resolve(current_module, &f.ty).map(|_| (f.name.as_str(), f.ty.as_str()))
+            table
+                .resolve(current_module, &f.ty)
+                .map(|_| (f.name.as_str(), f.ty.as_str()))
         })
         .collect();
 
     match owner_path.as_slice() {
         [vm_name] => {
-            let Some(&ty) = vm_fields.get(vm_name.as_str()) else { return Vec::new() };
-            let Some(info) = table.resolve(current_module, ty) else { return Vec::new() };
+            let Some(&ty) = vm_fields.get(vm_name.as_str()) else {
+                return Vec::new();
+            };
+            let Some(info) = table.resolve(current_module, ty) else {
+                return Vec::new();
+            };
             info.fields
                 .iter()
                 .filter(|(name, _)| name.starts_with(filter.as_str()))
@@ -87,8 +93,12 @@ pub fn completions_at(
                 .collect()
         }
         [vm_name, command_name] => {
-            let Some(&ty) = vm_fields.get(vm_name.as_str()) else { return Vec::new() };
-            let Some(info) = table.resolve(current_module, ty) else { return Vec::new() };
+            let Some(&ty) = vm_fields.get(vm_name.as_str()) else {
+                return Vec::new();
+            };
+            let Some(info) = table.resolve(current_module, ty) else {
+                return Vec::new();
+            };
             if info.fields.get(command_name.as_str()) != Some(&FieldKind::Command) {
                 return Vec::new();
             }
@@ -108,7 +118,11 @@ fn field_completion_item(name: &str, kind: FieldKind) -> CompletionItem {
         FieldKind::Computed | FieldKind::Attached => CompletionItemKind::PROPERTY,
         FieldKind::Observable | FieldKind::Prop | FieldKind::Param => CompletionItemKind::FIELD,
     };
-    CompletionItem { label: name.to_string(), kind: Some(item_kind), ..Default::default() }
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(item_kind),
+        ..Default::default()
+    }
 }
 
 fn command_member_completion_item(name: &str) -> CompletionItem {
@@ -117,7 +131,12 @@ fn command_member_completion_item(name: &str) -> CompletionItem {
     } else {
         (CompletionItemKind::PROPERTY, None)
     };
-    CompletionItem { label: name.to_string(), kind: Some(kind), insert_text, ..Default::default() }
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(kind),
+        insert_text,
+        ..Default::default()
+    }
 }
 
 /// LSP `Position` (0-based line, UTF-16 code-unit character) -> byte offset into `src`, matching
@@ -149,7 +168,13 @@ fn preceding_dotted_path(src: &str, offset: usize) -> Option<(usize, Vec<String>
     let prefix = src.get(..offset)?;
     let start = prefix
         .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
-        .map(|i| i + prefix[i..].chars().next().expect("rfind match is a valid char boundary").len_utf8())
+        .map(|i| {
+            i + prefix[i..]
+                .chars()
+                .next()
+                .expect("rfind match is a valid char boundary")
+                .len_utf8()
+        })
         .unwrap_or(0);
     let chain = &prefix[start..];
     if chain.is_empty() {
@@ -161,7 +186,9 @@ fn preceding_dotted_path(src: &str, offset: usize) -> Option<(usize, Vec<String>
         // No `.` typed yet — nothing to complete an owner's members against.
         return None;
     }
-    let filter = segments.pop().expect("split always yields at least one segment");
+    let filter = segments
+        .pop()
+        .expect("split always yields at least one segment");
     Some((start, segments, filter))
 }
 
@@ -173,8 +200,10 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(format!("elwindui_lsp_completion_test_{}_{unique}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "elwindui_lsp_completion_test_{}_{unique}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         for (name, contents) in files {
             std::fs::write(dir.join(name), contents).unwrap();
@@ -296,7 +325,10 @@ view Window { Window { Text { text: vm. } } }
         let mut col = 0u32;
         for (idx, ch) in src.char_indices() {
             if idx == offset {
-                return Position { line, character: col };
+                return Position {
+                    line,
+                    character: col,
+                };
             }
             if ch == '\n' {
                 line += 1;
@@ -305,14 +337,23 @@ view Window { Window { Text { text: vm. } } }
                 col += ch.len_utf16() as u32;
             }
         }
-        Position { line, character: col }
+        Position {
+            line,
+            character: col,
+        }
     }
 
     #[test]
     fn utf16_position_to_byte_offset_handles_multibyte_lines() {
         let src = "あvm.\n";
         // "あ" is 1 UTF-16 unit, 3 UTF-8 bytes; "vm." starts right after it.
-        let offset = utf16_position_to_byte_offset(src, Position { line: 0, character: 4 });
+        let offset = utf16_position_to_byte_offset(
+            src,
+            Position {
+                line: 0,
+                character: 4,
+            },
+        );
         assert_eq!(offset, Some("あvm.".len()));
     }
 }

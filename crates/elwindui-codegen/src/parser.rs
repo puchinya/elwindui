@@ -30,22 +30,62 @@ impl<'a> Parser<'a> {
             }
             let (embedded, sealed, native, is_abstract, content_field) = self.parse_item_attrs()?;
             if self.eat_keyword("use") {
-                self.reject_item_attrs(embedded, sealed, native, is_abstract, &content_field, "use")?;
+                self.reject_item_attrs(
+                    embedded,
+                    sealed,
+                    native,
+                    is_abstract,
+                    &content_field,
+                    "use",
+                )?;
                 uses.push(self.parse_use_decl()?);
             } else if self.eat_keyword("enum") {
-                self.reject_item_attrs(embedded, sealed, native, is_abstract, &content_field, "enum")?;
+                self.reject_item_attrs(
+                    embedded,
+                    sealed,
+                    native,
+                    is_abstract,
+                    &content_field,
+                    "enum",
+                )?;
                 items.push(Item::Enum(self.parse_enum_def()?));
             } else if self.eat_keyword("component") {
-                items.push(Item::Component(self.parse_fields_block(FieldKind::Prop, |name, base, fields, methods| {
-                    ComponentDef { name, base, fields, methods, embedded, sealed, native, is_abstract, content_field }
-                })?));
+                items.push(Item::Component(self.parse_fields_block(
+                    FieldKind::Prop,
+                    |name, base, fields, methods| ComponentDef {
+                        name,
+                        base,
+                        fields,
+                        methods,
+                        embedded,
+                        sealed,
+                        native,
+                        is_abstract,
+                        content_field,
+                    },
+                )?));
             } else if self.eat_keyword("viewmodel") {
-                self.reject_item_attrs(embedded, sealed, native, is_abstract, &content_field, "viewmodel")?;
-                items.push(Item::ViewModel(self.parse_fields_block(FieldKind::Observable, |name, _base, fields, _methods| {
-                    ViewModelDef { name, fields }
-                })?));
+                self.reject_item_attrs(
+                    embedded,
+                    sealed,
+                    native,
+                    is_abstract,
+                    &content_field,
+                    "viewmodel",
+                )?;
+                items.push(Item::ViewModel(self.parse_fields_block(
+                    FieldKind::Observable,
+                    |name, _base, fields, _methods| ViewModelDef { name, fields },
+                )?));
             } else if self.eat_keyword("view") {
-                self.reject_item_attrs(embedded, sealed, native, is_abstract, &content_field, "view")?;
+                self.reject_item_attrs(
+                    embedded,
+                    sealed,
+                    native,
+                    is_abstract,
+                    &content_field,
+                    "view",
+                )?;
                 items.push(Item::View(self.parse_view_def()?));
             } else {
                 return Err(self.err("expected `use`/`enum`/`component`/`viewmodel`/`view`"));
@@ -55,7 +95,12 @@ impl<'a> Parser<'a> {
         // `parse_module` only ever sees source text, not a file path — real module paths (付録B.1)
         // are assigned by the caller (`compile_dir_impl`), which knows where each file actually
         // lands in the crate. Defaults to `[]` (crate root), matching `Module`'s `Default`.
-        Ok(Module { path: Vec::new(), uses, items, ..Default::default() })
+        Ok(Module {
+            path: Vec::new(),
+            uses,
+            items,
+            ..Default::default()
+        })
     }
 
     /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[content(field_name)]`
@@ -280,7 +325,14 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.eat_char(',');
 
-        Ok(MethodDef { name, is_virtual, is_override, params, return_ty, body })
+        Ok(MethodDef {
+            name,
+            is_virtual,
+            is_override,
+            params,
+            return_ty,
+            body,
+        })
     }
 
     fn parse_field_def(&mut self, default_kind: FieldKind) -> Result<FieldDef, String> {
@@ -333,14 +385,21 @@ impl<'a> Parser<'a> {
                         }
                         self.expect_char(')')?;
                     }
-                    attrs.push(Attr::CommandMeta { is_async, can_execute });
+                    attrs.push(Attr::CommandMeta {
+                        is_async,
+                        can_execute,
+                    });
                 }
                 "length" => {
                     self.expect_char('(')?;
                     let range_src = self.take_balanced_until(&[')'])?;
                     let (start, end, inclusive) = parse_range(&range_src)?;
                     self.expect_char(')')?;
-                    attrs.push(Attr::Length { start, end, inclusive });
+                    attrs.push(Attr::Length {
+                        start,
+                        end,
+                        inclusive,
+                    });
                 }
                 other => return Err(self.err(&format!("unknown attribute #[{other}]"))),
             }
@@ -351,7 +410,9 @@ impl<'a> Parser<'a> {
         let name = self.parse_ident()?;
         self.skip_trivia();
         self.expect_char(':')?;
-        let ty = self.take_balanced_until(&['=', ',', '}']).map(|s| s.trim().to_string())?;
+        let ty = self
+            .take_balanced_until(&['=', ',', '}'])
+            .map(|s| s.trim().to_string())?;
 
         self.skip_trivia();
         let initializer = if self.eat_char('=') {
@@ -364,7 +425,13 @@ impl<'a> Parser<'a> {
         self.skip_trivia();
         self.eat_char(',');
 
-        Ok(FieldDef { name, ty, kind, attrs, initializer })
+        Ok(FieldDef {
+            name,
+            ty,
+            kind,
+            attrs,
+            initializer,
+        })
     }
 
     fn parse_initializer(&mut self) -> Result<Initializer, String> {
@@ -393,7 +460,10 @@ impl<'a> Parser<'a> {
             let block_src = block_src.trim();
             // `command!(async || { ... })` (付録P.4): the `async` marker itself is only tracked
             // via `#[command(async, ...)]` (see `parse_field_def`), so it's simply skipped here.
-            let block_src = block_src.strip_prefix("async").map(str::trim).unwrap_or(block_src);
+            let block_src = block_src
+                .strip_prefix("async")
+                .map(str::trim)
+                .unwrap_or(block_src);
             // `||` (no params) or `|name: Type|` (single typed param, e.g. `close_tab`'s index).
             let block_src = block_src
                 .strip_prefix("||")
@@ -409,7 +479,10 @@ impl<'a> Parser<'a> {
                 .ok_or_else(|| self.err("expected `||` or `|name: Type|` in command!(...)"))?;
             let block = syn::parse_str::<syn::Block>(block_src.trim())
                 .map_err(|e| format!("invalid command! body: {e}"))?;
-            return Ok(Initializer::Command { params, body: block });
+            return Ok(Initializer::Command {
+                params,
+                body: block,
+            });
         }
 
         let expr_src = self.take_balanced_until(&[',', '}'])?;
@@ -483,7 +556,9 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if id.is_some() {
-                return Err(self.err("#[id(\"...\")] must be immediately followed by a `let` binding"));
+                return Err(
+                    self.err("#[id(\"...\")] must be immediately followed by a `let` binding")
+                );
             }
             self.pos = checkpoint;
             break;
@@ -493,7 +568,13 @@ impl<'a> Parser<'a> {
         let root = self.parse_element_node()?;
         self.skip_trivia();
         self.expect_char('}')?;
-        Ok(ViewDef { target, on_mount, on_unmount, lets, root })
+        Ok(ViewDef {
+            target,
+            on_mount,
+            on_unmount,
+            lets,
+            root,
+        })
     }
 
     fn parse_element_node(&mut self) -> Result<ElementNode, String> {
@@ -542,7 +623,12 @@ impl<'a> Parser<'a> {
             self.eat_char(',');
         }
 
-        Ok(ElementNode { type_path, attributes, attached, children })
+        Ok(ElementNode {
+            type_path,
+            attributes,
+            attached,
+            children,
+        })
     }
 
     fn parse_view_expr(&mut self) -> Result<ViewExpr, String> {
@@ -575,7 +661,8 @@ impl<'a> Parser<'a> {
         // the dotted-path branch below (a bare identifier can't start with a digit, but without
         // this check a leading `-` would otherwise fall through and fail `parse_ident`).
         if self.peek_char().is_some_and(|c| c.is_ascii_digit())
-            || (self.peek_char() == Some('-') && self.rest()[1..].starts_with(|c: char| c.is_ascii_digit()))
+            || (self.peek_char() == Some('-')
+                && self.rest()[1..].starts_with(|c: char| c.is_ascii_digit()))
         {
             let lit_src = self.take_number_literal()?;
             let expr = syn::parse_str::<syn::Expr>(&lit_src)
@@ -675,11 +762,17 @@ impl<'a> Parser<'a> {
 
         if self.looks_like_element() {
             let element = self.parse_element_node()?;
-            return Ok(ViewExpr::Closure { param, body: ClosureBody::Element(Box::new(element)) });
+            return Ok(ViewExpr::Closure {
+                param,
+                body: ClosureBody::Element(Box::new(element)),
+            });
         }
 
         let body = self.parse_closure_expr_body()?;
-        Ok(ViewExpr::Closure { param, body: ClosureBody::Expr(Box::new(body)) })
+        Ok(ViewExpr::Closure {
+            param,
+            body: ClosureBody::Expr(Box::new(body)),
+        })
     }
 
     /// Lookahead-and-rewind (same idiom `parse_element_node` uses at its attribute/child-element
@@ -809,7 +902,12 @@ impl<'a> Parser<'a> {
         let rest = self.rest();
         if rest.starts_with(kw) {
             let after = &rest[kw.len()..];
-            if after.chars().next().map(|c| !c.is_alphanumeric() && c != '_').unwrap_or(true) {
+            if after
+                .chars()
+                .next()
+                .map(|c| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(true)
+            {
                 self.pos += kw.len();
                 return true;
             }
@@ -1064,23 +1162,41 @@ viewmodel NotepadViewModel {
         assert_eq!(vm.fields[0].kind, FieldKind::Observable);
         assert!(matches!(
             vm.fields[0].attrs.as_slice(),
-            [Attr::Length { start: 0, end: 100000, inclusive: true }]
+            [Attr::Length {
+                start: 0,
+                end: 100000,
+                inclusive: true
+            }]
         ));
 
         assert_eq!(vm.fields[3].name, "char_count");
         assert_eq!(vm.fields[3].kind, FieldKind::Computed);
-        assert!(matches!(vm.fields[3].initializer, Some(Initializer::Expr(_))));
+        assert!(matches!(
+            vm.fields[3].initializer,
+            Some(Initializer::Expr(_))
+        ));
 
         assert_eq!(vm.fields[4].name, "window_title");
-        assert!(matches!(vm.fields[4].initializer, Some(Initializer::Expr(_))));
+        assert!(matches!(
+            vm.fields[4].initializer,
+            Some(Initializer::Expr(_))
+        ));
 
         assert_eq!(vm.fields[5].name, "save");
         assert_eq!(vm.fields[5].kind, FieldKind::Command);
-        assert!(matches!(vm.fields[5].initializer, Some(Initializer::Command { .. })));
-        let has_can_execute = vm.fields[5]
-            .attrs
-            .iter()
-            .any(|a| matches!(a, Attr::CommandMeta { can_execute: Some(_), .. }));
+        assert!(matches!(
+            vm.fields[5].initializer,
+            Some(Initializer::Command { .. })
+        ));
+        let has_can_execute = vm.fields[5].attrs.iter().any(|a| {
+            matches!(
+                a,
+                Attr::CommandMeta {
+                    can_execute: Some(_),
+                    ..
+                }
+            )
+        });
         assert!(has_can_execute);
     }
 
@@ -1125,7 +1241,10 @@ view NotepadWindow {
 "#;
         let module = parse_module(src).expect("should parse");
         assert_eq!(module.uses.len(), 1);
-        assert_eq!(module.uses[0].path, vec!["crate", "notepad_view_model", "NotepadViewModel"]);
+        assert_eq!(
+            module.uses[0].path,
+            vec!["crate", "notepad_view_model", "NotepadViewModel"]
+        );
         assert_eq!(module.items.len(), 2);
 
         let Item::Component(component) = &module.items[0] else {
@@ -1172,46 +1291,75 @@ view NotepadWindow {
     fn literal(entry: &ChildEntry) -> &ElementNode {
         match entry {
             ChildEntry::Literal(elem) => elem,
-            ChildEntry::Ref(name) => panic!("expected a literal child element, found a `let`-ref to `{name}`"),
+            ChildEntry::Ref(name) => {
+                panic!("expected a literal child element, found a `let`-ref to `{name}`")
+            }
         }
     }
 
     fn parse_closure_attr(attr_src: &str) -> ViewExpr {
         let src = format!("view V {{ TabView {{ {attr_src} }} }}");
         let module = parse_module(&src).expect("should parse");
-        let Item::View(view) = &module.items[0] else { panic!("expected view") };
-        let (_, expr) = view.root.attributes.iter().find(|(k, _)| k == "x").expect("attribute `x`").clone();
+        let Item::View(view) = &module.items[0] else {
+            panic!("expected view")
+        };
+        let (_, expr) = view
+            .root
+            .attributes
+            .iter()
+            .find(|(k, _)| k == "x")
+            .expect("attribute `x`")
+            .clone();
         expr
     }
 
     #[test]
     fn parses_closure_with_dotted_path_body() {
         let expr = parse_closure_attr("x: |doc| doc.file_name");
-        let ViewExpr::Closure { param, body } = expr else { panic!("expected closure, got {expr:?}") };
+        let ViewExpr::Closure { param, body } = expr else {
+            panic!("expected closure, got {expr:?}")
+        };
         assert_eq!(param, "doc");
-        let ClosureBody::Expr(inner) = body else { panic!("expected expr body") };
-        assert!(matches!(*inner, ViewExpr::Path(p) if p == vec!["doc".to_string(), "file_name".to_string()]));
+        let ClosureBody::Expr(inner) = body else {
+            panic!("expected expr body")
+        };
+        assert!(
+            matches!(*inner, ViewExpr::Path(p) if p == vec!["doc".to_string(), "file_name".to_string()])
+        );
     }
 
     #[test]
     fn parses_closure_with_syn_fallback_body() {
         let expr = parse_closure_attr("x: |doc| std::rc::Rc::as_ptr(doc) as usize");
-        let ViewExpr::Closure { param, body } = expr else { panic!("expected closure, got {expr:?}") };
+        let ViewExpr::Closure { param, body } = expr else {
+            panic!("expected closure, got {expr:?}")
+        };
         assert_eq!(param, "doc");
-        let ClosureBody::Expr(inner) = body else { panic!("expected expr body") };
-        assert!(matches!(*inner, ViewExpr::Expr(_)), "expected a raw syn::Expr fallback, got {inner:?}");
+        let ClosureBody::Expr(inner) = body else {
+            panic!("expected expr body")
+        };
+        assert!(
+            matches!(*inner, ViewExpr::Expr(_)),
+            "expected a raw syn::Expr fallback, got {inner:?}"
+        );
     }
 
     #[test]
     fn parses_closure_with_element_body() {
         let expr = parse_closure_attr("x: |doc| DocumentView { doc: doc }");
-        let ViewExpr::Closure { param, body } = expr else { panic!("expected closure, got {expr:?}") };
+        let ViewExpr::Closure { param, body } = expr else {
+            panic!("expected closure, got {expr:?}")
+        };
         assert_eq!(param, "doc");
-        let ClosureBody::Element(elem) = body else { panic!("expected element body") };
+        let ClosureBody::Element(elem) = body else {
+            panic!("expected element body")
+        };
         assert_eq!(elem.type_path, "DocumentView");
         assert_eq!(elem.attributes.len(), 1);
         assert_eq!(elem.attributes[0].0, "doc");
-        assert!(matches!(&elem.attributes[0].1, ViewExpr::Path(p) if p == &vec!["doc".to_string()]));
+        assert!(
+            matches!(&elem.attributes[0].1, ViewExpr::Path(p) if p == &vec!["doc".to_string()])
+        );
     }
 
     /// Multiple closure-bearing attributes with no trailing commas, one per line — the DSL's own
@@ -1233,13 +1381,35 @@ view V {
 }
 "#;
         let module = parse_module(src).expect("should parse");
-        let Item::View(view) = &module.items[0] else { panic!("expected view") };
-        let attr = |name: &str| view.root.attributes.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        let Item::View(view) = &module.items[0] else {
+            panic!("expected view")
+        };
+        let attr = |name: &str| {
+            view.root
+                .attributes
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
 
         assert!(matches!(attr("key"), Some(ViewExpr::Closure { .. })));
-        assert!(matches!(attr("render_label"), Some(ViewExpr::Closure { body: ClosureBody::Expr(_), .. })));
-        assert!(matches!(attr("render_content"), Some(ViewExpr::Closure { body: ClosureBody::Element(_), .. })));
-        assert!(matches!(attr("selected"), Some(ViewExpr::Path(p)) if p == vec!["vm".to_string(), "active_tab".to_string()]));
+        assert!(matches!(
+            attr("render_label"),
+            Some(ViewExpr::Closure {
+                body: ClosureBody::Expr(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            attr("render_content"),
+            Some(ViewExpr::Closure {
+                body: ClosureBody::Element(_),
+                ..
+            })
+        ));
+        assert!(
+            matches!(attr("selected"), Some(ViewExpr::Path(p)) if p == vec!["vm".to_string(), "active_tab".to_string()])
+        );
     }
 
     #[test]
@@ -1266,7 +1436,9 @@ component ContentControl inherits Control {
 }
 "#;
         let module = parse_module(src).expect("should parse");
-        let Item::Component(control) = &module.items[0] else { panic!("expected component") };
+        let Item::Component(control) = &module.items[0] else {
+            panic!("expected component")
+        };
         assert_eq!(control.fields.len(), 1);
         assert_eq!(control.methods.len(), 1);
         assert_eq!(control.methods[0].name, "label");
@@ -1274,7 +1446,9 @@ component ContentControl inherits Control {
         assert!(!control.methods[0].is_override);
         assert!(control.methods[0].params.is_empty());
 
-        let Item::Component(content_control) = &module.items[1] else { panic!("expected component") };
+        let Item::Component(content_control) = &module.items[1] else {
+            panic!("expected component")
+        };
         assert_eq!(content_control.fields.len(), 1);
         assert_eq!(content_control.methods.len(), 1);
         assert_eq!(content_control.methods[0].name, "label");
@@ -1299,7 +1473,9 @@ view Widget {
 }
 "#;
         let module = parse_module(src).expect("should parse");
-        let Item::View(view) = &module.items[0] else { panic!("expected view") };
+        let Item::View(view) = &module.items[0] else {
+            panic!("expected view")
+        };
         assert!(view.on_mount.is_some());
         assert!(view.on_unmount.is_some());
         assert_eq!(view.root.type_path, "Text");
@@ -1316,7 +1492,9 @@ component Grid {
 }
 "#;
         let module = parse_module(src).expect("should parse");
-        let Item::Component(grid) = &module.items[0] else { panic!("expected component") };
+        let Item::Component(grid) = &module.items[0] else {
+            panic!("expected component")
+        };
         assert_eq!(grid.fields.len(), 2);
         assert_eq!(grid.fields[0].kind, FieldKind::Attached);
         assert_eq!(grid.fields[1].kind, FieldKind::Attached);
@@ -1335,18 +1513,35 @@ view MainGrid {
 }
 "#;
         let module = parse_module(src).expect("should parse");
-        let Item::View(view) = &module.items[0] else { panic!("expected view") };
+        let Item::View(view) = &module.items[0] else {
+            panic!("expected view")
+        };
         assert_eq!(view.root.type_path, "Grid");
-        assert!(matches!(&view.root.attributes[0].1, ViewExpr::Expr(syn::Expr::Array(_))));
-        assert!(matches!(&view.root.attributes[1].1, ViewExpr::Expr(syn::Expr::Array(_))));
+        assert!(matches!(
+            &view.root.attributes[0].1,
+            ViewExpr::Expr(syn::Expr::Array(_))
+        ));
+        assert!(matches!(
+            &view.root.attributes[1].1,
+            ViewExpr::Expr(syn::Expr::Array(_))
+        ));
 
         let header = literal(&view.root.children[0]);
         assert_eq!(header.type_path, "TextBlock");
         assert_eq!(header.attributes.len(), 1);
         assert_eq!(header.attached.len(), 2);
-        assert_eq!((header.attached[0].0.as_str(), header.attached[0].1.as_str()), ("Grid", "row"));
-        assert_eq!((header.attached[1].0.as_str(), header.attached[1].1.as_str()), ("Grid", "column"));
-        assert!(matches!(&header.attached[0].2, ViewExpr::Expr(syn::Expr::Lit(_))));
+        assert_eq!(
+            (header.attached[0].0.as_str(), header.attached[0].1.as_str()),
+            ("Grid", "row")
+        );
+        assert_eq!(
+            (header.attached[1].0.as_str(), header.attached[1].1.as_str()),
+            ("Grid", "column")
+        );
+        assert!(matches!(
+            &header.attached[0].2,
+            ViewExpr::Expr(syn::Expr::Lit(_))
+        ));
 
         let button = literal(&view.root.children[1]);
         assert_eq!(button.attached.len(), 2);
@@ -1359,12 +1554,24 @@ view MainGrid {
 fn parse_range(src: &str) -> Result<(i64, i64, bool), String> {
     let src = src.trim();
     if let Some((start, rest)) = src.split_once("..=") {
-        let start: i64 = start.trim().parse().map_err(|_| "invalid range start".to_string())?;
-        let end: i64 = rest.trim().parse().map_err(|_| "invalid range end".to_string())?;
+        let start: i64 = start
+            .trim()
+            .parse()
+            .map_err(|_| "invalid range start".to_string())?;
+        let end: i64 = rest
+            .trim()
+            .parse()
+            .map_err(|_| "invalid range end".to_string())?;
         Ok((start, end, true))
     } else if let Some((start, rest)) = src.split_once("..") {
-        let start: i64 = start.trim().parse().map_err(|_| "invalid range start".to_string())?;
-        let end: i64 = rest.trim().parse().map_err(|_| "invalid range end".to_string())?;
+        let start: i64 = start
+            .trim()
+            .parse()
+            .map_err(|_| "invalid range start".to_string())?;
+        let end: i64 = rest
+            .trim()
+            .parse()
+            .map_err(|_| "invalid range end".to_string())?;
         Ok((start, end, false))
     } else {
         Err(format!("invalid range `{src}`"))

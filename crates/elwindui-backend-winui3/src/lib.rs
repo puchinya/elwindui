@@ -58,9 +58,13 @@ pub use inner::AnyView;
 pub mod platform {
     pub mod file_dialog {
         use std::path::PathBuf;
+        use windows::Win32::System::Com::{
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        };
+        use windows::Win32::UI::Shell::{
+            FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH,
+        };
         use windows::core::Interface;
-        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
-        use windows::Win32::UI::Shell::{FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH};
 
         fn ensure_com_initialized() {
             unsafe {
@@ -74,7 +78,8 @@ pub mod platform {
         pub async fn open() -> Option<PathBuf> {
             ensure_com_initialized();
             unsafe {
-                let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                let dialog: IFileOpenDialog =
+                    CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
                 dialog.Show(None).ok()?;
                 let item = dialog.GetResult().ok()?;
                 let path = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
@@ -85,7 +90,8 @@ pub mod platform {
         pub async fn save() -> Option<PathBuf> {
             ensure_com_initialized();
             unsafe {
-                let dialog: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+                let dialog: IFileSaveDialog =
+                    CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
                 dialog.Show(None).ok()?;
                 let item = dialog.GetResult().ok()?;
                 let path = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
@@ -106,12 +112,14 @@ pub struct WinUI3Dispatcher {
 impl elwindui_core::task::Dispatcher for WinUI3Dispatcher {
     fn enqueue(&self, job: Box<dyn FnOnce() + Send + 'static>) {
         let job = std::cell::RefCell::new(Some(job));
-        let _ = self.queue.TryEnqueue(&bindings::Microsoft::UI::Dispatching::DispatcherQueueHandler::new(move || {
-            if let Some(job) = job.borrow_mut().take() {
-                job();
-            }
-            Ok(())
-        }));
+        let _ = self.queue.TryEnqueue(
+            &bindings::Microsoft::UI::Dispatching::DispatcherQueueHandler::new(move || {
+                if let Some(job) = job.borrow_mut().take() {
+                    job();
+                }
+                Ok(())
+            }),
+        );
     }
 }
 
@@ -120,9 +128,11 @@ impl elwindui_core::task::Dispatcher for WinUI3Dispatcher {
 /// that module's doc comment): it's the one well-defined place to install the task executor before
 /// any generated code runs.
 pub mod application {
-    use super::{bindings, WinUI3Dispatcher};
+    use super::{WinUI3Dispatcher, bindings};
     use elwindui_core::task::LocalExecutor;
-    use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, TranslateMessage, MSG};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+    };
 
     /// Blocking: enters the classic Win32 message loop. A `DispatcherQueueController` is created
     /// first (needed so `#[command(async)]` bodies have somewhere to post continuations back to —
@@ -135,7 +145,9 @@ pub mod application {
     /// implementation needs a `Window.Closed` handler calling `PostQuitMessage(0)` once the last
     /// window closes, mirroring AppKit's `applicationShouldTerminateAfterLastWindowClosed`).
     pub fn run() {
-        let controller = bindings::Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread()
+        let controller =
+            bindings::Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread(
+            )
             .expect("DispatcherQueueController::CreateOnCurrentThread");
         let queue = controller.DispatcherQueue().expect("DispatcherQueue");
         elwindui_core::task::set_current(LocalExecutor::new(WinUI3Dispatcher { queue }));

@@ -64,7 +64,10 @@ impl<D: Dispatcher + Send + Sync + 'static> LocalExecutor<D> {
         let Some(mut fut) = self.tasks.borrow_mut().remove(&id) else {
             return; // already completed, or a stale/duplicate wake
         };
-        let waker = Waker::from(Arc::new(TaskWaker { id, dispatcher: self.dispatcher.clone() }));
+        let waker = Waker::from(Arc::new(TaskWaker {
+            id,
+            dispatcher: self.dispatcher.clone(),
+        }));
         let mut cx = Context::from_waker(&waker);
         match fut.as_mut().poll(&mut cx) {
             Poll::Ready(()) => {}

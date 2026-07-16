@@ -29,8 +29,15 @@ const VARIABLE: u32 = 6;
 // Structural keywords `parser.rs` actually recognizes via `eat_keyword` (§1-15).
 const KEYWORDS: &[&str] = &["use", "enum", "component", "viewmodel", "view", "async"];
 // `#[name(...)]` attribute names `parse_field_def` recognizes (kind markers + `inject`/`length`).
-const ATTR_NAMES: &[&str] =
-    &["param", "prop", "observable", "computed", "inject", "command", "length"];
+const ATTR_NAMES: &[&str] = &[
+    "param",
+    "prop",
+    "observable",
+    "computed",
+    "inject",
+    "command",
+    "length",
+];
 // DSL macro forms recognized by `peek_keyword_bang`/direct match: `bind!`, `command!`, `t!`.
 const MACRO_NAMES: &[&str] = &["bind", "command", "t"];
 
@@ -51,7 +58,11 @@ struct Scanner<'a> {
 
 impl<'a> Scanner<'a> {
     fn new(src: &'a str) -> Self {
-        Scanner { chars: src.chars().peekable(), line: 0, col: 0 }
+        Scanner {
+            chars: src.chars().peekable(),
+            line: 0,
+            col: 0,
+        }
     }
 
     fn peek(&mut self) -> Option<char> {
@@ -77,7 +88,11 @@ pub fn semantic_tokens_for_source(src: &str) -> Vec<SemanticToken> {
     let mut prev_start = 0u32;
     for tok in raw {
         let delta_line = tok.line - prev_line;
-        let delta_start = if delta_line == 0 { tok.start - prev_start } else { tok.start };
+        let delta_start = if delta_line == 0 {
+            tok.start - prev_start
+        } else {
+            tok.start
+        };
         out.push(SemanticToken {
             delta_line,
             delta_start,
@@ -113,7 +128,12 @@ fn tokenize(src: &str) -> Vec<RawToken> {
                     }
                     sc.bump();
                 }
-                raw.push(RawToken { line: start_line, start: start_col, len: sc.col - start_col, ty: COMMENT });
+                raw.push(RawToken {
+                    line: start_line,
+                    start: start_col,
+                    len: sc.col - start_col,
+                    ty: COMMENT,
+                });
             }
             continue;
         }
@@ -129,7 +149,12 @@ fn tokenize(src: &str) -> Vec<RawToken> {
                     break;
                 }
             }
-            raw.push(RawToken { line: start_line, start: start_col, len: sc.col - start_col, ty: STRING });
+            raw.push(RawToken {
+                line: start_line,
+                start: start_col,
+                len: sc.col - start_col,
+                ty: STRING,
+            });
             continue;
         }
 
@@ -141,7 +166,12 @@ fn tokenize(src: &str) -> Vec<RawToken> {
                     break;
                 }
             }
-            raw.push(RawToken { line: start_line, start: start_col, len: sc.col - start_col, ty: NUMBER });
+            raw.push(RawToken {
+                line: start_line,
+                start: start_col,
+                len: sc.col - start_col,
+                ty: NUMBER,
+            });
             continue;
         }
 
@@ -164,7 +194,12 @@ fn tokenize(src: &str) -> Vec<RawToken> {
                     }
                 }
                 if ATTR_NAMES.contains(&name.as_str()) {
-                    raw.push(RawToken { line: attr_line, start: attr_col, len: sc.col - attr_col, ty: MACRO });
+                    raw.push(RawToken {
+                        line: attr_line,
+                        start: attr_col,
+                        len: sc.col - attr_col,
+                        ty: MACRO,
+                    });
                 }
             }
             continue;
@@ -190,7 +225,12 @@ fn tokenize(src: &str) -> Vec<RawToken> {
             } else {
                 VARIABLE
             };
-            raw.push(RawToken { line: start_line, start: start_col, len: sc.col - start_col, ty });
+            raw.push(RawToken {
+                line: start_line,
+                start: start_col,
+                len: sc.col - start_col,
+                ty,
+            });
             continue;
         }
 
@@ -253,10 +293,20 @@ mod tests {
     #[test]
     fn closure_syntax_has_no_special_casing_needed() {
         let toks = decode("render_label: |doc| doc.file_name\n");
-        let doc_tokens: Vec<_> = toks.iter().filter(|t| t.2 == "doc".len() as u32 && t.3 == VARIABLE).collect();
-        assert_eq!(doc_tokens.len(), 2, "expected `doc` to tokenize as VARIABLE both times: {toks:?}");
+        let doc_tokens: Vec<_> = toks
+            .iter()
+            .filter(|t| t.2 == "doc".len() as u32 && t.3 == VARIABLE)
+            .collect();
+        assert_eq!(
+            doc_tokens.len(),
+            2,
+            "expected `doc` to tokenize as VARIABLE both times: {toks:?}"
+        );
         // The two `|`s sit right at columns 14 and 18 (`render_label: ` is 14 chars, `|doc|` is 5
         // more); no token should start at either position.
-        assert!(!toks.iter().any(|t| t.1 == 14 || t.1 == 18), "expected no token emitted for either `|`: {toks:?}");
+        assert!(
+            !toks.iter().any(|t| t.1 == 14 || t.1 == 18),
+            "expected no token emitted for either `|`: {toks:?}"
+        );
     }
 }

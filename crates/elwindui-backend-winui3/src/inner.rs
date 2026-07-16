@@ -9,14 +9,18 @@
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Dispatching::{DispatcherQueue, DispatcherQueueHandler};
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, TabView as XamlTabView, TabViewCloseButtonOverlayMode, TabViewItem,
-    TabViewTabCloseRequestedEventArgs, TextBlock, TextBox,
+    Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, TabView as XamlTabView,
+    TabViewCloseButtonOverlayMode, TabViewItem, TabViewTabCloseRequestedEventArgs, TextBlock,
+    TextBox,
 };
 use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
 use crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
-use crate::bindings::Microsoft::UI::Xaml::Shapes::{Ellipse as XamlEllipse, Rectangle as XamlRectangle};
+use crate::bindings::Microsoft::UI::Xaml::Shapes::{
+    Ellipse as XamlEllipse, Rectangle as XamlRectangle,
+};
 use crate::bindings::Microsoft::UI::Xaml::{
-    FrameworkElement, RoutedEventHandler, SelectionChangedEventArgs, TextChangedEventArgs, UIElement, Window as XamlWindow,
+    FrameworkElement, RoutedEventHandler, SelectionChangedEventArgs, TextChangedEventArgs,
+    UIElement, Window as XamlWindow,
 };
 use crate::bindings::Windows::Foundation::{Size, TypedEventHandler};
 use crate::bindings::Windows::Graphics::{PointInt32, SizeInt32};
@@ -24,7 +28,7 @@ use crate::bindings::Windows::UI::Color;
 use elwindui_core::ui::UIElementExt as _;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
-use windows::core::{Interface, Result, HSTRING};
+use windows::core::{HSTRING, Interface, Result};
 
 /// The capability a type needs to be usable as an `AnyView` — implemented once per raw XAML element
 /// type (`TextBox`/`XamlButton`/`XamlTabView`) instead of matched on centrally, so a future native
@@ -81,11 +85,23 @@ impl AnyView {
     /// inherent method, not a shared `elwindui-core`-defined trait — measuring a native handle is
     /// entirely backend-specific, so `elwindui_core::ui::NativeControl` (a pure marker trait)
     /// doesn't know how to do it.
-    pub(crate) fn measure(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+    pub(crate) fn measure(
+        &self,
+        available: elwindui_core::base::Size,
+    ) -> elwindui_core::base::Size {
         let element = self.as_element();
-        let _ = element.Measure(Size { Width: available.width as f32, Height: available.height as f32 });
-        let desired = element.DesiredSize().unwrap_or(Size { Width: 0.0, Height: 0.0 });
-        elwindui_core::base::Size { width: desired.Width, height: desired.Height }
+        let _ = element.Measure(Size {
+            Width: available.width as f32,
+            Height: available.height as f32,
+        });
+        let desired = element.DesiredSize().unwrap_or(Size {
+            Width: 0.0,
+            Height: 0.0,
+        });
+        elwindui_core::base::Size {
+            width: desired.Width,
+            height: desired.Height,
+        }
     }
 
     /// Positions this native leaf — like `measure` above, a plain inherent method (elwindui-core's
@@ -182,18 +198,23 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
 impl TreeHostPanel {
     pub(crate) fn new() -> Self {
         let canvas = Canvas::new().expect("Canvas::new");
-        let this = Self { canvas, tree: Rc::new(RefCell::new(None)) };
+        let this = Self {
+            canvas,
+            tree: Rc::new(RefCell::new(None)),
+        };
         let weak = Rc::downgrade(&this.tree);
         let canvas_for_handler = this.canvas.clone();
         // `SizeChanged` fires whenever this panel's own allotted space changes (window resize,
         // or — for a `NativeTabView`'s per-tab content area — the tab strip/window resizing together)
         // — the same role `layout()` plays for AppKit's `TreeHostView`.
-        let _ = this.canvas.SizeChanged(&TypedEventHandler::new(move |_, _| {
-            if let Some(tree) = weak.upgrade() {
-                Self::relayout_static(&canvas_for_handler, &tree);
-            }
-            Ok(())
-        }));
+        let _ = this
+            .canvas
+            .SizeChanged(&TypedEventHandler::new(move |_, _| {
+                if let Some(tree) = weak.upgrade() {
+                    Self::relayout_static(&canvas_for_handler, &tree);
+                }
+                Ok(())
+            }));
         this
     }
 
@@ -221,7 +242,10 @@ impl TreeHostPanel {
         Self::relayout_static(&self.canvas, &self.tree);
     }
 
-    fn relayout_static(canvas: &Canvas, tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>) {
+    fn relayout_static(
+        canvas: &Canvas,
+        tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+    ) {
         use elwindui_core::base::Size as LSize;
 
         let width = canvas.ActualWidth().unwrap_or(0.0) as f32;
@@ -229,10 +253,15 @@ impl TreeHostPanel {
         let available = LSize { width, height };
 
         let tree_ref = tree.borrow();
-        let Some(tree) = tree_ref.as_ref() else { return };
-        let items: Vec<elwindui_core::ui::RenderItem<AnyView>> = elwindui_core::ui::layout_tree(tree, available);
+        let Some(tree) = tree_ref.as_ref() else {
+            return;
+        };
+        let items: Vec<elwindui_core::ui::RenderItem<AnyView>> =
+            elwindui_core::ui::layout_tree(tree, available);
 
-        let Ok(children) = canvas.Children() else { return };
+        let Ok(children) = canvas.Children() else {
+            return;
+        };
 
         // `items` is `layout_tree`'s single interleaved list, in `arrange`'s own parent-before-
         // children traversal order (see `RenderItem`'s doc comment) — replayed here in one pass so
@@ -244,7 +273,12 @@ impl TreeHostPanel {
         for item in items {
             match item {
                 elwindui_core::ui::RenderItem::Paint(paint, rect) => match paint {
-                    elwindui_core::ui::PaintKind::Shape { kind, fill, stroke, stroke_width } => {
+                    elwindui_core::ui::PaintKind::Shape {
+                        kind,
+                        fill,
+                        stroke,
+                        stroke_width,
+                    } => {
                         let element: UIElement = match kind {
                             elwindui_core::ui::ShapeKind::RoundedRect { corner_radius } => {
                                 let r = XamlRectangle::new().expect("Rectangle::new");
@@ -252,7 +286,9 @@ impl TreeHostPanel {
                                 let _ = r.SetRadiusY(corner_radius as f64);
                                 r.into()
                             }
-                            elwindui_core::ui::ShapeKind::Oval => XamlEllipse::new().expect("Ellipse::new").into(),
+                            elwindui_core::ui::ShapeKind::Oval => {
+                                XamlEllipse::new().expect("Ellipse::new").into()
+                            }
                         };
                         let fe: FrameworkElement = element.clone().into();
                         let _ = fe.SetWidth(rect.width as f64);
@@ -265,13 +301,18 @@ impl TreeHostPanel {
                             }
                         }
                         if let Some(stroke) = stroke {
-                            if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&stroke)) {
+                            if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&stroke))
+                            {
                                 let _ = set_shape_stroke(&element, &brush, stroke_width as f64);
                             }
                         }
                         let _ = children.Append(&element);
                     }
-                    elwindui_core::ui::PaintKind::Text { content, color, alignment } => {
+                    elwindui_core::ui::PaintKind::Text {
+                        content,
+                        color,
+                        alignment,
+                    } => {
                         // Uses the real XAML `TextBlock` class purely as a paint primitive
                         // (positioned manually via the same `Canvas.Left`/`Canvas.Top`/`Width`/
                         // `Height` convention as every shape above), never wrapped as a builtin
@@ -279,7 +320,9 @@ impl TreeHostPanel {
                         // `elwindui-backend-appkit`'s `CATextLayer` use.
                         let text_block = TextBlock::new().expect("TextBlock::new");
                         let _ = text_block.SetText(&HSTRING::from(content));
-                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(color.as_deref().unwrap_or("#000000"))) {
+                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(
+                            color.as_deref().unwrap_or("#000000"),
+                        )) {
                             let _ = text_block.SetForeground(&brush);
                         }
                         let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
@@ -297,7 +340,12 @@ impl TreeHostPanel {
                 // backend is spec-only/best-effort and unverified (see this crate's own top doc
                 // comment); real click wiring is AppKit-only for now.
                 elwindui_core::ui::RenderItem::Native(mut view, rect, _node) => {
-                    view.arrange(elwindui_core::base::Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+                    view.arrange(elwindui_core::base::Rect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    });
                     let _ = children.Append(&view.as_element());
                 }
             }
@@ -332,19 +380,42 @@ fn set_shape_stroke(element: &UIElement, brush: &SolidColorBrush, thickness: f64
 fn parse_color(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');
     let (r, g, b, a) = match (hex.len(), u32::from_str_radix(hex, 16)) {
-        (6, Ok(v)) => (((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8, 255u8),
-        (8, Ok(v)) => (((v >> 24) & 0xFF) as u8, ((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8),
+        (6, Ok(v)) => (
+            ((v >> 16) & 0xFF) as u8,
+            ((v >> 8) & 0xFF) as u8,
+            (v & 0xFF) as u8,
+            255u8,
+        ),
+        (8, Ok(v)) => (
+            ((v >> 24) & 0xFF) as u8,
+            ((v >> 16) & 0xFF) as u8,
+            ((v >> 8) & 0xFF) as u8,
+            (v & 0xFF) as u8,
+        ),
         _ => (0, 0, 0, 255),
     };
-    Color { A: a, R: r, G: g, B: b }
+    Color {
+        A: a,
+        R: r,
+        G: g,
+        B: b,
+    }
 }
 
 /// `elwindui_core::ui::TextAlignment` -> `Microsoft.UI.Xaml.TextAlignment`.
-fn xaml_text_alignment(alignment: elwindui_core::ui::TextAlignment) -> bindings::Microsoft::UI::Xaml::TextAlignment {
+fn xaml_text_alignment(
+    alignment: elwindui_core::ui::TextAlignment,
+) -> bindings::Microsoft::UI::Xaml::TextAlignment {
     match alignment {
-        elwindui_core::ui::TextAlignment::Left => bindings::Microsoft::UI::Xaml::TextAlignment::Left,
-        elwindui_core::ui::TextAlignment::Center => bindings::Microsoft::UI::Xaml::TextAlignment::Center,
-        elwindui_core::ui::TextAlignment::Right => bindings::Microsoft::UI::Xaml::TextAlignment::Right,
+        elwindui_core::ui::TextAlignment::Left => {
+            bindings::Microsoft::UI::Xaml::TextAlignment::Left
+        }
+        elwindui_core::ui::TextAlignment::Center => {
+            bindings::Microsoft::UI::Xaml::TextAlignment::Center
+        }
+        elwindui_core::ui::TextAlignment::Right => {
+            bindings::Microsoft::UI::Xaml::TextAlignment::Right
+        }
     }
 }
 
@@ -410,49 +481,73 @@ impl InnerWindow {
     /// coordinate conversion is needed here. `None` (no `AppWindow` yet, e.g. before the window has
     /// ever been shown) reads back as `0.0`.
     pub(crate) fn left(&self) -> f32 {
-        self.app_window().and_then(|w| w.Position().ok()).map(|p| p.X as f32).unwrap_or(0.0)
+        self.app_window()
+            .and_then(|w| w.Position().ok())
+            .map(|p| p.X as f32)
+            .unwrap_or(0.0)
     }
 
     pub(crate) fn set_left(&self, left: f32) {
         if let Some(app_window) = self.app_window() {
             if let Ok(position) = app_window.Position() {
-                let _ = app_window.Move(PointInt32 { X: left as i32, Y: position.Y });
+                let _ = app_window.Move(PointInt32 {
+                    X: left as i32,
+                    Y: position.Y,
+                });
             }
         }
     }
 
     pub(crate) fn top(&self) -> f32 {
-        self.app_window().and_then(|w| w.Position().ok()).map(|p| p.Y as f32).unwrap_or(0.0)
+        self.app_window()
+            .and_then(|w| w.Position().ok())
+            .map(|p| p.Y as f32)
+            .unwrap_or(0.0)
     }
 
     pub(crate) fn set_top(&self, top: f32) {
         if let Some(app_window) = self.app_window() {
             if let Ok(position) = app_window.Position() {
-                let _ = app_window.Move(PointInt32 { X: position.X, Y: top as i32 });
+                let _ = app_window.Move(PointInt32 {
+                    X: position.X,
+                    Y: top as i32,
+                });
             }
         }
     }
 
     pub(crate) fn width(&self) -> f32 {
-        self.app_window().and_then(|w| w.Size().ok()).map(|s| s.Width as f32).unwrap_or(0.0)
+        self.app_window()
+            .and_then(|w| w.Size().ok())
+            .map(|s| s.Width as f32)
+            .unwrap_or(0.0)
     }
 
     pub(crate) fn set_width(&self, width: f32) {
         if let Some(app_window) = self.app_window() {
             if let Ok(size) = app_window.Size() {
-                let _ = app_window.Resize(SizeInt32 { Width: width as i32, Height: size.Height });
+                let _ = app_window.Resize(SizeInt32 {
+                    Width: width as i32,
+                    Height: size.Height,
+                });
             }
         }
     }
 
     pub(crate) fn height(&self) -> f32 {
-        self.app_window().and_then(|w| w.Size().ok()).map(|s| s.Height as f32).unwrap_or(0.0)
+        self.app_window()
+            .and_then(|w| w.Size().ok())
+            .map(|s| s.Height as f32)
+            .unwrap_or(0.0)
     }
 
     pub(crate) fn set_height(&self, height: f32) {
         if let Some(app_window) = self.app_window() {
             if let Ok(size) = app_window.Size() {
-                let _ = app_window.Resize(SizeInt32 { Width: size.Width, Height: height as i32 });
+                let _ = app_window.Resize(SizeInt32 {
+                    Width: size.Width,
+                    Height: height as i32,
+                });
             }
         }
     }
@@ -471,16 +566,27 @@ impl InnerTextArea {
         let _ = text_box.SetAcceptsReturn(true);
         let _ = text_box.SetTextWrapping(bindings::Microsoft::UI::Xaml::TextWrapping::Wrap);
         let handle = AnyView::from(text_box.clone());
-        let this = Self { handle, text_box, on_change: Rc::new(RefCell::new(None)) };
+        let this = Self {
+            handle,
+            text_box,
+            on_change: Rc::new(RefCell::new(None)),
+        };
         let callback = this.on_change.clone();
         let text_box_for_handler = this.text_box.clone();
-        let _ = this.text_box.TextChanged(&TypedEventHandler::<TextBox, TextChangedEventArgs>::new(move |_, _| {
-            if let Some(cb) = callback.borrow().as_ref() {
-                let text = text_box_for_handler.Text().map(|s| s.to_string_lossy()).unwrap_or_default();
-                cb(text);
-            }
-            Ok(())
-        }));
+        let _ =
+            this.text_box
+                .TextChanged(&TypedEventHandler::<TextBox, TextChangedEventArgs>::new(
+                    move |_, _| {
+                        if let Some(cb) = callback.borrow().as_ref() {
+                            let text = text_box_for_handler
+                                .Text()
+                                .map(|s| s.to_string_lossy())
+                                .unwrap_or_default();
+                            cb(text);
+                        }
+                        Ok(())
+                    },
+                ));
         this
     }
 
@@ -496,7 +602,11 @@ impl InnerTextArea {
     /// typing a single character would immediately call this with that same character already
     /// applied, yanking the caret away mid-keystroke.
     pub(crate) fn set_text(&self, text: &str) {
-        let current = self.text_box.Text().map(|s| s.to_string_lossy()).unwrap_or_default();
+        let current = self
+            .text_box
+            .Text()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
         if current == text {
             return;
         }
@@ -519,7 +629,11 @@ impl InnerButton {
     pub(crate) fn new() -> Self {
         let xaml = XamlButton::new().expect("Button::new");
         let handle = AnyView::from(xaml.clone());
-        let this = Self { handle, xaml, on_click: Rc::new(RefCell::new(None)) };
+        let this = Self {
+            handle,
+            xaml,
+            on_click: Rc::new(RefCell::new(None)),
+        };
         let callback = this.on_click.clone();
         let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
             if let Some(cb) = callback.borrow().as_ref() {
@@ -565,7 +679,9 @@ pub(crate) struct InnerTabView {
 impl InnerTabView {
     pub(crate) fn new() -> Self {
         let xaml = XamlTabView::new().expect("NativeTabView::new");
-        let _ = xaml.SetTabWidthMode(bindings::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent);
+        let _ = xaml.SetTabWidthMode(
+            bindings::Microsoft::UI::Xaml::Controls::TabViewWidthMode::SizeToContent,
+        );
         let _ = xaml.SetCloseButtonOverlayMode(TabViewCloseButtonOverlayMode::Always);
         let _ = xaml.SetIsAddTabButtonVisible(true);
 
@@ -579,7 +695,10 @@ impl InnerTabView {
         };
 
         let on_select = this.on_select.clone();
-        let _ = this.xaml.SelectionChanged(&TypedEventHandler::<XamlTabView, SelectionChangedEventArgs>::new(move |sender, _| {
+        let _ = this.xaml.SelectionChanged(&TypedEventHandler::<
+            XamlTabView,
+            SelectionChangedEventArgs,
+        >::new(move |sender, _| {
             if let (Some(sender), Some(cb)) = (sender, on_select.borrow().as_ref()) {
                 let index = sender.SelectedIndex().unwrap_or(-1);
                 if index >= 0 {
@@ -590,8 +709,12 @@ impl InnerTabView {
         }));
 
         let on_close = this.on_close.clone();
-        let _ = this.xaml.TabCloseRequested(&TypedEventHandler::<XamlTabView, TabViewTabCloseRequestedEventArgs>::new(move |sender, args| {
-            if let (Some(sender), Some(args), Some(cb)) = (sender, args, on_close.borrow().as_ref()) {
+        let _ = this.xaml.TabCloseRequested(&TypedEventHandler::<
+            XamlTabView,
+            TabViewTabCloseRequestedEventArgs,
+        >::new(move |sender, args| {
+            if let (Some(sender), Some(args), Some(cb)) = (sender, args, on_close.borrow().as_ref())
+            {
                 if let Ok(items) = sender.TabItems() {
                     if let Ok(item) = args.Tab() {
                         if let Ok(index) = items.IndexOf(&item.into()) {
@@ -604,12 +727,14 @@ impl InnerTabView {
         }));
 
         let on_new_tab = this.on_new_tab.clone();
-        let _ = this.xaml.AddTabButtonClick(&TypedEventHandler::new(move |_, _| {
-            if let Some(cb) = on_new_tab.borrow().as_ref() {
-                cb();
-            }
-            Ok(())
-        }));
+        let _ = this
+            .xaml
+            .AddTabButtonClick(&TypedEventHandler::new(move |_, _| {
+                if let Some(cb) = on_new_tab.borrow().as_ref() {
+                    cb();
+                }
+                Ok(())
+            }));
 
         this
     }
@@ -675,7 +800,10 @@ pub(crate) struct InnerMenuItem {
 impl InnerMenuItem {
     pub(crate) fn new() -> Self {
         let xaml = MenuFlyoutItem::new().expect("MenuFlyoutItem::new");
-        let this = Self { xaml, on_select: Rc::new(RefCell::new(None)) };
+        let this = Self {
+            xaml,
+            on_select: Rc::new(RefCell::new(None)),
+        };
         let callback = this.on_select.clone();
         let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
             if let Some(cb) = callback.borrow().as_ref() {
@@ -700,9 +828,14 @@ impl InnerMenuItem {
     /// a `Ctrl`-modifier `KeyboardAccelerator` (WinUI3 has no single-string key-equivalent setter
     /// the way `NSMenuItem.keyEquivalent` does).
     pub(crate) fn set_shortcut(&self, key_equivalent: &str) {
-        let Some(key) = key_equivalent.chars().next() else { return };
-        let Ok(accelerator) = KeyboardAccelerator::new() else { return };
-        let _ = accelerator.SetModifiers(bindings::Microsoft::UI::Xaml::Input::VirtualKeyModifiers::Control);
+        let Some(key) = key_equivalent.chars().next() else {
+            return;
+        };
+        let Ok(accelerator) = KeyboardAccelerator::new() else {
+            return;
+        };
+        let _ = accelerator
+            .SetModifiers(bindings::Microsoft::UI::Xaml::Input::VirtualKeyModifiers::Control);
         let virtual_key = bindings::Windows::System::VirtualKey(key.to_ascii_uppercase() as i32);
         let _ = accelerator.SetKey(virtual_key);
         if let Ok(accelerators) = self.xaml.KeyboardAccelerators() {
@@ -727,12 +860,17 @@ impl InnerMenuItem {
 #[derive(Clone)]
 pub(crate) struct InnerMenu {
     items: Rc<RefCell<Vec<InnerMenuItem>>>,
-    installed_into: Rc<RefCell<Option<bindings::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>>>>,
+    installed_into: Rc<
+        RefCell<Option<bindings::Windows::Foundation::Collections::IVector<MenuFlyoutItemBase>>>,
+    >,
 }
 
 impl InnerMenu {
     pub(crate) fn new() -> Self {
-        Self { items: Rc::new(RefCell::new(Vec::new())), installed_into: Rc::new(RefCell::new(None)) }
+        Self {
+            items: Rc::new(RefCell::new(Vec::new())),
+            installed_into: Rc::new(RefCell::new(None)),
+        }
     }
 
     /// A real `IVector<MenuFlyoutItemBase>.Append`-style call once this `Menu` is installed into a
@@ -769,7 +907,8 @@ pub(crate) struct InnerMenuBarItem {
 
 impl InnerMenuBarItem {
     pub(crate) fn new() -> Self {
-        let xaml = bindings::Microsoft::UI::Xaml::Controls::MenuBarItem::new().expect("MenuBarItem::new");
+        let xaml =
+            bindings::Microsoft::UI::Xaml::Controls::MenuBarItem::new().expect("MenuBarItem::new");
         Self { xaml }
     }
 

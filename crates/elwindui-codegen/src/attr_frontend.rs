@@ -27,12 +27,14 @@ use std::path::Path;
 /// file's `use crate::notepad_view_model::NotepadViewModel;` can be resolved against it exactly like
 /// Rust's own name resolution (§12, 付録B.1) — the struct name alone isn't enough to know where it
 /// actually lives.
-pub fn viewmodel_defs_from_rs_file(path: impl AsRef<Path>) -> Result<Vec<(String, ViewModelDef)>, String> {
+pub fn viewmodel_defs_from_rs_file(
+    path: impl AsRef<Path>,
+) -> Result<Vec<(String, ViewModelDef)>, String> {
     let path = path.as_ref();
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let file: syn::File = syn::parse_file(&src)
-        .map_err(|e| format!("parsing {} as Rust: {e}", path.display()))?;
+    let src =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let file: syn::File =
+        syn::parse_file(&src).map_err(|e| format!("parsing {} as Rust: {e}", path.display()))?;
 
     file.items
         .iter()
@@ -49,10 +51,12 @@ pub fn viewmodel_defs_from_rs_file(path: impl AsRef<Path>) -> Result<Vec<(String
 }
 
 fn has_viewmodel_attr(item_mod: &syn::ItemMod) -> bool {
-    item_mod
-        .attrs
-        .iter()
-        .any(|attr| attr.path().segments.last().is_some_and(|seg| seg.ident == "viewmodel"))
+    item_mod.attrs.iter().any(|attr| {
+        attr.path()
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "viewmodel")
+    })
 }
 
 /// `#[elwindui::viewmodel] mod foo { struct Foo { ... } impl Foo { ... } }` — the `struct` supplies
@@ -62,10 +66,10 @@ fn has_viewmodel_attr(item_mod: &syn::ItemMod) -> bool {
 /// — Rust attribute macros only ever see one annotated item, so there's no way to correlate a
 /// separately-expanded `struct`-only macro with an `impl`-only macro afterwards.
 pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelDef, String> {
-    let (_, items) = item_mod
-        .content
-        .as_ref()
-        .ok_or_else(|| "#[elwindui::viewmodel] mod must have a body (`mod foo { ... }`, not `mod foo;`)".to_string())?;
+    let (_, items) = item_mod.content.as_ref().ok_or_else(|| {
+        "#[elwindui::viewmodel] mod must have a body (`mod foo { ... }`, not `mod foo;`)"
+            .to_string()
+    })?;
 
     let item_struct = items
         .iter()
@@ -73,7 +77,9 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
             syn::Item::Struct(s) => Some(s),
             _ => None,
         })
-        .ok_or_else(|| "expected exactly one `struct` inside the `#[elwindui::viewmodel]` mod".to_string())?;
+        .ok_or_else(|| {
+            "expected exactly one `struct` inside the `#[elwindui::viewmodel]` mod".to_string()
+        })?;
 
     let item_impl = items.iter().find_map(|item| match item {
         syn::Item::Impl(i) => Some(i),
@@ -87,7 +93,10 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
         attach_command_bodies(&mut fields, item_impl)?;
     }
 
-    if let Some(missing) = fields.iter().find(|f| f.kind == FieldKind::Command && f.initializer.is_none()) {
+    if let Some(missing) = fields
+        .iter()
+        .find(|f| f.kind == FieldKind::Command && f.initializer.is_none())
+    {
         return Err(format!(
             "command field `{}` has no matching `fn {}` in the mod's `impl` block",
             missing.name, missing.name
@@ -99,7 +108,10 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
 
 fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef>, String> {
     let syn::Fields::Named(named) = &item_struct.fields else {
-        return Err(format!("viewmodel struct `{}` must have named fields", item_struct.ident));
+        return Err(format!(
+            "viewmodel struct `{}` must have named fields",
+            item_struct.ident
+        ));
     };
 
     let mut out = Vec::new();
@@ -129,8 +141,9 @@ fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef
                 }
                 "computed" => {
                     kind = Some(FieldKind::Computed);
-                    let expr = parse_name_value_expr(attr, "expr")?
-                        .ok_or_else(|| format!("field `{name}`: #[computed(...)] needs `expr = expr`"))?;
+                    let expr = parse_name_value_expr(attr, "expr")?.ok_or_else(|| {
+                        format!("field `{name}`: #[computed(...)] needs `expr = expr`")
+                    })?;
                     initializer = Some(Initializer::Expr(expr));
                 }
                 "command" => {
@@ -139,11 +152,18 @@ fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef
                     // `is_async` is filled in later, once we've seen the matching `fn`'s
                     // signature (`attach_command_bodies`) — a plain field declaration has no
                     // way to say "async" itself.
-                    attrs.push(Attr::CommandMeta { is_async: false, can_execute });
+                    attrs.push(Attr::CommandMeta {
+                        is_async: false,
+                        can_execute,
+                    });
                 }
                 "length" => {
                     let (start, end, inclusive) = parse_length_range(attr)?;
-                    attrs.push(Attr::Length { start, end, inclusive });
+                    attrs.push(Attr::Length {
+                        start,
+                        end,
+                        inclusive,
+                    });
                 }
                 other => return Err(format!("field `{name}`: unknown attribute #[{other}]")),
             }
@@ -153,7 +173,13 @@ fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef
             format!("field `{name}` needs one of #[observable]/#[computed]/#[command]")
         })?;
 
-        out.push(FieldDef { name, ty, kind, attrs, initializer });
+        out.push(FieldDef {
+            name,
+            ty,
+            kind,
+            attrs,
+            initializer,
+        });
     }
     Ok(out)
 }
@@ -165,9 +191,14 @@ fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef
 /// `fn`'s own `async` keyword.
 fn attach_command_bodies(fields: &mut [FieldDef], item_impl: &syn::ItemImpl) -> Result<(), String> {
     for item in &item_impl.items {
-        let syn::ImplItem::Fn(item_fn) = item else { continue };
+        let syn::ImplItem::Fn(item_fn) = item else {
+            continue;
+        };
         let fn_name = item_fn.sig.ident.to_string();
-        let Some(field) = fields.iter_mut().find(|f| f.kind == FieldKind::Command && f.name == fn_name) else {
+        let Some(field) = fields
+            .iter_mut()
+            .find(|f| f.kind == FieldKind::Command && f.name == fn_name)
+        else {
             return Err(format!(
                 "fn `{fn_name}` in the impl block doesn't match any #[command] field of the same name"
             ));
@@ -179,14 +210,19 @@ fn attach_command_bodies(fields: &mut [FieldDef], item_impl: &syn::ItemImpl) -> 
             .iter()
             .filter_map(|arg| match arg {
                 syn::FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
-                    syn::Pat::Ident(pat_ident) => Some((pat_ident.ident.to_string(), (*pat_type.ty).clone())),
+                    syn::Pat::Ident(pat_ident) => {
+                        Some((pat_ident.ident.to_string(), (*pat_type.ty).clone()))
+                    }
                     _ => None,
                 },
                 syn::FnArg::Receiver(_) => None,
             })
             .collect();
 
-        field.initializer = Some(Initializer::Command { params, body: item_fn.block.clone() });
+        field.initializer = Some(Initializer::Command {
+            params,
+            body: item_fn.block.clone(),
+        });
 
         let is_async = item_fn.sig.asyncness.is_some();
         for attr in &mut field.attrs {
@@ -222,7 +258,11 @@ fn parse_name_value_expr(attr: &syn::Attribute, name: &str) -> Result<Option<syn
             Ok((ident, expr))
         })
         .map_err(|e| {
-            let attr_name = attr.path().get_ident().map(|i| i.to_string()).unwrap_or_default();
+            let attr_name = attr
+                .path()
+                .get_ident()
+                .map(|i| i.to_string())
+                .unwrap_or_default();
             format!("invalid #[{attr_name}(...)] arguments: {e}")
         })?;
     if ident == name {
@@ -233,10 +273,17 @@ fn parse_name_value_expr(attr: &syn::Attribute, name: &str) -> Result<Option<syn
 }
 
 fn parse_length_range(attr: &syn::Attribute) -> Result<(i64, i64, bool), String> {
-    let range: syn::ExprRange =
-        attr.parse_args().map_err(|e| format!("invalid #[length(...)] argument: {e}"))?;
-    let start = range.start.as_ref().ok_or_else(|| "#[length(...)] needs a start bound".to_string())?;
-    let end = range.end.as_ref().ok_or_else(|| "#[length(...)] needs an end bound".to_string())?;
+    let range: syn::ExprRange = attr
+        .parse_args()
+        .map_err(|e| format!("invalid #[length(...)] argument: {e}"))?;
+    let start = range
+        .start
+        .as_ref()
+        .ok_or_else(|| "#[length(...)] needs a start bound".to_string())?;
+    let end = range
+        .end
+        .as_ref()
+        .ok_or_else(|| "#[length(...)] needs an end bound".to_string())?;
     let start = expr_to_i64(start)?;
     let end = expr_to_i64(end)?;
     let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
@@ -245,9 +292,10 @@ fn parse_length_range(attr: &syn::Attribute) -> Result<(i64, i64, bool), String>
 
 fn expr_to_i64(expr: &syn::Expr) -> Result<i64, String> {
     match expr {
-        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(lit_int), .. }) => {
-            lit_int.base10_parse().map_err(|e| e.to_string())
-        }
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(lit_int),
+            ..
+        }) => lit_int.base10_parse().map_err(|e| e.to_string()),
         _ => Err("expected an integer literal".to_string()),
     }
 }
@@ -267,7 +315,9 @@ mod tests {
             ..Default::default()
         };
         let table = build_symbol_table(std::slice::from_ref(&module));
-        let crate::ast::Item::ViewModel(def) = &module.items[0] else { unreachable!() };
+        let crate::ast::Item::ViewModel(def) = &module.items[0] else {
+            unreachable!()
+        };
         generate_viewmodel(def, &module, &table)
     }
 
@@ -344,7 +394,10 @@ mod tests {
         "#;
         let item_mod: syn::ItemMod = syn::parse_str(src).unwrap();
         let err = viewmodel_def_from_item_mod(&item_mod).unwrap_err();
-        assert!(err.contains("increment"), "error should mention the field: {err}");
+        assert!(
+            err.contains("increment"),
+            "error should mention the field: {err}"
+        );
     }
 
     /// The attribute-macro frontend must produce *the same* generated code as the equivalent
@@ -390,7 +443,9 @@ viewmodel Counter {
 "#;
         let module = crate::parser::parse_module(dsl_src).expect("dsl should parse");
         let table = build_symbol_table(std::slice::from_ref(&module));
-        let crate::ast::Item::ViewModel(def) = &module.items[0] else { panic!("expected viewmodel") };
+        let crate::ast::Item::ViewModel(def) = &module.items[0] else {
+            panic!("expected viewmodel")
+        };
         let dsl_generated = generate_viewmodel(def, &module, &table).to_string();
 
         assert_eq!(attr_generated, dsl_generated);

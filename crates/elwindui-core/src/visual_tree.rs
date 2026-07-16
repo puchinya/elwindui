@@ -22,10 +22,10 @@ pub fn get_child(element: &dyn UIElementExt, index: usize) -> Option<Rc<dyn UIEl
     element.visual_children().into_iter().nth(index)
 }
 
-/// WinUI3's `VisualTreeHelper.GetParent` — thin wrapper over `UIElement::parent` for call-site
+/// WinUI3's `VisualTreeHelper.GetParent` — thin wrapper over `UIElement::visual_parent` for call-site
 /// symmetry with the other functions here.
 pub fn get_parent(element: &dyn UIElementExt) -> Option<Rc<dyn UIElementExt>> {
-    element.parent()
+    element.visual_parent()
 }
 
 /// Recursively collects every element in `root`'s subtree (including `root` itself) whose concrete
@@ -53,14 +53,14 @@ fn collect_all<T: 'static>(node: &dyn UIElementExt, out: &mut Vec<Rc<dyn UIEleme
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{new_element, LayoutExt as _, TextBlock, VerticalLayout};
+    use crate::ui::{LayoutExt as _, TextBlock, VerticalLayout};
 
     #[test]
     fn children_count_and_get_child_match_visual_children() {
-        let layout = VerticalLayout::construct();
-        layout.children().add(new_element(TextBlock::construct()));
-        layout.children().add(new_element(TextBlock::construct()));
-        let tree: Rc<dyn UIElementExt> = new_element(layout);
+        let layout = VerticalLayout::new();
+        layout.children().add(TextBlock::new());
+        layout.children().add(TextBlock::new());
+        let tree: Rc<dyn UIElementExt> = layout;
 
         assert_eq!(get_children_count(tree.as_ref()), 2);
         assert!(get_child(tree.as_ref(), 0).is_some());
@@ -69,10 +69,10 @@ mod tests {
 
     #[test]
     fn get_parent_walks_back_up() {
-        let layout = VerticalLayout::construct();
-        let text = new_element(TextBlock::construct());
+        let layout = VerticalLayout::new();
+        let text = TextBlock::new();
         layout.children().add(text.clone());
-        let tree: Rc<dyn UIElementExt> = new_element(layout);
+        let tree: Rc<dyn UIElementExt> = layout;
 
         let parent = get_parent(text.as_ref()).expect("child has a parent");
         assert!(Rc::ptr_eq(&parent, &tree));
@@ -81,12 +81,12 @@ mod tests {
 
     #[test]
     fn find_all_collects_matching_type_across_tree() {
-        let outer = VerticalLayout::construct();
-        let inner = VerticalLayout::construct();
-        inner.children().add(new_element(TextBlock::construct()));
-        outer.children().add(new_element(inner));
-        outer.children().add(new_element(TextBlock::construct()));
-        let tree: Rc<dyn UIElementExt> = new_element(outer);
+        let outer = VerticalLayout::new();
+        let inner = VerticalLayout::new();
+        inner.children().add(TextBlock::new());
+        outer.children().add(inner);
+        outer.children().add(TextBlock::new());
+        let tree: Rc<dyn UIElementExt> = outer;
 
         let texts = find_all::<TextBlock>(tree.as_ref());
         assert_eq!(texts.len(), 2);

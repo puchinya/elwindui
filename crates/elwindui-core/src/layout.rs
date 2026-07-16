@@ -43,24 +43,39 @@ pub enum Visibility {
 /// own `NaN`-sentinel equivalent). Used twice per `measure` call (`elwindui_core::ui`'s `measure`/
 /// `measure_and_align`): once on the space handed down to `measure_override`, once on its
 /// returned desired size.
-pub fn apply_size_constraints(size: Size, min_width: Option<f32>, max_width: Option<f32>, min_height: Option<f32>, max_height: Option<f32>) -> Size {
+pub fn apply_size_constraints(
+    size: Size,
+    min_width: Option<f32>,
+    max_width: Option<f32>,
+    min_height: Option<f32>,
+    max_height: Option<f32>,
+) -> Size {
     let clamp = |value: f32, min: Option<f32>, max: Option<f32>| -> f32 {
         let value = min.map_or(value, |min| value.max(min));
         max.map_or(value, |max| value.min(max))
     };
-    Size { width: clamp(size.width, min_width, max_width), height: clamp(size.height, min_height, max_height) }
+    Size {
+        width: clamp(size.width, min_width, max_width),
+        height: clamp(size.height, min_height, max_height),
+    }
 }
 
 /// Shrinks `size` by a uniform `margin` on every side (never below zero) — the "how much room is
 /// actually left for me to measure into" half of `UIElement`'s generic Margin handling.
 pub fn shrink_by_margin(size: Size, margin: f32) -> Size {
-    Size { width: (size.width - 2.0 * margin).max(0.0), height: (size.height - 2.0 * margin).max(0.0) }
+    Size {
+        width: (size.width - 2.0 * margin).max(0.0),
+        height: (size.height - 2.0 * margin).max(0.0),
+    }
 }
 
 /// The inverse of `shrink_by_margin` — what an element's *own* desired size (margin excluded)
 /// grows back into once its margin is added back, for reporting to whatever measured it.
 pub fn grow_by_margin(size: Size, margin: f32) -> Size {
-    Size { width: size.width + 2.0 * margin, height: size.height + 2.0 * margin }
+    Size {
+        width: size.width + 2.0 * margin,
+        height: size.height + 2.0 * margin,
+    }
 }
 
 /// Shrinks `rect` by a uniform `margin` on every side (never below zero), keeping it centered
@@ -80,7 +95,12 @@ pub fn shrink_rect_by_margin(rect: Rect, margin: f32) -> Rect {
 /// the corresponding edge/center of `slot`. This is `UIElement`'s generic per-element Arrange
 /// step (see `elwindui_core::ui`), applied uniformly regardless of element kind — not specific
 /// to `Stack` children the way the old `cross_align`-on-the-container design was.
-pub fn align_within(slot: Rect, desired: Size, h_align: HorizontalAlignment, v_align: VerticalAlignment) -> Rect {
+pub fn align_within(
+    slot: Rect,
+    desired: Size,
+    h_align: HorizontalAlignment,
+    v_align: VerticalAlignment,
+) -> Rect {
     let width = match h_align {
         HorizontalAlignment::Stretch => slot.width,
         _ => desired.width.min(slot.width),
@@ -99,7 +119,12 @@ pub fn align_within(slot: Rect, desired: Size, h_align: HorizontalAlignment, v_a
         VerticalAlignment::Center => slot.y + (slot.height - height) / 2.0,
         VerticalAlignment::Bottom => slot.y + (slot.height - height),
     };
-    Rect { x, y, width, height }
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 /// Pure `VerticalLayout`/`HorizontalLayout` arrangement math — no widgets, no `Rc`/`RefCell`, just
@@ -114,7 +139,12 @@ pub fn align_within(slot: Rect, desired: Size, h_align: HorizontalAlignment, v_a
 /// per-element `arrange` wrapper's job now, driven by that *child's own*
 /// `HorizontalAlignment`/`VerticalAlignment`, not a single setting the container applies to every
 /// child uniformly.
-pub fn stack_arrange(available: Size, orientation: Orientation, spacing: f32, child_sizes: &[Size]) -> Vec<Rect> {
+pub fn stack_arrange(
+    available: Size,
+    orientation: Orientation,
+    spacing: f32,
+    child_sizes: &[Size],
+) -> Vec<Rect> {
     let main_of = |s: Size| match orientation {
         Orientation::Horizontal => s.width,
         Orientation::Vertical => s.height,
@@ -129,8 +159,18 @@ pub fn stack_arrange(available: Size, orientation: Orientation, spacing: f32, ch
     for &size in child_sizes {
         let child_main = main_of(size);
         rects.push(match orientation {
-            Orientation::Horizontal => Rect { x: cursor, y: 0.0, width: child_main, height: available_cross },
-            Orientation::Vertical => Rect { x: 0.0, y: cursor, width: available_cross, height: child_main },
+            Orientation::Horizontal => Rect {
+                x: cursor,
+                y: 0.0,
+                width: child_main,
+                height: available_cross,
+            },
+            Orientation::Vertical => Rect {
+                x: 0.0,
+                y: cursor,
+                width: available_cross,
+                height: child_main,
+            },
         });
         cursor += child_main + spacing;
     }
@@ -152,13 +192,27 @@ pub fn stack_natural_size(orientation: Orientation, spacing: f32, child_sizes: &
         Orientation::Vertical => s.width,
     };
 
-    let natural_cross = child_sizes.iter().copied().map(cross_of).fold(0.0_f32, f32::max);
+    let natural_cross = child_sizes
+        .iter()
+        .copied()
+        .map(cross_of)
+        .fold(0.0_f32, f32::max);
     let total_main: f32 = child_sizes.iter().copied().map(main_of).sum::<f32>()
-        + if child_sizes.is_empty() { 0.0 } else { spacing * (child_sizes.len() - 1) as f32 };
+        + if child_sizes.is_empty() {
+            0.0
+        } else {
+            spacing * (child_sizes.len() - 1) as f32
+        };
 
     match orientation {
-        Orientation::Horizontal => Size { width: total_main, height: natural_cross },
-        Orientation::Vertical => Size { width: natural_cross, height: total_main },
+        Orientation::Horizontal => Size {
+            width: total_main,
+            height: natural_cross,
+        },
+        Orientation::Vertical => Size {
+            width: natural_cross,
+            height: total_main,
+        },
     }
 }
 
@@ -229,7 +283,10 @@ fn fixed_and_auto_track_sizes(defs: &[GridLength], indices: &[usize], dims: &[f3
         }
     }
     for (&idx, &dim) in indices.iter().zip(dims) {
-        let is_auto = !matches!(defs.get(idx), Some(GridLength::Fixed(_)) | Some(GridLength::Star(_)));
+        let is_auto = !matches!(
+            defs.get(idx),
+            Some(GridLength::Fixed(_)) | Some(GridLength::Star(_))
+        );
         if is_auto {
             sizes[idx] = sizes[idx].max(dim);
         }
@@ -246,7 +303,13 @@ fn distribute_star(defs: &[GridLength], sizes: &mut [f32], total_final: f32) {
     let remaining = (total_final - used).max(0.0);
     let total_weight: f32 = defs
         .iter()
-        .filter_map(|d| if let GridLength::Star(w) = d { Some(*w) } else { None })
+        .filter_map(|d| {
+            if let GridLength::Star(w) = d {
+                Some(*w)
+            } else {
+                None
+            }
+        })
         .sum();
     if total_weight <= 0.0 {
         return;
@@ -272,15 +335,29 @@ fn prefix_offsets(sizes: &[f32]) -> Vec<f32> {
 /// every column's/row's own natural size (`Star` tracks behave like `Auto` here, see
 /// `natural_track_sizes`). `cells`/`child_sizes` are parallel, one entry per child (`Grid`'s own
 /// `measure_override`/`arrange_override` build both from its `children`).
-pub fn grid_natural_size(rows: &[GridLength], columns: &[GridLength], cells: &[GridCell], child_sizes: &[Size]) -> Size {
-    let row_indices: Vec<usize> = cells.iter().map(|c| clamp_track_index(c.row, rows.len())).collect();
-    let col_indices: Vec<usize> = cells.iter().map(|c| clamp_track_index(c.column, columns.len())).collect();
+pub fn grid_natural_size(
+    rows: &[GridLength],
+    columns: &[GridLength],
+    cells: &[GridCell],
+    child_sizes: &[Size],
+) -> Size {
+    let row_indices: Vec<usize> = cells
+        .iter()
+        .map(|c| clamp_track_index(c.row, rows.len()))
+        .collect();
+    let col_indices: Vec<usize> = cells
+        .iter()
+        .map(|c| clamp_track_index(c.column, columns.len()))
+        .collect();
     let heights: Vec<f32> = child_sizes.iter().map(|s| s.height).collect();
     let widths: Vec<f32> = child_sizes.iter().map(|s| s.width).collect();
 
     let row_sizes = natural_track_sizes(rows, &row_indices, &heights);
     let col_sizes = natural_track_sizes(columns, &col_indices, &widths);
-    Size { width: col_sizes.iter().sum(), height: row_sizes.iter().sum() }
+    Size {
+        width: col_sizes.iter().sum(),
+        height: row_sizes.iter().sum(),
+    }
 }
 
 /// Pure `Grid` arrangement math (see `stack_arrange`'s own doc comment on why this is a free
@@ -294,8 +371,14 @@ pub fn grid_arrange(
     cells: &[GridCell],
     child_sizes: &[Size],
 ) -> Vec<Rect> {
-    let row_indices: Vec<usize> = cells.iter().map(|c| clamp_track_index(c.row, rows.len())).collect();
-    let col_indices: Vec<usize> = cells.iter().map(|c| clamp_track_index(c.column, columns.len())).collect();
+    let row_indices: Vec<usize> = cells
+        .iter()
+        .map(|c| clamp_track_index(c.row, rows.len()))
+        .collect();
+    let col_indices: Vec<usize> = cells
+        .iter()
+        .map(|c| clamp_track_index(c.column, columns.len()))
+        .collect();
     let heights: Vec<f32> = child_sizes.iter().map(|s| s.height).collect();
     let widths: Vec<f32> = child_sizes.iter().map(|s| s.width).collect();
 
@@ -310,7 +393,12 @@ pub fn grid_arrange(
     row_indices
         .iter()
         .zip(col_indices.iter())
-        .map(|(&r, &c)| Rect { x: col_offsets[c], y: row_offsets[r], width: col_sizes[c], height: row_sizes[r] })
+        .map(|(&r, &c)| Rect {
+            x: col_offsets[c],
+            y: row_offsets[r],
+            width: col_sizes[c],
+            height: row_sizes[r],
+        })
         .collect()
 }
 
@@ -331,8 +419,24 @@ mod tests {
         // alignment/sizing within it is applied by `elwindui_core::ui`'s generic wrapper, not
         // this function — so both rects report `available`'s full height (1000), not their own
         // measured height.
-        assert_eq!(rects[0], Rect { x: 0.0, y: 0.0, width: 10.0, height: 1000.0 });
-        assert_eq!(rects[1], Rect { x: 15.0, y: 0.0, width: 30.0, height: 1000.0 });
+        assert_eq!(
+            rects[0],
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 1000.0
+            }
+        );
+        assert_eq!(
+            rects[1],
+            Rect {
+                x: 15.0,
+                y: 0.0,
+                width: 30.0,
+                height: 1000.0
+            }
+        );
     }
 
     #[test]
@@ -340,61 +444,156 @@ mod tests {
         let sizes = [size(10.0, 20.0), size(30.0, 40.0)];
         let rects = stack_arrange(size(1000.0, 1000.0), Orientation::Vertical, 5.0, &sizes);
 
-        assert_eq!(rects[0], Rect { x: 0.0, y: 0.0, width: 1000.0, height: 20.0 });
-        assert_eq!(rects[1], Rect { x: 0.0, y: 25.0, width: 1000.0, height: 40.0 });
+        assert_eq!(
+            rects[0],
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1000.0,
+                height: 20.0
+            }
+        );
+        assert_eq!(
+            rects[1],
+            Rect {
+                x: 0.0,
+                y: 25.0,
+                width: 1000.0,
+                height: 40.0
+            }
+        );
     }
 
     #[test]
     fn stack_natural_size_sums_main_axis_and_maxes_cross_axis() {
         let sizes = [size(10.0, 20.0), size(30.0, 40.0)];
-        assert_eq!(stack_natural_size(Orientation::Horizontal, 5.0, &sizes), size(45.0, 40.0));
-        assert_eq!(stack_natural_size(Orientation::Vertical, 5.0, &sizes), size(30.0, 65.0));
+        assert_eq!(
+            stack_natural_size(Orientation::Horizontal, 5.0, &sizes),
+            size(45.0, 40.0)
+        );
+        assert_eq!(
+            stack_natural_size(Orientation::Vertical, 5.0, &sizes),
+            size(30.0, 65.0)
+        );
     }
 
     #[test]
     fn empty_children_yield_zero_natural_size_and_no_rects() {
         let rects = stack_arrange(size(100.0, 100.0), Orientation::Vertical, 5.0, &[]);
         assert!(rects.is_empty());
-        assert_eq!(stack_natural_size(Orientation::Vertical, 5.0, &[]), size(0.0, 0.0));
+        assert_eq!(
+            stack_natural_size(Orientation::Vertical, 5.0, &[]),
+            size(0.0, 0.0)
+        );
     }
 
     #[test]
     fn align_within_stretch_fills_the_slot_on_that_axis() {
-        let slot = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        let slot = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
         let desired = size(10.0, 10.0);
-        let rect = align_within(slot, desired, HorizontalAlignment::Stretch, VerticalAlignment::Stretch);
+        let rect = align_within(
+            slot,
+            desired,
+            HorizontalAlignment::Stretch,
+            VerticalAlignment::Stretch,
+        );
         assert_eq!(rect, slot);
     }
 
     #[test]
     fn align_within_start_top_keeps_desired_size_at_the_leading_edge() {
-        let slot = Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
+        let slot = Rect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
+        };
         let desired = size(10.0, 10.0);
-        let rect = align_within(slot, desired, HorizontalAlignment::Left, VerticalAlignment::Top);
-        assert_eq!(rect, Rect { x: 10.0, y: 20.0, width: 10.0, height: 10.0 });
+        let rect = align_within(
+            slot,
+            desired,
+            HorizontalAlignment::Left,
+            VerticalAlignment::Top,
+        );
+        assert_eq!(
+            rect,
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 10.0,
+                height: 10.0
+            }
+        );
     }
 
     #[test]
     fn align_within_center_centers_desired_size_within_the_slot() {
-        let slot = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+        let slot = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
         let desired = size(20.0, 10.0);
-        let rect = align_within(slot, desired, HorizontalAlignment::Center, VerticalAlignment::Center);
-        assert_eq!(rect, Rect { x: 40.0, y: 45.0, width: 20.0, height: 10.0 });
+        let rect = align_within(
+            slot,
+            desired,
+            HorizontalAlignment::Center,
+            VerticalAlignment::Center,
+        );
+        assert_eq!(
+            rect,
+            Rect {
+                x: 40.0,
+                y: 45.0,
+                width: 20.0,
+                height: 10.0
+            }
+        );
     }
 
     #[test]
     fn align_within_end_bottom_anchors_desired_size_at_the_trailing_edge() {
-        let slot = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+        let slot = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
         let desired = size(20.0, 10.0);
-        let rect = align_within(slot, desired, HorizontalAlignment::Right, VerticalAlignment::Bottom);
-        assert_eq!(rect, Rect { x: 80.0, y: 90.0, width: 20.0, height: 10.0 });
+        let rect = align_within(
+            slot,
+            desired,
+            HorizontalAlignment::Right,
+            VerticalAlignment::Bottom,
+        );
+        assert_eq!(
+            rect,
+            Rect {
+                x: 80.0,
+                y: 90.0,
+                width: 20.0,
+                height: 10.0
+            }
+        );
     }
 
     #[test]
     fn apply_size_constraints_clamps_only_the_bounds_that_are_set() {
         let s = size(50.0, 5.0);
-        assert_eq!(apply_size_constraints(s, Some(100.0), None, None, Some(4.0)), size(100.0, 4.0));
-        assert_eq!(apply_size_constraints(s, None, Some(20.0), None, None), size(20.0, 5.0));
+        assert_eq!(
+            apply_size_constraints(s, Some(100.0), None, None, Some(4.0)),
+            size(100.0, 4.0)
+        );
+        assert_eq!(
+            apply_size_constraints(s, None, Some(20.0), None, None),
+            size(20.0, 5.0)
+        );
         assert_eq!(apply_size_constraints(s, None, None, None, None), s);
     }
 
@@ -404,8 +603,21 @@ mod tests {
         assert_eq!(shrink_by_margin(s, 10.0), size(80.0, 30.0));
         assert_eq!(grow_by_margin(shrink_by_margin(s, 10.0), 10.0), s);
 
-        let r = Rect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 };
-        assert_eq!(shrink_rect_by_margin(r, 10.0), Rect { x: 10.0, y: 10.0, width: 80.0, height: 30.0 });
+        let r = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        };
+        assert_eq!(
+            shrink_rect_by_margin(r, 10.0),
+            Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 30.0
+            }
+        );
     }
 
     fn cell(row: i32, column: i32) -> GridCell {
@@ -421,15 +633,35 @@ mod tests {
         let sizes = [size(10.0, 20.0), size(30.0, 40.0)];
 
         let rects = grid_arrange(size(1000.0, 1000.0), &rows, &columns, &cells, &sizes);
-        assert_eq!(rects[0], Rect { x: 0.0, y: 0.0, width: 100.0, height: 40.0 });
-        assert_eq!(rects[1], Rect { x: 100.0, y: 0.0, width: 30.0, height: 40.0 });
+        assert_eq!(
+            rects[0],
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 40.0
+            }
+        );
+        assert_eq!(
+            rects[1],
+            Rect {
+                x: 100.0,
+                y: 0.0,
+                width: 30.0,
+                height: 40.0
+            }
+        );
     }
 
     #[test]
     fn grid_arrange_distributes_remaining_space_across_star_columns_by_weight() {
         // Fixed(100) + Star(1) + Star(2), final width 1000 -> remaining 900 split 1:2 -> 300/600.
         let rows = [GridLength::Auto];
-        let columns = [GridLength::Fixed(100.0), GridLength::Star(1.0), GridLength::Star(2.0)];
+        let columns = [
+            GridLength::Fixed(100.0),
+            GridLength::Star(1.0),
+            GridLength::Star(2.0),
+        ];
         let cells = [cell(0, 0), cell(0, 1), cell(0, 2)];
         let sizes = [size(5.0, 5.0), size(5.0, 5.0), size(5.0, 5.0)];
 
@@ -449,7 +681,10 @@ mod tests {
         let sizes = [size(10.0, 10.0)];
 
         let rects = grid_arrange(size(100.0, 100.0), &rows, &columns, &cells, &sizes);
-        assert_eq!(rects[0].y, 0.0, "single non-empty row still lands at offset 0 after clamping");
+        assert_eq!(
+            rects[0].y, 0.0,
+            "single non-empty row still lands at offset 0 after clamping"
+        );
     }
 
     #[test]
@@ -461,17 +696,34 @@ mod tests {
 
         // Fixed column reports its literal 50; Star column (no known final size yet) reports its
         // own content's natural width (30), same treatment as an Auto column would get.
-        assert_eq!(grid_natural_size(&rows, &columns, &cells, &sizes), size(80.0, 40.0));
+        assert_eq!(
+            grid_natural_size(&rows, &columns, &cells, &sizes),
+            size(80.0, 40.0)
+        );
     }
 
     #[test]
     fn grid_empty_rows_and_columns_are_treated_as_a_single_implicit_auto_track() {
         let cells = [cell(0, 0), cell(0, 0)];
         let sizes = [size(10.0, 20.0), size(30.0, 5.0)];
-        assert_eq!(grid_natural_size(&[], &[], &cells, &sizes), size(30.0, 20.0));
+        assert_eq!(
+            grid_natural_size(&[], &[], &cells, &sizes),
+            size(30.0, 20.0)
+        );
 
         let rects = grid_arrange(size(100.0, 100.0), &[], &[], &cells, &sizes);
-        assert_eq!(rects[0], Rect { x: 0.0, y: 0.0, width: 30.0, height: 20.0 });
-        assert_eq!(rects[1], rects[0], "both children share the single implicit cell");
+        assert_eq!(
+            rects[0],
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 30.0,
+                height: 20.0
+            }
+        );
+        assert_eq!(
+            rects[1], rects[0],
+            "both children share the single implicit cell"
+        );
     }
 }

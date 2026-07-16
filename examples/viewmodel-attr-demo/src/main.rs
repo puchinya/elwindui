@@ -34,5 +34,10 @@ fn main() {
     assert_eq!(c.count(), 1);
     assert_eq!(c.doubled(), 2);
 
-    println!("ok: count={} doubled={} can_execute={}", c.count(), c.doubled(), c.increment_can_execute());
+    println!(
+        "ok: count={} doubled={} can_execute={}",
+        c.count(),
+        c.doubled(),
+        c.increment_can_execute()
+    );
 }

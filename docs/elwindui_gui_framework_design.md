@@ -413,7 +413,7 @@ component Button inherits NativeControl {
 }
 ```
 
-**木構造は`Box`ではなく`Rc`で、本物の親ポインタを持つ**。`Element`ツリー(`Rc<dyn UIElement>`)の各ノードは`UIElementBase.parent: RefCell<Option<Weak<dyn UIElement>>>`という親への弱参照を持ち、要素が木に組み込まれる瞬間(`elwindui_core::ui::new_element`)に必ず設定される。これにより`dispatch_routed`は要素からルートまで単純に`parent()`を辿るだけでバブルでき、静的な`.elwind`構造でも、`TabView`の`items_source`/`item_template`のように実行時に動的組み立てられた木でも同じように機能する(木を毎回探索し直す必要がない)。
+**木構造は`Box`ではなく`Rc`で、本物の親ポインタを持つ**。各ノードは論理親`parent`とVisual親`visual_parent`への弱参照を持つ。要素を各コレクションへ追加した瞬間にそのコレクションが対応する親参照を設定する。これにより`dispatch_routed`は論理親を、レイアウトはVisual親を単純に辿れる。
 
 ```rust
 // elwindui-core

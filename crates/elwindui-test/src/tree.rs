@@ -22,14 +22,14 @@ fn write_node(node: &dyn UIElementExt, depth: usize, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elwindui_core::ui::{new_element, LayoutExt as _, TextBlock, VerticalLayout};
+    use elwindui_core::ui::{LayoutExt as _, TextBlock, VerticalLayout};
 
     #[test]
     fn dumps_nested_type_names_with_indentation() {
-        let layout = VerticalLayout::construct();
-        layout.children().add(new_element(TextBlock::construct()));
-        layout.children().add(new_element(TextBlock::construct()));
-        let tree = new_element(layout);
+        let layout = VerticalLayout::new();
+        layout.children().add(TextBlock::new());
+        layout.children().add(TextBlock::new());
+        let tree = layout;
 
         let dump = render_tree(tree.as_ref());
         let lines: Vec<&str> = dump.lines().collect();

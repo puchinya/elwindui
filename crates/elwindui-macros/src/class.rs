@@ -145,9 +145,9 @@ use quote::{format_ident, quote};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use syn::{
+    Field, Fields, FnArg, Ident, ImplItem, ImplItemFn, Item, Path, Token, Type, Visibility,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Field, Fields, FnArg, Ident, ImplItem, ImplItemFn, Item, Path, Token, Type, Visibility,
 };
 
 /// Parsed `#[class(inherits = .., struct_only = .., abstract_class, sealed, no_ancestor_forward)]`
@@ -227,7 +227,10 @@ impl Parse for ClassArg {
             "sealed" => Ok(ClassArg::Sealed),
             "trait_only" => Ok(ClassArg::TraitOnly),
             "no_ancestor_forward" => Ok(ClassArg::NoAncestorForward),
-            other => Err(syn::Error::new(ident.span(), format!("#[class]: unknown argument `{other}`"))),
+            other => Err(syn::Error::new(
+                ident.span(),
+                format!("#[class]: unknown argument `{other}`"),
+            )),
         }
     }
 }
@@ -264,7 +267,9 @@ struct StoredClassArgs {
 /// (never a valid crate name) if neither is — degrading to one shared unscoped bucket on a missing
 /// env var would silently reintroduce the exact bug this key exists to prevent.
 fn compiling_crate_key() -> String {
-    std::env::var("CARGO_CRATE_NAME").or_else(|_| std::env::var("CARGO_PKG_NAME")).unwrap_or_default()
+    std::env::var("CARGO_CRATE_NAME")
+        .or_else(|_| std::env::var("CARGO_PKG_NAME"))
+        .unwrap_or_default()
 }
 
 /// Keyed by `(compiling_crate_key(), class name)` (e.g. `("elwindui_core", "VerticalLayout")`) —
@@ -288,7 +293,10 @@ fn store_class_args(class_name: &str, args: &ClassArgs, owns_inherit_macros: boo
         no_ancestor_forward: args.no_ancestor_forward,
         owns_inherit_macros,
     };
-    class_arg_store().lock().unwrap().insert((compiling_crate_key(), class_name.to_string()), stored);
+    class_arg_store()
+        .lock()
+        .unwrap()
+        .insert((compiling_crate_key(), class_name.to_string()), stored);
 }
 
 /// `None` means no `struct ClassName` has been seen yet under this name — the caller (`expand_impl`)
@@ -302,8 +310,13 @@ fn store_class_args(class_name: &str, args: &ClassArgs, owns_inherit_macros: boo
 fn load_class_args(class_name: &str) -> Option<(ClassArgs, bool)> {
     let mut store = class_arg_store().lock().unwrap();
     let stored = store.remove(&(compiling_crate_key(), class_name.to_string()))?;
-    let parse_type = |s: &String| syn::parse_str::<Type>(s).expect("#[class]: internal: failed to reparse stored `inherits` type");
-    let parse_path = |s: &String| syn::parse_str::<Path>(s).expect("#[class]: internal: failed to reparse stored path");
+    let parse_type = |s: &String| {
+        syn::parse_str::<Type>(s)
+            .expect("#[class]: internal: failed to reparse stored `inherits` type")
+    };
+    let parse_path = |s: &String| {
+        syn::parse_str::<Path>(s).expect("#[class]: internal: failed to reparse stored path")
+    };
     Some((
         ClassArgs {
             inherits: stored.inherits.as_ref().map(parse_type),
@@ -357,7 +370,8 @@ struct SameCrateClassInfo {
 /// `cargo build`'s one-process-per-crate model, would otherwise leak one crate's registrations into
 /// every other crate's analysis within the same session).
 fn same_crate_classes() -> &'static Mutex<HashMap<(String, String), SameCrateClassInfo>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), SameCrateClassInfo>>> = OnceLock::new();
+    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), SameCrateClassInfo>>> =
+        OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -371,7 +385,9 @@ fn same_crate_classes() -> &'static Mutex<HashMap<(String, String), SameCrateCla
 /// path resolution for types, same as for macro names, uses call-site scope, not def-site scope).
 /// `arg_name` is `"inherits"` or `"struct_only"`, used only for the error message.
 fn validate_fully_qualified_path(path: &Path, arg_name: &str) -> syn::Result<()> {
-    let Some(last) = path.segments.last() else { return Ok(()) };
+    let Some(last) = path.segments.last() else {
+        return Ok(());
+    };
     let bare_name = last.ident.to_string();
     if path.segments.len() < 2 {
         let msg = format!(
@@ -382,7 +398,11 @@ fn validate_fully_qualified_path(path: &Path, arg_name: &str) -> syn::Result<()>
         );
         return Err(syn::Error::new_spanned(path, msg));
     }
-    if same_crate_classes().lock().unwrap().contains_key(&(compiling_crate_key(), bare_name.clone())) {
+    if same_crate_classes()
+        .lock()
+        .unwrap()
+        .contains_key(&(compiling_crate_key(), bare_name.clone()))
+    {
         let first = &path.segments.first().unwrap().ident;
         if first != "crate" {
             let msg = format!(
@@ -404,14 +424,24 @@ fn validate_fully_qualified_path(path: &Path, arg_name: &str) -> syn::Result<()>
 /// sharing declaration (e.g. a DSL-facing wrapper sharing its bare name with the raw native leaf
 /// it composes, such as `builtins::MenuItem` alongside this same crate's own `MenuItem` — a
 /// deliberately supported naming pattern, see this module's own top doc comment on `struct_only`).
-fn register_same_crate_class(bare_name: &str, struct_only: &Option<Path>, no_ancestor_forward: bool) -> bool {
+fn register_same_crate_class(
+    bare_name: &str,
+    struct_only: &Option<Path>,
+    no_ancestor_forward: bool,
+) -> bool {
     let struct_only = struct_only.as_ref().map(|p| quote! { #p }.to_string());
     let key = (compiling_crate_key(), bare_name.to_string());
     let mut registry = same_crate_classes().lock().unwrap();
     if registry.contains_key(&key) {
         false
     } else {
-        registry.insert(key, SameCrateClassInfo { struct_only, no_ancestor_forward });
+        registry.insert(
+            key,
+            SameCrateClassInfo {
+                struct_only,
+                no_ancestor_forward,
+            },
+        );
         true
     }
 }
@@ -447,7 +477,14 @@ fn path_module_prefix(ty: &Type) -> Option<TokenStream2> {
         return None;
     }
     let leading_colon = &tp.path.leading_colon;
-    let prefix_idents = tp.path.segments.iter().rev().skip(1).rev().map(|s| &s.ident);
+    let prefix_idents = tp
+        .path
+        .segments
+        .iter()
+        .rev()
+        .skip(1)
+        .rev()
+        .map(|s| &s.ident);
     let bare_name = tp.path.segments.last()?.ident.to_string();
     let mod_ident = macro_reexport_mod_ident(&bare_name);
     Some(quote! { #leading_colon #(#prefix_idents)::* :: #mod_ident })
@@ -459,7 +496,11 @@ fn path_module_prefix(ty: &Type) -> Option<TokenStream2> {
 /// currently compiling (a genuine same-crate declaration), `Some(path_module_prefix(ty))`
 /// otherwise — see that function's own doc comment for why this is always correct.
 fn inherit_macro_prefix(bare_name: &str, ty: &Type) -> Option<TokenStream2> {
-    if same_crate_classes().lock().unwrap().contains_key(&(compiling_crate_key(), bare_name.to_string())) {
+    if same_crate_classes()
+        .lock()
+        .unwrap()
+        .contains_key(&(compiling_crate_key(), bare_name.to_string()))
+    {
         return None;
     }
     path_module_prefix(ty)
@@ -495,7 +536,9 @@ fn inherit_macro_self_ref_path(bare_name: &str, ty: &Type, ident: Ident) -> Toke
 
 /// See `same_crate_classes`'s own doc comment (question 2).
 fn struct_only_collides_with(own_struct_only: &Option<Path>, parent_bare_name: &str) -> bool {
-    let Some(own) = own_struct_only else { return false };
+    let Some(own) = own_struct_only else {
+        return false;
+    };
     let own_str = quote! { #own }.to_string();
     same_crate_classes()
         .lock()
@@ -521,7 +564,9 @@ fn ancestor_own_trait(bare_name: &str, fallback: &Type) -> TokenStream2 {
         .get(&(compiling_crate_key(), bare_name.to_string()))
         .and_then(|info| info.struct_only.clone());
     match real {
-        Some(s) => s.parse().expect("#[class]: internal: failed to reparse stored struct_only path"),
+        Some(s) => s
+            .parse()
+            .expect("#[class]: internal: failed to reparse stored struct_only path"),
         None => {
             let t = ext_trait_type(fallback);
             quote! { #t }
@@ -575,7 +620,10 @@ fn to_snake_case(name: &str) -> String {
     for (i, &ch) in chars.iter().enumerate() {
         if ch.is_uppercase() {
             let prev_is_lower = i > 0 && chars[i - 1].is_lowercase();
-            let prev_is_upper_and_next_is_lower = i > 0 && chars[i - 1].is_uppercase() && i + 1 < chars.len() && chars[i + 1].is_lowercase();
+            let prev_is_upper_and_next_is_lower = i > 0
+                && chars[i - 1].is_uppercase()
+                && i + 1 < chars.len()
+                && chars[i + 1].is_lowercase();
             if i > 0 && (prev_is_lower || prev_is_upper_and_next_is_lower) {
                 out.push('_');
             }
@@ -851,13 +899,19 @@ fn build_inherit_macros(
     // insufficient once a hop can override *some but not all* of a trait's overridable methods). A
     // class with no `#[overridable]` methods of its own (the overwhelming majority) gets zero
     // slots, making every pattern/expansion below identical to before this mechanism existed.
-    let slot_idents: Vec<Ident> = (0..overridable_names.len()).map(|i| format_ident!("__slot_{i}")).collect();
+    let slot_idents: Vec<Ident> = (0..overridable_names.len())
+        .map(|i| format_ident!("__slot_{i}"))
+        .collect();
     // Pattern position: `[$( $__slot_i:item )?]` — captures this slot generically, whether or not
     // this particular arm is the one that fills it.
-    let slot_patterns: Vec<TokenStream2> = slot_idents.iter().map(|s| quote! { [$( $#s:item )?] }).collect();
+    let slot_patterns: Vec<TokenStream2> = slot_idents
+        .iter()
+        .map(|s| quote! { [$( $#s:item )?] })
+        .collect();
     // Expansion position: `[$( $__slot_i )?]` — re-embeds whatever this slot already held,
     // unchanged (used by every arm that doesn't touch this particular slot).
-    let slot_passthroughs: Vec<TokenStream2> = slot_idents.iter().map(|s| quote! { [$( $#s )?] }).collect();
+    let slot_passthroughs: Vec<TokenStream2> =
+        slot_idents.iter().map(|s| quote! { [$( $#s )?] }).collect();
     // The entry macro's own initial call: one literal empty `[]` per slot (no `$`/metavariable
     // involved here — this is the concrete starting value classify's own patterns above then match
     // against).
@@ -1037,8 +1091,11 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
                     return e.to_compile_error();
                 }
             }
-            let owns_inherit_macros =
-                register_same_crate_class(&item_struct.ident.to_string(), &args.struct_only, args.no_ancestor_forward);
+            let owns_inherit_macros = register_same_crate_class(
+                &item_struct.ident.to_string(),
+                &args.struct_only,
+                args.no_ancestor_forward,
+            );
             store_class_args(&item_struct.ident.to_string(), &args, owns_inherit_macros);
             expand_struct(&args, item_struct)
         }
@@ -1060,7 +1117,7 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
 /// up depending on `elwindui-core`, directly or only transitively through the `elwindui` facade,
 /// resolves correctly with no changes to this function.
 fn core_path() -> TokenStream2 {
-    use proc_macro_crate::{crate_name, FoundCrate};
+    use proc_macro_crate::{FoundCrate, crate_name};
     match crate_name("elwindui-core") {
         Ok(FoundCrate::Itself) => quote! { crate },
         Ok(FoundCrate::Name(name)) => {
@@ -1088,8 +1145,11 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
         Fields::Named(named) => named.named.iter().cloned().collect(),
         Fields::Unit => Vec::new(),
         Fields::Unnamed(_) => {
-            return syn::Error::new_spanned(&item, "#[class]: struct must use named fields, not a tuple struct")
-                .to_compile_error();
+            return syn::Error::new_spanned(
+                &item,
+                "#[class]: struct must use named fields, not a tuple struct",
+            )
+            .to_compile_error();
         }
     };
 
@@ -1156,10 +1216,15 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     let core = core_path();
     let bound_ty: Type = match &args.inherits {
         Some(t) => ext_trait_type(t),
-        None => syn::parse2(quote! { #core::base::AsAny }).expect("#[class]: internal: failed to build AsAny bound"),
+        None => syn::parse2(quote! { #core::base::AsAny })
+            .expect("#[class]: internal: failed to build AsAny bound"),
     };
     let bound = quote! { #bound_ty };
-    let colon_bound = if user_supertraits.is_empty() { quote! { : #bound } } else { quote! { : #user_supertraits + #bound } };
+    let colon_bound = if user_supertraits.is_empty() {
+        quote! { : #bound }
+    } else {
+        quote! { : #user_supertraits + #bound }
+    };
     let owns_inherit_macros = register_same_crate_class(&bare_name, &None, false);
     let sigs: Vec<syn::Signature> = items
         .iter()
@@ -1253,7 +1318,10 @@ fn build_rust_analyzer_shadow(
     let construct_fn = if has_hand_written_new {
         None
     } else {
-        ctor_methods.iter().find(|(f, _)| f.sig.ident == "construct").map(|(f, _)| f)
+        ctor_methods
+            .iter()
+            .find(|(f, _)| f.sig.ident == "construct")
+            .map(|(f, _)| f)
     };
     let auto_new = construct_fn.map(|f| {
         let params = &f.sig.inputs;
@@ -1308,9 +1376,15 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     let class_name = match &*item.self_ty {
         Type::Path(tp) => match tp.path.segments.last() {
             Some(seg) => seg.ident.clone(),
-            None => return syn::Error::new_spanned(&item.self_ty, "#[class]: empty type path").to_compile_error(),
+            None => {
+                return syn::Error::new_spanned(&item.self_ty, "#[class]: empty type path")
+                    .to_compile_error();
+            }
         },
-        other => return syn::Error::new_spanned(other, "#[class]: unsupported `impl` self type").to_compile_error(),
+        other => {
+            return syn::Error::new_spanned(other, "#[class]: unsupported `impl` self type")
+                .to_compile_error();
+        }
     };
     let bare_name = class_name.to_string();
     // The compiled struct is always exactly `class_name` — no suffix transform.
@@ -1349,7 +1423,11 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 if is_overridable {
                     overridable_names.push(f.sig.ident.clone());
                 }
-                f.attrs.retain(|a| !(a.path().is_ident("overridable") || a.path().is_ident("overrides") || a.path().is_ident("inherent")));
+                f.attrs.retain(|a| {
+                    !(a.path().is_ident("overridable")
+                        || a.path().is_ident("overrides")
+                        || a.path().is_ident("inherent"))
+                });
                 if is_overrides {
                     let mut f = f.clone();
                     f.vis = Visibility::Inherited;
@@ -1377,8 +1455,11 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 }
             }
             other => {
-                return syn::Error::new_spanned(other, "#[class]: only `fn` items are supported inside `impl ClassName { .. }`")
-                    .to_compile_error();
+                return syn::Error::new_spanned(
+                    other,
+                    "#[class]: only `fn` items are supported inside `impl ClassName { .. }`",
+                )
+                .to_compile_error();
             }
         }
     }
@@ -1453,7 +1534,8 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     let mut prelude = Vec::new();
     if let Some(inh) = &args.inherits {
         if let Some(parent_bare) = last_segment_name(inh) {
-            let sealed_path = inherit_macro_path(&parent_bare, inh, sealed_check_ident(&parent_bare));
+            let sealed_path =
+                inherit_macro_path(&parent_bare, inh, sealed_check_ident(&parent_bare));
             prelude.push(quote! { #sealed_path!(); });
 
             // `Parent`'s own entry macro is always invoked here, regardless of *this* class's own
@@ -1479,20 +1561,27 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             // builds an `impl`, so it has no use for these and doesn't take them.
             let parent_trait = ancestor_own_trait(&parent_bare, inh);
             if struct_only_collides_with(&args.struct_only, &parent_bare) {
-                let invoke_path = inherit_macro_path(&parent_bare, inh, inherit_macro_skip_ident(&parent_bare));
+                let invoke_path =
+                    inherit_macro_path(&parent_bare, inh, inherit_macro_skip_ident(&parent_bare));
                 prelude.push(quote! {
                     #invoke_path!(#impl_name #ty_generics; #(#overrides)*);
                 });
             } else {
-                let invoke_path = inherit_macro_path(&parent_bare, inh, inherit_macro_ident(&parent_bare));
+                let invoke_path =
+                    inherit_macro_path(&parent_bare, inh, inherit_macro_ident(&parent_bare));
                 prelude.push(quote! {
                     #invoke_path!(#impl_name #ty_generics, #parent_trait, #inh; #(#overrides)*);
                 });
             }
         }
     } else if !override_methods.is_empty() {
-        let names: Vec<String> = override_methods.iter().map(|f| f.sig.ident.to_string()).collect();
-        let msg = format!("#[class]: #[overrides] methods {names:?} require `inherits = ..` (root class mode has no ancestor)");
+        let names: Vec<String> = override_methods
+            .iter()
+            .map(|f| f.sig.ident.to_string())
+            .collect();
+        let msg = format!(
+            "#[class]: #[overrides] methods {names:?} require `inherits = ..` (root class mode has no ancestor)"
+        );
         return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
     }
 
@@ -1505,7 +1594,11 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         // `no_ancestor_forward` (e.g. `NativeTabView`'s `struct_only = TabView`): that target is a
         // hand-written trait predating this macro's `__dyn_x` convention, with no such method
         // declared on it at all — adding one here would be E0407 (method not a member of trait).
-        let existing_name = existing.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+        let existing_name = existing
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
         let dyn_accessor = (!args.no_ancestor_forward).then(|| {
             let dyn_ident = dyn_accessor_ident(&existing_name);
             quote! { fn #dyn_ident(&self) -> &dyn #existing { self } }
@@ -1551,11 +1644,14 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         // existing shape (its literal body embedded directly as the trait's own default, shared
         // verbatim by every descendant, since nothing ever overrides it).
         let dyn_ident = dyn_accessor_ident(&bare_name);
-        let (overridable_methods, plain_methods): (Vec<ImplItemFn>, Vec<ImplItemFn>) =
-            own_methods.into_iter().partition(|f| overridable_names.iter().any(|n| *n == f.sig.ident));
+        let (overridable_methods, plain_methods): (Vec<ImplItemFn>, Vec<ImplItemFn>) = own_methods
+            .into_iter()
+            .partition(|f| overridable_names.iter().any(|n| *n == f.sig.ident));
         let ext_ty = quote! { #ext_ident #ty_generics };
-        let overridable_sigs: Vec<syn::Signature> = overridable_methods.iter().map(|f| f.sig.clone()).collect();
-        let overridable_defaults = build_dyn_default_methods(&dyn_ident, &ext_ty, &overridable_sigs, &overridable_names);
+        let overridable_sigs: Vec<syn::Signature> =
+            overridable_methods.iter().map(|f| f.sig.clone()).collect();
+        let overridable_defaults =
+            build_dyn_default_methods(&dyn_ident, &ext_ty, &overridable_sigs, &overridable_names);
         let plain_defaults = plain_methods.iter().map(|f| quote! { #f });
         let overridable_bodies = overridable_methods.iter().map(|f| quote! { #f });
         // Each overridable method's own *dedicated* accessor (`per_method_accessor_ident` — see
@@ -1613,7 +1709,8 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         let dyn_ident = dyn_accessor_ident(&bare_name);
         let own_sigs: Vec<syn::Signature> = own_methods.iter().map(|f| f.sig.clone()).collect();
         let ext_ty = quote! { #ext_ident #ty_generics };
-        let dyn_methods = build_dyn_default_methods(&dyn_ident, &ext_ty, &own_sigs, &overridable_names);
+        let dyn_methods =
+            build_dyn_default_methods(&dyn_ident, &ext_ty, &own_sigs, &overridable_names);
         let bodies = own_methods.iter().map(|f| quote! { #f });
         // See root mode's own identical treatment (above) for why each of *this* class's own
         // `#[overridable]` methods (if it declares any of its own, beyond just re-overriding an
@@ -1659,7 +1756,10 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     let construct_fn = if has_hand_written_new || args.abstract_class {
         None
     } else {
-        ctor_methods.iter().find(|(f, _)| f.sig.ident == "construct").map(|(f, _)| f.clone())
+        ctor_methods
+            .iter()
+            .find(|(f, _)| f.sig.ident == "construct")
+            .map(|(f, _)| f.clone())
     };
     let auto_new = construct_fn.as_ref().map(|f| {
         let params = &f.sig.inputs;
@@ -1730,7 +1830,12 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         None
     } else {
         let dyn_ident = match &args.struct_only {
-            Some(p) => dyn_accessor_ident(&p.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()),
+            Some(p) => dyn_accessor_ident(
+                &p.segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default(),
+            ),
             None => dyn_accessor_ident(&bare_name),
         };
         // No further ancestor to recurse to (true root mode, e.g. `UIElement` -- or a
@@ -1747,7 +1852,11 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         let (recurse_macro_path, recurse_next) = match &args.inherits {
             Some(inh) => {
                 let parent_bare = last_segment_name(inh).unwrap_or_default();
-                let path = inherit_macro_self_ref_path(&parent_bare, inh, inherit_macro_ident(&parent_bare));
+                let path = inherit_macro_self_ref_path(
+                    &parent_bare,
+                    inh,
+                    inherit_macro_ident(&parent_bare),
+                );
                 let next_trait = rewrite_crate_segment(ancestor_own_trait(&parent_bare, inh));
                 let next_concrete = rewrite_crate_segment(quote! { #inh });
                 (path, Some((next_trait, next_concrete)))
@@ -1758,7 +1867,11 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         // A root class's `as_ui_element` is a *second* required method beyond `dyn_ident` itself
         // (see `build_inherit_macros`'s own doc comment on `extra_required_names`) — every other
         // shape has none.
-        let extra_required_names: Vec<Ident> = if is_root_mode { vec![format_ident!("as_ui_element")] } else { Vec::new() };
+        let extra_required_names: Vec<Ident> = if is_root_mode {
+            vec![format_ident!("as_ui_element")]
+        } else {
+            Vec::new()
+        };
         Some(build_inherit_macros(
             &bare_name,
             &dyn_ident,
@@ -1861,6 +1974,7 @@ mod rust_analyzer_shadow_tests {
             }
         };
         let out = expand_impl(ClassArgs::default(), item, true);
-        syn::parse2::<syn::File>(out).expect("rust-analyzer shadow output must be valid Rust syntax");
+        syn::parse2::<syn::File>(out)
+            .expect("rust-analyzer shadow output must be valid Rust syntax");
     }
 }

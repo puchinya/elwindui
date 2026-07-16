@@ -9,8 +9,11 @@
 //! into real XAML elements by `inner::TreeHostPanel` (used by both `Window`'s content view and
 //! `TabView`'s per-tab content area).
 
-use crate::inner::{InnerButton, InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem, InnerTabView, InnerTextArea, InnerWindow};
 use crate::AnyView;
+use crate::inner::{
+    InnerButton, InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem, InnerTabView,
+    InnerTextArea, InnerWindow,
+};
 // Deliberately *not* `use elwindui_core::base::AsAny;` here — see
 // `elwindui_backend_appkit::native_ui::MenuBarItem::set_submenu`'s doc comment (the one place that
 // pattern is explained in full) for why importing `AsAny` directly, rather than relying on it as
@@ -42,7 +45,10 @@ impl NativeControl {
         Some(&self.handle)
     }
     pub fn new(handle: AnyView) -> Self {
-        Self { base: elwindui_core::ui::UIElement::default(), handle }
+        Self {
+            base: elwindui_core::ui::UIElement::default(),
+            handle,
+        }
     }
 }
 
@@ -61,7 +67,9 @@ impl Window {
     // lets a `component X inherits Window` (host composition) embed a real `Window` directly as its
     // own `base` field.
     fn construct() -> Self {
-        Self { inner: InnerWindow::new() }
+        Self {
+            inner: InnerWindow::new(),
+        }
     }
 
     fn set_title(&self, title: &str) {
@@ -146,7 +154,10 @@ impl TextArea {
     fn new() -> Rc<Self> {
         let inner = InnerTextArea::new();
         let handle = inner.handle();
-        Rc::new(Self { base: NativeControl::new(handle), inner })
+        Rc::new(Self {
+            base: NativeControl::new(handle),
+            inner,
+        })
     }
 }
 
@@ -161,8 +172,14 @@ impl Button {
     /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)
     /// to fire `dispatch_routed` starting at this same node.
     #[inherent]
-    pub fn register_routed_handler<T: 'static>(&self, name: &'static str, handler: Box<dyn Fn(&T, &elwindui_core::input::RoutedEventArgs)>) {
-        self.base.as_ui_element().register_routed_handler(name, handler);
+    pub fn register_routed_handler<T: 'static>(
+        &self,
+        name: &'static str,
+        handler: Box<dyn Fn(&T, &elwindui_core::input::RoutedEventArgs)>,
+    ) {
+        self.base
+            .as_ui_element()
+            .register_routed_handler(name, handler);
     }
 
     #[inherent]
@@ -183,7 +200,10 @@ impl Button {
     fn new() -> Rc<Self> {
         let inner = InnerButton::new();
         let handle = inner.handle();
-        let this = Rc::new(Self { base: NativeControl::new(handle), inner });
+        let this = Rc::new(Self {
+            base: NativeControl::new(handle),
+            inner,
+        });
         // Wires the real XAML click directly to `dispatch_routed`, once, right here, rather than
         // re-detecting/re-wiring it on every relayout. Unconditional — `dispatch_routed` already
         // no-ops gracefully when nothing is registered for `"on_click"` at this node or any
@@ -240,7 +260,7 @@ pub struct TabView {
 /// own shape; every method below stays `#[inherent]`, unchanged.
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewItemExt)]
 pub struct TabViewItemImpl {
-    data_context: RefCell<Option<Rc<dyn Any>>>,
+    item: RefCell<Option<Rc<dyn Any>>>,
     header: RefCell<String>,
     // Taken (moved into a real `TreeHostPanel`) the first time this `TabViewItem` is inserted as a
     // displayed tab; `None` afterward — see `TabView`'s own doc comment for why that's never a
@@ -255,7 +275,7 @@ impl TabViewItemImpl {
     #[inherent]
     pub fn new() -> Rc<Self> {
         Rc::new(Self {
-            data_context: RefCell::new(None),
+            item: RefCell::new(None),
             header: RefCell::new(String::new()),
             content: RefCell::new(None),
             closable: Cell::new(true),
@@ -265,21 +285,21 @@ impl TabViewItemImpl {
 
     /// Same shape as `sync_dynamic_entries`'s own erased construction need — kept as a free
     /// function (not a method) since it builds a whole `Self` from an already-erased
-    /// `Rc<dyn Any>`, unlike `set_data_context<T>` (a real setter, generic over `T`).
+    /// `Rc<dyn Any>` item used to preserve dynamic-entry identity.
     #[inherent]
-    fn new_erased(data_context: Option<Rc<dyn Any>>, header: &str, content: Rc<dyn UIElementExt>, closable: Option<bool>) -> Rc<Self> {
+    fn new_erased(
+        item: Option<Rc<dyn Any>>,
+        header: &str,
+        content: Rc<dyn UIElementExt>,
+        closable: Option<bool>,
+    ) -> Rc<Self> {
         Rc::new(Self {
-            data_context: RefCell::new(data_context),
+            item: RefCell::new(item),
             header: RefCell::new(header.to_string()),
             content: RefCell::new(Some(content)),
             closable: Cell::new(closable.unwrap_or(true)),
             on_close: RefCell::new(None),
         })
-    }
-
-    #[inherent]
-    pub fn set_data_context<T: 'static>(&self, data_context: Rc<T>) {
-        *self.data_context.borrow_mut() = Some(data_context as Rc<dyn Any>);
     }
 
     #[inherent]
@@ -312,7 +332,11 @@ struct DynamicSource {
 
 impl Default for DynamicSource {
     fn default() -> Self {
-        DynamicSource { header_template: None, item_template: None, closable_default: true }
+        DynamicSource {
+            header_template: None,
+            item_template: None,
+            closable_default: true,
+        }
     }
 }
 
@@ -370,13 +394,19 @@ impl TabView {
     /// hand-written Rust glue code.
     #[inherent]
     pub fn selected_item(&self) -> Option<Rc<dyn Any>> {
-        self.entries.borrow().get(self.selected_index.get()).and_then(|e| e.data_context.borrow().clone())
+        self.entries
+            .borrow()
+            .get(self.selected_index.get())
+            .and_then(|e| e.item.borrow().clone())
     }
 
     /// WinUI3's `SelectedContainer` concept — see `selected_item`'s doc comment.
     #[inherent]
     pub fn selected_container(&self) -> Option<Rc<TabViewItemImpl>> {
-        self.entries.borrow().get(self.selected_index.get()).cloned()
+        self.entries
+            .borrow()
+            .get(self.selected_index.get())
+            .cloned()
     }
 
     /// A static `TabViewItem`'s own `on_close` (if set) takes precedence — it's the per-item
@@ -411,7 +441,7 @@ impl TabView {
     }
 
     /// Dynamic mode only — resyncs `items_source`. Reuses each already-synthesized `TabViewItem`
-    /// whose `data_context` is still `Rc::ptr_eq` to the same element; only genuinely new elements
+    /// whose stored item is still `Rc::ptr_eq` to the same element; only genuinely new elements
     /// call `header_template`/`item_template`.
     #[inherent]
     pub fn set_items_source<T: 'static>(&self, items: Vec<Rc<T>>) {
@@ -432,7 +462,10 @@ impl TabView {
     /// The default `closable` for a synthesized `TabViewItem` in dynamic mode.
     #[inherent]
     pub fn set_closable(&self, closable: bool) {
-        self.dynamic.borrow_mut().get_or_insert_with(DynamicSource::default).closable_default = closable;
+        self.dynamic
+            .borrow_mut()
+            .get_or_insert_with(DynamicSource::default)
+            .closable_default = closable;
     }
 
     #[inherent]
@@ -443,13 +476,24 @@ impl TabView {
     #[inherent]
     fn sync_dynamic_entries(&self, items: Vec<Rc<dyn Any>>) {
         let dynamic = self.dynamic.borrow();
-        let Some(dynamic) = dynamic.as_ref() else { return };
-        let (Some(header_template), Some(item_template)) = (&dynamic.header_template, &dynamic.item_template) else { return };
+        let Some(dynamic) = dynamic.as_ref() else {
+            return;
+        };
+        let (Some(header_template), Some(item_template)) =
+            (&dynamic.header_template, &dynamic.item_template)
+        else {
+            return;
+        };
         let mut entries = self.entries.borrow_mut();
         let new_entries: Vec<Rc<TabViewItemImpl>> = items
             .iter()
             .map(|item| {
-                match entries.iter().find(|e| e.data_context.borrow().as_ref().is_some_and(|dc| Rc::ptr_eq(dc, item))) {
+                match entries.iter().find(|e| {
+                    e.item
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|entry_item| Rc::ptr_eq(entry_item, item))
+                }) {
                     // Re-run `header_template` even for a reused entry — the label (e.g. a
                     // document's file name) can change independently of the item's own identity,
                     // and `entry.header` is otherwise never refreshed after construction.
@@ -460,7 +504,12 @@ impl TabView {
                     None => {
                         let header = header_template(item);
                         let content = item_template(item);
-                        TabViewItemImpl::new_erased(Some(Rc::clone(item)), &header, content, Some(dynamic.closable_default))
+                        TabViewItemImpl::new_erased(
+                            Some(Rc::clone(item)),
+                            &header,
+                            content,
+                            Some(dynamic.closable_default),
+                        )
                     }
                 }
             })
@@ -492,7 +541,9 @@ impl TabView {
             if !displayed.contains(key) {
                 let label = entry.header.borrow().clone();
                 let closable = entry.closable.get();
-                let content_host = self.inner.insert_tab(target_index.min(displayed.len()), &label, closable);
+                let content_host =
+                    self.inner
+                        .insert_tab(target_index.min(displayed.len()), &label, closable);
                 if let Some(content) = entry.content.borrow_mut().take() {
                     content_host.set_tree(content);
                 }
@@ -515,17 +566,25 @@ fn erase_items<T: 'static>(items: Vec<Rc<T>>) -> Vec<Rc<dyn Any>> {
 /// `Fn(&Rc<dyn Any>) -> String` — downcasting back to the concrete `T` on every call. The
 /// `Rc<dyn Any>`s it's ever actually called with all come from `erase_items::<T>` for this same
 /// `TabView`, so the downcast always succeeds.
-fn erase_render_string<T: 'static>(f: Box<dyn Fn(&Rc<T>) -> String>) -> Box<dyn Fn(&Rc<dyn Any>) -> String> {
+fn erase_render_string<T: 'static>(
+    f: Box<dyn Fn(&Rc<T>) -> String>,
+) -> Box<dyn Fn(&Rc<dyn Any>) -> String> {
     Box::new(move |item: &Rc<dyn Any>| {
-        let item: Rc<T> = Rc::clone(item).downcast::<T>().unwrap_or_else(|_| panic!("elwindui: TabView item type mismatch"));
+        let item: Rc<T> = Rc::clone(item)
+            .downcast::<T>()
+            .unwrap_or_else(|_| panic!("elwindui: TabView item type mismatch"));
         f(&item)
     })
 }
 
 /// Same as `erase_render_string`, for `item_template`'s `Rc<dyn UIElement>`-returning shape.
-fn erase_render<T: 'static>(f: Box<dyn Fn(&Rc<T>) -> Rc<dyn UIElementExt>>) -> Box<dyn Fn(&Rc<dyn Any>) -> Rc<dyn UIElementExt>> {
+fn erase_render<T: 'static>(
+    f: Box<dyn Fn(&Rc<T>) -> Rc<dyn UIElementExt>>,
+) -> Box<dyn Fn(&Rc<dyn Any>) -> Rc<dyn UIElementExt>> {
     Box::new(move |item: &Rc<dyn Any>| {
-        let item: Rc<T> = Rc::clone(item).downcast::<T>().unwrap_or_else(|_| panic!("elwindui: TabView item type mismatch"));
+        let item: Rc<T> = Rc::clone(item)
+            .downcast::<T>()
+            .unwrap_or_else(|_| panic!("elwindui: TabView item type mismatch"));
         f(&item)
     })
 }
@@ -544,7 +603,10 @@ pub struct MenuBar {
 #[elwindui_macros::class]
 impl MenuBar {
     fn new() -> Rc<Self> {
-        Rc::new(Self { inner: InnerMenuBar::new(), children: RefCell::new(Vec::new()) })
+        Rc::new(Self {
+            inner: InnerMenuBar::new(),
+            children: RefCell::new(Vec::new()),
+        })
     }
 
     /// Reconciles the native menu bar's installed items against `children` by `Rc` pointer
@@ -555,9 +617,15 @@ impl MenuBar {
     pub fn set_children(&self, children: Vec<Rc<MenuBarItem>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
-            let keep = children.iter().any(|new| Rc::ptr_eq(old, &(Rc::clone(new) as Rc<dyn elwindui_core::ui::MenuBarItemExt>)));
+            let keep = children.iter().any(|new| {
+                Rc::ptr_eq(
+                    old,
+                    &(Rc::clone(new) as Rc<dyn elwindui_core::ui::MenuBarItemExt>),
+                )
+            });
             if !keep {
-                self.inner.remove_item(&downcast_menu_bar_item(&**old).inner);
+                self.inner
+                    .remove_item(&downcast_menu_bar_item(&**old).inner);
             }
             keep
         });
@@ -583,7 +651,9 @@ impl MenuBar {
 }
 
 fn downcast_menu_bar_item(item: &dyn elwindui_core::ui::MenuBarItemExt) -> &MenuBarItem {
-    item.as_any().downcast_ref::<MenuBarItem>().expect("MenuBarExt: item must be this backend's MenuBarItem")
+    item.as_any()
+        .downcast_ref::<MenuBarItem>()
+        .expect("MenuBarExt: item must be this backend's MenuBarItem")
 }
 
 impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuBarItemExt> for MenuBar {
@@ -602,21 +672,26 @@ impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuBarItemExt> for MenuB
     }
     fn remove(&self, item: &Rc<dyn elwindui_core::ui::MenuBarItemExt>) -> bool {
         let mut children = self.children.borrow_mut();
-        let Some(pos) = children.iter().position(|old| Rc::ptr_eq(old, item)) else { return false };
-        self.inner.remove_item(&downcast_menu_bar_item(&*children[pos]).inner);
+        let Some(pos) = children.iter().position(|old| Rc::ptr_eq(old, item)) else {
+            return false;
+        };
+        self.inner
+            .remove_item(&downcast_menu_bar_item(&*children[pos]).inner);
         children.remove(pos);
         true
     }
     fn remove_at(&self, index: usize) -> Rc<dyn elwindui_core::ui::MenuBarItemExt> {
         let mut children = self.children.borrow_mut();
         let item = children.remove(index);
-        self.inner.remove_item(&downcast_menu_bar_item(&*item).inner);
+        self.inner
+            .remove_item(&downcast_menu_bar_item(&*item).inner);
         item
     }
     fn clear(&self) {
         let mut children = self.children.borrow_mut();
         for item in children.drain(..) {
-            self.inner.remove_item(&downcast_menu_bar_item(&*item).inner);
+            self.inner
+                .remove_item(&downcast_menu_bar_item(&*item).inner);
         }
     }
     fn len(&self) -> usize {
@@ -638,7 +713,9 @@ pub struct MenuBarItem {
 #[elwindui_macros::class]
 impl MenuBarItem {
     fn new() -> Rc<Self> {
-        Rc::new(Self { inner: InnerMenuBarItem::new() })
+        Rc::new(Self {
+            inner: InnerMenuBarItem::new(),
+        })
     }
 
     fn set_text(&self, text: &str) {
@@ -671,7 +748,10 @@ pub struct Menu {
 #[elwindui_macros::class]
 impl Menu {
     fn new() -> Rc<Self> {
-        Rc::new(Self { inner: InnerMenu::new(), children: RefCell::new(Vec::new()) })
+        Rc::new(Self {
+            inner: InnerMenu::new(),
+            children: RefCell::new(Vec::new()),
+        })
     }
 
     /// See `MenuBar::set_children`'s doc comment — same reconciliation pattern.
@@ -679,7 +759,12 @@ impl Menu {
     pub fn set_children(&self, children: Vec<Rc<MenuItem>>) {
         let mut current = self.children.borrow_mut();
         current.retain(|old| {
-            let keep = children.iter().any(|new| Rc::ptr_eq(old, &(Rc::clone(new) as Rc<dyn elwindui_core::ui::MenuItemExt>)));
+            let keep = children.iter().any(|new| {
+                Rc::ptr_eq(
+                    old,
+                    &(Rc::clone(new) as Rc<dyn elwindui_core::ui::MenuItemExt>),
+                )
+            });
             if !keep {
                 self.inner.remove_item(&downcast_menu_item(&**old).inner);
             }
@@ -707,7 +792,9 @@ impl Menu {
 }
 
 fn downcast_menu_item(item: &dyn elwindui_core::ui::MenuItemExt) -> &MenuItem {
-    item.as_any().downcast_ref::<MenuItem>().expect("MenuExt: item must be this backend's MenuItem")
+    item.as_any()
+        .downcast_ref::<MenuItem>()
+        .expect("MenuExt: item must be this backend's MenuItem")
 }
 
 impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuItemExt> for Menu {
@@ -724,8 +811,11 @@ impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuItemExt> for Menu {
     }
     fn remove(&self, item: &Rc<dyn elwindui_core::ui::MenuItemExt>) -> bool {
         let mut children = self.children.borrow_mut();
-        let Some(pos) = children.iter().position(|old| Rc::ptr_eq(old, item)) else { return false };
-        self.inner.remove_item(&downcast_menu_item(&*children[pos]).inner);
+        let Some(pos) = children.iter().position(|old| Rc::ptr_eq(old, item)) else {
+            return false;
+        };
+        self.inner
+            .remove_item(&downcast_menu_item(&*children[pos]).inner);
         children.remove(pos);
         true
     }
@@ -760,7 +850,9 @@ pub struct MenuItem {
 #[elwindui_macros::class]
 impl MenuItem {
     fn new() -> Rc<Self> {
-        Rc::new(Self { inner: InnerMenuItem::new() })
+        Rc::new(Self {
+            inner: InnerMenuItem::new(),
+        })
     }
 
     fn set_text(&self, text: &str) {

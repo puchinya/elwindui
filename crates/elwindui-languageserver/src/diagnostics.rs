@@ -40,7 +40,9 @@ pub fn parse_dir_modules(dir: impl AsRef<Path>) -> Vec<(PathBuf, Module)> {
     elwind_file_sources(dir.as_ref())
         .into_iter()
         .filter_map(|(path, text)| {
-            elwindui_codegen::parser::parse_module(&text).ok().map(|module| (path, module))
+            elwindui_codegen::parser::parse_module(&text)
+                .ok()
+                .map(|module| (path, module))
         })
         .collect()
 }
@@ -73,7 +75,9 @@ pub fn diagnostics_for_dir(dir: impl AsRef<Path>) -> HashMap<PathBuf, Vec<Diagno
             Ok(module) => modules.push(module),
             Err(e) => {
                 had_parse_error = true;
-                out.entry(path.clone()).or_default().push(parse_error_diagnostic(&e));
+                out.entry(path.clone())
+                    .or_default()
+                    .push(parse_error_diagnostic(&e));
             }
         }
     }
@@ -87,7 +91,9 @@ pub fn diagnostics_for_dir(dir: impl AsRef<Path>) -> HashMap<PathBuf, Vec<Diagno
     if let Err(errors) = elwindui_codegen::validate::validate(&modules) {
         for message in errors {
             let path = best_file_for_message(&sources, &message);
-            out.entry(path).or_default().push(validate_error_diagnostic(&message));
+            out.entry(path)
+                .or_default()
+                .push(validate_error_diagnostic(&message));
         }
     }
 
@@ -122,7 +128,10 @@ fn validate_error_diagnostic(message: &str) -> Diagnostic {
 }
 
 fn point(line: u32) -> Range {
-    Range { start: Position { line, character: 0 }, end: Position { line, character: 0 } }
+    Range {
+        start: Position { line, character: 0 },
+        end: Position { line, character: 0 },
+    }
 }
 
 /// `validate::validate`'s errors are file-agnostic bare strings (e.g. "NotepadWindow: `vm.saev...`
@@ -130,8 +139,10 @@ fn point(line: u32) -> Range {
 /// contains the message's leading identifier. Falls back to the first file if nothing matches —
 /// good enough for "there's a problem somewhere in this directory", not precise attribution.
 fn best_file_for_message(sources: &[(PathBuf, String)], message: &str) -> PathBuf {
-    let leading_ident: String =
-        message.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let leading_ident: String = message
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
     if !leading_ident.is_empty() {
         for (path, text) in sources {
             if text.contains(&leading_ident) {
@@ -150,8 +161,10 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(format!("elwindui_lsp_diag_test_{}_{unique}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "elwindui_lsp_diag_test_{}_{unique}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         for (name, contents) in files {
             std::fs::write(dir.join(name), contents).unwrap();
@@ -180,7 +193,10 @@ view Window1 { Window { TextArea { text: vm.content } } }
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(diags.len(), 2);
-        assert!(diags.values().all(|v| v.is_empty()), "expected no diagnostics, got: {diags:?}");
+        assert!(
+            diags.values().all(|v| v.is_empty()),
+            "expected no diagnostics, got: {diags:?}"
+        );
     }
 
     #[test]
@@ -189,7 +205,11 @@ view Window1 { Window { TextArea { text: vm.content } } }
         let diags = diagnostics_for_dir(&dir);
         std::fs::remove_dir_all(&dir).ok();
 
-        let broken = diags.iter().find(|(p, _)| p.ends_with("broken.elwind")).unwrap().1;
+        let broken = diags
+            .iter()
+            .find(|(p, _)| p.ends_with("broken.elwind"))
+            .unwrap()
+            .1;
         assert!(!broken.is_empty(), "expected a parse-error diagnostic");
     }
 
@@ -208,9 +228,15 @@ view Window2 { Window { Text { text: vm.no_such_field } } }
         let diags = diagnostics_for_dir(&dir);
         std::fs::remove_dir_all(&dir).ok();
 
-        let window_diags = diags.iter().find(|(p, _)| p.ends_with("window.elwind")).unwrap().1;
+        let window_diags = diags
+            .iter()
+            .find(|(p, _)| p.ends_with("window.elwind"))
+            .unwrap()
+            .1;
         assert!(
-            window_diags.iter().any(|d| d.message.contains("no_such_field")),
+            window_diags
+                .iter()
+                .any(|d| d.message.contains("no_such_field")),
             "expected window.elwind's diagnostics to mention the bad reference, got: {diags:?}"
         );
     }

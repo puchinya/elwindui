@@ -573,19 +573,6 @@ view Toolbar {
 
 上記のように条件・繰り返しで生成された要素も、`Row` インスタンスの `visual_children()` から一律に辿れる。
 
-### 共通属性:`data_context`
-
-`margin`/`horizontal_alignment`/`vertical_alignment`(`UIElementBase`)と同様、`data_context`も
-任意の要素に書ける共通属性である(WinUI3の`FrameworkElement.DataContext`)。対象コンポーネントの
-実フィールドにはならず、コード生成器のみが消費して`UIElementBase`へ詰める(型は`Rc<dyn Any>`で
-型消去される — 実行時に`element.data_context()`で参照可能)。
-
-`header_template`/`item_template`のようなテンプレートクロージャ本体の中では、`data_context`は
-そのクロージャ自身の束縛引数への別名として脱糖される(`|doc| ...`の中で`data_context.field`と
-書けば`doc.field`と書いたのと同じ意味になる)。この脱糖はテンプレートクロージャ内に限定されて
-おり、クロージャの外(通常の`view`式)で使っても解決されない — 付録Yの`TabView`/`TabViewItem`
-参照。
-
 ### 共通属性:`#[routed]`(ルーティングイベント、WinUI3スタイル)
 
 コールバック型フィールド(`fn()`等)には`#[routed]`アトリビュートを付けられる。付けたイベントは
@@ -1339,7 +1326,7 @@ elwindui本体(コード生成・手書きランタイム双方)でRustに“ク
     `self.base.method(...)`へ委譲するだけの薄い実装になる。
   - 構造体の生成は構造体リテラルを直接書かず、ファクトリー関数`create_class(...)`を経由する
     (例: `Button`なら`create_button()`)。`margin`/`horizontal_alignment`/`vertical_alignment`/
-    `data_context`/`grid_cell`(`UIElementImpl`が持つ共通フィールド)に加えて、**このクラス自身が
+    `grid_cell`(`UIElementImpl`が持つ共通フィールド)に加えて、**このクラス自身が
     宣言する`#[param]`フィールドも含めて全プロパティ**が`create_class(...)`の引数にはならない——
     ネイティブ手書きビルトイン(`Window`/`Button`/`TextArea`/`MenuBar`/`Menu`/`MenuItem`/
     `MenuBarItem`/`TabView`/`TabViewItem`)と`elwindui-core::ui`の仮想ビルトイン
@@ -1381,7 +1368,7 @@ pub trait UIElement: AsAny {
     fn as_native_control(&self) -> Option<&dyn Any> { None }
 }
 
-// margin/alignment/visibility/data_context/grid_cellは全て内部可変(`Cell`/`RefCell`) —
+// margin/alignment/visibility/grid_cellは全て内部可変(`Cell`/`RefCell`) —
 // `create_xxx(...)`は常に`UIElementImpl::default()`を組み立てるだけで、使用箇所ごとの値は構築後に
 // `set_margin(..)`等のセッターで反映する(前掲の規約説明参照)。
 pub struct UIElementImpl {
@@ -1438,8 +1425,7 @@ UIElement (トレイト、Margin/Alignment共通実装。UIElementImplがbaseな
 
 いずれも実装型は`XxxImpl`(`StackImpl`/`VerticalLayoutImpl`/`HorizontalLayoutImpl`/`ShapeImpl`/
 `TextBlockImpl`/`ControlImpl`/`GridImpl`/`NativeControlImpl<H>`)で、対応する`create_xxx(...)`
-ファクトリー関数(`elwindui_core::ui`)経由で生成し、`new_element(...)`で親子ポインタを配線した
-`Rc<dyn UIElement>`として木に組み込む。
+クラス自身の`new()`で`Rc`化してから、各コレクションの`add()`で子を木に組み込む。
 
 `NativeControlImpl<H>`の判定は`UIElement`の`as_native_control(&self) -> Option<&dyn Any>`という
 デフォルト`None`のメソッド経由で行う(`NativeControlImpl<H>`自身が`Some(self)`を返す)。単純な

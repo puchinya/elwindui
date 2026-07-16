@@ -24,7 +24,7 @@ pub use native_ui::*;
 pub use inner::AnyView;
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSApplicationDelegate};
 use objc2_foundation::NSObjectProtocol;
 use std::cell::RefCell;
@@ -46,7 +46,10 @@ pub mod platform {
             if panel.runModal() != NSModalResponseOK {
                 return None;
             }
-            panel.URL().and_then(|url| url.path()).map(|p| PathBuf::from(p.to_string()))
+            panel
+                .URL()
+                .and_then(|url| url.path())
+                .map(|p| PathBuf::from(p.to_string()))
         }
 
         pub async fn save() -> Option<PathBuf> {
@@ -54,7 +57,10 @@ pub mod platform {
             if panel.runModal() != NSModalResponseOK {
                 return None;
             }
-            panel.URL().and_then(|url| url.path()).map(|p| PathBuf::from(p.to_string()))
+            panel
+                .URL()
+                .and_then(|url| url.path())
+                .map(|p| PathBuf::from(p.to_string()))
         }
     }
 }
@@ -108,7 +114,7 @@ impl AppDelegate {
 /// `elwindui_core::task::set_current`) and the app delegate before any generated code runs. Call
 /// once, after showing the app's window(s).
 pub mod application {
-    use super::{AppDelegate, AppKitDispatcher, APP_DELEGATE};
+    use super::{APP_DELEGATE, AppDelegate, AppKitDispatcher};
     use crate::inner::mtm;
     use elwindui_core::task::LocalExecutor;
     use objc2_app_kit::NSApplication;

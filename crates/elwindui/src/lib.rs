@@ -26,11 +26,11 @@ pub use elwindui_backend_winui3 as backend;
 /// 内容をクレートルート直下に再エクスポートしている(各クレートの`src/lib.rs`参照)ため、
 /// ここではそのクレートルートを丸ごとglobする。
 pub mod ui {
-    pub use elwindui_core::ui::*;
     #[cfg(feature = "backend-appkit")]
     pub use elwindui_backend_appkit::*;
     #[cfg(feature = "backend-winui3")]
     pub use elwindui_backend_winui3::*;
+    pub use elwindui_core::ui::*;
 }
 
 /// `platform::clipboard`/`platform::file_dialog` etc. See docs/elwindui_spec.md 付録T.

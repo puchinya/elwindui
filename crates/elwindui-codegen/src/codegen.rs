@@ -4,8 +4,8 @@
 //! 依存関係グラフに基づくCell/RefCellベースの更新関数生成は付録O.5に対応する。
 
 use crate::ast::{
-    Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef, FieldKind, Initializer, Item,
-    MethodDef, Module, ViewDef, ViewExpr, ViewModelDef,
+    Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef, FieldKind,
+    Initializer, Item, MethodDef, Module, ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -224,7 +224,9 @@ impl SymbolTable {
             return Some(direct);
         }
         from.uses.iter().find_map(|u| {
-            let [prefix @ .., last] = u.path.as_slice() else { return None };
+            let [prefix @ .., last] = u.path.as_slice() else {
+                return None;
+            };
             if last != name {
                 return None;
             }
@@ -269,13 +271,19 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     // the *effective* one (`resolve_view_for` — own view, or inherited from `base`), not just a
     // literal same-module `Item::View`, so a component with no `view` of its own that inherits a
     // logical base's template is still inferred native/virtual correctly.
-    let mut component_meta: HashMap<(Vec<String>, String), (usize, Option<String>, Option<String>, bool)> = HashMap::new();
+    let mut component_meta: HashMap<
+        (Vec<String>, String),
+        (usize, Option<String>, Option<String>, bool),
+    > = HashMap::new();
 
     for (module_index, module) in modules.iter().enumerate() {
         for item in &module.items {
             let Item::Component(c) = item else { continue };
             let view_root = resolve_view_for(module, c, modules).map(|v| v.root.type_path.clone());
-            component_meta.insert((module.path.clone(), c.name.clone()), (module_index, c.base.clone(), view_root, c.native));
+            component_meta.insert(
+                (module.path.clone(), c.name.clone()),
+                (module_index, c.base.clone(), view_root, c.native),
+            );
         }
 
         for item in &module.items {
@@ -285,7 +293,10 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                     let effective_methods = resolve_effective_methods(module, c, modules);
                     let effective_view = resolve_view_for(module, c, modules);
                     let own_view = find_view(module, &c.name);
-                    let field_kinds = effective_fields.iter().map(|f| (f.name.clone(), f.kind)).collect();
+                    let field_kinds = effective_fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.kind))
+                        .collect();
                     let binds = effective_fields
                         .iter()
                         .filter_map(|f| match &f.initializer {
@@ -319,17 +330,26 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         .collect();
                     let two_way_fields = effective_fields
                         .iter()
-                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay)))
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay))
+                        })
                         .map(|f| f.name.clone())
                         .collect();
                     let routed_fields = effective_fields
                         .iter()
-                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::Routed)))
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                        })
                         .map(|f| f.name.clone())
                         .collect();
                     let onetime_fields = effective_fields
                         .iter()
-                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::Onetime)))
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && f.attrs.iter().any(|a| matches!(a, Attr::Onetime))
+                        })
                         .map(|f| f.name.clone())
                         .collect();
                     let field_types = effective_fields
@@ -415,13 +435,19 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                     let two_way_fields = v
                         .fields
                         .iter()
-                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay)))
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay))
+                        })
                         .map(|f| f.name.clone())
                         .collect();
                     let routed_fields = v
                         .fields
                         .iter()
-                        .filter(|f| f.initializer.is_none() && f.attrs.iter().any(|a| matches!(a, Attr::Routed)))
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                        })
                         .map(|f| f.name.clone())
                         .collect();
                     let field_types = v
@@ -475,21 +501,41 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
 
     let mut composed_shape_memo: HashMap<(Vec<String>, String), Option<String>> = HashMap::new();
     for key in &keys {
-        resolve_composed_shape(key, &component_meta, modules, &table, &mut composed_shape_memo);
+        resolve_composed_shape(
+            key,
+            &component_meta,
+            modules,
+            &table,
+            &mut composed_shape_memo,
+        );
     }
 
-    let host_composition_memo: HashMap<(Vec<String>, String), Option<(String, (Vec<String>, String))>> = keys
+    let host_composition_memo: HashMap<
+        (Vec<String>, String),
+        Option<(String, (Vec<String>, String))>,
+    > = keys
         .iter()
-        .map(|key| (key.clone(), resolve_host_composition_base(key, &component_meta, modules, &table, &memo)))
+        .map(|key| {
+            (
+                key.clone(),
+                resolve_host_composition_base(key, &component_meta, modules, &table, &memo),
+            )
+        })
         .collect();
-    let host_composition_base_keys: HashSet<(Vec<String>, String)> =
-        host_composition_memo.values().filter_map(|v| v.as_ref().map(|(_, base_key)| base_key.clone())).collect();
+    let host_composition_base_keys: HashSet<(Vec<String>, String)> = host_composition_memo
+        .values()
+        .filter_map(|v| v.as_ref().map(|(_, base_key)| base_key.clone()))
+        .collect();
 
     let mut types = table.types;
     for (key, info) in types.iter_mut() {
         info.is_native = memo.get(key).copied().unwrap_or(false);
         info.composed_shape = composed_shape_memo.get(key).cloned().flatten();
-        info.host_composition_base = host_composition_memo.get(key).cloned().flatten().map(|(name, _)| name);
+        info.host_composition_base = host_composition_memo
+            .get(key)
+            .cloned()
+            .flatten()
+            .map(|(name, _)| name);
         info.is_host_composition_base = host_composition_base_keys.contains(key);
     }
     SymbolTable { types }
@@ -507,16 +553,22 @@ fn find_component_and_module<'m>(
     name: &str,
     modules: &'m [Module],
 ) -> Option<(&'m Module, &'m ComponentDef)> {
-    if let Some(found) = modules.iter().filter(|m| m.path == from.path).find_map(|m| {
-        m.items.iter().find_map(|i| match i {
-            Item::Component(c) if c.name == name => Some((m, c)),
-            _ => None,
+    if let Some(found) = modules
+        .iter()
+        .filter(|m| m.path == from.path)
+        .find_map(|m| {
+            m.items.iter().find_map(|i| match i {
+                Item::Component(c) if c.name == name => Some((m, c)),
+                _ => None,
+            })
         })
-    }) {
+    {
         return Some(found);
     }
     for u in &from.uses {
-        let [prefix @ .., last] = u.path.as_slice() else { continue };
+        let [prefix @ .., last] = u.path.as_slice() else {
+            continue;
+        };
         if last != name {
             continue;
         }
@@ -560,7 +612,11 @@ fn find_view<'m>(module: &'m Module, target: &str) -> Option<&'m ViewDef> {
 /// break, not real inheritance. A component with *no* own view (pure template inheritance, see
 /// `resolve_view_for`) gets every one of base's fields unconditionally, since the entire inherited
 /// view already references them all the normal way.
-pub(crate) fn resolve_effective_fields<'m>(from: &'m Module, c: &ComponentDef, modules: &'m [Module]) -> Vec<FieldDef> {
+pub(crate) fn resolve_effective_fields<'m>(
+    from: &'m Module,
+    c: &ComponentDef,
+    modules: &'m [Module],
+) -> Vec<FieldDef> {
     let Some(base) = c.base.as_deref() else {
         return c.fields.clone();
     };
@@ -572,12 +628,17 @@ pub(crate) fn resolve_effective_fields<'m>(from: &'m Module, c: &ComponentDef, m
     };
     let base_fields = resolve_effective_fields(base_module, base_c, modules);
     let base_fields: Vec<FieldDef> = match find_view(from, &c.name) {
-        Some(view) => base_fields.into_iter().filter(|f| view_references_bare_name(view, &f.name)).collect(),
+        Some(view) => base_fields
+            .into_iter()
+            .filter(|f| view_references_bare_name(view, &f.name))
+            .collect(),
         None => base_fields,
     };
     let own_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
-    let mut result: Vec<FieldDef> =
-        base_fields.into_iter().filter(|f| !own_names.contains(f.name.as_str())).collect();
+    let mut result: Vec<FieldDef> = base_fields
+        .into_iter()
+        .filter(|f| !own_names.contains(f.name.as_str()))
+        .collect();
     result.extend(c.fields.iter().cloned());
     result
 }
@@ -587,12 +648,18 @@ pub(crate) fn resolve_effective_fields<'m>(from: &'m Module, c: &ComponentDef, m
 /// opposed to a literal/computed value (`fill: "#3a3a3c"`) or no mention at all. See
 /// `resolve_effective_fields`'s doc comment.
 fn view_references_bare_name(view: &ViewDef, name: &str) -> bool {
-    view.lets.iter().any(|l| element_references_bare_name(&l.element, name))
+    view.lets
+        .iter()
+        .any(|l| element_references_bare_name(&l.element, name))
         || element_references_bare_name(&view.root, name)
 }
 
 fn element_references_bare_name(node: &ElementNode, name: &str) -> bool {
-    if node.attributes.iter().any(|(_, expr)| view_expr_references_bare_name(expr, name)) {
+    if node
+        .attributes
+        .iter()
+        .any(|(_, expr)| view_expr_references_bare_name(expr, name))
+    {
         return true;
     }
     node.children.iter().any(|child| match child {
@@ -605,9 +672,19 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
     match expr {
         ViewExpr::Path(path) => path.len() == 1 && path[0] == name,
         ViewExpr::Element(elem) => element_references_bare_name(elem, name),
-        ViewExpr::Closure { body: ClosureBody::Element(elem), .. } => element_references_bare_name(elem, name),
-        ViewExpr::TFluent(_, args) => args.iter().any(|(_, v)| view_expr_references_bare_name(v, name)),
-        ViewExpr::MethodCall(..) | ViewExpr::Expr(_) | ViewExpr::Closure { body: ClosureBody::Expr(_), .. } => false,
+        ViewExpr::Closure {
+            body: ClosureBody::Element(elem),
+            ..
+        } => element_references_bare_name(elem, name),
+        ViewExpr::TFluent(_, args) => args
+            .iter()
+            .any(|(_, v)| view_expr_references_bare_name(v, name)),
+        ViewExpr::MethodCall(..)
+        | ViewExpr::Expr(_)
+        | ViewExpr::Closure {
+            body: ClosureBody::Expr(_),
+            ..
+        } => false,
     }
 }
 
@@ -623,15 +700,25 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
 /// the narrower "literal forward" notion (a field only *contributing* to some other computed value
 /// isn't being forwarded unchanged, so shouldn't be silently treated as inherited).
 fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
-    view.lets.iter().any(|l| element_references_name_anywhere(&l.element, name))
+    view.lets
+        .iter()
+        .any(|l| element_references_name_anywhere(&l.element, name))
         || element_references_name_anywhere(&view.root, name)
 }
 
 fn element_references_name_anywhere(node: &ElementNode, name: &str) -> bool {
-    if node.attributes.iter().any(|(_, expr)| view_expr_references_name_anywhere(expr, name)) {
+    if node
+        .attributes
+        .iter()
+        .any(|(_, expr)| view_expr_references_name_anywhere(expr, name))
+    {
         return true;
     }
-    if node.attached.iter().any(|(_, _, expr)| view_expr_references_name_anywhere(expr, name)) {
+    if node
+        .attached
+        .iter()
+        .any(|(_, _, expr)| view_expr_references_name_anywhere(expr, name))
+    {
         return true;
     }
     node.children.iter().any(|child| match child {
@@ -645,9 +732,17 @@ fn view_expr_references_name_anywhere(expr: &ViewExpr, name: &str) -> bool {
         ViewExpr::Path(path) => path.iter().any(|seg| seg == name),
         ViewExpr::MethodCall(path, _) => path.iter().any(|seg| seg == name),
         ViewExpr::Element(elem) => element_references_name_anywhere(elem, name),
-        ViewExpr::Closure { body: ClosureBody::Element(elem), .. } => element_references_name_anywhere(elem, name),
-        ViewExpr::Closure { body: ClosureBody::Expr(e), .. } => view_expr_references_name_anywhere(e, name),
-        ViewExpr::TFluent(_, args) => args.iter().any(|(_, v)| view_expr_references_name_anywhere(v, name)),
+        ViewExpr::Closure {
+            body: ClosureBody::Element(elem),
+            ..
+        } => element_references_name_anywhere(elem, name),
+        ViewExpr::Closure {
+            body: ClosureBody::Expr(e),
+            ..
+        } => view_expr_references_name_anywhere(e, name),
+        ViewExpr::TFluent(_, args) => args
+            .iter()
+            .any(|(_, v)| view_expr_references_name_anywhere(v, name)),
         ViewExpr::Expr(e) => expr_references_ident(e, name),
     }
 }
@@ -680,14 +775,22 @@ fn expr_references_ident(expr: &syn::Expr, name: &str) -> bool {
 /// methods (an override's body rewritten the same way). See `ComponentDef`'s doc comment. Only one
 /// `inherits` hop's worth of `base::` chaining is guaranteed correct — see `generate_view`'s doc
 /// comment on `own_on_mount`/`own_on_unmount` for the same limitation applied to lifecycle hooks.
-pub(crate) fn resolve_effective_methods<'m>(from: &'m Module, c: &ComponentDef, modules: &'m [Module]) -> Vec<MethodDef> {
+pub(crate) fn resolve_effective_methods<'m>(
+    from: &'m Module,
+    c: &ComponentDef,
+    modules: &'m [Module],
+) -> Vec<MethodDef> {
     let mut result = Vec::new();
     if let Some(base) = c.base.as_deref() {
         if base != "NativeControl" {
             if let Some((base_module, base_c)) = find_component_and_module(from, base, modules) {
                 let base_methods = resolve_effective_methods(base_module, base_c, modules);
-                let overridden: HashSet<&str> =
-                    c.methods.iter().filter(|m| m.is_override).map(|m| m.name.as_str()).collect();
+                let overridden: HashSet<&str> = c
+                    .methods
+                    .iter()
+                    .filter(|m| m.is_override)
+                    .map(|m| m.name.as_str())
+                    .collect();
                 for bm in base_methods {
                     if overridden.contains(bm.name.as_str()) {
                         let mut shadow = bm.clone();
@@ -718,7 +821,11 @@ pub(crate) fn resolve_effective_methods<'m>(from: &'m Module, c: &ComponentDef, 
 /// a primitive shape family with no `view` of its own (`Control`/`Rectangle`; those still require
 /// an explicit hand-written `view` — see
 /// `validate::validate_inherits`).
-pub(crate) fn resolve_view_for<'m>(from: &'m Module, c: &ComponentDef, modules: &'m [Module]) -> Option<ViewDef> {
+pub(crate) fn resolve_view_for<'m>(
+    from: &'m Module,
+    c: &ComponentDef,
+    modules: &'m [Module],
+) -> Option<ViewDef> {
     if let Some(own) = find_view(from, &c.name) {
         return Some(own.clone());
     }
@@ -728,7 +835,10 @@ pub(crate) fn resolve_view_for<'m>(from: &'m Module, c: &ComponentDef, modules: 
     }
     let (base_module, base_c) = find_component_and_module(from, base, modules)?;
     let base_view = resolve_view_for(base_module, base_c, modules)?;
-    Some(ViewDef { target: c.name.clone(), ..base_view })
+    Some(ViewDef {
+        target: c.name.clone(),
+        ..base_view
+    })
 }
 
 /// Rewrites `base::name(args)` — a method/`#[computed]`-initializer/`on_mount`/`on_unmount` body's
@@ -743,7 +853,12 @@ fn rewrite_base_calls(mut block: syn::Block, receiver: &syn::Ident) -> syn::Bloc
         fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
             if let syn::Expr::Call(call) = node {
                 if let syn::Expr::Path(p) = &*call.func {
-                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    let segs: Vec<String> = p
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect();
                     if let [base_seg, name] = segs.as_slice() {
                         if base_seg == "base" {
                             let receiver = self.receiver;
@@ -793,7 +908,9 @@ fn resolve_is_native(
             if let Some(root_name) = view_root {
                 let from = &modules[*module_index];
                 match table.resolve_key(from, root_name) {
-                    Some(root_key) => resolve_is_native(&root_key, component_meta, modules, table, memo),
+                    Some(root_key) => {
+                        resolve_is_native(&root_key, component_meta, modules, table, memo)
+                    }
                     None => false,
                 }
             } else {
@@ -832,7 +949,10 @@ fn resolve_composed_shape(
         let from = &modules[*module_index];
         let has_own_view = find_view(from, &key.1).is_some();
 
-        if table.resolve(from, base).is_some_and(|i| i.is_virtual_builtin) {
+        if table
+            .resolve(from, base)
+            .is_some_and(|i| i.is_virtual_builtin)
+        {
             // Direct shape composition against a hand-written `elwindui::core::ui` primitive
             // (`ContentControl inherits Control`): this component's own effective root must be
             // exactly `base` — matching `validate::validate_inherits`'s own requirement that an
@@ -886,7 +1006,11 @@ fn resolve_host_composition_base(
     let (module_index, base, view_root, _native) = component_meta.get(key)?;
     let base = base.as_deref()?;
     let from = &modules[*module_index];
-    if base == "NativeControl" || table.resolve(from, base).is_some_and(|i| i.is_virtual_builtin) {
+    if base == "NativeControl"
+        || table
+            .resolve(from, base)
+            .is_some_and(|i| i.is_virtual_builtin)
+    {
         return None;
     }
     let base_key = table.resolve_key(from, base)?;
@@ -912,9 +1036,9 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
             Item::Enum(e) => generate_enum(e),
             Item::ViewModel(v) => generate_viewmodel(v, module, table),
             Item::Component(c) => {
-                let info = table
-                    .resolve(module, &c.name)
-                    .unwrap_or_else(|| panic!("component `{}` missing from its own symbol table", c.name));
+                let info = table.resolve(module, &c.name).unwrap_or_else(|| {
+                    panic!("component `{}` missing from its own symbol table", c.name)
+                });
                 // `#[abstract]` (docs/elwindui_spec.md 付録E): a pure category tag
                 // (`UIElement`/`NativeControl`/`Layout`/`Shape`) never gets a `create_<snake
                 // case>(..)`/`new(..)` of its own — `validate::check_element_value` already rejects
@@ -979,7 +1103,10 @@ fn coerce_to_owned_string(ty: &str, expr: syn::Expr) -> syn::Expr {
 
 /// Copy-able field types get `Cell<T>`, everything else gets `RefCell<T>` (付録O.5).
 fn is_copy_type(ty: &str) -> bool {
-    matches!(ty, "i32" | "i64" | "f32" | "f64" | "bool" | "u32" | "u64" | "usize") || {
+    matches!(
+        ty,
+        "i32" | "i64" | "f32" | "f64" | "bool" | "u32" | "u64" | "usize"
+    ) || {
         // A bare, capitalized single-*word* type (no generic `<..>`/`::` of its own — `Vec<T>`/
         // `Box<dyn Fn()>`/`Rc<T>` are never Copy no matter what's inside the brackets) that isn't a
         // known non-Copy std type is assumed to be one of this file's own enums (all generated with
@@ -1035,8 +1162,13 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             }
         }
         if f.kind == FieldKind::Command {
-            if let Some(Attr::CommandMeta { can_execute: Some(expr), .. }) =
-                f.attrs.iter().find(|a| matches!(a, Attr::CommandMeta { .. }))
+            if let Some(Attr::CommandMeta {
+                can_execute: Some(expr),
+                ..
+            }) = f
+                .attrs
+                .iter()
+                .find(|a| matches!(a, Attr::CommandMeta { .. }))
             {
                 for dep in referenced_fields(expr, &field_names) {
                     dependents_of
@@ -1057,8 +1189,9 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
         match f.kind {
             FieldKind::Observable if nested_vec_item_type(&f.ty, from, table).is_some() => {
                 let field_ident = format_ident!("{}", f.name);
-                let item_ty: syn::Type = syn::parse_str(&nested_vec_item_type(&f.ty, from, table).unwrap())
-                    .expect("nested viewmodel type name must parse");
+                let item_ty: syn::Type =
+                    syn::parse_str(&nested_vec_item_type(&f.ty, from, table).unwrap())
+                        .expect("nested viewmodel type name must parse");
 
                 struct_fields.extend(quote! {
                     #field_ident: std::cell::RefCell<Vec<std::rc::Rc<#item_ty>>>,
@@ -1111,10 +1244,15 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 let field_ident = format_ident!("{}", f.name);
                 let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
                 let init_expr = match &f.initializer {
-                    Some(Initializer::Expr(e)) => {
-                        rewrite_field_refs(coerce_to_owned_string(&f.ty, e.clone()), &field_names, &format_ident!("self"))
-                    }
-                    _ => panic!("observable field `{}` needs a plain initializer expr", f.name),
+                    Some(Initializer::Expr(e)) => rewrite_field_refs(
+                        coerce_to_owned_string(&f.ty, e.clone()),
+                        &field_names,
+                        &format_ident!("self"),
+                    ),
+                    _ => panic!(
+                        "observable field `{}` needs a plain initializer expr",
+                        f.name
+                    ),
                 };
 
                 let (cell_ty, get_body, set_body): (TokenStream, TokenStream, TokenStream) =
@@ -1212,16 +1350,19 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     .attrs
                     .iter()
                     .find_map(|a| match a {
-                        Attr::CommandMeta { is_async, can_execute } => {
-                            Some((*is_async, can_execute.clone()))
-                        }
+                        Attr::CommandMeta {
+                            is_async,
+                            can_execute,
+                        } => Some((*is_async, can_execute.clone())),
                         _ => None,
                     })
                     .unwrap_or((false, None));
                 let can_execute_ident = format_ident!("{}_can_execute", f.name);
                 let can_execute_cache = format_ident!("{}_can_execute_cache", f.name);
                 let can_execute_expr_ts = match &can_execute_expr {
-                    Some(expr) => rewrite_field_refs(expr.clone(), &field_names, &format_ident!("self")),
+                    Some(expr) => {
+                        rewrite_field_refs(expr.clone(), &field_names, &format_ident!("self"))
+                    }
                     None => quote! { true },
                 };
 
@@ -1238,8 +1379,15 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 });
                 recompute_calls_after_new.extend(quote! { instance.#recompute_can_execute(); });
 
-                let Some(Initializer::Command { params, body: block }) = &f.initializer else {
-                    panic!("#[command] field `{}` needs a command!(...) initializer", f.name);
+                let Some(Initializer::Command {
+                    params,
+                    body: block,
+                }) = &f.initializer
+                else {
+                    panic!(
+                        "#[command] field `{}` needs a command!(...) initializer",
+                        f.name
+                    );
                 };
                 let execute_ident = format_ident!("{}_execute", f.name);
                 let param_decls = params.iter().map(|(name, ty)| {
@@ -1250,7 +1398,8 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     // Async commands use an owned `Rc<Self>` because `spawn_local` requires a
                     // `'static` future. `async move` also captures command arguments by value.
                     let self_ident = format_ident!("__self");
-                    let rewritten_block = rewrite_command_body(block.clone(), &field_names, &self_ident);
+                    let rewritten_block =
+                        rewrite_command_body(block.clone(), &field_names, &self_ident);
                     accessors.extend(quote! {
                         pub fn #execute_ident(&self, #(#param_decls),*) {
                             let __self = self.__self_weak.upgrade().expect(
@@ -1261,14 +1410,18 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     });
                 } else {
                     let self_ident = format_ident!("self");
-                    let rewritten_block = rewrite_command_body(block.clone(), &field_names, &self_ident);
+                    let rewritten_block =
+                        rewrite_command_body(block.clone(), &field_names, &self_ident);
                     accessors.extend(quote! {
                         pub fn #execute_ident(&self, #(#param_decls),*) #rewritten_block
                     });
                 }
             }
             FieldKind::Prop | FieldKind::Param | FieldKind::Attached => {
-                panic!("viewmodel field `{}` must be #[observable]/#[computed]/#[command]", f.name);
+                panic!(
+                    "viewmodel field `{}` must be #[observable]/#[computed]/#[command]",
+                    f.name
+                );
             }
         }
     }
@@ -1354,14 +1507,18 @@ fn referenced_fields(expr: &syn::Expr, field_names: &HashSet<&str>) -> Vec<Strin
                     // free function instead, which is happy to build its own short-lived
                     // `Collector` over these owned exprs.
                     for (_, value) in &args {
-                        self.found.extend(referenced_fields(value, self.field_names));
+                        self.found
+                            .extend(referenced_fields(value, self.field_names));
                     }
                 }
             }
             syn::visit::visit_expr_macro(self, node);
         }
     }
-    let mut collector = Collector { field_names, found: Vec::new() };
+    let mut collector = Collector {
+        field_names,
+        found: Vec::new(),
+    };
     collector.visit_expr(expr);
     collector.found.sort();
     collector.found.dedup();
@@ -1371,7 +1528,11 @@ fn referenced_fields(expr: &syn::Expr, field_names: &HashSet<&str>) -> Vec<Strin
 /// Rewrites bare identifier reads that name a sibling field (`content` inside a `#[computed]`
 /// initializer) into accessor calls (`self.content()`). Does not touch assignment targets —
 /// `command!` bodies use [`rewrite_command_body`] for that.
-fn rewrite_field_refs(mut expr: syn::Expr, field_names: &HashSet<&str>, receiver: &syn::Ident) -> TokenStream {
+fn rewrite_field_refs(
+    mut expr: syn::Expr,
+    field_names: &HashSet<&str>,
+    receiver: &syn::Ident,
+) -> TokenStream {
     struct Rewriter<'a> {
         field_names: &'a HashSet<&'a str>,
         receiver: &'a syn::Ident,
@@ -1391,7 +1552,10 @@ fn rewrite_field_refs(mut expr: syn::Expr, field_names: &HashSet<&str>, receiver
             syn::visit_mut::visit_expr_mut(self, node);
         }
     }
-    let mut rewriter = Rewriter { field_names, receiver };
+    let mut rewriter = Rewriter {
+        field_names,
+        receiver,
+    };
     rewriter.visit_expr_mut(&mut expr);
     quote! { #expr }
 }
@@ -1403,7 +1567,11 @@ fn rewrite_field_refs(mut expr: syn::Expr, field_names: &HashSet<&str>, receiver
 /// `syn::visit_mut` never descends into a macro's token stream (it has no structure to visit), so
 /// [`rewrite_field_refs`] alone can't see field references nested inside `t!(...)`'s arguments —
 /// each argument value is re-rewritten here once it's been pulled out as a real `syn::Expr`.
-fn rewrite_t_macro(expr: TokenStream, field_names: &HashSet<&str>, receiver: &syn::Ident) -> TokenStream {
+fn rewrite_t_macro(
+    expr: TokenStream,
+    field_names: &HashSet<&str>,
+    receiver: &syn::Ident,
+) -> TokenStream {
     let expr: syn::Expr = syn::parse2(expr).expect("rewrite_field_refs always yields valid Expr");
     if let syn::Expr::Macro(m) = &expr {
         if m.mac.path.is_ident("t") {
@@ -1417,7 +1585,9 @@ fn rewrite_t_macro(expr: TokenStream, field_names: &HashSet<&str>, receiver: &sy
 /// its named argument expressions. Shared by [`rewrite_t_call`] (codegen) and [`referenced_fields`]
 /// (dependency-graph analysis) — both need to look inside the macro's opaque token stream, since
 /// `syn::visit`/`syn::visit_mut` never descend into a macro's tokens on their own.
-fn parse_t_macro_tokens(tokens: &TokenStream) -> syn::Result<(syn::LitStr, Vec<(syn::Ident, syn::Expr)>)> {
+fn parse_t_macro_tokens(
+    tokens: &TokenStream,
+) -> syn::Result<(syn::LitStr, Vec<(syn::Ident, syn::Expr)>)> {
     let parser = |input: syn::parse::ParseStream| -> syn::Result<(syn::LitStr, Vec<(syn::Ident, syn::Expr)>)> {
         let key: syn::LitStr = input.parse()?;
         let mut args = Vec::new();
@@ -1435,10 +1605,14 @@ fn parse_t_macro_tokens(tokens: &TokenStream) -> syn::Result<(syn::LitStr, Vec<(
     syn::parse::Parser::parse2(parser, tokens.clone())
 }
 
-fn rewrite_t_call(tokens: &TokenStream, field_names: &HashSet<&str>, receiver: &syn::Ident) -> TokenStream {
+fn rewrite_t_call(
+    tokens: &TokenStream,
+    field_names: &HashSet<&str>,
+    receiver: &syn::Ident,
+) -> TokenStream {
     // Tokens look like: "key", name1: expr1, name2: expr2
-    let (key, args) = parse_t_macro_tokens(tokens)
-        .expect("t!(...) arguments must be `\"key\", name: expr, ...`");
+    let (key, args) =
+        parse_t_macro_tokens(tokens).expect("t!(...) arguments must be `\"key\", name: expr, ...`");
     let arg_pairs = args.iter().map(|(name, value)| {
         let name_str = name.to_string();
         let value = rewrite_field_refs(value.clone(), field_names, receiver);
@@ -1452,7 +1626,11 @@ fn rewrite_t_call(tokens: &TokenStream, field_names: &HashSet<&str>, receiver: &
 /// method body (`fn f(&self) { ... }`) rather than a closure. `receiver` is `self` for a plain
 /// (synchronous) command, or an owned local (`__self: Rc<Self>`) for an async one — see the
 /// `FieldKind::Command` `is_async` arm for why a borrowed `self` won't do there.
-fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>, receiver: &syn::Ident) -> TokenStream {
+fn rewrite_command_body(
+    mut block: syn::Block,
+    field_names: &HashSet<&str>,
+    receiver: &syn::Ident,
+) -> TokenStream {
     struct Rewriter<'a> {
         field_names: &'a HashSet<&'a str>,
         receiver: &'a syn::Ident,
@@ -1507,7 +1685,8 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>, rece
             if let syn::Expr::Macro(m) = node {
                 if m.mac.path.is_ident("t") {
                     let rewritten = rewrite_t_call(&m.mac.tokens, self.field_names, self.receiver);
-                    *node = syn::parse2(rewritten).expect("rewrite_t_call always yields a valid Expr");
+                    *node =
+                        syn::parse2(rewritten).expect("rewrite_t_call always yields a valid Expr");
                     return;
                 }
             }
@@ -1522,7 +1701,10 @@ fn rewrite_command_body(mut block: syn::Block, field_names: &HashSet<&str>, rece
             syn::visit_mut::visit_expr_mut(self, node);
         }
     }
-    let mut rewriter = Rewriter { field_names, receiver };
+    let mut rewriter = Rewriter {
+        field_names,
+        receiver,
+    };
     rewriter.visit_block_mut(&mut block);
     quote! { #block }
 }
@@ -1553,8 +1735,13 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                 // deferred fields use storage specialized for post-construction mutation.
                 let (inner_ty_str, is_option) = strip_option(&f.ty);
                 if is_option {
-                    let inner_ty: syn::Type = syn::parse_str(inner_ty_str).expect("field inner type must parse");
-                    let cell_ty = if is_copy_type(inner_ty_str) { quote! { std::cell::Cell } } else { quote! { std::cell::RefCell } };
+                    let inner_ty: syn::Type =
+                        syn::parse_str(inner_ty_str).expect("field inner type must parse");
+                    let cell_ty = if is_copy_type(inner_ty_str) {
+                        quote! { std::cell::Cell }
+                    } else {
+                        quote! { std::cell::RefCell }
+                    };
                     struct_fields.extend(quote! { #field_ident: #cell_ty<Option<#inner_ty>>, });
                     ctor_field_inits.extend(quote! { #field_ident: #cell_ty::new(None), });
                     let set_name = format_ident!("set_{}", f.name);
@@ -1598,7 +1785,10 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                 });
             }
             Some(Initializer::Expr(_)) | Some(Initializer::Command { .. }) => {
-                panic!("component field `{}` initializer form not supported yet", f.name);
+                panic!(
+                    "component field `{}` initializer form not supported yet",
+                    f.name
+                );
             }
         }
     }
@@ -1629,7 +1819,11 @@ fn emit_methods(methods: &[MethodDef]) -> TokenStream {
     let mut out = TokenStream::new();
     for m in methods {
         let name = format_ident!("{}", m.name);
-        let vis = if m.name.starts_with("__base_") { quote! {} } else { quote! { pub } };
+        let vis = if m.name.starts_with("__base_") {
+            quote! {}
+        } else {
+            quote! { pub }
+        };
         let params = m.params.iter().map(|(n, ty)| {
             let ident = format_ident!("{}", n);
             quote! { #ident: #ty }
@@ -1666,7 +1860,12 @@ impl EmitMode {
     }
 }
 
-fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table: &SymbolTable) -> TokenStream {
+fn generate_view(
+    view: &ViewDef,
+    component: &ComponentDef,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
     let target_name = view.target.clone();
     let target = format_ident!("{}", target_name);
     let has_own_view = find_view(from, &target_name).is_some();
@@ -1680,7 +1879,9 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // implements `UIElement` (and `Y`'s own trait) by delegating to it, instead of the ordinary
     // "wrapper owns a separately-`Rc`-erased root" shape every other `view`-having component uses
     // (see this function's tail `quote!`).
-    let composed_shape = table.resolve(from, &target_name).and_then(|i| i.composed_shape.clone());
+    let composed_shape = table
+        .resolve(from, &target_name)
+        .and_then(|i| i.composed_shape.clone());
     let is_shape_composition = has_own_view && composed_shape.is_some();
     // A component without its own view reuses the composed base value directly. Components with an
     // own view inherit behavior but retain their independently constructed root.
@@ -1691,7 +1892,9 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // Follows the same `base`-field/`XImpl`-rename/synthesized-trait shape as shape composition
     // below, just without an `impl UIElement` (`Y` doesn't implement it either) — see this
     // function's dedicated branch further down.
-    let host_composition_base = table.resolve(from, &target_name).and_then(|i| i.host_composition_base.clone());
+    let host_composition_base = table
+        .resolve(from, &target_name)
+        .and_then(|i| i.host_composition_base.clone());
     let is_host_composition = host_composition_base.is_some();
     let is_composed = composed_shape.is_some() || is_host_composition;
     // `#[class]` derives an `XExt` trait from the component struct `X`.
@@ -1725,7 +1928,12 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // `required_own_names`/`deferred_own_names`, computed further down using `ctx.own_fields`
     // itself) — every `emit_expr`/`plan_element`/`emit_construction`/`emit_resync` call that could
     // actually observe it happens later still, so setting it after the fact here is sound.
-    let mut ctx = ViewCtx { binds, closure_param: None, own_fields, mutable_own_fields: HashSet::new() };
+    let mut ctx = ViewCtx {
+        binds,
+        closure_param: None,
+        own_fields,
+        mutable_own_fields: HashSet::new(),
+    };
 
     let param_names: Vec<syn::Ident> = component
         .fields
@@ -1761,8 +1969,11 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // the base factory, be a use-after-move compile error. Only the genuinely-new fields this
     // component adds beyond its base (rare — empty for `LabeledPanel`) become its own struct fields;
     // reads of a forwarded name instead delegate to `self.base.<name>()` (`named_accessors`, below).
-    let mut own_struct_param_names: Vec<syn::Ident> =
-        if is_template_composition { param_names[base_param_count.min(param_names.len())..].to_vec() } else { param_names.clone() };
+    let mut own_struct_param_names: Vec<syn::Ident> = if is_template_composition {
+        param_names[base_param_count.min(param_names.len())..].to_vec()
+    } else {
+        param_names.clone()
+    };
     // Assigned below once `shape_forwarded_names` is known (`is_shape_composition` narrows this
     // further still), from `own_struct_param_names`'s own final value — see there.
     let own_struct_param_types: Vec<syn::Type>;
@@ -1776,12 +1987,18 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // `component` too, but only `generate_viewmodel`'s output has a `subscribe` method.
     let mut bind_owners: Vec<syn::Ident> = Vec::new();
     for f in &component.fields {
-        let Some(Initializer::Bind { path, mode }) = &f.initializer else { continue };
+        let Some(Initializer::Bind { path, mode }) = &f.initializer else {
+            continue;
+        };
         if mode == "OneTime" {
             continue;
         }
-        let [owner, _target] = path.as_slice() else { continue };
-        let Some(owner_field) = component.fields.iter().find(|of| &of.name == owner) else { continue };
+        let [owner, _target] = path.as_slice() else {
+            continue;
+        };
+        let Some(owner_field) = component.fields.iter().find(|of| &of.name == owner) else {
+            continue;
+        };
         let is_viewmodel = table
             .resolve(from, strip_rc_wrapper(&owner_field.ty))
             .is_some_and(|info| info.is_viewmodel);
@@ -1800,7 +2017,9 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // ran) would never be reflected. Harmless to add unconditionally: `resync()`'s blanket re-apply
     // already tolerates being called for attributes that don't actually depend on this owner.
     for f in &component.fields {
-        let is_viewmodel = table.resolve(from, strip_rc_wrapper(&f.ty)).is_some_and(|info| info.is_viewmodel);
+        let is_viewmodel = table
+            .resolve(from, strip_rc_wrapper(&f.ty))
+            .is_some_and(|info| info.is_viewmodel);
         if is_viewmodel && !bind_owners.iter().any(|o| o.to_string() == f.name) {
             bind_owners.push(format_ident!("{}", f.name));
         }
@@ -1826,13 +2045,29 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // it as-is instead of trying to resolve it via `SymbolTable`.
     for field in &component.fields {
         if field.initializer.is_none() && field.ty.contains("dyn UIElement") {
-            lets_map.insert(field.name.clone(), (format_ident!("{}", field.name), PASSTHROUGH_NODE.to_string()));
+            lets_map.insert(
+                field.name.clone(),
+                (
+                    format_ident!("{}", field.name),
+                    PASSTHROUGH_NODE.to_string(),
+                ),
+            );
         }
     }
     for let_binding in &view.lets {
-        let resolved = plan_element(&let_binding.element, &ctx, from, table, &mut plan, let_binding.id.is_some(), &lets_map);
+        let resolved = plan_element(
+            &let_binding.element,
+            &ctx,
+            from,
+            table,
+            &mut plan,
+            let_binding.id.is_some(),
+            &lets_map,
+        );
         if let_binding.id.is_some() {
-            plan.last_mut().expect("plan_element always pushes its own node").id = let_binding.id.clone();
+            plan.last_mut()
+                .expect("plan_element always pushes its own node")
+                .id = let_binding.id.clone();
         }
         lets_map.insert(let_binding.name.clone(), resolved);
     }
@@ -1847,7 +2082,9 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // further special-casing (unlike shape composition, the root here is still built by ordinary
     // `emit_construction`, so there's no separate construction path to intercept — only storage).
     if is_host_composition {
-        plan.last_mut().expect("plan_element always pushes a node for the root").binding = format_ident!("base");
+        plan.last_mut()
+            .expect("plan_element always pushes a node for the root")
+            .binding = format_ident!("base");
     }
 
     // `is_shape_composition`'s own analog of `is_template_composition`'s `forward_param_names`:
@@ -1868,7 +2105,9 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // `Option<f32>` — `build_virtual_value`'s `get_attr` unwraps via `.unwrap_or(0.0)` before
     // storing), so delegating its accessor to `self.base.<name>` would return the wrong type.
     let shape_forwarded_names: HashSet<String> = if is_shape_composition {
-        let root_node = plan.last().expect("plan_element always pushes a node for the root");
+        let root_node = plan
+            .last()
+            .expect("plan_element always pushes a node for the root");
         param_names
             .iter()
             .map(|n| n.to_string())
@@ -1883,7 +2122,10 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         HashSet::new()
     };
     own_struct_param_names.retain(|n| !shape_forwarded_names.contains(&n.to_string()));
-    let own_struct_param_names_set: HashSet<String> = own_struct_param_names.iter().map(|n| n.to_string()).collect();
+    let own_struct_param_names_set: HashSet<String> = own_struct_param_names
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
     own_struct_param_types = param_names
         .iter()
         .zip(param_types.iter())
@@ -1894,14 +2136,24 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // Unreferenced own `Option<T>` fields are initialized as `None` and exposed through
     // `set_<name>`. Fields needed while constructing the view remain constructor arguments.
     let is_deferred_own_field = |name: &syn::Ident| -> bool {
-        let ty_str = ctx.own_fields.get(&name.to_string()).expect("own_struct_param_names names one of ctx.own_fields' own keys");
+        let ty_str = ctx
+            .own_fields
+            .get(&name.to_string())
+            .expect("own_struct_param_names names one of ctx.own_fields' own keys");
         strip_option(ty_str).1 && !view_references_name_anywhere(view, &name.to_string())
     };
-    let deferred_own_names: Vec<syn::Ident> = own_struct_param_names.iter().filter(|n| is_deferred_own_field(n)).cloned().collect();
+    let deferred_own_names: Vec<syn::Ident> = own_struct_param_names
+        .iter()
+        .filter(|n| is_deferred_own_field(n))
+        .cloned()
+        .collect();
     let deferred_own_inner_types: Vec<syn::Type> = deferred_own_names
         .iter()
         .map(|n| {
-            let ty_str = ctx.own_fields.get(&n.to_string()).expect("own_struct_param_names names one of ctx.own_fields' own keys");
+            let ty_str = ctx
+                .own_fields
+                .get(&n.to_string())
+                .expect("own_struct_param_names names one of ctx.own_fields' own keys");
             syn::parse_str(strip_option(ty_str).0).expect("field inner type must parse")
         })
         .collect();
@@ -1910,18 +2162,26 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         .zip(deferred_own_inner_types.iter())
         .map(|(n, inner_ty)| {
             let ty_str = ctx.own_fields.get(&n.to_string()).unwrap();
-            let cell_ty = if is_copy_type(strip_option(ty_str).0) { quote! { std::cell::Cell } } else { quote! { std::cell::RefCell } };
+            let cell_ty = if is_copy_type(strip_option(ty_str).0) {
+                quote! { std::cell::Cell }
+            } else {
+                quote! { std::cell::RefCell }
+            };
             quote! { #cell_ty<Option<#inner_ty>> }
         })
         .collect();
-    let deferred_own_names_set: HashSet<String> = deferred_own_names.iter().map(|n| n.to_string()).collect();
+    let deferred_own_names_set: HashSet<String> =
+        deferred_own_names.iter().map(|n| n.to_string()).collect();
     // The `Self { .. }`/`#struct_ident { .. }` construction shorthand (`#(#name,)*`) only works for
     // a field with a live local variable of the same name — still true for a required own field
     // (still a `new(..)` argument), but not a deferred one (no argument, no local variable at all),
     // which instead needs an explicit `#name: #cell_ty::new(None)` initializer built here once and
     // reused by both `new(..)`'s own inline construction and `create_<snake case>(..)` below.
-    let required_own_names: Vec<syn::Ident> =
-        own_struct_param_names.iter().filter(|n| !deferred_own_names_set.contains(&n.to_string())).cloned().collect();
+    let required_own_names: Vec<syn::Ident> = own_struct_param_names
+        .iter()
+        .filter(|n| !deferred_own_names_set.contains(&n.to_string()))
+        .cloned()
+        .collect();
     let required_own_types: Vec<syn::Type> = own_struct_param_names
         .iter()
         .zip(own_struct_param_types.iter())
@@ -1945,7 +2205,11 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // `new(..)`/`create_<snake case>(..)`'s own argument list — `param_names`/`param_types` (which
     // also includes any `forward_param_names` prefix, never deferred — see above) minus the
     // deferred subset.
-    let ctor_param_names: Vec<syn::Ident> = param_names.iter().filter(|n| !deferred_own_names_set.contains(&n.to_string())).cloned().collect();
+    let ctor_param_names: Vec<syn::Ident> = param_names
+        .iter()
+        .filter(|n| !deferred_own_names_set.contains(&n.to_string()))
+        .cloned()
+        .collect();
     let ctor_param_types: Vec<syn::Type> = param_names
         .iter()
         .zip(param_types.iter())
@@ -1968,10 +2232,18 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // setter loop below).
     let mutable_required_names: Vec<syn::Ident> = required_own_names
         .iter()
-        .filter(|n| component.fields.iter().any(|f| f.name == n.to_string() && f.kind == FieldKind::Prop))
+        .filter(|n| {
+            component
+                .fields
+                .iter()
+                .any(|f| f.name == n.to_string() && f.kind == FieldKind::Prop)
+        })
         .cloned()
         .collect();
-    let mutable_required_names_set: HashSet<String> = mutable_required_names.iter().map(|n| n.to_string()).collect();
+    let mutable_required_names_set: HashSet<String> = mutable_required_names
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
     ctx.mutable_own_fields = mutable_required_names_set.clone();
     let mutable_required_types: Vec<syn::Type> = required_own_names
         .iter()
@@ -1983,7 +2255,11 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         .iter()
         .map(|n| {
             let ty_str = ctx.own_fields.get(&n.to_string()).unwrap();
-            if is_copy_type(ty_str) { quote! { std::cell::Cell } } else { quote! { std::cell::RefCell } }
+            if is_copy_type(ty_str) {
+                quote! { std::cell::Cell }
+            } else {
+                quote! { std::cell::RefCell }
+            }
         })
         .collect();
     let mutable_required_field_decls: TokenStream = mutable_required_names
@@ -1999,8 +2275,11 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         .collect();
     // The plain (bare-storage, `Self { #name, .. }`-shorthand-eligible) subset of `required_own_names`
     // — everything not promoted to Cell/RefCell storage above.
-    let plain_required_names: Vec<syn::Ident> =
-        required_own_names.iter().filter(|n| !mutable_required_names_set.contains(&n.to_string())).cloned().collect();
+    let plain_required_names: Vec<syn::Ident> = required_own_names
+        .iter()
+        .filter(|n| !mutable_required_names_set.contains(&n.to_string()))
+        .cloned()
+        .collect();
     let plain_required_types: Vec<syn::Type> = required_own_names
         .iter()
         .zip(required_own_types.iter())
@@ -2048,8 +2327,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         // A deferred field and a mutable-required one (`mutable_required_names`) are both
         // Cell/RefCell-backed storage read the same way — `strip_option` is a harmless no-op for
         // the latter (never `Option<T>`-typed itself), so one branch covers both.
-        let is_cell_backed =
-            deferred_own_names_set.contains(&name.to_string()) || mutable_required_names_set.contains(&name.to_string());
+        let is_cell_backed = deferred_own_names_set.contains(&name.to_string())
+            || mutable_required_names_set.contains(&name.to_string());
         let body = if is_template_composition && is_forwarded {
             quote! { self.base.#name() }
         } else if is_forwarded {
@@ -2086,7 +2365,10 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // (unwrapped) type, bare — not `Option<T>` — matching builtin setter signatures.
     // exactly (`build_component_setters`): an absent value simply never calls this at all, leaving
     // the field's own `None` default in place, so the setter itself never needs to accept `None`.
-    for (name, inner_ty) in deferred_own_names.iter().zip(deferred_own_inner_types.iter()) {
+    for (name, inner_ty) in deferred_own_names
+        .iter()
+        .zip(deferred_own_inner_types.iter())
+    {
         let set_name = format_ident!("set_{}", name);
         let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
         let set_body = if is_copy_type(strip_option(ty_str).0) {
@@ -2113,7 +2395,10 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // is never `Option`-shaped: the field always holds a real value from construction on) and it
     // re-runs `self.resync()` afterward, since this field — being required — is guaranteed to
     // actually feed into this component's own view.
-    for (name, ty) in mutable_required_names.iter().zip(mutable_required_types.iter()) {
+    for (name, ty) in mutable_required_names
+        .iter()
+        .zip(mutable_required_types.iter())
+    {
         let set_name = format_ident!("set_{}", name);
         let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
         let set_body = if is_copy_type(ty_str) {
@@ -2147,7 +2432,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
         for (i, node) in plan.iter().enumerate() {
             // The shape-composition root (see `is_shape_composition`'s doc comment) is built as a
             // plain, unwrapped `elwindui::core::ui::create_xxx(...)` value under its own
-            // `node.binding` name — not `new_element`-wrapped/erased into `Rc<dyn UIElement>` like
+            // `node.binding` name — retained at its concrete type rather than erased into `Rc<dyn UIElement>` like
             // every other node — so it can be moved into `Self`'s own `base` field as-is (see the
             // `struct_fields`/`field_inits` branch below and this function's tail `quote!`).
             if is_shape_composition && i == root_index {
@@ -2156,15 +2441,21 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 // ...) or itself a resolved DSL component (`ContentControl`, for `RoundedPanel
                 // inherits ContentControl`) — either way the result is a plain, unwrapped value
                 // moved into `Self`'s own `base` field as-is (see the `field_inits` branch below and
-                // this function's tail `quote!`), never `new_element`-wrapped/erased into `Rc<dyn
+                // this function's tail `quote!`), never wrapped/erased into `Rc<dyn
                 // UIElement>` like every other node.
-                if table.resolve(from, &view.root.type_path).is_some_and(|i| i.is_virtual_builtin) {
+                if table
+                    .resolve(from, &view.root.type_path)
+                    .is_some_and(|i| i.is_virtual_builtin)
+                {
                     let value = build_virtual_value(node, &ctx, from, table);
                     let base_impl_ty = shape_composition_base_type(&view.root.type_path);
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
                 } else {
                     let value = build_component_value(node, &ctx, from, table);
-                    let base_impl_ty = concrete_type_ident(&view.root.type_path, table.resolve(from, &view.root.type_path));
+                    let base_impl_ty = concrete_type_ident(
+                        &view.root.type_path,
+                        table.resolve(from, &view.root.type_path),
+                    );
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
                 }
                 continue;
@@ -2173,7 +2464,7 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             // unwrapped value via its own `construct()` — mirroring the shape-composition root just
             // above — so it can be moved into `Self`'s own `base` field as-is (see the `field_inits`
             // branch below): `Window` doesn't implement `UIElement` at all, so there's no
-            // `new_element`-wrapping/erasing to skip here the way shape composition's comment
+            // node erasure to skip here the way shape composition's comment
             // describes, but the "build unwrapped, embed directly" shape is identical. Mirrors
             // `emit_construction`'s `is_hand_written_native` branch exactly (`Type::new()` +
             // `build_component_setters`) except calling `construct()` — not `new()` — so the result
@@ -2184,7 +2475,10 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             if is_host_composition && i == root_index {
                 let binding = &node.binding;
                 let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
-                    panic!("unknown or out-of-scope element `{}` — is a `use` for it missing?", node.type_path)
+                    panic!(
+                        "unknown or out-of-scope element `{}` — is a `use` for it missing?",
+                        node.type_path
+                    )
                 });
                 let type_ident = concrete_type_ident(&node.type_path, Some(info));
                 let setters = build_component_setters(node, &ctx, from, table, info);
@@ -2203,7 +2497,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 // an `elwindui-backend-*` crate) is constructed as `Rc<Self>` uniformly (see `emit_construction`
                 // and this same convention below in `root_embed_method`), so a stored handle is always
                 // just `Rc<Type>` — no backend-crate-qualified path, no per-type bookkeeping fields.
-                let type_ident = concrete_type_ident(&node.type_path, table.resolve(from, &node.type_path));
+                let type_ident =
+                    concrete_type_ident(&node.type_path, table.resolve(from, &node.type_path));
                 struct_fields.extend(quote! { #binding: std::rc::Rc<#type_ident>, });
                 field_inits.extend(quote! { #binding: #binding.clone(), });
                 if let Some(id) = &node.id {
@@ -2243,12 +2538,16 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // than constructing anything itself. Host composition (`is_host_composition`) reuses the exact
     // same "value only, no declaration" shape — its root was already built unwrapped, above.
     if is_template_composition {
-        let base_name = component.base.as_deref().expect("is_template_composition implies a base");
+        let base_name = component
+            .base
+            .as_deref()
+            .expect("is_template_composition implies a base");
         // `base_name` (bare) is itself a composed component, so it's a real *trait* now, not a
         // struct (see `struct_ident`'s doc comment) — the field's concrete type must be its `Impl`
         // struct, exactly like `concrete_type_ident` resolves for any other reference to it.
         let base_info = table.resolve(from, base_name);
-        let base_construct = composed_construct_path(base_name, base_info.is_some_and(|i| i.is_builtin));
+        let base_construct =
+            composed_construct_path(base_name, base_info.is_some_and(|i| i.is_builtin));
         field_inits.extend(quote! { base: #base_construct(#(#forward_param_names),*), });
     } else if is_shape_composition || is_host_composition {
         field_inits.extend(quote! { base: #root_binding, });
@@ -2265,7 +2564,10 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // field (the same path any other non-native embedding site uses) — whether that root is a
     // hardcoded virtual builtin or a user-defined component whose own root is itself virtual
     // (chained `inherits`), `into_node_if_needed` dispatches on the root's resolved type either way.
-    let root_is_native = !is_template_composition && table.resolve(from, &view.root.type_path).is_some_and(|info| info.is_native);
+    let root_is_native = !is_template_composition
+        && table
+            .resolve(from, &view.root.type_path)
+            .is_some_and(|info| info.is_native);
     let root_embed_method = if is_template_composition || is_shape_composition {
         // `#target` implements `UIElement` itself now (see this function's tail `quote!`), so
         // `self` — not a separately-stored root field — already *is* the tree node; `Rc<Self>`
@@ -2289,7 +2591,12 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
             }
         }
     } else {
-        let root_expr = into_node_if_needed(quote! { self.#root_binding }, &view.root.type_path, from, table);
+        let root_expr = into_node_if_needed(
+            quote! { self.#root_binding },
+            &view.root.type_path,
+            from,
+            table,
+        );
         quote! {
             pub fn into_node(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn elwindui::core::ui::UIElementExt> {
                 #root_expr
@@ -2341,7 +2648,10 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     };
 
     let this_ident = format_ident!("this");
-    let on_mount_stmt = view.on_mount.as_ref().map(|block| rewrite_base_calls(block.clone(), &this_ident));
+    let on_mount_stmt = view
+        .on_mount
+        .as_ref()
+        .map(|block| rewrite_base_calls(block.clone(), &this_ident));
 
     let mut shadow_hooks = TokenStream::new();
     if let Some(block) = &base_on_mount_block {
@@ -2357,26 +2667,26 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
 
     let methods = emit_methods(&component.methods);
 
-    // Meaningful whenever `#target` is composed at all (`is_shape_composition`/
-    // `is_template_composition`, docs/elwindui_spec.md 付録H.2.1a): wires every child of `#target`'s
-    // own `base` (delegated through `UIElement::children`, regardless of how many composition levels
-    // deep `base` itself goes) to point its `parent` back at `this` — the same job
-    // `elwindui::core::ui::new_element` does for every other construction site, reproduced here
-    // because `this` (not `self.base` alone) is the real tree node now, and `new_element` is never
-    // called on `self.base` in isolation (built as a plain, unwrapped value instead — see
-    // `construct_stmts`/`field_inits` above).
-    let parent_wiring_stmt = if is_shape_composition || is_template_composition {
+    // A composed ContentControl carries its content as an ordinary field while its base is still a
+    // bare value. Once the outer node has an owner, insert that field through the Visual collection
+    // so the collection, rather than generated code, performs the Visual-parent wiring.
+    let content_attach_stmt = if (is_shape_composition && view.root.type_path == "ContentControl")
+        || (is_template_composition && component.base.as_deref() == Some("ContentControl"))
+    {
         quote! {
             {
-                use elwindui::core::ui::UIElementExt as _;
-                let __erased: std::rc::Rc<dyn elwindui::core::ui::UIElementExt> = this.clone();
-                for child in this.visual_children() {
-                    *child.as_ui_element().parent.borrow_mut() = Some(std::rc::Rc::downgrade(&__erased));
-                }
+                use elwindui::core::ui::ContentControlExt as _;
+                let __content = this.content();
+                this.as_ui_element().visual_collection.add(__content);
             }
         }
     } else {
         TokenStream::new()
+    };
+    let owner_bind_stmt = if is_host_composition {
+        TokenStream::new()
+    } else {
+        quote! { elwindui::core::ui::bind_element_owner(&this); }
     };
 
     // `#target`'s own class-hierarchy declaration (docs/elwindui_spec.md 付録H.2.1a). A composed
@@ -2437,7 +2747,13 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
     // like `elwindui_core::ui::TextAreaExt: NativeControlExt` does — so there's no need to skip
     // every transitive ancestor through the base trait's supertrait chain.
     let inherits_path: TokenStream = match &immediate_base_name {
-        Some(name) if table.resolve(from, name).is_some_and(|i| i.is_virtual_builtin) => shape_composition_base_type(name),
+        Some(name)
+            if table
+                .resolve(from, name)
+                .is_some_and(|i| i.is_virtual_builtin) =>
+        {
+            shape_composition_base_type(name)
+        }
         Some(name) => base_trait_path(name),
         None => TokenStream::new(),
     };
@@ -2481,7 +2797,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 // like this is exactly what that macro supports for this reason.
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     let this = std::rc::Rc::new(Self::construct(#(#ctor_param_names),*));
-                    #parent_wiring_stmt
+                    #owner_bind_stmt
+                    #content_attach_stmt
                     #wiring_stmts
                     // Most widgets already read live model state at construction time, so this is a
                     // no-op for them. A widget whose own state only ever appears in `resync()` (e.g.
@@ -2510,7 +2827,8 @@ fn generate_view(view: &ViewDef, component: &ComponentDef, from: &Module, table:
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #construct_stmts
                     let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits });
-                    #parent_wiring_stmt
+                    #owner_bind_stmt
+                    #content_attach_stmt
                     #wiring_stmts
                     this.resync();
                     #subscribe_stmts
@@ -2623,11 +2941,13 @@ fn plan_element(
     let mut child_bindings = Vec::new();
     for child in &node.children {
         match child {
-            ChildEntry::Literal(elem) => child_bindings.push(plan_element(elem, ctx, from, table, out, false, lets)),
+            ChildEntry::Literal(elem) => {
+                child_bindings.push(plan_element(elem, ctx, from, table, out, false, lets))
+            }
             ChildEntry::Ref(name) => {
-                let resolved = lets
-                    .get(name)
-                    .unwrap_or_else(|| panic!("`{name}` does not refer to an earlier `let` binding in this view"));
+                let resolved = lets.get(name).unwrap_or_else(|| {
+                    panic!("`{name}` does not refer to an earlier `let` binding in this view")
+                });
                 child_bindings.push(resolved.clone());
             }
         }
@@ -2636,7 +2956,10 @@ fn plan_element(
     let mut element_attr_bindings = HashMap::new();
     for (name, expr) in &node.attributes {
         if let ViewExpr::Element(elem) = expr {
-            element_attr_bindings.insert(name.clone(), plan_element(elem, ctx, from, table, out, false, lets));
+            element_attr_bindings.insert(
+                name.clone(),
+                plan_element(elem, ctx, from, table, out, false, lets),
+            );
         }
     }
 
@@ -2688,13 +3011,21 @@ fn desugar_command_attr(
     from: &Module,
     table: &SymbolTable,
 ) -> Vec<(String, ViewExpr)> {
-    let Some(ViewExpr::Path(command_path)) = attributes.iter().find(|(name, _)| name == "command").map(|(_, v)| v) else {
+    let Some(ViewExpr::Path(command_path)) = attributes
+        .iter()
+        .find(|(name, _)| name == "command")
+        .map(|(_, v)| v)
+    else {
         return attributes;
     };
     let Some(info) = table.resolve(from, type_path) else {
         return attributes;
     };
-    let on_fields: Vec<&String> = info.fields.keys().filter(|name| name.starts_with("on_")).collect();
+    let on_fields: Vec<&String> = info
+        .fields
+        .keys()
+        .filter(|name| name.starts_with("on_"))
+        .collect();
     let [trigger] = on_fields.as_slice() else {
         return attributes;
     };
@@ -2706,9 +3037,15 @@ fn desugar_command_attr(
     // left in place, `emit_resync`'s generic "call `set_<attr>` for every non-callback attribute"
     // loop would try (and fail to find) a `set_command` method, so it must be removed once
     // desugared, not just left inert.
-    let mut result: Vec<(String, ViewExpr)> = attributes.into_iter().filter(|(name, _)| name != "command").collect();
+    let mut result: Vec<(String, ViewExpr)> = attributes
+        .into_iter()
+        .filter(|(name, _)| name != "command")
+        .collect();
     if !result.iter().any(|(name, _)| *name == trigger) {
-        result.push((trigger, ViewExpr::MethodCall(command_path.clone(), "execute".to_string())));
+        result.push((
+            trigger,
+            ViewExpr::MethodCall(command_path.clone(), "execute".to_string()),
+        ));
     }
     if has_enabled_field && !result.iter().any(|(name, _)| name == "enabled") {
         let mut can_execute_path = command_path;
@@ -2719,7 +3056,10 @@ fn desugar_command_attr(
 }
 
 fn find_attr<'a>(node: &'a PlannedNode, name: &str) -> Option<&'a ViewExpr> {
-    node.attributes.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+    node.attributes
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
 }
 
 /// Emits `binding.as_ui_element().set_attached::<T>(owner, field, value)` for every `Owner::field: value`
@@ -2741,16 +3081,26 @@ fn find_attr<'a>(node: &'a PlannedNode, name: &str) -> Option<&'a ViewExpr> {
 /// component branch — see those call sites' own doc comments for exactly which child kinds this
 /// reaches. Verified end-to-end by launching the notepad example with a temporary `Grid` in its
 /// status bar (Fixed/Star/Fixed columns rendered with correct proportional widths).
-fn emit_attached_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, mode: &EmitMode, binding: &TokenStream) -> TokenStream {
+fn emit_attached_setters(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    mode: &EmitMode,
+    binding: &TokenStream,
+) -> TokenStream {
     let mut out = TokenStream::new();
     for (owner, field, value) in &node.attached {
         let ty_str = table
             .resolve(from, owner)
             .and_then(|info| info.attached_field_types.get(field))
             .unwrap_or_else(|| panic!("`{owner}::{field}` is not a known `#[attached]` field (should have been caught by validation)"));
-        let ty: syn::Type = syn::parse_str(ty_str).unwrap_or_else(|e| panic!("invalid attached field type `{ty_str}`: {e}"));
+        let ty: syn::Type = syn::parse_str(ty_str)
+            .unwrap_or_else(|e| panic!("invalid attached field type `{ty_str}`: {e}"));
         let value_ts = emit_expr(value, ctx, mode);
-        out.extend(quote! { #binding.as_ui_element().set_attached::<#ty>(#owner, #field, #value_ts); });
+        out.extend(
+            quote! { #binding.as_ui_element().set_attached::<#ty>(#owner, #field, #value_ts); },
+        );
     }
     out
 }
@@ -2758,7 +3108,10 @@ fn emit_attached_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table
 /// `Option<Foo>` -> `("Foo", true)`; anything else -> `(ty, false)` unchanged.
 pub(crate) fn strip_option(ty: &str) -> (&str, bool) {
     let trimmed = ty.trim();
-    match trimmed.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
+    match trimmed
+        .strip_prefix("Option<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
         Some(inner) => (inner.trim(), true),
         None => (trimmed, false),
     }
@@ -2804,11 +3157,16 @@ const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 /// - `Button`/`TextArea`/`TabView` (`TypeInfo::is_native_control_leaf`): already implements
 ///   `UIElement` directly — its own `base` (a backend-owned `NativeControlImpl`, composed via
 ///   `inherits = NativeControl` — see `elwindui_core::ui::NativeControl`'s own doc comment) was
-///   already built at construction time from *this exact use site*'s margin/alignment/data_context/
+///   already built at construction time from this exact use site's margin/alignment/
 ///   `routed_handlers` (see `emit_construction`'s `build_ui_element_base` argument) — so this is a
 ///   plain upcast, no fresh wrapper needed.
 /// - Other native values (`MenuBar`, `Menu`, or `Window`) are unsupported in UI-element slots.
-fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module, table: &SymbolTable) -> TokenStream {
+fn into_node_if_needed(
+    base: TokenStream,
+    source_type_path: &str,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
     if source_type_path == PASSTHROUGH_NODE {
         // `.clone()` (an `Rc` refcount bump), not a bare move — the same param is also stored
         // verbatim on `Self` (`generate_view`'s `Self { #(#param_names,)* .. }`), so the original
@@ -2848,7 +3206,13 @@ fn into_node_if_needed(base: TokenStream, source_type_path: &str, from: &Module,
 /// `render_label`/`render_content`, or any future widget with a per-item callback param). The
 /// closure's own parameter needs no type annotation — it's inferred from the constructor
 /// parameter's declared `Box<dyn Fn(&Rc<T>) -> R>` type at the call site.
-fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
+fn emit_closure_value(
+    param: &str,
+    body: &ClosureBody,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
     let param_ident = format_ident!("{}", param);
     let closure_ctx = ctx.with_closure_param(param);
     let body_expr = match body {
@@ -2857,7 +3221,15 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
             let mut plan = Vec::new();
             // No outer `let`-bound names are visible inside a template closure body — it runs in a
             // separate per-item instantiation context, not the enclosing view's own construction.
-            plan_element(elem, &closure_ctx, from, table, &mut plan, true, &HashMap::new());
+            plan_element(
+                elem,
+                &closure_ctx,
+                from,
+                table,
+                &mut plan,
+                true,
+                &HashMap::new(),
+            );
             let mut construct = TokenStream::new();
             for planned in &plan {
                 emit_construction(planned, &closure_ctx, from, table, &mut construct);
@@ -2869,7 +3241,8 @@ fn emit_closure_value(param: &str, body: &ClosureBody, ctx: &ViewCtx, from: &Mod
             // works exactly like any other embedding slot, via the same `is_native` dispatch
             // `into_node_if_needed` uses elsewhere.
             let root_binding = &root.binding;
-            let converted = into_node_if_needed(quote! { #root_binding }, &root.type_path, from, table);
+            let converted =
+                into_node_if_needed(quote! { #root_binding }, &root.type_path, from, table);
             quote! { { #construct #converted } }
         }
     };
@@ -2983,15 +3356,27 @@ fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
 ///     `TypeInfo::content_field`) with no matching attribute binds the element's single bare nested
 ///     child (`MenuBarItem`'s single nested `Menu`, bound to its `#[content(submenu)]` field);
 ///   - anything else is an ordinary `emit_expr` value.
-fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
-    if table.resolve(from, &node.type_path).is_some_and(|i| i.is_virtual_builtin) {
+fn emit_construction(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut TokenStream,
+) {
+    if table
+        .resolve(from, &node.type_path)
+        .is_some_and(|i| i.is_virtual_builtin)
+    {
         emit_virtual_construction(node, ctx, from, table, out);
         return;
     }
 
     let binding = &node.binding;
     let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
-        panic!("unknown or out-of-scope element `{}` — is a `use` for it missing?", node.type_path)
+        panic!(
+            "unknown or out-of-scope element `{}` — is a `use` for it missing?",
+            node.type_path
+        )
     });
     let type_ident = concrete_type_ident(&node.type_path, Some(info));
 
@@ -3020,7 +3405,8 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
         if !info.is_native && !node.attached.is_empty() {
             let erased = format_ident!("{}_erased", binding);
             let erased_ts = quote! { #erased };
-            let setters = emit_attached_setters(node, ctx, from, table, &EmitMode::Construction, &erased_ts);
+            let setters =
+                emit_attached_setters(node, ctx, from, table, &EmitMode::Construction, &erased_ts);
             out.extend(quote! {
                 let #erased: std::rc::Rc<dyn elwindui::core::ui::UIElementExt> = #binding.clone().into_node();
                 #setters
@@ -3029,13 +3415,19 @@ fn emit_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &S
     }
     // `Button`/`TextArea`/`TabView` (`inherits NativeControl`, `TypeInfo::is_native_control_leaf`)
     // own a real `base` (a backend-owned `NativeControlImpl`) field (docs/elwindui_spec.md
-    // 付録H.2.1a) — this use site's margin/data_context/attached properties are applied to it right
+    // 付録H.2.1a) — this use site's margin/attached properties are applied to it right
     // here, post-construction, exactly like `emit_virtual_construction` does for virtual builtins
     // (see `emit_common_ui_element_setters`). `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`
     // (`#[native]` directly, never entering the `UIElement` tree) don't get this at all.
     if info.is_native_control_leaf {
         let binding_ts = quote! { #binding };
-        out.extend(emit_common_ui_element_setters(node, ctx, from, table, &binding_ts));
+        out.extend(emit_common_ui_element_setters(
+            node,
+            ctx,
+            from,
+            table,
+            &binding_ts,
+        ));
         // `Button`'s own `on_click` is a real `#[routed]` field (`info.routed_fields`), already
         // wired by `emit_wiring`'s dedicated `is_routed` branch — applying the generic mechanism
         // here too would register the same callback twice.
@@ -3089,7 +3481,11 @@ fn is_deferred_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
 ///   (e.g. `Rectangle::corner_radius`) may have no real setter at all regardless of `FieldKind`.
 fn is_settable_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
     is_deferred_field(info, name, ty)
-        || (!info.is_builtin && info.effective_fields.iter().any(|f| f.name == name && f.kind == FieldKind::Prop))
+        || (!info.is_builtin
+            && info
+                .effective_fields
+                .iter()
+                .any(|f| f.name == name && f.kind == FieldKind::Prop))
 }
 
 /// Evaluates a resolved user-component node's own attributes into the positional argument list its
@@ -3101,7 +3497,13 @@ fn is_settable_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
 /// placeholder `None` — since that target's own `new(..)` does not declare one; the matching
 /// value (if this use site supplies one) is applied afterward instead, via
 /// `build_component_optional_setters`.
-fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, info: &TypeInfo) -> Vec<TokenStream> {
+fn build_component_args(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    info: &TypeInfo,
+) -> Vec<TokenStream> {
     // A bare nested child element (no `name:` attribute) only ever has somewhere to go if this
     // component declares a `children`-named param (a list, consumed in full below) or a
     // `#[content(field_name)]` (a single slot, consumed further down) — anything else, with no
@@ -3149,7 +3551,9 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
                 }
             }
-            Some(ViewExpr::Closure { param, body }) => emit_closure_value(param, body, ctx, from, table),
+            Some(ViewExpr::Closure { param, body }) => {
+                emit_closure_value(param, body, ctx, from, table)
+            }
             Some(other) => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
                 // A `String`-shaped param takes `&str` in every *hand-written* builtin (matching
@@ -3178,7 +3582,9 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
                 args.push(quote! { None });
                 continue;
             }
-            None if info.content_field.as_deref() == Some(name.as_str()) && !node.child_bindings.is_empty() => {
+            None if info.content_field.as_deref() == Some(name.as_str())
+                && !node.child_bindings.is_empty() =>
+            {
                 if node.child_bindings.len() > 1 {
                     panic!(
                         "`{}`'s `#[content({name})]` field can only bind a single nested child element, found {}",
@@ -3195,7 +3601,11 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
             }
             None => panic!("`{}` requires attribute `{name}`", node.type_path),
         };
-        args.push(if is_option { quote! { Some(#value) } } else { value });
+        args.push(if is_option {
+            quote! { Some(#value) }
+        } else {
+            value
+        });
     }
     args
 }
@@ -3204,7 +3614,7 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
 /// `is_hand_written_native` branch instead of positional constructor args (docs/elwindui_spec.md
 /// 付録H.2.1a's post-construction setter convention, extended to every builtin's own declared
 /// `#[param]`s, the same way `emit_common_ui_element_setters` already applies it to
-/// margin/data_context/grid_cell). Mirrors `build_component_args`'s field-by-field value
+/// margin/grid_cell). Mirrors `build_component_args`'s field-by-field value
 /// computation exactly (same bare-children/`ViewExpr::Element`/`ViewExpr::Closure`/
 /// `#[content(field_name)]` handling), except:
 /// - an absent `Option<..>`-typed attribute emits **no call at all** (the zero-argument
@@ -3224,7 +3634,13 @@ fn build_component_args(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table:
 ///   `set_items_source`
 ///   itself stays a separate, single-argument method (unaffected) — `emit_resync` already calls it
 ///   alone (its own value is concrete, no closure involved, so no inference problem there).
-fn build_component_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, info: &TypeInfo) -> Vec<TokenStream> {
+fn build_component_setters(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    info: &TypeInfo,
+) -> Vec<TokenStream> {
     let has_children_field = info.param_fields.iter().any(|(name, _)| name == "children");
     if !has_children_field && info.content_field.is_none() && !node.child_bindings.is_empty() {
         panic!(
@@ -3246,14 +3662,35 @@ fn build_component_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, tab
         if (name == "header_template" || name == "item_template") && dynamic_source_handled {
             continue;
         }
-        if name == "items_source" && info.param_fields.iter().any(|(n, _)| n == "header_template") {
-            let Some(items) = find_attr(node, "items_source") else { continue };
-            let Some(ViewExpr::Closure { param: header_param, body: header_body }) = find_attr(node, "header_template") else { continue };
-            let Some(ViewExpr::Closure { param: item_param, body: item_body }) = find_attr(node, "item_template") else { continue };
+        if name == "items_source"
+            && info
+                .param_fields
+                .iter()
+                .any(|(n, _)| n == "header_template")
+        {
+            let Some(items) = find_attr(node, "items_source") else {
+                continue;
+            };
+            let Some(ViewExpr::Closure {
+                param: header_param,
+                body: header_body,
+            }) = find_attr(node, "header_template")
+            else {
+                continue;
+            };
+            let Some(ViewExpr::Closure {
+                param: item_param,
+                body: item_body,
+            }) = find_attr(node, "item_template")
+            else {
+                continue;
+            };
             let items = emit_expr(items, ctx, &EmitMode::Construction);
             let header_template = emit_closure_value(header_param, header_body, ctx, from, table);
             let item_template = emit_closure_value(item_param, item_body, ctx, from, table);
-            setters.push(quote! { #binding.set_dynamic_source(#items, #header_template, #item_template); });
+            setters.push(
+                quote! { #binding.set_dynamic_source(#items, #header_template, #item_template); },
+            );
             dynamic_source_handled = true;
             continue;
         }
@@ -3288,7 +3725,10 @@ fn build_component_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, tab
             // separately stored as its own struct field (`generate_view`'s `Self { #(#field_inits,)*
             // .. }`), so the original binding must stay valid for that later use, exactly like
             // `into_any_view_if_needed`'s own default (non-`AnyView`) clone convention just above.
-            let items = node.child_bindings.iter().map(|(c, _)| quote! { #c.clone() });
+            let items = node
+                .child_bindings
+                .iter()
+                .map(|(c, _)| quote! { #c.clone() });
             setters.push(quote! {
                 for __c in vec![ #(#items),* ] { #binding.#accessor_ident().add(__c); }
             });
@@ -3309,7 +3749,9 @@ fn build_component_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, tab
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
                 }
             }
-            Some(ViewExpr::Closure { param, body }) => emit_closure_value(param, body, ctx, from, table),
+            Some(ViewExpr::Closure { param, body }) => {
+                emit_closure_value(param, body, ctx, from, table)
+            }
             Some(other) => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
                 if inner_ty == "String" {
@@ -3348,7 +3790,13 @@ fn build_component_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, tab
 /// supplies a value for the field — an absent one leaves that field's own
 /// `RefCell::new(None)`/`Cell::new(None)` default in place (`generate_view`/`generate_component`'s
 /// own field-splitting doc comment).
-fn build_component_optional_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, info: &TypeInfo) -> Vec<TokenStream> {
+fn build_component_optional_setters(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    info: &TypeInfo,
+) -> Vec<TokenStream> {
     let binding = &node.binding;
     let mut setters = Vec::new();
     for (name, ty) in &info.param_fields {
@@ -3371,7 +3819,9 @@ fn build_component_optional_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Mo
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
                 }
             }
-            Some(ViewExpr::Closure { param, body }) => emit_closure_value(param, body, ctx, from, table),
+            Some(ViewExpr::Closure { param, body }) => {
+                emit_closure_value(param, body, ctx, from, table)
+            }
             Some(other) => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
                 // The generated `set_<field>` setter takes the field's own declared (owned) inner
@@ -3399,16 +3849,24 @@ fn build_component_optional_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Mo
 /// `generate_view`'s `is_shape_composition` branch).
 ///
 /// Deferred fields of a composed base are not supported at this expression-only call site.
-fn build_component_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
+fn build_component_value(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
     let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
-        panic!("unknown or out-of-scope element `{}` — is a `use` for it missing?", node.type_path)
+        panic!(
+            "unknown or out-of-scope element `{}` — is a `use` for it missing?",
+            node.type_path
+        )
     });
     let construct_path = composed_construct_path(&node.type_path, info.is_builtin);
     let args = build_component_args(node, ctx, from, table, info);
     quote! { #construct_path(#(#args),*) }
 }
 
-/// Emits post-construction `binding.as_ui_element().set_margin(..)`/`set_data_context(..)`/
+/// Emits post-construction `binding.as_ui_element().set_margin(..)`/
 /// `set_attached::<T>(..)` calls (docs/elwindui_spec.md 付録H.2.1a) for whichever of these common
 /// attributes `node` actually specifies — shared by `emit_virtual_construction` (virtual builtins)
 /// and `emit_construction`'s native-control-leaf branch (`Button`/`TextArea`/`TabView` — see
@@ -3419,7 +3877,13 @@ fn build_component_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table
 /// `UIElementImpl::default()` in place. Deliberately does *not* handle the generic "any element can
 /// catch a routed `on_click`" attribute — see `emit_generic_on_click_routing`, a separate step for
 /// exactly that.
-fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, binding: &TokenStream) -> TokenStream {
+fn emit_common_ui_element_setters(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    binding: &TokenStream,
+) -> TokenStream {
     // Whether `expr` is a bare 1-segment reference to one of *this* component's own `#[param]`
     // fields that's already `Option<..>`-typed (e.g. `ContentControl`'s own `padding: Option<f32>`
     // forwarded as `Control { padding: padding }`) — as opposed to a plain value (a literal, a
@@ -3427,7 +3891,10 @@ fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Modu
     // argument type as-is.
     let is_own_option_field = |expr: &ViewExpr| match expr {
         ViewExpr::Path(segments) => match segments.as_slice() {
-            [only] => ctx.own_fields.get(only).is_some_and(|ty| ty.starts_with("Option<")),
+            [only] => ctx
+                .own_fields
+                .get(only)
+                .is_some_and(|ty| ty.starts_with("Option<")),
             _ => false,
         },
         _ => false,
@@ -3445,18 +3912,14 @@ fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Modu
         };
         out.extend(quote! { #binding.as_ui_element().set_margin(#value); });
     }
-    // `data_context` (付録Y) is likewise a common attribute, settable the same way `margin` is —
-    // an omitted one leaves `UIElementImpl::default()`'s `None`. The supplied expression is
-    // `Rc<dyn Any>`-erased here (matching every other cross-type-parameter value in this crate,
-    // e.g. `elwindui-backend-appkit`'s `tab_view` module's `erase_items`/`erase_render`) so
-    // `UIElementImpl` itself stays non-generic. The expression must already evaluate to an owned
-    // `Rc<T>` (matching `items_source`'s own `Vec<Rc<T>>` requirement) — the cast relies on that,
-    // it doesn't wrap in a fresh `Rc`.
-    if let Some(expr) = find_attr(node, "data_context") {
-        let value = emit_expr(expr, ctx, &EmitMode::Construction);
-        out.extend(quote! { #binding.as_ui_element().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
-    }
-    out.extend(emit_attached_setters(node, ctx, from, table, &EmitMode::Construction, binding));
+    out.extend(emit_attached_setters(
+        node,
+        ctx,
+        from,
+        table,
+        &EmitMode::Construction,
+        binding,
+    ));
     // `.as_ui_element()` is a trait method (`elwindui::core::ui::UIElement`), not an inherent one — needs
     // the trait in scope for dot-call resolution wherever `out` ends up spliced, regardless of
     // whatever `use`s the surrounding generated function happens to have (mirrors the parent-wiring
@@ -3480,7 +3943,11 @@ fn emit_common_ui_element_setters(node: &PlannedNode, ctx: &ViewCtx, from: &Modu
 /// branch only when the type doesn't *already* declare `on_click` as a real `#[routed]` field of
 /// its own (`Button` — wired instead by `emit_wiring`'s dedicated `is_routed` branch; applying this
 /// generic mechanism too would register the same callback twice).
-fn emit_generic_on_click_routing(node: &PlannedNode, ctx: &ViewCtx, binding: &TokenStream) -> TokenStream {
+fn emit_generic_on_click_routing(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    binding: &TokenStream,
+) -> TokenStream {
     match find_attr(node, "on_click") {
         Some(expr) => {
             let call = emit_expr(expr, ctx, &EmitMode::Construction);
@@ -3500,36 +3967,50 @@ fn emit_generic_on_click_routing(node: &PlannedNode, ctx: &ViewCtx, binding: &To
 
 /// Builds an `Rc<ConcreteImpl>` value for a virtual builtin (`VerticalLayout`/`HorizontalLayout`/
 /// `TextBlock`/`Control`/`Grid`/`Shape` — see `is_virtual_builtin`) directly from its own
-/// attributes, instead of calling a (nonexistent) `Type::new(args)`. Kept at its own concrete type
-/// (`new_element_concrete`, not `new_element`'s `Rc<dyn UIElement>` erasure) so a `stored` node can
+/// attributes, instead of calling a positional `Type::new(args)`. Kept at its own concrete type
+/// so a `stored` node can
 /// be kept on `Self` the same way any other builtin's stored field is (`generate_view`'s
 /// `struct_fields`/`field_inits`, which expect `Rc<#type_ident>`) and so `emit_resync` can call its
 /// real `set_*` setters later — erasure into `Rc<dyn UIElement>` happens lazily at whichever use
-/// site actually needs it (`into_node_if_needed`'s own virtual-builtin branch). Still goes through
-/// `new_element_concrete` rather than a bare `Rc::new` — skipping it would leave `self_handle`
-/// unset, silently turning every `invalidate()` call on this element (and thus `emit_resync`'s own
-/// `set_*` calls on it, which all end in one) into a no-op (see that function's own doc comment).
-fn emit_virtual_construction(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
+/// site actually needs it (`into_node_if_needed`'s own virtual-builtin branch).
+fn emit_virtual_construction(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut TokenStream,
+) {
     let binding = &node.binding;
     let value = build_virtual_value(node, ctx, from, table);
     let concrete_ty = concrete_type_ident(&node.type_path, table.resolve(from, &node.type_path));
     out.extend(quote! {
-        let #binding: std::rc::Rc<#concrete_ty> = elwindui::core::ui::new_element_concrete(#value);
+        let #binding: std::rc::Rc<#concrete_ty> = #value;
     });
     let binding_ts = quote! { #binding };
-    out.extend(emit_common_ui_element_setters(node, ctx, from, table, &binding_ts));
+    out.extend(emit_common_ui_element_setters(
+        node,
+        ctx,
+        from,
+        table,
+        &binding_ts,
+    ));
     out.extend(emit_generic_on_click_routing(node, ctx, &binding_ts));
 }
 
-/// Builds the plain (not yet `new_element`-wrapped) `elwindui::core::ui::create_xxx()` (empty
+/// Builds the plain `elwindui::core::ui::create_xxx()` (empty
 /// argument — docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention, extended to
 /// every builtin property) followed by whichever `set_<field>(..)` calls this use site's own
 /// attributes supply, as a single block expression evaluating to the fully-configured value — the
-/// value `emit_virtual_construction` normally wraps immediately in `new_element(..)`, but which a
+/// value `emit_virtual_construction` normally stores directly, but which a
 /// `component X inherits Y` shape-composition root (docs/elwindui_spec.md 付録H.2.1a) needs
 /// unwrapped so it can be embedded directly as `X`'s own `base` field instead of erased into
 /// `Rc<dyn UIElement>` (see `generate_view`'s `is_shape_composition` branch).
-fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
+fn build_virtual_value(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
     let info = table
         .resolve(from, &node.type_path)
         .unwrap_or_else(|| panic!("unknown virtual builtin `{}`", node.type_path));
@@ -3538,12 +4019,21 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
     let ext_ident = format_ident!("{}Ext", node.type_path);
     let common_field_names: HashSet<&str> = table
         .resolve(from, "UIElement")
-        .map(|ui_element| ui_element.param_fields.iter().map(|(name, _)| name.as_str()).collect())
+        .map(|ui_element| {
+            ui_element
+                .param_fields
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect()
+        })
         .unwrap_or_default();
 
     let is_own_option_field = |expr: &ViewExpr| match expr {
         ViewExpr::Path(segments) => match segments.as_slice() {
-            [only] => ctx.own_fields.get(only).is_some_and(|ty| ty.starts_with("Option<")),
+            [only] => ctx
+                .own_fields
+                .get(only)
+                .is_some_and(|ty| ty.starts_with("Option<")),
             _ => false,
         },
         _ => false,
@@ -3559,11 +4049,12 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
         let is_content = info.content_field.as_deref() == Some(name.as_str());
         if is_content && ty == "UIElementCollection" {
             needs_ui_element_trait = true;
-            let children = node
-                .child_bindings
-                .iter()
-                .map(|(binding, child_ty)| into_node_if_needed(quote! { #binding }, child_ty, from, table));
-            setters.extend(quote! { for __child in vec![ #(#children),* ] { __v.children_collection().add(__child); } });
+            let children = node.child_bindings.iter().map(|(binding, child_ty)| {
+                into_node_if_needed(quote! { #binding }, child_ty, from, table)
+            });
+            setters.extend(
+                quote! { for __child in vec![ #(#children),* ] { __v.children().add(__child); } },
+            );
             continue;
         }
 
@@ -3594,14 +4085,19 @@ fn build_virtual_value(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: 
         setters.extend(quote! { __v.#setter(#value); });
     }
 
-    let type_trait_use = needs_type_trait.then(|| quote! { use elwindui::core::ui::#ext_ident as _; });
-    let ui_element_trait_use = needs_ui_element_trait.then(|| quote! { use elwindui::core::ui::UIElementExt as _; });
+    let type_trait_use =
+        needs_type_trait.then(|| quote! { use elwindui::core::ui::#ext_ident as _; });
+    let ui_element_trait_use = needs_ui_element_trait.then(|| {
+        quote! {
+            use elwindui::core::ui::LayoutExt as _;
+        }
+    });
 
     quote! {
         {
             #type_trait_use
             #ui_element_trait_use
-            let __v = elwindui::core::ui::#type_ident::construct();
+            let __v = elwindui::core::ui::#type_ident::new();
             #setters
             __v
         }
@@ -3658,7 +4154,13 @@ fn shape_composition_base_type(base: &str) -> TokenStream {
 /// decides whether the callback takes an index — see `emit_wiring`'s doc on `takes_index` below);
 /// any attribute whose shape field is `#[two_way]` gets a `set_on_<attr>_change` callback wired
 /// back into its bound path.
-fn emit_wiring(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
+fn emit_wiring(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut TokenStream,
+) {
     if !node.stored {
         return;
     }
@@ -3670,7 +4172,9 @@ fn emit_wiring(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
     // `#[two_way]` attribute at all (every branch of the loop below that actually emits tokens is
     // mirrored by one of these two conditions).
     let needs_wiring = node.attributes.iter().any(|(name, expr)| {
-        name.starts_with("on_") || (info.is_some_and(|i| i.two_way_fields.contains(name)) && matches!(expr, ViewExpr::Path(_)))
+        name.starts_with("on_")
+            || (info.is_some_and(|i| i.two_way_fields.contains(name))
+                && matches!(expr, ViewExpr::Path(_)))
     });
     if !needs_wiring {
         return;
@@ -3770,7 +4274,13 @@ fn emit_wiring(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
 /// `#[two_way]` attributes (e.g. `TextArea`'s `text`) are resynced the same as any other — this
 /// pushes model→widget; `emit_wiring`'s separate `set_on_<attr>_change` callback is what pushes
 /// widget→model.
-fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable, out: &mut TokenStream) {
+fn emit_resync(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut TokenStream,
+) {
     if !node.stored {
         return;
     }
@@ -3784,12 +4294,8 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
     // copy of the same import for this function's own `self.#binding.#setter(..)` calls below.
     out.extend(builtin_trait_use(&node.type_path, info));
 
-    // `margin`/`data_context` (§13's common `UIElementBase` attributes, settable on *any* node
-    // regardless of its own type) are handled separately below, not by the generic per-attribute
-    // loop — they aren't part of any type's own `field_types` (so the loop's `is_copy` lookup would
-    // always miss) and their real setters (`UIElement::set_margin`/`set_data_context`) need the
-    // `UIElement` trait imported and take their argument *by value*, unlike this loop's
-    // reference-taking convention.
+    // `margin` is a common `UIElementBase` attribute handled separately below because it is not
+    // part of a type's own `field_types` and its setter takes the value by value.
     emit_common_ui_element_resync(node, ctx, &self_mode, binding, out);
 
     // Every codegen-*generated* setter (a virtual builtin's own `elwindui_core::ui` setters, or a
@@ -3806,7 +4312,7 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
         if matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. }) {
             continue;
         }
-        if name == "margin" || name == "data_context" {
+        if name == "margin" {
             continue;
         }
         // `#[onetime]` fields (`Window`'s own `left`/`top`/`width`/`height`,
@@ -3832,7 +4338,11 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
         if info.is_some_and(|i| {
             i.has_view
                 && i.param_fields.iter().any(|(n, _)| n == name)
-                && !is_settable_field(i, name, i.field_types.get(name).map(String::as_str).unwrap_or(""))
+                && !is_settable_field(
+                    i,
+                    name,
+                    i.field_types.get(name).map(String::as_str).unwrap_or(""),
+                )
         }) {
             continue;
         }
@@ -3842,7 +4352,9 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
         // The resync value itself is never `Option`-wrapped (only construction-time args are, per
         // the shape's own `Option<..>` convention for "may be absent"), so copy-ness is judged on
         // the stripped inner type — `Option<String>`'s runtime value here is a plain `String`.
-        let field_ty = info.and_then(|i| i.field_types.get(name)).map(String::as_str);
+        let field_ty = info
+            .and_then(|i| i.field_types.get(name))
+            .map(String::as_str);
         let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
         if is_copy {
             out.extend(quote! { self.#binding.#setter(#value); });
@@ -3869,21 +4381,22 @@ fn emit_resync(node: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolT
     }
 }
 
-/// Re-applies `margin`/`data_context` (§13's common `UIElementBase` attributes) during `resync()`
+/// Re-applies `margin` during `resync()`
 /// for *any* stored node, mirroring `emit_common_ui_element_setters`'s own construction-time
-/// conversions (`UIElement::set_margin(&self, margin: f32)`/`set_data_context(&self, data_context:
-/// Option<Rc<dyn Any>>)` — both by-value, needing the `UIElement` trait in scope). Split out from
+/// conversion (`UIElement::set_margin(&self, margin: f32)`). Split out from
 /// `emit_resync`'s main per-attribute loop since these two aren't part of any type's own
 /// `field_types`.
-fn emit_common_ui_element_resync(node: &PlannedNode, ctx: &ViewCtx, self_mode: &EmitMode, binding: &syn::Ident, out: &mut TokenStream) {
+fn emit_common_ui_element_resync(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    self_mode: &EmitMode,
+    binding: &syn::Ident,
+    out: &mut TokenStream,
+) {
     let mut body = TokenStream::new();
     if let Some(expr) = find_attr(node, "margin") {
         let value = emit_expr(expr, ctx, self_mode);
         body.extend(quote! { self.#binding.as_ui_element().set_margin(#value); });
-    }
-    if let Some(expr) = find_attr(node, "data_context") {
-        let value = emit_expr(expr, ctx, self_mode);
-        body.extend(quote! { self.#binding.as_ui_element().set_data_context(Some((#value) as std::rc::Rc<dyn std::any::Any>)); });
     }
     if !body.is_empty() {
         out.extend(quote! {
@@ -3945,7 +4458,10 @@ fn command_execute_call(
     };
     let resolved = resolve_bind(path, &ctx.binds);
     let (owner_path, command) = resolved.split_at(resolved.len() - 1);
-    let owner = owner_path.last().cloned().unwrap_or_else(|| "vm".to_string());
+    let owner = owner_path
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "vm".to_string());
     let base = mode.owner_tokens(&owner);
     let execute = format_ident!("{}_execute", command[0]);
     quote! { #base.#execute(#index_arg) }
@@ -3967,26 +4483,7 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
     match expr {
         ViewExpr::Expr(e) => quote! { #e },
         ViewExpr::Path(path) => {
-            // `data_context` (WinUI3's `FrameworkElement.DataContext`, 付録Y — lowercased to match
-            // this DSL's snake_case attribute naming, e.g. the `data_context:` attribute itself)
-            // is sugar for the enclosing `header_template`/`item_template` closure's own bound
-            // parameter — substituted for it before any other resolution, so `data_context.field`
-            // behaves exactly like writing the closure's real parameter name (`doc.field`) already
-            // does. Outside such a closure (`ctx.closure_param` is `None`) it's left alone and
-            // falls through to ordinary path resolution, which fails to resolve it (by design —
-            // this sugar is scoped to template closures only, see
-            // docs/elwindui_builtins_spec.md 付録Y).
-            let substituted_path;
-            let path: &[String] = if path.first().map(String::as_str) == Some("data_context") {
-                if let Some(param) = &ctx.closure_param {
-                    substituted_path = std::iter::once(param.clone()).chain(path[1..].iter().cloned()).collect::<Vec<_>>();
-                    &substituted_path
-                } else {
-                    path.as_slice()
-                }
-            } else {
-                path.as_slice()
-            };
+            let path: &[String] = path.as_slice();
             // A bare reference to the closure's own bound parameter (e.g. `doc` in
             // `item_template: |doc| DocumentView { doc: doc }`) passes the value straight
             // through — it isn't a `vm`-style field with a generated getter, so it must be
@@ -4035,7 +4532,10 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
         ViewExpr::MethodCall(path, method) => {
             let resolved = resolve_bind(path, &ctx.binds);
             let (owner_path, command) = resolved.split_at(resolved.len() - 1);
-            let owner = owner_path.last().cloned().unwrap_or_else(|| "vm".to_string());
+            let owner = owner_path
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "vm".to_string());
             let base = mode.owner_tokens(&owner);
             let call = format_ident!("{}_{}", command[0], method);
             quote! { #base.#call() }
@@ -4072,13 +4572,19 @@ fn emit_path_get(path: &[String], mode: &EmitMode) -> TokenStream {
             let getter = format_ident!("{}_can_execute", command);
             quote! { #base.#getter() }
         }
-        other => panic!("unsupported path shape after bind resolution: `{}`", other.join(".")),
+        other => panic!(
+            "unsupported path shape after bind resolution: `{}`",
+            other.join(".")
+        ),
     }
 }
 
 fn emit_setter(path: &[String], mode: &EmitMode) -> TokenStream {
     let [owner, field] = path else {
-        panic!("expected a 2-segment path after bind resolution, got `{}`", path.join("."));
+        panic!(
+            "expected a 2-segment path after bind resolution, got `{}`",
+            path.join(".")
+        );
     };
     let base = mode.owner_tokens(owner);
     let setter = format_ident!("set_{}", field);
@@ -4094,7 +4600,11 @@ mod tests {
     /// (`crate::builtin_modules`) are part of the symbol table — `compile_dir`/`generate_from_source`
     /// do this automatically, but a test building its own table directly needs to opt in explicitly.
     fn build_symbol_table_with_builtins(modules: &[Module]) -> SymbolTable {
-        let all: Vec<Module> = modules.iter().cloned().chain(crate::builtin_modules()).collect();
+        let all: Vec<Module> = modules
+            .iter()
+            .cloned()
+            .chain(crate::builtin_modules())
+            .collect();
         build_symbol_table(&all)
     }
 
@@ -4115,7 +4625,12 @@ mod tests {
 
         let table = build_symbol_table(&[module.clone()]);
         assert!(table.resolve(&module, "EmbeddedShape").unwrap().is_builtin);
-        assert!(!table.resolve(&module, "OrdinaryComponent").unwrap().is_builtin);
+        assert!(
+            !table
+                .resolve(&module, "OrdinaryComponent")
+                .unwrap()
+                .is_builtin
+        );
     }
 
     const VIEWMODEL_SRC: &str = r#"
@@ -4200,7 +4715,8 @@ view NotepadWindow {
     fn generates_valid_rust_for_notepad() {
         let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
         let window_module = parse_module(WINDOW_SRC).unwrap();
-        let table = build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+        let table =
+            build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
         let viewmodel_code = generate_module(&viewmodel_module, &table);
         assert_valid_rust("notepad_viewmodel", &viewmodel_code);
@@ -4241,7 +4757,8 @@ view NotepadWindow {
 "#;
         let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
         let window_module = parse_module(window_src).unwrap();
-        let table = build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+        let table =
+            build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
         let window_code = generate_module(&window_module, &table);
         assert_valid_rust("command_attr_window", &window_code);
@@ -4284,7 +4801,8 @@ view NotepadWindow {
 "#;
         let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
         let window_module = parse_module(window_src).unwrap();
-        let table = build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+        let table =
+            build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
         let window_code = generate_module(&window_module, &table);
         assert_valid_rust("command_attr_explicit_on_click_window", &window_code);
@@ -4370,7 +4888,8 @@ view NotepadWindow {
 "#;
         let viewmodel_module = parse_module(viewmodel_src).expect("viewmodel should parse");
         let window_module = parse_module(window_src).expect("window should parse");
-        let table = build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+        let table =
+            build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
         let viewmodel_code = generate_module(&viewmodel_module, &table);
         assert_valid_rust("menubar_tabview_viewmodel", &viewmodel_code);
@@ -4477,10 +4996,19 @@ view NotepadWindow {
 }
 "#;
         let viewmodel_module = parse_module(viewmodel_src).expect("viewmodel should parse");
-        let document_view_module = parse_module(document_view_src).expect("document view should parse");
+        let document_view_module =
+            parse_module(document_view_src).expect("document view should parse");
         let window_module = parse_module(window_src).expect("window should parse");
-        let modules = [viewmodel_module.clone(), document_view_module.clone(), window_module.clone()];
-        let all_modules: Vec<_> = modules.iter().cloned().chain(crate::builtin_modules()).collect();
+        let modules = [
+            viewmodel_module.clone(),
+            document_view_module.clone(),
+            window_module.clone(),
+        ];
+        let all_modules: Vec<_> = modules
+            .iter()
+            .cloned()
+            .chain(crate::builtin_modules())
+            .collect();
         let table = build_symbol_table(&all_modules);
 
         assert_eq!(crate::validate::validate(&all_modules), Ok(()));
@@ -4489,12 +5017,18 @@ view NotepadWindow {
         assert_valid_rust("document_view", &document_view_code);
         let document_view_str = document_view_code.to_string();
         assert!(document_view_str.contains("fn new (doc : std :: rc :: Rc < Document >)"));
-        assert!(!document_view_str.contains("fn show"), "DocumentView's root isn't `Window` — `show()` shouldn't be generated");
+        assert!(
+            !document_view_str.contains("fn show"),
+            "DocumentView's root isn't `Window` — `show()` shouldn't be generated"
+        );
         // `VerticalLayout` is a hand-written *virtual* builtin (no backend struct — see
         // `is_virtual_builtin`), so `DocumentView`'s root is virtual too (recursively inferred,
         // `build_symbol_table`'s `resolve_is_native`) and it generates `into_node`, not the old
         // `into_any_view`.
-        assert!(document_view_str.contains("fn into_node"), "document_view_str: {document_view_str}");
+        assert!(
+            document_view_str.contains("fn into_node"),
+            "document_view_str: {document_view_str}"
+        );
 
         let window_code = generate_module(&window_module, &table);
         assert_valid_rust("tabview_render_content_window", &window_code);
@@ -4505,8 +5039,14 @@ view NotepadWindow {
         // `content` is a plain upcast.
         // `DocumentView` itself is virtual, so `render_content`'s body calls `.into_node()` on it
         // instead.
-        assert!(!window_str.contains("into_any_view"), "window_str: {window_str}");
-        assert!(window_str.contains(". into_node ()"), "window_str: {window_str}");
+        assert!(
+            !window_str.contains("into_any_view"),
+            "window_str: {window_str}"
+        );
+        assert!(
+            window_str.contains(". into_node ()"),
+            "window_str: {window_str}"
+        );
         assert!(
             !window_str.contains("TextArea :: new (& __doc . content ())"),
             "the fixed TextArea fallback shouldn't be emitted once `item_template` is present"
@@ -4540,8 +5080,14 @@ view Greeting {
         assert_valid_rust("greeting_ctor", &generated);
 
         let s = generated.to_string();
-        assert!(s.contains("fn new (greeter : Greeter)"), "expected ctor param named `greeter`, got:\n{s}");
-        assert!(!s.contains("vm"), "ctor shouldn't hardcode a `vm` field name:\n{s}");
+        assert!(
+            s.contains("fn new (greeter : Greeter)"),
+            "expected ctor param named `greeter`, got:\n{s}"
+        );
+        assert!(
+            !s.contains("vm"),
+            "ctor shouldn't hardcode a `vm` field name:\n{s}"
+        );
         // `Greeting`'s view root is `TextBlock`, not `Window` — no top-level window to `show()`.
         assert!(!s.contains("fn show"));
         assert!(s.contains("fn into_node"));
@@ -4580,7 +5126,10 @@ viewmodel FileViewModel {
         );
         assert!(generated_str.contains("async"));
         assert!(generated_str.contains("elwindui :: i18n :: t"));
-        assert!(!generated_str.contains("t !"), "t!(...) should have been rewritten, not left as a macro call");
+        assert!(
+            !generated_str.contains("t !"),
+            "t!(...) should have been rewritten, not left as a macro call"
+        );
     }
 
     /// `ContentControl inherits Control` (docs/elwindui_builtins_spec.md 付録F.10) — the
@@ -4610,7 +5159,10 @@ view Foo {
         // always its own bare name (`ContentControlExt` is its auto-derived trait), so `Foo`'s own
         // generated code, resolving `ContentControl` as a child element, must construct that
         // concrete type (`emit_construction`'s `concrete_type_ident`).
-        assert!(generated_str.contains("ContentControl :: new"), "{generated_str}");
+        assert!(
+            generated_str.contains("ContentControl :: new"),
+            "{generated_str}"
+        );
 
         // `ContentControl`'s own generated code (produced when `builtin_modules()` is fed through
         // `generate_module` directly, mirroring how a real consumer's own `.elwind` component
@@ -4621,13 +5173,20 @@ view Foo {
         // builtin sharing that module (mirroring `compile_dir_impl`'s own filtering in `lib.rs`).
         let builtins_module = crate::builtin_modules()
             .into_iter()
-            .find(|m| m.items.iter().any(|i| matches!(i, Item::Component(c) if c.name == "ContentControl")))
+            .find(|m| {
+                m.items
+                    .iter()
+                    .any(|i| matches!(i, Item::Component(c) if c.name == "ContentControl"))
+            })
             .expect("ContentControl should be a registered builtin");
         let content_control_module = Module {
             items: builtins_module
                 .items
                 .iter()
-                .filter(|i| matches!(i, Item::Component(c) if c.name == "ContentControl") || matches!(i, Item::View(v) if v.target == "ContentControl"))
+                .filter(|i| {
+                    matches!(i, Item::Component(c) if c.name == "ContentControl")
+                        || matches!(i, Item::View(v) if v.target == "ContentControl")
+                })
                 .cloned()
                 .collect(),
             ..builtins_module
@@ -4635,20 +5194,33 @@ view Foo {
         let content_control_code = generate_module(&content_control_module, &table);
         assert_valid_rust("content_control_impl", &content_control_code);
         let content_control_str = content_control_code.to_string();
-        assert!(content_control_str.contains("elwindui :: core :: ui :: Control :: construct"));
+        assert!(content_control_str.contains("elwindui :: core :: ui :: Control :: new"));
         // `content`/`padding` are `#[class]`-managed own (untagged) methods now (docs/
         // elwindui_spec.md 付録H.2.1a) — the macro derives the matching trait declaration/impl from
         // these at expansion time, invisible in these pre-expansion generated tokens.
-        assert!(content_control_str.contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
+        assert!(
+            content_control_str
+                .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >")
+        );
         assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
         // Real struct is always the bare `ContentControl` name itself — the *source* `#[class]` is
         // written against that same bare name (docs/elwindui_spec.md 付録H.2.1a); the macro derives
         // its `ContentControlExt` trait alongside at expansion time — no `struct`/`trait` namespace
         // clash since the two are different identifiers.
-        assert!(content_control_str.contains("elwindui :: class (inherits = elwindui :: core :: ui :: Control)"), "{content_control_str}");
-        assert!(content_control_str.contains("pub struct ContentControl"), "{content_control_str}");
+        assert!(
+            content_control_str
+                .contains("elwindui :: class (inherits = elwindui :: core :: ui :: Control)"),
+            "{content_control_str}"
+        );
+        assert!(
+            content_control_str.contains("pub struct ContentControl"),
+            "{content_control_str}"
+        );
         // `#[class]` forwards `ControlExt` through its `__dyn_control` accessor.
-        assert!(!content_control_str.contains("# [ancestor]"), "{content_control_str}");
+        assert!(
+            !content_control_str.contains("# [ancestor]"),
+            "{content_control_str}"
+        );
     }
 
     /// A bare nested child element with nowhere to go (no `children` field, no
@@ -4715,16 +5287,30 @@ component LabeledPanel inherits ContentControl {
         // is written against that same bare name (docs/elwindui_spec.md 付録H.2.1a) — same reasoning
         // as `ContentControl`, and the macro derives `pub trait LabeledPanelExt: ..` itself at
         // expansion time, invisible in these pre-expansion generated tokens.
-        assert!(generated_str.contains("elwindui :: class (inherits = elwindui :: ui :: ContentControl)"), "{generated_str}");
-        assert!(generated_str.contains("pub struct LabeledPanel"), "{generated_str}");
+        assert!(
+            generated_str
+                .contains("elwindui :: class (inherits = elwindui :: ui :: ContentControl)"),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains("pub struct LabeledPanel"),
+            "{generated_str}"
+        );
         // Real base composition one level deeper than `ContentControl` itself: `LabeledPanel`
         // embeds a real `base: ContentControl` (built by calling `ContentControl`'s own
         // `construct(..)`), not a copy of `Control`'s construction — `Control::construct` only
         // ever appears in `ContentControl`'s *own* generated code (not exercised by this test, which
         // only generates `LabeledPanel`).
-        assert!(generated_str.contains("base : elwindui :: ui :: ContentControl :: construct"), "{generated_str}");
-        // `#[class]` resolves transitive ancestors during macro expansion.
-        assert!(!generated_str.contains("ControlExt"), "{generated_str}");
+        assert!(
+            generated_str.contains("base : elwindui :: ui :: ContentControl :: construct"),
+            "{generated_str}"
+        );
+        // The constructor imports ContentControlExt to attach the inherited content through the
+        // Visual collection after the outer node has an owner.
+        assert!(
+            generated_str.contains("ContentControlExt"),
+            "{generated_str}"
+        );
         // `#[class]` forwards `ContentControlExt` through `__dyn_content_control`.
         assert!(!generated_str.contains("# [ancestor]"), "{generated_str}");
     }
@@ -4771,8 +5357,14 @@ view Derived {
 
         let generated_str = generated.to_string();
         assert!(generated_str.contains("fn __base_label"), "{generated_str}");
-        assert!(generated_str.contains("fn __base_on_mount"), "{generated_str}");
-        assert!(generated_str.contains("this . __base_on_mount"), "{generated_str}");
+        assert!(
+            generated_str.contains("fn __base_on_mount"),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains("this . __base_on_mount"),
+            "{generated_str}"
+        );
     }
 
     /// `Grid` (§3) + attached properties (`Grid::row`/`Grid::column`, §3) end to end: a `view`
@@ -4800,13 +5392,34 @@ view Foo {
         assert_valid_rust("grid_with_attached_properties", &generated);
 
         let generated_str = generated.to_string();
-        assert!(generated_str.contains("elwindui :: core :: ui :: Grid :: construct"), "{generated_str}");
-        assert!(generated_str.contains("GridLength :: Auto"), "{generated_str}");
-        assert!(generated_str.contains("GridLength :: Fixed (120.0)"), "{generated_str}");
-        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 0)"#), "{generated_str}");
-        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 0)"#), "{generated_str}");
-        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 1)"#), "{generated_str}");
-        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 1)"#), "{generated_str}");
+        assert!(
+            generated_str.contains("elwindui :: core :: ui :: Grid :: new"),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains("GridLength :: Auto"),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains("GridLength :: Fixed (120.0)"),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 0)"#),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 0)"#),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 1)"#),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 1)"#),
+            "{generated_str}"
+        );
     }
 
     /// Verifies the attached-property behavior specified in docs/elwindui_spec.md §3:
@@ -4841,7 +5454,13 @@ view Foo {
 
         let generated_str = generated.to_string();
         assert!(generated_str.contains("into_node ()"), "{generated_str}");
-        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 1)"#), "{generated_str}");
-        assert!(generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 2)"#), "{generated_str}");
+        assert!(
+            generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "row" , 1)"#),
+            "{generated_str}"
+        );
+        assert!(
+            generated_str.contains(r#"set_attached :: < i32 > ("Grid" , "column" , 2)"#),
+            "{generated_str}"
+        );
     }
 }

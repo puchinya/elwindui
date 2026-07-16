@@ -27,8 +27,9 @@ const BUILTIN_SHAPE_SOURCE: &str = include_str!("builtins.elwind");
 /// without a `use` — rather than needing a separate "implicit visibility" fallback mechanism.
 pub fn builtin_modules() -> Vec<ast::Module> {
     // `parse_module` always defaults a freshly-parsed module's `path` to `[]` already.
-    let mut module = parser::parse_module(BUILTIN_SHAPE_SOURCE)
-        .unwrap_or_else(|e| panic!("failed to parse embedded builtin shapes: {e}\n---\n{BUILTIN_SHAPE_SOURCE}"));
+    let mut module = parser::parse_module(BUILTIN_SHAPE_SOURCE).unwrap_or_else(|e| {
+        panic!("failed to parse embedded builtin shapes: {e}\n---\n{BUILTIN_SHAPE_SOURCE}")
+    });
     // Marks every component parsed from here as eligible for `#[embedded]` — see
     // `ast::Module::is_builtin`'s doc comment and `validate::validate`'s check.
     module.is_builtin = true;
@@ -43,7 +44,9 @@ pub fn builtin_modules() -> Vec<ast::Module> {
 /// docs/elwindui_spec.md 付録B.1.
 pub fn generate_from_source(src: &str) -> Result<proc_macro2::TokenStream, String> {
     let module = parser::parse_module(src)?;
-    let all_modules: Vec<_> = std::iter::once(module.clone()).chain(builtin_modules()).collect();
+    let all_modules: Vec<_> = std::iter::once(module.clone())
+        .chain(builtin_modules())
+        .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(&all_modules);
     Ok(codegen::generate_module(&module, &table))
@@ -56,12 +59,19 @@ pub fn generate_from_source(src: &str) -> Result<proc_macro2::TokenStream, Strin
 /// `generate_viewmodel` directly — `generate_module` is also what conditionally emits the
 /// `__elwindui_block_on_ready` helper an async `#[command]` needs, and there's no reason to
 /// duplicate that check here).
-pub fn generate_viewmodel_from_item_mod(item_mod: &syn::ItemMod) -> Result<proc_macro2::TokenStream, String> {
+pub fn generate_viewmodel_from_item_mod(
+    item_mod: &syn::ItemMod,
+) -> Result<proc_macro2::TokenStream, String> {
     let def = attr_frontend::viewmodel_def_from_item_mod(item_mod)?;
     // A single macro invocation has no directory of sibling modules to cross-reference (`use`
     // resolution is moot with only one module), so the exact real path doesn't matter here — `[]`
     // (crate root) is as good as any.
-    let module = ast::Module { path: Vec::new(), uses: Vec::new(), items: vec![ast::Item::ViewModel(def)], ..Default::default() };
+    let module = ast::Module {
+        path: Vec::new(),
+        uses: Vec::new(),
+        items: vec![ast::Item::ViewModel(def)],
+        ..Default::default()
+    };
     validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(std::slice::from_ref(&module));
     Ok(codegen::generate_module(&module, &table))
@@ -99,8 +109,12 @@ pub fn compile_dir_with_extra_viewmodels(
 ) -> io::Result<()> {
     let mut extra_modules = Vec::new();
     for path in extra_rs_files {
-        let defs = attr_frontend::viewmodel_defs_from_rs_file(path.as_ref())
-            .unwrap_or_else(|e| panic!("scanning {} for #[elwindui::viewmodel] mods: {e}", path.as_ref().display()));
+        let defs = attr_frontend::viewmodel_defs_from_rs_file(path.as_ref()).unwrap_or_else(|e| {
+            panic!(
+                "scanning {} for #[elwindui::viewmodel] mods: {e}",
+                path.as_ref().display()
+            )
+        });
         extra_modules.extend(defs.into_iter().map(|(mod_name, def)| ast::Module {
             path: vec![mod_name],
             uses: Vec::new(),
@@ -143,8 +157,11 @@ fn compile_dir_impl(
     // `extra_modules` (Rust-attribute-macro viewmodels, if any) join in for validation/symbol-table
     // visibility only — see `compile_dir_with_extra_viewmodels`'s doc comment for why they must
     // not be code-generated again in the loop below.
-    let all_modules: Vec<_> =
-        elwind_modules.iter().cloned().chain(extra_modules.iter().cloned()).collect();
+    let all_modules: Vec<_> = elwind_modules
+        .iter()
+        .cloned()
+        .chain(extra_modules.iter().cloned())
+        .collect();
 
     if let Err(errors) = validate::validate(&all_modules) {
         panic!("elwind validation failed:\n{}", errors.join("\n"));

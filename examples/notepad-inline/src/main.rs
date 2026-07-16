@@ -62,7 +62,10 @@ mod notepad_view_model {
             match path {
                 Some(path) => {
                     let _ = std::fs::write(&path, content.clone());
-                    file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    file_name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
                     current_path = path.to_string_lossy().to_string();
                     state = SaveState::Saved;
                 }
@@ -75,7 +78,10 @@ mod notepad_view_model {
         async fn open(&self) {
             if let Some(path) = platform::file_dialog::open().await {
                 content = std::fs::read_to_string(&path).unwrap_or_default();
-                file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 current_path = path.to_string_lossy().to_string();
                 state = SaveState::Unsaved;
             }

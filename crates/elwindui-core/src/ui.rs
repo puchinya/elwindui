@@ -26,8 +26,7 @@
 //! (`UIElement::parent`, WinUI3's `_parent`) so `dispatch_routed` can bubble a routed event
 //! from any element up to the root by simply following `parent()` — no tree search needed, and
 //! critically, no dependence on the tree having been built by a single static `.elwind` traversal.
-//! A back-reference requires shared (`Rc`) ownership: `Box<dyn UIElement>`'s old parent-owns-child-
-//! outright model had no room for a child to point back. Concrete `new()` constructors establish
+//! A back-reference requires shared (`Rc`) ownership, allowing a child to point back to its parent. Concrete `new()` constructors establish
 //! their collection owner before any child is added.
 
 use crate::base::{Point, Rect, Size};
@@ -862,11 +861,8 @@ impl UIElementCollection {
 pub trait NativeControl {}
 
 /// The property-setter traits below (`TextArea`/`Button`/`MenuItem`/`Menu`/`MenuBar`/`MenuBarItem`/
-/// `Window`) are declared once here rather than duplicated per backend crate — every backend's own
-/// hand-written `XImpl` (`elwindui-backend-appkit`/`elwindui-backend-winui3`) had been independently
-/// declaring an identically-shaped trait (same method signatures, same doc-comment rationale)
-/// purely because Rust has no cross-crate trait sharing without a common home for it; this is that
-/// home. Each backend crate now just provides `impl Xxx for BackendXImpl { .. }` — the property
+/// `Window`) are declared once here rather than duplicated per backend crate.
+/// Each backend crate provides `impl Xxx for BackendXImpl { .. }` — the property
 /// *shape* (what setters exist, what they take) is common to every backend, only the method
 /// *bodies* (the actual platform API calls) differ, exactly the same split
 /// `NativeControl`/`Layout`/`Shape`/`Control`/etc. above already model for the virtual builtins.
@@ -1278,9 +1274,8 @@ impl Shape {
     }
 }
 
-/// `builtin::Rectangle`(docs/elwindui_builtins_spec.md 付録G/N)。かつては `elwindui-codegen`(`builtins.elwind`の`view Rectangle`)が
-/// 消費クレートごとに再生成していたが、バックエンド非依存な合成 builtin はここに一度だけ手書きする
-/// 方が二重管理にならない。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
+/// `builtin::Rectangle`(docs/elwindui_builtins_spec.md 付録G/N)。バックエンド非依存な合成 builtin
+/// としてここに手書きする。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
 /// 自身の共通描画メソッドを`base`委譲として登録している。
 #[elwindui_macros::class(inherits = crate::ui::Shape)]
 pub struct Rectangle {
@@ -1392,8 +1387,7 @@ impl Ellipse {
     }
 }
 
-/// Self-drawn primitive text (WinUI3's `TextBlock`) — no native widget, unlike the native `Text`
-/// this replaces. A leaf, like `NativeControlImpl`. Field named `text` (not `content`) to match `builtin::TextBlock`'s own `#[param]
+/// Self-drawn primitive text (WinUI3's `TextBlock`) — no native widget. A leaf, like `NativeControlImpl`. Field named `text` (not `content`) to match `builtin::TextBlock`'s own `#[param]
 /// text` name — `elwindui-codegen`'s setter-based construction calls `.set_{param name}(..)`
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
 /// `TextBlock`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `TextBlock` has no
@@ -1543,7 +1537,7 @@ impl Control {
 }
 
 /// `builtin::ContentControl`(docs/elwindui_spec.md 付録H.2.1a)— 単一の子(`content`)を持つ
-/// `Control`の薄いラッパー。`Rectangle`の doc comment 参照(同じ理由でここに直接手書きする)。
+/// `Control`の薄いラッパー。二重管理を避けるため、バックエンド非依存な合成 builtin としてここに直接手書きする。
 /// Content is a single Visual child managed directly by this type.
 #[elwindui_macros::class(inherits = crate::ui::Control)]
 pub struct ContentControl {
@@ -2035,8 +2029,7 @@ mod tests {
     /// — see that trait's own doc comment). Named `FakeNativeControl`, not the bare `NativeControl`
     /// that trait already uses, because `#[class]`-generated `__elwindui_inherit_*!` macros share a
     /// single flat, crate-wide namespace (unlike ordinary Rust items, which can share a bare name
-    /// across different modules) — a same-crate bare-name collision is a real `E0428`, not just a
-    /// registry ambiguity the way it used to be.
+    /// across different modules) — a same-crate bare-name collision is a real `E0428`.
     #[elwindui_macros::class(struct_only = crate::ui::NativeControlExt, inherits = crate::ui::UIElement)]
     struct FakeNativeControl {
         handle: FakeHandle,
@@ -2065,12 +2058,10 @@ mod tests {
     /// `#[overridable]`/`#[overrides]` usage example, exercised across a genuine 3-hop chain
     /// (`OverridableBase` -> `OverridableMid` -> `OverridableLeaf`) with two overridable methods —
     /// `OverridableMid` overrides only `label`, leaving `compute` untouched, and `OverridableLeaf`
-    /// (which itself overrides neither) relies on defaults for both. This is exactly the scenario a
-    /// single shared `#dyn_ident` accessor per trait used to get wrong (always reaching
-    /// `OverridableBase`'s original `compute`/`label`, skipping `OverridableMid`'s own `label`
-    /// override, because the accessor could only be reflexive-for-the-whole-trait or not) — see
-    /// `per_method_accessor_ident`'s own doc comment for the fix (one dedicated accessor per
-    /// `#[overridable]` method, resolved independently).
+    /// (which itself overrides neither) relies on defaults for both. This exercises resolution of
+    /// overridable methods across the chain: one dedicated accessor per `#[overridable]` method is
+    /// resolved independently, ensuring that overrides at intermediate hops are dispatched correctly
+    /// while untouched methods pass through (see `per_method_accessor_ident`'s own doc comment for details).
     #[elwindui_macros::class(inherits = crate::ui::UIElement)]
     struct OverridableBase {
         value: Cell<i32>,
@@ -2141,8 +2132,7 @@ mod tests {
         let leaf = OverridableLeaf::new();
         // Neither is overridden at `OverridableLeaf` itself: `compute` passes all the way through
         // `OverridableMid` (which never touched it) to `OverridableBase`'s original, while `label`
-        // stops at `OverridableMid`'s own override — the exact case a single shared accessor got
-        // wrong before the per-method accessor fix.
+        // stops at `OverridableMid`'s own override.
         assert_eq!(OverridableBaseExt::compute(&leaf, 5), 6);
         assert_eq!(OverridableBaseExt::label(&leaf), "mid");
     }
@@ -2280,8 +2270,7 @@ mod tests {
         // native leaves — checks that the inner stack's children get *absolute* coordinates, not
         // coordinates relative to the inner stack alone. Every element here uses `Left`/`Top`
         // alignment explicitly (not the `Stretch` default) so each child keeps its own measured
-        // size instead of filling its stack-allocated cross-axis slot — matching the old
-        // `CrossAlign::Start` behavior this test used to exercise.
+        // size instead of filling its stack-allocated cross-axis slot.
         fn leaf(name: &'static str, s: Size) -> Rc<dyn UIElementExt> {
             let node = FakeNativeControl::new(FakeHandle(name, s));
             node.as_ui_element()

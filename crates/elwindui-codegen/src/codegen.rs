@@ -1144,7 +1144,20 @@ fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<
 
 pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) -> TokenStream {
     let struct_name = format_ident!("{}", v.name);
+    let property_enum = format_ident!("{}Property", v.name);
     let field_names: HashSet<&str> = v.fields.iter().map(|f| f.name.as_str()).collect();
+    // PropertyChanged is intentionally typed per viewmodel.  A generated view can only subscribe
+    // to properties that its DSL expression actually references, so a stringly-typed global event
+    // would merely hide mistakes from the compiler.
+    let property_names: Vec<syn::Ident> = v
+        .fields
+        .iter()
+        .filter_map(|f| match f.kind {
+            FieldKind::Observable | FieldKind::Computed => Some(format_ident!("{}", f.name)),
+            FieldKind::Command => Some(format_ident!("{}_can_execute", f.name)),
+            _ => None,
+        })
+        .collect();
 
     // Viewmodels retain a weak self-reference so async commands can upgrade it to `Rc<Self>` and
     // create the `'static` future required by `elwindui::core::task::spawn_local`.
@@ -1207,7 +1220,11 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     .flatten()
                     .map(|dep| {
                         let recompute = format_ident!("recompute_{}", dep);
-                        quote! { self.#recompute(); }
+                        let property = format_ident!("{}", dep);
+                        quote! {
+                            self.#recompute();
+                            self.on_property_changed(#property_enum::#property);
+                        }
                     })
                     .collect();
 
@@ -1216,27 +1233,14 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                         self.#field_ident.borrow().clone()
                     }
                     pub fn #pusher(&self, item: std::rc::Rc<#item_ty>) {
-                        // Bubbles the pushed sub-viewmodel's own changes up to this viewmodel's
-                        // own `__resync_subscribers` — otherwise a component that only reads this
-                        // field's items through plain (non-`bind!`) attribute expressions (e.g. a
-                        // `TabView`'s `items_source`/`header_template`) would never resync when one
-                        // of those items mutates from outside this component's own wired `on_*`
-                        // callbacks (e.g. an `#[command(async)]` body resuming after this
-                        // component's post-callback `resync()` already ran).
-                        let __weak = self.__self_weak.clone();
-                        item.subscribe(move || {
-                            if let Some(__self) = __weak.upgrade() {
-                                for f in __self.__resync_subscribers.borrow().iter() { f(); }
-                            }
-                        });
                         self.#field_ident.borrow_mut().push(item);
                         #(#recompute_calls)*
-                        for f in self.__resync_subscribers.borrow().iter() { f(); }
+                        self.on_property_changed(#property_enum::#field_ident);
                     }
                     pub fn #remover(&self, index: usize) {
                         self.#field_ident.borrow_mut().remove(index);
                         #(#recompute_calls)*
-                        for f in self.__resync_subscribers.borrow().iter() { f(); }
+                        self.on_property_changed(#property_enum::#field_ident);
                     }
                 });
             }
@@ -1286,7 +1290,11 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     .flatten()
                     .map(|dep| {
                         let recompute = format_ident!("recompute_{}", dep);
-                        quote! { self.#recompute(); }
+                        let property = format_ident!("{}", dep);
+                        quote! {
+                            self.#recompute();
+                            self.on_property_changed(#property_enum::#property);
+                        }
                     })
                     .collect();
 
@@ -1295,7 +1303,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     pub fn #setter(&self, value: #ty) {
                         #set_body
                         #(#recompute_calls)*
-                        for f in self.__resync_subscribers.borrow().iter() { f(); }
+                        self.on_property_changed(#property_enum::#field_ident);
                     }
                 });
             }
@@ -1427,16 +1435,18 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
     }
 
     quote! {
+        #[allow(non_camel_case_types)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum #property_enum {
+            #(#property_names),*
+        }
+
         pub struct #struct_name {
             #struct_fields
-            // A dynamic subscriber list, unlike `dependents_of` above: the *number* of components
-            // that end up `bind!`-ing to this viewmodel instance (e.g. one `DocumentView` per open
-            // notepad tab) isn't known at compile time, so it can't be resolved into a static
-            // per-field recompute call the way `#[computed]`/`#[command(can_execute)]` dependents
-            // are (付録O.5). See docs/elwindui_spec.md §10/付録J.3: any mutation of a field reachable
-            // through `bind!` must propagate to every subscribing `prop`, not just ones reached via
-            // that same component's own wired `on_*` callbacks.
-            __resync_subscribers: std::cell::RefCell<Vec<Box<dyn Fn()>>>,
+            // `active` is separate from the callback borrow. `on_property_changed` snapshots this
+            // list before invocation, so a callback may cancel itself or another callback without
+            // conflicting with a RefCell borrow held by the notifier.
+            __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#property_enum)>>>)>>>,
             // Lets an async `#[command(async)]` body upgrade to an owned `Rc<Self>` before
             // spawning (see the `FieldKind::Command` `is_async` arm) instead of capturing a
             // borrowed `&self` that can't outlive this call. Unused (and so `#[allow(dead_code)]`)
@@ -1455,7 +1465,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 std::rc::Rc::new_cyclic(|__self_weak| {
                     let instance = Self {
                         #ctor_fields
-                        __resync_subscribers: std::cell::RefCell::new(Vec::new()),
+                        __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                         __self_weak: __self_weak.clone(),
                     };
                     #recompute_calls_after_new
@@ -1463,11 +1473,27 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 })
             }
 
-            /// Registers `f` to run after any `#[observable]` field on this instance changes.
-            /// Called by a `bind!`-ing component's generated `new()` so its `resync()` re-fires
-            /// whenever this viewmodel changes, regardless of which code path mutated it.
-            pub fn subscribe(&self, f: impl Fn() + 'static) {
-                self.__resync_subscribers.borrow_mut().push(Box::new(f));
+            /// Registers a typed PropertyChanged handler. Dropping the returned handle unregisters
+            /// it, which is essential for dynamic view regions and item templates.
+            pub fn subscribe_property_changed(
+                &self,
+                f: impl Fn(#property_enum) + 'static,
+            ) -> elwindui::core::reactive::Subscription {
+                let active = std::rc::Rc::new(std::cell::Cell::new(true));
+                let handler = std::rc::Rc::new(std::cell::RefCell::new(Box::new(f) as Box<dyn Fn(#property_enum)>));
+                self.__property_changed_handlers.borrow_mut().push((active.clone(), handler));
+                elwindui::core::reactive::Subscription::new(move || {
+                    active.set(false);
+                })
+            }
+
+            fn on_property_changed(&self, property: #property_enum) {
+                let handlers = self.__property_changed_handlers.borrow().clone();
+                for (active, handler) in handlers {
+                    if active.get() {
+                        (handler.borrow())(property);
+                    }
+                }
             }
 
             #accessors
@@ -1980,11 +2006,11 @@ fn generate_view(
 
     // `bind!(owner.field, mode)` fields whose `owner` is one of this component's own `#[param]`
     // dependencies and whose `mode` isn't `OneTime` (docs/elwindui_spec.md §10: `OneTime` captures
-    // once at instantiation and stays fixed, so it has nothing to subscribe to). Deduplicated by
-    // owner, since one `resync()` call already re-reads every attribute bound to that owner
-    // (`emit_resync` below), not just the specific field named in the `bind!`. Only owners whose
-    // type is a `viewmodel` are kept — `validate_bind_path` allows `bind!` to target a plain
-    // `component` too, but only `generate_viewmodel`'s output has a `subscribe` method.
+    // once at instantiation and stays fixed, so it has nothing to subscribe to). Owners are
+    // deduplicated: one typed PropertyChanged subscription dispatches to that owner's generated
+    // per-property update method. Only owners whose type is a `viewmodel` are kept —
+    // `validate_bind_path` allows `bind!` to target a plain `component` too, but only
+    // `generate_viewmodel`'s output has a PropertyChanged API.
     let mut bind_owners: Vec<syn::Ident> = Vec::new();
     for f in &component.fields {
         let Some(Initializer::Bind { path, mode }) = &f.initializer else {
@@ -2007,15 +2033,10 @@ fn generate_view(
         }
     }
     // Also subscribe to every component field whose own type is a `viewmodel`, even if this
-    // component never uses `bind!` on it — e.g. `TabView { items_source: vm.documents,
-    // header_template: |doc| doc.file_name, .. }` reads `vm` through plain (non-`bind!`)
-    // attribute expressions only, but `emit_resync` still needs to re-run when `vm` (or, via the
-    // nested-Vec-observable subscription bubbling `generate_viewmodel` sets up — see that
-    // function's `#pusher` — one of `vm`'s own nested sub-viewmodel items) changes. Without this,
-    // a mutation reaching `vm` from *outside* this component's own wired `on_*` callbacks (e.g. an
-    // `#[command(async)]` body that resumes after this component's post-callback `resync()` already
-    // ran) would never be reflected. Harmless to add unconditionally: `resync()`'s blanket re-apply
-    // already tolerates being called for attributes that don't actually depend on this owner.
+    // component never uses `bind!` on it — a view may use direct expressions such as
+    // `vm.active_tab`. The generated property dispatcher performs no work for properties that do
+    // not occur in the view; nested item viewmodels are intentionally not bubbled through their
+    // parent collection owner.
     for f in &component.fields {
         let is_viewmodel = table
             .resolve(from, strip_rc_wrapper(&f.ty))
@@ -2513,7 +2534,7 @@ fn generate_view(
         }
         for node in &plan {
             emit_wiring(node, &ctx, from, table, &mut wiring_stmts);
-            emit_resync(node, &ctx, from, table, &mut resync_stmts);
+            emit_resync(node, &ctx, from, table, None, &mut resync_stmts);
         }
     }
 
@@ -2608,21 +2629,21 @@ fn generate_view(
         }
     };
 
-    // For each `bind!` owner found above: subscribe so this component's `resync()` re-fires
-    // whenever that viewmodel changes through *any* path (a sibling component's callback, an async
-    // command, ...), not just this component's own wired `on_*` closures (`emit_wiring` only
-    // reaches the latter). `Weak` avoids a retain cycle — this component already holds a strong
-    // `Rc` to the owner via its own `#[param]` field, so the subscription closure must not hold a
-    // strong `Rc` back to `this` or the pair would never be dropped.
+    // The current generated update method still covers every attribute owned by this component,
+    // but it is now triggered by a typed PropertyChanged event and the subscription's lifetime is
+    // owned by the view.  Crucially, nested viewmodels no longer bubble their changes through a
+    // collection owner, so editing a document cannot resync the parent TabView.
     let subscribe_stmts: TokenStream = bind_owners
         .iter()
         .map(|owner_ident| {
+            let method = format_ident!("__resync_{}", owner_ident);
             quote! {
                 {
                     let weak = std::rc::Rc::downgrade(&this);
-                    this.#owner_ident.subscribe(move || {
-                        if let Some(this) = weak.upgrade() { this.resync(); }
+                    let subscription = this.#owner_ident.subscribe_property_changed(move |property| {
+                        if let Some(this) = weak.upgrade() { this.#method(property); }
                     });
+                    this.__property_changed_subscriptions.borrow_mut().push(subscription);
                 }
             }
         })
@@ -2782,12 +2803,106 @@ fn generate_view(
         Some(name) => base_trait_path(name),
         None => TokenStream::new(),
     };
+    let property_resync_methods: TokenStream = bind_owners
+        .iter()
+        .filter_map(|owner_ident| {
+            let owner_name = owner_ident.to_string();
+            let owner_field = component
+                .fields
+                .iter()
+                .find(|field| field.name == owner_name)?;
+            let owner_type = strip_rc_wrapper(&owner_field.ty);
+            let owner_info = table.resolve(from, owner_type)?;
+            if !owner_info.is_viewmodel {
+                return None;
+            }
+            let property_type_name = owner_type.rsplit("::").next()?;
+            let property_enum = format_ident!("{}Property", property_type_name);
+            let method = format_ident!("__resync_{}", owner_ident);
+            let branches: TokenStream = owner_info
+                .fields
+                .iter()
+                .filter_map(|(name, kind)| {
+                    let variant = if *kind == FieldKind::Command {
+                        format_ident!("{}_can_execute", name)
+                    } else {
+                        format_ident!("{}", name)
+                    };
+                    let mut statements = TokenStream::new();
+                    for node in &plan {
+                        emit_resync(
+                            node,
+                            &ctx,
+                            from,
+                            table,
+                            Some((&owner_name, name)),
+                            &mut statements,
+                        );
+                    }
+                    Some(quote! { #property_enum::#variant => { #statements } })
+                })
+                .collect();
+            Some(mark_inherent(quote! {
+                fn #method(&self, property: #property_enum) {
+                    match property { #branches }
+                }
+            }))
+        })
+        .collect();
+
     if is_composed {
         // Every one of these is purely inherent (`resync`/`#[id(..)]` child accessors/user methods/
         // lifecycle shadow hooks) — none is part of `#target`'s own generated trait — so `mark_inherent`
         // tags each with `#[inherent]` and they all land in the single `#[elwindui::class] impl
         // #target { .. }` block below instead of needing a second, separate plain `impl` purely to
         // hold them.
+        let property_resync_methods: TokenStream = bind_owners
+            .iter()
+            .filter_map(|owner_ident| {
+                let owner_name = owner_ident.to_string();
+                let owner_field = component
+                    .fields
+                    .iter()
+                    .find(|field| field.name == owner_name)?;
+                let owner_type = strip_rc_wrapper(&owner_field.ty);
+                let owner_info = table.resolve(from, owner_type)?;
+                if !owner_info.is_viewmodel {
+                    return None;
+                }
+                let property_type_name = owner_type.rsplit("::").next()?;
+                let property_enum = format_ident!("{}Property", property_type_name);
+                let method = format_ident!("__resync_{}", owner_ident);
+                let branches: TokenStream = owner_info
+                    .fields
+                    .iter()
+                    .filter_map(|(name, kind)| {
+                        let variant = if *kind == FieldKind::Command {
+                            format_ident!("{}_can_execute", name)
+                        } else {
+                            format_ident!("{}", name)
+                        };
+                        let mut statements = TokenStream::new();
+                        for node in &plan {
+                            emit_resync(
+                                node,
+                                &ctx,
+                                from,
+                                table,
+                                Some((&owner_name, name)),
+                                &mut statements,
+                            );
+                        }
+                        Some(quote! { #property_enum::#variant => { #statements } })
+                    })
+                    .collect();
+                Some(mark_inherent(quote! {
+                    fn #method(&self, property: #property_enum) {
+                        match property { #branches }
+                    }
+                }))
+            })
+            .collect();
+
         let resync_method = mark_inherent(quote! {
             fn resync(&self) {
                 #resync_stmts
@@ -2805,13 +2920,14 @@ fn generate_view(
                 #mutable_required_field_decls
                 #deferred_own_field_decls
                 #struct_fields
+                __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
             }
 
             #[elwindui::class]
             impl #target {
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()) }
                 }
 
                 // Hand-written (not left to `#[class]`'s own `construct`-driven auto-generation):
@@ -2840,6 +2956,7 @@ fn generate_view(
 
                 #own_class_methods
                 #resync_method
+                #property_resync_methods
                 #root_embed_method
                 #named_accessors
                 #methods
@@ -2853,7 +2970,7 @@ fn generate_view(
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits });
+                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()) });
                     #owner_bind_stmt
                     #content_attach_stmt
                     #wiring_stmts
@@ -2866,6 +2983,8 @@ fn generate_view(
                 fn resync(&self) {
                     #resync_stmts
                 }
+
+                #property_resync_methods
 
                 #root_embed_method
 
@@ -2880,6 +2999,7 @@ fn generate_view(
                 #mutable_required_field_decls
                 #deferred_own_field_decls
                 #struct_fields
+                __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
             }
         }
     }
@@ -4290,7 +4410,9 @@ fn emit_wiring(
                         let this = std::rc::Rc::clone(&this);
                         widget.#change_setter(Box::new(move |new_value| {
                             #setter(new_value);
-                            this.resync();
+                            // The model setter synchronously emits PropertyChanged. Its owning
+                            // view subscription applies the model→widget update; forcing a second
+                            // blanket resync here resets native editing state on AppKit.
                         }));
                     }
                 });
@@ -4304,11 +4426,68 @@ fn emit_wiring(
 /// `#[two_way]` attributes (e.g. `TextArea`'s `text`) are resynced the same as any other — this
 /// pushes model→widget; `emit_wiring`'s separate `set_on_<attr>_change` callback is what pushes
 /// widget→model.
+///
+/// When `filter` is present, only attributes that statically reference that owner/property are
+/// emitted.  Expression macros that the DSL cannot inspect are deliberately conservative: they
+/// remain attached to that owner's notifications rather than risking a stale UI value.
+fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &str) -> bool {
+    match expr {
+        ViewExpr::Path(path) => {
+            let path = resolve_bind(path, &ctx.binds);
+            matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
+        }
+        ViewExpr::MethodCall(path, _) => {
+            let path = resolve_bind(path, &ctx.binds);
+            matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
+        }
+        ViewExpr::TFluent(_, args) => args
+            .iter()
+            .any(|(_, value)| view_expr_depends_on(value, ctx, owner, property)),
+        ViewExpr::Expr(expr) => {
+            struct Collector<'a> {
+                owner: &'a str,
+                property: &'a str,
+                found: bool,
+                opaque_macro: bool,
+            }
+            impl<'ast> Visit<'ast> for Collector<'_> {
+                fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+                    let segments: Vec<_> = node.path.segments.iter().collect();
+                    if segments.len() >= 2
+                        && segments[0].ident == self.owner
+                        && segments[1].ident == self.property
+                    {
+                        self.found = true;
+                    }
+                    syn::visit::visit_expr_path(self, node);
+                }
+
+                fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+                    // `t!` and user macros hide arbitrary expressions in token trees. They need a
+                    // dedicated parser before they can participate in an exact dependency set.
+                    self.opaque_macro = true;
+                    syn::visit::visit_expr_macro(self, node);
+                }
+            }
+            let mut collector = Collector {
+                owner,
+                property,
+                found: false,
+                opaque_macro: false,
+            };
+            collector.visit_expr(expr);
+            collector.found || collector.opaque_macro
+        }
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } => false,
+    }
+}
+
 fn emit_resync(
     node: &PlannedNode,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
+    filter: Option<(&str, &str)>,
     out: &mut TokenStream,
 ) {
     if !node.stored {
@@ -4326,7 +4505,7 @@ fn emit_resync(
 
     // `margin` is a common `UIElementBase` attribute handled separately below because it is not
     // part of a type's own `field_types` and its setter takes the value by value.
-    emit_common_ui_element_resync(node, ctx, &self_mode, binding, out);
+    emit_common_ui_element_resync(node, ctx, &self_mode, binding, filter, out);
 
     // Every codegen-*generated* setter (a virtual builtin's own `elwindui_core::ui` setters, or a
     // `has_view` component's own generated `set_<name>` — both the deferred and the mutable-
@@ -4344,6 +4523,11 @@ fn emit_resync(
         }
         if name == "margin" {
             continue;
+        }
+        if let Some((owner, property)) = filter {
+            if !view_expr_depends_on(expr, ctx, owner, property) {
+                continue;
+            }
         }
         // `#[onetime]` fields (`Window`'s own `left`/`top`/`width`/`height`,
         // docs/elwindui_builtins_spec.md 付録F.1) are one-time initial-placement/size setters,
@@ -4421,10 +4605,15 @@ fn emit_common_ui_element_resync(
     ctx: &ViewCtx,
     self_mode: &EmitMode,
     binding: &syn::Ident,
+    filter: Option<(&str, &str)>,
     out: &mut TokenStream,
 ) {
     let mut body = TokenStream::new();
     if let Some(expr) = find_attr(node, "margin") {
+        if filter.is_some_and(|(owner, property)| !view_expr_depends_on(expr, ctx, owner, property))
+        {
+            return;
+        }
         let value = emit_expr(expr, ctx, self_mode);
         body.extend(quote! { self.#binding.as_ui_element().set_margin(#value); });
     }
@@ -4928,6 +5117,12 @@ view NotepadWindow {
         assert!(viewmodel_str.contains("documents_remove"));
         assert!(viewmodel_str.contains("Rc < Document >"));
         assert!(viewmodel_str.contains("fn close_tab_execute (& self , index : usize)"));
+        assert!(viewmodel_str.contains("NotepadViewModelProperty"));
+        assert!(viewmodel_str.contains("subscribe_property_changed"));
+        assert!(!viewmodel_str.contains("__resync_subscribers"));
+        // Item updates are observed by their rendered view/template, never bubbled through the
+        // owning collection as a synthetic parent change.
+        assert!(!viewmodel_str.contains("item . subscribe"));
 
         let window_code = generate_module(&window_module, &table);
         assert_valid_rust("menubar_tabview_window", &window_code);
@@ -5121,6 +5316,41 @@ view Greeting {
         // `Greeting`'s view root is `TextBlock`, not `Window` — no top-level window to `show()`.
         assert!(!s.contains("fn show"));
         assert!(s.contains("fn into_node"));
+    }
+
+    #[test]
+    fn property_update_does_not_reapply_unrelated_common_attributes() {
+        let src = r#"
+viewmodel Document {
+    #[observable]
+    content: String = String::new(),
+
+    #[observable]
+    file_name: String = String::new(),
+}
+
+component DocumentView {
+    #[param]
+    #[inject]
+    doc: Document,
+}
+
+view DocumentView {
+    VerticalLayout {
+        TextArea { text: doc.content }
+        TextBlock { margin: 4.0, text: doc.file_name }
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("property_update_common_attributes", &generated);
+
+        let generated = generated.to_string();
+        // `margin` is set at construction and by the initial resync. Neither `content` nor
+        // `file_name` notification may relayout this unrelated common UIElement property.
+        assert_eq!(generated.matches("set_margin").count(), 2, "{generated}");
     }
 
     #[test]

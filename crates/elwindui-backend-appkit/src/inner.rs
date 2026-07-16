@@ -24,6 +24,7 @@ use objc2_quartz_core::{
     kCAAlignmentLeft, kCAAlignmentRight,
 };
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub(crate) fn mtm() -> MainThreadMarker {
@@ -63,6 +64,12 @@ impl AppKitHandle for Retained<NSStackView> {
 pub struct AnyView(Rc<dyn AppKitHandle>);
 
 impl AnyView {
+    /// Stable identity of the retained native handle. Reusing its container across relayouts is
+    /// essential: AppKit resigns a control that is temporarily removed from its superview.
+    fn identity(&self) -> usize {
+        Rc::as_ptr(&self.0) as *const () as usize
+    }
+
     fn as_nsview(&self) -> Retained<NSView> {
         self.0.as_nsview()
     }
@@ -172,6 +179,9 @@ pub struct TreeHostIvars {
     tree: RefCell<Option<Rc<dyn UIElementExt>>>,
     /// The retained core-side rendering description for the currently hosted Visual tree.
     render_tree: RefCell<Option<elwindui_core::painter::RenderTree>>,
+    /// Native compositor islands, keyed by `AnyView` identity. They must survive ordinary
+    /// relayouts so the first responder is not detached from the view hierarchy.
+    native_containers: RefCell<HashMap<usize, Retained<NSView>>>,
     /// Set once, right after construction — lets `set_tree` hand out an `AppKitRelayoutHost`
     /// wrapping a weak reference back to this same view, without needing a `Retained<Self>` in
     /// hand at that point.
@@ -236,6 +246,7 @@ impl TreeHostView {
         let ivars = TreeHostIvars {
             tree: RefCell::new(None),
             render_tree: RefCell::new(None),
+            native_containers: RefCell::new(HashMap::new()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
         };
         let this = Self::alloc(m).set_ivars(ivars);
@@ -250,6 +261,7 @@ impl TreeHostView {
         for old in self.subviews().iter() {
             old.removeFromSuperview();
         }
+        self.ivars().native_containers.borrow_mut().clear();
         let weak_self = self.ivars().weak_self.borrow().clone();
         tree.as_ui_element()
             .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self))));
@@ -291,12 +303,6 @@ impl TreeHostView {
 
         self.setWantsLayer(true);
         let layer = self.layer().expect("wantsLayer(true) implies a layer");
-        // Native controls are represented by short-lived compositor islands. Remove the previous
-        // island views before replaying; the underlying `AnyView` handles remain owned by their
-        // UIElements and are reused when reinserted below.
-        for old in self.subviews().iter() {
-            old.removeFromSuperview();
-        }
         if let Some(existing) = unsafe { layer.sublayers() } {
             let stale: Vec<_> = existing
                 .iter()
@@ -309,12 +315,14 @@ impl TreeHostView {
             }
         }
 
+        let mut live_native_controls = HashSet::new();
         fn replay_group(
             host: &TreeHostView,
             layer: &Retained<CALayer>,
             group: &RenderGroup,
             origin: elwindui_core::base::Point,
             inherited_clip: Option<elwindui_core::base::Rect>,
+            live_native_controls: &mut HashSet<usize>,
         ) {
             let origin = elwindui_core::base::Point {
                 x: origin.x + group.offset.x,
@@ -337,6 +345,8 @@ impl TreeHostView {
                         let Some(mut view) = handle.downcast_ref::<AnyView>().cloned() else {
                             continue;
                         };
+                        let identity = view.identity();
+                        live_native_controls.insert(identity);
                         let rect = elwindui_core::base::Rect {
                             x: origin.x + rect.x,
                             y: origin.y + rect.y,
@@ -351,7 +361,16 @@ impl TreeHostView {
                         }
                         // This is deliberately a native island only around an actual native
                         // command; ordinary RenderGroups continue to replay to `layer` above.
-                        let container = NSView::new(mtm());
+                        let (container, is_new) = {
+                            let mut containers = host.ivars().native_containers.borrow_mut();
+                            if let Some(container) = containers.get(&identity) {
+                                (container.clone(), false)
+                            } else {
+                                let container = NSView::new(mtm());
+                                containers.insert(identity, container.clone());
+                                (container, true)
+                            }
+                        };
                         container.setFrame(NSRect::new(
                             objc2_foundation::NSPoint::new(
                                 visible_rect.x as f64,
@@ -363,9 +382,11 @@ impl TreeHostView {
                             ),
                         ));
                         container.setClipsToBounds(true);
-                        host.addSubview(&container);
                         let nsview = view.as_nsview();
-                        container.addSubview(&nsview);
+                        if is_new {
+                            host.addSubview(&container);
+                            container.addSubview(&nsview);
+                        }
                         nsview.setTranslatesAutoresizingMaskIntoConstraints(true);
                         view.arrange(elwindui_core::base::Rect {
                             x: rect.x - visible_rect.x,
@@ -472,7 +493,14 @@ impl TreeHostView {
                 }
             }
             for child in &group.children {
-                replay_group(host, layer, child, origin, effective_clip);
+                replay_group(
+                    host,
+                    layer,
+                    child,
+                    origin,
+                    effective_clip,
+                    live_native_controls,
+                );
             }
         }
         replay_group(
@@ -481,7 +509,19 @@ impl TreeHostView {
             &render_tree.root,
             elwindui_core::base::Point { x: 0.0, y: 0.0 },
             None,
+            &mut live_native_controls,
         );
+        self.ivars()
+            .native_containers
+            .borrow_mut()
+            .retain(|identity, container| {
+                if live_native_controls.contains(identity) {
+                    true
+                } else {
+                    container.removeFromSuperview();
+                    false
+                }
+            });
         /*for item in items {
             match item {
                 RenderItem::Native(mut view, rect, _node) => {
@@ -711,11 +751,9 @@ impl InnerTextArea {
         self.handle.clone()
     }
 
-    /// `NSTextView.setString:` unconditionally resets the caret/selection to the start, even when
-    /// the text it's given is identical to what's already there. The two-way `#[two_way] text`
-    /// binding re-syncs *every* bound field on *every* model change — including the one this exact
-    /// edit just caused — so without this guard, typing a single character would immediately call
-    /// this with that same character already applied, yanking the caret away mid-keystroke.
+    /// `NSTextView.setString:` resets the caret/selection. In the normal two-way input path the
+    /// native buffer has already changed before its delegate calls the model setter, so identical
+    /// model→widget updates must be a no-op.
     pub(crate) fn set_text(&self, text: &str) {
         if self.text_view.string().to_string() == text {
             return;

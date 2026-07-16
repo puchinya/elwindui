@@ -151,15 +151,14 @@ fn main() {
 mod tests {
     use super::*;
 
-    // Regression test for the `content`-binding-doesn't-refresh bug: `set_content` (however it's
-    // reached — here, directly, the same way `NotepadViewModel::open()` reaches it) must notify
-    // every `subscribe`r, not just whichever component happened to wire an `on_*` callback to it.
+    // Regression test for the `content` binding: model mutations must publish a typed
+    // PropertyChanged event to every view that depends on the property.
     #[test]
     fn observable_setter_notifies_subscribers() {
         let doc = DocumentViewModel::new();
         let notified = std::rc::Rc::new(std::cell::Cell::new(false));
         let notified_handle = notified.clone();
-        doc.subscribe(move || notified_handle.set(true));
+        let _subscription = doc.subscribe_property_changed(move |_| notified_handle.set(true));
 
         assert!(!notified.get(), "must not fire before any mutation");
         doc.set_content("loaded from disk".to_string());
@@ -171,11 +170,51 @@ mod tests {
     fn multiple_subscribers_all_fire() {
         let doc = DocumentViewModel::new();
         let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut subscriptions = Vec::new();
         for _ in 0..3 {
             let calls = calls.clone();
-            doc.subscribe(move || calls.set(calls.get() + 1));
+            subscriptions.push(doc.subscribe_property_changed(move |property| {
+                if property == DocumentViewModelProperty::content {
+                    calls.set(calls.get() + 1);
+                }
+            }));
         }
         doc.set_content("x".to_string());
         assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn dropped_property_changed_subscription_stops_receiving_events() {
+        let doc = DocumentViewModel::new();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        {
+            let calls = calls.clone();
+            let _subscription = doc.subscribe_property_changed(move |_| calls.set(calls.get() + 1));
+        }
+        doc.set_content("ignored".to_string());
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn cancelling_during_notification_skips_the_cancelled_handler() {
+        let doc = DocumentViewModel::new();
+        let cancelled_calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let later_subscription = std::rc::Rc::new(std::cell::RefCell::new(
+            None::<elwindui::core::reactive::Subscription>,
+        ));
+
+        let subscription_to_cancel = later_subscription.clone();
+        let _first = doc.subscribe_property_changed(move |_| {
+            if let Some(subscription) = subscription_to_cancel.borrow_mut().take() {
+                subscription.cancel();
+            }
+        });
+        let cancelled_calls_for_handler = cancelled_calls.clone();
+        *later_subscription.borrow_mut() = Some(doc.subscribe_property_changed(move |_| {
+            cancelled_calls_for_handler.set(cancelled_calls_for_handler.get() + 1);
+        }));
+
+        doc.set_content("x".to_string());
+        assert_eq!(cancelled_calls.get(), 0);
     }
 }

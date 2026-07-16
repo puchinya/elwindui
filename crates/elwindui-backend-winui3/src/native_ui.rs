@@ -445,8 +445,9 @@ impl TabView {
     /// call `header_template`/`item_template`.
     #[inherent]
     pub fn set_items_source<T: 'static>(&self, items: Vec<Rc<T>>) {
-        self.sync_dynamic_entries(erase_items(items));
-        self.rebuild();
+        if self.sync_dynamic_entries(erase_items(items)) {
+            self.rebuild();
+        }
     }
 
     /// Unlike `elwindui_backend_appkit::native_ui::TabView` (where selecting a tab means manually
@@ -455,6 +456,9 @@ impl TabView {
     /// natively — so this is just a straight passthrough, no rebuild needed.
     #[inherent]
     pub fn set_selected_index(&self, selected_index: usize) {
+        if self.selected_index.get() == selected_index {
+            return;
+        }
         self.selected_index.set(selected_index);
         self.inner.set_selected_index(selected_index);
     }
@@ -474,17 +478,18 @@ impl TabView {
     }
 
     #[inherent]
-    fn sync_dynamic_entries(&self, items: Vec<Rc<dyn Any>>) {
+    fn sync_dynamic_entries(&self, items: Vec<Rc<dyn Any>>) -> bool {
         let dynamic = self.dynamic.borrow();
         let Some(dynamic) = dynamic.as_ref() else {
-            return;
+            return false;
         };
         let (Some(header_template), Some(item_template)) =
             (&dynamic.header_template, &dynamic.item_template)
         else {
-            return;
+            return false;
         };
         let mut entries = self.entries.borrow_mut();
+        let mut changed = entries.len() != items.len();
         let new_entries: Vec<Rc<TabViewItemImpl>> = items
             .iter()
             .map(|item| {
@@ -498,10 +503,13 @@ impl TabView {
                     // document's file name) can change independently of the item's own identity,
                     // and `entry.header` is otherwise never refreshed after construction.
                     Some(existing) => {
-                        existing.set_header(&header_template(item));
+                        let header = header_template(item);
+                        changed |= *existing.header.borrow() != header;
+                        existing.set_header(&header);
                         Rc::clone(existing)
                     }
                     None => {
+                        changed = true;
                         let header = header_template(item);
                         let content = item_template(item);
                         TabViewItemImpl::new_erased(
@@ -514,7 +522,12 @@ impl TabView {
                 }
             })
             .collect();
+        changed |= entries
+            .iter()
+            .zip(new_entries.iter())
+            .any(|(old, new)| !Rc::ptr_eq(old, new));
         *entries = new_entries;
+        changed
     }
 
     /// Keyed diff (pointer identity — see `displayed`'s doc comment): removes displayed tabs whose

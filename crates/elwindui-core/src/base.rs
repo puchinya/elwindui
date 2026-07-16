@@ -1,6 +1,6 @@
 use std::any::Any;
 
-/// Lets the generic tree-walker (`layout_tree`) downcast a `&dyn UIElement` to a concrete
+/// Lets the generic RenderTree builder downcast a `&dyn UIElement` to a concrete
 /// `H` to pull out its handle — the *only* place `native_handle`-style access
 /// exists (deliberately not a method on `UIElement` itself: every other implementor would have to
 /// carry a meaningless default for a concept that doesn't apply to it). Blanket-implemented for

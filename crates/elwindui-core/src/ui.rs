@@ -12,14 +12,14 @@
 //! see docs/elwindui_spec.md 付録H.2.
 //!
 //! `H` (whatever a backend uses as its native widget handle, e.g. `elwindui-backend-appkit`'s
-//! `AnyView`) appears only on the functions that walk a tree looking for one (`layout_tree`,
+//! `AnyView`) appears only while RenderTree builds or reconciles a native command,
 //! `collect_render_items<H>`, downcasting a leaf's `try_as_native_control()` result straight to `H`)
 //! — the `UIElement` trait and every other concrete type
 //! (`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/`Control`) are
 //! handle-agnostic, since they never hold one.
 //!
 //! `Window` is deliberately *not* a `UIElement` — like WinUI3's `Window`, it's a separate
-//! top-level host that owns a `Rc<dyn UIElement>` (its content) and drives `layout_tree` against
+//! top-level host that owns a `Rc<dyn UIElement>` (its content), drives `layout_root`, and
 //! its own client area (see `elwindui-backend-appkit`'s `TreeHostView`).
 //!
 //! **Ownership: `Rc`, not `Box`.** Every node holds a real parent back-reference
@@ -37,15 +37,23 @@ use crate::layout::{
     align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin,
     shrink_by_margin, shrink_rect_by_margin, stack_arrange, stack_natural_size,
 };
+#[cfg(test)]
+use crate::painter::RenderCommand;
+pub use crate::painter::TextAlignment;
+use crate::painter::{RenderContext, RenderGroup, RenderTree};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_RENDER_GROUP_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The backend-agnostic handle to whatever native host (`elwindui-backend-appkit`'s `TreeHostView`,
 /// `elwindui-backend-winui3`'s `TreeHostPanel`) currently owns a given tree — the thing
 /// `UIElement::invalidate`/`invalidate_arrange`/`invalidate_measure` (see that trait) ultimately
-/// call to ask for a fresh `layout_tree` pass. Declared here (not a raw `Rc<dyn Fn()>`) so backends
+/// call to ask for a fresh `layout_root`/RenderTree reconciliation pass. Declared here (not a raw
+/// `Rc<dyn Fn()>`) so backends
 /// provide an `impl RelayoutHost for XHost` the same way they already provide `impl
 /// elwindui_core::ui::Button for ButtonImpl`/etc. — this crate's own established "shared trait in
 /// core, impl per backend" convention (see this module's own doc comment on `TextArea`/`Button`/...
@@ -54,7 +62,7 @@ use std::rc::{Rc, Weak};
 /// reference cycle, since the host itself holds the tree that (via `UIElement::invalidate_host`
 /// on that tree's root) holds this `Rc<dyn RelayoutHost>` right back.
 pub trait RelayoutHost {
-    fn request_relayout(&self);
+    fn request_relayout(&self, dirty_group_id: u64);
 }
 
 /// The fields every `UIElement` carries (WinUI3's `FrameworkElement` base class, via composition
@@ -77,7 +85,7 @@ pub trait RelayoutHost {
 /// `NativeControlImpl`, `TextBlock`, `Shape`, `VerticalLayout`/`HorizontalLayout`, and
 /// `Control` are all peers here, not variants of some enum.
 /// New kinds (a future `Grid`, say) are added by implementing this trait; nothing here or in
-/// `layout_tree` needs to change.
+/// `layout_root` needs to change.
 ///
 /// `UIElement` is the root of the class hierarchy (docs/elwindui_spec.md 付録H.2.1a) —
 /// `#[elwindui_macros::class]`'s "root class mode" (no `inherits`): every method on the paired
@@ -87,12 +95,17 @@ pub trait RelayoutHost {
 /// per implementor) is a genuinely required method.
 #[elwindui_macros::class]
 pub struct UIElement {
+    /// Stable identity of this Visual's retained RenderGroup. Never reused within a process.
+    pub render_group_id: u64,
     pub margin: Cell<f32>,
     pub horizontal_alignment: Cell<HorizontalAlignment>,
     pub vertical_alignment: Cell<VerticalAlignment>,
     /// WinUI3's `UIElement.Visibility` — `Visible` (default) or `Collapsed`. See `Visibility`'s own
     /// doc comment for how `Collapsed` is handled by the layout/render/hit-test traversals.
     pub visibility: Cell<Visibility>,
+    /// WPF-compatible inherited `ClipToBounds` local value. `None` inherits from the Visual parent;
+    /// the root's effective value is false.
+    pub clip_to_bounds: Cell<Option<bool>>,
     /// WinUI3's `FrameworkElement.Width`/`Height`/`MinWidth`/`MinHeight`/`MaxWidth`/`MaxHeight` —
     /// `None` is WinUI3's `NaN` sentinel ("unset", i.e. auto-sized). Applied generically by
     /// `UIElement::measure`/`arrange` (`crate::layout::apply_size_constraints`), the same way
@@ -168,10 +181,12 @@ pub struct UIElement {
 impl std::fmt::Debug for UIElement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UIElement")
+            .field("render_group_id", &self.render_group_id)
             .field("margin", &self.margin.get())
             .field("horizontal_alignment", &self.horizontal_alignment.get())
             .field("vertical_alignment", &self.vertical_alignment.get())
             .field("visibility", &self.visibility.get())
+            .field("clip_to_bounds", &self.clip_to_bounds.get())
             .field("width", &self.width.get())
             .field("height", &self.height.get())
             .field("min_width", &self.min_width.get())
@@ -216,10 +231,12 @@ impl Default for UIElement {
     fn default() -> Self {
         let owner = Rc::new(RefCell::new(None));
         UIElement {
+            render_group_id: NEXT_RENDER_GROUP_ID.fetch_add(1, Ordering::Relaxed),
             margin: Cell::new(0.0),
             horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
             vertical_alignment: Cell::new(VerticalAlignment::Stretch),
             visibility: Cell::new(Visibility::Visible),
+            clip_to_bounds: Cell::new(None),
             width: Cell::new(None),
             height: Cell::new(None),
             min_width: Cell::new(None),
@@ -283,6 +300,18 @@ impl UIElement {
     fn visibility(&self) -> Visibility {
         self.as_ui_element().visibility.get()
     }
+    fn render_group_id(&self) -> u64 {
+        self.as_ui_element().render_group_id
+    }
+    /// WPF's inherited `ClipToBounds`; the root defaults to false.
+    fn clip_to_bounds(&self) -> bool {
+        if let Some(value) = self.as_ui_element().clip_to_bounds.get() {
+            value
+        } else {
+            self.visual_parent()
+                .is_some_and(|parent| parent.clip_to_bounds())
+        }
+    }
     /// WinUI3's `FrameworkElement.Width`/`Height`/`MinWidth`/`MinHeight`/`MaxWidth`/`MaxHeight` —
     /// see `UIElement`'s own doc comment for these six fields.
     fn width(&self) -> Option<f32> {
@@ -340,6 +369,10 @@ impl UIElement {
     fn set_visibility(&self, visibility: Visibility) {
         self.as_ui_element().visibility.set(visibility);
         self.invalidate_measure();
+    }
+    fn set_clip_to_bounds(&self, value: Option<bool>) {
+        self.as_ui_element().clip_to_bounds.set(value);
+        self.invalidate_arrange();
     }
     fn set_width(&self, width: Option<f32>) {
         self.as_ui_element().width.set(width);
@@ -427,12 +460,10 @@ impl UIElement {
     fn arrange_override(&self, final_size: Size) -> Size {
         final_size
     }
-    /// Content this element paints for itself, if any (`None` for pure layout containers like
-    /// `Layout`, which only position children and draw nothing on their own account).
+    /// Records this element's own local drawing commands. Pure layout containers use the default
+    /// no-op implementation; children are rendered by the visual-tree walker.
     #[overridable]
-    fn paint(&self) -> Option<PaintKind> {
-        None
-    }
+    fn render(&self, _context: &mut RenderContext<'_>) {}
     /// `Some(&self.handle)` (the raw native handle itself, erased to `&dyn Any`) for a backend's own
     /// `NativeControlImpl { handle: AnyView, .. }` and for any type that composes one as its own
     /// `base` field (docs/elwindui_spec.md 付録H.2.1a — e.g. a backend's `ButtonImpl { base:
@@ -446,13 +477,10 @@ impl UIElement {
     fn try_as_native_control(&self) -> Option<&dyn Any> {
         None
     }
-    /// WinUI3's `UIElement.InvalidateVisual`-equivalent — asks whatever host owns this element's
-    /// tree to redraw. Redraw only: unlike `invalidate_arrange`/`invalidate_measure`, this does
-    /// *not* clear `measured_size`/`arranged_*` — the most recent measure/arrange results stay
-    /// valid and are simply repainted (matches a `paint()`-only change, e.g. `Shape::set_fill`). A
-    /// no-op if this element isn't (yet, or anymore) part of a hosted tree.
+    /// WPF's `UIElement.InvalidateVisual`: invalidates arrange state and asks the host for an
+    /// asynchronous layout/render pass. The pass records this Visual's RenderGroup again.
     fn invalidate(&self) {
-        request_relayout(self.as_ui_element());
+        self.invalidate_arrange();
     }
     /// WinUI3's `UIElement.InvalidateArrange` — marks this element's `arranged_width`/
     /// `arranged_height`/`arranged_offset` `None` (to be recomputed by the next `arrange` pass) and
@@ -552,7 +580,7 @@ impl UIElement {
         self.as_ui_element().measured_size.set(Some(result));
     }
     /// WinUI3's `UIElement.Arrange(Rect finalRect)` — `finalRect` is relative to this element's own
-    /// parent (not absolute screen/window coordinates — see `elwindui_core::ui::layout_tree`'s
+    /// parent (not absolute screen/window coordinates — see `elwindui_core::ui::layout_root`'s
     /// `collect_render_items` for where absolute positions actually get computed, by walking down
     /// accumulating each element's own `arranged_offset`). Applies this element's own margin and
     /// alignment against `finalRect` to compute its final position+size, caches those into
@@ -624,7 +652,7 @@ fn request_relayout(base: &UIElement) {
         current = element.visual_parent();
     }
     if let Some(host) = host {
-        host.request_relayout();
+        host.request_relayout(base.render_group_id);
     }
 }
 
@@ -814,64 +842,6 @@ impl UIElementCollection {
     }
     pub fn to_vec(&self) -> Vec<Rc<dyn UIElementExt>> {
         self.storage.borrow().clone()
-    }
-}
-
-/// One entry of `layout_tree`'s output, in `arrange`'s own parent-before-children traversal
-/// order — the single ordering a backend's host must replay verbatim (`addSubview`/`addSublayer`,
-/// or WinUI3's `Children.Append`, in this exact sequence) for a native leaf and a self-painted
-/// element to end up in the same relative front-to-back position they have in the source `.elwind`
-/// tree. Splitting `natives`/`paints` into two separately-ordered lists (the old shape) throws this
-/// relative ordering away — a `Rectangle` painted after a `Button` in traversal order could still
-/// end up either above or below it depending only on which backend happens to process its own two
-/// lists in which order, which is exactly the bug this single interleaved list avoids.
-pub enum RenderItem<H> {
-    Native(H, Rect, Rc<dyn UIElementExt>),
-    Paint(PaintKind, Rect),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PaintKind {
-    ShapeExt {
-        kind: ShapeKind,
-        fill: Option<String>,
-        stroke: Option<String>,
-        stroke_width: f32,
-    },
-    /// `TextBlock`'s self-drawn content. No font/size here yet (kept minimal for this pass) — a
-    /// backend measures/renders the string itself (e.g. AppKit via `NSAttributedString`/
-    /// `CATextLayer`), the same "elwindui-core doesn't know how to actually draw" split `Shape`
-    /// already has with `CAShapeLayer`.
-    Text {
-        content: String,
-        color: Option<String>,
-        alignment: TextAlignment,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ShapeKind {
-    RoundedRect { corner_radius: f32 },
-    Oval,
-}
-
-/// WinUI3's `TextBlock.TextAlignment` — how `TextBlock`'s own content is aligned *within its
-/// own drawn bounds*, independent of `UIElement::horizontal_alignment` (which positions the
-/// `TextBlock` element itself within whatever slot its parent allotted it). Deliberately a separate
-/// enum from `crate::layout::HorizontalAlignment` rather than reused: WinUI3 itself keeps these as
-/// two distinct types (`Microsoft.UI.Xaml.TextAlignment` vs `HorizontalAlignment`), and
-/// `HorizontalAlignment::Stretch` has no meaningful counterpart for text alignment. Only `Left`/
-/// `Center`/`Right` are modeled — WinUI3's `Justify`/`DetectFromContent` are out of scope for now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextAlignment {
-    Left,
-    Center,
-    Right,
-}
-
-impl Default for TextAlignment {
-    fn default() -> Self {
-        Self::Left
     }
 }
 
@@ -1198,7 +1168,6 @@ impl HorizontalLayout {
 /// DSL-level subclass today.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 pub struct Shape {
-    pub kind: Cell<ShapeKind>,
     pub fill: RefCell<Option<String>>,
     pub stroke: RefCell<Option<String>>,
     pub stroke_width: Cell<f32>,
@@ -1217,19 +1186,6 @@ impl Shape {
     fn arrange_override(&self, final_size: Size) -> Size {
         final_size
     }
-    #[overrides]
-    fn paint(&self) -> Option<PaintKind> {
-        Some(PaintKind::ShapeExt {
-            kind: self.kind.get(),
-            fill: self.fill.borrow().clone(),
-            stroke: self.stroke.borrow().clone(),
-            stroke_width: self.stroke_width.get(),
-        })
-    }
-    fn set_kind(&self, kind: ShapeKind) {
-        self.kind.set(kind);
-        self.invalidate();
-    }
     fn set_fill(&self, fill: Option<String>) {
         *self.fill.borrow_mut() = fill;
         self.invalidate();
@@ -1245,7 +1201,6 @@ impl Shape {
     fn construct() -> Self {
         Self {
             base: UIElement::default(),
-            kind: Cell::new(ShapeKind::RoundedRect { corner_radius: 0.0 }),
             fill: RefCell::new(None),
             stroke: RefCell::new(None),
             stroke_width: Cell::new(0.0),
@@ -1253,11 +1208,10 @@ impl Shape {
     }
 }
 
-/// `builtin::Rectangle`(docs/elwindui_builtins_spec.md 付録G/N)— `ShapeKind::RoundedRect` に固定
-/// した `Shape` の薄いラッパー。かつては `elwindui-codegen`(`builtins.elwind`の`view Rectangle`)が
+/// `builtin::Rectangle`(docs/elwindui_builtins_spec.md 付録G/N)。かつては `elwindui-codegen`(`builtins.elwind`の`view Rectangle`)が
 /// 消費クレートごとに再生成していたが、バックエンド非依存な合成 builtin はここに一度だけ手書きする
 /// 方が二重管理にならない。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
-/// 自身の必須メソッド(`set_kind`等)を`base`委譲として登録している。
+/// 自身の共通描画メソッドを`base`委譲として登録している。
 #[elwindui_macros::class(inherits = crate::ui::Shape)]
 pub struct Rectangle {
     stroke_width: Option<f32>,
@@ -1279,8 +1233,19 @@ impl Rectangle {
         self.corner_radius.clone()
     }
     #[overrides]
-    fn paint(&self) -> Option<PaintKind> {
-        self.base.paint()
+    fn render(&self, context: &mut RenderContext<'_>) {
+        context.rectangle(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: self.arranged_width().unwrap_or(0.0),
+                height: self.arranged_height().unwrap_or(0.0),
+            },
+            self.corner_radius.unwrap_or(0.0),
+            self.base.fill.borrow().clone(),
+            self.base.stroke.borrow().clone(),
+            self.base.stroke_width.get(),
+        );
     }
     #[inherent]
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
@@ -1297,9 +1262,6 @@ impl Rectangle {
         corner_radius: Option<f32>,
     ) -> Self {
         let shape = Shape::construct();
-        shape.set_kind(ShapeKind::RoundedRect {
-            corner_radius: corner_radius.unwrap_or(0.0),
-        });
         shape.set_fill(fill);
         shape.set_stroke(stroke);
         shape.set_stroke_width(stroke_width.unwrap_or(0.0));
@@ -1311,8 +1273,7 @@ impl Rectangle {
     }
 }
 
-/// `builtin::Ellipse`(docs/elwindui_builtins_spec.md 付録G/N)— `ShapeKind::Oval` に固定した
-/// `Shape` の薄いラッパー。`Rectangle`の doc comment 参照。
+/// `builtin::Ellipse`(docs/elwindui_builtins_spec.md 付録G/N)。`Rectangle`の doc comment 参照。
 #[elwindui_macros::class(inherits = crate::ui::Shape)]
 pub struct Ellipse {
     stroke_width: Option<f32>,
@@ -1330,8 +1291,18 @@ impl Ellipse {
         self.stroke_width.clone()
     }
     #[overrides]
-    fn paint(&self) -> Option<PaintKind> {
-        self.base.paint()
+    fn render(&self, context: &mut RenderContext<'_>) {
+        context.ellipse(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: self.arranged_width().unwrap_or(0.0),
+                height: self.arranged_height().unwrap_or(0.0),
+            },
+            self.base.fill.borrow().clone(),
+            self.base.stroke.borrow().clone(),
+            self.base.stroke_width.get(),
+        );
     }
     #[inherent]
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
@@ -1341,7 +1312,6 @@ impl Ellipse {
     // own `construct` doc comment for why this split exists.
     fn construct(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>) -> Self {
         let shape = Shape::construct();
-        shape.set_kind(ShapeKind::Oval);
         shape.set_fill(fill);
         shape.set_stroke(stroke);
         shape.set_stroke_width(stroke_width.unwrap_or(0.0));
@@ -1353,8 +1323,7 @@ impl Ellipse {
 }
 
 /// Self-drawn primitive text (WinUI3's `TextBlock`) — no native widget, unlike the native `Text`
-/// this replaces. A leaf, like `NativeControlImpl`. Field named `text` (not `content`, unlike
-/// `PaintKind::Text`'s own field of the same meaning) to match `builtin::TextBlock`'s own `#[param]
+/// this replaces. A leaf, like `NativeControlImpl`. Field named `text` (not `content`) to match `builtin::TextBlock`'s own `#[param]
 /// text` name — `elwindui-codegen`'s setter-based construction calls `.set_{param name}(..)`
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
 /// `TextBlock`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `TextBlock` has no
@@ -1384,12 +1353,18 @@ impl TextBlock {
         final_size
     }
     #[overrides]
-    fn paint(&self) -> Option<PaintKind> {
-        Some(PaintKind::Text {
-            content: self.text.borrow().clone(),
-            color: self.color.borrow().clone(),
-            alignment: self.alignment.get(),
-        })
+    fn render(&self, context: &mut RenderContext<'_>) {
+        context.text(
+            self.text.borrow().clone(),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: self.arranged_width().unwrap_or(0.0),
+                height: self.arranged_height().unwrap_or(0.0),
+            },
+            self.color.borrow().clone(),
+            self.alignment.get(),
+        );
     }
     fn set_text(&self, text: String) {
         *self.text.borrow_mut() = text;
@@ -1675,84 +1650,70 @@ pub fn natural_size(elem: &dyn UIElementExt) -> Size {
     elem.measured_size().unwrap_or_default()
 }
 
-/// Recursively walks `elem`'s already-`arrange`d subtree (reading the `arranged_width`/
-/// `arranged_height`/`arranged_offset` each element's own `arrange()` set — see that trait
-/// method's own doc comment), collecting every native leaf's handle (cloned —
-/// cheap for a thin `Retained<NSView>`-style handle) paired with its **absolute** rect and the
-/// `Rc<dyn UIElement>` tree node that owns it, and every self-painting element's content paired
-/// with its own absolute rect — interleaved into a single `Vec<RenderItem<H>>` in traversal order
-/// (see that type's doc comment for why this must stay one list, not two). Does no measuring or
-/// arranging itself — `layout_tree` (below) always runs a real `measure`/`arrange` pass first.
-fn collect_render_items<H: Clone + 'static>(
-    elem: &Rc<dyn UIElementExt>,
-    absolute_origin: Point,
-    out: &mut Vec<RenderItem<H>>,
-) {
-    // A `Collapsed` element neither renders itself nor recurses into its children — its whole
-    // subtree is skipped, matching WinUI3 (a `Collapsed` parent hides its descendants too). See
-    // `Visibility`'s own doc comment.
-    if elem.visibility() == Visibility::Collapsed {
-        return;
-    }
-    let width = elem.arranged_width().unwrap_or(0.0);
-    let height = elem.arranged_height().unwrap_or(0.0);
-    let absolute_rect = Rect {
-        x: absolute_origin.x,
-        y: absolute_origin.y,
-        width,
-        height,
+/// Records one Visual's local retained commands. Geometry and hierarchy are reconciled separately
+/// so a dirty Visual does not require replacing its RenderGroup allocation.
+fn record_group_commands<H: Clone + 'static>(elem: &Rc<dyn UIElementExt>, group: &mut RenderGroup) {
+    group.commands.clear();
+    let size = Size {
+        width: elem.arranged_width().unwrap_or(0.0),
+        height: elem.arranged_height().unwrap_or(0.0),
     };
-
-    // `try_as_native_control` (not a direct `as_any().downcast_ref` on `elem` itself) so a type that
-    // *composes* a backend's `NativeControlImpl { handle: H, .. }` as its own `base` field (e.g. a
-    // backend's `ButtonImpl`) is recognized too. Downcasts straight to `H` (the raw handle), not to
-    // any `elwindui-core`-defined wrapper struct — see `UIElement::try_as_native_control`'s own doc
-    // comment.
+    let mut context = RenderContext::begin_group(&mut group.commands, group.offset, group.clip);
     if let Some(native) = elem
         .as_ref()
         .try_as_native_control()
-        .and_then(|a| a.downcast_ref::<H>())
+        .and_then(|value| value.downcast_ref::<H>())
     {
-        out.push(RenderItem::Native(
-            native.clone(),
-            absolute_rect,
-            Rc::clone(elem),
-        ));
+        context.native_control(
+            group.id,
+            Rc::new(native.clone()),
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: size.width,
+                height: size.height,
+            },
+        );
     }
-    if let Some(paint) = elem.paint() {
-        out.push(RenderItem::Paint(paint, absolute_rect));
-    }
-
-    for child in elem.visual_children().iter() {
-        let offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-        let child_origin = Point {
-            x: absolute_origin.x + offset.x,
-            y: absolute_origin.y + offset.y,
-        };
-        collect_render_items::<H>(child, child_origin, out);
-    }
+    elem.render(&mut context);
+    context.end_group();
 }
 
-/// Measures and arranges `root` against `available`, then collects every render item — see
-/// `collect_render_items`'s own doc comment for the returned list's shape. A backend's host (see
-/// `elwindui-backend-appkit`'s `TreeHostView`) replays this list in order: a `RenderItem::Native`
-/// gets placed as a native subview and positioned via its handle's own `arrange` method (a plain
-/// inherent method on that backend's own handle type, not a generic `elwindui-core` trait method —
-/// placing a native handle is entirely backend-specific, same as measuring one, see
-/// `NativeControl`'s own doc comment; a real `#[routed]` click/etc. is wired once, at the
-/// widget's own construction time — see e.g. `elwindui_backend_appkit::builtins::Button::new` —
-/// not here), a `RenderItem::Paint` gets added as a paint layer (e.g. a `CAShapeLayer`) —
-/// `elwindui-core` itself knows nothing about `NSView`/`addSubview`/`CALayer`.
-///
-/// `H` only needs to be named here (and on each backend's own `NativeControlImpl`) — every other
-/// `UIElement` is handle-agnostic. The root's own `horizontal_alignment`/`vertical_alignment` default to
-/// `Stretch` (`UIElement::default`), so it fills `available` unless a caller explicitly
-/// overrides them — the same default every mainstream UI framework gives a top-level content
-/// element (`Window.Content`, an HTML `<body>`).
-pub fn layout_tree<H: Clone + 'static>(
-    root: &Rc<dyn UIElementExt>,
-    available: Size,
-) -> Vec<RenderItem<H>> {
+/// Builds one retained RenderGroup for every arranged, visible Visual.
+fn build_render_group<H: Clone + 'static>(
+    elem: &Rc<dyn UIElementExt>,
+    offset: Point,
+) -> Option<RenderGroup> {
+    if elem.visibility() == Visibility::Collapsed {
+        return None;
+    }
+    let size = Size {
+        width: elem.arranged_width().unwrap_or(0.0),
+        height: elem.arranged_height().unwrap_or(0.0),
+    };
+    let clip = elem.clip_to_bounds().then_some(Rect {
+        x: 0.0,
+        y: 0.0,
+        width: size.width,
+        height: size.height,
+    });
+    let id = elem.render_group_id();
+    let mut group = RenderGroup::new(id, offset, clip);
+    group.size = size;
+    record_group_commands::<H>(elem, &mut group);
+    for child in elem.visual_children() {
+        let child_offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+        if let Some(child_group) = build_render_group::<H>(&child, child_offset) {
+            group.children.push(child_group);
+        }
+    }
+    group.is_dirty = false;
+    Some(group)
+}
+
+/// Measures and arranges a host's content root. Rendering is intentionally separate: a host keeps
+/// its RenderTree and calls `RenderTree::new` once, then `RenderTree::reconcile` after each layout.
+pub fn layout_root(root: &Rc<dyn UIElementExt>, available: Size) {
     root.measure(available);
     let allotted = Rect {
         x: 0.0,
@@ -1761,21 +1722,125 @@ pub fn layout_tree<H: Clone + 'static>(
         height: available.height,
     };
     root.arrange(allotted);
-    // `root` has no parent to have offset it via a `child.arrange(rect)` call, but `root.arrange`
-    // still computed its own margin/alignment-driven `arranged_offset` against `allotted` (e.g. a
-    // non-zero margin, or non-Stretch alignment) — fold that in here, exactly as a real parent's
-    // loop would via `collect_render_items`'s own child-offset step.
-    let root_offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-    let mut out = Vec::new();
-    collect_render_items::<H>(
-        root,
-        Point {
-            x: allotted.x + root_offset.x,
-            y: allotted.y + root_offset.y,
-        },
-        &mut out,
-    );
-    out
+}
+
+fn index_render_groups(
+    elem: &Rc<dyn UIElementExt>,
+    group: &RenderGroup,
+    path: Vec<usize>,
+    group_paths: &mut HashMap<u64, Vec<usize>>,
+    visual_index: &mut HashMap<u64, Weak<dyn UIElementExt>>,
+) {
+    group_paths.insert(group.id, path.clone());
+    visual_index.insert(group.id, Rc::downgrade(elem));
+    let mut group_children = group.children.iter().enumerate();
+    for child in elem.visual_children() {
+        if child.visibility() == Visibility::Collapsed {
+            continue;
+        }
+        let Some((child_index, child_group)) = group_children.next() else {
+            break;
+        };
+        let mut child_path = path.clone();
+        child_path.push(child_index);
+        index_render_groups(&child, child_group, child_path, group_paths, visual_index);
+    }
+}
+
+fn reconcile_render_group<H: Clone + 'static>(
+    elem: &Rc<dyn UIElementExt>,
+    group: &mut RenderGroup,
+    offset: Point,
+) {
+    let size = Size {
+        width: elem.arranged_width().unwrap_or(0.0),
+        height: elem.arranged_height().unwrap_or(0.0),
+    };
+    let clip = elem.clip_to_bounds().then_some(Rect {
+        x: 0.0,
+        y: 0.0,
+        width: size.width,
+        height: size.height,
+    });
+    if group.offset != offset || group.size != size || group.clip != clip {
+        group.offset = offset;
+        group.size = size;
+        group.clip = clip;
+        group.is_dirty = true;
+    }
+
+    let old_children = std::mem::take(&mut group.children);
+    let mut old_by_id: HashMap<u64, RenderGroup> = old_children
+        .into_iter()
+        .map(|child| (child.id, child))
+        .collect();
+    let mut children = Vec::new();
+    for child in elem.visual_children() {
+        if child.visibility() == Visibility::Collapsed {
+            continue;
+        }
+        let child_offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+        let id = child.render_group_id();
+        let child_group = if let Some(mut existing) = old_by_id.remove(&id) {
+            reconcile_render_group::<H>(&child, &mut existing, child_offset);
+            existing
+        } else {
+            group.is_dirty = true;
+            build_render_group::<H>(&child, child_offset)
+                .expect("visible Visual must have a RenderGroup")
+        };
+        children.push(child_group);
+    }
+    if !old_by_id.is_empty() {
+        group.is_dirty = true;
+    }
+    group.children = children;
+    if group.is_dirty {
+        record_group_commands::<H>(elem, group);
+        group.is_dirty = false;
+    }
+}
+
+impl RenderTree {
+    /// Creates the initial retained tree from a layout-complete content root.
+    pub fn new<H: Clone + 'static>(root: &Rc<dyn UIElementExt>) -> Self {
+        let offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+        let root_group = build_render_group::<H>(root, offset)
+            .unwrap_or_else(|| RenderGroup::new(root.render_group_id(), offset, None));
+        let mut tree = Self::with_root(root_group);
+        index_render_groups(
+            root,
+            &tree.root,
+            Vec::new(),
+            &mut tree.group_paths,
+            &mut tree.visual_index,
+        );
+        tree
+    }
+
+    /// Reconciles an already retained tree after `layout_root`. Group identities and clean command
+    /// buffers survive; only changed or explicitly invalidated groups record commands again.
+    pub fn reconcile<H: Clone + 'static>(&mut self, root: &Rc<dyn UIElementExt>) -> bool {
+        if self.root.id != root.render_group_id() {
+            return false;
+        }
+        let offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+        reconcile_render_group::<H>(root, &mut self.root, offset);
+        self.group_paths.clear();
+        self.visual_index.clear();
+        index_render_groups(
+            root,
+            &self.root,
+            Vec::new(),
+            &mut self.group_paths,
+            &mut self.visual_index,
+        );
+        true
+    }
+
+    pub fn root_id(&self) -> u64 {
+        self.root.id
+    }
 }
 
 fn rect_contains(rect: Rect, at: Point) -> bool {
@@ -1830,10 +1895,10 @@ fn hit_test_at(
 
 /// Hit-tests `root` at `at` (absolute coordinates, e.g. the hosting `TreeHostView`'s own local
 /// point). Returns the deepest (topmost) hit element, or `None` if `at` falls outside `root`'s own
-/// bounds entirely. Requires `root` to have already been laid out (e.g. via `layout_tree`) — reads
+/// bounds entirely. Requires `root` to have already been laid out (e.g. via `layout_root`) — reads
 /// cached `arranged_width`/`arranged_height`/`arranged_offset`, doesn't recompute them.
 pub fn hit_test(root: &Rc<dyn UIElementExt>, at: Point) -> Option<Rc<dyn UIElementExt>> {
-    // See `layout_tree`'s own matching comment — `root`'s own `arranged_offset` (from its margin/
+    // See `layout_root`'s own matching comment — `root`'s own `arranged_offset` (from its margin/
     // alignment against the original allotted rect) must be folded in here too, so hit-testing
     // agrees with `collect_render_items`'s rendered coordinates.
     let root_offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
@@ -1877,6 +1942,11 @@ pub fn dispatch_routed<T: 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn layout_tree<H: Clone + 'static>(root: &Rc<dyn UIElementExt>, available: Size) -> RenderTree {
+        layout_root(root, available);
+        RenderTree::new::<H>(root)
+    }
 
     #[derive(Clone, PartialEq, Debug)]
     struct FakeHandle(&'static str, Size);
@@ -2040,20 +2110,75 @@ mod tests {
         }
     }
 
-    // Splits `layout_tree`'s single interleaved `Vec<RenderItem<H>>` back into the pre-`RenderItem`
-    // `(natives, paints)` shape these tests were originally written against (dropping each native's
-    // `Rc<dyn UIElement>` tree-node component too) — a test asserting on native/paint *content*
-    // doesn't care about their relative ordering against each other, only `render_item_ordering_*`
-    // below (which asserts on the combined list directly) tests that.
-    fn split<H: Clone>(items: Vec<RenderItem<H>>) -> (Vec<(H, Rect)>, Vec<(PaintKind, Rect)>) {
+    fn split(tree: RenderTree) -> (Vec<(FakeHandle, Rect)>, Vec<(RenderCommand, Rect)>) {
         let mut natives = Vec::new();
         let mut paints = Vec::new();
-        for item in items {
-            match item {
-                RenderItem::Native(h, r, _) => natives.push((h, r)),
-                RenderItem::Paint(p, r) => paints.push((p, r)),
+        fn visit(
+            group: &RenderGroup,
+            origin: Point,
+            natives: &mut Vec<(FakeHandle, Rect)>,
+            paints: &mut Vec<(RenderCommand, Rect)>,
+        ) {
+            let origin = Point {
+                x: origin.x + group.offset.x,
+                y: origin.y + group.offset.y,
+            };
+            for command in &group.commands {
+                match command {
+                    RenderCommand::NativeControl { handle, rect, .. } => {
+                        if let Some(handle) = handle.downcast_ref::<FakeHandle>() {
+                            natives.push((
+                                handle.clone(),
+                                Rect {
+                                    x: origin.x + rect.x,
+                                    y: origin.y + rect.y,
+                                    width: rect.width,
+                                    height: rect.height,
+                                },
+                            ));
+                        }
+                    }
+                    RenderCommand::Rectangle { rect, .. }
+                    | RenderCommand::Ellipse { rect, .. }
+                    | RenderCommand::Image { rect, .. } => paints.push((
+                        command.clone(),
+                        Rect {
+                            x: origin.x + rect.x,
+                            y: origin.y + rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        },
+                    )),
+                    RenderCommand::Text { rect, .. } => paints.push((
+                        command.clone(),
+                        Rect {
+                            x: origin.x + rect.x,
+                            y: origin.y + rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        },
+                    )),
+                    RenderCommand::Line { .. } | RenderCommand::Path { .. } => paints.push((
+                        command.clone(),
+                        Rect {
+                            x: origin.x,
+                            y: origin.y,
+                            width: 0.0,
+                            height: 0.0,
+                        },
+                    )),
+                }
+            }
+            for child in &group.children {
+                visit(child, origin, natives, paints);
             }
         }
+        visit(
+            &tree.root,
+            Point { x: 0.0, y: 0.0 },
+            &mut natives,
+            &mut paints,
+        );
         (natives, paints)
     }
 
@@ -2206,27 +2331,19 @@ mod tests {
     }
 
     #[test]
-    fn shape_reports_paint_and_has_no_children() {
+    fn abstract_shape_has_no_commands_and_no_children() {
         // `Shape` (matching real WinUI3's `Shape`) is a pure leaf: no `Children`/content property
         // of its own — see `Shape`'s own doc comment.
         let shape = Shape::new();
-        shape.set_kind(ShapeKind::RoundedRect { corner_radius: 8.0 });
         shape.set_fill(Some("#3498db".to_string()));
         let tree: Rc<dyn UIElementExt> = shape;
 
         assert!(tree.visual_children().is_empty());
         let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 50.0)));
-        assert_eq!(paints.len(), 1);
-        // As the root, the shape fills `available` (default `Stretch`, not its own zero-sized
-        // natural size).
-        assert_eq!(
-            paints[0].1,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 50.0
-            }
+        assert!(natives.is_empty());
+        assert!(
+            paints.is_empty(),
+            "Shape is abstract; Rectangle/Ellipse render concrete commands"
         );
         assert!(natives.is_empty());
     }
@@ -2429,8 +2546,7 @@ mod tests {
             self.base.__dyn_ui_element()
         }
         // `visual_children`/`try_as_native_control` aren't overridden here, so their accessors
-        // forward to `self.base` (same reasoning as `__dyn_ui_element` above); `measure_override`/
-        // `arrange_override`/`paint` *are* overridden below, so their accessors are reflexive.
+        // forward to `self.base` (same reasoning as `__dyn_ui_element` above).
         fn __dyn_x_for_visual_children(&self) -> &dyn UIElementExt {
             self.base.__dyn_x_for_visual_children()
         }
@@ -2440,7 +2556,7 @@ mod tests {
         fn __dyn_x_for_arrange_override(&self) -> &dyn UIElementExt {
             self
         }
-        fn __dyn_x_for_paint(&self) -> &dyn UIElementExt {
+        fn __dyn_x_for_render(&self) -> &dyn UIElementExt {
             self
         }
         fn __dyn_x_for_try_as_native_control(&self) -> &dyn UIElementExt {
@@ -2471,13 +2587,19 @@ mod tests {
             }
             final_size
         }
-        fn paint(&self) -> Option<PaintKind> {
-            Some(PaintKind::ShapeExt {
-                kind: ShapeKind::RoundedRect { corner_radius: 4.0 },
-                fill: Some("#000000".to_string()),
-                stroke: None,
-                stroke_width: 0.0,
-            })
+        fn render(&self, context: &mut RenderContext<'_>) {
+            context.rectangle(
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: self.arranged_width().unwrap_or(0.0),
+                    height: self.arranged_height().unwrap_or(0.0),
+                },
+                4.0,
+                Some("#000000".to_string()),
+                None,
+                0.0,
+            );
         }
     }
 
@@ -2497,26 +2619,138 @@ mod tests {
             .visual_collection
             .add(native("child", size(10.0, 10.0)));
         let tree: Rc<dyn UIElementExt> = tree;
-        let items = layout_tree::<FakeHandle>(&tree, size(50.0, 50.0));
-        assert_eq!(items.len(), 2);
-        assert!(matches!(items[0], RenderItem::Paint(..)));
-        assert!(matches!(items[1], RenderItem::Native(..)));
+        let render_tree = layout_tree::<FakeHandle>(&tree, size(50.0, 50.0));
+        assert!(matches!(
+            render_tree.root.commands[0],
+            RenderCommand::Rectangle { .. }
+        ));
+        assert!(matches!(
+            render_tree.root.children[0].commands[0],
+            RenderCommand::NativeControl { .. }
+        ));
     }
 
     #[test]
     fn text_block_defaults_to_left_alignment_and_set_text_alignment_updates_paint() {
         let text_block = TextBlock::construct();
         assert_eq!(text_block.alignment.get(), TextAlignment::Left);
-        match text_block.paint() {
-            Some(PaintKind::Text { alignment, .. }) => assert_eq!(alignment, TextAlignment::Left),
-            other => panic!("expected PaintKind::Text, got {other:?}"),
-        }
+        let mut commands = Vec::new();
+        text_block.render(&mut RenderContext::begin_group(
+            &mut commands,
+            Point { x: 0.0, y: 0.0 },
+            None,
+        ));
+        assert!(matches!(
+            commands[0],
+            RenderCommand::Text {
+                alignment: TextAlignment::Left,
+                ..
+            }
+        ));
 
         text_block.set_text_alignment(TextAlignment::Center);
-        match text_block.paint() {
-            Some(PaintKind::Text { alignment, .. }) => assert_eq!(alignment, TextAlignment::Center),
-            other => panic!("expected PaintKind::Text, got {other:?}"),
-        }
+        commands.clear();
+        text_block.render(&mut RenderContext::begin_group(
+            &mut commands,
+            Point { x: 0.0, y: 0.0 },
+            None,
+        ));
+        assert!(matches!(
+            commands[0],
+            RenderCommand::Text {
+                alignment: TextAlignment::Center,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn render_tree_indexes_stable_visual_ids_and_marks_only_target_group_dirty() {
+        let child = native("child", size(10.0, 10.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&child)]);
+        let mut render_tree = layout_tree::<FakeHandle>(&root, size(40.0, 40.0));
+        let child_id = child.render_group_id();
+        assert!(render_tree.group_paths.contains_key(&child_id));
+        assert!(render_tree.visual_index[&child_id].upgrade().is_some());
+        assert!(!render_tree.root.is_dirty);
+        assert!(render_tree.mark_dirty(child_id));
+        assert!(!render_tree.root.is_dirty);
+        assert!(render_tree.root.children[0].is_dirty);
+    }
+
+    #[test]
+    fn reconcile_reuses_matching_root_and_discards_removed_visual_indexes() {
+        let first = native("first", size(10.0, 10.0));
+        let second = native("second", size(10.0, 10.0));
+        let root = stack(
+            Orientation::Vertical,
+            0.0,
+            vec![Rc::clone(&first), Rc::clone(&second)],
+        );
+        layout_root(&root, size(40.0, 40.0));
+        let mut render_tree = RenderTree::new::<FakeHandle>(&root);
+        let root_address = (&render_tree.root as *const RenderGroup) as usize;
+        let first_id = first.render_group_id();
+        let second_id = second.render_group_id();
+
+        assert!(render_tree.mark_dirty(first_id));
+        layout_root(&root, size(40.0, 40.0));
+        assert!(render_tree.reconcile::<FakeHandle>(&root));
+        assert_eq!(
+            root_address,
+            (&render_tree.root as *const RenderGroup) as usize
+        );
+        assert!(render_tree.group_paths.contains_key(&first_id));
+        assert!(render_tree.group_paths.contains_key(&second_id));
+
+        assert!(root.as_ui_element().visual_collection.remove(&second));
+        layout_root(&root, size(40.0, 40.0));
+        assert!(render_tree.reconcile::<FakeHandle>(&root));
+        assert!(!render_tree.group_paths.contains_key(&second_id));
+        assert!(!render_tree.mark_dirty(second_id));
+    }
+
+    #[test]
+    fn reconcile_rejects_a_different_content_root() {
+        let first = native("first", size(10.0, 10.0));
+        let second = native("second", size(10.0, 10.0));
+        layout_root(&first, size(20.0, 20.0));
+        let mut render_tree = RenderTree::new::<FakeHandle>(&first);
+        layout_root(&second, size(20.0, 20.0));
+        assert!(!render_tree.reconcile::<FakeHandle>(&second));
+        assert_eq!(render_tree.root_id(), first.render_group_id());
+    }
+
+    #[test]
+    fn reconcile_rerecords_native_commands_when_only_arranged_size_changes() {
+        let root = native("root", size(10.0, 10.0));
+        layout_root(&root, size(40.0, 30.0));
+        let mut render_tree = RenderTree::new::<FakeHandle>(&root);
+        let native_rect = |tree: &RenderTree| match &tree.root.commands[0] {
+            RenderCommand::NativeControl { rect, .. } => *rect,
+            _ => panic!("expected native command"),
+        };
+        assert_eq!(native_rect(&render_tree).width, 40.0);
+
+        layout_root(&root, size(100.0, 80.0));
+        assert!(render_tree.reconcile::<FakeHandle>(&root));
+        assert_eq!(native_rect(&render_tree).width, 100.0);
+        assert_eq!(native_rect(&render_tree).height, 80.0);
+    }
+
+    #[test]
+    fn clip_to_bounds_defaults_false_and_inherits_from_visual_parent() {
+        let child = native("child", size(10.0, 10.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&child)]);
+        assert!(!child.clip_to_bounds());
+        root.set_clip_to_bounds(Some(true));
+        assert!(child.clip_to_bounds());
+        let render_tree = layout_tree::<FakeHandle>(&root, size(40.0, 40.0));
+        assert!(render_tree.root.clip.is_some());
+        assert!(render_tree.root.children[0].clip.is_some());
+        child.set_clip_to_bounds(Some(false));
+        let render_tree = layout_tree::<FakeHandle>(&root, size(40.0, 40.0));
+        assert!(render_tree.root.children[0].clip.is_none());
     }
 
     #[test]
@@ -2628,7 +2862,7 @@ mod tests {
             calls: Rc<RefCell<usize>>,
         }
         impl RelayoutHost for CountingHost {
-            fn request_relayout(&self) {
+            fn request_relayout(&self, _dirty_group_id: u64) {
                 *self.calls.borrow_mut() += 1;
             }
         }

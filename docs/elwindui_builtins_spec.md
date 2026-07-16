@@ -229,7 +229,7 @@ elwindui_core::ui::TextBlock::new(/* setters applied after construction */)
 })
 ```
 
-`TextBlock::paint()`は`elwindui_core::ui::PaintKind::Text { content, color, alignment }`を返すだけで、
+`TextBlock::render()`は`RenderContext`へローカル座標の`RenderCommand::Text`を追加するだけで、
 実際の文字計測・描画は各バックエンドの責務になる(`elwindui-core`はフォントも描画方法も知らない
 ——F.6の`Rectangle`/`Ellipse`と同じ役割分担):
 

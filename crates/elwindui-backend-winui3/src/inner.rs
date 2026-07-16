@@ -106,8 +106,8 @@ impl AnyView {
 
     /// Positions this native leaf — like `measure` above, a plain inherent method (elwindui-core's
     /// generic layout code never calls either) — called directly by `TreeHostPanel`'s own render
-    /// loop below, once `layout_tree` has already handed back a concrete
-    /// `RenderItem::Native(AnyView, ..)`. Unlike AppKit (where `arrange` calls `setFrame` directly),
+    /// loop below, after `layout_root` and RenderTree reconciliation have produced its native
+    /// command. Unlike AppKit (where `arrange` calls `setFrame` directly),
     /// a `Canvas`'s children are still measured/arranged by the real XAML layout system on every
     /// layout pass — this only needs to set the `Width`/`Height` and `Canvas.Left`/`Canvas.Top`
     /// attached properties once; `Canvas`'s own (built-in) `ArrangeOverride` does the rest, unlike
@@ -132,7 +132,7 @@ impl<T: WinUiHandle + 'static> From<T> for AnyView {
 /// `Canvas` needs no custom `MeasureOverride`/`ArrangeOverride` subclass (unlike `TreeHostView`'s
 /// `NSView` subclass) since `Canvas`'s own built-in layout already just measures every child with
 /// an unconstrained size and positions it from the `Canvas.Left`/`Canvas.Top` attached properties —
-/// exactly the "trust `elwindui_core::ui::layout_tree`'s own absolute-rect computation, don't
+/// exactly the "trust `elwindui_core::ui::layout_root`'s own absolute-rect computation, don't
 /// let the native layout system second-guess it" behavior this needs. `Rectangle`/`Ellipse`/
 /// `TextBlock` paint nodes become real `Shapes::Rectangle`/`Shapes::Ellipse`/`Controls::TextBlock`
 /// elements appended to `Canvas.Children` in traversal order (`Canvas` z-orders by collection
@@ -142,6 +142,7 @@ impl<T: WinUiHandle + 'static> From<T> for AnyView {
 pub struct TreeHostPanel {
     canvas: Canvas,
     tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+    render_tree: Rc<RefCell<Option<elwindui_core::painter::RenderTree>>>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
@@ -161,6 +162,7 @@ pub struct TreeHostPanel {
 struct WinUI3RelayoutHost {
     canvas: Canvas,
     tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+    render_tree: Weak<RefCell<Option<elwindui_core::painter::RenderTree>>>,
     /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
     /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
     /// (and clears it right before doing so).
@@ -173,7 +175,12 @@ struct WinUI3RelayoutHost {
 }
 
 impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
-    fn request_relayout(&self) {
+    fn request_relayout(&self, dirty_group_id: u64) {
+        if let Some(render_tree) = self.render_tree.upgrade() {
+            if let Some(render_tree) = render_tree.borrow_mut().as_mut() {
+                render_tree.mark_dirty(dirty_group_id);
+            }
+        }
         if self.pending.replace(true) {
             return; // already scheduled — the pending pass will pick up this call's changes too
         }
@@ -187,8 +194,10 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
         };
         let _ = queue.TryEnqueue(&DispatcherQueueHandler::new(move || {
             this.pending.set(false);
-            if let Some(tree) = this.tree.upgrade() {
-                TreeHostPanel::relayout_static(&this.canvas, &tree);
+            if let (Some(tree), Some(render_tree)) =
+                (this.tree.upgrade(), this.render_tree.upgrade())
+            {
+                TreeHostPanel::relayout_static(&this.canvas, &tree, &render_tree);
             }
             Ok(())
         }));
@@ -201,8 +210,10 @@ impl TreeHostPanel {
         let this = Self {
             canvas,
             tree: Rc::new(RefCell::new(None)),
+            render_tree: Rc::new(RefCell::new(None)),
         };
         let weak = Rc::downgrade(&this.tree);
+        let weak_render_tree = Rc::downgrade(&this.render_tree);
         let canvas_for_handler = this.canvas.clone();
         // `SizeChanged` fires whenever this panel's own allotted space changes (window resize,
         // or — for a `NativeTabView`'s per-tab content area — the tab strip/window resizing together)
@@ -210,8 +221,10 @@ impl TreeHostPanel {
         let _ = this
             .canvas
             .SizeChanged(&TypedEventHandler::new(move |_, _| {
-                if let Some(tree) = weak.upgrade() {
-                    Self::relayout_static(&canvas_for_handler, &tree);
+                if let (Some(tree), Some(render_tree)) =
+                    (weak.upgrade(), weak_render_tree.upgrade())
+                {
+                    Self::relayout_static(&canvas_for_handler, &tree, &render_tree);
                 }
                 Ok(())
             }));
@@ -233,18 +246,21 @@ impl TreeHostPanel {
         let host = Rc::new(WinUI3RelayoutHost {
             canvas: self.canvas.clone(),
             tree: Rc::downgrade(&self.tree),
+            render_tree: Rc::downgrade(&self.render_tree),
             pending: Cell::new(false),
             weak_self: RefCell::new(Weak::new()),
         });
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
         tree.as_ui_element().set_invalidate_host(Some(host));
         *self.tree.borrow_mut() = Some(tree);
-        Self::relayout_static(&self.canvas, &self.tree);
+        *self.render_tree.borrow_mut() = None;
+        Self::relayout_static(&self.canvas, &self.tree, &self.render_tree);
     }
 
     fn relayout_static(
         canvas: &Canvas,
         tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+        retained_tree: &Rc<RefCell<Option<elwindui_core::painter::RenderTree>>>,
     ) {
         use elwindui_core::base::Size as LSize;
 
@@ -256,14 +272,137 @@ impl TreeHostPanel {
         let Some(tree) = tree_ref.as_ref() else {
             return;
         };
-        let items: Vec<elwindui_core::ui::RenderItem<AnyView>> =
-            elwindui_core::ui::layout_tree(tree, available);
+        elwindui_core::ui::layout_root(tree, available);
+        {
+            let mut retained_tree = retained_tree.borrow_mut();
+            if retained_tree
+                .as_ref()
+                .is_some_and(|render_tree| render_tree.root_id() == tree.render_group_id())
+            {
+                retained_tree
+                    .as_mut()
+                    .expect("checked above")
+                    .reconcile::<AnyView>(tree);
+            } else {
+                *retained_tree = Some(elwindui_core::painter::RenderTree::new::<AnyView>(tree));
+            }
+        }
+        let retained_tree = retained_tree.borrow();
+        let Some(render_tree) = retained_tree.as_ref() else {
+            return;
+        };
 
         let Ok(children) = canvas.Children() else {
             return;
         };
 
-        // `items` is `layout_tree`'s single interleaved list, in `arrange`'s own parent-before-
+        fn collect_commands<'a>(
+            group: &'a elwindui_core::painter::RenderGroup,
+            origin: elwindui_core::base::Point,
+            out: &mut Vec<(
+                &'a elwindui_core::painter::RenderCommand,
+                elwindui_core::base::Point,
+            )>,
+        ) {
+            let origin = elwindui_core::base::Point {
+                x: origin.x + group.offset.x,
+                y: origin.y + group.offset.y,
+            };
+            for command in &group.commands {
+                out.push((command, origin));
+            }
+            for child in &group.children {
+                collect_commands(child, origin, out);
+            }
+        }
+        let mut commands = Vec::new();
+        collect_commands(
+            &render_tree.root,
+            elwindui_core::base::Point { x: 0.0, y: 0.0 },
+            &mut commands,
+        );
+        for (command, origin) in commands {
+            match command {
+                elwindui_core::painter::RenderCommand::Rectangle {
+                    rect,
+                    fill,
+                    stroke,
+                    stroke_width,
+                    ..
+                }
+                | elwindui_core::painter::RenderCommand::Ellipse {
+                    rect,
+                    fill,
+                    stroke,
+                    stroke_width,
+                } => {
+                    let element: UIElement = match command {
+                        elwindui_core::painter::RenderCommand::Rectangle {
+                            corner_radius, ..
+                        } => {
+                            let rectangle = XamlRectangle::new().expect("Rectangle::new");
+                            let _ = rectangle.SetRadiusX(*corner_radius as f64);
+                            let _ = rectangle.SetRadiusY(*corner_radius as f64);
+                            rectangle.into()
+                        }
+                        _ => XamlEllipse::new().expect("Ellipse::new").into(),
+                    };
+                    let fe: FrameworkElement = element.clone().into();
+                    let _ = fe.SetWidth(rect.width as f64);
+                    let _ = fe.SetHeight(rect.height as f64);
+                    let _ = Canvas::SetLeft(&fe, (origin.x + rect.x) as f64);
+                    let _ = Canvas::SetTop(&fe, (origin.y + rect.y) as f64);
+                    if let Some(fill) = fill {
+                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(fill)) {
+                            let _ = set_shape_fill(&element, &brush);
+                        }
+                    }
+                    if let Some(stroke) = stroke {
+                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(stroke)) {
+                            let _ = set_shape_stroke(&element, &brush, *stroke_width as f64);
+                        }
+                    }
+                    let _ = children.Append(&element);
+                }
+                elwindui_core::painter::RenderCommand::Text {
+                    content,
+                    rect,
+                    color,
+                    alignment,
+                    ..
+                } => {
+                    let text_block = TextBlock::new().expect("TextBlock::new");
+                    let _ = text_block.SetText(&HSTRING::from(content));
+                    if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(
+                        color.as_deref().unwrap_or("#000000"),
+                    )) {
+                        let _ = text_block.SetForeground(&brush);
+                    }
+                    let _ = text_block.SetTextAlignment(xaml_text_alignment(*alignment));
+                    let fe: FrameworkElement = text_block.into();
+                    let _ = fe.SetWidth(rect.width as f64);
+                    let _ = fe.SetHeight(rect.height as f64);
+                    let _ = Canvas::SetLeft(&fe, (origin.x + rect.x) as f64);
+                    let _ = Canvas::SetTop(&fe, (origin.y + rect.y) as f64);
+                    let _ = children.Append(&fe);
+                }
+                elwindui_core::painter::RenderCommand::NativeControl { handle, rect, .. } => {
+                    if let Some(mut view) = handle.downcast_ref::<AnyView>().cloned() {
+                        view.arrange(elwindui_core::base::Rect {
+                            x: origin.x + rect.x,
+                            y: origin.y + rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        });
+                        let _ = children.Append(&view.as_element());
+                    }
+                }
+                elwindui_core::painter::RenderCommand::Line { .. }
+                | elwindui_core::painter::RenderCommand::Path { .. }
+                | elwindui_core::painter::RenderCommand::Image { .. } => {}
+            }
+        }
+        /*// Historical flat-item replay, retained temporarily for migration reference.
         // children traversal order (see `RenderItem`'s doc comment) — replayed here in one pass so
         // `Children.Append` happens in the exact order encountered. `Canvas` z-orders by `Children`
         // collection order, so this makes document order the z-order for native leaves and
@@ -349,7 +488,7 @@ impl TreeHostPanel {
                     let _ = children.Append(&view.as_element());
                 }
             }
-        }
+        }*/
     }
 }
 

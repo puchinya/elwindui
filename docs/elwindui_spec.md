@@ -1362,7 +1362,7 @@ pub trait UIElement: AsAny {
     fn visual_children(&self) -> &[Rc<dyn UIElement>];
     fn measure_override(&self, available: Size, child_sizes: &[Size]) -> Size;
     fn arrange_override(&self, final_size: Size, child_sizes: &[Size]) -> Vec<Rect>;
-    fn paint(&self) -> Option<PaintKind> { None }
+    fn render(&self, context: &mut RenderContext) {}
     // `NativeControlImpl<H>`自身は`Some(self)`を返し、それを`base`として合成する型
     // (`ButtonImpl`等)は`Some(&self.base)`を返す——既定は`None`。付録H.2.1a参照。
     fn as_native_control(&self) -> Option<&dyn Any> { None }
@@ -1388,7 +1388,7 @@ pub struct UIElementImpl {
 
 `UIElement`はこの階層の既定(ルート)クラスなので`UIElementImpl`は`base`フィールドを持たない。
 `UIElement`トレイト自体はハンドル型`H`について非ジェネリックである。実ネイティブハンドルを持つのは
-`NativeControlImpl<H>`(下記)だけであり、木を歩く汎用関数(`measure`/`arrange::<H>`/`layout_tree::<H>`)の
+`NativeControlImpl<H>`(下記)だけであり、木を歩く汎用関数(`measure`/`arrange`/`layout_root`)の
 方がハンドル型`H`についてジェネリックになっている。
 
 ```
@@ -1506,7 +1506,7 @@ trait UIElement {
 ```
 
 `elwindui-core`のレイアウトエンジンは要素ごとのMeasure/Arrangeキャッシュを持たない(H.2の
-`layout_tree`は常にツリー全体を再計算する)ため、上記3メソッドは現状すべて同一の
+`layout_root` は measure/arrange を実行し、host 保持の `RenderTree::reconcile` が描画 tree を同期する)ため、上記3メソッドは現状すべて同一の
 `request_relayout`——ホストされているツリーの根まで`parent()`を辿り、そこに登録された
 `RelayoutHost`(`UIElementImpl::invalidate_host`)へ再レイアウトを依頼する——に帰着する。3つを
 分離してあるのは将来Measure/Arrangeを別々にキャッシュ・再計算できるようにするための拡張余地であり、

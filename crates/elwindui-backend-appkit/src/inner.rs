@@ -5,9 +5,8 @@
 //! `native_ui.rs` stays a thin, uniform "implement the core-side trait by delegating" layer.
 
 use elwindui_core::base::AsAny;
-use elwindui_core::ui::{
-    PaintKind, RelayoutHost, RenderItem, ShapeKind, UIElementExt, layout_tree,
-};
+use elwindui_core::painter::{RenderCommand, RenderGroup};
+use elwindui_core::ui::{RelayoutHost, UIElementExt, layout_root};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{
@@ -83,8 +82,8 @@ impl AnyView {
     }
 
     /// Positions this native leaf via plain `NSView.setFrame` — called directly by `TreeHostView`'s
-    /// own render loop below, once `layout_tree` has already handed back a concrete
-    /// `RenderItem::Native(AnyView, ..)`.
+    /// own render loop below, after `layout_root` and RenderTree reconciliation have produced its
+    /// retained native command.
     fn arrange(&mut self, final_rect: elwindui_core::base::Rect) {
         self.as_nsview().setFrame(NSRect::new(
             objc2_foundation::NSPoint::new(final_rect.x as f64, final_rect.y as f64),
@@ -135,6 +134,22 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
 }
 
+fn intersect_rect(
+    a: elwindui_core::base::Rect,
+    b: elwindui_core::base::Rect,
+) -> Option<elwindui_core::base::Rect> {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    let right = (a.x + a.width).min(b.x + b.width);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    (right > x && bottom > y).then_some(elwindui_core::base::Rect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    })
+}
+
 /// `elwindui_core::ui::TextAlignment` -> `CATextLayer.alignmentMode` — the `kCAAlignment*` values
 /// are `extern "C"` globals (`&'static NSString`), hence the `unsafe` read.
 fn ca_alignment_mode(
@@ -155,6 +170,8 @@ fn ca_alignment_mode(
 /// `InnerTabView`'s per-tab content area both are one of these.
 pub struct TreeHostIvars {
     tree: RefCell<Option<Rc<dyn UIElementExt>>>,
+    /// The retained core-side rendering description for the currently hosted Visual tree.
+    render_tree: RefCell<Option<elwindui_core::painter::RenderTree>>,
     /// Set once, right after construction — lets `set_tree` hand out an `AppKitRelayoutHost`
     /// wrapping a weak reference back to this same view, without needing a `Retained<Self>` in
     /// hand at that point.
@@ -167,8 +184,11 @@ pub struct TreeHostIvars {
 struct AppKitRelayoutHost(objc2::rc::Weak<TreeHostView>);
 
 impl RelayoutHost for AppKitRelayoutHost {
-    fn request_relayout(&self) {
+    fn request_relayout(&self, dirty_group_id: u64) {
         if let Some(view) = self.0.load() {
+            if let Some(render_tree) = view.ivars().render_tree.borrow_mut().as_mut() {
+                render_tree.mark_dirty(dirty_group_id);
+            }
             view.setNeedsLayout(true);
         }
     }
@@ -215,6 +235,7 @@ impl TreeHostView {
         let m = mtm();
         let ivars = TreeHostIvars {
             tree: RefCell::new(None),
+            render_tree: RefCell::new(None),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
         };
         let this = Self::alloc(m).set_ivars(ivars);
@@ -233,6 +254,7 @@ impl TreeHostView {
         tree.as_ui_element()
             .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self))));
         *self.ivars().tree.borrow_mut() = Some(tree);
+        *self.ivars().render_tree.borrow_mut() = None;
         self.invalidateIntrinsicContentSize();
         self.relayout();
     }
@@ -247,10 +269,34 @@ impl TreeHostView {
         };
         let tree = self.ivars().tree.borrow();
         let Some(tree) = tree.as_ref() else { return };
-        let items: Vec<RenderItem<AnyView>> = layout_tree(tree, available);
+        layout_root(tree, available);
+        {
+            let mut retained_tree = self.ivars().render_tree.borrow_mut();
+            if retained_tree
+                .as_ref()
+                .is_some_and(|render_tree| render_tree.root_id() == tree.render_group_id())
+            {
+                retained_tree
+                    .as_mut()
+                    .expect("checked above")
+                    .reconcile::<AnyView>(tree);
+            } else {
+                *retained_tree = Some(elwindui_core::painter::RenderTree::new::<AnyView>(tree));
+            }
+        }
+        let render_tree = self.ivars().render_tree.borrow();
+        let Some(render_tree) = render_tree.as_ref() else {
+            return;
+        };
 
         self.setWantsLayer(true);
         let layer = self.layer().expect("wantsLayer(true) implies a layer");
+        // Native controls are represented by short-lived compositor islands. Remove the previous
+        // island views before replaying; the underlying `AnyView` handles remain owned by their
+        // UIElements and are reused when reinserted below.
+        for old in self.subviews().iter() {
+            old.removeFromSuperview();
+        }
         if let Some(existing) = unsafe { layer.sublayers() } {
             let stale: Vec<_> = existing
                 .iter()
@@ -263,7 +309,180 @@ impl TreeHostView {
             }
         }
 
-        for item in items {
+        fn replay_group(
+            host: &TreeHostView,
+            layer: &Retained<CALayer>,
+            group: &RenderGroup,
+            origin: elwindui_core::base::Point,
+            inherited_clip: Option<elwindui_core::base::Rect>,
+        ) {
+            let origin = elwindui_core::base::Point {
+                x: origin.x + group.offset.x,
+                y: origin.y + group.offset.y,
+            };
+            let group_clip = group.clip.map(|clip| elwindui_core::base::Rect {
+                x: origin.x + clip.x,
+                y: origin.y + clip.y,
+                width: clip.width,
+                height: clip.height,
+            });
+            let effective_clip = match (inherited_clip, group_clip) {
+                (Some(a), Some(b)) => intersect_rect(a, b),
+                (Some(clip), None) | (None, Some(clip)) => Some(clip),
+                (None, None) => None,
+            };
+            for command in &group.commands {
+                match command {
+                    RenderCommand::NativeControl { handle, rect, .. } => {
+                        let Some(mut view) = handle.downcast_ref::<AnyView>().cloned() else {
+                            continue;
+                        };
+                        let rect = elwindui_core::base::Rect {
+                            x: origin.x + rect.x,
+                            y: origin.y + rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        };
+                        let visible_rect = effective_clip
+                            .and_then(|clip| intersect_rect(rect, clip))
+                            .unwrap_or(rect);
+                        if visible_rect.width <= 0.0 || visible_rect.height <= 0.0 {
+                            continue;
+                        }
+                        // This is deliberately a native island only around an actual native
+                        // command; ordinary RenderGroups continue to replay to `layer` above.
+                        let container = NSView::new(mtm());
+                        container.setFrame(NSRect::new(
+                            objc2_foundation::NSPoint::new(
+                                visible_rect.x as f64,
+                                visible_rect.y as f64,
+                            ),
+                            objc2_foundation::NSSize::new(
+                                visible_rect.width as f64,
+                                visible_rect.height as f64,
+                            ),
+                        ));
+                        container.setClipsToBounds(true);
+                        host.addSubview(&container);
+                        let nsview = view.as_nsview();
+                        container.addSubview(&nsview);
+                        nsview.setTranslatesAutoresizingMaskIntoConstraints(true);
+                        view.arrange(elwindui_core::base::Rect {
+                            x: rect.x - visible_rect.x,
+                            y: rect.y - visible_rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        });
+                    }
+                    RenderCommand::Rectangle {
+                        rect,
+                        corner_radius,
+                        fill,
+                        stroke,
+                        stroke_width,
+                    } => {
+                        let cg_rect = NSRect::new(
+                            objc2_foundation::NSPoint::new(
+                                (origin.x + rect.x) as f64,
+                                (origin.y + rect.y) as f64,
+                            ),
+                            objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
+                        );
+                        let shape_layer = CAShapeLayer::new();
+                        shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+                        let path = unsafe {
+                            CGPath::with_rounded_rect(
+                                cg_rect,
+                                *corner_radius as f64,
+                                *corner_radius as f64,
+                                std::ptr::null(),
+                            )
+                        };
+                        shape_layer.setPath(Some(&path));
+                        match fill {
+                            Some(fill) => shape_layer.setFillColor(Some(&parse_color(fill))),
+                            None => shape_layer.setFillColor(None),
+                        }
+                        if let Some(stroke) = stroke {
+                            shape_layer.setStrokeColor(Some(&parse_color(stroke)));
+                        }
+                        shape_layer.setLineWidth(*stroke_width as f64);
+                        let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
+                        layer.addSublayer(&shape_layer);
+                    }
+                    RenderCommand::Ellipse {
+                        rect,
+                        fill,
+                        stroke,
+                        stroke_width,
+                    } => {
+                        let cg_rect = NSRect::new(
+                            objc2_foundation::NSPoint::new(
+                                (origin.x + rect.x) as f64,
+                                (origin.y + rect.y) as f64,
+                            ),
+                            objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
+                        );
+                        let shape_layer = CAShapeLayer::new();
+                        shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+                        let path =
+                            unsafe { CGPath::with_ellipse_in_rect(cg_rect, std::ptr::null()) };
+                        shape_layer.setPath(Some(&path));
+                        match fill {
+                            Some(fill) => shape_layer.setFillColor(Some(&parse_color(fill))),
+                            None => shape_layer.setFillColor(None),
+                        }
+                        if let Some(stroke) = stroke {
+                            shape_layer.setStrokeColor(Some(&parse_color(stroke)));
+                        }
+                        shape_layer.setLineWidth(*stroke_width as f64);
+                        let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
+                        layer.addSublayer(&shape_layer);
+                    }
+                    RenderCommand::Text {
+                        content,
+                        rect,
+                        color,
+                        alignment,
+                        ..
+                    } => {
+                        let text_layer = CATextLayer::new();
+                        text_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+                        text_layer.setFrame(NSRect::new(
+                            objc2_foundation::NSPoint::new(
+                                (origin.x + rect.x) as f64,
+                                (origin.y + rect.y) as f64,
+                            ),
+                            objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
+                        ));
+                        text_layer.setFontSize(14.0);
+                        text_layer.setForegroundColor(Some(&parse_color(
+                            color.as_deref().unwrap_or("#000000"),
+                        )));
+                        text_layer.setAlignmentMode(ca_alignment_mode(*alignment));
+                        unsafe {
+                            text_layer.setString(Some(&NSString::from_str(content)));
+                        }
+                        let text_layer: Retained<CALayer> = Retained::into_super(text_layer);
+                        layer.addSublayer(&text_layer);
+                    }
+                    RenderCommand::Line { .. }
+                    | RenderCommand::Path { .. }
+                    | RenderCommand::Image { .. } => {}
+                }
+            }
+            for child in &group.children {
+                replay_group(host, layer, child, origin, effective_clip);
+            }
+        }
+        replay_group(
+            self,
+            &layer,
+            &render_tree.root,
+            elwindui_core::base::Point { x: 0.0, y: 0.0 },
+            None,
+        );
+        /*for item in items {
             match item {
                 RenderItem::Native(mut view, rect, _node) => {
                     let nsview = view.as_nsview();
@@ -334,7 +553,7 @@ impl TreeHostView {
                     }
                 }
             }
-        }
+        }*/
     }
 }
 
@@ -367,12 +586,29 @@ impl InnerWindow {
             )
         };
         let content_host = TreeHostView::new();
+        // `Window` property setters can resize the NSWindow after this content view has been
+        // installed (the notepad starts at 640×480 although InnerWindow's construction rect is
+        // 480×360). Keep the host synchronized with the client area just like per-tab hosts do.
+        content_host.setTranslatesAutoresizingMaskIntoConstraints(true);
+        content_host.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
         ns.setContentView(Some(&content_host));
         Self { ns, content_host }
     }
 
     pub(crate) fn set_content(&self, content: Rc<dyn UIElementExt>) {
         self.content_host.set_tree(content);
+    }
+
+    fn sync_content_host_frame(&self) {
+        let client = self.ns.contentRectForFrameRect(self.ns.frame());
+        self.content_host.setFrame(NSRect::new(
+            objc2_foundation::NSPoint::new(0.0, 0.0),
+            client.size,
+        ));
+        self.content_host.setNeedsLayout(true);
     }
 
     pub(crate) fn set_title(&self, title: &str) {
@@ -430,6 +666,7 @@ impl InnerWindow {
         let mut frame = self.ns.frame();
         frame.size.width = width as f64;
         self.ns.setFrame_display(frame, true);
+        self.sync_content_host_frame();
     }
 
     pub(crate) fn height(&self) -> f32 {
@@ -442,6 +679,7 @@ impl InnerWindow {
         frame.size.height = height as f64;
         frame.origin.y -= height as f64 - old_height;
         self.ns.setFrame_display(frame, true);
+        self.sync_content_host_frame();
     }
 }
 

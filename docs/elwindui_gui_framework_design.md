@@ -349,12 +349,12 @@ trait AccessibilityNode {
 
 **実装状況**: `AccessibilityNode`トレイトと`AccessibilityRole`/`AccessibilityState`の型定義は`elwindui-core::accessibility`に存在するが、いずれの型に対しても実装(`impl AccessibilityNode for ...`)がなく、`UIElement`ツリーにもいずれのバックエンドのネイティブアクセシビリティAPIにも未結線(`#[accessible(...)]`属性・14章ルール10の警告を含め未実装)。
 
-### 5.4 独自描画部品(Canvas / Painter)
+### 5.4 独自描画部品(Canvas / RenderContext)
 
-グラフ・ゲージ等「ピクセル単位で自分で描く」部品は宣言的な`view`構文の対象外とし、`Canvas`ビルトイン+命令的な`Painter`描画コードの組み合わせとして扱う。レイアウトは引き続き`.elwind`で宣言的に書き、描画内容は`Painter`を受け取るRust関数として書く。
+グラフ・ゲージ等「ピクセル単位で自分で描く」部品は宣言的な`view`構文の対象外とし、`Canvas`ビルトイン+命令的な`RenderContext`描画コードの組み合わせとして扱う。レイアウトは引き続き`.elwind`で宣言的に書き、描画内容は`RenderContext`を受け取るRust関数として書く。
 
 ```rust
-trait Painter {
+struct RenderContext {
     fn fill_rect(&mut self, rect: Rect, color: Color);
     fn stroke_rect(&mut self, rect: Rect, color: Color, width: f32);
     fn stroke_circle(&mut self, center: Point, radius: f32, color: Color, width: f32);
@@ -365,7 +365,7 @@ trait Painter {
 }
 ```
 
-`builtin::Canvas`自身は他ビルトイン同様`match target::backend()`で各backendのネイティブ描画コンテキストを`Painter`実装でラップし`on_paint`に渡す(バックエンド分岐が許されるのは`builtin`定義のみという§4.1の原則がここでも維持される)。
+`builtin::Canvas`自身は他ビルトイン同様`RenderContext`へ命令を記録し、backend は保持された`RenderTree`を再生する(バックエンド分岐が許されるのは`builtin`定義のみという§4.1の原則がここでも維持される)。
 
 描画コードは`.elwind`の外、通常のRustファイル(`src/painters/*.rs`)に分離する。推奨ディレクトリ構成:
 

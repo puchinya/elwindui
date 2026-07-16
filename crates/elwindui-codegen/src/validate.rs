@@ -11,6 +11,17 @@ use std::collections::{HashMap, HashSet};
 
 pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
+    let enum_variants: HashMap<String, HashSet<String>> = modules
+        .iter()
+        .flat_map(|module| &module.items)
+        .filter_map(|item| match item {
+            Item::Enum(def) => Some((
+                def.name.clone(),
+                def.variants.iter().cloned().collect::<HashSet<_>>(),
+            )),
+            _ => None,
+        })
+        .collect();
 
     // The same real-path-aware resolver `codegen.rs` uses for code generation, reused here so
     // `vm.field` / `bind!(vm.content, ..)` / etc. are checked against exactly what's actually in
@@ -175,7 +186,13 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 None,
                                 &mut errors,
                             );
-                            check_tab_view_mode(&let_binding.element, &c.name, &mut errors);
+                            check_dynamic_child_hosts(
+                                &let_binding.element,
+                                module,
+                                &c.name,
+                                &table,
+                                &mut errors,
+                            );
                             check_attached_properties(
                                 &let_binding.element,
                                 module,
@@ -193,8 +210,17 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                             c.base.as_deref(),
                             &mut errors,
                         );
-                        check_tab_view_mode(&view.root, &c.name, &mut errors);
+                        check_dynamic_child_hosts(&view.root, module, &c.name, &table, &mut errors);
                         check_attached_properties(&view.root, module, &c.name, &table, &mut errors);
+                        check_match_exhaustiveness(
+                            &view.root,
+                            c,
+                            &vm_fields,
+                            module,
+                            &table,
+                            &enum_variants,
+                            &mut errors,
+                        );
                     }
                 }
                 Item::ViewModel(v) => {
@@ -218,6 +244,133 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn check_match_exhaustiveness(
+    node: &ElementNode,
+    component: &ComponentDef,
+    vm_fields: &HashMap<&str, &str>,
+    module: &Module,
+    table: &SymbolTable,
+    enum_variants: &HashMap<String, HashSet<String>>,
+    errors: &mut Vec<String>,
+) {
+    for child in &node.children {
+        check_match_in_child(
+            child,
+            component,
+            vm_fields,
+            module,
+            table,
+            enum_variants,
+            errors,
+        );
+    }
+}
+
+fn check_match_in_child(
+    child: &ChildEntry,
+    component: &ComponentDef,
+    vm_fields: &HashMap<&str, &str>,
+    module: &Module,
+    table: &SymbolTable,
+    enum_variants: &HashMap<String, HashSet<String>>,
+    errors: &mut Vec<String>,
+) {
+    match child {
+        ChildEntry::Literal(node) => check_match_exhaustiveness(
+            node,
+            component,
+            vm_fields,
+            module,
+            table,
+            enum_variants,
+            errors,
+        ),
+        ChildEntry::Ref(_) => {}
+        ChildEntry::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            for child in then_branch.iter().chain(else_branch) {
+                check_match_in_child(
+                    child,
+                    component,
+                    vm_fields,
+                    module,
+                    table,
+                    enum_variants,
+                    errors,
+                );
+            }
+        }
+        ChildEntry::For { body, .. } => {
+            for child in body {
+                check_match_in_child(
+                    child,
+                    component,
+                    vm_fields,
+                    module,
+                    table,
+                    enum_variants,
+                    errors,
+                );
+            }
+        }
+        ChildEntry::Match { value, arms } => {
+            let enum_name = match value {
+                ViewExpr::Path(path) if path.len() == 1 => component
+                    .fields
+                    .iter()
+                    .find(|field| field.name == path[0])
+                    .map(|field| strip_rc_wrapper(&field.ty).to_string()),
+                ViewExpr::Path(path) if path.len() == 2 => vm_fields
+                    .get(path[0].as_str())
+                    .and_then(|vm_ty| table.resolve(module, vm_ty))
+                    .and_then(|info| info.field_types.get(&path[1]))
+                    .map(|ty| strip_rc_wrapper(ty).to_string()),
+                _ => None,
+            };
+            if let Some(enum_name) = enum_name.and_then(|name| {
+                enum_variants
+                    .get(name.rsplit("::").next().unwrap_or(&name))
+                    .cloned()
+            }) {
+                let wildcard = arms.iter().any(|arm| arm.pattern.trim() == "_");
+                let covered: HashSet<String> = arms
+                    .iter()
+                    .filter_map(|arm| arm.pattern.trim().rsplit("::").next())
+                    .filter(|variant| *variant != "_")
+                    .map(str::to_string)
+                    .collect();
+                if !wildcard {
+                    let mut missing: Vec<_> = enum_name.difference(&covered).cloned().collect();
+                    missing.sort();
+                    if !missing.is_empty() {
+                        errors.push(format!(
+                            "{}: match is not exhaustive; missing {}",
+                            component.name,
+                            missing.join(", ")
+                        ));
+                    }
+                }
+            }
+            for arm in arms {
+                for child in &arm.body {
+                    check_match_in_child(
+                        child,
+                        component,
+                        vm_fields,
+                        module,
+                        table,
+                        enum_variants,
+                        errors,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -282,10 +435,61 @@ fn check_vm_references(
         check_vm_expr(expr, from, component_name, vm_fields, table, errors);
     }
     for child in &node.children {
-        // A `ChildEntry::Ref` doesn't need its own recursive check here — the `let` binding it
-        // refers to is itself already walked as one of `view.lets` in `validate`'s main loop.
-        if let ChildEntry::Literal(elem) = child {
-            check_vm_references(elem, from, component_name, vm_fields, table, None, errors);
+        check_child_vm_references(child, from, component_name, vm_fields, table, errors);
+    }
+}
+
+fn check_child_vm_references(
+    child: &ChildEntry,
+    from: &Module,
+    component_name: &str,
+    vm_fields: &HashMap<&str, &str>,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    match child {
+        ChildEntry::Literal(element) => check_vm_references(
+            element,
+            from,
+            component_name,
+            vm_fields,
+            table,
+            None,
+            errors,
+        ),
+        ChildEntry::Ref(_) => {}
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            check_vm_expr(condition, from, component_name, vm_fields, table, errors);
+            for child in then_branch.iter().chain(else_branch) {
+                check_child_vm_references(child, from, component_name, vm_fields, table, errors);
+            }
+        }
+        ChildEntry::Match { value, arms } => {
+            check_vm_expr(value, from, component_name, vm_fields, table, errors);
+            for arm in arms {
+                for child in &arm.body {
+                    check_child_vm_references(
+                        child,
+                        from,
+                        component_name,
+                        vm_fields,
+                        table,
+                        errors,
+                    );
+                }
+            }
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            check_vm_expr(collection, from, component_name, vm_fields, table, errors);
+            for child in body {
+                check_child_vm_references(child, from, component_name, vm_fields, table, errors);
+            }
         }
     }
 }
@@ -364,7 +568,8 @@ fn check_vm_expr(
                 }
             }
         }
-        ViewExpr::MethodCall(..) | ViewExpr::Expr(_) => {}
+        ViewExpr::MethodCall(..) => {}
+        ViewExpr::Expr(expr) => check_static_view_expr(expr, component_name, errors),
         ViewExpr::TFluent(_, args) => {
             for (_, arg) in args {
                 check_vm_expr(arg, from, component_name, vm_fields, table, errors);
@@ -396,7 +601,57 @@ fn check_vm_expr(
     }
 }
 
-/// Checks a closure body (`header_template`/`item_template`'s `|param| ...`): a reference is
+/// View attributes must remain statically inspectable.  This deliberately accepts the concrete
+/// value forms the DSL already parses (literals, arrays, enum paths and enum constructors), while
+/// refusing arbitrary Rust code whose dependencies cannot be subscribed to safely.
+fn check_static_view_expr(expr: &syn::Expr, component_name: &str, errors: &mut Vec<String>) {
+    fn allowed(expr: &syn::Expr) -> bool {
+        match expr {
+            syn::Expr::Lit(_) | syn::Expr::Path(_) => true,
+            syn::Expr::Array(array) => array.elems.iter().all(allowed),
+            syn::Expr::Tuple(tuple) => tuple.elems.iter().all(allowed),
+            syn::Expr::Paren(paren) => allowed(&paren.expr),
+            syn::Expr::Group(group) => allowed(&group.expr),
+            syn::Expr::Unary(unary) => allowed(&unary.expr),
+            syn::Expr::Binary(binary) => allowed(&binary.left) && allowed(&binary.right),
+            syn::Expr::Cast(cast) => allowed(&cast.expr),
+            // Optional shape fields in the builtin declarations use this pure normalization
+            // before constructing their enum value.
+            syn::Expr::MethodCall(call) if call.method == "unwrap_or" => {
+                allowed(&call.receiver) && call.args.iter().all(allowed)
+            }
+            syn::Expr::Struct(value) => {
+                value.fields.iter().all(|field| allowed(&field.expr))
+                    && value.rest.as_deref().is_none_or(allowed)
+            }
+            // Tuple enum variants, e.g. `GridLength::Star(1.0)`, are values rather than opaque
+            // function calls. Requiring an UpperCamelCase final segment avoids accepting `foo()`.
+            syn::Expr::Call(call) => match call.func.as_ref() {
+                syn::Expr::Path(path) => {
+                    path.path.segments.last().is_some_and(|segment| {
+                        segment
+                            .ident
+                            .to_string()
+                            .chars()
+                            .next()
+                            .is_some_and(char::is_uppercase)
+                    }) && call.args.iter().all(allowed)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    if !allowed(expr) {
+        errors.push(format!(
+            "{component_name}: view expression `{}` is not statically analyzable — use #[computed], an explicit prop, or split it into literal/enum/path expressions",
+            quote::ToTokens::to_token_stream(expr)
+        ));
+    }
+}
+
+/// Checks a closure body (`for item in …`'s item-local expression): a reference is
 /// valid if its first segment is the closure's own bound parameter (the parameter isn't a `vm_fields`-tracked
 /// component/viewmodel) or a recognized `vm`-style field (checked the normal way via
 /// `check_vm_expr`). Anything else is an error — see `emit_expr` in `codegen.rs` for why an
@@ -440,59 +695,72 @@ fn check_closure_expr_body(
     }
 }
 
-/// Rule (付録Y): a `TabView` must use *exactly one* of its two mutually exclusive child-declaration
-/// modes — nested `TabViewItem`s written literally in `{}` (static), or `items_source` (+
-/// `header_template`/`item_template`, dynamic). Both or neither is ambiguous/incomplete and is
-/// rejected here rather than left to fail confusingly deep in codegen. Walks the whole `view` tree,
-/// including into element-valued attributes/closure bodies (`menu_bar: MenuBar { .. }`-style named
-/// slots and `header_template`/`item_template` closures), since a `TabView` may appear nested
-/// inside either.
-fn check_tab_view_mode(node: &ElementNode, component_name: &str, errors: &mut Vec<String>) {
-    if node.type_path == "TabView" {
-        let has_children = !node.children.is_empty();
-        let has_items_source = node
-            .attributes
-            .iter()
-            .any(|(name, _)| name == "items_source");
-        match (has_children, has_items_source) {
-            (true, true) => errors.push(format!(
-                "{component_name}: `TabView` has both nested `TabViewItem` children and `items_source` — use exactly one (static nesting or `items_source`, not both)"
-            )),
-            (false, false) => errors.push(format!(
-                "{component_name}: `TabView` has neither nested `TabViewItem` children nor `items_source` — must use exactly one"
-            )),
-            _ => {}
+/// Dynamic child ranges are meaningful only for an ordered content collection. A scalar
+/// `#[content(content)]` / `#[content(submenu)]` cannot host `if`/`match`/`for`, because there is
+/// no insertion position or retained child range to reconcile.
+fn check_dynamic_child_hosts(
+    node: &ElementNode,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    if node.children.iter().any(|child| {
+        matches!(
+            child,
+            ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. }
+        )
+    }) {
+        if let Some(info) = table.resolve(from, &node.type_path) {
+            let field = info.content_field.as_deref().unwrap_or("children");
+            let is_collection = info.field_types.get(field).is_some_and(|ty| {
+                ty.contains("UIElementCollection")
+                    || ty.trim_start().starts_with("Vec<")
+                    || ty.contains("ListExt<")
+            });
+            if !is_collection {
+                errors.push(format!(
+                    "{component_name}: dynamic child control flow under `{}` requires a collection content field; `#[content({field})]` has type `{}`",
+                    node.type_path,
+                    info.field_types.get(field).map(String::as_str).unwrap_or("<missing>")
+                ));
+            }
         }
     }
     for child in &node.children {
-        if let ChildEntry::Literal(elem) = child {
-            check_tab_view_mode(elem, component_name, errors);
-        }
-    }
-    for (_, expr) in &node.attributes {
-        check_tab_view_mode_in_expr(expr, component_name, errors);
-    }
-}
-
-fn check_tab_view_mode_in_expr(expr: &ViewExpr, component_name: &str, errors: &mut Vec<String>) {
-    match expr {
-        ViewExpr::Element(elem) => check_tab_view_mode(elem, component_name, errors),
-        ViewExpr::Closure {
-            body: ClosureBody::Element(elem),
-            ..
-        } => check_tab_view_mode(elem, component_name, errors),
-        ViewExpr::TFluent(_, args) => {
-            for (_, arg) in args {
-                check_tab_view_mode_in_expr(arg, component_name, errors);
+        match child {
+            ChildEntry::Literal(element) => {
+                check_dynamic_child_hosts(element, from, component_name, table, errors)
             }
+            ChildEntry::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                for child in then_branch.iter().chain(else_branch) {
+                    if let ChildEntry::Literal(element) = child {
+                        check_dynamic_child_hosts(element, from, component_name, table, errors);
+                    }
+                }
+            }
+            ChildEntry::Match { arms, .. } => {
+                for arm in arms {
+                    for child in &arm.body {
+                        if let ChildEntry::Literal(element) = child {
+                            check_dynamic_child_hosts(element, from, component_name, table, errors);
+                        }
+                    }
+                }
+            }
+            ChildEntry::For { body, .. } => {
+                for child in body {
+                    if let ChildEntry::Literal(element) = child {
+                        check_dynamic_child_hosts(element, from, component_name, table, errors);
+                    }
+                }
+            }
+            ChildEntry::Ref(_) => {}
         }
-        ViewExpr::Path(_)
-        | ViewExpr::MethodCall(..)
-        | ViewExpr::Expr(_)
-        | ViewExpr::Closure {
-            body: ClosureBody::Expr(_),
-            ..
-        } => {}
     }
 }
 
@@ -1234,34 +1502,35 @@ view Window10 {
         );
     }
 
-    /// The passthrough case (`doc: doc`) and a well-formed `item_template` must validate cleanly.
+    /// The `for` item passthrough case (`doc: doc`) must validate cleanly.
     #[test]
     fn accepts_well_formed_render_content() {
         let src = r#"
-viewmodel Doc {
+viewmodel Doc { }
+
+viewmodel Documents {
     #[observable]
-    documents: String = String::new(),
+    documents: Vec<std::rc::Rc<Doc>> = Vec::new(),
 }
 
 component DocumentView {
     #[param]
     #[inject]
-    doc: Doc,
+    doc: std::rc::Rc<Doc>,
 }
 
 component Window11 {
     #[param]
     #[inject]
-    vm: Doc,
+    vm: Documents,
 }
 
 view Window11 {
     Window {
         TabView {
-            items_source: vm.documents
-            header_template: |doc| doc.file_name
-            item_template: |doc| DocumentView { doc: doc }
-            selected_index: vm.documents
+            for doc in vm.documents {
+                TabViewItem { DocumentView { doc: doc } }
+            }
         }
     }
 }
@@ -1912,5 +2181,32 @@ view Foo {
 "#;
         let modules = vec![parse_module(src).unwrap()];
         assert_eq!(validate(&modules), Ok(()));
+    }
+
+    #[test]
+    fn rejects_non_exhaustive_enum_match_in_a_view() {
+        let src = r#"
+enum Status { Loading, Ready }
+
+component Screen {
+    status: Status,
+}
+
+view Screen {
+    VerticalLayout {
+        match status {
+            Status::Loading => TextBlock { text: "loading" },
+        }
+    }
+}
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("not exhaustive") && error.contains("Ready")),
+            "errors: {errors:?}"
+        );
     }
 }

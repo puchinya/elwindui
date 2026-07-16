@@ -141,6 +141,7 @@ fn with_current(f: impl FnOnce(&Rc<dyn ErasedExecutor>)) {
 /// Spawns `fut` on the current thread's executor (installed via `set_current`). This is what
 /// generated `#[command(async)]` bodies call — backend-agnostic, since by the time any component
 /// code runs, `application::run()` has already installed the concrete one.
+#[allow(unused_variables)] // rust-analyzer can analyze this with the executor call cfg-disabled.
 pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
     let boxed: LocalFuture = Box::pin(fut);
     with_current(move |executor| executor.spawn_local_erased(boxed));

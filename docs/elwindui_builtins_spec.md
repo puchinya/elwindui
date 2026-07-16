@@ -1293,7 +1293,7 @@ view NotepadWindow {
 
 # 付録Y. `TabView` / `TabViewItem`(複数ドキュメントタブ)
 
-複数のドキュメント(ファイル)を1つのウィンドウ内でタブ切り替えして扱うためのビルトイン。WinUI3の実際の`TabView`/`TabViewItem`に倣い、タブは**静的ネスト**(`TabViewItem`を`{}`内に直接書く)と**`items_source`によるデータ駆動**(WinUI3の`TabItemsSource`/`TabItemTemplate`/`HeaderTemplate`相当)の両方の書き方をサポートする。対象はせいぜい数十件程度の小規模なリストであり、`VirtualList`(付録Q)のような仮想化・再利用プールは持たない(選択中の1件を除き非表示のタブも実体は保持される)。
+複数のドキュメント(ファイル)を1つのウィンドウ内でタブ切り替えして扱うためのビルトイン。`TabView` は `#[content(children)]` の `TabViewItem` コレクションだけを持つ。実行時に増減するタブも一般の `for` 子要素構文で表すため、`items_source`/テンプレート専用 API は存在しない。対象はせいぜい数十件程度の小規模なリストであり、`VirtualList`(付録Q)のような仮想化・再利用プールは持たない(選択中の1件を除き非表示のタブも実体は保持される)。
 
 ## Y.1 基本構文
 
@@ -1309,7 +1309,7 @@ TabView {
 }
 ```
 
-**`items_source`によるデータ駆動**(タブが実行時に増減する場合。ノートパッド例):
+**動的なタブ**(実行時に増減する場合。ノートパッド例):
 
 ```rust
 view NotepadWindow {
@@ -1318,44 +1318,41 @@ view NotepadWindow {
         menu_bar: MenuBar { /* 付録X */ }
 
         TabView {
-            items_source: vm.documents
-            header_template: |doc| doc.file_name
-            item_template: |doc| DocumentView { doc: doc }
+            for doc in vm.documents {
+                TabViewItem {
+                    header: doc.file_name
+                    closable: true
+                    on_close: vm.close_active_tab.execute()
+                    DocumentView { doc: doc }
+                }
+            }
             selected_index: vm.active_tab
             on_select: vm.select_tab
-            on_close: vm.close_tab
             on_new_tab: vm.new_tab.execute()
-            closable: true
         }
     }
 }
 ```
 
-この2つの書き方は相互排他であり、どちらか一方のみを指定する(両方、またはどちらも指定しない場合はコンパイルエラー — 14章ルール23)。
+静的な `TabViewItem` と `for`/`if`/`match` の子要素は同じ `children` コレクションで、任意に組み合わせられる。
 
 `TabView`のプロパティ:
 
-- 静的ネストされた`TabViewItem { .. }` — `#[content(children)]`(`children: Vec<TabViewItem>`、WinUI3の`ContentPropertyAttribute`相当、付録H.2.2)で受け取る、タブの集合(`TabViewItem`自体は`UIElement`のVisualツリーに参加しないため`UIElementCollection`ではなく通常の`Vec`のまま——付録X/`MenuBar`/`MenuBarItem`と同じ`{}`ネスト機構)
-- `items_source` — 表示するデータの配列(`Vec<Rc<T>>`型の`#[observable]`な`viewmodel`フィールドを想定)
-- `header_template` — データ1件からタブ見出し文字列を返すクロージャ(戻り値は`String`。任意コンテンツヘッダーは現時点のAppKit/WinUI3バックエンドの制約により未対応)
-- `item_template` — データ1件からタブの中身として描画する`view`を返すクロージャ(常に選択中の1件のみが表示される)
+- `children` — `#[content(children)]`(`children: Vec<TabViewItem>`、WinUI3の`ContentPropertyAttribute`相当、付録H.2.2)で受け取るタブの集合。`TabViewItem` は `UIElement` の Visual ツリーに参加しないため、通常の `ListExt<dyn TabViewItemExt>` として保持する。静的ネストと `for`/`if`/`match` のいずれもこのコレクションに入る
 - `selected_index` — 現在選択中のインデックス(`usize`の観測可能値)。タブクリックで内部的に更新され`on_select`が発火する
-- `closable` — `items_source`モードで生成されるタブの既定の閉じるボタン("×")表示可否(静的モードでは各`TabViewItem`自身の`closable`が使われる)
-- `on_select` / `on_close` — タブ切り替え・(`items_source`モードの)タブを閉じる操作のコールバック(共に`fn(usize)`)
+- `on_select` — タブ切り替えのコールバック(`fn(usize)`)
 - `on_new_tab` — タブ列末尾の"+"ボタン押下時のコールバック
 
 `TabViewItem`のプロパティ:
 
 - `header` — タブ見出しに表示する文字列
 - `content` — タブの中身として描画する`view`
-- `closable` — このタブの閉じるボタン("×")の表示可否(既定`true`、静的モードのみ意味を持つ)
-- `on_close` — このタブの閉じるボタン押下時のコールバック(静的モードのみ;`items_source`モードは`TabView`側の`on_close(usize)`が使われる)
+- `closable` — このタブの閉じるボタン("×")の表示可否(既定`true`)
+- `on_close` — このタブの閉じるボタン押下時のコールバック
 
 ## Y.2 実装のしくみ
 
-`items_source`の各要素は`key`クロージャなしで自動的にreconcileされる — 各要素の`Rc<T>`ポインタ同一性(`Rc::as_ptr`)がそのまま同一性判定に使われ、`items_source`が更新されても同じ`Rc`インスタンスに対応するタブは同じウィジェットを使い回す(以前のバージョンではこれを`key: |doc| Rc::as_ptr(doc) as usize`のように手書きする必要があったが、今はフレームワーク側が自動的に行う)。
-
-`TabViewItem`は静的ネスト・`items_source`どちらの場合も同じ内部表現として使われる — `items_source`モードでは`header_template`/`item_template`を使って`TabView`が内部的に1件ずつ`TabViewItem`を合成し、静的モードで直接書かれた`TabViewItem`と全く同じしくみで表示される。`header_template`/`item_template`で扱いが異なる点に注意: `item_template`(中身の`view`ツリー)は同じ`Rc<T>`ポインタが続く限り初回のみ合成し、以降は使い回す(タブ切り替えのたびに`TextArea`のカーソル位置・フォーカスを失わないため)。一方`header_template`(タブ見出し文字列)は`Rc<T>`ポインタが既存エントリと一致して`TabViewItem`自体は使い回す場合でも、`items_source`が再同期される(=`resync()`が呼ばれる)たびに毎回呼び直され、見出しの最新値で上書きする — `doc.file_name`のようにタブの同一性とは独立に変化しうる値のため、`item_template`と同じ「初回のみ」ルールを適用すると見出しが更新されなくなる(実際に発生していた不具合、付録H.2.3・O.4.2の`resync()`伝播ルールと合わせて参照)。
+`for` の各要素は `Rc<T>` のポインタ同一性で reconcile される。同じ `Rc<T>` が残る限り、その要素から生成した `TabViewItem` と内容 view は再利用されるため、タブ切替や collection の並べ替えで `TextArea` のカーソル位置・フォーカスを失わない。`if`/`match` と複数の `for` も、それぞれが親 `children` 内の自分の範囲だけを insert/remove する。
 
 `SelectedItem`/`SelectedContainer`(WinUI3の同名概念)は`.elwind`の宣言的プロパティ/`on_select`のコールバック引数としては公開していない — `emit_wiring`の`on_*`汎用配線が「宣言型に`usize`が含まれれば単一引数`Fn(usize)`」という決め打ち機構であるため、2引数化するとこれと噛み合わない。かわりに各バックエンドRust実装(`elwindui-backend-appkit::native_ui::TabView`/`elwindui-backend-winui3::native_ui::TabView`)が`selected_item()`/`selected_container()`という素のメソッドを公開しており、手書きRustグルーコードから直接呼び出せる。
 
@@ -1363,7 +1360,7 @@ view NotepadWindow {
 
 | バックエンド | 実装 | 状態 |
 |---|---|---|
-| AppKit | `NSStackView`によるタブ見出し行(タイトル + 閉じるボタン + 末尾の"+"ボタン)、選択に応じてコンテンツ領域を差し替え。単一の共有コンテンツ領域を使い回すため、静的モードの`TabViewItem`は一度表示されるとその`content`を消費する — 別タブに切り替えた後に再度選択し直しても、コンテンツ領域は更新されない既知の制限がある(`items_source`モードは影響を受けない;`item_template`で合成された`TabViewItem`はタブが存在する限り選択され続けるまで再表示されないため) | 実装済み・検証済み |
+| AppKit | `NSStackView`によるタブ見出し行(タイトル + 閉じるボタン + 末尾の"+"ボタン)、選択に応じてコンテンツ領域を差し替え | 実装済み・検証済み |
 | WinUI3 | `Microsoft::UI::Xaml::Controls::TabView`。各`TabViewItem`の`Content`は独立して生き続ける`TreeHostPanel`であり、AppKitのような制限はない | 実装済み(ベストエフォート、未検証) |
 | GTK4 | `gtk::Notebook` | 未実装 |
 
@@ -1371,10 +1368,10 @@ view NotepadWindow {
 
 | 要件 | 対応 |
 |---|---|
-| 複数ドキュメントの保持 | 静的: `TabView { TabViewItem { .. } .. }` / 動的: `items_source: <Vec<Rc<T>>型の観測可能フィールド>` |
-| タブ見出し・内容の描画 | 静的: `TabViewItem`の`header`/`content` / 動的: `header_template`/`item_template`クロージャ |
+| 複数ドキュメントの保持 | 静的: `TabView { TabViewItem { .. } .. }` / 動的: `for item in <Vec<Rc<T>>> { TabViewItem { .. } }` |
+| タブ見出し・内容の描画 | `TabViewItem`の`header`/`content` |
 | タブ切り替え | `selected_index` + `on_select` |
-| タブを閉じる | 静的: `TabViewItem`の`closable`/`on_close` / 動的: `TabView`の`closable`/`on_close` |
+| タブを閉じる | `TabViewItem`の`closable`/`on_close` |
 | 新規タブ | `on_new_tab`("+"ボタン) |
-| 同一性判定 | `items_source`の各`Rc<T>`のポインタ同一性を自動使用(`key`クロージャ不要) |
+| 同一性判定 | `for` の各`Rc<T>`のポインタ同一性を自動使用(`key`クロージャ不要) |
 | 選択中アイテム/コンテナへのアクセス | 各バックエンドRust実装の`selected_item()`/`selected_container()`(`.elwind`宣言面には非公開) |

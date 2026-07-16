@@ -665,7 +665,72 @@ fn element_references_bare_name(node: &ElementNode, name: &str) -> bool {
     node.children.iter().any(|child| match child {
         ChildEntry::Literal(elem) => element_references_bare_name(elem, name),
         ChildEntry::Ref(n) => n == name,
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            view_expr_references_bare_name(condition, name)
+                || then_branch
+                    .iter()
+                    .any(|child| child_references_bare_name(child, name))
+                || else_branch
+                    .iter()
+                    .any(|child| child_references_bare_name(child, name))
+        }
+        ChildEntry::Match { value, arms } => {
+            view_expr_references_bare_name(value, name)
+                || arms.iter().any(|arm| {
+                    arm.body
+                        .iter()
+                        .any(|child| child_references_bare_name(child, name))
+                })
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            view_expr_references_bare_name(collection, name)
+                || body
+                    .iter()
+                    .any(|child| child_references_bare_name(child, name))
+        }
     })
+}
+
+fn child_references_bare_name(child: &ChildEntry, name: &str) -> bool {
+    match child {
+        ChildEntry::Literal(element) => element_references_bare_name(element, name),
+        ChildEntry::Ref(binding) => binding == name,
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            view_expr_references_bare_name(condition, name)
+                || then_branch
+                    .iter()
+                    .any(|child| child_references_bare_name(child, name))
+                || else_branch
+                    .iter()
+                    .any(|child| child_references_bare_name(child, name))
+        }
+        ChildEntry::Match { value, arms } => {
+            view_expr_references_bare_name(value, name)
+                || arms.iter().any(|arm| {
+                    arm.body
+                        .iter()
+                        .any(|child| child_references_bare_name(child, name))
+                })
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            view_expr_references_bare_name(collection, name)
+                || body
+                    .iter()
+                    .any(|child| child_references_bare_name(child, name))
+        }
+    }
 }
 
 fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
@@ -724,7 +789,72 @@ fn element_references_name_anywhere(node: &ElementNode, name: &str) -> bool {
     node.children.iter().any(|child| match child {
         ChildEntry::Literal(elem) => element_references_name_anywhere(elem, name),
         ChildEntry::Ref(n) => n == name,
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            view_expr_references_name_anywhere(condition, name)
+                || then_branch
+                    .iter()
+                    .any(|child| child_references_name_anywhere(child, name))
+                || else_branch
+                    .iter()
+                    .any(|child| child_references_name_anywhere(child, name))
+        }
+        ChildEntry::Match { value, arms } => {
+            view_expr_references_name_anywhere(value, name)
+                || arms.iter().any(|arm| {
+                    arm.body
+                        .iter()
+                        .any(|child| child_references_name_anywhere(child, name))
+                })
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            view_expr_references_name_anywhere(collection, name)
+                || body
+                    .iter()
+                    .any(|child| child_references_name_anywhere(child, name))
+        }
     })
+}
+
+fn child_references_name_anywhere(child: &ChildEntry, name: &str) -> bool {
+    match child {
+        ChildEntry::Literal(element) => element_references_name_anywhere(element, name),
+        ChildEntry::Ref(binding) => binding == name,
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            view_expr_references_name_anywhere(condition, name)
+                || then_branch
+                    .iter()
+                    .any(|child| child_references_name_anywhere(child, name))
+                || else_branch
+                    .iter()
+                    .any(|child| child_references_name_anywhere(child, name))
+        }
+        ChildEntry::Match { value, arms } => {
+            view_expr_references_name_anywhere(value, name)
+                || arms.iter().any(|arm| {
+                    arm.body
+                        .iter()
+                        .any(|child| child_references_name_anywhere(child, name))
+                })
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            view_expr_references_name_anywhere(collection, name)
+                || body
+                    .iter()
+                    .any(|child| child_references_name_anywhere(child, name))
+        }
+    }
 }
 
 fn view_expr_references_name_anywhere(expr: &ViewExpr, name: &str) -> bool {
@@ -1158,7 +1288,6 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             _ => None,
         })
         .collect();
-
     // Viewmodels retain a weak self-reference so async commands can upgrade it to `Rc<Self>` and
     // create the `'static` future required by `elwindui::core::task::spawn_local`.
 
@@ -2265,6 +2394,12 @@ fn generate_view(
         .iter()
         .map(|n| n.to_string())
         .collect();
+    // A component's runtime-mutable props use the same typed notification surface as a
+    // viewmodel. Only required props participate here: deferred props are not referenced by this
+    // component's view (otherwise they would not be deferred) and therefore have no local visual
+    // update to dispatch.
+    let component_property_enum = format_ident!("{}Property", component.name);
+    let component_property_variants = mutable_required_names.clone();
     ctx.mutable_own_fields = mutable_required_names_set.clone();
     let mutable_required_types: Vec<syn::Type> = required_own_names
         .iter()
@@ -2328,6 +2463,32 @@ fn generate_view(
     // trait #target: <base> { .. }`'s signatures and `impl #target for #targetImpl { .. }`'s bodies
     // from them automatically, so there's no separate signature-only list to maintain here anymore.
     let mut own_class_methods = TokenStream::new();
+
+    let component_property_api = mark_inherent(quote! {
+        pub fn subscribe_property_changed(
+            &self,
+            f: impl Fn(#component_property_enum) + 'static,
+        ) -> elwindui::core::reactive::Subscription {
+            let active = std::rc::Rc::new(std::cell::Cell::new(true));
+            let handler = std::rc::Rc::new(std::cell::RefCell::new(
+                Box::new(f) as Box<dyn Fn(#component_property_enum)>
+            ));
+            self.__property_changed_handlers
+                .borrow_mut()
+                .push((active.clone(), handler));
+            elwindui::core::reactive::Subscription::new(move || active.set(false))
+        }
+
+        #[allow(dead_code)]
+        fn on_property_changed(&self, property: #component_property_enum) {
+            let handlers = self.__property_changed_handlers.borrow().clone();
+            for (active, handler) in handlers {
+                if active.get() {
+                    (handler.borrow())(property);
+                }
+            }
+        }
+    });
 
     // Every `#[param]` field gets a public `pub fn <name>(&self) -> <Type>` accessor, not just
     // `#[id(...)]`-tagged lets above — code outside the generated view (and DSL-composed wrappers
@@ -2431,14 +2592,14 @@ fn generate_view(
             own_class_methods.extend(quote! {
                 fn #set_name(&self, value: #ty) {
                     #set_body
-                    self.resync();
+                    self.on_property_changed(#component_property_enum::#name);
                 }
             });
         } else {
             named_accessors.extend(quote! {
                 pub fn #set_name(&self, value: #ty) {
                     #set_body
-                    self.resync();
+                    self.on_property_changed(#component_property_enum::#name);
                 }
             });
         }
@@ -2449,8 +2610,36 @@ fn generate_view(
     // `create_<snake case>(..)` factory (below), so none of `plan`'s nodes are constructed or wired
     // here at all.
     let root_index = plan.len() - 1;
+    for node in &plan {
+        if node.dynamic.is_none() {
+            continue;
+        }
+        let parent = plan
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .child_bindings
+                    .iter()
+                    .any(|(child, _)| child == &node.binding)
+            })
+            .expect("dynamic child must have a parent collection");
+        let slot = format_ident!(
+            "__dynamic_slot_{}",
+            node.binding.to_string().trim_start_matches('_')
+        );
+        let item_ext = dynamic_collection_item_trait(parent, from, table);
+        struct_fields.extend(quote! {
+            #slot: elwindui::core::ui::DynamicChildSlot<dyn elwindui::core::ui::#item_ext>,
+        });
+        field_inits.extend(quote! {
+            #slot: elwindui::core::ui::DynamicChildSlot::default(),
+        });
+    }
     if !is_template_composition {
         for (i, node) in plan.iter().enumerate() {
+            if node.dynamic.is_some() {
+                continue;
+            }
             // The shape-composition root (see `is_shape_composition`'s doc comment) is built as a
             // plain, unwrapped `elwindui::core::ui::create_xxx(...)` value under its own
             // `node.binding` name — retained at its concrete type rather than erased into `Rc<dyn UIElement>` like
@@ -2533,6 +2722,9 @@ fn generate_view(
             }
         }
         for node in &plan {
+            if node.dynamic.is_some() {
+                continue;
+            }
             emit_wiring(node, &ctx, from, table, &mut wiring_stmts);
             emit_resync(node, &ctx, from, table, None, &mut resync_stmts);
         }
@@ -2648,6 +2840,73 @@ fn generate_view(
             }
         })
         .collect();
+    let dynamic_region_refresh_method: TokenStream = plan
+        .iter()
+        .filter_map(|node| {
+            let parent = plan.iter().find(|candidate| {
+                candidate.child_bindings.iter().any(|(child, _)| child == &node.binding)
+            })?;
+            let parent_binding = &parent.binding;
+            let slot = format_ident!("__dynamic_slot_{}", node.binding.to_string().trim_start_matches('_'));
+            let parent_ext = format_ident!("{}Ext", parent.type_path);
+            let item_ext = dynamic_collection_item_trait(parent, from, table);
+            let start = dynamic_child_start(parent, &node.binding);
+            match node.dynamic.as_ref()? {
+                DynamicPlan::For { collection, renderer, .. } => {
+                    let collection = emit_expr(collection, &ctx, &EmitMode::WithSelf(quote! { self }));
+                    Some(quote! {
+                        {
+                            use elwindui::core::ui::#parent_ext as _;
+                            self.#slot.replace_rc_items(self.#parent_binding.children(), #start, &(#collection), #renderer);
+                        }
+                    })
+                }
+                DynamicPlan::If { condition, then_bindings, else_bindings } => {
+                    let condition = emit_expr(condition, &ctx, &EmitMode::WithSelf(quote! { self }));
+                    let then_children = then_bindings.iter().map(|(child, ty)| {
+                        dynamic_child_binding(quote! { self.#child.clone() }, ty, &item_ext, from, table)
+                    });
+                    let else_children = else_bindings.iter().map(|(child, ty)| {
+                        dynamic_child_binding(quote! { self.#child.clone() }, ty, &item_ext, from, table)
+                    });
+                    Some(quote! {
+                        {
+                            use elwindui::core::ui::#parent_ext as _;
+                            if #condition {
+                                self.#slot.replace_children(self.#parent_binding.children(), #start, vec![#(#then_children),*]);
+                            } else {
+                                self.#slot.replace_children(self.#parent_binding.children(), #start, vec![#(#else_children),*]);
+                            }
+                        }
+                    })
+                }
+                DynamicPlan::Match { value, arms } => {
+                    let value = emit_expr(value, &ctx, &EmitMode::WithSelf(quote! { self }));
+                    let arms = arms.iter().map(|(pattern, children)| {
+                        let children = children.iter().map(|(child, ty)| {
+                            dynamic_child_binding(quote! { self.#child.clone() }, ty, &item_ext, from, table)
+                        });
+                        quote! { #pattern => vec![#(#children),*], }
+                    });
+                    Some(quote! {
+                        {
+                            use elwindui::core::ui::#parent_ext as _;
+                            self.#slot.replace_children(self.#parent_binding.children(), #start, match #value { #(#arms)* });
+                        }
+                    })
+                }
+            }
+        })
+        .collect();
+    let dynamic_region_refresh_method = if dynamic_region_refresh_method.is_empty() {
+        quote! { fn __refresh_dynamic_regions(&self) {} }
+    } else {
+        quote! {
+            fn __refresh_dynamic_regions(&self) {
+                #dynamic_region_refresh_method
+            }
+        }
+    };
 
     // §3/付録I.1's lifecycle hooks. `on_mount` is spliced directly into `new()` (against the local
     // `this: Rc<Self>`, the same receiver `base::on_mount()` rewrites to — see below); `on_unmount`
@@ -2839,7 +3098,7 @@ fn generate_view(
                             &mut statements,
                         );
                     }
-                    Some(quote! { #property_enum::#variant => { #statements } })
+                    Some(quote! { #property_enum::#variant => { #statements self.__refresh_dynamic_regions(); } })
                 })
                 .collect();
             Some(mark_inherent(quote! {
@@ -2849,6 +3108,51 @@ fn generate_view(
             }))
         })
         .collect();
+    let component_property_resync_methods: TokenStream = component_property_variants
+        .iter()
+        .map(|property| {
+            let method = format_ident!("__resync_{}", property);
+            let property_name = property.to_string();
+            let mut statements = TokenStream::new();
+            for node in &plan {
+                emit_resync(
+                    node,
+                    &ctx,
+                    from,
+                    table,
+                    Some(("", &property_name)),
+                    &mut statements,
+                );
+            }
+            quote! {
+                fn #method(&self) {
+                    #statements
+                }
+            }
+        })
+        .collect();
+    let component_property_dispatch: TokenStream = component_property_variants
+        .iter()
+        .map(|property| {
+            let method = format_ident!("__resync_{}", property);
+            quote! { #component_property_enum::#property => { this.#method(); this.__refresh_dynamic_regions(); }, }
+        })
+        .collect();
+    let component_self_subscription = if component_property_variants.is_empty() {
+        TokenStream::new()
+    } else {
+        quote! {
+            {
+                let weak = std::rc::Rc::downgrade(&this);
+                let subscription = this.subscribe_property_changed(move |property| {
+                    if let Some(this) = weak.upgrade() {
+                        match property { #component_property_dispatch }
+                    }
+                });
+                this.__property_changed_subscriptions.borrow_mut().push(subscription);
+            }
+        }
+    };
 
     if is_composed {
         // Every one of these is purely inherent (`resync`/`#[id(..)]` child accessors/user methods/
@@ -2902,6 +3206,7 @@ fn generate_view(
                 }))
             })
             .collect();
+        let component_property_resync_methods = mark_inherent(component_property_resync_methods);
 
         let resync_method = mark_inherent(quote! {
             fn resync(&self) {
@@ -2914,6 +3219,12 @@ fn generate_view(
         let shadow_hooks = mark_inherent(shadow_hooks);
         let on_unmount_method = on_unmount_method.map(mark_inherent);
         quote! {
+            #[allow(non_camel_case_types)]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub enum #component_property_enum {
+                #(#component_property_variants),*
+            }
+
             #[elwindui::class(inherits = #inherits_path)]
             pub struct #target {
                 #(#plain_required_names: #plain_required_types,)*
@@ -2921,13 +3232,14 @@ fn generate_view(
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
+                __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#component_property_enum)>>>)>>>,
             }
 
             #[elwindui::class]
             impl #target {
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()) }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }
                 }
 
                 // Hand-written (not left to `#[class]`'s own `construct`-driven auto-generation):
@@ -2942,6 +3254,7 @@ fn generate_view(
                     #owner_bind_stmt
                     #content_attach_stmt
                     #wiring_stmts
+                    this.__refresh_dynamic_regions();
                     // Most widgets already read live model state at construction time, so this is a
                     // no-op for them. A widget whose own state only ever appears in `resync()` (e.g.
                     // a dynamic list, like `TabView`'s tabs) needs this call so state populated
@@ -2949,14 +3262,18 @@ fn generate_view(
                     // appears immediately rather than waiting for the first unrelated user
                     // interaction.
                     this.resync();
+                    #component_self_subscription
                     #subscribe_stmts
                     #on_mount_stmt
                     this
                 }
 
                 #own_class_methods
+                #component_property_api
                 #resync_method
                 #property_resync_methods
+                #component_property_resync_methods
+                #dynamic_region_refresh_method
                 #root_embed_method
                 #named_accessors
                 #methods
@@ -2966,15 +3283,23 @@ fn generate_view(
         }
     } else {
         quote! {
+            #[allow(non_camel_case_types)]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            pub enum #component_property_enum {
+                #(#component_property_variants),*
+            }
+
             impl #struct_ident {
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()) });
+                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) });
                     #owner_bind_stmt
                     #content_attach_stmt
                     #wiring_stmts
                     this.resync();
+                    this.__refresh_dynamic_regions();
+                    #component_self_subscription
                     #subscribe_stmts
                     #on_mount_stmt
                     this
@@ -2985,6 +3310,9 @@ fn generate_view(
                 }
 
                 #property_resync_methods
+                #component_property_resync_methods
+                #dynamic_region_refresh_method
+                #component_property_api
 
                 #root_embed_method
 
@@ -3000,6 +3328,7 @@ fn generate_view(
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
+                __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#component_property_enum)>>>)>>>,
             }
         }
     }
@@ -3074,6 +3403,30 @@ struct PlannedNode {
     /// (`plan_element` itself has no notion of `id`, only the `LetBinding` wrapping it does), never
     /// by `plan_element`. Drives `emit_named_accessors`.
     id: Option<String>,
+    dynamic: Option<DynamicPlan>,
+}
+
+/// Internal planning marker for a transparent dynamic child range. It never names a generated
+/// Rust type or a runtime element: the generated component owns a `DynamicChildSlot` field and
+/// writes that range straight into its parent's declared `#[content]` collection.
+const DYNAMIC_CHILD_SLOT_MARKER: &str = "__dynamic_child_slot";
+
+#[allow(dead_code)]
+enum DynamicPlan {
+    If {
+        condition: ViewExpr,
+        then_bindings: Vec<(syn::Ident, String)>,
+        else_bindings: Vec<(syn::Ident, String)>,
+    },
+    Match {
+        value: ViewExpr,
+        arms: Vec<(syn::Pat, Vec<(syn::Ident, String)>)>,
+    },
+    For {
+        collection: ViewExpr,
+        renderer: TokenStream,
+        item_type: String,
+    },
 }
 
 fn plan_element(
@@ -3096,6 +3449,103 @@ fn plan_element(
                     panic!("`{name}` does not refer to an earlier `let` binding in this view")
                 });
                 child_bindings.push(resolved.clone());
+            }
+            ChildEntry::If { .. } => {
+                let ChildEntry::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } = child
+                else {
+                    panic!("dynamic match/for code generation is not implemented yet")
+                };
+                let then_bindings = then_branch
+                    .iter()
+                    .map(|entry| plan_child_entry(entry, ctx, from, table, out, lets))
+                    .collect();
+                let else_bindings = else_branch
+                    .iter()
+                    .map(|entry| plan_child_entry(entry, ctx, from, table, out, lets))
+                    .collect();
+                let binding = format_ident!("__node_{}", out.len());
+                out.push(PlannedNode {
+                    binding: binding.clone(),
+                    type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                    attributes: Vec::new(),
+                    attached: Vec::new(),
+                    child_bindings: Vec::new(),
+                    element_attr_bindings: HashMap::new(),
+                    stored: true,
+                    id: None,
+                    dynamic: Some(DynamicPlan::If {
+                        condition: condition.clone(),
+                        then_bindings,
+                        else_bindings,
+                    }),
+                });
+                child_bindings.push((binding, DYNAMIC_CHILD_SLOT_MARKER.to_string()));
+            }
+            ChildEntry::Match { value, arms } => {
+                let arms = arms
+                    .iter()
+                    .map(|arm| {
+                        let pattern =
+                            syn::parse::Parser::parse_str(syn::Pat::parse_single, &arm.pattern)
+                                .unwrap_or_else(|error| {
+                                    panic!("invalid match pattern `{}`: {error}", arm.pattern)
+                                });
+                        let children = arm
+                            .body
+                            .iter()
+                            .map(|entry| plan_child_entry(entry, ctx, from, table, out, lets))
+                            .collect();
+                        (pattern, children)
+                    })
+                    .collect();
+                let binding = format_ident!("__node_{}", out.len());
+                out.push(PlannedNode {
+                    binding: binding.clone(),
+                    type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                    attributes: Vec::new(),
+                    attached: Vec::new(),
+                    child_bindings: Vec::new(),
+                    element_attr_bindings: HashMap::new(),
+                    stored: true,
+                    id: None,
+                    dynamic: Some(DynamicPlan::Match {
+                        value: value.clone(),
+                        arms,
+                    }),
+                });
+                child_bindings.push((binding, DYNAMIC_CHILD_SLOT_MARKER.to_string()));
+            }
+            ChildEntry::For {
+                binding,
+                collection,
+                body,
+            } => {
+                let item_type = match body.as_slice() {
+                    [ChildEntry::Literal(element)] => element.type_path.clone(),
+                    _ => panic!("a `for` body currently requires exactly one element template"),
+                };
+                let renderer = emit_for_renderer(binding, body, ctx, from, table);
+                let binding = format_ident!("__node_{}", out.len());
+                out.push(PlannedNode {
+                    binding: binding.clone(),
+                    type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                    attributes: Vec::new(),
+                    attached: Vec::new(),
+                    child_bindings: Vec::new(),
+                    element_attr_bindings: HashMap::new(),
+                    stored: true,
+                    id: None,
+                    dynamic: Some(DynamicPlan::For {
+                        collection: collection.clone(),
+                        renderer,
+                        item_type,
+                    }),
+                });
+                child_bindings.push((binding, DYNAMIC_CHILD_SLOT_MARKER.to_string()));
             }
         }
     }
@@ -3129,8 +3579,152 @@ fn plan_element(
         element_attr_bindings,
         stored,
         id: None,
+        dynamic: None,
     });
     (binding, node.type_path.clone())
+}
+
+fn emit_for_renderer(
+    binding: &str,
+    body: &[ChildEntry],
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let [ChildEntry::Literal(element)] = body else {
+        panic!("a `for` body currently requires exactly one element template");
+    };
+    let param_ident = format_ident!("{}", binding);
+    let closure_ctx = ctx.with_closure_param(binding);
+    let mut plan = Vec::new();
+    plan_element(
+        element,
+        &closure_ctx,
+        from,
+        table,
+        &mut plan,
+        true,
+        &HashMap::new(),
+    );
+    let mut construct = TokenStream::new();
+    for planned in &plan {
+        emit_construction(planned, &closure_ctx, from, table, &mut construct);
+    }
+    let root = plan.last().expect("for element body must have a root");
+    let root_binding = &root.binding;
+    quote! {
+        |#param_ident: &_| {
+            #construct
+            #root_binding
+        }
+    }
+}
+
+/// Resolves the trait-object element type of a parent's declared content collection. This is driven
+/// by the resolved `#[content]` field rather than a widget-name branch: `Vec<TabViewItem>` becomes
+/// `TabViewItemExt`, while layout `Vec<Rc<dyn UIElement>>` becomes `UIElementExt`.
+fn dynamic_collection_item_trait(
+    parent: &PlannedNode,
+    from: &Module,
+    table: &SymbolTable,
+) -> syn::Ident {
+    let info = table
+        .resolve(from, &parent.type_path)
+        .unwrap_or_else(|| panic!("unknown dynamic-child parent `{}`", parent.type_path));
+    let field = info.content_field.as_deref().unwrap_or("children");
+    let ty = info.field_types.get(field).unwrap_or_else(|| {
+        panic!(
+            "`{}` has no content collection field `{field}`",
+            parent.type_path
+        )
+    });
+    if ty.contains("dyn UIElement") || ty.contains("UIElementCollection") {
+        return format_ident!("UIElementExt");
+    }
+    let Some(inner) = ty
+        .trim()
+        .strip_prefix("Vec<")
+        .or_else(|| ty.trim().split_once("ListExt<").map(|(_, value)| value))
+        .and_then(|value| value.strip_suffix('>'))
+    else {
+        // Validation rejects control-flow beneath scalar content fields. Keep this fallback here
+        // so generation can still produce a useful diagnostic for incomplete source instead of
+        // panicking before the validator has a chance to report it.
+        return format_ident!("{}Ext", ty.rsplit("::").next().unwrap_or(ty));
+    };
+    let inner = inner.trim().trim_start_matches("dyn ");
+    let name = inner
+        .rsplit("::")
+        .next()
+        .unwrap_or(inner)
+        .trim_matches(|c| c == '<' || c == '>');
+    format_ident!("{}Ext", name)
+}
+
+fn dynamic_child_binding(
+    binding: TokenStream,
+    child_type: &str,
+    item_trait: &syn::Ident,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    if item_trait == &format_ident!("UIElementExt") {
+        return into_node_if_needed(binding, child_type, from, table);
+    }
+    quote! {
+        {
+            let __child: std::rc::Rc<dyn elwindui::core::ui::#item_trait> = #binding;
+            __child
+        }
+    }
+}
+
+/// Computes a transparent slot's insertion point from its siblings. Static children are attached
+/// during construction; every earlier dynamic sibling contributes its current range length. This
+/// lets independent `if`/`match`/`for` slots coexist in one `#[content]` collection without either
+/// slot clearing or owning the other's children.
+fn dynamic_child_start(parent: &PlannedNode, target: &syn::Ident) -> TokenStream {
+    let preceding = parent
+        .child_bindings
+        .iter()
+        .take_while(|(binding, _)| binding != target)
+        .map(|(binding, ty)| {
+            if ty == DYNAMIC_CHILD_SLOT_MARKER {
+                let slot = format_ident!(
+                    "__dynamic_slot_{}",
+                    binding.to_string().trim_start_matches('_')
+                );
+                quote! { self.#slot.len() }
+            } else {
+                quote! { 1usize }
+            }
+        });
+    quote! { 0usize #( + #preceding )* }
+}
+
+fn plan_child_entry(
+    entry: &ChildEntry,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut Vec<PlannedNode>,
+    lets: &HashMap<String, (syn::Ident, String)>,
+) -> (syn::Ident, String) {
+    match entry {
+        ChildEntry::Literal(element) => {
+            let resolved = plan_element(element, ctx, from, table, out, false, lets);
+            out.last_mut()
+                .expect("plan_element pushed the child root")
+                .stored = true;
+            resolved
+        }
+        ChildEntry::Ref(name) => lets.get(name).cloned().unwrap_or_else(|| {
+            panic!("`{name}` does not refer to an earlier `let` binding in this view")
+        }),
+        ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. } => {
+            panic!("nested dynamic control-flow regions are not implemented yet")
+        }
+    }
 }
 
 /// `command: <path>` sugar (docs/elwindui_spec.md 付録O.4), WinUI3's `Button.Command`-style
@@ -3673,13 +4267,17 @@ fn build_component_args(
         }
         if name == "children" {
             let wants_node = ty.contains("dyn UIElement");
-            let items = node.child_bindings.iter().map(|(c, child_ty)| {
-                if wants_node {
-                    into_node_if_needed(quote! { #c }, child_ty, from, table)
-                } else {
-                    into_any_view_if_needed(quote! { #c }, ty)
-                }
-            });
+            let items = node
+                .child_bindings
+                .iter()
+                .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                .map(|(c, child_ty)| {
+                    if wants_node {
+                        into_node_if_needed(quote! { #c }, child_ty, from, table)
+                    } else {
+                        into_any_view_if_needed(quote! { #c }, ty)
+                    }
+                });
             args.push(quote! { vec![ #(#items),* ] });
             continue;
         }
@@ -3800,48 +4398,7 @@ fn build_component_setters(
 
     let binding = &node.binding;
     let mut setters = Vec::new();
-    // See this function's own doc comment's `TabView` bullet — `header_template`/`item_template`
-    // are consumed together with `items_source` (whichever of the three is encountered first in
-    // `info.param_fields`' declared order), so encountering either of the other two afterward must
-    // be a no-op rather than emitting its own (uninferrable) call.
-    let mut dynamic_source_handled = false;
     for (name, ty) in &info.param_fields {
-        if (name == "header_template" || name == "item_template") && dynamic_source_handled {
-            continue;
-        }
-        if name == "items_source"
-            && info
-                .param_fields
-                .iter()
-                .any(|(n, _)| n == "header_template")
-        {
-            let Some(items) = find_attr(node, "items_source") else {
-                continue;
-            };
-            let Some(ViewExpr::Closure {
-                param: header_param,
-                body: header_body,
-            }) = find_attr(node, "header_template")
-            else {
-                continue;
-            };
-            let Some(ViewExpr::Closure {
-                param: item_param,
-                body: item_body,
-            }) = find_attr(node, "item_template")
-            else {
-                continue;
-            };
-            let items = emit_expr(items, ctx, &EmitMode::Construction);
-            let header_template = emit_closure_value(header_param, header_body, ctx, from, table);
-            let item_template = emit_closure_value(item_param, item_body, ctx, from, table);
-            setters.push(
-                quote! { #binding.set_dynamic_source(#items, #header_template, #item_template); },
-            );
-            dynamic_source_handled = true;
-            continue;
-        }
-
         let setter_ident = format_ident!("set_{}", name);
         let is_this_field_content = info.content_field.as_deref() == Some(name.as_str());
         // `docs/elwindui_spec.md` §3 (`#[content(field_name)]`'s own paragraph): bare nested
@@ -3856,13 +4413,17 @@ fn build_component_setters(
         // convention for virtual builtins (`build_virtual_value`) one level up.
         if (name == "children" || is_this_field_content) && ty.trim_start().starts_with("Vec<") {
             let wants_node = ty.contains("dyn UIElement");
-            let items = node.child_bindings.iter().map(|(c, child_ty)| {
-                if wants_node {
-                    into_node_if_needed(quote! { #c }, child_ty, from, table)
-                } else {
-                    into_any_view_if_needed(quote! { #c }, ty)
-                }
-            });
+            let items = node
+                .child_bindings
+                .iter()
+                .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                .map(|(c, child_ty)| {
+                    if wants_node {
+                        into_node_if_needed(quote! { #c }, child_ty, from, table)
+                    } else {
+                        into_any_view_if_needed(quote! { #c }, ty)
+                    }
+                });
             setters.push(quote! { #binding.#setter_ident(vec![ #(#items),* ]); });
             continue;
         }
@@ -4199,9 +4760,13 @@ fn build_virtual_value(
         let is_content = info.content_field.as_deref() == Some(name.as_str());
         if is_content && ty == "UIElementCollection" {
             needs_ui_element_trait = true;
-            let children = node.child_bindings.iter().map(|(binding, child_ty)| {
-                into_node_if_needed(quote! { #binding }, child_ty, from, table)
-            });
+            let children = node
+                .child_bindings
+                .iter()
+                .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                .map(|(binding, child_ty)| {
+                    into_node_if_needed(quote! { #binding }, child_ty, from, table)
+                });
             setters.extend(
                 quote! { for __child in vec![ #(#children),* ] { __v.children().add(__child); } },
             );
@@ -4299,7 +4864,8 @@ fn shape_composition_base_type(base: &str) -> TokenStream {
 }
 
 /// Attaches callbacks (`on_*`) and two-way change-back wiring to widgets that were stored on
-/// `self`, each capturing a fresh `Rc::clone` and calling `resync()` after mutating the model. No
+/// `self`, each capturing a fresh `Rc::clone`. State-changing callbacks rely on their setter's
+/// typed PropertyChanged notification; they must not force a blanket `resync()` afterward. No
 /// per-type dispatch: any attribute named `on_*` is a callback (its shape's declared param type
 /// decides whether the callback takes an index — see `emit_wiring`'s doc on `takes_index` below);
 /// any attribute whose shape field is `#[two_way]` gets a `set_on_<attr>_change` callback wired
@@ -4357,7 +4923,6 @@ fn emit_wiring(
                         let this = std::rc::Rc::clone(&this);
                         widget.register_routed_handler::<()>(#name, Box::new(move |_: &(), _args: &elwindui::core::input::RoutedEventArgs| {
                             #call;
-                            this.resync();
                         }));
                     }
                 });
@@ -4378,7 +4943,6 @@ fn emit_wiring(
                         let this = std::rc::Rc::clone(&this);
                         widget.#setter(Box::new(move |index: usize| {
                             #call;
-                            this.resync();
                         }));
                     }
                 });
@@ -4390,7 +4954,14 @@ fn emit_wiring(
                         let this = std::rc::Rc::clone(&this);
                         widget.#setter(Box::new(move || {
                             #call;
-                            this.resync();
+                            // A command can mutate a collection used by a dynamic child range.
+                            // Observable collection helpers normally publish that change too, but
+                            // the event callback is not the only supported command path (and a
+                            // user-defined command need not mutate through a generated setter).
+                            // Reconcile the owned child ranges here as well. `DynamicChildSlot`
+                            // preserves unchanged Rc children, so this does not recreate an
+                            // existing tab or reset its native editing state.
+                            this.__refresh_dynamic_regions();
                         }));
                     }
                 });
@@ -4434,7 +5005,11 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
     match expr {
         ViewExpr::Path(path) => {
             let path = resolve_bind(path, &ctx.binds);
-            matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
+            if owner.is_empty() {
+                matches!(path.as_slice(), [path_property] if path_property == property)
+            } else {
+                matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
+            }
         }
         ViewExpr::MethodCall(path, _) => {
             let path = resolve_bind(path, &ctx.binds);
@@ -4453,9 +5028,12 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
             impl<'ast> Visit<'ast> for Collector<'_> {
                 fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
                     let segments: Vec<_> = node.path.segments.iter().collect();
-                    if segments.len() >= 2
-                        && segments[0].ident == self.owner
-                        && segments[1].ident == self.property
+                    if (self.owner.is_empty()
+                        && segments.len() == 1
+                        && segments[0].ident == self.property)
+                        || (segments.len() >= 2
+                            && segments[0].ident == self.owner
+                            && segments[1].ident == self.property)
                     {
                         self.found = true;
                     }
@@ -4515,6 +5093,9 @@ fn emit_resync(
     // still uses.
     let node_uses_owned_setters = info.is_some_and(|i| i.is_virtual_builtin || i.has_view);
     for (name, expr) in &node.attributes {
+        if info.is_some_and(|i| !i.field_types.contains_key(name)) {
+            continue;
+        }
         if name.starts_with("on_") {
             continue;
         }
@@ -4931,6 +5512,109 @@ view NotepadWindow {
     }
 
     #[test]
+    fn generates_dynamic_if_region_that_reads_the_current_property() {
+        let module = parse_module(
+            r#"
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    show: bool = true,
+                }
+
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+
+                view DynamicHost {
+                    VerticalLayout {
+                        if vm.show {
+                            TextBlock { text: "shown" }
+                        } else {
+                            TextBlock { text: "hidden" }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("dynamic if source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("dynamic_if", &generated);
+
+        let rendered = generated.to_string();
+        assert!(rendered.contains("fn __refresh_dynamic_regions"));
+        assert!(!rendered.contains("__dynamic_child_slot"));
+    }
+
+    #[test]
+    fn generates_dynamic_match_region() {
+        let module = parse_module(
+            r#"
+                enum Status { Ready, Busy }
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    status: Status = Status::Ready,
+                }
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+                view DynamicHost {
+                    VerticalLayout {
+                        match vm.status {
+                            Status::Ready => { TextBlock { text: "ready" } }
+                            Status::Busy => { TextBlock { text: "busy" } }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("dynamic match source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("dynamic_match", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("fn __refresh_dynamic_regions"));
+    }
+
+    #[test]
+    fn generates_dynamic_for_region_with_an_item_local_template() {
+        let module = parse_module(
+            r#"
+                viewmodel Item { }
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    items: Vec<std::rc::Rc<Item>> = Vec::new(),
+                }
+                component ItemView {
+                    #[param]
+                    item: std::rc::Rc<Item>,
+                }
+                view ItemView { TextBlock { text: "item" } }
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+                view DynamicHost {
+                    VerticalLayout {
+                        for item in vm.items { ItemView { item: item } }
+                    }
+                }
+            "#,
+        )
+        .expect("dynamic for source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("dynamic_for", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("replace_rc_items"));
+        assert!(rendered.contains("item . clone"));
+    }
+
+    #[test]
     fn generates_valid_rust_for_notepad() {
         let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
         let window_module = parse_module(WINDOW_SRC).unwrap();
@@ -5137,12 +5821,12 @@ view NotepadWindow {
         // type's constructor is.
         assert!(!window_str.contains("insert_tab"));
         assert!(!window_str.contains("__weak_self"));
-        assert!(window_str.contains("set_items_source"));
+        assert!(!window_str.contains("set_items_source"));
         assert!(window_str.contains("set_selected_index"));
     }
 
     #[test]
-    fn generates_valid_rust_for_tabview_header_template_and_item_template() {
+    fn generates_dynamic_tabview_children_and_refreshes_after_new_tab() {
         let viewmodel_src = r#"
 viewmodel Document {
     #[observable]
@@ -5208,14 +5892,15 @@ view NotepadWindow {
         title: t!("notepad-window-title")
 
         TabView {
-            items_source: vm.documents
-            header_template: |doc| doc.file_name
-            item_template: |doc| DocumentView { doc: doc }
+            for doc in vm.documents {
+                TabViewItem {
+                    header: doc.file_name
+                    DocumentView { doc: doc }
+                }
+            }
             selected_index: vm.active_tab
             on_select: vm.select_tab
-            on_close: vm.close_tab
             on_new_tab: vm.new_tab.execute()
-            closable: true
         }
     }
 }
@@ -5258,27 +5943,12 @@ view NotepadWindow {
         let window_code = generate_module(&window_module, &table);
         assert_valid_rust("tabview_render_content_window", &window_code);
         let window_str = window_code.to_string();
-        assert!(window_str.contains("DocumentView :: new"));
-        // `TabView` is a native-control leaf (`TypeInfo::is_native_control_leaf`) — it already
-        // implements `UIElement` on its own construction-time `base`, so embedding it as `Window`'s
-        // `content` is a plain upcast.
-        // `DocumentView` itself is virtual, so `render_content`'s body calls `.into_node()` on it
-        // instead.
-        assert!(
-            !window_str.contains("into_any_view"),
-            "window_str: {window_str}"
-        );
-        assert!(
-            window_str.contains(". into_node ()"),
-            "window_str: {window_str}"
-        );
-        assert!(
-            !window_str.contains("TextArea :: new (& __doc . content ())"),
-            "the fixed TextArea fallback shouldn't be emitted once `item_template` is present"
-        );
-        // `header_template`'s body must go through the getter-call sugar (`.file_name()`), not a
-        // raw field access — see the `parse_closure_expr_body` bug this test guards against.
-        assert!(window_str.contains("doc . file_name ()"));
+        assert!(window_str.contains("DynamicChildSlot"));
+        assert!(window_str.contains("replace_rc_items"));
+        assert!(window_str.contains("set_on_new_tab"));
+        assert!(window_str.contains("new_tab_execute"));
+        assert!(window_str.contains("__refresh_dynamic_regions"));
+        assert!(!window_str.contains("set_items_source"));
     }
 
     #[test]

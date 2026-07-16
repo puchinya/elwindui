@@ -136,8 +136,8 @@ pub struct UIElement {
     /// `Box<dyn Fn(&T, &RoutedEventArgs)>` erased to `Box<dyn Any>` (`T` is that field's own
     /// payload type — `()` for `on_click`, `usize` for a hypothetical routed `on_select`, ...);
     /// generated call sites know `T` statically from the `.elwind` declaration, so the downcast in
-    /// `dispatch_routed` always succeeds (matching the type-erasure pattern used by
-    /// `elwindui-builtins::appkit::tab_view`'s `items_source`).
+    /// `dispatch_routed` always succeeds (matching generated dynamic child ranges' type-erasure
+    /// pattern).
     pub routed_handlers: RoutedHandlers,
     /// Generic, type-erased attached-property bag (docs/elwindui_spec.md §3の添付プロパティ), keyed
     /// by `(owner, field)` — e.g. `("Grid", "row")` — and populated right after construction from
@@ -928,6 +928,87 @@ pub trait ListExt<T: ?Sized> {
     fn to_vec(&self) -> Vec<Rc<T>>;
 }
 
+/// State owned by a generated dynamic child range. It is deliberately not a `UIElement`: callers
+/// pass the resolved parent collection on every update, so `for`/`if`/`match` insert their actual
+/// children directly into that collection. For `Vec<Rc<U>>` sources, unchanged source identities
+/// retain their already-constructed child instances.
+pub struct DynamicChildSlot<T: ?Sized> {
+    keys: RefCell<Vec<usize>>,
+    children: RefCell<Vec<Rc<T>>>,
+}
+
+impl<T: ?Sized> Default for DynamicChildSlot<T> {
+    fn default() -> Self {
+        Self {
+            keys: RefCell::new(Vec::new()),
+            children: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl<T: ?Sized> DynamicChildSlot<T> {
+    /// Number of children this slot currently occupies in its parent collection.
+    pub fn len(&self) -> usize {
+        self.children.borrow().len()
+    }
+
+    pub fn replace_rc_items<U: 'static>(
+        &self,
+        host: &dyn ListExt<T>,
+        start: usize,
+        items: &[Rc<U>],
+        render: impl Fn(&Rc<U>) -> Rc<T>,
+    ) {
+        let previous_keys = self.keys.borrow();
+        let previous_children = self.children.borrow();
+        let mut next_keys = Vec::with_capacity(items.len());
+        let mut next_children = Vec::with_capacity(items.len());
+        for item in items {
+            let key = Rc::as_ptr(item) as usize;
+            let child = previous_keys
+                .iter()
+                .position(|previous| *previous == key)
+                .map(|index| Rc::clone(&previous_children[index]))
+                .unwrap_or_else(|| render(item));
+            next_keys.push(key);
+            next_children.push(child);
+        }
+        drop(previous_children);
+        drop(previous_keys);
+        self.replace_at(host, start, next_keys, next_children);
+    }
+
+    pub fn replace_children(&self, host: &dyn ListExt<T>, start: usize, children: Vec<Rc<T>>) {
+        self.replace_at(host, start, Vec::new(), children);
+    }
+
+    fn replace_at(
+        &self,
+        host: &dyn ListExt<T>,
+        start: usize,
+        keys: Vec<usize>,
+        children: Vec<Rc<T>>,
+    ) {
+        let previous = self.children.borrow();
+        let shared = previous.len().min(children.len());
+        for index in 0..shared {
+            if !Rc::ptr_eq(&previous[index], &children[index]) {
+                host.remove_at(start + index);
+                host.insert(start + index, Rc::clone(&children[index]));
+            }
+        }
+        for _ in children.len()..previous.len() {
+            host.remove_at(start + children.len());
+        }
+        for (index, child) in children.iter().enumerate().skip(previous.len()) {
+            host.insert(start + index, Rc::clone(child));
+        }
+        drop(previous);
+        *self.keys.borrow_mut() = keys;
+        *self.children.borrow_mut() = children;
+    }
+}
+
 #[elwindui_macros::class(trait_only)]
 pub trait Menu {
     fn add_item(&self, item: &dyn MenuItemExt);
@@ -958,26 +1039,15 @@ pub trait MenuBar {
     fn items(&self) -> &dyn ListExt<dyn MenuBarItemExt>;
 }
 
-/// `TabView`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). Deliberately empty: every one of
-/// `TabView`'s real `.elwind`-facing setters (`set_children`/`set_dynamic_source`/
-/// `set_items_source`/`set_closable`/`set_selected_index`/`set_on_select`/`set_on_close`/
-/// `set_on_new_tab`) is either generic (`set_dynamic_source<T>`/`set_items_source<T>`, not
-/// dyn-object-safe) or takes a backend-concrete `Rc<TabViewItem>`-shaped argument that has no
-/// common cross-backend signature worth sharing — see each backend's own `TabView`/`TabViewItem`
-/// doc comment. Existing purely so `elwindui_core::ui::TabViewExt` is a real, resolvable path —
-/// `elwindui-codegen`'s `builtin_trait_use` needs every native/virtual builtin (with no exceptions)
-/// to have one, so it can emit `use elwindui::core::ui::{Name}Ext as _;` uniformly instead of
-/// special-casing `TabView`/`TabViewItem` out of an 11-name list (`docs/elwindui_macro_class_spec.md`).
-/// Each backend implements this (empty) trait via `struct_only = elwindui_core::ui::TabViewExt` and
-/// keeps every real setter `#[inherent]`, exactly as it already did before this trait existed (this
-/// only swaps which trait path the backend's own `TabViewExt` resolves to — from a backend-local
-/// auto-generated one to this shared, deliberately-empty one).
+/// `TabView`'s class trait (docs/elwindui_spec.md 付録H.2.1a). Its content is a live, ordered
+/// collection of `TabViewItem`s. Dynamic child ranges update this collection directly; the
+/// backend reconciles the corresponding native tabs.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
-pub trait TabView {}
+pub trait TabView {
+    fn children(&self) -> &dyn ListExt<dyn TabViewItemExt>;
+}
 
-/// `TabViewItem`'s own class trait — see `TabView`'s own doc comment for the "why empty" rationale;
-/// same reasoning applies here (`set_header`/`set_content`/`set_closable`/`set_on_close`/
-/// backend-specific setters all stay `#[inherent]`). No `inherits`: like `Window`,
+/// `TabViewItem`'s own class trait. No `inherits`: like `Window`,
 /// `TabViewItem` is never itself embedded as a real `Rc<dyn UIElement>` node (see its own
 /// `builtins.elwind` doc comment), so it has no meaningful `NativeControl`/`UIElement` ancestor.
 #[elwindui_macros::class(trait_only)]
@@ -1910,7 +1980,7 @@ pub fn hit_test(root: &Rc<dyn UIElementExt>, at: Point) -> Option<Rc<dyn UIEleme
 /// registered under `name` (via `UIElement::register_routed_handler::<T>`), then its parent's,
 /// and so on up to the root (`UIElement::parent`), stopping as soon as one sets `args.handled`.
 /// Works identically whether `target`'s tree was built by a single static `.elwind` traversal or
-/// assembled at runtime (e.g. `TabView`'s `items_source`/`item_template`). `T` must match the type every handler for `name`
+/// assembled at runtime by a `for` child range. `T` must match the type every handler for `name`
 /// was registered with — see `UIElement::routed_handlers`'s doc comment for why the downcast
 /// this performs always succeeds in practice (both sides come from the same `.elwind` field
 /// declaration).
@@ -2854,6 +2924,72 @@ mod tests {
             &control
         ));
         assert_eq!(content_control.visual_children().len(), 1);
+    }
+
+    #[test]
+    fn dynamic_child_slot_reuses_rc_item_children_and_applies_source_order() {
+        struct TestList(RefCell<Vec<Rc<String>>>);
+
+        impl ListExt<String> for TestList {
+            fn add(&self, item: Rc<String>) {
+                self.0.borrow_mut().push(item);
+            }
+            fn insert(&self, index: usize, item: Rc<String>) {
+                self.0.borrow_mut().insert(index, item);
+            }
+            fn remove(&self, item: &Rc<String>) -> bool {
+                let mut items = self.0.borrow_mut();
+                let Some(index) = items.iter().position(|current| Rc::ptr_eq(current, item)) else {
+                    return false;
+                };
+                items.remove(index);
+                true
+            }
+            fn remove_at(&self, index: usize) -> Rc<String> {
+                self.0.borrow_mut().remove(index)
+            }
+            fn clear(&self) {
+                self.0.borrow_mut().clear();
+            }
+            fn len(&self) -> usize {
+                self.0.borrow().len()
+            }
+            fn is_empty(&self) -> bool {
+                self.0.borrow().is_empty()
+            }
+            fn to_vec(&self) -> Vec<Rc<String>> {
+                self.0.borrow().clone()
+            }
+        }
+
+        let slot = DynamicChildSlot::<String>::default();
+        let host = TestList(RefCell::new(Vec::new()));
+        let leading = Rc::new("leading".to_owned());
+        let trailing = Rc::new("trailing".to_owned());
+        let first = Rc::new("first".to_owned());
+        let second = Rc::new("second".to_owned());
+        let renders = Cell::new(0);
+        host.add(Rc::clone(&leading));
+        host.add(Rc::clone(&trailing));
+
+        slot.replace_rc_items(&host, 1, &[Rc::clone(&first), Rc::clone(&second)], |item| {
+            renders.set(renders.get() + 1);
+            Rc::new(format!("child:{item}"))
+        });
+        let original = host.to_vec();
+        assert_eq!(renders.get(), 2);
+        assert!(Rc::ptr_eq(&original[0], &leading));
+        assert!(Rc::ptr_eq(&original[3], &trailing));
+
+        slot.replace_rc_items(&host, 1, &[Rc::clone(&second), Rc::clone(&first)], |_| {
+            panic!("an unchanged Rc item must reuse its child")
+        });
+        let reordered = host.to_vec();
+        assert_eq!(renders.get(), 2);
+        assert!(Rc::ptr_eq(&reordered[0], &leading));
+        assert!(Rc::ptr_eq(&reordered[1], &original[2]));
+        assert!(Rc::ptr_eq(&reordered[2], &original[1]));
+        assert!(Rc::ptr_eq(&reordered[3], &trailing));
     }
 
     #[test]

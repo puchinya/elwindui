@@ -308,50 +308,20 @@ component MenuItem {
 #[sealed]
 #[content(children)]
 component TabView inherits NativeControl {
-    // Static mode: tabs written literally as nested `TabViewItem { .. }` children (WinUI3's XAML
-    // child-declaration style). Mutually exclusive with `items_source` below — see
-    // `elwindui-codegen::validate::check_tab_view_mode`. Kept as a plain `Vec<TabViewItem>` (not
-    // `UIElementCollection` — `TabViewItem` never enters the `UIElement` Visual tree, see its own
-    // doc comment below).
+    // Dynamic child ranges reconcile this collection directly. `TabViewItem` is not a visual-tree
+    // `UIElement`, so the backend owns the corresponding native tab hosts.
     children: Vec<TabViewItem>,
-
-    // Dynamic mode: a data-bound collection + templates (WinUI3's `TabItemsSource`/
-    // `TabItemTemplate`/`HeaderTemplate`). Each item's `Rc<T>` pointer identity is used directly
-    // for add/remove reconciliation — no separate `key` closure (see appkit/winui3 backends).
-    items_source: Option<Vec<std::rc::Rc<T>>>,
-
-    // Returns a plain string (not `Box<dyn UIElement>`): both `elwindui-backend-appkit`'s
-    // `TabChip` and `elwindui-backend-winui3`'s `insert_tab` only accept a `&str` title today —
-    // arbitrary-content tab headers (real WinUI3's `TabViewItem.HeaderTemplate` can hold anything)
-    // would need those lower backend crates extended first, out of scope here.
-    header_template: Option<fn(&std::rc::Rc<T>) -> String>,
-
-    item_template: Option<fn(&std::rc::Rc<T>) -> std::rc::Rc<dyn UIElement>>,
-
-    // Default closability for `items_source`-generated tabs (no literal `TabViewItem` to carry its
-    // own `closable` in that mode). Ignored in static mode — each `TabViewItem` carries its own.
-    closable: Option<bool>,
 
     selected_index: usize,
 
-    // `emit_wiring`'s generic `on_*` wiring threads a single `usize` index through for any
-    // callback field whose declared type contains `usize` (originally special-cased just for
-    // this field) — so this stays single-argument. The newly-selected item/
-    // container aren't threaded through it; use the backend struct's own `selected_item()`/
-    // `selected_container()` methods instead (WinUI3's `SelectedItem`/container concept, exposed
-    // as plain Rust accessors rather than `.elwind`-declarative props/callback args — see 付録Y).
+    // The selected tab position in `children`.
     on_select: fn(usize),
-
-    // `items_source` mode only — a static `TabViewItem`'s own `on_close` (below) is used instead.
-    on_close: fn(usize),
 
     on_new_tab: fn(),
 }
 
-// See docs/elwindui_builtins_spec.md 付録Y. Used two ways: written literally as a `TabView`'s
-// nested static child (WinUI3's XAML `TabViewItem` declaration), or synthesized internally by
-// `TabView` once per element of `items_source` (its `header`/`content` populated
-// from that item via `header_template`/`item_template`). Never itself embedded as a real
+// See docs/elwindui_builtins_spec.md 付録Y. Written as a `TabView` child, including from a dynamic
+// child range. Never itself embedded as a real
 // `Rc<dyn UIElement>` node (its own `content` is what gets mounted into a per-tab host) — like
 // `MenuBar`/`MenuItem`, declares `#[native]` directly rather than `inherits NativeControl`.
 #[embedded]

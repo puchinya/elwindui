@@ -71,7 +71,7 @@
 |---|---|
 | `component`/`view`分離 | 実装済み |
 | `param`/`prop`区別(`#[param]`、静的評価式制限) | 実装済み |
-| 制御構文(`if`/`for`/`match`) | 実装済み。`match`の網羅性は、生成先が実際のRust `enum`+`match`であるため多くの場面でRustコンパイラ自身の網羅性検査に乗る形で機能する |
+| 制御構文(`if`/`for`/`match`) | 部分実装。子要素位置の `if`/`else`・`match`・`for item in Vec<Rc<T>>` は、親コンポーネント所有の透明な動的子範囲として `#[content(...)]` コレクションへ直接 insert/remove する。各範囲は前後の静的子要素と他の動的範囲を保持し、`for` は `Rc::ptr_eq` の identity で既存 item の子を再利用する。`match` は validator が user enum の非網羅 arm をエラーにする。view root の制御構文、入れ子の動的範囲、任意 collection の再構築は未実装 |
 | `style{}`(横断的属性適用) | **未実装**。`elwindui-codegen`のASTに`Style`ノードが存在しない |
 | 値制約(`#[range]`/`#[step]`/`#[length]`/`#[pattern]`/`#[format]`/`#[check]`) | `#[length]`のみ実装。他は未実装 |
 | `enum`(`EnumName::values()`、`#[label(...)]`) | `EnumDef`はASTに存在(実装済み)。`values()`/`#[label]`によるi18nラベル付与の実装範囲は個別確認が必要 |

@@ -265,7 +265,7 @@ component VirtualList {
 ```
 
 (`TabView`はかつてこの例に使われていたが、付録Yの刷新で`key`クロージャ自体が無くなった
-(`items_source`の各要素は`Rc<T>`のポインタ同一性でそのままreconcileされる)ため、この例は
+(`for` の各要素は`Rc<T>`のポインタ同一性でそのままreconcileされる)ため、この例は
 `VirtualList`(付録Q — `key`を今も同じ形で使う)に差し替えている。)
 
 ---

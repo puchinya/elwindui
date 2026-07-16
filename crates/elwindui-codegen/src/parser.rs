@@ -591,6 +591,12 @@ impl<'a> Parser<'a> {
             if self.eat_char('}') {
                 break;
             }
+            if self.peek_keyword("if") || self.peek_keyword("match") || self.peek_keyword("for") {
+                children.push(self.parse_control_child()?);
+                self.skip_trivia();
+                self.eat_char(',');
+                continue;
+            }
             let ident_start = self.pos;
             let ident = self.parse_ident()?;
             self.skip_trivia();
@@ -629,6 +635,99 @@ impl<'a> Parser<'a> {
             attached,
             children,
         })
+    }
+
+    fn parse_control_child(&mut self) -> Result<ChildEntry, String> {
+        if self.eat_keyword("if") {
+            let condition = self.parse_control_expr_until('{')?;
+            let then_branch = self.parse_child_block()?;
+            self.skip_trivia();
+            let else_branch = if self.eat_keyword("else") {
+                self.skip_trivia();
+                if self.peek_keyword("if") {
+                    vec![self.parse_control_child()?]
+                } else {
+                    self.parse_child_block()?
+                }
+            } else {
+                Vec::new()
+            };
+            return Ok(ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            });
+        }
+        if self.eat_keyword("for") {
+            self.skip_trivia();
+            let binding = self.parse_ident()?;
+            self.skip_trivia();
+            if !self.eat_keyword("in") {
+                return Err(self.err("expected `in` in for child"));
+            }
+            let collection = self.parse_control_expr_until('{')?;
+            let body = self.parse_child_block()?;
+            return Ok(ChildEntry::For {
+                binding,
+                collection,
+                body,
+            });
+        }
+        if !self.eat_keyword("match") {
+            return Err(self.err("expected control-flow child"));
+        }
+        let value = self.parse_control_expr_until('{')?;
+        self.expect_char('{')?;
+        let mut arms = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.eat_char('}') {
+                break;
+            }
+            let pattern = self.take_balanced_until(&['='])?.trim().to_string();
+            self.expect_char('=')?;
+            self.expect_char('>')?;
+            self.skip_trivia();
+            let body = if self.peek_char() == Some('{') {
+                self.parse_child_block()?
+            } else {
+                vec![ChildEntry::Literal(self.parse_element_node()?)]
+            };
+            arms.push(MatchArm { pattern, body });
+            self.skip_trivia();
+            self.eat_char(',');
+        }
+        Ok(ChildEntry::Match { value, arms })
+    }
+
+    fn parse_child_block(&mut self) -> Result<Vec<ChildEntry>, String> {
+        self.expect_char('{')?;
+        let mut entries = Vec::new();
+        loop {
+            self.skip_trivia();
+            if self.eat_char('}') {
+                break;
+            }
+            if self.peek_keyword("if") || self.peek_keyword("match") || self.peek_keyword("for") {
+                entries.push(self.parse_control_child()?);
+            } else {
+                entries.push(ChildEntry::Literal(self.parse_element_node()?));
+            }
+            self.skip_trivia();
+            self.eat_char(',');
+        }
+        Ok(entries)
+    }
+
+    fn parse_control_expr_until(&mut self, terminator: char) -> Result<ViewExpr, String> {
+        let source = self.take_balanced_until(&[terminator])?;
+        let mut parser = Parser::new(source.trim());
+        let expr = parser.parse_view_expr()?;
+        parser.skip_trivia();
+        if !parser.at_eof() {
+            return Err(self.err("invalid control-flow expression"));
+        }
+        Ok(expr)
     }
 
     fn parse_view_expr(&mut self) -> Result<ViewExpr, String> {
@@ -915,6 +1014,13 @@ impl<'a> Parser<'a> {
         false
     }
 
+    fn peek_keyword(&mut self, kw: &str) -> bool {
+        let checkpoint = self.pos;
+        let matched = self.eat_keyword(kw);
+        self.pos = checkpoint;
+        matched
+    }
+
     fn peek_keyword_bang(&mut self, kw: &str) -> bool {
         self.skip_trivia();
         let needle = format!("{kw}!");
@@ -1108,6 +1214,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_dynamic_if_match_and_for_children() {
+        let module = parse_module(
+            r#"
+                component DynamicHost { }
+                view DynamicHost {
+                    VerticalLayout {
+                        if vm.visible { TextBlock { text: "yes" } } else { TextBlock { text: "no" } }
+                        match vm.status {
+                            Status::Ready => { TextBlock { text: "ready" } }
+                            _ => { TextBlock { text: "other" } }
+                        }
+                        for item in vm.items { TextBlock { text: "item" } }
+                    }
+                }
+            "#,
+        )
+        .expect("dynamic control-flow source should parse");
+        let Item::View(view) = &module.items[1] else {
+            panic!("expected view");
+        };
+        assert!(matches!(view.root.children[0], ChildEntry::If { .. }));
+        assert!(matches!(view.root.children[1], ChildEntry::Match { .. }));
+        assert!(matches!(view.root.children[2], ChildEntry::For { .. }));
+    }
+
+    #[test]
     fn parses_notepad_viewmodel() {
         let src = r#"
 enum SaveState { Unsaved, Saving, Saved }
@@ -1293,6 +1425,9 @@ view NotepadWindow {
             ChildEntry::Literal(elem) => elem,
             ChildEntry::Ref(name) => {
                 panic!("expected a literal child element, found a `let`-ref to `{name}`")
+            }
+            ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. } => {
+                panic!("expected a literal child element, found a control-flow region")
             }
         }
     }

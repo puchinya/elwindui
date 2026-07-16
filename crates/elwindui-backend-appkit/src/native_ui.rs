@@ -219,17 +219,10 @@ impl Button {
     }
 }
 
-/// See docs/elwindui_builtins_spec.md 付録Y. `TabView` supports two mutually exclusive child-
-/// declaration modes (`elwindui-codegen::validate::check_tab_view_mode` rejects using both or
-/// neither):
-/// - **Static**: `TabViewItem { .. }` written literally as nested children (WinUI3's XAML style).
-/// - **Dynamic**: `items_source` (+ `header_template`/`item_template`), a data-bound collection —
-///   one `TabViewItem` is synthesized per element, keyed by that element's own `Rc<T>` pointer
-///   (`item`) so an unchanged item reuses its previously-synthesized `TabViewItem` (and
-///   thus its already-built `content` tree) across `set_items_source` resyncs.
-///
-/// Both modes funnel into the same `entries: Vec<Rc<TabViewItemImpl>>` that `rebuild()` operates
-/// over uniformly. `struct_only = elwindui_core::ui::TabViewExt` (a deliberately empty shared trait —
+/// See docs/elwindui_builtins_spec.md 付録Y. `TabView` owns an ordered collection of literal
+/// `TabViewItem` children. Generated dynamic child slots reconcile that collection by `Rc`
+/// identity; this backend reconciles the corresponding native chips and content hosts.
+/// `struct_only = elwindui_core::ui::TabViewExt` (the shared trait exposes `children()`) —
 /// see its own doc comment): every method below stays `#[inherent]`, exactly as when this was an
 /// ordinary `inherits = NativeControl` class with its own backend-local auto-generated trait — this
 /// only swaps which trait path `TabViewExt` resolves to. `insert_tab`/`remove_tab`/
@@ -240,8 +233,7 @@ impl Button {
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewExt, inherits = crate::NativeControl)]
 pub struct TabView {
     inner: InnerTabView,
-    entries: RefCell<Vec<Rc<TabViewItemImpl>>>,
-    dynamic: RefCell<Option<DynamicSource>>,
+    children: RefCell<Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>>>,
     selected_index: Cell<usize>,
     /// Parallel to `displayed` below — each currently-displayed entry's chip + persistent content
     /// host, in the same order.
@@ -258,8 +250,7 @@ pub struct TabView {
     weak_self: RefCell<Weak<TabView>>,
 }
 
-/// The normalized per-tab representation — written literally in static mode, or synthesized once
-/// per `items_source` element in dynamic mode (see `TabView`'s own doc comment).
+/// The backend-native representation of one declarative `TabViewItem`.
 /// `struct_only = elwindui_core::ui::TabViewItemExt` (a deliberately empty shared trait — see its
 /// own doc comment in `elwindui-core`): every method below stays `#[inherent]`, unchanged from
 /// before this struct participated in the class hierarchy at all — this only makes
@@ -267,8 +258,7 @@ pub struct TabView {
 /// `builtin_trait_use` can treat `TabViewItem` uniformly with every other native/virtual builtin.
 /// No `inherits`: like `Window`, never itself embedded as a real `Rc<dyn UIElement>` node.
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewItemExt)]
-pub struct TabViewItemImpl {
-    item: RefCell<Option<Rc<dyn Any>>>,
+pub struct TabViewItem {
     header: RefCell<String>,
     // Handed to this entry's persistent content host (`TreeHostView::set_tree`) the first time
     // it's actually inserted as a real tab.
@@ -278,33 +268,13 @@ pub struct TabViewItemImpl {
 }
 
 #[elwindui_macros::class]
-impl TabViewItemImpl {
+impl TabViewItem {
     #[inherent]
     pub fn new() -> Rc<Self> {
         Rc::new(Self {
-            item: RefCell::new(None),
             header: RefCell::new(String::new()),
             content: RefCell::new(None),
             closable: Cell::new(true),
-            on_close: RefCell::new(None),
-        })
-    }
-
-    /// Same shape as `sync_dynamic_entries`'s own erased construction need — kept as a free
-    /// function (not a method) since it builds a whole `Self` from an already-erased
-    /// `Rc<dyn Any>` item used to preserve dynamic-entry identity.
-    #[inherent]
-    fn new_erased(
-        item: Option<Rc<dyn Any>>,
-        header: &str,
-        content: Rc<dyn UIElementExt>,
-        closable: Option<bool>,
-    ) -> Rc<Self> {
-        Rc::new(Self {
-            item: RefCell::new(item),
-            header: RefCell::new(header.to_string()),
-            content: RefCell::new(Some(content)),
-            closable: Cell::new(closable.unwrap_or(true)),
             on_close: RefCell::new(None),
         })
     }
@@ -330,23 +300,6 @@ impl TabViewItemImpl {
     }
 }
 
-/// Only set in dynamic mode — `None` for a `TabView` built from static `TabViewItem` children.
-struct DynamicSource {
-    header_template: Option<Box<dyn Fn(&Rc<dyn Any>) -> String>>,
-    item_template: Option<Box<dyn Fn(&Rc<dyn Any>) -> Rc<dyn UIElementExt>>>,
-    closable_default: bool,
-}
-
-impl Default for DynamicSource {
-    fn default() -> Self {
-        DynamicSource {
-            header_template: None,
-            item_template: None,
-            closable_default: true,
-        }
-    }
-}
-
 #[elwindui_macros::class]
 impl TabView {
     #[inherent]
@@ -356,8 +309,7 @@ impl TabView {
         let this = Rc::new(Self {
             base: NativeControl::new(handle),
             inner,
-            entries: RefCell::new(Vec::new()),
-            dynamic: RefCell::new(None),
+            children: RefCell::new(Vec::new()),
             selected_index: Cell::new(0),
             chips: RefCell::new(Vec::new()),
             displayed: RefCell::new(Vec::new()),
@@ -370,38 +322,14 @@ impl TabView {
         this
     }
 
-    /// Static mode: the literal `TabViewItem { .. }` children (mutually exclusive with
-    /// `set_items_source`'s dynamic mode — see `TabView`'s own doc comment).
+    /// Replaces the declaratively constructed children in one operation.
     #[inherent]
-    pub fn set_children(&self, children: Vec<Rc<TabViewItemImpl>>) {
-        if !children.is_empty() {
-            *self.entries.borrow_mut() = children;
-        }
-    }
-
-    /// Dynamic mode: establishes `self.dynamic`'s `header_template`/`item_template`.
-    #[inherent]
-    pub fn set_dynamic_source<T: 'static>(
-        &self,
-        items: Vec<Rc<T>>,
-        header_template: Box<dyn Fn(&Rc<T>) -> String>,
-        item_template: Box<dyn Fn(&Rc<T>) -> Rc<dyn UIElementExt>>,
-    ) {
-        let mut dynamic = self.dynamic.borrow_mut();
-        let entry = dynamic.get_or_insert_with(DynamicSource::default);
-        entry.header_template = Some(erase_render_string(header_template));
-        entry.item_template = Some(erase_render(item_template));
-        drop(dynamic);
-        let _ = items;
-    }
-
-    /// The default `closable` for a synthesized `TabViewItem` in dynamic mode.
-    #[inherent]
-    pub fn set_closable(&self, closable: bool) {
-        self.dynamic
-            .borrow_mut()
-            .get_or_insert_with(DynamicSource::default)
-            .closable_default = closable;
+    pub fn set_children(&self, children: Vec<Rc<TabViewItem>>) {
+        *self.children.borrow_mut() = children
+            .into_iter()
+            .map(|item| item as Rc<dyn elwindui_core::ui::TabViewItemExt>)
+            .collect();
+        self.rebuild();
     }
 
     #[inherent]
@@ -419,31 +347,8 @@ impl TabView {
         self.inner.set_on_new_tab(callback);
     }
 
-    /// WinUI3's `SelectedItem` concept — exposed as a plain accessor for advanced/manual use from
-    /// hand-written Rust glue code.
-    #[inherent]
-    pub fn selected_item(&self) -> Option<Rc<dyn Any>> {
-        self.entries
-            .borrow()
-            .get(self.selected_index.get())
-            .and_then(|e| e.item.borrow().clone())
-    }
-
-    /// WinUI3's `SelectedContainer` concept — see `selected_item`'s doc comment.
-    #[inherent]
-    pub fn selected_container(&self) -> Option<Rc<TabViewItemImpl>> {
-        self.entries
-            .borrow()
-            .get(self.selected_index.get())
-            .cloned()
-    }
-
-    /// Dynamic mode only — resyncs `items_source`.
-    #[inherent]
-    pub fn set_items_source<T: 'static>(&self, items: Vec<Rc<T>>) {
-        if self.sync_dynamic_entries(erase_items(items)) {
-            self.rebuild();
-        }
+    fn children(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> {
+        self
     }
 
     #[inherent]
@@ -460,60 +365,8 @@ impl TabView {
         self.inner.handle()
     }
 
-    #[inherent]
-    fn sync_dynamic_entries(&self, items: Vec<Rc<dyn Any>>) -> bool {
-        let dynamic = self.dynamic.borrow();
-        let Some(dynamic) = dynamic.as_ref() else {
-            return false;
-        };
-        let (Some(header_template), Some(item_template)) =
-            (&dynamic.header_template, &dynamic.item_template)
-        else {
-            return false;
-        };
-        let mut entries = self.entries.borrow_mut();
-        let mut changed = entries.len() != items.len();
-        let new_entries: Vec<Rc<TabViewItemImpl>> = items
-            .iter()
-            .map(|item| {
-                match entries.iter().find(|e| {
-                    e.item
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|entry_item| Rc::ptr_eq(entry_item, item))
-                }) {
-                    // Re-run `header_template` even for a reused entry — the label can change
-                    // independently of the item's own identity.
-                    Some(existing) => {
-                        let header = header_template(item);
-                        changed |= *existing.header.borrow() != header;
-                        existing.set_header(&header);
-                        Rc::clone(existing)
-                    }
-                    None => {
-                        changed = true;
-                        let header = header_template(item);
-                        let content = item_template(item);
-                        TabViewItemImpl::new_erased(
-                            Some(Rc::clone(item)),
-                            &header,
-                            content,
-                            Some(dynamic.closable_default),
-                        )
-                    }
-                }
-            })
-            .collect();
-        changed |= entries
-            .iter()
-            .zip(new_entries.iter())
-            .any(|(old, new)| !Rc::ptr_eq(old, new));
-        *entries = new_entries;
-        changed
-    }
-
     /// Keyed diff (pointer identity — see `displayed`'s doc comment): removes displayed tabs whose
-    /// `TabViewItem` no longer appears in `entries` (chip + persistent host together), inserts a
+    /// `TabViewItem` no longer appears in `children` (chip + persistent host together), inserts a
     /// chip + a fresh host for each not-yet-displayed one, refreshes every displayed tab's title,
     /// and shows/hides content hosts so only the selected entry's is visible.
     #[inherent]
@@ -523,9 +376,9 @@ impl TabView {
             .borrow()
             .upgrade()
             .expect("elwindui: TabView dropped while rebuilding");
-        let entries = self.entries.borrow();
+        let children = self.children.borrow();
         let selected = self.selected_index.get();
-        let new_keys: Vec<usize> = entries.iter().map(|e| Rc::as_ptr(e) as usize).collect();
+        let new_keys: Vec<usize> = children.iter().map(tab_view_item_key).collect();
 
         let mut chips = self.chips.borrow_mut();
         let mut displayed = self.displayed.borrow_mut();
@@ -538,20 +391,20 @@ impl TabView {
             }
         }
 
-        for (target_index, (key, entry)) in new_keys.iter().zip(entries.iter()).enumerate() {
+        for (target_index, (key, entry)) in new_keys.iter().zip(children.iter()).enumerate() {
             if displayed.contains(key) {
                 continue;
             }
-            let label = entry.header.borrow().clone();
+            let label = downcast_tab_view_item(&**entry).header.borrow().clone();
             let key = *key;
             let on_select: Box<dyn Fn()> = {
                 let this = Rc::clone(&this);
                 Box::new(move || {
                     let index = this
-                        .entries
+                        .children
                         .borrow()
                         .iter()
-                        .position(|e| Rc::as_ptr(e) as usize == key);
+                        .position(|e| tab_view_item_key(e) == key);
                     if let (Some(index), Some(cb)) = (index, this.on_select.borrow().as_ref()) {
                         cb(index);
                     }
@@ -560,15 +413,15 @@ impl TabView {
             let on_close: Box<dyn Fn()> = {
                 let this = Rc::clone(&this);
                 Box::new(move || {
-                    let entries = this.entries.borrow();
-                    let Some(index) = entries.iter().position(|e| Rc::as_ptr(e) as usize == key)
+                    let children = this.children.borrow();
+                    let Some(index) = children.iter().position(|e| tab_view_item_key(e) == key)
                     else {
                         return;
                     };
-                    let entry = Rc::clone(&entries[index]);
-                    drop(entries);
+                    let entry = Rc::clone(&children[index]);
+                    drop(children);
                     // A static `TabViewItem`'s own `on_close` (if set) takes precedence.
-                    if let Some(cb) = entry.on_close.borrow().as_ref() {
+                    if let Some(cb) = downcast_tab_view_item(&*entry).on_close.borrow().as_ref() {
                         cb();
                     } else if let Some(cb) = this.on_close.borrow().as_ref() {
                         cb(index);
@@ -579,18 +432,20 @@ impl TabView {
             let (chip, host) = self
                 .inner
                 .insert_tab(insert_at, &label, on_select, on_close);
-            if let Some(content) = entry.content.borrow().clone() {
+            if let Some(content) = downcast_tab_view_item(&**entry).content.borrow().clone() {
                 host.set_tree(content);
             }
             chips.insert(insert_at, (chip, host));
             displayed.insert(insert_at, key);
         }
 
-        let selected_key = entries.get(selected).map(|e| Rc::as_ptr(e) as usize);
+        let selected_key = children.get(selected).map(tab_view_item_key);
 
         for (i, key) in displayed.iter().enumerate() {
-            if let Some(entry) = entries.iter().find(|e| Rc::as_ptr(e) as usize == *key) {
-                chips[i].0.set_title(&entry.header.borrow());
+            if let Some(entry) = children.iter().find(|e| tab_view_item_key(e) == *key) {
+                chips[i]
+                    .0
+                    .set_title(&downcast_tab_view_item(&**entry).header.borrow());
             }
             chips[i].0.set_selected(Some(*key) == selected_key);
         }
@@ -612,35 +467,61 @@ impl TabView {
     }
 }
 
-fn erase_items<T: 'static>(items: Vec<Rc<T>>) -> Vec<Rc<dyn Any>> {
-    items.into_iter().map(|t| t as Rc<dyn Any>).collect()
+fn downcast_tab_view_item(item: &dyn elwindui_core::ui::TabViewItemExt) -> &TabViewItem {
+    item.as_any()
+        .downcast_ref::<TabViewItem>()
+        .expect("TabViewExt: child must be this backend's TabViewItem")
 }
 
-/// Wraps a caller-supplied `Fn(&Rc<T>) -> String` so it can be stored as
-/// `Fn(&Rc<dyn Any>) -> String` — downcasting back to the concrete `T` on every call. The
-/// `Rc<dyn Any>`s it's ever actually called with all come from `erase_items::<T>` for this same
-/// `TabView`, so the downcast always succeeds.
-fn erase_render_string<T: 'static>(
-    f: Box<dyn Fn(&Rc<T>) -> String>,
-) -> Box<dyn Fn(&Rc<dyn Any>) -> String> {
-    Box::new(move |item: &Rc<dyn Any>| {
-        let item: Rc<T> = Rc::clone(item)
-            .downcast::<T>()
-            .unwrap_or_else(|_| panic!("elwindui: TabView item type mismatch"));
-        f(&item)
-    })
+fn tab_view_item_key(item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) -> usize {
+    Rc::as_ptr(item) as *const () as usize
 }
 
-/// Same as `erase_render_string`, for `item_template`'s `Rc<dyn UIElement>`-returning shape.
-fn erase_render<T: 'static>(
-    f: Box<dyn Fn(&Rc<T>) -> Rc<dyn UIElementExt>>,
-) -> Box<dyn Fn(&Rc<dyn Any>) -> Rc<dyn UIElementExt>> {
-    Box::new(move |item: &Rc<dyn Any>| {
-        let item: Rc<T> = Rc::clone(item)
-            .downcast::<T>()
-            .unwrap_or_else(|_| panic!("elwindui: TabView item type mismatch"));
-        f(&item)
-    })
+impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> for TabView {
+    fn add(&self, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
+        self.children.borrow_mut().push(item);
+        self.rebuild();
+    }
+
+    fn insert(&self, index: usize, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
+        let mut children = self.children.borrow_mut();
+        let index = index.min(children.len());
+        children.insert(index, item);
+        drop(children);
+        self.rebuild();
+    }
+
+    fn remove(&self, item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) -> bool {
+        let mut children = self.children.borrow_mut();
+        let Some(index) = children.iter().position(|child| Rc::ptr_eq(child, item)) else {
+            return false;
+        };
+        children.remove(index);
+        drop(children);
+        self.rebuild();
+        true
+    }
+
+    fn remove_at(&self, index: usize) -> Rc<dyn elwindui_core::ui::TabViewItemExt> {
+        let item = self.children.borrow_mut().remove(index);
+        self.rebuild();
+        item
+    }
+
+    fn clear(&self) {
+        self.children.borrow_mut().clear();
+        self.rebuild();
+    }
+
+    fn len(&self) -> usize {
+        self.children.borrow().len()
+    }
+    fn is_empty(&self) -> bool {
+        self.children.borrow().is_empty()
+    }
+    fn to_vec(&self) -> Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>> {
+        self.children.borrow().clone()
+    }
 }
 
 #[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBarExt)]

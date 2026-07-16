@@ -312,6 +312,31 @@ pub struct ElementNode {
 pub enum ChildEntry {
     Literal(ElementNode),
     Ref(String),
+    /// Rust-style conditional child region. Both arms contain ordinary child entries so nested
+    /// control flow and literal elements share one representation.
+    If {
+        condition: ViewExpr,
+        then_branch: Vec<ChildEntry>,
+        else_branch: Vec<ChildEntry>,
+    },
+    /// Enum-oriented branch region. `pattern` is kept as source text until validation resolves
+    /// it against the discriminant enum (or recognises `_`).
+    Match {
+        value: ViewExpr,
+        arms: Vec<MatchArm>,
+    },
+    /// Repeated child region. The binding is local to `body` and never becomes a component field.
+    For {
+        binding: String,
+        collection: ViewExpr,
+        body: Vec<ChildEntry>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: String,
+    pub body: Vec<ChildEntry>,
 }
 
 /// Expressions that can appear as an element attribute value. `t!` is recognized directly by the

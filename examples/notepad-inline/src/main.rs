@@ -93,7 +93,7 @@ elwindui::component! {
     component NotepadWindow inherits Window {
         #[param]
         #[inject]
-        vm: std::rc::Rc<NotepadViewModel>,
+        vm: std::rc::Rc<NotepadViewModel>
     }
 
     view NotepadWindow {

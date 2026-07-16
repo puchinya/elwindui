@@ -56,6 +56,9 @@ mod notepad_view_model {
         close_tab: Command,
 
         #[command]
+        close_active_tab: Command,
+
+        #[command]
         select_tab: Command,
 
         // `documents.len() > 0` (rather than indexing into the active document's `state`) so this
@@ -81,6 +84,10 @@ mod notepad_view_model {
                     active_tab = documents.len() - 1;
                 }
             }
+        }
+
+        fn close_active_tab(&self) {
+            self.close_tab_execute(active_tab);
         }
 
         fn select_tab(&self, index: usize) {

@@ -977,7 +977,7 @@ impl TabStripImpl {
 }
 
 /// See docs/elwindui_builtins_spec.md 付録Y. Vertical stack of `[TabStripImpl, content_container]`
-/// — composed by `native_ui::TabView`, which owns the mapping from `items_source`/static
+/// — composed by `native_ui::TabView`, which owns the mapping from its `children` collection's
 /// `TabViewItem`s to `TabChipImpl`s + content hosts. This type only holds the widget areas — it has
 /// no notion of "the list of tabs" on its own.
 ///

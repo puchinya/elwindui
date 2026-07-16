@@ -32,8 +32,8 @@ pub struct RoutedEventArgs {
 /// (or from any other known element, e.g. a native leaf's own click) follows real parent
 /// back-references (`UIElement::parent`, WinUI3's `_parent`) up to the root, stopping as soon as a
 /// handler sets `handled` — no tree search needed to bubble, and no dependence on the tree having
-/// been built by a single static `.elwind` traversal (a dynamically-assembled one, e.g. `TabView`'s
-/// `items_source`, works identically). `hit_test`/`dispatch` operate over `UIElement` (not the
+/// been built by a single static `.elwind` traversal (a dynamically assembled `for` child range
+/// works identically). `hit_test`/`dispatch` operate over `UIElement` (not the
 /// separate `Element`/`ElementId` used for `#[id(...)]` name resolution) since only `UIElement`
 /// carries the measured/arranged geometry (`measure_override`/`arrange_override`) hit-testing
 /// needs — see `elwindui_core::ui::hit_test`/`dispatch_routed`, which this trait wraps.

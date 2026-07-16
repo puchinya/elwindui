@@ -266,6 +266,10 @@ pub fn register_routed_handler<T: 'static>(
 
 #[elwindui_macros::class]
 impl UIElement {
+    fn construct() -> Self {
+        Self::default()
+    }
+
     fn margin(&self) -> f32 {
         self.as_ui_element().margin.get()
     }
@@ -652,6 +656,10 @@ impl UIElementVisualCollection {
     }
     fn bind_owner(&self, owner: &Rc<dyn UIElementExt>) {
         *self.owner.borrow_mut() = Some(Rc::downgrade(owner));
+    }
+
+    fn bind_weak_owner(&self, owner: Weak<dyn UIElementExt>) {
+        *self.owner.borrow_mut() = Some(owner);
     }
     fn owner_rc(&self) -> Option<Rc<dyn UIElementExt>> {
         self.owner
@@ -1397,7 +1405,7 @@ impl TextBlock {
     }
     fn construct() -> Self {
         Self {
-            base: UIElement::default(),
+            base: UIElement::construct(),
             text: RefCell::new(String::new()),
             color: RefCell::new(None),
             alignment: Cell::new(TextAlignment::Left),
@@ -1481,7 +1489,7 @@ impl Control {
     }
     fn construct() -> Self {
         Self {
-            base: UIElement::default(),
+            base: UIElement::construct(),
             padding: Cell::new(0.0),
             content_horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
             content_vertical_alignment: Cell::new(VerticalAlignment::Stretch),
@@ -1494,50 +1502,46 @@ impl Control {
 /// Content is a single Visual child managed directly by this type.
 #[elwindui_macros::class(inherits = crate::ui::Control)]
 pub struct ContentControl {
-    padding: Option<f32>,
-    content: RefCell<Rc<dyn UIElementExt>>,
+    content: RefCell<Option<Rc<dyn UIElementExt>>>,
 }
 
 #[elwindui_macros::class]
 impl ContentControl {
-    fn padding(&self) -> Option<f32> {
-        self.padding.clone()
-    }
     fn content(&self) -> Rc<dyn UIElementExt> {
-        self.content.borrow().clone()
+        self.content
+            .borrow()
+            .clone()
+            .expect("ContentControl has no content")
     }
     fn set_content(&self, content: Rc<dyn UIElementExt>) {
-        let old = std::mem::replace(&mut *self.content.borrow_mut(), content.clone());
-        self.as_ui_element().visual_collection.remove(&old);
+        let old = self.content.borrow_mut().replace(content.clone());
+        if let Some(old) = old {
+            self.as_ui_element().visual_collection.remove(&old);
+        }
         self.as_ui_element().visual_collection.add(content);
     }
     #[inherent]
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
         self
     }
-    // The bare (not `Rc`-wrapped) value `new` below wraps — also what `component X inherits
-    // ContentControl` (`RoundedPanel`/`DocumentView` in `examples/notepad`) embeds unwrapped as its
-    // own `base` field, mirroring `Control`/`Shape`'s own `construct`. Unlike `Rectangle`/`Ellipse`'s
-    // `construct`, this one genuinely is called that way today (`ContentControl` isn't `#[sealed]`),
-    // by generated code that never goes through `ContentControl::new` at all — the parent-
-    // pointer wiring `new` does on top of this is only needed when `content` is embedded directly as
-    // *this* value's own child; a shape-composing subclass rewires it again itself once `content`
-    // becomes one of *its own* visual children. `new` is hand-written (not `#[class]`-auto-generated
-    // from `construct`) precisely because of that extra wiring step.
-    fn construct(padding: Option<f32>, content: Rc<dyn UIElementExt>) -> Self {
-        let control = Control::construct();
-        control.set_padding(padding.unwrap_or(0.0));
+    // The bare value is embedded as the base of generated subclasses. Content is attached only
+    // after that outer `Rc` exists, through `set_content`, so collection mutation owns the Visual
+    // parent wiring.
+    fn construct() -> Self {
         Self {
-            base: control,
-            padding,
-            content: RefCell::new(content),
+            base: Control::construct(),
+            content: RefCell::new(None),
         }
     }
-    fn new(padding: Option<f32>, content: Rc<dyn UIElementExt>) -> Rc<Self> {
-        let this = Rc::new(Self::construct(padding, content));
-        bind_element_owner(&this);
-        this.as_ui_element().visual_collection.add(this.content());
-        this
+    fn new() -> Rc<Self> {
+        Rc::<Self>::new_cyclic(|owner: &Weak<Self>| {
+            let this = Self::construct();
+            let owner: Weak<dyn UIElementExt> = owner.clone();
+            this.as_ui_element()
+                .visual_collection
+                .bind_weak_owner(owner);
+            this
+        })
     }
 }
 
@@ -2229,7 +2233,9 @@ mod tests {
 
     #[test]
     fn control_padding_shrinks_the_slot_its_children_are_arranged_into() {
-        let control = ContentControl::new(Some(10.0), native("a", size(10.0, 20.0)));
+        let control = ContentControl::new();
+        control.set_padding(10.0);
+        control.set_content(native("a", size(10.0, 20.0)));
         let tree: Rc<dyn UIElementExt> = control;
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert_eq!(
@@ -2598,7 +2604,8 @@ mod tests {
     #[test]
     fn content_control_replaces_its_visual_child() {
         let first = TextBlock::new();
-        let content_control = ContentControl::new(None, first.clone());
+        let content_control = ContentControl::new();
+        content_control.set_content(first.clone());
         let control: Rc<dyn UIElementExt> = content_control.clone();
         assert!(Rc::ptr_eq(
             &first.visual_parent().expect("initial visual parent"),

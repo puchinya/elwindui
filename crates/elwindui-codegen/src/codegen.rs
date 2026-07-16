@@ -2548,7 +2548,11 @@ fn generate_view(
         let base_info = table.resolve(from, base_name);
         let base_construct =
             composed_construct_path(base_name, base_info.is_some_and(|i| i.is_builtin));
-        field_inits.extend(quote! { base: #base_construct(#(#forward_param_names),*), });
+        if base_name == "ContentControl" && base_info.is_some_and(|info| info.is_builtin) {
+            field_inits.extend(quote! { base: #base_construct(), });
+        } else {
+            field_inits.extend(quote! { base: #base_construct(#(#forward_param_names),*), });
+        }
     } else if is_shape_composition || is_host_composition {
         field_inits.extend(quote! { base: #root_binding, });
     }
@@ -2667,22 +2671,43 @@ fn generate_view(
 
     let methods = emit_methods(&component.methods);
 
-    // A composed ContentControl carries its content as an ordinary field while its base is still a
-    // bare value. Once the outer node has an owner, insert that field through the Visual collection
-    // so the collection, rather than generated code, performs the Visual-parent wiring.
-    let content_attach_stmt = if (is_shape_composition && view.root.type_path == "ContentControl")
-        || (is_template_composition && component.base.as_deref() == Some("ContentControl"))
-    {
-        quote! {
-            {
-                use elwindui::core::ui::ContentControlExt as _;
-                let __content = this.content();
-                this.as_ui_element().visual_collection.add(__content);
-            }
-        }
-    } else {
-        TokenStream::new()
-    };
+    // A composed ContentControl starts with an empty bare base. Once its outer `Rc` exists, set
+    // the root's child through ContentControl so it owns the corresponding Visual mutation.
+    let (content_capture_stmt, content_attach_stmt) =
+        if is_shape_composition && view.root.type_path == "ContentControl" {
+            let (content_binding, content_type) = plan
+                .last()
+                .and_then(|root| root.child_bindings.first())
+                .unwrap_or_else(|| panic!("ContentControl composition requires one content child"));
+            let content = into_node_if_needed(
+                quote! { this.#content_binding.clone() },
+                content_type,
+                from,
+                table,
+            );
+            (
+                TokenStream::new(),
+                quote! {
+                    {
+                        use elwindui::core::ui::ContentControlExt as _;
+                        this.set_content(#content);
+                    }
+                },
+            )
+        } else if is_template_composition && component.base.as_deref() == Some("ContentControl") {
+            (
+                quote! { let __content = content.clone(); },
+                quote! {
+                    {
+                        use elwindui::core::ui::ContentControlExt as _;
+                        this.set_padding(padding.unwrap_or_default());
+                        this.set_content(__content);
+                    }
+                },
+            )
+        } else {
+            (TokenStream::new(), TokenStream::new())
+        };
     let owner_bind_stmt = if is_host_composition {
         TokenStream::new()
     } else {
@@ -2796,6 +2821,7 @@ fn generate_view(
                 // shape). Defining both `construct` and `new` in one `#[class]`-managed `impl` block
                 // like this is exactly what that macro supports for this reason.
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
+                    #content_capture_stmt
                     let this = std::rc::Rc::new(Self::construct(#(#ctor_param_names),*));
                     #owner_bind_stmt
                     #content_attach_stmt
@@ -2825,6 +2851,7 @@ fn generate_view(
         quote! {
             impl #struct_ident {
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
+                    #content_capture_stmt
                     #construct_stmts
                     let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits });
                     #owner_bind_stmt
@@ -3862,6 +3889,9 @@ fn build_component_value(
         )
     });
     let construct_path = composed_construct_path(&node.type_path, info.is_builtin);
+    if info.is_builtin && node.type_path == "ContentControl" {
+        return quote! { #construct_path() };
+    }
     let args = build_component_args(node, ctx, from, table, info);
     quote! { #construct_path(#(#args),*) }
 }

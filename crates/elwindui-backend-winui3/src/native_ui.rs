@@ -260,6 +260,7 @@ pub struct TabView {
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewItemExt)]
 pub struct TabViewItem {
     header: RefCell<String>,
+    on_header_changed: RefCell<Option<Box<dyn Fn()>>>,
     // Taken (moved into a real `TreeHostPanel`) the first time this `TabViewItem` is inserted as a
     // displayed tab; `None` afterward — see `TabView`'s own doc comment for why that's never a
     // problem here (unlike AppKit's single shared content pane).
@@ -274,6 +275,7 @@ impl TabViewItem {
     pub fn new() -> Rc<Self> {
         Rc::new(Self {
             header: RefCell::new(String::new()),
+            on_header_changed: RefCell::new(None),
             content: RefCell::new(None),
             closable: Cell::new(true),
             on_close: RefCell::new(None),
@@ -282,7 +284,13 @@ impl TabViewItem {
 
     #[inherent]
     pub fn set_header(&self, header: &str) {
+        if *self.header.borrow() == header {
+            return;
+        }
         *self.header.borrow_mut() = header.to_string();
+        if let Some(callback) = self.on_header_changed.borrow().as_ref() {
+            callback();
+        }
     }
 
     #[inherent]
@@ -322,6 +330,11 @@ impl TabView {
 
     #[inherent]
     pub fn set_children(&self, children: Vec<Rc<TabViewItem>>) {
+        for item in &children {
+            self.attach_header_listener(
+                &(Rc::clone(item) as Rc<dyn elwindui_core::ui::TabViewItemExt>),
+            );
+        }
         *self.children.borrow_mut() = children
             .into_iter()
             .map(|item| item as Rc<dyn elwindui_core::ui::TabViewItemExt>)
@@ -387,6 +400,42 @@ impl TabView {
         self.inner.handle()
     }
 
+    #[inherent]
+    fn attach_header_listener(&self, item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) {
+        let key = tab_view_item_key(item);
+        let weak = self.weak_self.borrow().clone();
+        *downcast_tab_view_item(&**item)
+            .on_header_changed
+            .borrow_mut() = Some(Box::new(move || {
+            if let Some(tab_view) = weak.upgrade() {
+                tab_view.refresh_dynamic_header(key);
+            }
+        }));
+    }
+
+    #[inherent]
+    fn refresh_dynamic_header(&self, key: usize) {
+        let Some(index) = self
+            .displayed
+            .borrow()
+            .iter()
+            .position(|displayed| *displayed == key)
+        else {
+            return;
+        };
+        let Some(item) = self
+            .children
+            .borrow()
+            .iter()
+            .find(|item| tab_view_item_key(item) == key)
+            .cloned()
+        else {
+            return;
+        };
+        self.inner
+            .set_tab_title(index, &downcast_tab_view_item(&*item).header.borrow());
+    }
+
     /// Keyed diff (pointer identity — see `displayed`'s doc comment): removes displayed tabs whose
     /// `TabViewItem` no longer appears in `children`, inserts a real `TabViewItem` (+ that entry's
     /// one-time `content`) for each not-yet-displayed one, and refreshes every displayed tab's
@@ -442,11 +491,13 @@ fn tab_view_item_key(item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) -> usize 
 
 impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> for TabView {
     fn add(&self, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
+        self.attach_header_listener(&item);
         self.children.borrow_mut().push(item);
         self.rebuild();
     }
 
     fn insert(&self, index: usize, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
+        self.attach_header_listener(&item);
         let mut children = self.children.borrow_mut();
         let index = index.min(children.len());
         children.insert(index, item);

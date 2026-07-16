@@ -3610,13 +3610,123 @@ fn emit_for_renderer(
     for planned in &plan {
         emit_construction(planned, &closure_ctx, from, table, &mut construct);
     }
+    let subscriptions = emit_for_item_subscriptions(&plan, binding, &closure_ctx, from, table);
     let root = plan.last().expect("for element body must have a root");
     let root_binding = &root.binding;
     quote! {
         |#param_ident: &_| {
             #construct
-            #root_binding
+            let mut __dynamic_item_subscriptions = Vec::new();
+            #subscriptions
+            elwindui::core::ui::DynamicChild::with_subscriptions(
+                #root_binding,
+                __dynamic_item_subscriptions,
+            )
         }
+    }
+}
+
+/// Emits observers owned by one `for` item. They update the already-created child directly;
+/// importantly, they never call the enclosing view's dynamic-range refresh method. `DynamicChild`
+/// retains the handles, so removing the item drops every observer before its UI is discarded.
+fn emit_for_item_subscriptions(
+    plan: &[PlannedNode],
+    parameter: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let parameter = format_ident!("{parameter}");
+    let mut out = TokenStream::new();
+    for node in plan {
+        let Some(info) = table.resolve(from, &node.type_path) else {
+            continue;
+        };
+        let binding = &node.binding;
+        let node_uses_owned_setters = info.is_virtual_builtin || info.has_view;
+        for (name, expr) in &node.attributes {
+            if name.starts_with("on_")
+                || !info.field_types.contains_key(name)
+                || matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. })
+                || !view_expr_references_closure_parameter(expr, parameter.to_string().as_str())
+                || (info.has_view
+                    && info.param_fields.iter().any(|(field, _)| field == name)
+                    && !is_settable_field(
+                        info,
+                        name,
+                        info.field_types.get(name).map(String::as_str).unwrap_or(""),
+                    ))
+            {
+                continue;
+            }
+            let field_ty = info.field_types.get(name).map(String::as_str).unwrap_or("");
+            let setter = format_ident!("set_{name}");
+            let value = emit_expr(expr, ctx, &EmitMode::Construction);
+            let is_copy = is_copy_type(strip_option(field_ty).0);
+            let setter_call = if is_copy {
+                quote! { item.#setter(#value); }
+            } else if strip_option(field_ty).0.starts_with("Vec<") {
+                quote! { item.#setter((#value).to_vec()); }
+            } else if node_uses_owned_setters {
+                let value = virtual_builtin_resync_value(field_ty, value);
+                quote! { item.#setter(#value); }
+            } else {
+                quote! { item.#setter(&(#value)); }
+            };
+            let trait_use = builtin_trait_use(&node.type_path, Some(info));
+            out.extend(quote! {
+                {
+                    #trait_use
+                    let source = std::rc::Rc::clone(#parameter);
+                    let subscription_source = std::rc::Rc::clone(&source);
+                    let weak_item = std::rc::Rc::downgrade(&#binding);
+                    __dynamic_item_subscriptions.push(source.subscribe_property_changed(move |_| {
+                        if let Some(item) = weak_item.upgrade() {
+                            let #parameter = &subscription_source;
+                            #setter_call
+                        }
+                    }));
+                }
+            });
+        }
+    }
+    out
+}
+
+fn view_expr_references_closure_parameter(expr: &ViewExpr, parameter: &str) -> bool {
+    match expr {
+        ViewExpr::Path(path) | ViewExpr::MethodCall(path, _) => {
+            path.first().is_some_and(|segment| segment == parameter)
+        }
+        ViewExpr::TFluent(_, args) => args
+            .iter()
+            .any(|(_, value)| view_expr_references_closure_parameter(value, parameter)),
+        ViewExpr::Expr(expr) => {
+            struct Collector<'a> {
+                parameter: &'a str,
+                found: bool,
+            }
+            impl<'ast> Visit<'ast> for Collector<'_> {
+                fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+                    if node
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|segment| segment.ident == self.parameter)
+                    {
+                        self.found = true;
+                    }
+                    syn::visit::visit_expr_path(self, node);
+                }
+            }
+            let mut collector = Collector {
+                parameter,
+                found: false,
+            };
+            collector.visit_expr(expr);
+            collector.found
+        }
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } => false,
     }
 }
 

@@ -930,14 +930,41 @@ pub trait ListExt<T: ?Sized> {
 /// retain their already-constructed child instances.
 pub struct DynamicChildSlot<T: ?Sized> {
     keys: RefCell<Vec<usize>>,
-    children: RefCell<Vec<Rc<T>>>,
+    items: RefCell<Vec<Rc<DynamicChild<T>>>>,
+}
+
+/// A dynamic child together with subscriptions that must live exactly as long as that child.
+/// This is an ownership record, not a UI node: the contained child is inserted directly in the
+/// parent's declared content collection.
+pub struct DynamicChild<T: ?Sized> {
+    pub child: Rc<T>,
+    pub subscriptions: Vec<crate::reactive::Subscription>,
+}
+
+impl<T: ?Sized> DynamicChild<T> {
+    pub fn new(child: Rc<T>) -> Self {
+        Self {
+            child,
+            subscriptions: Vec::new(),
+        }
+    }
+
+    pub fn with_subscriptions(
+        child: Rc<T>,
+        subscriptions: Vec<crate::reactive::Subscription>,
+    ) -> Self {
+        Self {
+            child,
+            subscriptions,
+        }
+    }
 }
 
 impl<T: ?Sized> Default for DynamicChildSlot<T> {
     fn default() -> Self {
         Self {
             keys: RefCell::new(Vec::new()),
-            children: RefCell::new(Vec::new()),
+            items: RefCell::new(Vec::new()),
         }
     }
 }
@@ -945,7 +972,7 @@ impl<T: ?Sized> Default for DynamicChildSlot<T> {
 impl<T: ?Sized> DynamicChildSlot<T> {
     /// Number of children this slot currently occupies in its parent collection.
     pub fn len(&self) -> usize {
-        self.children.borrow().len()
+        self.items.borrow().len()
     }
 
     pub fn replace_rc_items<U: 'static>(
@@ -953,29 +980,37 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         host: &dyn ListExt<T>,
         start: usize,
         items: &[Rc<U>],
-        render: impl Fn(&Rc<U>) -> Rc<T>,
+        render: impl Fn(&Rc<U>) -> DynamicChild<T>,
     ) {
         let previous_keys = self.keys.borrow();
-        let previous_children = self.children.borrow();
+        let previous_items = self.items.borrow();
         let mut next_keys = Vec::with_capacity(items.len());
-        let mut next_children = Vec::with_capacity(items.len());
+        let mut next_items = Vec::with_capacity(items.len());
         for item in items {
             let key = Rc::as_ptr(item) as usize;
-            let child = previous_keys
+            let rendered = previous_keys
                 .iter()
                 .position(|previous| *previous == key)
-                .map(|index| Rc::clone(&previous_children[index]))
-                .unwrap_or_else(|| render(item));
+                .map(|index| Rc::clone(&previous_items[index]))
+                .unwrap_or_else(|| Rc::new(render(item)));
             next_keys.push(key);
-            next_children.push(child);
+            next_items.push(rendered);
         }
-        drop(previous_children);
+        drop(previous_items);
         drop(previous_keys);
-        self.replace_at(host, start, next_keys, next_children);
+        self.replace_at(host, start, next_keys, next_items);
     }
 
     pub fn replace_children(&self, host: &dyn ListExt<T>, start: usize, children: Vec<Rc<T>>) {
-        self.replace_at(host, start, Vec::new(), children);
+        self.replace_at(
+            host,
+            start,
+            Vec::new(),
+            children
+                .into_iter()
+                .map(|child| Rc::new(DynamicChild::new(child)))
+                .collect(),
+        );
     }
 
     fn replace_at(
@@ -983,25 +1018,25 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         host: &dyn ListExt<T>,
         start: usize,
         keys: Vec<usize>,
-        children: Vec<Rc<T>>,
+        items: Vec<Rc<DynamicChild<T>>>,
     ) {
-        let previous = self.children.borrow();
-        let shared = previous.len().min(children.len());
+        let previous = self.items.borrow();
+        let shared = previous.len().min(items.len());
         for index in 0..shared {
-            if !Rc::ptr_eq(&previous[index], &children[index]) {
+            if !Rc::ptr_eq(&previous[index].child, &items[index].child) {
                 host.remove_at(start + index);
-                host.insert(start + index, Rc::clone(&children[index]));
+                host.insert(start + index, Rc::clone(&items[index].child));
             }
         }
-        for _ in children.len()..previous.len() {
-            host.remove_at(start + children.len());
+        for _ in items.len()..previous.len() {
+            host.remove_at(start + items.len());
         }
-        for (index, child) in children.iter().enumerate().skip(previous.len()) {
-            host.insert(start + index, Rc::clone(child));
+        for (index, item) in items.iter().enumerate().skip(previous.len()) {
+            host.insert(start + index, Rc::clone(&item.child));
         }
         drop(previous);
         *self.keys.borrow_mut() = keys;
-        *self.children.borrow_mut() = children;
+        *self.items.borrow_mut() = items;
     }
 }
 
@@ -2958,12 +2993,22 @@ mod tests {
         let first = Rc::new("first".to_owned());
         let second = Rc::new("second".to_owned());
         let renders = Cell::new(0);
+        let first_subscription_dropped = Rc::new(Cell::new(false));
+        let second_subscription_dropped = Rc::new(Cell::new(false));
         host.add(Rc::clone(&leading));
         host.add(Rc::clone(&trailing));
 
         slot.replace_rc_items(&host, 1, &[Rc::clone(&first), Rc::clone(&second)], |item| {
             renders.set(renders.get() + 1);
-            Rc::new(format!("child:{item}"))
+            let dropped = if Rc::ptr_eq(item, &first) {
+                Rc::clone(&first_subscription_dropped)
+            } else {
+                Rc::clone(&second_subscription_dropped)
+            };
+            DynamicChild::with_subscriptions(
+                Rc::new(format!("child:{item}")),
+                vec![crate::reactive::Subscription::new(move || dropped.set(true))],
+            )
         });
         let original = host.to_vec();
         assert_eq!(renders.get(), 2);
@@ -2979,6 +3024,12 @@ mod tests {
         assert!(Rc::ptr_eq(&reordered[1], &original[2]));
         assert!(Rc::ptr_eq(&reordered[2], &original[1]));
         assert!(Rc::ptr_eq(&reordered[3], &trailing));
+
+        slot.replace_rc_items(&host, 1, &[Rc::clone(&second)], |_| {
+            panic!("a retained Rc item must not be rendered again")
+        });
+        assert!(first_subscription_dropped.get());
+        assert!(!second_subscription_dropped.get());
     }
 
     #[test]

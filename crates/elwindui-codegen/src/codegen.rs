@@ -2821,10 +2821,10 @@ fn generate_view(
         }
     };
 
-    // The current generated update method still covers every attribute owned by this component,
-    // but it is now triggered by a typed PropertyChanged event and the subscription's lifetime is
-    // owned by the view.  Crucially, nested viewmodels no longer bubble their changes through a
-    // collection owner, so editing a document cannot resync the parent TabView.
+    // The generated update method covers every attribute owned by this component.
+    // It is triggered by a typed PropertyChanged event, and the subscription's lifetime is
+    // owned by the view. Nested viewmodels do not bubble their changes through a
+    // collection owner, preventing edits to a document from resyncking the parent TabView.
     let subscribe_stmts: TokenStream = bind_owners
         .iter()
         .map(|owner_ident| {
@@ -3744,7 +3744,7 @@ fn plan_child_entry(
 /// field has no unambiguous trigger, so `command` is left untouched (inert — `emit_construction`
 /// ignores attribute names with no matching declared field, same as any other unrecognized
 /// attribute). Explicit `on_*`/`enabled` attributes on the same element always win — this only
-/// fills in ones the caller didn't already set, so `command` and the older two-attribute style can
+/// fills in ones the caller didn't already set, so `command` and explicit `on_*`/`enabled` attributes can
 /// be freely mixed on the same element.
 fn desugar_command_attr(
     type_path: &str,
@@ -4190,7 +4190,7 @@ fn emit_construction(
 /// own `Self` exists, so it can't be deferred to a setter. A `None` effective view (a plain
 /// component with no `view` at all) has no such construction-time reference to worry about, so
 /// `Option`-ness alone decides. Never true for a hand-written native (`is_hand_written_native`) —
-/// that family defers *every* field unconditionally via the separate, older
+/// that family defers *every* field unconditionally via the separate
 /// `build_component_setters` path, not this one.
 fn is_deferred_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
     if is_hand_written_native(info) || !strip_option(ty).1 {
@@ -5933,8 +5933,7 @@ view NotepadWindow {
         );
         // `VerticalLayout` is a hand-written *virtual* builtin (no backend struct — see
         // `is_virtual_builtin`), so `DocumentView`'s root is virtual too (recursively inferred,
-        // `build_symbol_table`'s `resolve_is_native`) and it generates `into_node`, not the old
-        // `into_any_view`.
+        // `build_symbol_table`'s `resolve_is_native`) so it generates `into_node`.
         assert!(
             document_view_str.contains("fn into_node"),
             "document_view_str: {document_view_str}"

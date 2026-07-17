@@ -1258,9 +1258,11 @@ mod tests {
         let Item::View(view) = &module.items[1] else {
             panic!("expected view");
         };
-        assert!(matches!(view.root.children[0], ChildEntry::If { .. }));
-        assert!(matches!(view.root.children[1], ChildEntry::Match { .. }));
-        assert!(matches!(view.root.children[2], ChildEntry::For { .. }));
+        let root = literal(&view.root.children[0]);
+        assert_eq!(root.type_path, "VerticalLayout");
+        assert!(matches!(root.children[0], ChildEntry::If { .. }));
+        assert!(matches!(root.children[1], ChildEntry::Match { .. }));
+        assert!(matches!(root.children[2], ChildEntry::For { .. }));
     }
 
     #[test]
@@ -1420,10 +1422,12 @@ view NotepadWindow {
             panic!("expected view");
         };
         assert_eq!(view.target, "NotepadWindow");
-        assert_eq!(view.root.type_path, "Window");
         assert_eq!(view.root.children.len(), 1);
+        let root = literal(&view.root.children[0]);
+        assert_eq!(root.type_path, "Window");
+        assert_eq!(root.children.len(), 1);
 
-        let column = literal(&view.root.children[0]);
+        let column = literal(&root.children[0]);
         assert_eq!(column.type_path, "Column");
         assert_eq!(column.children.len(), 3);
         assert_eq!(literal(&column.children[0]).type_path, "Row");
@@ -1462,8 +1466,8 @@ view NotepadWindow {
         let Item::View(view) = &module.items[0] else {
             panic!("expected view")
         };
-        let (_, expr) = view
-            .root
+        let root = literal(&view.root.children[0]);
+        let (_, expr) = root
             .attributes
             .iter()
             .find(|(k, _)| k == "x")
@@ -1543,9 +1547,9 @@ view V {
         let Item::View(view) = &module.items[0] else {
             panic!("expected view")
         };
+        let root = literal(&view.root.children[0]);
         let attr = |name: &str| {
-            view.root
-                .attributes
+            root.attributes
                 .iter()
                 .find(|(k, _)| k == name)
                 .map(|(_, v)| v.clone())
@@ -1637,7 +1641,8 @@ view Widget {
         };
         assert!(view.on_mount.is_some());
         assert!(view.on_unmount.is_some());
-        assert_eq!(view.root.type_path, "Text");
+        assert_eq!(view.root.children.len(), 1);
+        assert_eq!(literal(&view.root.children[0]).type_path, "Text");
     }
 
     #[test]
@@ -1675,17 +1680,19 @@ view MainGrid {
         let Item::View(view) = &module.items[0] else {
             panic!("expected view")
         };
-        assert_eq!(view.root.type_path, "Grid");
+        assert_eq!(view.root.children.len(), 1);
+        let root = literal(&view.root.children[0]);
+        assert_eq!(root.type_path, "Grid");
         assert!(matches!(
-            &view.root.attributes[0].1,
+            &root.attributes[0].1,
             ViewExpr::Expr(syn::Expr::Array(_))
         ));
         assert!(matches!(
-            &view.root.attributes[1].1,
+            &root.attributes[1].1,
             ViewExpr::Expr(syn::Expr::Array(_))
         ));
 
-        let header = literal(&view.root.children[0]);
+        let header = literal(&root.children[0]);
         assert_eq!(header.type_path, "TextBlock");
         assert_eq!(header.attributes.len(), 1);
         assert_eq!(header.attached.len(), 2);
@@ -1702,7 +1709,7 @@ view MainGrid {
             ViewExpr::Expr(syn::Expr::Lit(_))
         ));
 
-        let button = literal(&view.root.children[1]);
+        let button = literal(&root.children[1]);
         assert_eq!(button.attached.len(), 2);
         assert_eq!(button.attached[0].0, "Grid");
         assert_eq!(button.attached[0].1, "row");

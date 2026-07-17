@@ -95,8 +95,8 @@ Card { title, value }   // title: title, value: value の省略形
 `component Name inherits Base { ... }` は `Base` を4通りに解決する(単なる構造的契約ではなく、WinUI3/C#の`Control → ContentControl → Button`と同じ実継承):
 
 1. **`Base`が`NativeControl`マーカー** — 純粋なカテゴリタグ(フィールド継承なし)。ネイティブ実装を持つ末端要素(`Button`等)であることを示すのみ。意味のある継承元を持たない末端要素(例:`Window` — 実際のWinUI3では`Control`ファミリーを経由せず`Object`を直接継承する)は、`inherits NativeControl`で存在しない共通の祖先を示唆する代わりに`inherits`自体を省略し、`#[native]`属性(付録E)を直接付与する。
-2. **`Base`が`view`を持たないプリミティブ形状ファミリー**(例:`builtin::Control`/`builtin::Rectangle`) — `Base`の`#[param]`/propフィールドを**再宣言なしに自動継承**する。ただし`Name`自身の`view`は引き続き必須で、そのルート要素は文字通り`Base`を構築しなければならない(シェイプ合成、後述の付録F.10参照)。
-3. **`Base`が自前の`view`を持つ論理コンポーネント**(builtinでもユーザー定義でも) — フィールドに加えて`view`(テンプレート)も継承する。`Name`が独自の`view`を書かなければ`Base`のテンプレートをそのまま(WinUI3の既定`ControlTemplate`のように)引き継ぎ、書けば**完全なテンプレート上書き**になる(ルート要素の型に制約はない)。
+2. **`Base`が`view`を持たないプリミティブ形状ファミリー**(例:`builtin::Control`/`builtin::Rectangle`)、または**`Base`自身が既にシェイプ合成されているDSLコンポーネント**、または**`Base`が`view`を持たないネイティブ実装のホスト**(例:`Window`) — `Base`の`#[param]`/propフィールドを**再宣言なしに自動継承**し、さらに`Name`自身の`view`の中身は**常に暗黙に`Base`自身の属性・子要素**になる(ラッパー要素は書かない――`Base { ... }`という入れ子は書かず、`Base`の属性・子要素を`view`の`{}`直下にそのまま書く)。シェイプ合成/ホスト合成(後述の付録F.10参照)。
+3. **`Base`が自前の`view`を持つ、それ自体は合成されていない論理コンポーネント**(builtinでもユーザー定義でも) — フィールドに加えて`view`(テンプレート)も継承する。`Name`が独自の`view`を書かなければ`Base`のテンプレートをそのまま(WinUI3の既定`ControlTemplate`のように)引き継ぎ、書けば**完全なテンプレート上書き**になる(ルート要素の型に制約はない)。
 4. **`Base`がネイティブ実装のみの末端要素**(例:`Button`) — 継承不可。生成されるRustコードを持たないため、委譲先が存在しない。
 
 ```rust
@@ -106,9 +106,14 @@ component ContentControl inherits Control {
 }
 
 view ContentControl {
-    Control { padding: padding, content }
+    // `Control { .. }` というラッパーは書かない — `view`の中身がそのまま暗黙に Control の
+    // 属性・子要素になる(2番目のケース)
+    padding: padding
+    content
 }
 ```
+
+`view`の中身が暗黙に`Base`自身になるかどうかは、`Base`が実際に合成可能(2番目のケースに当てはまるか)によって決まり、`Name`自身がラッパーを書くかどうかでは選べない――合成可能な`Base`を持つ`component`の`view`は常にこの形で書く。3番目のケース(合成されていない論理コンポーネントの継承)だけが、今まで通り「独自のルート要素を持つ完全なテンプレート上書き」になる。
 
 継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
 
@@ -297,6 +302,10 @@ match status {
 
 `match` は列挙体の全メンバーを網羅していれば `_ =>` を省略できる。網羅されていない場合はコンパイルエラーとなる(Rustの`match`と同じ挙動)。
 
+`if`/`match`の各分岐(`else if`チェーンを含む)には、さらに`if`/`match`/`for`を入れ子で書ける——`else if`は`else`ブロックの中にネストした`if`が1つある形として扱われる。ただし`for`自身のbody(繰り返される側のテンプレート)はリテラル要素のみで、その中に`if`/`match`/`for`をさらに入れ子にすることはできない(各`for`項目は使い捨てのローカル構造体であり、入れ子の動的領域を持つ永続状態を持たないため)。
+
+`#[content(field_name)]`(付録E)で指定した子要素の格納先フィールドがリスト型(`Vec<..>`/`ListExt<..>`)の場合、`if`/`match`/`for`のいずれも使える(前段落の入れ子ルールも同様)。フィールドが単一値型(例:`ContentControl`/`Window`の`content: Rc<dyn UIElement>`)の場合は`if`/`match`のみ使え、`for`は使えない(可変長のリストは単一の格納先に収まらないため)。単一値フィールド配下の`if`/`match`は、入れ子も含めたあらゆる分岐が最終的にちょうど1個の要素に還元できなければならない(1分岐に複数の裸の子要素を書くこともできない)。
+
 ---
 
 ## 6. スタイル(横断的属性適用)
@@ -451,7 +460,7 @@ volume: i32 = bind!(settings.volume, TwoWay),
 `#[observable]` のsetterは代入後に型付き `PropertyChanged` を発火する。`view` は式から
 静的に取得した依存プロパティだけを購読し、その属性または動的領域だけを更新する。従って
 `TextArea { text: doc.content }` の入力はその `TextArea` と `doc.content` に依存する表示だけを
-更新し、親の `TabView.items_source` を再同期しない。二方向バインディングのwidget→model側は
+更新し、親の `TabView` の children コレクションを再同期しない。二方向バインディングのwidget→model側は
 setterを呼ぶだけで、別途コンポーネント全体の再同期を呼んではならない。
 
 購読は `Subscription` で表され、表示領域が破棄されるとDropにより解除される。`for`/`if`/`match`
@@ -603,8 +612,8 @@ component Button inherits NativeControl {
 ハンドラは要素自身の型消去レジストリ(`UIElementBase.routed_handlers`)にイベント名で登録され、
 配送(`elwindui_core::ui::dispatch_routed`)は発生元要素から`UIElementBase.parent`(本物の親
 ポインタ、要素が木に組み込まれる際に必ず設定される)を辿って祖先へバブルする。`RoutedEventArgs`の
-`handled`フラグが立てられると、そこで伝播が止まる。親ポインタ方式のため、`TabView`の
-`items_source`/`item_template`のように実行時に動的組み立てられた木でも、静的な`.elwind`構造と
+`handled`フラグが立てられると、そこで伝播が止まる。親ポインタ方式のため、`for` のように
+実行時に動的組み立てられた木でも、静的な`.elwind`構造と
 同様にバブルが機能する(付録H参照)。現時点の実装範囲はAppKitバックエンドの`Button`のみ。
 
 ### 特定要素への名前付きアクセス:`#[id(...)]`
@@ -675,7 +684,7 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 20. `#[async_computed]` または `#[command(async, ...)]` が `viewmodel`/`store` 以外(通常の`component`のprop等)に付与されている → エラー(付録P参照。非同期状態はVM/Model層に閉じ込める)
 21. `#[undoable]` が `viewmodel` の `#[observable]` フィールド以外(`store`や`component`のprop等)に付与されている → エラー(付録U参照)
 22. `theme`の`variant`ブロックが`tokens{}`で宣言されていないトークン名を定義している、または`tokens{}`で宣言された一部のトークンを欠いている → エラー(付録R参照。全variant間でトークン集合の一致を保証する)
-23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(付録Q参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。`TabView`の`items_source`は同種のリコンサイル問題を`key`クロージャなしで解決している — 各要素の`Rc<T>`ポインタ同一性がそのまま同一性判定に使われるため、この警告に相当するものは発生しない(付録Y参照)。また`TabView`に静的な`TabViewItem`ネストと`items_source`系プロパティの両方、またはどちらも指定されていない場合はエラー(付録Y参照)。
+23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(付録Q参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(付録Y参照)。`TabView` は `TabViewItem` を子として指定する。
 24. `on_foreground`/`on_background`/`on_terminate`(付録W.5)が、アプリのエントリポイント(ルート)コンポーネント以外で宣言されている → 警告(OSレベルのライフサイクルは単一箇所への集約を推奨)
 25. コールバック型のフィールドで `Rc<dyn Fn(...)>` / `Box<dyn Fn(...)>` のような型消去表現を直接使用している(`fn(...)` 糖衣構文を使っていない) → エラー(4章「コールバック型フィールド」参照)
 
@@ -2056,7 +2065,7 @@ Button {
 - `Subscription` は表示オブジェクトが保持し、表示オブジェクトまたは動的領域の破棄時に Drop で
   解除される。通知中の購読追加・解除も安全でなければならない。
 - 子 viewmodel の変更を親 viewmodel のコレクション変更として転送しない。たとえば文書本文の変更は
-  その文書を表示する `TextArea` と文字数表示を更新するだけで、親 `TabView.items_source` を更新しない。
+その文書を表示する `TextArea` と文字数表示を更新するだけで、親 `TabView` の children を更新しない。
 
 `on_*` コールバックの後に行う全体 `resync()` は互換目的の初期化以外には用いない。非同期コマンドを
 含め、状態変更の反映は常に setter の `PropertyChanged` 通知により行われる。

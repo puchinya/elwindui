@@ -71,7 +71,7 @@
 |---|---|
 | `component`/`view`分離 | 実装済み |
 | `param`/`prop`区別(`#[param]`、静的評価式制限) | 実装済み |
-| 制御構文(`if`/`for`/`match`) | 部分実装。子要素位置の `if`/`else`・`match`・`for item in collection` は、親コンポーネント所有の透明な動的子範囲として `#[content(...)]` コレクションへ直接 insert/remove する。各範囲は前後の静的子要素と他の動的範囲を保持する。`for Vec<Rc<T>>`（および viewmodel 要素のリスト）は `Rc::ptr_eq` の identity で既存 item の子・購読を再利用し、他の collection は当該範囲のみを再構築する。`match` は validator が user enum の非網羅 arm をエラーにする。view root の制御構文と入れ子の動的範囲は未実装 |
+| 制御構文(`if`/`for`/`match`) | 実装済み。子要素位置の `if`/`else`(`else if`チェーン含む)・`match`・`for item in collection` は、親コンポーネント所有の透明な動的子範囲として `#[content(...)]` コレクションへ直接 insert/remove する。各範囲は前後の静的子要素と他の動的範囲を保持する。`for Vec<Rc<T>>`（および viewmodel 要素のリスト）は `Rc::ptr_eq` の identity で既存 item の子・購読を再利用し、他の collection は当該範囲のみを再構築する。`match` は validator が user enum の非網羅 arm をエラーにする。`if`/`match`の分岐内へのさらなる `if`/`match`/`for` の入れ子(`else if`含む)にも対応(`for`自身のbodyはリテラル要素のみのまま――入れ子非対応)。`#[content(...)]`フィールドが単一値型(`ContentControl`/`Window`の`content`等)の場合も`if`/`match`(`for`不可、全分岐が1要素に還元できる場合のみ)を書けるようになり、`inherits`の暗黙合成(下記)と組み合わせて view root 自体の動的化に相当する記法が書ける |
 | `style{}`(横断的属性適用) | **未実装**。`elwindui-codegen`のASTに`Style`ノードが存在しない |
 | 値制約(`#[range]`/`#[step]`/`#[length]`/`#[pattern]`/`#[format]`/`#[check]`) | `#[length]`のみ実装。他は未実装 |
 | `enum`(`EnumName::values()`、`#[label(...)]`) | `EnumDef`はASTに存在(実装済み)。`values()`/`#[label]`によるi18nラベル付与の実装範囲は個別確認が必要 |

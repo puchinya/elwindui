@@ -664,7 +664,9 @@ fn view_references_bare_name(view: &ViewDef, name: &str) -> bool {
     view.lets
         .iter()
         .any(|l| element_references_bare_name(&l.element, name))
-        || view.root.attributes
+        || view
+            .root
+            .attributes
             .iter()
             .any(|(_, expr)| view_expr_references_bare_name(expr, name))
         || view
@@ -758,10 +760,14 @@ fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
     view.lets
         .iter()
         .any(|l| element_references_name_anywhere(&l.element, name))
-        || view.root.attributes
+        || view
+            .root
+            .attributes
             .iter()
             .any(|(_, expr)| view_expr_references_name_anywhere(expr, name))
-        || view.root.attached
+        || view
+            .root
+            .attached
             .iter()
             .any(|(_, _, expr)| view_expr_references_name_anywhere(expr, name))
         || view
@@ -941,45 +947,101 @@ pub(crate) fn resolve_view_for<'m>(
     })
 }
 
-/// Resolves the concrete `ElementNode` a `view`'s body (`ast::ViewBody`) actually constructs —
-/// either the base itself (Phase 0's implicit-composition sugar: `inherits Y` where `Y` isn't one
-/// of the three base-less category tags means the body *is* `Y`'s own attributes/children, no
-/// wrapper element written), or, for an ordinary (non-composing) component, the body's one literal
-/// child, which is all a `view` with no composable base is allowed to contain. `base` is whichever
-/// component in the `inherits` chain actually owns this body (see `resolve_effective_root_type`,
-/// which walks to it the same way `resolve_view_for` does) — not necessarily the component whose
-/// `view` a caller is asking about, when that component has no `view` of its own and inherited one
-/// as a template.
-pub(crate) fn resolve_view_root_element(body: &ViewBody, base: Option<&str>) -> Option<ElementNode> {
-    match base {
-        Some(name) if !matches!(name, "UIElement" | "Layout" | "NativeControl") => {
-            Some(ElementNode {
-                type_path: name.to_string(),
-                attributes: body.attributes.clone(),
-                attached: body.attached.clone(),
-                children: body.children.clone(),
-            })
+/// Resolves the concrete `ElementNode` a `view`'s body (`ast::ViewBody`) actually constructs.
+/// `is_composed` is whatever the caller already knows from `TypeInfo` (`composed_shape.is_some() ||
+/// host_composition_base.is_some()` — see `generate_view`'s own `is_composed` and its call site,
+/// and `validate.rs`'s main loop) — deliberately *not* re-derived here from `base`'s name alone,
+/// since composability depends on `base`'s own recursively-resolved shape (`resolve_composed_shape`/
+/// `resolve_host_composition_base`), not just whether it's one of the three base-less category tags.
+///
+/// `is_composed`: the body *is* `base`'s own attributes/children directly — Phase 0's
+/// implicit-composition sugar, no wrapper element written (docs/elwindui_spec.md 付録H.2.1a).
+/// `!is_composed`: an ordinary (non-composing) component's `view`, which may only contain exactly
+/// one literal child — that child is the root.
+pub(crate) fn resolve_view_root_element(
+    body: &ViewBody,
+    base: Option<&str>,
+    is_composed: bool,
+) -> Option<ElementNode> {
+    if is_composed {
+        return Some(ElementNode {
+            type_path: base.expect("is_composed implies a base").to_string(),
+            attributes: body.attributes.clone(),
+            attached: body.attached.clone(),
+            children: body.children.clone(),
+        });
+    }
+    match body.children.as_slice() {
+        [ChildEntry::Literal(elem)] if body.attributes.is_empty() && body.attached.is_empty() => {
+            Some(elem.clone())
         }
-        _ => match body.children.as_slice() {
-            [ChildEntry::Literal(elem)] if body.attributes.is_empty() && body.attached.is_empty() => {
-                Some(elem.clone())
-            }
-            _ => None,
-        },
+        _ => None,
     }
 }
 
+/// `component_meta`-building-time (i.e. before any `TypeInfo` exists) approximation of "is `base`
+/// composable" — mirrors `resolve_composed_shape`/`resolve_host_composition_base`'s own conditions
+/// but computed purely from each component's own locally-declared `ComponentDef` flags (`embedded`/
+/// `native`/`base`) plus whether it `find_view`s, recursing the same way `resolve_composed_shape`
+/// does, since no cross-module `SymbolTable` is available yet at this point in `build_symbol_table`.
+fn base_is_composable_early(from: &Module, base: &str, modules: &[Module]) -> bool {
+    if base == "NativeControl" {
+        return false;
+    }
+    let Some((base_module, base_c)) = find_component_and_module(from, base, modules) else {
+        return false;
+    };
+    let base_has_view = find_view(base_module, &base_c.name).is_some();
+    let base_is_virtual_builtin = base_c.embedded
+        && !base_has_view
+        && base_c.base.as_deref() != Some("NativeControl")
+        && !base_c.native;
+    if base_is_virtual_builtin {
+        return true;
+    }
+    // Hand-written native host with no `view` of its own (`Window`-like, "host composition") —
+    // `#[native]` components are validated to declare no `base`, so this never overlaps with the
+    // `NativeControl`-leaf case above.
+    if base_c.native && !base_has_view {
+        return true;
+    }
+    if base_has_view {
+        return match base_c.base.as_deref() {
+            Some(grandparent) => base_is_composable_early(base_module, grandparent, modules),
+            None => false,
+        };
+    }
+    false
+}
+
 /// Lenient, `component_meta`-building-time counterpart of `resolve_view_root_element`: resolves
-/// just the effective root's *type name* (not a full `ElementNode`), walking to whichever ancestor
-/// in the `inherits` chain actually owns the effective `view` (mirroring `resolve_view_for`'s own
-/// walk) so `resolve_is_native` can recurse into that type's own nativeness. Returns `None` for a
-/// malformed body (no `view` anywhere in the chain, or a non-composing body that doesn't reduce to
-/// exactly one literal child) — `validate::validate` reports that case with a real error message;
-/// this function only needs *a* reasonable answer for native/virtual inference, not a diagnostic.
-fn resolve_effective_root_type(from: &Module, c: &ComponentDef, modules: &[Module]) -> Option<String> {
+/// just the effective root's *type name* (not a full `ElementNode`) so `resolve_is_native` can
+/// recurse into that type's own nativeness. Returns `None` for a malformed body (no `view` anywhere
+/// in the chain, or a non-composing body that doesn't reduce to exactly one literal child) —
+/// `validate::validate` reports that case with a real error message; this function only needs *a*
+/// reasonable answer for native/virtual inference, not a diagnostic.
+fn resolve_effective_root_type(
+    from: &Module,
+    c: &ComponentDef,
+    modules: &[Module],
+) -> Option<String> {
+    if let Some(base) = c.base.as_deref() {
+        if base_is_composable_early(from, base, modules) {
+            // The wrapper is always the *composing* component's own immediate base, regardless of
+            // whether that component wrote its own `view` or inherited one as a template — see
+            // `resolve_view_root_element`'s doc comment.
+            return Some(base.to_string());
+        }
+    }
     if let Some(own) = find_view(from, &c.name) {
-        return resolve_view_root_element(&own.root, c.base.as_deref())
-            .map(|elem| elem.type_path);
+        return match own.root.children.as_slice() {
+            [ChildEntry::Literal(elem)]
+                if own.root.attributes.is_empty() && own.root.attached.is_empty() =>
+            {
+                Some(elem.type_path.clone())
+            }
+            _ => None,
+        };
     }
     let base = c.base.as_deref()?;
     if base == "NativeControl" {
@@ -2239,15 +2301,27 @@ fn generate_view(
     // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
     // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
     // `continue` in `generate_module` just above).
-    let resolved_root = resolve_view_root_element(&view.root, component.base.as_deref())
-        .unwrap_or_else(|| {
-            panic!(
-                "{}: view root must be exactly one element unless it inherits a composable base",
-                component.name
-            )
-        });
+    let resolved_root = resolve_view_root_element(
+        &view.root,
+        component.base.as_deref(),
+        is_composed,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "{}: view root must be exactly one element unless it inherits a composable base",
+            component.name
+        )
+    });
 
-    plan_element(&resolved_root, &ctx, from, table, &mut plan, true, &lets_map);
+    plan_element(
+        &resolved_root,
+        &ctx,
+        from,
+        table,
+        &mut plan,
+        true,
+        &lets_map,
+    );
 
     // Host composition (`is_host_composition`'s doc comment): the root's stored field must be
     // named `base` (the same trait+Impl+base convention `is_shape_composition` follows), not the
@@ -2639,19 +2713,20 @@ fn generate_view(
         if node.dynamic.is_none() {
             continue;
         }
-        let parent = plan
-            .iter()
-            .find(|candidate| {
-                candidate
-                    .child_bindings
-                    .iter()
-                    .any(|(child, _)| child == &node.binding)
-            })
-            .expect("dynamic child must have a parent collection");
-        let slot = format_ident!(
-            "__dynamic_slot_{}",
-            node.binding.to_string().trim_start_matches('_')
-        );
+        // The real (non-dynamic) ancestor element — walking through any number of enclosing
+        // dynamic regions for a nested one (Phase 1) — whose own content-collection item type
+        // every dynamic node sharing that ancestor stores its `DynamicChildSlot` against. A
+        // *scalar* content field (Phase 2) needs no such slot at all — refreshing it is just a
+        // stateless `set_<field>(..)` swap, so it gets no struct field here (see
+        // `dynamic_region_refresh_method`'s own scalar/list split).
+        let parent = find_dynamic_region_anchor(&plan, &node.binding);
+        if !table
+            .resolve(from, &parent.type_path)
+            .is_some_and(content_field_is_list)
+        {
+            continue;
+        }
+        let slot = dynamic_slot_ident(&node.binding);
         let item_ext = dynamic_collection_item_trait(parent, from, table);
         struct_fields.extend(quote! {
             #slot: elwindui::core::ui::DynamicChildSlot<dyn elwindui::core::ui::#item_ext>,
@@ -2686,7 +2761,7 @@ fn generate_view(
                     let base_impl_ty = shape_composition_base_type(&resolved_root.type_path);
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
                 } else {
-                    let value = build_component_value(node, &ctx, from, table);
+                    let value = build_component_value(node, &ctx, from, table, &plan);
                     let base_impl_ty = concrete_type_ident(
                         &resolved_root.type_path,
                         table.resolve(from, &resolved_root.type_path),
@@ -2716,7 +2791,7 @@ fn generate_view(
                     )
                 });
                 let type_ident = concrete_type_ident(&node.type_path, Some(info));
-                let setters = build_component_setters(node, &ctx, from, table, info);
+                let setters = build_component_setters(node, &ctx, from, table, info, &plan);
                 let trait_use = builtin_trait_use(&node.type_path, Some(info));
                 construct_stmts.extend(quote! {
                     #trait_use
@@ -2725,7 +2800,7 @@ fn generate_view(
                 });
                 continue;
             }
-            emit_construction(node, &ctx, from, table, &mut construct_stmts);
+            emit_construction(node, &ctx, from, table, &mut construct_stmts, &plan);
             if node.stored {
                 let binding = &node.binding;
                 // Every resolved type (a `component`/`view` pair or a hand-written builtin in
@@ -2865,86 +2940,54 @@ fn generate_view(
             }
         })
         .collect();
+    // Only real-anchored (top-level) dynamic nodes get their own top-level statement here — a
+    // nested one (Phase 1) has no entry in any real element's own `child_bindings`, so the `find`
+    // below returns `None` for it and `?` skips it; it's reached instead through
+    // `emit_dynamic_node_refresh`'s own recursion into its real-anchored ancestor's branches.
     let dynamic_region_refresh_method: TokenStream = plan
         .iter()
         .filter_map(|node| {
+            node.dynamic.as_ref()?;
             let parent = plan.iter().find(|candidate| {
-                candidate.child_bindings.iter().any(|(child, _)| child == &node.binding)
+                candidate
+                    .child_bindings
+                    .iter()
+                    .any(|(child, _)| child == &node.binding)
             })?;
             let parent_binding = &parent.binding;
-            let slot = format_ident!("__dynamic_slot_{}", node.binding.to_string().trim_start_matches('_'));
             let parent_ext = format_ident!("{}Ext", parent.type_path);
             let item_ext = dynamic_collection_item_trait(parent, from, table);
-            let start = dynamic_child_start(parent, &node.binding);
-            match node.dynamic.as_ref()? {
-                DynamicPlan::For {
-                    collection,
-                    renderer,
-                    rc_identity,
-                    ..
-                } => {
-                    let collection = emit_expr(collection, &ctx, &EmitMode::WithSelf(quote! { self }));
-                    let replace = if *rc_identity {
-                        quote! {
-                            self.#slot.replace_rc_items(
-                                self.#parent_binding.children(),
-                                #start,
-                                &(#collection),
-                                #renderer,
-                            );
-                        }
-                    } else {
-                        quote! {
-                            self.#slot.replace_items(
-                                self.#parent_binding.children(),
-                                #start,
-                                #collection,
-                                #renderer,
-                            );
-                        }
-                    };
-                    Some(quote! {
-                        {
-                            use elwindui::core::ui::#parent_ext as _;
-                            #replace
-                        }
-                    })
+            let parent_info = table.resolve(from, &parent.type_path);
+            let body = if parent_info.is_some_and(content_field_is_list) {
+                let host = quote! { self.#parent_binding.children() };
+                emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table)
+            } else {
+                // Phase 2: a scalar `#[content(...)]` field needs no `DynamicChildSlot` at all —
+                // every branch resolves to exactly one element (`validate::validate`'s
+                // `dynamic_children_reduce_to_one_element` already guarantees this), so refreshing
+                // is just picking the active branch's already-constructed value and swapping it in
+                // via the field's own setter.
+                let field = parent_info
+                    .and_then(|i| i.content_field.as_deref())
+                    .unwrap_or("children");
+                let setter = format_ident!("set_{field}");
+                emit_scalar_dynamic_node_refresh(
+                    &plan,
+                    node,
+                    parent_binding,
+                    &setter,
+                    &item_ext,
+                    &ctx,
+                    from,
+                    table,
+                )
+            };
+            Some(quote! {
+                {
+                    use elwindui::core::ui::#parent_ext as _;
+                    #body
                 }
-                DynamicPlan::If { condition, then_bindings, else_bindings } => {
-                    let condition = emit_expr(condition, &ctx, &EmitMode::WithSelf(quote! { self }));
-                    let then_children = then_bindings.iter().map(|(child, ty)| {
-                        dynamic_child_binding(quote! { self.#child.clone() }, ty, &item_ext, from, table)
-                    });
-                    let else_children = else_bindings.iter().map(|(child, ty)| {
-                        dynamic_child_binding(quote! { self.#child.clone() }, ty, &item_ext, from, table)
-                    });
-                    Some(quote! {
-                        {
-                            use elwindui::core::ui::#parent_ext as _;
-                            if #condition {
-                                self.#slot.replace_children(self.#parent_binding.children(), #start, vec![#(#then_children),*]);
-                            } else {
-                                self.#slot.replace_children(self.#parent_binding.children(), #start, vec![#(#else_children),*]);
-                            }
-                        }
-                    })
-                }
-                DynamicPlan::Match { value, arms } => {
-                    let value = emit_expr(value, &ctx, &EmitMode::WithSelf(quote! { self }));
-                    let arms = arms.iter().map(|(pattern, children)| {
-                        let children = children.iter().map(|(child, ty)| {
-                            dynamic_child_binding(quote! { self.#child.clone() }, ty, &item_ext, from, table)
-                        });
-                        quote! { #pattern => vec![#(#children),*], }
-                    });
-                    Some(quote! {
-                        {
-                            use elwindui::core::ui::#parent_ext as _;
-                            self.#slot.replace_children(self.#parent_binding.children(), #start, match #value { #(#arms)* });
-                        }
-                    })
-                }
-            }
+            })
         })
         .collect();
     let dynamic_region_refresh_method = if dynamic_region_refresh_method.is_empty() {
@@ -3500,125 +3543,16 @@ fn plan_element(
                 });
                 child_bindings.push(resolved.clone());
             }
-            ChildEntry::If { .. } => {
-                let ChildEntry::If {
-                    condition,
-                    then_branch,
-                    else_branch,
-                } = child
-                else {
-                    panic!("dynamic match/for code generation is not implemented yet")
-                };
-                let then_bindings = then_branch
-                    .iter()
-                    .map(|entry| plan_child_entry(entry, ctx, from, table, out, lets))
-                    .collect();
-                let else_bindings = else_branch
-                    .iter()
-                    .map(|entry| plan_child_entry(entry, ctx, from, table, out, lets))
-                    .collect();
-                let binding = format_ident!("__node_{}", out.len());
-                out.push(PlannedNode {
-                    binding: binding.clone(),
-                    type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
-                    attributes: Vec::new(),
-                    attached: Vec::new(),
-                    child_bindings: Vec::new(),
-                    element_attr_bindings: HashMap::new(),
-                    stored: true,
-                    id: None,
-                    dynamic: Some(DynamicPlan::If {
-                        condition: condition.clone(),
-                        then_bindings,
-                        else_bindings,
-                    }),
-                });
-                child_bindings.push((binding, DYNAMIC_CHILD_SLOT_MARKER.to_string()));
-            }
-            ChildEntry::Match { value, arms } => {
-                let arms = arms
-                    .iter()
-                    .map(|arm| {
-                        let pattern =
-                            syn::parse::Parser::parse_str(syn::Pat::parse_single, &arm.pattern)
-                                .unwrap_or_else(|error| {
-                                    panic!("invalid match pattern `{}`: {error}", arm.pattern)
-                                });
-                        let children = arm
-                            .body
-                            .iter()
-                            .map(|entry| plan_child_entry(entry, ctx, from, table, out, lets))
-                            .collect();
-                        (pattern, children)
-                    })
-                    .collect();
-                let binding = format_ident!("__node_{}", out.len());
-                out.push(PlannedNode {
-                    binding: binding.clone(),
-                    type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
-                    attributes: Vec::new(),
-                    attached: Vec::new(),
-                    child_bindings: Vec::new(),
-                    element_attr_bindings: HashMap::new(),
-                    stored: true,
-                    id: None,
-                    dynamic: Some(DynamicPlan::Match {
-                        value: value.clone(),
-                        arms,
-                    }),
-                });
-                child_bindings.push((binding, DYNAMIC_CHILD_SLOT_MARKER.to_string()));
-            }
-            ChildEntry::For {
-                binding,
-                collection,
-                body,
-            } => {
-                let item_type = match body.first() {
-                    Some(ChildEntry::Literal(element)) => element.type_path.clone(),
-                    _ => panic!(
-                        "a `for` body currently requires one or more literal element templates"
-                    ),
-                };
-                if !body
-                    .iter()
-                    .all(|entry| matches!(entry, ChildEntry::Literal(_)))
-                {
-                    panic!("a `for` body currently requires literal element templates");
-                }
-                let parent = PlannedNode {
-                    binding: format_ident!("__for_parent"),
-                    type_path: node.type_path.clone(),
-                    attributes: Vec::new(),
-                    attached: Vec::new(),
-                    child_bindings: Vec::new(),
-                    element_attr_bindings: HashMap::new(),
-                    stored: false,
-                    id: None,
-                    dynamic: None,
-                };
-                let item_trait = dynamic_collection_item_trait(&parent, from, table);
-                let rc_identity = collection_uses_rc_identity(collection, ctx, from, table);
-                let renderer =
-                    emit_for_renderer(binding, body, ctx, from, table, &item_trait, rc_identity);
-                let binding = format_ident!("__node_{}", out.len());
-                out.push(PlannedNode {
-                    binding: binding.clone(),
-                    type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
-                    attributes: Vec::new(),
-                    attached: Vec::new(),
-                    child_bindings: Vec::new(),
-                    element_attr_bindings: HashMap::new(),
-                    stored: true,
-                    id: None,
-                    dynamic: Some(DynamicPlan::For {
-                        collection: collection.clone(),
-                        renderer,
-                        item_type,
-                        rc_identity,
-                    }),
-                });
-                child_bindings.push((binding, DYNAMIC_CHILD_SLOT_MARKER.to_string()));
+            ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. } => {
+                child_bindings.push(plan_dynamic_entry(
+                    child,
+                    &node.type_path,
+                    ctx,
+                    from,
+                    table,
+                    out,
+                    lets,
+                ));
             }
         }
     }
@@ -3686,7 +3620,7 @@ fn emit_for_renderer(
     }
     let mut construct = TokenStream::new();
     for planned in &plan {
-        emit_construction(planned, &closure_ctx, from, table, &mut construct);
+        emit_construction(planned, &closure_ctx, from, table, &mut construct, &plan);
     }
     let subscriptions = subscribe_to_item_changes
         .then(|| emit_for_item_subscriptions(&plan, binding, &closure_ctx, from, table))
@@ -3811,6 +3745,21 @@ fn view_expr_references_closure_parameter(expr: &ViewExpr, parameter: &str) -> b
     }
 }
 
+/// Phase 2 (docs/elwindui_spec.md 付録H.2.1a): whether `info`'s own `#[content(...)]` field
+/// (`children` if unnamed) is list-shaped (`Vec<...>`/`ListExt<...>`/`UIElementCollection`) rather
+/// than scalar (e.g. `ContentControl`/`Window`'s `content: Rc<dyn UIElement>`) — mirrors
+/// `validate.rs`'s `check_dynamic_child_hosts`'s own `is_collection` check exactly, reused here to
+/// decide which of the two dynamic-region refresh shapes applies (`DynamicChildSlot`/`ListExt` vs a
+/// plain `set_<field>(..)` swap — see `dynamic_region_refresh_method`'s own call site).
+fn content_field_is_list(info: &TypeInfo) -> bool {
+    let field = info.content_field.as_deref().unwrap_or("children");
+    info.field_types.get(field).is_some_and(|ty| {
+        ty.contains("UIElementCollection")
+            || ty.trim_start().starts_with("Vec<")
+            || ty.contains("ListExt<")
+    })
+}
+
 /// Resolves the trait-object element type of a parent's declared content collection. This is driven
 /// by the resolved `#[content]` field rather than a widget-name branch: `Vec<TabViewItem>` becomes
 /// `TabViewItemExt`, while layout `Vec<Rc<dyn UIElement>>` becomes `UIElementExt`.
@@ -3920,31 +3869,525 @@ fn dynamic_child_binding(
     }
 }
 
-/// Computes a transparent slot's insertion point from its siblings. Static children are attached
-/// during construction; every earlier dynamic sibling contributes its current range length. This
-/// lets independent `if`/`match`/`for` slots coexist in one `#[content]` collection without either
-/// slot clearing or owning the other's children.
-fn dynamic_child_start(parent: &PlannedNode, target: &syn::Ident) -> TokenStream {
-    let preceding = parent
-        .child_bindings
+/// Phase 2: the construction-time value for a scalar `#[content(...)]` field whose sole bare child
+/// is a dynamic (`if`/`match`) region — `marker_binding` names that region's own
+/// `DYNAMIC_CHILD_SLOT_MARKER` `PlannedNode`, found in `plan`. Deliberately picks the *first*
+/// branch (`If`'s `then`, `Match`'s first arm) completely unconditionally, without evaluating the
+/// region's own condition/value at all: `new()` already calls `__refresh_dynamic_regions()`
+/// immediately after construction, before `resync()` and before returning `Rc<Self>` to the caller
+/// (mirroring how a scalar-unrelated, list-based dynamic region starts genuinely empty at
+/// construction and is only ever populated for the first time by that same initial refresh call) —
+/// so whichever branch is picked here is corrected to the real one synchronously, before anything
+/// outside this function ever observes it. `for` can't reach here (Phase 2's validation rejects it
+/// under a scalar field — see `validate.rs`'s `check_dynamic_child_hosts`), so only `If`/`Match`
+/// are handled.
+fn initial_dynamic_content_value(
+    plan: &[PlannedNode],
+    marker_binding: &syn::Ident,
+    inner_ty: &str,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let node = plan
+        .iter()
+        .find(|n| &n.binding == marker_binding)
+        .expect("dynamic marker must be in plan");
+    let (child, child_ty) = match node
+        .dynamic
+        .as_ref()
+        .expect("marker binding must be a dynamic node")
+    {
+        DynamicPlan::If { then_bindings, .. } => &then_bindings[0],
+        DynamicPlan::Match { arms, .. } => &arms[0].1[0],
+        DynamicPlan::For { .. } => {
+            panic!("a `for` region cannot be the sole content of a scalar content field")
+        }
+    };
+    if inner_ty.contains("dyn UIElement") {
+        into_node_if_needed(quote! { #child }, child_ty, from, table)
+    } else {
+        into_any_view_if_needed(quote! { #child }, inner_ty)
+    }
+}
+
+/// The `DynamicChildSlot` struct field name for a dynamic `PlannedNode`'s own binding — shared by
+/// every place that needs to name it (struct-field emission, refresh-code generation, span/start
+/// computation) so the naming convention only lives in one place.
+fn dynamic_slot_ident(binding: &syn::Ident) -> syn::Ident {
+    format_ident!(
+        "__dynamic_slot_{}",
+        binding.to_string().trim_start_matches('_')
+    )
+}
+
+/// Bindings of the dynamic markers (`DYNAMIC_CHILD_SLOT_MARKER`-typed entries — nested `if`/`match`/
+/// `for` regions) appearing directly in `plan`'s own branches — not recursively; a nested marker's
+/// own further-nested markers are reached by recursing into it separately (`emit_clear_dynamic_node`/
+/// `slot_span` both do). `For` has no branches of its own (its body is literal-only, §Phase 1's
+/// documented scope boundary), so it never contains one.
+fn direct_nested_marker_bindings(plan: &DynamicPlan) -> Vec<&syn::Ident> {
+    match plan {
+        DynamicPlan::If {
+            then_bindings,
+            else_bindings,
+            ..
+        } => then_bindings
+            .iter()
+            .chain(else_bindings.iter())
+            .filter(|(_, ty)| ty == DYNAMIC_CHILD_SLOT_MARKER)
+            .map(|(b, _)| b)
+            .collect(),
+        DynamicPlan::Match { arms, .. } => arms
+            .iter()
+            .flat_map(|(_, children)| children.iter())
+            .filter(|(_, ty)| ty == DYNAMIC_CHILD_SLOT_MARKER)
+            .map(|(b, _)| b)
+            .collect(),
+        DynamicPlan::For { .. } => Vec::new(),
+    }
+}
+
+/// Whether `plan`'s own branches (not recursively) contain `target` — used to find which dynamic
+/// node, if any, directly encloses a nested dynamic region.
+fn dynamic_plan_contains_binding(plan: &DynamicPlan, target: &syn::Ident) -> bool {
+    direct_nested_marker_bindings(plan)
+        .into_iter()
+        .any(|b| b == target)
+}
+
+/// Returns the specific branch list (then/else/one match arm's children) of `plan` that directly
+/// contains `target` — the list `preceding_span` needs to compute `target`'s local offset within
+/// it. Panics if `target` isn't directly in any of `plan`'s own branches (only ever called after
+/// `dynamic_plan_contains_binding` has confirmed it is).
+fn dynamic_plan_branch_containing<'a>(
+    plan: &'a DynamicPlan,
+    target: &syn::Ident,
+) -> &'a [(syn::Ident, String)] {
+    match plan {
+        DynamicPlan::If {
+            then_bindings,
+            else_bindings,
+            ..
+        } => {
+            if then_bindings.iter().any(|(b, _)| b == target) {
+                then_bindings
+            } else {
+                else_bindings
+            }
+        }
+        DynamicPlan::Match { arms, .. } => arms
+            .iter()
+            .map(|(_, children)| children.as_slice())
+            .find(|children| children.iter().any(|(b, _)| b == target))
+            .expect("target must be in one of this Match's arms"),
+        DynamicPlan::For { .. } => panic!("`For` has no branches to search"),
+    }
+}
+
+/// Total number of real host children `node` (including any nested dynamic regions within it)
+/// currently occupies — `node`'s own slot length plus every nested marker's own `slot_span`,
+/// recursively, summed across *all* of `node`'s branches unconditionally. This is sound because
+/// every branch not currently selected is kept cleared to an empty `DynamicChildSlot` (see
+/// `emit_clear_dynamic_node`), so its nested markers' own `slot_span` is always 0 when inactive —
+/// no need to know which branch is active just to compute a later sibling's start position.
+fn slot_span(plan: &[PlannedNode], node_binding: &syn::Ident) -> TokenStream {
+    let node = plan
+        .iter()
+        .find(|n| &n.binding == node_binding)
+        .expect("dynamic node must be in plan");
+    let slot = dynamic_slot_ident(node_binding);
+    let own = quote! { self.#slot.len() };
+    let nested: Vec<TokenStream> = node
+        .dynamic
+        .as_ref()
+        .map(|d| {
+            direct_nested_marker_bindings(d)
+                .into_iter()
+                .map(|b| slot_span(plan, b))
+                .collect()
+        })
+        .unwrap_or_default();
+    quote! { #own #(+ #nested)* }
+}
+
+/// Sum of the spans (`slot_span` for a dynamic marker, `1usize` for a static literal child) of
+/// every entry in `siblings` preceding `target` — the shared "how far into this list does `target`
+/// start" computation used both for a real element's own `child_bindings` and for a dynamic node's
+/// individual branch lists (`then_bindings`/`else_bindings`/a `Match` arm's children).
+fn preceding_span(
+    plan: &[PlannedNode],
+    siblings: &[(syn::Ident, String)],
+    target: &syn::Ident,
+) -> TokenStream {
+    let preceding = siblings
         .iter()
         .take_while(|(binding, _)| binding != target)
         .map(|(binding, ty)| {
             if ty == DYNAMIC_CHILD_SLOT_MARKER {
-                let slot = format_ident!(
-                    "__dynamic_slot_{}",
-                    binding.to_string().trim_start_matches('_')
-                );
-                quote! { self.#slot.len() }
+                slot_span(plan, binding)
             } else {
                 quote! { 1usize }
             }
         });
-    quote! { 0usize #( + #preceding )* }
+    quote! { 0usize #( + (#preceding) )* }
+}
+
+/// Finds the nearest real (non-dynamic) ancestor *element* of a dynamic `PlannedNode`, walking
+/// through any number of enclosing dynamic regions (nested `if`/`match`/`for`, Phase 1). A dynamic
+/// node's binding appears either directly in a real element's own `child_bindings` (a top-level
+/// dynamic region) or inside exactly one other dynamic node's own branch lists (a nested region) —
+/// never both, and never neither in a well-formed plan.
+fn find_dynamic_region_anchor<'a>(plan: &'a [PlannedNode], target: &syn::Ident) -> &'a PlannedNode {
+    if let Some(parent) = plan.iter().find(|candidate| {
+        candidate
+            .child_bindings
+            .iter()
+            .any(|(child, _)| child == target)
+    }) {
+        return parent;
+    }
+    let enclosing = plan
+        .iter()
+        .find(|candidate| {
+            candidate
+                .dynamic
+                .as_ref()
+                .is_some_and(|d| dynamic_plan_contains_binding(d, target))
+        })
+        .expect("dynamic child must have a real ancestor or an enclosing dynamic region");
+    find_dynamic_region_anchor(plan, &enclosing.binding)
+}
+
+/// The absolute insertion point of a dynamic node's slot within its real ancestor's host
+/// collection — generalizes the old `dynamic_child_start` to walk through any number of enclosing
+/// dynamic regions. For a top-level region (directly under a real element), this is exactly
+/// `preceding_span` over that element's own `child_bindings`. For a nested region, it's the
+/// enclosing dynamic node's own absolute start (recursively) plus `target`'s local offset within
+/// whichever specific branch of the enclosing node it lives in.
+fn dynamic_region_start(plan: &[PlannedNode], target: &syn::Ident) -> TokenStream {
+    if let Some(parent) = plan.iter().find(|candidate| {
+        candidate
+            .child_bindings
+            .iter()
+            .any(|(child, _)| child == target)
+    }) {
+        return preceding_span(plan, &parent.child_bindings, target);
+    }
+    let enclosing = plan
+        .iter()
+        .find(|candidate| {
+            candidate
+                .dynamic
+                .as_ref()
+                .is_some_and(|d| dynamic_plan_contains_binding(d, target))
+        })
+        .expect("dynamic child must have a real ancestor or an enclosing dynamic region");
+    let branch = dynamic_plan_branch_containing(
+        enclosing.dynamic.as_ref().expect("just matched Some above"),
+        target,
+    );
+    let local = preceding_span(plan, branch, target);
+    let outer_start = dynamic_region_start(plan, &enclosing.binding);
+    quote! { (#outer_start) + (#local) }
+}
+
+/// Partitions a dynamic node's branch bindings into its own direct static leaf children (passed to
+/// `dynamic_child_binding` and placed straight into the branch's `vec![]`) and its nested dynamic
+/// markers (refreshed/cleared independently — see `emit_dynamic_node_refresh`/
+/// `emit_clear_dynamic_node` — since a marker has no `self.#binding` field of its own to read).
+fn partition_branch_bindings(
+    bindings: &[(syn::Ident, String)],
+) -> (Vec<&(syn::Ident, String)>, Vec<&syn::Ident>) {
+    let mut leaves = Vec::new();
+    let mut nested = Vec::new();
+    for entry @ (binding, ty) in bindings {
+        if ty == DYNAMIC_CHILD_SLOT_MARKER {
+            nested.push(binding);
+        } else {
+            leaves.push(entry);
+        }
+    }
+    (leaves, nested)
+}
+
+/// Forces a dynamic node's slot (and, recursively, every nested dynamic marker within *all* of its
+/// own branches) empty — removing whatever real children it currently holds from `host` and
+/// resetting its tracked state to 0-length. Used when an enclosing `if`/`match` branch switches
+/// away from a branch containing this node, so the node's own contribution to `slot_span` reads 0
+/// again the next time a sibling's start position is computed (see `slot_span`'s own doc comment).
+fn emit_clear_dynamic_node(
+    plan: &[PlannedNode],
+    node: &PlannedNode,
+    host: &TokenStream,
+) -> TokenStream {
+    let slot = dynamic_slot_ident(&node.binding);
+    let start = dynamic_region_start(plan, &node.binding);
+    let mut out = quote! {
+        self.#slot.replace_children(#host, #start, Vec::new());
+    };
+    if let Some(dynamic) = &node.dynamic {
+        for nested_binding in direct_nested_marker_bindings(dynamic) {
+            let nested_node = plan
+                .iter()
+                .find(|n| &n.binding == nested_binding)
+                .expect("nested marker must be in plan");
+            out.extend(emit_clear_dynamic_node(plan, nested_node, host));
+        }
+    }
+    out
+}
+
+/// Recursively emits the refresh statement for one dynamic node, targeting the real host collection
+/// `host` shared by it and every nested region within it (`host_ext`/`item_ext` are likewise the
+/// real ancestor's own — computed once, at the top-level `dynamic_region_refresh_method` call site,
+/// and threaded down unchanged). A top-level call is made only for a real-anchored node
+/// (`dynamic_region_refresh_method`'s own `plan.iter().find(..)` guard); nested markers are reached
+/// purely through this function's own recursion into `then_bindings`/`else_bindings`/`Match` arms,
+/// never as a separate top-level entry.
+fn emit_dynamic_node_refresh(
+    plan: &[PlannedNode],
+    node: &PlannedNode,
+    host: &TokenStream,
+    item_ext: &syn::Ident,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let slot = dynamic_slot_ident(&node.binding);
+    let start = dynamic_region_start(plan, &node.binding);
+    match node
+        .dynamic
+        .as_ref()
+        .expect("only called for a dynamic node")
+    {
+        DynamicPlan::For {
+            collection,
+            renderer,
+            rc_identity,
+            ..
+        } => {
+            let collection = emit_expr(collection, ctx, &EmitMode::WithSelf(quote! { self }));
+            if *rc_identity {
+                quote! {
+                    self.#slot.replace_rc_items(#host, #start, &(#collection), #renderer);
+                }
+            } else {
+                quote! {
+                    self.#slot.replace_items(#host, #start, #collection, #renderer);
+                }
+            }
+        }
+        DynamicPlan::If {
+            condition,
+            then_bindings,
+            else_bindings,
+        } => {
+            let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(quote! { self }));
+            let (then_leaves, then_nested) = partition_branch_bindings(then_bindings);
+            let (else_leaves, else_nested) = partition_branch_bindings(else_bindings);
+            let then_children = then_leaves.iter().map(|(child, ty)| {
+                dynamic_child_binding(quote! { self.#child.clone() }, ty, item_ext, from, table)
+            });
+            let else_children = else_leaves.iter().map(|(child, ty)| {
+                dynamic_child_binding(quote! { self.#child.clone() }, ty, item_ext, from, table)
+            });
+            let refresh_nested = |bindings: &[&syn::Ident]| -> TokenStream {
+                bindings
+                    .iter()
+                    .map(|b| {
+                        let n = plan.iter().find(|n| &n.binding == *b).expect("in plan");
+                        emit_dynamic_node_refresh(plan, n, host, item_ext, ctx, from, table)
+                    })
+                    .collect()
+            };
+            let clear_nested = |bindings: &[&syn::Ident]| -> TokenStream {
+                bindings
+                    .iter()
+                    .map(|b| {
+                        let n = plan.iter().find(|n| &n.binding == *b).expect("in plan");
+                        emit_clear_dynamic_node(plan, n, host)
+                    })
+                    .collect()
+            };
+            let clear_else = clear_nested(&else_nested);
+            let clear_then = clear_nested(&then_nested);
+            let refresh_then = refresh_nested(&then_nested);
+            let refresh_else = refresh_nested(&else_nested);
+            quote! {
+                if #condition {
+                    #clear_else
+                    self.#slot.replace_children(#host, #start, vec![#(#then_children),*]);
+                    #refresh_then
+                } else {
+                    #clear_then
+                    self.#slot.replace_children(#host, #start, vec![#(#else_children),*]);
+                    #refresh_else
+                }
+            }
+        }
+        DynamicPlan::Match { value, arms } => {
+            let value = emit_expr(value, ctx, &EmitMode::WithSelf(quote! { self }));
+            // Each arm clears every *other* arm's own nested markers before repopulating its own —
+            // never its own (unlike `If`'s fixed two-way "clear the other side" split, a `match`
+            // has no single "other" side, so which markers count as "other" depends on which arm
+            // ends up selected, hence computed per arm below). Clearing only the other arms (never
+            // the one actually selected) is what lets a nested `for` inside the currently-active
+            // arm keep reusing its previously-constructed items by `Rc` identity across refreshes —
+            // clearing it too would reset that identity cache for no reason every single time.
+            let arm_stmts = arms.iter().enumerate().map(|(i, (pattern, children))| {
+                let (leaves, nested) = partition_branch_bindings(children);
+                let leaf_children = leaves.iter().map(|(child, ty)| {
+                    dynamic_child_binding(quote! { self.#child.clone() }, ty, item_ext, from, table)
+                });
+                let clear_other_arms: TokenStream = arms
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .flat_map(|(_, (_, other_children))| {
+                        partition_branch_bindings(other_children).1
+                    })
+                    .map(|b| {
+                        let n = plan.iter().find(|n| &n.binding == b).expect("in plan");
+                        emit_clear_dynamic_node(plan, n, host)
+                    })
+                    .collect();
+                let refresh_nested: TokenStream = nested
+                    .iter()
+                    .map(|b| {
+                        let n = plan.iter().find(|n| &n.binding == *b).expect("in plan");
+                        emit_dynamic_node_refresh(plan, n, host, item_ext, ctx, from, table)
+                    })
+                    .collect();
+                quote! {
+                    #pattern => {
+                        #clear_other_arms
+                        self.#slot.replace_children(#host, #start, vec![#(#leaf_children),*]);
+                        #refresh_nested
+                    }
+                }
+            });
+            quote! {
+                match #value { #(#arm_stmts)* }
+            }
+        }
+    }
+}
+
+/// Phase 2's scalar counterpart of `emit_dynamic_node_refresh`: no `DynamicChildSlot`/`start`
+/// involved at all, since `validate::validate`'s `dynamic_children_reduce_to_one_element` already
+/// guarantees every branch (recursively) resolves to exactly one element. Refreshing is just
+/// picking the currently-selected branch's value and calling the content field's own
+/// `set_<field>(..)` — emitted directly inside whichever leaf branch turns out to be selected (a
+/// nested `if`/`match`, Phase 1, just narrows which leaf that is; the call to `#setter` itself only
+/// ever appears once the recursion bottoms out at `emit_scalar_branch_value`'s non-marker case).
+fn emit_scalar_dynamic_node_refresh(
+    plan: &[PlannedNode],
+    node: &PlannedNode,
+    owner_binding: &syn::Ident,
+    setter: &syn::Ident,
+    item_ext: &syn::Ident,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    match node
+        .dynamic
+        .as_ref()
+        .expect("only called for a dynamic node")
+    {
+        DynamicPlan::For { .. } => {
+            panic!("a `for` region cannot be the sole content of a scalar content field")
+        }
+        DynamicPlan::If {
+            condition,
+            then_bindings,
+            else_bindings,
+        } => {
+            let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(quote! { self }));
+            let then_value = emit_scalar_branch_value(
+                plan,
+                &then_bindings[0],
+                owner_binding,
+                setter,
+                item_ext,
+                ctx,
+                from,
+                table,
+            );
+            let else_value = emit_scalar_branch_value(
+                plan,
+                &else_bindings[0],
+                owner_binding,
+                setter,
+                item_ext,
+                ctx,
+                from,
+                table,
+            );
+            quote! {
+                if #condition { #then_value } else { #else_value }
+            }
+        }
+        DynamicPlan::Match { value, arms } => {
+            let value = emit_expr(value, ctx, &EmitMode::WithSelf(quote! { self }));
+            let arm_stmts = arms.iter().map(|(pattern, children)| {
+                let arm_value = emit_scalar_branch_value(
+                    plan,
+                    &children[0],
+                    owner_binding,
+                    setter,
+                    item_ext,
+                    ctx,
+                    from,
+                    table,
+                );
+                quote! { #pattern => { #arm_value } }
+            });
+            quote! {
+                match #value { #(#arm_stmts)* }
+            }
+        }
+    }
+}
+
+/// A single branch's contribution to `emit_scalar_dynamic_node_refresh` — either the branch's own
+/// leaf child (emits the actual `self.#owner_binding.#setter(..)` call) or, when the branch is
+/// itself a nested dynamic marker (Phase 1), a further recursive dispatch that bottoms out at
+/// exactly one such call regardless of nesting depth.
+fn emit_scalar_branch_value(
+    plan: &[PlannedNode],
+    entry: &(syn::Ident, String),
+    owner_binding: &syn::Ident,
+    setter: &syn::Ident,
+    item_ext: &syn::Ident,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let (binding, ty) = entry;
+    if ty == DYNAMIC_CHILD_SLOT_MARKER {
+        let nested = plan
+            .iter()
+            .find(|n| &n.binding == binding)
+            .expect("nested marker must be in plan");
+        return emit_scalar_dynamic_node_refresh(
+            plan,
+            nested,
+            owner_binding,
+            setter,
+            item_ext,
+            ctx,
+            from,
+            table,
+        );
+    }
+    let value = dynamic_child_binding(quote! { self.#binding.clone() }, ty, item_ext, from, table);
+    quote! { self.#owner_binding.#setter(#value); }
 }
 
 fn plan_child_entry(
     entry: &ChildEntry,
+    parent_type_path: &str,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
@@ -3963,7 +4406,150 @@ fn plan_child_entry(
             panic!("`{name}` does not refer to an earlier `let` binding in this view")
         }),
         ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. } => {
-            panic!("nested dynamic control-flow regions are not implemented yet")
+            plan_dynamic_entry(entry, parent_type_path, ctx, from, table, out, lets)
+        }
+    }
+}
+
+/// Plans an `If`/`Match`/`For` region into a transparent `DYNAMIC_CHILD_SLOT_MARKER` `PlannedNode`
+/// (see that constant's own doc comment) — shared by `plan_element`'s own children loop (a
+/// top-level dynamic region, directly under a real element) and `plan_child_entry` (a *nested*
+/// region, inside another dynamic region's own branch/arm/body). `parent_type_path` is always the
+/// nearest real (non-dynamic) ancestor *element*'s type — for a nested region that's the same real
+/// ancestor its enclosing dynamic region was itself planned against, threaded through unchanged
+/// (see `plan_child_entry`'s own call site) — never the immediately-enclosing `If`/`Match`/`For`,
+/// which has no collection of its own to resolve an item trait against. Only used here for `For`'s
+/// own `dynamic_collection_item_trait` lookup; `__refresh_dynamic_regions` (`emit_dynamic_region_refresh`)
+/// separately re-derives each region's real host/insertion-point at generation time by walking
+/// `plan` itself, so this function does not need to record the parent any more permanently than that.
+fn plan_dynamic_entry(
+    entry: &ChildEntry,
+    parent_type_path: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut Vec<PlannedNode>,
+    lets: &HashMap<String, (syn::Ident, String)>,
+) -> (syn::Ident, String) {
+    match entry {
+        ChildEntry::Literal(_) | ChildEntry::Ref(_) => {
+            unreachable!("plan_dynamic_entry is only called for If/Match/For entries")
+        }
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let then_bindings = then_branch
+                .iter()
+                .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
+                .collect();
+            let else_bindings = else_branch
+                .iter()
+                .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
+                .collect();
+            let binding = format_ident!("__node_{}", out.len());
+            out.push(PlannedNode {
+                binding: binding.clone(),
+                type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                attributes: Vec::new(),
+                attached: Vec::new(),
+                child_bindings: Vec::new(),
+                element_attr_bindings: HashMap::new(),
+                stored: true,
+                id: None,
+                dynamic: Some(DynamicPlan::If {
+                    condition: condition.clone(),
+                    then_bindings,
+                    else_bindings,
+                }),
+            });
+            (binding, DYNAMIC_CHILD_SLOT_MARKER.to_string())
+        }
+        ChildEntry::Match { value, arms } => {
+            let arms = arms
+                .iter()
+                .map(|arm| {
+                    let pattern =
+                        syn::parse::Parser::parse_str(syn::Pat::parse_single, &arm.pattern)
+                            .unwrap_or_else(|error| {
+                                panic!("invalid match pattern `{}`: {error}", arm.pattern)
+                            });
+                    let children = arm
+                        .body
+                        .iter()
+                        .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
+                        .collect();
+                    (pattern, children)
+                })
+                .collect();
+            let binding = format_ident!("__node_{}", out.len());
+            out.push(PlannedNode {
+                binding: binding.clone(),
+                type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                attributes: Vec::new(),
+                attached: Vec::new(),
+                child_bindings: Vec::new(),
+                element_attr_bindings: HashMap::new(),
+                stored: true,
+                id: None,
+                dynamic: Some(DynamicPlan::Match {
+                    value: value.clone(),
+                    arms,
+                }),
+            });
+            (binding, DYNAMIC_CHILD_SLOT_MARKER.to_string())
+        }
+        ChildEntry::For {
+            binding,
+            collection,
+            body,
+        } => {
+            let item_type = match body.first() {
+                Some(ChildEntry::Literal(element)) => element.type_path.clone(),
+                _ => {
+                    panic!("a `for` body currently requires one or more literal element templates")
+                }
+            };
+            if !body
+                .iter()
+                .all(|entry| matches!(entry, ChildEntry::Literal(_)))
+            {
+                panic!("a `for` body currently requires literal element templates");
+            }
+            let parent = PlannedNode {
+                binding: format_ident!("__for_parent"),
+                type_path: parent_type_path.to_string(),
+                attributes: Vec::new(),
+                attached: Vec::new(),
+                child_bindings: Vec::new(),
+                element_attr_bindings: HashMap::new(),
+                stored: false,
+                id: None,
+                dynamic: None,
+            };
+            let item_trait = dynamic_collection_item_trait(&parent, from, table);
+            let rc_identity = collection_uses_rc_identity(collection, ctx, from, table);
+            let renderer =
+                emit_for_renderer(binding, body, ctx, from, table, &item_trait, rc_identity);
+            let node_binding = format_ident!("__node_{}", out.len());
+            out.push(PlannedNode {
+                binding: node_binding.clone(),
+                type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
+                attributes: Vec::new(),
+                attached: Vec::new(),
+                child_bindings: Vec::new(),
+                element_attr_bindings: HashMap::new(),
+                stored: true,
+                id: None,
+                dynamic: Some(DynamicPlan::For {
+                    collection: collection.clone(),
+                    renderer,
+                    item_type,
+                    rc_identity,
+                }),
+            });
+            (node_binding, DYNAMIC_CHILD_SLOT_MARKER.to_string())
         }
     }
 }
@@ -4214,7 +4800,7 @@ fn emit_closure_value(
             );
             let mut construct = TokenStream::new();
             for planned in &plan {
-                emit_construction(planned, &closure_ctx, from, table, &mut construct);
+                emit_construction(planned, &closure_ctx, from, table, &mut construct, &plan);
             }
             let root = plan.last().expect("closure element body must have a root");
             // A closure content field's declared return type is `Rc<dyn UIElement>`, not a bare
@@ -4344,6 +4930,7 @@ fn emit_construction(
     from: &Module,
     table: &SymbolTable,
     out: &mut TokenStream,
+    plan: &[PlannedNode],
 ) {
     if table
         .resolve(from, &node.type_path)
@@ -4363,7 +4950,7 @@ fn emit_construction(
     let type_ident = concrete_type_ident(&node.type_path, Some(info));
 
     if is_hand_written_native(info) {
-        let setters = build_component_setters(node, ctx, from, table, info);
+        let setters = build_component_setters(node, ctx, from, table, info, plan);
         let trait_use = builtin_trait_use(&node.type_path, Some(info));
         out.extend(quote! {
             #trait_use
@@ -4376,7 +4963,7 @@ fn emit_construction(
         // target's own deferred `Option<T>` fields (`is_deferred_field`) from the positional list —
         // `build_component_optional_setters` supplies the matching trailing `.set_<field>(value)`
         // calls for whichever of them this use site actually gives a value.
-        let args = build_component_args(node, ctx, from, table, info);
+        let args = build_component_args(node, ctx, from, table, info, plan);
         let optional_setters = build_component_optional_setters(node, ctx, from, table, info);
         out.extend(quote! {
             let #binding = #type_ident::new(#(#args),*);
@@ -4485,6 +5072,7 @@ fn build_component_args(
     from: &Module,
     table: &SymbolTable,
     info: &TypeInfo,
+    plan: &[PlannedNode],
 ) -> Vec<TokenStream> {
     // A bare nested child element (no `name:` attribute) only ever has somewhere to go if this
     // component declares a `children`-named param (a list, consumed in full below) or a
@@ -4579,7 +5167,9 @@ fn build_component_args(
                     );
                 }
                 let (child, child_ty) = &node.child_bindings[0];
-                if inner_ty.contains("dyn UIElement") {
+                if child_ty == DYNAMIC_CHILD_SLOT_MARKER {
+                    initial_dynamic_content_value(plan, child, inner_ty, from, table)
+                } else if inner_ty.contains("dyn UIElement") {
                     into_node_if_needed(quote! { #child }, child_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #child }, inner_ty)
@@ -4616,6 +5206,7 @@ fn build_component_setters(
     from: &Module,
     table: &SymbolTable,
     info: &TypeInfo,
+    plan: &[PlannedNode],
 ) -> Vec<TokenStream> {
     let has_children_field = info.param_fields.iter().any(|(name, _)| name == "children");
     if !has_children_field && info.content_field.is_none() && !node.child_bindings.is_empty() {
@@ -4709,7 +5300,9 @@ fn build_component_setters(
                     );
                 }
                 let (child, child_ty) = &node.child_bindings[0];
-                if inner_ty.contains("dyn UIElement") {
+                if child_ty == DYNAMIC_CHILD_SLOT_MARKER {
+                    initial_dynamic_content_value(plan, child, inner_ty, from, table)
+                } else if inner_ty.contains("dyn UIElement") {
                     into_node_if_needed(quote! { #child }, child_ty, from, table)
                 } else {
                     into_any_view_if_needed(quote! { #child }, inner_ty)
@@ -4793,6 +5386,7 @@ fn build_component_value(
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
+    plan: &[PlannedNode],
 ) -> TokenStream {
     let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
         panic!(
@@ -4804,7 +5398,7 @@ fn build_component_value(
     if info.is_builtin && node.type_path == "ContentControl" {
         return quote! { #construct_path() };
     }
-    let args = build_component_args(node, ctx, from, table, info);
+    let args = build_component_args(node, ctx, from, table, info, plan);
     quote! { #construct_path(#(#args),*) }
 }
 
@@ -5776,6 +6370,225 @@ view NotepadWindow {
         let rendered = generated.to_string();
         assert!(rendered.contains("fn __refresh_dynamic_regions"));
         assert!(!rendered.contains("__dynamic_child_slot"));
+    }
+
+    /// Phase 1 (memory/elwindui_dynamic_controls_progress.md's "known unaddressed" item): `else if`
+    /// (`parser.rs`'s `parse_control_child` already parses this as a `ChildEntry::If` nested in the
+    /// outer `If`'s own `else_branch`, line 645-651) used to panic in `plan_child_entry` — this is
+    /// the most basic case of the nesting this phase fixes.
+    #[test]
+    fn generates_else_if_chain() {
+        let module = parse_module(
+            r#"
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    is_zero: bool = true,
+                    #[observable]
+                    is_one: bool = false,
+                }
+
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+
+                view DynamicHost {
+                    VerticalLayout {
+                        if vm.is_zero {
+                            TextBlock { text: "zero" }
+                        } else if vm.is_one {
+                            TextBlock { text: "one" }
+                        } else {
+                            TextBlock { text: "many" }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("else-if source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("else_if_chain", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("fn __refresh_dynamic_regions"));
+    }
+
+    /// A `for` nested inside an `if`'s then-branch: the outer `if` toggles between the `for` region
+    /// and a static fallback, so the nested `for`'s own `DynamicChildSlot` must be forced empty
+    /// (`replace_children` with an empty `vec`) whenever the `if` picks the static branch instead.
+    #[test]
+    fn generates_nested_for_inside_if_then_branch() {
+        let module = parse_module(
+            r#"
+                viewmodel Item { }
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    show_list: bool = true,
+                    #[observable]
+                    items: Vec<std::rc::Rc<Item>> = Vec::new(),
+                }
+                component ItemView {
+                    #[param]
+                    item: std::rc::Rc<Item>,
+                }
+                view ItemView { TextBlock { text: "item" } }
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+                view DynamicHost {
+                    VerticalLayout {
+                        if vm.show_list {
+                            for item in vm.items { ItemView { item: item } }
+                        } else {
+                            TextBlock { text: "empty" }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("nested for-in-if source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_for_in_if", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("fn __refresh_dynamic_regions"));
+        assert!(rendered.contains("replace_rc_items"));
+        // The nested `for`'s own slot must be independently clearable (empty `vec![]`) when the
+        // outer `if` picks the static `else` branch instead.
+        assert!(rendered.contains("replace_children") && rendered.contains("Vec :: new ()"));
+    }
+
+    /// An `if` nested inside one `match` arm: exercises `plan_dynamic_entry`'s `Match` case
+    /// delegating to `plan_child_entry` for a nested control-flow entry, and the generated
+    /// `__refresh_dynamic_regions`'s per-arm "clear every *other* arm's own nested markers" logic.
+    #[test]
+    fn generates_nested_if_inside_match_arm() {
+        let module = parse_module(
+            r#"
+                enum Status { Ready, Busy }
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    status: Status = Status::Ready,
+                    #[observable]
+                    urgent: bool = false,
+                }
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+                view DynamicHost {
+                    VerticalLayout {
+                        match vm.status {
+                            Status::Ready => {
+                                if vm.urgent {
+                                    TextBlock { text: "ready-urgent" }
+                                } else {
+                                    TextBlock { text: "ready" }
+                                }
+                            }
+                            Status::Busy => { TextBlock { text: "busy" } }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("nested if-in-match source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_if_in_match", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("fn __refresh_dynamic_regions"));
+    }
+
+    /// Phase 2 (docs/elwindui_spec.md 付録H.2.1a): a scalar `#[content(...)]` field
+    /// (`ContentControl`'s `content: Rc<dyn UIElement>`) can host an `if`/`match` dynamic region —
+    /// combined with Phase 0's implicit-composition sugar, this is what used to be called "root
+    /// self-dynamism": `component X inherits ContentControl { view X { if .. { A } else { B } } }`
+    /// with no wrapper element written at all. Swapping must go through `set_content`, never
+    /// `DynamicChildSlot` (there is nowhere to keep a list position for a single-value field).
+    #[test]
+    fn generates_scalar_content_dynamic_region_via_content_control() {
+        let module = parse_module(
+            r#"
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    show_a: bool = true,
+                }
+
+                component DynamicHost inherits ContentControl {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+
+                view DynamicHost {
+                    if vm.show_a {
+                        TextBlock { text: "a" }
+                    } else {
+                        TextBlock { text: "b" }
+                    }
+                }
+            "#,
+        )
+        .expect("scalar dynamic content source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let all_modules: Vec<_> = std::iter::once(module.clone())
+            .chain(crate::builtin_modules())
+            .collect();
+        assert_eq!(crate::validate::validate(&all_modules), Ok(()));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("scalar_dynamic_content_control", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("fn __refresh_dynamic_regions"));
+        assert!(rendered.contains("set_content"));
+        assert!(!rendered.contains("DynamicChildSlot"));
+    }
+
+    /// Same as above, but composing over `Window` (host composition) instead of `ContentControl` —
+    /// confirms the scalar swap path works uniformly regardless of which composed base declares the
+    /// scalar `#[content(...)]` field (`codegen.rs`'s `content_field_is_list`/
+    /// `emit_scalar_dynamic_node_refresh` don't special-case either type by name).
+    #[test]
+    fn generates_scalar_content_dynamic_region_via_window_host_composition() {
+        let module = parse_module(
+            r#"
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    show_a: bool = true,
+                }
+
+                component DynamicHost inherits Window {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+
+                view DynamicHost {
+                    title: "Dynamic"
+                    if vm.show_a {
+                        TextBlock { text: "a" }
+                    } else {
+                        TextBlock { text: "b" }
+                    }
+                }
+            "#,
+        )
+        .expect("scalar dynamic content (host composition) source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let all_modules: Vec<_> = std::iter::once(module.clone())
+            .chain(crate::builtin_modules())
+            .collect();
+        assert_eq!(crate::validate::validate(&all_modules), Ok(()));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("scalar_dynamic_content_window", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("fn __refresh_dynamic_regions"));
+        assert!(rendered.contains("set_content"));
+        assert!(!rendered.contains("DynamicChildSlot"));
     }
 
     #[test]

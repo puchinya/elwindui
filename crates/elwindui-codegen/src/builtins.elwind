@@ -151,12 +151,10 @@ component Rectangle inherits Shape {
 }
 
 view Rectangle {
-    Shape {
-        kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) }
-        fill: fill
-        stroke: stroke
-        stroke_width: stroke_width
-    }
+    kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) }
+    fill: fill
+    stroke: stroke
+    stroke_width: stroke_width
 }
 
 // A concrete `Shape` leaf — see `Rectangle` above for the shape-composition rationale. No fields
@@ -167,12 +165,10 @@ component Ellipse inherits Shape {
 }
 
 view Ellipse {
-    Shape {
-        kind: elwindui_core::ui::ShapeKind::Oval
-        fill: fill
-        stroke: stroke
-        stroke_width: stroke_width
-    }
+    kind: elwindui_core::ui::ShapeKind::Oval
+    fill: fill
+    stroke: stroke
+    stroke_width: stroke_width
 }
 
 // `children` is the Logical-tree child list this component declares (`UIElementCollection`,
@@ -209,10 +205,8 @@ component ContentControl inherits Control {
 }
 
 view ContentControl {
-    Control {
-        padding: padding,
-        content
-    }
+    padding: padding
+    content
 }
 
 // WPF/WinUI3-style row/column layout (docs/elwindui_spec.md §3) — a virtual builtin like `Control`/

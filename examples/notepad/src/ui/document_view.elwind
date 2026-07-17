@@ -17,19 +17,17 @@ component DocumentView inherits ContentControl {
 // space. `Grid`'s `GridLength::Star` row does actually fill whatever's left after the status bar's
 // `Auto` row takes its own height.
 view DocumentView {
-    ContentControl {
-        Grid {
-            rows: [elwindui::core::layout::GridLength::Star(1.0), elwindui::core::layout::GridLength::Auto]
-            columns: [elwindui::core::layout::GridLength::Star(1.0)]
-            TextArea { text: document_text, Grid::row: 0 }
-            HorizontalLayout {
-                Grid::row: 1
-                TextBlock {
-                    text: doc.file_name
-                    margin: 4.0
-                    }
-                RoundedPanel { label: t!("notepad-status-chars", count: doc.char_count) }
-            }
+    Grid {
+        rows: [elwindui::core::layout::GridLength::Star(1.0), elwindui::core::layout::GridLength::Auto]
+        columns: [elwindui::core::layout::GridLength::Star(1.0)]
+        TextArea { text: document_text, Grid::row: 0 }
+        HorizontalLayout {
+            Grid::row: 1
+            TextBlock {
+                text: doc.file_name
+                margin: 4.0
+                }
+            RoundedPanel { label: t!("notepad-status-chars", count: doc.char_count) }
         }
     }
 }

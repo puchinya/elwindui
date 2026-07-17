@@ -1,8 +1,9 @@
 // Demonstrates a custom component built by composing over another already-composed DSL component
 // (docs/elwindui_spec.md 付録G/N, 付録H.2.1a) — `RoundedPanel inherits ContentControl`, own `view`
-// root literally `ContentControl`, with a `Grid` overlaying a background `Rectangle` and the
-// `TextBlock` label in the same (default `(0, 0)`) cell. Because the root matches the base exactly,
-// `elwindui-codegen` generates the real struct as the bare `RoundedPanel` name itself (its
+// body implicitly `ContentControl`'s (no wrapper element written — Phase 0's implicit-composition
+// sugar), with a `Grid` overlaying a background `Rectangle` and the `TextBlock` label in the same
+// (default `(0, 0)`) cell. `elwindui-codegen` generates the real struct as the bare `RoundedPanel`
+// name itself (its
 // auto-derived `pub trait RoundedPanelExt: UIElementExt + ControlExt` lives alongside it) with a
 // `base: ContentControl` field, delegating to it one hop further than `ContentControl` itself
 // delegates to `Control` — `self` *is* the tree node at any composition depth (`into_node()` just
@@ -18,18 +19,16 @@ component RoundedPanel inherits ContentControl {
 }
 
 view RoundedPanel {
-    ContentControl {
-        Grid {
-            rows: [elwindui::core::layout::GridLength::Star(1.0)]
-            columns: [elwindui::core::layout::GridLength::Star(1.0)]
-            Rectangle {
-                fill: "#3a3a3c"
-                corner_radius: 8.0
-            }
-            TextBlock {
-                text: label
-                text_alignment: elwindui::core::ui::TextAlignment::Center
-                }
+    Grid {
+        rows: [elwindui::core::layout::GridLength::Star(1.0)]
+        columns: [elwindui::core::layout::GridLength::Star(1.0)]
+        Rectangle {
+            fill: "#3a3a3c"
+            corner_radius: 8.0
         }
+        TextBlock {
+            text: label
+            text_alignment: elwindui::core::ui::TextAlignment::Center
+            }
     }
 }

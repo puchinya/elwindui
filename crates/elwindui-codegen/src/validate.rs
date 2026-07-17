@@ -206,7 +206,14 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         // check below still expects, exactly the way `codegen::generate_view` does
                         // (a composable `base` implicitly wraps the whole body; otherwise the body
                         // must reduce to exactly one literal child).
-                        match codegen::resolve_view_root_element(&view.root, c.base.as_deref()) {
+                        let is_composed = table.resolve(module, &c.name).is_some_and(|info| {
+                            info.composed_shape.is_some() || info.host_composition_base.is_some()
+                        });
+                        match codegen::resolve_view_root_element(
+                            &view.root,
+                            c.base.as_deref(),
+                            is_composed,
+                        ) {
                             Some(resolved_root) => {
                                 check_vm_references(
                                     &resolved_root,
@@ -744,9 +751,16 @@ fn check_dynamic_child_hosts(
                     || ty.trim_start().starts_with("Vec<")
                     || ty.contains("ListExt<")
             });
-            if !is_collection {
+            // Phase 2 (docs/elwindui_spec.md 付録H.2.1a): a *scalar* `#[content(...)]` field (e.g.
+            // `ContentControl`/`Window`'s `content: Rc<dyn UIElement>`) can also host `if`/`match`
+            // dynamic children now — not `for` (a variable-length list can never fit one slot), and
+            // only if every branch, recursively, resolves to exactly one element (no `for`
+            // anywhere inside it either, and no branch with zero or multiple children) — the
+            // dynamic analogue of the existing "single content field can only bind one bare child"
+            // rule (`codegen.rs`'s `panics_on_multiple_bare_children_for_a_single_content_field`).
+            if !is_collection && !dynamic_children_reduce_to_one_element(&node.children) {
                 errors.push(format!(
-                    "{component_name}: dynamic child control flow under `{}` requires a collection content field; `#[content({field})]` has type `{}`",
+                    "{component_name}: dynamic child control flow under `{}` — `#[content({field})]` has scalar type `{}`, so every branch must resolve to exactly one element (`for` and multiple children per branch aren't allowed here; a collection-typed content field allows both, see `#[content({field})]`'s own type)",
                     node.type_path,
                     info.field_types.get(field).map(String::as_str).unwrap_or("<missing>")
                 ));
@@ -754,39 +768,77 @@ fn check_dynamic_child_hosts(
         }
     }
     for child in &node.children {
-        match child {
-            ChildEntry::Literal(element) => {
-                check_dynamic_child_hosts(element, from, component_name, table, errors)
-            }
-            ChildEntry::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                for child in then_branch.iter().chain(else_branch) {
-                    if let ChildEntry::Literal(element) = child {
-                        check_dynamic_child_hosts(element, from, component_name, table, errors);
-                    }
-                }
-            }
-            ChildEntry::Match { arms, .. } => {
-                for arm in arms {
-                    for child in &arm.body {
-                        if let ChildEntry::Literal(element) = child {
-                            check_dynamic_child_hosts(element, from, component_name, table, errors);
-                        }
-                    }
-                }
-            }
-            ChildEntry::For { body, .. } => {
-                for child in body {
-                    if let ChildEntry::Literal(element) = child {
-                        check_dynamic_child_hosts(element, from, component_name, table, errors);
-                    }
-                }
-            }
-            ChildEntry::Ref(_) => {}
+        check_dynamic_child_host_in_child(child, from, component_name, table, errors);
+    }
+}
+
+/// Recurses into a single child entry for `check_dynamic_child_hosts` — shared by `If`'s
+/// then/else branches, `Match`'s arms, and `For`'s body, so a nested `if`/`match`/`for` (Phase 1)
+/// is walked into just like a top-level one instead of being silently skipped. The "does *this*
+/// element's own `#[content(...)]` support dynamic children" check itself only ever needs to fire
+/// once per real element (`check_dynamic_child_hosts`'s own body, above) — a region nested inside
+/// another dynamic region still targets that same outer element, not a new one, so this function
+/// only needs to keep walking down to find further literal elements with dynamic children of their
+/// own to check.
+fn check_dynamic_child_host_in_child(
+    child: &ChildEntry,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    match child {
+        ChildEntry::Literal(element) => {
+            check_dynamic_child_hosts(element, from, component_name, table, errors)
         }
+        ChildEntry::Ref(_) => {}
+        ChildEntry::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            for child in then_branch.iter().chain(else_branch) {
+                check_dynamic_child_host_in_child(child, from, component_name, table, errors);
+            }
+        }
+        ChildEntry::Match { arms, .. } => {
+            for arm in arms {
+                for child in &arm.body {
+                    check_dynamic_child_host_in_child(child, from, component_name, table, errors);
+                }
+            }
+        }
+        ChildEntry::For { body, .. } => {
+            for child in body {
+                check_dynamic_child_host_in_child(child, from, component_name, table, errors);
+            }
+        }
+    }
+}
+
+/// Phase 2: whether `children` (a dynamic branch's body — `If`'s then/else, one `Match` arm's
+/// body) resolves to *exactly one element* — the shape a scalar `#[content(...)]` field's dynamic
+/// region must have in every branch, recursively. `For` never qualifies (a variable-length list
+/// can never be exactly one element); a nested `If`/`Match` qualifies only if *all* of its own
+/// branches do too.
+fn dynamic_children_reduce_to_one_element(children: &[ChildEntry]) -> bool {
+    let [only] = children else {
+        return false;
+    };
+    match only {
+        ChildEntry::Literal(_) | ChildEntry::Ref(_) => true,
+        ChildEntry::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            dynamic_children_reduce_to_one_element(then_branch)
+                && dynamic_children_reduce_to_one_element(else_branch)
+        }
+        ChildEntry::Match { arms, .. } => arms
+            .iter()
+            .all(|arm| dynamic_children_reduce_to_one_element(&arm.body)),
+        ChildEntry::For { .. } => false,
     }
 }
 
@@ -1083,26 +1135,21 @@ fn validate_inherits(
         return;
     }
 
-    // A primitive shape family (`has_view == false`, not native): `X` must have its own `view`
-    // whose root element is literally `Base` — unchanged shape-composition contract.
-    let view = modules
+    // A primitive shape family (`has_view == false`, not native): `X` must have its own `view` —
+    // Phase 0's implicit-composition sugar (docs/elwindui_spec.md 付録H.2.1a) means that `view`'s
+    // body is always implicitly `base`'s own attributes/children directly (no wrapper element to
+    // check the shape of anymore); a virtual-builtin base has no `view` of its own to fall back to
+    // as a template, so `X` must still declare one.
+    let has_own_view = modules
         .iter()
         .flat_map(|m| &m.items)
-        .find_map(|item| match item {
-            Item::View(v) if v.target == c.name => Some(v),
-            _ => None,
-        });
-    match view {
-        None => errors.push(format!(
+        .any(|item| matches!(item, Item::View(v) if v.target == c.name));
+    if !has_own_view {
+        errors.push(format!(
             "{}: inherits `{base}`, but has no `view {}` — a component inheriting a shape \
-             primitive with no `view` of its own must have its view's root element construct `{base}`",
+             primitive with no `view` of its own must declare one composing over `{base}`",
             c.name, c.name
-        )),
-        Some(v) if v.root.type_path != base => errors.push(format!(
-            "{}: inherits `{base}`, so `view {}`'s root element must be `{base}`, found `{}`",
-            c.name, c.name, v.root.type_path
-        )),
-        Some(_) => {}
+        ));
     }
 }
 
@@ -1565,12 +1612,14 @@ view Window11 {
         assert_eq!(validate(&modules), Ok(()));
     }
 
-    /// `inherits`'s shape-composition use case (docs/elwindui_spec.md §3): a component inheriting a
-    /// primitive shape family with no `view` of its own must have its own `view`'s root element
-    /// literally construct that base — `fill` is inherited from `Rectangle` automatically, with no
-    /// redeclaration needed, and `corner_style` is `RoundedPanel`'s own genuinely new field.
+    /// `inherits`'s shape-composition use case (docs/elwindui_spec.md §3, 付録H.2.1a): a component
+    /// inheriting a primitive shape family with no `view` of its own must have its own `view`, whose
+    /// body is always implicitly `Shape`'s own attributes/children (Phase 0's implicit-composition
+    /// sugar — no `Shape { .. }` wrapper written) — `fill` is inherited from `Rectangle`
+    /// automatically, with no redeclaration needed, and `corner_style` is `RoundedPanel`'s own
+    /// genuinely new field.
     #[test]
-    fn accepts_component_inheriting_a_shape_primitive_with_matching_view_root() {
+    fn accepts_component_inheriting_a_shape_primitive_via_implicit_composition() {
         let src = r#"
 component RoundedPanel inherits Shape {
     #[param]
@@ -1578,7 +1627,8 @@ component RoundedPanel inherits Shape {
 }
 
 view RoundedPanel {
-    Shape { kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
+    kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }
+    fill: fill
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
@@ -1590,7 +1640,7 @@ view RoundedPanel {
     /// `#[abstract]` (docs/elwindui_spec.md 付録E): `Shape` is a pure category tag that `Rectangle`/
     /// `Ellipse` shape-compose over — using it directly as a view root *without* declaring
     /// `inherits Shape` is not legitimate composition, so it's rejected the same as any other bare
-    /// use (unlike `accepts_component_inheriting_a_shape_primitive_with_matching_view_root`, which
+    /// use (unlike `accepts_component_inheriting_a_shape_primitive_via_implicit_composition`, which
     /// *does* declare `inherits Shape` and must keep working).
     #[test]
     fn rejects_abstract_component_used_as_a_bare_view_root_without_inherits() {
@@ -1638,8 +1688,16 @@ view Foo {
         );
     }
 
+    /// Phase 0 (docs/elwindui_spec.md 付録H.2.1a) removed the old "own `view`'s root element must
+    /// literally construct `base`" requirement entirely — a composable base's `view` body is always
+    /// implicitly its own attributes/children now, so there's no longer a *root shape* for
+    /// `validate::validate` to reject here. `Shape` has no `#[content(...)]` field to bind a bare
+    /// `VerticalLayout {}` child to at all — a pre-existing gap unrelated to Phase 0,
+    /// `generate_module` silently constructs and discards it rather than erroring (unlike a
+    /// hand-written/logical component's own `build_component_args`, which does reject this same
+    /// shape — see `codegen.rs`'s `panics_on_bare_child_with_no_content_field_declared`).
     #[test]
-    fn rejects_inherits_when_view_root_does_not_match_base() {
+    fn accepts_inherits_regardless_of_bare_child_shape_since_composition_is_now_always_implicit() {
         let src = r#"
 component RoundedPanel inherits Shape {
     #[param]
@@ -1653,9 +1711,73 @@ view RoundedPanel {
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
             .chain(crate::builtin_modules())
             .collect();
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// Phase 2 (docs/elwindui_spec.md 付録H.2.1a): a scalar `#[content(...)]` field (`ContentControl`'s
+    /// `content: Rc<dyn UIElement>`) can host `if`/`match` dynamic children now, but never `for` — a
+    /// variable-length list can never fit a single-value slot.
+    #[test]
+    fn rejects_for_under_a_scalar_content_field() {
+        let src = r#"
+viewmodel DynamicViewModel {
+    #[observable]
+    items: Vec<String> = Vec::new(),
+}
+
+component DynamicHost inherits ContentControl {
+    #[param]
+    #[inject]
+    vm: DynamicViewModel,
+}
+
+view DynamicHost {
+    for item in vm.items { TextBlock { text: item } }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("must be `Shape`")),
+            errs.iter()
+                .any(|e| e.contains("scalar type") && e.contains("ContentControl")),
+            "errors: {errs:?}"
+        );
+    }
+
+    /// A scalar content field's `if` is only valid when *both* branches resolve to exactly one
+    /// element — a branch with two bare children has nowhere for the second one to go.
+    #[test]
+    fn rejects_multiple_children_in_one_branch_under_a_scalar_content_field() {
+        let src = r#"
+viewmodel DynamicViewModel {
+    #[observable]
+    show_a: bool = true,
+}
+
+component DynamicHost inherits ContentControl {
+    #[param]
+    #[inject]
+    vm: DynamicViewModel,
+}
+
+view DynamicHost {
+    if vm.show_a {
+        TextBlock { text: "a" }
+        TextBlock { text: "a2" }
+    } else {
+        TextBlock { text: "b" }
+    }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("scalar type") && e.contains("ContentControl")),
             "errors: {errs:?}"
         );
     }

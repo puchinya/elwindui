@@ -97,27 +97,25 @@ elwindui::component! {
     }
 
     view NotepadWindow {
-        Window {
-            title: vm.window_title
+        title: vm.window_title
 
-            content: VerticalLayout {
-                HorizontalLayout {
-                    Button {
-                        text: t!("notepad-menu-save")
-                        on_click: vm.save.execute()
-                        enabled: vm.save.can_execute
-                    }
-                    Button {
-                        text: t!("notepad-menu-open")
-                        on_click: vm.open.execute()
-                    }
+        content: VerticalLayout {
+            HorizontalLayout {
+                Button {
+                    text: t!("notepad-menu-save")
+                    on_click: vm.save.execute()
+                    enabled: vm.save.can_execute
                 }
-
-                TextArea { text: vm.content }
-
-                HorizontalLayout {
-                    TextBlock { text: t!("notepad-status-chars", count: vm.char_count) }
+                Button {
+                    text: t!("notepad-menu-open")
+                    on_click: vm.open.execute()
                 }
+            }
+
+            TextArea { text: vm.content }
+
+            HorizontalLayout {
+                TextBlock { text: t!("notepad-status-chars", count: vm.char_count) }
             }
         }
     }

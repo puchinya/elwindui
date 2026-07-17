@@ -22,24 +22,22 @@ view NotepadWindow {
         on_new_tab: vm.new_tab.execute()
     };
 
-    Window {
-        title: t!("notepad-app-title")
-        left: 200.0
-        top: 200.0
-        width: 640.0
-        height: 480.0
+    title: t!("notepad-app-title")
+    left: 200.0
+    top: 200.0
+    width: 640.0
+    height: 480.0
 
-        menu_bar: MenuBar {
-            MenuBarItem {
-                text: t!("notepad-menu-file")
-                Menu {
-                    MenuItem { text: t!("notepad-menu-new"), shortcut: "n", command: vm.new_tab }
-                    MenuItem { text: t!("notepad-menu-open"), shortcut: "o", command: vm.open }
-                    MenuItem { text: t!("notepad-menu-save"), shortcut: "s", command: vm.save }
-                }
+    menu_bar: MenuBar {
+        MenuBarItem {
+            text: t!("notepad-menu-file")
+            Menu {
+                MenuItem { text: t!("notepad-menu-new"), shortcut: "n", command: vm.new_tab }
+                MenuItem { text: t!("notepad-menu-open"), shortcut: "o", command: vm.open }
+                MenuItem { text: t!("notepad-menu-save"), shortcut: "s", command: vm.save }
             }
         }
-
-        tabs
     }
+
+    tabs
 }

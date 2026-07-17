@@ -10,20 +10,21 @@ When asking the user a question (clarifying questions, `AskUserQuestion`, plan c
 
 This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to native OS toolkit backends (WinUI 3 / AppKit / GTK4). This is a Cargo workspace (`crates/*` + `examples/*`, no root `src/`) with a real, substantial implementation — not just a spec: `elwindui-codegen` (the `.elwind` → Rust compiler, both a `build.rs`-driven path and a `component!`/`#[viewmodel]` proc-macro path), `elwindui-core` (the `UIElement` runtime), `elwindui-macros`, `elwindui-i18n`, `elwindui-languageserver`, and `elwindui-backend-appkit` (built, run, and screenshot-verified on this machine) are all real. `elwindui-backend-winui3` has code but is unverified (no Windows environment); `elwindui-backend-gtk4` and hot reload (`elwindui-hotreload`) are stubs; there is no preview-tool crate at all yet. See `docs/elwindui_implementation_status.md` for the full, regularly-stale-prone breakdown of what's implemented vs. still just spec — check it, and re-verify against `crates/` directly, before assuming a feature described in the spec docs actually exists.
 
-The authoritative source of truth is `docs/elwindui_spec.md` (written in Japanese, core language:
-`component`/`view`, `param`/`prop`, control flow, static verification rules, etc.), plus
-`docs/elwindui_builtins_spec.md` — split out from the same doc because it had grown too large —
-which covers every `builtin::`-namespace UI element and `platform::`-namespace OS API. Both are
-long — read the relevant section rather than the whole file. Section map (grep each file for these
-headers):
+The authoritative source of truth is split across three Japanese-language docs, each scoped to a
+different concern. All three are long — read the relevant section rather than the whole file.
+Section map (grep each file for these headers):
 
-`docs/elwindui_spec.md` (core language/runtime, no builtin-widget catalog):
-- §1–§15 — core language: `component`/`view` split, `param`/`prop`, control flow, `style`, constraints, `enum`, `env::*`/`once`, `bind!`, i18n (Fluent), imports, the `Element` trait, and the full list of ~24 static verification rules (§14) a future compiler/linter must implement.
-- 付録A/C/D — backend abstraction: common AST → per-backend codegen, `target::backend()` compile-time constant.
-- 付録E — the `builtin::` namespace and `#[overrides(builtin::X)]` override rule (static verification only; the builtins themselves are in `elwindui_builtins_spec.md` 付録F).
-- 付録B — toolchain: `.elwind` → Rust via `build.rs` codegen (or proc-macro), `elwindui-languageserver` LSP, 3-tier live preview, hot-reload semantics.
-- 付録H — core runtime (layout/focus/accessibility), consumed by builtins but not itself a widget.
-- 付録I/J/K/O/P/R/S/U/V/W — lifecycle hooks, `store` (global/scoped shared state), keyboard shortcut *attribute*, `viewmodel`/`Command` (MVVM), async, theme/design tokens, error boundaries, undo/redo, snapshot testing, mobile lifecycle.
+`docs/elwindui_dsl_spec.md` (ElwindUIL **DSL syntax only** — no backend/runtime/state-management content):
+- §1–§15 — core language: `component`/`view` split, `param`/`prop`, control flow, `style`, constraints, `enum`, `env::*`/`once`, `bind!`, i18n (Fluent), imports, an overview of the `UIElement` tree-exploration contract, and the full list of ~24 static verification rules (§14) a future compiler/linter must implement.
+- 付録A — the `builtin::` namespace and `#[overrides(builtin::X)]` override rule (static verification only; the builtins themselves are in `elwindui_builtins_spec.md` 付録F), plus the `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[content(field_name)]` component-level attributes.
+
+`docs/elwindui_gui_framework_design.md` (GUI framework implementation — backend abstraction, runtime, state management; **not** a summary of the DSL spec, this is the primary source for these topics):
+- §1/§3 — backend abstraction: common AST → per-backend codegen, `target::backend()` compile-time constant, OS-native toolkit mapping.
+- §5 — core runtime: the `UIElement`/`UIElementExt` class hierarchy (§5.1/§5.1a — the Rust class-hierarchy convention lives here), Logical/Visual tree split, layout engine, focus, accessibility, `Canvas`/`Painter`, routing events.
+- §6 — lifecycle hooks (`on_mount`/`on_unmount`/`on_update`, app-level `on_foreground`/`on_background`/`on_terminate`).
+- §7 — `store` (global/scoped shared state), `viewmodel`/`Command` (MVVM), async, undo/redo.
+- §8 — keyboard shortcuts, navigation, dialogs, virtual lists, theme/design tokens, error boundaries, platform APIs, mobile.
+- §9 — snapshot testing.
 
 `docs/elwindui_builtins_spec.md` (every concrete `builtin::`/`platform::` element):
 - 付録F — reference implementations of `Window`/`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`TextArea`/`Dropdown` (the layout containers are named `VerticalLayout`/`HorizontalLayout`, not `Row`/`Column`; text display is `TextBlock`, not `Text`).
@@ -34,6 +35,11 @@ headers):
 - 付録T — `platform::clipboard`/`platform::file_dialog`, drag & drop.
 - 付録X/Y — `MenuBar`/`MenuBarItem` (native app menu bar) and `TabView`/`TabItem` (multi-document tabs), added for the notepad example.
 
+Toolchain design (`.elwind` → Rust codegen, LSP, live preview, hot-reload) lives in
+`docs/elwindui_tool_*_design.md`, not in the three docs above. `docs/elwindui_macro_class_spec.md`
+is the authoritative spec for `#[elwindui_macros::class]` and takes precedence over
+`elwindui_gui_framework_design.md`'s §5.1a summary if the two ever disagree.
+
 ## Core architectural rules to preserve when implementing
 
 - **`param` vs `prop`**: `#[param]` fields are fixed at instantiation and may only use static-evaluable expressions (literals, other params, pure builtins, `env::*`, `once` values) — never `bind!`, prop references, or impure calls. Default (`prop`) fields are runtime-mutable and support `bind!`/`#[computed]`. This split is what the §14 rules exist to enforce; don't weaken it for convenience.
@@ -41,7 +47,7 @@ headers):
 - **`native!` and `target::backend()` are restricted**: only reachable from `#[overrides(builtin::X)]` components or other builtins — arbitrary user components must not call into backend-specific code directly (rules 9/15). This is a forward-looking rule: `target::backend()` itself doesn't exist in code yet (backend selection today is Cargo feature flags — `backend-appkit`/`backend-winui3`/`backend-gtk4` on the `elwindui` facade crate), so there's nothing to enforce this against currently.
 - **`store`/`viewmodel` are never read directly from `#[param]`** — access always goes through `prop` + `bind!` (rule 12/13), and `viewmodel` internals aren't reachable from builtin view elements (rule 19), keeping MVVM's V/VM separation statically enforced.
 - **Builtin shadowing must be explicit** — a user `component` sharing a name with a `builtin::` element is a static ambiguity error unless annotated `#[overrides(builtin::X)]`; there is no implicit shadowing.
-- **Rust class-hierarchy convention (both codegen output and hand-written runtime code)**: for a class `Class` (with parent `SuperClass`), define `trait Class: SuperClass` + `struct ClassImpl { base: SuperClassImpl, /* own fields */ }`, with `ClassImpl` implementing `Class` and every ancestor trait (each ancestor method delegating to `self.base.method(...)`). The root class (no parent) has no `base` field. Construct via a `create_class(...)` factory function, never a bare struct literal. See docs/elwindui_spec.md 付録H.2.1a for the full rule and `elwindui-core::ui`'s `UIElement`/`Control`/etc. hierarchy for the reference implementation.
+- **Rust class-hierarchy convention (both codegen output and hand-written runtime code)**: for a class `Class` (with parent `SuperClass`), define `struct Class { base: SuperClass, /* own fields */ }` (bare struct name, no suffix) + `trait ClassExt: SuperClassExt`, with `Class` implementing `ClassExt` and every ancestor trait (each ancestor method delegating to `self.base.method(...)`). The root class (no parent) has no `base` field. Construct via a `create_class(...)` factory function, never a bare struct literal. See `docs/elwindui_macro_class_spec.md` (authoritative) and `docs/elwindui_gui_framework_design.md` §5.1a for the full rule, and `elwindui-core::ui`'s `UIElement`/`Control`/etc. hierarchy for the reference implementation.
 - **Don't unilaterally invent exceptions to an established codebase convention/rule** (e.g. `#[class]`'s normal bare-name struct declaration, the class-hierarchy convention above, or any other documented pattern) to work around a problem you haven't fully root-caused yet. If a normal-looking case seems to require a special-cased workaround, verify that the workaround is actually necessary first (re-check the mechanism in question — e.g. what name a macro actually emits, not just what's written at the call site) rather than assuming and coding around it. If a real exception does turn out to be needed, flag it to the user and get confirmation before writing it, rather than deciding and applying it silently.
 
 ## Commands

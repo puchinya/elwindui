@@ -5,7 +5,7 @@
 
 use crate::ast::{
     Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef, FieldKind,
-    Initializer, Item, MethodDef, Module, ViewDef, ViewExpr, ViewModelDef,
+    Initializer, Item, MethodDef, Module, ViewBody, ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -69,6 +69,9 @@ pub struct TypeInfo {
     /// `on_*` rule, not passed to `Target::new(...)` — so it never appears in `param_fields`, but
     /// still needs its declared type visible here for the arity check.
     pub field_types: HashMap<String, String>,
+    /// Declared types for every stored value field, including observable fields with an
+    /// initializer. Dynamic `for` uses this metadata to identify `Vec<Rc<T>>` sources.
+    pub value_field_types: HashMap<String, String>,
     /// `#[attached]` fields declared by this type (docs/elwindui_spec.md §3の添付プロパティ), mapped
     /// to their declared type — e.g. `Grid`'s own `{"row": "i32", "column": "i32"}`. Kept separate
     /// from `field_types` (rather than folded in) because that map filters out every field *with* an
@@ -279,7 +282,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
     for (module_index, module) in modules.iter().enumerate() {
         for item in &module.items {
             let Item::Component(c) = item else { continue };
-            let view_root = resolve_view_for(module, c, modules).map(|v| v.root.type_path.clone());
+            let view_root = resolve_effective_root_type(module, c, modules);
             component_meta.insert(
                 (module.path.clone(), c.name.clone()),
                 (module_index, c.base.clone(), view_root, c.native),
@@ -388,6 +391,11 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                                 && c.base.as_deref() != Some("NativeControl")
                                 && !c.native,
                             field_types,
+                            value_field_types: c
+                                .fields
+                                .iter()
+                                .map(|f| (f.name.clone(), f.ty.clone()))
+                                .collect(),
                             attached_field_types,
                             is_viewmodel: false,
                             is_native: false,
@@ -467,6 +475,11 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             onetime_fields: HashSet::new(),
                             is_virtual_builtin: false,
                             field_types,
+                            value_field_types: v
+                                .fields
+                                .iter()
+                                .map(|f| (f.name.clone(), f.ty.clone()))
+                                .collect(),
                             attached_field_types: HashMap::new(),
                             is_viewmodel: true,
                             is_native: false,
@@ -651,7 +664,14 @@ fn view_references_bare_name(view: &ViewDef, name: &str) -> bool {
     view.lets
         .iter()
         .any(|l| element_references_bare_name(&l.element, name))
-        || element_references_bare_name(&view.root, name)
+        || view.root.attributes
+            .iter()
+            .any(|(_, expr)| view_expr_references_bare_name(expr, name))
+        || view
+            .root
+            .children
+            .iter()
+            .any(|child| child_references_bare_name(child, name))
 }
 
 fn element_references_bare_name(node: &ElementNode, name: &str) -> bool {
@@ -662,39 +682,9 @@ fn element_references_bare_name(node: &ElementNode, name: &str) -> bool {
     {
         return true;
     }
-    node.children.iter().any(|child| match child {
-        ChildEntry::Literal(elem) => element_references_bare_name(elem, name),
-        ChildEntry::Ref(n) => n == name,
-        ChildEntry::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            view_expr_references_bare_name(condition, name)
-                || then_branch
-                    .iter()
-                    .any(|child| child_references_bare_name(child, name))
-                || else_branch
-                    .iter()
-                    .any(|child| child_references_bare_name(child, name))
-        }
-        ChildEntry::Match { value, arms } => {
-            view_expr_references_bare_name(value, name)
-                || arms.iter().any(|arm| {
-                    arm.body
-                        .iter()
-                        .any(|child| child_references_bare_name(child, name))
-                })
-        }
-        ChildEntry::For {
-            collection, body, ..
-        } => {
-            view_expr_references_bare_name(collection, name)
-                || body
-                    .iter()
-                    .any(|child| child_references_bare_name(child, name))
-        }
-    })
+    node.children
+        .iter()
+        .any(|child| child_references_bare_name(child, name))
 }
 
 fn child_references_bare_name(child: &ChildEntry, name: &str) -> bool {
@@ -768,7 +758,17 @@ fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
     view.lets
         .iter()
         .any(|l| element_references_name_anywhere(&l.element, name))
-        || element_references_name_anywhere(&view.root, name)
+        || view.root.attributes
+            .iter()
+            .any(|(_, expr)| view_expr_references_name_anywhere(expr, name))
+        || view.root.attached
+            .iter()
+            .any(|(_, _, expr)| view_expr_references_name_anywhere(expr, name))
+        || view
+            .root
+            .children
+            .iter()
+            .any(|child| child_references_name_anywhere(child, name))
 }
 
 fn element_references_name_anywhere(node: &ElementNode, name: &str) -> bool {
@@ -786,39 +786,9 @@ fn element_references_name_anywhere(node: &ElementNode, name: &str) -> bool {
     {
         return true;
     }
-    node.children.iter().any(|child| match child {
-        ChildEntry::Literal(elem) => element_references_name_anywhere(elem, name),
-        ChildEntry::Ref(n) => n == name,
-        ChildEntry::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            view_expr_references_name_anywhere(condition, name)
-                || then_branch
-                    .iter()
-                    .any(|child| child_references_name_anywhere(child, name))
-                || else_branch
-                    .iter()
-                    .any(|child| child_references_name_anywhere(child, name))
-        }
-        ChildEntry::Match { value, arms } => {
-            view_expr_references_name_anywhere(value, name)
-                || arms.iter().any(|arm| {
-                    arm.body
-                        .iter()
-                        .any(|child| child_references_name_anywhere(child, name))
-                })
-        }
-        ChildEntry::For {
-            collection, body, ..
-        } => {
-            view_expr_references_name_anywhere(collection, name)
-                || body
-                    .iter()
-                    .any(|child| child_references_name_anywhere(child, name))
-        }
-    })
+    node.children
+        .iter()
+        .any(|child| child_references_name_anywhere(child, name))
 }
 
 fn child_references_name_anywhere(child: &ChildEntry, name: &str) -> bool {
@@ -971,6 +941,54 @@ pub(crate) fn resolve_view_for<'m>(
     })
 }
 
+/// Resolves the concrete `ElementNode` a `view`'s body (`ast::ViewBody`) actually constructs —
+/// either the base itself (Phase 0's implicit-composition sugar: `inherits Y` where `Y` isn't one
+/// of the three base-less category tags means the body *is* `Y`'s own attributes/children, no
+/// wrapper element written), or, for an ordinary (non-composing) component, the body's one literal
+/// child, which is all a `view` with no composable base is allowed to contain. `base` is whichever
+/// component in the `inherits` chain actually owns this body (see `resolve_effective_root_type`,
+/// which walks to it the same way `resolve_view_for` does) — not necessarily the component whose
+/// `view` a caller is asking about, when that component has no `view` of its own and inherited one
+/// as a template.
+pub(crate) fn resolve_view_root_element(body: &ViewBody, base: Option<&str>) -> Option<ElementNode> {
+    match base {
+        Some(name) if !matches!(name, "UIElement" | "Layout" | "NativeControl") => {
+            Some(ElementNode {
+                type_path: name.to_string(),
+                attributes: body.attributes.clone(),
+                attached: body.attached.clone(),
+                children: body.children.clone(),
+            })
+        }
+        _ => match body.children.as_slice() {
+            [ChildEntry::Literal(elem)] if body.attributes.is_empty() && body.attached.is_empty() => {
+                Some(elem.clone())
+            }
+            _ => None,
+        },
+    }
+}
+
+/// Lenient, `component_meta`-building-time counterpart of `resolve_view_root_element`: resolves
+/// just the effective root's *type name* (not a full `ElementNode`), walking to whichever ancestor
+/// in the `inherits` chain actually owns the effective `view` (mirroring `resolve_view_for`'s own
+/// walk) so `resolve_is_native` can recurse into that type's own nativeness. Returns `None` for a
+/// malformed body (no `view` anywhere in the chain, or a non-composing body that doesn't reduce to
+/// exactly one literal child) — `validate::validate` reports that case with a real error message;
+/// this function only needs *a* reasonable answer for native/virtual inference, not a diagnostic.
+fn resolve_effective_root_type(from: &Module, c: &ComponentDef, modules: &[Module]) -> Option<String> {
+    if let Some(own) = find_view(from, &c.name) {
+        return resolve_view_root_element(&own.root, c.base.as_deref())
+            .map(|elem| elem.type_path);
+    }
+    let base = c.base.as_deref()?;
+    if base == "NativeControl" {
+        return None;
+    }
+    let (base_module, base_c) = find_component_and_module(from, base, modules)?;
+    resolve_effective_root_type(base_module, base_c, modules)
+}
+
 /// Rewrites `base::name(args)` — a method/`#[computed]`-initializer/`on_mount`/`on_unmount` body's
 /// call into its immediate base's implementation of the same name (§3) — to `#receiver.__base_name
 /// (args)`, the shadow copy `resolve_effective_methods`/`generate_view` emit alongside an
@@ -1071,45 +1089,35 @@ fn resolve_composed_shape(
     memo.insert(key.clone(), None);
 
     let result = (|| {
-        let (module_index, base, view_root, _native) = component_meta.get(key)?;
+        let (module_index, base, _view_root, _native) = component_meta.get(key)?;
         let base = base.as_deref()?;
         if base == "NativeControl" {
             return None;
         }
         let from = &modules[*module_index];
-        let has_own_view = find_view(from, &key.1).is_some();
 
         if table
             .resolve(from, base)
             .is_some_and(|i| i.is_virtual_builtin)
         {
             // Direct shape composition against a hand-written `elwindui::core::ui` primitive
-            // (`ContentControl inherits Control`): this component's own effective root must be
-            // exactly `base` — matching `validate::validate_inherits`'s own requirement that an
-            // explicit `view` is needed here.
-            return (view_root.as_deref() == Some(base)).then(|| base.to_string());
+            // (`ContentControl inherits Control`): Phase 0's implicit-composition sugar means
+            // there's no separate "own effective root literally constructs `base`" requirement to
+            // check anymore (docs/elwindui_spec.md 付録H.2.1a) — a composable `base` always
+            // composes, and `generate_view`'s `resolve_view_root_element` supplies the missing
+            // `Type { .. }` wrapper the view body no longer writes.
+            return Some(base.to_string());
         }
 
         let base_key = table.resolve_key(from, base)?;
-        let base_composed = resolve_composed_shape(&base_key, component_meta, modules, table, memo);
-
-        if has_own_view {
-            // Direct composition against an *already-composed DSL component*, one delegation hop
-            // further out (`RoundedPanel inherits ContentControl`, own `view` root literally
-            // `ContentControl`) — the same shape as the virtual-builtin case above, just one level
-            // up the chain. `generate_view`'s `is_shape_composition` doesn't otherwise care whether
-            // `base` is a hand-written primitive or another composed DSL component, since it always
-            // delegates through `self.base` regardless of that type's own nature.
-            (view_root.as_deref() == Some(base)).then_some(())?;
-            base_composed
-        } else {
-            // Template composition (`LabeledPanel inherits ContentControl`): only eligible when this
-            // component writes no `view` of its own (a full override has an independent tree — see
-            // `generate_view`'s own `is_shape_composition`/`is_template_composition` doc comments for
-            // why that case keeps the `resolve_effective_fields`/`__base_<name>` mechanism instead),
-            // and only if the base itself is already composed.
-            base_composed
-        }
+        // Direct composition against an *already-composed DSL component*, one delegation hop
+        // further out (`RoundedPanel inherits ContentControl`) — the same shape as the
+        // virtual-builtin case above, just one level up the chain. `generate_view`'s
+        // `is_shape_composition`/`is_template_composition` don't otherwise care whether `base` is a
+        // hand-written primitive or another composed DSL component, since both always delegate
+        // through `self.base` regardless of that type's own nature — see this function's own
+        // `has_own_view` split there, not here.
+        resolve_composed_shape(&base_key, component_meta, modules, table, memo)
     })();
 
     memo.insert(key.clone(), result.clone());
@@ -1133,7 +1141,7 @@ fn resolve_host_composition_base(
     table: &SymbolTable,
     is_native_memo: &HashMap<(Vec<String>, String), bool>,
 ) -> Option<(String, (Vec<String>, String))> {
-    let (module_index, base, view_root, _native) = component_meta.get(key)?;
+    let (module_index, base, _view_root, _native) = component_meta.get(key)?;
     let base = base.as_deref()?;
     let from = &modules[*module_index];
     if base == "NativeControl"
@@ -1147,7 +1155,7 @@ fn resolve_host_composition_base(
     let base_info = table.types.get(&base_key)?;
     let base_is_native = is_native_memo.get(&base_key).copied().unwrap_or(false);
     if base_is_native && !base_info.has_view && !base_info.is_native_control_leaf {
-        (view_root.as_deref() == Some(base)).then(|| (base.to_string(), base_key))
+        Some((base.to_string(), base_key))
     } else {
         None
     }
@@ -2222,7 +2230,24 @@ fn generate_view(
         lets_map.insert(let_binding.name.clone(), resolved);
     }
 
-    plan_element(&view.root, &ctx, from, table, &mut plan, true, &lets_map);
+    // Phase 0 (docs/elwindui_spec.md 付録H.2.1a's "inherits" section): a composable `base` (virtual
+    // builtin / already-composed DSL component / hand-written native host) has no wrapper element
+    // written in `view`'s body anymore — the body's own attributes/children directly *are* `base`'s
+    // — so the concrete root `ElementNode` `plan_element` (and everything below) still expects is
+    // synthesized here, once, from `view.root: ast::ViewBody`. An ordinary (non-composing)
+    // component's body must instead reduce to exactly one literal child; `validate::validate`
+    // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
+    // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
+    // `continue` in `generate_module` just above).
+    let resolved_root = resolve_view_root_element(&view.root, component.base.as_deref())
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: view root must be exactly one element unless it inherits a composable base",
+                component.name
+            )
+        });
+
+    plan_element(&resolved_root, &ctx, from, table, &mut plan, true, &lets_map);
 
     // Host composition (`is_host_composition`'s doc comment): the root's stored field must be
     // named `base` (the same trait+Impl+base convention `is_shape_composition` follows), not the
@@ -2654,17 +2679,17 @@ fn generate_view(
                 // this function's tail `quote!`), never wrapped/erased into `Rc<dyn
                 // UIElement>` like every other node.
                 if table
-                    .resolve(from, &view.root.type_path)
+                    .resolve(from, &resolved_root.type_path)
                     .is_some_and(|i| i.is_virtual_builtin)
                 {
                     let value = build_virtual_value(node, &ctx, from, table);
-                    let base_impl_ty = shape_composition_base_type(&view.root.type_path);
+                    let base_impl_ty = shape_composition_base_type(&resolved_root.type_path);
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
                 } else {
                     let value = build_component_value(node, &ctx, from, table);
                     let base_impl_ty = concrete_type_ident(
-                        &view.root.type_path,
-                        table.resolve(from, &view.root.type_path),
+                        &resolved_root.type_path,
+                        table.resolve(from, &resolved_root.type_path),
                     );
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
                 }
@@ -2783,7 +2808,7 @@ fn generate_view(
     // (chained `inherits`), `into_node_if_needed` dispatches on the root's resolved type either way.
     let root_is_native = !is_template_composition
         && table
-            .resolve(from, &view.root.type_path)
+            .resolve(from, &resolved_root.type_path)
             .is_some_and(|info| info.is_native);
     let root_embed_method = if is_template_composition || is_shape_composition {
         // `#target` implements `UIElement` itself now (see this function's tail `quote!`), so
@@ -2797,7 +2822,7 @@ fn generate_view(
     } else if is_host_composition {
         // `#[class(inherits = Window)]` generates the `WindowExt` forwarding, including `show`.
         TokenStream::new()
-    } else if view.root.type_path == "Window" {
+    } else if resolved_root.type_path == "Window" {
         // A top-level window must use `inherits Window` to receive the `WindowExt` API.
         TokenStream::new()
     } else if root_is_native {
@@ -2810,7 +2835,7 @@ fn generate_view(
     } else {
         let root_expr = into_node_if_needed(
             quote! { self.#root_binding },
-            &view.root.type_path,
+            &resolved_root.type_path,
             from,
             table,
         );
@@ -2852,12 +2877,36 @@ fn generate_view(
             let item_ext = dynamic_collection_item_trait(parent, from, table);
             let start = dynamic_child_start(parent, &node.binding);
             match node.dynamic.as_ref()? {
-                DynamicPlan::For { collection, renderer, .. } => {
+                DynamicPlan::For {
+                    collection,
+                    renderer,
+                    rc_identity,
+                    ..
+                } => {
                     let collection = emit_expr(collection, &ctx, &EmitMode::WithSelf(quote! { self }));
+                    let replace = if *rc_identity {
+                        quote! {
+                            self.#slot.replace_rc_items(
+                                self.#parent_binding.children(),
+                                #start,
+                                &(#collection),
+                                #renderer,
+                            );
+                        }
+                    } else {
+                        quote! {
+                            self.#slot.replace_items(
+                                self.#parent_binding.children(),
+                                #start,
+                                #collection,
+                                #renderer,
+                            );
+                        }
+                    };
                     Some(quote! {
                         {
                             use elwindui::core::ui::#parent_ext as _;
-                            self.#slot.replace_rc_items(self.#parent_binding.children(), #start, &(#collection), #renderer);
+                            #replace
                         }
                     })
                 }
@@ -2954,7 +3003,7 @@ fn generate_view(
     // A composed ContentControl starts with an empty bare base. Once its outer `Rc` exists, set
     // the root's child through ContentControl so it owns the corresponding Visual mutation.
     let (content_capture_stmt, content_attach_stmt) =
-        if is_shape_composition && view.root.type_path == "ContentControl" {
+        if is_shape_composition && resolved_root.type_path == "ContentControl" {
             let (content_binding, content_type) = plan
                 .last()
                 .and_then(|root| root.child_bindings.first())
@@ -3015,7 +3064,7 @@ fn generate_view(
     // The immediate base's own trait path — bare `X` for a consumer-defined base, `elwindui::ui::X`
     // for a builtin (`concrete_type_ident`'s own "is_builtin" rule, applied to the trait name rather
     // than the `Impl`-suffixed struct name). Deliberately the *immediate* base
-    // (`view.root.type_path`/`component.base`/`"Window"`), not the transitively-resolved
+    // (`resolved_root.type_path`/`component.base`/`"Window"`), not the transitively-resolved
     // `composed_shape` rather than the immediate base, e.g. `Control`, for
     // a template-composed `LabeledPanel inherits ContentControl`): `#target: ContentControl` alone
     // already reaches `Control`/`UIElement` transitively through `ContentControl`'s own supertrait
@@ -3031,12 +3080,12 @@ fn generate_view(
     };
     // The literal name (`.elwind`-level, e.g. `"ContentControl"`/`"Rectangle"`/`"Window"`) this
     // component's own generated trait bound (`inherits_path`) is keyed off — the *immediate* base
-    // actually embedded as this component's own `base: <BaseImpl>` field (`view.root.type_path` for
+    // actually embedded as this component's own `base: <BaseImpl>` field (`resolved_root.type_path` for
     // shape composition,
     // `component.base` for template composition, `"Window"` for host composition), deliberately
     // *not* the transitively-resolved `composed_shape`.
     let immediate_base_name: Option<String> = if is_shape_composition {
-        Some(view.root.type_path.clone())
+        Some(resolved_root.type_path.clone())
     } else if is_template_composition {
         component.base.clone()
     } else {
@@ -3426,6 +3475,7 @@ enum DynamicPlan {
         collection: ViewExpr,
         renderer: TokenStream,
         item_type: String,
+        rc_identity: bool,
     },
 }
 
@@ -3524,11 +3574,33 @@ fn plan_element(
                 collection,
                 body,
             } => {
-                let item_type = match body.as_slice() {
-                    [ChildEntry::Literal(element)] => element.type_path.clone(),
-                    _ => panic!("a `for` body currently requires exactly one element template"),
+                let item_type = match body.first() {
+                    Some(ChildEntry::Literal(element)) => element.type_path.clone(),
+                    _ => panic!(
+                        "a `for` body currently requires one or more literal element templates"
+                    ),
                 };
-                let renderer = emit_for_renderer(binding, body, ctx, from, table);
+                if !body
+                    .iter()
+                    .all(|entry| matches!(entry, ChildEntry::Literal(_)))
+                {
+                    panic!("a `for` body currently requires literal element templates");
+                }
+                let parent = PlannedNode {
+                    binding: format_ident!("__for_parent"),
+                    type_path: node.type_path.clone(),
+                    attributes: Vec::new(),
+                    attached: Vec::new(),
+                    child_bindings: Vec::new(),
+                    element_attr_bindings: HashMap::new(),
+                    stored: false,
+                    id: None,
+                    dynamic: None,
+                };
+                let item_trait = dynamic_collection_item_trait(&parent, from, table);
+                let rc_identity = collection_uses_rc_identity(collection, ctx, from, table);
+                let renderer =
+                    emit_for_renderer(binding, body, ctx, from, table, &item_trait, rc_identity);
                 let binding = format_ident!("__node_{}", out.len());
                 out.push(PlannedNode {
                     binding: binding.clone(),
@@ -3543,6 +3615,7 @@ fn plan_element(
                         collection: collection.clone(),
                         renderer,
                         item_type,
+                        rc_identity,
                     }),
                 });
                 child_bindings.push((binding, DYNAMIC_CHILD_SLOT_MARKER.to_string()));
@@ -3590,36 +3663,44 @@ fn emit_for_renderer(
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
+    item_trait: &syn::Ident,
+    subscribe_to_item_changes: bool,
 ) -> TokenStream {
-    let [ChildEntry::Literal(element)] = body else {
-        panic!("a `for` body currently requires exactly one element template");
-    };
     let param_ident = format_ident!("{}", binding);
     let closure_ctx = ctx.with_closure_param(binding);
     let mut plan = Vec::new();
-    plan_element(
-        element,
-        &closure_ctx,
-        from,
-        table,
-        &mut plan,
-        true,
-        &HashMap::new(),
-    );
+    let mut roots = Vec::new();
+    for entry in body {
+        let ChildEntry::Literal(element) = entry else {
+            unreachable!()
+        };
+        roots.push(plan_element(
+            element,
+            &closure_ctx,
+            from,
+            table,
+            &mut plan,
+            true,
+            &HashMap::new(),
+        ));
+    }
     let mut construct = TokenStream::new();
     for planned in &plan {
         emit_construction(planned, &closure_ctx, from, table, &mut construct);
     }
-    let subscriptions = emit_for_item_subscriptions(&plan, binding, &closure_ctx, from, table);
-    let root = plan.last().expect("for element body must have a root");
-    let root_binding = &root.binding;
+    let subscriptions = subscribe_to_item_changes
+        .then(|| emit_for_item_subscriptions(&plan, binding, &closure_ctx, from, table))
+        .unwrap_or_default();
+    let children = roots.iter().map(|(binding, ty)| {
+        dynamic_child_binding(quote! { #binding }, ty, item_trait, from, table)
+    });
     quote! {
         |#param_ident: &_| {
             #construct
             let mut __dynamic_item_subscriptions = Vec::new();
             #subscriptions
-            elwindui::core::ui::DynamicChild::with_subscriptions(
-                #root_binding,
+            elwindui::core::ui::DynamicChild::with_children(
+                vec![#(#children),*],
                 __dynamic_item_subscriptions,
             )
         }
@@ -3769,6 +3850,56 @@ fn dynamic_collection_item_trait(
         .unwrap_or(inner)
         .trim_matches(|c| c == '<' || c == '>');
     format_ident!("{}Ext", name)
+}
+
+/// Only `Vec<Rc<T>>` can preserve per-item UI and subscriptions by pointer identity. Other
+/// iterable values are still valid dynamic sources, but refresh by rebuilding just their slot.
+/// Keeping this conservative is intentional: an unresolved expression must never be treated as
+/// identity-stable merely because it happens to yield `Rc` values at runtime.
+fn collection_uses_rc_identity(
+    collection: &ViewExpr,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> bool {
+    let ViewExpr::Path(path) = collection else {
+        return false;
+    };
+    let [owner, field] = path.as_slice() else {
+        return false;
+    };
+    let Some(owner_type) = ctx.own_fields.get(owner) else {
+        return false;
+    };
+    let Some(owner_info) = table.resolve(from, strip_rc_wrapper(owner_type)) else {
+        return false;
+    };
+    let Some(collection_type) = owner_info.value_field_types.get(field) else {
+        return false;
+    };
+    let compact = collection_type
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    if compact.starts_with("Vec<Rc<")
+        || compact.starts_with("Vec<std::rc::Rc<")
+        || compact.starts_with("Vec<rc::Rc<")
+    {
+        return true;
+    }
+
+    // `#[viewmodel]` deliberately exposes `Vec<Document>` at its declaration boundary while
+    // storing each observable viewmodel item as `Rc<Document>` internally. Recognize that
+    // collection shape too, so the view has the same identity semantics as explicit `Vec<Rc<T>>`.
+    let Some(inner) = compact
+        .strip_prefix("Vec<")
+        .and_then(|value| value.strip_suffix('>'))
+    else {
+        return false;
+    };
+    table
+        .resolve(from, inner)
+        .is_some_and(|info| info.is_viewmodel)
 }
 
 fn dynamic_child_binding(
@@ -3993,7 +4124,7 @@ fn into_any_view_if_needed(base: TokenStream, ty: &str) -> TokenStream {
 const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 
 /// Converts a constructed child binding into `Rc<dyn elwindui::core::ui::UIElementExt>` for a slot
-/// that wants one (`Window`'s `content`, `TabView`'s `item_template` return, or a virtual
+/// that wants one (`Window`'s `content`, a callback content return, or a virtual
 /// builtin's own `children: Vec<Rc<dyn UIElement>>` — anywhere the declared type mentions `dyn
 /// UIElement`, checked by the caller before calling this). Four cases, by `source_type_path`'s
 /// resolved `is_native`/`is_native_control_leaf`:
@@ -4086,8 +4217,8 @@ fn emit_closure_value(
                 emit_construction(planned, &closure_ctx, from, table, &mut construct);
             }
             let root = plan.last().expect("closure element body must have a root");
-            // `item_template`'s declared return type is `Rc<dyn UIElement>` (`TabView` in
-            // `builtins.elwind`), not a bare `AnyView` — so a per-tab body rooted in a virtual
+            // A closure content field's declared return type is `Rc<dyn UIElement>`, not a bare
+            // `AnyView` — so a body rooted in a virtual
             // builtin/component (a `VerticalLayout`, or a `DocumentView`-style user component)
             // works exactly like any other embedding slot, via the same `is_native` dispatch
             // `into_node_if_needed` uses elsewhere.
@@ -4479,16 +4610,6 @@ fn build_component_args(
 /// - a `String`-shaped param still takes `&str` at the hand-written setter (unlike
 ///   `build_component_args`'s `has_view`-conditional `.to_string()`, which never applies here
 ///   since `is_hand_written_native` implies `!info.has_view`);
-/// - `TabView`'s `items_source`/`header_template`/`item_template` trio (all generic over the same
-///   `T`) is combined into a single `set_dynamic_source(items, header_template, item_template)`
-///   call instead of three independent ones — Rust can only unify a generic method call's type
-///   parameter across *that one call*'s own arguments; `header_template`/`item_template`'s closure
-///   bodies (`|doc| doc.file_name()`) carry no concrete type of their own to infer `T` from in
-///   isolation, so they must share a call with `items_source` (whose *value*, e.g.
-///   `vm.documents()`, is concretely `Vec<Rc<Document>>`) so all arguments unify one shared `T`.
-///   `set_items_source`
-///   itself stays a separate, single-argument method (unaffected) — `emit_resync` already calls it
-///   alone (its own value is concrete, no closure involved, so no inference problem there).
 fn build_component_setters(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -5265,7 +5386,7 @@ fn emit_resync(
             out.extend(quote! { self.#binding.#setter(#value); });
         } else if field_ty.is_some_and(|ty| strip_option(ty).0.starts_with("Vec<")) {
             // A `Vec<T>` field's real setter always takes it *by value* everywhere in this
-            // framework (`TabViewImpl::set_items_source`, `GridImpl::set_rows`/`set_columns`), so
+            // framework (for example `GridImpl::set_rows`/`set_columns`), so
             // this isn't gated on `node_uses_owned_setters` — `.to_vec()` coerces a DSL
             // array-literal value into an owned `Vec<T>` and is a harmless no-op clone when the
             // value is already one (e.g. `vm.documents()`).
@@ -5395,7 +5516,7 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
         ViewExpr::Path(path) => {
             let path: &[String] = path.as_slice();
             // A bare reference to the closure's own bound parameter (e.g. `doc` in
-            // `item_template: |doc| DocumentView { doc: doc }`) passes the value straight
+            // `render_content: |doc| DocumentView { doc: doc }`) passes the value straight
             // through — it isn't a `vm`-style field with a generated getter, so it must be
             // handled before `resolve_bind`/`emit_path_get` (which has no 1-segment path shape).
             if let [only] = path {
@@ -5725,6 +5846,41 @@ view NotepadWindow {
     }
 
     #[test]
+    fn rebuilds_only_the_for_slot_for_non_rc_items() {
+        let module = parse_module(
+            r#"
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    items: Vec<String> = Vec::new(),
+                }
+                component ItemView {
+                    #[param]
+                    item: String,
+                }
+                view ItemView { TextBlock { text: item } }
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+                view DynamicHost {
+                    VerticalLayout {
+                        for item in vm.items { ItemView { item: item } }
+                    }
+                }
+            "#,
+        )
+        .expect("plain dynamic for source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        assert_eq!(crate::validate::validate(&[module.clone()]), Ok(()));
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("plain_dynamic_for", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("replace_items"));
+        assert!(!rendered.contains("replace_rc_items"));
+    }
+
+    #[test]
     fn generates_valid_rust_for_notepad() {
         let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
         let window_module = parse_module(WINDOW_SRC).unwrap();
@@ -5887,9 +6043,12 @@ view NotepadWindow {
         }
 
         content: TabView {
-            items_source: vm.documents
-            header_template: |doc| doc.file_name
-            item_template: |doc| TextArea { text: doc.content }
+            for doc in vm.documents {
+                TabViewItem {
+                    header: doc.file_name
+                    TextArea { text: doc.content }
+                }
+            }
             selected_index: vm.active_tab
             on_select: vm.select_tab
             on_close: vm.close_tab
@@ -5948,7 +6107,7 @@ viewmodel Document {
 
 viewmodel NotepadViewModel {
     #[observable]
-    documents: Vec<Document> = Vec::new(),
+    documents: Vec<std::rc::Rc<Document>> = Vec::new(),
 
     #[observable]
     active_tab: usize = 0,
@@ -6007,6 +6166,10 @@ view NotepadWindow {
                     header: doc.file_name
                     DocumentView { doc: doc }
                 }
+                TabViewItem {
+                    header: "Details"
+                    TextBlock { text: doc.file_name }
+                }
             }
             selected_index: vm.active_tab
             on_select: vm.select_tab
@@ -6057,6 +6220,10 @@ view NotepadWindow {
         assert!(window_str.contains("set_on_new_tab"));
         assert!(window_str.contains("new_tab_execute"));
         assert!(window_str.contains("__refresh_dynamic_regions"));
+        assert!(window_str.contains("DynamicChild :: with_children"));
+        assert!(window_str.contains("__dynamic_item_subscriptions"));
+        assert!(window_str.contains("source . subscribe_property_changed"));
+        assert!(window_str.contains("item . set_header"));
         assert!(!window_str.contains("set_items_source"));
     }
 

@@ -565,15 +565,19 @@ impl<'a> Parser<'a> {
         }
 
         self.skip_trivia();
-        let root = self.parse_element_node()?;
-        self.skip_trivia();
-        self.expect_char('}')?;
+        let (attributes, attached, children) = self.parse_element_body()?;
+        // `parse_element_body` already consumed the view's own closing `}` (mirroring
+        // `parse_element_node`, which consumes `Type { ... }`'s own closing `}` the same way).
         Ok(ViewDef {
             target,
             on_mount,
             on_unmount,
             lets,
-            root,
+            root: ViewBody {
+                attributes,
+                attached,
+                children,
+            },
         })
     }
 
@@ -581,7 +585,32 @@ impl<'a> Parser<'a> {
         let type_path = self.parse_ident()?;
         self.skip_trivia();
         self.expect_char('{')?;
+        let (attributes, attached, children) = self.parse_element_body()?;
 
+        Ok(ElementNode {
+            type_path,
+            attributes,
+            attached,
+            children,
+        })
+    }
+
+    /// The part of an element's `{ ... }` body that follows the opening `{` — attribute/attached-
+    /// property lines and bare/control-flow child entries, up to (and consuming) the matching `}`.
+    /// Shared between `parse_element_node` (called after its own `type_path {`) and `parse_view_def`
+    /// (called after `view Name {`, which — unlike an element — names no type of its own; see
+    /// `ast::ViewBody`).
+    #[allow(clippy::type_complexity)]
+    fn parse_element_body(
+        &mut self,
+    ) -> Result<
+        (
+            Vec<(String, ViewExpr)>,
+            Vec<(String, String, ViewExpr)>,
+            Vec<ChildEntry>,
+        ),
+        String,
+    > {
         let mut attributes = Vec::new();
         let mut attached = Vec::new();
         let mut children = Vec::new();
@@ -629,12 +658,7 @@ impl<'a> Parser<'a> {
             self.eat_char(',');
         }
 
-        Ok(ElementNode {
-            type_path,
-            attributes,
-            attached,
-            children,
-        })
+        Ok((attributes, attached, children))
     }
 
     fn parse_control_child(&mut self) -> Result<ChildEntry, String> {

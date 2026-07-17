@@ -201,26 +201,52 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 &mut errors,
                             );
                         }
-                        check_vm_references(
-                            &view.root,
-                            module,
-                            &c.name,
-                            &vm_fields,
-                            &table,
-                            c.base.as_deref(),
-                            &mut errors,
-                        );
-                        check_dynamic_child_hosts(&view.root, module, &c.name, &table, &mut errors);
-                        check_attached_properties(&view.root, module, &c.name, &table, &mut errors);
-                        check_match_exhaustiveness(
-                            &view.root,
-                            c,
-                            &vm_fields,
-                            module,
-                            &table,
-                            &enum_variants,
-                            &mut errors,
-                        );
+                        // Phase 0 (docs/elwindui_spec.md 付録H.2.1a): `view.root` is now a bare
+                        // `ast::ViewBody` — resolve it to the concrete `ElementNode` every other
+                        // check below still expects, exactly the way `codegen::generate_view` does
+                        // (a composable `base` implicitly wraps the whole body; otherwise the body
+                        // must reduce to exactly one literal child).
+                        match codegen::resolve_view_root_element(&view.root, c.base.as_deref()) {
+                            Some(resolved_root) => {
+                                check_vm_references(
+                                    &resolved_root,
+                                    module,
+                                    &c.name,
+                                    &vm_fields,
+                                    &table,
+                                    c.base.as_deref(),
+                                    &mut errors,
+                                );
+                                check_dynamic_child_hosts(
+                                    &resolved_root,
+                                    module,
+                                    &c.name,
+                                    &table,
+                                    &mut errors,
+                                );
+                                check_attached_properties(
+                                    &resolved_root,
+                                    module,
+                                    &c.name,
+                                    &table,
+                                    &mut errors,
+                                );
+                                check_match_exhaustiveness(
+                                    &resolved_root,
+                                    c,
+                                    &vm_fields,
+                                    module,
+                                    &table,
+                                    &enum_variants,
+                                    &mut errors,
+                                );
+                            }
+                            None => errors.push(format!(
+                                "{}: view root must be exactly one element unless it inherits a \
+                                 composable base",
+                                c.name
+                            )),
+                        }
                     }
                 }
                 Item::ViewModel(v) => {

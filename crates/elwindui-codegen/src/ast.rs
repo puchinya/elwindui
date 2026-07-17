@@ -273,7 +273,20 @@ pub struct ViewDef {
     /// preceding `root`. Each introduces a name referenceable later (as a bare `ChildEntry::Ref`)
     /// within `root` or a later `let`'s own element.
     pub lets: Vec<LetBinding>,
-    pub root: ElementNode,
+    pub root: ViewBody,
+}
+
+/// `view Name { attrs...; children... }`'s own body — the same shape as `ElementNode` minus a
+/// `type_path`, since a `view` body no longer names its own root element type. Whether this is
+/// "the one literal root element of an ordinary component" (`children == [ChildEntry::Literal(_)]`,
+/// `attributes`/`attached` empty) or "the implicit composition body of a component whose `inherits`
+/// base is composable" (`codegen.rs`'s `resolve_view_root`) is resolved once the base's
+/// composability is known, not here — see docs/elwindui_spec.md 付録H.2.1a's "inherits" section.
+#[derive(Debug, Clone)]
+pub struct ViewBody {
+    pub attributes: Vec<(String, ViewExpr)>,
+    pub attached: Vec<(String, String, ViewExpr)>,
+    pub children: Vec<ChildEntry>,
 }
 
 /// `#[id("editor")] let editor = TextArea { text: content };` — see docs/elwindui_spec.md §13's
@@ -354,7 +367,7 @@ pub enum ViewExpr {
     /// Any other expression (string/number literals, etc.), parsed via `syn`.
     Expr(syn::Expr),
     /// `|doc| <body>` — a single untyped bound parameter (no destructuring, no type annotation)
-    /// used by `TabView`'s `header_template`/`item_template` attributes (付録Y) so a tab's
+    /// used by generic callback-valued attributes such as `render_content` so a view's
     /// per-item header/content can be an arbitrary expression or nested `view`, rather than the
     /// fixed `TextArea` codegen used to hardcode.
     Closure { param: String, body: ClosureBody },

@@ -938,6 +938,9 @@ pub struct DynamicChildSlot<T: ?Sized> {
 /// parent's declared content collection.
 pub struct DynamicChild<T: ?Sized> {
     pub child: Rc<T>,
+    /// Additional siblings produced by the same logical `for` item. `child` remains separate to
+    /// preserve the single-child API used by existing generated code.
+    pub siblings: Vec<Rc<T>>,
     pub subscriptions: Vec<crate::reactive::Subscription>,
 }
 
@@ -945,6 +948,7 @@ impl<T: ?Sized> DynamicChild<T> {
     pub fn new(child: Rc<T>) -> Self {
         Self {
             child,
+            siblings: Vec::new(),
             subscriptions: Vec::new(),
         }
     }
@@ -955,8 +959,32 @@ impl<T: ?Sized> DynamicChild<T> {
     ) -> Self {
         Self {
             child,
+            siblings: Vec::new(),
             subscriptions,
         }
+    }
+
+    pub fn with_children(
+        children: Vec<Rc<T>>,
+        subscriptions: Vec<crate::reactive::Subscription>,
+    ) -> Self {
+        let mut children = children.into_iter();
+        let child = children
+            .next()
+            .expect("a dynamic child item must contain at least one child");
+        Self {
+            child,
+            siblings: children.collect(),
+            subscriptions,
+        }
+    }
+
+    fn child_count(&self) -> usize {
+        1 + self.siblings.len()
+    }
+
+    fn children(&self) -> impl Iterator<Item = &Rc<T>> {
+        std::iter::once(&self.child).chain(self.siblings.iter())
     }
 }
 
@@ -972,7 +1000,11 @@ impl<T: ?Sized> Default for DynamicChildSlot<T> {
 impl<T: ?Sized> DynamicChildSlot<T> {
     /// Number of children this slot currently occupies in its parent collection.
     pub fn len(&self) -> usize {
-        self.items.borrow().len()
+        self.items
+            .borrow()
+            .iter()
+            .map(|item| item.child_count())
+            .sum()
     }
 
     pub fn replace_rc_items<U: 'static>(
@@ -1001,6 +1033,23 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         self.replace_at(host, start, next_keys, next_items);
     }
 
+    /// Rebuilds only this slot for collections that do not provide stable `Rc` identity. Unlike
+    /// `replace_rc_items`, no item instance is retained across calls; static siblings and other
+    /// dynamic slots remain untouched.
+    pub fn replace_items<U>(
+        &self,
+        host: &dyn ListExt<T>,
+        start: usize,
+        items: impl IntoIterator<Item = U>,
+        render: impl Fn(&U) -> DynamicChild<T>,
+    ) {
+        let items = items
+            .into_iter()
+            .map(|item| Rc::new(render(&item)))
+            .collect();
+        self.replace_at(host, start, Vec::new(), items);
+    }
+
     pub fn replace_children(&self, host: &dyn ListExt<T>, start: usize, children: Vec<Rc<T>>) {
         self.replace_at(
             host,
@@ -1021,18 +1070,30 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         items: Vec<Rc<DynamicChild<T>>>,
     ) {
         let previous = self.items.borrow();
-        let shared = previous.len().min(items.len());
+        let previous_children: Vec<_> = previous
+            .iter()
+            .flat_map(|item| item.children().cloned())
+            .collect();
+        let next_children: Vec<_> = items
+            .iter()
+            .flat_map(|item| item.children().cloned())
+            .collect();
+        let shared = previous_children.len().min(next_children.len());
         for index in 0..shared {
-            if !Rc::ptr_eq(&previous[index].child, &items[index].child) {
+            if !Rc::ptr_eq(&previous_children[index], &next_children[index]) {
                 host.remove_at(start + index);
-                host.insert(start + index, Rc::clone(&items[index].child));
+                host.insert(start + index, Rc::clone(&next_children[index]));
             }
         }
-        for _ in items.len()..previous.len() {
-            host.remove_at(start + items.len());
+        for _ in next_children.len()..previous_children.len() {
+            host.remove_at(start + next_children.len());
         }
-        for (index, item) in items.iter().enumerate().skip(previous.len()) {
-            host.insert(start + index, Rc::clone(&item.child));
+        for (index, child) in next_children
+            .iter()
+            .enumerate()
+            .skip(previous_children.len())
+        {
+            host.insert(start + index, Rc::clone(child));
         }
         drop(previous);
         *self.keys.borrow_mut() = keys;
@@ -3007,7 +3068,9 @@ mod tests {
             };
             DynamicChild::with_subscriptions(
                 Rc::new(format!("child:{item}")),
-                vec![crate::reactive::Subscription::new(move || dropped.set(true))],
+                vec![crate::reactive::Subscription::new(move || {
+                    dropped.set(true)
+                })],
             )
         });
         let original = host.to_vec();
@@ -3030,6 +3093,21 @@ mod tests {
         });
         assert!(first_subscription_dropped.get());
         assert!(!second_subscription_dropped.get());
+
+        slot.replace_children(
+            &host,
+            1,
+            vec![
+                Rc::new("first-child".to_owned()),
+                Rc::new("second-child".to_owned()),
+            ],
+        );
+        assert_eq!(slot.len(), 2);
+        assert_eq!(
+            host.to_vec().len(),
+            4,
+            "the range occupies both grouped children"
+        );
     }
 
     #[test]

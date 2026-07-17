@@ -779,7 +779,7 @@ view Dashboard {
 
 # 付録B. ツールチェーン仕様(コード生成・エディタ支援)
 
-> **実装状況**: B.1(`build.rs`方式の`elwindui_codegen::compile_dir`、および`elwindui::component!`proc-macro方式)は両方とも実装済みで、`examples/notepad`(build.rs方式)・`examples/notepad-inline`(proc-macro方式)で実際に使われている。B.2(`elwindui-languageserver`)は実装あり。B.3(3段階リアルタイムプレビュー)はワークスペースに対応するクレートが存在せず未着手。B.4(実行中アプリへのホットリロード)は`elwindui-hotreload`クレートが存在するが、現状は「`#[param]`変更なら再マウント、prop変更のみなら差分更新」という粒度判定ロジックのみの実装で、`hot-lib-reloader`によるdylib差し替え自体は未実装。
+> **実装状況**: B.1(`build.rs`方式の`elwindui_codegen::compile_dir`、および`#[elwindui::component]`/`#[elwindui::viewmodel]`proc-macro方式)は両方とも実装済みで、`examples/notepad`(build.rs方式)・`examples/notepad-inline`(proc-macro方式)で実際に使われている。B.2(`elwindui-languageserver`)は実装あり。B.3(3段階リアルタイムプレビュー)はワークスペースに対応するクレートが存在せず未着手。B.4(実行中アプリへのホットリロード)は`elwindui-hotreload`クレートが存在するが、現状は「`#[param]`変更なら再マウント、prop変更のみなら差分更新」という粒度判定ロジックのみの実装で、`hot-lib-reloader`によるdylib差し替え自体は未実装。
 
 ## B.1 ビルド時自動生成
 
@@ -812,13 +812,37 @@ include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
 
 **代替方式(proc-macro):**
 
+`component`/`view`を`.elwind`テキストとして書く代わりに、通常のRust `struct`定義として書く。
+フィールドは`#[param]`/`#[prop]`等の属性を伴う通常のフィールドとして、`view { .. }`要素ツリーは
+`view!`マクロ呼び出しを型に持つ1フィールド(`body`という名前が慣例)として表現する。
+
 ```rust
-elwindui::component! {
-    include_str!("ui/notepad_window.elwind")
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[bindable]
+    vm: std::rc::Rc<NotepadViewModel>,
+
+    body: view! {
+        title: vm.window_title
+        content: VerticalLayout {
+            TextArea { text: vm.content }
+        }
+    }
 }
 ```
 
-- 中間ファイルを生成せずコンパイル時に直接展開する。IDE補完精度を重視する場合は`build.rs`方式、シンプルさを重視する場合はproc-macro方式を選択する
+- `view!`は実在するマクロではなく、一度も展開されない。`#[elwindui::component]`(属性マクロ)が
+  付与された`struct`全体を丸ごと別のコードへ置き換えるため、内側の`view!`呼び出しはRustが実際に
+  展開しようとする対象には決して現れない ── マクロ呼び出しはRustの*型*位置において構文的に妥当
+  (`field: some_macro! { .. }`は`syn::Type::Macro`としてパースされる)であることを利用している。
+  `view!`のトークンは、`.elwind`のテキストと同じように生のDSLテキストとして読み出され、既存の
+  パーサ(`parser.rs`)にそのままかけられる。
+- 中間ファイルを生成せずコンパイル時に直接展開する。IDE補完精度を重視する場合は`build.rs`方式、
+  シンプルさを重視する場合はproc-macro方式を選択する
+- `view!`内部のコード補完・型チェック(rust-analyzer自身によるもの)はまだ提供されない。これは
+  `view!`が実際には展開されないマクロであるという、この方式の前提そのものに起因する制約であり、
+  対応するには`elwindui-languageserver`側の拡張(`.rs`ファイル中の`view!`トークン範囲を検出し、
+  既存のDSL解析・補完ロジックを適用する)が別途必要になる(未着手)。
 
 ## B.2 エディタ内リアルタイム診断(LSP)
 
@@ -2101,6 +2125,29 @@ struct NotepadViewModel {
 
 依存関係が動的(実行時にしか確定しない参照パス等)で静的解析が困難なケースに限り、`elwindui-core`が提供する小さな汎用リアクティブグラフ(スロットマップ+世代インデックスによる`SignalId`、Leptos/Xilem系のリアクティブランタイムと同様の設計)にフォールバックする。ただし本付録で示した通常のMVVM用途(observable + computed + command)では、このフォールバックは基本的に発生しない。
 
+**5. `#[bindable]`: 別マクロ呼び出しで定義されたviewmodelへの注入**
+
+`component`がviewmodelを注入するフィールドには`#[bindable]`を付ける(`#[param] #[inject]`を暗黙に含む、両方を書く必要はない)。
+
+```rust
+#[bindable]
+vm: std::rc::Rc<NotepadViewModel>,
+```
+
+`#[elwindui::component]` + `body: view! { .. }`(付録B.1「代替方式(proc-macro)」)のように、`component`と、それが注入する`viewmodel`が**別々のマクロ呼び出し**として展開される場合、`component`側のコード生成はその`viewmodel`の実体型を一切解決できない(各proc-macro展開は自分自身のトークンしか見えない)。このため、フィールドの型を「シンボルテーブルで`viewmodel`だと解決できるかどうか」で自動購読を配線するかどうかを判定する方式は、この構成では機能しない。
+
+`#[bindable]`はこの判定を型解決ではなく構文マーカーに置き換える。あわせて`elwindui::core::reactive::ObservableExt`という共通トレイトを導入し、`viewmodel`が生成する`PropertyChanged`購読を、プロパティ名(`&'static str`)で識別する形で公開する:
+
+```rust
+pub trait ObservableExt {
+    fn subscribe_property_changed(&self, f: impl Fn(&'static str) + 'static) -> Subscription;
+}
+```
+
+`component`側は`view!`(または`.elwind`の`view`)を自分でパースした時点で`vm.window_title`のような参照済みプロパティ名をすでに把握しているため、`viewmodel`側の型名を一切知らなくても、この文字列を`match`のキーとして使い、影響を受ける要素だけを更新する既存の細粒度更新の仕組み(`__resync_<owner>`)をそのまま維持できる — 「変わったら丸ごと`resync()`」への劣化ではない。呼び出しは常に具体的な型に対して単相化されるため(`dyn ObservableExt`は使わない)、方針3の「動的ディスパッチを使わない」にも抵触しない。
+
+`#[bindable]`はviewmodel注入の標準形であり、プロジェクト全体でこの形に統一する(`store`など、viewmodel以外への`#[inject]`はこの対象外)。
+
 ## O.6 テスト容易性
 
 `viewmodel`は`view`を持たず、ビルトイン要素にも依存しないため、**バックエンド(WinUI3/AppKit/GTK4)を一切起動せずに単体テストできる**。
@@ -2133,7 +2180,7 @@ fn save_disables_command_while_saving() {
 |---|---|
 | MVVMのViewModel層 | `viewmodel`構文(`store`と同じフィールド構文を再利用) |
 | 操作(Command)の抽象化 | `Command`型 + `#[command(can_execute: ...)]` + `command!(...)` |
-| View/ViewModelの結合 | `#[param] #[inject] vm: ViewModelType`(付録J.5の注入パターンを流用) |
+| View/ViewModelの結合 | `#[bindable] vm: ViewModelType`(`#[param] #[inject]`を暗黙に含む、O.5) |
 | V/VM分離の静的強制 | `viewmodel`内でのビルトイン要素参照・`view`ブロックを静的エラー(14章ルール19) |
 | 低オーバーヘッドな実装 | 依存関係の静的抽出(4章と同一)、`Cell`/`RefCell`ベースの内部表現、動的ディスパッチ排除、複雑ケースのみ汎用リアクティブグラフにフォールバック |
 | テスト容易性 | `viewmodel`はバックエンド非依存で通常の`#[test]`により単体テスト可能 |

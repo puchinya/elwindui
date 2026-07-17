@@ -2,7 +2,7 @@
 //!
 //! A consumer crate needs only `elwindui` itself in `[dependencies]` — `elwindui-codegen`
 //! (`compile_dir`/`compile_dir_with_extra_viewmodels`, called from build.rs) and `elwindui-macros`'
-//! `component!`/`#[viewmodel]` proc-macros both emit generated code that refers exclusively to
+//! `#[component]`/`#[viewmodel]` proc-macros both emit generated code that refers exclusively to
 //! `elwindui::core::..`/`elwindui::backend::..`/`elwindui::i18n::..` (never `elwindui_core::..`/
 //! `elwindui_backend_*::..`/`elwindui_i18n::..` directly), which resolve through the re-exports
 //! below regardless of how many crates deep `elwindui` itself pulls them in from.
@@ -10,6 +10,11 @@
 pub use elwindui_core as core;
 pub use elwindui_core::visual_tree;
 pub use elwindui_i18n as i18n;
+/// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes
+/// a `component`+`view` pair (docs/elwindui_spec.md §3/§13) as a single ordinary Rust `struct`,
+/// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the
+/// viewmodel half (付録O.2). `view!` is not a real macro (never invoked/expanded — see
+/// `elwindui_macros::component`'s own doc comment); its tokens are read as `.elwind`-DSL text.
 pub use elwindui_macros::{class, component, viewmodel};
 
 /// See the `backend-appkit`/`backend-winui3` re-export below — `elwindui-backend-gtk4` is still an

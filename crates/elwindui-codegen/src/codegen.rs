@@ -200,14 +200,14 @@ pub struct TypeInfo {
     /// component that doesn't declare `#[content(..)]`.
     pub content_field: Option<String>,
     /// Whether this type is marked `#[embedded]` in `elwindui-codegen`'s own `builtins.elwind`,
-    /// rather than being a consumer's own `.elwind`/`component!` declaration. `Module::is_builtin`
+    /// rather than being a consumer's own `.elwind`/`#[elwindui::component]` declaration. `Module::is_builtin`
     /// only authorizes that attribute inside the embedded shape source; `ComponentDef::embedded`
     /// is the actual per-type builtin boundary.
     /// `concrete_type_ident`/`composed_create_fn_ident`/the `host_composition_base` trait-bound
     /// site use this to decide whether a reference to this type can be fully qualified as
     /// `elwindui::ui::..` (a builtin always lives there) or must stay a bare identifier (a
     /// consumer-defined component could be generated into any scope — codegen has no fixed path
-    /// for it, only the flat crate-root `include!`/`component!` convention that makes it visible
+    /// for it, only the flat crate-root `include!`/proc-macro convention that makes it visible
     /// unqualified).
     pub is_builtin: bool,
 }
@@ -1349,6 +1349,17 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
     // PropertyChanged is intentionally typed per viewmodel.  A generated view can only subscribe
     // to properties that its DSL expression actually references, so a stringly-typed global event
     // would merely hide mistakes from the compiler.
+    //
+    // The `ObservableExt` impl below (`#[bindable]`'s target, `elwindui_core::reactive`) is the one
+    // deliberate exception: a component injecting this viewmodel across a *separate* macro
+    // invocation (`#[elwindui::component]` + `body: view! { .. }`, or any `.elwind` `view`
+    // referencing a viewmodel it can't resolve in its own symbol table) has no name for
+    // `#property_enum` to write a match arm against at all, enum-typed or otherwise — the choice
+    // there isn't "enum vs. string", it's "string vs. nothing works". It doesn't reopen the typo
+    // risk this comment warns about, either: the owning component's generated `&'static str` match
+    // arms are derived mechanically from the same parsed `view!`/`view` body that also generates
+    // its `self.vm.<field>()` read calls, never hand-typed independently, so the two can't drift
+    // apart the way a genuinely stringly-typed API could.
     let property_names: Vec<syn::Ident> = v
         .fields
         .iter()
@@ -1358,6 +1369,8 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             _ => None,
         })
         .collect();
+    let property_name_strs: Vec<String> =
+        property_names.iter().map(|ident| ident.to_string()).collect();
     // Viewmodels retain a weak self-reference so async commands can upgrade it to `Rc<Self>` and
     // create the `'static` future required by `elwindui::core::task::spawn_local`.
 
@@ -1696,6 +1709,30 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             }
 
             #accessors
+        }
+
+        impl #property_enum {
+            fn name(&self) -> &'static str {
+                match self {
+                    #(Self::#property_names => #property_name_strs,)*
+                }
+            }
+        }
+
+        // `#[bindable]`'s target (`ast::Attr::Bindable`'s own doc comment) — lets a component that
+        // can't name `#property_enum` (a separate macro invocation from this one) still wire a
+        // fine-grained, per-property `PropertyChanged` subscription, identifying properties by
+        // name instead. Delegates to the inherent `subscribe_property_changed` above (inherent
+        // methods resolve before trait methods, so this isn't self-recursive) purely to convert
+        // `#property_enum` to its name — every other behavior (handler storage, cancellation) is
+        // shared, unchanged.
+        impl elwindui::core::reactive::ObservableExt for #struct_name {
+            fn subscribe_property_changed(
+                &self,
+                f: impl Fn(&'static str) + 'static,
+            ) -> elwindui::core::reactive::Subscription {
+                self.subscribe_property_changed(move |property| f(property.name()))
+            }
         }
     }
 }
@@ -2203,47 +2240,24 @@ fn generate_view(
     // further still), from `own_struct_param_names`'s own final value — see there.
     let own_struct_param_types: Vec<syn::Type>;
 
-    // `bind!(owner.field, mode)` fields whose `owner` is one of this component's own `#[param]`
-    // dependencies and whose `mode` isn't `OneTime` (docs/elwindui_spec.md §10: `OneTime` captures
-    // once at instantiation and stays fixed, so it has nothing to subscribe to). Owners are
-    // deduplicated: one typed PropertyChanged subscription dispatches to that owner's generated
-    // per-property update method. Only owners whose type is a `viewmodel` are kept —
-    // `validate_bind_path` allows `bind!` to target a plain `component` too, but only
-    // `generate_viewmodel`'s output has a PropertyChanged API.
-    let mut bind_owners: Vec<syn::Ident> = Vec::new();
-    for f in &component.fields {
-        let Some(Initializer::Bind { path, mode }) = &f.initializer else {
-            continue;
-        };
-        if mode == "OneTime" {
-            continue;
-        }
-        let [owner, _target] = path.as_slice() else {
-            continue;
-        };
-        let Some(owner_field) = component.fields.iter().find(|of| &of.name == owner) else {
-            continue;
-        };
-        let is_viewmodel = table
-            .resolve(from, strip_rc_wrapper(&owner_field.ty))
-            .is_some_and(|info| info.is_viewmodel);
-        if is_viewmodel && !bind_owners.iter().any(|o| o.to_string() == *owner) {
-            bind_owners.push(format_ident!("{}", owner));
-        }
-    }
-    // Also subscribe to every component field whose own type is a `viewmodel`, even if this
-    // component never uses `bind!` on it — a view may use direct expressions such as
-    // `vm.active_tab`. The generated property dispatcher performs no work for properties that do
-    // not occur in the view; nested item viewmodels are intentionally not bubbled through their
-    // parent collection owner.
-    for f in &component.fields {
-        let is_viewmodel = table
-            .resolve(from, strip_rc_wrapper(&f.ty))
-            .is_some_and(|info| info.is_viewmodel);
-        if is_viewmodel && !bind_owners.iter().any(|o| o.to_string() == f.name) {
-            bind_owners.push(format_ident!("{}", f.name));
-        }
-    }
+    // Every `#[bindable]` field (`ast::Attr::Bindable`'s own doc comment) gets one auto-refreshing
+    // `PropertyChanged` subscription, dispatching by property *name* through
+    // `elwindui::core::reactive::ObservableExt` rather than a per-viewmodel-typed enum — deliberately
+    // a syntactic marker rather than inferred from whether the field's type happens to resolve as a
+    // `viewmodel` in *this* compilation's symbol table: `#[elwindui::component]`'s own macro
+    // invocation never has symbol-table visibility into a `viewmodel` declared by a separate
+    // `#[elwindui::viewmodel]` invocation (each proc-macro expansion only ever sees its own tokens),
+    // so relying on resolved-type inference would silently produce no subscription at all in
+    // exactly that case. This covers both a field referenced only through `bind!(owner.field, ..)`
+    // from another field's initializer, and one referenced directly in the view body (e.g.
+    // `vm.active_tab`) — either way, "does this field need a subscription" now depends solely on
+    // whether *it itself* is `#[bindable]`, not on how other fields/expressions reference it.
+    let bind_owners: Vec<syn::Ident> = component
+        .fields
+        .iter()
+        .filter(|f| f.attrs.iter().any(|a| matches!(a, Attr::Bindable)))
+        .map(|f| format_ident!("{}", f.name))
+        .collect();
 
     // Every node that has a callback or a value that can change after construction gets a
     // generated field name and is stored on the component so `resync`/closures can reach it later.
@@ -2922,9 +2936,14 @@ fn generate_view(
     };
 
     // The generated update method covers every attribute owned by this component.
-    // It is triggered by a typed PropertyChanged event, and the subscription's lifetime is
-    // owned by the view. Nested viewmodels do not bubble their changes through a
-    // collection owner, preventing edits to a document from resyncking the parent TabView.
+    // It is triggered by a PropertyChanged event (dispatched through `ObservableExt`, keyed by
+    // property name — see `bind_owners`'s own doc comment above for why this isn't a per-viewmodel
+    // enum), and the subscription's lifetime is owned by the view. Nested viewmodels do not bubble
+    // their changes through a collection owner, preventing edits to a document from resyncking the
+    // parent TabView. Called through the trait path (`ObservableExt::subscribe_property_changed`,
+    // not `this.#owner_ident.subscribe_property_changed`) since this component's own codegen has no
+    // name for `#owner_ident`'s concrete type to resolve an inherent method against — only that it
+    // implements `ObservableExt`, satisfied generically for any type that does.
     let subscribe_stmts: TokenStream = bind_owners
         .iter()
         .map(|owner_ident| {
@@ -2932,7 +2951,7 @@ fn generate_view(
             quote! {
                 {
                     let weak = std::rc::Rc::downgrade(&this);
-                    let subscription = this.#owner_ident.subscribe_property_changed(move |property| {
+                    let subscription = elwindui::core::reactive::ObservableExt::subscribe_property_changed(&*this.#owner_ident, move |property: &'static str| {
                         if let Some(this) = weak.upgrade() { this.#method(property); }
                     });
                     this.__property_changed_subscriptions.borrow_mut().push(subscription);
@@ -3154,52 +3173,8 @@ fn generate_view(
         Some(name) => base_trait_path(name),
         None => TokenStream::new(),
     };
-    let property_resync_methods: TokenStream = bind_owners
-        .iter()
-        .filter_map(|owner_ident| {
-            let owner_name = owner_ident.to_string();
-            let owner_field = component
-                .fields
-                .iter()
-                .find(|field| field.name == owner_name)?;
-            let owner_type = strip_rc_wrapper(&owner_field.ty);
-            let owner_info = table.resolve(from, owner_type)?;
-            if !owner_info.is_viewmodel {
-                return None;
-            }
-            let property_type_name = owner_type.rsplit("::").next()?;
-            let property_enum = format_ident!("{}Property", property_type_name);
-            let method = format_ident!("__resync_{}", owner_ident);
-            let branches: TokenStream = owner_info
-                .fields
-                .iter()
-                .filter_map(|(name, kind)| {
-                    let variant = if *kind == FieldKind::Command {
-                        format_ident!("{}_can_execute", name)
-                    } else {
-                        format_ident!("{}", name)
-                    };
-                    let mut statements = TokenStream::new();
-                    for node in &plan {
-                        emit_resync(
-                            node,
-                            &ctx,
-                            from,
-                            table,
-                            Some((&owner_name, name)),
-                            &mut statements,
-                        );
-                    }
-                    Some(quote! { #property_enum::#variant => { #statements self.__refresh_dynamic_regions(); } })
-                })
-                .collect();
-            Some(mark_inherent(quote! {
-                fn #method(&self, property: #property_enum) {
-                    match property { #branches }
-                }
-            }))
-        })
-        .collect();
+    let property_resync_methods: TokenStream =
+        mark_inherent(property_resync_methods_for(&bind_owners, &plan, &ctx, from, table, true));
     let component_property_resync_methods: TokenStream = component_property_variants
         .iter()
         .map(|property| {
@@ -3252,52 +3227,14 @@ fn generate_view(
         // tags each with `#[inherent]` and they all land in the single `#[elwindui::class] impl
         // #target { .. }` block below instead of needing a second, separate plain `impl` purely to
         // hold them.
-        let property_resync_methods: TokenStream = bind_owners
-            .iter()
-            .filter_map(|owner_ident| {
-                let owner_name = owner_ident.to_string();
-                let owner_field = component
-                    .fields
-                    .iter()
-                    .find(|field| field.name == owner_name)?;
-                let owner_type = strip_rc_wrapper(&owner_field.ty);
-                let owner_info = table.resolve(from, owner_type)?;
-                if !owner_info.is_viewmodel {
-                    return None;
-                }
-                let property_type_name = owner_type.rsplit("::").next()?;
-                let property_enum = format_ident!("{}Property", property_type_name);
-                let method = format_ident!("__resync_{}", owner_ident);
-                let branches: TokenStream = owner_info
-                    .fields
-                    .iter()
-                    .filter_map(|(name, kind)| {
-                        let variant = if *kind == FieldKind::Command {
-                            format_ident!("{}_can_execute", name)
-                        } else {
-                            format_ident!("{}", name)
-                        };
-                        let mut statements = TokenStream::new();
-                        for node in &plan {
-                            emit_resync(
-                                node,
-                                &ctx,
-                                from,
-                                table,
-                                Some((&owner_name, name)),
-                                &mut statements,
-                            );
-                        }
-                        Some(quote! { #property_enum::#variant => { #statements } })
-                    })
-                    .collect();
-                Some(mark_inherent(quote! {
-                    fn #method(&self, property: #property_enum) {
-                        match property { #branches }
-                    }
-                }))
-            })
-            .collect();
+        let property_resync_methods: TokenStream = mark_inherent(property_resync_methods_for(
+            &bind_owners,
+            &plan,
+            &ctx,
+            from,
+            table,
+            false,
+        ));
         let component_property_resync_methods = mark_inherent(component_property_resync_methods);
 
         let resync_method = mark_inherent(quote! {
@@ -5657,8 +5594,8 @@ fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> TokenStream 
     // A builtin (`is_builtin`) always lives at the fixed `elwindui::ui::..` path (see `TypeInfo::
     // is_builtin`'s own doc comment) — qualifying it there means callers never need a bare `use` for
     // it. A consumer-defined component has no such fixed path (codegen doesn't know where the
-    // consumer's build.rs/`component!` puts it), so it stays bare, resolved via the existing flat
-    // crate-root convention instead.
+    // consumer's build.rs/proc-macro path puts it), so it stays bare, resolved via the existing
+    // flat crate-root convention instead.
     if info.is_some_and(|i| i.is_builtin) {
         quote! { elwindui::ui::#ident }
     } else {
@@ -5823,6 +5760,125 @@ fn emit_wiring(
 /// pushes model→widget; `emit_wiring`'s separate `set_on_<attr>_change` callback is what pushes
 /// widget→model.
 ///
+/// Collects every distinct property name `expr` references as `<owner>.<property>` (or
+/// `<owner>.<property>(...)`) — walks the same shapes `view_expr_depends_on` tests one candidate
+/// at a time, but gathers names instead of testing a single one. Needed by
+/// `property_resync_methods_for`, which (unlike the `owner_info.fields`-driven code it replaces)
+/// has no symbol-table-derived list of "every field `owner`'s type could have" to check candidates
+/// against in the first place — see `ast::Attr::Bindable`'s doc comment for why that lookup can't
+/// be relied on for a `#[bindable]` field. Unlike `view_expr_depends_on`, an opaque macro call
+/// nested inside a plain `syn::Expr` (not the DSL's own recognized `t!(...)` sugar,
+/// `ViewExpr::TFluent`, already handled below) contributes no name here — there is no property
+/// *name* to collect from "this might depend on something", only from an actual `owner.property`
+/// path.
+fn collect_view_expr_owner_properties(
+    expr: &ViewExpr,
+    ctx: &ViewCtx,
+    owner: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        ViewExpr::Path(path) => {
+            let path = resolve_bind(path, &ctx.binds);
+            if let [path_owner, path_property, ..] = path.as_slice() {
+                if path_owner == owner {
+                    out.insert(path_property.clone());
+                }
+            }
+        }
+        ViewExpr::MethodCall(path, _) => {
+            let path = resolve_bind(path, &ctx.binds);
+            if let [path_owner, path_property, ..] = path.as_slice() {
+                if path_owner == owner {
+                    out.insert(path_property.clone());
+                }
+            }
+        }
+        ViewExpr::TFluent(_, args) => {
+            for (_, value) in args {
+                collect_view_expr_owner_properties(value, ctx, owner, out);
+            }
+        }
+        ViewExpr::Expr(expr) => {
+            struct Collector<'a> {
+                owner: &'a str,
+                out: &'a mut std::collections::BTreeSet<String>,
+            }
+            impl<'ast> Visit<'ast> for Collector<'_> {
+                fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+                    let segments: Vec<_> = node.path.segments.iter().collect();
+                    if segments.len() >= 2 && segments[0].ident == self.owner {
+                        self.out.insert(segments[1].ident.to_string());
+                    }
+                    syn::visit::visit_expr_path(self, node);
+                }
+            }
+            let mut collector = Collector { owner, out };
+            collector.visit_expr(expr);
+        }
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } => {}
+    }
+}
+
+/// Builds one `fn __resync_<owner>(&self, property: &'static str)` per `bind_owners` entry — a
+/// `match` arm per distinct `<owner>.<property>` path this component's view body actually
+/// references (`collect_view_expr_owner_properties`), string-keyed rather than the per-viewmodel
+/// `XProperty` enum the code this replaces matched on (`ast::Attr::Bindable`'s doc comment explains
+/// why: this component's own codegen has no name for that enum to write a match arm against when
+/// `owner`'s concrete type is declared by a separate macro invocation). `include_refresh` mirrors
+/// the pre-existing composed/non-composed difference at each of this function's two call sites: a
+/// non-composed component needs an explicit `self.__refresh_dynamic_regions()` after each
+/// property's own statements; a composed one's `new()` already covers this elsewhere.
+fn property_resync_methods_for(
+    bind_owners: &[syn::Ident],
+    plan: &[PlannedNode],
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    include_refresh: bool,
+) -> TokenStream {
+    bind_owners
+        .iter()
+        .map(|owner_ident| {
+            let owner_name = owner_ident.to_string();
+            let mut properties: std::collections::BTreeSet<String> = Default::default();
+            for node in plan {
+                for (_, expr) in &node.attributes {
+                    collect_view_expr_owner_properties(expr, ctx, &owner_name, &mut properties);
+                }
+            }
+            let method = format_ident!("__resync_{}", owner_ident);
+            let branches: TokenStream = properties
+                .iter()
+                .map(|property_name| {
+                    let mut statements = TokenStream::new();
+                    for node in plan {
+                        emit_resync(
+                            node,
+                            ctx,
+                            from,
+                            table,
+                            Some((&owner_name, property_name)),
+                            &mut statements,
+                        );
+                    }
+                    let refresh =
+                        include_refresh.then(|| quote! { self.__refresh_dynamic_regions(); });
+                    quote! { #property_name => { #statements #refresh } }
+                })
+                .collect();
+            quote! {
+                fn #method(&self, property: &'static str) {
+                    match property {
+                        #branches
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
 /// When `filter` is present, only attributes that statically reference that owner/property are
 /// emitted.  Expression macros that the DSL cannot inspect are deliberately conservative: they
 /// remain attached to that owner's notifications rather than risking a stale UI value.
@@ -6296,8 +6352,7 @@ viewmodel NotepadViewModel {
 use crate::NotepadViewModel;
 
 component NotepadWindow {
-    #[param]
-    #[inject]
+    #[bindable]
     vm: NotepadViewModel,
 
     content: String = bind!(vm.content, TwoWay),
@@ -6711,6 +6766,12 @@ view NotepadWindow {
         assert!(window_str.contains("fn resync"));
         assert!(window_str.contains("save_execute"));
         assert!(window_str.contains("save_can_execute"));
+        // `#[bindable] vm` (`WINDOW_SRC`) must wire an `ObservableExt`-based, string-keyed
+        // subscription rather than the old per-viewmodel enum — see `ast::Attr::Bindable`.
+        assert!(window_str.contains("ObservableExt :: subscribe_property_changed"));
+        assert!(window_str.contains("fn __resync_vm (& self , property : & 'static str)"));
+        assert!(window_str.contains("\"window_title\""));
+        assert!(window_str.contains("\"char_count\""));
     }
 
     #[test]

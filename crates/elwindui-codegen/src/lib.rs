@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod attr_frontend;
 pub mod codegen;
+pub mod component_frontend;
 pub mod parser;
 pub mod validate;
 
@@ -36,24 +37,8 @@ pub fn builtin_modules() -> Vec<ast::Module> {
     vec![module]
 }
 
-/// Parses, validates and generates Rust code for a single self-contained `.elwind` source string
-/// (no filesystem access) — the shared core behind both the build.rs path (`compile_dir`, which
-/// additionally builds a symbol table spanning *all* files in a directory for cross-file
-/// references) and the proc-macro path (`elwindui-macros`'s `component!`, which only ever sees
-/// one macro invocation's worth of source and has no files to cross-reference). See
-/// docs/elwindui_spec.md 付録B.1.
-pub fn generate_from_source(src: &str) -> Result<proc_macro2::TokenStream, String> {
-    let module = parser::parse_module(src)?;
-    let all_modules: Vec<_> = std::iter::once(module.clone())
-        .chain(builtin_modules())
-        .collect();
-    validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
-    let table = codegen::build_symbol_table(&all_modules);
-    Ok(codegen::generate_module(&module, &table))
-}
-
-/// The attribute-macro counterpart to `generate_from_source`: takes a `#[elwindui::viewmodel] mod
-/// foo { struct Foo { ... } impl Foo { ... } }` (already parsed as a `syn::ItemMod` by the
+/// The attribute-macro counterpart to `generate_component_from_item_struct`: takes a
+/// `#[elwindui::viewmodel] mod foo { struct Foo { ... } impl Foo { ... } }` (already parsed as a `syn::ItemMod` by the
 /// `elwindui-macros` proc-macro), builds the same `ViewModelDef` AST `parser.rs` would from
 /// equivalent `.elwind` text (see `attr_frontend`), and feeds it through `generate_module` (not
 /// `generate_viewmodel` directly — `generate_module` is also what conditionally emits the
@@ -74,6 +59,33 @@ pub fn generate_viewmodel_from_item_mod(
     };
     validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(std::slice::from_ref(&module));
+    Ok(codegen::generate_module(&module, &table))
+}
+
+/// The attribute-macro counterpart for `component`/`view` (the struct+`view!` frontend, successor
+/// to the removed `elwindui::component!` bang macro): takes an already-parsed
+/// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` (`base`
+/// from the attribute's own `inherits Base` argument, `item_struct` parsed by the
+/// `elwindui-macros` proc-macro) and builds the matching `ComponentDef`/`ViewDef` pair (see
+/// `component_frontend`). Unlike `generate_viewmodel_from_item_mod`, this chains in
+/// `builtin_modules()` — a view body routinely references `Window`/`VerticalLayout`/etc.
+pub fn generate_component_from_item_struct(
+    base: Option<String>,
+    item_struct: &syn::ItemStruct,
+) -> Result<proc_macro2::TokenStream, String> {
+    let (component_def, view_def) =
+        component_frontend::component_and_view_from_item_struct(base, item_struct)?;
+    let module = ast::Module {
+        path: Vec::new(),
+        uses: Vec::new(),
+        items: vec![ast::Item::Component(component_def), ast::Item::View(view_def)],
+        ..Default::default()
+    };
+    let all_modules: Vec<_> = std::iter::once(module.clone())
+        .chain(builtin_modules())
+        .collect();
+    validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
+    let table = codegen::build_symbol_table(&all_modules);
     Ok(codegen::generate_module(&module, &table))
 }
 
@@ -197,64 +209,3 @@ fn compile_dir_impl(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generates_valid_rust_from_a_single_inline_source() {
-        // Everything the split notepad_viewmodel.elwind/notepad_window.elwind files contain,
-        // merged into one source string — the shape an `elwindui::component! { ... }` inline
-        // macro invocation would see.
-        let src = r#"
-enum SaveState { Unsaved, Saving, Saved }
-
-viewmodel NotepadViewModel {
-    #[observable]
-    content: String = String::new(),
-
-    #[observable]
-    file_name: String = "untitled.txt",
-
-    #[observable]
-    state: SaveState = SaveState::Unsaved,
-
-    #[computed]
-    char_count: i32 = content.chars().count() as i32,
-
-    #[computed]
-    window_title: String = t!("notepad-window-title", file_name: file_name),
-
-    #[command(can_execute: state != SaveState::Saving)]
-    save: Command = command!(|| {
-        state = SaveState::Saving;
-        document::save(&content);
-        state = SaveState::Saved;
-    }),
-}
-
-component NotepadWindow {
-    #[param]
-    #[inject]
-    vm: NotepadViewModel,
-
-    content: String = bind!(vm.content, TwoWay),
-}
-
-view NotepadWindow {
-    Window {
-        title: vm.window_title
-        VerticalLayout {
-            TextArea { text: content }
-        }
-    }
-}
-"#;
-        let generated = generate_from_source(src).expect("should generate");
-        let file: syn::File = syn::parse2(generated.clone())
-            .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
-        let pretty = prettyplease::unparse(&file);
-        assert!(pretty.contains("struct NotepadViewModel"));
-        assert!(pretty.contains("struct NotepadWindow"));
-    }
-}

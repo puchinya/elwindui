@@ -11,6 +11,7 @@
 //! work: it just has to produce the same shape of AST parser.rs already produces.
 
 use crate::ast::{Attr, FieldDef, FieldKind, Initializer, ViewModelDef};
+use crate::parser;
 use std::path::Path;
 
 /// Finds every `#[elwindui::viewmodel] mod foo { ... }` at the top level of a `.rs` file and builds
@@ -87,7 +88,7 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
     });
 
     let name = item_struct.ident.to_string();
-    let mut fields = fields_from_item_struct(item_struct)?;
+    let mut fields = fields_from_item_struct(item_struct, FieldKind::Observable)?;
 
     if let Some(item_impl) = item_impl {
         attach_command_bodies(&mut fields, item_impl)?;
@@ -106,12 +107,30 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
     Ok(ViewModelDef { name, fields })
 }
 
-fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef>, String> {
+/// Builds `FieldDef`s from a `syn::ItemStruct`'s named fields, recognizing the same attribute
+/// vocabulary `parser.rs`'s DSL field parser (`parse_field_def`) does — `param`/`prop`/
+/// `observable`/`computed`/`attached`/`inject`/`two_way`/`routed`/`override`/`onetime`/`command`/
+/// `length` — uniformly whether the caller is a `viewmodel` (`default_kind: FieldKind::Observable`,
+/// via `viewmodel_def_from_item_mod`) or a `component` (`default_kind: FieldKind::Prop`, via
+/// `component_frontend.rs`), exactly mirroring `parse_module`'s two `parse_fields_block` call
+/// sites. Whether a particular kind/attribute combination is actually *sensible* (e.g.
+/// `#[observable]` on a component field) is left to `validate::validate`, same as hand-written DSL
+/// text — no duplicate validation here.
+///
+/// `#[observable(default = expr)]`/`#[computed(expr = expr)]` parse their value as a plain
+/// `syn::Expr` (`parse_name_value_expr`) — fine since neither ever needs `bind!`/`command!` sugar.
+/// `#[prop(default = ...)]`/`#[attached(default = ...)]` instead route their raw token text
+/// through `parser::parse_initializer` (`parse_name_value_tokens`), so `bind!(vm.content,
+/// TwoWay)`/`command!(...)` written there get the same recognition hand-written `.elwind` text
+/// gets — unlike a `view!`-typed field's tokens (discarded whole), a field default is emitted
+/// verbatim into code that really gets compiled, so it can't be left as an inert
+/// `syn::Expr::Macro`.
+pub(crate) fn fields_from_item_struct(
+    item_struct: &syn::ItemStruct,
+    default_kind: FieldKind,
+) -> Result<Vec<FieldDef>, String> {
     let syn::Fields::Named(named) = &item_struct.fields else {
-        return Err(format!(
-            "viewmodel struct `{}` must have named fields",
-            item_struct.ident
-        ));
+        return Err(format!("`{}` must have named fields", item_struct.ident));
     };
 
     let mut out = Vec::new();
@@ -123,7 +142,7 @@ fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef
             .to_string();
         let ty = type_to_compact_string(&field.ty);
 
-        let mut kind = None;
+        let mut kind = default_kind;
         let mut attrs = Vec::new();
         let mut initializer = None;
 
@@ -132,22 +151,43 @@ fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef
                 return Err(format!("field `{name}`: expected a simple attribute name"));
             };
             match attr_name.as_str() {
+                "param" => kind = FieldKind::Param,
+                "prop" => {
+                    kind = FieldKind::Prop;
+                    if let Some(tokens) = parse_name_value_tokens(attr, "default")? {
+                        initializer = Some(
+                            parser::parse_initializer(&tokens.to_string()).map_err(|e| {
+                                format!("field `{name}`: invalid #[prop(default = ...)]: {e}")
+                            })?,
+                        );
+                    }
+                }
                 "observable" => {
-                    kind = Some(FieldKind::Observable);
+                    kind = FieldKind::Observable;
                     let default = parse_name_value_expr(attr, "default")?.ok_or_else(|| {
                         format!("field `{name}`: #[observable(...)] needs `default = expr`")
                     })?;
                     initializer = Some(Initializer::Expr(default));
                 }
                 "computed" => {
-                    kind = Some(FieldKind::Computed);
+                    kind = FieldKind::Computed;
                     let expr = parse_name_value_expr(attr, "expr")?.ok_or_else(|| {
                         format!("field `{name}`: #[computed(...)] needs `expr = expr`")
                     })?;
                     initializer = Some(Initializer::Expr(expr));
                 }
+                "attached" => {
+                    kind = FieldKind::Attached;
+                    if let Some(tokens) = parse_name_value_tokens(attr, "default")? {
+                        initializer = Some(
+                            parser::parse_initializer(&tokens.to_string()).map_err(|e| {
+                                format!("field `{name}`: invalid #[attached(default = ...)]: {e}")
+                            })?,
+                        );
+                    }
+                }
                 "command" => {
-                    kind = Some(FieldKind::Command);
+                    kind = FieldKind::Command;
                     let can_execute = parse_name_value_expr(attr, "can_execute")?;
                     // `is_async` is filled in later, once we've seen the matching `fn`'s
                     // signature (`attach_command_bodies`) — a plain field declaration has no
@@ -157,6 +197,16 @@ fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef
                         can_execute,
                     });
                 }
+                "inject" => attrs.push(Attr::Inject),
+                "bindable" => {
+                    kind = FieldKind::Param;
+                    attrs.push(Attr::Inject);
+                    attrs.push(Attr::Bindable);
+                }
+                "two_way" => attrs.push(Attr::TwoWay),
+                "routed" => attrs.push(Attr::Routed),
+                "override" => attrs.push(Attr::Override),
+                "onetime" => attrs.push(Attr::Onetime),
                 "length" => {
                     let (start, end, inclusive) = parse_length_range(attr)?;
                     attrs.push(Attr::Length {
@@ -169,9 +219,16 @@ fn fields_from_item_struct(item_struct: &syn::ItemStruct) -> Result<Vec<FieldDef
             }
         }
 
-        let kind = kind.ok_or_else(|| {
-            format!("field `{name}` needs one of #[observable]/#[computed]/#[command]")
-        })?;
+        // Unlike hand-written `.elwind` text, a plain Rust struct field has no `= expr` syntax of
+        // its own — `#[observable(default = ...)]`/`#[computed(expr = ...)]` are the only place
+        // either kind's value can be written, so (whether `kind` came from an explicit attribute
+        // or fell back to `default_kind`) both must end up with an initializer.
+        if matches!(kind, FieldKind::Observable | FieldKind::Computed) && initializer.is_none() {
+            return Err(format!(
+                "field `{name}`: an Observable/Computed field needs #[observable(default = ...)] \
+                 or #[computed(expr = ...)] (plain Rust struct fields have no other way to supply one)"
+            ));
+        }
 
         out.push(FieldDef {
             name,
@@ -267,6 +324,40 @@ fn parse_name_value_expr(attr: &syn::Attribute, name: &str) -> Result<Option<syn
         })?;
     if ident == name {
         Ok(Some(expr))
+    } else {
+        Err(format!("expected `{name} = ...`, found `{ident} = ...`"))
+    }
+}
+
+/// Like `parse_name_value_expr`, but returns `name = <tokens>`'s raw, unparsed token text instead
+/// of eagerly parsing it as a `syn::Expr` — used for `#[prop(default = ...)]`/`#[attached(default
+/// = ...)]`, which (unlike `observable`/`computed`) need `bind!`/`command!` sugar recognized via
+/// `parser::parse_initializer` rather than left as an inert `syn::Expr::Macro` (see
+/// `fields_from_item_struct`'s doc comment).
+fn parse_name_value_tokens(
+    attr: &syn::Attribute,
+    name: &str,
+) -> Result<Option<proc_macro2::TokenStream>, String> {
+    if matches!(attr.meta, syn::Meta::Path(_)) {
+        return Ok(None);
+    }
+    let (ident, tokens) = attr
+        .parse_args_with(|input: syn::parse::ParseStream| {
+            let ident: syn::Ident = input.parse()?;
+            input.parse::<syn::Token![=]>()?;
+            let tokens: proc_macro2::TokenStream = input.parse()?;
+            Ok((ident, tokens))
+        })
+        .map_err(|e| {
+            let attr_name = attr
+                .path()
+                .get_ident()
+                .map(|i| i.to_string())
+                .unwrap_or_default();
+            format!("invalid #[{attr_name}(...)] arguments: {e}")
+        })?;
+    if ident == name {
+        Ok(Some(tokens))
     } else {
         Err(format!("expected `{name} = ...`, found `{ident} = ...`"))
     }

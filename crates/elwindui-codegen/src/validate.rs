@@ -136,6 +136,22 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 c.name, f.name
                             ));
                         }
+                        // `#[bindable]` (`ast::Attr::Bindable`'s own doc comment) wires an
+                        // auto-refreshing `PropertyChanged` subscription via
+                        // `elwindui::core::reactive::ObservableExt`, whose generated call
+                        // dereferences the field through an `Rc` (every `viewmodel` is always
+                        // `Rc`-allocated) — this only checks the field's *spelled* type looks
+                        // `Rc`-wrapped; it can't check that the type actually implements
+                        // `ObservableExt` (that's real `rustc` type-checking on the generated
+                        // code, not something elwindui-codegen's own static analysis can see).
+                        if f.attrs.iter().any(|a| matches!(a, Attr::Bindable))
+                            && strip_rc_wrapper(&f.ty) == f.ty.trim()
+                        {
+                            errors.push(format!(
+                                "{}.{}: #[bindable] field must be `Rc<..>`-wrapped, found `{}`",
+                                c.name, f.name, f.ty
+                            ));
+                        }
                         if let Some(Initializer::Bind { path, .. }) = &f.initializer {
                             validate_bind_path(
                                 module,

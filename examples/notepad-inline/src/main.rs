@@ -1,14 +1,20 @@
 //! Same notepad UI as `examples/notepad`, but with everything embedded inline instead of build.rs
 //! + separate `.elwind` files: the viewmodel via `#[elwindui::viewmodel]` (a real Rust
 //! `struct`+`impl`, see docs/elwindui_spec.md 付録O.2 and `elwindui_codegen::attr_frontend`), and
-//! the view via `elwindui::component! { ... }` (still needed for `view { ... }` element trees,
-//! which aren't valid Rust expression syntax — that half can't move to plain Rust).
+//! the component/view via `#[elwindui::component(inherits Window)]` on an ordinary `struct` (see
+//! `elwindui_codegen::component_frontend`). The `view { ... }` element-tree DSL still isn't valid
+//! Rust *expression* syntax, so it can't become a real field *value* — but it can be a field's
+//! *type*, spelled `view! { ... }`: a macro invocation is legal Rust in type position, and because
+//! `#[elwindui::component]` (an attribute macro) replaces the whole annotated `struct`, that inner
+//! `view!` invocation never survives to be expanded — `view` isn't even a real macro anywhere. Its
+//! tokens are read back out as `.elwind`-DSL text instead, the same way the (now removed)
+//! `elwindui::component!` bang macro treated its whole input as DSL text.
 
 // `#[elwindui::class]`'s `__elwindui_inherit_*!` chain mechanism needs a same-crate macro-to-macro
 // reference (`$crate::the_macro!`) to also work cross-crate, which currently requires this lint
 // disabled — see `crates/elwindui-macros/src/class.rs`'s own doc comment on
 // `inherit_macro_self_ref_path` for the full explanation, and `docs/elwindui_macro_class_spec.md`.
-// Every crate using `#[class]` (including via `elwindui::component!`, as here) with a same-crate
+// Every crate using `#[class]` (including via `#[elwindui::component]`, as here) with a same-crate
 // `inherits` chain needs this same line.
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
@@ -89,18 +95,22 @@ mod notepad_view_model {
     }
 }
 
-elwindui::component! {
-    component NotepadWindow inherits Window {
-        #[param]
-        #[inject]
-        vm: std::rc::Rc<NotepadViewModel>
-    }
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[bindable]
+    vm: std::rc::Rc<NotepadViewModel>,
 
-    view NotepadWindow {
+    body: view! {
         title: vm.window_title
 
-        content: VerticalLayout {
+        // `Grid` (not `VerticalLayout`) so `TextArea` gets the window's remaining space instead of
+        // only its own natural height — `VerticalLayout`'s main axis is always "Auto" sizing, same
+        // reasoning as `examples/notepad/src/ui/document_view.elwind`'s own `Grid` usage.
+        content: Grid {
+            rows: [elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Star(1.0), elwindui::core::layout::GridLength::Auto]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
             HorizontalLayout {
+                Grid::row: 0
                 Button {
                     text: t!("notepad-menu-save")
                     on_click: vm.save.execute()
@@ -112,9 +122,10 @@ elwindui::component! {
                 }
             }
 
-            TextArea { text: vm.content }
+            TextArea { text: vm.content, Grid::row: 1 }
 
             HorizontalLayout {
+                Grid::row: 2
                 TextBlock { text: t!("notepad-status-chars", count: vm.char_count) }
             }
         }

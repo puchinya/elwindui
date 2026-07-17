@@ -9,6 +9,29 @@ pub fn parse_module(src: &str) -> Result<Module, String> {
     Parser::new(src).parse_module()
 }
 
+/// Parses the content that would appear inside `view Name { <this> }` — on_mount/on_unmount
+/// blocks, `let`-bindings, then the root body — from a standalone string with no enclosing
+/// `view Name { .. }` of its own (no target name, no wrapping braces). Used by
+/// `component_frontend.rs` to parse a `view! { .. }`-typed struct field's macro tokens, which
+/// arrive as exactly this content (`syn::Macro::tokens` excludes the delimiters). Appends a
+/// synthetic trailing `}` since `parse_element_body`'s own loop always terminates by consuming one.
+#[allow(clippy::type_complexity)]
+pub fn parse_view_body(
+    src: &str,
+) -> Result<(Option<syn::Block>, Option<syn::Block>, Vec<LetBinding>, ViewBody), String> {
+    Parser::new(&format!("{src}\n}}")).parse_view_body_tail()
+}
+
+/// Parses a single field/attribute initializer expression — `bind!(a.b, TwoWay)`,
+/// `command!(|| { .. })`, or a plain expression — from standalone text, exactly like the `= ...`
+/// right-hand side of a DSL field declaration (`parse_field_def`). Used by `attr_frontend.rs` so a
+/// Rust-attribute-sourced default value (e.g. `#[prop(default = bind!(vm.content, TwoWay))]`) gets
+/// the same `bind!`/`command!` recognition as hand-written `.elwind` text, instead of being parsed
+/// as an inert `syn::Expr::Macro` that `codegen.rs` wouldn't know how to treat specially.
+pub fn parse_initializer(src: &str) -> Result<Initializer, String> {
+    Parser::new(src).parse_initializer()
+}
+
 struct Parser<'a> {
     src: &'a str,
     pos: usize,
@@ -353,6 +376,11 @@ impl<'a> Parser<'a> {
                 "computed" => kind = FieldKind::Computed,
                 "attached" => kind = FieldKind::Attached,
                 "inject" => attrs.push(Attr::Inject),
+                "bindable" => {
+                    kind = FieldKind::Param;
+                    attrs.push(Attr::Inject);
+                    attrs.push(Attr::Bindable);
+                }
                 "two_way" => attrs.push(Attr::TwoWay),
                 "routed" => attrs.push(Attr::Routed),
                 "override" => attrs.push(Attr::Override),
@@ -435,8 +463,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_initializer(&mut self) -> Result<Initializer, String> {
-        if self.peek_keyword_bang("bind") {
-            self.pos += "bind!".len();
+        if self.eat_keyword_bang("bind") {
             self.expect_char('(')?;
             self.skip_trivia();
             let mut path = vec![self.parse_ident()?];
@@ -452,8 +479,7 @@ impl<'a> Parser<'a> {
             return Ok(Initializer::Bind { path, mode });
         }
 
-        if self.peek_keyword_bang("command") {
-            self.pos += "command!".len();
+        if self.eat_keyword_bang("command") {
             self.expect_char('(')?;
             let block_src = self.take_balanced_until(&[')'])?;
             self.expect_char(')')?;
@@ -495,7 +521,24 @@ impl<'a> Parser<'a> {
         let target = self.parse_ident()?;
         self.expect_char('{')?;
         self.skip_trivia();
+        let (on_mount, on_unmount, lets, root) = self.parse_view_body_tail()?;
+        Ok(ViewDef {
+            target,
+            on_mount,
+            on_unmount,
+            lets,
+            root,
+        })
+    }
 
+    /// The part of `view Name { <this> }` that follows the opening `{` — on_mount/on_unmount
+    /// blocks, `let`-bindings, then the root body (attributes/attached/children). Factored out of
+    /// `parse_view_def` so `parse_view_body` (below) can parse the same content standalone, with
+    /// no `target`/wrapping braces of its own — see that function's doc comment.
+    #[allow(clippy::type_complexity)]
+    fn parse_view_body_tail(
+        &mut self,
+    ) -> Result<(Option<syn::Block>, Option<syn::Block>, Vec<LetBinding>, ViewBody), String> {
         let mut on_mount = None;
         let mut on_unmount = None;
         loop {
@@ -568,17 +611,16 @@ impl<'a> Parser<'a> {
         let (attributes, attached, children) = self.parse_element_body()?;
         // `parse_element_body` already consumed the view's own closing `}` (mirroring
         // `parse_element_node`, which consumes `Type { ... }`'s own closing `}` the same way).
-        Ok(ViewDef {
-            target,
+        Ok((
             on_mount,
             on_unmount,
             lets,
-            root: ViewBody {
+            ViewBody {
                 attributes,
                 attached,
                 children,
             },
-        })
+        ))
     }
 
     fn parse_element_node(&mut self) -> Result<ElementNode, String> {
@@ -797,13 +839,20 @@ impl<'a> Parser<'a> {
         // attribute value (`Grid`'s `rows`/`columns`, §3). Captured verbatim and handed to `syn`
         // directly (same take-then-`syn::parse_str` fallback `parse_initializer` already uses for
         // a field's default expr) rather than taught to this function's own dotted-path/`t!` sugar,
-        // since a bracketed literal can't be confused with any of those. Uses
-        // `take_expr_until_line_end_or` (not `take_balanced_until`) for the same reason
-        // `parse_closure_expr_body` does — view attributes have no required trailing separator, so
-        // a plain `,`/`}` search would swallow every following attribute's text too once the
-        // array's own closing `]` brings the bracket depth back to 0.
+        // since a bracketed literal can't be confused with any of those. Unlike a general
+        // expression (`take_expr_until_line_end_or`, relied on by `parse_closure_expr_body` and
+        // needed there because an arbitrary expression has no self-delimiting end marker), an
+        // array literal *is* self-delimiting — its own matching `]` unambiguously ends it — so
+        // `take_bracketed_src` stops exactly there regardless of trailing separators or
+        // whitespace/newlines. This matters beyond style: relying on an unnested newline to end
+        // the capture (as this used to) silently breaks whenever this DSL text didn't come from a
+        // real `.elwind` file with real line breaks but from a macro's `TokenStream::to_string()`
+        // (`elwindui::component!`'s removed bang-macro form, or `view!`'s tokens today) —
+        // `to_string()` never preserves original source line breaks, so the "stop at newline"
+        // fallback would keep consuming every subsequent attribute/child until the next stray
+        // `,`/`}`, exactly the class of bug `eat_keyword_bang` fixed for `t!`/`bind!`/`command!`.
         if self.peek_char() == Some('[') {
-            let expr_src = self.take_expr_until_line_end_or(&[',', '}'])?;
+            let expr_src = self.take_bracketed_src()?;
             let expr = syn::parse_str::<syn::Expr>(expr_src.trim())
                 .map_err(|e| format!("invalid array literal `{}`: {e}", expr_src.trim()))?;
             return Ok(ViewExpr::Expr(expr));
@@ -831,8 +880,7 @@ impl<'a> Parser<'a> {
             return Ok(ViewExpr::Expr(expr));
         }
 
-        if self.peek_keyword_bang("t") {
-            self.pos += "t!".len();
+        if self.eat_keyword_bang("t") {
             self.expect_char('(')?;
             self.skip_trivia();
             let key_src = self.take_string_literal()?;
@@ -1045,10 +1093,23 @@ impl<'a> Parser<'a> {
         matched
     }
 
-    fn peek_keyword_bang(&mut self, kw: &str) -> bool {
-        self.skip_trivia();
-        let needle = format!("{kw}!");
-        self.rest().starts_with(&needle)
+    /// Like `eat_keyword`, but for the DSL's own `bind!(..)`/`command!(..)`/`t!(..)` macro-call
+    /// sugar forms: consumes `kw` followed by `!`, tolerating whitespace in between. Real rustc's
+    /// `proc_macro::TokenStream::to_string()` never puts a space between an identifier and an
+    /// immediately-following `!`, but rust-analyzer's own proc-macro-srv token-stream-to-text
+    /// implementation does (`foo !` rather than `foo!`) — confirmed via `rust-analyzer diagnostics`
+    /// producing a real `macro-error` here for a `view!`/`component!`-style macro's tokens read
+    /// back out as DSL text, while `cargo build`/`cargo test` (real rustc) stayed clean. Assuming
+    /// the two always agree byte-for-byte is exactly the kind of thing CLAUDE.md's "verify with
+    /// rust-analyzer" step exists to catch.
+    fn eat_keyword_bang(&mut self, kw: &str) -> bool {
+        let checkpoint = self.pos;
+        if self.eat_keyword(kw) && self.eat_char('!') {
+            true
+        } else {
+            self.pos = checkpoint;
+            false
+        }
     }
 
     fn parse_ident(&mut self) -> Result<String, String> {
@@ -1195,6 +1256,42 @@ impl<'a> Parser<'a> {
         Ok(self.src[start..self.pos].to_string())
     }
 
+    /// Captures a full bracket-delimited literal (`[ ... ]`, brackets included), respecting nested
+    /// brackets/parens/braces and string literals — mirrors `take_block_src`'s `{ ... }` capture,
+    /// just for `[`/`]`. Used for array-literal attribute values (`rows: [GridLength::Auto, ..]`),
+    /// which — unlike a general expression — are self-delimiting by their own matching bracket, so
+    /// this needs no separator/newline convention to know where the value ends.
+    fn take_bracketed_src(&mut self) -> Result<String, String> {
+        self.skip_trivia();
+        let start = self.pos;
+        if self.peek_char() != Some('[') {
+            return Err(self.err("expected `[`"));
+        }
+        let mut depth: i32 = 0;
+        loop {
+            match self.peek_char() {
+                None => return Err(self.err("unexpected end of input in array literal")),
+                Some('"') => {
+                    self.take_string_literal()?;
+                    continue;
+                }
+                Some('[') | Some('(') | Some('{') => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                Some(']') | Some(')') | Some('}') => {
+                    depth -= 1;
+                    self.pos += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Some(c) => self.pos += c.len_utf8(),
+            }
+        }
+        Ok(self.src[start..self.pos].to_string())
+    }
+
     /// Like `take_balanced_until`, but also stops at an unnested newline — needed for a closure
     /// body's `syn::Expr` fallback, since view attributes have no required separator between them
     /// (`parse_element_node`'s trailing `,` is optional; one-attribute-per-line with no comma is
@@ -1229,7 +1326,18 @@ impl<'a> Parser<'a> {
 
     fn err(&self, msg: &str) -> String {
         let line = self.src[..self.pos].matches('\n').count() + 1;
-        format!("parse error at line {line}: {msg}")
+        let pos = self.pos.min(self.src.len());
+        let mut snippet_start = pos.saturating_sub(30);
+        while snippet_start > 0 && !self.src.is_char_boundary(snippet_start) {
+            snippet_start -= 1;
+        }
+        let mut snippet_end = (pos + 30).min(self.src.len());
+        while snippet_end < self.src.len() && !self.src.is_char_boundary(snippet_end) {
+            snippet_end += 1;
+        }
+        let before = &self.src[snippet_start..pos];
+        let after = &self.src[pos..snippet_end];
+        format!("parse error at line {line}: {msg} (near: {before:?} <|> {after:?})")
     }
 }
 

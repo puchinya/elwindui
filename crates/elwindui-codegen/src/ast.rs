@@ -222,6 +222,27 @@ pub enum Attr {
     /// `node.type_path == "Window" && matches!(name, "left" | "top" | "width" | "height")` check
     /// in `codegen.rs`'s `emit_resync`.
     Onetime,
+    /// `#[bindable]`: shorthand for `#[param] #[inject]` on a field whose type is expected to
+    /// implement `elwindui::core::reactive::ObservableExt` (currently: a `viewmodel`) — the
+    /// canonical, project-wide way to inject a viewmodel into a `component` (付録O.8). Parsing
+    /// this attribute (`parser::parse_field_def`/`attr_frontend::fields_from_item_struct`) sets
+    /// `FieldKind::Param` and pushes `Attr::Inject` alongside it, exactly as if both had been
+    /// written by hand — so `#[bindable]` never appears without `Inject` also present.
+    ///
+    /// Unlike plain `#[inject]` (also used for non-reactive dependencies, e.g. 付録J `store`),
+    /// `#[bindable]` is what `codegen.rs`'s `generate_view` looks for when deciding which fields
+    /// to wire an auto-refreshing `PropertyChanged` subscription for (`bind_owners` in
+    /// `generate_view`) — deliberately a syntactic marker rather than inferred from whether the
+    /// field's type happens to resolve as a `viewmodel` in *this* compilation's symbol table:
+    /// `#[elwindui::component]`'s own macro invocation never has symbol-table visibility into a
+    /// `viewmodel` declared by a separate `#[elwindui::viewmodel]` invocation (each proc-macro
+    /// expansion only ever sees its own tokens), so relying on resolved-type inference would
+    /// silently produce no subscription at all in exactly that (common) case. `validate::validate`
+    /// checks the field's type looks like `Rc<..>` (every generated `viewmodel` is always
+    /// `Rc`-allocated) — but not that it implements `ObservableExt`, since elwindui-codegen has no
+    /// way to check that itself; a mismatched type is a real `rustc` trait-bound error in the
+    /// generated code instead.
+    Bindable,
 }
 
 /// A `component`/`viewmodel` field. See docs/elwindui_spec.md §3, 付録O.2.

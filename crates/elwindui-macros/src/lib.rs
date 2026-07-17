@@ -2,28 +2,6 @@ use proc_macro::TokenStream;
 
 mod class;
 
-/// `elwindui::component! { component NotepadWindow { ... } view NotepadWindow { ... } }`, the
-/// proc-macro alternative to the build.rs codegen path (`elwindui_codegen::compile_dir`) — lets
-/// `component`/`viewmodel`/`enum`/`view` items be written inline in a `.rs` file instead of in a
-/// separate `.elwind` file, the way `slint::slint! { ... }` embeds Slint markup inline. See
-/// docs/elwindui_spec.md 付録B.1.
-///
-/// A single invocation is parsed as one self-contained `Module` (see
-/// `elwindui_codegen::generate_from_source`): cross-references only resolve against `component`/
-/// `viewmodel`/`enum` items written in the *same* macro invocation, unlike `compile_dir`, which
-/// builds one symbol table spanning every `.elwind` file in a directory.
-#[proc_macro]
-pub fn component(input: TokenStream) -> TokenStream {
-    let src = input.to_string();
-    match elwindui_codegen::generate_from_source(&src) {
-        Ok(tokens) => tokens.into(),
-        Err(e) => {
-            let msg = format!("elwindui::component!: {e}");
-            quote::quote! { compile_error!(#msg); }.into()
-        }
-    }
-}
-
 /// `#[elwindui::viewmodel] mod foo { struct Foo { #[observable(default = ...)] field: Ty, ... }
 /// impl Foo { fn some_command(&self) { ... } } }` — lets a `viewmodel` be written as ordinary Rust
 /// (a real `struct` + a real `impl` with real attributes and real `fn` bodies) instead of the
@@ -35,7 +13,7 @@ pub fn component(input: TokenStream) -> TokenStream {
 /// with their `impl` bodies).
 ///
 /// The `mod` wrapper itself doesn't survive expansion — the generated `struct`/`impl` appear
-/// unwrapped at the scope where the `mod` was written, the same way `component!`'s output does.
+/// unwrapped at the scope where the `mod` was written.
 #[proc_macro_attribute]
 pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item_mod = match syn::parse::<syn::ItemMod>(item) {
@@ -54,6 +32,67 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
             quote::quote! { compile_error!(#msg); }.into()
         }
     }
+}
+
+/// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — lets a
+/// `component`+`view` pair be written as a single ordinary Rust `struct` instead of the `.elwind`
+/// DSL's `component Name inherits Base { .. } view Name { .. }` block pair. Ordinary fields become
+/// the component's own `#[param]`/`#[prop]`/etc. fields, exactly as in `.elwind` text; exactly one
+/// field, typed as a `view! { .. }` macro invocation, supplies the view tree.
+///
+/// `view` is never a real macro — it's never invoked, since this attribute macro (which runs
+/// before any inner item macro would) replaces the whole annotated `struct` with different code,
+/// so `view!`'s tokens never survive into anything Rust itself expands. They're recovered here as
+/// plain DSL text instead (`elwindui_codegen::component_frontend`), the same way the (now removed)
+/// `elwindui::component!` bang macro treated its whole input as DSL text via `input.to_string()`.
+/// See docs/elwindui_spec.md 付録B.1.
+///
+/// `#[virtual]`/`#[override]` methods aren't supported yet — there's no natural place for a method
+/// *body* on a bare `struct` (unlike `#[elwindui::viewmodel]`'s paired `impl` block for `#[command]`
+/// bodies). The natural extension point, if/when needed, is a companion `#[elwindui::component] impl
+/// Name { .. }` matched up by struct name.
+#[proc_macro_attribute]
+pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item_struct = match syn::parse::<syn::ItemStruct>(item) {
+        Ok(item_struct) => item_struct,
+        Err(e) => {
+            let msg = format!("#[elwindui::component]: expected a plain `struct Name {{ .. }}`: {e}");
+            return quote::quote! { compile_error!(#msg); }.into();
+        }
+    };
+    let base = match parse_inherits_arg(attr.into()) {
+        Ok(base) => base,
+        Err(e) => {
+            let msg = format!("#[elwindui::component]: {e}");
+            return quote::quote! { compile_error!(#msg); }.into();
+        }
+    };
+    match elwindui_codegen::generate_component_from_item_struct(base, &item_struct) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => {
+            let msg = format!("#[elwindui::component]: {e}");
+            quote::quote! { compile_error!(#msg); }.into()
+        }
+    }
+}
+
+/// Parses `#[component]`'s own argument list: empty (no base), or exactly `inherits Base` (no
+/// `=`, matching the DSL's own `component Name inherits Base` spelling — unlike `#[class]`'s
+/// `inherits = ..` convention).
+fn parse_inherits_arg(attr: proc_macro2::TokenStream) -> syn::Result<Option<String>> {
+    use syn::parse::Parser;
+    if attr.is_empty() {
+        return Ok(None);
+    }
+    (|input: syn::parse::ParseStream| {
+        let kw: syn::Ident = input.parse()?;
+        if kw != "inherits" {
+            return Err(syn::Error::new(kw.span(), "expected `inherits <Base>`"));
+        }
+        let base: syn::Ident = input.parse()?;
+        Ok(Some(base.to_string()))
+    })
+    .parse2(attr)
 }
 
 /// `#[elwindui_macros::class(inherits = SuperClass, struct_only = existing::TraitPath, trait_only, abstract_class, sealed)]`

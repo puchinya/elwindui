@@ -90,14 +90,33 @@ include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
 
 ### 4.2 proc-macro方式
 
+`component`/`view`を`.elwind`テキストとして書く代わりに、通常のRust `struct`定義として書く。
+フィールドは`#[param]`/`#[prop]`等の属性を伴う通常のフィールドとして、`view { .. }`要素ツリーは
+`view!`マクロ呼び出しを型に持つ1フィールドとして表現する。
+
 ```rust
-elwindui::component! {
-    include_str!("ui/notepad_window.elwind")
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[bindable]
+    vm: std::rc::Rc<NotepadViewModel>,
+
+    body: view! {
+        title: vm.window_title
+        content: VerticalLayout {
+            TextArea { text: vm.content }
+        }
+    }
 }
 ```
 
+- `view!`は実在するマクロではなく、一度も展開されない。`#[elwindui::component]`(属性マクロ)が
+  `struct`全体を丸ごと別のコードへ置き換えるため、内側の`view!`呼び出しはRustが実際に展開する
+  対象には現れない ── マクロ呼び出しがRustの*型*位置において構文的に妥当(`field: some_macro! {
+  .. }`は`syn::Type::Macro`としてパースされる)であることを利用したトリック。`view!`のトークンは
+  `.elwind`テキストと同じ生のDSLテキストとして読み出され、既存のパーサ(`crates/elwindui-codegen/
+  src/parser.rs`)へそのままかけられる。
 - 中間ファイルを生成せず、コンパイル時にトークン列として直接展開する。
-- ビルド構成がシンプルになる(`build.rs`の追加が不要)一方、生成コードが実ファイルとして残らないため、IDE補完の精度はbuild.rs方式に劣る。
+- ビルド構成がシンプルになる(`build.rs`の追加が不要)一方、生成コードが実ファイルとして残らないため、IDE補完の精度はbuild.rs方式に劣る。加えて`view!`の中身自体は、rust-analyzer自身による補完・型チェックの対象にもならない(`elwindui-languageserver`側の別途拡張が必要、未着手)。
 
 ### 4.3 選択指針
 
@@ -108,7 +127,7 @@ elwindui::component! {
 
 いずれの方式でも②〜④のパイプライン(静的検証・定数畳み込み・コード生成)は共通の内部実装(`elwindui-codegen`本体)を呼び出すのみとし、起動方式の違いによってコンパイラの検証結果や生成コードの意味が変わることはない。
 
-**実装状況の注**: 両方式とも実装済みで、実サンプルで検証されている。build.rs方式は`elwindui_codegen::compile_dir`/`compile_dir_with_extra_viewmodels`(`crates/elwindui-codegen/src/lib.rs`)として実装され、`examples/notepad`が利用する。proc-macro方式は`elwindui_macros::component!`/`#[elwindui_macros::viewmodel]`(`crates/elwindui-macros/src/lib.rs`、`elwindui::component!`/`#[elwindui::viewmodel]`として再エクスポート)として実装され、`examples/notepad-inline`(view+viewmodel両方)と`examples/viewmodel-attr-demo`(`#[elwindui::viewmodel]`のみ、view層無し)が利用する。
+**実装状況の注**: 両方式とも実装済みで、実サンプルで検証されている。build.rs方式は`elwindui_codegen::compile_dir`/`compile_dir_with_extra_viewmodels`(`crates/elwindui-codegen/src/lib.rs`)として実装され、`examples/notepad`が利用する。proc-macro方式は`elwindui_macros::component`/`#[elwindui_macros::viewmodel]`(`crates/elwindui-macros/src/lib.rs`、`elwindui::component`/`#[elwindui::viewmodel]`として再エクスポート)として実装され、`examples/notepad-inline`(component+view+viewmodel全て)と`examples/viewmodel-attr-demo`(`#[elwindui::viewmodel]`のみ、view層無し)が利用する。`component`は`struct`に付与する属性マクロで、`view`要素ツリーは`view!`型フィールド(`crates/elwindui-codegen/src/component_frontend.rs`が処理)として書く。
 
 ---
 

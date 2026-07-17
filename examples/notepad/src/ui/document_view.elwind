@@ -4,8 +4,7 @@ use crate::document_view_model::DocumentViewModel;
 // below) — own field renamed to `document_text` (not `content`) since `ContentControl` already
 // declares an inherited `content: Rc<dyn UIElement>` field of its own.
 component DocumentView inherits ContentControl {
-    #[param]
-    #[inject]
+    #[bindable]
     doc: std::rc::Rc<DocumentViewModel>,
 
     document_text: String = bind!(doc.content, TwoWay),

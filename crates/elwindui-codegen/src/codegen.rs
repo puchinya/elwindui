@@ -1843,6 +1843,28 @@ fn rewrite_t_macro(
     quote! { #expr }
 }
 
+/// [`rewrite_t_macro`]'s counterpart for an expression emitted where sibling field references are
+/// already-correct bare local identifiers rather than needing a `self.<field>()` rewrite — a
+/// component's own defaulted-prop/computed field's *initial* value, computed once via a plain `let`
+/// before `self` exists (`generate_view`'s own-field construction-time `let` bindings, above). Only
+/// `t!(...)`'s own macro-call shape needs expanding here (it isn't real Rust `syn::visit` can walk
+/// into); its argument values are left exactly as parsed, unlike [`rewrite_t_call`]'s `receiver`-
+/// prefixed ones.
+fn rewrite_t_macro_bare(expr: syn::Expr) -> TokenStream {
+    if let syn::Expr::Macro(m) = &expr {
+        if m.mac.path.is_ident("t") {
+            let (key, args) = parse_t_macro_tokens(&m.mac.tokens)
+                .expect("t!(...) arguments must be `\"key\", name: expr, ...`");
+            let arg_pairs = args.iter().map(|(name, value)| {
+                let name_str = name.to_string();
+                quote! { (#name_str, elwindui::i18n::FluentValue::from(#value)) }
+            });
+            return quote! { elwindui::i18n::t(#key, &[ #(#arg_pairs),* ]) };
+        }
+    }
+    quote! { #expr }
+}
+
 /// Parses a `t!(...)` macro's raw tokens (`"key", name1: expr1, name2: expr2`) into the key and
 /// its named argument expressions. Shared by [`rewrite_t_call`] (codegen) and [`referenced_fields`]
 /// (dependency-graph analysis) — both need to look inside the macro's opaque token stream, since
@@ -1978,6 +2000,53 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
     let mut ctor_field_inits = TokenStream::new();
     let mut accessors = TokenStream::new();
 
+    // A defaulted `#[prop(default = ...)]`/`#[computed(expr = ...)]` field (`generate_view`'s own
+    // sibling handling above has the full design-rationale doc comment) — this view-less component
+    // has no widget tree to construct and no `resync()` to hook into, so this is simpler than
+    // `generate_view`'s version: just Cell/RefCell storage, seeded by a `let <name> = <expr>;`
+    // chain (bare sibling references — plain local identifiers, exactly like `generate_view`'s own,
+    // since `self` doesn't exist yet inside `new(..)`'s still-being-built struct literal either),
+    // a getter, a `#[prop]`-default field's setter (cascading into any `#[computed]` field that
+    // depends on it, mirroring `generate_viewmodel`'s Observable-setter cascade), and a
+    // `recompute_<name>` for each `#[computed]` field.
+    let field_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
+    let own_computed_fields: Vec<&FieldDef> = c
+        .fields
+        .iter()
+        .filter(|f| f.kind == FieldKind::Computed && matches!(f.initializer, Some(Initializer::Expr(_))))
+        .collect();
+    let mut dependents_of: HashMap<String, Vec<String>> = HashMap::new();
+    for f in &own_computed_fields {
+        if let Some(Initializer::Expr(expr)) = &f.initializer {
+            for dep in referenced_fields(expr, &field_names) {
+                dependents_of.entry(dep).or_default().push(f.name.clone());
+            }
+        }
+    }
+    let mut default_let_stmts = TokenStream::new();
+    for f in c.fields.iter().filter(|f| {
+        matches!(f.initializer, Some(Initializer::Expr(_)))
+            && matches!(f.kind, FieldKind::Prop | FieldKind::Computed)
+    }) {
+        let field_ident = format_ident!("{}", f.name);
+        let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
+        let Some(Initializer::Expr(raw_expr)) = &f.initializer else {
+            unreachable!("filtered to Some(Initializer::Expr(_)) above");
+        };
+        let init_expr = rewrite_t_macro_bare(raw_expr.clone());
+        default_let_stmts.extend(quote! { let #field_ident: #ty = #init_expr; });
+    }
+    let component_property_enum = format_ident!("{}Property", c.name);
+    let property_variants: Vec<syn::Ident> = c
+        .fields
+        .iter()
+        .filter(|f| {
+            matches!(f.initializer, Some(Initializer::Expr(_)))
+                && matches!(f.kind, FieldKind::Prop | FieldKind::Computed)
+        })
+        .map(|f| format_ident!("{}", f.name))
+        .collect();
+
     for f in &c.fields {
         let field_ident = format_ident!("{}", f.name);
         let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
@@ -2046,9 +2115,87 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                     pub fn #set_name(&self, value: #ty) { self.#owner_ident.#setter(value); }
                 });
             }
-            Some(Initializer::Expr(_)) | Some(Initializer::Command { .. }) => {
+            Some(Initializer::Expr(raw_expr)) if f.kind == FieldKind::Prop => {
+                let cell_ty = if is_copy_type(&f.ty) {
+                    quote! { std::cell::Cell }
+                } else {
+                    quote! { std::cell::RefCell }
+                };
+                struct_fields.extend(quote! { #field_ident: #cell_ty<#ty>, });
+                ctor_field_inits.extend(quote! { #field_ident: <#cell_ty<_>>::new(#field_ident), });
+                let get_body = if is_copy_type(&f.ty) {
+                    quote! { self.#field_ident.get() }
+                } else {
+                    quote! { self.#field_ident.borrow().clone() }
+                };
+                let set_name = format_ident!("set_{}", f.name);
+                let set_body = if is_copy_type(&f.ty) {
+                    quote! { self.#field_ident.set(value); }
+                } else {
+                    quote! { *self.#field_ident.borrow_mut() = value; }
+                };
+                let recompute_calls: Vec<TokenStream> = dependents_of
+                    .get(&f.name)
+                    .into_iter()
+                    .flatten()
+                    .map(|dep| {
+                        let recompute = format_ident!("recompute_{}", dep);
+                        let property = format_ident!("{}", dep);
+                        quote! {
+                            self.#recompute();
+                            self.on_property_changed(#component_property_enum::#property);
+                        }
+                    })
+                    .collect();
+                accessors.extend(quote! {
+                    pub fn #field_ident(&self) -> #ty { #get_body }
+                    pub fn #set_name(&self, value: #ty) {
+                        #set_body
+                        #(#recompute_calls)*
+                        self.on_property_changed(#component_property_enum::#field_ident);
+                    }
+                });
+                let _ = raw_expr; // consumed by `default_let_stmts`, above
+            }
+            Some(Initializer::Expr(raw_expr)) if f.kind == FieldKind::Computed => {
+                let cell_ty = if is_copy_type(&f.ty) {
+                    quote! { std::cell::Cell }
+                } else {
+                    quote! { std::cell::RefCell }
+                };
+                struct_fields.extend(quote! { #field_ident: #cell_ty<#ty>, });
+                ctor_field_inits.extend(quote! { #field_ident: <#cell_ty<_>>::new(#field_ident), });
+                let get_body = if is_copy_type(&f.ty) {
+                    quote! { self.#field_ident.get() }
+                } else {
+                    quote! { self.#field_ident.borrow().clone() }
+                };
+                let set_cache = if is_copy_type(&f.ty) {
+                    quote! { self.#field_ident.set(value); }
+                } else {
+                    quote! { *self.#field_ident.borrow_mut() = value; }
+                };
+                let compute_expr = rewrite_t_macro(
+                    rewrite_field_refs(raw_expr.clone(), &field_names, &format_ident!("self")),
+                    &field_names,
+                    &format_ident!("self"),
+                );
+                let recompute = format_ident!("recompute_{}", f.name);
+                accessors.extend(quote! {
+                    pub fn #field_ident(&self) -> #ty { #get_body }
+                    fn #recompute(&self) {
+                        let value: #ty = #compute_expr;
+                        #set_cache
+                    }
+                });
+            }
+            Some(Initializer::Expr(_)) => unreachable!(
+                "field `{}`: a plain initializer expr is only valid on #[prop]/#[computed] (validate.rs already rejects other kinds)",
+                f.name
+            ),
+            Some(Initializer::Command { .. }) => {
                 panic!(
-                    "component field `{}` initializer form not supported yet",
+                    "component field `{}`: #[command] is a viewmodel-only construct (docs/elwindui_spec.md 付録O.3), not supported on a plain component",
                     f.name
                 );
             }
@@ -2058,13 +2205,48 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
     let _ = table; // reserved for future cross-component validation
     let methods = emit_methods(&c.methods);
     quote! {
+        #[allow(non_camel_case_types)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum #component_property_enum {
+            #(#property_variants),*
+        }
+
         pub struct #struct_name {
             #struct_fields
+            __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#component_property_enum)>>>)>>>,
         }
 
         impl #struct_name {
             pub fn new(#ctor_params) -> Self {
-                Self { #ctor_field_inits }
+                #default_let_stmts
+                Self {
+                    #ctor_field_inits
+                    __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+                }
+            }
+
+            pub fn subscribe_property_changed(
+                &self,
+                f: impl Fn(#component_property_enum) + 'static,
+            ) -> elwindui::core::reactive::Subscription {
+                let active = std::rc::Rc::new(std::cell::Cell::new(true));
+                let handler = std::rc::Rc::new(std::cell::RefCell::new(
+                    Box::new(f) as Box<dyn Fn(#component_property_enum)>
+                ));
+                self.__property_changed_handlers
+                    .borrow_mut()
+                    .push((active.clone(), handler));
+                elwindui::core::reactive::Subscription::new(move || active.set(false))
+            }
+
+            #[allow(dead_code)]
+            fn on_property_changed(&self, property: #component_property_enum) {
+                let handlers = self.__property_changed_handlers.borrow().clone();
+                for (active, handler) in handlers {
+                    if active.get() {
+                        (handler.borrow())(property);
+                    }
+                }
             }
 
             #accessors
@@ -2180,12 +2362,83 @@ fn generate_view(
     // `Control { padding: padding }`) apart from "a plain value that itself needs `Some(..)`
     // wrapping" (e.g. a literal `padding: 8.0`) — forwarding the former through the latter's
     // wrapping convention would double-wrap into `Option<Option<T>>`.
-    let own_fields: std::collections::HashMap<String, String> = component
+    let mut own_fields: std::collections::HashMap<String, String> = component
         .fields
         .iter()
         .filter(|f| f.initializer.is_none())
         .map(|f| (f.name.clone(), f.ty.clone()))
         .collect();
+
+    // A component's own `#[prop(default = expr)]`/`#[computed(expr = expr)]` fields — unlike every
+    // category above, these carry a real initializer expression, but (unlike `viewmodel`'s
+    // `#[observable]`/`#[computed]`, `generate_viewmodel` above) they weren't recognized as "one of
+    // this component's own fields" by anything downstream at all until this block: not stored on
+    // the struct, no accessor, and (critically) invisible to `emit_expr`'s bare-identifier
+    // resolution (`ctx.own_fields`), which used to make a same-component reference like `text:
+    // label` fail with "unsupported path shape after bind resolution". Mirrors two things already
+    // proven out elsewhere in this file rather than inventing a third mechanism: `mutable_required_names`
+    // below (Cell/RefCell storage + a generated `{Component}Property` enum + per-property `resync`,
+    // for a component's own *required* mutable `prop` fields) and `generate_viewmodel`'s own
+    // `dependents_of`-driven Computed-field cascade (this function's sibling above).
+    let field_names: HashSet<&str> = component.fields.iter().map(|f| f.name.as_str()).collect();
+    let own_default_fields: Vec<&FieldDef> = component
+        .fields
+        .iter()
+        .filter(|f| f.kind == FieldKind::Prop && matches!(f.initializer, Some(Initializer::Expr(_))))
+        .collect();
+    let own_computed_fields: Vec<&FieldDef> = component
+        .fields
+        .iter()
+        .filter(|f| f.kind == FieldKind::Computed && matches!(f.initializer, Some(Initializer::Expr(_))))
+        .collect();
+    own_fields.extend(
+        own_default_fields
+            .iter()
+            .chain(own_computed_fields.iter())
+            .map(|f| (f.name.clone(), f.ty.clone())),
+    );
+    // Dependency graph (mirrors `generate_viewmodel`'s own `dependents_of`, `codegen.rs` above) so
+    // that setting an own defaulted-prop field cascades into recomputing + notifying every own
+    // computed field that depends on it — scoped to this component's own fields only (a computed
+    // field's expression may also reference a `#[param]` field, which never changes after
+    // construction and so needs no cascade entry).
+    let mut own_dependents_of: HashMap<String, Vec<String>> = HashMap::new();
+    for f in &own_computed_fields {
+        if let Some(Initializer::Expr(expr)) = &f.initializer {
+            for dep in referenced_fields(expr, &field_names) {
+                own_dependents_of.entry(dep).or_default().push(f.name.clone());
+            }
+        }
+    }
+    // Own defaulted-prop/computed fields are read as plain bare identifiers (`label`, not
+    // `vm.label`) inside this component's own view — including while the view's root element tree
+    // is still being *constructed* (`EmitMode::Construction`, before `self`/`Rc<Self>` exists,
+    // exactly like a `#[param]` field's own ctor argument). Since a plain Rust struct field has no
+    // way to carry a default value expression as a real `new(..)` computation step, each one is
+    // instead seeded by a `let <name> = <expr>;` statement emitted up front, before any element gets
+    // constructed — `emit_expr`'s existing own-field bare-path branch already resolves a
+    // `Construction`-mode reference to a plain local identifier, so no changes are needed there
+    // beyond making `ctx.own_fields` aware of these names (done above). Unlike the `recompute_<name>`
+    // methods generated below (which run later, as `&self` methods, and so rewrite sibling
+    // references to `self.<field>()`), this initial computation runs before `self` exists, so
+    // sibling references here are deliberately left as bare identifiers — already valid Rust once
+    // each is its own preceding `let`. Field order in the source is trusted to already put
+    // dependencies before dependents (the same assumption `.elwind` authors already have to satisfy
+    // for a `#[computed]` field to read sensibly top-to-bottom); this doesn't topologically sort.
+    let mut own_default_construct_stmts = TokenStream::new();
+    for f in component.fields.iter().filter(|f| {
+        matches!(f.initializer, Some(Initializer::Expr(_)))
+            && matches!(f.kind, FieldKind::Prop | FieldKind::Computed)
+    }) {
+        let field_ident = format_ident!("{}", f.name);
+        let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
+        let Some(Initializer::Expr(raw_expr)) = &f.initializer else {
+            unreachable!("filtered to Some(Initializer::Expr(_)) above");
+        };
+        let init_expr = rewrite_t_macro_bare(raw_expr.clone());
+        own_default_construct_stmts.extend(quote! { let #field_ident: #ty = #init_expr; });
+    }
+
     // `mutable_own_fields` is populated below, once `mutable_required_names` is known (it needs
     // `required_own_names`/`deferred_own_names`, computed further down using `ctx.own_fields`
     // itself) — every `emit_expr`/`plan_element`/`emit_construction`/`emit_resync` call that could
@@ -2512,8 +2765,82 @@ fn generate_view(
     // component's view (otherwise they would not be deferred) and therefore have no local visual
     // update to dispatch.
     let component_property_enum = format_ident!("{}Property", component.name);
-    let component_property_variants = mutable_required_names.clone();
+
+    // Own defaulted-prop/computed fields (collected above, before `ctx.own_fields`'s own map was
+    // finalized) each get exactly the same Cell/RefCell storage shape as `mutable_required_names`
+    // just above — the only difference is what seeds the initial value: a `mutable_required_names`
+    // field is seeded from a `new(..)` ctor argument, these are seeded from the `let <name> = ..;`
+    // statements already sitting at the front of `construct_stmts` (`own_default_construct_stmts`,
+    // above) — `#name: <#cell_ty<_>>::new(#name)` is agnostic to which kind of in-scope local
+    // `#name` actually is.
+    let own_default_names: Vec<syn::Ident> = own_default_fields
+        .iter()
+        .map(|f| format_ident!("{}", f.name))
+        .collect();
+    let own_default_types: Vec<syn::Type> = own_default_fields
+        .iter()
+        .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
+        .collect();
+    let own_default_cell_types: Vec<TokenStream> = own_default_fields
+        .iter()
+        .map(|f| {
+            if is_copy_type(&f.ty) {
+                quote! { std::cell::Cell }
+            } else {
+                quote! { std::cell::RefCell }
+            }
+        })
+        .collect();
+    let own_default_field_decls: TokenStream = own_default_names
+        .iter()
+        .zip(own_default_types.iter())
+        .zip(own_default_cell_types.iter())
+        .map(|((name, ty), cell_ty)| quote! { #name: #cell_ty<#ty>, })
+        .collect();
+    let own_default_field_inits: TokenStream = own_default_names
+        .iter()
+        .zip(own_default_cell_types.iter())
+        .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .collect();
+
+    let own_computed_names: Vec<syn::Ident> = own_computed_fields
+        .iter()
+        .map(|f| format_ident!("{}", f.name))
+        .collect();
+    let own_computed_types: Vec<syn::Type> = own_computed_fields
+        .iter()
+        .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
+        .collect();
+    let own_computed_cell_types: Vec<TokenStream> = own_computed_fields
+        .iter()
+        .map(|f| {
+            if is_copy_type(&f.ty) {
+                quote! { std::cell::Cell }
+            } else {
+                quote! { std::cell::RefCell }
+            }
+        })
+        .collect();
+    let own_computed_field_decls: TokenStream = own_computed_names
+        .iter()
+        .zip(own_computed_types.iter())
+        .zip(own_computed_cell_types.iter())
+        .map(|((name, ty), cell_ty)| quote! { #name: #cell_ty<#ty>, })
+        .collect();
+    let own_computed_field_inits: TokenStream = own_computed_names
+        .iter()
+        .zip(own_computed_cell_types.iter())
+        .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .collect();
+
+    let mut component_property_variants = mutable_required_names.clone();
+    component_property_variants.extend(own_default_names.iter().cloned());
+    component_property_variants.extend(own_computed_names.iter().cloned());
     ctx.mutable_own_fields = mutable_required_names_set.clone();
+    ctx.mutable_own_fields
+        .extend(own_default_names.iter().map(|n| n.to_string()));
+    ctx.mutable_own_fields
+        .extend(own_computed_names.iter().map(|n| n.to_string()));
     let mutable_required_types: Vec<syn::Type> = required_own_names
         .iter()
         .zip(required_own_types.iter())
@@ -2557,7 +2884,7 @@ fn generate_view(
         .collect();
 
     let mut struct_fields = TokenStream::new();
-    let mut construct_stmts = TokenStream::new();
+    let mut construct_stmts = own_default_construct_stmts;
     let mut field_inits = TokenStream::new();
     let mut wiring_stmts = TokenStream::new();
     let mut resync_stmts = TokenStream::new();
@@ -2717,6 +3044,124 @@ fn generate_view(
             });
         }
     }
+
+    // Getter + setter for a component's own defaulted-prop field (`own_default_names`, collected
+    // near the top of this function alongside `own_computed_names`) — same Cell/RefCell read as
+    // `mutable_required_names`' own getter, except it has no entry in the `param_names` getter loop
+    // above at all (these fields are never `new(..)` arguments), and the same `on_property_changed`-
+    // driven setter as `mutable_required_names`' own, additionally cascading into any own
+    // `#[computed]` field that depends on it (`own_dependents_of`, collected near the top) —
+    // mirroring `generate_viewmodel`'s own Observable-field setter cascade (`recompute_calls`,
+    // this function's sibling above).
+    for (name, ty) in own_default_names.iter().zip(own_default_types.iter()) {
+        let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
+        let get_body = if is_copy_type(ty_str) {
+            quote! { self.#name.get() }
+        } else {
+            quote! { self.#name.borrow().clone() }
+        };
+        let set_name = format_ident!("set_{}", name);
+        let set_body = if is_copy_type(ty_str) {
+            quote! { self.#name.set(value); }
+        } else {
+            quote! { *self.#name.borrow_mut() = value; }
+        };
+        let recompute_calls: Vec<TokenStream> = own_dependents_of
+            .get(&name.to_string())
+            .into_iter()
+            .flatten()
+            .map(|dep| {
+                let recompute = format_ident!("recompute_{}", dep);
+                let property = format_ident!("{}", dep);
+                quote! {
+                    self.#recompute();
+                    self.on_property_changed(#component_property_enum::#property);
+                }
+            })
+            .collect();
+        if is_composed {
+            own_class_methods.extend(quote! {
+                fn #name(&self) -> #ty { #get_body }
+                fn #set_name(&self, value: #ty) {
+                    #set_body
+                    #(#recompute_calls)*
+                    self.on_property_changed(#component_property_enum::#name);
+                }
+            });
+        } else {
+            named_accessors.extend(quote! {
+                pub fn #name(&self) -> #ty { #get_body }
+                pub fn #set_name(&self, value: #ty) {
+                    #set_body
+                    #(#recompute_calls)*
+                    self.on_property_changed(#component_property_enum::#name);
+                }
+            });
+        }
+    }
+
+    // Getter for a component's own `#[computed]` field (`own_computed_names`) — read-only (external
+    // assignment to a `#[computed]` field is already a static error, docs/elwindui_spec.md 14章
+    // ルール3), Cell/RefCell-backed under the *same* field name as the accessor (not a `_cache`-
+    // suffixed one like `generate_viewmodel`'s own Computed arm uses): this generic own-field
+    // bare-path branch (`emit_expr`) reads `self.#ident.get()`/`.borrow().clone()` directly off
+    // `ctx.mutable_own_fields`'s matching field name, and Rust allows a struct field and a
+    // same-named inherent method to coexist (disambiguated by call syntax) — so keeping them at the
+    // same name lets that existing machinery apply unmodified instead of needing a second lookup
+    // table just for a suffix. The matching private `recompute_<name>` method (which actually
+    // (re)computes this cache) is generated separately, alongside `component_property_resync_methods`
+    // below — same reasoning as that method: internal-only, must not appear on `#[class]`'s generated
+    // public trait.
+    for (name, ty) in own_computed_names.iter().zip(own_computed_types.iter()) {
+        let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
+        let get_body = if is_copy_type(ty_str) {
+            quote! { self.#name.get() }
+        } else {
+            quote! { self.#name.borrow().clone() }
+        };
+        if is_composed {
+            own_class_methods.extend(quote! {
+                fn #name(&self) -> #ty { #get_body }
+            });
+        } else {
+            named_accessors.extend(quote! {
+                pub fn #name(&self) -> #ty { #get_body }
+            });
+        }
+    }
+    // `recompute_<name>` for every own `#[computed]` field — mirrors `generate_viewmodel`'s own
+    // Computed arm's `recompute_<name>` exactly (recomputes from the current values of whatever it
+    // references, via `self.<field>()` calls, and overwrites the cache). Computed unconditionally
+    // here (not `is_composed`-branched) and used both as-is (non-composed — already private, no
+    // `pub` needed) and `mark_inherent`-wrapped (composed) below, exactly like
+    // `component_property_resync_methods`.
+    let own_computed_recompute_methods: TokenStream = own_computed_fields
+        .iter()
+        .map(|f| {
+            let name = format_ident!("{}", f.name);
+            let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
+            let Some(Initializer::Expr(raw_expr)) = &f.initializer else {
+                unreachable!("own_computed_fields filtered to Some(Initializer::Expr(_))");
+            };
+            let compute_expr = rewrite_t_macro(
+                rewrite_field_refs(raw_expr.clone(), &field_names, &format_ident!("self")),
+                &field_names,
+                &format_ident!("self"),
+            );
+            let set_cache = if is_copy_type(&f.ty) {
+                quote! { self.#name.set(value); }
+            } else {
+                quote! { *self.#name.borrow_mut() = value; }
+            };
+            let recompute = format_ident!("recompute_{}", name);
+            quote! {
+                fn #recompute(&self) {
+                    let value: #ty = #compute_expr;
+                    #set_cache
+                }
+            }
+        })
+        .collect();
 
     // `is_template_composition`'s `plan`/`view` are the *base's* own (cloned, `resolve_view_for`)
     // tree, not this component's — its only real construction step is calling the base's own
@@ -3236,6 +3681,7 @@ fn generate_view(
             false,
         ));
         let component_property_resync_methods = mark_inherent(component_property_resync_methods);
+        let own_computed_recompute_methods = mark_inherent(own_computed_recompute_methods);
 
         let resync_method = mark_inherent(quote! {
             fn resync(&self) {
@@ -3258,6 +3704,8 @@ fn generate_view(
             pub struct #target {
                 #(#plain_required_names: #plain_required_types,)*
                 #mutable_required_field_decls
+                #own_default_field_decls
+                #own_computed_field_decls
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
@@ -3268,7 +3716,7 @@ fn generate_view(
             impl #target {
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }
                 }
 
                 // Hand-written (not left to `#[class]`'s own `construct`-driven auto-generation):
@@ -3302,6 +3750,7 @@ fn generate_view(
                 #resync_method
                 #property_resync_methods
                 #component_property_resync_methods
+                #own_computed_recompute_methods
                 #dynamic_region_refresh_method
                 #root_embed_method
                 #named_accessors
@@ -3322,7 +3771,7 @@ fn generate_view(
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) });
+                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) });
                     #owner_bind_stmt
                     #content_attach_stmt
                     #wiring_stmts
@@ -3340,6 +3789,7 @@ fn generate_view(
 
                 #property_resync_methods
                 #component_property_resync_methods
+                #own_computed_recompute_methods
                 #dynamic_region_refresh_method
                 #component_property_api
 
@@ -3354,6 +3804,8 @@ fn generate_view(
             pub struct #struct_ident {
                 #(#plain_required_names: #plain_required_types,)*
                 #mutable_required_field_decls
+                #own_default_field_decls
+                #own_computed_field_decls
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,

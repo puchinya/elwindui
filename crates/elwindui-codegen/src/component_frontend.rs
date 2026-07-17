@@ -212,3 +212,193 @@ view Counter {
         assert_eq!(attr_generated, dsl_generated);
     }
 }
+
+/// Exercises a component's own `#[prop(default = ...)]`/`#[computed(expr = ...)]` fields —
+/// referenced bare from that *same* component's own `view!` — through the full pipeline
+/// (`component_and_view_from_item_struct` -> `validate` -> `generate_module`). This combination
+/// (as opposed to a `viewmodel`'s `#[observable]`/`#[computed]`, referenced via `vm.field`) had no
+/// codegen support at all before `generate_view`/`generate_component` grew it: `own_fields`, and
+/// everything derived from it, used to filter to `f.initializer.is_none()` only, so a bare
+/// same-component reference like `text: label` failed with "unsupported path shape after bind
+/// resolution". See docs/elwindui_dsl_spec.md's "Rustファイル内での代替記法" subsection, whose
+/// `VolumeControl` example this mirrors.
+#[cfg(test)]
+mod doc_example_own_default_and_computed_fields {
+    use crate::codegen::{build_symbol_table, generate_module};
+
+    /// The minimal case: a `#[prop(default = ...)]` field referenced bare in its own view, no
+    /// `#[computed]`, no `inherits`, no dynamic (`match`/`if`) child region.
+    #[test]
+    fn own_default_prop_referenced_bare_in_own_view() {
+        let src = r#"
+component Greeter {
+    #[prop]
+    title: String = "hi".to_string(),
+}
+
+view Greeter {
+    TextBlock { text: title }
+}
+"#;
+        let generated = generate_and_check(src);
+        assert!(generated.contains("fn title"), "expected a `title` getter:\n{generated}");
+        assert!(generated.contains("fn set_title"), "expected a `set_title` setter:\n{generated}");
+    }
+
+    /// A `#[computed]` field depending on a `#[prop(default = ...)]` field, both referenced bare in
+    /// the owning component's own view — pins the `recompute_<name>`/`on_property_changed` cascade
+    /// a defaulted-prop's setter must trigger for any computed field that depends on it.
+    #[test]
+    fn own_computed_field_depending_on_own_default_prop() {
+        let src = r#"
+component Greeter {
+    #[prop]
+    volume: i32 = 50,
+
+    #[computed]
+    label: String = volume.to_string() + "%",
+}
+
+view Greeter {
+    TextBlock { text: label }
+}
+"#;
+        let generated = generate_and_check(src);
+        assert!(generated.contains("fn label"), "expected a `label` getter:\n{generated}");
+        assert!(
+            generated.contains("recompute_label"),
+            "expected a recompute_label method:\n{generated}"
+        );
+        assert!(
+            generated.contains("fn set_volume"),
+            "expected a `set_volume` setter:\n{generated}"
+        );
+        // `set_volume` must cascade into recomputing + notifying `label`, not just itself.
+        let set_volume_start = generated
+            .find("fn set_volume")
+            .expect("set_volume should be present");
+        let set_volume_body = &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
+        assert!(
+            set_volume_body.contains("recompute_label"),
+            "set_volume should cascade into recompute_label:\n{set_volume_body}"
+        );
+    }
+
+    /// The exact `docs/elwindui_dsl_spec.md` "Rustファイル内での代替記法" example: `VolumeControl`
+    /// inherits `ContentControl` (a real builtin, already shape-composed over `Control`), and
+    /// branches over a `#[param] orientation: Orientation` via `match` inside `view!`, referencing
+    /// its own `#[prop(default = 50)] volume`/`#[computed] label` fields bare from inside the match
+    /// arms' nested `TextBlock`s.
+    #[test]
+    fn doc_volume_control_example() {
+        let deps_src = r#"
+enum Orientation {
+    Horizontal,
+    Vertical,
+}
+"#;
+        let deps_module = crate::parser::parse_module(deps_src).expect("deps should parse");
+
+        let struct_src = r#"
+            struct VolumeControl {
+                #[param]
+                orientation: Orientation,
+
+                #[prop(default = 50)]
+                volume: i32,
+
+                #[computed(expr = volume.to_string() + "%")]
+                label: String,
+
+                body: view! {
+                    match orientation {
+                        Orientation::Horizontal => { HorizontalLayout { TextBlock { text: label } } }
+                        Orientation::Vertical => { VerticalLayout { TextBlock { text: label } } }
+                    }
+                }
+            }
+        "#;
+        let item_struct: syn::ItemStruct =
+            syn::parse_str(struct_src).expect("struct should parse as valid Rust");
+        let (component_def, view_def) = super::component_and_view_from_item_struct(
+            Some("ContentControl".to_string()),
+            &item_struct,
+        )
+        .expect("should build ComponentDef/ViewDef");
+
+        let mut module = deps_module;
+        module.items.push(crate::ast::Item::Component(component_def));
+        module.items.push(crate::ast::Item::View(view_def));
+
+        let all_modules: Vec<_> = std::iter::once(module.clone())
+            .chain(crate::builtin_modules())
+            .collect();
+        crate::validate::validate(&all_modules).expect("should validate");
+        let table = build_symbol_table(&all_modules);
+        let generated = generate_module(&module, &table);
+        syn::parse2::<syn::File>(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
+        let generated = generated.to_string();
+        let set_volume_start = generated
+            .find("fn set_volume")
+            .expect("set_volume should be present");
+        let set_volume_body = &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
+        assert!(
+            set_volume_body.contains("recompute_label"),
+            "set_volume should cascade into recompute_label:\n{set_volume_body}"
+        );
+    }
+
+    /// `generate_component` (a view-less component — `Item::Component` with no `Item::View`
+    /// anywhere in its `inherits` chain, `generate_module`'s `None` branch) needed the exact same
+    /// fix as `generate_view` — it used to `panic!("... initializer form not supported yet")` for
+    /// any `#[prop(default = ...)]`/`#[computed(...)]` field at all.
+    #[test]
+    fn view_less_component_own_default_and_computed_fields() {
+        let src = r#"
+component Settings {
+    #[prop]
+    volume: i32 = 50,
+
+    #[computed]
+    label: String = volume.to_string() + "%",
+}
+"#;
+        let module = crate::parser::parse_module(src).expect("dsl should parse");
+        let all_modules: Vec<_> = std::iter::once(module.clone())
+            .chain(crate::builtin_modules())
+            .collect();
+        crate::validate::validate(&all_modules).expect("should validate");
+        let table = build_symbol_table(&all_modules);
+        let generated = generate_module(&module, &table);
+        syn::parse2::<syn::File>(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
+        let generated = generated.to_string();
+        assert!(generated.contains("fn label"), "expected a `label` getter:\n{generated}");
+        assert!(
+            generated.contains("recompute_label"),
+            "expected a recompute_label method:\n{generated}"
+        );
+        let set_volume_start = generated
+            .find("fn set_volume")
+            .expect("set_volume should be present");
+        let set_volume_body = &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
+        assert!(
+            set_volume_body.contains("recompute_label"),
+            "set_volume should cascade into recompute_label:\n{set_volume_body}"
+        );
+    }
+
+    fn generate_and_check(src: &str) -> String {
+        let module = crate::parser::parse_module(src).expect("dsl should parse");
+        let all_modules: Vec<_> = std::iter::once(module.clone())
+            .chain(crate::builtin_modules())
+            .collect();
+        crate::validate::validate(&all_modules).expect("should validate");
+        let table = build_symbol_table(&all_modules);
+        let generated = generate_module(&module, &table);
+        syn::parse2::<syn::File>(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
+        generated.to_string()
+    }
+}

@@ -388,9 +388,15 @@ fn check_match_in_child(
                     .cloned()
             }) {
                 let wildcard = arms.iter().any(|arm| arm.pattern.trim() == "_");
+                // `arm.pattern`'s source text comes either straight from `.elwind` file text (no
+                // extra whitespace around `::`) or, for a `view!`-macro-sourced `component`
+                // (`component_frontend.rs`), from `proc_macro2::TokenStream::to_string()`, which
+                // always re-serializes a qualified path with spaces around `::` (`"Orientation ::
+                // Vertical"`) — `.map(str::trim)` on the split segment (not just the whole pattern
+                // up front) keeps this variant-name extraction correct in both cases.
                 let covered: HashSet<String> = arms
                     .iter()
-                    .filter_map(|arm| arm.pattern.trim().rsplit("::").next())
+                    .filter_map(|arm| arm.pattern.rsplit("::").next().map(str::trim))
                     .filter(|variant| *variant != "_")
                     .map(str::to_string)
                     .collect();

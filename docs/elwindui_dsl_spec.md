@@ -146,6 +146,80 @@ component ContentControl inherits Control {
 
 `#[overrides(builtin::X)]`(付録A)は`inherits`とは別の、無関係な仕組みである — 前者は同名builtinの明示的なシャドーイング、後者はクラス階層の構築であり、混同しないこと。
 
+### Rustファイル内での代替記法:`#[elwindui::component]`
+
+`component`/`view`ブロックのペアは、`.elwind`テキストとして書く代わりに、通常のRustファイル中で
+属性マクロ`#[elwindui::component(inherits Base)]`を使って1つの`struct`として書くこともできる
+(`inherits`が無い場合は引数省略)。フィールドは`#[param]`/`#[prop]`等の属性を伴う通常のフィールドと
+してそのまま書き、`view { .. }`の要素ツリーは`view!`マクロ呼び出しを型に持つ1フィールド(フィールド名は
+任意)として表現する。冒頭のVolumeControlの例を、今度は`ContentControl`を継承する形で書き直した記法
+(`ContentControl`は`Control`から見て既にシェイプ合成済みのDSLコンポーネント=上記2番目のケースなので、
+`content`フィールドが再宣言なしに自動継承され、`view`の中身はラッパーを書かず暗黙に`content`属性になる):
+
+```rust
+#[elwindui::component(inherits ContentControl)]
+struct VolumeControl {
+    #[param]
+    orientation: Orientation,
+
+    #[prop(default = 50)]
+    volume: i32,
+
+    #[computed(expr = volume.to_string() + "%")]
+    label: String,
+
+    body: view! {
+        // `ContentControl { .. }` というラッパーは書かない — 裸の子要素がそのまま暗黙に`content`に
+        // バインドされる(付録Eの`#[content(field_name)]`規約)
+        match orientation {
+            Orientation::Horizontal => { HorizontalLayout { TextBlock { text: label } } }
+            Orientation::Vertical => { VerticalLayout { TextBlock { text: label } } }
+        }
+    }
+}
+```
+
+- 通常のRust `struct`フィールドには`field: Ty = expr`という初期化式の構文が無いため、デフォルト値・
+  算出式は`#[prop(default = expr)]`/`#[computed(expr = expr)]`/`#[attached(default = expr)]`のように
+  対応する属性自身の名前付き引数として渡す——`viewmodel`側の`#[observable(default = expr)]`/
+  `#[computed(expr = expr)]`(`docs/elwindui_gui_framework_design.md`§7.2)と同じ仕組み
+  (`crates/elwindui-codegen/src/attr_frontend.rs`が両方の`struct`フロントエンドで共有)
+- `#[param]`フィールドは現状この属性マクロ経由ではデフォルト値を持てない(対応する`default = expr`
+  引数が実装されていない)ため、`orientation`は常に必須のコンストラクタ引数になる——`.elwind`
+  テキスト形式の`#[param] orientation: Orientation = Orientation::Horizontal`のようなデフォルト付き
+  `#[param]`は、この記法では今のところ表現できない
+- `volume`は`#[prop(default = 50)]`という通常の(実行時可変な)`prop`——ここでは自己完結した例にする
+  ため固定値をデフォルトにしているが、外部の`store`/`viewmodel`へ結びつけたい場合は呼び出し側で
+  `bind!`を使う(`#[prop(default = bind!(..))]`のようにフィールド宣言自体に埋め込むのではなく、
+  §10のバインディング機構は`.elwind`テキスト形式で書くのが素直)
+- `component`自身の`#[prop(default=...)]`/`#[computed(...)]`フィールドを、その同じcomponentの
+  `view`から裸の識別子で参照できる(`text: label`)——コード生成側は、`volume`が変わるたびに
+  `label`を再計算して該当するビューノードだけを再同期する専用の`{Component}Property`通知機構を
+  生成する(`mutable_required_names`と同型、`docs/elwindui_gui_framework_design.md`§7.2の
+  `viewmodel`の仕組みをcomponent自身のフィールドにも広げたもの)。ただし依存関係の検出は
+  `#[computed(expr = ...)]`の式を実際に`syn`で走査して見つかったフィールド参照に限られるため、
+  `t!(...)`の中に書かれた参照以外は、マクロの不透明なトークン列に隠れた参照(例:
+  `format!("{volume}%")`のようなインライン捕捉)を検出できない——`volume.to_string() + "%"`の
+  ように、参照したいフィールドを実際の`syn::Expr`として現れる形で書く必要がある
+- `match`の条件式(`orientation`)は裸のフィールド参照のみで、`if orientation ==
+  Orientation::Horizontal`のような比較式はDSLの`if`条件文法では扱えない(現状`if`/`match`の
+  条件式パーサは裸のパス参照程度しか受け付けない)——enumによる分岐は`if`の等値比較ではなく
+  `match`を使う
+- `#[elwindui::component]`の引数は`inherits Base`のみ(`=`は付けない——`.elwind`側の
+  `component Name inherits Base`と同じ綴り。`#[elwindui_macros::class]`の`inherits = ..`とは
+  流儀が異なるので混同しないこと)
+- `view!`は実在するマクロとして展開されるわけではない——`#[elwindui::component]`が`struct`全体を
+  丸ごと別のコードへ置き換えるため、`view!`呼び出しのトークンはRustの型位置(`syn::Type::Macro`として
+  構文的に妥当)を借りた記法にすぎず、生のDSLテキストとして読み出されて既存のパーサへそのままかけられる
+- 呼び出し側(インスタンス化)は`.elwind`形式で書いた場合と完全に同一——通常のRustの`let`束縛を使う
+- `viewmodel`にも同様の代替記法(`#[elwindui::viewmodel] mod foo { .. }`)があり、`#[bindable]`
+  (`docs/elwindui_gui_framework_design.md`§7.2)経由で`component`側と結線する
+- `#[virtual]`/`#[override]`メソッドはこの記法では未対応——バインドできる`impl`本体の置き場所が
+  自然には定まらないため(`.elwind`テキスト形式でのみサポート)
+- `.elwind`テキスト形式(build.rs方式)との比較・使い分けの指針は`docs/elwindui_tool_codegen_design.md`
+  §4を参照。実装は`elwindui_macros::component`(`elwindui::component`として再エクスポート)で、
+  `examples/notepad-inline`が実例
+
 ### 添付プロパティ(`#[attached]`):WPF/WinUI3方式
 
 あるcomponentが宣言し、**任意の別要素が自分自身に設定できる**プロパティ(WPFの`Grid.Row`/`Grid.Column`相当)。

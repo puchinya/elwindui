@@ -29,7 +29,15 @@ pub fn parse_view_body(
 /// the same `bind!`/`command!` recognition as hand-written `.elwind` text, instead of being parsed
 /// as an inert `syn::Expr::Macro` that `codegen.rs` wouldn't know how to treat specially.
 pub fn parse_initializer(src: &str) -> Result<Initializer, String> {
-    Parser::new(src).parse_initializer()
+    // Unlike the `= ...` right-hand side of a hand-written `.elwind` field declaration (parsed by
+    // `self.parse_initializer()` below while more source always follows, guaranteeing a trailing
+    // `,`/`}` for the plain-expression fallback's `take_balanced_until` to find), `src` here is a
+    // whole, self-contained attribute-token string (`parse_name_value_tokens`'s `tokens.to_string()`)
+    // with nothing after it — so a bare literal/expr default (`#[prop(default = 50)]`) would hit
+    // EOF before any terminator and fail. Appending a synthetic terminator gives that fallback the
+    // same trailing character a hand-written field declaration always has; `bind!`/`command!` parse
+    // their own `(...)` explicitly and never reach that fallback, so they're unaffected.
+    Parser::new(&format!("{src}}}")).parse_initializer()
 }
 
 struct Parser<'a> {

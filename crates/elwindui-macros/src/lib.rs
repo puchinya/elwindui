@@ -3,14 +3,16 @@ use proc_macro::TokenStream;
 mod class;
 
 /// `#[elwindui::viewmodel] mod foo { struct Foo { #[observable(default = ...)] field: Ty, ... }
-/// impl Foo { fn some_command(&self) { ... } } }` — lets a `viewmodel` be written as ordinary Rust
+/// impl Foo { fn some_action(&self) { ... } } }` — lets a `viewmodel` be written as ordinary Rust
 /// (a real `struct` + a real `impl` with real attributes and real `fn` bodies) instead of the
 /// `.elwind` DSL's `viewmodel Name { ... }` block, matching how WPF-style MVVM frameworks keep the
 /// ViewModel in the host language and reserve markup (here, `.elwind`'s `view { ... }`) for the
-/// View. See docs/elwindui_spec.md 付録O.2, and `elwindui_codegen::attr_frontend` for why the
-/// `struct`+`impl` have to be wrapped in one `mod` (a single attribute-macro invocation only ever
-/// sees one annotated item, so both need to arrive together for command fields to be matched up
-/// with their `impl` bodies).
+/// View. Every `fn`/`async fn` in the `impl` block is itself an action, auto-detected with no
+/// separate struct-side declaration — see `elwindui_codegen::attr_frontend` for why the
+/// `struct`+`impl` still have to be wrapped in one `mod` (a single attribute-macro invocation only
+/// ever sees one annotated item, so both need to arrive together for action bodies to be picked
+/// up at all). `.elwind`-native `viewmodel` text has no equivalent — it only supports
+/// `#[observable]`/`#[computed]`; a viewmodel needing actions must use this Rust-native form.
 ///
 /// The `mod` wrapper itself doesn't survive expansion — the generated `struct`/`impl` appear
 /// unwrapped at the scope where the `mod` was written.
@@ -48,7 +50,7 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// See docs/elwindui_spec.md 付録B.1.
 ///
 /// `#[virtual]`/`#[override]` methods aren't supported yet — there's no natural place for a method
-/// *body* on a bare `struct` (unlike `#[elwindui::viewmodel]`'s paired `impl` block for `#[command]`
+/// *body* on a bare `struct` (unlike `#[elwindui::viewmodel]`'s paired `impl` block for action
 /// bodies). The natural extension point, if/when needed, is a companion `#[elwindui::component] impl
 /// Name { .. }` matched up by struct name.
 #[proc_macro_attribute]

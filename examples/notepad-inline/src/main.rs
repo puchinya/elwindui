@@ -50,11 +50,8 @@ mod notepad_view_model {
         #[computed(expr = t!("notepad-window-title", file_name: file_name))]
         window_title: String,
 
-        #[command(can_execute = state != SaveState::Saving)]
-        save: Command,
-
-        #[command]
-        open: Command,
+        #[computed(expr = state != SaveState::Saving)]
+        save_can_execute: bool,
     }
 
     impl NotepadViewModel {
@@ -95,6 +92,39 @@ mod notepad_view_model {
     }
 }
 
+/*
+#[elwindui::component(inherits ContentControl)]
+struct CustomCheckBox {
+    #[prop(default = false)]
+    is_checked: bool,
+    #[prop(default = String::new())]
+    label: String,
+
+    body: view! {
+        on_tapped: || => { is_checked = !is_checked }
+        HorizontalLayout {
+            if is_checked {
+                Rectangle {
+                    width: 16.0
+                    height: 16.0
+                    fill: "#0078D7"
+                    stroke: "#000000"
+                    stroke_width: 1.0
+                }
+            } else {
+                Rectangle {
+                    width: 16.0
+                    height: 16.0
+                    fill: "#FFFFFF"
+                    stroke: "#000000"
+                    stroke_width: 1.0
+                }
+            }
+            TextBlock { text: label }
+        }
+    }
+}*/
+
 #[elwindui::component(inherits Window)]
 struct NotepadWindow {
     #[bindable]
@@ -113,12 +143,12 @@ struct NotepadWindow {
                 Grid::row: 0
                 Button {
                     text: t!("notepad-menu-save")
-                    on_click: vm.save.execute()
-                    enabled: vm.save.can_execute
+                    on_click: vm.save
+                    enabled: vm.save_can_execute
                 }
                 Button {
                     text: t!("notepad-menu-open")
-                    on_click: vm.open.execute()
+                    on_click: vm.open
                 }
             }
 

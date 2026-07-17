@@ -14,7 +14,7 @@
 | `elwindui-codegen` | 約8900行 | 実装済み(コンパイラ本体)。`build.rs`経由の`compile_dir`系と`#[elwindui::component]`/`#[elwindui::viewmodel]`プロシージャルマクロ系、両方の起動経路が実働し、それぞれ`examples/notepad`・`examples/notepad-inline`・`examples/viewmodel-attr-demo`で使用されている。`#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }`という、`component`+`view`ペアを1つのRust `struct`として書ける形式(`component_frontend.rs`)が実装済み ── `view!`は実在するマクロではなく、`.elwind` DSLテキストとして読み出されるだけの型位置マクロ呼び出し |
 | `elwindui-macros` | - | 実装済み。`#[class(inherits/implements/supertrait/abstract_class/sealed)]` + `#[inherent]`/`#[ancestor]`によるクラス階層生成マクロ。`docs/elwindui_gui_framework_design.md`§5.1aの記述と一致 |
 | `elwindui-i18n` | 58行+マクロ | 実装済み。Fluentベースのランタイム(`t!`, `declare!`マクロ)。ただしビルド時の`.ftl`静的検証(未翻訳キー検出・引数名整合性チェック)は`elwindui-codegen`側に存在せず未実装 |
-| `elwindui-languageserver` | 約990行 | 部分実装。診断(`elwindui-codegen`の`parser`/`validate`を再利用)、シンタックスハイライト(semantic tokens)、メンバー補完(`vm.field`/`vm.command.*`)が実働。hover、生成コードプレビュー、オフスクリーンレンダリングと連携したインスタンス生成パイプラインは未実装 |
+| `elwindui-languageserver` | 約990行 | 部分実装。診断(`elwindui-codegen`の`parser`/`validate`を再利用)、シンタックスハイライト(semantic tokens)、メンバー補完(`vm.field`)が実働。hover、生成コードプレビュー、オフスクリーンレンダリングと連携したインスタンス生成パイプラインは未実装 |
 | `elwindui-hotreload` | 32行 | スタブのみ。`param`/`prop`差分からremount/patchを判定する純粋関数(`decide_reload_action`)だけが存在し、`hot-lib-reloader`統合・実際のdylib差し替えは未実装 |
 | `elwindui-test` | 79行 | 部分実装。`render_tree`(`UIElement`ツリーの、各ノードを`type_name()`でラベル付けしたインデントダンプ)のみ実装。`render_canvas_snapshot`/`assert_image_snapshot!`は未実装(`canvas.rs`はdocコメントのみのスタブ) |
 | `elwindui-backend-appkit` | 約1800行 | 実装済み・実機検証済み。本機で`cargo build`/実行/スクリーンショット確認済みの唯一のバックエンド |
@@ -77,11 +77,12 @@
 | `enum`(`EnumName::values()`、`#[label(...)]`) | `EnumDef`はASTに存在(実装済み)。`values()`/`#[label]`によるi18nラベル付与の実装範囲は個別確認が必要 |
 | `env::*` / `once` | **未実装**。`elwindui-codegen`にDSLキーワードとしての扱いが無い |
 | `bind!` | 実装済み(`Initializer::Bind`) |
-| `command!` | 実装済み(`Initializer::Command`) |
+| `viewmodel`アクション(旧`#[command]`/`Command`型/`command!`マクロ、撤廃済み) | 実装済み。`#[elwindui::viewmodel]`のRustネイティブ`impl`ブロックの`fn`/`async fn`がそのまま自動検出されアクションになる(`Initializer::Action`、struct側の宣言は不要)。`.elwind`ネイティブ`viewmodel Name { ... }`構文にはアクションを宣言する手段が無い(`#[observable]`/`#[computed]`のみサポート) — アクションが必要な`viewmodel`は必ずRustネイティブ構文を使う |
+| `on_*`イベント属性のクロージャ構文(`\|param, ...\| 式`/`{ .. }`) | 実装済み。対象フィールドの`fn(T0, T1, ...)`宣言から位置対応でパラメータ型を決める汎用機構(`codegen::emit_wiring`)。0引数ハンドラはベアパスの糖衣(`on_click: vm.save`)も書ける |
 | i18n(Fluent、`t!`) | ランタイム(`elwindui-i18n`)は実装済み。ビルド時の`.ftl`静的検証(未翻訳キー検出・引数名整合性チェック)は未実装 |
 | モジュール(`use`) | 生成先が実際のRustコードのため`use`解決自体はRustコンパイラに委譲される。循環参照・未解決パスの独自の機械的検出は未確認 |
 | `visual_tree`モジュール(WinUI3の`VisualTreeHelper`相当。`get_children_count`/`get_child`/`get_parent`/`find_all`) | 実装済み。`UIElement::visual_children()`/`parent()`が本体の走査を担い、ランタイム文字列idによる検索(`find_by_id`相当)は`#[id(...)]`(静的アクセサ)と役割が重複するため未提供・提供予定なし |
-| 14章 静的検証ルール(全25項目) | 部分実装。`crates/elwindui-codegen/src/validate.rs`(約1600行)がルール18(`#[command]`フィールド型)・19(`viewmodel`内`view`参照禁止)を含む多くの言語機能バリデーションを実装しているが、ルール番号がソース上に明示されているのはルール18・19のみで、前提機能自体が未実装のルール(9・14・15など、`target::backend()`依存)は検証不能 |
+| 14章 静的検証ルール(全25項目) | 部分実装。`crates/elwindui-codegen/src/validate.rs`がルール19(`viewmodel`内`view`参照禁止)を含む多くの言語機能バリデーションを実装しているが、前提機能自体が未実装のルール(9・14・15など、`target::backend()`依存)は検証不能。ルール18(旧`#[command]`型検査)は`Command`機構撤廃に伴う欠番 |
 
 ---
 
@@ -95,7 +96,7 @@
 | ナビゲーション(`NavigationHost`/`Route`) | `docs/elwindui_builtins_spec.md`付録L | **未実装**(§3のビルトイン一覧参照) |
 | ダイアログ/メニュー/ツールチップ | `docs/elwindui_builtins_spec.md`付録M | `Menu`/`MenuItem`本体は実装済み、`Dialog`/`Tooltip`および汎用`context_menu`/`tooltip`属性は未実装 |
 | 描画拡張(Brush/Geometry/Effect/Transform/レイヤー合成/アニメーション) | `docs/elwindui_builtins_spec.md`付録N | 未実装。`Painter`基本セット(塗り・線・テキスト)のみ`elwindui-core`に存在、`Canvas`自体が未実装のため利用できない |
-| MVVM(`viewmodel`/`Command`) | `docs/elwindui_gui_framework_design.md`§7.2 | 実装済み。`#[observable]`/`#[computed]`/`#[command]`が動作し、`examples/notepad`のMVVM構成で実際に使われている |
+| MVVM(`viewmodel`/アクション) | `docs/elwindui_gui_framework_design.md`§7.2 | 実装済み。`#[observable]`/`#[computed]`と、`impl`ブロックの`fn`/`async fn`から自動検出されるアクションが動作し、`examples/notepad`のMVVM構成で実際に使われている |
 | 非同期処理 | `docs/elwindui_gui_framework_design.md`§7.3 | 部分実装。`spawn`相当(`spawn_local`)は実装済みで`examples/notepad`が使用。`AsyncState<T>`/`#[async_computed]`/`task!`マクロは未実装 |
 | リスト仮想化(`VirtualList`) | `docs/elwindui_builtins_spec.md`付録Q | 未実装 |
 | テーマ/デザイントークン(`theme`) | `docs/elwindui_gui_framework_design.md`§8.5 | 未実装 |

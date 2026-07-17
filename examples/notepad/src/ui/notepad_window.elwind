@@ -12,13 +12,13 @@ view NotepadWindow {
             TabViewItem {
                 header: doc.file_name
                 closable: true
-                on_close: vm.close_active_tab.execute()
+                on_close: vm.close_active_tab
                 DocumentView { doc: doc }
             }
         }
         selected_index: vm.active_tab
-        on_select: vm.select_tab
-        on_new_tab: vm.new_tab.execute()
+        on_select: |index| vm.select_tab(index)
+        on_new_tab: vm.new_tab
     };
 
     title: t!("notepad-app-title")
@@ -31,9 +31,9 @@ view NotepadWindow {
         MenuBarItem {
             text: t!("notepad-menu-file")
             Menu {
-                MenuItem { text: t!("notepad-menu-new"), shortcut: "n", command: vm.new_tab }
-                MenuItem { text: t!("notepad-menu-open"), shortcut: "o", command: vm.open }
-                MenuItem { text: t!("notepad-menu-save"), shortcut: "s", command: vm.save }
+                MenuItem { text: t!("notepad-menu-new"), shortcut: "n", on_select: vm.new_tab }
+                MenuItem { text: t!("notepad-menu-open"), shortcut: "o", on_select: vm.open }
+                MenuItem { text: t!("notepad-menu-save"), shortcut: "s", on_select: vm.save, enabled: vm.save_can_execute }
             }
         }
     }

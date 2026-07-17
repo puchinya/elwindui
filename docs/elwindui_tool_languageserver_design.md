@@ -35,8 +35,8 @@
 **実装状況(Phase 1)**: 上記1(即時診断)は`elwindui_codegen::{parser, validate}`をそのまま再利用する形で実装済み(`src/diagnostics.rs`)。2(コードプレビュー)・3(ホバー)は未実装で、後続フェーズの範囲。
 
 なお上記3機能には含まれていないが、Phase 1実装の一環として以下の2機能も追加した(実装が先行した追加機能):
-- `textDocument/semanticTokens/full`によるシンタックスハイライト(キーワード/型名/文字列/数値/コメント/`#[...]`属性・`bind!`/`command!`/`t!`マクロの色分け、`src/semantic_tokens.rs`)。これは`parser.rs`のAST(位置情報を持たない)を経由せず、ソーステキストを直接走査する専用の軽量トークナイザで実現している——`ast.rs`全体にspan情報を持たせる大掛かりな変更を避けつつ、色分け表示という実用上のニーズに応えるための独立した実装である。
-- `textDocument/completion`による`vm.field`/`vm.command.execute()`/`vm.command.can_execute`のメンバー補完(`src/completion.rs`、`elwindui_codegen::codegen::SymbolTable::resolve`を利用)。
+- `textDocument/semanticTokens/full`によるシンタックスハイライト(キーワード/型名/文字列/数値/コメント/`#[...]`属性・`bind!`/`t!`マクロの色分け、`src/semantic_tokens.rs`)。これは`parser.rs`のAST(位置情報を持たない)を経由せず、ソーステキストを直接走査する専用の軽量トークナイザで実現している——`ast.rs`全体にspan情報を持たせる大掛かりな変更を避けつつ、色分け表示という実用上のニーズに応えるための独立した実装である。
+- `textDocument/completion`による`vm.field`のメンバー補完(`src/completion.rs`、`elwindui_codegen::codegen::SymbolTable::resolve`を利用)。アクションも他のフィールドと同じ1階層の補完で扱われる(`Command`型が撤廃され、`.execute()`/`.can_execute`のような2階層の補完対象が無くなったため)。
 
 まとめると、現在実装済みなのは「即時診断・シンタックスハイライト・メンバー補完」の3つであり、§4に述べる「プレビュー用インスタンス生成」パイプライン(オフスクリーンレンダリングを含む)およびホバー情報・生成コードプレビューは未実装。
 

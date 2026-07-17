@@ -49,26 +49,11 @@ mod notepad_view_model {
         #[observable(default = 0usize)]
         active_tab: usize,
 
-        #[command]
-        new_tab: Command,
-
-        #[command]
-        close_tab: Command,
-
-        #[command]
-        close_active_tab: Command,
-
-        #[command]
-        select_tab: Command,
-
         // `documents.len() > 0` (rather than indexing into the active document's `state`) so this
         // is safe to evaluate even in the brief window right after construction, before `main.rs`
-        // has called `new_tab_execute()` to open the first tab.
-        #[command(can_execute = documents.len() > 0)]
-        save: Command,
-
-        #[command]
-        open: Command,
+        // has called `new_tab()` to open the first tab.
+        #[computed(expr = documents.len() > 0)]
+        save_can_execute: bool,
     }
 
     impl NotepadViewModel {
@@ -87,7 +72,7 @@ mod notepad_view_model {
         }
 
         fn close_active_tab(&self) {
-            self.close_tab_execute(active_tab);
+            self.close_tab(active_tab);
         }
 
         fn select_tab(&self, index: usize) {
@@ -147,7 +132,7 @@ fn main() {
     // stops `documents` from being empty right after construction otherwise, and several viewmodel
     // expressions (e.g. `save`'s can_execute) as well as `TabView`'s active-tab lookup assume at
     // least one document exists.
-    vm.new_tab_execute();
+    vm.new_tab();
     let window = NotepadWindow::new(vm);
     window.show();
 

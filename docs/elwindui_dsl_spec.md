@@ -345,6 +345,34 @@ component VirtualList {
 }
 ```
 
+### コールバック型フィールドへのクロージャ値構文
+
+`fn(...)`型のフィールドに実際の値を渡す際の構文。パラメータは型注釈なしの識別子のみ(分解パターン不可)— 実際の型は宣言側の`fn(T0, T1, ...)`から**位置対応**で決まる。パラメータを取らない場合(`fn()`)は、クロージャを書かずベアパスの糖衣構文でも書ける:
+
+```
+||  式                       // パラメータ0個、式1つ
+|param|  式                  // パラメータ1個、式1つ
+|param, param2|  式          // パラメータ2個以上も可
+|param, ...|  { 文; ... }    // 複数文のRustブロック本体
+|param|  Type { .. }         // ネストした要素構築(値計算コールバック専用、後述)
+<パス>                        // パラメータ0個の糖衣構文(`|| <パス>`と同義)
+```
+
+```rust
+TabView {
+    on_select: |index| vm.select_tab(index)     // 1引数、式1つ
+    on_close: |index| {                          // 1引数、複数文ブロック
+        vm.log_close(index);
+        vm.close_tab(index);
+    }
+    on_new_tab: vm.new_tab                        // 0引数、ベアパスの糖衣
+}
+```
+
+- `render_content: |item| DocumentView { doc: item }`のような「ネストした要素を返す」形は`#[param]`側の値計算コールバック専有の形で、`on_*`のような通知コールバック(イベントハンドラ)には使えない(要素を返しても配線先がない)
+- ブロック本体`{ 文; ... }`は式1つの本体と違い、他のDSL式のような「`vm.field`は自動的にゲッター/アクション呼び出しになる」糖衣を持たない**素のRust**として解釈される — アクションを呼ぶ場合は`vm.close_tab(index)`のように明示的に`()`を書く(`vm.close_tab`だけだと、存在しないフィールドへのアクセスとして扱われコンパイルエラーになる)。`vm`のような参照先の解決(`self.vm`相当への書き換え)自体は式本体と同様に行われる
+- クロージャ本体内の`vm.field`/`vm.action(args)`のような参照は、他のDSL式と同じ規則で解決される(コード生成側の詳細は`docs/elwindui_gui_framework_design.md`§7.2参照)
+
 ---
 
 ## 5. 制御構文
@@ -732,7 +760,7 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 
 コンパイラ/リンタが実行前に検出すべき項目:
 
-> **実装状況**: `crates/elwindui-codegen/src/validate.rs`(1616行)は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 18, 19, 25 — `#[param]`の静的性、`bind!`経由のstoreアクセス、`viewmodel`のV/VM分離、`#[command]`の型検査など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: `theme`未実装、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装)は`validate.rs`にも対応する検査が存在しない。
+> **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25 — `#[param]`の静的性、`bind!`経由のstoreアクセス、`viewmodel`のV/VM分離など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: `theme`未実装、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は`Command`機構撤廃(付録O.3〜O.5相当の仕組みが丸ごと廃止)に伴う欠番。
 
 1. `#[param]` フィールドの初期化式に `bind!` / propの参照 / `#[computed]` が出現 → エラー
 2. `#[param]` フィールドの初期化式に非純粋関数(`now()`, `random()` 等)が出現 → エラー(`env::*` / `once` 値は例外)
@@ -751,9 +779,9 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 15. `Dialog`/`Menu`等のオーバーレイ系ビルトインの外側(通常のcomponent)で`native!`/`target::backend()`が出現 → エラー(ルール9と同じ原則、`docs/elwindui_builtins_spec.md`付録M参照)
 16. `Transition`/`KeyframeAnimation`(`docs/elwindui_builtins_spec.md`付録N.6)で存在しないイージング関数名、または範囲外のキーフレーム位置(`0.0..=1.0`外)が指定されている → エラー
 17. `Effect`(`docs/elwindui_builtins_spec.md`付録N.3)のパラメータが対応バックエンドでサポートされない組み合わせ(例:GTK4未対応のエフェクト種別)である場合 → 警告(該当バックエンドではフォールバック描画に切り替わる旨を明示)
-18. `#[command]`が付与されたフィールドの型が`Command`でない → エラー
+18. (欠番 — `Command`機構撤廃により削除。旧ルールは「`#[command]`が付与されたフィールドの型が`Command`でない → エラー」だったが、アクションはRustの`impl`ブロックの`fn`として自動検出されるようになり、対応する型検査自体が存在しなくなった)
 19. `viewmodel`定義内に`view`ブロック、またはビルトイン要素(`Row`/`Text`等)への直接参照が存在する → エラー(`docs/elwindui_gui_framework_design.md`§7.2参照。ViewModelは表示ロジックを持たず、MVVMのV/VM分離を静的に強制する)
-20. `#[async_computed]` または `#[command(async, ...)]` が `viewmodel`/`store` 以外(通常の`component`のprop等)に付与されている → エラー(`docs/elwindui_gui_framework_design.md`§7.3参照。非同期状態はVM/Model層に閉じ込める)
+20. `#[async_computed]` が `viewmodel`/`store` 以外(通常の`component`のprop等)に付与されている → エラー(`docs/elwindui_gui_framework_design.md`§7.3参照。非同期状態はVM/Model層に閉じ込める)
 21. `#[undoable]` が `viewmodel` の `#[observable]` フィールド以外(`store`や`component`のprop等)に付与されている → エラー(`docs/elwindui_gui_framework_design.md`§7.4参照)
 22. `theme`の`variant`ブロックが`tokens{}`で宣言されていないトークン名を定義している、または`tokens{}`で宣言された一部のトークンを欠いている → エラー(`docs/elwindui_gui_framework_design.md`§8.5参照。全variant間でトークン集合の一致を保証する)
 23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(`docs/elwindui_builtins_spec.md`付録Q参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(`docs/elwindui_builtins_spec.md`付録Y参照)。`TabView` は `TabViewItem` を子として指定する。

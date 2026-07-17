@@ -1,5 +1,8 @@
-//! `textDocument/completion` for `vm.field` / `vm.command.execute()` / `vm.command.can_execute`
-//! (付録O.4) — the same shapes `elwindui_codegen::validate::check_vm_expr` already understands.
+//! `textDocument/completion` for `vm.field` — the same shape `elwindui_codegen::validate::check_vm_expr`
+//! already understands. An action (e.g. `vm.save`) completes the same way as any other field —
+//! there's no separate `.execute()`/`.can_execute` member form to drill into (actions can't even
+//! be declared from `.elwind`-native `viewmodel` text at all; only the Rust-native
+//! `#[elwindui::viewmodel]` frontend supports them, see `elwindui_codegen::attr_frontend`).
 //!
 //! `ast.rs` has no span info (see `diagnostics.rs`'s doc comment), so this doesn't know which
 //! element the cursor is structurally inside. Instead it takes every `#[param]` field of every
@@ -8,10 +11,9 @@
 //! enough for the current codebase's one-`component`-per-file convention, and a false positive here
 //! only means an unrelated field name shows up in the candidate list, never a wrong resolution.
 //!
-//! Only two dotted-path depths are supported, matching what `check_vm_expr` validates:
-//! `vm.|` (complete `vm`'s fields/commands) and `vm.save.|` (complete `execute`/`can_execute`, only
-//! if `save` is a `#[command]` field). Deeper paths and recursing into a field's own type (e.g. a
-//! nested viewmodel) are out of scope — `TypeInfo` doesn't carry per-field type names, only kinds.
+//! Only one dotted-path depth is supported, matching what `check_vm_expr` validates: `vm.|`
+//! (complete `vm`'s fields). Deeper paths and recursing into a field's own type (e.g. a nested
+//! viewmodel) are out of scope — `TypeInfo` doesn't carry per-field type names, only kinds.
 
 use elwindui_codegen::ast::{FieldKind, Item, Module};
 use elwindui_codegen::codegen;
@@ -92,49 +94,19 @@ pub fn completions_at(
                 .map(|(name, kind)| field_completion_item(name, *kind))
                 .collect()
         }
-        [vm_name, command_name] => {
-            let Some(&ty) = vm_fields.get(vm_name.as_str()) else {
-                return Vec::new();
-            };
-            let Some(info) = table.resolve(current_module, ty) else {
-                return Vec::new();
-            };
-            if info.fields.get(command_name.as_str()) != Some(&FieldKind::Command) {
-                return Vec::new();
-            }
-            ["execute", "can_execute"]
-                .into_iter()
-                .filter(|name| name.starts_with(filter.as_str()))
-                .map(command_member_completion_item)
-                .collect()
-        }
         _ => Vec::new(),
     }
 }
 
 fn field_completion_item(name: &str, kind: FieldKind) -> CompletionItem {
     let item_kind = match kind {
-        FieldKind::Command => CompletionItemKind::METHOD,
+        FieldKind::Action => CompletionItemKind::METHOD,
         FieldKind::Computed | FieldKind::Attached => CompletionItemKind::PROPERTY,
         FieldKind::Observable | FieldKind::Prop | FieldKind::Param => CompletionItemKind::FIELD,
     };
     CompletionItem {
         label: name.to_string(),
         kind: Some(item_kind),
-        ..Default::default()
-    }
-}
-
-fn command_member_completion_item(name: &str) -> CompletionItem {
-    let (kind, insert_text) = if name == "execute" {
-        (CompletionItemKind::METHOD, Some("execute()".to_string()))
-    } else {
-        (CompletionItemKind::PROPERTY, None)
-    };
-    CompletionItem {
-        label: name.to_string(),
-        kind: Some(kind),
-        insert_text,
         ..Default::default()
     }
 }
@@ -216,8 +188,8 @@ viewmodel Vm {
     #[observable]
     content: String = String::new(),
 
-    #[command(can_execute: true)]
-    save: Command = command!(|| {}),
+    #[computed]
+    save_can_execute: bool = true,
 }
 "#;
 
@@ -241,7 +213,7 @@ view Window {{ Window {{ Text {{ text: {body_after_vm_dot} }} }} }}
     }
 
     #[test]
-    fn completes_vm_fields_and_commands_after_vm_dot() {
+    fn completes_vm_fields_after_vm_dot() {
         let src = window_src("vm.");
         let dir = write_dir(&[("vm.elwind", VM_SRC), ("window.elwind", &src)]);
         let window_path = dir.join("window.elwind");
@@ -251,7 +223,7 @@ view Window {{ Window {{ Text {{ text: {body_after_vm_dot} }} }} }}
         let items = completions_at(&dir, &window_path, &src, position);
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(labels(&items), vec!["content", "save"]);
+        assert_eq!(labels(&items), vec!["content", "save_can_execute"]);
     }
 
     #[test]
@@ -265,25 +237,13 @@ view Window {{ Window {{ Text {{ text: {body_after_vm_dot} }} }} }}
         let items = completions_at(&dir, &window_path, &src, position);
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(labels(&items), vec!["save"]);
+        assert_eq!(labels(&items), vec!["save_can_execute"]);
     }
 
     #[test]
-    fn completes_execute_and_can_execute_after_a_command_field() {
-        let src = window_src("vm.save.");
-        let dir = write_dir(&[("vm.elwind", VM_SRC), ("window.elwind", &src)]);
-        let window_path = dir.join("window.elwind");
-        let offset = src.find("vm.save.").unwrap() + "vm.save.".len();
-        let position = byte_offset_to_position(&src, offset);
-
-        let items = completions_at(&dir, &window_path, &src, position);
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert_eq!(labels(&items), vec!["can_execute", "execute"]);
-    }
-
-    #[test]
-    fn no_completions_after_a_non_command_field() {
+    fn no_completions_after_a_field_dot() {
+        // No 2-level drilling of any kind anymore (actions resolve exactly like any other field,
+        // with no `.execute()`/`.can_execute` member form to complete).
         let src = window_src("vm.content.");
         let dir = write_dir(&[("vm.elwind", VM_SRC), ("window.elwind", &src)]);
         let window_path = dir.join("window.elwind");

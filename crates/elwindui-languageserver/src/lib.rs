@@ -3,10 +3,9 @@
 //!
 //! Phase 1 (this crate, currently): real-time diagnostics (付録B.2 item 1, reusing
 //! `elwindui_codegen::{parser, validate}` as-is via the `diagnostics` module), syntax highlighting
-//! (`semantic_tokens`), and `vm.field`/`vm.command.execute()`/`vm.command.can_execute` member
-//! completion (`completion`, built on `elwindui_codegen::codegen::SymbolTable::resolve`). Generated-
-//! code preview and hover (付録B.2 items 2/3) and the offscreen-rendering pipeline (付録B.3) are
-//! later phases, not attempted here.
+//! (`semantic_tokens`), and `vm.field` member completion (`completion`, built on
+//! `elwindui_codegen::codegen::SymbolTable::resolve`). Generated-code preview and hover (付録B.2
+//! items 2/3) and the offscreen-rendering pipeline (付録B.3) are later phases, not attempted here.
 
 pub mod completion;
 pub mod diagnostics;

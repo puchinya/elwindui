@@ -393,39 +393,6 @@ impl<'a> Parser<'a> {
                 "routed" => attrs.push(Attr::Routed),
                 "override" => attrs.push(Attr::Override),
                 "onetime" => attrs.push(Attr::Onetime),
-                "command" => {
-                    kind = FieldKind::Command;
-                    let mut is_async = false;
-                    let mut can_execute = None;
-                    self.skip_trivia();
-                    if self.eat_char('(') {
-                        self.skip_trivia();
-                        if self.eat_keyword("async") {
-                            is_async = true;
-                            self.skip_trivia();
-                            self.eat_char(',');
-                            self.skip_trivia();
-                        }
-                        // `can_execute: expr` (optional; `#[command(async)]` alone has none)
-                        if self.peek_char() != Some(')') {
-                            let arg_name = self.parse_ident()?;
-                            if arg_name != "can_execute" {
-                                return Err(self.err("expected `can_execute` in #[command(...)]"));
-                            }
-                            self.expect_char(':')?;
-                            let expr_src = self.take_balanced_until(&[')'])?;
-                            can_execute = Some(
-                                syn::parse_str::<syn::Expr>(&expr_src)
-                                    .map_err(|e| format!("invalid can_execute expr: {e}"))?,
-                            );
-                        }
-                        self.expect_char(')')?;
-                    }
-                    attrs.push(Attr::CommandMeta {
-                        is_async,
-                        can_execute,
-                    });
-                }
                 "length" => {
                     self.expect_char('(')?;
                     let range_src = self.take_balanced_until(&[')'])?;
@@ -485,38 +452,6 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
             self.expect_char(')')?;
             return Ok(Initializer::Bind { path, mode });
-        }
-
-        if self.eat_keyword_bang("command") {
-            self.expect_char('(')?;
-            let block_src = self.take_balanced_until(&[')'])?;
-            self.expect_char(')')?;
-            let block_src = block_src.trim();
-            // `command!(async || { ... })` (付録P.4): the `async` marker itself is only tracked
-            // via `#[command(async, ...)]` (see `parse_field_def`), so it's simply skipped here.
-            let block_src = block_src
-                .strip_prefix("async")
-                .map(str::trim)
-                .unwrap_or(block_src);
-            // `||` (no params) or `|name: Type|` (single typed param, e.g. `close_tab`'s index).
-            let block_src = block_src
-                .strip_prefix("||")
-                .map(|rest| (Vec::new(), rest))
-                .or_else(|| {
-                    let rest = block_src.strip_prefix('|')?;
-                    let (param_src, rest) = rest.split_once('|')?;
-                    let (name, ty_src) = param_src.split_once(':')?;
-                    let ty = syn::parse_str::<syn::Type>(ty_src.trim()).ok()?;
-                    Some((vec![(name.trim().to_string(), ty)], rest))
-                });
-            let (params, block_src) = block_src
-                .ok_or_else(|| self.err("expected `||` or `|name: Type|` in command!(...)"))?;
-            let block = syn::parse_str::<syn::Block>(block_src.trim())
-                .map_err(|e| format!("invalid command! body: {e}"))?;
-            return Ok(Initializer::Command {
-                params,
-                body: block,
-            });
         }
 
         let expr_src = self.take_balanced_until(&[',', '}'])?;
@@ -913,43 +848,63 @@ impl<'a> Parser<'a> {
             return Ok(ViewExpr::TFluent(key, args));
         }
 
-        // Dotted field path, optionally followed by `()` (a zero-arg method call).
+        // Dotted field path. `()` is no longer special-cased here — a trailing call like
+        // `vm.close_tab(index)` only ever appears inside a closure body (`parse_closure_expr_body`
+        // falls back to `syn::Expr` for it), never as a bare top-level attribute value.
         let mut path = vec![self.parse_ident()?];
         while self.eat_str(".") {
             path.push(self.parse_ident()?);
         }
-        self.skip_trivia();
-        if self.peek_str("()") {
-            self.pos += 2;
-            let method = path.pop().expect("path always has at least one segment");
-            return Ok(ViewExpr::MethodCall(path, method));
-        }
         Ok(ViewExpr::Path(path))
     }
 
-    /// `|doc| <body>` — 付録Y's `key`/`render_label`/`render_content` attributes. Always a single
-    /// untyped bound parameter (no destructuring, no `: Type`); the body is either a nested
-    /// element construction (`render_content: |doc| DocumentView { doc: doc }`) or a plain
-    /// expression (`key`/`render_label`).
+    /// `|| <body>` / `|index| <body>` / `|a, b| <body>` — used both by 付録Y's `key`/
+    /// `render_label`/`render_content` attributes and, more generally, by any `on_*` event
+    /// attribute that needs to name its callback's arguments (`codegen::emit_wiring`). Zero or
+    /// more untyped bound parameters (no destructuring, no `: Type` — the real types come
+    /// positionally from the target field's own `fn(T0, T1, ...)` declaration); the body is a
+    /// nested element construction (`render_content: |doc| DocumentView { doc: doc }`), a brace-
+    /// delimited Rust block (`on_close: |index| { vm.log(index); vm.close_tab(index) }`), or a
+    /// plain expression (`key`/`render_label`/`on_select: |index| vm.select_tab(index)`).
     fn parse_closure(&mut self) -> Result<ViewExpr, String> {
         self.expect_char('|')?;
         self.skip_trivia();
-        let param = self.parse_ident()?;
+        let mut params = Vec::new();
+        if self.peek_char() != Some('|') {
+            loop {
+                params.push(self.parse_ident()?);
+                self.skip_trivia();
+                if !self.eat_char(',') {
+                    break;
+                }
+                self.skip_trivia();
+            }
+        }
         self.skip_trivia();
         self.expect_char('|')?;
         self.skip_trivia();
+
+        if self.peek_char() == Some('{') {
+            let block_src = self.take_block_src()?;
+            let block = syn::parse_str::<syn::Block>(&block_src)
+                .map_err(|e| format!("invalid closure block body: {e}"))?;
+            return Ok(ViewExpr::Closure {
+                params,
+                body: ClosureBody::Block(block),
+            });
+        }
 
         if self.looks_like_element() {
             let element = self.parse_element_node()?;
             return Ok(ViewExpr::Closure {
-                param,
+                params,
                 body: ClosureBody::Element(Box::new(element)),
             });
         }
 
         let body = self.parse_closure_expr_body()?;
         Ok(ViewExpr::Closure {
-            param,
+            params,
             body: ClosureBody::Expr(Box::new(body)),
         })
     }
@@ -1403,18 +1358,8 @@ viewmodel NotepadViewModel {
     #[computed]
     window_title: String = t!("notepad-window-title", file_name: file_name),
 
-    #[command(can_execute: state != SaveState::Saving)]
-    save: Command = command!(|| {
-        state = SaveState::Saving;
-        document::save(&content);
-        state = SaveState::Saved;
-    }),
-
-    #[command]
-    open: Command = command!(|| {
-        content = document::open_dialog();
-        state = SaveState::Unsaved;
-    }),
+    #[computed]
+    save_can_execute: bool = state != SaveState::Saving,
 }
 "#;
         let module = parse_module(src).expect("should parse");
@@ -1430,7 +1375,7 @@ viewmodel NotepadViewModel {
             panic!("expected viewmodel");
         };
         assert_eq!(vm.name, "NotepadViewModel");
-        assert_eq!(vm.fields.len(), 7);
+        assert_eq!(vm.fields.len(), 6);
 
         assert_eq!(vm.fields[0].name, "content");
         assert_eq!(vm.fields[0].kind, FieldKind::Observable);
@@ -1455,23 +1400,6 @@ viewmodel NotepadViewModel {
             vm.fields[4].initializer,
             Some(Initializer::Expr(_))
         ));
-
-        assert_eq!(vm.fields[5].name, "save");
-        assert_eq!(vm.fields[5].kind, FieldKind::Command);
-        assert!(matches!(
-            vm.fields[5].initializer,
-            Some(Initializer::Command { .. })
-        ));
-        let has_can_execute = vm.fields[5].attrs.iter().any(|a| {
-            matches!(
-                a,
-                Attr::CommandMeta {
-                    can_execute: Some(_),
-                    ..
-                }
-            )
-        });
-        assert!(has_can_execute);
     }
 
     #[test]
@@ -1495,12 +1423,12 @@ view NotepadWindow {
             Row {
                 Button {
                     text: t!("notepad-menu-save")
-                    on_click: vm.save.execute()
-                    enabled: vm.save.can_execute
+                    on_click: vm.save
+                    enabled: vm.save_can_execute
                 }
                 Button {
                     text: t!("notepad-menu-open")
-                    on_click: vm.open.execute()
+                    on_click: vm.open
                 }
             }
 
@@ -1558,8 +1486,8 @@ view NotepadWindow {
             .find(|(k, _)| k == "on_click")
             .map(|(_, v)| v)
             .unwrap();
-        assert!(matches!(on_click, ViewExpr::MethodCall(path, method)
-            if path == &vec!["vm".to_string(), "save".to_string()] && method == "execute"));
+        assert!(matches!(on_click, ViewExpr::Path(path)
+            if path == &vec!["vm".to_string(), "save".to_string()]));
     }
 
     /// Unwraps a test fixture's `ChildEntry`, which is always a literal nested element (none of
@@ -1595,10 +1523,10 @@ view NotepadWindow {
     #[test]
     fn parses_closure_with_dotted_path_body() {
         let expr = parse_closure_attr("x: |doc| doc.file_name");
-        let ViewExpr::Closure { param, body } = expr else {
+        let ViewExpr::Closure { params, body } = expr else {
             panic!("expected closure, got {expr:?}")
         };
-        assert_eq!(param, "doc");
+        assert_eq!(params, vec!["doc".to_string()]);
         let ClosureBody::Expr(inner) = body else {
             panic!("expected expr body")
         };
@@ -1610,10 +1538,10 @@ view NotepadWindow {
     #[test]
     fn parses_closure_with_syn_fallback_body() {
         let expr = parse_closure_attr("x: |doc| std::rc::Rc::as_ptr(doc) as usize");
-        let ViewExpr::Closure { param, body } = expr else {
+        let ViewExpr::Closure { params, body } = expr else {
             panic!("expected closure, got {expr:?}")
         };
-        assert_eq!(param, "doc");
+        assert_eq!(params, vec!["doc".to_string()]);
         let ClosureBody::Expr(inner) = body else {
             panic!("expected expr body")
         };
@@ -1626,10 +1554,10 @@ view NotepadWindow {
     #[test]
     fn parses_closure_with_element_body() {
         let expr = parse_closure_attr("x: |doc| DocumentView { doc: doc }");
-        let ViewExpr::Closure { param, body } = expr else {
+        let ViewExpr::Closure { params, body } = expr else {
             panic!("expected closure, got {expr:?}")
         };
-        assert_eq!(param, "doc");
+        assert_eq!(params, vec!["doc".to_string()]);
         let ClosureBody::Element(elem) = body else {
             panic!("expected element body")
         };
@@ -1639,6 +1567,34 @@ view NotepadWindow {
         assert!(
             matches!(&elem.attributes[0].1, ViewExpr::Path(p) if p == &vec!["doc".to_string()])
         );
+    }
+
+    #[test]
+    fn parses_zero_param_closure() {
+        let expr = parse_closure_attr("x: || vm.save");
+        let ViewExpr::Closure { params, body } = expr else {
+            panic!("expected closure, got {expr:?}")
+        };
+        assert!(params.is_empty());
+        let ClosureBody::Expr(inner) = body else {
+            panic!("expected expr body")
+        };
+        assert!(
+            matches!(*inner, ViewExpr::Path(p) if p == vec!["vm".to_string(), "save".to_string()])
+        );
+    }
+
+    #[test]
+    fn parses_multi_param_closure_with_block_body() {
+        let expr = parse_closure_attr("x: |a, b| { vm.log(a); vm.close_tab(b) }");
+        let ViewExpr::Closure { params, body } = expr else {
+            panic!("expected closure, got {expr:?}")
+        };
+        assert_eq!(params, vec!["a".to_string(), "b".to_string()]);
+        let ClosureBody::Block(block) = body else {
+            panic!("expected block body, got {body:?}")
+        };
+        assert_eq!(block.stmts.len(), 2);
     }
 
     /// Multiple closure-bearing attributes with no trailing commas, one per line — the DSL's own

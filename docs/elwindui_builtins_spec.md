@@ -1181,15 +1181,16 @@ let text: Option<String> = platform::clipboard::read_text();
 ## T.2 ファイルダイアログ(非同期、実装済み・AppKit/WinUI3)
 
 ```rust
-#[command(async)]
-open: Command = command!(async || {
-    if let Some(path) = platform::file_dialog::open().await {
-        content = fs::read_to_string(&path).await.unwrap_or_default();
+impl NotepadViewModel {
+    async fn open(&self) {
+        if let Some(path) = platform::file_dialog::open().await {
+            content = fs::read_to_string(&path).await.unwrap_or_default();
+        }
     }
-}),
+}
 ```
 
-- ファイルダイアログは本質的に非同期(ユーザーの操作待ち)であるため、常に`Future`を返し、付録Pの`#[command(async)]`パターンと組み合わせて使う
+- ファイルダイアログは本質的に非同期(ユーザーの操作待ち)であるため、常に`Future`を返す。`viewmodel`の`impl`ブロックに`async fn`を書くだけでよく(`docs/elwindui_gui_framework_design.md`§7.2/§7.3参照)、専用の属性は不要
 - 実装(`crates/elwindui-backend-appkit/src/lib.rs`の`platform::file_dialog`、`elwindui-backend-winui3`側も同型)は`open() -> Option<PathBuf>`/`save() -> Option<PathBuf>`のみで、`FileFilter`引数など拡張フィルタリングはまだ持たない。`examples/notepad`が実際にこの2関数を使用している(AppKit側で動作確認済み、WinUI3側は未検証)。GTK4は`platform`モジュール自体が存在しないため未対応。
 
 ## T.3 ドラッグ&ドロップ(未実装・仕様のみ)
@@ -1237,16 +1238,16 @@ view NotepadWindow {
             MenuBarItem {
                 text: t!("menu-file")
                 Menu {
-                    MenuItem { text: t!("menu-new"), #[shortcut(winui3: "Ctrl+N", appkit: "Cmd+N")], on_select: vm.new_tab.execute() }
-                    MenuItem { text: t!("menu-open"), #[shortcut(winui3: "Ctrl+O", appkit: "Cmd+O")], on_select: vm.open.execute() }
-                    MenuItem { text: t!("menu-save"), #[shortcut(winui3: "Ctrl+S", appkit: "Cmd+S")], on_select: vm.save.execute(), enabled: vm.save.can_execute }
+                    MenuItem { text: t!("menu-new"), #[shortcut(winui3: "Ctrl+N", appkit: "Cmd+N")], on_select: vm.new_tab }
+                    MenuItem { text: t!("menu-open"), #[shortcut(winui3: "Ctrl+O", appkit: "Cmd+O")], on_select: vm.open }
+                    MenuItem { text: t!("menu-save"), #[shortcut(winui3: "Ctrl+S", appkit: "Cmd+S")], on_select: vm.save, enabled: vm.save_can_execute }
                 }
             }
             MenuBarItem {
                 text: t!("menu-edit")
                 Menu {
-                    MenuItem { text: t!("menu-undo"), #[shortcut("Ctrl+Z")], on_select: vm.undo.execute() }
-                    MenuItem { text: t!("menu-redo"), #[shortcut(winui3: "Ctrl+Y", appkit: "Cmd+Shift+Z")], on_select: vm.redo.execute() }
+                    MenuItem { text: t!("menu-undo"), #[shortcut("Ctrl+Z")], on_select: vm.undo }
+                    MenuItem { text: t!("menu-redo"), #[shortcut(winui3: "Ctrl+Y", appkit: "Cmd+Shift+Z")], on_select: vm.redo }
                 }
             }
         }
@@ -1259,7 +1260,7 @@ view NotepadWindow {
 - `menu_bar`は`Window`が持てる任意属性で、`MenuBar { MenuBarItem { ... } ... }`を渡す
 - `MenuBarItem`は最上段(File/Editのようなドロップダウンの見出し)であり、中身は付録Mの`Menu`/`MenuItem`をそのまま再利用する。新しい項目プリミティブは導入しない
 - `MenuItem`は`docs/elwindui_gui_framework_design.md`§8.1の`#[shortcut(...)]`を追加で持てる。表示されるアクセラレータ文字列はOSごとの標準表記(macOSは⌘、WinUI3/GTK4はCtrl+)に自動変換される(同節と同じ規則)
-- `enabled`は`Button`(付録F)と同じ共通属性で、`vm.save.can_execute`のような`Command`のcan_execute式をそのまま束縛できる
+- `enabled`は`Button`(付録F)と同じ共通属性で、実行可否を表す普通の`#[computed]`フィールド(`vm.save_can_execute`のような、`docs/elwindui_gui_framework_design.md`§7.2参照)をそのまま束縛できる
 
 ## X.2 バックエンド対応
 
@@ -1294,8 +1295,8 @@ TabView {
     TabViewItem { header: "Home", content: HomeView {} }
     TabViewItem { header: "Settings", content: SettingsView {} }
     selected_index: 0
-    on_select: vm.select_tab
-    on_new_tab: vm.new_tab.execute()
+    on_select: |index| vm.select_tab(index)
+    on_new_tab: vm.new_tab
 }
 ```
 
@@ -1312,13 +1313,13 @@ view NotepadWindow {
                 TabViewItem {
                     header: doc.file_name
                     closable: true
-                    on_close: vm.close_active_tab.execute()
+                    on_close: vm.close_active_tab
                     DocumentView { doc: doc }
                 }
             }
             selected_index: vm.active_tab
-            on_select: vm.select_tab
-            on_new_tab: vm.new_tab.execute()
+            on_select: |index| vm.select_tab(index)
+            on_new_tab: vm.new_tab
         }
     }
 }
@@ -1344,7 +1345,7 @@ view NotepadWindow {
 
 `for` の各要素は `Rc<T>` のポインタ同一性で reconcile される。同じ `Rc<T>` が残る限り、その要素から生成した `TabViewItem` と内容 view は再利用されるため、タブ切替や collection の並べ替えで `TextArea` のカーソル位置・フォーカスを失わない。`if`/`match` と複数の `for` も、それぞれが親 `children` 内の自分の範囲だけを insert/remove する。
 
-`SelectedItem`/`SelectedContainer`(WinUI3の同名概念)は`.elwind`の宣言的プロパティ/`on_select`のコールバック引数としては公開していない — `emit_wiring`の`on_*`汎用配線が「宣言型に`usize`が含まれれば単一引数`Fn(usize)`」という決め打ち機構であるため、2引数化するとこれと噛み合わない。かわりに各バックエンドRust実装(`elwindui-backend-appkit::native_ui::TabView`/`elwindui-backend-winui3::native_ui::TabView`)が`selected_item()`/`selected_container()`という素のメソッドを公開しており、手書きRustグルーコードから直接呼び出せる。
+`SelectedItem`/`SelectedContainer`(WinUI3の同名概念)は`.elwind`の宣言的プロパティ/`on_select`のコールバック引数としては公開していない — `emit_wiring`の`on_*`汎用配線は宣言側の`fn(T0, T1, ...)`型から引数の個数・型を汎用的に決めるが(`docs/elwindui_gui_framework_design.md`§7.2)、`TabView.on_select`自体が`fn(usize)`(単一引数)としてしか宣言されていないため、2引数化するには`builtins.elwind`側の宣言そのものを変える必要がある。かわりに各バックエンドRust実装(`elwindui-backend-appkit::native_ui::TabView`/`elwindui-backend-winui3::native_ui::TabView`)が`selected_item()`/`selected_container()`という素のメソッドを公開しており、手書きRustグルーコードから直接呼び出せる。
 
 ## Y.3 バックエンド対応
 

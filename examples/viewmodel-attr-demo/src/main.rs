@@ -13,8 +13,8 @@ mod counter_vm {
         #[computed(expr = count * 2)]
         doubled: i32,
 
-        #[command(can_execute = count < 10)]
-        increment: Command,
+        #[computed(expr = count < 10)]
+        increment_can_execute: bool,
     }
 
     impl Counter {
@@ -30,7 +30,7 @@ fn main() {
     assert_eq!(c.doubled(), 0);
     assert!(c.increment_can_execute());
 
-    c.increment_execute();
+    c.increment();
     assert_eq!(c.count(), 1);
     assert_eq!(c.doubled(), 2);
 

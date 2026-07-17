@@ -120,13 +120,6 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     }
 
                     for f in &c.fields {
-                        // Rule 18: `#[command]` field type must be `Command`.
-                        if f.kind == FieldKind::Command && f.ty != "Command" {
-                            errors.push(format!(
-                                "{}.{}: #[command] field must have type `Command`, found `{}`",
-                                c.name, f.name, f.ty
-                            ));
-                        }
                         // `#[attached]` (§3) declares a property other elements set on
                         // *themselves* via `Owner::field: value` — it needs a default value for
                         // whichever of them never set it explicitly (see `check_attached_properties`).
@@ -272,17 +265,9 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         }
                     }
                 }
-                Item::ViewModel(v) => {
-                    for f in &v.fields {
-                        if f.kind == FieldKind::Command && f.ty != "Command" {
-                            errors.push(format!(
-                                "{}.{}: #[command] field must have type `Command`, found `{}`",
-                                v.name, f.name, f.ty
-                            ));
-                        }
-                        // Rule 19 (viewmodel must not reference view/builtin elements) holds by
-                        // construction: `ViewModelDef` has no `view` body in this AST.
-                    }
+                Item::ViewModel(_) => {
+                    // Rule 19 (viewmodel must not reference view/builtin elements) holds by
+                    // construction: `ViewModelDef` has no `view` body in this AST.
                 }
                 Item::Enum(_) | Item::View(_) => {}
             }
@@ -594,46 +579,18 @@ fn check_vm_expr(
                     }
                 }
             }
-            // `vm.command.can_execute` (付録O.4's 3-segment special form).
-            [vm_name, command, suffix] if suffix == "can_execute" => {
-                if let Some(&ty) = vm_fields.get(vm_name.as_str()) {
-                    let is_command = table.resolve(from, ty).is_some_and(|info| {
-                        info.fields.get(command.as_str()) == Some(&FieldKind::Command)
-                    });
-                    if !is_command {
-                        errors.push(format!(
-                            "{component_name}: `{vm_name}.{command}.can_execute` — `{ty}` has no command `{command}`"
-                        ));
-                    }
-                }
-            }
             _ => {}
         },
-        ViewExpr::MethodCall(path, method) if method == "execute" => {
-            if let [vm_name, command] = path.as_slice() {
-                if let Some(&ty) = vm_fields.get(vm_name.as_str()) {
-                    let is_command = table.resolve(from, ty).is_some_and(|info| {
-                        info.fields.get(command.as_str()) == Some(&FieldKind::Command)
-                    });
-                    if !is_command {
-                        errors.push(format!(
-                            "{component_name}: `{vm_name}.{command}.execute()` — `{ty}` has no command `{command}`"
-                        ));
-                    }
-                }
-            }
-        }
-        ViewExpr::MethodCall(..) => {}
         ViewExpr::Expr(expr) => check_static_view_expr(expr, component_name, errors),
         ViewExpr::TFluent(_, args) => {
             for (_, arg) in args {
                 check_vm_expr(arg, from, component_name, vm_fields, table, errors);
             }
         }
-        ViewExpr::Closure { param, body } => match body {
+        ViewExpr::Closure { params, body } => match body {
             ClosureBody::Expr(inner) => check_closure_expr_body(
                 inner,
-                param,
+                params,
                 from,
                 component_name,
                 vm_fields,
@@ -642,13 +599,18 @@ fn check_vm_expr(
             ),
             ClosureBody::Element(elem) => check_element_value(
                 elem,
-                Some(param),
+                params.first().map(String::as_str),
                 from,
                 component_name,
                 vm_fields,
                 table,
                 errors,
             ),
+            // A block-bodied closure (`on_*` event handlers) is ordinary Rust, not the DSL's own
+            // path grammar — left unvalidated here, same as `ViewExpr::Expr`'s raw `syn::Expr`
+            // above (`codegen::rewrite_view_closure_block` still resolves `vm.foo` references
+            // correctly at codegen time; only this static pre-check is skipped).
+            ClosureBody::Block(_) => {}
         },
         ViewExpr::Element(elem) => {
             check_element_value(elem, None, from, component_name, vm_fields, table, errors)
@@ -714,7 +676,7 @@ fn check_static_view_expr(expr: &syn::Expr, component_name: &str, errors: &mut V
 /// bogus bare identifier instead of failing to compile.
 fn check_closure_expr_body(
     expr: &ViewExpr,
-    param: &str,
+    params: &[String],
     from: &Module,
     component_name: &str,
     vm_fields: &HashMap<&str, &str>,
@@ -723,15 +685,15 @@ fn check_closure_expr_body(
 ) {
     let first_segment = match expr {
         ViewExpr::Path(path) => path.first(),
-        ViewExpr::MethodCall(path, _) => path.first(),
         ViewExpr::TFluent(_, args) => {
             for (_, arg) in args {
-                check_closure_expr_body(arg, param, from, component_name, vm_fields, table, errors);
+                check_closure_expr_body(arg, params, from, component_name, vm_fields, table, errors);
             }
             return;
         }
-        // A raw `syn::Expr` (e.g. `std::rc::Rc::as_ptr(doc) as usize`) isn't inspected further,
-        // matching how ordinary (non-closure) `Expr` values are already left unvalidated above.
+        // A raw `syn::Expr` (e.g. `std::rc::Rc::as_ptr(doc) as usize`, or an `on_*` handler's
+        // `vm.close_tab(index)`) isn't inspected further, matching how ordinary (non-closure)
+        // `Expr` values are already left unvalidated above.
         ViewExpr::Expr(_) => return,
         // The parser never produces a closure directly nested inside another closure's expression
         // body, nor a bare element there (an element-valued closure body is always
@@ -739,12 +701,13 @@ fn check_closure_expr_body(
         ViewExpr::Closure { .. } | ViewExpr::Element(_) => return,
     };
     match first_segment {
-        Some(first) if first == param => {}
+        Some(first) if params.iter().any(|p| p == first) => {}
         Some(first) if vm_fields.contains_key(first.as_str()) => {
             check_vm_expr(expr, from, component_name, vm_fields, table, errors);
         }
         Some(first) => errors.push(format!(
-            "{component_name}: closure body references `{first}`, which is neither the closure's own parameter `{param}` nor a recognized field — a closure may only reference its own bound parameter"
+            "{component_name}: closure body references `{first}`, which is neither one of the closure's own parameters (`{}`) nor a recognized field",
+            params.join(", ")
         )),
         None => {}
     }
@@ -919,10 +882,9 @@ fn check_attached_properties_in_expr(
             }
         }
         ViewExpr::Path(_)
-        | ViewExpr::MethodCall(..)
         | ViewExpr::Expr(_)
         | ViewExpr::Closure {
-            body: ClosureBody::Expr(_),
+            body: ClosureBody::Expr(_) | ClosureBody::Block(_),
             ..
         } => {}
     }
@@ -984,7 +946,7 @@ fn check_element_value(
         match param {
             Some(param) => check_closure_expr_body(
                 value,
-                param,
+                std::slice::from_ref(&param.to_string()),
                 from,
                 component_name,
                 vm_fields,
@@ -1265,19 +1227,39 @@ mod tests {
     use super::*;
     use crate::parser::parse_module;
 
+    /// Actions can't be declared in `.elwind`-native `viewmodel` text (only `#[observable]`/
+    /// `#[computed]` can) — a viewmodel with an action is always built via the Rust-native
+    /// `attr_frontend` frontend, same as the real `#[elwindui::viewmodel]` macro. `path:
+    /// Vec::new()` matches `.elwind`'s own crate-root placement, so a plain `vm: NotepadViewModel`
+    /// reference elsewhere resolves against it exactly the same way.
+    fn viewmodel_module_from_rust(src: &str) -> Module {
+        let item_mod: syn::ItemMod = syn::parse_str(src).expect("mod should parse as valid Rust");
+        let def = crate::attr_frontend::viewmodel_def_from_item_mod(&item_mod)
+            .expect("should build a ViewModelDef");
+        Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items: vec![Item::ViewModel(def)],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn accepts_notepad_modules() {
-        let viewmodel_src = r#"
-enum SaveState { Unsaved, Saving, Saved }
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod notepad_view_model {
+                struct NotepadViewModel {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
 
-viewmodel NotepadViewModel {
-    #[observable]
-    content: String = String::new(),
-
-    #[command(can_execute: true)]
-    save: Command = command!(|| {}),
-}
-"#;
+                impl NotepadViewModel {
+                    fn save(&self) {}
+                }
+            }
+        "#,
+        );
         let window_src = r#"
 component NotepadWindow {
     #[param]
@@ -1291,10 +1273,7 @@ view NotepadWindow {
     Window { TextArea { text: content } }
 }
 "#;
-        let modules = vec![
-            parse_module(viewmodel_src).unwrap(),
-            parse_module(window_src).unwrap(),
-        ];
+        let modules = vec![viewmodel_module, parse_module(window_src).unwrap()];
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1319,20 +1298,30 @@ view Window2 { Window { TextArea { text: missing } } }
         assert!(errs.iter().any(|e| e.contains("does_not_exist")));
     }
 
-    /// `vm.documents` / `vm.save.execute()` / `vm.save.can_execute` — the shape
-    /// `examples/notepad`'s `notepad_window.elwind` actually uses against a `NotepadViewModel`
-    /// defined elsewhere (not in this same slice of parsed modules) — must validate cleanly.
+    /// `vm.documents` / `vm.save` / `vm.save_can_execute` — the shape `examples/notepad`'s
+    /// `notepad_window.elwind` actually uses against a `NotepadViewModel` defined elsewhere (not in
+    /// this same slice of parsed modules) — must validate cleanly. An action (`save`) resolves
+    /// through the exact same 2-segment `[vm_name, field]` check as any other viewmodel field —
+    /// there's no separate `Command`-wrapper form to validate.
     #[test]
     fn accepts_valid_vm_field_and_command_references() {
-        let viewmodel_src = r#"
-viewmodel NotepadViewModel {
-    #[observable]
-    documents: String = String::new(),
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod notepad_view_model {
+                struct NotepadViewModel {
+                    #[observable(default = String::new())]
+                    documents: String,
 
-    #[command(can_execute: true)]
-    save: Command = command!(|| {}),
-}
-"#;
+                    #[computed(expr = true)]
+                    save_can_execute: bool,
+                }
+
+                impl NotepadViewModel {
+                    fn save(&self) {}
+                }
+            }
+        "#,
+        );
         let window_src = r#"
 component NotepadWindow {
     #[param]
@@ -1345,16 +1334,13 @@ view NotepadWindow {
         title: vm.documents
         Button {
             text: t!("save-label")
-            on_click: vm.save.execute()
-            enabled: vm.save.can_execute
+            on_click: vm.save
+            enabled: vm.save_can_execute
         }
     }
 }
 "#;
-        let modules = vec![
-            parse_module(viewmodel_src).unwrap(),
-            parse_module(window_src).unwrap(),
-        ];
+        let modules = vec![viewmodel_module, parse_module(window_src).unwrap()];
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1380,6 +1366,9 @@ view Window3 { Window { TextBlock { text: vm.no_such_field } } }
         );
     }
 
+    /// An unknown action reference (`vm.no_such_command`, a bare path since actions no longer have
+    /// a separate `.execute()` form) is rejected by the same 2-segment `[vm_name, field]` check
+    /// `rejects_reference_to_unknown_vm_field` already covers for ordinary fields.
     #[test]
     fn rejects_reference_to_unknown_vm_command() {
         let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
@@ -1389,29 +1378,7 @@ component Window4 {
     #[inject]
     vm: Vm,
 }
-view Window4 { Window { Button { text: "x", on_click: vm.no_such_command.execute() } } }
-"#;
-        let modules = vec![
-            parse_module(viewmodel_src).unwrap(),
-            parse_module(window_src).unwrap(),
-        ];
-        let errs = validate(&modules).unwrap_err();
-        assert!(
-            errs.iter().any(|e| e.contains("no_such_command")),
-            "errors: {errs:?}"
-        );
-    }
-
-    #[test]
-    fn rejects_reference_to_unknown_vm_can_execute() {
-        let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
-        let window_src = r#"
-component Window5 {
-    #[param]
-    #[inject]
-    vm: Vm,
-}
-view Window5 { Window { Button { text: "x", enabled: vm.no_such_command.can_execute } } }
+view Window4 { Window { Button { text: "x", on_click: vm.no_such_command } } }
 "#;
         let modules = vec![
             parse_module(viewmodel_src).unwrap(),

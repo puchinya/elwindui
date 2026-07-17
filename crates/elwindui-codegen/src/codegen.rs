@@ -736,10 +736,9 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
         ViewExpr::TFluent(_, args) => args
             .iter()
             .any(|(_, v)| view_expr_references_bare_name(v, name)),
-        ViewExpr::MethodCall(..)
-        | ViewExpr::Expr(_)
+        ViewExpr::Expr(_)
         | ViewExpr::Closure {
-            body: ClosureBody::Expr(_),
+            body: ClosureBody::Expr(_) | ClosureBody::Block(_),
             ..
         } => false,
     }
@@ -836,7 +835,6 @@ fn child_references_name_anywhere(child: &ChildEntry, name: &str) -> bool {
 fn view_expr_references_name_anywhere(expr: &ViewExpr, name: &str) -> bool {
     match expr {
         ViewExpr::Path(path) => path.iter().any(|seg| seg == name),
-        ViewExpr::MethodCall(path, _) => path.iter().any(|seg| seg == name),
         ViewExpr::Element(elem) => element_references_name_anywhere(elem, name),
         ViewExpr::Closure {
             body: ClosureBody::Element(elem),
@@ -846,6 +844,10 @@ fn view_expr_references_name_anywhere(expr: &ViewExpr, name: &str) -> bool {
             body: ClosureBody::Expr(e),
             ..
         } => view_expr_references_name_anywhere(e, name),
+        ViewExpr::Closure {
+            body: ClosureBody::Block(block),
+            ..
+        } => block_references_ident(block, name),
         ViewExpr::TFluent(_, args) => args
             .iter()
             .any(|(_, v)| view_expr_references_name_anywhere(v, name)),
@@ -872,6 +874,26 @@ fn expr_references_ident(expr: &syn::Expr, name: &str) -> bool {
     }
     let mut finder = Finder { name, found: false };
     syn::visit::Visit::visit_expr(&mut finder, expr);
+    finder.found
+}
+
+/// [`expr_references_ident`]'s counterpart for a `ClosureBody::Block` (a multi-statement `on_*`
+/// handler body) — same bare-identifier walk, over every statement instead of a single expression.
+fn block_references_ident(block: &syn::Block, name: &str) -> bool {
+    struct Finder<'a> {
+        name: &'a str,
+        found: bool,
+    }
+    impl<'a> syn::visit::Visit<'a> for Finder<'a> {
+        fn visit_expr_path(&mut self, node: &'a syn::ExprPath) {
+            if node.path.segments.len() == 1 && node.path.segments[0].ident == self.name {
+                self.found = true;
+            }
+            syn::visit::visit_expr_path(self, node);
+        }
+    }
+    let mut finder = Finder { name, found: false };
+    syn::visit::Visit::visit_block(&mut finder, block);
     finder.found
 }
 
@@ -1313,7 +1335,6 @@ fn is_copy_type(ty: &str) -> bool {
         // `derive(Copy)`, see `generate_enum`).
         ty.chars().next().is_some_and(|c| c.is_uppercase())
             && ty != "String"
-            && ty != "Command"
             && !ty.contains('<')
             && !ty.contains("::")
     }
@@ -1337,8 +1358,7 @@ fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<
     // struct, so it always calls this with an empty table and relies entirely on the heuristic
     // below, same idea as `is_copy_type`'s "capitalized and not a known scalar" guess.
     let known = table.resolve(from, inner).is_some();
-    let looks_nested = inner.chars().next().is_some_and(|c| c.is_uppercase())
-        && !matches!(inner, "String" | "Command");
+    let looks_nested = inner.chars().next().is_some_and(|c| c.is_uppercase()) && inner != "String";
     (known || looks_nested).then(|| inner.to_string())
 }
 
@@ -1365,41 +1385,24 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
         .iter()
         .filter_map(|f| match f.kind {
             FieldKind::Observable | FieldKind::Computed => Some(format_ident!("{}", f.name)),
-            FieldKind::Command => Some(format_ident!("{}_can_execute", f.name)),
             _ => None,
         })
         .collect();
     let property_name_strs: Vec<String> =
         property_names.iter().map(|ident| ident.to_string()).collect();
-    // Viewmodels retain a weak self-reference so async commands can upgrade it to `Rc<Self>` and
+    // Viewmodels retain a weak self-reference so async actions can upgrade it to `Rc<Self>` and
     // create the `'static` future required by `elwindui::core::task::spawn_local`.
 
-    // `#[computed]` fields and `#[command(can_execute: ...)]` both need a dependency list so that
-    // each observable's setter can call exactly the recompute functions that depend on it,
-    // matching 付録O.5's "具体的な更新関数を静的に生成する" (no dynamic subscriber list).
+    // `#[computed]` fields need a dependency list so that each observable's setter can call
+    // exactly the recompute functions that depend on it (no dynamic subscriber list). An action's
+    // own gating condition (what used to be `#[command(can_execute: ...)]`) is now just an
+    // ordinary `#[computed]` field the caller writes by hand, so it's already covered here.
     let mut dependents_of: HashMap<String, Vec<String>> = HashMap::new();
     for f in &v.fields {
         if f.kind == FieldKind::Computed {
             if let Some(Initializer::Expr(expr)) = &f.initializer {
                 for dep in referenced_fields(expr, &field_names) {
                     dependents_of.entry(dep).or_default().push(f.name.clone());
-                }
-            }
-        }
-        if f.kind == FieldKind::Command {
-            if let Some(Attr::CommandMeta {
-                can_execute: Some(expr),
-                ..
-            }) = f
-                .attrs
-                .iter()
-                .find(|a| matches!(a, Attr::CommandMeta { .. }))
-            {
-                for dep in referenced_fields(expr, &field_names) {
-                    dependents_of
-                        .entry(dep)
-                        .or_default()
-                        .push(format!("{}_can_execute", f.name));
                 }
             }
         }
@@ -1565,65 +1568,34 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 });
                 recompute_calls_after_new.extend(quote! { instance.#recompute(); });
             }
-            FieldKind::Command => {
-                let (is_async, can_execute_expr) = f
-                    .attrs
-                    .iter()
-                    .find_map(|a| match a {
-                        Attr::CommandMeta {
-                            is_async,
-                            can_execute,
-                        } => Some((*is_async, can_execute.clone())),
-                        _ => None,
-                    })
-                    .unwrap_or((false, None));
-                let can_execute_ident = format_ident!("{}_can_execute", f.name);
-                let can_execute_cache = format_ident!("{}_can_execute_cache", f.name);
-                let can_execute_expr_ts = match &can_execute_expr {
-                    Some(expr) => {
-                        rewrite_field_refs(expr.clone(), &field_names, &format_ident!("self"))
-                    }
-                    None => quote! { true },
-                };
-
-                struct_fields.extend(quote! { #can_execute_cache: std::cell::Cell<bool>, });
-                ctor_fields.extend(quote! { #can_execute_cache: std::cell::Cell::new(true), });
-
-                let recompute_can_execute = format_ident!("recompute_{}_can_execute", f.name);
-                accessors.extend(quote! {
-                    pub fn #can_execute_ident(&self) -> bool { self.#can_execute_cache.get() }
-                    fn #recompute_can_execute(&self) {
-                        let value: bool = #can_execute_expr_ts;
-                        self.#can_execute_cache.set(value);
-                    }
-                });
-                recompute_calls_after_new.extend(quote! { instance.#recompute_can_execute(); });
-
-                let Some(Initializer::Command {
+            FieldKind::Action => {
+                let Some(Initializer::Action {
                     params,
+                    is_async,
                     body: block,
                 }) = &f.initializer
                 else {
                     panic!(
-                        "#[command] field `{}` needs a command!(...) initializer",
+                        "action field `{}` needs a body (an `impl` fn of the same name)",
                         f.name
                     );
                 };
-                let execute_ident = format_ident!("{}_execute", f.name);
+                let action_ident = format_ident!("{}", f.name);
                 let param_decls = params.iter().map(|(name, ty)| {
                     let ident = format_ident!("{}", name);
                     quote! { #ident: #ty }
                 });
-                if is_async {
-                    // Async commands use an owned `Rc<Self>` because `spawn_local` requires a
-                    // `'static` future. `async move` also captures command arguments by value.
+                if *is_async {
+                    // Async actions use an owned `Rc<Self>` because `spawn_local` requires a
+                    // `'static` future. `async move` also captures the action's arguments by
+                    // value.
                     let self_ident = format_ident!("__self");
                     let rewritten_block =
-                        rewrite_command_body(block.clone(), &field_names, &self_ident);
+                        rewrite_action_body(block.clone(), &field_names, &self_ident);
                     accessors.extend(quote! {
-                        pub fn #execute_ident(&self, #(#param_decls),*) {
+                        pub fn #action_ident(&self, #(#param_decls),*) {
                             let __self = self.__self_weak.upgrade().expect(
-                                "elwindui: viewmodel was dropped while a #[command(async)] was still pending"
+                                "elwindui: viewmodel was dropped while an async action was still pending"
                             );
                             elwindui::core::task::spawn_local(async move #rewritten_block);
                         }
@@ -1631,15 +1603,15 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 } else {
                     let self_ident = format_ident!("self");
                     let rewritten_block =
-                        rewrite_command_body(block.clone(), &field_names, &self_ident);
+                        rewrite_action_body(block.clone(), &field_names, &self_ident);
                     accessors.extend(quote! {
-                        pub fn #execute_ident(&self, #(#param_decls),*) #rewritten_block
+                        pub fn #action_ident(&self, #(#param_decls),*) #rewritten_block
                     });
                 }
             }
             FieldKind::Prop | FieldKind::Param | FieldKind::Attached => {
                 panic!(
-                    "viewmodel field `{}` must be #[observable]/#[computed]/#[command]",
+                    "viewmodel field `{}` must be #[observable]/#[computed]",
                     f.name
                 );
             }
@@ -1659,10 +1631,10 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             // list before invocation, so a callback may cancel itself or another callback without
             // conflicting with a RefCell borrow held by the notifier.
             __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#property_enum)>>>)>>>,
-            // Lets an async `#[command(async)]` body upgrade to an owned `Rc<Self>` before
-            // spawning (see the `FieldKind::Command` `is_async` arm) instead of capturing a
-            // borrowed `&self` that can't outlive this call. Unused (and so `#[allow(dead_code)]`)
-            // on a viewmodel with no async command.
+            // Lets an async action body upgrade to an owned `Rc<Self>` before spawning (see the
+            // `FieldKind::Action` `is_async` arm) instead of capturing a borrowed `&self` that
+            // can't outlive this call. Unused (and so `#[allow(dead_code)]`) on a viewmodel with
+            // no async action.
             #[allow(dead_code)]
             __self_weak: std::rc::Weak<Self>,
         }
@@ -1789,7 +1761,7 @@ fn referenced_fields(expr: &syn::Expr, field_names: &HashSet<&str>) -> Vec<Strin
 
 /// Rewrites bare identifier reads that name a sibling field (`content` inside a `#[computed]`
 /// initializer) into accessor calls (`self.content()`). Does not touch assignment targets —
-/// `command!` bodies use [`rewrite_command_body`] for that.
+/// action bodies use [`rewrite_action_body`] for that.
 fn rewrite_field_refs(
     mut expr: syn::Expr,
     field_names: &HashSet<&str>,
@@ -1905,12 +1877,12 @@ fn rewrite_t_call(
     quote! { elwindui::i18n::t(#key, &[ #(#arg_pairs),* ]) }
 }
 
-/// Rewrites a `command!(|| { ... })` body: assignments to a sibling field (`state = expr`) become
-/// setter calls, bare reads of a sibling field become getter calls, and the whole thing becomes a
-/// method body (`fn f(&self) { ... }`) rather than a closure. `receiver` is `self` for a plain
-/// (synchronous) command, or an owned local (`__self: Rc<Self>`) for an async one — see the
-/// `FieldKind::Command` `is_async` arm for why a borrowed `self` won't do there.
-fn rewrite_command_body(
+/// Rewrites a viewmodel action's `impl` fn body: assignments to a sibling field (`state = expr`)
+/// become setter calls, bare reads of a sibling field become getter calls, and the whole thing
+/// becomes a method body (`fn f(&self) { ... }`). `receiver` is `self` for a plain (synchronous)
+/// action, or an owned local (`__self: Rc<Self>`) for an async one — see the `FieldKind::Action`
+/// `is_async` arm for why a borrowed `self` won't do there.
+fn rewrite_action_body(
     mut block: syn::Block,
     field_names: &HashSet<&str>,
     receiver: &syn::Ident,
@@ -1963,7 +1935,7 @@ fn rewrite_command_body(
                     }
                 }
             }
-            // `t!(...)` inside a command body: `syn::visit_mut` never descends into a macro's
+            // `t!(...)` inside an action body: `syn::visit_mut` never descends into a macro's
             // token stream, so this has to be special-cased the same way as
             // `rewrite_t_macro`/`rewrite_t_call` (used for `#[computed]` initializers).
             if let syn::Expr::Macro(m) = node {
@@ -2193,9 +2165,10 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                 "field `{}`: a plain initializer expr is only valid on #[prop]/#[computed] (validate.rs already rejects other kinds)",
                 f.name
             ),
-            Some(Initializer::Command { .. }) => {
+            Some(Initializer::Action { .. }) => {
                 panic!(
-                    "component field `{}`: #[command] is a viewmodel-only construct (docs/elwindui_spec.md 付録O.3), not supported on a plain component",
+                    "component field `{}`: an action is a viewmodel-only construct, synthesized \
+                     from an `impl` block's `fn`s — not supported on a plain component",
                     f.name
                 );
             }
@@ -3956,7 +3929,7 @@ fn plan_element(
         }
     }
 
-    let attributes = desugar_command_attr(&node.type_path, node.attributes.clone(), from, table);
+    let attributes = node.attributes.clone();
     let binding = format_ident!("__{}_{}", node.type_path.to_lowercase(), out.len());
     // A virtual builtin (`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`)
     // has a real `elwindui_core::ui` struct with real `set_*` setters (`TextBlockImpl::set_text`
@@ -4099,9 +4072,7 @@ fn emit_for_item_subscriptions(
 
 fn view_expr_references_closure_parameter(expr: &ViewExpr, parameter: &str) -> bool {
     match expr {
-        ViewExpr::Path(path) | ViewExpr::MethodCall(path, _) => {
-            path.first().is_some_and(|segment| segment == parameter)
-        }
+        ViewExpr::Path(path) => path.first().is_some_and(|segment| segment == parameter),
         ViewExpr::TFluent(_, args) => args
             .iter()
             .any(|(_, value)| view_expr_references_closure_parameter(value, parameter)),
@@ -4943,75 +4914,6 @@ fn plan_dynamic_entry(
     }
 }
 
-/// `command: <path>` sugar (docs/elwindui_spec.md 付録O.4), WinUI3's `Button.Command`-style
-/// convenience: expands to the equivalent `<sole on_* field>: <path>.execute()` (+
-/// `enabled: <path>.can_execute` if the shape also declares an `enabled` field) — exactly what
-/// writing `on_click: vm.save.execute()` + `enabled: vm.save.can_execute` by hand already
-/// generates. `command` never becomes a real `#[param]` passed to `Type::new(..)` — there's no
-/// single shared `Command` Rust type to pass (付録O.5 monomorphizes each viewmodel's `Command`
-/// field into its own `<field>_execute`/`<field>_can_execute` methods, never a materialized
-/// `Command` value) — this is purely an attribute-level rewrite, run once during planning.
-///
-/// Driven entirely by the resolved shape's own declared fields (which single field name starts
-/// with `on_`), not hardcoded per widget name — so this works identically for a hand-written
-/// builtin (`Button`/`MenuItem`, which declare their `on_click`/`on_select` field the same way
-/// `TabView` already declares `on_select`/`on_close`) or any user-defined component (native or
-/// virtual) with exactly one `on_*` event of its own. A shape with zero or more than one `on_*`
-/// field has no unambiguous trigger, so `command` is left untouched (inert — `emit_construction`
-/// ignores attribute names with no matching declared field, same as any other unrecognized
-/// attribute). Explicit `on_*`/`enabled` attributes on the same element always win — this only
-/// fills in ones the caller didn't already set, so `command` and explicit `on_*`/`enabled` attributes can
-/// be freely mixed on the same element.
-fn desugar_command_attr(
-    type_path: &str,
-    attributes: Vec<(String, ViewExpr)>,
-    from: &Module,
-    table: &SymbolTable,
-) -> Vec<(String, ViewExpr)> {
-    let Some(ViewExpr::Path(command_path)) = attributes
-        .iter()
-        .find(|(name, _)| name == "command")
-        .map(|(_, v)| v)
-    else {
-        return attributes;
-    };
-    let Some(info) = table.resolve(from, type_path) else {
-        return attributes;
-    };
-    let on_fields: Vec<&String> = info
-        .fields
-        .keys()
-        .filter(|name| name.starts_with("on_"))
-        .collect();
-    let [trigger] = on_fields.as_slice() else {
-        return attributes;
-    };
-    let trigger = (*trigger).clone();
-    let command_path = command_path.clone();
-    let has_enabled_field = info.field_types.contains_key("enabled");
-
-    // `command` isn't itself a declared field on any target (see this function's doc comment) —
-    // left in place, `emit_resync`'s generic "call `set_<attr>` for every non-callback attribute"
-    // loop would try (and fail to find) a `set_command` method, so it must be removed once
-    // desugared, not just left inert.
-    let mut result: Vec<(String, ViewExpr)> = attributes
-        .into_iter()
-        .filter(|(name, _)| name != "command")
-        .collect();
-    if !result.iter().any(|(name, _)| *name == trigger) {
-        result.push((
-            trigger,
-            ViewExpr::MethodCall(command_path.clone(), "execute".to_string()),
-        ));
-    }
-    if has_enabled_field && !result.iter().any(|(name, _)| name == "enabled") {
-        let mut can_execute_path = command_path;
-        can_execute_path.push("can_execute".to_string());
-        result.push(("enabled".to_string(), ViewExpr::Path(can_execute_path)));
-    }
-    result
-}
-
 fn find_attr<'a>(node: &'a PlannedNode, name: &str) -> Option<&'a ViewExpr> {
     node.attributes
         .iter()
@@ -5160,20 +5062,32 @@ fn into_node_if_needed(
 
 /// `|param| <body>` -> `Box::new(move |param| { <body> })` — a real, ordinary Rust closure value,
 /// usable as any `Box<dyn Fn(..) -> ..>`-typed constructor argument (`TabView`'s `key`/
-/// `render_label`/`render_content`, or any future widget with a per-item callback param). The
-/// closure's own parameter needs no type annotation — it's inferred from the constructor
-/// parameter's declared `Box<dyn Fn(&Rc<T>) -> R>` type at the call site.
+/// `render_label`/`render_content`, or any future widget with a per-item callback param). Always
+/// exactly one parameter for this value-computation category of callback (unlike `on_*` event
+/// attributes, generalized separately in `emit_wiring`); the parameter needs no type annotation —
+/// it's inferred from the constructor parameter's declared `Box<dyn Fn(&Rc<T>) -> R>` type at the
+/// call site.
 fn emit_closure_value(
-    param: &str,
+    params: &[String],
     body: &ClosureBody,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
 ) -> TokenStream {
+    let [param] = params else {
+        panic!(
+            "expected exactly one closure parameter here (e.g. `key: |item| ...`), got {}",
+            params.len()
+        );
+    };
     let param_ident = format_ident!("{}", param);
     let closure_ctx = ctx.with_closure_param(param);
     let body_expr = match body {
         ClosureBody::Expr(expr) => emit_expr(expr, &closure_ctx, &EmitMode::Construction),
+        ClosureBody::Block(_) => panic!(
+            "a block-bodied closure (`{{ .. }}`) isn't supported for this value-computation \
+             callback — use a single expression, e.g. `|item| item.file_name`"
+        ),
         ClosureBody::Element(elem) => {
             let mut plan = Vec::new();
             // No outer `let`-bound names are visible inside a template closure body — it runs in a
@@ -5514,8 +5428,8 @@ fn build_component_args(
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
                 }
             }
-            Some(ViewExpr::Closure { param, body }) => {
-                emit_closure_value(param, body, ctx, from, table)
+            Some(ViewExpr::Closure { params, body }) => {
+                emit_closure_value(params, body, ctx, from, table)
             }
             Some(other) => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
@@ -5668,8 +5582,8 @@ fn build_component_setters(
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
                 }
             }
-            Some(ViewExpr::Closure { param, body }) => {
-                emit_closure_value(param, body, ctx, from, table)
+            Some(ViewExpr::Closure { params, body }) => {
+                emit_closure_value(params, body, ctx, from, table)
             }
             Some(other) => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
@@ -5740,8 +5654,8 @@ fn build_component_optional_setters(
                     into_any_view_if_needed(quote! { #nested_binding }, inner_ty)
                 }
             }
-            Some(ViewExpr::Closure { param, body }) => {
-                emit_closure_value(param, body, ctx, from, table)
+            Some(ViewExpr::Closure { params, body }) => {
+                emit_closure_value(params, body, ctx, from, table)
             }
             Some(other) => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
@@ -6130,7 +6044,17 @@ fn emit_wiring(
             // arg only for now (`T = ()`) — see `ast::Attr::Routed`'s doc comment.
             let is_routed = info.is_some_and(|i| i.routed_fields.contains(name));
             if is_routed {
-                let call = emit_expr(expr, ctx, &self_mode);
+                let call = match expr {
+                    ViewExpr::Closure { params, body } if params.is_empty() => {
+                        emit_on_event_closure_body(body, params, ctx, &self_mode)
+                    }
+                    ViewExpr::Closure { params, .. } => panic!(
+                        "`{name}` is #[routed] and takes no parameters, but a closure with {} \
+                         parameter(s) was given",
+                        params.len()
+                    ),
+                    other => emit_expr(other, ctx, &self_mode),
+                };
                 out.extend(quote! {
                     {
                         let widget = this.#binding.clone();
@@ -6142,40 +6066,66 @@ fn emit_wiring(
                 });
                 continue;
             }
-            // A callback whose shape declares `Fn(usize)` (e.g. `TabView`'s per-tab `on_select`/
-            // `on_close`) is a bare command path that needs an index threaded through
-            // (`command_execute_call`); anything
-            // else (`Fn()`, e.g. `on_click`/`on_new_tab`) is an ordinary zero-arg call.
-            let takes_index = info
+            // The callback's declared arity/types (from its `fn(T0, T1, ...)` sugar, e.g.
+            // `TabView`'s per-tab `on_select: fn(usize)`) drive both how many closure parameters
+            // are expected and what to type them as — no more hardcoded `usize` sniffing.
+            let param_types = info
                 .and_then(|i| i.field_types.get(name))
-                .is_some_and(|ty| ty.contains("usize"));
-            if takes_index {
-                let call = command_execute_call(node, name, ctx, &self_mode, quote! { index });
-                out.extend(quote! {
-                    {
-                        let widget = this.#binding.clone();
-                        let this = std::rc::Rc::clone(&this);
-                        widget.#setter(Box::new(move |index: usize| {
-                            #call;
-                        }));
+                .map(|ty| callback_param_types(ty))
+                .unwrap_or_default();
+            if param_types.is_empty() {
+                let call = match expr {
+                    ViewExpr::Closure { params, body } if params.is_empty() => {
+                        emit_on_event_closure_body(body, params, ctx, &self_mode)
                     }
-                });
-            } else {
-                let call = emit_expr(expr, ctx, &self_mode);
+                    ViewExpr::Closure { params, .. } => panic!(
+                        "`{name}` takes no parameters, but a closure with {} parameter(s) was given",
+                        params.len()
+                    ),
+                    other => emit_expr(other, ctx, &self_mode),
+                };
                 out.extend(quote! {
                     {
                         let widget = this.#binding.clone();
                         let this = std::rc::Rc::clone(&this);
                         widget.#setter(Box::new(move || {
                             #call;
-                            // A command can mutate a collection used by a dynamic child range.
+                            // An action can mutate a collection used by a dynamic child range.
                             // Observable collection helpers normally publish that change too, but
-                            // the event callback is not the only supported command path (and a
-                            // user-defined command need not mutate through a generated setter).
+                            // the event callback is not the only supported action path (and a
+                            // user-defined action need not mutate through a generated setter).
                             // Reconcile the owned child ranges here as well. `DynamicChildSlot`
                             // preserves unchanged Rc children, so this does not recreate an
                             // existing tab or reset its native editing state.
                             this.__refresh_dynamic_regions();
+                        }));
+                    }
+                });
+            } else {
+                let ViewExpr::Closure { params, body } = expr else {
+                    panic!(
+                        "`{name}` needs {} parameter(s); write an explicit closure, e.g. `{name}: |x| ...`",
+                        param_types.len()
+                    );
+                };
+                if params.len() != param_types.len() {
+                    panic!(
+                        "`{name}`'s closure takes {} parameter(s) but the callback field declares {}",
+                        params.len(),
+                        param_types.len()
+                    );
+                }
+                let param_decls = params.iter().zip(&param_types).map(|(name, ty)| {
+                    let ident = format_ident!("{}", name);
+                    quote! { #ident: #ty }
+                });
+                let call = emit_on_event_closure_body(body, params, ctx, &self_mode);
+                out.extend(quote! {
+                    {
+                        let widget = this.#binding.clone();
+                        let this = std::rc::Rc::clone(&this);
+                        widget.#setter(Box::new(move |#(#param_decls),*| {
+                            #call;
                         }));
                     }
                 });
@@ -6206,6 +6156,160 @@ fn emit_wiring(
     }
 }
 
+/// Parses an `on_*` field's declared `fn(T0, T1, ...)` sugar type string (stored raw in
+/// `TypeInfo::field_types`, e.g. `"fn(usize)"`, `"fn()"`) into its parameter types — drives how
+/// many parameters `emit_wiring` expects an explicit closure attribute value to declare, and what
+/// to type each one as. Splits on top-level commas only (bracket-depth-aware), so a parameter
+/// type that itself contains a comma (e.g. a generic) isn't split incorrectly.
+fn callback_param_types(ty: &str) -> Vec<syn::Type> {
+    let inner = ty
+        .trim()
+        .strip_prefix("fn")
+        .map(str::trim_start)
+        .and_then(|rest| rest.strip_prefix('('))
+        .and_then(|rest| rest.rsplit_once(')'))
+        .map(|(inner, _)| inner)
+        .unwrap_or("");
+    let mut params = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                params.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < inner.len() {
+        params.push(&inner[start..]);
+    }
+    params
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            syn::parse_str::<syn::Type>(s)
+                .unwrap_or_else(|e| panic!("invalid callback parameter type `{s}`: {e}"))
+        })
+        .collect()
+}
+
+/// Emits an `on_*` event handler's body. `ClosureBody::Expr`'s DSL-native shapes (`vm.save`,
+/// `t!(...)`, ...) already resolve correctly through the ordinary `emit_expr` — only the `syn::Expr`
+/// fallback (e.g. `vm.close_tab(index)`, which the DSL's own dotted-path grammar can't fully
+/// consume — see `parser::Parser::parse_closure_expr_body`) needs the same bare-owner-reference
+/// rewriting `ClosureBody::Block` gets. An `Element` body makes no sense for an event handler (it's
+/// a value-computation shape, `key`/`render_label`/`render_content`'s own use of `ClosureBody`).
+fn emit_on_event_closure_body(
+    body: &ClosureBody,
+    closure_params: &[String],
+    ctx: &ViewCtx,
+    mode: &EmitMode,
+) -> TokenStream {
+    match body {
+        ClosureBody::Expr(inner) => match inner.as_ref() {
+            ViewExpr::Expr(raw) => rewrite_view_closure_expr(raw.clone(), closure_params, ctx, mode),
+            other => emit_expr(other, ctx, mode),
+        },
+        ClosureBody::Block(block) => rewrite_view_closure_block(block.clone(), closure_params, ctx, mode),
+        ClosureBody::Element(_) => panic!(
+            "an `on_*` event handler's closure body must be an expression or `{{ .. }}` block, \
+             not a nested element"
+        ),
+    }
+}
+
+/// Rewrites bare references to a resolvable owner (a bind-sugar name, or one of this component's
+/// own fields — e.g. `vm`) inside an `on_*` event handler's closure body into the same
+/// `self.vm.field()`/`self.vm` forms every other DSL attribute value resolves to — the closure's
+/// own bound parameters (`closure_params`, e.g. `index`) are left untouched as genuine locals.
+/// Shared by [`rewrite_view_closure_expr`]/[`rewrite_view_closure_block`] since a `syn::Expr` and a
+/// `syn::Block` both just need the same `syn::visit_mut::VisitMut` walk applied at a different
+/// entry point.
+struct ViewClosureRewriter<'a> {
+    closure_params: &'a [String],
+    ctx: &'a ViewCtx,
+    mode: &'a EmitMode,
+}
+
+impl<'a> ViewClosureRewriter<'a> {
+    fn resolved_owner(&self, name: &str) -> Option<TokenStream> {
+        if self.closure_params.iter().any(|p| p == name) {
+            return None;
+        }
+        if self.ctx.own_fields.contains_key(name) && !self.ctx.binds.contains_key(name) {
+            return Some(self.mode.owner_tokens(name));
+        }
+        None
+    }
+}
+
+impl<'a> VisitMut for ViewClosureRewriter<'a> {
+    fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+        if let syn::Expr::Path(p) = node {
+            let segments: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            if let [only] = segments.as_slice() {
+                if self.closure_params.iter().any(|p| p == only) {
+                    return;
+                }
+                let resolved_bind = resolve_bind(std::slice::from_ref(only), &self.ctx.binds);
+                if let [owner, field] = resolved_bind.as_slice() {
+                    let base = self.mode.owner_tokens(owner);
+                    let getter = format_ident!("{}", field);
+                    *node = syn::parse_quote! { #base.#getter() };
+                    return;
+                }
+                if let Some(base) = self.resolved_owner(only) {
+                    *node = syn::parse_quote! { #base };
+                }
+                return;
+            }
+            if let [owner, field] = segments.as_slice() {
+                if let Some(base) = self.resolved_owner(owner) {
+                    let getter = format_ident!("{}", field);
+                    *node = syn::parse_quote! { #base.#getter() };
+                    return;
+                }
+            }
+        }
+        syn::visit_mut::visit_expr_mut(self, node);
+    }
+}
+
+fn rewrite_view_closure_expr(
+    mut expr: syn::Expr,
+    closure_params: &[String],
+    ctx: &ViewCtx,
+    mode: &EmitMode,
+) -> TokenStream {
+    ViewClosureRewriter {
+        closure_params,
+        ctx,
+        mode,
+    }
+    .visit_expr_mut(&mut expr);
+    quote! { #expr }
+}
+
+fn rewrite_view_closure_block(
+    mut block: syn::Block,
+    closure_params: &[String],
+    ctx: &ViewCtx,
+    mode: &EmitMode,
+) -> TokenStream {
+    ViewClosureRewriter {
+        closure_params,
+        ctx,
+        mode,
+    }
+    .visit_block_mut(&mut block);
+    quote! { #block }
+}
+
 /// Re-pushes every dynamic (non-callback, non-`Element`/`Closure`-valued) attribute of every
 /// stored widget from current model state, calling `set_<attr>(value)` on its resolved type.
 /// `#[two_way]` attributes (e.g. `TextArea`'s `text`) are resynced the same as any other — this
@@ -6231,14 +6335,6 @@ fn collect_view_expr_owner_properties(
 ) {
     match expr {
         ViewExpr::Path(path) => {
-            let path = resolve_bind(path, &ctx.binds);
-            if let [path_owner, path_property, ..] = path.as_slice() {
-                if path_owner == owner {
-                    out.insert(path_property.clone());
-                }
-            }
-        }
-        ViewExpr::MethodCall(path, _) => {
             let path = resolve_bind(path, &ctx.binds);
             if let [path_owner, path_property, ..] = path.as_slice() {
                 if path_owner == owner {
@@ -6343,10 +6439,6 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
             } else {
                 matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
             }
-        }
-        ViewExpr::MethodCall(path, _) => {
-            let path = resolve_bind(path, &ctx.binds);
-            matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
         }
         ViewExpr::TFluent(_, args) => args
             .iter()
@@ -6574,32 +6666,6 @@ fn virtual_builtin_resync_value(ty: &str, value: TokenStream) -> TokenStream {
     }
 }
 
-/// Resolves a `TabView` callback attribute (`on_select`/`on_close`) — a bare 2-segment path to a
-/// `Command` (e.g. `vm.select_tab`, *not* a `.execute()` call, since the call itself needs to
-/// happen later with a concrete per-tab index that isn't known until `emit_tabview_resync` is
-/// building that specific tab's widgets) — into a call expression against that command's
-/// generated `_execute` method, passing `index_arg` (usually the loop-local tab index).
-fn command_execute_call(
-    node: &PlannedNode,
-    attr_name: &str,
-    ctx: &ViewCtx,
-    mode: &EmitMode,
-    index_arg: TokenStream,
-) -> TokenStream {
-    let Some(ViewExpr::Path(path)) = find_attr(node, attr_name) else {
-        panic!("TabView's `{attr_name}` must be a bare command path, e.g. `vm.select_tab`");
-    };
-    let resolved = resolve_bind(path, &ctx.binds);
-    let (owner_path, command) = resolved.split_at(resolved.len() - 1);
-    let owner = owner_path
-        .last()
-        .cloned()
-        .unwrap_or_else(|| "vm".to_string());
-    let base = mode.owner_tokens(&owner);
-    let execute = format_ident!("{}_execute", command[0]);
-    quote! { #base.#execute(#index_arg) }
-}
-
 /// Resolves the DSL's bare-field bind sugar: `content` (a `component` field defined as
 /// `bind!(vm.content, ...)`) becomes `["vm", "content"]`. Paths that don't match a known bind
 /// (e.g. `vm.window_title`, already fully qualified) pass through unchanged.
@@ -6662,17 +6728,6 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
             let resolved = resolve_bind(path, &ctx.binds);
             emit_path_get(&resolved, mode)
         }
-        ViewExpr::MethodCall(path, method) => {
-            let resolved = resolve_bind(path, &ctx.binds);
-            let (owner_path, command) = resolved.split_at(resolved.len() - 1);
-            let owner = owner_path
-                .last()
-                .cloned()
-                .unwrap_or_else(|| "vm".to_string());
-            let base = mode.owner_tokens(&owner);
-            let call = format_ident!("{}_{}", command[0], method);
-            quote! { #base.#call() }
-        }
         ViewExpr::TFluent(key, args) => {
             let arg_pairs = args.iter().map(|(name, value)| {
                 let value_tokens = emit_expr(value, ctx, mode);
@@ -6690,19 +6745,13 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
 }
 
 /// A resolved `["vm", "content"]`-style path -> `vm.content()` (construction) /
-/// `self.vm.content()` (with self). `["vm", "save", "can_execute"]` (付録O.3's `vm.save.can_execute`)
-/// is the one 3-segment shape: the middle segment names a `#[command]` field, so it's folded
-/// together with `can_execute` into a single `save_can_execute()` accessor.
+/// `self.vm.content()` (with self). A viewmodel action (`vm.save`) resolves through this exact
+/// same 2-segment shape — there is no separate `Command`-wrapper indirection to fold in.
 fn emit_path_get(path: &[String], mode: &EmitMode) -> TokenStream {
     match path {
         [owner, field] => {
             let base = mode.owner_tokens(owner);
             let getter = format_ident!("{}", field);
-            quote! { #base.#getter() }
-        }
-        [owner, command, suffix] if suffix == "can_execute" => {
-            let base = mode.owner_tokens(owner);
-            let getter = format_ident!("{}_can_execute", command);
             quote! { #base.#getter() }
         }
         other => panic!(
@@ -6766,39 +6815,65 @@ mod tests {
         );
     }
 
-    const VIEWMODEL_SRC: &str = r#"
-enum SaveState { Unsaved, Saving, Saved }
+    /// Actions can't be declared in `.elwind`-native `viewmodel` text (only `#[observable]`/
+    /// `#[computed]` can); a viewmodel with actions is always built via the Rust-native
+    /// `attr_frontend` frontend (`mod { struct .. impl .. }`) instead, same as the real
+    /// `#[elwindui::viewmodel]` macro — see `attr_frontend::viewmodel_def_from_item_mod`. `path:
+    /// Vec::new()` matches `.elwind`'s own crate-root placement (`parse_module`'s modules are also
+    /// always `path: []`), so `use crate::NotepadViewModel;` elsewhere resolves against it exactly
+    /// the same way.
+    fn viewmodel_module_from_rust(src: &str) -> Module {
+        let item_mod: syn::ItemMod = syn::parse_str(src).expect("mod should parse as valid Rust");
+        let def = crate::attr_frontend::viewmodel_def_from_item_mod(&item_mod)
+            .expect("should build a ViewModelDef");
+        Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items: vec![Item::ViewModel(def)],
+            ..Default::default()
+        }
+    }
 
-viewmodel NotepadViewModel {
-    #[observable]
-    content: String = String::new(),
+    fn notepad_viewmodel_module() -> Module {
+        viewmodel_module_from_rust(
+            r#"
+            mod notepad_view_model {
+                struct NotepadViewModel {
+                    #[observable(default = String::new())]
+                    content: String,
 
-    #[observable]
-    file_name: String = "untitled.txt",
+                    #[observable(default = "untitled.txt")]
+                    file_name: String,
 
-    #[observable]
-    state: SaveState = SaveState::Unsaved,
+                    #[observable(default = SaveState::Unsaved)]
+                    state: SaveState,
 
-    #[computed]
-    char_count: i32 = content.chars().count() as i32,
+                    #[computed(expr = content.chars().count() as i32)]
+                    char_count: i32,
 
-    #[computed]
-    window_title: String = t!("notepad-window-title", file_name: file_name),
+                    #[computed(expr = t!("notepad-window-title", file_name: file_name))]
+                    window_title: String,
 
-    #[command(can_execute: state != SaveState::Saving)]
-    save: Command = command!(|| {
-        state = SaveState::Saving;
-        document::save(&content);
-        state = SaveState::Saved;
-    }),
+                    #[computed(expr = state != SaveState::Saving)]
+                    save_can_execute: bool,
+                }
 
-    #[command]
-    open: Command = command!(|| {
-        content = document::open_dialog();
-        state = SaveState::Unsaved;
-    }),
-}
-"#;
+                impl NotepadViewModel {
+                    fn save(&self) {
+                        state = SaveState::Saving;
+                        document::save(&content);
+                        state = SaveState::Saved;
+                    }
+
+                    fn open(&self) {
+                        content = document::open_dialog();
+                        state = SaveState::Unsaved;
+                    }
+                }
+            }
+        "#,
+        )
+    }
 
     const WINDOW_SRC: &str = r#"
 use crate::NotepadViewModel;
@@ -6818,12 +6893,12 @@ view NotepadWindow {
             HorizontalLayout {
                 Button {
                     text: t!("notepad-menu-save")
-                    on_click: vm.save.execute()
-                    enabled: vm.save.can_execute
+                    on_click: vm.save
+                    enabled: vm.save_can_execute
                 }
                 Button {
                     text: t!("notepad-menu-open")
-                    on_click: vm.open.execute()
+                    on_click: vm.open
                 }
             }
 
@@ -7202,7 +7277,7 @@ view NotepadWindow {
 
     #[test]
     fn generates_valid_rust_for_notepad() {
-        let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
+        let viewmodel_module = notepad_viewmodel_module();
         let window_module = parse_module(WINDOW_SRC).unwrap();
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
@@ -7216,7 +7291,6 @@ view NotepadWindow {
         let window_str = window_code.to_string();
         assert!(window_str.contains("struct NotepadWindow"));
         assert!(window_str.contains("fn resync"));
-        assert!(window_str.contains("save_execute"));
         assert!(window_str.contains("save_can_execute"));
         // `#[bindable] vm` (`WINDOW_SRC`) must wire an `ObservableExt`-based, string-keyed
         // subscription rather than the old per-viewmodel enum — see `ast::Attr::Bindable`.
@@ -7226,8 +7300,13 @@ view NotepadWindow {
         assert!(window_str.contains("\"char_count\""));
     }
 
+    /// Generalized `on_*` closure wiring (replaces the old `usize`-sniffing `command_execute_call`
+    /// special case): a zero-param closure with a multi-statement block body on a `#[routed]`
+    /// field (`Button.on_click`), and a 1-param closure with a block body on a plain `fn(usize)`
+    /// field (`TabView.on_select`) — both should resolve `vm.save`/`vm.select_tab(index)` bare
+    /// references the same way a single-expression body already does.
     #[test]
-    fn command_attr_desugars_to_execute_wiring_and_enabled_resync() {
+    fn on_star_closures_support_block_bodies_and_generalized_arity() {
         let window_src = r#"
 use crate::NotepadViewModel;
 
@@ -7240,37 +7319,31 @@ component NotepadWindow {
 view NotepadWindow {
     Window {
         title: vm.window_title
-
-        HorizontalLayout {
-            Button {
-                text: t!("notepad-menu-save")
-                command: vm.save
+        Button {
+            text: t!("notepad-menu-save")
+            on_click: || {
+                vm.save();
+                vm.save();
             }
         }
     }
 }
 "#;
-        let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
+        let viewmodel_module = notepad_viewmodel_module();
         let window_module = parse_module(window_src).unwrap();
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
         let window_code = generate_module(&window_module, &table);
-        assert_valid_rust("command_attr_window", &window_code);
-
+        assert_valid_rust("on_star_block_body_window", &window_code);
         let window_str = window_code.to_string();
-        // `command: vm.save` must desugar to exactly what `on_click: vm.save.execute()` +
-        // `enabled: vm.save.can_execute` generate by hand (see `desugar_command_attr`). `on_click`
-        // is `#[routed]` (`Button` in `builtins.elwind`), so it's wired via
-        // `register_routed_handler`, not `set_on_click` directly — see `emit_wiring`'s `is_routed`
-        // branch.
         assert!(window_str.contains("register_routed_handler"));
-        assert!(window_str.contains("save_execute"));
-        assert!(window_str.contains("save_can_execute"));
+        // Both statements' bare `vm` reference must have been rewritten to `this . vm`.
+        assert_eq!(window_str.matches("this . vm . save ()").count(), 2);
     }
 
     #[test]
-    fn command_attr_does_not_override_an_explicit_on_click() {
+    fn on_select_closure_with_wrong_param_count_panics() {
         let window_src = r#"
 use crate::NotepadViewModel;
 
@@ -7283,37 +7356,29 @@ component NotepadWindow {
 view NotepadWindow {
     Window {
         title: vm.window_title
-
-        HorizontalLayout {
-            Button {
-                text: t!("notepad-menu-save")
-                command: vm.save
-                on_click: vm.open.execute()
-            }
+        TabView {
+            selected_index: 0
+            on_select: || vm.save
         }
     }
 }
 "#;
-        let viewmodel_module = parse_module(VIEWMODEL_SRC).unwrap();
+        let viewmodel_module = notepad_viewmodel_module();
         let window_module = parse_module(window_src).unwrap();
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
-        let window_code = generate_module(&window_module, &table);
-        assert_valid_rust("command_attr_explicit_on_click_window", &window_code);
-
-        let window_str = window_code.to_string();
-        // The explicit `on_click` wins — `command`'s own execute-wiring is not also emitted, so
-        // `save_execute` never appears (only `open_execute`, from the explicit `on_click`), but
-        // `command`'s `enabled` wiring (no explicit `enabled` given) still comes through.
-        assert!(window_str.contains("open_execute"));
-        assert!(!window_str.contains("save_execute"));
-        assert!(window_str.contains("save_can_execute"));
+        let result = std::panic::catch_unwind(|| generate_module(&window_module, &table));
+        assert!(
+            result.is_err(),
+            "expected a panic for a 0-param closure on a `fn(usize)` field"
+        );
     }
 
     #[test]
     fn generates_valid_rust_for_menubar_and_tabview() {
-        let viewmodel_src = r#"
+        let document_module = parse_module(
+            r#"
 viewmodel Document {
     #[observable]
     content: String = String::new(),
@@ -7321,31 +7386,37 @@ viewmodel Document {
     #[observable]
     file_name: String = "untitled.txt",
 }
+"#,
+        )
+        .expect("document viewmodel should parse");
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod notepad_view_model {
+                struct NotepadViewModel {
+                    #[observable(default = Vec::new())]
+                    documents: Vec<Document>,
 
-viewmodel NotepadViewModel {
-    #[observable]
-    documents: Vec<Document> = Vec::new(),
+                    #[observable(default = 0usize)]
+                    active_tab: usize,
+                }
 
-    #[observable]
-    active_tab: usize = 0,
+                impl NotepadViewModel {
+                    fn new_tab(&self) {
+                        documents.push(std::rc::Rc::new(Document::new()));
+                        active_tab = documents.len() - 1;
+                    }
 
-    #[command]
-    new_tab: Command = command!(|| {
-        documents.push(std::rc::Rc::new(Document::new()));
-        active_tab = documents.len() - 1;
-    }),
+                    fn close_tab(&self, index: usize) {
+                        documents.remove(index);
+                    }
 
-    #[command]
-    close_tab: Command = command!(|index: usize| {
-        documents.remove(index);
-    }),
-
-    #[command]
-    select_tab: Command = command!(|index: usize| {
-        active_tab = index;
-    }),
-}
-"#;
+                    fn select_tab(&self, index: usize) {
+                        active_tab = index;
+                    }
+                }
+            }
+        "#,
+        );
         let window_src = r#"
 use crate::NotepadViewModel;
 
@@ -7363,7 +7434,7 @@ view NotepadWindow {
             MenuBarItem {
                 text: t!("menu-file")
                 Menu {
-                    MenuItem { text: t!("menu-new"), shortcut: "n", on_select: vm.new_tab.execute() }
+                    MenuItem { text: t!("menu-new"), shortcut: "n", on_select: vm.new_tab }
                 }
             }
         }
@@ -7376,18 +7447,18 @@ view NotepadWindow {
                 }
             }
             selected_index: vm.active_tab
-            on_select: vm.select_tab
-            on_close: vm.close_tab
-            on_new_tab: vm.new_tab.execute()
-            closable: true
+            on_select: |index| vm.select_tab(index)
+            on_new_tab: vm.new_tab
         }
     }
 }
 "#;
-        let viewmodel_module = parse_module(viewmodel_src).expect("viewmodel should parse");
         let window_module = parse_module(window_src).expect("window should parse");
-        let table =
-            build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+        let table = build_symbol_table_with_builtins(&[
+            document_module.clone(),
+            viewmodel_module.clone(),
+            window_module.clone(),
+        ]);
 
         let viewmodel_code = generate_module(&viewmodel_module, &table);
         assert_valid_rust("menubar_tabview_viewmodel", &viewmodel_code);
@@ -7395,7 +7466,7 @@ view NotepadWindow {
         assert!(viewmodel_str.contains("documents_push"));
         assert!(viewmodel_str.contains("documents_remove"));
         assert!(viewmodel_str.contains("Rc < Document >"));
-        assert!(viewmodel_str.contains("fn close_tab_execute (& self , index : usize)"));
+        assert!(viewmodel_str.contains("fn close_tab (& self , index : usize)"));
         assert!(viewmodel_str.contains("NotepadViewModelProperty"));
         assert!(viewmodel_str.contains("subscribe_property_changed"));
         assert!(!viewmodel_str.contains("__resync_subscribers"));
@@ -7430,31 +7501,35 @@ viewmodel Document {
     #[observable]
     file_name: String = "untitled.txt",
 }
-
-viewmodel NotepadViewModel {
-    #[observable]
-    documents: Vec<std::rc::Rc<Document>> = Vec::new(),
-
-    #[observable]
-    active_tab: usize = 0,
-
-    #[command]
-    new_tab: Command = command!(|| {
-        documents.push(std::rc::Rc::new(Document::new()));
-        active_tab = documents.len() - 1;
-    }),
-
-    #[command]
-    close_tab: Command = command!(|index: usize| {
-        documents.remove(index);
-    }),
-
-    #[command]
-    select_tab: Command = command!(|index: usize| {
-        active_tab = index;
-    }),
-}
 "#;
+        let notepad_viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod notepad_view_model {
+                struct NotepadViewModel {
+                    #[observable(default = Vec::new())]
+                    documents: Vec<std::rc::Rc<Document>>,
+
+                    #[observable(default = 0usize)]
+                    active_tab: usize,
+                }
+
+                impl NotepadViewModel {
+                    fn new_tab(&self) {
+                        documents.push(std::rc::Rc::new(Document::new()));
+                        active_tab = documents.len() - 1;
+                    }
+
+                    fn close_tab(&self, index: usize) {
+                        documents.remove(index);
+                    }
+
+                    fn select_tab(&self, index: usize) {
+                        active_tab = index;
+                    }
+                }
+            }
+        "#,
+        );
         let document_view_src = r#"
 use crate::Document;
 
@@ -7498,18 +7573,19 @@ view NotepadWindow {
                 }
             }
             selected_index: vm.active_tab
-            on_select: vm.select_tab
-            on_new_tab: vm.new_tab.execute()
+            on_select: |index| vm.select_tab(index)
+            on_new_tab: vm.new_tab
         }
     }
 }
 "#;
-        let viewmodel_module = parse_module(viewmodel_src).expect("viewmodel should parse");
+        let document_module = parse_module(viewmodel_src).expect("viewmodel should parse");
         let document_view_module =
             parse_module(document_view_src).expect("document view should parse");
         let window_module = parse_module(window_src).expect("window should parse");
         let modules = [
-            viewmodel_module.clone(),
+            document_module.clone(),
+            notepad_viewmodel_module.clone(),
             document_view_module.clone(),
             window_module.clone(),
         ];
@@ -7544,7 +7620,7 @@ view NotepadWindow {
         assert!(window_str.contains("DynamicChildSlot"));
         assert!(window_str.contains("replace_rc_items"));
         assert!(window_str.contains("set_on_new_tab"));
-        assert!(window_str.contains("new_tab_execute"));
+        assert!(window_str.contains("new_tab"));
         assert!(window_str.contains("__refresh_dynamic_regions"));
         assert!(window_str.contains("DynamicChild :: with_children"));
         assert!(window_str.contains("__dynamic_item_subscriptions"));
@@ -7626,34 +7702,38 @@ view DocumentView {
     }
 
     #[test]
-    fn generates_valid_rust_for_async_command_with_nested_t_macro() {
-        let src = r#"
-viewmodel FileViewModel {
-    #[observable]
-    content: String = String::new(),
+    fn generates_valid_rust_for_async_action_with_nested_t_macro() {
+        let module = viewmodel_module_from_rust(
+            r#"
+            mod file_view_model {
+                struct FileViewModel {
+                    #[observable(default = String::new())]
+                    content: String,
 
-    #[observable]
-    status: String = String::new(),
+                    #[observable(default = String::new())]
+                    status: String,
+                }
 
-    #[command(async)]
-    open: Command = command!(async || {
-        if let Some(path) = platform::file_dialog::open().await {
-            content = std::fs::read_to_string(&path).unwrap_or_default();
-            status = t!("opened-status", name: content);
-        }
-    }),
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+                impl FileViewModel {
+                    async fn open(&self) {
+                        if let Some(path) = platform::file_dialog::open().await {
+                            content = std::fs::read_to_string(&path).unwrap_or_default();
+                            status = t!("opened-status", name: content);
+                        }
+                    }
+                }
+            }
+        "#,
+        );
         let table = build_symbol_table(std::slice::from_ref(&module));
         let generated = generate_module(&module, &table);
-        assert_valid_rust("async_command", &generated);
+        assert_valid_rust("async_action", &generated);
 
         let generated_str = generated.to_string();
         assert!(generated_str.contains("elwindui :: core :: task :: spawn_local"));
         assert!(
             generated_str.contains("__self . content ()"),
-            "t!(...) args inside an async command body must resolve through `__self`, not a \
+            "t!(...) args inside an async action body must resolve through `__self`, not a \
              borrowed `self` that can't outlive the call:\n{generated_str}"
         );
         assert!(generated_str.contains("async"));

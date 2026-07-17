@@ -35,11 +35,10 @@ const ATTR_NAMES: &[&str] = &[
     "observable",
     "computed",
     "inject",
-    "command",
     "length",
 ];
-// DSL macro forms recognized by `peek_keyword_bang`/direct match: `bind!`, `command!`, `t!`.
-const MACRO_NAMES: &[&str] = &["bind", "command", "t"];
+// DSL macro forms recognized by `peek_keyword_bang`/direct match: `bind!`, `t!`.
+const MACRO_NAMES: &[&str] = &["bind", "t"];
 
 struct RawToken {
     line: u32,

@@ -19,9 +19,10 @@ pub trait Dispatcher {
 
 type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
 
-/// A single-threaded executor for `!Send` futures — `#[command(async)]` bodies, which own
-/// `Rc`/`RefCell` component/viewmodel state and so can never be handed to a `Send`-bound
-/// executor. Mirrors C#'s `async`/`await` + `SynchronizationContext.Post`: a task starts on the
+/// A single-threaded executor for `!Send` futures — a `viewmodel`'s async action methods (any
+/// `async fn` in an `#[elwindui::viewmodel]` `impl` block), which own `Rc`/`RefCell`
+/// component/viewmodel state and so can never be handed to a `Send`-bound executor. Mirrors C#'s
+/// `async`/`await` + `SynchronizationContext.Post`: a task starts on the
 /// UI thread, may genuinely suspend (e.g. awaiting a background `tokio` task's `JoinHandle`), and
 /// resumes back on the UI thread — wherever the real work actually happened doesn't matter, since
 /// only the `Waker` (never the future itself, never any `Rc`/`RefCell` state) needs to cross
@@ -41,7 +42,7 @@ impl<D: Dispatcher + Send + Sync + 'static> LocalExecutor<D> {
         })
     }
 
-    /// Spawns `fut`, polling it once immediately — most `#[command(async)]` bodies today still
+    /// Spawns `fut`, polling it once immediately — most async action bodies today still
     /// resolve synchronously (a modal dialog's `.await` that never really suspends), so this path
     /// costs nothing extra for them. A future that returns `Pending` is kept alive in `tasks` and
     /// resumed later through its `Waker`.
@@ -121,8 +122,8 @@ thread_local! {
 }
 
 /// Installs `executor` as this thread's task executor — called once by a backend's
-/// `application::run()` before entering the platform event loop. Generated `#[command(async)]`
-/// bodies never see `D`/`LocalExecutor` directly; they only ever call the backend-agnostic
+/// `application::run()` before entering the platform event loop. Generated async action bodies
+/// never see `D`/`LocalExecutor` directly; they only ever call the backend-agnostic
 /// `spawn_local` below.
 pub fn set_current<D: Dispatcher + Send + Sync + 'static>(executor: Rc<LocalExecutor<D>>) {
     CURRENT.with(|current| *current.borrow_mut() = Some(executor));
@@ -133,13 +134,13 @@ fn with_current(f: impl FnOnce(&Rc<dyn ErasedExecutor>)) {
         Some(executor) => f(executor),
         None => panic!(
             "elwindui: spawn_local called with no executor installed \
-             (application::run() must install one before any #[command(async)] can run)"
+             (application::run() must install one before any async action can run)"
         ),
     });
 }
 
 /// Spawns `fut` on the current thread's executor (installed via `set_current`). This is what
-/// generated `#[command(async)]` bodies call — backend-agnostic, since by the time any component
+/// generated async action bodies call — backend-agnostic, since by the time any component
 /// code runs, `application::run()` has already installed the concrete one.
 #[allow(unused_variables)] // rust-analyzer can analyze this with the executor call cfg-disabled.
 pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {

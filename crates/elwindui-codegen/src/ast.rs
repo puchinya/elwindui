@@ -165,8 +165,11 @@ pub enum FieldKind {
     Observable,
     /// `#[computed]`: read-only, recomputed from its dependencies. See §4, 付録O.5.
     Computed,
-    /// `#[command(...)]`, backed by `command!(...)`. See 付録O.3.
-    Command,
+    /// A `viewmodel` action method, auto-detected from an `impl` block's `fn`/`async fn` (Rust-
+    /// native `#[elwindui::viewmodel] mod { struct .. impl .. }` frontend only — the `.elwind`
+    /// DSL has no syntax to declare one). Not a real struct field: `attr_frontend.rs` synthesizes
+    /// one `FieldDef` per `impl` `fn` directly, with no corresponding struct-side declaration.
+    Action,
     /// `#[attached]`: a WPF/WinUI3-style attached property (§3) — declares a property that any
     /// *other* element in the tree may set on itself via `Owner::field: value` (e.g. `Grid`'s
     /// `row`/`column`, settable on any child anywhere, not just `Grid`'s own direct children).
@@ -192,12 +195,6 @@ pub enum Attr {
         start: i64,
         end: i64,
         inclusive: bool,
-    },
-    /// `#[command(can_execute: expr)]` / `#[command(async)]` / `#[command(async, can_execute: expr)]`.
-    /// See 付録O.3, 付録P.4.
-    CommandMeta {
-        is_async: bool,
-        can_execute: Option<syn::Expr>,
     },
     /// `#[routed]`: marks a callback-typed field (`fn()`, `fn(usize)`, ...) as a WinUI3-style
     /// routed event — dispatched via `elwindui_core::ui::dispatch_routed` (bubbling from the
@@ -255,19 +252,21 @@ pub struct FieldDef {
     pub initializer: Option<Initializer>,
 }
 
-/// How a field's initializer expression was recognized. Only `bind!`/`command!` are given their
-/// own DSL-level macro syntax (§10, 付録O.3); everything else is an arbitrary Rust expression and
-/// is parsed for real via `syn` rather than kept as opaque text.
+/// How a field's initializer expression was recognized. Only `bind!` is given its own DSL-level
+/// macro syntax (§10); everything else is an arbitrary Rust expression and is parsed for real via
+/// `syn` rather than kept as opaque text.
 #[derive(Debug, Clone)]
 pub enum Initializer {
     /// `bind!(vm.content, TwoWay)`. See §10.
     Bind { path: Vec<String>, mode: String },
-    /// `command!(|| { ... })` / `command!(|index: usize| { ... })`. `params` is empty for the
-    /// common zero-arg case; a parameterized command (needed so e.g. `TabView`'s per-tab
-    /// close/select callbacks can pass an index through to a `Command`) generates
-    /// `pub fn X_execute(&self, index: usize)` instead of the zero-arg form. See 付録O.3.
-    Command {
+    /// A `FieldKind::Action` field's body, taken directly from the matching `impl` `fn`'s
+    /// signature (`params`, `is_async`) and block (`body`) — see
+    /// `attr_frontend::synthesize_action_fields`. `params` is empty for the common zero-arg case;
+    /// a parameterized action (needed so e.g. `TabView`'s per-tab close/select callbacks can pass
+    /// an index through) generates `pub fn X(&self, index: usize)` instead of the zero-arg form.
+    Action {
         params: Vec<(String, syn::Type)>,
+        is_async: bool,
         body: syn::Block,
     },
     /// Any other initializer expression (literals, `String::new()`, `content.chars().count()
@@ -379,33 +378,45 @@ pub struct MatchArm {
 #[derive(Debug, Clone)]
 pub enum ViewExpr {
     /// A dotted field path, e.g. `content` -> `["content"]`, `vm.window_title` ->
-    /// `["vm", "window_title"]`.
+    /// `["vm", "window_title"]`. Also used for a zero-arg callback-typed attribute given as a
+    /// bare action reference (e.g. `on_click: vm.save`), which resolves through the same getter-
+    /// call codegen as any other 0-arg path.
     Path(Vec<String>),
-    /// `vm.save.execute()`: `(["vm", "save"], "execute")`. See 付録O.4.
-    MethodCall(Vec<String>, String),
     /// `t!("key", name: expr, ...)`. See §11.
     TFluent(String, Vec<(String, ViewExpr)>),
     /// Any other expression (string/number literals, etc.), parsed via `syn`.
     Expr(syn::Expr),
-    /// `|doc| <body>` — a single untyped bound parameter (no destructuring, no type annotation)
-    /// used by generic callback-valued attributes such as `render_content` so a view's
-    /// per-item header/content can be an arbitrary expression or nested `view`, rather than the
-    /// fixed `TextArea` codegen used to hardcode.
-    Closure { param: String, body: ClosureBody },
+    /// `|doc| <body>` / `|index| <body>` / `|| <body>` — zero or more untyped bound parameters
+    /// (no destructuring, no type annotation; the real parameter types come positionally from the
+    /// target callback field's own `fn(T0, T1, ...)` declaration). Used both by generic callback-
+    /// valued attributes such as `render_content` (a view's per-item header/content can be an
+    /// arbitrary expression or nested `view`) and, more generally, by any `on_*` event attribute
+    /// that needs to name its callback's arguments (e.g. `on_select: |index| vm.select_tab(index)`
+    /// on `TabView`) — see `codegen::emit_wiring`.
+    Closure {
+        params: Vec<String>,
+        body: ClosureBody,
+    },
     /// `menu_bar: MenuBar { .. }` — a nested element used as an ordinary (non-closure) attribute
     /// value, for a builtin shape's "named single-child slot" (e.g. `Window`'s `menu_bar`/
     /// `content` params instead of positional/type-based child detection). Same shape as
-    /// `ClosureBody::Element`, just not behind a `|param|`.
+    /// `ClosureBody::Element`, just not behind a `|params|`.
     Element(Box<ElementNode>),
 }
 
 /// The body of a `ViewExpr::Closure`. `key`/`render_label` return a plain expression;
-/// `render_content` returns a `view` (an element construction), so the two need different shapes
-/// rather than forcing `render_content`'s `Type { ... }` through `ViewExpr`.
+/// `render_content` returns a `view` (an element construction); a multi-statement `on_*` handler
+/// body needs an ordinary Rust block — each needs a different shape rather than forcing everything
+/// through `ViewExpr`.
 #[derive(Debug, Clone)]
 pub enum ClosureBody {
     /// `|doc| doc.file_name`, `|doc| std::rc::Rc::as_ptr(doc) as usize`.
     Expr(Box<ViewExpr>),
     /// `|doc| DocumentView { doc: doc }`.
     Element(Box<ElementNode>),
+    /// `|index| { vm.log(index); vm.close_tab(index) }` — an ordinary Rust block, used for `on_*`
+    /// event handlers that need more than one statement. Bare references to `vm`/own-fields inside
+    /// are rewritten at codegen time the same way a single-expression `Path` body's getter/setter
+    /// calls are (`codegen::rewrite_view_closure_block`).
+    Block(syn::Block),
 }

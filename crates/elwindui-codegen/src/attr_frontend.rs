@@ -61,11 +61,11 @@ fn has_viewmodel_attr(item_mod: &syn::ItemMod) -> bool {
 }
 
 /// `#[elwindui::viewmodel] mod foo { struct Foo { ... } impl Foo { ... } }` — the `struct` supplies
-/// field declarations (`#[observable(default = expr)]` etc.), the `impl`'s `fn`s supply each
-/// `#[command]` field's body, matched to its field by name (a field `new_tab: Command` pairs with
-/// `fn new_tab(&self) { ... }` in the same mod). A single macro invocation must see both together
-/// — Rust attribute macros only ever see one annotated item, so there's no way to correlate a
-/// separately-expanded `struct`-only macro with an `impl`-only macro afterwards.
+/// `#[observable]`/`#[computed]` field declarations; every `fn`/`async fn` in the `impl` block is
+/// itself an action (no separate struct-side declaration needed — see `synthesize_action_fields`).
+/// A single macro invocation must see both together — Rust attribute macros only ever see one
+/// annotated item, so there's no way to correlate a separately-expanded `struct`-only macro with an
+/// `impl`-only macro afterwards.
 pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelDef, String> {
     let (_, items) = item_mod.content.as_ref().ok_or_else(|| {
         "#[elwindui::viewmodel] mod must have a body (`mod foo { ... }`, not `mod foo;`)"
@@ -91,17 +91,7 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
     let mut fields = fields_from_item_struct(item_struct, FieldKind::Observable)?;
 
     if let Some(item_impl) = item_impl {
-        attach_command_bodies(&mut fields, item_impl)?;
-    }
-
-    if let Some(missing) = fields
-        .iter()
-        .find(|f| f.kind == FieldKind::Command && f.initializer.is_none())
-    {
-        return Err(format!(
-            "command field `{}` has no matching `fn {}` in the mod's `impl` block",
-            missing.name, missing.name
-        ));
+        fields.extend(synthesize_action_fields(item_impl));
     }
 
     Ok(ViewModelDef { name, fields })
@@ -109,22 +99,22 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
 
 /// Builds `FieldDef`s from a `syn::ItemStruct`'s named fields, recognizing the same attribute
 /// vocabulary `parser.rs`'s DSL field parser (`parse_field_def`) does — `param`/`prop`/
-/// `observable`/`computed`/`attached`/`inject`/`two_way`/`routed`/`override`/`onetime`/`command`/
+/// `observable`/`computed`/`attached`/`inject`/`two_way`/`routed`/`override`/`onetime`/
 /// `length` — uniformly whether the caller is a `viewmodel` (`default_kind: FieldKind::Observable`,
 /// via `viewmodel_def_from_item_mod`) or a `component` (`default_kind: FieldKind::Prop`, via
 /// `component_frontend.rs`), exactly mirroring `parse_module`'s two `parse_fields_block` call
 /// sites. Whether a particular kind/attribute combination is actually *sensible* (e.g.
 /// `#[observable]` on a component field) is left to `validate::validate`, same as hand-written DSL
-/// text — no duplicate validation here.
+/// text — no duplicate validation here. `FieldKind::Action` never appears here — actions are
+/// synthesized separately from the `impl` block, see `synthesize_action_fields`.
 ///
 /// `#[observable(default = expr)]`/`#[computed(expr = expr)]` parse their value as a plain
-/// `syn::Expr` (`parse_name_value_expr`) — fine since neither ever needs `bind!`/`command!` sugar.
+/// `syn::Expr` (`parse_name_value_expr`) — fine since neither ever needs `bind!` sugar.
 /// `#[prop(default = ...)]`/`#[attached(default = ...)]` instead route their raw token text
 /// through `parser::parse_initializer` (`parse_name_value_tokens`), so `bind!(vm.content,
-/// TwoWay)`/`command!(...)` written there get the same recognition hand-written `.elwind` text
-/// gets — unlike a `view!`-typed field's tokens (discarded whole), a field default is emitted
-/// verbatim into code that really gets compiled, so it can't be left as an inert
-/// `syn::Expr::Macro`.
+/// TwoWay)` written there gets the same recognition hand-written `.elwind` text gets — unlike a
+/// `view!`-typed field's tokens (discarded whole), a field default is emitted verbatim into code
+/// that really gets compiled, so it can't be left as an inert `syn::Expr::Macro`.
 pub(crate) fn fields_from_item_struct(
     item_struct: &syn::ItemStruct,
     default_kind: FieldKind,
@@ -186,17 +176,6 @@ pub(crate) fn fields_from_item_struct(
                         );
                     }
                 }
-                "command" => {
-                    kind = FieldKind::Command;
-                    let can_execute = parse_name_value_expr(attr, "can_execute")?;
-                    // `is_async` is filled in later, once we've seen the matching `fn`'s
-                    // signature (`attach_command_bodies`) — a plain field declaration has no
-                    // way to say "async" itself.
-                    attrs.push(Attr::CommandMeta {
-                        is_async: false,
-                        can_execute,
-                    });
-                }
                 "inject" => attrs.push(Attr::Inject),
                 "bindable" => {
                     kind = FieldKind::Param;
@@ -241,54 +220,50 @@ pub(crate) fn fields_from_item_struct(
     Ok(out)
 }
 
-/// Matches each `#[command]` field to the `fn` of the same name in the mod's `impl` block, filling
-/// in the field's `Initializer::Command` (params + raw body — `rewrite_command_body`, called
-/// unconditionally by `generate_viewmodel`, does the sibling-field-reference rewriting, exactly as
-/// it already does for DSL-sourced command bodies) and the `CommandMeta::is_async` flag from the
-/// `fn`'s own `async` keyword.
-fn attach_command_bodies(fields: &mut [FieldDef], item_impl: &syn::ItemImpl) -> Result<(), String> {
-    for item in &item_impl.items {
-        let syn::ImplItem::Fn(item_fn) = item else {
-            continue;
-        };
-        let fn_name = item_fn.sig.ident.to_string();
-        let Some(field) = fields
-            .iter_mut()
-            .find(|f| f.kind == FieldKind::Command && f.name == fn_name)
-        else {
-            return Err(format!(
-                "fn `{fn_name}` in the impl block doesn't match any #[command] field of the same name"
-            ));
-        };
+/// Builds one `FieldDef { kind: Action, .. }` per `fn`/`async fn` in the mod's `impl` block — no
+/// struct-side declaration is needed or matched against; the `impl` block alone is the action
+/// list. `params`/`body` come straight from the `fn`'s own signature/block (`rewrite_action_body`,
+/// called unconditionally by `generate_viewmodel`, does the sibling-field-reference rewriting);
+/// async-ness is read directly from the `fn`'s own `async` keyword rather than a separate
+/// attribute. `ty` is unused by `generate_viewmodel`'s `FieldKind::Action` arm (an action has no
+/// declared Rust type of its own — its generated method's signature comes from `params`/the
+/// `fn`'s `async`-ness) and left empty.
+fn synthesize_action_fields(item_impl: &syn::ItemImpl) -> Vec<FieldDef> {
+    item_impl
+        .items
+        .iter()
+        .filter_map(|item| {
+            let syn::ImplItem::Fn(item_fn) = item else {
+                return None;
+            };
+            let params = item_fn
+                .sig
+                .inputs
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
+                        syn::Pat::Ident(pat_ident) => {
+                            Some((pat_ident.ident.to_string(), (*pat_type.ty).clone()))
+                        }
+                        _ => None,
+                    },
+                    syn::FnArg::Receiver(_) => None,
+                })
+                .collect();
 
-        let params = item_fn
-            .sig
-            .inputs
-            .iter()
-            .filter_map(|arg| match arg {
-                syn::FnArg::Typed(pat_type) => match pat_type.pat.as_ref() {
-                    syn::Pat::Ident(pat_ident) => {
-                        Some((pat_ident.ident.to_string(), (*pat_type.ty).clone()))
-                    }
-                    _ => None,
-                },
-                syn::FnArg::Receiver(_) => None,
+            Some(FieldDef {
+                name: item_fn.sig.ident.to_string(),
+                ty: String::new(),
+                kind: FieldKind::Action,
+                attrs: Vec::new(),
+                initializer: Some(Initializer::Action {
+                    params,
+                    is_async: item_fn.sig.asyncness.is_some(),
+                    body: item_fn.block.clone(),
+                }),
             })
-            .collect();
-
-        field.initializer = Some(Initializer::Command {
-            params,
-            body: item_fn.block.clone(),
-        });
-
-        let is_async = item_fn.sig.asyncness.is_some();
-        for attr in &mut field.attrs {
-            if let Attr::CommandMeta { is_async: flag, .. } = attr {
-                *flag = is_async;
-            }
-        }
-    }
-    Ok(())
+        })
+        .collect()
 }
 
 /// `syn::Type` -> the tight, no-whitespace string form the rest of `codegen.rs` expects (it round-
@@ -301,8 +276,7 @@ fn type_to_compact_string(ty: &syn::Type) -> String {
 }
 
 /// Parses `#[attr_name(name = expr)]`'s inner `name = expr` and returns `expr` if present —
-/// `Ok(None)` for a bare `#[attr_name]` with no parenthesized arguments at all (e.g. plain
-/// `#[command]`).
+/// `Ok(None)` for a bare `#[attr_name]` with no parenthesized arguments at all.
 fn parse_name_value_expr(attr: &syn::Attribute, name: &str) -> Result<Option<syn::Expr>, String> {
     if matches!(attr.meta, syn::Meta::Path(_)) {
         return Ok(None);
@@ -331,7 +305,7 @@ fn parse_name_value_expr(attr: &syn::Attribute, name: &str) -> Result<Option<syn
 
 /// Like `parse_name_value_expr`, but returns `name = <tokens>`'s raw, unparsed token text instead
 /// of eagerly parsing it as a `syn::Expr` — used for `#[prop(default = ...)]`/`#[attached(default
-/// = ...)]`, which (unlike `observable`/`computed`) need `bind!`/`command!` sugar recognized via
+/// = ...)]`, which (unlike `observable`/`computed`) need `bind!` sugar recognized via
 /// `parser::parse_initializer` rather than left as an inert `syn::Expr::Macro` (see
 /// `fields_from_item_struct`'s doc comment).
 fn parse_name_value_tokens(
@@ -443,15 +417,15 @@ mod tests {
     }
 
     #[test]
-    fn command_field_pairs_with_impl_fn_of_the_same_name() {
+    fn impl_fn_becomes_an_action_method() {
         let src = r#"
             mod vm {
                 struct Counter {
                     #[observable(default = 0i32)]
                     count: i32,
 
-                    #[command(can_execute = count < 10)]
-                    increment: Command,
+                    #[computed(expr = count < 10)]
+                    increment_can_execute: bool,
                 }
 
                 impl Counter {
@@ -465,81 +439,28 @@ mod tests {
         syn::parse2::<syn::File>(generated.clone())
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         let s = generated.to_string();
-        assert!(s.contains("fn increment_execute"));
+        assert!(s.contains("fn increment"));
         assert!(s.contains("fn increment_can_execute"));
         // The body's bare `count` reference must have been rewritten to `self.count()`/
-        // `self.set_count(...)` by the same `rewrite_command_body` the DSL path uses.
+        // `self.set_count(...)` by the same `rewrite_action_body` the DSL path uses.
         assert!(s.contains("self . set_count"));
     }
 
+    /// No struct-side declaration is needed for an action — an `impl` `fn` with no field of the
+    /// same name is not an error (unlike the old `#[command]` pairing scheme).
     #[test]
-    fn missing_impl_fn_for_command_field_is_an_error() {
+    fn impl_fn_needs_no_matching_struct_field() {
         let src = r#"
             mod vm {
-                struct Counter {
-                    #[command]
-                    increment: Command,
+                struct Counter {}
+                impl Counter {
+                    fn increment(&self) {}
                 }
-                impl Counter {}
             }
         "#;
         let item_mod: syn::ItemMod = syn::parse_str(src).unwrap();
-        let err = viewmodel_def_from_item_mod(&item_mod).unwrap_err();
-        assert!(
-            err.contains("increment"),
-            "error should mention the field: {err}"
-        );
-    }
-
-    /// The attribute-macro frontend must produce *the same* generated code as the equivalent
-    /// `.elwind` DSL text through the existing `parser.rs` — proving `generate_viewmodel`
-    /// (codegen.rs) really is unchanged/shared, not just superficially similar.
-    #[test]
-    fn matches_dsl_frontend_output_for_an_equivalent_viewmodel() {
-        let attr_src = r#"
-            mod vm {
-                struct Counter {
-                    #[observable(default = 0i32)]
-                    count: i32,
-
-                    #[computed(expr = count * 2)]
-                    doubled: i32,
-
-                    #[command(can_execute = count < 10)]
-                    increment: Command,
-                }
-
-                impl Counter {
-                    fn increment(&self) {
-                        count = count + 1;
-                    }
-                }
-            }
-        "#;
-        let attr_generated = generate(attr_src).to_string();
-
-        let dsl_src = r#"
-viewmodel Counter {
-    #[observable]
-    count: i32 = 0i32,
-
-    #[computed]
-    doubled: i32 = count * 2,
-
-    #[command(can_execute: count < 10)]
-    increment: Command = command!(|| {
-        count = count + 1;
-    }),
-}
-"#;
-        let module = crate::parser::parse_module(dsl_src).expect("dsl should parse");
-        let table = build_symbol_table(std::slice::from_ref(&module));
-        let crate::ast::Item::ViewModel(def) = &module.items[0] else {
-            panic!("expected viewmodel")
-        };
-        let dsl_generated = generate_viewmodel(def, &module, &table).to_string();
-
-        assert_eq!(attr_generated, dsl_generated);
+        let def = viewmodel_def_from_item_mod(&item_mod).expect("should build a ViewModelDef");
+        assert!(def.fields.iter().any(|f| f.name == "increment"));
     }
 
     #[test]
@@ -555,9 +476,6 @@ viewmodel Counter {
                 struct Counter {
                     #[observable(default = 0i32)]
                     count: i32,
-
-                    #[command]
-                    increment: Command,
                 }
 
                 impl Counter {

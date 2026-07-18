@@ -107,13 +107,14 @@ fn distance(a: Point, b: Point) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-/// `elem`'s own logical-parent chain (`UIElement::parent`, matching what `dispatch_routed` bubbles
-/// along), innermost (`elem` itself) first, root last. `None` yields an empty chain.
+/// `elem`'s own Visual-parent chain (`UIElement::visual_parent`, matching what `dispatch_routed`
+/// bubbles along — see that function's own doc comment), innermost (`elem` itself) first, root
+/// last. `None` yields an empty chain.
 fn ancestor_chain(elem: Option<Rc<dyn UIElementExt>>) -> Vec<Rc<dyn UIElementExt>> {
     let mut chain = Vec::new();
     let mut current = elem;
     while let Some(e) = current {
-        current = e.parent();
+        current = e.visual_parent();
         chain.push(e);
     }
     chain

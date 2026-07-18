@@ -691,7 +691,7 @@ component Button inherits NativeControl {
 }
 ```
 
-**木構造は`Box`ではなく`Rc`で、本物の親ポインタを持つ**。各ノードは論理親`parent`とVisual親`visual_parent`への弱参照を持つ。要素を各コレクションへ追加した瞬間にそのコレクションが対応する親参照を設定する。これにより`dispatch_routed`は論理親を、レイアウトはVisual親を単純に辿れる。
+**木構造は`Box`ではなく`Rc`で、本物の親ポインタを持つ**。各ノードは論理親`parent`とVisual親`visual_parent`への弱参照を持つ。要素を各コレクションへ追加した瞬間にそのコレクションが対応する親参照を設定する。実WinUI3同様、測定/配置/描画/ヒットテストに加えイベントルーティング(`dispatch_routed`)も単純にVisual親を辿るだけで済む——論理親`parent`は将来のテンプレート機能・アクセシビリティツリー(§5.2)向けの受け皿として維持されるのみで、イベントルーティングには使われない。
 
 ```rust
 // elwindui-core

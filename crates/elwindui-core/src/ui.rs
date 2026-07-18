@@ -23,11 +23,15 @@
 //! its own client area (see `elwindui-backend-appkit`'s `TreeHostView`).
 //!
 //! **Ownership: `Rc`, not `Box`.** Every node holds a real parent back-reference
-//! (`UIElement::parent`, WinUI3's `_parent`) so `dispatch_routed` can bubble a routed event
-//! from any element up to the root by simply following `parent()` — no tree search needed, and
-//! critically, no dependence on the tree having been built by a single static `.elwind` traversal.
-//! A back-reference requires shared (`Rc`) ownership, allowing a child to point back to its parent. Concrete `new()` constructors establish
-//! their collection owner before any child is added.
+//! (`UIElement::visual_parent`, WinUI3's `_parent`) so `dispatch_routed` can bubble a routed event
+//! from any element up to the root by simply following `visual_parent()` — no tree search needed,
+//! and critically, no dependence on the tree having been built by a single static `.elwind`
+//! traversal. Matches real WinUI3/UWP, where measure/arrange/render/hit-test *and* routed-event
+//! bubbling all walk the Visual tree — the separate Logical `parent` back-reference exists purely
+//! as a receptacle for a future template/accessibility tree (see `UIElementCollection`'s own doc
+//! comment) and plays no part in event routing. A back-reference requires shared (`Rc`) ownership,
+//! allowing a child to point back to its parent. Concrete `new()` constructors establish their
+//! collection owner before any child is added.
 
 use crate::base::{Point, Rect, Size};
 use crate::input::RoutedEventArgs;
@@ -1765,12 +1769,11 @@ impl ContentControl {
             *old.as_ui_element().parent.borrow_mut() = None;
             self.as_ui_element().visual_collection.remove(&old);
         }
-        // `visual_collection.add` (below) only wires up `content`'s *Visual* parent — routed-event
-        // bubbling (`elwindui_core::ui::dispatch_routed`) walks the *Logical* `parent` chain instead
-        // (`UIElement::parent`), so without this, a tap/click hit-tested inside `content` could never
-        // bubble past it to reach a handler registered on this `ContentControl` itself (e.g. a
-        // `component X inherits ContentControl` with its own `on_tapped` on its `view!` root) —
-        // mirrors what `UIElementCollection::add` already does for `Layout::children`.
+        // `visual_collection.add` (below) is what routed-event bubbling (`dispatch_routed`) actually
+        // relies on now — it walks `visual_parent`. Setting `content`'s Logical `parent` here too is
+        // no longer needed for routing; it's kept purely so the Logical tree (a receptacle for a
+        // future template/accessibility tree, see `UIElementCollection`'s own doc comment) stays
+        // consistent — mirrors what `UIElementCollection::add` already does for `Layout::children`.
         if let Some(owner) = self.as_ui_element().visual_collection.owner_rc() {
             *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
         }
@@ -2169,8 +2172,8 @@ fn intersect_rect(a: Rect, b: Rect) -> Rect {
 ///   captured by the layout container itself.
 ///
 /// See `elwindui_core::input::PointerDispatcher`'s doc comment (modeled on WinUI3's routed events)
-/// — bubbling from the returned element is then just `dispatch_routed` following `parent()`, no
-/// path/ancestor computation needed here.
+/// — bubbling from the returned element is then just `dispatch_routed` following `visual_parent()`,
+/// no path/ancestor computation needed here.
 fn hit_test_at(
     elem: &Rc<dyn UIElementExt>,
     absolute_origin: Point,
@@ -2271,7 +2274,8 @@ fn invoke_handlers_at<T: 'static>(
 
 /// Bubbles a routed event starting at `target` (e.g. `hit_test`'s return value, or a native leaf's
 /// own tree node — see `elwindui-backend-appkit`'s `TreeHostView`): calls `target`'s own handlers
-/// registered under `name`, then its parent's, and so on up to the root (`UIElement::parent`),
+/// registered under `name`, then its parent's, and so on up to the root (`UIElement::visual_parent`
+/// — matching real WinUI3, where routed events bubble along the Visual tree, not the Logical one),
 /// stopping as soon as one sets `args.handled`. Works identically whether `target`'s tree was built
 /// by a single static `.elwind` traversal or assembled at runtime by a `for` child range.
 pub fn dispatch_routed<T: 'static>(
@@ -2286,7 +2290,7 @@ pub fn dispatch_routed<T: 'static>(
         if args.handled.get() {
             return;
         }
-        current = elem.parent();
+        current = elem.visual_parent();
     }
 }
 
@@ -3389,6 +3393,32 @@ mod tests {
         assert_eq!(*leaf_calls.borrow(), 1);
         assert_eq!(*root_calls.borrow(), 1);
         assert!(args.handled.get());
+    }
+
+    #[test]
+    fn dispatch_routed_bubbles_via_visual_parent_even_without_a_logical_parent() {
+        // `leaf` is added straight to `root`'s `visual_collection`, bypassing
+        // `UIElementCollection` — matching `logical_and_visual_collections_keep_their_parent_relationships_separate`'s
+        // `visual_only` pattern, `leaf` ends up with a `visual_parent` but no logical `parent()` at
+        // all. `dispatch_routed` must still reach `root`'s handler, since it bubbles via
+        // `visual_parent` (real WinUI3 semantics), not the Logical `parent` chain.
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![]);
+        root.as_ui_element().visual_collection.add(leaf.clone());
+        assert!(leaf.parent().is_none());
+
+        let root_calls = Rc::new(RefCell::new(0));
+        {
+            let root_calls = Rc::clone(&root_calls);
+            root.as_ui_element().register_routed_handler::<()>(
+                "on_click",
+                Box::new(move |_, _| *root_calls.borrow_mut() += 1),
+            );
+        }
+
+        let args = RoutedEventArgs::default();
+        dispatch_routed(&leaf, "on_click", &(), &args);
+        assert_eq!(*root_calls.borrow(), 1);
     }
 
     #[test]

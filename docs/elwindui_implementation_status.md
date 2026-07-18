@@ -50,6 +50,7 @@
 
 - `Menu`/`MenuItem`は`MenuBarItem.submenu`経由での利用は実装済みだが、任意要素に`context_menu`属性で汎用的に付けるコンテキストメニュー機構は未実装。
 - `tooltip`共通属性も未実装。
+- `Control`の`template: Option<ControlTemplate<Self>>`(WinUI3の`Control.Template`相当の視覚ツリー実行時差し替え、`docs/elwindui_builtins_spec.md`付録F.9.1・`docs/elwindui_dsl_spec.md`§4・`docs/elwindui_gui_framework_design.md`§5.12)は**設計のみ・未実装**。`crates/elwindui-core/src/ui.rs`の`Control`構造体に対応フィールドは無く、現状は`children`をそのままVisual子要素にする挙動のみ実装済み。
 
 ### 未実装(仕様のみ、`.elwind`宣言なし)
 
@@ -79,10 +80,12 @@
 | `bind!` | 実装済み(`Initializer::Bind`) |
 | `viewmodel`アクション(旧`#[command]`/`Command`型/`command!`マクロ、撤廃済み) | 実装済み。`#[elwindui::viewmodel]`のRustネイティブ`impl`ブロックの`fn`/`async fn`がそのまま自動検出されアクションになる(`Initializer::Action`、struct側の宣言は不要)。`.elwind`ネイティブ`viewmodel Name { ... }`構文にはアクションを宣言する手段が無い(`#[observable]`/`#[computed]`のみサポート) — アクションが必要な`viewmodel`は必ずRustネイティブ構文を使う |
 | `on_*`イベント属性のクロージャ構文(`\|param, ...\| 式`/`{ .. }`) | 実装済み。対象フィールドの`fn(T0, T1, ...)`宣言から位置対応でパラメータ型を決める汎用機構(`codegen::emit_wiring`)。0引数ハンドラはベアパスの糖衣(`on_click: vm.save`)も書ける |
+| 値計算コールバックがネストした要素を構築する構文(`\|param\| Type { .. }`、`VirtualList`の`render_item`・`ControlTemplate<Self>`が依存) | **未実装**。対応する`VirtualList`自体が未実装(§5参照)なため、この構文もコード生成に存在しない |
+| `ControlTemplate<Self>`型フィールド・`body: <field>(Self)`・`#[elwindui::template]` | **未実装**。`docs/elwindui_dsl_spec.md`§4、§5参照 |
 | i18n(Fluent、`t!`) | ランタイム(`elwindui-i18n`)は実装済み。ビルド時の`.ftl`静的検証(未翻訳キー検出・引数名整合性チェック)は未実装 |
 | モジュール(`use`) | 生成先が実際のRustコードのため`use`解決自体はRustコンパイラに委譲される。循環参照・未解決パスの独自の機械的検出は未確認 |
 | `visual_tree`モジュール(WinUI3の`VisualTreeHelper`相当。`get_children_count`/`get_child`/`get_parent`/`find_all`) | 実装済み。`UIElement::visual_children()`/`parent()`が本体の走査を担い、ランタイム文字列idによる検索(`find_by_id`相当)は`#[id(...)]`(静的アクセサ)と役割が重複するため未提供・提供予定なし |
-| 14章 静的検証ルール(全25項目) | 部分実装。`crates/elwindui-codegen/src/validate.rs`がルール19(`viewmodel`内`view`参照禁止)を含む多くの言語機能バリデーションを実装しているが、前提機能自体が未実装のルール(9・14・15など、`target::backend()`依存)は検証不能。ルール18(旧`#[command]`型検査)は`Command`機構撤廃に伴う欠番 |
+| 14章 静的検証ルール(全29項目) | 部分実装。`crates/elwindui-codegen/src/validate.rs`がルール19(`viewmodel`内`view`参照禁止)を含む多くの言語機能バリデーションを実装しているが、前提機能自体が未実装のルール(9・14・15など、`target::backend()`依存。26〜29は`ControlTemplate<Self>`依存)は検証不能。ルール18(旧`#[command]`型検査)は`Command`機構撤廃に伴う欠番 |
 
 ---
 
@@ -91,7 +94,7 @@
 | 機能 | 参照先 | 状況 |
 |---|---|---|
 | ライフサイクルフック(`on_mount`/`on_unmount`/`on_update`) | `docs/elwindui_gui_framework_design.md`§6.1 | `on_mount`は実装・結線済み。`on_unmount`はパース・コード生成されるが、`elwindui-core::ui`に実際のツリー離脱(デタッチ)フックが無いため**呼び出されない** |
-| `store`(グローバル状態) | `docs/elwindui_gui_framework_design.md`§7.1 | **未実装**。ASTに`Store`ノードが無い |
+| `store`(グローバル状態) | `docs/elwindui_gui_framework_design.md`§7.1 | **未実装**。ASTに`Store`ノードが無い。`ControlTemplate<Self>`の広域既定値(WinUI3の`Style`代替、同節参照)もこれに依存するため未実装 |
 | キーボードショートカット(`#[shortcut(...)]`、`#[focus(...)]`) | `docs/elwindui_gui_framework_design.md`§8.1 | **未実装**(`FocusManager`は型のみ存在、§1参照) |
 | ナビゲーション(`NavigationHost`/`Route`) | `docs/elwindui_builtins_spec.md`付録L | **未実装**(§3のビルトイン一覧参照) |
 | ダイアログ/メニュー/ツールチップ | `docs/elwindui_builtins_spec.md`付録M | `Menu`/`MenuItem`本体は実装済み、`Dialog`/`Tooltip`および汎用`context_menu`/`tooltip`属性は未実装 |
@@ -112,7 +115,7 @@
 
 | ツール | 状況 |
 |---|---|
-| `elwindui-codegen`(コード生成) | 実装済み。`build.rs`経由・プロシージャルマクロ経由の両方が実働。バックエンド選択の定数畳み込み(`docs/elwindui_gui_framework_design.md`§3.3)は前提機能が無いため未実装 |
+| `elwindui-codegen`(コード生成) | 実装済み。`build.rs`経由・プロシージャルマクロ経由の両方が実働。バックエンド選択の定数畳み込み(`docs/elwindui_gui_framework_design.md`§3.3)は前提機能が無いため未実装。`#[elwindui::component]`/`#[elwindui::viewmodel]`と同系統の3つ目のRust代替記法`#[elwindui::template]`(`docs/elwindui_tool_codegen_design.md`§4.2・`docs/elwindui_dsl_spec.md`§4参照)は設計のみ・未実装 |
 | `elwindui-languageserver`(LSP) | 部分実装。診断・シンタックスハイライト・メンバー補完まで実働。hover・プレビュー用インスタンス生成パイプラインは未実装 |
 | ホットリロード(`elwindui-hotreload`) | スタブのみ。remount/patch判定ロジックのみ存在、dylib差し替えは未実装 |
 | リアルタイムプレビュー | **クレート自体が存在しない**。100%未着手 |
@@ -126,3 +129,4 @@
 - **ルーティングイベント(`#[routed]`)の実配線はAppKitバックエンドのみ検証済み**。`Button`の実クリック(`on_click`)に加え、共通`component UIElement`が宣言する9個のポインタ/タップイベント(`on_pointer_pressed`等、`elwindui_core::input::PointerDispatcher`)が自前描画系`UIElement`(`Layout`/`Control`/`Shape`/`TextBlock`系)で実配線済み——`Button`/`TextArea`/`TabView`等のネイティブリーフは別NSViewとして重なっているため実際には発火しない。`hit_test`自体も`ClipToBounds`/透明背景パススルー/`IsHitTestVisible`(`UIElement::hit_test_visible`)対応済み。トンネリングイベント・`Canvas`固有のポインタイベント・明示的ポインタキャプチャAPI・WinUI3での実配線は未着手。
 - **`store`/`viewmodel`のうち`viewmodel`(MVVM)は実装済みだが`store`(グローバル状態)は未実装**——`examples/notepad`のMVVMは`viewmodel`のみで構成されている。
 - **`Backend` enum / `target::backend()`が存在しないため、これに依存する多くの静的検証ルール・ビルトイン(`NavigationHost`、ダイアログ/メニューのバックエンド分岐等)が「未実装」の根本原因になっている。** 将来この仕組みを実装する際は、影響範囲がドキュメント全体に及ぶことに留意する。
+- **`Control.template`(WinUI3方式`ControlTemplate`、`docs/elwindui_dsl_spec.md`§4・`docs/elwindui_gui_framework_design.md`§5.12・`docs/elwindui_builtins_spec.md`付録F.9.1)は設計のみ・未実装。** 前提となる「値計算コールバックがネストした要素を構築する」構文(`VirtualList`の`render_item`と共通)自体も未実装のため、実装時はまずそちらから着手が必要。広域既定値(WinUI3の`Style`代替)は`store`(同じく未実装)への依存として設計されている。

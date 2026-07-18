@@ -220,6 +220,27 @@ struct VolumeControl {
   §4を参照。実装は`elwindui_macros::component`(`elwindui::component`として再エクスポート)で、
   `examples/notepad-inline`が実例
 
+### `#[elwindui::template]`:再利用可能な名前付きテンプレート(Rustファイル内の代替記法)
+
+> **実装状況**: 設計のみ・未実装。`#[elwindui::component]`/`#[elwindui::viewmodel]`と同系統だが、専用の`fn`向け属性マクロとしてはまだ存在しない。
+
+`template: |control| Grid { .. }`のようなインライン値クロージャ(前節「`ControlTemplate<Self>`」参照)はその場限り(1箇所)の書き方しかできない。複数のコンポーネントで同じテンプレートを使い回したい(WinUI3で`ControlTemplate`を`Style`リソースとして共有するのと同じ用途)場合のために、`#[elwindui::component]`(`struct`に付与)・`#[elwindui::viewmodel]`(`mod`に付与)と同系統の、**単一の`fn`に付与する新しい属性マクロ**を用意する:
+
+```rust
+#[elwindui::template]
+fn button_template(inst: &Button) -> Rc<dyn UIElement> {
+    Row {
+        Rectangle { .. }
+        inst.content
+    }
+}
+```
+
+- パラメータは必ず1個。型注釈は普通のRustとして必須(`.elwind`の値クロージャと違い、これは生Rustの`fn`宣言なので型省略はできない)。戻り値の型は`Rc<dyn UIElement>`固定
+- `#[elwindui::component]`(`elwindui_macros::component`、`crates/elwindui-macros/src/lib.rs`)と同じトリック——`fn`の本体ブロックをRustとして解釈させず、生のDSLテキストとして`elwindui-codegen`の既存パーサに渡し、パラメータ名(`inst`)を「テンプレート対象インスタンス」として束縛した状態でコード生成する想定(`elwindui-codegen`側に姉妹フロントエンドを追加する実装になる見込み)
+- 値としての参照は裸パス(`template: button_template`)。これは`ControlTemplate<Self>`型フィールドへの裸パス代入の規則(前節参照——関数アイテムそのものを値として使う、既存の0引数呼び出し糖衣とは別の意味)に従う。パラメータ型が厳密にフィールドの`Self`と一致しない関数を指している場合はエラー(14章ルール29)
+- `docs/elwindui_tool_codegen_design.md`§4.2/§4.3も参照(`component`/`viewmodel`と並ぶ3つ目のRust代替記法として言及)
+
 ### 添付プロパティ(`#[attached]`):WPF/WinUI3方式
 
 あるcomponentが宣言し、**任意の別要素が自分自身に設定できる**プロパティ(WPFの`Grid.Row`/`Grid.Column`相当)。
@@ -372,6 +393,61 @@ TabView {
 - `render_content: |item| DocumentView { doc: item }`のような「ネストした要素を返す」形は`#[param]`側の値計算コールバック専有の形で、`on_*`のような通知コールバック(イベントハンドラ)には使えない(要素を返しても配線先がない)
 - ブロック本体`{ 文; ... }`は式1つの本体と違い、他のDSL式のような「`vm.field`は自動的にゲッター/アクション呼び出しになる」糖衣を持たない**素のRust**として解釈される — アクションを呼ぶ場合は`vm.close_tab(index)`のように明示的に`()`を書く(`vm.close_tab`だけだと、存在しないフィールドへのアクセスとして扱われコンパイルエラーになる)。`vm`のような参照先の解決(`self.vm`相当への書き換え)自体は式本体と同様に行われる
 - クロージャ本体内の`vm.field`/`vm.action(args)`のような参照は、他のDSL式と同じ規則で解決される(コード生成側の詳細は`docs/elwindui_gui_framework_design.md`§7.2参照)
+
+### `ControlTemplate<Self>`:テンプレート型フィールド(WinUI3方式`ControlTemplate`)
+
+> **実装状況**: 設計のみ。本節が前提とする「値計算コールバックがネストした要素を構築する」機構自体(直前の`|param| Type { .. }`)がまだコード生成に実装されていないため、本節はそれに依存する形でさらに未実装。
+
+`ControlTemplate<Self>`は、コンポーネント自身の視覚ツリーを実行時に丸ごと差し替え可能にする専用のフィールド型糖衣。WinUI3の`Control.Template`(`ContentPresenter`等を介した視覚ツリーの丸ごと差し替え、`Style`経由でインスタンス単位に再テンプレート化できる)に相当する。
+
+```rust
+component Control inherits UIElement {
+    children: UIElementCollection,
+    padding: Option<f32>,
+
+    #[prop(default = None)]
+    template: Option<ControlTemplate<Self>>,
+}
+```
+
+- ジェネリック引数は常に文字通り`Self`のみを許す(コンポーネント自身の型)。それ以外を書くとエラー(14章ルール26)。
+- 意味的には`Rc<dyn Fn(&Self) -> Rc<dyn UIElement>>`の糖衣だが、単なる`fn(&Self) -> Rc<dyn UIElement>`コールバック糖衣とは扱いが異なる専用の型として区別する:
+  - **`prop`必須**(`#[param]`不可、14章ルール27)——直前の「値計算コールバックは`#[param]`側専有」という原則(§4冒頭)に対する**意図的な例外**。テンプレートは実行時に差し替えられて初めて意味があるため、実体化時固定の`#[param]`では目的を果たせない
+  - 値が変わったとき、対応する`body`(下記)配下の視覚ツリーを丸ごと再構築するという、通常のプロパティ値の再代入とは異なる**構造的な**再同期が必要(`docs/elwindui_gui_framework_design.md`新設§5.7参照)
+
+**値の書き方**は新しい構文を作らず、直前の「ネストした要素を構築する」値クロージャ構文(`|param| Type { .. }`)をそのまま使う:
+
+```
+template: |control| Grid {
+    Rectangle { .. }
+    control.content
+}
+```
+
+パラメータ名は普通の識別子(型キーワードの`Self`はここでは使えない——値束縛名としては`control`のような通常の識別子を使う)。クロージャ内から`control.content`/`control.padding()`のように自分自身の他フィールドへ直接アクセスできる。これはWinUI3の`TemplateBinding`(リフレクションベース)の静的型付け版に相当し、既存の「`#[param]`フィールドへの名前付きアクセサ自動生成」(`docs/elwindui_builtins_spec.md`付録F補足)をそのまま使う。
+
+**`body: <field>(Self)`**——`ControlTemplate<Self>`型のフィールドを、自分自身を渡して呼び出した結果を視覚ツリーのルートにする、という新しい`body`/`view`ルートの書き方。`field`名は`template`に限定せず、`ControlTemplate<Self>`型のフィールドなら任意の名前で使える一般規則(14章ルール28: `field`が同一component内の`ControlTemplate<Self>`型フィールドでない場合はエラー)。`builtin::Control`(`docs/elwindui_builtins_spec.md`付録F.9)の例:
+
+```rust
+view Control {
+    match template {
+        Some(t) => t(Self),
+        None => /* 既存挙動: children をそのまま Visual 子要素にする */,
+    }
+}
+```
+
+`ControlTemplate<Self>`が返すのは常に単一ルート要素(WinUI3実物の`ControlTemplate`、および本DSLの「単一値フィールドの`if`/`match`は1要素に還元」ルール(§5)と同じ)。`Control.template`が`None`(既定)のときは現行どおり`children`を直接Visual子要素にする——挙動変更なし。
+
+**再利用可能な名前付きテンプレート**は、その場限りのインライン値クロージャの代わりに、独立したRust関数として書いて使い回せる(`#[elwindui::template]`、下記「Rustファイル内での代替記法」参照)。裸パスで参照する:
+
+```rust
+Button { template: button_template }
+```
+
+`ControlTemplate<Self>`型フィールドへの裸パス代入は、既存の裸パス糖衣(直前、`fn()`型=0引数フィールド専用、`on_new_tab: vm.new_tab`が`|| vm.new_tab()`の糖衣になるもの)とは**意味が異なる**——「0引数で呼び出した結果」ではなく、`#[elwindui::template]`で定義された関数アイテムそのものを値として直接束縛する(14章ルール29)。`ControlTemplate<Self>`型フィールドはそもそも`fn(...)`糖衣とは別の専用型なので、既存の裸パス規則と文法上バッティングはしない。
+
+**広く共有される既定値**(WinUI3の`Style`相当、複数コンポーネントに跨って既定テンプレートを一括変更する用途)は、新しい仕組みを作らず既存の`store`+`bind!`(`docs/elwindui_gui_framework_design.md`§7.1)をそのまま使う。詳細は同節を参照。
 
 ---
 
@@ -760,7 +836,7 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 
 コンパイラ/リンタが実行前に検出すべき項目:
 
-> **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25 — `#[param]`の静的性、`bind!`経由のstoreアクセス、`viewmodel`のV/VM分離など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: `theme`未実装、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は`Command`機構撤廃(付録O.3〜O.5相当の仕組みが丸ごと廃止)に伴う欠番。
+> **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25 — `#[param]`の静的性、`bind!`経由のstoreアクセス、`viewmodel`のV/VM分離など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: `theme`未実装、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装、26〜29: `ControlTemplate<Self>`/`#[elwindui::template]`未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は`Command`機構撤廃(付録O.3〜O.5相当の仕組みが丸ごと廃止)に伴う欠番。
 
 1. `#[param]` フィールドの初期化式に `bind!` / propの参照 / `#[computed]` が出現 → エラー
 2. `#[param]` フィールドの初期化式に非純粋関数(`now()`, `random()` 等)が出現 → エラー(`env::*` / `once` 値は例外)
@@ -787,6 +863,10 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(`docs/elwindui_builtins_spec.md`付録Q参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(`docs/elwindui_builtins_spec.md`付録Y参照)。`TabView` は `TabViewItem` を子として指定する。
 24. `on_foreground`/`on_background`/`on_terminate`(`docs/elwindui_gui_framework_design.md`§6.2)が、アプリのエントリポイント(ルート)コンポーネント以外で宣言されている → 警告(OSレベルのライフサイクルは単一箇所への集約を推奨)
 25. コールバック型のフィールドで `Rc<dyn Fn(...)>` / `Box<dyn Fn(...)>` のような型消去表現を直接使用している(`fn(...)` 糖衣構文を使っていない) → エラー(4章「コールバック型フィールド」参照)
+26. `ControlTemplate<T>` の `T` が `Self` 以外 → エラー(4章「`ControlTemplate<Self>`」参照)
+27. `ControlTemplate<Self>` 型フィールドに `#[param]` が付与されている → エラー(実行時差し替えができて初めて意味を持つため、常に`prop`でなければならない)
+28. `body`/`view` ルートの `<field>(Self)` の `field` が、同一component内で宣言された `ControlTemplate<Self>` 型フィールドでない → エラー
+29. `ControlTemplate<Self>` 型フィールドへの裸パス代入が、`#[elwindui::template]` で定義され、かつパラメータ型が厳密に `Self` と一致する関数を指していない → エラー(4章「`#[elwindui::template]`」参照)
 
 ---
 

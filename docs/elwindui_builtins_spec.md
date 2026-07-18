@@ -358,19 +358,76 @@ WinUI3の`Control`(複数パーツからなる汎用コンポジション)に相
 component Control inherits UIElement {
     children: UIElementCollection,
     padding: Option<f32>,
+
+    #[prop(default = None)]
+    template: Option<ControlTemplate<Self>>,
+}
+
+view Control {
+    match template {
+        Some(t) => t(Self),
+        None => /* 既存挙動: children をそのまま Visual 子要素にする */,
+    }
 }
 ```
 
+> **実装状況**: `template`/`ControlTemplate<Self>`は設計のみ・未実装(`docs/elwindui_dsl_spec.md`§4、`docs/elwindui_gui_framework_design.md`§5.12参照)。`crates/elwindui-core/src/ui.rs`の`Control`構造体に対応するフィールドはまだ無い(同ファイルのdocコメントに"template replacement is future work"と明記されている)。以下は`children: UIElementCollection`だけを組み立てる、現在実装済みの挙動。
+
 `children: UIElementCollection`はこのコンポーネントが宣言するLogicalツリーの子要素リスト
-(`docs/elwindui_gui_framework_design.md`§5.2)——`VerticalLayout`/`HorizontalLayout`/`Grid`と違いテンプレート機構を持たないため、
-このリストがそのままVisualツリーの子要素(`visual_children()`)にもなる。
+(`docs/elwindui_gui_framework_design.md`§5.2)——`VerticalLayout`/`HorizontalLayout`/`Grid`と同様、`template`が`None`(既定)の間はテンプレート機構を経由せず、
+このリストがそのままVisualツリーの子要素(`visual_children()`)になる(**挙動は現行のまま変更しない**)。`template`に`Some(..)`を設定した場合のみ、その呼び出し結果1個がVisualツリーの唯一の子として`children`を置き換える。
 
 `content_horizontal_alignment`/`content_vertical_alignment`(`elwindui_core::ui::Control`に既存の
 フィールド)は、他の属性(`margin`/`horizontal_alignment`等、`docs/elwindui_gui_framework_design.md`§5.1)と同じ「enumバリアントの
 リテラル構文がまだ存在しない」という制約により、現時点では`.elwind`側の属性として設定できず
 `Default`の`Stretch`のまま据え置かれている。
 
+### F.9.1 `template`の使用例(`CustomButton`)
+
+`inherits Control`する派生コンポーネントは、自分自身の追加フィールド(`content`等)を宣言しつつ、`template`で独自の視覚ツリーを組み立てられる。値の書き方は2通り:
+
+**その場限りのインライン値クロージャ**(`docs/elwindui_dsl_spec.md`§4「コールバック型フィールドへのクロージャ値構文」をそのまま流用):
+
+```
+component CustomButton inherits Control {
+    content: Rc<dyn UIElement>,
+
+    #[prop(default = Some(|control| Grid {
+        Rectangle { .. }
+        control.content
+    }))]
+    template: Option<ControlTemplate<Self>>,
+}
+```
+
+**再利用可能な名前付きテンプレート**(`#[elwindui::template]`、`docs/elwindui_dsl_spec.md`§4「`#[elwindui::template]`」参照)を裸パスで参照する形:
+
+```rust
+#[elwindui::template]
+fn custom_button_template(inst: &CustomButton) -> Rc<dyn UIElement> {
+    Grid {
+        Rectangle { .. }
+        inst.content
+    }
+}
+```
+
+`CustomButton`側は、この関数を裸パスで参照するだけでよい:
+
+```
+component CustomButton inherits Control {
+    content: Rc<dyn UIElement>,
+
+    #[prop(default = Some(custom_button_template))]
+    template: Option<ControlTemplate<Self>>,
+}
+```
+
+いずれの形でも、テンプレート本体からは`control.content`/`inst.content`のように自分自身の他フィールドへ直接アクセスできる(WinUI3の`TemplateBinding`の静的型付け版、`docs/elwindui_builtins_spec.md`付録F補足参照)。複数コンポーネントに跨る既定テンプレートの一括差し替え(WinUI3の`Style`相当)は`store`+`bind!`を使う——`docs/elwindui_gui_framework_design.md`§7.1参照。
+
 ## F.10 `builtin::ContentControl`
+
+`template`(F.9.1)とは独立した既存レイヤーであり、変更なし——`ContentControl`は自身の`template`を使わず、従来どおり`Control`へ`content`を1個だけ転送する形のまま据え置く。
 
 WinUI3の実際の`ContentControl`(単一の`Content`プロパティを持つ、`Button`/`Window`の`Content`の
 実際の基底——`Control`の複数子要素版とは区別される)に相当する。`elwindui_core::ui`に別のRust型を

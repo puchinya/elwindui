@@ -135,6 +135,8 @@ struct NotepadWindow {
 
 **実装状況の注**: 両方式とも実装済みで、実サンプルで検証されている。build.rs方式は`elwindui_codegen::compile_dir`/`compile_dir_with_extra_viewmodels`(`crates/elwindui-codegen/src/lib.rs`)として実装され、`examples/notepad`が利用する。proc-macro方式は`elwindui_macros::component`/`#[elwindui_macros::viewmodel]`(`crates/elwindui-macros/src/lib.rs`、`elwindui::component`/`#[elwindui::viewmodel]`として再エクスポート)として実装され、`examples/notepad-inline`(component+view+viewmodel全て)と`examples/viewmodel-attr-demo`(`#[elwindui::viewmodel]`のみ、view層無し)が利用する。`component`は`struct`に付与する属性マクロで、`view`要素ツリーは`view!`型フィールド(`crates/elwindui-codegen/src/component_frontend.rs`が処理)として書く。
 
+`component`/`viewmodel`と同系統の3つ目のRust代替記法として、単一の`fn`に付与する`#[elwindui::template]`(再利用可能な名前付き`ControlTemplate<Self>`定義、`docs/elwindui_dsl_spec.md`§4「`#[elwindui::template]`」参照)が設計されている——**設計のみ・未実装**。
+
 ---
 
 ## 5. 他ツールとの連携点

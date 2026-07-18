@@ -26,7 +26,7 @@ pub enum MouseButton {
 
 /// WinUI3's `VirtualKeyModifiers` (`PointerRoutedEventArgs`'s modifier-key snapshot), scoped down
 /// to the four keys every desktop platform exposes uniformly. `meta` is the Windows/Command key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,
@@ -395,5 +395,379 @@ impl PointerDispatcher {
                 );
             }
         }
+    }
+}
+
+/// WinUI3's `VirtualKey`, scoped down to the subset every desktop platform reports uniformly —
+/// see docs/elwindui_gui_framework_design.md §8.1. `Character` covers ordinary printable keys
+/// (layout-dependent, best-effort — a backend maps its own native keycode/character to this
+/// directly; no keyboard-layout remapping is attempted by `elwindui-core` itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Key {
+    Character(char),
+    Enter,
+    Escape,
+    Tab,
+    Backspace,
+    Delete,
+    Space,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+}
+
+/// Payload for `on_key_down`/`on_key_up` (docs/elwindui_gui_framework_design.md §8.1). Dispatched
+/// only to whichever element `FocusTracker::focused` currently names — unlike the pointer events,
+/// there is no hit-testing involved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyEventArgs {
+    pub key: Key,
+    pub modifiers: KeyModifiers,
+    pub is_repeat: bool,
+}
+
+/// Payload for `on_text_input` — the IME-committed string, or a directly-typed character when no
+/// IME is involved. Only ever carries already-committed text; in-progress IME composition previews
+/// are not exposed to `.elwind` (see docs/elwindui_gui_framework_design.md §8.1's own caveat).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextInputEventArgs {
+    pub text: String,
+}
+
+/// The backend-reported half of a raw key event — mirrors `RawPointerEventKind`'s role for mouse
+/// input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RawKeyEventKind {
+    Down { is_repeat: bool },
+    Up,
+}
+
+/// A single raw key event, backend-agnostic — mirrors `RawPointerEvent`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RawKeyEvent {
+    pub kind: RawKeyEventKind,
+    pub key: Key,
+    pub modifiers: KeyModifiers,
+    pub timestamp_ms: f64,
+}
+
+/// A single raw committed-text event, fed to `KeyboardDispatcher::handle_text_input` — mirrors
+/// `RawKeyEvent`'s role for `on_text_input`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawTextInputEvent {
+    pub text: String,
+}
+
+/// WinUI3's `Control.FocusState` — not just "focused or not", but *how* focus was acquired, so a
+/// component can (e.g.) only show a focus ring for keyboard navigation and not for a mouse click.
+/// See `crate::focus::FocusTracker::set_focus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusState {
+    Unfocused,
+    Pointer,
+    Keyboard,
+    Programmatic,
+}
+
+/// A single key combination a `#[shortcut(...)]`-annotated field registers into a
+/// `ShortcutRegistry` — docs/elwindui_gui_framework_design.md §8.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyChord {
+    pub key: Key,
+    pub modifiers: KeyModifiers,
+}
+
+/// Whether a registered shortcut fires regardless of which element (if any) is focused (`Global`,
+/// the default — matches a menu accelerator), or only while its own declaring element is on the
+/// current focus chain (`Local`, `#[shortcut(.., scope: local)]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutScope {
+    Global,
+    Local,
+}
+
+/// One `#[shortcut(...)]`-annotated field, registered by `elwindui-codegen`'s generated `new()`
+/// onto the declaring element itself (`UIElement::declared_shortcuts`) — not yet reachable from any
+/// `ShortcutRegistry` at that point, since the element doesn't know which tree/window it'll end up
+/// hosted under until it's actually attached. A host's own `set_tree` walks the whole freshly-set
+/// tree once and feeds every element's own `declared_shortcuts` into its `ShortcutRegistry`
+/// (mirrors how `UIElement::routed_handlers` is populated at construction but only actually fires
+/// once wired to a live dispatcher).
+#[derive(Debug, Clone)]
+pub struct ShortcutDecl {
+    pub chord: KeyChord,
+    pub scope: ShortcutScope,
+    pub event_name: &'static str,
+}
+
+/// Matches raw key chords against every `#[shortcut(...)]` registered across a hosted tree — one
+/// instance per hosted tree, owned by the same host as its sibling `KeyboardDispatcher`
+/// (`ShortcutRegistry` itself has no tree-walking knowledge; `KeyboardDispatcher::handle_key`
+/// consults it before bubbling `on_key_down` to the focused element, same ordering WinUI3 uses for
+/// `KeyboardAccelerator`s versus ordinary `KeyDown`).
+#[derive(Default)]
+pub struct ShortcutRegistry {
+    bindings: RefCell<Vec<(KeyChord, ShortcutScope, Rc<dyn UIElementExt>, &'static str)>>,
+}
+
+impl ShortcutRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&self) {
+        self.bindings.borrow_mut().clear();
+    }
+
+    pub fn register(
+        &self,
+        chord: KeyChord,
+        scope: ShortcutScope,
+        target: Rc<dyn UIElementExt>,
+        event_name: &'static str,
+    ) {
+        self.bindings
+            .borrow_mut()
+            .push((chord, scope, target, event_name));
+    }
+
+    /// `Global` bindings are always eligible. `Local` bindings are only eligible while their own
+    /// `target` is somewhere on `focused`'s own ancestor chain (`target` itself, or an ancestor of
+    /// it) — matching `#[shortcut(.., scope: local)]`'s documented "only while the declaring
+    /// element has focus" semantics, where "has focus" is read the same way `on_key_down` bubbling
+    /// would already reach it. Fires the first matching binding's own `event_name` via
+    /// `dispatch_direct` (not bubbling — the binding's own `target` already *is* the intended
+    /// recipient, e.g. a `Button`'s `on_click`) and returns whether anything matched.
+    pub fn try_dispatch(&self, chord: KeyChord, focused: Option<&Rc<dyn UIElementExt>>) -> bool {
+        let bindings = self.bindings.borrow();
+        for (bound_chord, scope, target, event_name) in bindings.iter() {
+            if *bound_chord != chord {
+                continue;
+            }
+            let eligible = match scope {
+                ShortcutScope::Global => true,
+                ShortcutScope::Local => focused.is_some_and(|focused| {
+                    ancestor_chain(Some(Rc::clone(focused)))
+                        .iter()
+                        .any(|e| Rc::ptr_eq(e, target))
+                }),
+            };
+            if eligible {
+                crate::ui::dispatch_direct(target, event_name, &(), &RoutedEventArgs::default());
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Turns raw keyboard input into `elwindui_core::ui::dispatch_routed`/`dispatch_direct` calls
+/// against a hosted tree's currently-focused element — the keyboard counterpart to
+/// `PointerDispatcher`, owned the same way (one instance per hosted tree, fed every native key
+/// event via [`Self::handle_key`]/[`Self::handle_text_input`]). Modeled on WinUI3's input manager +
+/// `FocusManager` (docs/elwindui_gui_framework_design.md §5.5/§8.1).
+#[derive(Default)]
+pub struct KeyboardDispatcher {
+    pub focus: crate::focus::FocusTracker,
+    shortcuts: ShortcutRegistry,
+}
+
+impl KeyboardDispatcher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn shortcuts(&self) -> &ShortcutRegistry {
+        &self.shortcuts
+    }
+
+    /// Evaluates `ShortcutRegistry` first (matching WinUI3's accelerator-before-`KeyDown`
+    /// ordering), then — if nothing consumed it — bubbles `on_key_down`/`on_key_up` from the
+    /// currently-focused element (a no-op if nothing is focused). If the event is an unhandled
+    /// `Down` on `Key::Tab`, moves focus via `FocusTracker::move_focus` (`Previous` if `Shift` is
+    /// held, `Next` otherwise) — WinUI3's default `Tab`-cycles-focus behavior.
+    pub fn handle_key(&self, root: &Rc<dyn UIElementExt>, event: RawKeyEvent) {
+        let chord = KeyChord {
+            key: event.key,
+            modifiers: event.modifiers,
+        };
+        let focused = self.focus.focused();
+        if self.shortcuts.try_dispatch(chord, focused.as_ref()) {
+            return;
+        }
+        let is_repeat = matches!(event.kind, RawKeyEventKind::Down { is_repeat } if is_repeat);
+        let event_name = match event.kind {
+            RawKeyEventKind::Down { .. } => "on_key_down",
+            RawKeyEventKind::Up => "on_key_up",
+        };
+        let payload = KeyEventArgs {
+            key: event.key,
+            modifiers: event.modifiers,
+            is_repeat,
+        };
+        let args = RoutedEventArgs::default();
+        if let Some(target) = &focused {
+            crate::ui::dispatch_routed(target, event_name, &payload, &args);
+        }
+        if !args.handled.get()
+            && matches!(event.kind, RawKeyEventKind::Down { .. })
+            && event.key == Key::Tab
+        {
+            let direction = if event.modifiers.shift {
+                crate::focus::FocusDirection::Previous
+            } else {
+                crate::focus::FocusDirection::Next
+            };
+            self.focus.move_focus(root, direction);
+        }
+    }
+
+    /// Bubbles `on_text_input` from the currently-focused element — a no-op if nothing is focused.
+    pub fn handle_text_input(&self, _root: &Rc<dyn UIElementExt>, event: RawTextInputEvent) {
+        let Some(target) = self.focus.focused() else {
+            return;
+        };
+        let payload = TextInputEventArgs { text: event.text };
+        crate::ui::dispatch_routed(
+            &target,
+            "on_text_input",
+            &payload,
+            &RoutedEventArgs::default(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::*;
+    use crate::ui::{LayoutExt, VerticalLayout};
+
+    fn tab_stop() -> Rc<VerticalLayout> {
+        let node = VerticalLayout::new();
+        node.set_tab_stop(true);
+        node
+    }
+
+    #[test]
+    fn tab_moves_focus_to_next_tab_stop() {
+        let root = VerticalLayout::new();
+        let a = tab_stop();
+        let b = tab_stop();
+        root.children().add(a.clone());
+        root.children().add(b.clone());
+        let root: Rc<dyn UIElementExt> = root;
+
+        let dispatcher = KeyboardDispatcher::new();
+        dispatcher.handle_key(
+            &root,
+            RawKeyEvent {
+                kind: RawKeyEventKind::Down { is_repeat: false },
+                key: Key::Tab,
+                modifiers: KeyModifiers::default(),
+                timestamp_ms: 0.0,
+            },
+        );
+        let a_dyn: Rc<dyn UIElementExt> = a;
+        assert!(Rc::ptr_eq(&dispatcher.focus.focused().unwrap(), &a_dyn));
+    }
+
+    #[test]
+    fn key_down_bubbles_to_focused_element_and_ancestors() {
+        let root = VerticalLayout::new();
+        let child = tab_stop();
+        root.children().add(child.clone());
+
+        let seen_on_root = Rc::new(std::cell::Cell::new(false));
+        {
+            let seen_on_root = seen_on_root.clone();
+            root.register_routed_handler::<KeyEventArgs>(
+                "on_key_down",
+                Box::new(move |_payload, _args| {
+                    seen_on_root.set(true);
+                }),
+            );
+        }
+        let root: Rc<dyn UIElementExt> = root;
+        let child: Rc<dyn UIElementExt> = child;
+
+        let dispatcher = KeyboardDispatcher::new();
+        assert!(dispatcher.focus.set_focus(&child, crate::input::FocusState::Programmatic));
+        dispatcher.handle_key(
+            &root,
+            RawKeyEvent {
+                kind: RawKeyEventKind::Down { is_repeat: false },
+                key: Key::Character('a'),
+                modifiers: KeyModifiers::default(),
+                timestamp_ms: 0.0,
+            },
+        );
+        assert!(seen_on_root.get());
+    }
+
+    #[test]
+    fn global_shortcut_fires_without_focus() {
+        let target = tab_stop();
+        let fired = Rc::new(std::cell::Cell::new(false));
+        {
+            let fired = fired.clone();
+            target
+                .register_routed_handler::<()>("on_click", Box::new(move |_, _| fired.set(true)));
+        }
+        let target: Rc<dyn UIElementExt> = target;
+
+        let registry = ShortcutRegistry::new();
+        let chord = KeyChord {
+            key: Key::Character('s'),
+            modifiers: KeyModifiers {
+                control: true,
+                ..Default::default()
+            },
+        };
+        registry.register(chord, ShortcutScope::Global, target, "on_click");
+        assert!(registry.try_dispatch(chord, None));
+        assert!(fired.get());
+    }
+
+    #[test]
+    fn local_shortcut_requires_focus_chain() {
+        let target = tab_stop();
+        let other = tab_stop();
+        let fired = Rc::new(std::cell::Cell::new(false));
+        {
+            let fired = fired.clone();
+            target
+                .register_routed_handler::<()>("on_click", Box::new(move |_, _| fired.set(true)));
+        }
+        let target: Rc<dyn UIElementExt> = target;
+        let other: Rc<dyn UIElementExt> = other;
+
+        let registry = ShortcutRegistry::new();
+        let chord = KeyChord {
+            key: Key::Character('f'),
+            modifiers: KeyModifiers::default(),
+        };
+        registry.register(chord, ShortcutScope::Local, target.clone(), "on_click");
+
+        assert!(!registry.try_dispatch(chord, Some(&other)));
+        assert!(!fired.get());
+        assert!(registry.try_dispatch(chord, Some(&target)));
+        assert!(fired.get());
     }
 }

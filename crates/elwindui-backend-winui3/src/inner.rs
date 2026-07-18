@@ -13,7 +13,10 @@ use crate::bindings::Microsoft::UI::Xaml::Controls::{
     TabViewCloseButtonOverlayMode, TabViewItem, TabViewTabCloseRequestedEventArgs, TextBlock,
     TextBox,
 };
-use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
+use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
+use crate::bindings::Microsoft::UI::Xaml::Input::{
+    CharacterReceivedRoutedEventArgs, KeyRoutedEventArgs, KeyboardAccelerator,
+};
 use crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
 use crate::bindings::Microsoft::UI::Xaml::Shapes::{
     Ellipse as XamlEllipse, Rectangle as XamlRectangle,
@@ -24,11 +27,87 @@ use crate::bindings::Microsoft::UI::Xaml::{
 };
 use crate::bindings::Windows::Foundation::{Size, TypedEventHandler};
 use crate::bindings::Windows::Graphics::{PointInt32, SizeInt32};
+use crate::bindings::Windows::System::VirtualKey;
 use crate::bindings::Windows::UI::Color;
-use elwindui_core::ui::UIElementExt as _;
+use crate::bindings::Windows::UI::Core::CoreVirtualKeyStates;
+use elwindui_core::input::{
+    FocusState, Key, KeyModifiers, KeyboardDispatcher, RawKeyEvent, RawKeyEventKind,
+    RawTextInputEvent, ShortcutRegistry,
+};
+use elwindui_core::ui::{FocusHost, UIElementExt as _};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use windows::core::{HSTRING, Interface, Result};
+
+/// `VirtualKey.0`(a fixed `i32` code, the classic Win32 `VK_*` constants) -> `elwindui_core::input::
+/// Key` for the named keys `Key` distinguishes; every other key falls back to treating the code as
+/// an ASCII letter/digit (`VirtualKey::A`..`VirtualKey::Z`/`VirtualKey::Number0`..`Number9` are
+/// numerically identical to their ASCII codes, `0x41..=0x5A`/`0x30..=0x39` — the same convention
+/// `InnerMenuItem::set_shortcut` above already relies on). Codes are the standard, long-stable
+/// Win32 virtual-key constants (`VK_RETURN`, `VK_TAB`, ...).
+fn winui_key(virtual_key: VirtualKey) -> Option<Key> {
+    let key = match virtual_key.0 {
+        0x0D => Key::Enter,
+        0x1B => Key::Escape,
+        0x09 => Key::Tab,
+        0x08 => Key::Backspace,
+        0x2E => Key::Delete,
+        0x20 => Key::Space,
+        0x25 => Key::Left,
+        0x26 => Key::Up,
+        0x27 => Key::Right,
+        0x28 => Key::Down,
+        0x24 => Key::Home,
+        0x23 => Key::End,
+        0x21 => Key::PageUp,
+        0x22 => Key::PageDown,
+        0x70 => Key::F1,
+        0x71 => Key::F2,
+        0x72 => Key::F3,
+        0x73 => Key::F4,
+        0x74 => Key::F5,
+        0x75 => Key::F6,
+        0x76 => Key::F7,
+        0x77 => Key::F8,
+        0x78 => Key::F9,
+        0x79 => Key::F10,
+        0x7A => Key::F11,
+        0x7B => Key::F12,
+        code @ (0x30..=0x39 | 0x41..=0x5A) => Key::Character((code as u8 as char).to_ascii_lowercase()),
+        _ => return None,
+    };
+    Some(key)
+}
+
+/// `Microsoft::UI::Input::InputKeyboardSource::GetKeyStateForCurrentThread` (the WinAppSDK/WinUI3
+/// desktop replacement for UWP's `CoreWindow.GetKeyState`) -> `elwindui_core::input::KeyModifiers`.
+/// `KeyRoutedEventArgs` itself carries no modifier snapshot (unlike AppKit's `NSEvent.
+/// modifierFlags()`), so this polls current key state directly instead.
+fn winui_modifiers() -> KeyModifiers {
+    fn is_down(vk: i32) -> bool {
+        InputKeyboardSource::GetKeyStateForCurrentThread(VirtualKey(vk))
+            .map(|state| state.contains(CoreVirtualKeyStates::Down))
+            .unwrap_or(false)
+    }
+    KeyModifiers {
+        shift: is_down(0x10),                 // VK_SHIFT
+        control: is_down(0x11),                // VK_CONTROL
+        alt: is_down(0x12),                    // VK_MENU
+        meta: is_down(0x5B) || is_down(0x5C),   // VK_LWIN / VK_RWIN
+    }
+}
+
+/// Depth-first, `visual_children()`-based walk feeding every element's own
+/// `UIElementExt::declared_shortcuts()` into `registry` — mirrors
+/// `elwindui_backend_appkit::inner::collect_shortcuts_into`.
+fn collect_shortcuts_into(tree: &Rc<dyn elwindui_core::ui::UIElementExt>, registry: &ShortcutRegistry) {
+    for decl in tree.declared_shortcuts() {
+        registry.register(decl.chord, decl.scope, tree.clone(), decl.event_name);
+    }
+    for child in tree.visual_children() {
+        collect_shortcuts_into(&child, registry);
+    }
+}
 
 /// The capability a type needs to be usable as an `AnyView` — implemented once per raw XAML element
 /// type (`TextBox`/`XamlButton`/`XamlTabView`) instead of matched on centrally, so a future native
@@ -143,6 +222,15 @@ pub struct TreeHostPanel {
     canvas: Canvas,
     tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     render_tree: Rc<RefCell<Option<elwindui_core::painter::RenderTree>>>,
+    /// Turns `canvas`'s own raw `KeyDown`/`KeyUp`/`CharacterReceived` events into
+    /// `elwindui_core::ui::dispatch_routed` calls against whichever element currently has focus,
+    /// and owns the `FocusTracker`/`ShortcutRegistry` for whatever tree this panel hosts — mirrors
+    /// `elwindui_backend_appkit::inner::TreeHostIvars::keyboard`'s own doc comment, including its
+    /// caveat: self-drawn elements' virtual focus is real, but a native leaf (`Button`/`TextArea`/
+    /// `TabView`) receives real OS keyboard focus/events directly and needs its own individual
+    /// wiring (see `native_ui.rs`'s `Button`/`TextArea`) — `canvas`'s own `KeyDown`/`KeyUp` below
+    /// never even fire while one is focused.
+    keyboard: Rc<KeyboardDispatcher>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
@@ -204,6 +292,24 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
     }
 }
 
+/// `elwindui_core::ui::FocusHost` for `TreeHostPanel` — the `FocusHost` counterpart to
+/// `WinUI3RelayoutHost`, same weak-back-reference shape (a strong one would create the same
+/// `tree` -> `focus_host` -> panel reference cycle `WinUI3RelayoutHost`'s own doc comment
+/// describes). Delegates straight to `keyboard.focus`, the single source of truth for this panel's
+/// own hosted tree — mirrors `elwindui_backend_appkit::inner::AppKitFocusHost`.
+struct WinUI3FocusHost {
+    keyboard: Weak<KeyboardDispatcher>,
+}
+
+impl FocusHost for WinUI3FocusHost {
+    fn request_focus(&self, target: &Rc<dyn elwindui_core::ui::UIElementExt>) -> bool {
+        match self.keyboard.upgrade() {
+            Some(keyboard) => keyboard.focus.set_focus(target, FocusState::Programmatic),
+            None => false,
+        }
+    }
+}
+
 impl TreeHostPanel {
     pub(crate) fn new() -> Self {
         let canvas = Canvas::new().expect("Canvas::new");
@@ -211,7 +317,116 @@ impl TreeHostPanel {
             canvas,
             tree: Rc::new(RefCell::new(None)),
             render_tree: Rc::new(RefCell::new(None)),
+            keyboard: Rc::new(KeyboardDispatcher::new()),
         };
+        // WinUI3's own `Control.IsTabStop`/keyboard-focusability gate — without this, `canvas`
+        // never becomes a candidate for real OS keyboard focus at all, so `KeyDown`/`KeyUp` below
+        // would never fire for self-drawn elements (mirrors AppKit's `acceptsFirstResponder`
+        // override in `elwindui_backend_appkit::inner::TreeHostView`).
+        let _ = this.canvas.SetIsTabStop(true);
+        {
+            let tree_for_key = Rc::downgrade(&this.tree);
+            let keyboard_for_key = Rc::downgrade(&this.keyboard);
+            let _ = this
+                .canvas
+                .KeyDown(&TypedEventHandler::<UIElement, KeyRoutedEventArgs>::new(
+                    move |_sender, args| {
+                        let (Some(tree), Some(keyboard), Some(args)) = (
+                            tree_for_key.upgrade(),
+                            keyboard_for_key.upgrade(),
+                            args.as_ref(),
+                        ) else {
+                            return Ok(());
+                        };
+                        let (Some(tree), Ok(virtual_key)) = (tree.borrow().clone(), args.Key())
+                        else {
+                            return Ok(());
+                        };
+                        let Some(key) = winui_key(virtual_key) else {
+                            return Ok(());
+                        };
+                        let is_repeat = args
+                            .KeyStatus()
+                            .map(|status| status.RepeatCount > 1)
+                            .unwrap_or(false);
+                        keyboard.handle_key(
+                            &tree,
+                            RawKeyEvent {
+                                kind: RawKeyEventKind::Down { is_repeat },
+                                key,
+                                modifiers: winui_modifiers(),
+                                timestamp_ms: 0.0,
+                            },
+                        );
+                        Ok(())
+                    },
+                ));
+        }
+        {
+            let tree_for_key = Rc::downgrade(&this.tree);
+            let keyboard_for_key = Rc::downgrade(&this.keyboard);
+            let _ = this
+                .canvas
+                .KeyUp(&TypedEventHandler::<UIElement, KeyRoutedEventArgs>::new(
+                    move |_sender, args| {
+                        let (Some(tree), Some(keyboard), Some(args)) = (
+                            tree_for_key.upgrade(),
+                            keyboard_for_key.upgrade(),
+                            args.as_ref(),
+                        ) else {
+                            return Ok(());
+                        };
+                        let (Some(tree), Ok(virtual_key)) = (tree.borrow().clone(), args.Key())
+                        else {
+                            return Ok(());
+                        };
+                        let Some(key) = winui_key(virtual_key) else {
+                            return Ok(());
+                        };
+                        keyboard.handle_key(
+                            &tree,
+                            RawKeyEvent {
+                                kind: RawKeyEventKind::Up,
+                                key,
+                                modifiers: winui_modifiers(),
+                                timestamp_ms: 0.0,
+                            },
+                        );
+                        Ok(())
+                    },
+                ));
+        }
+        {
+            let tree_for_text = Rc::downgrade(&this.tree);
+            let keyboard_for_text = Rc::downgrade(&this.keyboard);
+            let _ = this.canvas.CharacterReceived(&TypedEventHandler::<
+                UIElement,
+                CharacterReceivedRoutedEventArgs,
+            >::new(move |_sender, args| {
+                let (Some(tree), Some(keyboard), Some(args)) = (
+                    tree_for_text.upgrade(),
+                    keyboard_for_text.upgrade(),
+                    args.as_ref(),
+                ) else {
+                    return Ok(());
+                };
+                let (Some(tree), Ok(code_unit)) = (tree.borrow().clone(), args.Character()) else {
+                    return Ok(());
+                };
+                let Some(ch) = char::from_u32(code_unit as u32) else {
+                    return Ok(());
+                };
+                if !ch.is_control() {
+                    keyboard.handle_text_input(
+                        &tree,
+                        RawTextInputEvent {
+                            text: ch.to_string(),
+                        },
+                    );
+                }
+                Ok(())
+            }));
+        }
         let weak = Rc::downgrade(&this.tree);
         let weak_render_tree = Rc::downgrade(&this.render_tree);
         let canvas_for_handler = this.canvas.clone();
@@ -252,6 +467,12 @@ impl TreeHostPanel {
         });
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
         tree.as_ui_element().set_invalidate_host(Some(host));
+        tree.as_ui_element().set_focus_host(Some(Rc::new(WinUI3FocusHost {
+            keyboard: Rc::downgrade(&self.keyboard),
+        })));
+        self.keyboard.focus.clear_focus();
+        self.keyboard.shortcuts().clear();
+        collect_shortcuts_into(&tree, self.keyboard.shortcuts());
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
         Self::relayout_static(&self.canvas, &self.tree, &self.render_tree);

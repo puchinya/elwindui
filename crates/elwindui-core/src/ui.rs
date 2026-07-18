@@ -34,7 +34,7 @@
 //! collection owner before any child is added.
 
 use crate::base::{Point, Rect, Size};
-use crate::input::RoutedEventArgs;
+use crate::input::{FocusState, RoutedEventArgs};
 use crate::layout::{
     GridCell, GridLength, HorizontalAlignment, Orientation, VerticalAlignment, Visibility,
     align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin,
@@ -66,6 +66,19 @@ static NEXT_RENDER_GROUP_ID: AtomicU64 = AtomicU64::new(1);
 /// on that tree's root) holds this `Rc<dyn RelayoutHost>` right back.
 pub trait RelayoutHost {
     fn request_relayout(&self, dirty_group_id: u64);
+}
+
+/// The `FocusHost` counterpart to `RelayoutHost` — registered the same way (`UIElement::focus_host`
+/// on a hosted tree's root, set by the host's own `set_tree`), discovered the same way
+/// (`request_focus` walks `visual_parent` up to the root, mirroring `request_relayout`), and backed
+/// by the same "wrap a weak handle back to the host" convention. `UIElementExt::focus()` is the
+/// public entry point every element gets for free — see docs/elwindui_gui_framework_design.md §5.5.
+pub trait FocusHost {
+    /// Always requests `FocusState::Programmatic` — matching real WinUI3, where `Control.Focus()`'s
+    /// public entry point only ever sets `Programmatic`; `Keyboard`/`Pointer` are set exclusively by
+    /// the framework's own input handling (`KeyboardDispatcher`/a future click-to-focus wiring).
+    /// Returns `false` if `target` isn't a tab stop (`UIElementExt::is_tab_stop`).
+    fn request_focus(&self, target: &Rc<dyn UIElementExt>) -> bool;
 }
 
 /// The fields every `UIElement` carries (WinUI3's `FrameworkElement` base class, via composition
@@ -184,6 +197,28 @@ pub struct UIElement {
     /// on `self` directly. See `RelayoutHost`'s own doc comment for why this is a trait object
     /// rather than a raw closure.
     pub invalidate_host: RefCell<Option<Rc<dyn RelayoutHost>>>,
+    /// WinUI3's `Control.IsTabStop` — whether this element participates in `FocusTracker`'s tab
+    /// order at all. `false` by default; a `NativeControl<H>`-backed leaf (`Button`/`TextArea`/
+    /// `TabView`) sets this `true` in its own `new()` (mirrors `Button::new()`'s `on_click` wiring),
+    /// and `#[focus(order: ..)]` forces it `true` on whatever field it's declared on
+    /// (`elwindui-codegen`'s `emit_wiring`). See `UIElementExt::is_tab_stop`.
+    pub tab_stop: Cell<bool>,
+    /// WinUI3's `Control.TabIndex` — `None` (default) falls back to tree/declaration order, the
+    /// same way an unset `TabIndex` does in real WinUI3. See `UIElementExt::focus_order`.
+    pub focus_order: Cell<Option<i32>>,
+    /// WinUI3's `Control.FocusState` — written only by `FocusTracker::set_focus`/`clear_focus`, read
+    /// via `UIElementExt::focus_state`.
+    pub focus_state: Cell<FocusState>,
+    /// The `FocusHost` counterpart to `invalidate_host` — see that field's own doc comment and
+    /// `FocusHost`'s own.
+    pub focus_host: RefCell<Option<Rc<dyn FocusHost>>>,
+    /// `#[shortcut(...)]`-annotated fields declared on this element, registered here by
+    /// `elwindui-codegen`'s generated `new()` — not yet reachable from any `ShortcutRegistry` (this
+    /// element doesn't know which tree/window it'll end up hosted under yet). A host's own
+    /// `set_tree` walks the whole freshly-set tree once and feeds every element's own
+    /// `declared_shortcuts` into its `ShortcutRegistry` — see `crate::input::ShortcutDecl`'s own doc
+    /// comment.
+    pub declared_shortcuts: RefCell<Vec<crate::input::ShortcutDecl>>,
 }
 
 impl std::fmt::Debug for UIElement {
@@ -232,6 +267,10 @@ impl std::fmt::Debug for UIElement {
             )
             .field("visual_children_len", &self.visual_collection.len())
             .field("invalidate_host", &self.invalidate_host.borrow().is_some())
+            .field("tab_stop", &self.tab_stop.get())
+            .field("focus_order", &self.focus_order.get())
+            .field("focus_state", &self.focus_state.get())
+            .field("focus_host", &self.focus_host.borrow().is_some())
             .finish()
     }
 }
@@ -263,6 +302,11 @@ impl Default for UIElement {
             visual_parent: RefCell::new(None),
             visual_collection: UIElementVisualCollection::new(owner),
             invalidate_host: RefCell::new(None),
+            tab_stop: Cell::new(false),
+            focus_order: Cell::new(None),
+            focus_state: Cell::new(FocusState::Unfocused),
+            focus_host: RefCell::new(None),
+            declared_shortcuts: RefCell::new(Vec::new()),
         }
     }
 }
@@ -599,6 +643,68 @@ impl UIElement {
     fn set_invalidate_host(&self, host: Option<Rc<dyn RelayoutHost>>) {
         *self.as_ui_element().invalidate_host.borrow_mut() = host;
     }
+    /// WinUI3's `Control.IsTabStop` — see `UIElement::tab_stop`'s own doc comment.
+    fn is_tab_stop(&self) -> bool {
+        self.as_ui_element().tab_stop.get()
+    }
+    fn set_tab_stop(&self, value: bool) {
+        self.as_ui_element().tab_stop.set(value);
+    }
+    /// WinUI3's `Control.TabIndex` — see `UIElement::focus_order`'s own doc comment.
+    fn focus_order(&self) -> Option<i32> {
+        self.as_ui_element().focus_order.get()
+    }
+    fn set_focus_order(&self, value: Option<i32>) {
+        self.as_ui_element().focus_order.set(value);
+    }
+    /// WinUI3's `Control.FocusState` — see `UIElement::focus_state`'s own doc comment. Written only
+    /// by `crate::focus::FocusTracker::set_focus`/`clear_focus`, never directly.
+    fn focus_state(&self) -> FocusState {
+        self.as_ui_element().focus_state.get()
+    }
+    /// `pub(crate)`-in-spirit (public for `crate::focus::FocusTracker`'s sake, which lives in a
+    /// sibling module of this same crate — there is no narrower visibility that still reaches it):
+    /// not meant to be called from outside `FocusTracker`. See `UIElement::focus_state`'s own doc
+    /// comment.
+    fn set_focus_state(&self, value: FocusState) {
+        self.as_ui_element().focus_state.set(value);
+    }
+    /// Called by whatever backend host is about to own this element as the root of a hosted tree —
+    /// the `FocusHost` counterpart to `set_invalidate_host`, set at the same time by the same
+    /// caller. `None` un-registers.
+    fn set_focus_host(&self, host: Option<Rc<dyn FocusHost>>) {
+        *self.as_ui_element().focus_host.borrow_mut() = host;
+    }
+    /// Registers a `#[shortcut(...)]`-annotated field's binding on this element — see
+    /// `UIElement::declared_shortcuts`'s own doc comment.
+    fn declare_shortcut(&self, decl: crate::input::ShortcutDecl) {
+        self.as_ui_element().declared_shortcuts.borrow_mut().push(decl);
+    }
+    /// Every `#[shortcut(...)]` this element has declared — see `UIElement::declared_shortcuts`'s
+    /// own doc comment. A host's own `set_tree` calls this on every node while walking a freshly-set
+    /// tree, feeding each result into its `ShortcutRegistry`.
+    fn declared_shortcuts(&self) -> Vec<crate::input::ShortcutDecl> {
+        self.as_ui_element().declared_shortcuts.borrow().clone()
+    }
+    /// WinUI3's `Control.Focus()` — forces this element to become its hosted tree's focused
+    /// element, always with `FocusState::Programmatic` (see `FocusHost::request_focus`'s own doc
+    /// comment). Walks up the Visual-parent chain (mirroring `request_relayout`) looking for the
+    /// `FocusHost` a backend host registered via `set_focus_host`. Returns `false` if this element
+    /// isn't a tab stop, isn't part of a hosted tree, or the containing tree has no host wired up
+    /// (e.g. a standalone test tree).
+    fn focus(&self) -> bool {
+        let target = self
+            .as_ui_element()
+            .visual_collection
+            .owner_handle()
+            .borrow()
+            .as_ref()
+            .and_then(|w| w.upgrade());
+        match target {
+            Some(target) => request_focus(&target),
+            None => false,
+        }
+    }
     /// WinUI3's `UIElement.Measure(Size availableSize)` — computes this element's own desired size
     /// (margin-inclusive) against `available`, recursing into children as `measure_override` (still
     /// freely overridable, unlike this method) needs them, and caches the result in
@@ -706,6 +812,29 @@ fn request_relayout(base: &UIElement) {
     }
     if let Some(host) = host {
         host.request_relayout(base.render_group_id);
+    }
+}
+
+/// Shared implementation for `UIElementExt::focus` — mirrors `request_relayout`'s "walk
+/// `visual_parent` to the root, looking for the nearest registered host" shape, but (unlike
+/// `request_relayout`, which only ever needs `base.render_group_id`, a plain `u64`) keeps `target`
+/// itself as the fixed argument passed to whichever `FocusHost` is found, since `FocusHost::
+/// request_focus` needs the real `Rc<dyn UIElementExt>` to hand to `FocusTracker::set_focus`.
+fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
+    let mut current = Some(Rc::clone(target));
+    let mut host = target.as_ui_element().focus_host.borrow().clone();
+    while let Some(element) = current {
+        host = element
+            .as_ui_element()
+            .focus_host
+            .borrow()
+            .clone()
+            .or(host);
+        current = element.visual_parent();
+    }
+    match host {
+        Some(host) => host.request_focus(target),
+        None => false,
     }
 }
 

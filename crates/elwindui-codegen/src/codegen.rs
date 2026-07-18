@@ -5,7 +5,7 @@
 
 use crate::ast::{
     Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef, FieldKind,
-    Initializer, Item, MethodDef, Module, ViewBody, ViewDef, ViewExpr, ViewModelDef,
+    Initializer, Item, MethodDef, Module, ShortcutScope, ViewBody, ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -48,6 +48,14 @@ pub struct TypeInfo {
     /// `routed_handlers()` into the `NativeControl`/virtual-builtin `UIElementBase` wrapping it,
     /// rather than starting that wrapper with a fresh, empty one.
     pub routed_fields: HashSet<String>,
+    /// `field_name -> name of the component that *directly* declares it` (the component whose own
+    /// `ComponentDef::fields` literally lists it, not merely inherits it) — `resolve_effective_fields`
+    /// flattens the whole `inherits` chain into one list and loses this, so it's tracked separately
+    /// here (`resolve_field_declaring_types`, mirroring that same recursion). Consulted by
+    /// `emit_field_setter_call` to decide whether a setter call needs UFCS disambiguation (see its
+    /// own doc comment) — a field this type declares itself is never ambiguous, only one it inherited
+    /// from some ancestor.
+    pub declaring_types: HashMap<String, String>,
     /// Names of `#[onetime]` fields (`ast::Attr::Onetime`'s own doc comment) — applied once at
     /// construction, never re-pushed by `emit_resync`'s per-attribute loop. Empty for ordinary user
     /// components (only `builtins.elwind`'s `Window` declares any today: `left`/`top`/`width`/
@@ -414,6 +422,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             is_abstract: c.is_abstract,
                             content_field: c.content_field.clone(),
                             is_builtin: c.embedded,
+                            declaring_types: resolve_field_declaring_types(module, c, modules),
                         },
                     );
                 }
@@ -472,6 +481,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             param_fields,
                             two_way_fields,
                             routed_fields,
+                            declaring_types: HashMap::new(),
                             onetime_fields: HashSet::new(),
                             is_virtual_builtin: false,
                             field_types,
@@ -675,6 +685,57 @@ pub(crate) fn resolve_effective_fields<'m>(
         .filter(|f| !own_names.contains(f.name.as_str()))
         .collect();
     result.extend(c.fields.iter().cloned());
+    result
+}
+
+/// `field_name -> declaring component name`, for every field `resolve_effective_fields(from, c,
+/// modules)` would return — same recursion (same `inherits`-chain walk, same `#[routed]`/common-
+/// field/bare-reference exemption filter for a `has_view` component's own base), but tracking
+/// *which* component's own `ComponentDef::fields` literally declares each name rather than the
+/// `FieldDef` itself. See `TypeInfo::declaring_types`'s own doc comment for why this needs to be
+/// tracked separately (the flattened field list alone can't answer "who declared this").
+fn resolve_field_declaring_types(
+    from: &Module,
+    c: &ComponentDef,
+    modules: &[Module],
+) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+    if let Some(base) = c.base.as_deref() {
+        if let Some((base_module, base_c)) = find_component_and_module(from, base, modules) {
+            let base_declaring = resolve_field_declaring_types(base_module, base_c, modules);
+            // Mirrors `resolve_effective_fields`'s own exemption filter exactly: a `has_view`
+            // component only forwards its base's `#[routed]`/`UIElement`-common/bare-referenced
+            // fields, everything else is dropped (never reachable on this component at all, so it
+            // shouldn't appear in `declaring_types` either).
+            match find_view(from, &c.name) {
+                Some(view) => {
+                    let common_fields: HashSet<&str> =
+                        find_component_and_module(from, "UIElement", modules)
+                            .map(|(_, ui)| ui.fields.iter().map(|f| f.name.as_str()).collect())
+                            .unwrap_or_default();
+                    let base_fields = resolve_effective_fields(base_module, base_c, modules);
+                    let kept_names: HashSet<&str> = base_fields
+                        .iter()
+                        .filter(|f| {
+                            f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                                || common_fields.contains(f.name.as_str())
+                                || view_references_bare_name(view, &f.name)
+                        })
+                        .map(|f| f.name.as_str())
+                        .collect();
+                    result.extend(
+                        base_declaring
+                            .into_iter()
+                            .filter(|(name, _)| kept_names.contains(name.as_str())),
+                    );
+                }
+                None => result.extend(base_declaring),
+            }
+        }
+    }
+    for f in &c.fields {
+        result.insert(f.name.clone(), c.name.clone());
+    }
     result
 }
 
@@ -1012,11 +1073,16 @@ pub(crate) fn resolve_view_root_element(
             type_path: base.expect("is_composed implies a base").to_string(),
             attributes: body.attributes.clone(),
             attached: body.attached.clone(),
+            attribute_shortcuts: body.attribute_shortcuts.clone(),
             children: body.children.clone(),
         });
     }
     match body.children.as_slice() {
-        [ChildEntry::Literal(elem)] if body.attributes.is_empty() && body.attached.is_empty() => {
+        [ChildEntry::Literal(elem)]
+            if body.attributes.is_empty()
+                && body.attached.is_empty()
+                && body.attribute_shortcuts.is_empty() =>
+        {
             Some(elem.clone())
         }
         _ => None,
@@ -3922,6 +3988,11 @@ struct PlannedNode {
     /// copied verbatim from `ElementNode::attached`. Consulted only when constructing this node's
     /// own `UIElementBase` (see `grid_cell_expr`); a node with none gets `GridCell::default()`.
     attached: Vec<(String, String, ViewExpr)>,
+    /// `#[shortcut(...)]`-annotated attributes written directly on this element (§8.1) — copied
+    /// verbatim (name-keyed, for `emit_wiring`'s lookup) from `ElementNode::attribute_shortcuts`.
+    /// See that field's own doc comment for why this lives per-usage-site rather than on
+    /// `TypeInfo` the way `routed_fields`/`two_way_fields` do.
+    attribute_shortcuts: HashMap<String, (Vec<(Option<String>, String)>, ShortcutScope)>,
     /// Bindings of `ViewExpr::Element`-valued *attributes* (a "named single-child slot", e.g.
     /// `menu_bar: MenuBar { .. }`), keyed by attribute name — planned/constructed the same way
     /// `child_bindings` are, just addressed by name instead of position.
@@ -4022,6 +4093,11 @@ fn plan_element(
         type_path: node.type_path.clone(),
         attributes,
         attached: node.attached.clone(),
+        attribute_shortcuts: node
+            .attribute_shortcuts
+            .iter()
+            .map(|(name, chords, scope)| (name.clone(), (chords.clone(), *scope)))
+            .collect(),
         child_bindings,
         element_attr_bindings,
         stored,
@@ -4892,6 +4968,7 @@ fn plan_dynamic_entry(
                 type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
                 attributes: Vec::new(),
                 attached: Vec::new(),
+                attribute_shortcuts: HashMap::new(),
                 child_bindings: Vec::new(),
                 element_attr_bindings: HashMap::new(),
                 stored: true,
@@ -4927,6 +5004,7 @@ fn plan_dynamic_entry(
                 type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
                 attributes: Vec::new(),
                 attached: Vec::new(),
+                attribute_shortcuts: HashMap::new(),
                 child_bindings: Vec::new(),
                 element_attr_bindings: HashMap::new(),
                 stored: true,
@@ -4960,6 +5038,7 @@ fn plan_dynamic_entry(
                 type_path: parent_type_path.to_string(),
                 attributes: Vec::new(),
                 attached: Vec::new(),
+                attribute_shortcuts: HashMap::new(),
                 child_bindings: Vec::new(),
                 element_attr_bindings: HashMap::new(),
                 stored: false,
@@ -4976,6 +5055,7 @@ fn plan_dynamic_entry(
                 type_path: DYNAMIC_CHILD_SLOT_MARKER.to_string(),
                 attributes: Vec::new(),
                 attached: Vec::new(),
+                attribute_shortcuts: HashMap::new(),
                 child_bindings: Vec::new(),
                 element_attr_bindings: HashMap::new(),
                 stored: true,
@@ -5273,6 +5353,63 @@ fn mark_inherent(tokens: TokenStream) -> TokenStream {
 /// or any user component) needs no `use` here at all — its own setters are either derived
 /// generically by `generate_view` (no shared trait involved) or, for a `has_view` builtin,
 /// hand-written directly in `elwindui_core::ui` and called without a trait import.
+/// Emits the setter call for `name` on `receiver` (a value of `node_type`'s own concrete type),
+/// disambiguating against `E0034 "multiple applicable items in scope"` whenever `name` is actually
+/// declared by some *ancestor* of `node_type` rather than `node_type` itself.
+///
+/// Why this is needed at all: every `#[class]`-managed component's own generated `{Name}Ext` trait
+/// re-implements (forwards) *every* ancestor method, including ones it never overrides — so a
+/// composed/host-composition component (`CustomCheckBox inherits ContentControl`, `self_is_node`)
+/// ends up with both `impl CustomCheckBoxExt for CustomCheckBox` *and* `impl UIElementExt for
+/// CustomCheckBox` (and `ControlExt`, `ContentControlExt`, ...) simultaneously providing the exact
+/// same default-bodied `set_<name>` for any field `UIElement`/`Control`/... declared — calling
+/// `receiver.set_<name>(..)` directly is ambiguous the moment more than one of those traits is in
+/// scope, which is exactly the case inside that component's own `#[class]`-processed `impl` block.
+/// This is *not* specific to fields `UIElement` itself declares (an earlier, narrower version of
+/// this fix only handled those) — the identical ambiguity happens for any ancestor's own field
+/// (`Control`'s `padding`, `Layout`'s `children`, a user-defined intermediate component's own
+/// fields, ...), so the fix has to be equally general: name the *actual declaring type's* trait
+/// explicitly via UFCS (`{Declarer}Ext::set_<name>(&receiver, value)`), which sidesteps method-call
+/// ambiguity entirely (no candidate search — the trait is named outright) regardless of which level
+/// of the hierarchy actually owns the field. A field `node_type` declares itself needs no
+/// disambiguation at all (nothing else provides it), so this only special-cases the inherited case.
+fn emit_field_setter_call(
+    name: &str,
+    node_type: &str,
+    setter: &syn::Ident,
+    args: TokenStream,
+    receiver: &TokenStream,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let declaring_type = table
+        .resolve(from, node_type)
+        .and_then(|info| info.declaring_types.get(name));
+    match declaring_type {
+        // Named via UFCS (`{Ext}::method(&receiver, ..)`, fully path-qualified) rather than
+        // `receiver.method(..)` — naming the trait explicitly means there is no candidate *search*
+        // for Rust to find ambiguous in the first place, regardless of how many other `..Ext`
+        // traits `receiver`'s own concrete type also happens to implement. No `use` needed since
+        // the path is already fully qualified here. `&*(#receiver)` (not a bare `&#receiver`):
+        // unlike ordinary method-call syntax, UFCS does *not* auto-deref its receiver argument, so
+        // this needs to land on exactly `&ConcreteType` itself regardless of whether `receiver` is
+        // already `&Self` (`emit_resync`'s `self`, where `&*self` is just a re-borrow) or an owned
+        // `Rc<ConcreteType>` (`build_component_setters`/`build_component_optional_setters`'s own
+        // `binding`, where `&*binding` derefs through `Rc`'s own `Deref` impl).
+        Some(declarer) if declarer != node_type => {
+            let declarer_info = table.resolve(from, declarer);
+            let ext_ident = format_ident!("{declarer}Ext");
+            let ext_path = if declarer_info.is_some_and(|i| i.is_builtin) {
+                quote! { elwindui::ui::#ext_ident }
+            } else {
+                quote! { #ext_ident }
+            };
+            quote! { #ext_path::#setter(&*(#receiver), #args); }
+        }
+        _ => quote! { #receiver.#setter(#args); },
+    }
+}
+
 fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
     if info.is_some_and(|i| i.is_native || i.is_virtual_builtin) {
         let ext_ident = format_ident!("{type_path}Ext");
@@ -5730,7 +5867,15 @@ fn build_component_setters(
             }
             None => panic!("`{}` requires attribute `{name}`", node.type_path),
         };
-        setters.push(quote! { #binding.#setter_ident(#value); });
+        setters.push(emit_field_setter_call(
+            name,
+            &node.type_path,
+            &setter_ident,
+            value,
+            &quote! { #binding },
+            from,
+            table,
+        ));
     }
     setters
 }
@@ -5800,7 +5945,15 @@ fn build_component_optional_setters(
             }
             None => continue,
         };
-        setters.push(quote! { #binding.#setter_ident(#value); });
+        setters.push(emit_field_setter_call(
+            name,
+            &node.type_path,
+            &setter_ident,
+            value,
+            &quote! { #binding },
+            from,
+            table,
+        ));
     }
     setters
 }
@@ -5894,6 +6047,178 @@ fn emit_generic_on_click_routing(
         }
         None => quote! {},
     }
+}
+
+/// A `#[shortcut("Ctrl+Shift+S")]` key spec, parsed once and shared between `validate.rs` (checks
+/// the spec is well-formed before codegen ever runs) and `emit_shortcut_chord_expr` (turns it into
+/// an `elwindui::core::input::KeyChord` expression) — see `ast::Attr::Shortcut`'s own doc comment.
+pub(crate) struct ParsedShortcut {
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub meta: bool,
+    pub key: ShortcutKey,
+}
+
+pub(crate) enum ShortcutKey {
+    /// One of `elwindui_core::input::Key`'s named variants, spelled exactly as declared there
+    /// (`"Enter"`, `"F1"`, ...) — interpolated directly as `Key::#ident`.
+    Named(&'static str),
+    Character(char),
+}
+
+/// Every `elwindui_core::input::Key` variant other than `Character` — see `ShortcutKey::Named`.
+const SHORTCUT_NAMED_KEYS: &[&str] = &[
+    "Enter", "Escape", "Tab", "Backspace", "Delete", "Space", "Up", "Down", "Left", "Right",
+    "Home", "End", "PageUp", "PageDown", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9",
+    "F10", "F11", "F12",
+];
+
+/// Parses one `+`-separated `#[shortcut(...)]` key spec (`"Ctrl+Shift+S"`) into modifier flags plus
+/// the key itself. The last `+`-separated part is always the key; every part before it must be one
+/// of `Ctrl`/`Shift`/`Alt`/`Meta` (docs/elwindui_gui_framework_design.md §8.1's platform-neutral
+/// modifier vocabulary — never `Cmd`, which only exists as codegen's own macOS remap of `Ctrl`, see
+/// `resolve_shortcut_chord`).
+pub(crate) fn parse_shortcut_spec(spec: &str) -> Result<ParsedShortcut, String> {
+    let mut shift = false;
+    let mut control = false;
+    let mut alt = false;
+    let mut meta = false;
+    let parts: Vec<&str> = spec.split('+').map(str::trim).collect();
+    let Some((key_part, modifier_parts)) = parts.split_last() else {
+        return Err(format!("empty #[shortcut] key spec `{spec}`"));
+    };
+    for m in modifier_parts {
+        match *m {
+            "Ctrl" => control = true,
+            "Shift" => shift = true,
+            "Alt" => alt = true,
+            "Meta" => meta = true,
+            other => {
+                return Err(format!(
+                    "unknown #[shortcut] modifier `{other}` in `{spec}` (expected Ctrl/Shift/Alt/Meta)"
+                ));
+            }
+        }
+    }
+    let key = if let Some(named) = SHORTCUT_NAMED_KEYS.iter().find(|n| **n == *key_part) {
+        ShortcutKey::Named(named)
+    } else {
+        let mut chars = key_part.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => ShortcutKey::Character(c.to_ascii_lowercase()),
+            _ => {
+                return Err(format!(
+                    "unknown #[shortcut] key `{key_part}` in `{spec}` (expected a single character or one of {SHORTCUT_NAMED_KEYS:?})"
+                ));
+            }
+        }
+    };
+    Ok(ParsedShortcut {
+        shift,
+        control,
+        alt,
+        meta,
+        key,
+    })
+}
+
+/// One `#[shortcut(...)]` chord spec resolved for a specific backend — see
+/// `resolve_shortcut_chord`'s own doc comment for `Specific` vs `Fallback`.
+enum ResolvedShortcutChord<'a> {
+    Specific(&'a str),
+    Fallback(&'a str),
+}
+
+/// Picks which chord spec applies to `backend_name` (`"appkit"`/`"winui3"`) out of a
+/// `#[shortcut(...)]` field's own declared `chords` list: that backend's own explicit entry if
+/// present (`Specific` — used verbatim, no remapping), else the first backend-agnostic (`None`-
+/// keyed) entry if any (`Fallback` — `emit_shortcut_chord_expr` applies `resolve_shortcut_chord`'s
+/// platform remap to this case only), else `None` (no applicable chord at all for this backend —
+/// `emit_shortcut_registration` skips emitting anything under that backend's own `#[cfg(...)]`).
+fn resolve_shortcut_chord<'a>(
+    chords: &'a [(Option<String>, String)],
+    backend_name: &str,
+) -> Option<ResolvedShortcutChord<'a>> {
+    if let Some((_, spec)) = chords.iter().find(|(b, _)| b.as_deref() == Some(backend_name)) {
+        return Some(ResolvedShortcutChord::Specific(spec));
+    }
+    chords
+        .iter()
+        .find(|(b, _)| b.is_none())
+        .map(|(_, spec)| ResolvedShortcutChord::Fallback(spec))
+}
+
+/// Builds the `elwindui::core::input::KeyChord { .. }` expression for `resolved`, applying
+/// docs/elwindui_gui_framework_design.md §8.1's platform remap ("macOS向けビルドでは`Ctrl`が自動的に
+/// `Cmd`に読み替えられる") only to a `Fallback` chord (a backend-agnostic spec picking up macOS's own
+/// idiom automatically) on `backend_name == "appkit"` — an explicit `Specific` override (the author
+/// wrote `appkit: "..."` themselves) is always used exactly as written, remap or not.
+fn emit_shortcut_chord_expr(resolved: &ResolvedShortcutChord, backend_name: &str) -> TokenStream {
+    let (spec, remap_ctrl_to_meta) = match resolved {
+        ResolvedShortcutChord::Specific(spec) => (*spec, false),
+        ResolvedShortcutChord::Fallback(spec) => (*spec, backend_name == "appkit"),
+    };
+    let parsed = parse_shortcut_spec(spec)
+        .unwrap_or_else(|e| panic!("invalid #[shortcut] key spec: {e}"));
+    let control = parsed.control && !remap_ctrl_to_meta;
+    let meta = parsed.meta || (parsed.control && remap_ctrl_to_meta);
+    let shift = parsed.shift;
+    let alt = parsed.alt;
+    let key_expr = match parsed.key {
+        ShortcutKey::Named(name) => {
+            let ident = format_ident!("{name}");
+            quote! { elwindui::core::input::Key::#ident }
+        }
+        ShortcutKey::Character(c) => quote! { elwindui::core::input::Key::Character(#c) },
+    };
+    quote! {
+        elwindui::core::input::KeyChord {
+            key: #key_expr,
+            modifiers: elwindui::core::input::KeyModifiers {
+                shift: #shift,
+                control: #control,
+                alt: #alt,
+                meta: #meta,
+            },
+        }
+    }
+}
+
+/// Emits `<binding>.as_ui_element().declare_shortcut(..)` for every backend covered by `chords`
+/// (`resolve_shortcut_chord`), each under its own `#[cfg(feature = "backend-<name>")]` — mirrors the
+/// existing Cargo-feature-flag-driven backend selection (`docs/elwindui_implementation_status.md`'s
+/// noted stand-in for the not-yet-implemented `target::backend()`), not a `match` over some runtime
+/// backend enum. A backend with no applicable chord at all (`resolve_shortcut_chord` returning
+/// `None`) is silently skipped — `validate::validate_shortcut_fields` warns about that case ahead of
+/// time so it's never a silent surprise.
+fn emit_shortcut_registration(
+    name: &str,
+    chords: &[(Option<String>, String)],
+    scope: ShortcutScope,
+    binding: &TokenStream,
+) -> TokenStream {
+    let scope_expr = match scope {
+        ShortcutScope::Global => quote! { elwindui::core::input::ShortcutScope::Global },
+        ShortcutScope::Local => quote! { elwindui::core::input::ShortcutScope::Local },
+    };
+    let mut out = TokenStream::new();
+    for backend_name in ["appkit", "winui3"] {
+        let Some(resolved) = resolve_shortcut_chord(chords, backend_name) else {
+            continue;
+        };
+        let chord_expr = emit_shortcut_chord_expr(&resolved, backend_name);
+        let feature = format!("backend-{backend_name}");
+        out.extend(quote! {
+            #[cfg(feature = #feature)]
+            #binding.as_ui_element().declare_shortcut(elwindui::core::input::ShortcutDecl {
+                chord: #chord_expr,
+                scope: #scope_expr,
+                event_name: #name,
+            });
+        });
+    }
+    out
 }
 
 /// Emits `<binding>.register_routed_handler::<T>(name, ..)` for one `#[routed]` field —
@@ -6245,12 +6570,26 @@ fn emit_wiring(
                     &self_mode,
                     &quote! { widget.as_ui_element() },
                 );
+                // `#[shortcut(...)]` (docs/elwindui_gui_framework_design.md §8.1) — a per-usage-
+                // site annotation on *this* element's own `on_click`/etc. attribute (`node.
+                // attribute_shortcuts`, not `TypeInfo`'s field-declaration-level metadata — see
+                // `ast::ElementNode::attribute_shortcuts`'s own doc comment for why). A host's own
+                // `set_tree` later harvests the registration into a live `ShortcutRegistry` (see
+                // `UIElement::declared_shortcuts`'s own doc comment).
+                let shortcut_registration = node
+                    .attribute_shortcuts
+                    .get(name)
+                    .map(|(chords, scope)| {
+                        emit_shortcut_registration(name, chords, *scope, &quote! { widget.as_ui_element() })
+                    })
+                    .unwrap_or_default();
                 out.extend(quote! {
                     {
                         use elwindui::core::ui::UIElementExt as _;
                         let widget = #widget_binding;
                         let this = std::rc::Rc::clone(&this);
                         #registration
+                        #shortcut_registration
                     }
                 });
                 continue;
@@ -6840,14 +7179,30 @@ fn emit_resync(
             .map(String::as_str);
         let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
         if is_copy {
-            out.extend(quote! { #receiver.#setter(#value); });
+            out.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                value,
+                &receiver,
+                from,
+                table,
+            ));
         } else if field_ty.is_some_and(|ty| strip_option(ty).0.starts_with("Vec<")) {
             // A `Vec<T>` field's real setter always takes it *by value* everywhere in this
             // framework (for example `GridImpl::set_rows`/`set_columns`), so
             // this isn't gated on `node_uses_owned_setters` — `.to_vec()` coerces a DSL
             // array-literal value into an owned `Vec<T>` and is a harmless no-op clone when the
             // value is already one (e.g. `vm.documents()`).
-            out.extend(quote! { #receiver.#setter((#value).to_vec()); });
+            out.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                quote! { (#value).to_vec() },
+                &receiver,
+                from,
+                table,
+            ));
         } else if node_uses_owned_setters {
             // Every codegen-generated `set_*` setter (a virtual builtin's `TextBlockImpl::set_text`/
             // `ShapeImpl::set_fill`/..., or a `has_view` component's own generated `set_<name>` —
@@ -6857,9 +7212,25 @@ fn emit_resync(
             // string (`virtual_builtin_resync_value`, despite the name — the conversion rules are
             // identical for both) instead of the `&(..)`-wrapping the `else` branch below uses.
             let converted = virtual_builtin_resync_value(field_ty.unwrap_or(""), value);
-            out.extend(quote! { #receiver.#setter(#converted); });
+            out.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                converted,
+                &receiver,
+                from,
+                table,
+            ));
         } else {
-            out.extend(quote! { #receiver.#setter(&(#value)); });
+            out.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                quote! { &(#value) },
+                &receiver,
+                from,
+                table,
+            ));
         }
     }
 }

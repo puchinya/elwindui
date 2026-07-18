@@ -10,7 +10,7 @@
 
 | クレート | 行数(目安) | 状況 |
 |---|---|---|
-| `elwindui-core` | 約3100行 | 実装済み。`UIElement`クラス階層(`#[elwindui_macros::class]`)、WinUI3準拠のMeasure/Arrange(`measure`/`arrange`/`measure_override`/`arrange_override`)、retained `RenderTree`/`RenderContext`、ルーティングイベント(`dispatch_routed`/`dispatch_direct`/`hit_test`、`ClipToBounds`/透明背景パススルー/`IsHitTestVisible`対応済み)、ポインタ/タップ入力(`elwindui_core::input::PointerDispatcher`)が実働。`FocusManager`/`AccessibilityNode`トレイトは**型定義のみ**で実装(`impl`)がテスト用ダミー1つ以外に存在しない |
+| `elwindui-core` | 約3400行 | 実装済み。`UIElement`クラス階層(`#[elwindui_macros::class]`)、WinUI3準拠のMeasure/Arrange(`measure`/`arrange`/`measure_override`/`arrange_override`)、retained `RenderTree`/`RenderContext`、ルーティングイベント(`dispatch_routed`/`dispatch_direct`/`hit_test`、`ClipToBounds`/透明背景パススルー/`IsHitTestVisible`対応済み)、ポインタ/タップ入力(`elwindui_core::input::PointerDispatcher`)、キーボード/フォーカス入力(`elwindui_core::input::KeyboardDispatcher`/`ShortcutRegistry`、`elwindui_core::focus::FocusTracker`、`UIElementExt::focus()`/`FocusHost`)が実働。`AccessibilityNode`トレイトは**型定義のみ**で実装(`impl`)がテスト用ダミー1つ以外に存在しない |
 | `elwindui-codegen` | 約8900行 | 実装済み(コンパイラ本体)。`build.rs`経由の`compile_dir`系と`#[elwindui::component]`/`#[elwindui::viewmodel]`プロシージャルマクロ系、両方の起動経路が実働し、それぞれ`examples/notepad`・`examples/notepad-inline`・`examples/viewmodel-attr-demo`で使用されている。`#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }`という、`component`+`view`ペアを1つのRust `struct`として書ける形式(`component_frontend.rs`)が実装済み ── `view!`は実在するマクロではなく、`.elwind` DSLテキストとして読み出されるだけの型位置マクロ呼び出し |
 | `elwindui-macros` | - | 実装済み。`#[class(inherits/implements/supertrait/abstract_class/sealed)]` + `#[inherent]`/`#[ancestor]`によるクラス階層生成マクロ。`docs/elwindui_gui_framework_design.md`§5.1aの記述と一致 |
 | `elwindui-i18n` | 58行+マクロ | 実装済み。Fluentベースのランタイム(`t!`, `declare!`マクロ)。ただしビルド時の`.ftl`静的検証(未翻訳キー検出・引数名整合性チェック)は`elwindui-codegen`側に存在せず未実装 |
@@ -95,7 +95,7 @@
 |---|---|---|
 | ライフサイクルフック(`on_mount`/`on_unmount`/`on_update`) | `docs/elwindui_gui_framework_design.md`§6.1 | `on_mount`は実装・結線済み。`on_unmount`はパース・コード生成されるが、`elwindui-core::ui`に実際のツリー離脱(デタッチ)フックが無いため**呼び出されない** |
 | `store`(グローバル状態) | `docs/elwindui_gui_framework_design.md`§7.1 | **未実装**。ASTに`Store`ノードが無い。`ControlTemplate<Self>`の広域既定値(WinUI3の`Style`代替、同節参照)もこれに依存するため未実装 |
-| キーボードショートカット(`#[shortcut(...)]`、`#[focus(...)]`) | `docs/elwindui_gui_framework_design.md`§8.1 | **未実装**(`FocusManager`は型のみ存在、§1参照) |
+| キーボード入力・フォーカス管理(`on_key_down`/`on_key_up`/`on_text_input`/`on_got_focus`/`on_lost_focus`、`tab_stop`/`focus_order`、`#[shortcut(...)]`、`UIElementExt::focus()`) | `docs/elwindui_gui_framework_design.md`§5.5/§8.1 | 実装済み(AppKit・WinUI3両バックエンド。WinUI3側は`elwindui-backend-winui3`が元々`#![cfg(target_os = "windows")]`ゲートのためこのマシンではコンパイル確認自体不可、未検証)。`#[focus(order/trap)]`という専用DSL属性は設計から変更——`tab_stop`/`focus_order`という普通の共通プロパティに置き換えた(§5.5参照)。自前描画系要素の自動フォーカス移譲(クリックでフォーカス)、方向キーでのフォーカス移動、ネイティブリーフ(`Button`/`TextArea`)自身の`on_key_down`/`on_got_focus`個別配線、IME変換中プレビュー表示は未実装 |
 | ナビゲーション(`NavigationHost`/`Route`) | `docs/elwindui_builtins_spec.md`付録L | **未実装**(§3のビルトイン一覧参照) |
 | ダイアログ/メニュー/ツールチップ | `docs/elwindui_builtins_spec.md`付録M | `Menu`/`MenuItem`本体は実装済み、`Dialog`/`Tooltip`および汎用`context_menu`/`tooltip`属性は未実装 |
 | 描画拡張(Brush/Geometry/Effect/Transform/レイヤー合成/アニメーション) | `docs/elwindui_builtins_spec.md`付録N | 未実装。`Painter`基本セット(塗り・線・テキスト)のみ`elwindui-core`に存在、`Canvas`自体が未実装のため利用できない |
@@ -125,8 +125,8 @@
 ## 7. 既知の主なギャップまとめ
 
 - **GTK4バックエンドは事実上何も実装されていない**(2行のスタブ)。本ドキュメントの他の章で「WinUI3/AppKit/GTK4」と横並びで書かれている箇所の多くは、GTK4に関しては未着手であることに注意。
-- **フォーカス管理・アクセシビリティは型定義のみ**で、`UIElement`ツリーにもバックエンドのネイティブAPI(`AutomationPeer`/`NSAccessibilityElement`/AT-SPI)にも未結線。
-- **ルーティングイベント(`#[routed]`)の実配線はAppKitバックエンドのみ検証済み**。`Button`の実クリック(`on_click`)に加え、共通`component UIElement`が宣言する9個のポインタ/タップイベント(`on_pointer_pressed`等、`elwindui_core::input::PointerDispatcher`)が自前描画系`UIElement`(`Layout`/`Control`/`Shape`/`TextBlock`系)で実配線済み——`Button`/`TextArea`/`TabView`等のネイティブリーフは別NSViewとして重なっているため実際には発火しない。`hit_test`自体も`ClipToBounds`/透明背景パススルー/`IsHitTestVisible`(`UIElement::hit_test_visible`)対応済み。トンネリングイベント・`Canvas`固有のポインタイベント・明示的ポインタキャプチャAPI・WinUI3での実配線は未着手。
+- **アクセシビリティは型定義のみ**で、`UIElement`ツリーにもバックエンドのネイティブAPI(`AutomationPeer`/`NSAccessibilityElement`/AT-SPI)にも未結線。フォーカス管理(`elwindui_core::focus::FocusTracker`)は実装済み(§5参照)——旧`AccessibilityNode`と並んで「型のみ」だった従来のフォーカス管理箇所はこの節では対象外になった。
+- **ルーティングイベント(`#[routed]`)の実配線はAppKit・WinUI3両バックエンドで対応**(WinUI3側はこのマシンでは`elwindui-backend-winui3`自体がコンパイル確認不可のため未検証)。`Button`の実クリック(`on_click`)、共通`component UIElement`が宣言する9個のポインタ/タップイベント(`on_pointer_pressed`等、`elwindui_core::input::PointerDispatcher`)、5個のキーボード/フォーカスイベント(`on_key_down`等、`elwindui_core::input::KeyboardDispatcher`/`elwindui_core::focus::FocusTracker`)が自前描画系`UIElement`(`Layout`/`Control`/`Shape`/`TextBlock`系)で実配線済み——`Button`/`TextArea`/`TabView`等のネイティブリーフは別ウィジェットとして重なっているため、ポインタ/キーボードいずれも実際には発火しない(`on_click`のみ個別配線済み)。`hit_test`自体も`ClipToBounds`/透明背景パススルー/`IsHitTestVisible`(`UIElement::hit_test_visible`)対応済み。トンネリングイベント・`Canvas`固有のポインタイベント・明示的ポインタキャプチャAPIは未着手。
 - **`store`/`viewmodel`のうち`viewmodel`(MVVM)は実装済みだが`store`(グローバル状態)は未実装**——`examples/notepad`のMVVMは`viewmodel`のみで構成されている。
 - **`Backend` enum / `target::backend()`が存在しないため、これに依存する多くの静的検証ルール・ビルトイン(`NavigationHost`、ダイアログ/メニューのバックエンド分岐等)が「未実装」の根本原因になっている。** 将来この仕組みを実装する際は、影響範囲がドキュメント全体に及ぶことに留意する。
 - **`Control.template`(WinUI3方式`ControlTemplate`、`docs/elwindui_dsl_spec.md`§4・`docs/elwindui_gui_framework_design.md`§5.12・`docs/elwindui_builtins_spec.md`付録F.9.1)は設計のみ・未実装。** 前提となる「値計算コールバックがネストした要素を構築する」構文(`VirtualList`の`render_item`と共通)自体も未実装のため、実装時はまずそちらから着手が必要。広域既定値(WinUI3の`Style`代替)は`store`(同じく未実装)への依存として設計されている。

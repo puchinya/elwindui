@@ -153,10 +153,14 @@ impl TextArea {
     fn new() -> Rc<Self> {
         let inner = InnerTextArea::new();
         let handle = inner.handle();
-        Rc::new(Self {
+        let this = Rc::new(Self {
             base: NativeControl::new(handle),
             inner,
-        })
+        });
+        // WinUI3's `TextBox`/AppKit's `NSTextField` are tab stops by default — see
+        // docs/elwindui_gui_framework_design.md §5.5.
+        this.set_tab_stop(true);
+        this
     }
 }
 
@@ -203,6 +207,9 @@ impl Button {
             base: NativeControl::new(handle),
             inner,
         });
+        // WinUI3's `Button` is a tab stop by default — see
+        // docs/elwindui_gui_framework_design.md §5.5.
+        this.set_tab_stop(true);
         // Wires the real `NSButton` click directly to `dispatch_routed`, once, right here, rather
         // than re-detecting/re-wiring it on every relayout. Unconditional — `dispatch_routed`
         // already no-ops gracefully when nothing is registered for `"on_click"` at this node or any
@@ -327,6 +334,9 @@ impl TabView {
             weak_self: RefCell::new(Weak::new()),
         });
         *this.weak_self.borrow_mut() = Rc::downgrade(&this);
+        // WinUI3's `TabView` is a tab stop by default — see
+        // docs/elwindui_gui_framework_design.md §5.5.
+        this.set_tab_stop(true);
         this
     }
 

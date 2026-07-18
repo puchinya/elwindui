@@ -40,6 +40,35 @@ component UIElement {
     // `elwindui_core::ui::UIElement::hit_test_visible`'s own doc comment.
     hit_test_visible: Option<bool>,
 
+    // WinUI3's `Control.IsTabStop`/`Control.TabIndex` (docs/elwindui_gui_framework_design.md §5.5).
+    // `tab_stop: true` opts a self-drawn element (`Layout`/`Control`/`Shape`/`TextBlock`) into
+    // `FocusTracker`'s Tab-key traversal; native leaves (`Button`/`TextArea`/`TabView`) already
+    // default to `true` (set by each backend's own `new()`). `focus_order` breaks ties within that
+    // traversal (unset falls back to tree/declaration order, matching an unset WinUI3 `TabIndex`).
+    // Plain common properties — like `margin`/`hit_test_visible` above — rather than a dedicated
+    // `#[focus(..)]` attribute: no new DSL syntax is needed since `UIElementExt::set_tab_stop`/
+    // `set_focus_order` are already ordinary post-construction setters.
+    tab_stop: Option<bool>,
+    focus_order: Option<i32>,
+
+    // Keyboard/focus routed events (docs/elwindui_gui_framework_design.md §5.5/§8.1). `on_key_down`/
+    // `on_key_up`/`on_text_input` are dispatched to whichever element currently has focus (no
+    // hit-testing involved, unlike the pointer events above) and bubble from there —
+    // `elwindui_core::input::KeyboardDispatcher`. `on_got_focus`/`on_lost_focus` fire non-bubbling
+    // (`elwindui_core::ui::dispatch_direct`, WinUI3's own `GotFocus`/`LostFocus` semantics) at the
+    // exact element whose `focus_state()` just changed — see
+    // `elwindui_core::focus::FocusTracker::set_focus`.
+    #[routed]
+    on_key_down: fn(elwindui::core::input::KeyEventArgs),
+    #[routed]
+    on_key_up: fn(elwindui::core::input::KeyEventArgs),
+    #[routed]
+    on_text_input: fn(elwindui::core::input::TextInputEventArgs),
+    #[routed]
+    on_got_focus: fn(),
+    #[routed]
+    on_lost_focus: fn(),
+
     // Pointer/tap routed events. Every `PointerEventArgs`/`PointerWheelEventArgs`/`TappedEventArgs`
     // payload's `position` is in the hosting tree's own root-relative coordinate space — see
     // `elwindui_core::input::PointerEventArgs`'s own doc comment. Currently only fired for

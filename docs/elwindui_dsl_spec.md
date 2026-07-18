@@ -790,7 +790,28 @@ component Button inherits NativeControl {
 ポインタ、要素が木に組み込まれる際に必ず設定される)を辿って祖先へバブルする。`RoutedEventArgs`の
 `handled`フラグが立てられると、そこで伝播が止まる。親ポインタ方式のため、`for` のように
 実行時に動的組み立てられた木でも、静的な`.elwind`構造と
-同様にバブルが機能する(`docs/elwindui_gui_framework_design.md`§5.10参照)。現時点の実装範囲はAppKitバックエンドの`Button`のみ。
+同様にバブルが機能する(`docs/elwindui_gui_framework_design.md`§5.10参照)。実装範囲はAppKit・WinUI3両バックエンドの`Button`のポインタ/タップ9イベント(§5.10)に加え、キーボード/フォーカス系5イベント——`on_key_down`/`on_key_up`/`on_text_input`(バブリング)、`on_got_focus`/`on_lost_focus`(非バブリング、`dispatch_direct`)——も`component UIElement`の`#[routed]`フィールドとして宣言されている(`docs/elwindui_gui_framework_design.md`§5.5/§8.1参照)。WinUI3側はWindows環境が無く未検証。
+
+### 要素使用箇所への注釈:`#[shortcut(...)]`(キーボードショートカット)
+
+`#[routed]`が**フィールド宣言**(全インスタンス共通の配線方式)に付くのに対し、`#[shortcut(...)]`は
+`Button { ... }`という**要素の使用箇所**に付く注釈である——ショートカットは本質的にインスタンスごとの
+決定(「このSaveボタンだけ`Ctrl+S`」)であり、`builtins.elwind`の`Button.on_click: fn()`という共有宣言
+には付けられないため。構文上は`#[id(...)]`(前節)と同じ「要素の`{}`本体内で特定の行の直前に書く注釈」
+という位置づけだが、`let`束縛ではなく通常の`属性名: 値`という属性行の直前に書く点が異なる。
+
+```rust
+Button {
+    text: t!("notepad-menu-save")
+    #[shortcut("Ctrl+S")]
+    on_click: save_document()
+}
+```
+
+`#[shortcut(...)]`が付けられるのは`#[routed]`なフィールド(`on_click`/`on_key_down`等)のみ。詳細な構文
+(`winui3: "..."`/`appkit: "..."`によるバックエンド別指定、`scope: local`)・プラットフォーム変換規則
+(macOSでの`Ctrl`→`Cmd`自動読み替え)・実行時の仕組み(`ShortcutRegistry`)は
+`docs/elwindui_gui_framework_design.md`§8.1参照。実装範囲はAppKit・WinUI3両バックエンド(WinUI3側未検証)。
 
 ### 特定要素への名前付きアクセス:`#[id(...)]`
 
@@ -836,7 +857,7 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 
 コンパイラ/リンタが実行前に検出すべき項目:
 
-> **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25 — `#[param]`の静的性、`bind!`経由のstoreアクセス、`viewmodel`のV/VM分離など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: `theme`未実装、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装、26〜29: `ControlTemplate<Self>`/`#[elwindui::template]`未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は`Command`機構撤廃(付録O.3〜O.5相当の仕組みが丸ごと廃止)に伴う欠番。
+> **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25, 30〜31 — `#[param]`の静的性、`bind!`経由のstoreアクセス、`viewmodel`のV/VM分離、`#[shortcut(...)]`の妥当性など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: `theme`未実装、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装、26〜29: `ControlTemplate<Self>`/`#[elwindui::template]`未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は`Command`機構撤廃(付録O.3〜O.5相当の仕組みが丸ごと廃止)に伴う欠番。
 
 1. `#[param]` フィールドの初期化式に `bind!` / propの参照 / `#[computed]` が出現 → エラー
 2. `#[param]` フィールドの初期化式に非純粋関数(`now()`, `random()` 等)が出現 → エラー(`env::*` / `once` 値は例外)
@@ -867,6 +888,8 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 27. `ControlTemplate<Self>` 型フィールドに `#[param]` が付与されている → エラー(実行時差し替えができて初めて意味を持つため、常に`prop`でなければならない)
 28. `body`/`view` ルートの `<field>(Self)` の `field` が、同一component内で宣言された `ControlTemplate<Self>` 型フィールドでない → エラー
 29. `ControlTemplate<Self>` 型フィールドへの裸パス代入が、`#[elwindui::template]` で定義され、かつパラメータ型が厳密に `Self` と一致する関数を指していない → エラー(4章「`#[elwindui::template]`」参照)
+30. `#[shortcut(...)]` が `#[routed]` でない属性に付与されている → エラー(4章「`#[shortcut(...)]`」参照。`on_click`等のコールバック属性以外に付けても意味を持たない)
+31. `#[shortcut(...)]` に指定されたキー表記(修飾キー名/キー名)が不正 → エラー(`docs/elwindui_gui_framework_design.md`§8.1参照。`codegen::parse_shortcut_spec`と同じパーサーで検査するため、ここを通れば必ずコード生成もパースに成功する)
 
 ---
 

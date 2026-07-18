@@ -100,6 +100,7 @@ struct CustomCheckBox {
     label: String,
 
     body: view! {
+        tab_stop: true
         on_tapped: |e| { is_checked = !is_checked }
         HorizontalLayout {
             if is_checked {
@@ -142,6 +143,7 @@ struct NotepadWindow {
                 Grid::row: 0
                 Button {
                     text: t!("notepad-menu-save")
+                    #[shortcut("Ctrl+S")]
                     on_click: vm.save
                     enabled: vm.save_can_execute
                 }

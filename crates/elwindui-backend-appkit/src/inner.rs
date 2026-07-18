@@ -6,10 +6,12 @@
 
 use elwindui_core::base::{AsAny, Point};
 use elwindui_core::input::{
-    KeyModifiers, MouseButton, PointerDispatcher, RawPointerEvent, RawPointerEventKind,
+    FocusState, Key, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher,
+    RawKeyEvent, RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
+    ShortcutRegistry,
 };
 use elwindui_core::painter::{RenderCommand, RenderGroup};
-use elwindui_core::ui::{RelayoutHost, UIElementExt, layout_root};
+use elwindui_core::ui::{FocusHost, RelayoutHost, UIElementExt, layout_root};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{
@@ -39,6 +41,61 @@ fn nsevent_modifiers(event: &NSEvent) -> KeyModifiers {
         control: flags.contains(NSEventModifierFlags::Control),
         alt: flags.contains(NSEventModifierFlags::Option),
         meta: flags.contains(NSEventModifierFlags::Command),
+    }
+}
+
+/// `NSEvent.keyCode()` (a fixed physical-key code, not layout-remapped) -> `elwindui_core::input::
+/// Key` for the named keys `Key` distinguishes; every other key falls back to
+/// `charactersIgnoringModifiers()`'s first character (`Key::Character`, layout-dependent —
+/// see that variant's own doc comment). The named-key codes below are macOS's standard (and
+/// long-stable) virtual keycodes for the US keyboard's physical key positions.
+fn nsevent_key(event: &NSEvent) -> Option<Key> {
+    let key = match event.keyCode() {
+        36 => Some(Key::Enter),
+        48 => Some(Key::Tab),
+        49 => Some(Key::Space),
+        51 => Some(Key::Backspace),
+        53 => Some(Key::Escape),
+        117 => Some(Key::Delete),
+        115 => Some(Key::Home),
+        119 => Some(Key::End),
+        116 => Some(Key::PageUp),
+        121 => Some(Key::PageDown),
+        123 => Some(Key::Left),
+        124 => Some(Key::Right),
+        125 => Some(Key::Down),
+        126 => Some(Key::Up),
+        122 => Some(Key::F1),
+        120 => Some(Key::F2),
+        99 => Some(Key::F3),
+        118 => Some(Key::F4),
+        96 => Some(Key::F5),
+        97 => Some(Key::F6),
+        98 => Some(Key::F7),
+        100 => Some(Key::F8),
+        101 => Some(Key::F9),
+        109 => Some(Key::F10),
+        103 => Some(Key::F11),
+        111 => Some(Key::F12),
+        _ => None,
+    };
+    key.or_else(|| {
+        event
+            .charactersIgnoringModifiers()
+            .and_then(|s| s.to_string().chars().next())
+            .map(Key::Character)
+    })
+}
+
+/// Depth-first, `visual_children()`-based walk feeding every element's own
+/// `UIElementExt::declared_shortcuts()` into `registry` — see `crate::input::ShortcutDecl`'s own
+/// doc comment for why this can't happen at construction time.
+fn collect_shortcuts_into(tree: &Rc<dyn UIElementExt>, registry: &ShortcutRegistry) {
+    for decl in tree.declared_shortcuts() {
+        registry.register(decl.chord, decl.scope, tree.clone(), decl.event_name);
+    }
+    for child in tree.visual_children() {
+        collect_shortcuts_into(&child, registry);
     }
 }
 
@@ -208,6 +265,16 @@ pub struct TreeHostIvars {
     /// `native_containers` island) receives the OS mouse event directly via ordinary AppKit
     /// hit-testing, never reaching this view's own overrides below at all.
     pointer: PointerDispatcher,
+    /// Turns this view's own raw key/text events into `elwindui_core::ui::dispatch_routed` calls
+    /// against whichever element currently has focus, and owns the `FocusTracker`/
+    /// `ShortcutRegistry` for whatever tree this view hosts — see
+    /// `elwindui_core::input::KeyboardDispatcher`'s own doc comment. `docs/elwindui_gui_framework_
+    /// design.md` §5.5/§8.1's currently-implemented range mirrors `pointer`'s own: self-drawn
+    /// elements' virtual focus is real (`KeyboardDispatcher::focus` is the single source of truth),
+    /// but a native leaf (`Button`/`TextArea`/`TabView`) receives real OS keyboard focus/events
+    /// directly and needs its own individual wiring (see `native_ui.rs`'s `Button`/`TextArea`) —
+    /// this view's own `keyDown:`/`keyUp:` overrides below never even fire while one is focused.
+    keyboard: KeyboardDispatcher,
     /// The single `NSTrackingArea` this view keeps registered for itself, so `updateTrackingAreas`
     /// can remove the previous one before installing a freshly-sized replacement rather than
     /// accumulating a new one on every resize.
@@ -226,6 +293,24 @@ impl RelayoutHost for AppKitRelayoutHost {
                 render_tree.mark_dirty(dirty_group_id);
             }
             view.setNeedsLayout(true);
+        }
+    }
+}
+
+/// `elwindui_core::ui::FocusHost` for `TreeHostView` — the `FocusHost` counterpart to
+/// `AppKitRelayoutHost`, same weak-back-reference shape. Delegates straight to
+/// `TreeHostIvars::keyboard.focus`, the single source of truth for this view's own hosted tree.
+struct AppKitFocusHost(objc2::rc::Weak<TreeHostView>);
+
+impl FocusHost for AppKitFocusHost {
+    fn request_focus(&self, target: &Rc<dyn UIElementExt>) -> bool {
+        match self.0.load() {
+            Some(view) => view
+                .ivars()
+                .keyboard
+                .focus
+                .set_focus(target, FocusState::Programmatic),
+            None => false,
         }
     }
 }
@@ -286,6 +371,24 @@ define_class!(
             };
             self.addTrackingArea(&area);
             *self.ivars().tracking_area.borrow_mut() = Some(area);
+        }
+
+        /// `NSResponder`'s own gate on receiving `keyDown:`/`keyUp:` at all — `NSView`'s default is
+        /// `false`, which is why this view never saw a single key event before this override.
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            self.dispatch_key(event, true);
+            self.dispatch_text_input(event);
+        }
+
+        #[unsafe(method(keyUp:))]
+        fn key_up(&self, event: &NSEvent) {
+            self.dispatch_key(event, false);
         }
 
         #[unsafe(method(mouseDown:))]
@@ -358,6 +461,7 @@ impl TreeHostView {
             native_containers: RefCell::new(HashMap::new()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
             pointer: PointerDispatcher::new(),
+            keyboard: KeyboardDispatcher::new(),
             tracking_area: RefCell::new(None),
         };
         let this = Self::alloc(m).set_ivars(ivars);
@@ -407,6 +511,52 @@ impl TreeHostView {
         );
     }
 
+    /// Converts `event`'s own key/modifiers/repeat and feeds it, together with `is_down`, to
+    /// `KeyboardDispatcher::handle_key` against whatever tree this view currently hosts. A no-op if
+    /// no tree is hosted yet, or if `event` maps to no `Key` at all (`nsevent_key` returning `None`
+    /// — practically never, since it always falls back to the raw character).
+    fn dispatch_key(&self, event: &NSEvent, is_down: bool) {
+        let tree = self.ivars().tree.borrow();
+        let Some(tree) = tree.as_ref() else { return };
+        let Some(key) = nsevent_key(event) else {
+            return;
+        };
+        self.ivars().keyboard.handle_key(
+            tree,
+            RawKeyEvent {
+                kind: if is_down {
+                    RawKeyEventKind::Down {
+                        is_repeat: event.isARepeat(),
+                    }
+                } else {
+                    RawKeyEventKind::Up
+                },
+                key,
+                modifiers: nsevent_modifiers(event),
+                timestamp_ms: event.timestamp() * 1000.0,
+            },
+        );
+    }
+
+    /// `event.characters()` (post-modifier, pre-IME — see `nsevent_key`'s own doc comment on the
+    /// same "no full `NSTextInputClient`" limitation) fed to `KeyboardDispatcher::handle_text_input`
+    /// as `on_text_input`, filtered to a single non-control character. Control keys (arrows, Tab,
+    /// Enter, Escape, function keys, ...) also produce a non-empty `characters()` string on macOS —
+    /// excluding `Unicode` control-category characters keeps those from misfiring as text input.
+    fn dispatch_text_input(&self, event: &NSEvent) {
+        let tree = self.ivars().tree.borrow();
+        let Some(tree) = tree.as_ref() else { return };
+        let Some(text) = event.characters().map(|s| s.to_string()) else {
+            return;
+        };
+        if text.is_empty() || text.chars().any(|c| c.is_control()) {
+            return;
+        }
+        self.ivars()
+            .keyboard
+            .handle_text_input(tree, RawTextInputEvent { text });
+    }
+
     /// Replaces this host's entire content, discarding whatever native subviews were there before.
     pub(crate) fn set_tree(&self, tree: Rc<dyn UIElementExt>) {
         for old in self.subviews().iter() {
@@ -415,7 +565,12 @@ impl TreeHostView {
         self.ivars().native_containers.borrow_mut().clear();
         let weak_self = self.ivars().weak_self.borrow().clone();
         tree.as_ui_element()
-            .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self))));
+            .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self.clone()))));
+        tree.as_ui_element()
+            .set_focus_host(Some(Rc::new(AppKitFocusHost(weak_self))));
+        self.ivars().keyboard.focus.clear_focus();
+        self.ivars().keyboard.shortcuts().clear();
+        collect_shortcuts_into(&tree, self.ivars().keyboard.shortcuts());
         *self.ivars().tree.borrow_mut() = Some(tree);
         *self.ivars().render_tree.borrow_mut() = None;
         self.invalidateIntrinsicContentSize();

@@ -1,10 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo run -p notepad > /tmp/notepad_run.log 2>&1 & *)"
+      "Bash(cargo run -p notepad > /tmp/notepad_run.log 2>&1 & *)",
+      "Bash(cargo expand *)",
+      "Bash(kill %1)",
+      "Bash(pkill -f target/debug/notepad-inline)",
+      "Bash(xargs ls -la)",
+      "Bash(osascript -e ' *)",
+      "Bash(pkill -f \"target/debug/notepad-inline\")",
+      "Bash(echo \"exit: $?\")"
     ],
     "additionalDirectories": [
-      "/private/tmp"
+      "/private/tmp",
+      "/tmp"
     ]
   }
 }

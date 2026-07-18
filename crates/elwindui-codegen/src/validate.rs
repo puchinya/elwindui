@@ -209,6 +209,13 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 &table,
                                 &mut errors,
                             );
+                            check_shortcut_attrs(
+                                &let_binding.element,
+                                module,
+                                &c.name,
+                                &table,
+                                &mut errors,
+                            );
                         }
                         // Phase 0 (docs/elwindui_spec.md 付録H.2.1a): `view.root` is now a bare
                         // `ast::ViewBody` — resolve it to the concrete `ElementNode` every other
@@ -241,6 +248,13 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                     &mut errors,
                                 );
                                 check_attached_properties(
+                                    &resolved_root,
+                                    module,
+                                    &c.name,
+                                    &table,
+                                    &mut errors,
+                                );
+                                check_shortcut_attrs(
                                     &resolved_root,
                                     module,
                                     &c.name,
@@ -858,6 +872,84 @@ fn check_attached_properties(
     }
     for (_, expr) in &node.attributes {
         check_attached_properties_in_expr(expr, from, component_name, table, errors);
+    }
+}
+
+/// `#[shortcut(...)]` (docs/elwindui_gui_framework_design.md §8.1) only means anything on an
+/// attribute that's actually `#[routed]` on this element's resolved type (same reasoning as
+/// `on_click`/`on_key_down` themselves being callback-shaped, not arbitrary data) — checked here,
+/// against the concrete usage site, rather than in `parse_field_def`'s per-declaration checks: a
+/// shortcut is inherently a per-instance annotation (see `ast::ElementNode::attribute_shortcuts`'s
+/// own doc comment for why it can't live on the field's shared declaration in `builtins.elwind`).
+/// Also checks every declared key spec parses (`codegen::parse_shortcut_spec` — the same parser
+/// `codegen::emit_shortcut_chord_expr` uses, so a spec that passes here is guaranteed not to panic
+/// during code generation).
+fn check_shortcut_attrs(
+    node: &ElementNode,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    for (name, chords, _scope) in &node.attribute_shortcuts {
+        match table.resolve(from, &node.type_path) {
+            Some(info) if info.routed_fields.contains(name) => {}
+            Some(_) => errors.push(format!(
+                "{component_name}: #[shortcut(...)] on `{}.{name}` — `{name}` is not a #[routed] attribute",
+                node.type_path
+            )),
+            None => errors.push(format!(
+                "{component_name}: #[shortcut(...)] on `{}.{name}` — `{}` is not a known component/builtin (missing `use`?)",
+                node.type_path, node.type_path
+            )),
+        }
+        for (backend, spec) in chords {
+            if let Err(e) = codegen::parse_shortcut_spec(spec) {
+                let backend_note = backend
+                    .as_deref()
+                    .map(|b| format!(" ({b})"))
+                    .unwrap_or_default();
+                errors.push(format!(
+                    "{component_name}: #[shortcut] key spec `{spec}`{backend_note} on `{}.{name}`: {e}",
+                    node.type_path
+                ));
+            }
+        }
+    }
+    for child in &node.children {
+        if let ChildEntry::Literal(elem) = child {
+            check_shortcut_attrs(elem, from, component_name, table, errors);
+        }
+    }
+    for (_, expr) in &node.attributes {
+        check_shortcut_attrs_in_expr(expr, from, component_name, table, errors);
+    }
+}
+
+fn check_shortcut_attrs_in_expr(
+    expr: &ViewExpr,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    match expr {
+        ViewExpr::Element(elem) => check_shortcut_attrs(elem, from, component_name, table, errors),
+        ViewExpr::Closure {
+            body: ClosureBody::Element(elem),
+            ..
+        } => check_shortcut_attrs(elem, from, component_name, table, errors),
+        ViewExpr::TFluent(_, args) => {
+            for (_, arg) in args {
+                check_shortcut_attrs_in_expr(arg, from, component_name, table, errors);
+            }
+        }
+        ViewExpr::Path(_)
+        | ViewExpr::Expr(_)
+        | ViewExpr::Closure {
+            body: ClosureBody::Expr(_) | ClosureBody::Block(_),
+            ..
+        } => {}
     }
 }
 
@@ -2345,5 +2437,64 @@ view Screen {
                 .any(|error| error.contains("not exhaustive") && error.contains("Ready")),
             "errors: {errors:?}"
         );
+    }
+
+    #[test]
+    fn rejects_shortcut_on_non_routed_attribute() {
+        let src = r#"
+component SaveField { }
+view SaveField {
+    Button {
+        #[shortcut("Ctrl+S")]
+        text: "Save"
+    }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("#[routed]")),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_shortcut_key_spec() {
+        let src = r#"
+component SaveField { }
+view SaveField {
+    Button {
+        #[shortcut("Hyper+S")]
+        on_click: save
+    }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("Hyper")),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_valid_shortcut_on_routed_attribute() {
+        let src = r#"
+component SaveField { }
+view SaveField {
+    Button {
+        #[shortcut("Ctrl+S")]
+        on_click: save
+    }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
+        assert_eq!(validate(&modules), Ok(()));
     }
 }

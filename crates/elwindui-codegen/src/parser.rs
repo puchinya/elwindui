@@ -437,6 +437,60 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parses the comma-separated contents of `#[shortcut(...)]`, *not* including the surrounding
+    /// parens (the caller already consumed the opening one and consumes the closing one). Each
+    /// entry is either a bare string literal (`"Ctrl+S"`, a chord for every backend with no more
+    /// specific entry), `scope: local`/`scope: global` (sets `ShortcutScope`, default `Global`), or
+    /// `backend_name: "chord"` (a per-backend override, e.g. `winui3: "Ctrl+S"`) — see
+    /// `ast::ElementNode::attribute_shortcuts`'s own doc comment. Called from
+    /// `parse_element_body`'s attribute-prefix handling, *not* from `parse_field_def` — a shortcut
+    /// is a per-usage-site annotation, not part of any field's own declaration.
+    fn parse_shortcut_attr(
+        &mut self,
+    ) -> Result<(Vec<(Option<String>, String)>, ShortcutScope), String> {
+        let mut chords = Vec::new();
+        let mut scope = ShortcutScope::Global;
+        loop {
+            self.skip_trivia();
+            match self.peek_char() {
+                Some(')') | None => break,
+                Some('"') => {
+                    let literal = self.take_string_literal()?;
+                    chords.push((None, literal.trim_matches('"').to_string()));
+                }
+                _ => {
+                    let key = self.parse_ident()?;
+                    self.skip_trivia();
+                    self.expect_char(':')?;
+                    self.skip_trivia();
+                    if key == "scope" {
+                        let value = self.parse_ident()?;
+                        scope = match value.as_str() {
+                            "global" => ShortcutScope::Global,
+                            "local" => ShortcutScope::Local,
+                            other => {
+                                return Err(self.err(&format!(
+                                    "unknown #[shortcut] scope `{other}` (expected `global` or `local`)"
+                                )));
+                            }
+                        };
+                    } else {
+                        let literal = self.take_string_literal()?;
+                        chords.push((Some(key), literal.trim_matches('"').to_string()));
+                    }
+                }
+            }
+            self.skip_trivia();
+            if !self.eat_char(',') {
+                break;
+            }
+        }
+        if chords.is_empty() {
+            return Err(self.err("#[shortcut(...)] needs at least one key combination"));
+        }
+        Ok((chords, scope))
+    }
+
     fn parse_initializer(&mut self) -> Result<Initializer, String> {
         if self.eat_keyword_bang("bind") {
             self.expect_char('(')?;
@@ -551,7 +605,7 @@ impl<'a> Parser<'a> {
         }
 
         self.skip_trivia();
-        let (attributes, attached, children) = self.parse_element_body()?;
+        let (attributes, attached, attribute_shortcuts, children) = self.parse_element_body()?;
         // `parse_element_body` already consumed the view's own closing `}` (mirroring
         // `parse_element_node`, which consumes `Type { ... }`'s own closing `}` the same way).
         Ok((
@@ -561,6 +615,7 @@ impl<'a> Parser<'a> {
             ViewBody {
                 attributes,
                 attached,
+                attribute_shortcuts,
                 children,
             },
         ))
@@ -570,12 +625,13 @@ impl<'a> Parser<'a> {
         let type_path = self.parse_ident()?;
         self.skip_trivia();
         self.expect_char('{')?;
-        let (attributes, attached, children) = self.parse_element_body()?;
+        let (attributes, attached, attribute_shortcuts, children) = self.parse_element_body()?;
 
         Ok(ElementNode {
             type_path,
             attributes,
             attached,
+            attribute_shortcuts,
             children,
         })
     }
@@ -592,12 +648,14 @@ impl<'a> Parser<'a> {
         (
             Vec<(String, ViewExpr)>,
             Vec<(String, String, ViewExpr)>,
+            Vec<(String, Vec<(Option<String>, String)>, ShortcutScope)>,
             Vec<ChildEntry>,
         ),
         String,
     > {
         let mut attributes = Vec::new();
         let mut attached = Vec::new();
+        let mut attribute_shortcuts = Vec::new();
         let mut children = Vec::new();
 
         loop {
@@ -611,10 +669,37 @@ impl<'a> Parser<'a> {
                 self.eat_char(',');
                 continue;
             }
+            // `#[shortcut(...)]` (docs/elwindui_gui_framework_design.md §8.1) — the only
+            // attribute-prefix syntax an element body supports today (unlike `#[id("...")]`, which
+            // only ever precedes a `let` binding, never an ordinary attribute line — see
+            // `parse_view_def`). Must be immediately followed by a plain `ident: value` attribute
+            // line; it annotates that specific attribute's value, not a child or attached property.
+            let mut pending_shortcut = None;
+            if self.peek_char() == Some('#') {
+                self.eat_char('#');
+                self.expect_char('[')?;
+                let attr_name = self.parse_ident()?;
+                if attr_name != "shortcut" {
+                    return Err(self.err(&format!(
+                        "unknown element attribute #[{attr_name}] (only #[shortcut(...)] is supported here)"
+                    )));
+                }
+                self.expect_char('(')?;
+                let (chords, scope) = self.parse_shortcut_attr()?;
+                self.expect_char(')')?;
+                self.expect_char(']')?;
+                self.skip_trivia();
+                pending_shortcut = Some((chords, scope));
+            }
             let ident_start = self.pos;
             let ident = self.parse_ident()?;
             self.skip_trivia();
             if self.eat_str("::") {
+                if pending_shortcut.is_some() {
+                    return Err(self.err(
+                        "#[shortcut(...)] must be immediately followed by a plain `attribute: value` line, not an attached property",
+                    ));
+                }
                 // `Owner::field: value` — an attached-property setter (§3), checked *before* the
                 // single-`:` attribute case below (`eat_str("::")` only matches the literal 2-char
                 // sequence, so plain `ident:` is unaffected).
@@ -628,12 +713,25 @@ impl<'a> Parser<'a> {
             } else if self.eat_char(':') {
                 self.skip_trivia();
                 let value = self.parse_view_expr()?;
+                if let Some((chords, scope)) = pending_shortcut {
+                    attribute_shortcuts.push((ident.clone(), chords, scope));
+                }
                 attributes.push((ident, value));
             } else if self.peek_char() == Some('{') {
+                if pending_shortcut.is_some() {
+                    return Err(self.err(
+                        "#[shortcut(...)] must be immediately followed by a plain `attribute: value` line, not a child element",
+                    ));
+                }
                 // bare `Type { ... }`: this is a nested child element, `ident` was its type name.
                 self.pos = ident_start;
                 children.push(ChildEntry::Literal(self.parse_element_node()?));
             } else {
+                if pending_shortcut.is_some() {
+                    return Err(self.err(
+                        "#[shortcut(...)] must be immediately followed by a plain `attribute: value` line, not a `let` reference",
+                    ));
+                }
                 // bare identifier with neither `:` nor `{` following: a reference to an earlier
                 // `#[id(...)]? let <ident> = ...;` binding (see `parse_view_def`), e.g. `Column {
                 // editor, StatusBar {} }`'s `editor`.
@@ -643,7 +741,7 @@ impl<'a> Parser<'a> {
             self.eat_char(',');
         }
 
-        Ok((attributes, attached, children))
+        Ok((attributes, attached, attribute_shortcuts, children))
     }
 
     fn parse_control_child(&mut self) -> Result<ChildEntry, String> {
@@ -1785,6 +1883,45 @@ view MainGrid {
         assert_eq!(button.attached.len(), 2);
         assert_eq!(button.attached[0].0, "Grid");
         assert_eq!(button.attached[0].1, "row");
+    }
+
+    #[test]
+    fn parses_shortcut_attr_variants() {
+        let src = r#"
+component SaveField { }
+view SaveField {
+    Button {
+        #[shortcut("Ctrl+S")]
+        on_click: vm.save
+
+        #[shortcut(winui3: "Ctrl+F", appkit: "Cmd+F", scope: local)]
+        on_find: vm.find
+    }
+}
+"#;
+        let module = parse_module(src).expect("should parse");
+        let Item::View(view) = &module.items[1] else {
+            panic!("expected view")
+        };
+        let root = literal(&view.root.children[0]);
+        assert_eq!(root.type_path, "Button");
+        assert_eq!(root.attribute_shortcuts.len(), 2);
+
+        let (name, chords, scope) = &root.attribute_shortcuts[0];
+        assert_eq!(name, "on_click");
+        assert_eq!(chords, &[(None, "Ctrl+S".to_string())]);
+        assert_eq!(*scope, ShortcutScope::Global);
+
+        let (name, chords, scope) = &root.attribute_shortcuts[1];
+        assert_eq!(name, "on_find");
+        assert_eq!(
+            chords,
+            &[
+                (Some("winui3".to_string()), "Ctrl+F".to_string()),
+                (Some("appkit".to_string()), "Cmd+F".to_string()),
+            ]
+        );
+        assert_eq!(*scope, ShortcutScope::Local);
     }
 }
 

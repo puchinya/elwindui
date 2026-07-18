@@ -242,6 +242,13 @@ pub enum Attr {
     Bindable,
 }
 
+/// See `ElementNode::attribute_shortcuts`'s own doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutScope {
+    Global,
+    Local,
+}
+
 /// A `component`/`viewmodel` field. See docs/elwindui_spec.md §3, 付録O.2.
 #[derive(Debug, Clone)]
 pub struct FieldDef {
@@ -306,6 +313,9 @@ pub struct ViewDef {
 pub struct ViewBody {
     pub attributes: Vec<(String, ViewExpr)>,
     pub attached: Vec<(String, String, ViewExpr)>,
+    /// See `ElementNode::attribute_shortcuts`'s own doc comment — this is the same thing for the
+    /// view's own (implicit) root element.
+    pub attribute_shortcuts: Vec<(String, Vec<(Option<String>, String)>, ShortcutScope)>,
     pub children: Vec<ChildEntry>,
 }
 
@@ -335,6 +345,20 @@ pub struct ElementNode {
     /// `validate::validate` and `codegen.rs`'s `PlannedNode`/wherever a child's `UIElementBase` is
     /// constructed.
     pub attached: Vec<(String, String, ViewExpr)>,
+    /// `#[shortcut("Ctrl+S")] on_click: vm.save` — a keyboard shortcut attached to *this specific
+    /// use* of a `#[routed]`-declared attribute (`on_click`, `on_key_down`, ...), not to the
+    /// field's own declaration (unlike every other `Attr` variant): a shortcut is inherently a
+    /// per-instance decision (this one `Button` gets `Ctrl+S`, not every `Button` in the app), so
+    /// it can't live on `Button.on_click: fn()`'s shared declaration in `builtins.elwind` the way
+    /// `#[routed]` itself does. `(attribute name, chords, scope)`, one entry per annotated
+    /// attribute — `chords` is a list of `(backend, key spec)` pairs (a `None` backend applies to
+    /// every backend with no more specific entry of its own, e.g. `#[shortcut(winui3: "Ctrl+S",
+    /// appkit: "Cmd+S")]` has no `None` entry at all: both backends are covered explicitly).
+    /// `validate::validate` checks the named attribute actually is `#[routed]` on this element's
+    /// resolved type, and that every chord's key spec parses (`codegen::parse_shortcut_spec`).
+    /// See docs/elwindui_gui_framework_design.md §8.1, `parser::parse_shortcut_attr`,
+    /// `codegen::emit_shortcut_registration`.
+    pub attribute_shortcuts: Vec<(String, Vec<(Option<String>, String)>, ShortcutScope)>,
     pub children: Vec<ChildEntry>,
 }
 

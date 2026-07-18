@@ -639,8 +639,21 @@ impl UIElement {
             });
         }
         let desired_with_margin = self.measured_size().unwrap_or_default();
-        let slot = shrink_rect_by_margin(final_rect, self.margin());
+        let mut slot = shrink_rect_by_margin(final_rect, self.margin());
         let desired_without_margin = shrink_by_margin(desired_with_margin, self.margin());
+        // WinUI3/WPF: an explicit `Width`/`Height` wins over `Stretch` — `Stretch` only fills the
+        // slot when that axis was never set at all (`align_within`'s own "fills the slot" rule).
+        // Shrinking the slot itself to the explicit size here (rather than teaching `align_within`
+        // about "explicit-ness") keeps that function exactly what its own doc comment says it is:
+        // pure size-in/rect-out math with no widget knowledge — the same way real WPF's own
+        // `FrameworkElement.ArrangeCore` consults `this.Width`/`this.Height` directly, right where
+        // `this` is available, rather than threading an "is explicit" flag into a separate helper.
+        if self.width().is_some() {
+            slot.width = slot.width.min(desired_without_margin.width);
+        }
+        if self.height().is_some() {
+            slot.height = slot.height.min(desired_without_margin.height);
+        }
         let own_rect = align_within(
             slot,
             desired_without_margin,
@@ -843,6 +856,7 @@ impl UIElementCollection {
             .iter()
             .position(|candidate| Rc::ptr_eq(candidate, child))
             .map(|index| storage.remove(index));
+        drop(storage);
         if let Some(removed) = removed {
             *child.as_ui_element().parent.borrow_mut() = None;
             if let Some(owner) = self.owner_rc() {
@@ -1748,7 +1762,17 @@ impl ContentControl {
     fn set_content(&self, content: Rc<dyn UIElementExt>) {
         let old = self.content.borrow_mut().replace(content.clone());
         if let Some(old) = old {
+            *old.as_ui_element().parent.borrow_mut() = None;
             self.as_ui_element().visual_collection.remove(&old);
+        }
+        // `visual_collection.add` (below) only wires up `content`'s *Visual* parent — routed-event
+        // bubbling (`elwindui_core::ui::dispatch_routed`) walks the *Logical* `parent` chain instead
+        // (`UIElement::parent`), so without this, a tap/click hit-tested inside `content` could never
+        // bubble past it to reach a handler registered on this `ContentControl` itself (e.g. a
+        // `component X inherits ContentControl` with its own `on_tapped` on its `view!` root) —
+        // mirrors what `UIElementCollection::add` already does for `Layout::children`.
+        if let Some(owner) = self.as_ui_element().visual_collection.owner_rc() {
+            *content.as_ui_element().parent.borrow_mut() = Some(Rc::downgrade(&owner));
         }
         self.as_ui_element().visual_collection.add(content);
     }

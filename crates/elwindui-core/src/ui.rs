@@ -102,6 +102,11 @@ pub struct UIElement {
     /// WinUI3's `UIElement.Visibility` — `Visible` (default) or `Collapsed`. See `Visibility`'s own
     /// doc comment for how `Collapsed` is handled by the layout/render/hit-test traversals.
     pub visibility: Cell<Visibility>,
+    /// WinUI3's `UIElement.IsHitTestVisible` — `true` (default) means normal hit-testing;
+    /// `false` excludes this element *and its entire subtree* from `hit_test` while leaving
+    /// rendering/layout untouched (unlike `Visibility::Collapsed`, which affects layout too). See
+    /// `hit_test_at`'s own doc comment.
+    pub hit_test_visible: Cell<bool>,
     /// WPF-compatible inherited `ClipToBounds` local value. `None` inherits from the Visual parent;
     /// the root's effective value is false.
     pub clip_to_bounds: Cell<Option<bool>>,
@@ -185,6 +190,7 @@ impl std::fmt::Debug for UIElement {
             .field("horizontal_alignment", &self.horizontal_alignment.get())
             .field("vertical_alignment", &self.vertical_alignment.get())
             .field("visibility", &self.visibility.get())
+            .field("hit_test_visible", &self.hit_test_visible.get())
             .field("clip_to_bounds", &self.clip_to_bounds.get())
             .field("width", &self.width.get())
             .field("height", &self.height.get())
@@ -235,6 +241,7 @@ impl Default for UIElement {
             horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
             vertical_alignment: Cell::new(VerticalAlignment::Stretch),
             visibility: Cell::new(Visibility::Visible),
+            hit_test_visible: Cell::new(true),
             clip_to_bounds: Cell::new(None),
             width: Cell::new(None),
             height: Cell::new(None),
@@ -298,6 +305,10 @@ impl UIElement {
     /// WinUI3's `UIElement.Visibility` — see `Visibility`'s own doc comment.
     fn visibility(&self) -> Visibility {
         self.as_ui_element().visibility.get()
+    }
+    /// WinUI3's `UIElement.IsHitTestVisible` — see `UIElement::hit_test_visible`'s own doc comment.
+    fn hit_test_visible(&self) -> bool {
+        self.as_ui_element().hit_test_visible.get()
     }
     fn render_group_id(&self) -> u64 {
         self.as_ui_element().render_group_id
@@ -369,32 +380,47 @@ impl UIElement {
         self.as_ui_element().visibility.set(visibility);
         self.invalidate_measure();
     }
+    /// See `UIElement::hit_test_visible`'s own doc comment. Hit-testing only — no layout/render
+    /// effect, so unlike most other setters here this doesn't invalidate anything.
+    fn set_hit_test_visible(&self, hit_test_visible: bool) {
+        self.as_ui_element().hit_test_visible.set(hit_test_visible);
+    }
     fn set_clip_to_bounds(&self, value: Option<bool>) {
         self.as_ui_element().clip_to_bounds.set(value);
         self.invalidate_arrange();
     }
-    fn set_width(&self, width: Option<f32>) {
-        self.as_ui_element().width.set(width);
+    // `Option<f32>`-typed at the DSL/`builtins.elwind` declaration (an unset value means "let
+    // natural sizing decide"), but taking the plain, unwrapped `f32` here — matching every other
+    // deferred `Option<T>`-declared common property's own setter (`set_margin(&self, margin: f32)`
+    // above, `set_enabled(&self, enabled: bool)` on `Button`/`MenuItem`, ...): "unset" is expressed
+    // purely by never calling the setter at all (the constructed default, `None`, stays in place),
+    // never by an explicit `None` argument — no DSL syntax spells that anyway. Keeping every
+    // deferred common property on this one shared convention lets `elwindui-codegen`'s generic,
+    // field-name-agnostic setter emission (`build_component_args`/`build_component_setters`/
+    // `build_component_optional_setters`) apply to all of them uniformly, with no per-field
+    // Option-wrapping decision needed anywhere in codegen.
+    fn set_width(&self, width: f32) {
+        self.as_ui_element().width.set(Some(width));
         self.invalidate_measure();
     }
-    fn set_height(&self, height: Option<f32>) {
-        self.as_ui_element().height.set(height);
+    fn set_height(&self, height: f32) {
+        self.as_ui_element().height.set(Some(height));
         self.invalidate_measure();
     }
-    fn set_min_width(&self, min_width: Option<f32>) {
-        self.as_ui_element().min_width.set(min_width);
+    fn set_min_width(&self, min_width: f32) {
+        self.as_ui_element().min_width.set(Some(min_width));
         self.invalidate_measure();
     }
-    fn set_min_height(&self, min_height: Option<f32>) {
-        self.as_ui_element().min_height.set(min_height);
+    fn set_min_height(&self, min_height: f32) {
+        self.as_ui_element().min_height.set(Some(min_height));
         self.invalidate_measure();
     }
-    fn set_max_width(&self, max_width: Option<f32>) {
-        self.as_ui_element().max_width.set(max_width);
+    fn set_max_width(&self, max_width: f32) {
+        self.as_ui_element().max_width.set(Some(max_width));
         self.invalidate_measure();
     }
-    fn set_max_height(&self, max_height: Option<f32>) {
-        self.as_ui_element().max_height.set(max_height);
+    fn set_max_height(&self, max_height: f32) {
+        self.as_ui_element().max_height.set(Some(max_height));
         self.invalidate_measure();
     }
     /// The parent in the Logical tree. `UIElementCollection` owns this relationship.
@@ -463,6 +489,17 @@ impl UIElement {
     /// no-op implementation; children are rendered by the visual-tree walker.
     #[overridable]
     fn render(&self, _context: &mut RenderContext<'_>) {}
+    /// WinUI3/WPF's "an element with no `Background`/`Fill` isn't itself hit-testable" rule
+    /// (`hit_test_at`'s own doc comment) — whether *this element's own bounds* (not its children's)
+    /// should be considered a hit-test candidate. Defaults to `true` (every leaf-like element —
+    /// `NativeControl`/`TextBlock` — represents real content). `Layout`/`Control` (no background
+    /// concept at all in `builtins.elwind`) override this to `false`; `Shape` overrides it to
+    /// whether `fill`/`stroke` is actually set. This is independent of `hit_test_visible`, which
+    /// excludes the whole subtree unconditionally.
+    #[overridable]
+    fn hit_test_content(&self) -> bool {
+        true
+    }
     /// `Some(&self.handle)` (the raw native handle itself, erased to `&dyn Any`) for a backend's own
     /// `NativeControlImpl { handle: AnyView, .. }` and for any type that composes one as its own
     /// `base` field (docs/elwindui_spec.md 付録H.2.1a — e.g. a backend's `ButtonImpl { base:
@@ -844,6 +881,42 @@ impl UIElementCollection {
     }
 }
 
+/// Lets a `Layout`-family container's own `UIElementCollection` (`VerticalLayout`/`HorizontalLayout`/
+/// `Grid`'s `children`) serve as a dynamic-child-range host the exact same way `TabView`/`Menu`/
+/// `MenuBar`'s own dedicated `ListExt` implementors already do (`elwindui-codegen`'s
+/// `DynamicChildSlot::replace_children`/`replace_rc_items`, driving `if`/`for`/`match` inside a
+/// `.elwind` view) — every method here already exists verbatim as one of `UIElementCollection`'s own
+/// inherent methods just above; this only adds the trait so a `&UIElementCollection` can also be used
+/// as `&dyn ListExt<dyn UIElementExt>` where the generated code needs one. The inherent methods
+/// remain what ordinary `.add(..)`-style call sites resolve to (inherent methods take priority over
+/// trait methods for a concrete receiver type) — this impl only matters for `dyn`-erased callers.
+impl ListExt<dyn UIElementExt> for UIElementCollection {
+    fn add(&self, item: Rc<dyn UIElementExt>) {
+        UIElementCollection::add(self, item);
+    }
+    fn insert(&self, index: usize, item: Rc<dyn UIElementExt>) {
+        UIElementCollection::insert(self, index, item);
+    }
+    fn remove(&self, item: &Rc<dyn UIElementExt>) -> bool {
+        UIElementCollection::remove(self, item)
+    }
+    fn remove_at(&self, index: usize) -> Rc<dyn UIElementExt> {
+        UIElementCollection::remove_at(self, index)
+    }
+    fn clear(&self) {
+        UIElementCollection::clear(self);
+    }
+    fn len(&self) -> usize {
+        UIElementCollection::len(self)
+    }
+    fn is_empty(&self) -> bool {
+        UIElementCollection::is_empty(self)
+    }
+    fn to_vec(&self) -> Vec<Rc<dyn UIElementExt>> {
+        UIElementCollection::to_vec(self)
+    }
+}
+
 /// `Button`/`TextArea`/`TabView` — the only `UIElement`s with a real backend handle. Always a leaf as
 /// far as this tree is concerned: whatever lives beneath it in its own backend-managed hierarchy
 /// (e.g. `TabView`'s tab-switching) is opaque here. A pure marker trait (`trait_only` — no
@@ -1203,6 +1276,16 @@ impl Layout {
         &self.children
     }
 
+    /// `Layout` (and every subclass — `VerticalLayout`/`HorizontalLayout`/`Grid`) has no
+    /// `Background`/`Fill` concept in `builtins.elwind` at all, so it's never itself a hit-test
+    /// candidate — a click in the empty space between children falls through to whatever's behind
+    /// it, matching WinUI3/WPF's "unset Background isn't hit-testable" panel behavior. See
+    /// `UIElement::hit_test_content`'s own doc comment.
+    #[overrides]
+    fn hit_test_content(&self) -> bool {
+        false
+    }
+
     fn construct() -> Self {
         let base = UIElement::default();
         let children = UIElementCollection::new(base.visual_collection.owner_handle());
@@ -1347,6 +1430,14 @@ impl Shape {
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
         final_size
+    }
+    /// A shape with neither `fill` nor `stroke` set paints nothing, so it isn't hit-testable
+    /// either (WinUI3/WPF's `Shape.Fill == null` rule) — see
+    /// `UIElement::hit_test_content`'s own doc comment. A simplification vs. real path/stroke-
+    /// aware hit-testing: this is a whole-bounding-rect yes/no, not per-pixel.
+    #[overrides]
+    fn hit_test_content(&self) -> bool {
+        self.fill.borrow().is_some() || self.stroke.borrow().is_some()
     }
     fn set_fill(&self, fill: Option<String>) {
         *self.fill.borrow_mut() = fill;
@@ -1609,6 +1700,12 @@ impl Control {
     }
     fn content_vertical_alignment(&self) -> VerticalAlignment {
         self.content_vertical_alignment.get()
+    }
+    /// `Control`/`ContentControl` have no `Background`/`Fill` concept either — see
+    /// `Layout::hit_test_content`'s own doc comment for the identical rationale.
+    #[overrides]
+    fn hit_test_content(&self) -> bool {
+        false
     }
     fn set_padding(&self, padding: f32) {
         self.padding.set(padding);
@@ -2007,50 +2104,103 @@ fn rect_contains(rect: Rect, at: Point) -> bool {
     at.x >= rect.x && at.x <= rect.x + rect.width && at.y >= rect.y && at.y <= rect.y + rect.height
 }
 
+/// Intersection of two absolute-coordinate rects — `Rect`'s `width`/`height` go negative (never
+/// clamped to 0) when they don't overlap at all, which `rect_contains` already correctly treats as
+/// "contains nothing" (`at.x <= rect.x + rect.width` can't hold for any real `at.x` once `width` is
+/// negative). Used by `hit_test_at` to fold each `clip_to_bounds`-opted-in ancestor's own rect into
+/// the effective clip a point must fall within to reach its descendants at all.
+fn intersect_rect(a: Rect, b: Rect) -> Rect {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    let right = (a.x + a.width).min(b.x + b.width);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    Rect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    }
+}
+
 /// Re-runs the same read-only traversal `collect_render_items` (above) does, without needing to
 /// know any backend's native handle type — hit-testing only needs each element's own already-
 /// `arrange`d rect, never its handle. Returns the deepest (topmost) element whose rect contains
-/// `at`, or `None` if `at` falls outside `elem`'s own bounds entirely. See
-/// `elwindui_core::input::InputRouter`'s doc comment (modeled on WinUI3's routed events) —
-/// bubbling from the returned element is then just `dispatch_routed` following `parent()`, no
+/// `at`, or `None` if `at` falls outside `elem`'s own bounds entirely.
+///
+/// Two points where this deliberately mirrors WinUI3/WPF rather than a naive "does the point fall
+/// within this element's own rect" test:
+///
+/// - **`clip_to_bounds` only clips when actually set**, exactly like rendering already does
+///   (`build_render_group`/`reconcile_render_group` only attach a `RenderGroup.clip` when
+///   `elem.clip_to_bounds()` is `true`, and `elwindui-backend-appkit`'s `replay_group` intersects
+///   that clip down through the tree). A child positioned outside its own (non-clipping) parent's
+///   rect remains hit-testable — only an ancestor that opted into `clip_to_bounds` bounds its
+///   descendants. `inherited_clip` threads the accumulated effective clip (the intersection of
+///   every such opted-in ancestor's own rect) down the recursion; `at` falling outside it excludes
+///   the element *and* its whole subtree, mirroring `Visibility::Collapsed`'s treatment.
+/// - **An element with no visible content of its own isn't a self-hit candidate**
+///   (`UIElement::hit_test_content` — WinUI3/WPF's "unset `Background`/`Fill` isn't hit-testable"
+///   rule). Children are still searched regardless (they may have their own content), so a click in
+///   a `Layout`'s empty space correctly falls through to whatever's behind it rather than being
+///   captured by the layout container itself.
+///
+/// See `elwindui_core::input::PointerDispatcher`'s doc comment (modeled on WinUI3's routed events)
+/// — bubbling from the returned element is then just `dispatch_routed` following `parent()`, no
 /// path/ancestor computation needed here.
 fn hit_test_at(
     elem: &Rc<dyn UIElementExt>,
     absolute_origin: Point,
     at: Point,
+    inherited_clip: Option<Rect>,
 ) -> Option<Rc<dyn UIElementExt>> {
     // A `Collapsed` element (and its whole subtree) is excluded from hit-testing, matching
-    // `collect_render_items`'s own treatment — see `Visibility`'s own doc comment.
-    if elem.visibility() == Visibility::Collapsed {
+    // `collect_render_items`'s own treatment — see `Visibility`'s own doc comment. `hit_test_visible
+    // == false` (WinUI3's `IsHitTestVisible`) excludes the subtree the same way, with no layout/
+    // render effect at all — see that field's own doc comment.
+    if elem.visibility() == Visibility::Collapsed || !elem.hit_test_visible() {
         return None;
     }
     let width = elem.arranged_width().unwrap_or(0.0);
     let height = elem.arranged_height().unwrap_or(0.0);
-    let absolute_rect = Rect {
+    let own_rect = Rect {
         x: absolute_origin.x,
         y: absolute_origin.y,
         width,
         height,
     };
-    if !rect_contains(absolute_rect, at) {
-        return None;
+    let own_clip = elem.clip_to_bounds().then_some(own_rect);
+    let effective_clip = match (inherited_clip, own_clip) {
+        (Some(a), Some(b)) => Some(intersect_rect(a, b)),
+        (Some(clip), None) | (None, Some(clip)) => Some(clip),
+        (None, None) => None,
+    };
+    if let Some(clip) = effective_clip {
+        if !rect_contains(clip, at) {
+            return None;
+        }
     }
 
     // Children are searched last-to-first: traversal order paints later children on top of
     // earlier ones (see 付録N's z-order note), so the *last* child whose own rect contains `at`
-    // is the topmost, correctly-hit one.
+    // is the topmost, correctly-hit one. Checked regardless of whether `at` falls within `elem`'s
+    // *own* rect — a child may render outside a non-clipping parent's bounds (see this function's
+    // own doc comment).
     for child in elem.visual_children().iter().rev() {
         let offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
         let child_origin = Point {
             x: absolute_origin.x + offset.x,
             y: absolute_origin.y + offset.y,
         };
-        if let Some(hit) = hit_test_at(child, child_origin, at) {
+        if let Some(hit) = hit_test_at(child, child_origin, at, effective_clip) {
             return Some(hit);
         }
     }
 
-    Some(Rc::clone(elem))
+    if rect_contains(own_rect, at) && elem.hit_test_content() {
+        Some(Rc::clone(elem))
+    } else {
+        None
+    }
 }
 
 /// Hit-tests `root` at `at` (absolute coordinates, e.g. the hosting `TreeHostView`'s own local
@@ -2062,18 +2212,44 @@ pub fn hit_test(root: &Rc<dyn UIElementExt>, at: Point) -> Option<Rc<dyn UIEleme
     // alignment against the original allotted rect) must be folded in here too, so hit-testing
     // agrees with `collect_render_items`'s rendered coordinates.
     let root_offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-    hit_test_at(root, root_offset, at)
+    hit_test_at(root, root_offset, at, None)
+}
+
+/// Invokes only `elem`'s own handlers registered under `name` (via
+/// `UIElement::register_routed_handler::<T>`) — no bubbling to `parent()` at all. Factored out of
+/// `dispatch_routed` (which loops this over the parent chain) so callers that need to fire a
+/// routed event at a *specific* element without also re-firing it at every one of that element's
+/// ancestors can do so — e.g. `PointerDispatcher`'s ancestor-chain-diffed `on_pointer_entered`/
+/// `on_pointer_exited` (WPF/UWP's non-bubbling `MouseEnter`/`MouseLeave` semantics: an ancestor
+/// that's still hovered must not see a spurious re-fire just because a *deeper* descendant's hover
+/// state changed). `T` must match the type every handler for `name` was registered with — see
+/// `UIElement::routed_handlers`'s doc comment for why the downcast this performs always succeeds in
+/// practice.
+fn invoke_handlers_at<T: 'static>(
+    elem: &Rc<dyn UIElementExt>,
+    name: &str,
+    payload: &T,
+    args: &RoutedEventArgs,
+) {
+    let handlers = elem.as_ui_element().routed_handlers.borrow();
+    if let Some(handlers) = handlers.get(name) {
+        for handler in handlers {
+            let handler = handler
+                .downcast_ref::<Box<dyn Fn(&T, &RoutedEventArgs)>>()
+                .expect("elwindui: routed handler registered under a mismatched payload type");
+            handler(payload, args);
+            if args.handled.get() {
+                return;
+            }
+        }
+    }
 }
 
 /// Bubbles a routed event starting at `target` (e.g. `hit_test`'s return value, or a native leaf's
 /// own tree node — see `elwindui-backend-appkit`'s `TreeHostView`): calls `target`'s own handlers
-/// registered under `name` (via `UIElement::register_routed_handler::<T>`), then its parent's,
-/// and so on up to the root (`UIElement::parent`), stopping as soon as one sets `args.handled`.
-/// Works identically whether `target`'s tree was built by a single static `.elwind` traversal or
-/// assembled at runtime by a `for` child range. `T` must match the type every handler for `name`
-/// was registered with — see `UIElement::routed_handlers`'s doc comment for why the downcast
-/// this performs always succeeds in practice (both sides come from the same `.elwind` field
-/// declaration).
+/// registered under `name`, then its parent's, and so on up to the root (`UIElement::parent`),
+/// stopping as soon as one sets `args.handled`. Works identically whether `target`'s tree was built
+/// by a single static `.elwind` traversal or assembled at runtime by a `for` child range.
 pub fn dispatch_routed<T: 'static>(
     target: &Rc<dyn UIElementExt>,
     name: &str,
@@ -2082,21 +2258,23 @@ pub fn dispatch_routed<T: 'static>(
 ) {
     let mut current = Some(Rc::clone(target));
     while let Some(elem) = current {
-        let handlers = elem.as_ui_element().routed_handlers.borrow();
-        if let Some(handlers) = handlers.get(name) {
-            for handler in handlers {
-                let handler = handler
-                    .downcast_ref::<Box<dyn Fn(&T, &RoutedEventArgs)>>()
-                    .expect("elwindui: routed handler registered under a mismatched payload type");
-                handler(payload, args);
-                if args.handled.get() {
-                    return;
-                }
-            }
+        invoke_handlers_at(&elem, name, payload, args);
+        if args.handled.get() {
+            return;
         }
-        drop(handlers);
         current = elem.parent();
     }
+}
+
+/// See `invoke_handlers_at`'s own doc comment — the `pub(crate)` entry point `elwindui_core::input`
+/// uses for non-bubbling routed dispatch.
+pub(crate) fn dispatch_direct<T: 'static>(
+    target: &Rc<dyn UIElementExt>,
+    name: &str,
+    payload: &T,
+    args: &RoutedEventArgs,
+) {
+    invoke_handlers_at(target, name, payload, args);
 }
 
 #[cfg(test)]
@@ -2548,8 +2726,8 @@ mod tests {
     #[test]
     fn explicit_width_and_height_override_the_elements_own_measured_size() {
         let tree: Rc<dyn UIElementExt> = FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0)));
-        tree.as_ui_element().set_width(Some(50.0));
-        tree.as_ui_element().set_height(Some(5.0));
+        tree.as_ui_element().set_width(50.0);
+        tree.as_ui_element().set_height(5.0);
         // `Stretch` (the default) still governs slot placement; the explicit width/height above
         // constrains what `measure_override`'s own `available`/`desired` see, not the final
         // stretch-to-slot size — a non-`Stretch` alignment (below) is what actually surfaces the
@@ -2573,8 +2751,8 @@ mod tests {
     #[test]
     fn min_and_max_clamp_the_elements_own_measured_size() {
         let tree: Rc<dyn UIElementExt> = FakeNativeControl::new(FakeHandle("a", size(10.0, 20.0)));
-        tree.as_ui_element().set_min_width(Some(30.0));
-        tree.as_ui_element().set_max_height(Some(8.0));
+        tree.as_ui_element().set_min_width(30.0);
+        tree.as_ui_element().set_max_height(8.0);
         tree.as_ui_element()
             .set_horizontal_alignment(HorizontalAlignment::Left);
         tree.as_ui_element()
@@ -2716,6 +2894,9 @@ mod tests {
         }
         fn __dyn_x_for_try_as_native_control(&self) -> &dyn UIElementExt {
             self.base.__dyn_x_for_try_as_native_control()
+        }
+        fn __dyn_x_for_hit_test_content(&self) -> &dyn UIElementExt {
+            self.base.__dyn_x_for_hit_test_content()
         }
         fn measure_override(&self, available: Size) -> Size {
             self.base
@@ -3258,5 +3439,253 @@ mod tests {
         tree.as_ui_element().set_visibility(Visibility::Collapsed);
         layout_tree::<FakeHandle>(&tree, size(100.0, 100.0));
         assert!(hit_test(&tree, Point { x: 5.0, y: 5.0 }).is_none());
+    }
+
+    #[test]
+    fn layout_containers_are_transparent_to_hit_testing() {
+        let leaf = native("leaf", size(10.0, 10.0));
+        leaf.as_ui_element()
+            .set_horizontal_alignment(HorizontalAlignment::Left);
+        leaf.as_ui_element()
+            .set_vertical_alignment(VerticalAlignment::Top);
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        layout_tree::<FakeHandle>(&root, size(100.0, 100.0));
+
+        assert!(Rc::ptr_eq(
+            &hit_test(&root, Point { x: 5.0, y: 5.0 }).expect("leaf should be hit"),
+            &leaf
+        ));
+        assert!(
+            hit_test(&root, Point { x: 50.0, y: 50.0 }).is_none(),
+            "VerticalLayout has no Background/Fill concept, so its own empty space must not be \
+             hit-testable — a click there falls through instead of hitting the container itself"
+        );
+    }
+
+    fn rectangle(fill: Option<&str>, stroke: Option<&str>) -> Rc<dyn UIElementExt> {
+        let this = Rc::new(Rectangle::construct(
+            fill.map(str::to_string),
+            stroke.map(str::to_string),
+            None,
+            None,
+        ));
+        bind_element_owner(&this);
+        this
+    }
+
+    #[test]
+    fn shape_is_hit_testable_only_when_fill_or_stroke_is_set() {
+        let transparent = rectangle(None, None);
+        transparent.as_ui_element().set_width(20.0);
+        transparent.as_ui_element().set_height(20.0);
+        layout_tree::<FakeHandle>(&transparent, size(100.0, 100.0));
+        assert!(
+            hit_test(&transparent, Point { x: 5.0, y: 5.0 }).is_none(),
+            "a Shape with neither fill nor stroke set paints nothing, so it must not be hit"
+        );
+
+        let filled = rectangle(Some("#ffffff"), None);
+        filled.as_ui_element().set_width(20.0);
+        filled.as_ui_element().set_height(20.0);
+        layout_tree::<FakeHandle>(&filled, size(100.0, 100.0));
+        assert!(hit_test(&filled, Point { x: 5.0, y: 5.0 }).is_some());
+    }
+
+    #[test]
+    fn hit_test_visible_false_excludes_the_element_and_its_whole_subtree() {
+        let leaf = native("leaf", size(10.0, 10.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        layout_tree::<FakeHandle>(&root, size(100.0, 100.0));
+        assert!(hit_test(&root, Point { x: 5.0, y: 5.0 }).is_some());
+
+        root.as_ui_element().set_hit_test_visible(false);
+        assert!(
+            hit_test(&root, Point { x: 5.0, y: 5.0 }).is_none(),
+            "IsHitTestVisible=false must exclude descendants too, not just the element itself"
+        );
+    }
+
+    #[test]
+    fn hit_test_respects_clip_to_bounds_only_when_actually_set() {
+        // Manually wired (not `stack`/`layout_tree`) so the child's own arranged rect can be made
+        // to genuinely overflow its parent's — exactly the case `clip_to_bounds` distinguishes.
+        let child = native("child", size(50.0, 50.0));
+        let parent = native("parent", size(20.0, 20.0));
+        parent.as_ui_element().visual_collection.add(child.clone());
+        parent.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        });
+        child.arrange(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 50.0,
+            height: 50.0,
+        });
+
+        // Outside `parent`'s own 20x20 rect but inside the child's own (overflowing) 50x50 one.
+        let outside_parent = Point { x: 30.0, y: 30.0 };
+        assert!(
+            Rc::ptr_eq(
+                &hit_test(&parent, outside_parent).expect("the overflowing child should be hit"),
+                &child
+            ),
+            "clip_to_bounds defaults to false, so a child rendering outside its parent's own \
+             bounds must remain hit-testable there"
+        );
+
+        parent.as_ui_element().set_clip_to_bounds(Some(true));
+        assert!(
+            hit_test(&parent, outside_parent).is_none(),
+            "once the parent opts into clip_to_bounds, the overflowing child must be excluded too"
+        );
+    }
+
+    fn count_calls<T: 'static>(elem: &Rc<dyn UIElementExt>, name: &'static str) -> Rc<RefCell<i32>> {
+        let count = Rc::new(RefCell::new(0));
+        let counted = Rc::clone(&count);
+        elem.as_ui_element().register_routed_handler::<T>(
+            name,
+            Box::new(move |_: &T, _: &RoutedEventArgs| {
+                *counted.borrow_mut() += 1;
+            }),
+        );
+        count
+    }
+
+    fn move_event(x: f32, y: f32) -> crate::input::RawPointerEvent {
+        crate::input::RawPointerEvent {
+            kind: crate::input::RawPointerEventKind::Moved,
+            position: Point { x, y },
+            modifiers: crate::input::KeyModifiers::default(),
+            timestamp_ms: 0.0,
+        }
+    }
+
+    fn press_event(x: f32, y: f32, button: crate::input::MouseButton, at_ms: f64) -> crate::input::RawPointerEvent {
+        crate::input::RawPointerEvent {
+            kind: crate::input::RawPointerEventKind::Pressed(button),
+            position: Point { x, y },
+            modifiers: crate::input::KeyModifiers::default(),
+            timestamp_ms: at_ms,
+        }
+    }
+
+    fn release_event(x: f32, y: f32, button: crate::input::MouseButton, at_ms: f64) -> crate::input::RawPointerEvent {
+        crate::input::RawPointerEvent {
+            kind: crate::input::RawPointerEventKind::Released(button),
+            position: Point { x, y },
+            modifiers: crate::input::KeyModifiers::default(),
+            timestamp_ms: at_ms,
+        }
+    }
+
+    #[test]
+    fn pointer_entered_exited_do_not_refire_on_a_still_hovered_shared_ancestor() {
+        let leaf_a = native("a", size(10.0, 10.0));
+        let leaf_b = native("b", size(10.0, 10.0));
+        let root = stack(
+            Orientation::Vertical,
+            0.0,
+            vec![Rc::clone(&leaf_a), Rc::clone(&leaf_b)],
+        );
+        layout_tree::<FakeHandle>(&root, size(100.0, 100.0));
+
+        let root_entered = count_calls::<crate::input::PointerEventArgs>(&root, "on_pointer_entered");
+        let root_exited = count_calls::<crate::input::PointerEventArgs>(&root, "on_pointer_exited");
+        let a_entered = count_calls::<crate::input::PointerEventArgs>(&leaf_a, "on_pointer_entered");
+        let a_exited = count_calls::<crate::input::PointerEventArgs>(&leaf_a, "on_pointer_exited");
+        let b_entered = count_calls::<crate::input::PointerEventArgs>(&leaf_b, "on_pointer_entered");
+        let b_exited = count_calls::<crate::input::PointerEventArgs>(&leaf_b, "on_pointer_exited");
+
+        let dispatcher = crate::input::PointerDispatcher::new();
+        dispatcher.handle(&root, move_event(5.0, 5.0));
+        assert_eq!((*root_entered.borrow(), *a_entered.borrow()), (1, 1));
+
+        // Moving from `a` to `b` (both under the same `root`) must not re-fire `root`'s own
+        // Entered/Exited — it was, and remains, hovered throughout.
+        dispatcher.handle(&root, move_event(5.0, 15.0));
+        assert_eq!(*a_exited.borrow(), 1);
+        assert_eq!(*b_entered.borrow(), 1);
+        assert_eq!((*root_entered.borrow(), *root_exited.borrow()), (1, 0));
+
+        // Moving off the tree entirely (into the layout's own transparent empty space) exits
+        // everything, `root` included.
+        dispatcher.handle(&root, move_event(5.0, 90.0));
+        assert_eq!(*b_exited.borrow(), 1);
+        assert_eq!(*root_exited.borrow(), 1);
+    }
+
+    #[test]
+    fn tap_fires_even_after_dragging_out_and_back_within_threshold() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
+
+        let dispatcher = crate::input::PointerDispatcher::new();
+        dispatcher.handle(&leaf, press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0));
+        // Wanders far outside `leaf`'s own bounds mid-drag — implicit capture must keep routing
+        // `Moved`/`Released` to `leaf` regardless.
+        dispatcher.handle(&leaf, move_event(500.0, 500.0));
+        dispatcher.handle(&leaf, release_event(6.0, 6.0, crate::input::MouseButton::Left, 10.0));
+
+        assert_eq!(*tapped.borrow(), 1);
+    }
+
+    #[test]
+    fn tap_does_not_fire_when_release_moves_past_the_threshold() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
+        let pressed = count_calls::<crate::input::PointerEventArgs>(&leaf, "on_pointer_pressed");
+        let released = count_calls::<crate::input::PointerEventArgs>(&leaf, "on_pointer_released");
+
+        let dispatcher = crate::input::PointerDispatcher::new();
+        dispatcher.handle(&leaf, press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0));
+        dispatcher.handle(&leaf, release_event(20.0, 20.0, crate::input::MouseButton::Left, 10.0));
+
+        assert_eq!(*pressed.borrow(), 1);
+        assert_eq!(*released.borrow(), 1);
+        assert_eq!(*tapped.borrow(), 0);
+    }
+
+    #[test]
+    fn double_tap_fires_on_a_second_nearby_tap_within_the_time_window() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
+        let double_tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_double_tapped");
+
+        let dispatcher = crate::input::PointerDispatcher::new();
+        dispatcher.handle(&leaf, press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0));
+        dispatcher.handle(&leaf, release_event(5.0, 5.0, crate::input::MouseButton::Left, 10.0));
+        dispatcher.handle(&leaf, press_event(6.0, 6.0, crate::input::MouseButton::Left, 100.0));
+        dispatcher.handle(&leaf, release_event(6.0, 6.0, crate::input::MouseButton::Left, 110.0));
+
+        assert_eq!(*tapped.borrow(), 2);
+        assert_eq!(*double_tapped.borrow(), 1);
+
+        // A third tap right after pairs with nothing (the second tap's own record was consumed).
+        dispatcher.handle(&leaf, press_event(6.0, 6.0, crate::input::MouseButton::Left, 150.0));
+        dispatcher.handle(&leaf, release_event(6.0, 6.0, crate::input::MouseButton::Left, 155.0));
+        assert_eq!(*tapped.borrow(), 3);
+        assert_eq!(*double_tapped.borrow(), 1);
+    }
+
+    #[test]
+    fn right_button_fires_right_tapped_not_tapped() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
+        let right_tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_right_tapped");
+
+        let dispatcher = crate::input::PointerDispatcher::new();
+        dispatcher.handle(&leaf, press_event(5.0, 5.0, crate::input::MouseButton::Right, 0.0));
+        dispatcher.handle(&leaf, release_event(5.0, 5.0, crate::input::MouseButton::Right, 10.0));
+
+        assert_eq!(*tapped.borrow(), 0);
+        assert_eq!(*right_tapped.borrow(), 1);
     }
 }

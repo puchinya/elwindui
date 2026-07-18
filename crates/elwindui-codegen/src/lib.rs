@@ -68,25 +68,35 @@ pub fn generate_viewmodel_from_item_mod(
 /// from the attribute's own `inherits Base` argument, `item_struct` parsed by the
 /// `elwindui-macros` proc-macro) and builds the matching `ComponentDef`/`ViewDef` pair (see
 /// `component_frontend`). Unlike `generate_viewmodel_from_item_mod`, this chains in
-/// `builtin_modules()` — a view body routinely references `Window`/`VerticalLayout`/etc.
+/// `builtin_modules()` — a view body routinely references `Window`/`VerticalLayout`/etc. — as well
+/// as `component_frontend::sibling_component_modules()`, so a `view!` can also reference an *earlier*
+/// same-crate `#[elwindui::component]` struct as a plain element type (each attribute-macro
+/// invocation otherwise only ever sees its own single annotated struct — see
+/// `component_frontend::same_crate_components`'s own doc comment for the full mechanism and its
+/// declaration-order requirement).
 pub fn generate_component_from_item_struct(
     base: Option<String>,
     item_struct: &syn::ItemStruct,
 ) -> Result<proc_macro2::TokenStream, String> {
     let (component_def, view_def) =
-        component_frontend::component_and_view_from_item_struct(base, item_struct)?;
+        component_frontend::component_and_view_from_item_struct(base.clone(), item_struct)?;
+    let name = component_def.name.clone();
     let module = ast::Module {
         path: Vec::new(),
         uses: Vec::new(),
         items: vec![ast::Item::Component(component_def), ast::Item::View(view_def)],
         ..Default::default()
     };
+    let sibling_modules = component_frontend::sibling_component_modules(&name);
     let all_modules: Vec<_> = std::iter::once(module.clone())
+        .chain(sibling_modules)
         .chain(builtin_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(&all_modules);
-    Ok(codegen::generate_module(&module, &table))
+    let generated = codegen::generate_module(&module, &table);
+    component_frontend::register_same_crate_component(&name, base.as_deref(), item_struct);
+    Ok(generated)
 }
 
 /// Compiles every `.elwind` file under `src` into Rust source under `out_dir`. The generated

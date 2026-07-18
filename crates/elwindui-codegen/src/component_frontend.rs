@@ -18,8 +18,10 @@
 //! Because `generate_module` (codegen.rs) only ever consumes the `ComponentDef`/`ViewDef` AST —
 //! never the original source — nothing in codegen.rs needs to change for this frontend to work.
 
-use crate::ast::{ComponentDef, FieldKind, ViewDef};
-use crate::{attr_frontend, parser};
+use crate::ast::{ComponentDef, FieldKind, Module, ViewDef};
+use crate::{attr_frontend, ast, parser};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` (already
 /// parsed as a `syn::ItemStruct` by the `elwindui-macros` proc-macro, `base` from the attribute's
@@ -97,6 +99,95 @@ pub fn component_and_view_from_item_struct(
 
 fn is_view_macro_field(field: &syn::Field) -> bool {
     matches!(&field.ty, syn::Type::Macro(tm) if tm.mac.path.is_ident("view"))
+}
+
+/// The identifier of the crate currently being compiled, read fresh from the environment variables
+/// cargo (and rust-analyzer's own proc-macro-srv, same protocol/env vars) sets for *this*
+/// macro-expansion request. Mirrors `elwindui-macros/src/class.rs`'s own `compiling_crate_key`
+/// (duplicated rather than shared — `elwindui-codegen` is the crate `elwindui-macros` depends on,
+/// not the other way around) — see that function's doc comment for the full rationale: without this
+/// key, `same_crate_components()` (below) would leak one crate's registered components into a
+/// completely unrelated crate the moment both get processed within the same rust-analyzer session
+/// (rust-analyzer runs one persistent `proc-macro-srv` process workspace-wide, unlike a real `cargo
+/// build`'s one-process-per-crate model where a fresh, empty `OnceLock` per compilation would be
+/// enough on its own).
+fn compiling_crate_key() -> String {
+    std::env::var("CARGO_CRATE_NAME")
+        .or_else(|_| std::env::var("CARGO_PKG_NAME"))
+        .unwrap_or_default()
+}
+
+/// A registered `#[elwindui::component]` struct, kept as reparseable source text rather than a raw
+/// `ComponentDef`/`ViewDef` (which are full of `syn::Expr`/`syn::Block` etc.) — those wrap the real
+/// compiler's own (non-`Send`/`Sync`) proc-macro bridge types when this crate is compiled into an
+/// actual proc-macro dylib, which a `static`-held `Mutex<..>` can't store. `quote!{ #item_struct
+/// }.to_string()` turns it into a plain, `Send`-safe `String`; `sibling_component_modules` re-parses
+/// it and re-runs `component_and_view_from_item_struct` on demand, the same "recover it via the same
+/// construction path, don't duplicate the logic" approach `class.rs`'s own `StoredClassArgs` uses
+/// for its `inherits`/`struct_only` fields.
+struct StoredComponent {
+    base: Option<String>,
+    struct_src: String,
+}
+
+/// Keyed by `(compiling_crate_key(), component name)` — every `#[elwindui::component]` struct
+/// successfully generated so far *within this same crate compilation* (see `compiling_crate_key`'s
+/// own doc comment for why the crate key is part of the key at all). Populated by
+/// `register_same_crate_component` right after a component's own codegen succeeds; read by
+/// `sibling_component_modules` so a *later* `#[elwindui::component]` invocation in the same crate can
+/// resolve an *earlier* one as a plain element type in its own `view! { .. }` — e.g.
+/// `examples/notepad-inline`'s `NotepadWindow` referencing the `CustomCheckBox` declared earlier in
+/// the same file. This only ever works in file/declaration order (a component can't see a sibling
+/// declared *after* it) — the same order-dependency `class.rs` already relies on and documents for
+/// its own struct-before-impl same-crate mechanism, not a new kind of fragility.
+fn same_crate_components() -> &'static Mutex<HashMap<(String, String), StoredComponent>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredComponent>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers `name`'s already-successfully-generated `#[elwindui::component(inherits base)] struct
+/// item_struct { .. }` so a later same-crate `#[elwindui::component]` invocation can resolve it as a
+/// sibling element type — see `same_crate_components`'s own doc comment. Only call this after this
+/// component's own codegen has actually succeeded — a component that failed to generate must not
+/// become resolvable by anything else.
+pub fn register_same_crate_component(name: &str, base: Option<&str>, item_struct: &syn::ItemStruct) {
+    let stored = StoredComponent {
+        base: base.map(str::to_string),
+        struct_src: quote::quote! { #item_struct }.to_string(),
+    };
+    same_crate_components()
+        .lock()
+        .unwrap()
+        .insert((compiling_crate_key(), name.to_string()), stored);
+}
+
+/// Every same-crate sibling `#[elwindui::component]` registered so far (via
+/// `register_same_crate_component`), other than `skip_name` itself, rebuilt as one `Module` each
+/// (`path: []`, matching the flat crate-root visibility every `#[elwindui::component]`-generated type
+/// actually has in real Rust — see `builtin_modules`'s own doc comment for why two `Module`s sharing
+/// that same empty path already resolve against each other with no `use` needed). `skip_name` guards
+/// against a stale self-entry from an earlier rust-analyzer pass over the same struct colliding with
+/// the module this invocation is about to build for itself.
+pub fn sibling_component_modules(skip_name: &str) -> Vec<Module> {
+    let key = compiling_crate_key();
+    let store = same_crate_components().lock().unwrap();
+    store
+        .iter()
+        .filter(|((crate_key, name), _)| crate_key == &key && name != skip_name)
+        .map(|(_, stored)| {
+            let item_struct: syn::ItemStruct = syn::parse_str(&stored.struct_src)
+                .expect("internal: failed to reparse a registered sibling component's struct text");
+            let (component_def, view_def) =
+                component_and_view_from_item_struct(stored.base.clone(), &item_struct)
+                    .expect("internal: failed to rebuild a registered sibling component");
+            Module {
+                path: Vec::new(),
+                uses: Vec::new(),
+                items: vec![ast::Item::Component(component_def), ast::Item::View(view_def)],
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

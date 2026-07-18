@@ -703,7 +703,31 @@ pub fn hit_test(root: &Rc<dyn UIElement>, available: Size, at: Point) -> Option<
 
 ハンドラ本体は`UIElementBase.routed_handlers`(イベント名で引く型消去レジストリ、`Rc<RefCell<HashMap<&'static str, Vec<Box<dyn Any>>>>>`)に登録される。`Button`のようなネイティブウィジェットは、自分自身の構築時点(まだ`NativeControl`ラッパーが存在しない、木構築はboundary-up)に自分自身の`routed_handlers`へ登録し、`elwindui-codegen`の`into_node_if_needed`がラップ時に同じ`Rc`を共有する。実際のネイティブクリック配線(`NSButton`のtarget-action等)は、木とネイティブハンドルの両方が同時にスコープ内にある唯一の場所である各バックエンドの`relayout`(`TreeHostView`/`TreeHostPanel`)が担う。
 
-現時点の実装範囲は、AppKitバックエンドの`Button`のみ(検証済み)。トンネリング(`Preview*`)、`Canvas`上のポインタイベント、WinUI3バックエンドでの実配線は将来の課題として残る。
+`#[routed]`は`on_click`(`Button`専用の実配線)に加え、共通`component UIElement`自身が宣言する9個のポインタ/タップイベント
+(`on_pointer_pressed`/`on_pointer_released`/`on_pointer_moved`/`on_pointer_entered`/`on_pointer_exited`/
+`on_pointer_wheel_changed`/`on_tapped`/`on_double_tapped`/`on_right_tapped`。ペイロードは
+`elwindui_core::input::PointerEventArgs`/`PointerWheelEventArgs`/`TappedEventArgs`)にも使われている。
+これらは`UIElement`が宣言する実フィールドなので、ビルトイン・ユーザー定義を問わずどのコンポーネントでも書ける——`on_click`と異なり
+`elwindui-codegen`側に属性名のハードコードは一切なく、フィールドの`fn(T)`宣言型(`callback_param_types`)から
+ペイロード型を機械的に導出する(`docs/elwindui_tool_codegen_design.md`の実装原則参照)。
+
+実配線は`elwindui_core::input::PointerDispatcher`(WinUI3の入力マネージャ+`GestureRecognizer`に相当)が担う。
+`elwindui_core::ui::hit_test`でヒットテストし`dispatch_routed`でバブルさせる点は`on_click`と同じだが、WinUI3に寄せて
+以下2点を実装している: ①Enter/Exitは祖先チェーン全体の差分diffで発火し(共通祖先は再発火しない、`dispatch_direct`という
+非バブリングの1要素向けディスパッチを使う)、②押下中は`PointerDispatcher`内部の暗黙キャプチャにより`Moved`/`Released`が
+押した要素へ再ヒットテストなしで届き続ける(要素外にドラッグしてから戻して離してもタップ扱いになる)。ただし公開の
+明示的ポインタキャプチャAPI(`CapturePointer`相当)と`PointerCaptureLost`は未実装。`hit_test`自体もWinUI3寄りに拡張済み:
+`ClipToBounds`が`true`の祖先だけがクリップを子孫へ伝播する(未設定ならクリップしない)、背景/塗りを持たない要素
+(`Layout`/`Control`系)は自分自身ではヒットしない(空きスペースは背後へパススルー)、`IsHitTestVisible`
+(`UIElement::hit_test_visible`)でサブツリーごとヒットテストから除外できる。
+
+現時点の実装範囲は、AppKitバックエンドの`Button`の実クリックに加え、`VerticalLayout`/`HorizontalLayout`/`Grid`/
+`Control`/`ContentControl`/`Shape`(`Rectangle`/`Ellipse`)/`TextBlock`等の自前描画系`UIElement`全般で上記9イベントが
+実配線済み(`TreeHostView`の`mouseDown:`/`mouseUp:`/`mouseMoved:`/`mouseDragged:`/`mouseEntered:`/`mouseExited:`/
+`scrollWheel:`/`updateTrackingAreas`)。`Button`/`TextArea`/`TabView`などのネイティブリーフは別NSViewとして重ねられた
+ネイティブアイランドのため、OSのマウスイベントはそのNSView自身が受け取り`TreeHostView`側には伝播しない——`.elwind`側の
+記述自体は静的エラーにならないが実際には発火しない。トンネリング(`Preview*`)、`Canvas`固有のポインタイベント、
+WinUI3バックエンドでの実配線は引き続き将来の課題として残る。
 
 ### 5.11 まとめ
 

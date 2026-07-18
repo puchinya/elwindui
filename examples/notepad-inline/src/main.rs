@@ -92,7 +92,6 @@ mod notepad_view_model {
     }
 }
 
-/*
 #[elwindui::component(inherits ContentControl)]
 struct CustomCheckBox {
     #[prop(default = false)]
@@ -101,7 +100,7 @@ struct CustomCheckBox {
     label: String,
 
     body: view! {
-        on_tapped: || => { is_checked = !is_checked }
+        on_tapped: |e| { is_checked = !is_checked }
         HorizontalLayout {
             if is_checked {
                 Rectangle {
@@ -120,10 +119,10 @@ struct CustomCheckBox {
                     stroke_width: 1.0
                 }
             }
-            TextBlock { text: label }
+            TextBlock { text: label, color: "#ffffff" }
         }
     }
-}*/
+}
 
 #[elwindui::component(inherits Window)]
 struct NotepadWindow {
@@ -149,6 +148,9 @@ struct NotepadWindow {
                 Button {
                     text: t!("notepad-menu-open")
                     on_click: vm.open
+                }
+                CustomCheckBox {
+                    label: "ABC"
                 }
             }
 

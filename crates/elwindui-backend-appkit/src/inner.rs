@@ -4,7 +4,10 @@
 //! of genuinely AppKit-specific complexity (NSTextView delegates, tab strip bookkeeping, ...) so
 //! `native_ui.rs` stays a thin, uniform "implement the core-side trait by delegating" layer.
 
-use elwindui_core::base::AsAny;
+use elwindui_core::base::{AsAny, Point};
+use elwindui_core::input::{
+    KeyModifiers, MouseButton, PointerDispatcher, RawPointerEvent, RawPointerEventKind,
+};
 use elwindui_core::painter::{RenderCommand, RenderGroup};
 use elwindui_core::ui::{RelayoutHost, UIElementExt, layout_root};
 use objc2::rc::Retained;
@@ -13,8 +16,9 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSMenu, NSMenuItem,
-    NSScreen, NSScrollView, NSStackView, NSTextDelegate, NSTextView, NSTextViewDelegate,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView, NSTextDelegate,
+    NSTextView, NSTextViewDelegate, NSTrackingArea, NSTrackingAreaOptions,
     NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::{CGColor, CGPath};
@@ -26,6 +30,17 @@ use objc2_quartz_core::{
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+
+/// `NSEvent.modifierFlags()` -> `elwindui_core::input::KeyModifiers`.
+fn nsevent_modifiers(event: &NSEvent) -> KeyModifiers {
+    let flags = event.modifierFlags();
+    KeyModifiers {
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        control: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        meta: flags.contains(NSEventModifierFlags::Command),
+    }
+}
 
 pub(crate) fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().expect("elwindui-backend-appkit must run on the main thread")
@@ -186,6 +201,17 @@ pub struct TreeHostIvars {
     /// wrapping a weak reference back to this same view, without needing a `Retained<Self>` in
     /// hand at that point.
     weak_self: RefCell<objc2::rc::Weak<TreeHostView>>,
+    /// Turns this view's own raw `NSEvent`s into `elwindui_core::ui::hit_test`/`dispatch_routed`
+    /// calls against `tree` — see `elwindui_core::input::PointerDispatcher`'s own doc comment.
+    /// `docs/elwindui_gui_framework_design.md` §5.10's currently-implemented range: self-drawn
+    /// elements only, since a native subview (`Button`/`TextArea`/`TabView`, laid out as its own
+    /// `native_containers` island) receives the OS mouse event directly via ordinary AppKit
+    /// hit-testing, never reaching this view's own overrides below at all.
+    pointer: PointerDispatcher,
+    /// The single `NSTrackingArea` this view keeps registered for itself, so `updateTrackingAreas`
+    /// can remove the previous one before installing a freshly-sized replacement rather than
+    /// accumulating a new one on every resize.
+    tracking_area: RefCell<Option<Retained<NSTrackingArea>>>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
@@ -237,6 +263,89 @@ define_class!(
         fn is_flipped(&self) -> bool {
             true
         }
+
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), updateTrackingAreas];
+            }
+            if let Some(old) = self.ivars().tracking_area.borrow_mut().take() {
+                self.removeTrackingArea(&old);
+            }
+            let area = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    NSTrackingArea::alloc(),
+                    self.bounds(),
+                    NSTrackingAreaOptions::MouseEnteredAndExited
+                        | NSTrackingAreaOptions::MouseMoved
+                        | NSTrackingAreaOptions::ActiveInKeyWindow
+                        | NSTrackingAreaOptions::InVisibleRect,
+                    Some(self as &AnyObject),
+                    None,
+                )
+            };
+            self.addTrackingArea(&area);
+            *self.ivars().tracking_area.borrow_mut() = Some(area);
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.dispatch_pointer(event, RawPointerEventKind::Pressed(MouseButton::Left));
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            self.dispatch_pointer(event, RawPointerEventKind::Released(MouseButton::Left));
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            self.dispatch_pointer(event, RawPointerEventKind::Pressed(MouseButton::Right));
+        }
+
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &NSEvent) {
+            self.dispatch_pointer(event, RawPointerEventKind::Released(MouseButton::Right));
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            self.dispatch_pointer(event, RawPointerEventKind::Moved);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.dispatch_pointer(event, RawPointerEventKind::Moved);
+        }
+
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, event: &NSEvent) {
+            self.dispatch_pointer(event, RawPointerEventKind::Moved);
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &NSEvent) {
+            self.dispatch_pointer(event, RawPointerEventKind::Moved);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) {
+            // A plain `Moved` re-hit-tests from `event`'s own (by now outside this view's bounds)
+            // position, which naturally misses everything — `PointerDispatcher`'s hover diffing
+            // then exits every element in the last-known hover chain on its own.
+            self.dispatch_pointer(event, RawPointerEventKind::Moved);
+        }
+
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            self.dispatch_pointer(
+                event,
+                RawPointerEventKind::WheelChanged {
+                    delta_x: event.scrollingDeltaX() as f32,
+                    delta_y: event.scrollingDeltaY() as f32,
+                },
+            );
+        }
     }
 );
 
@@ -248,12 +357,54 @@ impl TreeHostView {
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
+            pointer: PointerDispatcher::new(),
+            tracking_area: RefCell::new(None),
         };
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =
             unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
         *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
         this
+    }
+
+    /// Converts `event`'s own position/modifiers/timestamp and feeds it, together with `kind`, to
+    /// `PointerDispatcher::handle` against whatever tree this view currently hosts — the single
+    /// entry point every `mouseDown:`/`mouseUp:`/`mouseMoved:`/... override above funnels through.
+    /// A no-op if no tree is hosted yet.
+    fn dispatch_pointer(&self, event: &NSEvent, kind: RawPointerEventKind) {
+        // `isFlipped` is `true` (see that override above), so this is already this view's own
+        // top-left-origin local space — the same space `elwindui_core::ui::hit_test`'s `at`
+        // expects, matching `elwindui_core::ui::layout_root`'s own coordinate convention.
+        let location = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.dispatch_pointer_at(
+            Point {
+                x: location.x as f32,
+                y: location.y as f32,
+            },
+            nsevent_modifiers(event),
+            kind,
+            event.timestamp(),
+        );
+    }
+
+    fn dispatch_pointer_at(
+        &self,
+        position: Point,
+        modifiers: KeyModifiers,
+        kind: RawPointerEventKind,
+        timestamp: f64,
+    ) {
+        let tree = self.ivars().tree.borrow();
+        let Some(tree) = tree.as_ref() else { return };
+        self.ivars().pointer.handle(
+            tree,
+            RawPointerEvent {
+                kind,
+                position,
+                modifiers,
+                timestamp_ms: timestamp * 1000.0,
+            },
+        );
     }
 
     /// Replaces this host's entire content, discarding whatever native subviews were there before.

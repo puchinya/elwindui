@@ -8,27 +8,71 @@
 // it: none of them implement `elwindui_core::ui::UIElement` at all (see their own comments).
 // Common properties every element supports regardless of its own concrete type
 // (`elwindui_core::ui::UIElement`, ui.rs — `margin`/`horizontal_alignment`/`vertical_alignment`/
-// `visibility`/`width`/`height`/`min_width`/`min_height`/`max_width`/`max_height`).
+// `visibility`/`width`/`height`/`min_width`/`min_height`/`max_width`/`max_height`/
+// `hit_test_visible`), plus a common set of `#[routed]` pointer/tap events
+// (docs/elwindui_gui_framework_design.md §5.10, modeled on WinUI3's `UIElement` pointer events).
 // Declared here (rather than left for `elwindui-codegen` to special-case by literal attribute name,
-// as `margin` used to be) so every component — builtin or user-defined — picks them
-// up for free through the same inherited-field machinery any other inherited param already uses,
-// with no per-attribute-name hardcoding in the compiler. `horizontal_alignment`/`vertical_alignment`/
-// `visibility` are enum-typed the same way `TextBlock.text_alignment`/`Grid`'s `rows`/`columns`
-// already are — set with a fully-qualified path expression
+// as `margin` used to be, and as `on_click` still is — see that field's own doc comment below) so
+// every component — builtin or user-defined — picks them up for free through the same
+// inherited-field machinery any other inherited param already uses, with no per-attribute-name
+// hardcoding in the compiler: `elwindui-codegen` discovers these purely from this component's own
+// declared field types (`#[routed]` + the field's `fn(T)` sugar), the same way it already discovers
+// `TabView.on_select`'s `usize` payload — see `callback_param_types`. `horizontal_alignment`/
+// `vertical_alignment`/`visibility` are enum-typed the same way `TextBlock.text_alignment`/
+// `Grid`'s `rows`/`columns` already are — set with a fully-qualified path expression
 // (`elwindui_core::layout::HorizontalAlignment::Center`), no new DSL literal syntax needed.
 #[embedded]
 #[abstract]
 component UIElement {
     margin: Option<f32>,
-    horizontal_alignment: Option<elwindui_core::layout::HorizontalAlignment>,
-    vertical_alignment: Option<elwindui_core::layout::VerticalAlignment>,
-    visibility: Option<elwindui_core::layout::Visibility>,
+    horizontal_alignment: Option<elwindui::core::layout::HorizontalAlignment>,
+    vertical_alignment: Option<elwindui::core::layout::VerticalAlignment>,
+    visibility: Option<elwindui::core::layout::Visibility>,
     width: Option<f32>,
     height: Option<f32>,
     min_width: Option<f32>,
     min_height: Option<f32>,
     max_width: Option<f32>,
     max_height: Option<f32>,
+
+    // WinUI3's `IsHitTestVisible` — `false` excludes this element *and its whole subtree* from
+    // `elwindui_core::ui::hit_test` while leaving layout/rendering untouched. See
+    // `elwindui_core::ui::UIElement::hit_test_visible`'s own doc comment.
+    hit_test_visible: Option<bool>,
+
+    // Pointer/tap routed events. Every `PointerEventArgs`/`PointerWheelEventArgs`/`TappedEventArgs`
+    // payload's `position` is in the hosting tree's own root-relative coordinate space — see
+    // `elwindui_core::input::PointerEventArgs`'s own doc comment. Currently only fired for
+    // self-drawn elements on the AppKit backend (`Layout`/`Control`/`Shape`/`TextBlock` and their
+    // subclasses); native leaves (`Button`/`TextArea`/`TabView`) don't receive them — see
+    // `docs/elwindui_gui_framework_design.md` §5.10.
+    // `elwindui::core::input::..` (the facade path — never the bare `elwindui_core::` crate name):
+    // these payload types are spliced by `elwindui-codegen` directly into generated
+    // `register_routed_handler::<..>` turbofish output (`emit_routed_registration`), the same
+    // reason `horizontal_alignment`/`vertical_alignment`/`visibility` above are also declared via
+    // `elwindui::core::layout::..` rather than the bare crate name — every one of `UIElement`'s own
+    // fields can now end up embedded verbatim into a consumer's generated struct (a deferred
+    // `Option<T>` field's storage type, `resolve_effective_fields`'s exemption for fields declared
+    // directly on `UIElement`), not just used for internal bookkeeping — see this crate's own doc
+    // comment on why generated code must always go through the `elwindui::` facade.
+    #[routed]
+    on_pointer_pressed: fn(elwindui::core::input::PointerEventArgs),
+    #[routed]
+    on_pointer_released: fn(elwindui::core::input::PointerEventArgs),
+    #[routed]
+    on_pointer_moved: fn(elwindui::core::input::PointerEventArgs),
+    #[routed]
+    on_pointer_entered: fn(elwindui::core::input::PointerEventArgs),
+    #[routed]
+    on_pointer_exited: fn(elwindui::core::input::PointerEventArgs),
+    #[routed]
+    on_pointer_wheel_changed: fn(elwindui::core::input::PointerWheelEventArgs),
+    #[routed]
+    on_tapped: fn(elwindui::core::input::TappedEventArgs),
+    #[routed]
+    on_double_tapped: fn(elwindui::core::input::TappedEventArgs),
+    #[routed]
+    on_right_tapped: fn(elwindui::core::input::TappedEventArgs),
 }
 
 // Every layout-container virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Grid`) — mirrors

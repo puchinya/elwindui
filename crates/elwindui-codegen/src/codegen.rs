@@ -633,18 +633,40 @@ pub(crate) fn resolve_effective_fields<'m>(
     let Some(base) = c.base.as_deref() else {
         return c.fields.clone();
     };
-    if base == "NativeControl" {
-        return c.fields.clone();
-    }
     let Some((base_module, base_c)) = find_component_and_module(from, base, modules) else {
         return c.fields.clone();
     };
     let base_fields = resolve_effective_fields(base_module, base_c, modules);
     let base_fields: Vec<FieldDef> = match find_view(from, &c.name) {
-        Some(view) => base_fields
-            .into_iter()
-            .filter(|f| view_references_bare_name(view, &f.name))
-            .collect(),
+        // `#[routed]` fields (docs/elwindui_gui_framework_design.md §5.10, e.g. `UIElement`'s own
+        // `on_tapped`/`on_pointer_pressed`/...), and every field declared directly on the root
+        // `UIElement` component itself (`margin`/`width`/`height`/... — `builtins.elwind`'s own doc
+        // comment on that declaration: "every component — builtin or user-defined — picks them up
+        // for free ... with no per-attribute-name hardcoding in the compiler"), are exempt from the
+        // bare-reference requirement below: both apply directly to whatever concrete node this
+        // component constructs (`emit_wiring`'s `is_routed` branch for the former,
+        // `build_component_args`/`build_component_setters`/`build_component_optional_setters`'s
+        // generic per-`param_fields` setter emission for the latter) regardless of whether the view
+        // body happens to mention them by name — unlike an ordinary value field, there is nothing
+        // for the view to "forward" in the first place, so requiring a bare reference would just
+        // silently drop them for any component with its own view (in practice nearly every real
+        // one). The `UIElement`-membership check is a plain name lookup against its own (not
+        // recursively flattened) `ComponentDef::fields` — resolved the same way any other
+        // `inherits` target already is in this function, so no field name is ever hardcoded here.
+        Some(view) => {
+            let common_fields: HashSet<&str> =
+                find_component_and_module(from, "UIElement", modules)
+                    .map(|(_, ui)| ui.fields.iter().map(|f| f.name.as_str()).collect())
+                    .unwrap_or_default();
+            base_fields
+                .into_iter()
+                .filter(|f| {
+                    f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                        || common_fields.contains(f.name.as_str())
+                        || view_references_bare_name(view, &f.name)
+                })
+                .collect()
+        }
         None => base_fields,
     };
     let own_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
@@ -2423,16 +2445,25 @@ fn generate_view(
         mutable_own_fields: HashSet::new(),
     };
 
+    // `on_*`-named fields are excluded here for the same reason `TypeInfo::param_fields` (built
+    // separately, in `build_symbol_table`) already excludes them: a `#[routed]` field (`UIElement`'s
+    // own `on_tapped`/`on_pointer_pressed`/... — inherited by every component through
+    // `resolve_effective_fields`, not just ones that declare it directly, e.g. `Button.on_click`) is
+    // wired through the `on_x: ..` DSL attribute + `register_routed_handler` (`emit_wiring`'s own
+    // `is_routed` branch), never as a positional constructor argument — before this filter existed
+    // here, every `has_view` composed component's `new(..)` silently gained 9 required
+    // `fn(PointerEventArgs)`-typed parameters nothing ever supplied, breaking every existing call
+    // site the moment these fields became inheritable (`RoundedPanel`/`DocumentView`, e.g.).
     let param_names: Vec<syn::Ident> = component
         .fields
         .iter()
-        .filter(|f| f.initializer.is_none())
+        .filter(|f| f.initializer.is_none() && !f.name.starts_with("on_"))
         .map(|f| format_ident!("{}", f.name))
         .collect();
     let param_types: Vec<syn::Type> = component
         .fields
         .iter()
-        .filter(|f| f.initializer.is_none())
+        .filter(|f| f.initializer.is_none() && !f.name.starts_with("on_"))
         .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
         .collect();
 
@@ -2574,6 +2605,26 @@ fn generate_view(
         plan.last_mut()
             .expect("plan_element always pushes a node for the root")
             .binding = format_ident!("base");
+    }
+
+    // A shape-composition `ContentControl` root's content child must also survive past
+    // construction: `new()`'s post-construction `this.set_content(this.<content_binding>.clone())`
+    // (below, `content_attach_stmt`) needs to reach it as a real `self.<binding>` field — but
+    // `plan_element`'s ordinary `is_root || !attributes.is_empty()` rule leaves a bare child with no
+    // attributes of its own (e.g. `HorizontalLayout { .. }`, just nested children, no top-level
+    // attribute) unstored, since nothing about *that* node alone says it needs to live past
+    // `construct()`. Forced here — before the `struct_fields`/`field_inits` loop below reads
+    // `node.stored` — for the same reason `is_host_composition`'s rename just above runs this early.
+    if is_shape_composition && resolved_root.type_path == "ContentControl" {
+        if let Some(content_binding) = plan
+            .last()
+            .and_then(|root| root.child_bindings.first())
+            .map(|(binding, _)| binding.clone())
+        {
+            if let Some(content_node) = plan.iter_mut().find(|n| n.binding == content_binding) {
+                content_node.stored = true;
+            }
+        }
     }
 
     // `is_shape_composition`'s own analog of `is_template_composition`'s `forward_param_names`:
@@ -3257,8 +3308,12 @@ fn generate_view(
             if node.dynamic.is_some() {
                 continue;
             }
-            emit_wiring(node, &ctx, from, table, &mut wiring_stmts);
-            emit_resync(node, &ctx, from, table, None, &mut resync_stmts);
+            // See `emit_wiring`'s/`emit_resync`'s own `self_is_node` doc comment: only the plan's
+            // own root can be a shape/host-composition root with no separate `self.#binding` field.
+            let self_is_node = (is_shape_composition || is_host_composition)
+                && node.binding == plan[root_index].binding;
+            emit_wiring(node, &ctx, from, table, &mut wiring_stmts, self_is_node);
+            emit_resync(node, &ctx, from, table, None, &mut resync_stmts, self_is_node);
         }
     }
 
@@ -3419,9 +3474,21 @@ fn generate_view(
                     table,
                 )
             };
+            // `.children()` (called inside `#body`, when the parent is a `Layout` family type —
+            // `VerticalLayout`/`HorizontalLayout`/`Grid`, always a virtual builtin) is `LayoutExt`'s
+            // own default method, inherited (not redeclared) by each of those — `#parent_ext` alone
+            // isn't enough to bring a default *ancestor* trait method into scope, the same reason
+            // `emit_wiring`'s routed-handler registration needs its own explicit `UIElementExt`
+            // import. Not needed for `TabView` (the only other `content_field_is_list` type), whose
+            // own `children()` is declared directly on `TabViewExt` — gated instead of unconditional
+            // to avoid an always-unused import there.
+            let layout_children_use = parent_info
+                .is_some_and(|i| i.is_virtual_builtin)
+                .then(|| quote! { use elwindui::core::ui::LayoutExt as _; });
             Some(quote! {
                 {
                     use elwindui::core::ui::#parent_ext as _;
+                    #layout_children_use
                     #body
                 }
             })
@@ -3591,8 +3658,15 @@ fn generate_view(
         Some(name) => base_trait_path(name),
         None => TokenStream::new(),
     };
-    let property_resync_methods: TokenStream =
-        mark_inherent(property_resync_methods_for(&bind_owners, &plan, &ctx, from, table, true));
+    let property_resync_methods: TokenStream = mark_inherent(property_resync_methods_for(
+        &bind_owners,
+        &plan,
+        &ctx,
+        from,
+        table,
+        true,
+        is_shape_composition || is_host_composition,
+    ));
     let component_property_resync_methods: TokenStream = component_property_variants
         .iter()
         .map(|property| {
@@ -3600,6 +3674,8 @@ fn generate_view(
             let property_name = property.to_string();
             let mut statements = TokenStream::new();
             for node in &plan {
+                let self_is_node = (is_shape_composition || is_host_composition)
+                    && node.binding == plan[root_index].binding;
                 emit_resync(
                     node,
                     &ctx,
@@ -3607,6 +3683,7 @@ fn generate_view(
                     table,
                     Some(("", &property_name)),
                     &mut statements,
+                    self_is_node,
                 );
             }
             quote! {
@@ -3652,6 +3729,7 @@ fn generate_view(
             from,
             table,
             false,
+            is_shape_composition || is_host_composition,
         ));
         let component_property_resync_methods = mark_inherent(component_property_resync_methods);
         let own_computed_recompute_methods = mark_inherent(own_computed_recompute_methods);
@@ -5257,6 +5335,11 @@ fn emit_construction(
         let trait_use = builtin_trait_use(&node.type_path, Some(info));
         out.extend(quote! {
             #trait_use
+            // See the matching `use` in this function's `else` branch below — a field inherited
+            // from `UIElement` itself (`margin`/`width`/`height`/...) needs `UIElementExt` in scope
+            // for `setters` (below) to call its shared-trait setter.
+            #[allow(unused_imports)]
+            use elwindui::core::ui::UIElementExt as _;
             let #binding = #type_ident::new();
             #(#setters)*
         });
@@ -5269,6 +5352,14 @@ fn emit_construction(
         let args = build_component_args(node, ctx, from, table, info, plan);
         let optional_setters = build_component_optional_setters(node, ctx, from, table, info);
         out.extend(quote! {
+            // A deferred field inherited from `UIElement` itself (`margin`/`width`/`height`/... —
+            // `resolve_effective_fields`'s own doc comment) is set through `UIElementExt`, a shared
+            // trait method rather than an inherent one — needs this in scope wherever
+            // `optional_setters` (below) calls one. Harmless when unused (every other deferred
+            // field's own setter is inherent), same as `builtin_trait_use`'s own unconditional
+            // `#[allow(unused_imports)]`.
+            #[allow(unused_imports)]
+            use elwindui::core::ui::UIElementExt as _;
             let #binding = #type_ident::new(#(#args),*);
             #(#optional_setters)*
         });
@@ -5358,6 +5449,32 @@ fn is_settable_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
                 .effective_fields
                 .iter()
                 .any(|f| f.name == name && f.kind == FieldKind::Prop))
+}
+
+/// Whether `name` is a `has_view` target's own field carrying a plain default expression
+/// (`FieldKind::Prop`, `Initializer::Expr(..)` — e.g. `#[prop(default = false)]`/`label: String =
+/// "".to_string()`) — as opposed to a `#[param]`/no-initializer field (already in `param_fields`),
+/// a `#[computed]`/`bind!`-initialized field (never independently settable from outside), or an
+/// action. Such a field has an initializer, so `param_fields` (only ever "every no-initializer
+/// field") never includes it, and unlike an `Option<..>`-typed deferred field
+/// (`is_deferred_field`) it previously had **no** way to be overridden from a use site at all —
+/// its own declared default was the only value it could ever have, even though `generate_view`
+/// already gives it a real `set_<name>` (the same one `#[computed]`'s own recompute cascade and a
+/// same-component bare-identifier reference both call). `build_component_optional_setters` (below)
+/// closes that gap: a use site providing an explicit attribute for one of these now gets a real
+/// post-construction `set_<name>(value)` call, exactly like a deferred `Option<..>` field already
+/// does. Gated on `!info.is_builtin` for the same reason `is_settable_field` is — this crate's own
+/// embedded `builtins.elwind` never declares a defaulted `Prop` field today (only `#[attached]`
+/// fields have a `= expr` default, a wholly separate mechanism — `emit_attached_setters`), but
+/// nothing here should assume a hand-written native's own defaulted field (if one existed) works
+/// this same way.
+fn is_defaulted_settable_field(info: &TypeInfo, name: &str) -> bool {
+    !info.is_builtin
+        && info.effective_fields.iter().any(|f| {
+            f.name == name
+                && f.kind == FieldKind::Prop
+                && matches!(f.initializer, Some(Initializer::Expr(_)))
+        })
 }
 
 /// Evaluates a resolved user-component node's own attributes into the positional argument list its
@@ -5618,13 +5735,15 @@ fn build_component_setters(
     setters
 }
 
-/// Builds trailing `.set_<field>(value)` calls for
-/// a `has_view`/plain component's own *deferred* `Option<T>` fields (`is_deferred_field`), used
-/// alongside `build_component_args`'s now-shrunk positional list (see `emit_construction`'s
-/// non-`is_hand_written_native` branch). Only ever emits a call when this use site actually
-/// supplies a value for the field — an absent one leaves that field's own
-/// `RefCell::new(None)`/`Cell::new(None)` default in place (`generate_view`/`generate_component`'s
-/// own field-splitting doc comment).
+/// Builds trailing `.set_<field>(value)` calls for a `has_view`/plain component's own *deferred*
+/// `Option<T>` fields (`is_deferred_field`, used alongside `build_component_args`'s now-shrunk
+/// positional list — see `emit_construction`'s non-`is_hand_written_native` branch) *and* its own
+/// defaulted `Prop` fields (`is_defaulted_settable_field` — a field with a plain default expression,
+/// e.g. `#[prop(default = false)]`, which never becomes a positional `new(..)` argument at all).
+/// Only ever emits a call when this use site actually supplies a value for the field — an absent
+/// one leaves that field's own already-applied default (`RefCell::new(None)`/`Cell::new(None)` for
+/// a deferred field, or the declared default expression itself for a defaulted one) in place
+/// (`generate_view`/`generate_component`'s own field-splitting doc comment).
 fn build_component_optional_setters(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -5633,20 +5752,30 @@ fn build_component_optional_setters(
     info: &TypeInfo,
 ) -> Vec<TokenStream> {
     let binding = &node.binding;
+    let deferred_fields = info
+        .param_fields
+        .iter()
+        .filter(|(name, ty)| is_deferred_field(info, name, ty))
+        .map(|(name, ty)| (name.as_str(), ty.as_str()));
+    let defaulted_fields = info
+        .effective_fields
+        .iter()
+        .filter(|f| is_defaulted_settable_field(info, &f.name))
+        .map(|f| (f.name.as_str(), f.ty.as_str()));
+
     let mut setters = Vec::new();
-    for (name, ty) in &info.param_fields {
-        if !is_deferred_field(info, name, ty) {
-            continue;
-        }
+    for (name, ty) in deferred_fields.chain(defaulted_fields) {
         let setter_ident = format_ident!("set_{}", name);
-        // `is_deferred_field` only ever returns `true` for an `Option<..>`-typed field, so
-        // `inner_ty` here is always the unwrapped inner type.
+        // A deferred field is always `Option<..>` (`is_deferred_field`'s own guard); a defaulted
+        // field (`is_defaulted_settable_field`) is whatever plain type it was declared with —
+        // `strip_option` is a no-op for the latter, so `inner_ty` is always the right type either
+        // way.
         let (inner_ty, _) = strip_option(ty);
         let value = match find_attr(node, name) {
             Some(ViewExpr::Element(_)) => {
                 let (nested_binding, nested_ty) = node
                     .element_attr_bindings
-                    .get(name.as_str())
+                    .get(name)
                     .unwrap_or_else(|| panic!("planned element binding for `{name}` must exist"));
                 if inner_ty.contains("dyn UIElement") {
                     into_node_if_needed(quote! { #nested_binding }, nested_ty, from, table)
@@ -5705,17 +5834,15 @@ fn build_component_value(
     quote! { #construct_path(#(#args),*) }
 }
 
-/// Emits post-construction `binding.as_ui_element().set_margin(..)`/
-/// `set_attached::<T>(..)` calls (docs/elwindui_spec.md 付録H.2.1a) for whichever of these common
-/// attributes `node` actually specifies — shared by `emit_virtual_construction` (virtual builtins)
-/// and `emit_construction`'s native-control-leaf branch (`Button`/`TextArea`/`TabView` — see
-/// `TypeInfo::is_native_control_leaf`). `UIElementImpl`'s fields are all interior-mutable
-/// (`Cell`/`RefCell`) precisely so this can run *after* `Type::new(..)` returns rather than needing
-/// every `create_xxx`/hand-written builtin constructor to accept a `base: UIElementImpl` argument —
-/// a use site left with none of these attributes emits nothing at all, leaving
-/// `UIElementImpl::default()` in place. Deliberately does *not* handle the generic "any element can
-/// catch a routed `on_click`" attribute — see `emit_generic_on_click_routing`, a separate step for
-/// exactly that.
+/// Emits post-construction `set_attached::<T>(..)` calls (docs/elwindui_spec.md 付録H.2.1a) for
+/// whichever attached properties `node` actually specifies — shared by `emit_virtual_construction`
+/// (virtual builtins) and `emit_construction`'s native-control-leaf branch (`Button`/`TextArea`/
+/// `TabView` — see `TypeInfo::is_native_control_leaf`). `margin`/`width`/`height`/... (every other
+/// common `UIElement` attribute) no longer need a separate call here — they're ordinary
+/// `param_fields` members now (`resolve_effective_fields`'s own exemption for fields declared
+/// directly on `UIElement`), so `build_component_setters`/`build_virtual_value`'s own generic,
+/// field-name-agnostic per-field loops already emit their setter calls. A use site with no attached
+/// properties at all emits nothing.
 fn emit_common_ui_element_setters(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -5723,47 +5850,12 @@ fn emit_common_ui_element_setters(
     table: &SymbolTable,
     binding: &TokenStream,
 ) -> TokenStream {
-    // Whether `expr` is a bare 1-segment reference to one of *this* component's own `#[param]`
-    // fields that's already `Option<..>`-typed (e.g. `ContentControl`'s own `padding: Option<f32>`
-    // forwarded as `Control { padding: padding }`) — as opposed to a plain value (a literal, a
-    // required field, a `vm.field`-shaped bind path, ...) that's already the setter's own plain
-    // argument type as-is.
-    let is_own_option_field = |expr: &ViewExpr| match expr {
-        ViewExpr::Path(segments) => match segments.as_slice() {
-            [only] => ctx
-                .own_fields
-                .get(only)
-                .is_some_and(|ty| ty.starts_with("Option<")),
-            _ => false,
-        },
-        _ => false,
-    };
-    let mut out = TokenStream::new();
-    // `margin` is settable today (the view-expression parser has numeric-literal support);
-    // `horizontal_alignment`/`vertical_alignment` have no enum-variant-literal syntax yet, so they
-    // stay at `UIElementImpl::default()`'s `Stretch` (matching every other element's default).
-    if let Some(expr) = find_attr(node, "margin") {
-        let value = if is_own_option_field(expr) {
-            let inner = emit_expr(expr, ctx, &EmitMode::Construction);
-            quote! { (#inner).unwrap_or(0.0) }
-        } else {
-            emit_expr(expr, ctx, &EmitMode::Construction)
-        };
-        out.extend(quote! { #binding.as_ui_element().set_margin(#value); });
-    }
-    out.extend(emit_attached_setters(
-        node,
-        ctx,
-        from,
-        table,
-        &EmitMode::Construction,
-        binding,
-    ));
-    // `.as_ui_element()` is a trait method (`elwindui::core::ui::UIElement`), not an inherent one — needs
-    // the trait in scope for dot-call resolution wherever `out` ends up spliced, regardless of
-    // whatever `use`s the surrounding generated function happens to have (mirrors the parent-wiring
-    // `use elwindui::core::ui::UIElementExt as _;` guard elsewhere in this module). A no-op (empty
-    // `out`) skips it — no `.as_ui_element()` call to guard.
+    let out = emit_attached_setters(node, ctx, from, table, &EmitMode::Construction, binding);
+    // `.as_ui_element()` (called inside `emit_attached_setters`'s own `set_attached::<T>(..)`) is a
+    // trait method (`elwindui::core::ui::UIElementExt`), not an inherent one — needs the trait in
+    // scope here since `binding` is a concrete type in both of this function's callers (never a
+    // `dyn UIElementExt` trait object, which wouldn't need the import at all). A no-op (empty `out`)
+    // skips it — no `.as_ui_element()` call to guard.
     if out.is_empty() {
         out
     } else {
@@ -5804,6 +5896,73 @@ fn emit_generic_on_click_routing(
     }
 }
 
+/// Emits `<binding>.register_routed_handler::<T>(name, ..)` for one `#[routed]` field —
+/// `param_types` (the field's own declared `fn(T0, ..)` sugar, already parsed by
+/// `callback_param_types`) is the *only* source of `T`; this function never hardcodes an event
+/// name or payload type of its own. Empty `param_types` -> `T = ()`, matching a bare expression or
+/// zero-arg closure (`on_click`'s own established shape). Exactly one -> `T` is that declared
+/// type, and `expr` must be an explicit 1-parameter closure (`on_tapped: |e| ...`) — matching
+/// `TabView.on_select: fn(usize)`'s own established convention for typed callback fields (see the
+/// non-routed branch in `emit_wiring`, just below this function's own caller). `binding` is an
+/// already-valid receiver expression (a local `widget` variable `emit_wiring`'s own `is_routed`
+/// branch already bound, alongside the `this`-capturing wrapper block that binding's closure body
+/// may itself need — this function doesn't manage any of that, only the registration call itself).
+fn emit_routed_registration(
+    name: &str,
+    expr: &ViewExpr,
+    param_types: &[syn::Type],
+    ctx: &ViewCtx,
+    mode: &EmitMode,
+    binding: &TokenStream,
+) -> TokenStream {
+    match param_types {
+        [] => {
+            let call = match expr {
+                ViewExpr::Closure { params, body } if params.is_empty() => {
+                    emit_on_event_closure_body(body, params, ctx, mode)
+                }
+                ViewExpr::Closure { params, .. } => panic!(
+                    "`{name}` is #[routed] and takes no parameters, but a closure with {} \
+                     parameter(s) was given",
+                    params.len()
+                ),
+                other => emit_expr(other, ctx, mode),
+            };
+            quote! {
+                #binding.register_routed_handler::<()>(#name, Box::new(move |_: &(), _args: &elwindui::core::input::RoutedEventArgs| {
+                    #call;
+                }));
+            }
+        }
+        [payload_ty] => {
+            let ViewExpr::Closure { params, body } = expr else {
+                panic!(
+                    "`{name}` is #[routed] and declares 1 parameter; write an explicit closure, \
+                     e.g. `{name}: |e| ...`"
+                );
+            };
+            if params.len() != 1 {
+                panic!(
+                    "`{name}`'s closure takes {} parameter(s) but the field declares 1",
+                    params.len()
+                );
+            }
+            let param_ident = format_ident!("{}", params[0]);
+            let call = emit_on_event_closure_body(body, params, ctx, mode);
+            quote! {
+                #binding.register_routed_handler::<#payload_ty>(#name, Box::new(move |__payload: &#payload_ty, _args: &elwindui::core::input::RoutedEventArgs| {
+                    let #param_ident = *__payload;
+                    #call;
+                }));
+            }
+        }
+        _ => panic!(
+            "`{name}` is #[routed] with {} parameters — routed fields support at most 1 today",
+            param_types.len()
+        ),
+    }
+}
+
 /// Builds an `Rc<ConcreteImpl>` value for a virtual builtin (`VerticalLayout`/`HorizontalLayout`/
 /// `TextBlock`/`Control`/`Grid`/`Shape` — see `is_virtual_builtin`) directly from its own
 /// attributes, instead of calling a positional `Type::new(args)`. Kept at its own concrete type
@@ -5821,7 +5980,8 @@ fn emit_virtual_construction(
 ) {
     let binding = &node.binding;
     let value = build_virtual_value(node, ctx, from, table);
-    let concrete_ty = concrete_type_ident(&node.type_path, table.resolve(from, &node.type_path));
+    let info = table.resolve(from, &node.type_path);
+    let concrete_ty = concrete_type_ident(&node.type_path, info);
     out.extend(quote! {
         let #binding: std::rc::Rc<#concrete_ty> = #value;
     });
@@ -5880,10 +6040,12 @@ fn build_virtual_value(
     let mut setters = TokenStream::new();
     let mut needs_type_trait = false;
     let mut needs_ui_element_trait = false;
+    // Whether any field set below is one of `UIElement`'s own (`margin`/`width`/`height`/... —
+    // `common_field_names`, already resolved generically above) rather than this type's own —
+    // its setter lives on `UIElementExt`, not `#ext_ident` (`{type_path}Ext`), so it needs its own
+    // trait import.
+    let mut needs_ui_element_ext = false;
     for (name, ty) in &info.param_fields {
-        if common_field_names.contains(name.as_str()) {
-            continue;
-        }
         let setter = format_ident!("set_{name}");
         let is_content = info.content_field.as_deref() == Some(name.as_str());
         if is_content && ty == "UIElementCollection" {
@@ -5924,7 +6086,11 @@ fn build_virtual_value(
         } else {
             value
         };
-        needs_type_trait = true;
+        if common_field_names.contains(name.as_str()) {
+            needs_ui_element_ext = true;
+        } else {
+            needs_type_trait = true;
+        }
         setters.extend(quote! { __v.#setter(#value); });
     }
 
@@ -5935,11 +6101,14 @@ fn build_virtual_value(
             use elwindui::core::ui::LayoutExt as _;
         }
     });
+    let ui_element_ext_use =
+        needs_ui_element_ext.then(|| quote! { use elwindui::core::ui::UIElementExt as _; });
 
     quote! {
         {
             #type_trait_use
             #ui_element_trait_use
+            #ui_element_ext_use
             let __v = elwindui::core::ui::#type_ident::new();
             #setters
             __v
@@ -6004,6 +6173,7 @@ fn emit_wiring(
     from: &Module,
     table: &SymbolTable,
     out: &mut TokenStream,
+    self_is_node: bool,
 ) {
     if !node.stored {
         return;
@@ -6011,6 +6181,16 @@ fn emit_wiring(
     let binding = &node.binding;
     let self_mode = EmitMode::WithSelf(quote! { this });
     let info = table.resolve(from, &node.type_path);
+    // A shape/host-composition root (`generate_view`'s `is_shape_composition`/`is_host_composition`
+    // — `node.binding == root_binding`) has no separately-stored `self.#binding` field of its own:
+    // it's moved into `self.base` at construction, and `self`/`this` itself *is* the tree node (see
+    // that code's own doc comment). Every `let widget = this.#binding.clone();` below needs `this`
+    // itself in that case instead.
+    let widget_binding = if self_is_node {
+        quote! { this.clone() }
+    } else {
+        quote! { this.#binding.clone() }
+    };
     // Only inject the trait `use` when this node actually has something to wire up below — an
     // unconditional injection here left an always-unused import on any stored node with no `on_*`/
     // `#[two_way]` attribute at all (every branch of the loop below that actually emits tokens is
@@ -6040,28 +6220,37 @@ fn emit_wiring(
             // `#[routed]` (docs/elwindui_spec.md 4章): registered on the widget's own storage
             // (`Button::register_routed_handler`, delegating to its own `routed_handlers`) instead
             // of calling `set_<attr>` directly — `dispatch_routed` invokes it later, bubbling
-            // through ancestors too, rather than this being the only thing that ever runs. Zero-
-            // arg only for now (`T = ()`) — see `ast::Attr::Routed`'s doc comment.
+            // through ancestors too, rather than this being the only thing that ever runs. The
+            // payload type is never hardcoded here — `emit_routed_registration` derives it purely
+            // from the field's own declared `fn(T)` sugar (`callback_param_types`, the same
+            // mechanism the non-routed branch just below already uses for `TabView.on_select`).
             let is_routed = info.is_some_and(|i| i.routed_fields.contains(name));
             if is_routed {
-                let call = match expr {
-                    ViewExpr::Closure { params, body } if params.is_empty() => {
-                        emit_on_event_closure_body(body, params, ctx, &self_mode)
-                    }
-                    ViewExpr::Closure { params, .. } => panic!(
-                        "`{name}` is #[routed] and takes no parameters, but a closure with {} \
-                         parameter(s) was given",
-                        params.len()
-                    ),
-                    other => emit_expr(other, ctx, &self_mode),
-                };
+                let param_types = info
+                    .and_then(|i| i.field_types.get(name))
+                    .map(|ty| callback_param_types(ty))
+                    .unwrap_or_default();
+                // `.as_ui_element()` (not a bare `widget.register_routed_handler(..)` call): a
+                // native leaf's own `register_routed_handler` (`ButtonImpl` etc., hand-written in
+                // `elwindui-backend-*`'s `native_ui.rs`) is a genuine inherent method, but a
+                // virtual builtin's is only ever `UIElementExt`'s own default method — reachable
+                // uniformly through `.as_ui_element()` regardless of which concrete type `widget`
+                // is, matching `emit_generic_on_click_routing`'s own established pattern (see that
+                // function's doc comment) — hence the matching local `use` just below too.
+                let registration = emit_routed_registration(
+                    name,
+                    expr,
+                    &param_types,
+                    ctx,
+                    &self_mode,
+                    &quote! { widget.as_ui_element() },
+                );
                 out.extend(quote! {
                     {
-                        let widget = this.#binding.clone();
+                        use elwindui::core::ui::UIElementExt as _;
+                        let widget = #widget_binding;
                         let this = std::rc::Rc::clone(&this);
-                        widget.register_routed_handler::<()>(#name, Box::new(move |_: &(), _args: &elwindui::core::input::RoutedEventArgs| {
-                            #call;
-                        }));
+                        #registration
                     }
                 });
                 continue;
@@ -6086,7 +6275,7 @@ fn emit_wiring(
                 };
                 out.extend(quote! {
                     {
-                        let widget = this.#binding.clone();
+                        let widget = #widget_binding;
                         let this = std::rc::Rc::clone(&this);
                         widget.#setter(Box::new(move || {
                             #call;
@@ -6122,7 +6311,7 @@ fn emit_wiring(
                 let call = emit_on_event_closure_body(body, params, ctx, &self_mode);
                 out.extend(quote! {
                     {
-                        let widget = this.#binding.clone();
+                        let widget = #widget_binding;
                         let this = std::rc::Rc::clone(&this);
                         widget.#setter(Box::new(move |#(#param_decls),*| {
                             #call;
@@ -6141,7 +6330,7 @@ fn emit_wiring(
                 let change_setter = format_ident!("set_on_{name}_change");
                 out.extend(quote! {
                     {
-                        let widget = this.#binding.clone();
+                        let widget = #widget_binding;
                         let this = std::rc::Rc::clone(&this);
                         widget.#change_setter(Box::new(move |new_value| {
                             #setter(new_value);
@@ -6246,10 +6435,61 @@ impl<'a> ViewClosureRewriter<'a> {
         }
         None
     }
+
+    /// A bare 1-segment reference to one of this component's own *mutable* (`#[prop]`,
+    /// `ViewCtx::mutable_own_fields`) fields, used as a *value* (read) rather than as the setter
+    /// target of an assignment — mirrors `emit_expr`'s own identical `.get()`/`.borrow().clone()`
+    /// handling for the same field kind (that function's own doc comment on `ctx.mutable_own_fields`
+    /// explains why: it's `Cell`/`RefCell`-backed, so `self.<name>` alone would hand back the cell
+    /// itself, not its value). Only matters in `WithSelf` mode — see that same comment for why
+    /// `Construction` mode's raw, not-yet-cell-wrapped local needs no such unwrapping.
+    fn resolved_mutable_field_read(&self, name: &str) -> Option<TokenStream> {
+        if self.closure_params.iter().any(|p| p == name) {
+            return None;
+        }
+        if !self.ctx.mutable_own_fields.contains(name) {
+            return None;
+        }
+        let EmitMode::WithSelf(self_tok) = self.mode else {
+            return None;
+        };
+        let ident = format_ident!("{}", name);
+        let ty_str = self.ctx.own_fields.get(name)?;
+        Some(if is_copy_type(ty_str) {
+            quote! { #self_tok.#ident.get() }
+        } else {
+            quote! { #self_tok.#ident.borrow().clone() }
+        })
+    }
 }
 
 impl<'a> VisitMut for ViewClosureRewriter<'a> {
     fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+        // `x = <rhs>` where `x` is a bare 1-segment reference to one of this component's own
+        // mutable fields (`#[prop] is_checked: bool` mutated as `is_checked = !is_checked`) has no
+        // real lvalue to assign into — the field's actual storage is `Cell`/`RefCell`-backed, only
+        // reachable through its generated `set_<name>` setter. Rewritten to a setter call before
+        // the generic `Expr::Path` handling below ever sees the (otherwise ordinary-looking) left-
+        // hand side. Any other assignment (a genuine local variable, `+=`-style compound assignment
+        // which `syn` represents as `Expr::Binary` and never reaches here, ...) falls through to the
+        // default recursive visit at the bottom, unchanged.
+        if let syn::Expr::Assign(assign) = node {
+            if let syn::Expr::Path(p) = assign.left.as_ref() {
+                if let Some(ident) = p.path.get_ident() {
+                    let name = ident.to_string();
+                    let is_closure_param = self.closure_params.iter().any(|p| p == &name);
+                    if !is_closure_param && self.ctx.mutable_own_fields.contains(&name) {
+                        if let EmitMode::WithSelf(self_tok) = self.mode {
+                            self.visit_expr_mut(&mut assign.right);
+                            let setter = format_ident!("set_{}", name);
+                            let rhs = &assign.right;
+                            *node = syn::parse_quote! { #self_tok.#setter(#rhs) };
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         if let syn::Expr::Path(p) = node {
             let segments: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
             if let [only] = segments.as_slice() {
@@ -6261,6 +6501,10 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                     let base = self.mode.owner_tokens(owner);
                     let getter = format_ident!("{}", field);
                     *node = syn::parse_quote! { #base.#getter() };
+                    return;
+                }
+                if let Some(value) = self.resolved_mutable_field_read(only) {
+                    *node = syn::parse_quote! { #value };
                     return;
                 }
                 if let Some(base) = self.resolved_owner(only) {
@@ -6384,7 +6628,11 @@ fn property_resync_methods_for(
     from: &Module,
     table: &SymbolTable,
     include_refresh: bool,
+    // Whether `plan`'s own root (`plan.last()`) is a shape/host-composition root with no separate
+    // `self.#binding` field of its own — see `emit_wiring`/`emit_resync`'s matching doc comments.
+    root_is_self: bool,
 ) -> TokenStream {
+    let root_binding = plan.last().map(|r| r.binding.clone());
     bind_owners
         .iter()
         .map(|owner_ident| {
@@ -6401,6 +6649,8 @@ fn property_resync_methods_for(
                 .map(|property_name| {
                     let mut statements = TokenStream::new();
                     for node in plan {
+                        let self_is_node =
+                            root_is_self && root_binding.as_ref() == Some(&node.binding);
                         emit_resync(
                             node,
                             ctx,
@@ -6408,6 +6658,7 @@ fn property_resync_methods_for(
                             table,
                             Some((&owner_name, property_name)),
                             &mut statements,
+                            self_is_node,
                         );
                     }
                     let refresh =
@@ -6492,6 +6743,7 @@ fn emit_resync(
     table: &SymbolTable,
     filter: Option<(&str, &str)>,
     out: &mut TokenStream,
+    self_is_node: bool,
 ) {
     if !node.stored {
         return;
@@ -6499,16 +6751,30 @@ fn emit_resync(
     let binding = &node.binding;
     let self_mode = EmitMode::WithSelf(quote! { self });
     let info = table.resolve(from, &node.type_path);
+    // See `emit_wiring`'s matching `widget_binding`/`self_is_node` doc comment — a shape/host-
+    // composition root has no separately-stored `self.#binding` field; `self` itself already *is*
+    // the tree node.
+    let receiver = if self_is_node {
+        quote! { self }
+    } else {
+        quote! { self.#binding }
+    };
     // `resync()` is its own function, a separate lexical scope from `new()` — the `use` already
     // injected alongside construction (`emit_construction`'s `builtin_trait_use`, or
     // `build_virtual_value`'s own inline copy for a virtual builtin) doesn't carry over here, so
     // any hand-written native or virtual builtin whose setters are shared-trait-only needs its own
     // copy of the same import for this function's own `self.#binding.#setter(..)` calls below.
     out.extend(builtin_trait_use(&node.type_path, info));
-
-    // `margin` is a common `UIElementBase` attribute handled separately below because it is not
-    // part of a type's own `field_types` and its setter takes the value by value.
-    emit_common_ui_element_resync(node, ctx, &self_mode, binding, filter, out);
+    // A deferred field inherited from `UIElement` itself (`margin`/`width`/`height`/... —
+    // `resolve_effective_fields`'s own doc comment) is set through `UIElementExt`, a shared trait
+    // method — needed here for the same reason as `emit_construction`'s own matching `use` (this
+    // function is a separate scope, so that one doesn't carry over). Harmless when unused, same as
+    // `builtin_trait_use` itself; picked up by the main per-attribute loop below (`margin`/`width`/
+    // `height`/... are now ordinary `field_types` members, no separate resync path needed for them).
+    out.extend(quote! {
+        #[allow(unused_imports)]
+        use elwindui::core::ui::UIElementExt as _;
+    });
 
     // Every codegen-*generated* setter (a virtual builtin's own `elwindui_core::ui` setters, or a
     // `has_view` component's own generated `set_<name>` — both the deferred and the mutable-
@@ -6525,9 +6791,6 @@ fn emit_resync(
             continue;
         }
         if matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. }) {
-            continue;
-        }
-        if name == "margin" {
             continue;
         }
         if let Some((owner, property)) = filter {
@@ -6577,14 +6840,14 @@ fn emit_resync(
             .map(String::as_str);
         let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
         if is_copy {
-            out.extend(quote! { self.#binding.#setter(#value); });
+            out.extend(quote! { #receiver.#setter(#value); });
         } else if field_ty.is_some_and(|ty| strip_option(ty).0.starts_with("Vec<")) {
             // A `Vec<T>` field's real setter always takes it *by value* everywhere in this
             // framework (for example `GridImpl::set_rows`/`set_columns`), so
             // this isn't gated on `node_uses_owned_setters` — `.to_vec()` coerces a DSL
             // array-literal value into an owned `Vec<T>` and is a harmless no-op clone when the
             // value is already one (e.g. `vm.documents()`).
-            out.extend(quote! { self.#binding.#setter((#value).to_vec()); });
+            out.extend(quote! { #receiver.#setter((#value).to_vec()); });
         } else if node_uses_owned_setters {
             // Every codegen-generated `set_*` setter (a virtual builtin's `TextBlockImpl::set_text`/
             // `ShapeImpl::set_fill`/..., or a `has_view` component's own generated `set_<name>` —
@@ -6594,42 +6857,10 @@ fn emit_resync(
             // string (`virtual_builtin_resync_value`, despite the name — the conversion rules are
             // identical for both) instead of the `&(..)`-wrapping the `else` branch below uses.
             let converted = virtual_builtin_resync_value(field_ty.unwrap_or(""), value);
-            out.extend(quote! { self.#binding.#setter(#converted); });
+            out.extend(quote! { #receiver.#setter(#converted); });
         } else {
-            out.extend(quote! { self.#binding.#setter(&(#value)); });
+            out.extend(quote! { #receiver.#setter(&(#value)); });
         }
-    }
-}
-
-/// Re-applies `margin` during `resync()`
-/// for *any* stored node, mirroring `emit_common_ui_element_setters`'s own construction-time
-/// conversion (`UIElement::set_margin(&self, margin: f32)`). Split out from
-/// `emit_resync`'s main per-attribute loop since these two aren't part of any type's own
-/// `field_types`.
-fn emit_common_ui_element_resync(
-    node: &PlannedNode,
-    ctx: &ViewCtx,
-    self_mode: &EmitMode,
-    binding: &syn::Ident,
-    filter: Option<(&str, &str)>,
-    out: &mut TokenStream,
-) {
-    let mut body = TokenStream::new();
-    if let Some(expr) = find_attr(node, "margin") {
-        if filter.is_some_and(|(owner, property)| !view_expr_depends_on(expr, ctx, owner, property))
-        {
-            return;
-        }
-        let value = emit_expr(expr, ctx, self_mode);
-        body.extend(quote! { self.#binding.as_ui_element().set_margin(#value); });
-    }
-    if !body.is_empty() {
-        out.extend(quote! {
-            {
-                use elwindui::core::ui::UIElementExt as _;
-                #body
-            }
-        });
     }
 }
 
@@ -7340,6 +7571,127 @@ view NotepadWindow {
         assert!(window_str.contains("register_routed_handler"));
         // Both statements' bare `vm` reference must have been rewritten to `this . vm`.
         assert_eq!(window_str.matches("this . vm . save ()").count(), 2);
+    }
+
+    /// The pointer/tap `#[routed]` fields added to the common `UIElement` component
+    /// (docs/elwindui_gui_framework_design.md §5.10) must be wired with the payload type each
+    /// field itself declares (`fn(elwindui_core::input::PointerEventArgs)`/`TappedEventArgs`/...) —
+    /// derived purely from `TypeInfo::field_types` via `callback_param_types`, never a hardcoded
+    /// event-name/type table in `elwindui-codegen` itself (the codegen design doc's own no-
+    /// hardcoding rule). Exercised on a plain virtual builtin (`VerticalLayout`), not `Button`.
+    #[test]
+    fn routed_pointer_event_derives_its_payload_type_from_the_field_declaration() {
+        let window_src = r#"
+use crate::NotepadViewModel;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+}
+
+view NotepadWindow {
+    Window {
+        title: vm.window_title
+        VerticalLayout {
+            on_tapped: |e| { vm.save(); }
+        }
+    }
+}
+"#;
+        let viewmodel_module = notepad_viewmodel_module();
+        let window_module = parse_module(window_src).unwrap();
+        let table =
+            build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+
+        let window_code = generate_module(&window_module, &table);
+        assert_valid_rust("routed_pointer_event_window", &window_code);
+        let window_str = window_code.to_string();
+        assert!(window_str.contains(
+            "register_routed_handler :: < elwindui :: core :: input :: TappedEventArgs >"
+        ));
+        assert_eq!(window_str.matches("\"on_tapped\"").count(), 1);
+        assert_eq!(window_str.matches("this . vm . save ()").count(), 1);
+        // `VerticalLayout` (a virtual builtin, unlike `Button`) has no *inherent*
+        // `register_routed_handler` of its own — only `UIElementExt`'s default method, reachable
+        // via `.as_ui_element()` with that trait explicitly in scope. `assert_valid_rust` only
+        // checks syntax (`syn`, no name resolution), so it alone would not have caught a
+        // regression back to a bare `widget.register_routed_handler(..)` call here — this crate's
+        // own `cargo build -p notepad` is what actually surfaced that failure mode originally.
+        assert!(window_str.contains("widget . as_ui_element () . register_routed_handler"));
+        assert!(window_str.contains("use elwindui :: core :: ui :: UIElementExt as _ ;"));
+    }
+
+    /// Two different `#[routed]` fields on the same element must each resolve to their *own*
+    /// declared payload type, not share one — confirms the type derivation is genuinely per-field
+    /// (`TypeInfo::field_types`), not a single guessed/default type.
+    #[test]
+    fn distinct_routed_pointer_events_each_resolve_their_own_distinct_payload_type() {
+        let window_src = r#"
+use crate::NotepadViewModel;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+}
+
+view NotepadWindow {
+    Window {
+        title: vm.window_title
+        VerticalLayout {
+            on_pointer_entered: |e| { vm.save(); }
+            on_pointer_wheel_changed: |e| { vm.save(); }
+        }
+    }
+}
+"#;
+        let viewmodel_module = notepad_viewmodel_module();
+        let window_module = parse_module(window_src).unwrap();
+        let table =
+            build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+
+        let window_code = generate_module(&window_module, &table);
+        assert_valid_rust("distinct_routed_pointer_events_window", &window_code);
+        let window_str = window_code.to_string();
+        assert!(window_str.contains(
+            "register_routed_handler :: < elwindui :: core :: input :: PointerEventArgs >"
+        ));
+        assert!(window_str.contains(
+            "register_routed_handler :: < elwindui :: core :: input :: PointerWheelEventArgs >"
+        ));
+    }
+
+    #[test]
+    fn on_tapped_closure_with_wrong_param_count_panics() {
+        let window_src = r#"
+use crate::NotepadViewModel;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+}
+
+view NotepadWindow {
+    Window {
+        title: vm.window_title
+        VerticalLayout {
+            on_tapped: || vm.save()
+        }
+    }
+}
+"#;
+        let viewmodel_module = notepad_viewmodel_module();
+        let window_module = parse_module(window_src).unwrap();
+        let table =
+            build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
+
+        let result = std::panic::catch_unwind(|| generate_module(&window_module, &table));
+        assert!(
+            result.is_err(),
+            "expected a panic for a 0-param closure on a #[routed] field declaring 1 parameter"
+        );
     }
 
     #[test]

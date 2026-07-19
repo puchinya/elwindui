@@ -1,0 +1,11 @@
+[package]
+name = "painter-demo"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+elwindui = { path = "../../crates/elwindui", features = ["backend-appkit"] }
+
+[lints]
+workspace = true

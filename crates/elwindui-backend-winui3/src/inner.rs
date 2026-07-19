@@ -8,18 +8,18 @@
 
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Dispatching::{DispatcherQueue, DispatcherQueueHandler};
+use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
     Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, TabView as XamlTabView,
     TabViewCloseButtonOverlayMode, TabViewItem, TabViewTabCloseRequestedEventArgs, TextBlock,
     TextBox,
 };
-use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
 use crate::bindings::Microsoft::UI::Xaml::Input::{
     CharacterReceivedRoutedEventArgs, KeyRoutedEventArgs, KeyboardAccelerator,
 };
 use crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
 use crate::bindings::Microsoft::UI::Xaml::Shapes::{
-    Ellipse as XamlEllipse, Rectangle as XamlRectangle,
+    Ellipse as XamlEllipse, Line as XamlLine, Rectangle as XamlRectangle,
 };
 use crate::bindings::Microsoft::UI::Xaml::{
     FrameworkElement, RoutedEventHandler, SelectionChangedEventArgs, TextChangedEventArgs,
@@ -73,7 +73,9 @@ fn winui_key(virtual_key: VirtualKey) -> Option<Key> {
         0x79 => Key::F10,
         0x7A => Key::F11,
         0x7B => Key::F12,
-        code @ (0x30..=0x39 | 0x41..=0x5A) => Key::Character((code as u8 as char).to_ascii_lowercase()),
+        code @ (0x30..=0x39 | 0x41..=0x5A) => {
+            Key::Character((code as u8 as char).to_ascii_lowercase())
+        }
         _ => return None,
     };
     Some(key)
@@ -91,16 +93,19 @@ fn winui_modifiers() -> KeyModifiers {
     }
     KeyModifiers {
         shift: is_down(0x10),                 // VK_SHIFT
-        control: is_down(0x11),                // VK_CONTROL
-        alt: is_down(0x12),                    // VK_MENU
-        meta: is_down(0x5B) || is_down(0x5C),   // VK_LWIN / VK_RWIN
+        control: is_down(0x11),               // VK_CONTROL
+        alt: is_down(0x12),                   // VK_MENU
+        meta: is_down(0x5B) || is_down(0x5C), // VK_LWIN / VK_RWIN
     }
 }
 
 /// Depth-first, `visual_children()`-based walk feeding every element's own
 /// `UIElementExt::declared_shortcuts()` into `registry` — mirrors
 /// `elwindui_backend_appkit::inner::collect_shortcuts_into`.
-fn collect_shortcuts_into(tree: &Rc<dyn elwindui_core::ui::UIElementExt>, registry: &ShortcutRegistry) {
+fn collect_shortcuts_into(
+    tree: &Rc<dyn elwindui_core::ui::UIElementExt>,
+    registry: &ShortcutRegistry,
+) {
     for decl in tree.declared_shortcuts() {
         registry.register(decl.chord, decl.scope, tree.clone(), decl.event_name);
     }
@@ -467,9 +472,10 @@ impl TreeHostPanel {
         });
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
         tree.as_ui_element().set_invalidate_host(Some(host));
-        tree.as_ui_element().set_focus_host(Some(Rc::new(WinUI3FocusHost {
-            keyboard: Rc::downgrade(&self.keyboard),
-        })));
+        tree.as_ui_element()
+            .set_focus_host(Some(Rc::new(WinUI3FocusHost {
+                keyboard: Rc::downgrade(&self.keyboard),
+            })));
         self.keyboard.focus.clear_focus();
         self.keyboard.shortcuts().clear();
         collect_shortcuts_into(&tree, self.keyboard.shortcuts());
@@ -542,48 +548,82 @@ impl TreeHostPanel {
             elwindui_core::base::Point { x: 0.0, y: 0.0 },
             &mut commands,
         );
+        // NOTE (unverified — no Windows machine to build/run this against, see this crate's own
+        // `lib.rs` doc comment): mirrors `elwindui-backend-appkit::inner`'s own replay logic as
+        // closely as this backend's existing "one XAML `Shape` per command, flat `Canvas.Children`
+        // list" architecture allows. `PushClip`/`PushTransform`/`PushOpacity` (and their `Pop*`
+        // counterparts) are new state-stack commands this flat per-command loop has no scope
+        // tracking for — same pre-existing limitation as this loop already had for nested
+        // `RenderGroup.clip` (see `collect_commands` above, which already flattens away all
+        // group nesting). `FillPath`/`StrokePath`/`DrawImage` and a gradient `Brush` are left
+        // unsupported for the same reason: this backend has no Win2D/`CanvasControl` drawing
+        // surface to build a general path/gradient/image renderer on top of (unlike the AppKit
+        // backend, which can lean on `CAShapeLayer`/`CAGradientLayer`) — extending this beyond
+        // XAML's own `Rectangle`/`Ellipse`/`Line`/`TextBlock` shapes would need that surface
+        // added first. Each unsupported command hits its own explicit `unsupported_command!` arm
+        // below (a `#[cfg(debug_assertions)]` `eprintln!`) rather than being silently dropped.
+        macro_rules! unsupported_command {
+            ($name:literal) => {{
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "elwindui-backend-winui3: {} is not yet supported by this backend's replay pass",
+                    $name
+                );
+            }};
+        }
         for (command, origin) in commands {
             match command {
-                elwindui_core::painter::RenderCommand::Rectangle {
-                    rect,
-                    fill,
-                    stroke,
-                    stroke_width,
-                    ..
-                }
-                | elwindui_core::painter::RenderCommand::Ellipse {
-                    rect,
-                    fill,
-                    stroke,
-                    stroke_width,
-                } => {
-                    let element: UIElement = match command {
-                        elwindui_core::painter::RenderCommand::Rectangle {
-                            corner_radius, ..
-                        } => {
-                            let rectangle = XamlRectangle::new().expect("Rectangle::new");
-                            let _ = rectangle.SetRadiusX(*corner_radius as f64);
-                            let _ = rectangle.SetRadiusY(*corner_radius as f64);
-                            rectangle.into()
-                        }
-                        _ => XamlEllipse::new().expect("Ellipse::new").into(),
-                    };
-                    let fe: FrameworkElement = element.clone().into();
-                    let _ = fe.SetWidth(rect.width as f64);
-                    let _ = fe.SetHeight(rect.height as f64);
-                    let _ = Canvas::SetLeft(&fe, (origin.x + rect.x) as f64);
-                    let _ = Canvas::SetTop(&fe, (origin.y + rect.y) as f64);
-                    if let Some(fill) = fill {
-                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(fill)) {
-                            let _ = set_shape_fill(&element, &brush);
-                        }
-                    }
-                    if let Some(stroke) = stroke {
-                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(stroke)) {
-                            let _ = set_shape_stroke(&element, &brush, *stroke_width as f64);
-                        }
-                    }
+                elwindui_core::painter::RenderCommand::FillRect { rect, brush }
+                | elwindui_core::painter::RenderCommand::StrokeRect { rect, brush, .. } => {
+                    let rectangle = XamlRectangle::new().expect("Rectangle::new");
+                    let element: UIElement = rectangle.into();
+                    place_shape(&element, origin, rect);
                     let _ = children.Append(&element);
+                    apply_shape_paint(&element, command);
+                }
+                elwindui_core::painter::RenderCommand::FillRoundedRect { rect, radii, .. }
+                | elwindui_core::painter::RenderCommand::StrokeRoundedRect {
+                    rect, radii, ..
+                } => {
+                    let rectangle = XamlRectangle::new().expect("Rectangle::new");
+                    // XAML `Rectangle` only supports one uniform corner radius — per-corner radii
+                    // (`CornerRadius`'s four independent values) collapse to their average here.
+                    let uniform_radius =
+                        (radii.top_left + radii.top_right + radii.bottom_right + radii.bottom_left)
+                            as f64
+                            / 4.0;
+                    let _ = rectangle.SetRadiusX(uniform_radius);
+                    let _ = rectangle.SetRadiusY(uniform_radius);
+                    let element: UIElement = rectangle.into();
+                    place_shape(&element, origin, rect);
+                    let _ = children.Append(&element);
+                    apply_shape_paint(&element, command);
+                }
+                elwindui_core::painter::RenderCommand::FillEllipse { rect, .. }
+                | elwindui_core::painter::RenderCommand::StrokeEllipse { rect, .. } => {
+                    let element: UIElement = XamlEllipse::new().expect("Ellipse::new").into();
+                    place_shape(&element, origin, rect);
+                    let _ = children.Append(&element);
+                    apply_shape_paint(&element, command);
+                }
+                elwindui_core::painter::RenderCommand::DrawLine {
+                    from,
+                    to,
+                    brush,
+                    stroke,
+                } => {
+                    let line = XamlLine::new().expect("Line::new");
+                    let _ = line.SetX1((origin.x + from.x) as f64);
+                    let _ = line.SetY1((origin.y + from.y) as f64);
+                    let _ = line.SetX2((origin.x + to.x) as f64);
+                    let _ = line.SetY2((origin.y + to.y) as f64);
+                    if let Ok(color_brush) = SolidColorBrush::CreateInstance(
+                        painter_color_to_winui_color(brush_sample_color(brush)),
+                    ) {
+                        let _ = line.SetStroke(&color_brush);
+                        let _ = line.SetStrokeThickness(stroke.width as f64);
+                    }
+                    let _ = children.Append(&line);
                 }
                 elwindui_core::painter::RenderCommand::Text {
                     content,
@@ -594,9 +634,11 @@ impl TreeHostPanel {
                 } => {
                     let text_block = TextBlock::new().expect("TextBlock::new");
                     let _ = text_block.SetText(&HSTRING::from(content));
-                    if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(
-                        color.as_deref().unwrap_or("#000000"),
-                    )) {
+                    if let Ok(brush) =
+                        SolidColorBrush::CreateInstance(painter_color_to_winui_color(
+                            color.unwrap_or(elwindui_core::painter::Color::black()),
+                        ))
+                    {
                         let _ = text_block.SetForeground(&brush);
                     }
                     let _ = text_block.SetTextAlignment(xaml_text_alignment(*alignment));
@@ -618,98 +660,25 @@ impl TreeHostPanel {
                         let _ = children.Append(&view.as_element());
                     }
                 }
-                elwindui_core::painter::RenderCommand::Line { .. }
-                | elwindui_core::painter::RenderCommand::Path { .. }
-                | elwindui_core::painter::RenderCommand::Image { .. } => {}
-            }
-        }
-        /*// Historical flat-item replay, retained temporarily for migration reference.
-        // children traversal order (see `RenderItem`'s doc comment) — replayed here in one pass so
-        // `Children.Append` happens in the exact order encountered. `Canvas` z-orders by `Children`
-        // collection order, so this makes document order the z-order for native leaves and
-        // self-painted content alike (e.g. a `Rectangle`'s fill staying behind a `Button` child
-        // placed after it), instead of appending "all paints" then "all natives" as two separate
-        // batches, which threw the relative ordering between the two away.
-        for item in items {
-            match item {
-                elwindui_core::ui::RenderItem::Paint(paint, rect) => match paint {
-                    elwindui_core::ui::PaintKind::Shape {
-                        kind,
-                        fill,
-                        stroke,
-                        stroke_width,
-                    } => {
-                        let element: UIElement = match kind {
-                            elwindui_core::ui::ShapeKind::RoundedRect { corner_radius } => {
-                                let r = XamlRectangle::new().expect("Rectangle::new");
-                                let _ = r.SetRadiusX(corner_radius as f64);
-                                let _ = r.SetRadiusY(corner_radius as f64);
-                                r.into()
-                            }
-                            elwindui_core::ui::ShapeKind::Oval => {
-                                XamlEllipse::new().expect("Ellipse::new").into()
-                            }
-                        };
-                        let fe: FrameworkElement = element.clone().into();
-                        let _ = fe.SetWidth(rect.width as f64);
-                        let _ = fe.SetHeight(rect.height as f64);
-                        let _ = Canvas::SetLeft(&fe, rect.x as f64);
-                        let _ = Canvas::SetTop(&fe, rect.y as f64);
-                        if let Some(fill) = fill {
-                            if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&fill)) {
-                                let _ = set_shape_fill(&element, &brush);
-                            }
-                        }
-                        if let Some(stroke) = stroke {
-                            if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(&stroke))
-                            {
-                                let _ = set_shape_stroke(&element, &brush, stroke_width as f64);
-                            }
-                        }
-                        let _ = children.Append(&element);
-                    }
-                    elwindui_core::ui::PaintKind::Text {
-                        content,
-                        color,
-                        alignment,
-                    } => {
-                        // Uses the real XAML `TextBlock` class purely as a paint primitive
-                        // (positioned manually via the same `Canvas.Left`/`Canvas.Top`/`Width`/
-                        // `Height` convention as every shape above), never wrapped as a builtin
-                        // widget with its own getter/setter surface — the WinUI3 counterpart of
-                        // `elwindui-backend-appkit`'s `CATextLayer` use.
-                        let text_block = TextBlock::new().expect("TextBlock::new");
-                        let _ = text_block.SetText(&HSTRING::from(content));
-                        if let Ok(brush) = SolidColorBrush::CreateInstance(parse_color(
-                            color.as_deref().unwrap_or("#000000"),
-                        )) {
-                            let _ = text_block.SetForeground(&brush);
-                        }
-                        let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
-                        let fe: FrameworkElement = text_block.into();
-                        let _ = fe.SetWidth(rect.width as f64);
-                        let _ = fe.SetHeight(rect.height as f64);
-                        let _ = Canvas::SetLeft(&fe, rect.x as f64);
-                        let _ = Canvas::SetTop(&fe, rect.y as f64);
-                        let _ = children.Append(&fe);
-                    }
-                },
-                // The third element (each native's own `Rc<dyn UIElement>` tree node) is what
-                // AppKit's `TreeHostView::relayout` uses to wire routed-event dispatch
-                // (docs/elwindui_spec.md 4章, `#[routed]`) — not done here, since this WinUI3
-                // backend is spec-only/best-effort and unverified (see this crate's own top doc
-                // comment); real click wiring is AppKit-only for now.
-                elwindui_core::ui::RenderItem::Native(mut view, rect, _node) => {
-                    view.arrange(elwindui_core::base::Rect {
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.width,
-                        height: rect.height,
-                    });
-                    let _ = children.Append(&view.as_element());
+                elwindui_core::painter::RenderCommand::FillPath { .. } => {
+                    unsupported_command!("FillPath")
+                }
+                elwindui_core::painter::RenderCommand::StrokePath { .. } => {
+                    unsupported_command!("StrokePath")
+                }
+                elwindui_core::painter::RenderCommand::DrawImage { .. } => {
+                    unsupported_command!("DrawImage")
+                }
+                elwindui_core::painter::RenderCommand::PushClip { .. }
+                | elwindui_core::painter::RenderCommand::PopClip
+                | elwindui_core::painter::RenderCommand::PushTransform { .. }
+                | elwindui_core::painter::RenderCommand::PopTransform
+                | elwindui_core::painter::RenderCommand::PushOpacity { .. }
+                | elwindui_core::painter::RenderCommand::PopOpacity => {
+                    unsupported_command!("clip/transform/opacity stack")
                 }
             }
-        }*/
+        }
     }
 }
 
@@ -734,31 +703,81 @@ fn set_shape_stroke(element: &UIElement, brush: &SolidColorBrush, thickness: f64
     e.SetStrokeThickness(thickness)
 }
 
-/// Parses a `"#RRGGBB"`/`"#RRGGBBAA"` hex color (the only form `Rectangle`/`Ellipse`'s `fill`/
-/// `stroke` params accept) into a `Windows::UI::Color`. An unparseable string falls back to opaque
-/// black rather than panicking, since this runs during layout, not construction.
-fn parse_color(hex: &str) -> Color {
-    let hex = hex.trim_start_matches('#');
-    let (r, g, b, a) = match (hex.len(), u32::from_str_radix(hex, 16)) {
-        (6, Ok(v)) => (
-            ((v >> 16) & 0xFF) as u8,
-            ((v >> 8) & 0xFF) as u8,
-            (v & 0xFF) as u8,
-            255u8,
-        ),
-        (8, Ok(v)) => (
-            ((v >> 24) & 0xFF) as u8,
-            ((v >> 16) & 0xFF) as u8,
-            ((v >> 8) & 0xFF) as u8,
-            (v & 0xFF) as u8,
-        ),
-        _ => (0, 0, 0, 255),
-    };
+/// Converts our own `elwindui_core::painter::Color` (RGBA field order) into a `Windows::UI::Color`
+/// (ARGB field order) — a plain field re-shuffle, no hex round-trip needed now that `Color` is a
+/// real value type rather than a backend-agnostic hex string (painter design doc §18).
+fn painter_color_to_winui_color(c: elwindui_core::painter::Color) -> Color {
     Color {
-        A: a,
-        R: r,
-        G: g,
-        B: b,
+        A: c.a,
+        R: c.r,
+        G: c.g,
+        B: c.b,
+    }
+}
+
+/// Picks one representative `elwindui_core::painter::Color` out of a `Brush` — this backend has
+/// no Win2D/`CanvasControl` drawing surface to build a real gradient/image brush renderer on top
+/// of (see the doc comment on this file's own `RenderCommand` replay loop), so a gradient falls
+/// back to its first stop and an image brush falls back to opaque black, rather than the command
+/// silently painting nothing.
+fn brush_sample_color(brush: &elwindui_core::painter::Brush) -> elwindui_core::painter::Color {
+    match brush {
+        elwindui_core::painter::Brush::Solid(color) => *color,
+        elwindui_core::painter::Brush::LinearGradient(g) => g
+            .stops
+            .first()
+            .map(|s| s.color)
+            .unwrap_or(elwindui_core::painter::Color::black()),
+        elwindui_core::painter::Brush::RadialGradient(g) => g
+            .stops
+            .first()
+            .map(|s| s.color)
+            .unwrap_or(elwindui_core::painter::Color::black()),
+        elwindui_core::painter::Brush::Image(_) => elwindui_core::painter::Color::black(),
+    }
+}
+
+/// Shared by every `Fill*`/`Stroke*` shape command (`elwindui_core::base::Rect`-based ones only —
+/// `DrawLine` positions its own `Line` element directly): sizes/positions `element` on the shared
+/// `Canvas` at `origin + rect`. Doesn't itself append `element` to `Canvas.Children()` — the
+/// caller does that (its exact collection type comes from generated bindgen output this crate
+/// can't name directly outside a real Windows build).
+fn place_shape(
+    element: &UIElement,
+    origin: elwindui_core::base::Point,
+    rect: &elwindui_core::base::Rect,
+) {
+    let fe: FrameworkElement = element.clone().into();
+    let _ = fe.SetWidth(rect.width as f64);
+    let _ = fe.SetHeight(rect.height as f64);
+    let _ = Canvas::SetLeft(&fe, (origin.x + rect.x) as f64);
+    let _ = Canvas::SetTop(&fe, (origin.y + rect.y) as f64);
+}
+
+/// Applies whichever `Fill*`/`Stroke*` command's own `brush`/`stroke` this is to `element` — one
+/// dispatch point so `relayout_static`'s own match doesn't repeat this per variant.
+fn apply_shape_paint(element: &UIElement, command: &elwindui_core::painter::RenderCommand) {
+    use elwindui_core::painter::RenderCommand;
+    match command {
+        RenderCommand::FillRect { brush, .. }
+        | RenderCommand::FillRoundedRect { brush, .. }
+        | RenderCommand::FillEllipse { brush, .. } => {
+            if let Ok(color_brush) = SolidColorBrush::CreateInstance(painter_color_to_winui_color(
+                brush_sample_color(brush),
+            )) {
+                let _ = set_shape_fill(element, &color_brush);
+            }
+        }
+        RenderCommand::StrokeRect { brush, stroke, .. }
+        | RenderCommand::StrokeRoundedRect { brush, stroke, .. }
+        | RenderCommand::StrokeEllipse { brush, stroke, .. } => {
+            if let Ok(color_brush) = SolidColorBrush::CreateInstance(painter_color_to_winui_color(
+                brush_sample_color(brush),
+            )) {
+                let _ = set_shape_stroke(element, &color_brush, stroke.width as f64);
+            }
+        }
+        _ => {}
     }
 }
 

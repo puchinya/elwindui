@@ -194,25 +194,26 @@ component HorizontalLayout inherits Layout {
 // have a real, named backend struct (`elwindui_core::ui::Shape`) — used as `Rectangle`/`Ellipse`'s
 // own `base` field — but no *user-facing* `Shape::new(..)` constructor call is ever generated for
 // it directly (`Shape` is `#[abstract]`): `elwindui-codegen`'s `emit_virtual_construction` assembles
-// a real `elwindui_core::ui::Shape` value inline at each use site instead. `kind` is the one field a leaf never
-// bare-forwards — each leaf computes its own `elwindui_core::ui::ShapeKind` value instead
-// (`Rectangle`'s `RoundedRect { corner_radius }`, `Ellipse`'s fixed `Oval`). No `children` —
-// matching real WinUI3's `Shape`, a pure leaf with no `Children`/content property of its own
-// (docs/elwindui_spec.md 付録H.2.2).
+// a real `elwindui_core::ui::Shape` value inline at each use site instead. `fill`/`stroke` are
+// `elwindui::core::painter::Brush`-typed (not raw hex strings) — a string literal assigned to
+// either field is validated and converted to `Brush::Solid(Color::rgba(..))` at codegen time (see
+// `elwindui-codegen`'s literal-coercion handling for `Brush`/`Color`-typed fields), so
+// `Rectangle { fill: "#3a3a3c" }` keeps working unchanged at the `.elwind` call site. No
+// `children` — matching real WinUI3's `Shape`, a pure leaf with no `Children`/content property of
+// its own (docs/elwindui_spec.md 付録H.2.2).
 #[embedded]
 #[abstract]
 component Shape inherits UIElement {
-    kind: elwindui_core::ui::ShapeKind,
-    fill: Option<String>,
-    stroke: Option<String>,
+    fill: Option<elwindui::core::painter::Brush>,
+    stroke: Option<elwindui::core::painter::Brush>,
     stroke_width: Option<f32>,
 }
 
 // A concrete `Shape` leaf: inherits `Shape` via shape-composition (`ContentControl inherits
 // Control`'s pattern) instead of being a virtual builtin itself — `fill`/`stroke`/`stroke_width`
-// are inherited unchanged (bare-forwarded below), `corner_radius` is `Rectangle`'s own field, and
-// `kind` (not bare-forwardable — there's nothing to forward *from*, each leaf computes its own) is
-// set from it. `Shape` has no `children` to forward at all (see `Shape`'s own doc comment) —
+// are inherited unchanged (bare-forwarded below); `corner_radius` is `Rectangle`'s own field,
+// auto-forwarded to `elwindui_core::ui::Rectangle::construct`'s matching parameter without needing
+// a `view` line of its own. `Shape` has no `children` to forward at all (see `Shape`'s own doc comment) —
 // nesting a child inside `Rectangle` isn't possible (see `RoundedPanel`, which overlays its
 // background `Rectangle` and label as `Grid` siblings instead).
 // `#[sealed]`: a further `component X inherits Rectangle` has no more structure to add here —
@@ -224,7 +225,6 @@ component Rectangle inherits Shape {
 }
 
 view Rectangle {
-    kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or(0.0) }
     fill: fill
     stroke: stroke
     stroke_width: stroke_width
@@ -238,7 +238,6 @@ component Ellipse inherits Shape {
 }
 
 view Ellipse {
-    kind: elwindui_core::ui::ShapeKind::Oval
     fill: fill
     stroke: stroke
     stroke_width: stroke_width
@@ -323,7 +322,7 @@ component Button inherits NativeControl {
 #[embedded]
 component TextBlock inherits UIElement {
     text: String,
-    color: Option<String>,
+    color: Option<elwindui::core::painter::Color>,
     text_alignment: Option<TextAlignment>,
 }
 

@@ -31,10 +31,13 @@ objc2-app-kit = { version = "0.3", features = [
     "NSOpenPanel",
     "NSMenu",
     "NSMenuItem",
+    "NSImage",
+    "NSBitmapImageRep",
+    "NSGraphicsContext",
     "objc2-quartz-core",
 ] }
-objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAShapeLayer", "CATextLayer"] }
-objc2-core-graphics = { version = "0.3.2", features = ["CGPath", "CGColor", "CGColorSpace", "CGGeometry", "CGAffineTransform"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAShapeLayer", "CATextLayer", "CAGradientLayer"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGPath", "CGColor", "CGColorSpace", "CGGeometry", "CGAffineTransform", "CGGradient", "CGImage", "CGDataProvider", "CGBitmapContext", "CGContext"] }
 objc2-core-foundation = "0.3.2"
 
 [lints]

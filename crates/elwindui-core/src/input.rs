@@ -708,7 +708,11 @@ mod keyboard_tests {
         let child: Rc<dyn UIElementExt> = child;
 
         let dispatcher = KeyboardDispatcher::new();
-        assert!(dispatcher.focus.set_focus(&child, crate::input::FocusState::Programmatic));
+        assert!(
+            dispatcher
+                .focus
+                .set_focus(&child, crate::input::FocusState::Programmatic)
+        );
         dispatcher.handle_key(
             &root,
             RawKeyEvent {
@@ -727,8 +731,7 @@ mod keyboard_tests {
         let fired = Rc::new(std::cell::Cell::new(false));
         {
             let fired = fired.clone();
-            target
-                .register_routed_handler::<()>("on_click", Box::new(move |_, _| fired.set(true)));
+            target.register_routed_handler::<()>("on_click", Box::new(move |_, _| fired.set(true)));
         }
         let target: Rc<dyn UIElementExt> = target;
 
@@ -752,8 +755,7 @@ mod keyboard_tests {
         let fired = Rc::new(std::cell::Cell::new(false));
         {
             let fired = fired.clone();
-            target
-                .register_routed_handler::<()>("on_click", Box::new(move |_, _| fired.set(true)));
+            target.register_routed_handler::<()>("on_click", Box::new(move |_, _| fired.set(true)));
         }
         let target: Rc<dyn UIElementExt> = target;
         let other: Rc<dyn UIElementExt> = other;

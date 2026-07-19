@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 elwindui-macros = { path = "../elwindui-macros" }
+flo_curves = "0.8.0"
 
 [lints]
 workspace = true

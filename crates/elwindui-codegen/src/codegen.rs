@@ -1476,8 +1476,10 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             _ => None,
         })
         .collect();
-    let property_name_strs: Vec<String> =
-        property_names.iter().map(|ident| ident.to_string()).collect();
+    let property_name_strs: Vec<String> = property_names
+        .iter()
+        .map(|ident| ident.to_string())
+        .collect();
     // Viewmodels retain a weak self-reference so async actions can upgrade it to `Rc<Self>` and
     // create the `'static` future required by `elwindui::core::task::spawn_local`.
 
@@ -2073,7 +2075,9 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
     let own_computed_fields: Vec<&FieldDef> = c
         .fields
         .iter()
-        .filter(|f| f.kind == FieldKind::Computed && matches!(f.initializer, Some(Initializer::Expr(_))))
+        .filter(|f| {
+            f.kind == FieldKind::Computed && matches!(f.initializer, Some(Initializer::Expr(_)))
+        })
         .collect();
     let mut dependents_of: HashMap<String, Vec<String>> = HashMap::new();
     for f in &own_computed_fields {
@@ -2445,12 +2449,16 @@ fn generate_view(
     let own_default_fields: Vec<&FieldDef> = component
         .fields
         .iter()
-        .filter(|f| f.kind == FieldKind::Prop && matches!(f.initializer, Some(Initializer::Expr(_))))
+        .filter(|f| {
+            f.kind == FieldKind::Prop && matches!(f.initializer, Some(Initializer::Expr(_)))
+        })
         .collect();
     let own_computed_fields: Vec<&FieldDef> = component
         .fields
         .iter()
-        .filter(|f| f.kind == FieldKind::Computed && matches!(f.initializer, Some(Initializer::Expr(_))))
+        .filter(|f| {
+            f.kind == FieldKind::Computed && matches!(f.initializer, Some(Initializer::Expr(_)))
+        })
         .collect();
     own_fields.extend(
         own_default_fields
@@ -2467,7 +2475,10 @@ fn generate_view(
     for f in &own_computed_fields {
         if let Some(Initializer::Expr(expr)) = &f.initializer {
             for dep in referenced_fields(expr, &field_names) {
-                own_dependents_of.entry(dep).or_default().push(f.name.clone());
+                own_dependents_of
+                    .entry(dep)
+                    .or_default()
+                    .push(f.name.clone());
             }
         }
     }
@@ -3379,7 +3390,15 @@ fn generate_view(
             let self_is_node = (is_shape_composition || is_host_composition)
                 && node.binding == plan[root_index].binding;
             emit_wiring(node, &ctx, from, table, &mut wiring_stmts, self_is_node);
-            emit_resync(node, &ctx, from, table, None, &mut resync_stmts, self_is_node);
+            emit_resync(
+                node,
+                &ctx,
+                from,
+                table,
+                None,
+                &mut resync_stmts,
+                self_is_node,
+            );
         }
     }
 
@@ -4184,6 +4203,7 @@ fn emit_for_item_subscriptions(
                     && info.param_fields.iter().any(|(field, _)| field == name)
                     && !is_settable_field(
                         info,
+                        &node.type_path,
                         name,
                         info.field_types.get(name).map(String::as_str).unwrap_or(""),
                     ))
@@ -5134,6 +5154,74 @@ pub(crate) fn strip_option(ty: &str) -> (&str, bool) {
     }
 }
 
+/// Parses a `"#rrggbb"`/`"#rrggbbaa"` hex string into its four byte components — the same rule
+/// `elwindui_core::painter::Color::parse_hex` implements at runtime, duplicated here (rather than
+/// depending on `elwindui-core` from this crate just for this) since it's a tiny, stable parsing
+/// rule and `elwindui-codegen` otherwise has zero runtime dependency on the crate whose code it
+/// generates calls into.
+fn parse_hex_color_literal(s: &str) -> Result<(u8, u8, u8, u8), String> {
+    let s = s.trim_start_matches('#');
+    let byte = |slice: &str| {
+        u8::from_str_radix(slice, 16).map_err(|_| format!("invalid hex color literal `#{s}`"))
+    };
+    match s.len() {
+        6 => Ok((byte(&s[0..2])?, byte(&s[2..4])?, byte(&s[4..6])?, 0xff)),
+        8 => Ok((
+            byte(&s[0..2])?,
+            byte(&s[2..4])?,
+            byte(&s[4..6])?,
+            byte(&s[6..8])?,
+        )),
+        _ => Err(format!(
+            "invalid hex color literal `#{s}`: expected 6 or 8 hex digits"
+        )),
+    }
+}
+
+/// A string literal assigned to a `Brush`/`Color`(-in-`Option<..>`)-typed attribute (e.g.
+/// `Rectangle { fill: "#3a3a3c" }`, `TextBlock { color: "#ffffff" }`) is validated and converted
+/// to `Brush::Solid(Color::rgba(..))`/`Color::rgba(..)` **at codegen time** rather than spliced
+/// through as a raw string — the generated code never calls a fallible/panicking hex parser at
+/// runtime, and a malformed literal becomes a codegen-time error (this function `panic!`s, which
+/// surfaces as a proc-macro/build-script failure — a compile error in every practical sense) since
+/// the literal's well-formedness is fully knowable at compile time. Returns `None` (leaving the
+/// caller to fall through to its normal expression-emission path) for anything that isn't a bare
+/// string literal against one of these two target types — a dynamic (non-literal) `Brush`/`Color`-
+/// typed expression is out of scope for this coercion; the caller is expected to already produce a
+/// correctly-typed `Brush`/`Color` value itself.
+fn coerce_color_literal(inner_ty: &str, value: &ViewExpr) -> Option<TokenStream> {
+    let ViewExpr::Expr(expr) = value else {
+        return None;
+    };
+    // Unwrap any `Group`/`Paren` nesting a proc-macro token stream (the `#[elwindui::component]` +
+    // `view! { .. }` frontend, `component_frontend.rs`) can introduce around a literal that a
+    // freshly `syn::parse_str`-parsed `.elwind` text expression never has — the underlying literal
+    // is the same either way, so this coercion should recognize both uniformly.
+    let mut expr = expr;
+    while let syn::Expr::Group(group) = expr {
+        expr = &group.expr;
+    }
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(lit_str),
+        ..
+    }) = expr
+    else {
+        return None;
+    };
+    let is_brush = inner_ty.trim() == "elwindui::core::painter::Brush";
+    let is_color = inner_ty.trim() == "elwindui::core::painter::Color";
+    if !is_brush && !is_color {
+        return None;
+    }
+    let hex = lit_str.value();
+    let (r, g, b, a) = parse_hex_color_literal(&hex).unwrap_or_else(|e| panic!("{e}"));
+    Some(if is_brush {
+        quote! { elwindui::core::painter::Brush::Solid(elwindui::core::painter::Color::rgba(#r, #g, #b, #a)) }
+    } else {
+        quote! { elwindui::core::painter::Color::rgba(#r, #g, #b, #a) }
+    })
+}
+
 /// Converts a constructed child binding into `AnyView` when the resolved shape actually wants one
 /// (its declared type mentions `AnyView` — `VerticalLayout`/`HorizontalLayout`'s
 /// `children: Vec<AnyView>`); some containers want a *concrete* child type instead (`MenuBar`'s
@@ -5178,6 +5266,32 @@ const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 ///   `routed_handlers` (see `emit_construction`'s `build_ui_element_base` argument) — so this is a
 ///   plain upcast, no fresh wrapper needed.
 /// - Other native values (`MenuBar`, `Menu`, or `Window`) are unsupported in UI-element slots.
+/// For a bare single-segment `ViewExpr::Path` (`content: canvas`), the referenced field's own
+/// declared type — reduced to a plausible symbol-table lookup key by stripping one layer of
+/// smart-pointer/`Option` wrapper and any module-path prefix (`std :: rc :: Rc < PainterDemoCanvas
+/// >` -> `PainterDemoCanvas`; `ctx.own_fields` stores types as `quote!`-stringified text, hence the
+/// stray spaces). Returns `None` for anything else (a multi-segment path, `vm.field`, or a name
+/// `ctx.own_fields` doesn't have) — `into_node_if_needed`'s caller already treats an empty/
+/// unresolvable string as "not a known symbol-table type", so this doesn't need to distinguish
+/// those cases itself.
+fn bare_own_field_type(expr: &ViewExpr, ctx: &ViewCtx) -> Option<String> {
+    let ViewExpr::Path(path) = expr else {
+        return None;
+    };
+    let [name] = path.as_slice() else {
+        return None;
+    };
+    let ty = ctx.own_fields.get(name)?;
+    let inner = match ty.find('<') {
+        Some(open) if ty.trim_end().ends_with('>') => {
+            let close = ty.trim_end().len() - 1;
+            &ty[open + 1..close]
+        }
+        _ => ty.as_str(),
+    };
+    Some(inner.rsplit("::").next().unwrap_or(inner).trim().to_string())
+}
+
 fn into_node_if_needed(
     base: TokenStream,
     source_type_path: &str,
@@ -5551,12 +5665,32 @@ fn emit_construction(
 /// `Option`-ness alone decides. Never true for a hand-written native (`is_hand_written_native`) —
 /// that family defers *every* field unconditionally via the separate
 /// `build_component_setters` path, not this one.
-fn is_deferred_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
+/// `component_name` disambiguates a field this exact type declares itself (`info.declaring_types`)
+/// from one it merely inherited — declared-here-directly fields are never deferred even with a
+/// `view` and no bare-forward, since (unlike an *inherited* field, which needs a `view`-level
+/// forward to prove its value is actually threaded through to construction) there's no base class
+/// to forward *from* in the first place: `Rectangle`'s own `corner_radius` (composed over `Shape`,
+/// which has no `corner_radius` field of its own to bare-forward) is the motivating case — its
+/// real `elwindui_core::ui::Rectangle::construct` signature always takes it positionally and has
+/// no `set_corner_radius`, so treating it as deferred would emit a call to a setter that doesn't
+/// exist.
+fn is_deferred_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str) -> bool {
     if is_hand_written_native(info) || !strip_option(ty).1 {
         return false;
     }
     match &info.effective_view {
-        Some(view) => !view_references_name_anywhere(view, name),
+        // Only *this* branch gets the "declared directly on this type" exemption — a type with no
+        // `view` at all (e.g. `TextBlock`, whose real constructor takes no arguments and whose own
+        // `color`/`text_alignment` genuinely do have real `set_<name>` setters) must keep every
+        // `Option<T>` field deferred regardless of who declares it, so this must never affect the
+        // `None` arm below.
+        Some(view) => {
+            let declared_here = info
+                .declaring_types
+                .get(name)
+                .is_some_and(|owner| owner == component_name);
+            !declared_here && !view_references_name_anywhere(view, name)
+        }
         None => true,
     }
 }
@@ -5579,8 +5713,8 @@ fn is_deferred_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
 ///   elwindui_spec.md 付録H.2.1a) — their real implementation is hand-written directly in
 ///   `elwindui_core::ui`, never run through `generate_view`, so a "no `#[param]`" field there
 ///   (e.g. `Rectangle::corner_radius`) may have no real setter at all regardless of `FieldKind`.
-fn is_settable_field(info: &TypeInfo, name: &str, ty: &str) -> bool {
-    is_deferred_field(info, name, ty)
+fn is_settable_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str) -> bool {
+    is_deferred_field(info, component_name, name, ty)
         || (!info.is_builtin
             && info
                 .effective_fields
@@ -5648,7 +5782,7 @@ fn build_component_args(
 
     let mut args = Vec::new();
     for (name, ty) in &info.param_fields {
-        if is_deferred_field(info, name, ty) {
+        if is_deferred_field(info, &node.type_path, name, ty) {
             continue;
         }
         if name == "children" {
@@ -5686,27 +5820,46 @@ fn build_component_args(
                 emit_closure_value(params, body, ctx, from, table)
             }
             Some(other) => {
-                let value = emit_expr(other, ctx, &EmitMode::Construction);
-                // A `String`-shaped param takes `&str` in every *hand-written* builtin (matching
-                // the shape declaration's `String`/`Option<String>` — see this crate's own
-                // `src/builtins.elwind`), so the value is wrapped in `&(..)` here regardless of
-                // whether the DSL expression itself is a `&str` literal or a computed `String`
-                // (e.g. `t!(...)`) — Rust's deref coercion accepts either as `&str` at the call
-                // site. A `view`-having (`info.has_view`) component's
-                // *generated* `new(..)` instead takes the field's literal declared type verbatim
-                // (`generate_view`'s `param_types`) — for a plain `#[param] label: String` that's an
-                // owned `String`, so a `&str` literal (e.g. `Rectangle { fill: "#3a3a3c" }`) needs
-                // `.to_string()` instead of `&(..)` to match it; `.to_string()` is just as happy
-                // taking an already-owned `String` expression (a fresh, harmless copy), so this
-                // applies uniformly regardless of which shape the DSL expression itself has.
-                if inner_ty == "String" {
-                    if info.has_view {
-                        quote! { (#value).to_string() }
-                    } else {
-                        quote! { &(#value) }
-                    }
+                if let Some(coerced) = coerce_color_literal(inner_ty, other) {
+                    coerced
                 } else {
-                    value
+                    let value = emit_expr(other, ctx, &EmitMode::Construction);
+                    // A `String`-shaped param takes `&str` in every *hand-written* builtin (matching
+                    // the shape declaration's `String`/`Option<String>` — see this crate's own
+                    // `src/builtins.elwind`), so the value is wrapped in `&(..)` here regardless of
+                    // whether the DSL expression itself is a `&str` literal or a computed `String`
+                    // (e.g. `t!(...)`) — Rust's deref coercion accepts either as `&str` at the call
+                    // site. A `view`-having (`info.has_view`) component's
+                    // *generated* `new(..)` instead takes the field's literal declared type verbatim
+                    // (`generate_view`'s `param_types`) — for a plain `#[param] label: String` that's an
+                    // owned `String`, so a `&str` literal (e.g. `Rectangle { fill: "#3a3a3c" }`) needs
+                    // `.to_string()` instead of `&(..)` to match it; `.to_string()` is just as happy
+                    // taking an already-owned `String` expression (a fresh, harmless copy), so this
+                    // applies uniformly regardless of which shape the DSL expression itself has.
+                    if inner_ty == "String" {
+                        if info.has_view {
+                            quote! { (#value).to_string() }
+                        } else {
+                            quote! { &(#value) }
+                        }
+                    } else if inner_ty.contains("dyn UIElement") {
+                        // A bare-forwarded own field (`content: canvas`, `ViewExpr::Path`) whose
+                        // *target* wants `dyn UIElement` but whose own declared type is some
+                        // concrete element (own `#[param] canvas: Rc<SomeConcreteElement>`) needs
+                        // the same `.into_node()` conversion a literal nested element already gets
+                        // via `into_node_if_needed` (`Some(ViewExpr::Element(_))`'s own arm, above)
+                        // — a bare `ViewExpr::Path` never went through that arm at all, so without
+                        // this the raw concrete-typed value hits the `dyn UIElement`-typed setter
+                        // straight, a type mismatch. `bare_own_field_type` resolves the *source*
+                        // field's own declared type from `ctx.own_fields`; `into_node_if_needed`
+                        // itself safely degrades to an unconditional `.into_node()` call when that
+                        // type doesn't resolve as a real symbol-table entry (e.g. a hand-written,
+                        // non-DSL `#[elwindui::class]` leaf like a demo's own drawing canvas).
+                        let source_type = bare_own_field_type(other, ctx).unwrap_or_default();
+                        into_node_if_needed(value, &source_type, from, table)
+                    } else {
+                        value
+                    }
                 }
             }
             None if is_option => {
@@ -5843,6 +5996,11 @@ fn build_component_setters(
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
                 if inner_ty == "String" {
                     quote! { &(#value) }
+                } else if inner_ty.contains("dyn UIElement") {
+                    // Mirrors `build_component_args`/`build_virtual_value`'s identically-named
+                    // branch — see that one's own doc comment.
+                    let source_type = bare_own_field_type(other, ctx).unwrap_or_default();
+                    into_node_if_needed(value, &source_type, from, table)
                 } else {
                     value
                 }
@@ -5900,7 +6058,7 @@ fn build_component_optional_setters(
     let deferred_fields = info
         .param_fields
         .iter()
-        .filter(|(name, ty)| is_deferred_field(info, name, ty))
+        .filter(|(name, ty)| is_deferred_field(info, &node.type_path, name, ty))
         .map(|(name, ty)| (name.as_str(), ty.as_str()));
     let defaulted_fields = info
         .effective_fields
@@ -5932,15 +6090,19 @@ fn build_component_optional_setters(
                 emit_closure_value(params, body, ctx, from, table)
             }
             Some(other) => {
-                let value = emit_expr(other, ctx, &EmitMode::Construction);
-                // The generated `set_<field>` setter takes the field's own declared (owned) inner
-                // type, e.g. `String` — not `&str` the way a hand-written builtin's setter does
-                // (`build_component_setters`) — matching `build_component_args`'s own
-                // `has_view`-conditional `.to_string()` convention.
-                if inner_ty == "String" {
-                    quote! { (#value).to_string() }
+                if let Some(coerced) = coerce_color_literal(inner_ty, other) {
+                    coerced
                 } else {
-                    value
+                    let value = emit_expr(other, ctx, &EmitMode::Construction);
+                    // The generated `set_<field>` setter takes the field's own declared (owned) inner
+                    // type, e.g. `String` — not `&str` the way a hand-written builtin's setter does
+                    // (`build_component_setters`) — matching `build_component_args`'s own
+                    // `has_view`-conditional `.to_string()` convention.
+                    if inner_ty == "String" {
+                        quote! { (#value).to_string() }
+                    } else {
+                        value
+                    }
                 }
             }
             None => continue,
@@ -6069,9 +6231,32 @@ pub(crate) enum ShortcutKey {
 
 /// Every `elwindui_core::input::Key` variant other than `Character` — see `ShortcutKey::Named`.
 const SHORTCUT_NAMED_KEYS: &[&str] = &[
-    "Enter", "Escape", "Tab", "Backspace", "Delete", "Space", "Up", "Down", "Left", "Right",
-    "Home", "End", "PageUp", "PageDown", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9",
-    "F10", "F11", "F12",
+    "Enter",
+    "Escape",
+    "Tab",
+    "Backspace",
+    "Delete",
+    "Space",
+    "Up",
+    "Down",
+    "Left",
+    "Right",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9",
+    "F10",
+    "F11",
+    "F12",
 ];
 
 /// Parses one `+`-separated `#[shortcut(...)]` key spec (`"Ctrl+Shift+S"`) into modifier flags plus
@@ -6140,7 +6325,10 @@ fn resolve_shortcut_chord<'a>(
     chords: &'a [(Option<String>, String)],
     backend_name: &str,
 ) -> Option<ResolvedShortcutChord<'a>> {
-    if let Some((_, spec)) = chords.iter().find(|(b, _)| b.as_deref() == Some(backend_name)) {
+    if let Some((_, spec)) = chords
+        .iter()
+        .find(|(b, _)| b.as_deref() == Some(backend_name))
+    {
         return Some(ResolvedShortcutChord::Specific(spec));
     }
     chords
@@ -6159,8 +6347,8 @@ fn emit_shortcut_chord_expr(resolved: &ResolvedShortcutChord, backend_name: &str
         ResolvedShortcutChord::Specific(spec) => (*spec, false),
         ResolvedShortcutChord::Fallback(spec) => (*spec, backend_name == "appkit"),
     };
-    let parsed = parse_shortcut_spec(spec)
-        .unwrap_or_else(|e| panic!("invalid #[shortcut] key spec: {e}"));
+    let parsed =
+        parse_shortcut_spec(spec).unwrap_or_else(|e| panic!("invalid #[shortcut] key spec: {e}"));
     let control = parsed.control && !remap_ctrl_to_meta;
     let meta = parsed.meta || (parsed.control && remap_ctrl_to_meta);
     let shift = parsed.shift;
@@ -6395,21 +6583,36 @@ fn build_virtual_value(
             }
             panic!("`{}` requires attribute `{name}`", node.type_path);
         };
-        let value = emit_expr(expr, ctx, &EmitMode::Construction);
-        let value = if is_option && inner_ty == "String" {
-            if is_own_option_field(expr) {
-                value
+        let value = if let Some(coerced) = coerce_color_literal(inner_ty, expr) {
+            if is_option {
+                quote! { Some(#coerced) }
             } else {
-                quote! { Some((#value).to_string()) }
+                coerced
             }
-        } else if is_option && is_own_option_field(expr) {
-            quote! { (#value).unwrap_or_default() }
-        } else if inner_ty == "String" {
-            quote! { (#value).to_string() }
-        } else if inner_ty.starts_with("Vec<") {
-            quote! { (#value).to_vec() }
         } else {
-            value
+            let value = emit_expr(expr, ctx, &EmitMode::Construction);
+            if is_option && inner_ty == "String" {
+                if is_own_option_field(expr) {
+                    value
+                } else {
+                    quote! { Some((#value).to_string()) }
+                }
+            } else if is_option && is_own_option_field(expr) {
+                quote! { (#value).unwrap_or_default() }
+            } else if inner_ty == "String" {
+                quote! { (#value).to_string() }
+            } else if inner_ty.starts_with("Vec<") {
+                quote! { (#value).to_vec() }
+            } else if inner_ty.contains("dyn UIElement") {
+                // Mirrors `build_component_args`'s own identically-named branch — a bare-forwarded
+                // own field (`content: canvas`) whose target wants `dyn UIElement` needs the same
+                // `.into_node()` conversion a literal nested element gets, which a bare
+                // `ViewExpr::Path` never goes through on its own. See that branch's own doc comment.
+                let source_type = bare_own_field_type(expr, ctx).unwrap_or_default();
+                into_node_if_needed(value, &source_type, from, table)
+            } else {
+                value
+            }
         };
         if common_field_names.contains(name.as_str()) {
             needs_ui_element_ext = true;
@@ -6580,7 +6783,12 @@ fn emit_wiring(
                     .attribute_shortcuts
                     .get(name)
                     .map(|(chords, scope)| {
-                        emit_shortcut_registration(name, chords, *scope, &quote! { widget.as_ui_element() })
+                        emit_shortcut_registration(
+                            name,
+                            chords,
+                            *scope,
+                            &quote! { widget.as_ui_element() },
+                        )
                     })
                     .unwrap_or_default();
                 out.extend(quote! {
@@ -6740,10 +6948,14 @@ fn emit_on_event_closure_body(
 ) -> TokenStream {
     match body {
         ClosureBody::Expr(inner) => match inner.as_ref() {
-            ViewExpr::Expr(raw) => rewrite_view_closure_expr(raw.clone(), closure_params, ctx, mode),
+            ViewExpr::Expr(raw) => {
+                rewrite_view_closure_expr(raw.clone(), closure_params, ctx, mode)
+            }
             other => emit_expr(other, ctx, mode),
         },
-        ClosureBody::Block(block) => rewrite_view_closure_block(block.clone(), closure_params, ctx, mode),
+        ClosureBody::Block(block) => {
+            rewrite_view_closure_block(block.clone(), closure_params, ctx, mode)
+        }
         ClosureBody::Element(_) => panic!(
             "an `on_*` event handler's closure body must be an expression or `{{ .. }}` block, \
              not a nested element"
@@ -6830,7 +7042,12 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
             }
         }
         if let syn::Expr::Path(p) = node {
-            let segments: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let segments: Vec<String> = p
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
             if let [only] = segments.as_slice() {
                 if self.closure_params.iter().any(|p| p == only) {
                     return;
@@ -7162,6 +7379,7 @@ fn emit_resync(
                 && i.param_fields.iter().any(|(n, _)| n == name)
                 && !is_settable_field(
                     i,
+                    &node.type_path,
                     name,
                     i.field_types.get(name).map(String::as_str).unwrap_or(""),
                 )
@@ -7170,13 +7388,34 @@ fn emit_resync(
         }
 
         let setter = format_ident!("set_{name}");
-        let value = emit_expr(expr, ctx, &self_mode);
         // The resync value itself is never `Option`-wrapped (only construction-time args are, per
         // the shape's own `Option<..>` convention for "may be absent"), so copy-ness is judged on
         // the stripped inner type — `Option<String>`'s runtime value here is a plain `String`.
         let field_ty = info
             .and_then(|i| i.field_types.get(name))
             .map(String::as_str);
+        if let Some(coerced) = coerce_color_literal(strip_option(field_ty.unwrap_or("")).0, expr) {
+            // `virtual_builtin_resync_value` would otherwise splice the raw (uncoerced) literal
+            // straight into `Some(..)`/the bare setter argument — this mirrors its own
+            // `Option<..>`-wrapping decision, just starting from the already-coerced value instead
+            // of a fresh `emit_expr` call.
+            let value = if strip_option(field_ty.unwrap_or("")).1 {
+                quote! { Some(#coerced) }
+            } else {
+                coerced
+            };
+            out.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                value,
+                &receiver,
+                from,
+                table,
+            ));
+            continue;
+        }
+        let value = emit_expr(expr, ctx, &self_mode);
         let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
         if is_copy {
             out.extend(emit_field_setter_call(
@@ -7212,6 +7451,24 @@ fn emit_resync(
             // string (`virtual_builtin_resync_value`, despite the name — the conversion rules are
             // identical for both) instead of the `&(..)`-wrapping the `else` branch below uses.
             let converted = virtual_builtin_resync_value(field_ty.unwrap_or(""), value);
+            out.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                converted,
+                &receiver,
+                from,
+                table,
+            ));
+        } else if field_ty.is_some_and(|ty| strip_option(ty).0.contains("dyn UIElement")) {
+            // A hand-written native's `dyn UIElement`-typed setter (`Window::set_content`) takes
+            // its argument *by value*, unlike the `&str`-taking convention the blanket `else`
+            // branch below assumes for every other hand-written-native field — and, same as
+            // `build_component_args`/`build_virtual_value`/`build_component_setters`'s identically
+            // -named branches, a bare-forwarded own field whose own type is some concrete element
+            // still needs `.into_node()` to satisfy that `dyn UIElement` target at all.
+            let source_type = bare_own_field_type(expr, ctx).unwrap_or_default();
+            let converted = into_node_if_needed(value, &source_type, from, table);
             out.extend(emit_field_setter_call(
                 name,
                 &node.type_path,
@@ -8467,6 +8724,58 @@ view DocumentView {
         );
     }
 
+    /// `Rectangle { fill: "#3a3a3c" }` (a real usage — see `examples/notepad/src/ui/
+    /// rounded_panel.elwind`) — `fill`/`stroke` are `Brush`-typed (painter design doc §18's
+    /// `Option<String>` → `Option<Brush>` migration), so a hex string literal must be validated
+    /// and converted to `Brush::Solid(Color::rgba(..))` at codegen time (`coerce_color_literal`)
+    /// rather than spliced through unchanged.
+    #[test]
+    fn rectangle_fill_hex_literal_is_coerced_to_a_brush() {
+        let src = r##"
+component Foo {
+}
+
+view Foo {
+    Rectangle {
+        fill: "#3a3a3c"
+        corner_radius: 8.0
+    }
+}
+"##;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("rectangle_fill_literal", &generated);
+        let generated_str = generated.to_string();
+        assert!(
+            generated_str.contains(
+                "elwindui :: core :: painter :: Brush :: Solid (elwindui :: core :: painter :: Color :: rgba (58u8 , 58u8 , 60u8 , 255u8))"
+            ),
+            "{generated_str}"
+        );
+    }
+
+    /// `coerce_color_literal` must reject a malformed hex literal at codegen time rather than
+    /// spliced through as-is (which would only fail much later, confusingly, at real `rustc` type-
+    /// checking or — worse — silently compile if `Brush`/`Color` ever gained a `From<&str>` impl).
+    #[test]
+    #[should_panic(expected = "invalid hex color literal")]
+    fn malformed_fill_hex_literal_panics_at_codegen_time() {
+        let src = r##"
+component Foo {
+}
+
+view Foo {
+    Rectangle {
+        fill: "#zzzzzz"
+    }
+}
+"##;
+        let module = parse_module(src).expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let _ = generate_module(&module, &table);
+    }
+
     /// `ContentControl inherits Control` (docs/elwindui_builtins_spec.md 付録F.10) — the
     /// `#[param] content` field is forwarded as a bare child into `Control`'s own children via the
     /// `PASSTHROUGH_NODE`-tagged `lets_map` seeding in `generate_view`, and every `#[param]` field
@@ -8708,7 +9017,7 @@ view Derived {
     /// builtin, like `Control`/`Shape`) with each virtual child's own `grid_cell` populated.
     #[test]
     fn generates_valid_rust_for_grid_with_attached_properties() {
-        let src = r#"
+        let src = r##"
 component Foo {
 }
 
@@ -8717,10 +9026,10 @@ view Foo {
         rows: [elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Star(1.0)]
         columns: [elwindui::core::layout::GridLength::Fixed(120.0), elwindui::core::layout::GridLength::Star(1.0)]
         TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
-        Shape { kind: elwindui::core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: "black", Grid::row: 1, Grid::column: 1 }
+        Shape { fill: "#000000", Grid::row: 1, Grid::column: 1 }
     }
 }
-"#;
+"##;
         let module = parse_module(src).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);

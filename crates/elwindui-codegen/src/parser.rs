@@ -18,7 +18,15 @@ pub fn parse_module(src: &str) -> Result<Module, String> {
 #[allow(clippy::type_complexity)]
 pub fn parse_view_body(
     src: &str,
-) -> Result<(Option<syn::Block>, Option<syn::Block>, Vec<LetBinding>, ViewBody), String> {
+) -> Result<
+    (
+        Option<syn::Block>,
+        Option<syn::Block>,
+        Vec<LetBinding>,
+        ViewBody,
+    ),
+    String,
+> {
     Parser::new(&format!("{src}\n}}")).parse_view_body_tail()
 }
 
@@ -535,7 +543,15 @@ impl<'a> Parser<'a> {
     #[allow(clippy::type_complexity)]
     fn parse_view_body_tail(
         &mut self,
-    ) -> Result<(Option<syn::Block>, Option<syn::Block>, Vec<LetBinding>, ViewBody), String> {
+    ) -> Result<
+        (
+            Option<syn::Block>,
+            Option<syn::Block>,
+            Vec<LetBinding>,
+            ViewBody,
+        ),
+        String,
+    > {
         let mut on_mount = None;
         let mut on_unmount = None;
         loop {

@@ -86,12 +86,7 @@ impl FocusTracker {
         let previous = self.focused.borrow_mut().take();
         if let Some(previous) = &previous {
             previous.set_focus_state(FocusState::Unfocused);
-            crate::ui::dispatch_direct(
-                previous,
-                "on_lost_focus",
-                &(),
-                &RoutedEventArgs::default(),
-            );
+            crate::ui::dispatch_direct(previous, "on_lost_focus", &(), &RoutedEventArgs::default());
         }
         target.set_focus_state(state);
         *self.focused.borrow_mut() = Some(Rc::clone(target));
@@ -105,12 +100,7 @@ impl FocusTracker {
         let previous = self.focused.borrow_mut().take();
         if let Some(previous) = &previous {
             previous.set_focus_state(FocusState::Unfocused);
-            crate::ui::dispatch_direct(
-                previous,
-                "on_lost_focus",
-                &(),
-                &RoutedEventArgs::default(),
-            );
+            crate::ui::dispatch_direct(previous, "on_lost_focus", &(), &RoutedEventArgs::default());
         }
     }
 
@@ -159,7 +149,9 @@ impl FocusTracker {
                     None => order.last().expect("checked non-empty above"),
                 }
             }
-            FocusDirection::Up | FocusDirection::Down | FocusDirection::Left
+            FocusDirection::Up
+            | FocusDirection::Down
+            | FocusDirection::Left
             | FocusDirection::Right => return false,
         };
         self.set_focus(next, FocusState::Keyboard)

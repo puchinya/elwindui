@@ -701,7 +701,15 @@ fn check_closure_expr_body(
         ViewExpr::Path(path) => path.first(),
         ViewExpr::TFluent(_, args) => {
             for (_, arg) in args {
-                check_closure_expr_body(arg, params, from, component_name, vm_fields, table, errors);
+                check_closure_expr_body(
+                    arg,
+                    params,
+                    from,
+                    component_name,
+                    vm_fields,
+                    table,
+                    errors,
+                );
             }
             return;
         }

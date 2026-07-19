@@ -33,7 +33,7 @@
 //! allowing a child to point back to its parent. Concrete `new()` constructors establish their
 //! collection owner before any child is added.
 
-use crate::base::{Point, Rect, Size};
+use crate::base::{CornerRadius, Point, Rect, Size};
 use crate::input::{FocusState, RoutedEventArgs};
 use crate::layout::{
     GridCell, GridLength, HorizontalAlignment, Orientation, VerticalAlignment, Visibility,
@@ -43,7 +43,7 @@ use crate::layout::{
 #[cfg(test)]
 use crate::painter::RenderCommand;
 pub use crate::painter::TextAlignment;
-use crate::painter::{RenderContext, RenderGroup, RenderTree};
+use crate::painter::{Brush, Color, RenderContext, RenderGroup, RenderTree, StrokeStyle};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -678,7 +678,10 @@ impl UIElement {
     /// Registers a `#[shortcut(...)]`-annotated field's binding on this element — see
     /// `UIElement::declared_shortcuts`'s own doc comment.
     fn declare_shortcut(&self, decl: crate::input::ShortcutDecl) {
-        self.as_ui_element().declared_shortcuts.borrow_mut().push(decl);
+        self.as_ui_element()
+            .declared_shortcuts
+            .borrow_mut()
+            .push(decl);
     }
     /// Every `#[shortcut(...)]` this element has declared — see `UIElement::declared_shortcuts`'s
     /// own doc comment. A host's own `set_tree` calls this on every node while walking a freshly-set
@@ -824,12 +827,7 @@ fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
     let mut current = Some(Rc::clone(target));
     let mut host = target.as_ui_element().focus_host.borrow().clone();
     while let Some(element) = current {
-        host = element
-            .as_ui_element()
-            .focus_host
-            .borrow()
-            .clone()
-            .or(host);
+        host = element.as_ui_element().focus_host.borrow().clone().or(host);
         current = element.visual_parent();
     }
     match host {
@@ -1560,8 +1558,8 @@ impl HorizontalLayout {
 /// DSL-level subclass today.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 pub struct Shape {
-    pub fill: RefCell<Option<String>>,
-    pub stroke: RefCell<Option<String>>,
+    pub fill: RefCell<Option<Brush>>,
+    pub stroke: RefCell<Option<Brush>>,
     pub stroke_width: Cell<f32>,
 }
 
@@ -1586,11 +1584,11 @@ impl Shape {
     fn hit_test_content(&self) -> bool {
         self.fill.borrow().is_some() || self.stroke.borrow().is_some()
     }
-    fn set_fill(&self, fill: Option<String>) {
+    fn set_fill(&self, fill: Option<Brush>) {
         *self.fill.borrow_mut() = fill;
         self.invalidate();
     }
-    fn set_stroke(&self, stroke: Option<String>) {
+    fn set_stroke(&self, stroke: Option<Brush>) {
         *self.stroke.borrow_mut() = stroke;
         self.invalidate();
     }
@@ -1619,10 +1617,10 @@ pub struct Rectangle {
 
 #[elwindui_macros::class]
 impl Rectangle {
-    fn fill(&self) -> Option<String> {
+    fn fill(&self) -> Option<Brush> {
         self.base.fill.borrow().clone()
     }
-    fn stroke(&self) -> Option<String> {
+    fn stroke(&self) -> Option<Brush> {
         self.base.stroke.borrow().clone()
     }
     fn stroke_width(&self) -> Option<f32> {
@@ -1633,18 +1631,23 @@ impl Rectangle {
     }
     #[overrides]
     fn render(&self, context: &mut RenderContext<'_>) {
-        context.rectangle(
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: self.arranged_width().unwrap_or(0.0),
-                height: self.arranged_height().unwrap_or(0.0),
-            },
-            self.corner_radius.unwrap_or(0.0),
-            self.base.fill.borrow().clone(),
-            self.base.stroke.borrow().clone(),
-            self.base.stroke_width.get(),
-        );
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: self.arranged_width().unwrap_or(0.0),
+            height: self.arranged_height().unwrap_or(0.0),
+        };
+        let radii = CornerRadius::uniform(self.corner_radius.unwrap_or(0.0));
+        if let Some(fill) = self.base.fill.borrow().as_ref() {
+            context.fill_rounded_rect(rect, radii, fill);
+        }
+        if let Some(stroke) = self.base.stroke.borrow().as_ref() {
+            let style = StrokeStyle {
+                width: self.base.stroke_width.get(),
+                ..Default::default()
+            };
+            context.stroke_rounded_rect(rect, radii, stroke, &style);
+        }
     }
     #[inherent]
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
@@ -1655,8 +1658,8 @@ impl Rectangle {
     // `Control`/`Shape`'s own `construct` (`Rectangle` is `#[sealed]` today, so nothing actually
     // reaches this via that path yet, but the shape stays consistent with every other builtin).
     fn construct(
-        fill: Option<String>,
-        stroke: Option<String>,
+        fill: Option<Brush>,
+        stroke: Option<Brush>,
         stroke_width: Option<f32>,
         corner_radius: Option<f32>,
     ) -> Self {
@@ -1680,10 +1683,10 @@ pub struct Ellipse {
 
 #[elwindui_macros::class]
 impl Ellipse {
-    fn fill(&self) -> Option<String> {
+    fn fill(&self) -> Option<Brush> {
         self.base.fill.borrow().clone()
     }
-    fn stroke(&self) -> Option<String> {
+    fn stroke(&self) -> Option<Brush> {
         self.base.stroke.borrow().clone()
     }
     fn stroke_width(&self) -> Option<f32> {
@@ -1691,17 +1694,22 @@ impl Ellipse {
     }
     #[overrides]
     fn render(&self, context: &mut RenderContext<'_>) {
-        context.ellipse(
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: self.arranged_width().unwrap_or(0.0),
-                height: self.arranged_height().unwrap_or(0.0),
-            },
-            self.base.fill.borrow().clone(),
-            self.base.stroke.borrow().clone(),
-            self.base.stroke_width.get(),
-        );
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: self.arranged_width().unwrap_or(0.0),
+            height: self.arranged_height().unwrap_or(0.0),
+        };
+        if let Some(fill) = self.base.fill.borrow().as_ref() {
+            context.fill_ellipse(rect, fill);
+        }
+        if let Some(stroke) = self.base.stroke.borrow().as_ref() {
+            let style = StrokeStyle {
+                width: self.base.stroke_width.get(),
+                ..Default::default()
+            };
+            context.stroke_ellipse(rect, stroke, &style);
+        }
     }
     #[inherent]
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
@@ -1709,7 +1717,7 @@ impl Ellipse {
     }
     // The bare (not `Rc`-wrapped) value `#[class]`'s auto-generated `new` wraps — see `Rectangle`'s
     // own `construct` doc comment for why this split exists.
-    fn construct(fill: Option<String>, stroke: Option<String>, stroke_width: Option<f32>) -> Self {
+    fn construct(fill: Option<Brush>, stroke: Option<Brush>, stroke_width: Option<f32>) -> Self {
         let shape = Shape::construct();
         shape.set_fill(fill);
         shape.set_stroke(stroke);
@@ -1729,7 +1737,7 @@ impl Ellipse {
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 pub struct TextBlock {
     pub text: RefCell<String>,
-    pub color: RefCell<Option<String>>,
+    pub color: RefCell<Option<Color>>,
     pub alignment: Cell<TextAlignment>,
 }
 
@@ -1752,15 +1760,15 @@ impl TextBlock {
     }
     #[overrides]
     fn render(&self, context: &mut RenderContext<'_>) {
-        context.text(
-            self.text.borrow().clone(),
+        context.draw_text(
+            &self.text.borrow(),
             Rect {
                 x: 0.0,
                 y: 0.0,
                 width: self.arranged_width().unwrap_or(0.0),
                 height: self.arranged_height().unwrap_or(0.0),
             },
-            self.color.borrow().clone(),
+            *self.color.borrow(),
             self.alignment.get(),
         );
     }
@@ -1768,7 +1776,7 @@ impl TextBlock {
         *self.text.borrow_mut() = text;
         self.invalidate_measure();
     }
-    fn set_color(&self, color: Option<String>) {
+    fn set_color(&self, color: Option<Color>) {
         *self.color.borrow_mut() = color;
         self.invalidate();
     }
@@ -2629,9 +2637,13 @@ mod tests {
                             ));
                         }
                     }
-                    RenderCommand::Rectangle { rect, .. }
-                    | RenderCommand::Ellipse { rect, .. }
-                    | RenderCommand::Image { rect, .. } => paints.push((
+                    RenderCommand::FillRect { rect, .. }
+                    | RenderCommand::StrokeRect { rect, .. }
+                    | RenderCommand::FillRoundedRect { rect, .. }
+                    | RenderCommand::StrokeRoundedRect { rect, .. }
+                    | RenderCommand::FillEllipse { rect, .. }
+                    | RenderCommand::StrokeEllipse { rect, .. }
+                    | RenderCommand::Text { rect, .. } => paints.push((
                         command.clone(),
                         Rect {
                             x: origin.x + rect.x,
@@ -2640,16 +2652,18 @@ mod tests {
                             height: rect.height,
                         },
                     )),
-                    RenderCommand::Text { rect, .. } => paints.push((
+                    RenderCommand::DrawImage { dest, .. } => paints.push((
                         command.clone(),
                         Rect {
-                            x: origin.x + rect.x,
-                            y: origin.y + rect.y,
-                            width: rect.width,
-                            height: rect.height,
+                            x: origin.x + dest.x,
+                            y: origin.y + dest.y,
+                            width: dest.width,
+                            height: dest.height,
                         },
                     )),
-                    RenderCommand::Line { .. } | RenderCommand::Path { .. } => paints.push((
+                    RenderCommand::DrawLine { .. }
+                    | RenderCommand::FillPath { .. }
+                    | RenderCommand::StrokePath { .. } => paints.push((
                         command.clone(),
                         Rect {
                             x: origin.x,
@@ -2658,6 +2672,12 @@ mod tests {
                             height: 0.0,
                         },
                     )),
+                    RenderCommand::PushClip { .. }
+                    | RenderCommand::PopClip
+                    | RenderCommand::PushTransform { .. }
+                    | RenderCommand::PopTransform
+                    | RenderCommand::PushOpacity { .. }
+                    | RenderCommand::PopOpacity => {}
                 }
             }
             for child in &group.children {
@@ -2825,7 +2845,7 @@ mod tests {
         // `Shape` (matching real WinUI3's `Shape`) is a pure leaf: no `Children`/content property
         // of its own — see `Shape`'s own doc comment.
         let shape = Shape::new();
-        shape.set_fill(Some("#3498db".to_string()));
+        shape.set_fill(Some(Brush::Solid(Color::parse_hex("#3498db").unwrap())));
         let tree: Rc<dyn UIElementExt> = shape;
 
         assert!(tree.visual_children().is_empty());
@@ -3081,17 +3101,15 @@ mod tests {
             final_size
         }
         fn render(&self, context: &mut RenderContext<'_>) {
-            context.rectangle(
+            context.fill_rounded_rect(
                 Rect {
                     x: 0.0,
                     y: 0.0,
                     width: self.arranged_width().unwrap_or(0.0),
                     height: self.arranged_height().unwrap_or(0.0),
                 },
-                4.0,
-                Some("#000000".to_string()),
-                None,
-                0.0,
+                CornerRadius::uniform(4.0),
+                &Brush::Solid(Color::black()),
             );
         }
     }
@@ -3115,7 +3133,7 @@ mod tests {
         let render_tree = layout_tree::<FakeHandle>(&tree, size(50.0, 50.0));
         assert!(matches!(
             render_tree.root.commands[0],
-            RenderCommand::Rectangle { .. }
+            RenderCommand::FillRoundedRect { .. }
         ));
         assert!(matches!(
             render_tree.root.children[0].commands[0],
@@ -3646,9 +3664,10 @@ mod tests {
     }
 
     fn rectangle(fill: Option<&str>, stroke: Option<&str>) -> Rc<dyn UIElementExt> {
+        let to_brush = |hex: &str| Brush::Solid(Color::parse_hex(hex).unwrap());
         let this = Rc::new(Rectangle::construct(
-            fill.map(str::to_string),
-            stroke.map(str::to_string),
+            fill.map(to_brush),
+            stroke.map(to_brush),
             None,
             None,
         ));
@@ -3726,7 +3745,10 @@ mod tests {
         );
     }
 
-    fn count_calls<T: 'static>(elem: &Rc<dyn UIElementExt>, name: &'static str) -> Rc<RefCell<i32>> {
+    fn count_calls<T: 'static>(
+        elem: &Rc<dyn UIElementExt>,
+        name: &'static str,
+    ) -> Rc<RefCell<i32>> {
         let count = Rc::new(RefCell::new(0));
         let counted = Rc::clone(&count);
         elem.as_ui_element().register_routed_handler::<T>(
@@ -3747,7 +3769,12 @@ mod tests {
         }
     }
 
-    fn press_event(x: f32, y: f32, button: crate::input::MouseButton, at_ms: f64) -> crate::input::RawPointerEvent {
+    fn press_event(
+        x: f32,
+        y: f32,
+        button: crate::input::MouseButton,
+        at_ms: f64,
+    ) -> crate::input::RawPointerEvent {
         crate::input::RawPointerEvent {
             kind: crate::input::RawPointerEventKind::Pressed(button),
             position: Point { x, y },
@@ -3756,7 +3783,12 @@ mod tests {
         }
     }
 
-    fn release_event(x: f32, y: f32, button: crate::input::MouseButton, at_ms: f64) -> crate::input::RawPointerEvent {
+    fn release_event(
+        x: f32,
+        y: f32,
+        button: crate::input::MouseButton,
+        at_ms: f64,
+    ) -> crate::input::RawPointerEvent {
         crate::input::RawPointerEvent {
             kind: crate::input::RawPointerEventKind::Released(button),
             position: Point { x, y },
@@ -3776,11 +3808,14 @@ mod tests {
         );
         layout_tree::<FakeHandle>(&root, size(100.0, 100.0));
 
-        let root_entered = count_calls::<crate::input::PointerEventArgs>(&root, "on_pointer_entered");
+        let root_entered =
+            count_calls::<crate::input::PointerEventArgs>(&root, "on_pointer_entered");
         let root_exited = count_calls::<crate::input::PointerEventArgs>(&root, "on_pointer_exited");
-        let a_entered = count_calls::<crate::input::PointerEventArgs>(&leaf_a, "on_pointer_entered");
+        let a_entered =
+            count_calls::<crate::input::PointerEventArgs>(&leaf_a, "on_pointer_entered");
         let a_exited = count_calls::<crate::input::PointerEventArgs>(&leaf_a, "on_pointer_exited");
-        let b_entered = count_calls::<crate::input::PointerEventArgs>(&leaf_b, "on_pointer_entered");
+        let b_entered =
+            count_calls::<crate::input::PointerEventArgs>(&leaf_b, "on_pointer_entered");
         let b_exited = count_calls::<crate::input::PointerEventArgs>(&leaf_b, "on_pointer_exited");
 
         let dispatcher = crate::input::PointerDispatcher::new();
@@ -3808,11 +3843,17 @@ mod tests {
         let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
 
         let dispatcher = crate::input::PointerDispatcher::new();
-        dispatcher.handle(&leaf, press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0));
+        dispatcher.handle(
+            &leaf,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
+        );
         // Wanders far outside `leaf`'s own bounds mid-drag — implicit capture must keep routing
         // `Moved`/`Released` to `leaf` regardless.
         dispatcher.handle(&leaf, move_event(500.0, 500.0));
-        dispatcher.handle(&leaf, release_event(6.0, 6.0, crate::input::MouseButton::Left, 10.0));
+        dispatcher.handle(
+            &leaf,
+            release_event(6.0, 6.0, crate::input::MouseButton::Left, 10.0),
+        );
 
         assert_eq!(*tapped.borrow(), 1);
     }
@@ -3826,8 +3867,14 @@ mod tests {
         let released = count_calls::<crate::input::PointerEventArgs>(&leaf, "on_pointer_released");
 
         let dispatcher = crate::input::PointerDispatcher::new();
-        dispatcher.handle(&leaf, press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0));
-        dispatcher.handle(&leaf, release_event(20.0, 20.0, crate::input::MouseButton::Left, 10.0));
+        dispatcher.handle(
+            &leaf,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            release_event(20.0, 20.0, crate::input::MouseButton::Left, 10.0),
+        );
 
         assert_eq!(*pressed.borrow(), 1);
         assert_eq!(*released.borrow(), 1);
@@ -3842,17 +3889,35 @@ mod tests {
         let double_tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_double_tapped");
 
         let dispatcher = crate::input::PointerDispatcher::new();
-        dispatcher.handle(&leaf, press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0));
-        dispatcher.handle(&leaf, release_event(5.0, 5.0, crate::input::MouseButton::Left, 10.0));
-        dispatcher.handle(&leaf, press_event(6.0, 6.0, crate::input::MouseButton::Left, 100.0));
-        dispatcher.handle(&leaf, release_event(6.0, 6.0, crate::input::MouseButton::Left, 110.0));
+        dispatcher.handle(
+            &leaf,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            release_event(5.0, 5.0, crate::input::MouseButton::Left, 10.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            press_event(6.0, 6.0, crate::input::MouseButton::Left, 100.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            release_event(6.0, 6.0, crate::input::MouseButton::Left, 110.0),
+        );
 
         assert_eq!(*tapped.borrow(), 2);
         assert_eq!(*double_tapped.borrow(), 1);
 
         // A third tap right after pairs with nothing (the second tap's own record was consumed).
-        dispatcher.handle(&leaf, press_event(6.0, 6.0, crate::input::MouseButton::Left, 150.0));
-        dispatcher.handle(&leaf, release_event(6.0, 6.0, crate::input::MouseButton::Left, 155.0));
+        dispatcher.handle(
+            &leaf,
+            press_event(6.0, 6.0, crate::input::MouseButton::Left, 150.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            release_event(6.0, 6.0, crate::input::MouseButton::Left, 155.0),
+        );
         assert_eq!(*tapped.borrow(), 3);
         assert_eq!(*double_tapped.borrow(), 1);
     }
@@ -3865,8 +3930,14 @@ mod tests {
         let right_tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_right_tapped");
 
         let dispatcher = crate::input::PointerDispatcher::new();
-        dispatcher.handle(&leaf, press_event(5.0, 5.0, crate::input::MouseButton::Right, 0.0));
-        dispatcher.handle(&leaf, release_event(5.0, 5.0, crate::input::MouseButton::Right, 10.0));
+        dispatcher.handle(
+            &leaf,
+            press_event(5.0, 5.0, crate::input::MouseButton::Right, 0.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            release_event(5.0, 5.0, crate::input::MouseButton::Right, 10.0),
+        );
 
         assert_eq!(*tapped.borrow(), 0);
         assert_eq!(*right_tapped.borrow(), 1);

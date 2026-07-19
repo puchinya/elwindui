@@ -58,7 +58,8 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item_struct = match syn::parse::<syn::ItemStruct>(item) {
         Ok(item_struct) => item_struct,
         Err(e) => {
-            let msg = format!("#[elwindui::component]: expected a plain `struct Name {{ .. }}`: {e}");
+            let msg =
+                format!("#[elwindui::component]: expected a plain `struct Name {{ .. }}`: {e}");
             return quote::quote! { compile_error!(#msg); }.into();
         }
     };

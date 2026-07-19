@@ -205,10 +205,16 @@ WinUI3の`UIElement`階層(`UIElement => TextBlock (プリミティブ描画(非
 ```
 component TextBlock {
     text: String,
-    color: Option<String>,
+    color: Option<elwindui::core::painter::Color>,
     text_alignment: Option<TextAlignment>,
 }
 ```
+
+`color`(`Rectangle`/`Ellipse`の`fill`/`stroke`と同様、`elwindui_core::painter`の描画API刷新に伴い
+`Option<String>`から`Option<Color>`/`Option<Brush>`へ移行済み——`docs/elwindui_gui_framework_design.md`
+§5.7の`RenderContext`拡張参照)だが、`color: "#ffffff"`のような16進文字列リテラルは
+`elwindui-codegen`がコード生成時に検証し`Color::rgba(..)`/`Brush::Solid(Color::rgba(..))`へ変換するため、
+`.elwind`側の構文は従来どおり変更不要。不正な16進文字列はコード生成時エラーになる(実行時パニックにはならない)。
 
 `text_alignment`(`elwindui_core::ui::TextAlignment` — `Left`/`Center`/`Right`、省略時は`Left`)は
 テキスト自身が自分の描画領域内でどう揃うかを指定する。要素自体を親の割り当て領域内でどう配置するか
@@ -319,6 +325,10 @@ view Dropdown {
 で実装されている。ただし`VerticalLayout`/`HorizontalLayout`/`Control`と異なり、`Shape`は
 子要素を一切持たない(実WinUI3の`Shape`が`Children`/content propertyを持たないのと同じ、
 `docs/elwindui_gui_framework_design.md`§5.2) —— `.elwind`側の`Shape`宣言にも`children`フィールドは存在しない。
+`fill`/`stroke`は`Option<elwindui::core::painter::Brush>`(`Color`単色に限らずグラデーション等も
+表現できる`Brush`型 — `docs/elwindui_gui_framework_design.md`§5.7)——`fill: "#3a3a3c"`のような16進
+文字列リテラルは`elwindui-codegen`がコード生成時に検証し`Brush::Solid(Color::rgba(..))`へ変換するため
+(`TextBlock.color`のF.3節と同じ規則)、`.elwind`側の構文は従来どおり変更不要。
 詳細はG章・N章(Canvas/Painterによるカスタム描画)を参照。
 
 ## F.7 部品の全体依存関係(メモ帳の例)

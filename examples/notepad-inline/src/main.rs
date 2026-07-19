@@ -122,7 +122,7 @@ struct CustomCheckBox {
             }
             TextBlock { text: label, color: "#ffffff" }
         }
-    }
+    },
 }
 
 #[elwindui::component(inherits Window)]
@@ -163,7 +163,7 @@ struct NotepadWindow {
                 TextBlock { text: t!("notepad-status-chars", count: vm.char_count) }
             }
         }
-    }
+    },
 }
 
 fn main() {

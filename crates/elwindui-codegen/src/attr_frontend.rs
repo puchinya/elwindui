@@ -145,11 +145,10 @@ pub(crate) fn fields_from_item_struct(
                 "prop" => {
                     kind = FieldKind::Prop;
                     if let Some(tokens) = parse_name_value_tokens(attr, "default")? {
-                        initializer = Some(
-                            parser::parse_initializer(&tokens.to_string()).map_err(|e| {
+                        initializer =
+                            Some(parser::parse_initializer(&tokens.to_string()).map_err(|e| {
                                 format!("field `{name}`: invalid #[prop(default = ...)]: {e}")
-                            })?,
-                        );
+                            })?);
                     }
                 }
                 "observable" => {
@@ -169,11 +168,10 @@ pub(crate) fn fields_from_item_struct(
                 "attached" => {
                     kind = FieldKind::Attached;
                     if let Some(tokens) = parse_name_value_tokens(attr, "default")? {
-                        initializer = Some(
-                            parser::parse_initializer(&tokens.to_string()).map_err(|e| {
+                        initializer =
+                            Some(parser::parse_initializer(&tokens.to_string()).map_err(|e| {
                                 format!("field `{name}`: invalid #[attached(default = ...)]: {e}")
-                            })?,
-                        );
+                            })?);
                     }
                 }
                 "inject" => attrs.push(Attr::Inject),

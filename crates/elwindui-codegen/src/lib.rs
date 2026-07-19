@@ -84,7 +84,10 @@ pub fn generate_component_from_item_struct(
     let module = ast::Module {
         path: Vec::new(),
         uses: Vec::new(),
-        items: vec![ast::Item::Component(component_def), ast::Item::View(view_def)],
+        items: vec![
+            ast::Item::Component(component_def),
+            ast::Item::View(view_def),
+        ],
         ..Default::default()
     };
     let sibling_modules = component_frontend::sibling_component_modules(&name);
@@ -218,4 +221,3 @@ fn compile_dir_impl(
 
     Ok(())
 }
-

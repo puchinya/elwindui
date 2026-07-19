@@ -19,7 +19,7 @@
 //! never the original source — nothing in codegen.rs needs to change for this frontend to work.
 
 use crate::ast::{ComponentDef, FieldKind, Module, ViewDef};
-use crate::{attr_frontend, ast, parser};
+use crate::{ast, attr_frontend, parser};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -150,7 +150,11 @@ fn same_crate_components() -> &'static Mutex<HashMap<(String, String), StoredCom
 /// sibling element type — see `same_crate_components`'s own doc comment. Only call this after this
 /// component's own codegen has actually succeeded — a component that failed to generate must not
 /// become resolvable by anything else.
-pub fn register_same_crate_component(name: &str, base: Option<&str>, item_struct: &syn::ItemStruct) {
+pub fn register_same_crate_component(
+    name: &str,
+    base: Option<&str>,
+    item_struct: &syn::ItemStruct,
+) {
     let stored = StoredComponent {
         base: base.map(str::to_string),
         struct_src: quote::quote! { #item_struct }.to_string(),
@@ -183,7 +187,10 @@ pub fn sibling_component_modules(skip_name: &str) -> Vec<Module> {
             Module {
                 path: Vec::new(),
                 uses: Vec::new(),
-                items: vec![ast::Item::Component(component_def), ast::Item::View(view_def)],
+                items: vec![
+                    ast::Item::Component(component_def),
+                    ast::Item::View(view_def),
+                ],
                 ..Default::default()
             }
         })
@@ -251,9 +258,8 @@ mod tests {
             }
         "#;
         let item_struct: syn::ItemStruct = syn::parse_str(src).unwrap();
-        let err =
-            component_and_view_from_item_struct(Some("Window".to_string()), &item_struct)
-                .unwrap_err();
+        let err = component_and_view_from_item_struct(Some("Window".to_string()), &item_struct)
+            .unwrap_err();
         assert!(err.contains("view!"), "error should mention view!: {err}");
     }
 
@@ -332,8 +338,14 @@ view Greeter {
 }
 "#;
         let generated = generate_and_check(src);
-        assert!(generated.contains("fn title"), "expected a `title` getter:\n{generated}");
-        assert!(generated.contains("fn set_title"), "expected a `set_title` setter:\n{generated}");
+        assert!(
+            generated.contains("fn title"),
+            "expected a `title` getter:\n{generated}"
+        );
+        assert!(
+            generated.contains("fn set_title"),
+            "expected a `set_title` setter:\n{generated}"
+        );
     }
 
     /// A `#[computed]` field depending on a `#[prop(default = ...)]` field, both referenced bare in
@@ -355,7 +367,10 @@ view Greeter {
 }
 "#;
         let generated = generate_and_check(src);
-        assert!(generated.contains("fn label"), "expected a `label` getter:\n{generated}");
+        assert!(
+            generated.contains("fn label"),
+            "expected a `label` getter:\n{generated}"
+        );
         assert!(
             generated.contains("recompute_label"),
             "expected a recompute_label method:\n{generated}"
@@ -368,7 +383,8 @@ view Greeter {
         let set_volume_start = generated
             .find("fn set_volume")
             .expect("set_volume should be present");
-        let set_volume_body = &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
+        let set_volume_body =
+            &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
         assert!(
             set_volume_body.contains("recompute_label"),
             "set_volume should cascade into recompute_label:\n{set_volume_body}"
@@ -418,7 +434,9 @@ enum Orientation {
         .expect("should build ComponentDef/ViewDef");
 
         let mut module = deps_module;
-        module.items.push(crate::ast::Item::Component(component_def));
+        module
+            .items
+            .push(crate::ast::Item::Component(component_def));
         module.items.push(crate::ast::Item::View(view_def));
 
         let all_modules: Vec<_> = std::iter::once(module.clone())
@@ -433,7 +451,8 @@ enum Orientation {
         let set_volume_start = generated
             .find("fn set_volume")
             .expect("set_volume should be present");
-        let set_volume_body = &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
+        let set_volume_body =
+            &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
         assert!(
             set_volume_body.contains("recompute_label"),
             "set_volume should cascade into recompute_label:\n{set_volume_body}"
@@ -465,7 +484,10 @@ component Settings {
         syn::parse2::<syn::File>(generated.clone())
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         let generated = generated.to_string();
-        assert!(generated.contains("fn label"), "expected a `label` getter:\n{generated}");
+        assert!(
+            generated.contains("fn label"),
+            "expected a `label` getter:\n{generated}"
+        );
         assert!(
             generated.contains("recompute_label"),
             "expected a recompute_label method:\n{generated}"
@@ -473,7 +495,8 @@ component Settings {
         let set_volume_start = generated
             .find("fn set_volume")
             .expect("set_volume should be present");
-        let set_volume_body = &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
+        let set_volume_body =
+            &generated[set_volume_start..(set_volume_start + 400).min(generated.len())];
         assert!(
             set_volume_body.contains("recompute_label"),
             "set_volume should cascade into recompute_label:\n{set_volume_body}"

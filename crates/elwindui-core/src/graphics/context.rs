@@ -314,7 +314,7 @@ impl<'a> RenderContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::painter::Color;
+    use crate::graphics::Color;
 
     #[test]
     fn render_context_records_local_commands() {

@@ -101,7 +101,7 @@ impl Color {
         Self::parse_hex(s).expect("invalid hex color")
     }
 
-    /// Prefer constructing a [`crate::painter::Brush`] directly rather than round-tripping through
+    /// Prefer constructing a [`crate::graphics::Brush`] directly rather than round-tripping through
     /// a hex string for backend consumption.
     #[deprecated(
         note = "hex strings are no longer the backend interchange format; construct a Brush/Color directly"

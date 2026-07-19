@@ -61,7 +61,7 @@ impl StrokeStyle {
     /// Validates `width`/`miter_limit`/`dash_offset`/every `dash_pattern` entry are finite and
     /// non-negative. Called explicitly rather than at construction time, since `StrokeStyle` is a
     /// plain data struct built with struct-update syntax (`StrokeStyle { width: 2.0, ..Default
-    /// ::default() }`) throughout the painter API (see design doc §17's usage example).
+    /// ::default() }`) throughout the graphics API (see design doc §17's usage example).
     pub fn validate(&self) -> Result<(), StrokeError> {
         let finite_non_negative = |v: f32| v.is_finite() && v >= 0.0;
         if !finite_non_negative(self.width)

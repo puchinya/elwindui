@@ -434,7 +434,7 @@ impl Path {
     pub fn stroked_contains(
         &self,
         point: Point,
-        stroke_style: &crate::painter::StrokeStyle,
+        stroke_style: &crate::graphics::StrokeStyle,
         transform: Option<AffineTransform>,
     ) -> bool {
         let point = match transform {
@@ -1026,7 +1026,7 @@ mod tests {
         let mut b = PathBuilder::new();
         b.add_line(pt(0.0, 0.0), pt(100.0, 0.0));
         let path = b.build().unwrap();
-        let stroke = crate::painter::StrokeStyle {
+        let stroke = crate::graphics::StrokeStyle {
             width: 4.0,
             ..Default::default()
         };

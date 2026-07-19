@@ -41,9 +41,9 @@ use crate::layout::{
     shrink_by_margin, shrink_rect_by_margin, stack_arrange, stack_natural_size,
 };
 #[cfg(test)]
-use crate::painter::RenderCommand;
-pub use crate::painter::TextAlignment;
-use crate::painter::{Brush, Color, RenderContext, RenderGroup, RenderTree, StrokeStyle};
+use crate::graphics::RenderCommand;
+pub use crate::graphics::TextAlignment;
+use crate::graphics::{Brush, Color, RenderContext, RenderGroup, RenderTree, StrokeStyle};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

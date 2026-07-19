@@ -9,7 +9,7 @@ use elwindui_core::input::{
     FocusState, Key, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
     RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent, ShortcutRegistry,
 };
-use elwindui_core::painter::{RenderCommand, RenderGroup};
+use elwindui_core::graphics::{RenderCommand, RenderGroup};
 use elwindui_core::ui::{FocusHost, RelayoutHost, UIElementExt, layout_root};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -253,11 +253,11 @@ fn ca_alignment_mode(
 pub struct TreeHostIvars {
     tree: RefCell<Option<Rc<dyn UIElementExt>>>,
     /// The retained core-side rendering description for the currently hosted Visual tree.
-    render_tree: RefCell<Option<elwindui_core::painter::RenderTree>>,
+    render_tree: RefCell<Option<elwindui_core::graphics::RenderTree>>,
     /// Native compositor islands, keyed by `AnyView` identity. They must survive ordinary
     /// relayouts so the first responder is not detached from the view hierarchy.
     native_containers: RefCell<HashMap<usize, Retained<NSView>>>,
-    /// Decoded-image cache (`RenderCommand::DrawImage`'s `elwindui_core::painter::Image` -> real
+    /// Decoded-image cache (`RenderCommand::DrawImage`'s `elwindui_core::graphics::Image` -> real
     /// `CGImage`), keyed by the `Image`'s own pointer identity — see `resolve_cgimage`'s own doc
     /// comment. Never cleared piecemeal (unlike `native_containers`): a stale entry for an
     /// `Image` no longer referenced by the current tree is simply harmless dead weight, not
@@ -642,7 +642,7 @@ impl TreeHostView {
                     .expect("checked above")
                     .reconcile::<AnyView>(tree);
             } else {
-                *retained_tree = Some(elwindui_core::painter::RenderTree::new::<AnyView>(tree));
+                *retained_tree = Some(elwindui_core::graphics::RenderTree::new::<AnyView>(tree));
             }
         }
         let render_tree = self.ivars().render_tree.borrow();
@@ -850,7 +850,7 @@ fn replay_group(
 /// command recurses with the updated accumulator (`transform`/`opacity`) or (for `PushClip`, the
 /// one state needing real geometry) an intersected `clip`; the matching `Pop*` — always the first
 /// `Pop*` this recursive call sees, since `RenderContext`'s own `push_*`/`pop_*` pair 1:1 in LIFO
-/// order regardless of *kind* (see `elwindui_core::painter::context`'s `stack_depth` counter) —
+/// order regardless of *kind* (see `elwindui_core::graphics::context`'s `stack_depth` counter) —
 /// ends that call and returns control to the caller's own loop. Returns the index just past the
 /// consumed slice.
 #[allow(clippy::too_many_arguments)]
@@ -1049,7 +1049,7 @@ fn geometry_bounds(
 /// intersection — `Clip::Path`'s bounds are used (a bounding-box approximation, consistent with
 /// this whole replay pass never doing true per-pixel clipping).
 fn clip_bounds(
-    clip: &elwindui_core::painter::Clip,
+    clip: &elwindui_core::graphics::Clip,
     origin: elwindui_core::base::Point,
 ) -> Option<elwindui_core::base::Rect> {
     let offset = |r: elwindui_core::base::Rect| elwindui_core::base::Rect {
@@ -1059,9 +1059,9 @@ fn clip_bounds(
         height: r.height,
     };
     match clip {
-        elwindui_core::painter::Clip::Rect(r) => Some(offset(*r)),
-        elwindui_core::painter::Clip::RoundedRect { rect, .. } => Some(offset(*rect)),
-        elwindui_core::painter::Clip::Path { path, .. } => Some(offset(path.bounds())),
+        elwindui_core::graphics::Clip::Rect(r) => Some(offset(*r)),
+        elwindui_core::graphics::Clip::RoundedRect { rect, .. } => Some(offset(*rect)),
+        elwindui_core::graphics::Clip::Path { path, .. } => Some(offset(path.bounds())),
     }
 }
 
@@ -1071,25 +1071,25 @@ fn clip_bounds(
 /// layer occupies (its `frame` is set to exactly overlay its parent, so no re-anchoring is needed).
 fn clip_mask_layer(
     world: &elwindui_core::base::AffineTransform,
-    clip: &elwindui_core::painter::Clip,
+    clip: &elwindui_core::graphics::Clip,
 ) -> Retained<CALayer> {
     let mask_layer = CAShapeLayer::new();
     let (path, rule) = match clip {
-        elwindui_core::painter::Clip::Rect(rect) => (
+        elwindui_core::graphics::Clip::Rect(rect) => (
             rounded_rect_cgpath(world, *rect, elwindui_core::base::CornerRadius::default()),
-            elwindui_core::painter::FillRule::NonZero,
+            elwindui_core::graphics::FillRule::NonZero,
         ),
-        elwindui_core::painter::Clip::RoundedRect { rect, radii } => {
-            (rounded_rect_cgpath(world, *rect, *radii), elwindui_core::painter::FillRule::NonZero)
+        elwindui_core::graphics::Clip::RoundedRect { rect, radii } => {
+            (rounded_rect_cgpath(world, *rect, *radii), elwindui_core::graphics::FillRule::NonZero)
         }
-        elwindui_core::painter::Clip::Path { path, rule } => (path_to_cgpath(world, path), *rule),
+        elwindui_core::graphics::Clip::Path { path, rule } => (path_to_cgpath(world, path), *rule),
     };
     mask_layer.setPath(Some(&path));
     mask_layer.setFillRule(match rule {
-        elwindui_core::painter::FillRule::NonZero => unsafe { kCAFillRuleNonZero },
-        elwindui_core::painter::FillRule::EvenOdd => unsafe { kCAFillRuleEvenOdd },
+        elwindui_core::graphics::FillRule::NonZero => unsafe { kCAFillRuleNonZero },
+        elwindui_core::graphics::FillRule::EvenOdd => unsafe { kCAFillRuleEvenOdd },
     });
-    mask_layer.setFillColor(Some(&color_to_cgcolor(elwindui_core::painter::Color::black())));
+    mask_layer.setFillColor(Some(&color_to_cgcolor(elwindui_core::graphics::Color::black())));
     Retained::into_super(mask_layer)
 }
 
@@ -1202,8 +1202,8 @@ fn replay_paint_command(
             shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
             shape_layer.setPath(Some(&cg_path));
             shape_layer.setFillRule(match rule {
-                elwindui_core::painter::FillRule::NonZero => unsafe { kCAFillRuleNonZero },
-                elwindui_core::painter::FillRule::EvenOdd => unsafe { kCAFillRuleEvenOdd },
+                elwindui_core::graphics::FillRule::NonZero => unsafe { kCAFillRuleNonZero },
+                elwindui_core::graphics::FillRule::EvenOdd => unsafe { kCAFillRuleEvenOdd },
             });
             apply_fill(&shape_layer, Some(brush), path.bounds());
             shape_layer.setOpacity(opacity);
@@ -1268,7 +1268,7 @@ fn replay_paint_command(
             ));
             text_layer.setFontSize(14.0);
             text_layer.setForegroundColor(Some(&color_to_cgcolor(
-                color.unwrap_or(elwindui_core::painter::Color::black()),
+                color.unwrap_or(elwindui_core::graphics::Color::black()),
             )));
             text_layer.setAlignmentMode(ca_alignment_mode(*alignment));
             unsafe {
@@ -1330,11 +1330,11 @@ fn crop_cgimage(
 fn fitted_image_rect(
     dest: elwindui_core::base::Rect,
     image_size: (f32, f32),
-    fit: elwindui_core::painter::ImageFit,
-    alignment_x: elwindui_core::painter::AlignmentX,
-    alignment_y: elwindui_core::painter::AlignmentY,
+    fit: elwindui_core::graphics::ImageFit,
+    alignment_x: elwindui_core::graphics::AlignmentX,
+    alignment_y: elwindui_core::graphics::AlignmentY,
 ) -> elwindui_core::base::Rect {
-    use elwindui_core::painter::{AlignmentX, AlignmentY, ImageFit};
+    use elwindui_core::graphics::{AlignmentX, AlignmentY, ImageFit};
     let (iw, ih) = image_size;
     let (w, h) = if iw <= 0.0 || ih <= 0.0 {
         (dest.width, dest.height)
@@ -1380,7 +1380,7 @@ fn build_image_container_layer(
     resolved_cg_image: &CFRetained<CGImage>,
     dest: elwindui_core::base::Rect,
     source: Option<elwindui_core::base::Rect>,
-    options: &elwindui_core::painter::ImageDrawOptions,
+    options: &elwindui_core::graphics::ImageDrawOptions,
     world: &elwindui_core::base::AffineTransform,
     opacity: f32,
 ) -> Option<Retained<CALayer>> {
@@ -1422,8 +1422,8 @@ fn build_image_container_layer(
     ));
     unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
     let filter = match options.sampling {
-        elwindui_core::painter::ImageSampling::Nearest => unsafe { kCAFilterNearest },
-        elwindui_core::painter::ImageSampling::Linear | elwindui_core::painter::ImageSampling::Cubic => unsafe {
+        elwindui_core::graphics::ImageSampling::Nearest => unsafe { kCAFilterNearest },
+        elwindui_core::graphics::ImageSampling::Linear | elwindui_core::graphics::ImageSampling::Cubic => unsafe {
             kCAFilterLinear
         },
     };
@@ -1437,10 +1437,10 @@ fn build_image_container_layer(
 fn add_shape_layer(
     layer: &Retained<CALayer>,
     path: &CFRetained<CGMutablePath>,
-    fill: Option<&elwindui_core::painter::Brush>,
+    fill: Option<&elwindui_core::graphics::Brush>,
     stroke: Option<(
-        &elwindui_core::painter::Brush,
-        &elwindui_core::painter::StrokeStyle,
+        &elwindui_core::graphics::Brush,
+        &elwindui_core::graphics::StrokeStyle,
     )>,
     opacity: f32,
     bounds: elwindui_core::base::Rect,
@@ -1497,13 +1497,13 @@ fn is_pure_translation(t: &elwindui_core::base::AffineTransform) -> bool {
 /// here (painter design doc §9.4 accepts a documented-but-unimplemented gap in the same spirit).
 fn try_add_gradient_fill_layer(
     layer: &Retained<CALayer>,
-    brush: &elwindui_core::painter::Brush,
+    brush: &elwindui_core::graphics::Brush,
     bounds: elwindui_core::base::Rect,
     mask_shape: GradientMaskShape,
     world: &elwindui_core::base::AffineTransform,
     opacity: f32,
 ) -> bool {
-    use elwindui_core::painter::Brush;
+    use elwindui_core::graphics::Brush;
     if !is_pure_translation(world) {
         return false;
     }
@@ -1517,7 +1517,7 @@ fn try_add_gradient_fill_layer(
     ));
     ca_layer.setOpacity(opacity);
 
-    let stops: &[elwindui_core::painter::GradientStop] = match brush {
+    let stops: &[elwindui_core::graphics::GradientStop] = match brush {
         Brush::LinearGradient(g) => {
             unsafe { gradient_layer.setType(kCAGradientLayerAxial) };
             gradient_layer.setStartPoint(gradient_unit_point(g.start, g.mapping, bounds));
@@ -1529,8 +1529,8 @@ fn try_add_gradient_fill_layer(
             let center = gradient_unit_point(g.center, g.mapping, bounds);
             gradient_layer.setStartPoint(center);
             let (rx, ry) = match g.mapping {
-                elwindui_core::painter::BrushMappingMode::RelativeToBounds => (g.radius_x, g.radius_y),
-                elwindui_core::painter::BrushMappingMode::Absolute => (
+                elwindui_core::graphics::BrushMappingMode::RelativeToBounds => (g.radius_x, g.radius_y),
+                elwindui_core::graphics::BrushMappingMode::Absolute => (
                     g.radius_x / bounds.width.max(1e-6),
                     g.radius_y / bounds.height.max(1e-6),
                 ),
@@ -1577,7 +1577,7 @@ fn try_add_gradient_fill_layer(
         GradientMaskShape::Ellipse => ellipse_cgpath(&identity, local_bounds),
     };
     mask_layer.setPath(Some(&mask_path));
-    mask_layer.setFillColor(Some(&color_to_cgcolor(elwindui_core::painter::Color::black())));
+    mask_layer.setFillColor(Some(&color_to_cgcolor(elwindui_core::graphics::Color::black())));
     let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
     unsafe { ca_layer.setMask(Some(&mask_layer)) };
 
@@ -1588,14 +1588,14 @@ fn try_add_gradient_fill_layer(
 
 fn gradient_unit_point(
     p: elwindui_core::base::Point,
-    mapping: elwindui_core::painter::BrushMappingMode,
+    mapping: elwindui_core::graphics::BrushMappingMode,
     bounds: elwindui_core::base::Rect,
 ) -> objc2_core_foundation::CGPoint {
     match mapping {
-        elwindui_core::painter::BrushMappingMode::RelativeToBounds => {
+        elwindui_core::graphics::BrushMappingMode::RelativeToBounds => {
             objc2_core_foundation::CGPoint::new(p.x as f64, p.y as f64)
         }
-        elwindui_core::painter::BrushMappingMode::Absolute => objc2_core_foundation::CGPoint::new(
+        elwindui_core::graphics::BrushMappingMode::Absolute => objc2_core_foundation::CGPoint::new(
             ((p.x - bounds.x) / bounds.width.max(1e-6)) as f64,
             ((p.y - bounds.y) / bounds.height.max(1e-6)) as f64,
         ),
@@ -1609,17 +1609,17 @@ fn gradient_unit_point(
 /// own superlayer once `shape_layer` itself has been added (see call sites).
 fn apply_fill(
     shape_layer: &CAShapeLayer,
-    brush: Option<&elwindui_core::painter::Brush>,
+    brush: Option<&elwindui_core::graphics::Brush>,
     bounds: elwindui_core::base::Rect,
 ) {
     match brush {
         None => shape_layer.setFillColor(None),
-        Some(elwindui_core::painter::Brush::Solid(color)) => {
+        Some(elwindui_core::graphics::Brush::Solid(color)) => {
             shape_layer.setFillColor(Some(&color_to_cgcolor(*color)));
         }
         Some(
-            brush @ (elwindui_core::painter::Brush::LinearGradient(_)
-            | elwindui_core::painter::Brush::RadialGradient(_)),
+            brush @ (elwindui_core::graphics::Brush::LinearGradient(_)
+            | elwindui_core::graphics::Brush::RadialGradient(_)),
         ) => {
             // No direct sibling-insertion point here (that needs the *superlayer*, only known
             // once `shape_layer` itself is added) — approximate with the gradient's first stop as
@@ -1631,7 +1631,7 @@ fn apply_fill(
                 shape_layer.setFillColor(Some(&color_to_cgcolor(color)));
             }
         }
-        Some(elwindui_core::painter::Brush::Image(_)) => {
+        Some(elwindui_core::graphics::Brush::Image(_)) => {
             // Same limitation as the gradient case above — image-brush fills aren't realized yet.
         }
     }
@@ -1640,13 +1640,13 @@ fn apply_fill(
 
 fn apply_stroke(
     shape_layer: &CAShapeLayer,
-    brush: &elwindui_core::painter::Brush,
-    style: &elwindui_core::painter::StrokeStyle,
+    brush: &elwindui_core::graphics::Brush,
+    style: &elwindui_core::graphics::StrokeStyle,
     _bounds: elwindui_core::base::Rect,
 ) {
     let color = match brush {
-        elwindui_core::painter::Brush::Solid(color) => *color,
-        other => first_gradient_stop_color(other).unwrap_or(elwindui_core::painter::Color::black()),
+        elwindui_core::graphics::Brush::Solid(color) => *color,
+        other => first_gradient_stop_color(other).unwrap_or(elwindui_core::graphics::Color::black()),
     };
     shape_layer.setStrokeColor(Some(&color_to_cgcolor(color)));
     shape_layer.setLineWidth(style.width as f64);
@@ -1669,37 +1669,37 @@ fn apply_stroke(
 }
 
 fn first_gradient_stop_color(
-    brush: &elwindui_core::painter::Brush,
-) -> Option<elwindui_core::painter::Color> {
+    brush: &elwindui_core::graphics::Brush,
+) -> Option<elwindui_core::graphics::Color> {
     match brush {
-        elwindui_core::painter::Brush::LinearGradient(g) => g.stops.first().map(|s| s.color),
-        elwindui_core::painter::Brush::RadialGradient(g) => g.stops.first().map(|s| s.color),
+        elwindui_core::graphics::Brush::LinearGradient(g) => g.stops.first().map(|s| s.color),
+        elwindui_core::graphics::Brush::RadialGradient(g) => g.stops.first().map(|s| s.color),
         _ => None,
     }
 }
 
-fn ca_line_cap(cap: elwindui_core::painter::LineCap) -> &'static CAShapeLayerLineCap {
+fn ca_line_cap(cap: elwindui_core::graphics::LineCap) -> &'static CAShapeLayerLineCap {
     unsafe {
         match cap {
-            elwindui_core::painter::LineCap::Butt => kCALineCapButt,
-            elwindui_core::painter::LineCap::Round => kCALineCapRound,
-            elwindui_core::painter::LineCap::Square => kCALineCapSquare,
+            elwindui_core::graphics::LineCap::Butt => kCALineCapButt,
+            elwindui_core::graphics::LineCap::Round => kCALineCapRound,
+            elwindui_core::graphics::LineCap::Square => kCALineCapSquare,
         }
     }
 }
 
-fn ca_line_join(join: elwindui_core::painter::LineJoin) -> &'static CAShapeLayerLineJoin {
+fn ca_line_join(join: elwindui_core::graphics::LineJoin) -> &'static CAShapeLayerLineJoin {
     unsafe {
         match join {
-            elwindui_core::painter::LineJoin::Miter => kCALineJoinMiter,
-            elwindui_core::painter::LineJoin::Round => kCALineJoinRound,
-            elwindui_core::painter::LineJoin::Bevel => kCALineJoinBevel,
+            elwindui_core::graphics::LineJoin::Miter => kCALineJoinMiter,
+            elwindui_core::graphics::LineJoin::Round => kCALineJoinRound,
+            elwindui_core::graphics::LineJoin::Bevel => kCALineJoinBevel,
         }
     }
 }
 
 fn color_to_cgcolor(
-    color: elwindui_core::painter::Color,
+    color: elwindui_core::graphics::Color,
 ) -> objc2_core_foundation::CFRetained<CGColor> {
     CGColor::new_generic_rgb(
         color.r as f64 / 255.0,
@@ -1720,7 +1720,7 @@ fn rounded_rect_cgpath(
     rect: elwindui_core::base::Rect,
     radii: elwindui_core::base::CornerRadius,
 ) -> CFRetained<CGMutablePath> {
-    let mut builder = elwindui_core::painter::PathBuilder::new();
+    let mut builder = elwindui_core::graphics::PathBuilder::new();
     builder.add_rounded_rect(rect, radii);
     path_to_cgpath(
         world,
@@ -1732,7 +1732,7 @@ fn ellipse_cgpath(
     world: &elwindui_core::base::AffineTransform,
     rect: elwindui_core::base::Rect,
 ) -> CFRetained<CGMutablePath> {
-    let mut builder = elwindui_core::painter::PathBuilder::new();
+    let mut builder = elwindui_core::graphics::PathBuilder::new();
     builder.add_ellipse(rect);
     path_to_cgpath(
         world,
@@ -1745,24 +1745,24 @@ fn ellipse_cgpath(
 /// only ever has to emit `moveTo`/`lineTo`/`curveTo`/`closePath`.
 fn path_to_cgpath(
     world: &elwindui_core::base::AffineTransform,
-    path: &elwindui_core::painter::Path,
+    path: &elwindui_core::graphics::Path,
 ) -> CFRetained<CGMutablePath> {
     let cg_path = CGMutablePath::new();
     for command in path.commands() {
         match *command {
-            elwindui_core::painter::PathCommand::MoveTo(p) => {
+            elwindui_core::graphics::PathCommand::MoveTo(p) => {
                 let p = transform_point(world, p);
                 unsafe {
                     CGMutablePath::move_to_point(Some(&cg_path), std::ptr::null(), p.x, p.y);
                 }
             }
-            elwindui_core::painter::PathCommand::LineTo(p) => {
+            elwindui_core::graphics::PathCommand::LineTo(p) => {
                 let p = transform_point(world, p);
                 unsafe {
                     CGMutablePath::add_line_to_point(Some(&cg_path), std::ptr::null(), p.x, p.y);
                 }
             }
-            elwindui_core::painter::PathCommand::QuadTo { control, to } => {
+            elwindui_core::graphics::PathCommand::QuadTo { control, to } => {
                 let c = transform_point(world, control);
                 let p = transform_point(world, to);
                 unsafe {
@@ -1776,7 +1776,7 @@ fn path_to_cgpath(
                     );
                 }
             }
-            elwindui_core::painter::PathCommand::CubicTo {
+            elwindui_core::graphics::PathCommand::CubicTo {
                 control1,
                 control2,
                 to,
@@ -1797,7 +1797,7 @@ fn path_to_cgpath(
                     );
                 }
             }
-            elwindui_core::painter::PathCommand::ArcTo(_) => {
+            elwindui_core::graphics::PathCommand::ArcTo(_) => {
                 // `Path` normalizes every `ArcTo` to cubics internally for bounds/flattening
                 // purposes, but `PathCommand::ArcTo` itself (this raw command list) is the
                 // author's original, un-normalized form — reachable here directly. Converting it
@@ -1805,7 +1805,7 @@ fn path_to_cgpath(
                 // known gap (an arc segment drawn via `PathBuilder::arc_to`/`arc_center` won't
                 // render on this backend yet) rather than a silent geometry corruption.
             }
-            elwindui_core::painter::PathCommand::Close => {
+            elwindui_core::graphics::PathCommand::Close => {
                 CGMutablePath::close_subpath(Some(&cg_path));
             }
         }
@@ -1818,7 +1818,7 @@ fn path_to_cgpath(
 /// `Arc`-backed and the same logical image reuses the same `Arc` across relayouts unless the
 /// application constructs a fresh one).
 fn resolve_cgimage(
-    image: &elwindui_core::painter::Image,
+    image: &elwindui_core::graphics::Image,
     cache: &mut HashMap<usize, CFRetained<CGImage>>,
 ) -> Option<CFRetained<CGImage>> {
     let key = image as *const _ as usize;
@@ -1845,9 +1845,9 @@ unsafe extern "C-unwind" fn release_boxed_pixels(
     }
 }
 
-fn decode_cgimage(image: &elwindui_core::painter::Image) -> Option<CFRetained<CGImage>> {
+fn decode_cgimage(image: &elwindui_core::graphics::Image) -> Option<CFRetained<CGImage>> {
     match image.data() {
-        elwindui_core::painter::ImageData::Rgba8 {
+        elwindui_core::graphics::ImageData::Rgba8 {
             width,
             height,
             stride,
@@ -1868,7 +1868,7 @@ fn decode_cgimage(image: &elwindui_core::painter::Image) -> Option<CFRetained<CG
             }?;
             let color_space = CGColorSpace::new_device_rgb()?;
             let alpha_info = match alpha {
-                elwindui_core::painter::AlphaMode::Opaque => {
+                elwindui_core::graphics::AlphaMode::Opaque => {
                     objc2_core_graphics::CGImageAlphaInfo::NoneSkipLast
                 }
                 _ => objc2_core_graphics::CGImageAlphaInfo::PremultipliedLast,
@@ -1889,7 +1889,7 @@ fn decode_cgimage(image: &elwindui_core::painter::Image) -> Option<CFRetained<CG
                 )
             }
         }
-        elwindui_core::painter::ImageData::Encoded { bytes, .. } => {
+        elwindui_core::graphics::ImageData::Encoded { bytes, .. } => {
             let data = objc2_foundation::NSData::with_bytes(bytes);
             let ns_image = NSImage::initWithData(NSImage::alloc(), &data)?;
             let mut rect = NSRect::new(objc2_foundation::NSPoint::new(0.0, 0.0), ns_image.size());
@@ -1905,7 +1905,7 @@ fn decode_cgimage(image: &elwindui_core::painter::Image) -> Option<CFRetained<CG
                 .expect("Retained is never null");
             Some(unsafe { CFRetained::from_raw(ptr) })
         }
-        elwindui_core::painter::ImageData::Backend(handle) => {
+        elwindui_core::graphics::ImageData::Backend(handle) => {
             handle.0.downcast_ref::<CFRetained<CGImage>>().cloned()
         }
     }
@@ -2673,8 +2673,8 @@ mod golden_tests {
         add_shape_layer(
             &root,
             &path,
-            Some(&elwindui_core::painter::Brush::Solid(
-                elwindui_core::painter::Color::rgb(255, 0, 0),
+            Some(&elwindui_core::graphics::Brush::Solid(
+                elwindui_core::graphics::Color::rgb(255, 0, 0),
             )),
             None,
             1.0,
@@ -2704,8 +2704,8 @@ mod golden_tests {
         add_shape_layer(
             &root,
             &path,
-            Some(&elwindui_core::painter::Brush::Solid(
-                elwindui_core::painter::Color::rgb(0, 128, 255),
+            Some(&elwindui_core::graphics::Brush::Solid(
+                elwindui_core::graphics::Color::rgb(0, 128, 255),
             )),
             None,
             1.0,
@@ -2734,7 +2734,7 @@ mod golden_tests {
             height: 32.0,
         };
         let path = rounded_rect_cgpath(&world, rect, elwindui_core::base::CornerRadius::default());
-        let stroke = elwindui_core::painter::StrokeStyle {
+        let stroke = elwindui_core::graphics::StrokeStyle {
             width: 4.0,
             ..Default::default()
         };
@@ -2743,7 +2743,7 @@ mod golden_tests {
             &path,
             None,
             Some((
-                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &elwindui_core::graphics::Brush::Solid(elwindui_core::graphics::Color::black()),
                 &stroke,
             )),
             1.0,
@@ -2775,8 +2775,8 @@ mod golden_tests {
         add_shape_layer(
             &root,
             &path,
-            Some(&elwindui_core::painter::Brush::Solid(
-                elwindui_core::painter::Color::rgb(0, 255, 0),
+            Some(&elwindui_core::graphics::Brush::Solid(
+                elwindui_core::graphics::Color::rgb(0, 255, 0),
             )),
             None,
             0.5,
@@ -2805,9 +2805,9 @@ mod golden_tests {
         let placed = fitted_image_rect(
             dest,
             (20.0, 80.0),
-            elwindui_core::painter::ImageFit::Fill,
-            elwindui_core::painter::AlignmentX::Center,
-            elwindui_core::painter::AlignmentY::Center,
+            elwindui_core::graphics::ImageFit::Fill,
+            elwindui_core::graphics::AlignmentX::Center,
+            elwindui_core::graphics::AlignmentY::Center,
         );
         assert_eq!(placed, elwindui_core::base::Rect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 });
     }
@@ -2825,9 +2825,9 @@ mod golden_tests {
         let placed = fitted_image_rect(
             dest,
             (200.0, 100.0),
-            elwindui_core::painter::ImageFit::Contain,
-            elwindui_core::painter::AlignmentX::Center,
-            elwindui_core::painter::AlignmentY::Center,
+            elwindui_core::graphics::ImageFit::Contain,
+            elwindui_core::graphics::AlignmentX::Center,
+            elwindui_core::graphics::AlignmentY::Center,
         );
         assert_eq!(placed.width, 100.0);
         assert_eq!(placed.height, 50.0);
@@ -2848,9 +2848,9 @@ mod golden_tests {
         let placed = fitted_image_rect(
             dest,
             (200.0, 100.0),
-            elwindui_core::painter::ImageFit::Cover,
-            elwindui_core::painter::AlignmentX::Center,
-            elwindui_core::painter::AlignmentY::Center,
+            elwindui_core::graphics::ImageFit::Cover,
+            elwindui_core::graphics::AlignmentX::Center,
+            elwindui_core::graphics::AlignmentY::Center,
         );
         assert_eq!(placed.width, 200.0);
         assert_eq!(placed.height, 100.0);
@@ -2869,9 +2869,9 @@ mod golden_tests {
         let placed = fitted_image_rect(
             dest,
             (30.0, 20.0),
-            elwindui_core::painter::ImageFit::None,
-            elwindui_core::painter::AlignmentX::Right,
-            elwindui_core::painter::AlignmentY::Bottom,
+            elwindui_core::graphics::ImageFit::None,
+            elwindui_core::graphics::AlignmentX::Right,
+            elwindui_core::graphics::AlignmentY::Bottom,
         );
         assert_eq!(placed.width, 30.0);
         assert_eq!(placed.height, 20.0);
@@ -2916,8 +2916,8 @@ mod golden_tests {
         add_shape_layer(
             &root,
             &path,
-            Some(&elwindui_core::painter::Brush::Solid(
-                elwindui_core::painter::Color::rgb(0, 200, 0),
+            Some(&elwindui_core::graphics::Brush::Solid(
+                elwindui_core::graphics::Color::rgb(0, 200, 0),
             )),
             None,
             1.0,
@@ -2944,10 +2944,10 @@ mod golden_tests {
             CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 16.0, 32.0);
             CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 48.0, 32.0);
         }
-        let stroke = elwindui_core::painter::StrokeStyle {
+        let stroke = elwindui_core::graphics::StrokeStyle {
             width: 10.0,
-            start_cap: elwindui_core::painter::LineCap::Butt,
-            end_cap: elwindui_core::painter::LineCap::Butt,
+            start_cap: elwindui_core::graphics::LineCap::Butt,
+            end_cap: elwindui_core::graphics::LineCap::Butt,
             ..Default::default()
         };
         let bounds = elwindui_core::base::Rect {
@@ -2961,7 +2961,7 @@ mod golden_tests {
             &path,
             None,
             Some((
-                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &elwindui_core::graphics::Brush::Solid(elwindui_core::graphics::Color::black()),
                 &stroke,
             )),
             1.0,
@@ -2990,10 +2990,10 @@ mod golden_tests {
         }
         // Half the 10.0 stroke width is 5.0, so a round cap extends ~5px past x=16 — well past
         // the same x=13 sample point a butt cap (the test above) leaves unpainted.
-        let stroke = elwindui_core::painter::StrokeStyle {
+        let stroke = elwindui_core::graphics::StrokeStyle {
             width: 10.0,
-            start_cap: elwindui_core::painter::LineCap::Round,
-            end_cap: elwindui_core::painter::LineCap::Round,
+            start_cap: elwindui_core::graphics::LineCap::Round,
+            end_cap: elwindui_core::graphics::LineCap::Round,
             ..Default::default()
         };
         let bounds = elwindui_core::base::Rect {
@@ -3007,7 +3007,7 @@ mod golden_tests {
             &path,
             None,
             Some((
-                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &elwindui_core::graphics::Brush::Solid(elwindui_core::graphics::Color::black()),
                 &stroke,
             )),
             1.0,
@@ -3021,7 +3021,7 @@ mod golden_tests {
     /// stroked with `join`/`miter_limit` — shared by the miter/bevel/miter-limit tests below, since
     /// they only differ in that one `StrokeStyle`.
     fn stroke_acute_v(
-        join: elwindui_core::painter::LineJoin,
+        join: elwindui_core::graphics::LineJoin,
         miter_limit: f32,
     ) -> (u8, u8, u8, u8) {
         let bitmap = Bitmap::new(64, 64);
@@ -3036,7 +3036,7 @@ mod golden_tests {
             CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 32.0, 10.0);
             CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 54.0, 50.0);
         }
-        let stroke = elwindui_core::painter::StrokeStyle {
+        let stroke = elwindui_core::graphics::StrokeStyle {
             width: 8.0,
             line_join: join,
             miter_limit,
@@ -3053,7 +3053,7 @@ mod golden_tests {
             &path,
             None,
             Some((
-                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &elwindui_core::graphics::Brush::Solid(elwindui_core::graphics::Color::black()),
                 &stroke,
             )),
             1.0,
@@ -3071,7 +3071,7 @@ mod golden_tests {
         // Default `miter_limit` (10.0) comfortably exceeds this vertex's own ~2.07 ratio, so the
         // join renders as a true miter.
         approx(
-            stroke_acute_v(elwindui_core::painter::LineJoin::Miter, 10.0),
+            stroke_acute_v(elwindui_core::graphics::LineJoin::Miter, 10.0),
             (0, 0, 0, 255),
             80,
         );
@@ -3080,7 +3080,7 @@ mod golden_tests {
     #[test]
     fn line_join_bevel_does_not_extend_the_outer_corner_of_an_acute_angle() {
         approx(
-            stroke_acute_v(elwindui_core::painter::LineJoin::Bevel, 10.0),
+            stroke_acute_v(elwindui_core::graphics::LineJoin::Bevel, 10.0),
             (0, 0, 0, 0),
             10,
         );
@@ -3091,7 +3091,7 @@ mod golden_tests {
         // This vertex needs a miter-length/half-width ratio of ~2.07; 1.5 falls short, so even a
         // `LineJoin::Miter` request must fall back to a bevel-style flat corner.
         approx(
-            stroke_acute_v(elwindui_core::painter::LineJoin::Miter, 1.5),
+            stroke_acute_v(elwindui_core::graphics::LineJoin::Miter, 1.5),
             (0, 0, 0, 0),
             10,
         );
@@ -3110,7 +3110,7 @@ mod golden_tests {
             CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 4.0, 32.0);
             CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 60.0, 32.0);
         }
-        let stroke = elwindui_core::painter::StrokeStyle {
+        let stroke = elwindui_core::graphics::StrokeStyle {
             width: 6.0,
             dash_pattern: std::sync::Arc::from([8.0, 8.0]),
             ..Default::default()
@@ -3126,7 +3126,7 @@ mod golden_tests {
             &path,
             None,
             Some((
-                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &elwindui_core::graphics::Brush::Solid(elwindui_core::graphics::Color::black()),
                 &stroke,
             )),
             1.0,
@@ -3152,7 +3152,7 @@ mod golden_tests {
             CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 4.0, 32.0);
             CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 60.0, 32.0);
         }
-        let stroke = elwindui_core::painter::StrokeStyle {
+        let stroke = elwindui_core::graphics::StrokeStyle {
             width: 6.0,
             dash_pattern: std::sync::Arc::from([8.0, 8.0]),
             dash_offset: 8.0,
@@ -3169,7 +3169,7 @@ mod golden_tests {
             &path,
             None,
             Some((
-                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &elwindui_core::graphics::Brush::Solid(elwindui_core::graphics::Color::black()),
                 &stroke,
             )),
             1.0,
@@ -3183,8 +3183,8 @@ mod golden_tests {
 
     /// The path shared by the `NonZero`/`EvenOdd` tests below: two 30x30 squares, sharing the same
     /// winding order, overlapping in their bottom-right/top-left quadrant.
-    fn two_overlapping_same_winding_squares() -> elwindui_core::painter::Path {
-        let mut builder = elwindui_core::painter::PathBuilder::new();
+    fn two_overlapping_same_winding_squares() -> elwindui_core::graphics::Path {
+        let mut builder = elwindui_core::graphics::PathBuilder::new();
         builder.add_rect(elwindui_core::base::Rect {
             x: 10.0,
             y: 10.0,
@@ -3216,8 +3216,8 @@ mod golden_tests {
         shape_layer.setFillRule(unsafe { kCAFillRuleNonZero });
         apply_fill(
             &shape_layer,
-            Some(&elwindui_core::painter::Brush::Solid(
-                elwindui_core::painter::Color::rgb(0, 150, 0),
+            Some(&elwindui_core::graphics::Brush::Solid(
+                elwindui_core::graphics::Color::rgb(0, 150, 0),
             )),
             path.bounds(),
         );
@@ -3245,8 +3245,8 @@ mod golden_tests {
         shape_layer.setFillRule(unsafe { kCAFillRuleEvenOdd });
         apply_fill(
             &shape_layer,
-            Some(&elwindui_core::painter::Brush::Solid(
-                elwindui_core::painter::Color::rgb(0, 150, 0),
+            Some(&elwindui_core::graphics::Brush::Solid(
+                elwindui_core::graphics::Color::rgb(0, 150, 0),
             )),
             path.bounds(),
         );
@@ -3267,7 +3267,7 @@ mod golden_tests {
             objc2_core_foundation::CGSize::new(64.0, 64.0),
         ));
         let world = elwindui_core::base::AffineTransform::identity();
-        let mut builder = elwindui_core::painter::PathBuilder::new();
+        let mut builder = elwindui_core::graphics::PathBuilder::new();
         builder.move_to(elwindui_core::base::Point { x: 10.0, y: 50.0 });
         builder.quad_to(
             elwindui_core::base::Point { x: 32.0, y: 10.0 },
@@ -3275,7 +3275,7 @@ mod golden_tests {
         );
         let path = builder.build().expect("a moved-to, curved path is never empty");
         let cg_path = path_to_cgpath(&world, &path);
-        let stroke = elwindui_core::painter::StrokeStyle {
+        let stroke = elwindui_core::graphics::StrokeStyle {
             width: 6.0,
             ..Default::default()
         };
@@ -3284,7 +3284,7 @@ mod golden_tests {
             &cg_path,
             None,
             Some((
-                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &elwindui_core::graphics::Brush::Solid(elwindui_core::graphics::Color::black()),
                 &stroke,
             )),
             1.0,
@@ -3307,7 +3307,7 @@ mod golden_tests {
             objc2_core_foundation::CGSize::new(64.0, 64.0),
         ));
         let world = elwindui_core::base::AffineTransform::identity();
-        let mut builder = elwindui_core::painter::PathBuilder::new();
+        let mut builder = elwindui_core::graphics::PathBuilder::new();
         builder.move_to(elwindui_core::base::Point { x: 10.0, y: 50.0 });
         builder.cubic_to(
             elwindui_core::base::Point { x: 20.0, y: 10.0 },
@@ -3316,7 +3316,7 @@ mod golden_tests {
         );
         let path = builder.build().expect("a moved-to, curved path is never empty");
         let cg_path = path_to_cgpath(&world, &path);
-        let stroke = elwindui_core::painter::StrokeStyle {
+        let stroke = elwindui_core::graphics::StrokeStyle {
             width: 6.0,
             ..Default::default()
         };
@@ -3325,7 +3325,7 @@ mod golden_tests {
             &cg_path,
             None,
             Some((
-                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &elwindui_core::graphics::Brush::Solid(elwindui_core::graphics::Color::black()),
                 &stroke,
             )),
             1.0,
@@ -3353,19 +3353,19 @@ mod golden_tests {
             width: 64.0,
             height: 64.0,
         };
-        let brush = elwindui_core::painter::Brush::LinearGradient(
-            elwindui_core::painter::LinearGradientBrush::new(
+        let brush = elwindui_core::graphics::Brush::LinearGradient(
+            elwindui_core::graphics::LinearGradientBrush::new(
                 elwindui_core::base::Point { x: 0.0, y: 0.0 },
                 elwindui_core::base::Point { x: 1.0, y: 0.0 },
                 vec![
-                    elwindui_core::painter::GradientStop::new(
+                    elwindui_core::graphics::GradientStop::new(
                         0.0,
-                        elwindui_core::painter::Color::rgb(255, 0, 0),
+                        elwindui_core::graphics::Color::rgb(255, 0, 0),
                     )
                     .unwrap(),
-                    elwindui_core::painter::GradientStop::new(
+                    elwindui_core::graphics::GradientStop::new(
                         1.0,
-                        elwindui_core::painter::Color::rgb(0, 0, 255),
+                        elwindui_core::graphics::Color::rgb(0, 0, 255),
                     )
                     .unwrap(),
                 ],
@@ -3404,20 +3404,20 @@ mod golden_tests {
             width: 64.0,
             height: 64.0,
         };
-        let brush = elwindui_core::painter::Brush::RadialGradient(
-            elwindui_core::painter::RadialGradientBrush::new(
+        let brush = elwindui_core::graphics::Brush::RadialGradient(
+            elwindui_core::graphics::RadialGradientBrush::new(
                 elwindui_core::base::Point { x: 0.5, y: 0.5 },
                 0.5,
                 0.5,
                 vec![
-                    elwindui_core::painter::GradientStop::new(
+                    elwindui_core::graphics::GradientStop::new(
                         0.0,
-                        elwindui_core::painter::Color::rgb(255, 0, 0),
+                        elwindui_core::graphics::Color::rgb(255, 0, 0),
                     )
                     .unwrap(),
-                    elwindui_core::painter::GradientStop::new(
+                    elwindui_core::graphics::GradientStop::new(
                         1.0,
-                        elwindui_core::painter::Color::rgb(0, 0, 255),
+                        elwindui_core::graphics::Color::rgb(0, 0, 255),
                     )
                     .unwrap(),
                 ],
@@ -3451,12 +3451,12 @@ mod golden_tests {
         // (already exact) while the height (half of the square) leaves 5px letterbox gaps above
         // and below, centered by default alignment.
         let pixels = vec![0u8, 0, 255, 255].repeat(20 * 10);
-        let image = elwindui_core::painter::Image::from_rgba8(
+        let image = elwindui_core::graphics::Image::from_rgba8(
             20,
             10,
             20 * 4,
             pixels,
-            elwindui_core::painter::AlphaMode::Opaque,
+            elwindui_core::graphics::AlphaMode::Opaque,
         )
         .expect("valid RGBA8 buffer");
         let mut image_cache = HashMap::new();
@@ -3468,8 +3468,8 @@ mod golden_tests {
             width: 20.0,
             height: 20.0,
         };
-        let options = elwindui_core::painter::ImageDrawOptions {
-            fit: elwindui_core::painter::ImageFit::Contain,
+        let options = elwindui_core::graphics::ImageDrawOptions {
+            fit: elwindui_core::graphics::ImageFit::Contain,
             ..Default::default()
         };
         let world = elwindui_core::base::AffineTransform::identity();
@@ -3492,12 +3492,12 @@ mod golden_tests {
         ));
         // A 2x1 image: left pixel red, right pixel blue.
         let pixels = vec![255u8, 0, 0, 255, 0, 0, 255, 255];
-        let image = elwindui_core::painter::Image::from_rgba8(
+        let image = elwindui_core::graphics::Image::from_rgba8(
             2,
             1,
             2 * 4,
             pixels,
-            elwindui_core::painter::AlphaMode::Opaque,
+            elwindui_core::graphics::AlphaMode::Opaque,
         )
         .expect("valid RGBA8 buffer");
         let mut image_cache = HashMap::new();
@@ -3516,8 +3516,8 @@ mod golden_tests {
             width: 1.0,
             height: 1.0,
         };
-        let options = elwindui_core::painter::ImageDrawOptions {
-            fit: elwindui_core::painter::ImageFit::Fill,
+        let options = elwindui_core::graphics::ImageDrawOptions {
+            fit: elwindui_core::graphics::ImageFit::Fill,
             ..Default::default()
         };
         let world = elwindui_core::base::AffineTransform::identity();
@@ -3561,8 +3561,8 @@ mod golden_tests {
         add_shape_layer(
             &root,
             &path,
-            Some(&elwindui_core::painter::Brush::Solid(
-                elwindui_core::painter::Color::rgb(0, 200, 0),
+            Some(&elwindui_core::graphics::Brush::Solid(
+                elwindui_core::graphics::Color::rgb(0, 200, 0),
             )),
             None,
             1.0,
@@ -3595,8 +3595,8 @@ mod golden_tests {
         add_shape_layer(
             &root,
             &path,
-            Some(&elwindui_core::painter::Brush::Solid(
-                elwindui_core::painter::Color::rgb(0, 255, 0),
+            Some(&elwindui_core::graphics::Brush::Solid(
+                elwindui_core::graphics::Color::rgb(0, 255, 0),
             )),
             None,
             opacity,

@@ -226,7 +226,7 @@ impl<T: WinUiHandle + 'static> From<T> for AnyView {
 pub struct TreeHostPanel {
     canvas: Canvas,
     tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
-    render_tree: Rc<RefCell<Option<elwindui_core::painter::RenderTree>>>,
+    render_tree: Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
     /// Turns `canvas`'s own raw `KeyDown`/`KeyUp`/`CharacterReceived` events into
     /// `elwindui_core::ui::dispatch_routed` calls against whichever element currently has focus,
     /// and owns the `FocusTracker`/`ShortcutRegistry` for whatever tree this panel hosts — mirrors
@@ -255,7 +255,7 @@ pub struct TreeHostPanel {
 struct WinUI3RelayoutHost {
     canvas: Canvas,
     tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
-    render_tree: Weak<RefCell<Option<elwindui_core::painter::RenderTree>>>,
+    render_tree: Weak<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
     /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
     /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
     /// (and clears it right before doing so).
@@ -487,7 +487,7 @@ impl TreeHostPanel {
     fn relayout_static(
         canvas: &Canvas,
         tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
-        retained_tree: &Rc<RefCell<Option<elwindui_core::painter::RenderTree>>>,
+        retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
     ) {
         use elwindui_core::base::Size as LSize;
 
@@ -511,7 +511,7 @@ impl TreeHostPanel {
                     .expect("checked above")
                     .reconcile::<AnyView>(tree);
             } else {
-                *retained_tree = Some(elwindui_core::painter::RenderTree::new::<AnyView>(tree));
+                *retained_tree = Some(elwindui_core::graphics::RenderTree::new::<AnyView>(tree));
             }
         }
         let retained_tree = retained_tree.borrow();
@@ -524,10 +524,10 @@ impl TreeHostPanel {
         };
 
         fn collect_commands<'a>(
-            group: &'a elwindui_core::painter::RenderGroup,
+            group: &'a elwindui_core::graphics::RenderGroup,
             origin: elwindui_core::base::Point,
             out: &mut Vec<(
-                &'a elwindui_core::painter::RenderCommand,
+                &'a elwindui_core::graphics::RenderCommand,
                 elwindui_core::base::Point,
             )>,
         ) {
@@ -573,16 +573,16 @@ impl TreeHostPanel {
         }
         for (command, origin) in commands {
             match command {
-                elwindui_core::painter::RenderCommand::FillRect { rect, brush }
-                | elwindui_core::painter::RenderCommand::StrokeRect { rect, brush, .. } => {
+                elwindui_core::graphics::RenderCommand::FillRect { rect, brush }
+                | elwindui_core::graphics::RenderCommand::StrokeRect { rect, brush, .. } => {
                     let rectangle = XamlRectangle::new().expect("Rectangle::new");
                     let element: UIElement = rectangle.into();
                     place_shape(&element, origin, rect);
                     let _ = children.Append(&element);
                     apply_shape_paint(&element, command);
                 }
-                elwindui_core::painter::RenderCommand::FillRoundedRect { rect, radii, .. }
-                | elwindui_core::painter::RenderCommand::StrokeRoundedRect {
+                elwindui_core::graphics::RenderCommand::FillRoundedRect { rect, radii, .. }
+                | elwindui_core::graphics::RenderCommand::StrokeRoundedRect {
                     rect, radii, ..
                 } => {
                     let rectangle = XamlRectangle::new().expect("Rectangle::new");
@@ -599,14 +599,14 @@ impl TreeHostPanel {
                     let _ = children.Append(&element);
                     apply_shape_paint(&element, command);
                 }
-                elwindui_core::painter::RenderCommand::FillEllipse { rect, .. }
-                | elwindui_core::painter::RenderCommand::StrokeEllipse { rect, .. } => {
+                elwindui_core::graphics::RenderCommand::FillEllipse { rect, .. }
+                | elwindui_core::graphics::RenderCommand::StrokeEllipse { rect, .. } => {
                     let element: UIElement = XamlEllipse::new().expect("Ellipse::new").into();
                     place_shape(&element, origin, rect);
                     let _ = children.Append(&element);
                     apply_shape_paint(&element, command);
                 }
-                elwindui_core::painter::RenderCommand::DrawLine {
+                elwindui_core::graphics::RenderCommand::DrawLine {
                     from,
                     to,
                     brush,
@@ -618,14 +618,14 @@ impl TreeHostPanel {
                     let _ = line.SetX2((origin.x + to.x) as f64);
                     let _ = line.SetY2((origin.y + to.y) as f64);
                     if let Ok(color_brush) = SolidColorBrush::CreateInstance(
-                        painter_color_to_winui_color(brush_sample_color(brush)),
+                        graphics_color_to_winui_color(brush_sample_color(brush)),
                     ) {
                         let _ = line.SetStroke(&color_brush);
                         let _ = line.SetStrokeThickness(stroke.width as f64);
                     }
                     let _ = children.Append(&line);
                 }
-                elwindui_core::painter::RenderCommand::Text {
+                elwindui_core::graphics::RenderCommand::Text {
                     content,
                     rect,
                     color,
@@ -635,8 +635,8 @@ impl TreeHostPanel {
                     let text_block = TextBlock::new().expect("TextBlock::new");
                     let _ = text_block.SetText(&HSTRING::from(content));
                     if let Ok(brush) =
-                        SolidColorBrush::CreateInstance(painter_color_to_winui_color(
-                            color.unwrap_or(elwindui_core::painter::Color::black()),
+                        SolidColorBrush::CreateInstance(graphics_color_to_winui_color(
+                            color.unwrap_or(elwindui_core::graphics::Color::black()),
                         ))
                     {
                         let _ = text_block.SetForeground(&brush);
@@ -649,7 +649,7 @@ impl TreeHostPanel {
                     let _ = Canvas::SetTop(&fe, (origin.y + rect.y) as f64);
                     let _ = children.Append(&fe);
                 }
-                elwindui_core::painter::RenderCommand::NativeControl { handle, rect, .. } => {
+                elwindui_core::graphics::RenderCommand::NativeControl { handle, rect, .. } => {
                     if let Some(mut view) = handle.downcast_ref::<AnyView>().cloned() {
                         view.arrange(elwindui_core::base::Rect {
                             x: origin.x + rect.x,
@@ -660,21 +660,21 @@ impl TreeHostPanel {
                         let _ = children.Append(&view.as_element());
                     }
                 }
-                elwindui_core::painter::RenderCommand::FillPath { .. } => {
+                elwindui_core::graphics::RenderCommand::FillPath { .. } => {
                     unsupported_command!("FillPath")
                 }
-                elwindui_core::painter::RenderCommand::StrokePath { .. } => {
+                elwindui_core::graphics::RenderCommand::StrokePath { .. } => {
                     unsupported_command!("StrokePath")
                 }
-                elwindui_core::painter::RenderCommand::DrawImage { .. } => {
+                elwindui_core::graphics::RenderCommand::DrawImage { .. } => {
                     unsupported_command!("DrawImage")
                 }
-                elwindui_core::painter::RenderCommand::PushClip { .. }
-                | elwindui_core::painter::RenderCommand::PopClip
-                | elwindui_core::painter::RenderCommand::PushTransform { .. }
-                | elwindui_core::painter::RenderCommand::PopTransform
-                | elwindui_core::painter::RenderCommand::PushOpacity { .. }
-                | elwindui_core::painter::RenderCommand::PopOpacity => {
+                elwindui_core::graphics::RenderCommand::PushClip { .. }
+                | elwindui_core::graphics::RenderCommand::PopClip
+                | elwindui_core::graphics::RenderCommand::PushTransform { .. }
+                | elwindui_core::graphics::RenderCommand::PopTransform
+                | elwindui_core::graphics::RenderCommand::PushOpacity { .. }
+                | elwindui_core::graphics::RenderCommand::PopOpacity => {
                     unsupported_command!("clip/transform/opacity stack")
                 }
             }
@@ -703,10 +703,10 @@ fn set_shape_stroke(element: &UIElement, brush: &SolidColorBrush, thickness: f64
     e.SetStrokeThickness(thickness)
 }
 
-/// Converts our own `elwindui_core::painter::Color` (RGBA field order) into a `Windows::UI::Color`
+/// Converts our own `elwindui_core::graphics::Color` (RGBA field order) into a `Windows::UI::Color`
 /// (ARGB field order) — a plain field re-shuffle, no hex round-trip needed now that `Color` is a
 /// real value type rather than a backend-agnostic hex string (painter design doc §18).
-fn painter_color_to_winui_color(c: elwindui_core::painter::Color) -> Color {
+fn graphics_color_to_winui_color(c: elwindui_core::graphics::Color) -> Color {
     Color {
         A: c.a,
         R: c.r,
@@ -715,25 +715,25 @@ fn painter_color_to_winui_color(c: elwindui_core::painter::Color) -> Color {
     }
 }
 
-/// Picks one representative `elwindui_core::painter::Color` out of a `Brush` — this backend has
+/// Picks one representative `elwindui_core::graphics::Color` out of a `Brush` — this backend has
 /// no Win2D/`CanvasControl` drawing surface to build a real gradient/image brush renderer on top
 /// of (see the doc comment on this file's own `RenderCommand` replay loop), so a gradient falls
 /// back to its first stop and an image brush falls back to opaque black, rather than the command
 /// silently painting nothing.
-fn brush_sample_color(brush: &elwindui_core::painter::Brush) -> elwindui_core::painter::Color {
+fn brush_sample_color(brush: &elwindui_core::graphics::Brush) -> elwindui_core::graphics::Color {
     match brush {
-        elwindui_core::painter::Brush::Solid(color) => *color,
-        elwindui_core::painter::Brush::LinearGradient(g) => g
+        elwindui_core::graphics::Brush::Solid(color) => *color,
+        elwindui_core::graphics::Brush::LinearGradient(g) => g
             .stops
             .first()
             .map(|s| s.color)
-            .unwrap_or(elwindui_core::painter::Color::black()),
-        elwindui_core::painter::Brush::RadialGradient(g) => g
+            .unwrap_or(elwindui_core::graphics::Color::black()),
+        elwindui_core::graphics::Brush::RadialGradient(g) => g
             .stops
             .first()
             .map(|s| s.color)
-            .unwrap_or(elwindui_core::painter::Color::black()),
-        elwindui_core::painter::Brush::Image(_) => elwindui_core::painter::Color::black(),
+            .unwrap_or(elwindui_core::graphics::Color::black()),
+        elwindui_core::graphics::Brush::Image(_) => elwindui_core::graphics::Color::black(),
     }
 }
 
@@ -756,13 +756,13 @@ fn place_shape(
 
 /// Applies whichever `Fill*`/`Stroke*` command's own `brush`/`stroke` this is to `element` — one
 /// dispatch point so `relayout_static`'s own match doesn't repeat this per variant.
-fn apply_shape_paint(element: &UIElement, command: &elwindui_core::painter::RenderCommand) {
-    use elwindui_core::painter::RenderCommand;
+fn apply_shape_paint(element: &UIElement, command: &elwindui_core::graphics::RenderCommand) {
+    use elwindui_core::graphics::RenderCommand;
     match command {
         RenderCommand::FillRect { brush, .. }
         | RenderCommand::FillRoundedRect { brush, .. }
         | RenderCommand::FillEllipse { brush, .. } => {
-            if let Ok(color_brush) = SolidColorBrush::CreateInstance(painter_color_to_winui_color(
+            if let Ok(color_brush) = SolidColorBrush::CreateInstance(graphics_color_to_winui_color(
                 brush_sample_color(brush),
             )) {
                 let _ = set_shape_fill(element, &color_brush);
@@ -771,7 +771,7 @@ fn apply_shape_paint(element: &UIElement, command: &elwindui_core::painter::Rend
         RenderCommand::StrokeRect { brush, stroke, .. }
         | RenderCommand::StrokeRoundedRect { brush, stroke, .. }
         | RenderCommand::StrokeEllipse { brush, stroke, .. } => {
-            if let Ok(color_brush) = SolidColorBrush::CreateInstance(painter_color_to_winui_color(
+            if let Ok(color_brush) = SolidColorBrush::CreateInstance(graphics_color_to_winui_color(
                 brush_sample_color(brush),
             )) {
                 let _ = set_shape_stroke(element, &color_brush, stroke.width as f64);

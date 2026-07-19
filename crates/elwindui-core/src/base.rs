@@ -15,9 +15,9 @@ impl<T: Any> AsAny for T {
 }
 
 /// See docs/elwindui_spec.md 付録H.2. Common geometry primitives shared across layout
-/// (`elwindui_core::layout`), painting (`elwindui_core::painter`), input
+/// (`elwindui_core::layout`), painting (`elwindui_core::graphics`), input
 /// (`elwindui_core::input`), and every backend crate — kept in their own module rather than
-/// under `layout`/`painter` since neither of those is the "owner" of a concept this widely used.
+/// under `layout`/`graphics` since neither of those is the "owner" of a concept this widely used.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     pub x: f32,

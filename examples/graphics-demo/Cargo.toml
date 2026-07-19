@@ -1,5 +1,5 @@
 [package]
-name = "painter-demo"
+name = "graphics-demo"
 version.workspace = true
 edition.workspace = true
 publish = false

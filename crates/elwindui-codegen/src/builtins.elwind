@@ -195,7 +195,7 @@ component HorizontalLayout inherits Layout {
 // own `base` field — but no *user-facing* `Shape::new(..)` constructor call is ever generated for
 // it directly (`Shape` is `#[abstract]`): `elwindui-codegen`'s `emit_virtual_construction` assembles
 // a real `elwindui_core::ui::Shape` value inline at each use site instead. `fill`/`stroke` are
-// `elwindui::core::painter::Brush`-typed (not raw hex strings) — a string literal assigned to
+// `elwindui::core::graphics::Brush`-typed (not raw hex strings) — a string literal assigned to
 // either field is validated and converted to `Brush::Solid(Color::rgba(..))` at codegen time (see
 // `elwindui-codegen`'s literal-coercion handling for `Brush`/`Color`-typed fields), so
 // `Rectangle { fill: "#3a3a3c" }` keeps working unchanged at the `.elwind` call site. No
@@ -204,8 +204,8 @@ component HorizontalLayout inherits Layout {
 #[embedded]
 #[abstract]
 component Shape inherits UIElement {
-    fill: Option<elwindui::core::painter::Brush>,
-    stroke: Option<elwindui::core::painter::Brush>,
+    fill: Option<elwindui::core::graphics::Brush>,
+    stroke: Option<elwindui::core::graphics::Brush>,
     stroke_width: Option<f32>,
 }
 
@@ -322,7 +322,7 @@ component Button inherits NativeControl {
 #[embedded]
 component TextBlock inherits UIElement {
     text: String,
-    color: Option<elwindui::core::painter::Color>,
+    color: Option<elwindui::core::graphics::Color>,
     text_alignment: Option<TextAlignment>,
 }
 

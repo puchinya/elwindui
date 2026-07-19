@@ -5155,7 +5155,7 @@ pub(crate) fn strip_option(ty: &str) -> (&str, bool) {
 }
 
 /// Parses a `"#rrggbb"`/`"#rrggbbaa"` hex string into its four byte components — the same rule
-/// `elwindui_core::painter::Color::parse_hex` implements at runtime, duplicated here (rather than
+/// `elwindui_core::graphics::Color::parse_hex` implements at runtime, duplicated here (rather than
 /// depending on `elwindui-core` from this crate just for this) since it's a tiny, stable parsing
 /// rule and `elwindui-codegen` otherwise has zero runtime dependency on the crate whose code it
 /// generates calls into.
@@ -5208,17 +5208,17 @@ fn coerce_color_literal(inner_ty: &str, value: &ViewExpr) -> Option<TokenStream>
     else {
         return None;
     };
-    let is_brush = inner_ty.trim() == "elwindui::core::painter::Brush";
-    let is_color = inner_ty.trim() == "elwindui::core::painter::Color";
+    let is_brush = inner_ty.trim() == "elwindui::core::graphics::Brush";
+    let is_color = inner_ty.trim() == "elwindui::core::graphics::Color";
     if !is_brush && !is_color {
         return None;
     }
     let hex = lit_str.value();
     let (r, g, b, a) = parse_hex_color_literal(&hex).unwrap_or_else(|e| panic!("{e}"));
     Some(if is_brush {
-        quote! { elwindui::core::painter::Brush::Solid(elwindui::core::painter::Color::rgba(#r, #g, #b, #a)) }
+        quote! { elwindui::core::graphics::Brush::Solid(elwindui::core::graphics::Color::rgba(#r, #g, #b, #a)) }
     } else {
-        quote! { elwindui::core::painter::Color::rgba(#r, #g, #b, #a) }
+        quote! { elwindui::core::graphics::Color::rgba(#r, #g, #b, #a) }
     })
 }
 
@@ -5268,8 +5268,8 @@ const PASSTHROUGH_NODE: &str = "__passthrough_node__";
 /// - Other native values (`MenuBar`, `Menu`, or `Window`) are unsupported in UI-element slots.
 /// For a bare single-segment `ViewExpr::Path` (`content: canvas`), the referenced field's own
 /// declared type — reduced to a plausible symbol-table lookup key by stripping one layer of
-/// smart-pointer/`Option` wrapper and any module-path prefix (`std :: rc :: Rc < PainterDemoCanvas
-/// >` -> `PainterDemoCanvas`; `ctx.own_fields` stores types as `quote!`-stringified text, hence the
+/// smart-pointer/`Option` wrapper and any module-path prefix (`std :: rc :: Rc < GraphicsDemoCanvas
+/// >` -> `GraphicsDemoCanvas`; `ctx.own_fields` stores types as `quote!`-stringified text, hence the
 /// stray spaces). Returns `None` for anything else (a multi-segment path, `vm.field`, or a name
 /// `ctx.own_fields` doesn't have) — `into_node_if_needed`'s caller already treats an empty/
 /// unresolvable string as "not a known symbol-table type", so this doesn't need to distinguish
@@ -8749,7 +8749,7 @@ view Foo {
         let generated_str = generated.to_string();
         assert!(
             generated_str.contains(
-                "elwindui :: core :: painter :: Brush :: Solid (elwindui :: core :: painter :: Color :: rgba (58u8 , 58u8 , 60u8 , 255u8))"
+                "elwindui :: core :: graphics :: Brush :: Solid (elwindui :: core :: graphics :: Color :: rgba (58u8 , 58u8 , 60u8 , 255u8))"
             ),
             "{generated_str}"
         );

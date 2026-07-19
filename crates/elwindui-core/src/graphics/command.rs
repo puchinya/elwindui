@@ -20,7 +20,7 @@ impl Default for TextAlignment {
 }
 
 /// Backend-independent font placeholder — font selection/shaping/measurement is out of scope for
-/// this painter API revision (painter design doc §1/§22); `Font` stays a zero-sized marker until
+/// this graphics API revision (painter design doc §1/§22); `Font` stays a zero-sized marker until
 /// that work happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Font;

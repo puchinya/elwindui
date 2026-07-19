@@ -45,6 +45,16 @@ use std::collections::HashMap;
 /// particular backend chooses to rasterize it at).
 const MAX_OFFSCREEN_DIMENSION: usize = 4096;
 
+thread_local! {
+    /// One `CIContext` reused for every filter-chain render on this (AppKit's single UI) thread,
+    /// rather than a fresh one per call — `CIContext` construction sets up a real GPU/Metal
+    /// rendering pipeline and Apple's own documentation calls it expensive enough to create once
+    /// and reuse for the app's lifetime, not per render. `thread_local!` (rather than proving
+    /// `Retained<CIContext>` is `Send`/`Sync`, which it generally isn't for an arbitrary
+    /// Objective-C object) is sufficient since every caller here already runs on the main thread.
+    static SHARED_CI_CONTEXT: Retained<CIContext> = unsafe { CIContext::context() };
+}
+
 /// A vector feature with no reasonable mapping onto this backend's native APIs — reported once
 /// (debug builds only, matching `elwindui-backend-winui3`'s own `unsupported_command!`
 /// convention) rather than silently dropped; the surrounding content still renders.
@@ -158,6 +168,19 @@ fn render_group(
 ) {
     let world = parent_world.concat(&group.transform);
 
+    // Groups that carry no visual meaning of their own (a bare organizational `<g>`, extremely
+    // common in Illustrator/Figma exports — see the doc comment on `is_transparent_passthrough`)
+    // are rendered straight into `layer` with no `CALayer` of their own: skipping this wrapper is
+    // invisible to the final image but matters a lot for a document with thousands of such groups
+    // (`elwind_chan.svg`'s 5864 paths are largely each wrapped in their own trivial `<g>`), since
+    // every skipped wrapper is one fewer `CALayer` this backend must synchronously construct.
+    if is_transparent_passthrough(group) {
+        for child in group.children.iter() {
+            render_node(layer, child, &world, parent_opacity, image_cache);
+        }
+        return;
+    }
+
     let wrapper = CALayer::new();
     wrapper.setName(Some(&NSString::from_str("elwindui-paint")));
     wrapper.setFrame(layer.bounds());
@@ -198,6 +221,22 @@ fn render_group(
     apply_blend_mode(&wrapper, group.blend_mode);
 
     layer.addSublayer(&wrapper);
+}
+
+/// True when `group` itself contributes nothing to the final image beyond grouping its
+/// children — no transform, full opacity, normal blending, no clip-path/mask/filter, and not an
+/// isolated stacking context (`isolate` would need its own offscreen compositing pass to be
+/// correct, which flattening away would break) — so `render_group` can hand its children straight
+/// to the parent `CALayer` instead of allocating a `wrapper` (and possibly a second `clip_path`
+/// content layer) purely to relay them unchanged.
+fn is_transparent_passthrough(group: &VectorGroup) -> bool {
+    group.transform == AffineTransform::IDENTITY
+        && group.opacity == 1.0
+        && group.blend_mode == VectorBlendMode::Normal
+        && !group.isolate
+        && group.clip_path.is_none()
+        && group.mask.is_none()
+        && group.filters.is_empty()
 }
 
 fn apply_blend_mode(layer: &CALayer, mode: VectorBlendMode) {
@@ -894,12 +933,13 @@ fn render_filtered_content(
         }
     }
 
-    let ci_context = unsafe { CIContext::context() };
     let render_rect = CGRect::new(
         CGPoint::new(local_rect.x as f64, local_rect.y as f64),
         CGSize::new(local_rect.width as f64, local_rect.height as f64),
     );
-    let Some(result_cgimage) = (unsafe { ci_context.createCGImage_fromRect(&current, render_rect) }) else {
+    let Some(result_cgimage) =
+        SHARED_CI_CONTEXT.with(|ctx| unsafe { ctx.createCGImage_fromRect(&current, render_rect) })
+    else {
         return;
     };
     let result_cgimage = retained_to_cf_cgimage(result_cgimage);

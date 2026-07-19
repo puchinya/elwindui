@@ -36,7 +36,8 @@ use elwindui::core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui::core::graphics::{
     Brush, Clip, Color, FillRule, GeometryCombineMode, GradientStop, Image, ImageBrush,
     ImageDrawOptions, ImageFit, LineCap, LineJoin, LinearGradientBrush, Path, PathBuilder,
-    RadialGradientBrush, RenderContext, Stretch, StrokeStyle, TextAlignment, TileMode,
+    RadialGradientBrush, RenderContext, Stretch, StrokeStyle, TextAlignment, TileMode, VectorImage,
+    VectorImageDrawOptions,
 };
 use elwindui::core::ui::UIElementExt;
 use elwindui::ui::WindowExt;
@@ -92,6 +93,13 @@ const IMAGES: &[DemoEntry] = &[
     DemoEntry { label: "Texture Tile", draw: draw_image_texture_tile },
 ];
 
+const SVG: &[DemoEntry] = &[
+    DemoEntry { label: "Contain", draw: draw_svg_contain },
+    DemoEntry { label: "Cover", draw: draw_svg_cover },
+    DemoEntry { label: "Affine Transform", draw: draw_svg_affine },
+    DemoEntry { label: "Opacity", draw: draw_svg_opacity },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GraphicsDemoCategory {
     Fills,
@@ -100,6 +108,7 @@ enum GraphicsDemoCategory {
     PathCombine,
     Compositing,
     Images,
+    Svg,
 }
 
 impl GraphicsDemoCategory {
@@ -111,6 +120,7 @@ impl GraphicsDemoCategory {
             Self::PathCombine => PATH_COMBINE,
             Self::Compositing => COMPOSITING,
             Self::Images => IMAGES,
+            Self::Svg => SVG,
         }
     }
 }
@@ -622,6 +632,91 @@ fn draw_image_texture_tile(context: &mut RenderContext<'_>, rect: Rect) {
     context.fill_rounded_rect(rect, CornerRadius::uniform(14.0), &brush);
 }
 
+/// Anchored on `CARGO_MANIFEST_DIR` for the same launch-directory-independence reason
+/// `ELWIND_CHAN_PNG_PATH` documents above — `images/elwind_chan.svg` (a real, ~3.7MB illustration
+/// exported from a design tool, not a synthetic fixture) copied into this crate's own `assets/`.
+const ELWIND_CHAN_SVG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/elwind_chan.svg");
+
+/// Loaded once and shared, same reasoning as `elwind_chan_image()` above — `elwindui_svg::
+/// load_svg_file` does real file I/O and `usvg` parsing, neither of which `RenderContext::
+/// draw_vector_image`'s own recording call should ever repeat per repaint (実装指示書§25).
+fn elwind_chan_vector() -> &'static VectorImage {
+    static VECTOR: OnceLock<VectorImage> = OnceLock::new();
+    VECTOR.get_or_init(|| {
+        elwindui::svg::load_svg_file(ELWIND_CHAN_SVG_PATH)
+            .expect("assets/elwind_chan.svg must be a loadable SVG")
+    })
+}
+
+fn draw_svg_contain(context: &mut RenderContext<'_>, rect: Rect) {
+    context.draw_vector_image(
+        elwind_chan_vector(),
+        rect,
+        None,
+        VectorImageDrawOptions {
+            fit: ImageFit::Contain,
+            ..Default::default()
+        },
+    );
+}
+
+fn draw_svg_cover(context: &mut RenderContext<'_>, rect: Rect) {
+    context.draw_vector_image(
+        elwind_chan_vector(),
+        rect,
+        None,
+        VectorImageDrawOptions {
+            fit: ImageFit::Cover,
+            ..Default::default()
+        },
+    );
+}
+
+/// Same rotation+non-uniform-scale composition as `draw_image_affine` above — this exercises
+/// `vector_renderer`'s own arbitrary-`world`-transform gradient/group placement, not just a plain
+/// translation.
+fn draw_svg_affine(context: &mut RenderContext<'_>, rect: Rect) {
+    let center = Point {
+        x: rect.x + rect.width / 2.0,
+        y: rect.y + rect.height / 2.0,
+    };
+    let local_rect = Rect {
+        x: -55.0,
+        y: -55.0,
+        width: 110.0,
+        height: 110.0,
+    };
+    let transform = AffineTransform::translation(center.x, center.y)
+        .concat(&AffineTransform::rotation(18f32.to_radians()))
+        .concat(&AffineTransform::scale(1.15, 0.85));
+    context.with_transform(transform, |ctx| {
+        ctx.draw_vector_image(
+            elwind_chan_vector(),
+            local_rect,
+            None,
+            VectorImageDrawOptions {
+                fit: ImageFit::Contain,
+                ..Default::default()
+            },
+        );
+    });
+}
+
+fn draw_svg_opacity(context: &mut RenderContext<'_>, rect: Rect) {
+    context.fill_rounded_rect(rect, CornerRadius::uniform(10.0), &Brush::Solid(Color::rgb(37, 99, 235)));
+    context.with_opacity(0.5, |ctx| {
+        ctx.draw_vector_image(
+            elwind_chan_vector(),
+            rect,
+            None,
+            VectorImageDrawOptions {
+                fit: ImageFit::Contain,
+                ..Default::default()
+            },
+        );
+    });
+}
+
 // `TabView`'s chip click handler (`elwindui-backend-appkit`'s `native_ui::TabView::rebuild`) only
 // ever fires the DSL `on_select` callback — it never updates `selected_index` on its own (that
 // `usize` observable is one-directional, view -> `on_select` -> model -> back down through
@@ -664,6 +759,7 @@ struct GraphicsDemoWindow {
     path_combine_canvas: std::rc::Rc<GraphicsDemoCanvas>,
     compositing_canvas: std::rc::Rc<GraphicsDemoCanvas>,
     images_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    svg_canvas: std::rc::Rc<GraphicsDemoCanvas>,
 
     body: view! {
         title: "Graphics Demo"
@@ -706,6 +802,12 @@ struct GraphicsDemoWindow {
                 closable: false
                 on_close: || {}
             }
+            TabViewItem {
+                header: "SVG"
+                content: svg_canvas
+                closable: false
+                on_close: || {}
+            }
             selected_index: vm.selected_tab
             on_select: |index| { vm.select_tab(index) }
             on_new_tab: || {}
@@ -723,6 +825,7 @@ fn main() {
         GraphicsDemoCanvas::new(GraphicsDemoCategory::PathCombine),
         GraphicsDemoCanvas::new(GraphicsDemoCategory::Compositing),
         GraphicsDemoCanvas::new(GraphicsDemoCategory::Images),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Svg),
     );
     window.show();
     elwindui::application::run();

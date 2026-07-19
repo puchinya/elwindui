@@ -3,6 +3,7 @@ use super::color::Color;
 use super::image::{Image, ImageDrawOptions};
 use super::path::{FillRule, Path};
 use super::stroke::StrokeStyle;
+use super::vector_image::{VectorImage, VectorImageDrawOptions};
 use crate::base::{AffineTransform, CornerRadius, Rect};
 use std::any::Any;
 use std::rc::Rc;
@@ -90,6 +91,14 @@ pub enum RenderCommand {
         dest: Rect,
         source: Option<Rect>,
         options: ImageDrawOptions,
+    },
+    /// `image`'s internal `Arc` makes this variant's own `Clone` cheap — see
+    /// `VectorImage`'s own doc comment (SVG読み込み・ベクター描画対応 実装指示書§1.3).
+    DrawVectorImage {
+        image: VectorImage,
+        dest: Rect,
+        source: Option<Rect>,
+        options: VectorImageDrawOptions,
     },
     Text {
         content: String,

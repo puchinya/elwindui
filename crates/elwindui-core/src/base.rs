@@ -168,6 +168,31 @@ impl AffineTransform {
             y: self.m12 * vector.x + self.m22 * vector.y,
         }
     }
+
+    /// The inverse transform (`self.invert().unwrap().concat(&self) == IDENTITY`), or `None` if
+    /// `self` is singular (not invertible — e.g. a zero scale). Used wherever a transform needs
+    /// to be "factored out" of an already-composed one, e.g. deriving a node's transform relative
+    /// to an ancestor from two already-absolute transforms.
+    #[must_use]
+    pub fn invert(&self) -> Option<Self> {
+        let det = self.m11 * self.m22 - self.m12 * self.m21;
+        if det.abs() < 1e-9 {
+            return None;
+        }
+        let inv_det = 1.0 / det;
+        let m11 = self.m22 * inv_det;
+        let m12 = -self.m12 * inv_det;
+        let m21 = -self.m21 * inv_det;
+        let m22 = self.m11 * inv_det;
+        Some(Self {
+            m11,
+            m12,
+            m21,
+            m22,
+            dx: -(self.dx * m11 + self.dy * m21),
+            dy: -(self.dx * m12 + self.dy * m22),
+        })
+    }
 }
 
 impl Default for AffineTransform {
@@ -184,6 +209,24 @@ mod affine_transform_tests {
     fn identity_is_a_no_op() {
         let p = Point { x: 3.0, y: 4.0 };
         assert_eq!(AffineTransform::identity().transform_point(p), p);
+    }
+
+    #[test]
+    fn invert_undoes_a_transform() {
+        let t = AffineTransform::translation(10.0, -5.0)
+            .concat(&AffineTransform::scale(2.0, 3.0))
+            .concat(&AffineTransform::rotation(0.7));
+        let inv = t.invert().unwrap();
+        let p = Point { x: 12.0, y: -8.0 };
+        let round_tripped = inv.transform_point(t.transform_point(p));
+        assert!((round_tripped.x - p.x).abs() < 1e-4);
+        assert!((round_tripped.y - p.y).abs() < 1e-4);
+    }
+
+    #[test]
+    fn invert_returns_none_for_singular_transform() {
+        let t = AffineTransform::scale(0.0, 1.0);
+        assert!(t.invert().is_none());
     }
 
     #[test]

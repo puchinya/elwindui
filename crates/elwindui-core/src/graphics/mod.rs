@@ -13,6 +13,9 @@ mod path;
 mod path_combine;
 mod render_tree;
 mod stroke;
+mod vector_filter;
+mod vector_image;
+mod vector_scene;
 
 pub use brush::{
     AlignmentX, AlignmentY, Brush, BrushMappingMode, GradientError, GradientSpreadMethod,
@@ -31,3 +34,23 @@ pub use path::{
 };
 pub use render_tree::{RenderGroup, RenderTree};
 pub use stroke::{LineCap, LineJoin, StrokeError, StrokeStyle};
+pub use vector_filter::{
+    VectorBlendFilter, VectorColorChannel, VectorColorInterpolation, VectorColorMatrixFilter,
+    VectorColorMatrixKind, VectorComponentTransferFilter, VectorCompositeFilter,
+    VectorCompositeOperator, VectorConvolveMatrixFilter, VectorDiffuseLightingFilter,
+    VectorDisplacementMapFilter, VectorDropShadowFilter, VectorEdgeMode, VectorFilter,
+    VectorFilterImage, VectorFilterInput, VectorFilterPrimitive, VectorFilterPrimitiveNode,
+    VectorFilterResultId, VectorFloodFilter, VectorGaussianBlurFilter, VectorLightSource,
+    VectorMergeFilter, VectorMorphologyFilter, VectorMorphologyOperator, VectorOffsetFilter,
+    VectorSpecularLightingFilter, VectorTileFilter, VectorTransferFunction,
+    VectorTurbulenceFilter, VectorTurbulenceKind,
+};
+pub use vector_image::{
+    ImageSource, PreserveAspectRatio, PreserveAspectRatioAlign, PreserveAspectRatioMeetOrSlice,
+    VectorImage, VectorImageBuilder, VectorImageDrawOptions, VectorImageError, VectorImageId,
+};
+pub use vector_scene::{
+    VectorBlendMode, VectorClipPath, VectorFill, VectorGroup, VectorMask, VectorMaskType,
+    VectorNode, VectorPaint, VectorPaintOrder, VectorPathNode, VectorPattern, VectorRasterNode,
+    VectorShapeRendering, VectorStroke,
+};

@@ -4,6 +4,7 @@ use super::command::{Clip, Font, RenderCommand, TextAlignment};
 use super::image::{Image, ImageDrawOptions};
 use super::path::{FillRule, Path};
 use super::stroke::StrokeStyle;
+use super::vector_image::{VectorImage, VectorImageDrawOptions};
 use crate::base::{AffineTransform, CornerRadius, Point, Rect};
 
 pub struct Fill<'a> {
@@ -281,6 +282,21 @@ impl<'a> RenderContext<'a> {
         });
     }
 
+    pub fn draw_vector_image(
+        &mut self,
+        image: &VectorImage,
+        dest: Rect,
+        source: Option<Rect>,
+        options: VectorImageDrawOptions,
+    ) {
+        self.commands.push(RenderCommand::DrawVectorImage {
+            image: image.clone(),
+            dest,
+            source,
+            options,
+        });
+    }
+
     pub fn draw_text(
         &mut self,
         text: &str,
@@ -382,5 +398,89 @@ mod tests {
         let mut context = RenderContext::begin_group(&mut commands, Point { x: 0.0, y: 0.0 }, None);
         context.push_transform(AffineTransform::identity());
         context.end_group();
+    }
+
+    fn test_vector_image() -> crate::graphics::VectorImage {
+        crate::graphics::VectorImageBuilder::new(
+            crate::base::Size {
+                width: 10.0,
+                height: 10.0,
+            },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        )
+        .unwrap()
+        .finish()
+        .unwrap()
+    }
+
+    #[test]
+    fn draw_vector_image_records_one_command_with_dest_source_and_options() {
+        let mut commands = Vec::new();
+        let mut context = RenderContext::begin_group(&mut commands, Point { x: 0.0, y: 0.0 }, None);
+        let image = test_vector_image();
+        let dest = Rect {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+        let source = Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 5.0,
+            height: 5.0,
+        });
+        let options = VectorImageDrawOptions {
+            opacity: 0.5,
+            ..Default::default()
+        };
+        context.draw_vector_image(&image, dest, source, options);
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            RenderCommand::DrawVectorImage {
+                image: recorded,
+                dest: recorded_dest,
+                source: recorded_source,
+                options: recorded_options,
+            } => {
+                assert_eq!(recorded.id(), image.id());
+                assert_eq!(*recorded_dest, dest);
+                assert_eq!(*recorded_source, source);
+                assert_eq!(*recorded_options, options);
+            }
+            _ => panic!("expected DrawVectorImage"),
+        }
+    }
+
+    #[test]
+    fn render_command_draw_vector_image_clone_preserves_image_id() {
+        let image = test_vector_image();
+        let command = RenderCommand::DrawVectorImage {
+            image: image.clone(),
+            dest: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            source: None,
+            options: VectorImageDrawOptions::default(),
+        };
+        let cloned = command.clone();
+        match (command, cloned) {
+            (
+                RenderCommand::DrawVectorImage { image: a, .. },
+                RenderCommand::DrawVectorImage { image: b, .. },
+            ) => {
+                assert_eq!(a.id(), b.id());
+                assert_eq!(a.id(), image.id());
+            }
+            _ => panic!("expected DrawVectorImage variants"),
+        }
     }
 }

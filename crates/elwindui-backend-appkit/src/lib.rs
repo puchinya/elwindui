@@ -15,6 +15,7 @@
 
 mod inner;
 mod native_ui;
+mod vector_renderer;
 
 pub use native_ui::*;
 

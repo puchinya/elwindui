@@ -7,12 +7,14 @@ edition.workspace = true
 elwindui-core = { path = "../elwindui-core" }
 elwindui-macros = { path = "../elwindui-macros" }
 elwindui-i18n = { path = "../elwindui-i18n" }
+elwindui-svg = { path = "../elwindui-svg", optional = true }
 elwindui-backend-winui3 = { path = "../elwindui-backend-winui3", optional = true }
 elwindui-backend-appkit = { path = "../elwindui-backend-appkit", optional = true }
 elwindui-backend-gtk4 = { path = "../elwindui-backend-gtk4", optional = true }
 
 [features]
 default = []
+svg = ["dep:elwindui-svg"]
 backend-winui3 = ["dep:elwindui-backend-winui3"]
 backend-appkit = ["dep:elwindui-backend-appkit"]
 backend-gtk4 = ["dep:elwindui-backend-gtk4"]

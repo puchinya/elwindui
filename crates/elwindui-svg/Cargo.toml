@@ -1,0 +1,17 @@
+[package]
+name = "elwindui-svg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+elwindui-core = { path = "../elwindui-core" }
+usvg = { version = "0.47", default-features = false, features = ["text"] }
+tiny-skia-path = "0.12"
+fontdb = "0.23"
+
+[dev-dependencies]
+resvg = "0.47"
+flate2 = "1"
+
+[lints]
+workspace = true

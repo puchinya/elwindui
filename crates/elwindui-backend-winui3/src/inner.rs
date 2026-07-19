@@ -669,6 +669,14 @@ impl TreeHostPanel {
                 elwindui_core::graphics::RenderCommand::DrawImage { .. } => {
                     unsupported_command!("DrawImage")
                 }
+                elwindui_core::graphics::RenderCommand::DrawVectorImage { .. } => {
+                    // Same reasoning as `FillPath`/`DrawImage` above: no Win2D/`CanvasControl`
+                    // drawing surface exists on this backend yet to build a vector-scene renderer
+                    // on top of (実装指示書§26条件14: WinUI3はコンパイル確認+明示的unsupportedで
+                    // 十分). `elwindui-svg`'s `usvg` dependency is never referenced here — this
+                    // backend only ever sees the already-loaded, SVG-format-agnostic `VectorImage`.
+                    unsupported_command!("DrawVectorImage")
+                }
                 elwindui_core::graphics::RenderCommand::PushClip { .. }
                 | elwindui_core::graphics::RenderCommand::PopClip
                 | elwindui_core::graphics::RenderCommand::PushTransform { .. }

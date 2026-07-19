@@ -216,7 +216,7 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
 }
 
-fn intersect_rect(
+pub(crate) fn intersect_rect(
     a: elwindui_core::base::Rect,
     b: elwindui_core::base::Rect,
 ) -> Option<elwindui_core::base::Rect> {
@@ -1031,7 +1031,9 @@ fn geometry_bounds(
         | RenderCommand::FillEllipse { rect, .. }
         | RenderCommand::StrokeEllipse { rect, .. }
         | RenderCommand::Text { rect, .. } => Some(offset(rect)),
-        RenderCommand::DrawImage { dest, .. } => Some(offset(dest)),
+        RenderCommand::DrawImage { dest, .. } | RenderCommand::DrawVectorImage { dest, .. } => {
+            Some(offset(dest))
+        }
         RenderCommand::DrawLine { .. }
         | RenderCommand::FillPath { .. }
         | RenderCommand::StrokePath { .. } => None,
@@ -1069,7 +1071,7 @@ fn clip_bounds(
 /// per-pixel clipping — `world` is already `translation(origin) * transform` at the `PushClip`
 /// site, keeping the mask path in the same canvas-absolute coordinate space the masked container
 /// layer occupies (its `frame` is set to exactly overlay its parent, so no re-anchoring is needed).
-fn clip_mask_layer(
+pub(crate) fn clip_mask_layer(
     world: &elwindui_core::base::AffineTransform,
     clip: &elwindui_core::graphics::Clip,
 ) -> Retained<CALayer> {
@@ -1093,7 +1095,7 @@ fn clip_mask_layer(
     Retained::into_super(mask_layer)
 }
 
-fn transform_point(
+pub(crate) fn transform_point(
     t: &elwindui_core::base::AffineTransform,
     p: elwindui_core::base::Point,
 ) -> objc2_foundation::NSPoint {
@@ -1253,6 +1255,16 @@ fn replay_paint_command(
             };
             layer.addSublayer(&container);
         }
+        RenderCommand::DrawVectorImage {
+            image,
+            dest,
+            source,
+            options,
+        } => {
+            crate::vector_renderer::draw_vector_image(
+                layer, image, *dest, *source, options, &world, opacity, image_cache,
+            );
+        }
         RenderCommand::Text {
             content,
             rect,
@@ -1333,7 +1345,7 @@ fn crop_cgimage(
 /// (`Cover`/`None`) is distributed per `alignment_x`/`alignment_y` — overflow is why the caller
 /// needs its own `masksToBounds` container rather than just handing this rect straight to `dest`'s
 /// own layer.
-fn fitted_image_rect(
+pub(crate) fn fitted_image_rect(
     dest: elwindui_core::base::Rect,
     image_size: (f32, f32),
     fit: elwindui_core::graphics::ImageFit,
@@ -1382,7 +1394,7 @@ fn fitted_image_rect(
 /// exercisable from `golden_tests` without needing a real `TreeHostView`/`NSView`. Returns `None`
 /// when there's nothing to draw (`source` clamps to an empty crop against `resolved_cg_image`'s
 /// own bounds).
-fn build_image_container_layer(
+pub(crate) fn build_image_container_layer(
     resolved_cg_image: &CFRetained<CGImage>,
     dest: elwindui_core::base::Rect,
     source: Option<elwindui_core::base::Rect>,
@@ -1465,7 +1477,7 @@ fn build_image_container_layer(
     Some(container)
 }
 
-fn add_shape_layer(
+pub(crate) fn add_shape_layer(
     layer: &Retained<CALayer>,
     path: &CFRetained<CGMutablePath>,
     fill: Option<&elwindui_core::graphics::Brush>,
@@ -1618,7 +1630,7 @@ fn try_add_gradient_fill_layer(
     true
 }
 
-fn gradient_unit_point(
+pub(crate) fn gradient_unit_point(
     p: elwindui_core::base::Point,
     mapping: elwindui_core::graphics::BrushMappingMode,
     bounds: elwindui_core::base::Rect,
@@ -1799,7 +1811,7 @@ fn add_tiled_image_layers(
 /// color) — `shape_layer` itself is left with no fill color (transparent interior) and the
 /// gradient layer, masked by a copy of the same shape, is added alongside it in `shape_layer`'s
 /// own superlayer once `shape_layer` itself has been added (see call sites).
-fn apply_fill(
+pub(crate) fn apply_fill(
     shape_layer: &CAShapeLayer,
     brush: Option<&elwindui_core::graphics::Brush>,
     bounds: elwindui_core::base::Rect,
@@ -1834,7 +1846,7 @@ fn apply_fill(
     let _ = bounds;
 }
 
-fn apply_stroke(
+pub(crate) fn apply_stroke(
     shape_layer: &CAShapeLayer,
     brush: &elwindui_core::graphics::Brush,
     style: &elwindui_core::graphics::StrokeStyle,
@@ -1894,7 +1906,7 @@ fn ca_line_join(join: elwindui_core::graphics::LineJoin) -> &'static CAShapeLaye
     }
 }
 
-fn color_to_cgcolor(
+pub(crate) fn color_to_cgcolor(
     color: elwindui_core::graphics::Color,
 ) -> objc2_core_foundation::CFRetained<CGColor> {
     CGColor::new_generic_rgb(
@@ -1939,7 +1951,7 @@ fn ellipse_cgpath(
 /// Converts one of our own `Path`s into a `CGMutablePath`, applying `world` to every point —
 /// arcs/quads are already normalized to cubics by `Path`'s own internal representation, so this
 /// only ever has to emit `moveTo`/`lineTo`/`curveTo`/`closePath`.
-fn path_to_cgpath(
+pub(crate) fn path_to_cgpath(
     world: &elwindui_core::base::AffineTransform,
     path: &elwindui_core::graphics::Path,
 ) -> CFRetained<CGMutablePath> {
@@ -2013,7 +2025,7 @@ fn path_to_cgpath(
 /// keyed by the `Image`'s own `Arc` pointer identity — cheap and stable since `Image` is
 /// `Arc`-backed and the same logical image reuses the same `Arc` across relayouts unless the
 /// application constructs a fresh one).
-fn resolve_cgimage(
+pub(crate) fn resolve_cgimage(
     image: &elwindui_core::graphics::Image,
     cache: &mut HashMap<usize, CFRetained<CGImage>>,
 ) -> Option<CFRetained<CGImage>> {
@@ -2041,7 +2053,7 @@ unsafe extern "C-unwind" fn release_boxed_pixels(
     }
 }
 
-fn decode_cgimage(image: &elwindui_core::graphics::Image) -> Option<CFRetained<CGImage>> {
+pub(crate) fn decode_cgimage(image: &elwindui_core::graphics::Image) -> Option<CFRetained<CGImage>> {
     match image.data() {
         elwindui_core::graphics::ImageData::Rgba8 {
             width,
@@ -3806,5 +3818,192 @@ mod golden_tests {
         // value winning.
         assert!(a < 100, "nested 0.5*0.5 opacity should be far below ~127, got {a}");
         assert!(a > 20, "nested opacity should still be visibly painted, got {a}");
+    }
+}
+
+/// `RenderCommand::DrawVectorImage` golden tests (SVG読み込み・ベクター描画対応 実装指示書§22.8) —
+/// same offscreen `CALayer.renderInContext` + sample-point-with-tolerance technique as
+/// `golden_tests` above, cross-checked against `resvg`'s own rasterization of the same fixture SVG
+/// (a dev-dependency only — see `vector_renderer.rs`'s own module doc comment on why production
+/// rendering never touches `usvg`/`resvg`). Sample points are chosen on the canvas's own vertical
+/// center line wherever possible, same reasoning `golden_tests`'s own doc comment gives for why
+/// that's Y-flip-invariant and safe to compare directly against `CALayer.renderInContext`'s
+/// flipped output without correcting for it.
+#[cfg(test)]
+mod svg_golden_tests {
+    use super::*;
+    use elwindui_core::graphics::VectorImageDrawOptions;
+
+    struct Bitmap {
+        ctx: CFRetained<objc2_core_graphics::CGContext>,
+        pixels: Box<[u8]>,
+        width: usize,
+        height: usize,
+        bytes_per_row: usize,
+    }
+
+    impl Bitmap {
+        fn new(width: usize, height: usize) -> Self {
+            let bytes_per_row = width * 4;
+            let mut pixels = vec![0u8; bytes_per_row * height].into_boxed_slice();
+            let color_space = CGColorSpace::new_device_rgb().expect("device RGB color space");
+            #[allow(deprecated)]
+            let bitmap_info = objc2_core_graphics::CGImageAlphaInfo::PremultipliedLast.0
+                | objc2_core_graphics::CGBitmapInfo::ByteOrder32Big.0;
+            let ctx = unsafe {
+                objc2_core_graphics::CGBitmapContextCreate(
+                    pixels.as_mut_ptr() as *mut _,
+                    width,
+                    height,
+                    8,
+                    bytes_per_row,
+                    Some(&color_space),
+                    bitmap_info,
+                )
+            }
+            .expect("CGBitmapContextCreate");
+            Self {
+                ctx,
+                pixels,
+                width,
+                height,
+                bytes_per_row,
+            }
+        }
+
+        fn pixel(&self, x: usize, y: usize) -> (u8, u8, u8, u8) {
+            assert!(x < self.width && y < self.height);
+            let offset = y * self.bytes_per_row + x * 4;
+            (
+                self.pixels[offset],
+                self.pixels[offset + 1],
+                self.pixels[offset + 2],
+                self.pixels[offset + 3],
+            )
+        }
+    }
+
+    fn approx(actual: (u8, u8, u8, u8), expected: (u8, u8, u8, u8), tolerance: u8) {
+        let close = |a: u8, b: u8| a.abs_diff(b) <= tolerance;
+        assert!(
+            close(actual.0, expected.0)
+                && close(actual.1, expected.1)
+                && close(actual.2, expected.2)
+                && close(actual.3, expected.3),
+            "expected {expected:?}, got {actual:?} (tolerance {tolerance})"
+        );
+    }
+
+    fn render_via_elwindui(svg: &str, size: usize) -> Bitmap {
+        let image = elwindui_svg::load_svg_str(svg).expect("valid fixture SVG");
+        let bitmap = Bitmap::new(size, size);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(size as f64, size as f64),
+        ));
+        let world = elwindui_core::base::AffineTransform::identity();
+        let dest = elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: size as f32,
+            height: size as f32,
+        };
+        let mut cache = HashMap::new();
+        crate::vector_renderer::draw_vector_image(
+            &root,
+            &image,
+            dest,
+            None,
+            &VectorImageDrawOptions::default(),
+            &world,
+            1.0,
+            &mut cache,
+        );
+        root.renderInContext(&bitmap.ctx);
+        bitmap
+    }
+
+    fn render_via_resvg(svg: &str, size: u32) -> resvg::tiny_skia::Pixmap {
+        let opt = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_str(svg, &opt).expect("valid fixture SVG");
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).expect("non-zero pixmap size");
+        let tree_size = tree.size();
+        let scale = (size as f32 / tree_size.width()).min(size as f32 / tree_size.height());
+        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+        pixmap
+    }
+
+    fn resvg_pixel(pixmap: &resvg::tiny_skia::Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let c = pixmap.pixel(x, y).unwrap_or(resvg::tiny_skia::PremultipliedColorU8::TRANSPARENT);
+        (c.red(), c.green(), c.blue(), c.alpha())
+    }
+
+    const SOLID_RECT_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect x="16" y="16" width="32" height="32" fill="#ff0000"/></svg>"##;
+
+    #[test]
+    fn solid_rect_matches_resvg_at_center_and_is_transparent_outside() {
+        let bitmap = render_via_elwindui(SOLID_RECT_SVG, 64);
+        let reference = render_via_resvg(SOLID_RECT_SVG, 64);
+        approx(bitmap.pixel(32, 32), resvg_pixel(&reference, 32, 32), 40);
+        approx(bitmap.pixel(2, 2), (0, 0, 0, 0), 10);
+    }
+
+    const LINEAR_GRADIENT_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+        <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#0000ff"/>
+            <stop offset="1" stop-color="#ffff00"/>
+        </linearGradient></defs>
+        <rect x="0" y="0" width="64" height="64" fill="url(#g)"/>
+    </svg>"##;
+
+    #[test]
+    fn linear_gradient_matches_resvg_at_left_and_right_samples() {
+        let bitmap = render_via_elwindui(LINEAR_GRADIENT_SVG, 64);
+        let reference = render_via_resvg(LINEAR_GRADIENT_SVG, 64);
+        // Both sample points sit on the vertical center row (y=32), which a horizontal-only
+        // gradient never varies along — Y-flip-invariant, same reasoning as `golden_tests`'s own
+        // sample point choices.
+        for x in [4u32, 60u32] {
+            approx(
+                bitmap.pixel(x as usize, 32),
+                resvg_pixel(&reference, x, 32),
+                50,
+            );
+        }
+    }
+
+    const GROUP_OPACITY_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+        <g opacity="0.5"><rect x="16" y="16" width="32" height="32" fill="#00ff00"/></g>
+    </svg>"##;
+
+    #[test]
+    fn group_opacity_matches_resvg_alpha_at_center() {
+        let bitmap = render_via_elwindui(GROUP_OPACITY_SVG, 64);
+        let reference = render_via_resvg(GROUP_OPACITY_SVG, 64);
+        approx(bitmap.pixel(32, 32), resvg_pixel(&reference, 32, 32), 50);
+    }
+
+    const CLIP_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+        <defs><clipPath id="c"><circle cx="32" cy="32" r="16"/></clipPath></defs>
+        <rect x="0" y="0" width="64" height="64" fill="#ff00ff" clip-path="url(#c)"/>
+    </svg>"##;
+
+    #[test]
+    fn clip_path_matches_resvg_inside_the_circle_and_is_transparent_outside() {
+        let bitmap = render_via_elwindui(CLIP_SVG, 64);
+        let reference = render_via_resvg(CLIP_SVG, 64);
+        // Wider tolerance than the other fixtures here: `CAShapeLayer`-mask compositing carries
+        // more inherent AA/blending softness than a plain shape fill even at the mask's own
+        // center, well away from its edge (empirically observed ~64/255 green-channel deviation at
+        // this fixture's dead center) — still tight enough to catch a genuinely broken clip (e.g.
+        // one that fails open/fully-transparent).
+        approx(bitmap.pixel(32, 32), resvg_pixel(&reference, 32, 32), 90);
+        assert!(
+            bitmap.pixel(2, 2).3 < 30,
+            "outside the clipPath circle should be near-transparent, got alpha {}",
+            bitmap.pixel(2, 2).3
+        );
     }
 }

@@ -10,6 +10,11 @@
 pub use elwindui_core as core;
 pub use elwindui_core::visual_tree;
 pub use elwindui_i18n as i18n;
+/// SVG loading (`load_svg_file`/`load_svg_bytes`/`load_svg_str`, `SvgLoader`) — backends never
+/// depend on this crate directly, only on the `elwindui_core::graphics::VectorImage` it produces
+/// (SVG読み込み・ベクター描画対応 実装指示書§1.5/§4.3).
+#[cfg(feature = "svg")]
+pub use elwindui_svg as svg;
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes
 /// a `component`+`view` pair (docs/elwindui_spec.md §3/§13) as a single ordinary Rust `struct`,
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the

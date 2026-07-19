@@ -536,23 +536,7 @@ pub(super) fn path_from_commands(commands: Vec<PathCommand>) -> Option<Path> {
 }
 
 fn invert(t: &AffineTransform) -> Option<AffineTransform> {
-    let det = t.m11 * t.m22 - t.m12 * t.m21;
-    if det.abs() < 1e-9 {
-        return None;
-    }
-    let inv_det = 1.0 / det;
-    let m11 = t.m22 * inv_det;
-    let m12 = -t.m12 * inv_det;
-    let m21 = -t.m21 * inv_det;
-    let m22 = t.m11 * inv_det;
-    Some(AffineTransform {
-        m11,
-        m12,
-        m21,
-        m22,
-        dx: -(t.dx * m11 + t.dy * m21),
-        dy: -(t.dx * m12 + t.dy * m22),
-    })
+    t.invert()
 }
 
 fn distance_to_segment(p: Point, a: Point, b: Point) -> f32 {

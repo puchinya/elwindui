@@ -265,6 +265,31 @@ pub struct TreeHostIvars {
     /// `native_containers` has for comparatively little benefit (a decoded `CGImage` is far
     /// cheaper to keep around than a live `NSView` island).
     image_cache: RefCell<HashMap<usize, CFRetained<CGImage>>>,
+    /// Per-`RenderGroup` id, the persistent container `CALayer` holding that group's own painted
+    /// sublayers — a flat sibling of the root paint layer (`frame` always exactly matches the
+    /// root's own `bounds()`, a zero-offset "namespace" rather than a real nested coordinate
+    /// space) so every existing absolute-canvas-coordinate drawing helper
+    /// (`replay_paint_command`/`try_add_gradient_fill_layer`/`clip_mask_layer`/`DrawImage`'s own
+    /// container) keeps working completely unchanged. Reused across `relayout` passes — see
+    /// `group_layer_cache_keys`'s own doc comment for when its contents get rebuilt vs left alone
+    /// (painter design doc §15's renderer cache, acceptance criterion 14).
+    group_layers: RefCell<HashMap<u64, Retained<CALayer>>>,
+    /// What `group_layers[id]`'s sublayers were last rebuilt from. A `RenderGroup`'s own
+    /// `generation` alone can't tell `replay_group` whether a rebuild is needed: this backend
+    /// bakes the *full accumulated* origin/clip/transform/opacity directly into each leaf's
+    /// `CGPath`/frame (not a live nested `CALayer` transform, by deliberate design — see
+    /// `replay_group`'s own doc comment), so a group whose own `commands` are byte-for-byte
+    /// unchanged still needs rebuilding if an ancestor's offset moved (the group's own relative
+    /// `offset` stays the same, so its `generation` never bumps, even though the *absolute*
+    /// geometry baked into its cached sublayers is now stale). Comparing the full
+    /// `(generation, origin, clip, transform, opacity)` tuple each pass catches both cases.
+    group_layer_cache_keys: RefCell<HashMap<u64, GroupCacheKey>>,
+    /// Which `native_containers` identities were discovered inside each group's own `commands` the
+    /// last time it was actually rebuilt — replayed back into `live_native_controls` on a cache hit
+    /// (where `replay_commands` doesn't run and so can't rediscover them itself), so
+    /// `native_containers`' own liveness-based pruning at the end of `relayout` doesn't tear down a
+    /// native control just because its owning group happened to be skipped this pass.
+    group_native_controls: RefCell<HashMap<u64, Vec<usize>>>,
     /// Set once, right after construction — lets `set_tree` hand out an `AppKitRelayoutHost`
     /// wrapping a weak reference back to this same view, without needing a `Retained<Self>` in
     /// hand at that point.
@@ -471,6 +496,9 @@ impl TreeHostView {
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
             image_cache: RefCell::new(HashMap::new()),
+            group_layers: RefCell::new(HashMap::new()),
+            group_layer_cache_keys: RefCell::new(HashMap::new()),
+            group_native_controls: RefCell::new(HashMap::new()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
             pointer: PointerDispatcher::new(),
             keyboard: KeyboardDispatcher::new(),
@@ -575,6 +603,9 @@ impl TreeHostView {
             old.removeFromSuperview();
         }
         self.ivars().native_containers.borrow_mut().clear();
+        self.ivars().group_layers.borrow_mut().clear();
+        self.ivars().group_layer_cache_keys.borrow_mut().clear();
+        self.ivars().group_native_controls.borrow_mut().clear();
         let weak_self = self.ivars().weak_self.borrow().clone();
         tree.as_ui_element()
             .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self.clone()))));
@@ -621,19 +652,9 @@ impl TreeHostView {
 
         self.setWantsLayer(true);
         let layer = self.layer().expect("wantsLayer(true) implies a layer");
-        if let Some(existing) = unsafe { layer.sublayers() } {
-            let stale: Vec<_> = existing
-                .iter()
-                .filter(|sub| {
-                    sub.name().map(|n| n.to_string()).as_deref() == Some("elwindui-paint")
-                })
-                .collect();
-            for sub in stale {
-                sub.removeFromSuperlayer();
-            }
-        }
 
         let mut live_native_controls = HashSet::new();
+        let mut live_group_ids = HashSet::new();
         let mut image_cache = self.ivars().image_cache.borrow_mut();
         replay_group(
             self,
@@ -644,6 +665,7 @@ impl TreeHostView {
             elwindui_core::base::AffineTransform::identity(),
             1.0,
             &mut live_native_controls,
+            &mut live_group_ids,
             &mut image_cache,
         );
         drop(image_cache);
@@ -658,11 +680,38 @@ impl TreeHostView {
                     false
                 }
             });
+        self.ivars().group_layers.borrow_mut().retain(|id, container| {
+            if live_group_ids.contains(id) {
+                true
+            } else {
+                container.removeFromSuperlayer();
+                false
+            }
+        });
+        self.ivars()
+            .group_layer_cache_keys
+            .borrow_mut()
+            .retain(|id, _| live_group_ids.contains(id));
+        self.ivars()
+            .group_native_controls
+            .borrow_mut()
+            .retain(|id, _| live_group_ids.contains(id));
     }
 }
 
+/// What `TreeHostIvars::group_layers[id]`'s sublayers were last rebuilt from — see that field's
+/// own doc comment for why `RenderGroup::generation` alone isn't a sufficient cache key.
+#[derive(Clone, Copy, PartialEq)]
+struct GroupCacheKey {
+    origin: elwindui_core::base::Point,
+    clip: Option<elwindui_core::base::Rect>,
+    transform: elwindui_core::base::AffineTransform,
+    opacity: f32,
+    generation: u64,
+}
+
 /// One retained-render replay pass over a `RenderGroup` tree, appending real `CALayer`s to
-/// `layer` (ordinary painted content) and real `NSView` islands to `host` (native controls),
+/// `root_layer` (ordinary painted content) and real `NSView` islands to `host` (native controls),
 /// in traversal order so both interleave in the correct Z order (painter design doc §14.2's
 /// "single custom drawing surface" intent, adapted to AppKit's native layer-composition model
 /// rather than a `NSView.draw(_:)`/`CGContext` replay — `CAShapeLayer`/`CAGradientLayer` already
@@ -675,15 +724,30 @@ impl TreeHostView {
 /// intersection test (skip a leaf whose rect doesn't overlap `clip` at all) rather than true
 /// per-pixel masking, mirroring `Shape::hit_test_content`'s own "whole bounding rect, not
 /// per-pixel" simplification elsewhere in this codebase.
+///
+/// Each `RenderGroup` gets one persistent, cached container `CALayer` (`TreeHostIvars::
+/// group_layers`) rather than a fresh throwaway one every pass — a *flat* sibling of every other
+/// group's own container (`frame` always exactly `root_layer.bounds()`, deliberately not nested
+/// to match the `RenderGroup` tree shape, so the absolute-canvas-coordinate geometry every leaf
+/// drawing helper already bakes in stays valid unchanged; nesting would need re-deriving all of
+/// that in per-container-local coordinates for no benefit). Re-adding an already-attached
+/// container to `root_layer` every pass (regardless of whether its *content* is rebuilt) moves it
+/// to the top of the sublayer list, which is enough on its own to keep Z-order correct across a
+/// mix of rebuilt and cache-hit groups each frame — the actually expensive part
+/// (`CGPath`/`CAShapeLayer`/`CAGradientLayer` construction) only happens when `GroupCacheKey`
+/// shows this group's replay inputs actually changed since last time (painter design doc §15's
+/// renderer cache, acceptance criterion 14: "画像・pathリソースを毎フレーム再生成しない").
+#[allow(clippy::too_many_arguments)]
 fn replay_group(
     host: &TreeHostView,
-    layer: &Retained<CALayer>,
+    root_layer: &Retained<CALayer>,
     group: &RenderGroup,
     origin: elwindui_core::base::Point,
     inherited_clip: Option<elwindui_core::base::Rect>,
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
     live_native_controls: &mut HashSet<usize>,
+    live_group_ids: &mut HashSet<u64>,
     image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
 ) {
     let origin = elwindui_core::base::Point {
@@ -701,28 +765,82 @@ fn replay_group(
         (Some(clip), None) | (None, Some(clip)) => Some(clip),
         (None, None) => None,
     };
-    replay_commands(
-        host,
-        layer,
-        &group.commands,
-        0,
+    live_group_ids.insert(group.id);
+
+    let is_new = !host.ivars().group_layers.borrow().contains_key(&group.id);
+    let container = host
+        .ivars()
+        .group_layers
+        .borrow_mut()
+        .entry(group.id)
+        .or_insert_with(|| {
+            let c = CALayer::new();
+            c.setName(Some(&NSString::from_str("elwindui-paint")));
+            c
+        })
+        .clone();
+    container.setFrame(root_layer.bounds());
+    root_layer.addSublayer(&container);
+
+    let key = GroupCacheKey {
         origin,
-        effective_clip,
+        clip: effective_clip,
         transform,
         opacity,
-        live_native_controls,
-        image_cache,
-    );
+        generation: group.generation,
+    };
+    let stale =
+        is_new || host.ivars().group_layer_cache_keys.borrow().get(&group.id) != Some(&key);
+    if stale {
+        if let Some(existing) = unsafe { container.sublayers() } {
+            // `removeFromSuperlayer` while iterating `existing` (a live view onto `container`'s
+            // own sublayer array, not a snapshot) trips Foundation's mutation-during-enumeration
+            // guard — collect into a plain `Vec` first, then iterate that instead.
+            let old: Vec<_> = existing.iter().collect();
+            for sub in old {
+                sub.removeFromSuperlayer();
+            }
+        }
+        let native_controls_before: HashSet<usize> = live_native_controls.clone();
+        replay_commands(
+            host,
+            &container,
+            &group.commands,
+            0,
+            origin,
+            effective_clip,
+            transform,
+            opacity,
+            live_native_controls,
+            image_cache,
+        );
+        let discovered_native_controls: Vec<usize> = live_native_controls
+            .difference(&native_controls_before)
+            .copied()
+            .collect();
+        host.ivars()
+            .group_native_controls
+            .borrow_mut()
+            .insert(group.id, discovered_native_controls);
+        host.ivars()
+            .group_layer_cache_keys
+            .borrow_mut()
+            .insert(group.id, key);
+    } else if let Some(ids) = host.ivars().group_native_controls.borrow().get(&group.id) {
+        live_native_controls.extend(ids);
+    }
+
     for child in &group.children {
         replay_group(
             host,
-            layer,
+            root_layer,
             child,
             origin,
             effective_clip,
             transform,
             opacity,
             live_native_controls,
+            live_group_ids,
             image_cache,
         );
     }
@@ -1119,54 +1237,14 @@ fn replay_paint_command(
             // `CALayer.contents` equivalent — tiling would need multiple image sublayers stamped
             // across `dest` — and isn't attempted here; every `TileMode` draws as `None` (single
             // placement per `fitted_image_rect`) instead of silently ignoring the field outright.
-            let Some(cg_image) = resolve_cgimage(image, image_cache) else {
+            let Some(resolved) = resolve_cgimage(image, image_cache) else {
                 return;
             };
-            let Some(cg_image) = crop_cgimage(&cg_image, *source) else {
+            let Some(container) =
+                build_image_container_layer(&resolved, *dest, *source, options, &world, opacity)
+            else {
                 return;
             };
-            let image_size = (
-                CGImage::width(Some(&cg_image)) as f32,
-                CGImage::height(Some(&cg_image)) as f32,
-            );
-            let placed =
-                fitted_image_rect(*dest, image_size, options.fit, options.alignment_x, options.alignment_y);
-
-            // A `dest`-sized, `masksToBounds` container keeps `Cover`/`None` overflow (the placed
-            // image can be larger than `dest`) from bleeding into neighboring content — `placed` is
-            // already expressed in this container's own local (dest-relative) coordinate space, the
-            // same re-anchoring `try_add_gradient_fill_layer`'s mask path uses for the same reason.
-            let container = CALayer::new();
-            container.setName(Some(&NSString::from_str("elwindui-paint")));
-            container.setMasksToBounds(true);
-            container.setFrame(NSRect::new(
-                transform_point(
-                    &world,
-                    elwindui_core::base::Point {
-                        x: dest.x,
-                        y: dest.y,
-                    },
-                ),
-                objc2_foundation::NSSize::new(dest.width as f64, dest.height as f64),
-            ));
-
-            let image_layer = CALayer::new();
-            image_layer.setFrame(NSRect::new(
-                objc2_foundation::NSPoint::new(placed.x as f64, placed.y as f64),
-                objc2_foundation::NSSize::new(placed.width as f64, placed.height as f64),
-            ));
-            unsafe {
-                image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject))
-            };
-            let filter = match options.sampling {
-                elwindui_core::painter::ImageSampling::Nearest => unsafe { kCAFilterNearest },
-                elwindui_core::painter::ImageSampling::Linear
-                | elwindui_core::painter::ImageSampling::Cubic => unsafe { kCAFilterLinear },
-            };
-            image_layer.setMagnificationFilter(filter);
-            image_layer.setMinificationFilter(filter);
-            container.addSublayer(&image_layer);
-            container.setOpacity(opacity);
             layer.addSublayer(&container);
         }
         RenderCommand::Text {
@@ -1290,6 +1368,70 @@ fn fitted_image_rect(
         width: w,
         height: h,
     }
+}
+
+/// Builds the `masksToBounds` container + inner image `CALayer` for one `RenderCommand::DrawImage`
+/// — factored out of `replay_paint_command`'s own arm so `crop_cgimage`/`fitted_image_rect`'s
+/// actual `CALayer` construction (not just their own pure-value-level unit tests) is directly
+/// exercisable from `golden_tests` without needing a real `TreeHostView`/`NSView`. Returns `None`
+/// when there's nothing to draw (`source` clamps to an empty crop against `resolved_cg_image`'s
+/// own bounds).
+fn build_image_container_layer(
+    resolved_cg_image: &CFRetained<CGImage>,
+    dest: elwindui_core::base::Rect,
+    source: Option<elwindui_core::base::Rect>,
+    options: &elwindui_core::painter::ImageDrawOptions,
+    world: &elwindui_core::base::AffineTransform,
+    opacity: f32,
+) -> Option<Retained<CALayer>> {
+    let cg_image = crop_cgimage(resolved_cg_image, source)?;
+    let image_size = (
+        CGImage::width(Some(&cg_image)) as f32,
+        CGImage::height(Some(&cg_image)) as f32,
+    );
+    let placed = fitted_image_rect(
+        dest,
+        image_size,
+        options.fit,
+        options.alignment_x,
+        options.alignment_y,
+    );
+
+    // A `dest`-sized, `masksToBounds` container keeps `Cover`/`None` overflow (the placed image
+    // can be larger than `dest`) from bleeding into neighboring content — `placed` is already
+    // expressed in this container's own local (dest-relative) coordinate space, the same
+    // re-anchoring `try_add_gradient_fill_layer`'s mask path uses for the same reason.
+    let container = CALayer::new();
+    container.setName(Some(&NSString::from_str("elwindui-paint")));
+    container.setMasksToBounds(true);
+    container.setFrame(NSRect::new(
+        transform_point(
+            world,
+            elwindui_core::base::Point {
+                x: dest.x,
+                y: dest.y,
+            },
+        ),
+        objc2_foundation::NSSize::new(dest.width as f64, dest.height as f64),
+    ));
+
+    let image_layer = CALayer::new();
+    image_layer.setFrame(NSRect::new(
+        objc2_foundation::NSPoint::new(placed.x as f64, placed.y as f64),
+        objc2_foundation::NSSize::new(placed.width as f64, placed.height as f64),
+    ));
+    unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
+    let filter = match options.sampling {
+        elwindui_core::painter::ImageSampling::Nearest => unsafe { kCAFilterNearest },
+        elwindui_core::painter::ImageSampling::Linear | elwindui_core::painter::ImageSampling::Cubic => unsafe {
+            kCAFilterLinear
+        },
+    };
+    image_layer.setMagnificationFilter(filter);
+    image_layer.setMinificationFilter(filter);
+    container.addSublayer(&image_layer);
+    container.setOpacity(opacity);
+    Some(container)
 }
 
 fn add_shape_layer(
@@ -2490,6 +2632,13 @@ mod golden_tests {
         }
     }
 
+    /// `CALayer.renderInContext:` against a `CGBitmapContext` renders **Y-flipped** relative to
+    /// the logical/path coordinates fed to `add_shape_layer`/`rounded_rect_cgpath`/etc — a shape
+    /// built at logical `y` ends up at roughly `bitmap.pixel(x, bitmap.height - y)`, not
+    /// `bitmap.pixel(x, y)`. The 4 original tests below never surfaced this (they only ever sample
+    /// flip-symmetric geometry: bounding-box corners of a uniform shape, or points exactly on the
+    /// canvas's own vertical center) — any *new* test with real top/bottom asymmetry (e.g. one
+    /// rounded corner vs one sharp corner, a curve that bows toward one edge) must account for it.
     fn render_layer(root: &Retained<CALayer>, bitmap: &Bitmap) {
         root.renderInContext(&bitmap.ctx);
     }
@@ -2728,5 +2877,738 @@ mod golden_tests {
         assert_eq!(placed.height, 20.0);
         assert_eq!(placed.x, 70.0);
         assert_eq!(placed.y, 80.0);
+    }
+
+    // The remaining tests below extend coverage toward painter design doc §20.2's ~19-scene
+    // checklist (only the 4 tests above existed before this pass). Not covered by this lightweight
+    // harness (a bare `CALayer` fed straight to the drawing helpers, no `TreeHostView`/real window):
+    // native-control/painted-content Z-order interleaving — that needs a real `NSView` subview
+    // hierarchy, out of reach here without much heavier test infrastructure. Also not covered:
+    // clockwise/counterclockwise arc sweep — `path_to_cgpath`'s own doc comment already documents
+    // `PathCommand::ArcTo` as unrendered on this backend (a known gap, not something this test pass
+    // introduced), so a "does the sweep direction change the rendered shape" test would just fail
+    // against that pre-existing gap rather than exercising real behavior.
+
+    #[test]
+    fn rounded_rect_applies_each_corner_radius_independently() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let world = elwindui_core::base::AffineTransform::identity();
+        let rect = elwindui_core::base::Rect {
+            x: 8.0,
+            y: 8.0,
+            width: 48.0,
+            height: 48.0,
+        };
+        // `top_left` (the (rect.x, rect.y) corner — see `PathBuilder::add_rounded_rect`) stays
+        // sharp; the other three corners are rounded.
+        let radii = elwindui_core::base::CornerRadius {
+            top_left: 0.0,
+            top_right: 20.0,
+            bottom_right: 20.0,
+            bottom_left: 20.0,
+        };
+        let path = rounded_rect_cgpath(&world, rect, radii);
+        add_shape_layer(
+            &root,
+            &path,
+            Some(&elwindui_core::painter::Brush::Solid(
+                elwindui_core::painter::Color::rgb(0, 200, 0),
+            )),
+            None,
+            1.0,
+            rect,
+        );
+        render_layer(&root, &bitmap);
+        // The sharp (radius 0) corner is painted right up to (rect.x, rect.y) — `render_layer`'s
+        // own Y-flip note applies (logical y=9 lands near pixel row 64-9=55).
+        approx(bitmap.pixel(9, 55), (0, 200, 0, 255), 50);
+        // The rounded (radius 20) opposite corner stays unpainted this close to (x+w, y+h).
+        approx(bitmap.pixel(55, 9), (0, 0, 0, 0), 10);
+    }
+
+    #[test]
+    fn line_cap_butt_does_not_extend_past_the_segment_endpoint() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let path = CGMutablePath::new();
+        unsafe {
+            CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 16.0, 32.0);
+            CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 48.0, 32.0);
+        }
+        let stroke = elwindui_core::painter::StrokeStyle {
+            width: 10.0,
+            start_cap: elwindui_core::painter::LineCap::Butt,
+            end_cap: elwindui_core::painter::LineCap::Butt,
+            ..Default::default()
+        };
+        let bounds = elwindui_core::base::Rect {
+            x: 16.0,
+            y: 27.0,
+            width: 32.0,
+            height: 10.0,
+        };
+        add_shape_layer(
+            &root,
+            &path,
+            None,
+            Some((
+                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &stroke,
+            )),
+            1.0,
+            bounds,
+        );
+        render_layer(&root, &bitmap);
+        // Well inside the segment: painted.
+        approx(bitmap.pixel(32, 32), (0, 0, 0, 255), 50);
+        // 3px beyond the endpoint at x=16 — a butt cap stops exactly at the endpoint, so this
+        // stays unpainted.
+        approx(bitmap.pixel(13, 32), (0, 0, 0, 0), 10);
+    }
+
+    #[test]
+    fn line_cap_round_extends_past_the_segment_endpoint() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let path = CGMutablePath::new();
+        unsafe {
+            CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 16.0, 32.0);
+            CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 48.0, 32.0);
+        }
+        // Half the 10.0 stroke width is 5.0, so a round cap extends ~5px past x=16 — well past
+        // the same x=13 sample point a butt cap (the test above) leaves unpainted.
+        let stroke = elwindui_core::painter::StrokeStyle {
+            width: 10.0,
+            start_cap: elwindui_core::painter::LineCap::Round,
+            end_cap: elwindui_core::painter::LineCap::Round,
+            ..Default::default()
+        };
+        let bounds = elwindui_core::base::Rect {
+            x: 16.0,
+            y: 27.0,
+            width: 32.0,
+            height: 10.0,
+        };
+        add_shape_layer(
+            &root,
+            &path,
+            None,
+            Some((
+                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &stroke,
+            )),
+            1.0,
+            bounds,
+        );
+        render_layer(&root, &bitmap);
+        approx(bitmap.pixel(13, 32), (0, 0, 0, 255), 80);
+    }
+
+    /// Builds a narrow, acute-angled "V" (two segments meeting at `(32, 10)`, opening downward)
+    /// stroked with `join`/`miter_limit` — shared by the miter/bevel/miter-limit tests below, since
+    /// they only differ in that one `StrokeStyle`.
+    fn stroke_acute_v(
+        join: elwindui_core::painter::LineJoin,
+        miter_limit: f32,
+    ) -> (u8, u8, u8, u8) {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let path = CGMutablePath::new();
+        unsafe {
+            CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 10.0, 50.0);
+            CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 32.0, 10.0);
+            CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 54.0, 50.0);
+        }
+        let stroke = elwindui_core::painter::StrokeStyle {
+            width: 8.0,
+            line_join: join,
+            miter_limit,
+            ..Default::default()
+        };
+        let bounds = elwindui_core::base::Rect {
+            x: 10.0,
+            y: 10.0,
+            width: 44.0,
+            height: 40.0,
+        };
+        add_shape_layer(
+            &root,
+            &path,
+            None,
+            Some((
+                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &stroke,
+            )),
+            1.0,
+            bounds,
+        );
+        render_layer(&root, &bitmap);
+        // Between the bevel's flat cut (~y=6.5) and the full miter tip (~y=1.7) along the
+        // vertex's outward bisector — a miter join reaches this point, a bevel join does not.
+        // `render_layer`'s own Y-flip note applies (logical y=4 lands near pixel row 64-4=60).
+        bitmap.pixel(32, 60)
+    }
+
+    #[test]
+    fn line_join_miter_extends_the_outer_corner_of_an_acute_angle() {
+        // Default `miter_limit` (10.0) comfortably exceeds this vertex's own ~2.07 ratio, so the
+        // join renders as a true miter.
+        approx(
+            stroke_acute_v(elwindui_core::painter::LineJoin::Miter, 10.0),
+            (0, 0, 0, 255),
+            80,
+        );
+    }
+
+    #[test]
+    fn line_join_bevel_does_not_extend_the_outer_corner_of_an_acute_angle() {
+        approx(
+            stroke_acute_v(elwindui_core::painter::LineJoin::Bevel, 10.0),
+            (0, 0, 0, 0),
+            10,
+        );
+    }
+
+    #[test]
+    fn miter_limit_below_the_vertex_ratio_forces_a_bevel_style_corner() {
+        // This vertex needs a miter-length/half-width ratio of ~2.07; 1.5 falls short, so even a
+        // `LineJoin::Miter` request must fall back to a bevel-style flat corner.
+        approx(
+            stroke_acute_v(elwindui_core::painter::LineJoin::Miter, 1.5),
+            (0, 0, 0, 0),
+            10,
+        );
+    }
+
+    #[test]
+    fn dash_pattern_alternates_on_and_off_segments_along_the_line() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let path = CGMutablePath::new();
+        unsafe {
+            CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 4.0, 32.0);
+            CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 60.0, 32.0);
+        }
+        let stroke = elwindui_core::painter::StrokeStyle {
+            width: 6.0,
+            dash_pattern: std::sync::Arc::from([8.0, 8.0]),
+            ..Default::default()
+        };
+        let bounds = elwindui_core::base::Rect {
+            x: 4.0,
+            y: 29.0,
+            width: 56.0,
+            height: 6.0,
+        };
+        add_shape_layer(
+            &root,
+            &path,
+            None,
+            Some((
+                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &stroke,
+            )),
+            1.0,
+            bounds,
+        );
+        render_layer(&root, &bitmap);
+        // [4, 12) is the first "on" segment.
+        approx(bitmap.pixel(8, 32), (0, 0, 0, 255), 50);
+        // [12, 20) is the first "off" gap.
+        approx(bitmap.pixel(16, 32), (0, 0, 0, 0), 10);
+    }
+
+    #[test]
+    fn dash_offset_shifts_the_on_off_phase_along_the_line() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let path = CGMutablePath::new();
+        unsafe {
+            CGMutablePath::move_to_point(Some(&path), std::ptr::null(), 4.0, 32.0);
+            CGMutablePath::add_line_to_point(Some(&path), std::ptr::null(), 60.0, 32.0);
+        }
+        let stroke = elwindui_core::painter::StrokeStyle {
+            width: 6.0,
+            dash_pattern: std::sync::Arc::from([8.0, 8.0]),
+            dash_offset: 8.0,
+            ..Default::default()
+        };
+        let bounds = elwindui_core::base::Rect {
+            x: 4.0,
+            y: 29.0,
+            width: 56.0,
+            height: 6.0,
+        };
+        add_shape_layer(
+            &root,
+            &path,
+            None,
+            Some((
+                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &stroke,
+            )),
+            1.0,
+            bounds,
+        );
+        render_layer(&root, &bitmap);
+        // With no offset, x=8 sits in the first "on" segment (the test above). Shifting the phase
+        // by a full dash period (8.0) flips it to "off".
+        approx(bitmap.pixel(8, 32), (0, 0, 0, 0), 10);
+    }
+
+    /// The path shared by the `NonZero`/`EvenOdd` tests below: two 30x30 squares, sharing the same
+    /// winding order, overlapping in their bottom-right/top-left quadrant.
+    fn two_overlapping_same_winding_squares() -> elwindui_core::painter::Path {
+        let mut builder = elwindui_core::painter::PathBuilder::new();
+        builder.add_rect(elwindui_core::base::Rect {
+            x: 10.0,
+            y: 10.0,
+            width: 30.0,
+            height: 30.0,
+        });
+        builder.add_rect(elwindui_core::base::Rect {
+            x: 25.0,
+            y: 25.0,
+            width: 30.0,
+            height: 30.0,
+        });
+        builder.build().expect("two rects is never an empty path")
+    }
+
+    #[test]
+    fn nonzero_fill_rule_fills_the_overlap_of_two_same_winding_subpaths() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let world = elwindui_core::base::AffineTransform::identity();
+        let path = two_overlapping_same_winding_squares();
+        let cg_path = path_to_cgpath(&world, &path);
+        let shape_layer = CAShapeLayer::new();
+        shape_layer.setPath(Some(&cg_path));
+        shape_layer.setFillRule(unsafe { kCAFillRuleNonZero });
+        apply_fill(
+            &shape_layer,
+            Some(&elwindui_core::painter::Brush::Solid(
+                elwindui_core::painter::Color::rgb(0, 150, 0),
+            )),
+            path.bounds(),
+        );
+        shape_layer.setOpacity(1.0);
+        let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
+        root.addSublayer(&shape_layer);
+        render_layer(&root, &bitmap);
+        approx(bitmap.pixel(32, 32), (0, 150, 0, 255), 50); // overlap: two windings, still filled
+        approx(bitmap.pixel(15, 49), (0, 150, 0, 255), 50); // first square only (Y-flipped)
+    }
+
+    #[test]
+    fn evenodd_fill_rule_punches_a_hole_where_two_same_winding_subpaths_overlap() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let world = elwindui_core::base::AffineTransform::identity();
+        let path = two_overlapping_same_winding_squares();
+        let cg_path = path_to_cgpath(&world, &path);
+        let shape_layer = CAShapeLayer::new();
+        shape_layer.setPath(Some(&cg_path));
+        shape_layer.setFillRule(unsafe { kCAFillRuleEvenOdd });
+        apply_fill(
+            &shape_layer,
+            Some(&elwindui_core::painter::Brush::Solid(
+                elwindui_core::painter::Color::rgb(0, 150, 0),
+            )),
+            path.bounds(),
+        );
+        shape_layer.setOpacity(1.0);
+        let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
+        root.addSublayer(&shape_layer);
+        render_layer(&root, &bitmap);
+        approx(bitmap.pixel(32, 32), (0, 0, 0, 0), 10); // overlap: even crossing count -> a hole
+        approx(bitmap.pixel(15, 49), (0, 150, 0, 255), 50); // first square only: still filled (Y-flipped)
+    }
+
+    #[test]
+    fn quadratic_bezier_bows_away_from_the_straight_chord_between_its_endpoints() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let world = elwindui_core::base::AffineTransform::identity();
+        let mut builder = elwindui_core::painter::PathBuilder::new();
+        builder.move_to(elwindui_core::base::Point { x: 10.0, y: 50.0 });
+        builder.quad_to(
+            elwindui_core::base::Point { x: 32.0, y: 10.0 },
+            elwindui_core::base::Point { x: 54.0, y: 50.0 },
+        );
+        let path = builder.build().expect("a moved-to, curved path is never empty");
+        let cg_path = path_to_cgpath(&world, &path);
+        let stroke = elwindui_core::painter::StrokeStyle {
+            width: 6.0,
+            ..Default::default()
+        };
+        add_shape_layer(
+            &root,
+            &cg_path,
+            None,
+            Some((
+                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &stroke,
+            )),
+            1.0,
+            path.bounds(),
+        );
+        render_layer(&root, &bitmap);
+        // The curve's own midpoint (t=0.5) sits at (32, 30) — nowhere near the straight chord's
+        // midpoint (32, 50), proving the quadratic control point actually bent the curve.
+        // `render_layer`'s own Y-flip note applies (logical y -> pixel row 64-y).
+        approx(bitmap.pixel(32, 34), (0, 0, 0, 255), 50);
+        approx(bitmap.pixel(32, 14), (0, 0, 0, 0), 10);
+    }
+
+    #[test]
+    fn cubic_bezier_bows_away_from_the_straight_chord_between_its_endpoints() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let world = elwindui_core::base::AffineTransform::identity();
+        let mut builder = elwindui_core::painter::PathBuilder::new();
+        builder.move_to(elwindui_core::base::Point { x: 10.0, y: 50.0 });
+        builder.cubic_to(
+            elwindui_core::base::Point { x: 20.0, y: 10.0 },
+            elwindui_core::base::Point { x: 44.0, y: 10.0 },
+            elwindui_core::base::Point { x: 54.0, y: 50.0 },
+        );
+        let path = builder.build().expect("a moved-to, curved path is never empty");
+        let cg_path = path_to_cgpath(&world, &path);
+        let stroke = elwindui_core::painter::StrokeStyle {
+            width: 6.0,
+            ..Default::default()
+        };
+        add_shape_layer(
+            &root,
+            &cg_path,
+            None,
+            Some((
+                &elwindui_core::painter::Brush::Solid(elwindui_core::painter::Color::black()),
+                &stroke,
+            )),
+            1.0,
+            path.bounds(),
+        );
+        render_layer(&root, &bitmap);
+        // The curve's own midpoint (t=0.5) sits at (32, 20) — nowhere near the straight chord's
+        // midpoint (32, 50), proving both control points actually bent the curve.
+        // `render_layer`'s own Y-flip note applies (logical y -> pixel row 64-y).
+        approx(bitmap.pixel(32, 44), (0, 0, 0, 255), 50);
+        approx(bitmap.pixel(32, 14), (0, 0, 0, 0), 10);
+    }
+
+    #[test]
+    fn linear_gradient_interpolates_between_its_two_stop_colors() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let rect = elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+        };
+        let brush = elwindui_core::painter::Brush::LinearGradient(
+            elwindui_core::painter::LinearGradientBrush::new(
+                elwindui_core::base::Point { x: 0.0, y: 0.0 },
+                elwindui_core::base::Point { x: 1.0, y: 0.0 },
+                vec![
+                    elwindui_core::painter::GradientStop::new(
+                        0.0,
+                        elwindui_core::painter::Color::rgb(255, 0, 0),
+                    )
+                    .unwrap(),
+                    elwindui_core::painter::GradientStop::new(
+                        1.0,
+                        elwindui_core::painter::Color::rgb(0, 0, 255),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let world = elwindui_core::base::AffineTransform::identity();
+        let realized = try_add_gradient_fill_layer(
+            &root,
+            &brush,
+            rect,
+            GradientMaskShape::RoundedRect(elwindui_core::base::CornerRadius::default()),
+            &world,
+            1.0,
+        );
+        assert!(
+            realized,
+            "a pure-translation world must realize a gradient brush as a real CAGradientLayer"
+        );
+        render_layer(&root, &bitmap);
+        approx(bitmap.pixel(4, 32), (255, 0, 0, 255), 80); // near the left edge: close to stop 0
+        approx(bitmap.pixel(60, 32), (0, 0, 255, 255), 80); // near the right edge: close to stop 1
+    }
+
+    #[test]
+    fn radial_gradient_interpolates_from_center_to_edge() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let rect = elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 64.0,
+            height: 64.0,
+        };
+        let brush = elwindui_core::painter::Brush::RadialGradient(
+            elwindui_core::painter::RadialGradientBrush::new(
+                elwindui_core::base::Point { x: 0.5, y: 0.5 },
+                0.5,
+                0.5,
+                vec![
+                    elwindui_core::painter::GradientStop::new(
+                        0.0,
+                        elwindui_core::painter::Color::rgb(255, 0, 0),
+                    )
+                    .unwrap(),
+                    elwindui_core::painter::GradientStop::new(
+                        1.0,
+                        elwindui_core::painter::Color::rgb(0, 0, 255),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let world = elwindui_core::base::AffineTransform::identity();
+        let realized = try_add_gradient_fill_layer(
+            &root,
+            &brush,
+            rect,
+            GradientMaskShape::Ellipse,
+            &world,
+            1.0,
+        );
+        assert!(realized);
+        render_layer(&root, &bitmap);
+        approx(bitmap.pixel(32, 32), (255, 0, 0, 255), 60); // center: close to stop 0
+        approx(bitmap.pixel(32, 4), (0, 0, 255, 255), 90); // near the edge: close to stop 1
+    }
+
+    #[test]
+    fn draw_image_contain_letterboxes_and_leaves_the_gap_unpainted() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        // A 20x10 solid-blue image `Contain`ed into a 20x20 square must shrink to fit the width
+        // (already exact) while the height (half of the square) leaves 5px letterbox gaps above
+        // and below, centered by default alignment.
+        let pixels = vec![0u8, 0, 255, 255].repeat(20 * 10);
+        let image = elwindui_core::painter::Image::from_rgba8(
+            20,
+            10,
+            20 * 4,
+            pixels,
+            elwindui_core::painter::AlphaMode::Opaque,
+        )
+        .expect("valid RGBA8 buffer");
+        let mut image_cache = HashMap::new();
+        let resolved =
+            resolve_cgimage(&image, &mut image_cache).expect("valid RGBA8 buffer decodes");
+        let dest = elwindui_core::base::Rect {
+            x: 2.0,
+            y: 2.0,
+            width: 20.0,
+            height: 20.0,
+        };
+        let options = elwindui_core::painter::ImageDrawOptions {
+            fit: elwindui_core::painter::ImageFit::Contain,
+            ..Default::default()
+        };
+        let world = elwindui_core::base::AffineTransform::identity();
+        let container = build_image_container_layer(&resolved, dest, None, &options, &world, 1.0)
+            .expect("no source crop means there's always something to draw");
+        root.addSublayer(&container);
+        render_layer(&root, &bitmap);
+        // `render_layer`'s own Y-flip note applies (logical y -> pixel row 64-y).
+        approx(bitmap.pixel(12, 52), (0, 0, 255, 255), 50); // inside the letterboxed image
+        approx(bitmap.pixel(12, 60), (0, 0, 0, 0), 10); // top letterbox gap: left unpainted
+    }
+
+    #[test]
+    fn draw_image_source_crop_only_shows_the_cropped_region() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        // A 2x1 image: left pixel red, right pixel blue.
+        let pixels = vec![255u8, 0, 0, 255, 0, 0, 255, 255];
+        let image = elwindui_core::painter::Image::from_rgba8(
+            2,
+            1,
+            2 * 4,
+            pixels,
+            elwindui_core::painter::AlphaMode::Opaque,
+        )
+        .expect("valid RGBA8 buffer");
+        let mut image_cache = HashMap::new();
+        let resolved =
+            resolve_cgimage(&image, &mut image_cache).expect("valid RGBA8 buffer decodes");
+        let dest = elwindui_core::base::Rect {
+            x: 2.0,
+            y: 2.0,
+            width: 20.0,
+            height: 20.0,
+        };
+        // Crop to just the right (blue) pixel.
+        let source = elwindui_core::base::Rect {
+            x: 1.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        let options = elwindui_core::painter::ImageDrawOptions {
+            fit: elwindui_core::painter::ImageFit::Fill,
+            ..Default::default()
+        };
+        let world = elwindui_core::base::AffineTransform::identity();
+        let container =
+            build_image_container_layer(&resolved, dest, Some(source), &options, &world, 1.0)
+                .expect("the crop rect is fully inside the image, not an empty intersection");
+        root.addSublayer(&container);
+        render_layer(&root, &bitmap);
+        // `render_layer`'s own Y-flip note applies (logical y -> pixel row 64-y).
+        approx(bitmap.pixel(12, 52), (0, 0, 255, 255), 50);
+    }
+
+    // The two tests below exercise nested `PushTransform`/`PushOpacity` *composition* — but not
+    // through `replay_commands`'s own Push/Pop recursion itself: that needs a real `&TreeHostView`
+    // (its `NativeControl` arm touches `host.ivars()`), and constructing one (`TreeHostView::new`)
+    // asserts the calling thread is the app's main thread, which `cargo test`'s worker-thread pool
+    // never is. Instead, each test computes the exact composed `AffineTransform`/`opacity`
+    // `replay_commands`' `PushTransform`/`PushOpacity` arms would produce (`transform.concat
+    // (pushed)`, `opacity * pushed` — see those arms' own source) and feeds it straight to
+    // `rounded_rect_cgpath`/`add_shape_layer`, the same one-level-below approach every other test
+    // in this module already uses.
+
+    #[test]
+    fn nested_push_transform_composes_both_transforms_in_order() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let outer = elwindui_core::base::AffineTransform::translation(20.0, 0.0);
+        let inner = elwindui_core::base::AffineTransform::translation(0.0, 20.0);
+        let world = outer.concat(&inner);
+        let rect = elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let path = rounded_rect_cgpath(&world, rect, elwindui_core::base::CornerRadius::default());
+        add_shape_layer(
+            &root,
+            &path,
+            Some(&elwindui_core::painter::Brush::Solid(
+                elwindui_core::painter::Color::rgb(0, 200, 0),
+            )),
+            None,
+            1.0,
+            rect,
+        );
+        render_layer(&root, &bitmap);
+        // Both translations compose: the 10x10 rect, originally at (0,0), ends up at (20,20).
+        // `render_layer`'s own Y-flip note applies (logical y -> pixel row 64-y).
+        approx(bitmap.pixel(25, 39), (0, 200, 0, 255), 50);
+        approx(bitmap.pixel(5, 59), (0, 0, 0, 0), 10);
+    }
+
+    #[test]
+    fn nested_push_opacity_multiplies_both_levels() {
+        let bitmap = Bitmap::new(64, 64);
+        let root = CALayer::new();
+        root.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(64.0, 64.0),
+        ));
+        let world = elwindui_core::base::AffineTransform::identity();
+        let opacity = 0.5f32 * 0.5f32;
+        let rect = elwindui_core::base::Rect {
+            x: 16.0,
+            y: 16.0,
+            width: 32.0,
+            height: 32.0,
+        };
+        let path = rounded_rect_cgpath(&world, rect, elwindui_core::base::CornerRadius::default());
+        add_shape_layer(
+            &root,
+            &path,
+            Some(&elwindui_core::painter::Brush::Solid(
+                elwindui_core::painter::Color::rgb(0, 255, 0),
+            )),
+            None,
+            opacity,
+            rect,
+        );
+        render_layer(&root, &bitmap);
+        // The rect is centered on the canvas, so this sample point is Y-flip-invariant.
+        let (_, _, _, a) = bitmap.pixel(32, 32);
+        // 0.5 * 0.5 = 0.25 net opacity, far below what a single 0.5 level would give (~127) —
+        // proving the two `PushOpacity` levels multiplied instead of only the inner (or outer)
+        // value winning.
+        assert!(a < 100, "nested 0.5*0.5 opacity should be far below ~127, got {a}");
+        assert!(a > 20, "nested opacity should still be visibly painted, got {a}");
     }
 }

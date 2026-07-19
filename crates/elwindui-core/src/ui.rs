@@ -2122,6 +2122,7 @@ fn build_render_group<H: Clone + 'static>(
     let mut group = RenderGroup::new(id, offset, clip);
     group.size = size;
     record_group_commands::<H>(elem, &mut group);
+    group.generation += 1;
     for child in elem.visual_children() {
         let child_offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
         if let Some(child_group) = build_render_group::<H>(&child, child_offset) {
@@ -2219,6 +2220,7 @@ fn reconcile_render_group<H: Clone + 'static>(
     if group.is_dirty {
         record_group_commands::<H>(elem, group);
         group.is_dirty = false;
+        group.generation += 1;
     }
 }
 

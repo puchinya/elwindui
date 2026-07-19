@@ -8,6 +8,14 @@ use std::rc::Weak;
 pub struct RenderGroup {
     pub id: u64,
     pub is_dirty: bool,
+    /// Bumped every time `commands` is (re)recorded — unlike `is_dirty` (reset to `false` again
+    /// within the same `reconcile`/`new` call that set it, a purely transient signal internal to
+    /// `ui.rs`'s own dirty-tracking), this never resets, so a renderer replay layer can compare it
+    /// against a "last replayed" value it keeps *across* `reconcile` calls to know whether this
+    /// group's own `commands` actually changed since it last built native resources from them
+    /// (painter design doc §15's renderer cache; see `elwindui-backend-appkit`'s per-group
+    /// `CALayer` cache for the consumer).
+    pub generation: u64,
     pub offset: Point,
     /// The arranged local extent. It is retained separately from `clip`: an unclipped Visual can
     /// still need to re-record its local commands when only its size changes.
@@ -22,6 +30,7 @@ impl RenderGroup {
         Self {
             id,
             is_dirty: true,
+            generation: 0,
             offset,
             size: Size::default(),
             clip,

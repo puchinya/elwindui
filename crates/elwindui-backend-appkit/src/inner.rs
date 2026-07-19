@@ -265,6 +265,15 @@ pub struct TreeHostIvars {
     /// `native_containers` has for comparatively little benefit (a decoded `CGImage` is far
     /// cheaper to keep around than a live `NSView` island).
     image_cache: RefCell<HashMap<usize, CFRetained<CGImage>>>,
+    /// `RenderCommand::DrawVectorImage`'s `VectorRasterizeMode::Auto`/`Fixed` cache — the
+    /// rasterized-bitmap counterpart to `image_cache` above, keyed by `VectorImageId` rather than
+    /// pointer identity since the *same* `VectorImage` may legitimately need re-rasterizing at a
+    /// different pixel size (unlike a decoded raster `Image`, which has one fixed native size).
+    /// At most one entry per id — `Auto` mode simply overwrites the entry when the requested size
+    /// changes (see `VectorRasterizeMode::Auto`'s own doc comment); `Fixed` mode never changes
+    /// size so its entry never gets overwritten after the first rasterization. Never pruned, same
+    /// reasoning as `image_cache` above.
+    vector_raster_cache: RefCell<HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, CFRetained<CGImage>)>>,
     /// Per-`RenderGroup` id, the persistent container `CALayer` holding that group's own painted
     /// sublayers — a flat sibling of the root paint layer (`frame` always exactly matches the
     /// root's own `bounds()`, a zero-offset "namespace" rather than a real nested coordinate
@@ -496,6 +505,7 @@ impl TreeHostView {
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
             image_cache: RefCell::new(HashMap::new()),
+            vector_raster_cache: RefCell::new(HashMap::new()),
             group_layers: RefCell::new(HashMap::new()),
             group_layer_cache_keys: RefCell::new(HashMap::new()),
             group_native_controls: RefCell::new(HashMap::new()),
@@ -656,6 +666,7 @@ impl TreeHostView {
         let mut live_native_controls = HashSet::new();
         let mut live_group_ids = HashSet::new();
         let mut image_cache = self.ivars().image_cache.borrow_mut();
+        let mut vector_raster_cache = self.ivars().vector_raster_cache.borrow_mut();
         replay_group(
             self,
             &layer,
@@ -667,8 +678,10 @@ impl TreeHostView {
             &mut live_native_controls,
             &mut live_group_ids,
             &mut image_cache,
+            &mut vector_raster_cache,
         );
         drop(image_cache);
+        drop(vector_raster_cache);
         self.ivars()
             .native_containers
             .borrow_mut()
@@ -749,6 +762,7 @@ fn replay_group(
     live_native_controls: &mut HashSet<usize>,
     live_group_ids: &mut HashSet<u64>,
     image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, CFRetained<CGImage>)>,
 ) {
     let origin = elwindui_core::base::Point {
         x: origin.x + group.offset.x,
@@ -813,6 +827,7 @@ fn replay_group(
             opacity,
             live_native_controls,
             image_cache,
+            vector_raster_cache,
         );
         let discovered_native_controls: Vec<usize> = live_native_controls
             .difference(&native_controls_before)
@@ -842,6 +857,7 @@ fn replay_group(
             live_native_controls,
             live_group_ids,
             image_cache,
+            vector_raster_cache,
         );
     }
 }
@@ -865,6 +881,7 @@ fn replay_commands(
     opacity: f32,
     live_native_controls: &mut HashSet<usize>,
     image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, CFRetained<CGImage>)>,
 ) -> usize {
     let mut idx = start;
     while idx < commands.len() {
@@ -905,6 +922,7 @@ fn replay_commands(
                     opacity,
                     live_native_controls,
                     image_cache,
+                    vector_raster_cache,
                 );
             }
             RenderCommand::PushTransform { transform: pushed } => {
@@ -919,6 +937,7 @@ fn replay_commands(
                     opacity,
                     live_native_controls,
                     image_cache,
+                    vector_raster_cache,
                 );
             }
             RenderCommand::PushOpacity { opacity: pushed } => {
@@ -933,6 +952,7 @@ fn replay_commands(
                     opacity * *pushed,
                     live_native_controls,
                     image_cache,
+                    vector_raster_cache,
                 );
             }
             RenderCommand::NativeControl { handle, rect, .. } => {
@@ -1001,6 +1021,7 @@ fn replay_commands(
                         transform,
                         opacity,
                         image_cache,
+                        vector_raster_cache,
                     );
                 }
                 idx += 1;
@@ -1108,6 +1129,7 @@ pub(crate) fn transform_point(
 /// geometry directly (each corner point individually — see `replay_group`'s own doc comment for
 /// why this is simpler/more robust here than a nested `CALayer.affineTransform`) and `opacity` to
 /// the resulting layer.
+#[allow(clippy::too_many_arguments)]
 fn replay_paint_command(
     _host: &TreeHostView,
     layer: &Retained<CALayer>,
@@ -1116,6 +1138,7 @@ fn replay_paint_command(
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
     image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, CFRetained<CGImage>)>,
 ) {
     let world =
         elwindui_core::base::AffineTransform::translation(origin.x, origin.y).concat(&transform);
@@ -1263,6 +1286,7 @@ fn replay_paint_command(
         } => {
             crate::vector_renderer::draw_vector_image(
                 layer, image, *dest, *source, options, &world, opacity, image_cache,
+                vector_raster_cache,
             );
         }
         RenderCommand::Text {
@@ -3910,6 +3934,7 @@ mod svg_golden_tests {
             height: size as f32,
         };
         let mut cache = HashMap::new();
+        let mut vector_raster_cache = HashMap::new();
         crate::vector_renderer::draw_vector_image(
             &root,
             &image,
@@ -3919,6 +3944,7 @@ mod svg_golden_tests {
             &world,
             1.0,
             &mut cache,
+            &mut vector_raster_cache,
         );
         root.renderInContext(&bitmap.ctx);
         bitmap
@@ -4091,5 +4117,121 @@ mod svg_golden_tests {
         // an infinite-repetition test where the tile source's extent isn't pipeline-constrained).
         let bitmap = render_via_elwindui(FE_TILE_SVG, 64);
         approx(bitmap.pixel(32, 32), (0, 255, 0, 255), 40);
+    }
+
+    /// `VectorRasterizeMode::Auto`/`Fixed`/`Vector` — the rasterize-and-cache draw modes
+    /// (`vector_renderer.rs::draw_vector_image`'s own doc comment), tested against
+    /// `vector_raster_cache` directly rather than pixel output (already covered by every test
+    /// above, all of which now exercise `Auto`, the new default) — these instead confirm *when* a
+    /// cached bitmap is reused vs. rebuilt.
+    mod rasterize_mode {
+        use super::*;
+        use elwindui_core::graphics::VectorRasterizeMode;
+
+        fn draw_into(
+            image: &elwindui_core::graphics::VectorImage,
+            dest: elwindui_core::base::Rect,
+            rasterize: VectorRasterizeMode,
+            image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+            vector_raster_cache: &mut HashMap<
+                elwindui_core::graphics::VectorImageId,
+                (u32, u32, CFRetained<CGImage>),
+            >,
+        ) {
+            let root = CALayer::new();
+            root.setBounds(objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::new(0.0, 0.0),
+                objc2_core_foundation::CGSize::new(64.0, 64.0),
+            ));
+            crate::vector_renderer::draw_vector_image(
+                &root,
+                image,
+                dest,
+                None,
+                &VectorImageDrawOptions {
+                    rasterize,
+                    ..Default::default()
+                },
+                &elwindui_core::base::AffineTransform::identity(),
+                1.0,
+                image_cache,
+                vector_raster_cache,
+            );
+        }
+
+        fn small_rect_image() -> elwindui_core::graphics::VectorImage {
+            elwindui_svg::load_svg_str(SOLID_RECT_SVG).expect("valid fixture SVG")
+        }
+
+        fn dest(size: f32) -> elwindui_core::base::Rect {
+            elwindui_core::base::Rect { x: 0.0, y: 0.0, width: size, height: size }
+        }
+
+        #[test]
+        fn auto_mode_reuses_the_cached_bitmap_when_the_drawn_size_is_unchanged() {
+            let image = small_rect_image();
+            let mut image_cache = HashMap::new();
+            let mut cache = HashMap::new();
+            draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            let (w1, h1, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
+            draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
+            assert_eq!((w1, h1), (w2, h2));
+            assert_eq!(
+                CFRetained::as_ptr(&cg1),
+                CFRetained::as_ptr(&cg2),
+                "same size should reuse the exact same cached CGImage, not rasterize again"
+            );
+        }
+
+        #[test]
+        fn auto_mode_rerasterizes_when_the_drawn_size_changes() {
+            let image = small_rect_image();
+            let mut image_cache = HashMap::new();
+            let mut cache = HashMap::new();
+            draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            let (_, _, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
+            draw_into(&image, dest(128.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
+            assert_eq!((w2, h2), (128, 128));
+            assert_ne!(
+                CFRetained::as_ptr(&cg1),
+                CFRetained::as_ptr(&cg2),
+                "a different drawn size must trigger a fresh rasterization"
+            );
+        }
+
+        #[test]
+        fn fixed_mode_keeps_the_same_bitmap_across_a_dest_resize() {
+            let image = small_rect_image();
+            let mut image_cache = HashMap::new();
+            let mut cache = HashMap::new();
+            let fixed = VectorRasterizeMode::Fixed { pixel_width: 32, pixel_height: 32 };
+            draw_into(&image, dest(64.0), fixed, &mut image_cache, &mut cache);
+            let (w1, h1, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
+            assert_eq!((w1, h1), (32, 32));
+            // A `dest` resize that would have changed `Auto`'s target pixel size must not affect
+            // `Fixed` at all — that's the whole point of specifying a fixed rasterization size.
+            draw_into(&image, dest(128.0), fixed, &mut image_cache, &mut cache);
+            let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
+            assert_eq!((w2, h2), (32, 32));
+            assert_eq!(
+                CFRetained::as_ptr(&cg1),
+                CFRetained::as_ptr(&cg2),
+                "Fixed mode must not rerasterize when only the display size changes"
+            );
+        }
+
+        #[test]
+        fn vector_mode_never_populates_the_raster_cache() {
+            let image = small_rect_image();
+            let mut image_cache = HashMap::new();
+            let mut cache = HashMap::new();
+            draw_into(&image, dest(64.0), VectorRasterizeMode::Vector, &mut image_cache, &mut cache);
+            assert!(
+                cache.is_empty(),
+                "Vector mode should render the live CALayer tree, never touching the raster cache"
+            );
+        }
     }
 }

@@ -21,10 +21,11 @@ use crate::inner::{
 };
 use elwindui_core::base::{AffineTransform, Point, Rect};
 use elwindui_core::graphics::{
-    Brush, Clip, Color, FillRule, GradientStop, Path, StrokeStyle, VectorBlendMode, VectorFill,
-    VectorFilter, VectorFilterInput, VectorFilterPrimitive, VectorFilterPrimitiveNode,
-    VectorGroup, VectorImage, VectorImageDrawOptions, VectorMask, VectorMaskType, VectorNode,
-    VectorPaint, VectorPathNode, VectorPattern, VectorRasterNode, VectorStroke,
+    Brush, Clip, Color, FillRule, GradientStop, ImageDrawOptions, Path, StrokeStyle,
+    VectorBlendMode, VectorFill, VectorFilter, VectorFilterInput, VectorFilterPrimitive,
+    VectorFilterPrimitiveNode, VectorGroup, VectorImage, VectorImageDrawOptions, VectorImageId,
+    VectorMask, VectorMaskType, VectorNode, VectorPaint, VectorPathNode, VectorPattern,
+    VectorRasterNode, VectorRasterizeMode, VectorStroke,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -76,36 +77,12 @@ pub(crate) fn draw_vector_image(
     world: &AffineTransform,
     opacity: f32,
     image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, CFRetained<CGImage>)>,
 ) {
     let src_rect = source.unwrap_or_else(|| image.view_box());
     if src_rect.width <= 0.0 || src_rect.height <= 0.0 {
         return;
     }
-
-    // Reuses the exact same `Fill`/`Contain`/`Cover`/`None` + alignment placement math ordinary
-    // `DrawImage` uses (実装指示書§17) — `src_rect`'s size stands in for `DrawImage`'s own
-    // `image_size` parameter.
-    let placed = fitted_image_rect(
-        dest,
-        (src_rect.width, src_rect.height),
-        options.fit,
-        options.alignment_x,
-        options.alignment_y,
-    );
-    let scale_x = if src_rect.width.abs() > 1e-6 {
-        placed.width / src_rect.width
-    } else {
-        1.0
-    };
-    let scale_y = if src_rect.height.abs() > 1e-6 {
-        placed.height / src_rect.height
-    } else {
-        1.0
-    };
-    let root_local = AffineTransform::translation(dest.x + placed.x, dest.y + placed.y)
-        .concat(&AffineTransform::scale(scale_x, scale_y))
-        .concat(&AffineTransform::translation(-src_rect.x, -src_rect.y));
-    let root_world = world.concat(&root_local);
     let combined_opacity = opacity * options.opacity;
 
     let container = if options.clip_to_dest {
@@ -120,7 +97,131 @@ pub(crate) fn draw_vector_image(
         layer.clone()
     };
 
-    render_group(&container, image.root(), &root_world, combined_opacity, image_cache);
+    match options.rasterize {
+        VectorRasterizeMode::Vector => {
+            // Reuses the exact same `Fill`/`Contain`/`Cover`/`None` + alignment placement math
+            // ordinary `DrawImage` uses (実装指示書§17) — `src_rect`'s size stands in for
+            // `DrawImage`'s own `image_size` parameter.
+            let placed = fitted_image_rect(
+                dest,
+                (src_rect.width, src_rect.height),
+                options.fit,
+                options.alignment_x,
+                options.alignment_y,
+            );
+            let scale_x = if src_rect.width.abs() > 1e-6 {
+                placed.width / src_rect.width
+            } else {
+                1.0
+            };
+            let scale_y = if src_rect.height.abs() > 1e-6 {
+                placed.height / src_rect.height
+            } else {
+                1.0
+            };
+            let root_local = AffineTransform::translation(dest.x + placed.x, dest.y + placed.y)
+                .concat(&AffineTransform::scale(scale_x, scale_y))
+                .concat(&AffineTransform::translation(-src_rect.x, -src_rect.y));
+            let root_world = world.concat(&root_local);
+            render_group(&container, image.root(), &root_world, combined_opacity, image_cache);
+        }
+        VectorRasterizeMode::Auto | VectorRasterizeMode::Fixed { .. } => {
+            let (pixel_width, pixel_height) = match options.rasterize {
+                VectorRasterizeMode::Auto => {
+                    // `dest`'s actually-displayed size (in points) — the `Auto` cache key —
+                    // times this layer's own `contentsScale`, which AppKit keeps in sync with
+                    // the hosting window's `backingScaleFactor` for a layer-backed view, so a
+                    // Retina display gets a crisp (not upscaled/blurry) rasterization without
+                    // this function needing its own screen/window lookup.
+                    let placed = fitted_image_rect(
+                        dest,
+                        (src_rect.width, src_rect.height),
+                        options.fit,
+                        options.alignment_x,
+                        options.alignment_y,
+                    );
+                    let scale = layer.contentsScale() as f32;
+                    (
+                        (placed.width * scale).round().max(1.0) as u32,
+                        (placed.height * scale).round().max(1.0) as u32,
+                    )
+                }
+                VectorRasterizeMode::Fixed { pixel_width, pixel_height } => {
+                    (pixel_width, pixel_height)
+                }
+                VectorRasterizeMode::Vector => unreachable!(),
+            };
+            let cached = vector_raster_cache
+                .get(&image.id())
+                .filter(|(w, h, _)| *w == pixel_width && *h == pixel_height)
+                .map(|(_, _, cg_image)| cg_image.clone());
+            let cg_image = match cached {
+                Some(cg_image) => cg_image,
+                None => {
+                    let Some(cg_image) = rasterize_vector_image_to_cgimage(
+                        image,
+                        src_rect,
+                        pixel_width as usize,
+                        pixel_height as usize,
+                        image_cache,
+                    ) else {
+                        return;
+                    };
+                    vector_raster_cache.insert(image.id(), (pixel_width, pixel_height, cg_image.clone()));
+                    cg_image
+                }
+            };
+            let image_options = ImageDrawOptions {
+                opacity: options.opacity,
+                fit: options.fit,
+                alignment_x: options.alignment_x,
+                alignment_y: options.alignment_y,
+                ..Default::default()
+            };
+            if let Some(image_layer) =
+                build_image_container_layer(&cg_image, dest, None, &image_options, world, opacity)
+            {
+                container.addSublayer(&image_layer);
+            }
+        }
+    }
+}
+
+/// Rasterizes `image`'s `src_rect` region (in the image's own view-box units) into a fresh
+/// `pixel_width × pixel_height` `CGImage`, for `VectorRasterizeMode::Auto`/`Fixed`
+/// (`draw_vector_image`'s own doc comment). Reuses the exact same offscreen infrastructure
+/// (`rasterize_calayer_to_pixels`/`pixels_to_cgimage`) mask/pattern/filter rendering already
+/// depends on, and calls `render_group` unchanged — every feature that pipeline supports (masks,
+/// patterns, filters, nested groups) therefore keeps working identically here, just rendered once
+/// into a cached bitmap instead of left as a live `CALayer` tree.
+fn rasterize_vector_image_to_cgimage(
+    image: &VectorImage,
+    src_rect: Rect,
+    pixel_width: usize,
+    pixel_height: usize,
+    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+) -> Option<CFRetained<CGImage>> {
+    if pixel_width == 0
+        || pixel_height == 0
+        || pixel_width > MAX_OFFSCREEN_DIMENSION
+        || pixel_height > MAX_OFFSCREEN_DIMENSION
+        || src_rect.width.abs() <= 1e-6
+        || src_rect.height.abs() <= 1e-6
+    {
+        return None;
+    }
+    let scale_x = pixel_width as f32 / src_rect.width;
+    let scale_y = pixel_height as f32 / src_rect.height;
+    let root = CALayer::new();
+    root.setBounds(CGRect::new(
+        CGPoint::new(0.0, 0.0),
+        CGSize::new(pixel_width as f64, pixel_height as f64),
+    ));
+    let src_to_pixel = AffineTransform::scale(scale_x, scale_y)
+        .concat(&AffineTransform::translation(-src_rect.x, -src_rect.y));
+    render_group(&root, image.root(), &src_to_pixel, 1.0, image_cache);
+    let (pixels, width, height) = rasterize_calayer_to_pixels(&root, pixel_width, pixel_height)?;
+    pixels_to_cgimage(pixels, width, height)
 }
 
 fn render_node(

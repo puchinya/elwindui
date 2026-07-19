@@ -326,14 +326,17 @@ component TextBlock inherits UIElement {
     text_alignment: Option<TextAlignment>,
 }
 
-// Self-drawn like `TextBlock` above — no native widget on any backend, `source`/`stretch` field
-// names match `elwindui_core::ui::Image::construct`'s parameter names 1:1, so no `view Image { .. }`
-// mapping block is needed (same reasoning as `TextBlock` having none). `ImageSource` carries either
-// a raster `Image` or a loaded `VectorImage` (SVG読み込み・ベクター描画対応 実装指示書§24).
+// Self-drawn like `TextBlock` above — no native widget on any backend, `source`/`stretch`/
+// `rasterize` field names match `elwindui_core::ui::Image::construct`'s parameter names 1:1, so no
+// `view Image { .. }` mapping block is needed (same reasoning as `TextBlock` having none).
+// `ImageSource` carries either a raster `Image` or a loaded `VectorImage` (SVG読み込み・ベクター描画
+// 対応 実装指示書§24). `rasterize` only affects a `Vector` source — see `VectorRasterizeMode`'s own
+// doc comment for the `Auto`/`Fixed`/`Vector` tradeoff.
 #[embedded]
 component Image inherits UIElement {
     source: Option<elwindui::core::graphics::ImageSource>,
     stretch: Option<elwindui::core::graphics::Stretch>,
+    rasterize: Option<elwindui::core::graphics::VectorRasterizeMode>,
 }
 
 // `items` — not a plain `Vec<T>` field like `TabView`'s `children` — is

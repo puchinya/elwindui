@@ -180,6 +180,36 @@ impl VectorImageBuilder {
     }
 }
 
+/// How a backend should turn a [`VectorImage`]'s scene graph into what actually lands on screen —
+/// a WinUI3 `SvgImageSource`-style choice between staying fully vector (a live, infinitely crisp
+/// shape tree) and rasterizing to a single cached bitmap (far cheaper to keep composited when the
+/// scene graph is large, at the cost of blurring under further upscale beyond the rasterized
+/// size). `Auto` and `Fixed` both rasterize; they differ only in *when* a backend is allowed to
+/// reuse a previously cached bitmap rather than redrawing — see each variant's own doc comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorRasterizeMode {
+    /// Rasterize at the size this image is actually being drawn at (in device pixels), and cache
+    /// that bitmap keyed by size — cheap to keep reusing while the drawn size stays the same, but
+    /// a size change (e.g. the hosting `Image` widget being resized) invalidates the cache and
+    /// forces a fresh rasterization at the new size. The right default for most content: no
+    /// per-frame cost once a size has settled, still crisp at whatever size it's actually shown.
+    #[default]
+    Auto,
+    /// Rasterize once at this fixed pixel size — WinUI3's `SvgImageSource.RasterizePixelWidth`/
+    /// `RasterizePixelHeight` (a size of `0` there means "track the display size", i.e. this
+    /// crate's `Auto`). Never invalidated by a later resize of the hosting widget (the cached
+    /// bitmap is simply stretched to fit, like any other raster image) — since the target size is
+    /// known independently of layout, a backend may also rasterize *before* the first paint that
+    /// needs it (this is what "pre-caching" means for a vector image: pick `Fixed` with the size
+    /// you already know you'll want).
+    Fixed { pixel_width: u32, pixel_height: u32 },
+    /// Opt out of rasterization entirely — the pre-existing behavior, a live shape tree rendered
+    /// directly (e.g. `CALayer`/`CAShapeLayer` per node on AppKit). Right for content that will be
+    /// scaled arbitrarily larger than its natural size (a rasterized bitmap would blur) or is
+    /// small/simple enough that the rasterize-and-cache overhead isn't worth it.
+    Vector,
+}
+
 /// How a [`VectorImage`] is placed into an arbitrary `dest` rect by
 /// [`super::context::RenderContext::draw_vector_image`] — the SVG analogue of `ImageDrawOptions`
 /// (指示書§16.3).
@@ -190,6 +220,7 @@ pub struct VectorImageDrawOptions {
     pub alignment_x: super::brush::AlignmentX,
     pub alignment_y: super::brush::AlignmentY,
     pub clip_to_dest: bool,
+    pub rasterize: VectorRasterizeMode,
 }
 
 impl Default for VectorImageDrawOptions {
@@ -200,6 +231,7 @@ impl Default for VectorImageDrawOptions {
             alignment_x: super::brush::AlignmentX::Center,
             alignment_y: super::brush::AlignmentY::Center,
             clip_to_dest: true,
+            rasterize: VectorRasterizeMode::default(),
         }
     }
 }

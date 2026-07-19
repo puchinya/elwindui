@@ -45,7 +45,7 @@ use crate::graphics::RenderCommand;
 pub use crate::graphics::TextAlignment;
 use crate::graphics::{
     Brush, Color, ImageDrawOptions, ImageFit, ImageSource, RenderContext, RenderGroup, RenderTree,
-    Stretch, StrokeStyle, VectorImageDrawOptions,
+    Stretch, StrokeStyle, VectorImageDrawOptions, VectorRasterizeMode,
 };
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -1754,6 +1754,7 @@ fn stretch_to_image_fit(stretch: Stretch) -> ImageFit {
 pub struct Image {
     source: RefCell<Option<ImageSource>>,
     stretch: Cell<Stretch>,
+    rasterize: Cell<VectorRasterizeMode>,
 }
 
 #[elwindui_macros::class]
@@ -1763,6 +1764,9 @@ impl Image {
     }
     fn stretch(&self) -> Stretch {
         self.stretch.get()
+    }
+    fn rasterize(&self) -> VectorRasterizeMode {
+        self.rasterize.get()
     }
     #[overrides]
     fn measure_override(&self, _available: Size) -> Size {
@@ -1818,6 +1822,7 @@ impl Image {
                     None,
                     VectorImageDrawOptions {
                         fit,
+                        rasterize: self.rasterize.get(),
                         ..Default::default()
                     },
                 );
@@ -1833,15 +1838,24 @@ impl Image {
         self.stretch.set(stretch);
         self.invalidate();
     }
+    fn set_rasterize(&self, rasterize: VectorRasterizeMode) {
+        self.rasterize.set(rasterize);
+        self.invalidate();
+    }
     #[inherent]
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
         self
     }
-    fn construct(source: Option<ImageSource>, stretch: Option<Stretch>) -> Self {
+    fn construct(
+        source: Option<ImageSource>,
+        stretch: Option<Stretch>,
+        rasterize: Option<VectorRasterizeMode>,
+    ) -> Self {
         Self {
             base: UIElement::default(),
             source: RefCell::new(source),
             stretch: Cell::new(stretch.unwrap_or(Stretch::Uniform)),
+            rasterize: Cell::new(rasterize.unwrap_or_default()),
         }
     }
 }

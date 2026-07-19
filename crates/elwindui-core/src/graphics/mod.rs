@@ -48,6 +48,7 @@ pub use vector_filter::{
 pub use vector_image::{
     ImageSource, PreserveAspectRatio, PreserveAspectRatioAlign, PreserveAspectRatioMeetOrSlice,
     VectorImage, VectorImageBuilder, VectorImageDrawOptions, VectorImageError, VectorImageId,
+    VectorRasterizeMode,
 };
 pub use vector_scene::{
     VectorBlendMode, VectorClipPath, VectorFill, VectorGroup, VectorMask, VectorMaskType,

@@ -1123,7 +1123,9 @@ fn replay_paint_command(
     };
     match command {
         RenderCommand::FillRect { rect, brush } => {
-            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(elwindui_core::base::CornerRadius::default()), &world, opacity) {
+            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(elwindui_core::base::CornerRadius::default()), &world, opacity)
+                && !try_add_image_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(elwindui_core::base::CornerRadius::default()), &world, opacity, image_cache)
+            {
                 let path = rounded_rect_path(rect, elwindui_core::base::CornerRadius::default());
                 add_shape_layer(layer, &path, Some(brush), None, opacity, *rect);
             }
@@ -1137,7 +1139,9 @@ fn replay_paint_command(
             add_shape_layer(layer, &path, None, Some((brush, stroke)), opacity, *rect);
         }
         RenderCommand::FillRoundedRect { rect, radii, brush } => {
-            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(*radii), &world, opacity) {
+            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(*radii), &world, opacity)
+                && !try_add_image_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(*radii), &world, opacity, image_cache)
+            {
                 let path = rounded_rect_path(rect, *radii);
                 add_shape_layer(layer, &path, Some(brush), None, opacity, *rect);
             }
@@ -1152,7 +1156,9 @@ fn replay_paint_command(
             add_shape_layer(layer, &path, None, Some((brush, stroke)), opacity, *rect);
         }
         RenderCommand::FillEllipse { rect, brush } => {
-            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::Ellipse, &world, opacity) {
+            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::Ellipse, &world, opacity)
+                && !try_add_image_fill_layer(layer, brush, *rect, GradientMaskShape::Ellipse, &world, opacity, image_cache)
+            {
                 let path = ellipse_cgpath(&world, *rect);
                 add_shape_layer(layer, &path, Some(brush), None, opacity, *rect);
             }
@@ -1401,19 +1407,44 @@ fn build_image_container_layer(
     // can be larger than `dest`) from bleeding into neighboring content — `placed` is already
     // expressed in this container's own local (dest-relative) coordinate space, the same
     // re-anchoring `try_add_gradient_fill_layer`'s mask path uses for the same reason.
+    //
+    // `position`/`bounds`/`affineTransform` (not `setFrame`) is what actually lets this container
+    // rotate/scale under a non-translation `world` — `setFrame` only ever places an *axis-aligned*
+    // rect, so an earlier version of this function that transformed just `dest`'s origin point and
+    // handed `setFrame` the untransformed `dest.width`/`dest.height` silently dropped any rotation
+    // or scale in `world` (unlike every path-based paint command, which transforms each of its
+    // path's points individually and so rotates/scales correctly). With `anchorPoint` left at
+    // `CALayer`'s own default `(0.5, 0.5)`, `position` set to `world`'s image of `dest`'s *center*
+    // and `bounds` set to `dest`'s own untransformed size, `affineTransform` only needs to carry
+    // `world`'s linear part (`m11`/`m12`/`m21`/`m22` — translation is already folded into
+    // `position` via the center point, and matrix composition keeps a transform's linear part
+    // independent of any translation elsewhere in the chain, so reading it straight off `world` is
+    // exact regardless of how `world` itself was built up). For a pure-translation `world` (the
+    // common case) this reduces to exactly the old `setFrame` placement: identity linear part plus
+    // a `position` that is `dest`'s translated center.
     let container = CALayer::new();
     container.setName(Some(&NSString::from_str("elwindui-paint")));
     container.setMasksToBounds(true);
-    container.setFrame(NSRect::new(
-        transform_point(
-            world,
-            elwindui_core::base::Point {
-                x: dest.x,
-                y: dest.y,
-            },
-        ),
-        objc2_foundation::NSSize::new(dest.width as f64, dest.height as f64),
+    container.setBounds(objc2_core_foundation::CGRect::new(
+        objc2_core_foundation::CGPoint::new(0.0, 0.0),
+        objc2_core_foundation::CGSize::new(dest.width as f64, dest.height as f64),
     ));
+    let center_absolute = world.transform_point(elwindui_core::base::Point {
+        x: dest.x + dest.width / 2.0,
+        y: dest.y + dest.height / 2.0,
+    });
+    container.setPosition(objc2_core_foundation::CGPoint::new(
+        center_absolute.x as f64,
+        center_absolute.y as f64,
+    ));
+    container.setAffineTransform(objc2_core_foundation::CGAffineTransform {
+        a: world.m11 as f64,
+        b: world.m12 as f64,
+        c: world.m21 as f64,
+        d: world.m22 as f64,
+        tx: 0.0,
+        ty: 0.0,
+    });
 
     let image_layer = CALayer::new();
     image_layer.setFrame(NSRect::new(
@@ -1478,9 +1509,10 @@ fn is_pure_translation(t: &elwindui_core::base::AffineTransform) -> bool {
 
 /// Realizes a `LinearGradient`/`RadialGradient` fill as a real `CAGradientLayer` (rather than
 /// `apply_fill`'s flat first-stop-color fallback), masked to `shape`'s outline. Returns `false`
-/// (does nothing) for anything else — a solid brush, an unsupported `Image` brush, or a gradient
-/// under a non-translation `world` (rotated/scaled group) — so the caller falls back to
-/// `add_shape_layer`'s existing solid-color path in those cases.
+/// (does nothing) for anything else — a solid brush, an `Image` brush (handled separately by
+/// `try_add_image_fill_layer`), or a gradient under a non-translation `world` (rotated/scaled
+/// group) — so the caller falls back to `add_shape_layer`'s existing solid-color path in those
+/// cases.
 ///
 /// The mask needs its own path expressed in the *gradient layer's local* coordinate space (origin
 /// at the gradient layer's own top-left, not the canvas-absolute space `path_to_cgpath`/
@@ -1602,6 +1634,166 @@ fn gradient_unit_point(
     }
 }
 
+/// `ImageBrush::stretch` -> `ImageFit` — same four cases, `fitted_image_rect` just knows them
+/// under the `ImageFit` name (the `Fill`/`Contain`/`Cover`/`None` vocabulary `draw_image` itself
+/// uses), so an `ImageBrush` fill can reuse that placement helper as-is.
+fn stretch_to_image_fit(stretch: elwindui_core::graphics::Stretch) -> elwindui_core::graphics::ImageFit {
+    use elwindui_core::graphics::{ImageFit, Stretch};
+    match stretch {
+        Stretch::None => ImageFit::None,
+        Stretch::Fill => ImageFit::Fill,
+        Stretch::Uniform => ImageFit::Contain,
+        Stretch::UniformToFill => ImageFit::Cover,
+    }
+}
+
+/// Realizes an `ImageBrush` fill as a real image `CALayer`, masked to `shape`'s outline — the
+/// `Brush::Image` sibling of `try_add_gradient_fill_layer` above, same masked-sublayer strategy
+/// (see that function's own doc comment for why the mask needs its own local-space path). Returns
+/// `false` (does nothing) for anything but an `Image` brush under a pure-translation `world`, so
+/// the caller falls back to `add_shape_layer`'s existing (no-op-for-`Image`) path in those cases.
+fn try_add_image_fill_layer(
+    layer: &Retained<CALayer>,
+    brush: &elwindui_core::graphics::Brush,
+    bounds: elwindui_core::base::Rect,
+    mask_shape: GradientMaskShape,
+    world: &elwindui_core::base::AffineTransform,
+    opacity: f32,
+    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+) -> bool {
+    use elwindui_core::graphics::Brush;
+    let Brush::Image(image_brush) = brush else {
+        return false;
+    };
+    if !is_pure_translation(world) {
+        return false;
+    }
+    let Some(resolved) = resolve_cgimage(&image_brush.image, image_cache) else {
+        return false;
+    };
+    let Some(cg_image) = crop_cgimage(&resolved, image_brush.source_rect) else {
+        return false;
+    };
+    let image_size = (
+        CGImage::width(Some(&cg_image)) as f32,
+        CGImage::height(Some(&cg_image)) as f32,
+    );
+
+    let absolute_origin = world.transform_point(elwindui_core::base::Point { x: bounds.x, y: bounds.y });
+    let container = CALayer::new();
+    container.setName(Some(&NSString::from_str("elwindui-paint")));
+    container.setMasksToBounds(true);
+    container.setFrame(NSRect::new(
+        objc2_foundation::NSPoint::new(absolute_origin.x as f64, absolute_origin.y as f64),
+        objc2_foundation::NSSize::new(bounds.width as f64, bounds.height as f64),
+    ));
+    container.setOpacity(opacity * image_brush.opacity);
+
+    let local_bounds = elwindui_core::base::Rect { x: 0.0, y: 0.0, ..bounds };
+    match image_brush.tile_mode {
+        elwindui_core::graphics::TileMode::None => {
+            let placed = fitted_image_rect(
+                local_bounds,
+                image_size,
+                stretch_to_image_fit(image_brush.stretch),
+                image_brush.alignment_x,
+                image_brush.alignment_y,
+            );
+            let image_layer = CALayer::new();
+            image_layer.setFrame(NSRect::new(
+                objc2_foundation::NSPoint::new(placed.x as f64, placed.y as f64),
+                objc2_foundation::NSSize::new(placed.width as f64, placed.height as f64),
+            ));
+            unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
+            container.addSublayer(&image_layer);
+        }
+        tile_mode @ (elwindui_core::graphics::TileMode::Tile
+        | elwindui_core::graphics::TileMode::FlipX
+        | elwindui_core::graphics::TileMode::FlipY
+        | elwindui_core::graphics::TileMode::FlipXY) => {
+            add_tiled_image_layers(&container, &cg_image, image_size, image_brush.transform, tile_mode, local_bounds);
+        }
+    }
+
+    // Same re-anchored-at-(0,0) mask path `try_add_gradient_fill_layer` builds — see that
+    // function's own doc comment for why `local_bounds` (not another `translation(-bounds.x,
+    // -bounds.y)`) is what belongs alongside the identity transform here.
+    let mask_layer = CAShapeLayer::new();
+    let identity = elwindui_core::base::AffineTransform::identity();
+    let mask_path = match mask_shape {
+        GradientMaskShape::RoundedRect(radii) => rounded_rect_cgpath(&identity, local_bounds, radii),
+        GradientMaskShape::Ellipse => ellipse_cgpath(&identity, local_bounds),
+    };
+    mask_layer.setPath(Some(&mask_path));
+    mask_layer.setFillColor(Some(&color_to_cgcolor(elwindui_core::graphics::Color::black())));
+    let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
+    unsafe { container.setMask(Some(&mask_layer)) };
+
+    layer.addSublayer(&container);
+    true
+}
+
+/// Fills `local_bounds` (already `container`'s own `(0,0)`-anchored local space) with repeated
+/// copies of `cg_image`, one tile per grid cell — the `TileMode::Tile`/`FlipX`/`FlipY`/`FlipXY`
+/// sibling of `try_add_image_fill_layer`'s single-placement `TileMode::None` branch.
+///
+/// A tile's rendered size is `image_size` scaled by `tile_transform`'s *diagonal* only
+/// (`m11`/`m22`) — off-diagonal rotation/skew components aren't supported for sizing a tile, a
+/// deliberate simplification in the same spirit as this file's other documented-not-silent gaps
+/// (e.g. `try_add_gradient_fill_layer`'s own doc comment on `GradientSpreadMethod::{Reflect,
+/// Repeat}`). `ImageBrush` has no dedicated "one tile's size" field (unlike WPF's `TileBrush.
+/// Viewport`) — SwiftUI's `ImagePaint(image:sourceRect:scale:)` is the closer prior art (a single
+/// scale factor, no separate viewport), which is what this mirrors: reusing the existing
+/// `transform` field's scale rather than adding a new one.
+///
+/// Each tile is positioned via `position`/`bounds`/`affineTransform` (default `anchorPoint`
+/// `(0.5, 0.5)`), the same convention `build_image_container_layer`'s rotation fix and this
+/// function's own `container` use — `affineTransform` here only ever carries a +/-1 diagonal
+/// flip: `Tile` is the identity case (`flip_x`/`flip_y` both `false`), `FlipX`/`FlipY`/`FlipXY`
+/// mirror alternating columns/rows/both, matching WPF `TileMode`'s semantics. Row/column counts
+/// are capped at `MAX_TILES_PER_AXIS` so a near-zero `tile_transform` scale (e.g. a misconfigured
+/// brush) produces a bounded, if visually wrong, sublayer count rather than an unbounded one.
+fn add_tiled_image_layers(
+    container: &Retained<CALayer>,
+    cg_image: &CFRetained<CGImage>,
+    image_size: (f32, f32),
+    tile_transform: elwindui_core::base::AffineTransform,
+    tile_mode: elwindui_core::graphics::TileMode,
+    local_bounds: elwindui_core::base::Rect,
+) {
+    use elwindui_core::graphics::TileMode;
+    const MAX_TILES_PER_AXIS: i32 = 64;
+    let tile_w = (image_size.0 * tile_transform.m11.abs()).max(1.0);
+    let tile_h = (image_size.1 * tile_transform.m22.abs()).max(1.0);
+    let cols = ((local_bounds.width / tile_w).ceil() as i32).clamp(1, MAX_TILES_PER_AXIS);
+    let rows = ((local_bounds.height / tile_h).ceil() as i32).clamp(1, MAX_TILES_PER_AXIS);
+    for row in 0..rows {
+        for col in 0..cols {
+            let flip_x = matches!(tile_mode, TileMode::FlipX | TileMode::FlipXY) && col % 2 == 1;
+            let flip_y = matches!(tile_mode, TileMode::FlipY | TileMode::FlipXY) && row % 2 == 1;
+            let image_layer = CALayer::new();
+            image_layer.setBounds(objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::new(0.0, 0.0),
+                objc2_core_foundation::CGSize::new(tile_w as f64, tile_h as f64),
+            ));
+            image_layer.setPosition(objc2_core_foundation::CGPoint::new(
+                (local_bounds.x + col as f32 * tile_w + tile_w / 2.0) as f64,
+                (local_bounds.y + row as f32 * tile_h + tile_h / 2.0) as f64,
+            ));
+            image_layer.setAffineTransform(objc2_core_foundation::CGAffineTransform {
+                a: if flip_x { -1.0 } else { 1.0 },
+                b: 0.0,
+                c: 0.0,
+                d: if flip_y { -1.0 } else { 1.0 },
+                tx: 0.0,
+                ty: 0.0,
+            });
+            unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
+            container.addSublayer(&image_layer);
+        }
+    }
+}
+
 /// Applies `brush` as `shape_layer`'s fill. A gradient brush is realized as a masked
 /// `CAGradientLayer` sibling rather than `CAShapeLayer.fillColor` (which only accepts a solid
 /// color) — `shape_layer` itself is left with no fill color (transparent interior) and the
@@ -1632,7 +1824,11 @@ fn apply_fill(
             }
         }
         Some(elwindui_core::graphics::Brush::Image(_)) => {
-            // Same limitation as the gradient case above — image-brush fills aren't realized yet.
+            // `FillRect`/`FillRoundedRect`/`FillEllipse` never reach this arm for an `Image`
+            // brush — their call sites try `try_add_image_fill_layer` first and only fall back
+            // to `add_shape_layer` (hence here) when that returns `false` (a non-translation
+            // `world`). `FillPath`/`StrokePath` have no such upstream attempt, so an `Image`
+            // brush there still degrades to no fill at all, same as the gradient case above.
         }
     }
     let _ = bounds;

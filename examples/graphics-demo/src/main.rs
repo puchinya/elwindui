@@ -7,18 +7,24 @@
 //! whose `render()` calls the new `RenderContext` primitives directly.
 //!
 //! Grouped into a `TabView` — one tab per `graphics` submodule area (fills, strokes, paths,
-//! path-boolean-combine, compositing/images) — so each area gets its own screen's worth of room.
+//! path-boolean-combine, compositing, images) — so each area gets its own screen's worth of room.
 //! Each tab lays its demos out in a single labeled-card row (the same idea the pre-TabView version
 //! of this file used for its whole 4x2 grid, just scoped to one tab's cells at a time). This is
 //! the standing tool to re-run and screenshot (see CLAUDE.md's screenshot recipe) whenever
 //! `elwindui_core::graphics` changes — extend the relevant tab's `const` table, or add a new tab
 //! if a whole new submodule area shows up, keeping the tab count comfortably under ten.
 //!
-//! Two `graphics` features are deliberately **not** demoed here: `Brush::Image` as a fill (AppKit's
-//! `apply_fill` treats it as a no-op — see that function's own doc comment) and
-//! `PathBuilder::arc_to`/`arc_center` (AppKit's `path_to_cgpath` skips raw `PathCommand::ArcTo`
-//! entirely — see that function's own doc comment). Both are real, already-documented gaps in the
-//! AppKit backend, not oversights here; a demo cell for either would just render blank.
+//! The "Images" tab draws a real file (`assets/elwind_chan.png`, embedded via `include_bytes!`),
+//! not a synthetic pixel buffer — including a `Brush::Image` texture fill, which AppKit's
+//! `apply_fill` used to treat as a no-op for every command; `FillRect`/`FillRoundedRect`/
+//! `FillEllipse` now realize it via `try_add_image_fill_layer` (the same masked-`CALayer` strategy
+//! `try_add_gradient_fill_layer` already used for gradient brushes) — see that function's own doc
+//! comment. `FillPath`/`StrokePath` still fall back to `apply_fill`'s no-op arm for an `Image`
+//! brush, a real, already-documented gap, not an oversight here.
+//!
+//! One `graphics` feature is still deliberately **not** demoed here: `PathBuilder::arc_to`/
+//! `arc_center` (AppKit's `path_to_cgpath` skips raw `PathCommand::ArcTo` entirely — see that
+//! function's own doc comment) — a demo cell for it would just render blank.
 
 // See `examples/notepad-inline/src/main.rs`'s own copy of this line for the full explanation
 // (`crates/elwindui-macros/src/class.rs`'s `inherit_macro_self_ref_path` doc comment) — needed by
@@ -28,14 +34,14 @@
 
 use elwindui::core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui::core::graphics::{
-    AlphaMode, Brush, Clip, Color, FillRule, GeometryCombineMode, GradientStop, Image,
-    ImageDrawOptions, ImageFit, ImageSampling, LineCap, LineJoin, LinearGradientBrush, Path,
-    PathBuilder, RadialGradientBrush, RenderContext, StrokeStyle, TextAlignment,
+    Brush, Clip, Color, FillRule, GeometryCombineMode, GradientStop, Image, ImageBrush,
+    ImageDrawOptions, ImageFit, LineCap, LineJoin, LinearGradientBrush, Path, PathBuilder,
+    RadialGradientBrush, RenderContext, Stretch, StrokeStyle, TextAlignment, TileMode,
 };
 use elwindui::core::ui::UIElementExt;
 use elwindui::ui::WindowExt;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const GAP: f32 = 16.0;
 const LABEL_HEIGHT: f32 = 20.0;
@@ -71,11 +77,19 @@ const PATH_COMBINE: &[DemoEntry] = &[
     DemoEntry { label: "Exclude", draw: draw_combine_exclude },
 ];
 
-const COMPOSITING_AND_IMAGES: &[DemoEntry] = &[
+const COMPOSITING: &[DemoEntry] = &[
     DemoEntry { label: "Clip", draw: draw_clip_demo },
     DemoEntry { label: "Transform", draw: draw_transform_demo },
     DemoEntry { label: "Opacity", draw: draw_opacity_demo },
-    DemoEntry { label: "Image", draw: draw_image_demo },
+];
+
+const IMAGES: &[DemoEntry] = &[
+    DemoEntry { label: "Normal", draw: draw_image_normal },
+    DemoEntry { label: "Partial (Crop)", draw: draw_image_partial },
+    DemoEntry { label: "Affine Transform", draw: draw_image_affine },
+    DemoEntry { label: "Transparency", draw: draw_image_transparency },
+    DemoEntry { label: "Texture Brush Fill", draw: draw_image_texture_fill },
+    DemoEntry { label: "Texture Tile", draw: draw_image_texture_tile },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +98,8 @@ enum GraphicsDemoCategory {
     Strokes,
     Paths,
     PathCombine,
-    CompositingAndImages,
+    Compositing,
+    Images,
 }
 
 impl GraphicsDemoCategory {
@@ -94,7 +109,8 @@ impl GraphicsDemoCategory {
             Self::Strokes => STROKES,
             Self::Paths => PATHS,
             Self::PathCombine => PATH_COMBINE,
-            Self::CompositingAndImages => COMPOSITING_AND_IMAGES,
+            Self::Compositing => COMPOSITING,
+            Self::Images => IMAGES,
         }
     }
 }
@@ -479,30 +495,131 @@ fn draw_opacity_demo(context: &mut RenderContext<'_>, rect: Rect) {
     });
 }
 
-fn draw_image_demo(context: &mut RenderContext<'_>, rect: Rect) {
-    let size: u32 = 8;
-    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let (r, g, b) = if (x + y) % 2 == 0 {
-                (250u8, 204u8, 21u8)
-            } else {
-                (30u8, 41u8, 59u8)
-            };
-            pixels.extend_from_slice(&[r, g, b, 255]);
-        }
-    }
-    let image = Image::from_rgba8(size, size, size * 4, pixels, AlphaMode::Opaque).expect("valid RGBA8 buffer");
+/// Anchored on `CARGO_MANIFEST_DIR` (this crate's own directory) rather than a bare relative
+/// path, so `cargo run -p graphics-demo` finds `assets/elwind_chan.png` regardless of the
+/// process's current working directory at launch — `Image::from_file` itself still does the real
+/// `std::fs::read` at run time, this constant just makes the path launch-directory-independent.
+const ELWIND_CHAN_PNG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/elwind_chan.png");
+
+/// `resolve_cgimage` (AppKit backend) caches decoded `CGImage`s by the `&Image`'s own address, so
+/// every demo cell below must share one `Image` handle rather than each calling `Image::from_file`
+/// itself — a fresh `Image` per call would defeat that cache and re-decode the PNG on every
+/// repaint (painter design doc §13.1's "never re-decoded/re-uploaded on repaint" invariant).
+fn elwind_chan_image() -> &'static Image {
+    static IMAGE: OnceLock<Image> = OnceLock::new();
+    IMAGE.get_or_init(|| Image::from_file(ELWIND_CHAN_PNG_PATH).expect("assets/elwind_chan.png must be readable"))
+}
+
+fn draw_image_normal(context: &mut RenderContext<'_>, rect: Rect) {
     context.draw_image(
-        &image,
+        elwind_chan_image(),
         rect,
         None,
         ImageDrawOptions {
-            sampling: ImageSampling::Nearest,
-            fit: ImageFit::Fill,
+            fit: ImageFit::Contain,
             ..Default::default()
         },
     );
+}
+
+/// Crops to the upper-center square of the source 1024x1024 PNG (roughly the character's head)
+/// via `draw_image`'s own `source: Option<Rect>` — AppKit's `crop_cgimage` clamps this against the
+/// resolved `CGImage`'s bounds before drawing.
+fn draw_image_partial(context: &mut RenderContext<'_>, rect: Rect) {
+    let source = Rect {
+        x: 232.0,
+        y: 60.0,
+        width: 560.0,
+        height: 560.0,
+    };
+    context.draw_image(
+        elwind_chan_image(),
+        rect,
+        Some(source),
+        ImageDrawOptions {
+            fit: ImageFit::Cover,
+            ..Default::default()
+        },
+    );
+}
+
+/// Same `with_transform` pattern as `draw_transform_demo`, but rotation *and* non-uniform scale
+/// composed together — a plain rotation alone wouldn't visibly distinguish this from a rotated
+/// `draw_image` call with `fit: Contain`, so the unequal x/y scale is what makes this read as a
+/// genuine affine transform rather than just a rotation.
+fn draw_image_affine(context: &mut RenderContext<'_>, rect: Rect) {
+    let center = Point {
+        x: rect.x + rect.width / 2.0,
+        y: rect.y + rect.height / 2.0,
+    };
+    let local_rect = Rect {
+        x: -55.0,
+        y: -55.0,
+        width: 110.0,
+        height: 110.0,
+    };
+    let transform = AffineTransform::translation(center.x, center.y)
+        .concat(&AffineTransform::rotation(18f32.to_radians()))
+        .concat(&AffineTransform::scale(1.25, 0.8));
+    context.with_transform(transform, |ctx| {
+        ctx.draw_image(
+            elwind_chan_image(),
+            local_rect,
+            None,
+            ImageDrawOptions {
+                fit: ImageFit::Contain,
+                ..Default::default()
+            },
+        );
+    });
+}
+
+/// `ImageDrawOptions::opacity` is never read by the AppKit backend (only the render-tree's own
+/// `PushOpacity`/`PopOpacity` group opacity is) — same reasoning `draw_opacity_demo` above
+/// documents for shapes, so this wraps `draw_image` in `with_opacity` rather than setting the
+/// (inert, on this backend) options field. A solid backdrop behind it is what actually makes the
+/// resulting translucency visible.
+fn draw_image_transparency(context: &mut RenderContext<'_>, rect: Rect) {
+    context.fill_rounded_rect(rect, CornerRadius::uniform(10.0), &Brush::Solid(Color::rgb(37, 99, 235)));
+    context.with_opacity(0.45, |ctx| {
+        ctx.draw_image(
+            elwind_chan_image(),
+            rect,
+            None,
+            ImageDrawOptions {
+                fit: ImageFit::Contain,
+                ..Default::default()
+            },
+        );
+    });
+}
+
+/// Exercises `try_add_image_fill_layer` (`elwindui-backend-appkit`'s new `Brush::Image` support
+/// for `FillRect`/`FillRoundedRect`/`FillEllipse`) directly, rather than `draw_image` — this is
+/// the shape filled *with* the image as a texture, not the image drawn as its own element.
+fn draw_image_texture_fill(context: &mut RenderContext<'_>, rect: Rect) {
+    let brush = Brush::Image(ImageBrush {
+        stretch: Stretch::UniformToFill,
+        ..ImageBrush::new(elwind_chan_image().clone())
+    });
+    context.fill_rounded_rect(rect, CornerRadius::uniform(14.0), &brush);
+}
+
+/// Same `try_add_image_fill_layer` path as `draw_image_texture_fill` above, but `tile_mode: Tile`
+/// instead of the default `TileMode::None` — `ImageBrush` has no dedicated "one tile's size"
+/// field, so the shrink is expressed via the existing `transform` field's scale. `image_size` in
+/// `try_add_image_fill_layer`/`add_tiled_image_layers` is the source `CGImage`'s raw *pixel*
+/// dimensions (1024x1024 here), not points, so this scale has to shrink by roughly the ratio of a
+/// desired on-screen tile size to that pixel size (~30pt / 1024px) rather than an intuitive-looking
+/// "small" fraction like 0.2 — this cell's own drawable rect is only ~110pt wide, and 0.2x1024 =
+/// ~205pt is bigger than the whole cell.
+fn draw_image_texture_tile(context: &mut RenderContext<'_>, rect: Rect) {
+    let brush = Brush::Image(ImageBrush {
+        tile_mode: TileMode::Tile,
+        transform: AffineTransform::scale(0.03, 0.03),
+        ..ImageBrush::new(elwind_chan_image().clone())
+    });
+    context.fill_rounded_rect(rect, CornerRadius::uniform(14.0), &brush);
 }
 
 // `TabView`'s chip click handler (`elwindui-backend-appkit`'s `native_ui::TabView::rebuild`) only
@@ -545,7 +662,8 @@ struct GraphicsDemoWindow {
     strokes_canvas: std::rc::Rc<GraphicsDemoCanvas>,
     paths_canvas: std::rc::Rc<GraphicsDemoCanvas>,
     path_combine_canvas: std::rc::Rc<GraphicsDemoCanvas>,
-    compositing_and_images_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    compositing_canvas: std::rc::Rc<GraphicsDemoCanvas>,
+    images_canvas: std::rc::Rc<GraphicsDemoCanvas>,
 
     body: view! {
         title: "Graphics Demo"
@@ -577,8 +695,14 @@ struct GraphicsDemoWindow {
                 on_close: || {}
             }
             TabViewItem {
-                header: "Compositing & Images"
-                content: compositing_and_images_canvas
+                header: "Compositing"
+                content: compositing_canvas
+                closable: false
+                on_close: || {}
+            }
+            TabViewItem {
+                header: "Images"
+                content: images_canvas
                 closable: false
                 on_close: || {}
             }
@@ -597,7 +721,8 @@ fn main() {
         GraphicsDemoCanvas::new(GraphicsDemoCategory::Strokes),
         GraphicsDemoCanvas::new(GraphicsDemoCategory::Paths),
         GraphicsDemoCanvas::new(GraphicsDemoCategory::PathCombine),
-        GraphicsDemoCanvas::new(GraphicsDemoCategory::CompositingAndImages),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Compositing),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Images),
     );
     window.show();
     elwindui::application::run();

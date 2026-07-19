@@ -4185,19 +4185,62 @@ mod svg_golden_tests {
         }
 
         #[test]
-        fn auto_mode_rerasterizes_when_the_drawn_size_changes() {
+        fn auto_mode_rerasterizes_at_the_exact_size_when_growth_jumps_past_the_1_5x_margin() {
             let image = small_rect_image();
             let mut image_cache = HashMap::new();
             let mut cache = HashMap::new();
             draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
             let (_, _, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
+            // 128 >= 64 * 1.5 (96), so this isn't a "gradual" enlargement the margin should
+            // absorb — the fresh rasterization lands exactly on the requested size.
             draw_into(&image, dest(128.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
             let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
             assert_eq!((w2, h2), (128, 128));
             assert_ne!(
                 CFRetained::as_ptr(&cg1),
                 CFRetained::as_ptr(&cg2),
-                "a different drawn size must trigger a fresh rasterization"
+                "a growth past the 1.5x margin must trigger a fresh rasterization"
+            );
+        }
+
+        #[test]
+        fn auto_mode_never_rerasterizes_when_the_drawn_size_shrinks() {
+            let image = small_rect_image();
+            let mut image_cache = HashMap::new();
+            let mut cache = HashMap::new();
+            draw_into(&image, dest(128.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            let (_, _, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
+            draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
+            // The larger bitmap is kept as-is — `build_image_container_layer` just downscales it
+            // to fit the smaller `dest`, so there is nothing to gain from rerasterizing smaller.
+            assert_eq!((w2, h2), (128, 128));
+            assert_eq!(
+                CFRetained::as_ptr(&cg1),
+                CFRetained::as_ptr(&cg2),
+                "shrinking the drawn size must never trigger a rerasterization"
+            );
+        }
+
+        #[test]
+        fn auto_mode_pads_a_gradual_enlargement_to_1_5x_and_then_reuses_that_padding() {
+            let image = small_rect_image();
+            let mut image_cache = HashMap::new();
+            let mut cache = HashMap::new();
+            draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            // 80 < 64 * 1.5 (96) — growth within the margin pads to 96, not the raw 80 requested.
+            draw_into(&image, dest(80.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("padded rasterization cached");
+            assert_eq!((w2, h2), (96, 96));
+            // A further, still-modest enlargement that fits inside the 96x96 padding must reuse
+            // it without rerasterizing — this is the whole point of padding on growth.
+            draw_into(&image, dest(90.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+            let (w3, h3, cg3) = cache.get(&image.id()).cloned().expect("still cached");
+            assert_eq!((w3, h3), (96, 96));
+            assert_eq!(
+                CFRetained::as_ptr(&cg2),
+                CFRetained::as_ptr(&cg3),
+                "growth that still fits inside the padded bitmap must not rerasterize"
             );
         }
 

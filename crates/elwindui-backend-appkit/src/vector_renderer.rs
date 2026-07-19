@@ -126,13 +126,13 @@ pub(crate) fn draw_vector_image(
             render_group(&container, image.root(), &root_world, combined_opacity, image_cache);
         }
         VectorRasterizeMode::Auto | VectorRasterizeMode::Fixed { .. } => {
-            let (pixel_width, pixel_height) = match options.rasterize {
+            let cg_image = match options.rasterize {
                 VectorRasterizeMode::Auto => {
-                    // `dest`'s actually-displayed size (in points) — the `Auto` cache key —
-                    // times this layer's own `contentsScale`, which AppKit keeps in sync with
-                    // the hosting window's `backingScaleFactor` for a layer-backed view, so a
-                    // Retina display gets a crisp (not upscaled/blurry) rasterization without
-                    // this function needing its own screen/window lookup.
+                    // `dest`'s actually-displayed size (in points) times this layer's own
+                    // `contentsScale`, which AppKit keeps in sync with the hosting window's
+                    // `backingScaleFactor` for a layer-backed view, so a Retina display gets a
+                    // crisp (not upscaled/blurry) rasterization without this function needing its
+                    // own screen/window lookup.
                     let placed = fitted_image_rect(
                         dest,
                         (src_rect.width, src_rect.height),
@@ -141,35 +141,56 @@ pub(crate) fn draw_vector_image(
                         options.alignment_y,
                     );
                     let scale = layer.contentsScale() as f32;
-                    (
+                    let requested = (
                         (placed.width * scale).round().max(1.0) as u32,
                         (placed.height * scale).round().max(1.0) as u32,
-                    )
+                    );
+                    let cached_size = vector_raster_cache.get(&image.id()).map(|(w, h, _)| (*w, *h));
+                    match auto_raster_target_size(cached_size, requested) {
+                        None => vector_raster_cache
+                            .get(&image.id())
+                            .map(|(_, _, cg_image)| cg_image.clone())
+                            .expect("cached_size was Some when auto_raster_target_size returned None"),
+                        Some((target_width, target_height)) => {
+                            let Some(cg_image) = rasterize_vector_image_to_cgimage(
+                                image,
+                                src_rect,
+                                target_width as usize,
+                                target_height as usize,
+                                image_cache,
+                            ) else {
+                                return;
+                            };
+                            vector_raster_cache
+                                .insert(image.id(), (target_width, target_height, cg_image.clone()));
+                            cg_image
+                        }
+                    }
                 }
                 VectorRasterizeMode::Fixed { pixel_width, pixel_height } => {
-                    (pixel_width, pixel_height)
+                    let cached = vector_raster_cache
+                        .get(&image.id())
+                        .filter(|(w, h, _)| *w == pixel_width && *h == pixel_height)
+                        .map(|(_, _, cg_image)| cg_image.clone());
+                    match cached {
+                        Some(cg_image) => cg_image,
+                        None => {
+                            let Some(cg_image) = rasterize_vector_image_to_cgimage(
+                                image,
+                                src_rect,
+                                pixel_width as usize,
+                                pixel_height as usize,
+                                image_cache,
+                            ) else {
+                                return;
+                            };
+                            vector_raster_cache
+                                .insert(image.id(), (pixel_width, pixel_height, cg_image.clone()));
+                            cg_image
+                        }
+                    }
                 }
                 VectorRasterizeMode::Vector => unreachable!(),
-            };
-            let cached = vector_raster_cache
-                .get(&image.id())
-                .filter(|(w, h, _)| *w == pixel_width && *h == pixel_height)
-                .map(|(_, _, cg_image)| cg_image.clone());
-            let cg_image = match cached {
-                Some(cg_image) => cg_image,
-                None => {
-                    let Some(cg_image) = rasterize_vector_image_to_cgimage(
-                        image,
-                        src_rect,
-                        pixel_width as usize,
-                        pixel_height as usize,
-                        image_cache,
-                    ) else {
-                        return;
-                    };
-                    vector_raster_cache.insert(image.id(), (pixel_width, pixel_height, cg_image.clone()));
-                    cg_image
-                }
             };
             let image_options = ImageDrawOptions {
                 opacity: options.opacity,
@@ -222,6 +243,77 @@ fn rasterize_vector_image_to_cgimage(
     render_group(&root, image.root(), &src_to_pixel, 1.0, image_cache);
     let (pixels, width, height) = rasterize_calayer_to_pixels(&root, pixel_width, pixel_height)?;
     pixels_to_cgimage(pixels, width, height)
+}
+
+/// Decides whether `VectorRasterizeMode::Auto` needs to (re)rasterize, and at what size, given
+/// the previous cache entry's size (if any, `cached`) and the size actually being requested now
+/// (`requested`) — `draw_vector_image`'s own `Auto` arm. `None` means "reuse the existing cached
+/// bitmap unchanged": shrinking (or an unchanged size) never triggers a rerasterization, since
+/// `build_image_container_layer` downscales a larger cached bitmap to fit `dest` with no quality
+/// loss (unlike upscaling, which would blur). `Some(size)` means a fresh rasterization is needed —
+/// on growth, padded to 1.5x the *previous* cached size (rounded up) as long as the newly
+/// requested size still fits under that margin, so a gradual, continuous enlargement (e.g. a live
+/// window resize drag) doesn't force a rasterization on every single size change; a jump past the
+/// 1.5x margin just rasterizes at the size actually requested, rather than over-allocating a
+/// buffer that wouldn't even cover it.
+fn auto_raster_target_size(cached: Option<(u32, u32)>, requested: (u32, u32)) -> Option<(u32, u32)> {
+    let Some((cached_width, cached_height)) = cached else {
+        return Some(requested);
+    };
+    if requested.0 <= cached_width && requested.1 <= cached_height {
+        return None;
+    }
+    let margin_width = (cached_width as f32 * 1.5).ceil() as u32;
+    let margin_height = (cached_height as f32 * 1.5).ceil() as u32;
+    if requested.0 < margin_width && requested.1 < margin_height {
+        Some((margin_width, margin_height))
+    } else {
+        Some(requested)
+    }
+}
+
+#[cfg(test)]
+mod auto_raster_target_size_tests {
+    use super::auto_raster_target_size;
+
+    #[test]
+    fn no_existing_cache_rasterizes_at_the_requested_size() {
+        assert_eq!(auto_raster_target_size(None, (100, 50)), Some((100, 50)));
+    }
+
+    #[test]
+    fn shrinking_in_both_axes_reuses_the_existing_cache() {
+        assert_eq!(auto_raster_target_size(Some((100, 100)), (50, 40)), None);
+    }
+
+    #[test]
+    fn unchanged_size_reuses_the_existing_cache() {
+        assert_eq!(auto_raster_target_size(Some((100, 100)), (100, 100)), None);
+    }
+
+    #[test]
+    fn one_axis_shrinking_and_the_other_unchanged_is_not_growth() {
+        assert_eq!(auto_raster_target_size(Some((100, 100)), (60, 100)), None);
+    }
+
+    #[test]
+    fn growth_within_1_5x_margin_pads_to_1_5x_the_cached_size() {
+        // 100 * 1.5 = 150, 80 * 1.5 = 120 — both requested dims (120, 100) sit strictly under
+        // that margin, so the target is the margin itself, not the raw request.
+        assert_eq!(auto_raster_target_size(Some((100, 80)), (120, 100)), Some((150, 120)));
+    }
+
+    #[test]
+    fn growth_at_or_past_the_1_5x_margin_in_either_axis_uses_the_exact_requested_size() {
+        // Width alone (200 >= 150) already exceeds its margin, even though height (90) doesn't.
+        assert_eq!(auto_raster_target_size(Some((100, 80)), (200, 90)), Some((200, 90)));
+    }
+
+    #[test]
+    fn margin_rounds_up_for_odd_cached_sizes() {
+        // 101 * 1.5 = 151.5 -> ceil 152.
+        assert_eq!(auto_raster_target_size(Some((101, 101)), (110, 110)), Some((152, 152)));
+    }
 }
 
 fn render_node(

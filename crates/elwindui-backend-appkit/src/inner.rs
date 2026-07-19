@@ -4006,4 +4006,90 @@ mod svg_golden_tests {
             bitmap.pixel(2, 2).3
         );
     }
+
+    const PATTERN_TILE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+        <defs>
+            <pattern id="p" x="0" y="0" width="8" height="8" patternUnits="userSpaceOnUse">
+                <rect width="8" height="8" fill="#0000ff"/>
+            </pattern>
+        </defs>
+        <rect x="0" y="0" width="64" height="64" fill="url(#p)"/>
+    </svg>"##;
+
+    #[test]
+    fn pattern_fill_repeats_across_the_whole_shape_not_just_the_first_tile() {
+        let bitmap = render_via_elwindui(PATTERN_TILE_SVG, 64);
+        let reference = render_via_resvg(PATTERN_TILE_SVG, 64);
+        // A single-tile-only implementation would leave everything outside the pattern's own
+        // declared `[0,8)x[0,8)` tile fully transparent — sampling far from the origin (here, deep
+        // into the 8th tile column/row) is exactly what distinguishes "repeats infinitely" from
+        // "drawn once at its own position".
+        for (x, y) in [(60usize, 60usize), (36, 4), (4, 36)] {
+            let (_, _, b, a) = bitmap.pixel(x, y);
+            assert!(
+                a > 200 && b > 150,
+                "expected an opaque blue tile at ({x},{y}), got rgba={:?}",
+                bitmap.pixel(x, y)
+            );
+        }
+        approx(bitmap.pixel(60, 60), resvg_pixel(&reference, 60, 60), 60);
+    }
+
+    const FE_COMPOSITE_XOR_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+        <filter id="f" x="0" y="0" width="64" height="64" filterUnits="userSpaceOnUse">
+            <feFlood flood-color="#ff0000" result="a"/>
+            <feFlood flood-color="#0000ff" result="b"/>
+            <feComposite in="a" in2="b" operator="xor"/>
+        </filter>
+        <rect x="0" y="0" width="64" height="64" fill="#000000" filter="url(#f)"/>
+    </svg>"##;
+
+    #[test]
+    fn fe_composite_xor_cancels_out_two_fully_overlapping_opaque_floods() {
+        let bitmap = render_via_elwindui(FE_COMPOSITE_XOR_SVG, 64);
+        let reference = render_via_resvg(FE_COMPOSITE_XOR_SVG, 64);
+        // Two same-extent, fully opaque flood fills XOR'd together cancel out completely (each is
+        // entirely "covered" by the other, so both `SourceOut` halves are empty) — a deterministic
+        // outcome distinct from the old "treated as Over" fallback, which would show the top
+        // (red) flood solidly instead.
+        approx(bitmap.pixel(32, 32), (0, 0, 0, 0), 40);
+        approx(bitmap.pixel(32, 32), resvg_pixel(&reference, 32, 32), 40);
+    }
+
+    const FE_COMPOSITE_ARITHMETIC_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+        <filter id="f" x="0" y="0" width="64" height="64" filterUnits="userSpaceOnUse">
+            <feFlood flood-color="#ff0000" result="a"/>
+            <feFlood flood-color="#0000ff" result="b"/>
+            <feComposite in="a" in2="b" operator="arithmetic" k1="0.5" k2="0.5" k3="0.5" k4="0"/>
+        </filter>
+        <rect x="0" y="0" width="64" height="64" fill="#000000" filter="url(#f)"/>
+    </svg>"##;
+
+    #[test]
+    fn fe_composite_arithmetic_matches_resvg() {
+        let bitmap = render_via_elwindui(FE_COMPOSITE_ARITHMETIC_SVG, 64);
+        let reference = render_via_resvg(FE_COMPOSITE_ARITHMETIC_SVG, 64);
+        approx(bitmap.pixel(32, 32), resvg_pixel(&reference, 32, 32), 40);
+    }
+
+    const FE_TILE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+        <filter id="f" x="0" y="0" width="64" height="64" filterUnits="userSpaceOnUse">
+            <feFlood flood-color="#00ff00" result="flood"/>
+            <feTile in="flood"/>
+        </filter>
+        <rect x="0" y="0" width="64" height="64" fill="#000000" filter="url(#f)"/>
+    </svg>"##;
+
+    #[test]
+    fn fe_tile_filter_primitive_runs_without_error_and_preserves_flood_color() {
+        // A full-region `feFlood` already covers the entire filter region (this pipeline doesn't
+        // apply each primitive's own `x`/`y`/`width`/`height` subregion before feeding it to the
+        // next primitive — a pre-existing simplification orthogonal to this test), so tiling it
+        // is visually a no-op; this fixture's job is to confirm `CIAffineTile` accepts the
+        // `NSValue`-boxed identity `inputTransform` without erroring and the color survives,
+        // rather than demonstrating visible repetition (see `pattern_fill_repeats_...` above for
+        // an infinite-repetition test where the tile source's extent isn't pipeline-constrained).
+        let bitmap = render_via_elwindui(FE_TILE_SVG, 64);
+        approx(bitmap.pixel(32, 32), (0, 255, 0, 255), 40);
+    }
 }

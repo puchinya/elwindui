@@ -32,7 +32,7 @@ use objc2::AnyThread;
 use objc2_core_foundation::{CFRetained, CGAffineTransform, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo};
 use objc2_core_image::{CIColor, CIContext, CIFilter, CIImage, CIVector};
-use objc2_foundation::{NSDictionary, NSNumber, NSString};
+use objc2_foundation::{NSDictionary, NSNumber, NSString, NSValue};
 use objc2_quartz_core::{
     CAGradientLayer, CALayer, CAShapeLayer, kCAFillRuleEvenOdd, kCAFillRuleNonZero,
     kCAGradientLayerAxial, kCAGradientLayerRadial,
@@ -565,7 +565,8 @@ fn render_fill(
         }
         VectorPaint::Pattern(pattern) => {
             add_pattern_shape_layer(
-                layer, path, world, pattern, fill.rule, fill.opacity, opacity, image_cache,
+                layer, path, world, local_bounds, pattern, fill.rule, fill.opacity, opacity,
+                image_cache,
             );
         }
     }
@@ -702,26 +703,42 @@ fn add_gradient_shape_layer(
     layer.addSublayer(&gradient_layer);
 }
 
-/// Single-tile pattern fill: renders `pattern.root` once into an offscreen image sized to
-/// `pattern.tile_rect`, then places and masks it exactly like the gradient case above. This does
-/// not repeat the tile across the fill region (a real `CGPatternCallbacks`-based infinite tiling
-/// is real future work) — content renders once at its natural position rather than being dropped,
-/// which is the closer approximation for the common case of a pattern tile that already covers (or
-/// exceeds) its filled shape.
+/// Largest pattern tile grid extent allowed along either axis — same defensive cap
+/// `add_tiled_image_layers` (`inner.rs`, the `ImageBrush` tile-fill counterpart this mirrors)
+/// already applies, so a tiny `tile_rect` against a large fill region produces a bounded (if
+/// visually truncated) tile count rather than an unbounded one.
+const MAX_PATTERN_TILES_PER_AXIS: i32 = 64;
+
+/// Repeating pattern fill: renders `pattern.root` once into an offscreen image sized to
+/// `pattern.tile_rect`, then tiles that single rendered image as a grid of sibling `CALayer`s
+/// covering `local_bounds` (the fill shape's own bounding box) — real infinite tiling, not a
+/// single placement, following the same "render once, stamp many `CALayer`s at `position`/
+/// `bounds`" strategy `add_tiled_image_layers` (`inner.rs`) already uses for `ImageBrush` tile
+/// fills. Unlike that helper, the whole tile grid is wrapped in one parent layer that carries
+/// `world`'s rotation/scale via `position`/`bounds`/`affineTransform` (`place_offscreen_image`'s
+/// own technique), so — like this module's gradient fill — pattern tiling isn't restricted to a
+/// pure-translation `world`.
 #[allow(clippy::too_many_arguments)]
 fn add_pattern_shape_layer(
     layer: &Retained<CALayer>,
     path: &Path,
     world: &AffineTransform,
+    local_bounds: Rect,
     pattern: &VectorPattern,
     fill_rule: FillRule,
     paint_opacity: f32,
     opacity: f32,
     image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
 ) {
+    let tile_rect = pattern.tile_rect;
+    if tile_rect.width <= 0.0 || tile_rect.height <= 0.0 {
+        report_unsupported("pattern fill (degenerate tile rect)");
+        return;
+    }
+
     let Some((pixels, w, h)) = rasterize_nodes_to_pixels(
         std::slice::from_ref(&VectorNode::Group(pattern.root.clone())),
-        pattern.tile_rect,
+        tile_rect,
         image_cache,
     ) else {
         report_unsupported("pattern fill (offscreen render failed)");
@@ -731,8 +748,67 @@ fn add_pattern_shape_layer(
         return;
     };
 
+    // The tile grid cells (relative to `tile_rect`'s own declared origin, which need not align
+    // with `local_bounds`'s own top-left) needed to cover the fill shape's bounding box, in both
+    // directions.
+    let start_col = ((local_bounds.x - tile_rect.x) / tile_rect.width).floor() as i32;
+    let end_col = (((local_bounds.x + local_bounds.width - tile_rect.x) / tile_rect.width).ceil() as i32)
+        .max(start_col + 1);
+    let start_row = ((local_bounds.y - tile_rect.y) / tile_rect.height).floor() as i32;
+    let end_row = (((local_bounds.y + local_bounds.height - tile_rect.y) / tile_rect.height).ceil() as i32)
+        .max(start_row + 1);
+    let start_col = start_col.max(end_col - MAX_PATTERN_TILES_PER_AXIS);
+    let start_row = start_row.max(end_row - MAX_PATTERN_TILES_PER_AXIS);
+
+    let grid_local = Rect {
+        x: tile_rect.x + start_col as f32 * tile_rect.width,
+        y: tile_rect.y + start_row as f32 * tile_rect.height,
+        width: (end_col - start_col) as f32 * tile_rect.width,
+        height: (end_row - start_row) as f32 * tile_rect.height,
+    };
+
     let tile_world = world.concat(&pattern.transform);
-    let image_layer = place_offscreen_image(&tile_cgimage, pattern.tile_rect, &tile_world, opacity * paint_opacity);
+    let wrapper = CALayer::new();
+    wrapper.setName(Some(&NSString::from_str("elwindui-paint")));
+    wrapper.setBounds(CGRect::new(
+        CGPoint::new(0.0, 0.0),
+        CGSize::new(grid_local.width as f64, grid_local.height as f64),
+    ));
+    let center = tile_world.transform_point(Point {
+        x: grid_local.x + grid_local.width / 2.0,
+        y: grid_local.y + grid_local.height / 2.0,
+    });
+    wrapper.setPosition(CGPoint::new(center.x as f64, center.y as f64));
+    wrapper.setAffineTransform(CGAffineTransform {
+        a: tile_world.m11 as f64,
+        b: tile_world.m12 as f64,
+        c: tile_world.m21 as f64,
+        d: tile_world.m22 as f64,
+        tx: 0.0,
+        ty: 0.0,
+    });
+    wrapper.setOpacity(opacity * paint_opacity);
+
+    // Every tile shares the one already-rendered `tile_cgimage` (a cheap `contents` pointer set
+    // per sublayer, not a re-render) and only needs plain axis-aligned placement within `wrapper`,
+    // since `wrapper` itself already carries `tile_world`'s rotation/scale.
+    for row in start_row..end_row {
+        for col in start_col..end_col {
+            let tile_layer = CALayer::new();
+            tile_layer.setBounds(CGRect::new(
+                CGPoint::new(0.0, 0.0),
+                CGSize::new(tile_rect.width as f64, tile_rect.height as f64),
+            ));
+            let local_x = tile_rect.x + col as f32 * tile_rect.width - grid_local.x;
+            let local_y = tile_rect.y + row as f32 * tile_rect.height - grid_local.y;
+            tile_layer.setPosition(CGPoint::new(
+                (local_x + tile_rect.width / 2.0) as f64,
+                (local_y + tile_rect.height / 2.0) as f64,
+            ));
+            unsafe { tile_layer.setContents(Some(tile_cgimage.as_ref() as &AnyObject)) };
+            wrapper.addSublayer(&tile_layer);
+        }
+    }
 
     let mask_path = path_to_cgpath(world, path);
     let mask_layer = CAShapeLayer::new();
@@ -743,9 +819,9 @@ fn add_pattern_shape_layer(
     });
     mask_layer.setFillColor(Some(&color_to_cgcolor(Color::BLACK)));
     let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
-    unsafe { image_layer.setMask(Some(&mask_layer)) };
+    unsafe { wrapper.setMask(Some(&mask_layer)) };
 
-    layer.addSublayer(&image_layer);
+    layer.addSublayer(&wrapper);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -969,8 +1045,22 @@ fn apply_filter_primitive(
             apply_drop_shadow(&input, fe)
         }
         VectorFilterPrimitive::Tile(fe) => {
-            report_unsupported("feTile filter primitive (input passed through)");
-            resolve_filter_input(&fe.input, source_graphic, results)
+            let input = resolve_filter_input(&fe.input, source_graphic, results)?;
+            // `CIAffineTile` ("applies an affine transformation to an image and then tiles the
+            // transformed image") matches feTile's own semantics exactly under the identity
+            // transform: repeat the input's own extent infinitely.
+            let identity = NSValue::new(CGAffineTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                tx: 0.0,
+                ty: 0.0,
+            });
+            let params = ci_dict(&[("inputTransform", identity.as_ref() as &AnyObject)]);
+            Some(unsafe {
+                input.imageByApplyingFilter_withInputParameters(&NSString::from_str("CIAffineTile"), &params)
+            })
         }
         VectorFilterPrimitive::Turbulence(_) => {
             report_unsupported("feTurbulence filter primitive (input passed through)");
@@ -1022,18 +1112,82 @@ fn composite(
     operator: elwindui_core::graphics::VectorCompositeOperator,
 ) -> Option<Retained<CIImage>> {
     use elwindui_core::graphics::VectorCompositeOperator;
-    let name = match operator {
-        VectorCompositeOperator::Over => "CISourceOverCompositing",
-        VectorCompositeOperator::In => "CISourceInCompositing",
-        VectorCompositeOperator::Out => "CISourceOutCompositing",
-        VectorCompositeOperator::Atop => "CISourceAtopCompositing",
-        VectorCompositeOperator::Xor | VectorCompositeOperator::Arithmetic { .. } => {
-            report_unsupported("feComposite Xor/Arithmetic operator (treated as Over)");
-            "CISourceOverCompositing"
+    match operator {
+        VectorCompositeOperator::Over
+        | VectorCompositeOperator::In
+        | VectorCompositeOperator::Out
+        | VectorCompositeOperator::Atop => {
+            let name = match operator {
+                VectorCompositeOperator::Over => "CISourceOverCompositing",
+                VectorCompositeOperator::In => "CISourceInCompositing",
+                VectorCompositeOperator::Out => "CISourceOutCompositing",
+                VectorCompositeOperator::Atop => "CISourceAtopCompositing",
+                _ => unreachable!("matched above"),
+            };
+            Some(apply_named(input1, name, input2))
         }
+        // The union of "i1 minus i2" and "i2 minus i1" — SVG's own definition of Xor compositing
+        // — built from the same `CISourceOutCompositing` the arm above already uses for `Out`.
+        VectorCompositeOperator::Xor => {
+            let out1 = apply_named(input1, "CISourceOutCompositing", input2);
+            let out2 = apply_named(input2, "CISourceOutCompositing", input1);
+            Some(unsafe { out1.imageByCompositingOverImage(&out2) })
+        }
+        // `result = k1*i1*i2 + k2*i1 + k3*i2 + k4`, SVG's own formula, computed directly from
+        // existing named Core Image filters: a true per-pixel multiply (`CIMultiplyCompositing` —
+        // distinct from `CIMultiplyBlendMode`, which this module's own group blend-mode handling
+        // uses and which layers its own alpha-compositing formula on top rather than a bare
+        // multiply), uniform per-channel scaling (`CIColorMatrix`, the same technique
+        // `apply_drop_shadow`'s own tint/opacity matrices already use), and true per-pixel
+        // addition (`CIAdditionCompositing`).
+        VectorCompositeOperator::Arithmetic { k1, k2, k3, k4 } => {
+            let product = apply_named(input1, "CIMultiplyCompositing", input2);
+            let term1 = scale_all_channels(&product, k1);
+            let term2 = scale_all_channels(input1, k2);
+            let term3 = scale_all_channels(input2, k3);
+            let constant = flat_color_image(k4, k4, k4, k4, unsafe { input1.extent() });
+            let sum = apply_named(&term1, "CIAdditionCompositing", &term2);
+            let sum = apply_named(&sum, "CIAdditionCompositing", &term3);
+            Some(apply_named(&sum, "CIAdditionCompositing", &constant))
+        }
+    }
+}
+
+/// Applies a two-input named Core Image compositing filter (`CISourceOverCompositing`,
+/// `CIMultiplyCompositing`, `CIAdditionCompositing`, ...) — `image` is `inputImage`, `other` is
+/// `inputBackgroundImage`, matching every two-input filter this module already uses this same
+/// parameter-name convention for.
+fn apply_named(image: &Retained<CIImage>, name: &str, other: &Retained<CIImage>) -> Retained<CIImage> {
+    let params = ci_dict(&[("inputBackgroundImage", other.as_ref() as &AnyObject)]);
+    unsafe { image.imageByApplyingFilter_withInputParameters(&NSString::from_str(name), &params) }
+}
+
+/// Multiplies every channel (R, G, B, and A alike) of `image` by the same scalar `k` via
+/// `CIColorMatrix` — the building block `composite`'s `Arithmetic` arm uses for its `k1`/`k2`/`k3`
+/// terms, and the same diagonal-matrix technique `apply_drop_shadow` already uses for its own
+/// tint/opacity adjustments.
+fn scale_all_channels(image: &Retained<CIImage>, k: f32) -> Retained<CIImage> {
+    let zero = ci_vector4(0.0, 0.0, 0.0, 0.0);
+    let params = ci_dict(&[
+        ("inputRVector", ci_vector4(k, 0.0, 0.0, 0.0).as_ref() as &AnyObject),
+        ("inputGVector", ci_vector4(0.0, k, 0.0, 0.0).as_ref() as &AnyObject),
+        ("inputBVector", ci_vector4(0.0, 0.0, k, 0.0).as_ref() as &AnyObject),
+        ("inputAVector", ci_vector4(0.0, 0.0, 0.0, k).as_ref() as &AnyObject),
+        ("inputBiasVector", zero.as_ref() as &AnyObject),
+    ]);
+    unsafe { image.imageByApplyingFilter_withInputParameters(&NSString::from_str("CIColorMatrix"), &params) }
+}
+
+/// A solid, uniform-color `CIImage` covering exactly `extent` — the `k4` constant term in
+/// `composite`'s `Arithmetic` arm, and the same `CIColor`+`CIImage::initWithColor`+
+/// `imageByCroppingToRect` technique the `Flood` filter primitive arm already uses (a bare
+/// `CIImage` color fill has infinite extent until cropped).
+fn flat_color_image(r: f32, g: f32, b: f32, a: f32, extent: CGRect) -> Retained<CIImage> {
+    let color = unsafe {
+        CIColor::colorWithRed_green_blue_alpha(r as f64, g as f64, b as f64, a as f64)
     };
-    let params = ci_dict(&[("inputBackgroundImage", input2.as_ref() as &AnyObject)]);
-    Some(unsafe { input1.imageByApplyingFilter_withInputParameters(&NSString::from_str(name), &params) })
+    let image = unsafe { CIImage::initWithColor(CIImage::alloc(), &color) };
+    unsafe { image.imageByCroppingToRect(extent) }
 }
 
 fn apply_color_matrix(

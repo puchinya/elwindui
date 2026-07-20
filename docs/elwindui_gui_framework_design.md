@@ -59,6 +59,36 @@ elwindui-backend-appkit # 同上、objc2経由
 elwindui-backend-gtk4   # 同上、gtk-rs経由
 ```
 
+### アプリケーションの起動
+
+通常のアプリケーションは、同期・引数なし・戻り値なしの `main` に
+`#[elwindui::main]` を付ける。属性マクロは同じUIスレッドで `elwindui::init()` を実行し、
+バックエンドのGUIランタイムが開始した後に関数本文を実行する。したがって、Windowなどの
+ネイティブUIオブジェクトは必ず本文内で生成する。
+
+```rust
+#[elwindui::main]
+fn main() {
+    let window = MainWindow::new();
+    window.show();
+}
+```
+
+高度な用途では、同じスレッドから手動で起動できる。
+
+```rust
+fn main() {
+    elwindui::init().expect("initialize elwindui");
+    elwindui::application::run(|| {
+        let window = MainWindow::new();
+        window.show();
+    });
+}
+```
+
+`Window::show()` 済みのトップレベルウィンドウはバックエンドが閉じるまで保持し、最後の
+ウィンドウが閉じるとネイティブアプリケーションを終了する。
+
 `.elwind`コンパイラが生成するコードは常に`elwindui-core`のトレイト境界に対して書かれ、実行時にどのバックエンドクレートがリンクされるかで実体が決まる。バックエンド指定は`#![backend(...)]`(ビルド設定)と`target::backend()`(式内定数、§3.3)の2つの窓口を持つ設計だが、いずれも現時点では未実装(実際のバックエンド選択は`elwindui`ファサードクレートのCargoフィーチャ`backend-appkit`/`backend-winui3`/`backend-gtk4`のみで行われる。詳細は§3.3、`docs/elwindui_implementation_status.md`)。
 
 ---

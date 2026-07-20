@@ -815,6 +815,7 @@ struct GraphicsDemoWindow {
     },
 }
 
+#[elwindui::main]
 fn main() {
     let vm = GraphicsDemoViewModel::new();
     let window = GraphicsDemoWindow::new(
@@ -828,5 +829,4 @@ fn main() {
         GraphicsDemoCanvas::new(GraphicsDemoCategory::Svg),
     );
     window.show();
-    elwindui::application::run();
 }

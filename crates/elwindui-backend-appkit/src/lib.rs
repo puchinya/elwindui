@@ -13,6 +13,15 @@
 // Every crate using `#[class]` with a same-crate `inherits` chain needs this same line.
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
+/// Performs process-wide AppKit setup required before creating views.
+///
+/// AppKit performs this lazily when the application object is created, so this is intentionally
+/// idempotent and currently has no eager work. It exists to keep the facade's `elwindui::init()`
+/// contract uniform across native backends.
+pub fn init() -> Result<(), std::convert::Infallible> {
+    Ok(())
+}
+
 mod inner;
 mod native_ui;
 mod vector_renderer;
@@ -120,8 +129,11 @@ pub mod application {
     use elwindui_core::task::LocalExecutor;
     use objc2_app_kit::NSApplication;
 
-    /// Blocking: enters the AppKit main event loop.
-    pub fn run() {
+    /// Runs `startup` on AppKit's main thread, then enters the AppKit main event loop.
+    pub fn run<F>(startup: F)
+    where
+        F: FnOnce() + 'static,
+    {
         elwindui_core::task::set_current(LocalExecutor::new(AppKitDispatcher));
 
         let mtm = mtm();
@@ -130,6 +142,7 @@ pub mod application {
         app.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));
         APP_DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
 
+        startup();
         app.run();
     }
 }

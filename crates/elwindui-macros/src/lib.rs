@@ -1,4 +1,5 @@
 use proc_macro::TokenStream;
+use syn::spanned::Spanned;
 
 mod class;
 
@@ -106,4 +107,101 @@ fn parse_inherits_arg(attr: proc_macro2::TokenStream) -> syn::Result<Option<Stri
 #[proc_macro_attribute]
 pub fn class(attr: TokenStream, item: TokenStream) -> TokenStream {
     class::expand(attr.into(), item.into()).into()
+}
+
+/// Defines the process entry point for an elwindui application.
+///
+/// The application runtime needs to be initialized before a UI thread is entered, but the
+/// platform-specific event loop must own construction of the first native controls.  Moving the
+/// user's body into `application::run` makes that ordering explicit without exposing it in every
+/// application.
+#[proc_macro_attribute]
+pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new_spanned(
+            proc_macro2::TokenStream::from(attr),
+            "#[elwindui::main] does not accept arguments",
+        )
+        .into_compile_error()
+        .into();
+    }
+
+    let function = match syn::parse::<syn::ItemFn>(item) {
+        Ok(function) => function,
+        Err(error) => return error.into_compile_error().into(),
+    };
+
+    let mut errors: Option<syn::Error> = None;
+    let mut reject = |span: proc_macro2::Span, message: &str| {
+        let error = syn::Error::new(span, message);
+        if let Some(existing) = &mut errors {
+            existing.combine(error);
+        } else {
+            errors = Some(error);
+        }
+    };
+    if function.sig.ident != "main" {
+        reject(
+            function.sig.ident.span(),
+            "#[elwindui::main] can only be applied to `fn main()`",
+        );
+    }
+    if !function.sig.inputs.is_empty() {
+        reject(
+            function.sig.inputs.span(),
+            "#[elwindui::main] requires a `main` function without arguments",
+        );
+    }
+    if function.sig.asyncness.is_some() {
+        reject(
+            function.sig.asyncness.span(),
+            "#[elwindui::main] does not support `async fn`",
+        );
+    }
+    if !matches!(function.sig.output, syn::ReturnType::Default) {
+        reject(
+            function.sig.output.span(),
+            "#[elwindui::main] requires `fn main()` to return `()`",
+        );
+    }
+    if !function.sig.generics.params.is_empty() || function.sig.generics.where_clause.is_some() {
+        reject(
+            function.sig.generics.span(),
+            "#[elwindui::main] does not support generics or a where clause",
+        );
+    }
+    if function.sig.abi.is_some() {
+        reject(
+            function.sig.abi.span(),
+            "#[elwindui::main] does not support an extern ABI",
+        );
+    }
+    if function.sig.variadic.is_some() {
+        reject(
+            function.sig.variadic.span(),
+            "#[elwindui::main] does not support variadic functions",
+        );
+    }
+    if function.sig.constness.is_some() {
+        reject(
+            function.sig.constness.span(),
+            "#[elwindui::main] does not support const functions",
+        );
+    }
+    if let Some(errors) = errors {
+        return errors.into_compile_error().into();
+    }
+
+    let attrs = function.attrs;
+    let block = function.block;
+    quote::quote! {
+        #(#attrs)*
+        fn main() {
+            if let Err(error) = ::elwindui::init() {
+                panic!("initialize elwindui: {error:?}");
+            }
+            ::elwindui::application::run(move || #block);
+        }
+    }
+    .into()
 }

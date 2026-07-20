@@ -101,19 +101,30 @@
 //! line each and the real win here is eliminating the `ClassNameExt` trait declaration and the
 //! ancestor delegation boilerplate.
 //!
-//! A `&self`-free method literally named `construct` (any signature, returning `Self`) opts a class
-//! into an *auto-generated* `new`: `#[class]` emits a matching `pub fn new(<same params>) ->
-//! std::rc::Rc<Self> { std::rc::Rc::new(Self::construct(<forwarded args>)) }` alongside it, so every
-//! adopting class's constructor uniformly returns `Rc<Self>` (this crate's universal DSL-facing
-//! convention) without hand-maintaining that wrapper itself. `construct`'s own body is entirely
-//! hand-written, exactly like the `new() -> Self` it replaces: for an `inherits = Base` class it
-//! typically builds its own `base` field by calling `Base::construct(..)`, recursively, all the way
-//! to the root's `Default::default()`. A class not using this convention (a hand-written `new`
-//! returning `Rc<Self>` directly, the pre-existing form) is entirely unaffected; defining *both*
-//! `construct` and `new` in the same `impl` block is also fine — the hand-written `new` simply wins
-//! (no auto-generation) — for a class whose `new` needs real post-construction work beyond
-//! `Rc::new(Self::construct(..))` itself (e.g. rewiring parent pointers), while `construct` still
-//! exists for other classes to call when they only need the bare, unwrapped value.
+//! A `&self`-free method literally named `construct` (any signature, returning `Self`) is
+//! **mandatory** on every `#[class]`-tagged class — a class with zero or more than one qualifying
+//! `construct` is a compile error, and `#[class]` never synthesizes a default one. `construct`'s own
+//! body is hand-written: for an `inherits = Base` class it typically builds its own `base` field by
+//! calling `Base::construct(..)`, recursively, all the way to the root.
+//!
+//! `construct` opts every class into an *auto-generated* `new`, built on `std::rc::Rc::new_cyclic`
+//! so `construct`'s own body can reference the special identifier `__self_weak` — a weak reference to
+//! the final, most-derived object being constructed — and so any `fn on_constructed(&self)` the class
+//! defines runs automatically, exactly once, right after the `Rc` exists, base-class-first across the
+//! whole `inherits` chain. Hand-writing `new` is a compile error — any post-construction work a class
+//! used to do in a hand-written `new` (parent-pointer rewiring, event wiring, ...) belongs in
+//! `on_constructed` instead. `abstract_class` is the only exception: it still requires `construct`
+//! (so its own concrete subclasses have something mechanical to call for their own `base` field) but
+//! never gets an auto-generated `new` of its own, since it's never meant to be directly instantiated.
+//!
+//! `__self_weak`'s type, and the hidden parameter `construct` actually gains internally
+//! (`__class_self_weak`, after `#[class]` renames the function to `__class_construct`), is always
+//! *this class's own* `{ClassName}Ext` trait (or, for `struct_only`, whatever existing trait it
+//! implements directly) — never a propagated "hierarchy root" type. An ancestor `construct` call
+//! inside the class's own body (rewritten to call `Base::__class_construct(__class_self_weak.clone(),
+//! ..)`) relies on the ordinary `{ClassName}Ext: {BaseExt}` supertrait bound already in place at that
+//! call site to coerce the weak reference upward — no chain-walking or cross-crate propagation is
+//! needed anywhere, even when `inherits` crosses a crate boundary.
 //!
 //! `trait_only` declares a pure interface/marker trait with no backing struct anywhere in *this*
 //! crate at all — every concrete implementor (in this crate or a backend crate) provides its own
@@ -145,7 +156,7 @@ use quote::{format_ident, quote};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use syn::{
-    Field, Fields, FnArg, Ident, ImplItem, ImplItemFn, Item, Path, Token, Type, Visibility,
+    Field, Fields, FnArg, Ident, ImplItem, ImplItemFn, Item, Pat, Path, Token, Type, Visibility,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
@@ -1364,6 +1375,148 @@ fn build_rust_analyzer_shadow(
     }
 }
 
+/// Validates `fn on_constructed(&self)`'s signature (guide §4.2): exactly `&self`, no other params,
+/// no generics, not `async`, returns `()` (explicit `-> ()` or no `-> ..` at all). Returns the guide's
+/// own suggested diagnostic text on any violation.
+fn validate_on_constructed_sig(sig: &syn::Signature) -> syn::Result<()> {
+    let msg = "`on_constructed` must have the signature `fn on_constructed(&self)`";
+    if sig.asyncness.is_some() {
+        return Err(syn::Error::new_spanned(sig, msg));
+    }
+    if !sig.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(&sig.generics, msg));
+    }
+    let mut inputs = sig.inputs.iter();
+    match inputs.next() {
+        Some(FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none() => {}
+        _ => return Err(syn::Error::new_spanned(&sig.inputs, msg)),
+    }
+    if inputs.next().is_some() {
+        return Err(syn::Error::new_spanned(&sig.inputs, msg));
+    }
+    match &sig.output {
+        syn::ReturnType::Default => {}
+        syn::ReturnType::Type(_, ty) => {
+            let is_unit = matches!(&**ty, Type::Tuple(t) if t.elems.is_empty());
+            if !is_unit {
+                return Err(syn::Error::new_spanned(ty, msg));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `true` if `ty` is written literally as the bare `Self` path type — used to validate `construct`'s
+/// own declared return type (guide §10.1/test 12.18).
+fn is_self_type(ty: &Type) -> bool {
+    matches!(ty, Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self"))
+}
+
+/// Rewrites `construct`'s own function body in place (guide §3.2/§3.3/§6): every bare reference to
+/// the reserved identifier `__self_weak` becomes `__class_self_weak` (the real hidden parameter this
+/// function is about to gain), and every call whose callee is exactly `<parent_bare_name>::construct`
+/// — this class's own declared `inherits = ..` target, never an unrelated `Type::construct()` call —
+/// becomes `<parent_bare_name>::__class_construct(__class_self_weak.clone(), ..)`. Pure `syn`
+/// `VisitMut` AST rewriting, never string replacement (guide §6.3). Also rejects a user-declared
+/// `let __self_weak = ..;` binding as a reserved-identifier collision (guide §5.3/§5.4) — a
+/// same-named *parameter* is checked separately by the caller, before this visitor ever runs, since
+/// `syn::Signature`'s own params aren't part of the `Block` this visitor walks.
+struct SelfWeakRewriter<'a> {
+    hidden_ident: &'a Ident,
+    parent_bare_name: Option<&'a str>,
+    error: Option<syn::Error>,
+}
+
+impl<'a> syn::visit_mut::VisitMut for SelfWeakRewriter<'a> {
+    fn visit_local_mut(&mut self, local: &mut syn::Local) {
+        if let syn::Pat::Ident(pi) = &local.pat {
+            if pi.ident == "__self_weak" && self.error.is_none() {
+                self.error = Some(syn::Error::new_spanned(
+                    pi,
+                    "`__self_weak` is reserved by the #[class] macro",
+                ));
+            }
+        }
+        syn::visit_mut::visit_local_mut(self, local);
+    }
+
+    fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
+        // Post-order: recurse first, so a nested `__self_weak` reference used as an argument to an
+        // ancestor `construct(..)` call gets rewritten before the enclosing call itself is handled.
+        syn::visit_mut::visit_expr_mut(self, expr);
+        match expr {
+            syn::Expr::Path(p) if p.path.is_ident("__self_weak") => {
+                if let Some(seg) = p.path.segments.first_mut() {
+                    seg.ident = self.hidden_ident.clone();
+                }
+            }
+            syn::Expr::Call(call) => {
+                let Some(parent) = self.parent_bare_name else {
+                    return;
+                };
+                let syn::Expr::Path(fp) = &mut *call.func else {
+                    return;
+                };
+                let segs = &fp.path.segments;
+                if segs.len() < 2 {
+                    return;
+                }
+                let last_is_construct = segs.last().is_some_and(|s| s.ident == "construct");
+                let second_last_matches = segs[segs.len() - 2].ident == parent;
+                if !(last_is_construct && second_last_matches) {
+                    return;
+                }
+                fp.path.segments.last_mut().unwrap().ident = format_ident!("__class_construct");
+                let hidden = self.hidden_ident.clone();
+                let new_arg: syn::Expr = syn::parse_quote! { #hidden.clone() };
+                call.args.insert(0, new_arg);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Transforms a user-written `construct` function in place into the real, hidden
+/// `__class_construct` (guide §3.1/§3.2): inserts the leading hidden parameter
+/// `__class_self_weak: std::rc::Weak<dyn {own_ext_ty}>` (this class's own Ext trait — see
+/// `expand_impl`'s own `own_ext_ty` computation, §1a/§1b of the plan: no root-type propagation is
+/// needed since every ancestor `construct` call coerces via the ordinary `{Child}Ext: {Parent}Ext`
+/// supertrait bound already in place at the call site), rewrites `__self_weak`/ancestor-`construct`
+/// references in the body (`SelfWeakRewriter`), and renames the function to `__class_construct`.
+fn transform_construct_fn(
+    f: &mut ImplItemFn,
+    own_ext_ty: &TokenStream2,
+    parent_bare_name: Option<&str>,
+) -> syn::Result<()> {
+    for arg in &f.sig.inputs {
+        if let FnArg::Typed(pt) = arg {
+            if let Pat::Ident(pi) = &*pt.pat {
+                if pi.ident == "__self_weak" {
+                    return Err(syn::Error::new_spanned(
+                        pi,
+                        "`__self_weak` is reserved by the #[class] macro",
+                    ));
+                }
+            }
+        }
+    }
+    let hidden_ident = format_ident!("__class_self_weak");
+    let mut rewriter = SelfWeakRewriter {
+        hidden_ident: &hidden_ident,
+        parent_bare_name,
+        error: None,
+    };
+    syn::visit_mut::VisitMut::visit_block_mut(&mut rewriter, &mut f.block);
+    if let Some(e) = rewriter.error {
+        return Err(e);
+    }
+    f.sig.ident = format_ident!("__class_construct");
+    f.attrs.push(syn::parse_quote!(#[doc(hidden)]));
+    let hidden_param: FnArg = syn::parse_quote! { #hidden_ident: std::rc::Weak<dyn #own_ext_ty> };
+    f.sig.inputs.insert(0, hidden_param);
+    Ok(())
+}
+
 fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -> TokenStream2 {
     if item.trait_.is_some() {
         return syn::Error::new_spanned(
@@ -1407,11 +1560,28 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     // invocation; routing to the right ancestor's `impl` is entirely the classify muncher's job
     // (keyed by each method's own name), not something resolved here.
     let mut override_methods: Vec<ImplItemFn> = Vec::new();
+    // The optional `fn on_constructed(&self)` lifecycle hook (§1d/§4 of the plan) — stashed here
+    // rather than flowing through `instance_methods` since it's a purely internal lifecycle hook,
+    // never part of `{ClassName}Ext`. `None` if this class doesn't define one.
+    let mut on_constructed_fn: Option<ImplItemFn> = None;
     // This classification pass reads only `item.items`, never `args`/`class_arg_store` — moved
     // ahead of the store lookup below specifically so `build_rust_analyzer_shadow` (called right
     // after it) never depends on that lookup's success. See that function's own doc comment.
     for impl_item in item.items {
         match impl_item {
+            ImplItem::Fn(f) if f.sig.ident == "on_constructed" => {
+                if let Err(e) = validate_on_constructed_sig(&f.sig) {
+                    return e.to_compile_error();
+                }
+                on_constructed_fn = Some(f);
+            }
+            ImplItem::Fn(f) if f.sig.ident == "new" => {
+                let msg = "#[class]: do not define `new` by hand — `#[class]` generates `new()` \
+                           automatically from `construct` and runs `on_constructed` automatically once \
+                           `Rc::new_cyclic` completes. Move any post-construction work (parent-pointer \
+                           wiring, event wiring, ...) into `on_constructed` instead.";
+                return syn::Error::new_spanned(&f.sig, msg).to_compile_error();
+            }
             ImplItem::Fn(mut f) => {
                 // `#[inherent]` opts a `&self` method *out* of trait-impl routing entirely — for
                 // helpers that aren't part of any trait (ancestor's or `ClassNameExt`'s own), e.g. the
@@ -1464,6 +1634,43 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         }
     }
     let own_methods = instance_methods;
+
+    // `construct` is mandatory for every `#[class]`-tagged class (guide §10.1, confirmed in scope
+    // with no carve-out for hand-written-`new()`-only classes) — find it and verify exactly one
+    // qualifying candidate exists. Checked here, ahead of `args` resolution/`core_path()` (both
+    // needed only once a real `construct` is confirmed to exist), so a class with a missing/
+    // duplicate/malformed `construct` fails fast without requiring anything else about this
+    // class's environment (e.g. a resolvable path to `elwindui-core`) to be in place yet.
+    let construct_positions: Vec<usize> = ctor_methods
+        .iter()
+        .enumerate()
+        .filter(|(_, (f, _))| f.sig.ident == "construct")
+        .map(|(i, _)| i)
+        .collect();
+    match construct_positions.len() {
+        0 => {
+            let msg = format!("class `{class_name}` does not define `construct(...) -> Self`");
+            return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
+        }
+        1 => {}
+        _ => {
+            let msg = format!(
+                "#[class]: class `{class_name}` defines multiple `construct` functions — exactly \
+                 one `construct(...) -> Self` is required"
+            );
+            return syn::Error::new_spanned(&item.self_ty, msg).to_compile_error();
+        }
+    }
+    let construct_index = construct_positions[0];
+    let construct_returns_self = matches!(
+        &ctor_methods[construct_index].0.sig.output,
+        syn::ReturnType::Type(_, ty) if is_self_type(ty)
+    );
+    if !construct_returns_self {
+        let msg = "#[class]: `construct` must return `Self`";
+        return syn::Error::new_spanned(&ctor_methods[construct_index].0.sig, msg)
+            .to_compile_error();
+    }
 
     // A bare `#[class]` on the impl means "use whatever `#[class(..)]` args the paired `struct
     // ClassName` declared" (see `store_class_args`/`load_class_args`) — explicit args on the impl
@@ -1586,6 +1793,25 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     }
 
     let ext_ident = to_ext_ident(&bare_name, class_name.span());
+
+    // This class's own `{ClassName}Ext` trait (or, for `struct_only`, the existing trait it
+    // implements directly) — the type `__class_self_weak` is declared as. No root-type propagation
+    // is needed: an ancestor `construct` call coerces via the ordinary `{Child}Ext: {Parent}Ext`
+    // supertrait bound already in place at the call site (`Weak<dyn Sub> -> Weak<dyn Super>` coerces
+    // at argument position whenever `Sub: Super`, verified against this workspace's own toolchain).
+    let own_ext_ty: TokenStream2 = match &args.struct_only {
+        Some(p) => quote! { #p },
+        None => quote! { #ext_ident #ty_generics },
+    };
+    let parent_bare_name_owned = args.inherits.as_ref().and_then(last_segment_name);
+    if let Err(e) = transform_construct_fn(
+        &mut ctor_methods[construct_index].0,
+        &own_ext_ty,
+        parent_bare_name_owned.as_deref(),
+    ) {
+        return e.to_compile_error();
+    }
+
     let (trait_decl, trait_impl) = if let Some(existing) = &args.struct_only {
         // The concrete, hand-written implementor of someone else's `{Name}Ext` trait — this is the
         // one shape besides root mode that provides *real* bodies directly rather than relying on
@@ -1731,40 +1957,22 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         )
     };
 
-    if args.abstract_class {
-        if let Some((new_fn, _)) = ctor_methods.iter().find(|(f, _)| f.sig.ident == "new") {
-            let msg = format!("abstract_class `{class_name}` must not define `new`");
-            return syn::Error::new_spanned(&new_fn.sig, msg).to_compile_error();
-        }
-    }
-
-    // `construct` (a bare-value initializer, typically calling `Base::construct(..)` for its own
-    // `base` field when `inherits = ..`) opts a class into an *auto-generated* `new` — see this
-    // function's own doc comment. A class not using this convention (a hand-written `new` returning
-    // `Rc<Self>` directly, the pre-existing form) is entirely unaffected. If the user hand-writes
-    // *both* `construct` and `new` in the same block, the hand-written `new` simply wins (no
-    // auto-generation, no error) — a legitimate shape for a class whose `new` needs to do real work
-    // beyond `Rc::new(Self::construct(..))` itself (e.g. `ContentControl::new`'s post-construction
-    // parent-pointer rewiring), while `construct` still exists for other classes to call directly
-    // when they only need the bare, unwrapped value. `abstract_class` (e.g. `Layout`) never gets an
-    // auto-generated `new` either way — an abstract class is never meant to be directly, publicly
-    // instantiated as its own `Rc<Self>` — but it can still define `construct` (and only
-    // `construct`) purely so its own concrete subclasses (`VerticalLayout`/`HorizontalLayout`) have
-    // something mechanical to call for their own `base` field, instead of re-building `Layout { .. }`
-    // by hand in each one.
-    let has_hand_written_new = ctor_methods.iter().any(|(f, _)| f.sig.ident == "new");
-    let construct_fn = if has_hand_written_new || args.abstract_class {
-        None
-    } else {
-        ctor_methods
-            .iter()
-            .find(|(f, _)| f.sig.ident == "construct")
-            .map(|(f, _)| f.clone())
-    };
-    let auto_new = construct_fn.as_ref().map(|f| {
-        let params = &f.sig.inputs;
+    // `construct` (mandatory, checked above) always drives an *auto-generated* `new` built on
+    // `Rc::new_cyclic`, running the `on_constructed` hook chain right after — hand-writing `new` by
+    // hand is rejected earlier, in the classification loop. `abstract_class` (e.g. `Layout`) never
+    // gets an auto-generated `new` — an abstract class is never meant to be directly, publicly
+    // instantiated as its own `Rc<Self>` — but it still defines `construct` (mandatory) purely so
+    // its own concrete subclasses (`VerticalLayout`/`HorizontalLayout`) have something mechanical to
+    // call for their own `base` field, instead of re-building `Layout { .. }` by hand in each one.
+    let auto_new = (!args.abstract_class).then(|| {
+        // `params` already includes the leading hidden `__class_self_weak` parameter
+        // `transform_construct_fn` inserted — `new`'s own public signature/forwarded call skips it
+        // (index 0) and restates only the user's original parameters.
+        let params = &ctor_methods[construct_index].0.sig.inputs;
+        let public_params = params.iter().skip(1);
         let arg_names: Vec<TokenStream2> = params
             .iter()
+            .skip(1)
             .filter_map(|arg| match arg {
                 FnArg::Typed(pat_type) => {
                     let pat = &pat_type.pat;
@@ -1774,11 +1982,35 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             })
             .collect();
         quote! {
-            pub fn new(#params) -> std::rc::Rc<Self> {
-                std::rc::Rc::new(Self::construct(#(#arg_names),*))
+            pub fn new(#(#public_params),*) -> std::rc::Rc<Self> {
+                let __obj = std::rc::Rc::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
+                    Self::__class_construct(__weak_self.clone(), #(#arg_names),*)
+                });
+                __obj.__elwindui_run_on_constructed();
+                __obj
             }
         }
     });
+
+    // The hidden lifecycle hook-chain method (guide §4.5): base-class-first, exactly once per
+    // object, never part of `{ClassName}Ext` (no dynamic dispatch needed — it's only ever called
+    // once, concretely, right after `Rc::new_cyclic`, on the exact type being constructed).
+    let run_on_constructed_ident = format_ident!("__elwindui_run_on_constructed");
+    let base_hook_call = args
+        .inherits
+        .as_ref()
+        .map(|_| quote! { self.base.#run_on_constructed_ident(); });
+    let own_hook_call = on_constructed_fn
+        .as_ref()
+        .map(|_| quote! { self.on_constructed(); });
+    let run_on_constructed_method = quote! {
+        #[doc(hidden)]
+        pub fn #run_on_constructed_ident(&self) {
+            #base_hook_call
+            #own_hook_call
+        }
+    };
+    let on_constructed_method_emit = on_constructed_fn.as_ref().map(|f| quote! { #f });
 
     let mut ctor_block = TokenStream2::new();
     if !ctor_methods.is_empty() || auto_new.is_some() {
@@ -1795,6 +2027,8 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         ctor_block = quote! {
             impl #impl_generics #impl_name #ty_generics #where_clause {
                 #(#fns)*
+                #on_constructed_method_emit
+                #run_on_constructed_method
                 #auto_new
             }
         };
@@ -1976,5 +2210,338 @@ mod rust_analyzer_shadow_tests {
         let out = expand_impl(ClassArgs::default(), item, true);
         syn::parse2::<syn::File>(out)
             .expect("rust-analyzer shadow output must be valid Rust syntax");
+    }
+}
+
+/// Guide §12's test matrix for `__self_weak`/`on_constructed`/mandatory-`construct`/banned-hand-`new`,
+/// adapted to this module's actual entry points. Drives the real, top-level `expand` (not
+/// `expand_impl` directly) for both the `struct` and `impl` invocations of each fixture — exactly the
+/// two-invocation sequence a real `#[elwindui_macros::class]` use site produces, since the mandatory-
+/// `construct`/`__self_weak` machinery under test lives in `expand_impl` but depends on
+/// `class_arg_store`/`same_crate_classes` state only `expand`'s own `struct` branch populates. Each
+/// fixture uses a unique type name (`class_arg_store`/`same_crate_classes` are process-global, and
+/// `cargo test` runs these concurrently by default) — never reuse a name across fixtures below.
+#[cfg(test)]
+mod self_weak_on_constructed_tests {
+    use super::*;
+
+    /// Runs `expand` for `struct_item` then for `impl_item` (bare attr, matching real
+    /// `#[elwindui_macros::class]` usage on the `impl` side) and returns `(struct output, impl
+    /// output)`.
+    fn expand_pair(
+        struct_attr: TokenStream2,
+        struct_item: TokenStream2,
+        impl_item: TokenStream2,
+    ) -> (TokenStream2, TokenStream2) {
+        let struct_out = expand(struct_attr, struct_item);
+        let impl_out = expand(TokenStream2::new(), impl_item);
+        (struct_out, impl_out)
+    }
+
+    fn is_compile_error_containing(ts: &TokenStream2, needle: &str) -> bool {
+        let s = ts.to_string();
+        s.contains("compile_error") && s.contains(needle)
+    }
+
+    // A *successful* expansion always embeds a `compile_error!` literal too (inside the always-
+    // generated `__elwindui_inherit_*_terminal!` check macro's own body, unconditionally present,
+    // never itself triggered) — so a bare `s.contains("compile_error")` can't distinguish a real
+    // top-level error from a normal, successful expansion. `expand_impl`'s own error paths instead
+    // return *only* the `compile_error!` call (nothing else), discarding every other generated item
+    // — so a real error is always the very first token in the output.
+    fn is_real_compile_error(ts: &TokenStream2) -> bool {
+        ts.to_string().trim_start().starts_with("compile_error")
+    }
+
+    // 12.16 (adapted): a class with no `construct` at all is a compile error, with no implicit
+    // default `construct` synthesized.
+    #[test]
+    fn construct_missing_is_compile_error() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestMissingCtor { text: String } },
+            quote! {
+                impl SelfWeakTestMissingCtor {
+                    fn text(&self) -> &str { &self.text }
+                }
+            },
+        );
+        assert!(
+            is_compile_error_containing(&impl_out, "does not define `construct"),
+            "expected a missing-`construct` compile_error, got: {impl_out}"
+        );
+    }
+
+    // 12.17: more than one qualifying `construct` is a compile error.
+    #[test]
+    fn construct_duplicate_is_compile_error() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestDupCtor {} },
+            quote! {
+                impl SelfWeakTestDupCtor {
+                    fn construct() -> Self { Self {} }
+                    fn construct(_x: i32) -> Self { Self {} }
+                }
+            },
+        );
+        assert!(
+            is_compile_error_containing(&impl_out, "multiple `construct`"),
+            "expected a duplicate-`construct` compile_error, got: {impl_out}"
+        );
+    }
+
+    // 12.18: a `construct` with the wrong receiver/return type is rejected.
+    #[test]
+    fn construct_wrong_return_type_is_compile_error() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestBadReturn {} },
+            quote! {
+                impl SelfWeakTestBadReturn {
+                    fn construct() -> std::rc::Rc<Self> { std::rc::Rc::new(Self {}) }
+                }
+            },
+        );
+        assert!(
+            is_compile_error_containing(&impl_out, "`construct` must return `Self`"),
+            "expected a wrong-return-type compile_error, got: {impl_out}"
+        );
+    }
+
+    // Confirmed design decision: hand-writing `new` is unconditionally rejected — `#[class]` always
+    // derives it from `construct`.
+    #[test]
+    fn hand_written_new_is_compile_error() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestHandNew {} },
+            quote! {
+                impl SelfWeakTestHandNew {
+                    fn construct() -> Self { Self {} }
+                    fn new() -> std::rc::Rc<Self> { std::rc::Rc::new(Self::construct()) }
+                }
+            },
+        );
+        assert!(
+            is_compile_error_containing(&impl_out, "do not define `new` by hand"),
+            "expected a hand-written-`new` compile_error, got: {impl_out}"
+        );
+    }
+
+    // 12.8 (parameter form): `__self_weak` is reserved and can't be used as a `construct` parameter
+    // name.
+    #[test]
+    fn self_weak_reserved_as_param_is_compile_error() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestReservedParam {} },
+            quote! {
+                impl SelfWeakTestReservedParam {
+                    fn construct(__self_weak: usize) -> Self { Self {} }
+                }
+            },
+        );
+        assert!(
+            is_compile_error_containing(&impl_out, "reserved by the #[class] macro"),
+            "expected a reserved-identifier compile_error, got: {impl_out}"
+        );
+    }
+
+    // 12.8 (let-binding form): same reservation, this time as a local binding inside `construct`.
+    #[test]
+    fn self_weak_reserved_as_let_binding_is_compile_error() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestReservedLet {} },
+            quote! {
+                impl SelfWeakTestReservedLet {
+                    fn construct() -> Self {
+                        let __self_weak = 1;
+                        let _ = __self_weak;
+                        Self {}
+                    }
+                }
+            },
+        );
+        assert!(
+            is_compile_error_containing(&impl_out, "reserved by the #[class] macro"),
+            "expected a reserved-identifier compile_error, got: {impl_out}"
+        );
+    }
+
+    // 12.14: every listed invalid `on_constructed` signature is rejected with the guide's own
+    // suggested message.
+    #[test]
+    fn on_constructed_bad_signatures_are_compile_errors() {
+        let bad_signatures: &[TokenStream2] = &[
+            quote! { fn on_constructed(&mut self) {} },
+            quote! { fn on_constructed(&self) -> bool { true } },
+            quote! { async fn on_constructed(&self) {} },
+            quote! { fn on_constructed(&self) -> Result<(), ()> { Ok(()) } },
+            quote! { fn on_constructed(&self, extra: i32) { let _ = extra; } },
+        ];
+        for (i, sig) in bad_signatures.iter().enumerate() {
+            let struct_ident = format_ident!("SelfWeakTestBadHook{i}");
+            let (_struct_out, impl_out) = expand_pair(
+                quote! {},
+                quote! { pub struct #struct_ident {} },
+                quote! {
+                    impl #struct_ident {
+                        fn construct() -> Self { Self {} }
+                        #sig
+                    }
+                },
+            );
+            assert!(
+                is_compile_error_containing(
+                    &impl_out,
+                    "`on_constructed` must have the signature `fn on_constructed(&self)`"
+                ),
+                "signature #{i} ({sig}) should have been rejected, got: {impl_out}"
+            );
+        }
+    }
+
+    // 12.11: a class with no `on_constructed` still compiles — `new()`/the hook chain must not
+    // require one.
+    #[test]
+    fn on_constructed_is_optional() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestNoHook { value: i32 } },
+            quote! {
+                impl SelfWeakTestNoHook {
+                    fn construct() -> Self { Self { value: 10 } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&impl_out),
+            "a class with no on_constructed must not error: {impl_out}"
+        );
+        syn::parse2::<syn::File>(impl_out.clone())
+            .unwrap_or_else(|e| panic!("expansion must be valid Rust syntax: {e}\n{impl_out}"));
+    }
+
+    // §3.1/§3.2: `construct` is renamed to the hidden `__class_construct`, gains a leading
+    // `__class_self_weak: Weak<dyn SelfWeakTestRenamedExt>` parameter (this class's own Ext trait —
+    // no root-type propagation, per the confirmed design), and the auto-generated `new()` is built on
+    // `Rc::new_cyclic`, running the hook chain before returning.
+    #[test]
+    fn construct_is_renamed_and_new_uses_rc_new_cyclic() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestRenamed { value: i32 } },
+            quote! {
+                impl SelfWeakTestRenamed {
+                    fn construct(value: i32) -> Self { Self { value } }
+                }
+            },
+        );
+        let s = impl_out.to_string();
+        assert!(!is_real_compile_error(&impl_out), "unexpected error: {s}");
+        assert!(
+            s.contains("__class_construct"),
+            "construct should be renamed to __class_construct: {s}"
+        );
+        assert!(
+            s.contains("__class_self_weak") && s.contains("Weak") && s.contains("SelfWeakTestRenamedExt"),
+            "hidden param should be typed against this class's own Ext trait: {s}"
+        );
+        assert!(
+            s.contains("new_cyclic"),
+            "auto-generated new() should use Rc::new_cyclic: {s}"
+        );
+        assert!(
+            s.contains("__elwindui_run_on_constructed"),
+            "auto-generated new() should run the hook chain: {s}"
+        );
+        syn::parse2::<syn::File>(impl_out.clone())
+            .unwrap_or_else(|e| panic!("expansion must be valid Rust syntax: {e}\n{s}"));
+    }
+
+    // §3.3/§6.1/§6.2: an ancestor `construct()` call inside this class's own `construct` body is
+    // rewritten to call `__class_construct` with the self-weak forwarded, while an unrelated
+    // `Type::construct()` call is left completely untouched.
+    #[test]
+    fn ancestor_construct_call_is_rewritten_and_unrelated_calls_are_not() {
+        let (_parent_struct_out, _parent_impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestParent { value: i32 } },
+            quote! {
+                impl SelfWeakTestParent {
+                    fn construct() -> Self { Self { value: 0 } }
+                }
+            },
+        );
+        let (_child_struct_out, child_impl_out) = expand_pair(
+            quote! { inherits = crate::self_weak_on_constructed_tests::SelfWeakTestParent },
+            quote! { pub struct SelfWeakTestChild { extra: i32 } },
+            quote! {
+                impl SelfWeakTestChild {
+                    fn construct() -> Self {
+                        let unrelated = SelfWeakTestUnrelatedFactory::construct();
+                        Self { base: SelfWeakTestParent::construct(), extra: unrelated }
+                    }
+                }
+            },
+        );
+        let s = child_impl_out.to_string();
+        assert!(!is_real_compile_error(&child_impl_out), "unexpected error: {s}");
+        assert!(
+            s.contains("SelfWeakTestParent :: __class_construct")
+                || s.contains("SelfWeakTestParent::__class_construct"),
+            "ancestor construct() call should be rewritten to __class_construct: {s}"
+        );
+        assert!(
+            s.contains("SelfWeakTestUnrelatedFactory :: construct")
+                || s.contains("SelfWeakTestUnrelatedFactory::construct"),
+            "an unrelated Type::construct() call must not be rewritten: {s}"
+        );
+        assert!(
+            !s.contains("SelfWeakTestUnrelatedFactory :: __class_construct")
+                && !s.contains("SelfWeakTestUnrelatedFactory::__class_construct"),
+            "an unrelated Type::construct() call must not be rewritten: {s}"
+        );
+    }
+
+    // 12.10/12.13: `on_constructed` is detected, kept out of the class's own `{ClassName}Ext` trait
+    // (guide §1d — it's purely an internal lifecycle hook), and chained base-first via
+    // `__elwindui_run_on_constructed`.
+    #[test]
+    fn on_constructed_is_chained_base_first_and_excluded_from_own_trait() {
+        let (_parent_struct_out, parent_impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct SelfWeakTestHookParent { value: i32 } },
+            quote! {
+                impl SelfWeakTestHookParent {
+                    fn construct() -> Self { Self { value: 0 } }
+                    fn on_constructed(&self) {}
+                }
+            },
+        );
+        let parent_s = parent_impl_out.to_string();
+        assert!(
+            !is_real_compile_error(&parent_impl_out),
+            "unexpected error: {parent_s}"
+        );
+        // The trait declaration (`pub trait SelfWeakTestHookParentExt ...`) must not itself declare
+        // `on_constructed` as one of its own (dyn-dispatched) methods.
+        let trait_decl_start = parent_s
+            .find("pub trait SelfWeakTestHookParentExt")
+            .expect("trait declaration must exist");
+        let trait_decl_slice = &parent_s[trait_decl_start..];
+        let trait_decl_end = trait_decl_slice.find("impl ").unwrap_or(trait_decl_slice.len());
+        assert!(
+            !trait_decl_slice[..trait_decl_end].contains("on_constructed"),
+            "on_constructed must not become a trait method: {}",
+            &trait_decl_slice[..trait_decl_end]
+        );
+        assert!(
+            parent_s.contains("fn on_constructed (& self)")
+                || parent_s.contains("fn on_constructed(&self)"),
+            "on_constructed's own body must still be emitted as a plain method: {parent_s}"
+        );
     }
 }

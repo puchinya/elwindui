@@ -30,8 +30,9 @@
 //! bubbling all walk the Visual tree — the separate Logical `parent` back-reference exists purely
 //! as a receptacle for a future template/accessibility tree (see `UIElementCollection`'s own doc
 //! comment) and plays no part in event routing. A back-reference requires shared (`Rc`) ownership,
-//! allowing a child to point back to its parent. Concrete `new()` constructors establish their
-//! collection owner before any child is added.
+//! allowing a child to point back to its parent. Every collection's own owner is already fully
+//! established by the time `construct()` returns (via `#[class]`'s `__self_weak`, see
+//! `UIElement::construct`) — well before any child is ever added.
 
 use crate::base::{CornerRadius, Point, Rect, Size};
 use crate::input::{FocusState, RoutedEventArgs};
@@ -90,7 +91,7 @@ pub trait FocusHost {
 ///
 /// Every field here is interior-mutable (`Cell`/`RefCell`, matching `routed_handlers`/`parent`,
 /// which already were) — every `create_xxx(...)` factory in this crate (and every hand-written
-/// backend's `create_button`/etc.) builds its own `UIElement::default()` internally, taking no
+/// backend's `create_button`/etc.) builds its own `UIElement::construct()` internally, taking no
 /// `base` parameter at all; `elwindui-codegen`'s generated code instead calls `set_margin`/
 /// `set_horizontal_alignment`/`set_vertical_alignment`/`set_grid_cell` (and
 /// `register_routed_handler`, already `Rc<RefCell<..>>`-based) through `&self` right after
@@ -278,42 +279,6 @@ impl std::fmt::Debug for UIElement {
     }
 }
 
-impl Default for UIElement {
-    fn default() -> Self {
-        let owner = Rc::new(RefCell::new(None));
-        UIElement {
-            render_group_id: NEXT_RENDER_GROUP_ID.fetch_add(1, Ordering::Relaxed),
-            margin: Cell::new(0.0),
-            horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
-            vertical_alignment: Cell::new(VerticalAlignment::Stretch),
-            visibility: Cell::new(Visibility::Visible),
-            hit_test_visible: Cell::new(true),
-            clip_to_bounds: Cell::new(None),
-            width: Cell::new(None),
-            height: Cell::new(None),
-            min_width: Cell::new(None),
-            min_height: Cell::new(None),
-            max_width: Cell::new(None),
-            max_height: Cell::new(None),
-            measured_size: Cell::new(None),
-            arranged_width: Cell::new(None),
-            arranged_height: Cell::new(None),
-            arranged_offset: Cell::new(None),
-            routed_handlers: Rc::new(RefCell::new(HashMap::new())),
-            attached: RefCell::new(HashMap::new()),
-            parent: RefCell::new(None),
-            visual_parent: RefCell::new(None),
-            visual_collection: UIElementVisualCollection::new(owner),
-            invalidate_host: RefCell::new(None),
-            tab_stop: Cell::new(false),
-            focus_order: Cell::new(None),
-            focus_state: Cell::new(FocusState::Unfocused),
-            focus_host: RefCell::new(None),
-            declared_shortcuts: RefCell::new(Vec::new()),
-        }
-    }
-}
-
 /// The type every widget wrapper wanting `#[routed]` support (not just `UIElement`, which
 /// every `UIElement` already carries one of — a hand-written builtin like
 /// `elwindui-builtins::appkit::Button` needs its *own* copy too, registered into at its own
@@ -341,7 +306,36 @@ pub fn register_routed_handler<T: 'static>(
 #[elwindui_macros::class]
 impl UIElement {
     fn construct() -> Self {
-        Self::default()
+        UIElement {
+            render_group_id: NEXT_RENDER_GROUP_ID.fetch_add(1, Ordering::Relaxed),
+            margin: Cell::new(0.0),
+            horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
+            vertical_alignment: Cell::new(VerticalAlignment::Stretch),
+            visibility: Cell::new(Visibility::Visible),
+            hit_test_visible: Cell::new(true),
+            clip_to_bounds: Cell::new(None),
+            width: Cell::new(None),
+            height: Cell::new(None),
+            min_width: Cell::new(None),
+            min_height: Cell::new(None),
+            max_width: Cell::new(None),
+            max_height: Cell::new(None),
+            measured_size: Cell::new(None),
+            arranged_width: Cell::new(None),
+            arranged_height: Cell::new(None),
+            arranged_offset: Cell::new(None),
+            routed_handlers: Rc::new(RefCell::new(HashMap::new())),
+            attached: RefCell::new(HashMap::new()),
+            parent: RefCell::new(None),
+            visual_parent: RefCell::new(None),
+            visual_collection: UIElementVisualCollection::new(__self_weak.clone()),
+            invalidate_host: RefCell::new(None),
+            tab_stop: Cell::new(false),
+            focus_order: Cell::new(None),
+            focus_state: Cell::new(FocusState::Unfocused),
+            focus_host: RefCell::new(None),
+            declared_shortcuts: RefCell::new(Vec::new()),
+        }
     }
 
     fn margin(&self) -> f32 {
@@ -699,13 +693,7 @@ impl UIElement {
     /// isn't a tab stop, isn't part of a hosted tree, or the containing tree has no host wired up
     /// (e.g. a standalone test tree).
     fn focus(&self) -> bool {
-        let target = self
-            .as_ui_element()
-            .visual_collection
-            .owner_handle()
-            .borrow()
-            .as_ref()
-            .and_then(|w| w.upgrade());
+        let target = self.as_ui_element().visual_collection.owner_rc();
         match target {
             Some(target) => request_focus(&target),
             None => false,
@@ -839,47 +827,28 @@ fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
     }
 }
 
-/// Binds an already-constructed node to the owner slots used by its collections.  This is called
-/// by each concrete `new()` immediately after it creates its `Rc<Self>`; children are then added
-/// through the collection APIs, which perform all parent wiring.
-pub fn bind_element_owner<T: UIElementExt + 'static>(this: &Rc<T>) {
-    let erased: Rc<dyn UIElementExt> = this.clone();
-    erased.as_ui_element().visual_collection.bind_owner(&erased);
-}
-
 /// The Visual tree's actual child storage (the low-level
 /// counterpart to `Panel.Children`'s `UIElementCollection` below) — a plain, runtime-mutable
 /// `add`/`insert`/`remove`/`remove_at`/`clear` collection. `UIElement::visual_children` holds
 /// one of these directly; `UIElement::visual_children()` (the default trait method) just reads it.
-/// Every mutation owns Visual-parent wiring and invalidates its owner.
+/// Every mutation owns Visual-parent wiring and invalidates its owner. `owner` is set once, at
+/// construction (from `__self_weak` — see `UIElement::construct`), and never changes afterward: no
+/// two-stage bind-after-`Rc::new` step is needed anymore.
 #[derive(Clone)]
 pub struct UIElementVisualCollection {
     storage: Rc<RefCell<Vec<Rc<dyn UIElementExt>>>>,
-    owner: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>,
+    owner: Weak<dyn UIElementExt>,
 }
 
 impl UIElementVisualCollection {
-    pub fn new(owner: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>) -> Self {
+    pub fn new(owner: Weak<dyn UIElementExt>) -> Self {
         Self {
             storage: Rc::new(RefCell::new(Vec::new())),
             owner,
         }
     }
-    fn bind_owner(&self, owner: &Rc<dyn UIElementExt>) {
-        *self.owner.borrow_mut() = Some(Rc::downgrade(owner));
-    }
-
-    fn bind_weak_owner(&self, owner: Weak<dyn UIElementExt>) {
-        *self.owner.borrow_mut() = Some(owner);
-    }
-    fn owner_rc(&self) -> Option<Rc<dyn UIElementExt>> {
-        self.owner
-            .borrow()
-            .as_ref()
-            .and_then(|owner| owner.upgrade())
-    }
-    pub fn owner_handle(&self) -> Rc<RefCell<Option<Weak<dyn UIElementExt>>>> {
-        self.owner.clone()
+    pub fn owner_rc(&self) -> Option<Rc<dyn UIElementExt>> {
+        self.owner.upgrade()
     }
     pub fn add(&self, child: Rc<dyn UIElementExt>) {
         if let Some(owner) = self.owner_rc() {
@@ -950,18 +919,18 @@ impl UIElementVisualCollection {
 #[derive(Clone)]
 pub struct UIElementCollection {
     storage: Rc<RefCell<Vec<Rc<dyn UIElementExt>>>>,
-    owner: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>,
+    owner: Weak<dyn UIElementExt>,
 }
 
 impl UIElementCollection {
-    pub fn new(owner: Rc<RefCell<Option<Weak<dyn UIElementExt>>>>) -> Self {
+    pub fn new(owner: Weak<dyn UIElementExt>) -> Self {
         Self {
             storage: Rc::new(RefCell::new(Vec::new())),
             owner,
         }
     }
     fn owner_rc(&self) -> Option<Rc<dyn UIElementExt>> {
-        self.owner.borrow().as_ref().and_then(|w| w.upgrade())
+        self.owner.upgrade()
     }
     pub fn add(&self, child: Rc<dyn UIElementExt>) {
         if let Some(owner) = self.owner_rc() {
@@ -1435,8 +1404,8 @@ impl Layout {
     }
 
     fn construct() -> Self {
-        let base = UIElement::default();
-        let children = UIElementCollection::new(base.visual_collection.owner_handle());
+        let base = UIElement::construct();
+        let children = UIElementCollection::new(__self_weak.clone());
         Self { base, children }
     }
 }
@@ -1491,11 +1460,6 @@ impl VerticalLayout {
             spacing: Cell::new(0.0),
         }
     }
-    fn new() -> Rc<Self> {
-        let this = Rc::new(Self::construct());
-        bind_element_owner(&this);
-        this
-    }
 }
 
 /// `HorizontalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). `spacing` lives here
@@ -1547,11 +1511,6 @@ impl HorizontalLayout {
             spacing: Cell::new(0.0),
         }
     }
-    fn new() -> Rc<Self> {
-        let this = Rc::new(Self::construct());
-        bind_element_owner(&this);
-        this
-    }
 }
 
 /// `Rectangle`/`Ellipse`. A pure leaf, like `TextBlock` — no children of its own (matching real
@@ -1601,7 +1560,7 @@ impl Shape {
     }
     fn construct() -> Self {
         Self {
-            base: UIElement::default(),
+            base: UIElement::construct(),
             fill: RefCell::new(None),
             stroke: RefCell::new(None),
             stroke_width: Cell::new(0.0),
@@ -1852,7 +1811,7 @@ impl Image {
         rasterize: Option<VectorRasterizeMode>,
     ) -> Self {
         Self {
-            base: UIElement::default(),
+            base: UIElement::construct(),
             source: RefCell::new(source),
             stretch: Cell::new(stretch.unwrap_or(Stretch::Uniform)),
             rasterize: Cell::new(rasterize.unwrap_or_default()),
@@ -2060,16 +2019,6 @@ impl ContentControl {
             content: RefCell::new(None),
         }
     }
-    fn new() -> Rc<Self> {
-        Rc::<Self>::new_cyclic(|owner: &Weak<Self>| {
-            let this = Self::construct();
-            let owner: Weak<dyn UIElementExt> = owner.clone();
-            this.as_ui_element()
-                .visual_collection
-                .bind_weak_owner(owner);
-            this
-        })
-    }
 }
 
 /// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/elwindui_spec.md §3). Each child's
@@ -2159,11 +2108,6 @@ impl Grid {
             rows: RefCell::new(Vec::new()),
             columns: RefCell::new(Vec::new()),
         }
-    }
-    fn new() -> Rc<Self> {
-        let this = Rc::new(Self::construct());
-        bind_element_owner(&this);
-        this
     }
 }
 
@@ -2617,13 +2561,11 @@ mod tests {
         fn try_as_native_control(&self) -> Option<&dyn Any> {
             Some(&self.handle)
         }
-        fn new(handle: FakeHandle) -> Rc<Self> {
-            let this = Rc::new(Self {
-                base: UIElement::default(),
+        fn construct(handle: FakeHandle) -> Self {
+            Self {
+                base: UIElement::construct(),
                 handle,
-            });
-            bind_element_owner(&this);
-            this
+            }
         }
     }
 
@@ -2649,9 +2591,9 @@ mod tests {
         fn label(&self) -> &'static str {
             "base"
         }
-        fn new() -> Self {
+        fn construct() -> Self {
             Self {
-                base: UIElement::default(),
+                base: UIElement::construct(),
                 value: Cell::new(1),
             }
         }
@@ -2668,9 +2610,9 @@ mod tests {
         fn label(&self) -> &'static str {
             "mid"
         }
-        fn new() -> Self {
+        fn construct() -> Self {
             Self {
-                base: OverridableBase::new(),
+                base: OverridableBase::construct(),
             }
         }
     }
@@ -2683,9 +2625,9 @@ mod tests {
 
     #[elwindui_macros::class]
     impl OverridableLeaf {
-        fn new() -> Self {
+        fn construct() -> Self {
             Self {
-                base: OverridableMid::new(),
+                base: OverridableMid::construct(),
             }
         }
     }
@@ -2693,20 +2635,20 @@ mod tests {
     #[test]
     fn overridable_override_dispatches_through_inherit_macro() {
         let base = OverridableBase::new();
-        assert_eq!(OverridableBaseExt::compute(&base, 5), 6);
-        assert_eq!(OverridableBaseExt::label(&base), "base");
+        assert_eq!(OverridableBaseExt::compute(&*base, 5), 6);
+        assert_eq!(OverridableBaseExt::label(&*base), "base");
 
         let mid = OverridableMid::new();
         // `compute` isn't overridden at this hop — falls back to `OverridableBase`'s own default.
-        assert_eq!(OverridableBaseExt::compute(&mid, 5), 6);
-        assert_eq!(OverridableBaseExt::label(&mid), "mid");
+        assert_eq!(OverridableBaseExt::compute(&*mid, 5), 6);
+        assert_eq!(OverridableBaseExt::label(&*mid), "mid");
 
         let leaf = OverridableLeaf::new();
         // Neither is overridden at `OverridableLeaf` itself: `compute` passes all the way through
         // `OverridableMid` (which never touched it) to `OverridableBase`'s original, while `label`
         // stops at `OverridableMid`'s own override.
-        assert_eq!(OverridableBaseExt::compute(&leaf, 5), 6);
-        assert_eq!(OverridableBaseExt::label(&leaf), "mid");
+        assert_eq!(OverridableBaseExt::compute(&*leaf, 5), 6);
+        assert_eq!(OverridableBaseExt::label(&*leaf), "mid");
     }
 
     fn size(width: f32, height: f32) -> Size {
@@ -3256,10 +3198,17 @@ mod tests {
         // this list in order therefore places the native leaf *in front of* the container's own
         // paint, matching the source tree's parent-then-child nesting instead of an accidental
         // "all natives first" or "all paints first" batching.
-        let tree = Rc::new(PaintingContainer {
-            base: UIElement::default(),
+        // `PaintingContainer` isn't `#[class]`-managed (it hand-implements `UIElementExt` directly,
+        // above), so it has no auto-generated `new()` to reach `UIElement::construct`'s real,
+        // hidden-weak-parameter form through — it calls the internal `__class_construct` directly,
+        // via its own hand-rolled `Rc::new_cyclic`, exactly the shape any non-`#[class]` code needing
+        // a real self-weak has to use.
+        let tree = Rc::<PaintingContainer>::new_cyclic(|weak: &Weak<PaintingContainer>| {
+            let weak: Weak<dyn UIElementExt> = weak.clone();
+            PaintingContainer {
+                base: UIElement::__class_construct(weak),
+            }
         });
-        bind_element_owner(&tree);
         tree.as_ui_element()
             .visual_collection
             .add(native("child", size(10.0, 10.0)));
@@ -3277,7 +3226,7 @@ mod tests {
 
     #[test]
     fn text_block_defaults_to_left_alignment_and_set_text_alignment_updates_paint() {
-        let text_block = TextBlock::construct();
+        let text_block = TextBlock::new();
         assert_eq!(text_block.alignment.get(), TextAlignment::Left);
         let mut commands = Vec::new();
         text_block.render(&mut RenderContext::begin_group(
@@ -3799,14 +3748,7 @@ mod tests {
 
     fn rectangle(fill: Option<&str>, stroke: Option<&str>) -> Rc<dyn UIElementExt> {
         let to_brush = |hex: &str| Brush::Solid(Color::parse_hex(hex).unwrap());
-        let this = Rc::new(Rectangle::construct(
-            fill.map(to_brush),
-            stroke.map(to_brush),
-            None,
-            None,
-        ));
-        bind_element_owner(&this);
-        this
+        Rectangle::new(fill.map(to_brush), stroke.map(to_brush), None, None)
     }
 
     #[test]

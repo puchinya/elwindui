@@ -3632,16 +3632,20 @@ fn generate_view(
 
     let methods = emit_methods(&component.methods);
 
-    // A composed ContentControl starts with an empty bare base. Once its outer `Rc` exists, set
-    // the root's child through ContentControl so it owns the corresponding Visual mutation.
+    // A composed ContentControl starts with an empty bare base. Content can only be attached once
+    // the outer `Rc` exists (`set_content`'s own parent-pointer wiring needs a real, upgradable
+    // self-weak — see `UIElement::construct`'s own `__self_weak` doc comment), so this always runs
+    // from the generated `on_constructed`, never from `construct` itself.
     let (content_capture_stmt, content_attach_stmt) =
         if is_shape_composition && resolved_root.type_path == "ContentControl" {
             let (content_binding, content_type) = plan
                 .last()
                 .and_then(|root| root.child_bindings.first())
                 .unwrap_or_else(|| panic!("ContentControl composition requires one content child"));
+            // `#content_binding` is a real, already-stored struct field (see `struct_fields`/
+            // `field_inits` above), reachable directly off `&self` — no capture step needed.
             let content = into_node_if_needed(
-                quote! { this.#content_binding.clone() },
+                quote! { self.#content_binding.clone() },
                 content_type,
                 from,
                 table,
@@ -3651,29 +3655,34 @@ fn generate_view(
                 quote! {
                     {
                         use elwindui::core::ui::ContentControlExt as _;
-                        this.set_content(#content);
+                        self.set_content(#content);
                     }
                 },
             )
         } else if is_template_composition && component.base.as_deref() == Some("ContentControl") {
+            // Unlike the shape-composition case above, `content`/`padding` are `construct`'s own
+            // parameters, not stored fields — `on_constructed` has no parameters of its own to read
+            // them back from, so `construct` stashes them in this hidden field for `on_constructed`
+            // to drain exactly once.
+            struct_fields.extend(quote! {
+                __deferred_content_attach: std::cell::RefCell<Option<(Option<f32>, std::rc::Rc<dyn elwindui::core::ui::UIElementExt>)>>,
+            });
+            field_inits.extend(quote! {
+                __deferred_content_attach: std::cell::RefCell::new(Some((padding, content.clone()))),
+            });
             (
-                quote! { let __content = content.clone(); },
+                TokenStream::new(),
                 quote! {
-                    {
+                    if let Some((padding, content)) = self.__deferred_content_attach.borrow_mut().take() {
                         use elwindui::core::ui::ContentControlExt as _;
-                        this.set_padding(padding.unwrap_or_default());
-                        this.set_content(__content);
+                        self.set_padding(padding.unwrap_or_default());
+                        self.set_content(content);
                     }
                 },
             )
         } else {
             (TokenStream::new(), TokenStream::new())
         };
-    let owner_bind_stmt = if is_host_composition {
-        TokenStream::new()
-    } else {
-        quote! { elwindui::core::ui::bind_element_owner(&this); }
-    };
 
     // `#target`'s own class-hierarchy declaration (docs/elwindui_spec.md 付録H.2.1a). A composed
     // component (`is_shape_composition`/`is_template_composition`/`is_host_composition`) is declared
@@ -3846,25 +3855,45 @@ fn generate_view(
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
                 __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#component_property_enum)>>>)>>>,
+                // Erased to `dyn Any` (not e.g. `dyn elwindui::core::ui::UIElementExt`) so this same
+                // field shape works uniformly whether `#target`'s own chain reaches `UIElementExt`
+                // (shape/template composition) or not (host composition, `inherits Window` — `Window`
+                // never implements `UIElementExt` at all). `#[class]`'s own `{ClassName}Ext: ..`
+                // supertrait chain always transitively reaches `AsAny: Any`, so `__self_weak` (see
+                // `construct`, below) always coerces into this regardless of which chain it's in.
+                __self_weak: std::cell::RefCell<std::rc::Weak<dyn std::any::Any>>,
             }
 
             #[elwindui::class]
             impl #target {
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
+                    let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased) }
                 }
 
-                // Hand-written (not left to `#[class]`'s own `construct`-driven auto-generation):
-                // needs real work beyond `Rc::new(Self::construct(..))` itself (parent-pointer
-                // wiring, event wiring, the initial `resync()`, lifecycle hooks — see
-                // `ContentControlImpl::new`'s own doc comment in `elwindui-core` for the same
-                // shape). Defining both `construct` and `new` in one `#[class]`-managed `impl` block
-                // like this is exactly what that macro supports for this reason.
-                pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
-                    #content_capture_stmt
-                    let this = std::rc::Rc::new(Self::construct(#(#ctor_param_names),*));
-                    #owner_bind_stmt
+                // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
+                // completes its `Rc::new_cyclic` (parent-pointer wiring, event wiring, the initial
+                // `resync()`, lifecycle hooks — see `ContentControlImpl`'s own `on_constructed` doc
+                // comment in `elwindui-core` for the same shape). `new()` itself is never hand-written
+                // here — `#[class]` derives it from `construct` above.
+                //
+                // `wiring_stmts`/`component_self_subscription`/`subscribe_stmts`/`on_mount_stmt` were
+                // all originally generated against a local `this: Rc<Self>` bound right after
+                // `Rc::new` — several of them `move` a cloned `this`/`Rc::downgrade(&this)` into a
+                // callback that outlives this function call, which a bare `&self` can't provide.
+                // `on_constructed` reconstructs the same `this: Rc<Self>` binding here from the
+                // `__self_weak` field `construct` populated above (guaranteed to upgrade successfully
+                // — `on_constructed` only ever runs once the enclosing `Rc` exists) so none of that
+                // generation logic needs to change.
+                fn on_constructed(&self) {
+                    let this: std::rc::Rc<#target> = self
+                        .__self_weak
+                        .borrow()
+                        .upgrade()
+                        .expect("on_constructed: object must already be Rc-constructed")
+                        .downcast::<#target>()
+                        .expect("on_constructed: owner must be this component");
                     #content_attach_stmt
                     #wiring_stmts
                     this.__refresh_dynamic_regions();
@@ -3878,7 +3907,6 @@ fn generate_view(
                     #component_self_subscription
                     #subscribe_stmts
                     #on_mount_stmt
-                    this
                 }
 
                 #own_class_methods
@@ -3908,7 +3936,6 @@ fn generate_view(
                     #content_capture_stmt
                     #construct_stmts
                     let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) });
-                    #owner_bind_stmt
                     #content_attach_stmt
                     #wiring_stmts
                     this.resync();

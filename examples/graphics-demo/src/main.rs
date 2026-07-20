@@ -176,7 +176,7 @@ impl GraphicsDemoCanvas {
     }
     fn construct(category: GraphicsDemoCategory) -> Self {
         Self {
-            base: elwindui::core::ui::UIElement::default(),
+            base: elwindui::core::ui::UIElement::construct(),
             category,
         }
     }

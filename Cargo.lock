@@ -265,6 +265,7 @@ name = "elwindui-macros"
 version = "0.1.0"
 dependencies = [
  "elwindui-codegen",
+ "elwindui-core",
  "proc-macro-crate",
  "proc-macro2",
  "quote",

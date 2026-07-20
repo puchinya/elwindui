@@ -43,9 +43,9 @@ impl NativeControl {
     fn try_as_native_control(&self) -> Option<&dyn Any> {
         Some(&self.handle)
     }
-    pub fn new(handle: AnyView) -> Self {
+    fn construct(handle: AnyView) -> Self {
         Self {
-            base: elwindui_core::ui::UIElement::default(),
+            base: elwindui_core::ui::UIElement::construct(),
             handle,
         }
     }
@@ -150,17 +150,19 @@ impl TextArea {
         self.inner.set_on_change(callback);
     }
 
-    fn new() -> Rc<Self> {
+    fn construct() -> Self {
         let inner = InnerTextArea::new();
         let handle = inner.handle();
-        let this = Rc::new(Self {
-            base: NativeControl::new(handle),
+        Self {
+            base: NativeControl::construct(handle),
             inner,
-        });
+        }
+    }
+
+    fn on_constructed(&self) {
         // WinUI3's `TextBox`/AppKit's `NSTextField` are tab stops by default — see
         // docs/elwindui_gui_framework_design.md §5.5.
-        this.set_tab_stop(true);
-        this
+        self.set_tab_stop(true);
     }
 }
 
@@ -200,29 +202,35 @@ impl Button {
         self.inner.set_text(text);
     }
 
-    fn new() -> Rc<Self> {
+    fn construct() -> Self {
         let inner = InnerButton::new();
         let handle = inner.handle();
-        let this = Rc::new(Self {
-            base: NativeControl::new(handle),
+        Self {
+            base: NativeControl::construct(handle),
             inner,
-        });
+        }
+    }
+
+    fn on_constructed(&self) {
         // WinUI3's `Button` is a tab stop by default — see
         // docs/elwindui_gui_framework_design.md §5.5.
-        this.set_tab_stop(true);
+        self.set_tab_stop(true);
         // Wires the real `NSButton` click directly to `dispatch_routed`, once, right here, rather
         // than re-detecting/re-wiring it on every relayout. Unconditional — `dispatch_routed`
         // already no-ops gracefully when nothing is registered for `"on_click"` at this node or any
         // ancestor (`elwindui-codegen`'s `emit_wiring` registers the actual `#[routed] on_click`
         // handler here, via `register_routed_handler` above, right after this constructor returns).
-        {
-            let node: Rc<dyn UIElementExt> = this.clone();
-            this.inner.set_on_click(Box::new(move || {
-                let args = elwindui_core::input::RoutedEventArgs::default();
-                elwindui_core::ui::dispatch_routed(&node, "on_click", &(), &args);
-            }));
-        }
-        this
+        // `owner_rc()` is guaranteed `Some` here — `on_constructed` only ever runs once the
+        // enclosing `Rc` is fully built.
+        let node: Rc<dyn UIElementExt> = self
+            .as_ui_element()
+            .visual_collection
+            .owner_rc()
+            .expect("Button::on_constructed: object must already be Rc-constructed");
+        self.inner.set_on_click(Box::new(move || {
+            let args = elwindui_core::input::RoutedEventArgs::default();
+            elwindui_core::ui::dispatch_routed(&node, "on_click", &(), &args);
+        }));
     }
 }
 
@@ -277,15 +285,14 @@ pub struct TabViewItem {
 
 #[elwindui_macros::class]
 impl TabViewItem {
-    #[inherent]
-    pub fn new() -> Rc<Self> {
-        Rc::new(Self {
+    fn construct() -> Self {
+        Self {
             header: RefCell::new(String::new()),
             on_header_changed: RefCell::new(None),
             content: RefCell::new(None),
             closable: Cell::new(true),
             on_close: RefCell::new(None),
-        })
+        }
     }
 
     #[inherent]
@@ -317,12 +324,11 @@ impl TabViewItem {
 
 #[elwindui_macros::class]
 impl TabView {
-    #[inherent]
-    pub fn new() -> Rc<Self> {
+    fn construct() -> Self {
         let inner = InnerTabView::new();
         let handle = inner.handle();
-        let this = Rc::new(Self {
-            base: NativeControl::new(handle),
+        Self {
+            base: NativeControl::construct(handle),
             inner,
             children: RefCell::new(Vec::new()),
             selected_index: Cell::new(0),
@@ -332,12 +338,26 @@ impl TabView {
             on_select: RefCell::new(None),
             on_close: RefCell::new(None),
             weak_self: RefCell::new(Weak::new()),
-        });
-        *this.weak_self.borrow_mut() = Rc::downgrade(&this);
+        }
+    }
+
+    fn on_constructed(&self) {
+        // `owner_rc()` is guaranteed `Some` here (see `Button::on_constructed`'s own doc comment);
+        // downcasting the type-erased owner back to this concrete `TabView` is what lets `rebuild`/
+        // `attach_header_listener` upgrade `weak_self` into a real `Rc<TabView>` later.
+        let node = self
+            .as_ui_element()
+            .visual_collection
+            .owner_rc()
+            .expect("TabView::on_constructed: object must already be Rc-constructed");
+        let any_rc: Rc<dyn Any> = node;
+        let this = any_rc
+            .downcast::<TabView>()
+            .expect("TabView::on_constructed: owner must be this TabView");
+        *self.weak_self.borrow_mut() = Rc::downgrade(&this);
         // WinUI3's `TabView` is a tab stop by default — see
         // docs/elwindui_gui_framework_design.md §5.5.
-        this.set_tab_stop(true);
-        this
+        self.set_tab_stop(true);
     }
 
     /// Replaces the declaratively constructed children in one operation.
@@ -601,11 +621,11 @@ pub struct MenuBar {
 
 #[elwindui_macros::class]
 impl MenuBar {
-    fn new() -> Rc<Self> {
-        Rc::new(Self {
+    fn construct() -> Self {
+        Self {
             inner: InnerMenuBar::new(),
             children: RefCell::new(Vec::new()),
-        })
+        }
     }
 
     /// Reconciles the native menu bar's installed items against `children` by `Rc` pointer
@@ -711,10 +731,10 @@ pub struct MenuBarItem {
 
 #[elwindui_macros::class]
 impl MenuBarItem {
-    fn new() -> Rc<Self> {
-        Rc::new(Self {
+    fn construct() -> Self {
+        Self {
             inner: InnerMenuBarItem::new(),
-        })
+        }
     }
 
     fn set_text(&self, text: &str) {
@@ -755,11 +775,11 @@ pub struct Menu {
 
 #[elwindui_macros::class]
 impl Menu {
-    fn new() -> Rc<Self> {
-        Rc::new(Self {
+    fn construct() -> Self {
+        Self {
             inner: InnerMenu::new(),
             children: RefCell::new(Vec::new()),
-        })
+        }
     }
 
     /// See `MenuBar::set_children`'s doc comment — same reconciliation pattern.
@@ -857,10 +877,10 @@ pub struct MenuItem {
 
 #[elwindui_macros::class]
 impl MenuItem {
-    fn new() -> Rc<Self> {
-        Rc::new(Self {
+    fn construct() -> Self {
+        Self {
             inner: InnerMenuItem::new(),
-        })
+        }
     }
 
     fn set_text(&self, text: &str) {

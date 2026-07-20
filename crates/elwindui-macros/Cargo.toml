@@ -13,5 +13,14 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 
+[dev-dependencies]
+# Lets `class.rs`'s own `#[cfg(test)]` expansion tests drive `expand`/`expand_impl` through a full,
+# successful pass (`core_path()` needs *some* crate depending on `elwindui-core` to resolve against)
+# without creating a real build-time cycle: Cargo only pulls dev-dependencies in when building/
+# testing *this* crate directly, never when `elwindui-macros` is compiled as an ordinary dependency
+# of `elwindui-core` (or anything else) — so `elwindui-core`'s own regular dependency on
+# `elwindui-macros` doesn't round-trip back into an actual cyclic *build*.
+elwindui-core = { path = "../elwindui-core" }
+
 [lints]
 workspace = true

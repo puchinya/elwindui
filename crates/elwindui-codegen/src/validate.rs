@@ -145,6 +145,29 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 c.name, f.name, f.ty
                             ));
                         }
+                        // `#[bindable]` is meant exclusively for viewmodel injection (§7.2 — "the
+                        // standard form for viewmodel injection, unify the whole project around
+                        // this shape"). When the field's (Rc-stripped) type happens to be
+                        // resolvable from this module — same-directory `.elwind` files and
+                        // `compile_dir_with_extra_viewmodels`'s Rust-side viewmodels both commonly
+                        // are — check it actually names a `viewmodel`, catching a `#[bindable]`
+                        // mistakenly put on a plain `component` field early. When it's *not*
+                        // resolvable (e.g. a `#[elwindui::component]`+`view!{..}` proc-macro
+                        // referencing a viewmodel from a separate, unrelated macro expansion),
+                        // this can't be checked at all — trust the marker, the same way
+                        // `collection_uses_rc_identity` (`codegen.rs`) does for `for`-loop identity.
+                        if f.attrs.iter().any(|a| matches!(a, Attr::Bindable)) {
+                            let inner = strip_rc_wrapper(&f.ty);
+                            if let Some(info) = table.resolve(module, inner) {
+                                if !info.is_viewmodel {
+                                    errors.push(format!(
+                                        "{}.{}: #[bindable] field's type `{}` isn't a `viewmodel` — \
+                                         #[bindable] is only for injecting a viewmodel",
+                                        c.name, f.name, inner
+                                    ));
+                                }
+                            }
+                        }
                         if let Some(Initializer::Bind { path, .. }) = &f.initializer {
                             validate_bind_path(
                                 module,
@@ -1396,6 +1419,50 @@ view Window2 { Window { TextArea { text: missing } } }
         ];
         let errs = validate(&modules).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("does_not_exist")));
+    }
+
+    #[test]
+    fn accepts_bindable_field_whose_type_is_a_viewmodel() {
+        let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
+        let window_src = r#"
+component Window2 {
+    #[bindable]
+    vm: std::rc::Rc<Vm>,
+}
+view Window2 { Window { TextBlock { text: "x" } } }
+"#;
+        let modules = vec![
+            parse_module(viewmodel_src).unwrap(),
+            parse_module(window_src).unwrap(),
+        ];
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// `#[bindable]` (§7.2) is exclusively for viewmodel injection — a `#[bindable]` field whose
+    /// type resolves to a plain `component` (not a `viewmodel`) is a mistake this can actually catch
+    /// (unlike the cross-macro-boundary case, where the type isn't resolvable at all and the marker
+    /// must be trusted — see the check's own doc comment in this file).
+    #[test]
+    fn rejects_bindable_field_whose_type_is_not_a_viewmodel() {
+        let src = r#"
+component NotAViewModel {
+    #[param]
+    label: String,
+}
+view NotAViewModel { TextBlock { text: label } }
+
+component Window2 {
+    #[bindable]
+    thing: std::rc::Rc<NotAViewModel>,
+}
+view Window2 { Window { NotAViewModel { label: "x" } } }
+"#;
+        let modules = vec![parse_module(src).unwrap()];
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("isn't a `viewmodel`")),
+            "errs: {errs:?}"
+        );
     }
 
     /// `vm.documents` / `vm.save` / `vm.save_can_execute` — the shape `examples/notepad`'s

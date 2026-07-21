@@ -218,7 +218,7 @@ see):
     distinction as the `AnyView::measure` fix above, just applied to the container driving `available`
     instead of to an individual native control's own measure pass.
 
-### Root cause of "text not reflected after Open": `elwindui-codegen`'s `for`-loop identity detection never recognizes `#[elwindui::viewmodel]`-defined Rust types — high-impact, not fixed this session
+### Root cause of "text not reflected after Open": `elwindui-codegen`'s `for`-loop identity detection resolved the wrong file's scope — fixed this session
 
 After the three fixes above, `notepad`'s `TabView` header and menu bar rendered correctly, but opening
 a file still showed the tab title updating (`untitled.txt` → the opened file's name) while the
@@ -236,7 +236,7 @@ lasting change:
   every command handler generated from `notepad_window.elwind` (`on_select` for New/Open/Save, the
   `TabView`'s own `on_new_tab`) unconditionally calls `this.__refresh_dynamic_regions()` right after
   invoking the command — and `__refresh_dynamic_regions()` for the `for doc in vm.documents` loop
-  compiles down to `self.__dynamic_slot_node_0.replace_items(...)`, **not**
+  compiled down to `self.__dynamic_slot_node_0.replace_items(...)`, **not**
   `replace_rc_items(...)`. `replace_items` is the non-identity-preserving path: it has no way to tell
   "this is still the same document" from "this is a different one," so it tears down and reconstructs
   every `TabViewItem`/`DocumentView`/native `TextArea` in the list on every call, discarding whatever
@@ -244,35 +244,74 @@ lasting change:
   - `elwindui-codegen`'s `collection_uses_rc_identity` (`codegen.rs`) is supposed to pick
     `replace_rc_items` for exactly this shape — it has a dedicated carve-out for "`#[viewmodel]`
     deliberately exposes `Vec<Document>` at its declaration boundary while storing each item as
-    `Rc<Document>` internally" (its own comment, `codegen.rs:4401-4403`) — but that carve-out is
-    gated on `table.resolve(from, "DocumentViewModel").is_some_and(|info| info.is_viewmodel)`, and
-    `table` is `elwindui-codegen`'s own `.elwind`-file `SymbolTable`, populated only from `component`/
-    `view`/`viewmodel` items parsed out of `.elwind` sources. `NotepadViewModel`/`DocumentViewModel`
-    here are defined in **`main.rs`**, via the separate `#[elwindui::viewmodel]` **Rust proc-macro**
-    (`docs/elwindui_gui_framework_design.md` §7's blessed MVVM pattern) — a completely different code
-    path that never registers anything into this table. `table.resolve` therefore returns `None` for
-    both types, `collection_uses_rc_identity` returns `false` before it even reaches the `is_viewmodel`
-    check (it fails earlier, at `table.resolve(from, "NotepadViewModel")` for `vm` itself — see
-    `codegen.rs`'s `collection_uses_rc_identity`, the `let Some(owner_info) = table.resolve(...)`
-    line), and the codegen falls back to `replace_items`.
-  - This is **not specific to `notepad`, to `TabView`, or to WinUI3**: any `.elwind` `for` loop over a
-    `#[bindable] Rc<SomeProcMacroViewModel>` field's `Vec<...>` collection — i.e. the standard,
-    documented way to combine `#[elwindui::viewmodel]` with a `.elwind` view — hits this same
-    fallback, unconditionally, today. `elwindui-backend-appkit` likely masks the symptom rather than
-    avoiding the bug: its `TabView` doc comment explicitly says recreating tab chips on every resync
-    is safe there because chips are cheap and content is already handled as single-shared-pane
-    swapping — but that's a difference in how *tolerant* AppKit's widgets are of full rebuild, not
-    evidence the rebuild itself is being avoided.
-- **Not fixed this session** — this is a codegen fix (`elwindui-codegen`'s `SymbolTable`/
-  `collection_uses_rc_identity`), not a WinUI3 backend fix, and needs a decision on approach before
-  writing it (e.g.: teach the `.elwind` compiler to recognize `#[elwindui::viewmodel]` mod blocks in
-  sibling `.rs` files and register them into the same table with `is_viewmodel: true`; add an
-  explicit opt-in declaration the user writes in the `.elwind` file for externally-defined viewmodel
-  types; or something else) — flagged to the user rather than picked unilaterally, per this repo's
-  own guidance against inventing workarounds for a not-fully-root-caused problem. The three fixes
-  above (reentrancy panic, menu-bar sizing, `TabView` content sizing) are real, verified, and worth
-  keeping regardless of how this is eventually fixed, since `replace_items` rebuilding a tab's content
-  will need correctly-sized/non-panicking native controls no matter what.
+    `Rc<Document>` internally" — but that carve-out was gated on
+    `table.resolve(from, "DocumentViewModel").is_some_and(|info| info.is_viewmodel)`, where `from` is
+    the module the `for` loop's own file (`notepad_window.elwind`) parses into. **`compile_dir_with_
+    extra_viewmodels`(`elwindui-codegen/src/lib.rs`, called by `examples/notepad/build.rs`) already
+    exists and correctly registers `main.rs`'s `#[elwindui::viewmodel]` types into the table** — an
+    earlier revision of this doc incorrectly claimed no such registration mechanism existed at all;
+    it does, and `notepad_window.elwind`'s own `use crate::notepad_view_model::NotepadViewModel;`
+    resolves `vm`'s own type fine. The actual failure is one level down: `notepad_window.elwind`
+    never names `DocumentViewModel` directly (`doc` is only ever the `for` loop's implicit binding),
+    so it has no `use` for it, while `document_view.elwind` (which declares `DocumentView.doc: Rc
+    <DocumentViewModel>` directly) does. Resolving the *element* type against the *for-loop's own*
+    file's `use` list — instead of, say, `DocumentView`'s — was the actual bug: which file you look
+    from changes the answer for a type neither file was ever required to name explicitly.
+  - This was **not specific to `notepad`, to `TabView`, or to WinUI3**: any `.elwind` `for` loop over
+    a `#[bindable] Rc<SomeProcMacroViewModel>` field's `Vec<...>` collection — i.e. the standard,
+    documented way to combine `#[elwindui::viewmodel]` with a `.elwind` view — hit this same
+    fallback whenever the loop's own file happened not to `use` the element type by name (the common
+    case, since the loop never needs to name it). `elwindui-backend-appkit` likely masked the symptom
+    rather than avoiding the bug: its `TabView` doc comment explicitly says recreating tab chips on
+    every resync is safe there because chips are cheap and content is already handled as
+    single-shared-pane swapping — but that's a difference in how *tolerant* AppKit's widgets are of
+    full rebuild, not evidence the rebuild itself was being avoided.
+- **Fixed this session**, via a different approach than resolve-scope patching (user's own design,
+  strictly better — see `docs/elwindui_gui_framework_design.md` §7.2's `#[bindable]`): rather than
+  trying to resolve the loop's *element* type by name at all (fragile — cross-file/cross-macro
+  visibility of a `#[elwindui::viewmodel]` type is exactly the problem `#[bindable]` itself already
+  exists to route around, per §7.2's own rationale and `validate.rs`'s matching comment on why it
+  "can't check the type actually implements `ObservableExt`"), `collection_uses_rc_identity`
+  (`codegen.rs`) now also recognizes identity-stability by checking whether the loop's body hands the
+  item to some child element's `#[bindable]` field (`for_body_binds_item_to_a_bindable_field`, new).
+  That only ever needs to resolve the *receiving component's* type (`DocumentView`, always in scope
+  via same-directory `.elwind` visibility or `sibling_component_modules`) — never the viewmodel type
+  itself — so it works regardless of which file `use`s what. `TypeInfo` gained a `bindable_fields:
+  HashSet<String>` set (mirroring `two_way_fields`/`routed_fields`) to support this. `validate.rs`
+  also gained a companion check: a `#[bindable]` field's type, *when resolvable*, must actually be a
+  `viewmodel` (a real mistake this can now catch); when unresolvable (e.g. a `#[elwindui::component]`
+  + `view!{..}` proc-macro referencing a viewmodel from a separate macro expansion), it's skipped and
+  the marker is trusted, matching the existing, deliberate `#[bindable]` design.
+  - Regression test: `codegen::tests::for_loop_identity_survives_when_element_type_isnt_used_by_the_
+    for_loops_own_file` reproduces the exact real-notepad shape (bare `Vec<DocumentViewModel>`, no
+    `Rc<..>` spelled out; the viewmodel module registered at its own module path, mirroring
+    `viewmodel_defs_from_rs_file`'s real production behavior, not the older, simpler `path: []` test
+    helper used elsewhere; the `for`-loop's own file `use`s `NotepadViewModel`/`DocumentView` but
+    never `DocumentViewModel`) — confirmed to fail (`replace_items`) with the fix disabled and pass
+    (`replace_rc_items`) with it enabled. `validate::tests::{accepts,rejects}_bindable_field_whose_
+    type_is_{a,not_a}_viewmodel` cover the new `validate.rs` check.
+  - Runtime-verified on `notepad.exe` **without a native file dialog** (unreliable to automate/paste
+    into): typed a marker string into tab 1's `TextArea`, clicked File > New (any command handler
+    triggers the same `__refresh_dynamic_regions()` full-region refresh a file-dialog-driven `Open`
+    does — no dialog needed to exercise the identical code path), re-selected tab 1, and confirmed the
+    typed text was still there (screenshotted via `PrintWindow`, mouse-click-to-foreground). Before
+    the fix this would have discarded and rebuilt tab 1's `TextArea` from scratch, identically to the
+    original Open-time symptom.
+- **Known, related, larger gap — not fixed, deliberately out of scope, revisit separately**:
+  `#[elwindui::component]` + `view!{..}` (the pure-Rust-macro frontend, `elwindui-codegen/src/lib.rs`'s
+  `generate_component_from_item_struct`) has no viewmodel-registration mechanism at all (no
+  `compile_dir_with_extra_viewmodels` equivalent) — `sibling_component_modules()`/
+  `same_crate_components()` (`component_frontend.rs`) only tracks sibling *components*, not
+  viewmodels. The `#[bindable]`-based fix above sidesteps this for `for`-loop identity specifically
+  (it only ever needs the receiving *component* type, already visible via `sibling_component_
+  modules()`), but other viewmodel-referencing static checks in this frontend still can't resolve the
+  viewmodel type at all. Fix, if/when undertaken: duplicate `same_crate_components()`'s exact pattern
+  (a `compiling_crate_key()`-scoped `OnceLock<Mutex<HashMap<..>>>`, self-registered on successful
+  macro expansion, read by later same-crate expansions) as a new, separate `same_crate_viewmodels()`
+  for `#[elwindui::viewmodel]` — do **not** reuse `elwindui_macros::class`'s `same_crate_classes()`,
+  which is a different-purpose registry for the `UIElement` inheritance chain that viewmodels don't
+  participate in at all (`generate_viewmodel`'s output is a plain struct + hand-written `ObservableExt`
+  impl, no `#[class]`). Same "declaration order only" caveat as `sibling_component_modules()` today.
 
 ## Verified evidence
 
@@ -303,13 +342,10 @@ lasting change:
 
 ## Remaining known work
 
-- **Top priority**: fix `elwindui-codegen`'s `for`-loop identity detection to recognize
-  `#[elwindui::viewmodel]`-defined Rust types (see "Root cause of 'text not reflected after Open'"
-  above) — until this lands, any `.elwind` `for` loop over a proc-macro viewmodel's `Vec<...>` field
-  silently uses the non-identity `replace_items` path, discarding and rebuilding every native control
-  in the loop on every command, which actively breaks WinUI3's persistent-native-control model (and
-  is wasted work on every other backend too). Needs a design decision (see that section) before
-  implementation, not a quick patch.
+- ~~Fix `elwindui-codegen`'s `for`-loop identity detection~~ — **done this session**, see "Root cause
+  of 'text not reflected after Open'" above. The remaining, deliberately-out-of-scope
+  `#[elwindui::component]`+`view!{..}` viewmodel-registration gap (`same_crate_viewmodels()`,
+  documented in that same section) is still open.
 - **Deferred from the same investigation as the `Width`/`Height`-reset fix above — not attempted
   this session, each individually reasoned through and cross-referenced against source but not
   implemented or tested:**

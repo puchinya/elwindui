@@ -10,7 +10,10 @@ subset build as completion.
 ## Build and environment
 
 - Working directory: `C:\Users\puchi\git\elwindui`.
-- Before Windows builds, use `. .\tools\setup-vs-env.ps1` in the same PowerShell session.
+- Before Windows builds, use `. .\tools\setup-vs-env.ps1` in the same PowerShell session — this is
+  now a hard requirement, not just for MSVC: `build.rs` also shells out to `makepri.exe` and
+  `cppwinrt.exe` from the Windows SDK (see below), both resolved via `WindowsSdkDir`/
+  `WindowsSDKVersion`, which that script sets.
 - `rg` is installed. Keep inspections bounded and direct; see `docs/agents/windows.md`.
 - Windows App SDK restore is centralized in `tools/restore-winui3.ps1`.
   - Runtime package: `Microsoft.WindowsAppSDK` `1.8.260209005`.
@@ -27,8 +30,9 @@ subset build as completion.
   - The main projection now references that separate projection before the generic `windows`
     reference.
   - WinUI 3 and Win2D remain in one main generated projection.
-  - `--implement` is enabled for the main projection because a composed XAML `Application` is
-    required at runtime.
+  - `--implement` is enabled for the main projection because native `Window`/`Button`/`TextArea`
+    construction from Rust needs it (hosting `Application` itself no longer goes through this
+    projection at all — see below).
 - CanvasControl and Win2D drawing are wired into the backend, including retained primitive
   rendering, paths, images, gradients, brushes, clipping, opacity layers, stroke styles, SVG
   viewBox / patterns, and the supported direct blend modes.
@@ -39,52 +43,330 @@ subset build as completion.
   - It accepts only synchronous `fn main()` with no arguments and no return type.
   - It calls `::elwindui::init()` then `::elwindui::application::run(move || { user body })`.
 - All backend `application::run` entry points take `FnOnce() + 'static` startup closures.
-- WinUI uses `Microsoft.UI.Xaml.Application::Start`, not a manually-created DispatcherQueue or
-  `GetMessageW` loop.
-  - The generated `ApplicationInitializationCallback` imposes `Send`; startup itself is stored in
-    TLS so it does not receive an incorrect `Send` requirement.
-  - A composed XAML application provides `IApplicationOverrides` plus
-    `IXamlMetadataProvider` and delegates metadata queries to
-    `XamlControlsXamlMetaDataProvider`.
-  - This composition was necessary: plain `Application::new()` crashed in `Microsoft.UI.Xaml.dll`
-    with a stowed exception (`0xC000027B` / underlying `0x8007007A`).
+
+### `Application` is now hosted from a small C++/WinRT shim, not pure Rust
+
+**This is the big architectural change from earlier in this file's history — read this section
+before touching `application::run`, `cpp/app_host.cpp`, or the `Application.Resources`/
+`XamlControlsResources` path.**
+
+- `crates/elwindui-backend-winui3/cpp/app_host.cpp` — a deliberately tiny C++/WinRT translation
+  unit. It defines `struct App : ApplicationT<App, IXamlMetadataProvider>` (a real, correctly-
+  composed WinRT class via cppwinrt's own composable-class support), whose `OnLaunched` registers
+  `Microsoft.UI.Xaml.Controls.XamlControlsResources` into `Application.Resources` once, then calls
+  back into Rust through exactly one exported C ABI function:
+  `extern "C" void elwindui_winui3_run(void (*startup)())`. Everything else — window creation,
+  controls, layout, rendering, event routing — stays in Rust; nothing WinUI-specific beyond hosting
+  `Application` itself belongs in this file.
+- `crates/elwindui-backend-winui3/build.rs`'s `build_cpp_app_host` generates a C++/WinRT projection
+  for this via `cppwinrt.exe` (reusing the exact same winmd input set already computed for
+  `windows-bindgen`, plus the WebView2 winmd `Microsoft.UI.Xaml.winmd` itself references even though
+  this shim never touches WebView2 — cppwinrt validates the whole input database up front) and
+  compiles `cpp/app_host.cpp` against it with the `cc` crate (MSVC, C++20). Requires `cppwinrt.exe`
+  from the Windows SDK (present via `tools/setup-vs-env.ps1`'s `WindowsSdkDir`).
+- `crates/elwindui-backend-winui3/src/lib.rs`'s `application::run` declares
+  `unsafe extern "C" { fn elwindui_winui3_run(startup: extern "C" fn()); }` and calls it directly —
+  no more `ApplicationInitializationCallback`/`IApplicationFactory::CreateInstance` on the Rust
+  side. `application::startup_trampoline` (the `extern "C" fn` passed across) sets up the
+  `DispatcherQueue`-backed task executor and runs the user's `startup` closure, exactly like the old
+  Rust callback body did. Window tracking (`retain_window`/`release_window`/`WINDOWS`) is unchanged
+  and stays in Rust; `release_window` now gets its `Application` handle via
+  `bindings::Microsoft::UI::Xaml::Application::Current()` (this works reliably now — see below)
+  instead of a retained handle from Rust-side composition.
+- **Why a C++ shim, when `docs/agents/windows.md`'s sibling rule here used to say not to**: this
+  was not a shortcut — it was adopted only after two from-scratch pure-Rust `Application`
+  compositions were built, run, and found to leave `Application.Resources` broken regardless.
+  `windows-rs` has no support for WinRT "composable class" aggregation (subclassing a WinRT runtime
+  class like `Application`) — see microsoft/windows-rs#3404. Attempt 1 was a
+  `#[windows_core::implement(IApplicationOverrides, IXamlMetadataProvider)]`-based `Application`
+  (this file's own previous revision documented it working well enough to avoid a *startup* crash,
+  which is genuinely true and unrelated to this issue). Attempt 2, after Attempt 1's
+  `Application.Resources` turned out to be broken, was a completely from-scratch manual COM
+  aggregation (hand-written vtables, correct outer→inner `QueryInterface` forwarding per
+  <https://learn.microsoft.com/windows/win32/com/aggregation> — the exact fix that looked most
+  likely to be the culprit). **Both compiled, ran without crashing, and both left
+  `Application.Resources`/`Application::SetResources` reproducibly broken** — any touch of it
+  failed with `Error 0x80004002 in ifactory->QueryInterface(Microsoft.UI.Xaml.Media.AcrylicBrush)`,
+  identically, regardless of aggregation correctness, timing (before/after window creation), or
+  whether `AcrylicBrush`/`XamlControlsResources` were pre-activated first. That result affirmatively
+  rules out COM identity/forwarding as the cause. Only swapping to `ApplicationT<App>` — cppwinrt's
+  own, real, long-since-proven composable-class support — made `Application.Resources` work, with
+  zero errors, on the first attempt. Whatever `ApplicationT<App>` does differently from both Rust
+  attempts remains unknown (see "Open question" below) — but empirically, only it works. The
+  historical Rust attempts are preserved in `git log -- crates/elwindui-backend-winui3/src/composed_application.rs`
+  (file since deleted) for anyone tempted to re-attempt a pure-Rust fix.
+  - **Open question, not yet answered**: exactly *what* `ApplicationT<App>` does that a correctly-
+    aggregated hand-rolled Rust `Application` doesn't. Candidates nobody has confirmed or ruled out
+    yet: some other WinRT interface cppwinrt's composable-class support implements that neither
+    Rust attempt did (beyond `IApplicationOverrides`/`IXamlMetadataProvider`); some ordering/timing
+    guarantee specific to `winrt::make<App>()`'s own construction sequence; or something about how
+    cppwinrt's generated vtables present themselves to `Microsoft.UI.Xaml.dll`'s internal default-
+    resource-dictionary construction that a hand-rolled vtable, however ABI-correct, doesn't
+    replicate. A native debugger (WinDbg) stepping through `Microsoft.UI.Xaml.dll`'s own
+    `Application.Resources` getter/setter, comparing the C++-composed vs. Rust-composed case, would
+    be the way to actually answer this — not attempted here.
+  - **`docs/agents/windows.md`'s "do not use a C++ adapter before exhausting this direct
+    windows-bindgen approach" still stands as the default** — this exists only because that direct
+    approach was exhausted for this one specific problem (`Application.Resources`), not as a general
+    precedent. Everything else in this backend (Window, Button, TextArea, TabView, MenuBar, Win2D
+    drawing, ...) still goes through the direct `windows-bindgen` Rust projection with zero C++,
+    unchanged. Do not grow `cpp/app_host.cpp` beyond hosting `Application` itself.
+- **An unpackaged process needs its own `resources.pri` next to the executable before
+  `ms-appx://` resource resolution works at all** — this is a *separate*, already-solved
+  precondition from the `Application.Resources` composition issue above, and was necessary
+  regardless of which composition approach ended up being used (confirmed: `XamlControlsResources`
+  activation failed with `Cannot locate resource from 'ms-appx:///Microsoft.UI.Xaml/Themes/
+  themeresources.xaml'` — `HRESULT 0x80004005` — until a minimal `resources.pri` existed beside the
+  exe, at which point that same activation call started succeeding). `build.rs`'s
+  `generate_resources_pri` generates one (via `makepri.exe createconfig` + `makepri.exe new`,
+  indexing none of this crate's own resources — it exists purely to bootstrap MRT resource-context
+  resolution) and copies it to the shared `target/<profile>/` directory, so every example binary
+  gets it automatically. Requires `makepri.exe` from the Windows SDK (same `WindowsSdkDir`
+  precondition as `cppwinrt.exe`).
 - `Window::show()` keeps a strong WinUI Window reference in UI-thread TLS. The `Closed` event
   removes it, and the final window calls `Application::Exit()`.
 - `notepad-inline`, `notepad`, and `graphics-demo` use `#[elwindui::main]`.
 
+### `AnyView::measure` resets `Width`/`Height` to `NaN` before every native `Measure()` call
+
+**This is the fix for the `Button` (and `MenuFlyoutItem`, confirmed via `notepad`'s File menu)
+zero-width bug** — a second, unrelated root cause from the `Application.Resources` one above, found
+after four other hypotheses were tried and ruled out (see prior revisions of this file / git history
+for that trail if curious, not reproduced here since it's resolved).
+
+- **Root cause**: `AnyView::arrange` (`inner.rs`) calls `element.SetWidth(final_rect.width)` /
+  `SetHeight(final_rect.height)` to give a native control concrete bounds within the plain `Canvas`
+  this backend hosts everything in (`Canvas` has no native measure-driven arrange of its own, unlike
+  a real WinUI layout panel). Setting an explicit `Width`/`Height` on a `FrameworkElement` is
+  **sticky**: once set, `Measure()` always reports that exact `Width`/`Height` in `DesiredSize`
+  (clamped to, not derived from, whatever `available` is passed), regardless of content, forever —
+  standard WPF/UWP/WinUI `FrameworkElement` behavior, not a bug in `Microsoft.UI.Xaml.dll`. The very
+  first relayout pass runs before the window has a real size, so `available` (and therefore the
+  `final_rect` `arrange` computes) is `{0, 0}` — `arrange` sets `Width`/`Height` to `0`, and from
+  that point on `Measure()` reports `DesiredSize` of `0` no matter how large `available` later
+  becomes, since the explicit `Width`/`Height` — not `available` — is what's being measured.
+  - This created a **self-reinforcing loop specific to content-driven (`Auto`-sized) parents**: for
+    a `HorizontalLayout`, each child's `arrange`-time `final_rect` is derived *from that same
+    child's own* (corrupted, stuck-at-0) `DesiredSize`, so every subsequent pass re-applies
+    `SetWidth(0)`, permanently. `TextArea` escaped the loop by coincidence, not because it was
+    unaffected: it sits in a `Grid` `Star` row, whose `arrange` allocation comes from the *column's*
+    share of `available` (external to the child's own `DesiredSize`), so a healthy nonzero `Width`
+    got reasserted independent of whatever `Measure()` last reported. This is exactly why
+    `TextArea` recovered once `Application.Resources` was fixed while `Button` never did no matter
+    how many relayout/resize cycles ran — the bugs were unrelated, and this one specifically only
+    ever manifests in `Auto`/content-sized layout contexts.
+- **Fix**: `AnyView::measure` now calls `element.SetWidth(f64::NAN)` / `SetHeight(f64::NAN)` (`NaN`
+  is the real WinUI 3 sentinel for "unset"/`Auto`), then `element.InvalidateMeasure()` (defensive —
+  `SetWidth`/`SetHeight` alone mark the element measure-dirty going forward but don't guarantee this
+  exact `Measure` call re-runs the native measure pass rather than short-circuiting on a still-cached
+  `DesiredSize`), *before* calling `element.Measure(available)`. This makes every measure pass
+  reflect the element's actual natural/content-driven size in response to `available`, undoing
+  whatever `arrange` left behind from the previous pass. `arrange` itself is unchanged — it still
+  needs to set an explicit `Width`/`Height` for `Canvas` positioning to work at all; the fix is
+  resetting it back before the *next* measurement, not avoiding setting it.
+- **Verified**: `notepad-inline`'s Save/Open buttons and `notepad`'s File `MenuFlyoutItem`s (New/
+  Open/Save) all screenshot with correct Fluent chrome and visible text after this change.
+- **A tempting-looking defense-in-depth variant that turned out to regress this fix — do not
+  re-add**: skipping `TreeHostPanel::relayout_static` entirely (`return` early) when
+  `canvas.ActualWidth()`/`ActualHeight()` are still `0` (i.e. the very first, synchronous call from
+  `set_tree`, before the window has a real size), on the theory that it's a wasted pass superseded by
+  the panel's own `SizeChanged`-triggered relayout once a real size arrives. Tried and reverted: with
+  this guard in place, `Button`s stopped rendering again (confirmed via screenshot, isolated by
+  reverting just this one change), even though `SizeChanged` does fire and does trigger a later
+  correctly-sized pass. Something about that very first `{0, 0}` pass is load-bearing for later
+  passes to behave correctly (candidates, not investigated further: `RenderTree`/`RenderGroup` id
+  assignment or other one-time initialization state the reconcile path in `relayout_static` expects
+  to already exist) — this needs its own investigation before attempting again, independent of the
+  `Width`/`Height` reset fix above, which does not depend on it.
+
+### `notepad` File>Open reentrancy panic, menu-bar/`TabView` content sizing — fixed this session
+
+Three more `notepad`-specific fixes, found by actually clicking through File>Open with a real file
+(mouse-click foreground + `PrintWindow` screenshot, plus one full-desktop `CopyFromScreen` capture to
+see `MenuFlyout` popups, which are separate top-level windows `PrintWindow` on the main `hwnd` can't
+see):
+
+- **`RefCell` already-borrowed panic on File>Open** (`inner.rs`, all four
+  `invoke_ui_*_event_callback` functions): each one held a `.borrow()` on the callback map for the
+  duration of invoking the callback itself. Opening a file synchronously rebuilds native controls
+  (see the `for`-loop bug below), which registers *new* UI event callbacks — i.e. re-entrant
+  `borrow_mut()` on the same `RefCell` while the outer `borrow()` was still alive. Fixed by cloning
+  the `Rc<callback>` out of the map and dropping the borrow before invoking it:
+  `let callback = MAP.with(|m| m.borrow().get(&id).cloned()); if let Some(cb) = callback { cb(); }`.
+- **`notepad`'s menu bar and `TabView` header were invisible** (`InnerWindow::set_menu_bar`,
+  `inner.rs`): when a menu bar is present, `content_host` (the `TreeHostPanel` holding the actual
+  tree) is placed as a *child* of an outer `Canvas` (alongside the menu bar), not directly as
+  `Window.Content` — and a `Canvas` child does not auto-stretch to fill its parent the way
+  `Window.Content` does. Fixed by wiring an explicit `SizeChanged` handler on the outer `Canvas` that
+  sets `content_host`'s `Width`/`Height` from `outer.ActualWidth()/ActualHeight() - MENU_BAR_HEIGHT`.
+- **`TabViewItem` content (the per-tab `TreeHostPanel`) never became visible/correctly sized**, even
+  after the menu-bar fix above: unlike the window-level `content_host`, a `TabViewItem.Content`
+  Canvas's `SizeChanged` was observed (via temporary debug logging) to simply never fire, and
+  `SetWidth`/`SetHeight`/`InvalidateMeasure`/`InvalidateArrange` do not make `ActualWidth`/
+  `ActualHeight` update either, even after several seconds. Fixed two ways, both needed together:
+  - Added `TreeHostPanel::force_relayout(&self)`, which calls `relayout_static` directly rather than
+    waiting on the (unreliable, for this specific host) native `SizeChanged` cascade.
+    `InnerTabView` now tracks every tab's `TreeHostPanel` (not just its `FrameworkElement`) in
+    `content_hosts: Rc<RefCell<Vec<TreeHostPanel>>>`, and the `TabView`-level (not per-item)
+    `SizeChanged` handler calls `SetWidth`/`SetHeight` + `force_relayout()` on all of them.
+  - `TreeHostPanel::relayout_static` itself (`inner.rs`) computed its layout `available` size from
+    `canvas.ActualWidth()/ActualHeight()` — which, per the point above, does not reflect a
+    `SetWidth`/`SetHeight` call made moments earlier on a `TabViewItem`-hosted Canvas. Fixed by
+    preferring the explicit `Width`/`Height` property (`canvas.Width()`/`Height()`) when finite (i.e.
+    someone already told this panel its size explicitly) and only falling back to
+    `ActualWidth`/`ActualHeight` when they're `NaN` — this is the *same* explicit-vs-native-actual
+    distinction as the `AnyView::measure` fix above, just applied to the container driving `available`
+    instead of to an individual native control's own measure pass.
+
+### Root cause of "text not reflected after Open": `elwindui-codegen`'s `for`-loop identity detection never recognizes `#[elwindui::viewmodel]`-defined Rust types — high-impact, not fixed this session
+
+After the three fixes above, `notepad`'s `TabView` header and menu bar rendered correctly, but opening
+a file still showed the tab title updating (`untitled.txt` → the opened file's name) while the
+document body stayed blank. Root-caused via temporary `eprintln!` instrumentation in
+`InnerTextArea::set_text` (logging `ActualWidth`/`ActualHeight`/explicit `Width`/`Height` on every
+call) plus one in `relayout_static` — since removed, this was throwaway diagnostic code, not a
+lasting change:
+
+- **Observation**: for one `File > Open`, `set_text` fired *three* times with the correct 62-char
+  content, not once: the first on a fully laid-out `TextBox` (`ActualWidth/Height` and explicit
+  `Width`/`Height` all real, e.g. `624×385`) — this one should have been the *only* call — followed
+  by two more, each on a **brand-new** `TextBox` (`ActualWidth/Height` still `0`, explicit
+  `Width`/`Height` still `NaN`, i.e. never yet through `arrange()`).
+- **Why**: reading the actual generated code (`target/debug/build/notepad-*/out/notepad_window.rs`),
+  every command handler generated from `notepad_window.elwind` (`on_select` for New/Open/Save, the
+  `TabView`'s own `on_new_tab`) unconditionally calls `this.__refresh_dynamic_regions()` right after
+  invoking the command — and `__refresh_dynamic_regions()` for the `for doc in vm.documents` loop
+  compiles down to `self.__dynamic_slot_node_0.replace_items(...)`, **not**
+  `replace_rc_items(...)`. `replace_items` is the non-identity-preserving path: it has no way to tell
+  "this is still the same document" from "this is a different one," so it tears down and reconstructs
+  every `TabViewItem`/`DocumentView`/native `TextArea` in the list on every call, discarding whatever
+  native control state (size, focus, caret) the old one had.
+  - `elwindui-codegen`'s `collection_uses_rc_identity` (`codegen.rs`) is supposed to pick
+    `replace_rc_items` for exactly this shape — it has a dedicated carve-out for "`#[viewmodel]`
+    deliberately exposes `Vec<Document>` at its declaration boundary while storing each item as
+    `Rc<Document>` internally" (its own comment, `codegen.rs:4401-4403`) — but that carve-out is
+    gated on `table.resolve(from, "DocumentViewModel").is_some_and(|info| info.is_viewmodel)`, and
+    `table` is `elwindui-codegen`'s own `.elwind`-file `SymbolTable`, populated only from `component`/
+    `view`/`viewmodel` items parsed out of `.elwind` sources. `NotepadViewModel`/`DocumentViewModel`
+    here are defined in **`main.rs`**, via the separate `#[elwindui::viewmodel]` **Rust proc-macro**
+    (`docs/elwindui_gui_framework_design.md` §7's blessed MVVM pattern) — a completely different code
+    path that never registers anything into this table. `table.resolve` therefore returns `None` for
+    both types, `collection_uses_rc_identity` returns `false` before it even reaches the `is_viewmodel`
+    check (it fails earlier, at `table.resolve(from, "NotepadViewModel")` for `vm` itself — see
+    `codegen.rs`'s `collection_uses_rc_identity`, the `let Some(owner_info) = table.resolve(...)`
+    line), and the codegen falls back to `replace_items`.
+  - This is **not specific to `notepad`, to `TabView`, or to WinUI3**: any `.elwind` `for` loop over a
+    `#[bindable] Rc<SomeProcMacroViewModel>` field's `Vec<...>` collection — i.e. the standard,
+    documented way to combine `#[elwindui::viewmodel]` with a `.elwind` view — hits this same
+    fallback, unconditionally, today. `elwindui-backend-appkit` likely masks the symptom rather than
+    avoiding the bug: its `TabView` doc comment explicitly says recreating tab chips on every resync
+    is safe there because chips are cheap and content is already handled as single-shared-pane
+    swapping — but that's a difference in how *tolerant* AppKit's widgets are of full rebuild, not
+    evidence the rebuild itself is being avoided.
+- **Not fixed this session** — this is a codegen fix (`elwindui-codegen`'s `SymbolTable`/
+  `collection_uses_rc_identity`), not a WinUI3 backend fix, and needs a decision on approach before
+  writing it (e.g.: teach the `.elwind` compiler to recognize `#[elwindui::viewmodel]` mod blocks in
+  sibling `.rs` files and register them into the same table with `is_viewmodel: true`; add an
+  explicit opt-in declaration the user writes in the `.elwind` file for externally-defined viewmodel
+  types; or something else) — flagged to the user rather than picked unilaterally, per this repo's
+  own guidance against inventing workarounds for a not-fully-root-caused problem. The three fixes
+  above (reentrancy panic, menu-bar sizing, `TabView` content sizing) are real, verified, and worth
+  keeping regardless of how this is eventually fixed, since `replace_items` rebuilding a tab's content
+  will need correctly-sized/non-panicking native controls no matter what.
+
 ## Verified evidence
 
-- `cargo check -p elwindui-backend-winui3`: succeeded after the composed Application change.
-- `cargo check -p notepad-inline`: succeeded.
-- `cargo check -p notepad -p graphics-demo`: succeeded.
-- `cargo build -p notepad-inline`: completed successfully (the command host reported timeout only
-  after Cargo had printed its successful finish line at 1m56s).
-- Runtime test: `target\debug\notepad-inline.exe` launched successfully after the composed
-  Application change. Process `notepad-inline` remained running, `Responding=True`, with native
-  window title `untitled.txt`. This proves XAML initialization, startup execution, and creation of
-  native controls such as the notepad TabView no longer fail with the earlier cross-thread/XAML
-  startup issue.
+- `cargo build -p elwindui-backend-winui3` / `-p notepad-inline -p notepad -p graphics-demo`: all
+  succeed cleanly with the C++/WinRT shim in place (`cc`-compiled `app_host.cpp` links into every
+  example binary with no unresolved symbols).
+- Runtime test, `notepad-inline.exe`, screenshotted (not just process-alive-checked) via a real
+  mouse click to bring the window to the foreground + `GetWindowRect`/`CopyFromScreen` (this
+  session's whole verification methodology — screenshot the actual window, don't trust `cargo
+  build` or "process didn't crash" alone):
+  - No crash, no stray stderr output, on repeated launches.
+  - **`TextArea` (`TextBox`) now renders with real Fluent chrome (dark-theme background, since this
+    machine is in dark mode — that is correct WinUI 3 behavior, not a bug) and is genuinely
+    functional**: clicked into it and typed via `SendKeys`, and the typed character appeared in the
+    control. `AnyView::measure`'s `DesiredSize` for it went from `{0, 0}` (broken) to `{64, 32}`
+    (real) once `Application.Resources` held `XamlControlsResources`. This is the fix landing for
+    real, not just a measured proxy for it.
+  - **`Button` (Save/Open) now renders correctly too** — screenshotted with real Fluent chrome
+    (visible border/background, "Save"/"Open" text). Root cause was entirely separate from
+    `Application.Resources` (see `AnyView::measure`/`arrange` fix below) — do not conflate the two if
+    revisiting this history.
 - `rust-analyzer diagnostics .` was attempted after installing the official rust-analyzer
-  component. It reports pre-existing broad codegen/proc-macro diagnostics (notably `E0282` in
-  examples and invalid escapes in `elwindui-codegen`), so it is not currently a clean whole-workspace
-  gate. Do not claim it passed without repairing those unrelated diagnostics.
+  component (in an earlier session revision, before the C++ shim work). It reports pre-existing
+  broad codegen/proc-macro diagnostics (notably `E0282` in examples and invalid escapes in
+  `elwindui-codegen`), so it is not currently a clean whole-workspace gate. Do not claim it passed
+  without repairing those unrelated diagnostics. Not re-run after the C++ shim change — do so before
+  trusting IDE-level cleanliness of the new `cpp/`/`build.rs` code.
 
 ## Remaining known work
 
+- **Top priority**: fix `elwindui-codegen`'s `for`-loop identity detection to recognize
+  `#[elwindui::viewmodel]`-defined Rust types (see "Root cause of 'text not reflected after Open'"
+  above) — until this lands, any `.elwind` `for` loop over a proc-macro viewmodel's `Vec<...>` field
+  silently uses the non-identity `replace_items` path, discarding and rebuilding every native control
+  in the loop on every command, which actively breaks WinUI3's persistent-native-control model (and
+  is wasted work on every other backend too). Needs a design decision (see that section) before
+  implementation, not a quick patch.
+- **Deferred from the same investigation as the `Width`/`Height`-reset fix above — not attempted
+  this session, each individually reasoned through and cross-referenced against source but not
+  implemented or tested:**
+  - `elwindui_core::ui::HorizontalLayout`/`VerticalLayout::measure_override`
+    (`crates/elwindui-core/src/ui.rs`) pass their own `available` straight through to every child's
+    `measure(available)` uninflated on the main axis, instead of measuring each child with
+    `f32::INFINITY` on the main axis (cross axis still constrained) the way a real stack panel does.
+    Not the direct cause of the `Button` bug above (`Button` already receives ample `available`
+    width by the time it's measured) but worth fixing for correctness — a content-sized
+    `HorizontalLayout` should size itself from its children's *natural* widths, not from whatever
+    finite `available` its own parent happened to hand it. This is `elwindui-core`, so it affects
+    every backend (including `elwindui-backend-appkit`, which currently works) — verify AppKit's own
+    behavior isn't inadvertently relying on the current pass-through semantics before changing this.
+  - `Grid`'s measure/arrange (`elwindui-core`) hands every child the same `available` regardless of
+    `Fixed`/`Auto`/`Star` row/column sizing, instead of the standard two-pass algorithm (resolve
+    `Fixed` tracks, measure `Auto` tracks at their natural size, distribute remaining space across
+    `Star` tracks by weight, then measure/arrange `Star`-track children against their *resolved*
+    track size). Also `elwindui-core`-wide, same cross-backend caveat as above.
+  - `TreeHostPanel::relayout_static` (`inner.rs`) detaches every native control from `Canvas.Children`
+    (`children.Clear()`) and rebuilds from scratch on *every* relayout pass, rather than diffing
+    against what's already attached. Not confirmed to cause any concrete bug (the `Width`/`Height`
+    fix above is what actually mattered for `Button`), but is a plausible source of
+    template-realization/`Loaded`-`Unloaded`/focus/`TextBox`-selection churn worth revisiting if
+    further WinUI3-specific control misbehavior shows up — reconciling by native-object identity
+    (skip unchanged, `RemoveAt`+`InsertAt` for moved, `Append`/`Remove` for added/removed) instead of
+    a full clear+rebuild would be the fix, likely alongside moving the clear/rebuild to *after*
+    `layout_root`'s measure pass rather than before it.
+  - A Windows-only regression test asserting an `InnerButton` recovers a nonzero natural width after
+    a zero-width `arrange()` followed by a real-sized `measure()` — guards specifically against
+    reintroducing the `Width`/`Height`-stickiness bug above. Use a genuinely distinguishing label
+    (e.g. `"a very long button label"` vs. a single character) rather than `"Save"`/`"Open"`, since
+    both of those already happened to be past the Fluent `Button`'s minimum width and wouldn't by
+    themselves prove content is contributing to the measured size.
 - `crates/elwindui-backend-winui3/src/inner.rs` still logs that SVG group blend modes that do not
   map directly to `CanvasBlend`, isolation, and filters need an offscreen effect graph. Luminance
   masks currently fall back to geometry clipping rather than alpha/luminance mask rasterization.
   These are real implementation gaps; do not call the backend complete while they remain.
-- Verify the final-window close path with an actual user close operation; the retention and Exit
-  code compiles, but that exact runtime path has not yet been observed.
-- Continue a requirement-by-requirement audit of the backend against `elwindui-core` traits and
-  the AppKit implementation. Search for semantic gaps, not only TODO comments.
+- Verify the final-window close path with an actual user close operation (a real mouse click on the
+  native close button); the retention/`Exit()` code compiles and `release_window` now resolves
+  `Application::Current()` fresh each time, but that exact runtime path has not yet been observed
+  since the C++/WinRT shim change.
+- Continue a requirement-by-requirement audit of the backend against `elwindui-core` traits and the
+  AppKit implementation. Search for semantic gaps, not only TODO comments — this session's
+  `TextArea`/`Button` findings came from actually screenshotting (and, for `TextArea`, typing into)
+  a running example, not from reading code or from `cargo build` succeeding.
 
 ## Do not regress
 
-- Do not replace `Application::Start` with `DispatcherQueueController::CreateOnCurrentThread` or
-  a Win32 `GetMessageW` loop.
+- Do not replace `Application::Start` (now called from `cpp/app_host.cpp`, not Rust) with
+  `DispatcherQueueController::CreateOnCurrentThread` or a Win32 `GetMessageW` loop.
 - Do not generate WinUI and Win2D into separate Rust type systems.
-- Do not use a C++ adapter before exhausting this direct `windows-bindgen` approach.
+- `cpp/app_host.cpp` is now real, load-bearing infrastructure (see above) — but do not grow it
+  beyond hosting `Application` itself (registering `XamlControlsResources`, receiving `OnLaunched`,
+  calling back into Rust). Window management, controls, layout, rendering, event dispatch, and all
+  other framework/business logic must stay in Rust, reached from C++ only through
+  `elwindui_winui3_run`'s one C ABI callback. Do not add a second C++ file or a general-purpose C++
+  interop layer without the same level of justification (an exhausted direct-Rust attempt) this one
+  required.
 - Do not make UI objects `Send`/`Sync`, and do not impose `Send` on user startup closures.
 - Do not automatically format the whole worktree: it has many unrelated, user-owned dirty files.

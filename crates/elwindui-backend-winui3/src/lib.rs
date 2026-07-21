@@ -160,27 +160,14 @@ impl elwindui_core::task::Dispatcher for WinUI3Dispatcher {
 /// any generated code runs.
 pub mod application {
     use super::{WinUI3Dispatcher, bindings};
-    use bindings::Microsoft::UI::Xaml::{
-        Application, IApplicationFactory, IApplicationOverrides, IApplicationOverrides_Impl,
-        LaunchActivatedEventArgs,
-    };
-    use bindings::Microsoft::UI::Xaml::Markup::{
-        IXamlMetadataProvider, IXamlMetadataProvider_Impl, IXamlType, XmlnsDefinition,
-    };
-    use bindings::Microsoft::UI::Xaml::XamlTypeInfo::XamlControlsXamlMetaDataProvider;
     use elwindui_core::task::LocalExecutor;
     use std::cell::RefCell;
-    use windows_core::{IInspectable, Interface, Type};
 
     thread_local! {
         // The generated callback wrapper requires its closure to be `Send`, whereas startup is
         // intentionally UI-thread-local. Keeping it in TLS means the callback captures nothing
         // and startup never acquires an incorrect `Send` bound.
         static STARTUP: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
-        // `Application::Start` does not retain the Rust wrapper. Hold it on the UI thread until
-        // the XAML event loop exits.
-        static XAML_APPLICATION: RefCell<Option<RetainedApplication>> =
-            const { RefCell::new(None) };
         static WINDOWS: RefCell<Vec<RetainedWindow>> = const { RefCell::new(Vec::new()) };
         static NEXT_WINDOW_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
@@ -190,71 +177,39 @@ pub mod application {
         _window: bindings::Microsoft::UI::Xaml::Window,
     }
 
-    // WinUI's application factory needs an aggregate that supplies both lifecycle overrides and
-    // XAML metadata. A plain `Application::new()` lacks those interfaces and terminates inside
-    // Microsoft.UI.Xaml before a window can be created.
-    #[windows_core::implement(IApplicationOverrides, IXamlMetadataProvider)]
-    struct XamlApplication {
-        provider: XamlControlsXamlMetaDataProvider,
+    // Hosting `Application` itself (composing it, registering `XamlControlsResources` into
+    // `Application.Resources`, receiving `OnLaunched`) lives in `cpp/app_host.cpp`, a small
+    // C++/WinRT shim built by `build.rs` via `cc` — not here. `windows-rs` has no support for
+    // WinRT "composable class" aggregation (subclassing a WinRT runtime class like `Application`);
+    // two from-scratch Rust attempts were tried (a `#[windows_core::implement]`-based one, and a
+    // from-scratch manual COM aggregation with correct outer->inner `QueryInterface` forwarding —
+    // see `git log` for `composed_application.rs`, since removed) and both left
+    // `Application.Resources` reproducibly broken (`Error 0x80004002 in
+    // ifactory->QueryInterface(Microsoft.UI.Xaml.Media.AcrylicBrush)`), ruling out COM identity as
+    // the cause. `ApplicationT<App>` — cppwinrt's own, real, widely-used composable-class support —
+    // does not hit this. Everything past `Application` construction/resources (window creation,
+    // controls, layout, rendering, event routing) stays in Rust; `cpp/app_host.cpp` calls back into
+    // it through nothing but the one C ABI function below. See microsoft/windows-rs#3404 and
+    // `cpp/app_host.cpp`'s own doc comment for the full investigation.
+    unsafe extern "C" {
+        fn elwindui_winui3_run(startup: extern "C" fn());
     }
 
-    impl IApplicationOverrides_Impl for XamlApplication_Impl {
-        fn OnLaunched(
-            &self,
-            _args: windows_core::Ref<'_, LaunchActivatedEventArgs>,
-        ) -> windows_core::Result<()> {
-            Ok(())
-        }
-    }
+    /// The C ABI entry point `cpp/app_host.cpp`'s `App::OnLaunched` calls, once, after
+    /// `Application.Resources` already has `XamlControlsResources` merged in and before any
+    /// `Window`/control is constructed. Installs the task executor (needs a live `DispatcherQueue`,
+    /// which only exists once `Microsoft.UI.Xaml.Application::Start` has actually started running —
+    /// same requirement the old pure-Rust callback had), then runs the user's `startup`.
+    extern "C" fn startup_trampoline() {
+        let queue = bindings::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread()
+            .expect("Microsoft.UI.Dispatching.DispatcherQueue::GetForCurrentThread");
+        elwindui_core::task::set_current(LocalExecutor::new(WinUI3Dispatcher { queue }));
 
-    impl IXamlMetadataProvider_Impl for XamlApplication_Impl {
-        fn GetXamlType(
-            &self,
-            r#type: &crate::Windows::UI::Xaml::Interop::TypeName,
-        ) -> windows_core::Result<IXamlType> {
-            self.provider.GetXamlType(r#type)
-        }
-
-        fn GetXamlTypeByFullName(
-            &self,
-            full_name: &windows_core::HSTRING,
-        ) -> windows_core::Result<IXamlType> {
-            self.provider.GetXamlTypeByFullName(full_name)
-        }
-
-        fn GetXmlnsDefinitions(&self) -> windows_core::Result<windows_core::Array<XmlnsDefinition>> {
-            self.provider.GetXmlnsDefinitions()
-        }
-    }
-
-    struct RetainedApplication {
-        application: Application,
-        _outer: IInspectable,
-        _inner: IInspectable,
-    }
-
-    fn compose_application() -> windows_core::Result<RetainedApplication> {
-        let outer: IInspectable = XamlApplication {
-            provider: XamlControlsXamlMetaDataProvider::new()?,
-        }
-        .into();
-        let factory = windows_core::factory::<Application, IApplicationFactory>()?;
-        unsafe {
-            let mut inner = core::ptr::null_mut();
-            let mut application = core::ptr::null_mut();
-            (Interface::vtable(&factory).CreateInstance)(
-                Interface::as_raw(&factory),
-                Interface::as_raw(&outer),
-                &mut inner,
-                &mut application,
-            )
-            .ok()?;
-            Ok(RetainedApplication {
-                application: Type::from_abi(application)?,
-                _outer: outer,
-                _inner: Type::from_abi(inner)?,
-            })
-        }
+        STARTUP.with(|slot| {
+            if let Some(startup) = slot.borrow_mut().take() {
+                startup();
+            }
+        });
     }
 
     pub(crate) fn retain_window(window: &bindings::Microsoft::UI::Xaml::Window) {
@@ -282,19 +237,16 @@ pub mod application {
             !windows.is_empty()
         });
         if !has_windows {
-            XAML_APPLICATION.with(|slot| {
-                if let Some(application) = slot.borrow().as_ref() {
-                    application
-                        .application
-                        .Exit()
-                        .expect("Microsoft.UI.Xaml.Application::Exit");
-                }
-            });
+            bindings::Microsoft::UI::Xaml::Application::Current()
+                .expect("Microsoft.UI.Xaml.Application::Current")
+                .Exit()
+                .expect("Microsoft.UI.Xaml.Application::Exit");
         }
     }
 
-    /// Runs `startup` from WinUI's application-initialization callback, then lets
-    /// `Microsoft.UI.Xaml.Application::Start` own the native message loop.
+    /// Runs `startup` from the C++/WinRT shim's `App::OnLaunched` (via `startup_trampoline`), then
+    /// lets `Microsoft.UI.Xaml.Application::Start` (called from `cpp/app_host.cpp`) own the native
+    /// message loop.
     pub fn run<F>(startup: F)
     where
         F: FnOnce() + 'static,
@@ -303,24 +255,6 @@ pub mod application {
             assert!(slot.borrow().is_none(), "elwindui::application::run may only be called once");
             *slot.borrow_mut() = Some(Box::new(startup));
         });
-
-        let callback = bindings::Microsoft::UI::Xaml::ApplicationInitializationCallback::new(
-            move |_| {
-                let application = compose_application()?;
-                XAML_APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
-
-                let queue = bindings::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread()?;
-                elwindui_core::task::set_current(LocalExecutor::new(WinUI3Dispatcher { queue }));
-
-                STARTUP.with(|slot| {
-                    if let Some(startup) = slot.borrow_mut().take() {
-                        startup();
-                    }
-                });
-                Ok(())
-            },
-        );
-        bindings::Microsoft::UI::Xaml::Application::Start(&callback)
-            .expect("Microsoft.UI.Xaml.Application::Start");
+        unsafe { elwindui_winui3_run(startup_trampoline) };
     }
 }

@@ -75,11 +75,15 @@ fn register_ui_event_callback(callback: Rc<dyn Fn()>) -> usize {
 }
 
 fn invoke_ui_event_callback(id: usize) {
-    UI_EVENT_CALLBACKS.with(|callbacks| {
-        if let Some(callback) = callbacks.borrow().get(&id) {
-            callback();
-        }
-    });
+    // Clone the `Rc` out and drop the borrow *before* calling it — the callback body (e.g. opening
+    // a file, which can synchronously rebuild native controls and register new callbacks) can
+    // legitimately re-enter `register_ui_event_callback`/this same map. Holding `borrow()` across
+    // the call would make that a `RefCell` double-borrow panic (`already borrowed`), not just a
+    // theoretical risk — reproduced via `notepad`'s File > Open.
+    let callback = UI_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback();
+    }
 }
 
 fn register_ui_index_event_callback(callback: Rc<dyn Fn(usize)>) -> usize {
@@ -89,9 +93,11 @@ fn register_ui_index_event_callback(callback: Rc<dyn Fn(usize)>) -> usize {
 }
 
 fn invoke_ui_index_event_callback(id: usize, index: usize) {
-    UI_INDEX_EVENT_CALLBACKS.with(|callbacks| {
-        if let Some(callback) = callbacks.borrow().get(&id) { callback(index); }
-    });
+    // See `invoke_ui_event_callback`'s doc comment — same re-entrancy hazard, same fix.
+    let callback = UI_INDEX_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(index);
+    }
 }
 
 fn register_ui_key_event_callback(callback: Rc<dyn Fn(RawKeyEvent)>) -> usize {
@@ -101,9 +107,11 @@ fn register_ui_key_event_callback(callback: Rc<dyn Fn(RawKeyEvent)>) -> usize {
 }
 
 fn invoke_ui_key_event_callback(id: usize, event: RawKeyEvent) {
-    UI_KEY_EVENT_CALLBACKS.with(|callbacks| {
-        if let Some(callback) = callbacks.borrow().get(&id) { callback(event); }
-    });
+    // See `invoke_ui_event_callback`'s doc comment — same re-entrancy hazard, same fix.
+    let callback = UI_KEY_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(event);
+    }
 }
 
 fn register_ui_text_event_callback(callback: Rc<dyn Fn(String)>) -> usize {
@@ -113,9 +121,11 @@ fn register_ui_text_event_callback(callback: Rc<dyn Fn(String)>) -> usize {
 }
 
 fn invoke_ui_text_event_callback(id: usize, text: String) {
-    UI_TEXT_EVENT_CALLBACKS.with(|callbacks| {
-        if let Some(callback) = callbacks.borrow().get(&id) { callback(text); }
-    });
+    // See `invoke_ui_event_callback`'s doc comment — same re-entrancy hazard, same fix.
+    let callback = UI_TEXT_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(text);
+    }
 }
 
 /// `VirtualKey.0`(a fixed `i32` code, the classic Win32 `VK_*` constants) -> `elwindui_core::input::
@@ -253,6 +263,28 @@ impl AnyView {
         available: elwindui_core::base::Size,
     ) -> elwindui_core::base::Size {
         let element = self.as_element();
+        // `arrange` (below) sets an explicit `Width`/`Height` on this same `FrameworkElement` so a
+        // plain `Canvas` (which has no native measure-driven arrange of its own) gives it concrete
+        // bounds. That explicit size persists across relayout passes and, once set, permanently
+        // overrides the element's own natural/content-driven measurement — a `FrameworkElement`
+        // with an explicit `Width` always reports that `Width` from `Measure()` regardless of
+        // content, clamped to (not derived from) `available`. Without resetting it back to
+        // `NaN` ("unset"/Auto) here first, the very first relayout pass — where `available` is
+        // `{0, 0}` before the window has a real size — sets `Width`/`Height` to 0 via `arrange`,
+        // and every subsequent `Measure` call then reports `DesiredSize` of 0 forever, regardless
+        // of how large `available` later becomes: a self-reinforcing feedback loop, not a one-time
+        // glitch. (Containers that arrange children from an external allocation independent of the
+        // child's own measured size — e.g. a `Grid` `Star` row — escape this, since their own
+        // `arrange` overwrites `Width`/`Height` with that external allocation every pass regardless
+        // of what `Measure` last reported; content-driven/Auto containers, whose `arrange` derives
+        // each child's final size *from* that same child's `DesiredSize`, do not.)
+        let _ = element.SetWidth(f64::NAN);
+        let _ = element.SetHeight(f64::NAN);
+        // `SetWidth`/`SetHeight` alone mark the element measure-dirty going forward, but don't
+        // retroactively guarantee *this* `Measure` call re-runs the native measure pass rather than
+        // short-circuiting on a still-cached `DesiredSize` from before the reset — invalidate
+        // explicitly so the call below is never skipped.
+        let _ = element.InvalidateMeasure();
         let _ = element.Measure(Size {
             Width: available.width as f32,
             Height: available.height as f32,
@@ -1478,6 +1510,17 @@ impl TreeHostPanel {
         self.canvas.cast().expect("Canvas must be a FrameworkElement")
     }
 
+    /// Forces an immediate, synchronous relayout pass against `canvas`'s *current*
+    /// `ActualWidth`/`ActualHeight` — for hosts whose size is pushed in explicitly (e.g. a
+    /// `TabViewItem`'s own content `Canvas`, sized by `native_ui::TabView`/`InnerTabView` rather
+    /// than by native layout) rather than reliably arriving through `canvas`'s own `SizeChanged`.
+    /// Confirmed necessary, not just defensive: `SetWidth`/`SetHeight` (even with
+    /// `InvalidateMeasure`/`InvalidateArrange`) on such a `Canvas` does not, in practice, make its
+    /// `SizeChanged` fire on any later frame either — logged and observed directly, not assumed.
+    pub(crate) fn force_relayout(&self) {
+        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree);
+    }
+
     /// Replaces this host's entire content, discarding whatever native children were there before
     /// — a full swap rather than a diff, matching `NativeTabView`'s wholesale content swap between
     /// tabs and `Window::set_content` only ever being called once (see `TreeHostView::set_tree`'s
@@ -1521,8 +1564,24 @@ impl TreeHostPanel {
     ) {
         use elwindui_core::base::Size as LSize;
 
-        let width = canvas.ActualWidth().unwrap_or(0.0) as f32;
-        let height = canvas.ActualHeight().unwrap_or(0.0) as f32;
+        // `ActualWidth`/`ActualHeight` only update after a real native layout pass runs on this
+        // element, which never happens for a panel used as `TabViewItem.Content` (see
+        // `force_relayout`'s doc comment). When a caller has explicitly set `Width`/`Height` (not
+        // `NaN`, the "unset" sentinel) ahead of calling this — e.g. `InnerTabView`'s resize
+        // callback — that value is authoritative and already reflects the real available size, so
+        // prefer it over the possibly-stale `ActualWidth`/`ActualHeight`.
+        let explicit_width = canvas.Width().unwrap_or(f64::NAN);
+        let explicit_height = canvas.Height().unwrap_or(f64::NAN);
+        let width = if explicit_width.is_finite() {
+            explicit_width as f32
+        } else {
+            canvas.ActualWidth().unwrap_or(0.0) as f32
+        };
+        let height = if explicit_height.is_finite() {
+            explicit_height as f32
+        } else {
+            canvas.ActualHeight().unwrap_or(0.0) as f32
+        };
         let available = LSize { width, height };
         if let Ok(surface) = draw_canvas.cast::<FrameworkElement>() {
             let _ = surface.SetWidth(width as f64);
@@ -1869,12 +1928,39 @@ impl InnerWindow {
     /// `TreeHostPanel`'s own "don't trust native auto-layout, position everything explicitly"
     /// approach.
     pub(crate) fn set_menu_bar(&self, menu_bar: &InnerMenuBar) {
+        const MENU_BAR_HEIGHT: f64 = 32.0;
         let outer = Canvas::new().expect("Canvas::new");
         if let Ok(children) = outer.Children() {
             let _ = children.Append(&menu_bar.xaml);
             let _ = children.Append(&self.content_host.as_element());
-            let _ = Canvas::SetTop(&self.content_host.as_element(), 32.0);
+            let _ = Canvas::SetTop(&self.content_host.as_element(), MENU_BAR_HEIGHT);
         }
+        // A plain `Canvas`'s children do not stretch to fill it the way `Window.Content` stretches
+        // to fill the window — unlike the no-menu-bar case (`new`, above), where `content_host` is
+        // set directly as `Window.Content` and so inherits that automatic fill, here it is merely
+        // one more `Canvas` child and never receives an explicit `Width`/`Height` otherwise.
+        // Without this, `content_host.ActualWidth`/`ActualHeight` stay `0` forever (nothing ever
+        // sets or resizes them), so `TreeHostPanel::relayout_static` never lays anything out and
+        // its whole subtree — `TabView`, every native control and drawn primitive in it — never
+        // gets a visible size, even though property updates (e.g. `TextArea::set_text`) keep
+        // reaching the native controls underneath correctly. Mirrors the same `SizeChanged`-driven
+        // bootstrap `TreeHostPanel::new` already uses for its own `Canvas` in the no-menu-bar case.
+        let content_host = self.content_host.as_element();
+        let resize = {
+            let outer = outer.clone();
+            let content_host = content_host.clone();
+            move || {
+                let width = outer.ActualWidth().unwrap_or(0.0);
+                let height = (outer.ActualHeight().unwrap_or(0.0) - MENU_BAR_HEIGHT).max(0.0);
+                let _ = content_host.SetWidth(width);
+                let _ = content_host.SetHeight(height);
+            }
+        };
+        resize();
+        let _ = outer.SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
+            resize();
+            Ok(())
+        }));
         let _ = self.xaml.SetContent(&outer);
     }
 
@@ -2100,6 +2186,14 @@ pub(crate) struct InnerTabView {
     on_select: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
     on_close: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
     on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    /// Every tab's own content `TreeHostPanel` (`insert_tab`'s `content_host`), so `TabView`'s own
+    /// `SizeChanged` (below) can keep every one of them sized *and freshly relaid-out* to match —
+    /// not just the currently selected tab's — since an unselected tab may never itself receive a
+    /// `SizeChanged` (its `ActualWidth`/`ActualHeight` may simply never be assigned at all while
+    /// not the visible content), unlike `TabView` itself, which reliably resizes with the window.
+    /// See `insert_tab`'s own doc comment for why this is needed at all, and
+    /// `TreeHostPanel::force_relayout`'s for why setting the size alone isn't enough either.
+    content_hosts: Rc<RefCell<Vec<TreeHostPanel>>>,
 }
 
 impl InnerTabView {
@@ -2118,7 +2212,31 @@ impl InnerTabView {
             on_select: Rc::new(RefCell::new(None)),
             on_close: Rc::new(RefCell::new(None)),
             on_new_tab: Rc::new(RefCell::new(None)),
+            content_hosts: Rc::new(RefCell::new(Vec::new())),
         };
+
+        {
+        let content_hosts = this.content_hosts.clone();
+        let xaml_for_resize = this.xaml.clone();
+        let callback_id = register_ui_event_callback(Rc::new(move || {
+            let width = xaml_for_resize.ActualWidth().unwrap_or(0.0);
+            let height = xaml_for_resize.ActualHeight().unwrap_or(0.0);
+            for content_host in content_hosts.borrow().iter() {
+                let element = content_host.as_element();
+                let _ = element.SetWidth(width);
+                let _ = element.SetHeight(height);
+                // Setting `Width`/`Height` alone (even with `InvalidateMeasure`/`InvalidateArrange`)
+                // does not make this `Canvas`'s own `SizeChanged` fire on any later frame either —
+                // confirmed by logging `ActualWidth`/`ActualHeight` immediately after, which stayed
+                // `0` — so relayout can't be left to arrive on its own; force it directly instead.
+                content_host.force_relayout();
+            }
+        }));
+        let _ = this.xaml.SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
+            invoke_ui_event_callback(callback_id);
+            Ok(())
+        }));
+        }
 
         {
         let on_select = this.on_select.clone();
@@ -2203,6 +2321,29 @@ impl InnerTabView {
         }
         let _ = item.SetIsClosable(closable);
         let _ = item.SetContent(&content_host.as_element());
+        // `content_host` is a plain `Canvas`, and nothing else here ever gives it an explicit
+        // `Width`/`Height` — unlike `Window.Content`, a `TabViewItem`'s own `ContentPresenter` does
+        // not stretch its `Content` to fill it (same issue, and same fix, as
+        // `InnerWindow::set_menu_bar`'s own doc comment describes for its menu-bar-wrapping outer
+        // `Canvas`). Without this, `content_host.ActualWidth`/`ActualHeight` stay `0` forever and
+        // this tab's whole widget tree never becomes visible, even though native property updates
+        // (e.g. `TextArea::set_text`) keep reaching the controls inside it correctly.
+        //
+        // Sizing from *this* `TabViewItem`'s own `SizeChanged` (tried first) does not work: an
+        // unselected tab's `ActualWidth`/`ActualHeight` apparently never gets assigned at all while
+        // it isn't the visible one, so its `SizeChanged` may simply never fire — including for the
+        // very first tab, before any selection change has ever happened. `TabView` itself, though,
+        // reliably resizes with the window (confirmed — its own tab strip renders correctly), so
+        // `content_hosts` tracks every tab's own `TreeHostPanel` and `new`'s `TabView.SizeChanged`
+        // handler resizes *and force-relays-out* all of them together (see
+        // `TreeHostPanel::force_relayout`'s doc comment), whether or not each one is currently
+        // selected.
+        self.content_hosts.borrow_mut().push(content_host.clone());
+        let width = self.xaml.ActualWidth().unwrap_or(0.0);
+        let height = self.xaml.ActualHeight().unwrap_or(0.0);
+        let _ = content_host.as_element().SetWidth(width);
+        let _ = content_host.as_element().SetHeight(height);
+        content_host.force_relayout();
         if let Ok(items) = self.xaml.TabItems() {
             let item: windows::core::IInspectable = item.into();
             let _ = items.InsertAt(index as u32, &item);
@@ -2214,6 +2355,10 @@ impl InnerTabView {
         if let Ok(items) = self.xaml.TabItems() {
             let _ = items.RemoveAt(index as u32);
         }
+        // Not removed from `content_hosts` — a closed tab's now-detached `Canvas` just keeps
+        // getting harmlessly resized in the background along with the rest; not worth the
+        // bookkeeping to prune it given `insert_tab`'s `index` and this list's (unordered, append-
+        // only) positions don't otherwise need to correspond.
     }
 
     pub(crate) fn set_tab_title(&self, index: usize, title: &str) {

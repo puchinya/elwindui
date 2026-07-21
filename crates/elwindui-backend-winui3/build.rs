@@ -72,7 +72,7 @@ fn main() {
         args.push("--in".to_owned());
         args.push(win2d.to_string_lossy().into_owned());
     }
-    if let Some(dir) = contract_dir {
+    if let Some(dir) = contract_dir.clone() {
         for entry in std::fs::read_dir(dir).expect("read Windows App SDK contracts").flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|extension| extension == "winmd") {
@@ -81,6 +81,17 @@ fn main() {
             }
         }
     }
+    // Captured before `--reference`/`--out`/`--filter` extend `args` further below — this is the
+    // exact same winmd input set `windows-bindgen` uses, reused as `cppwinrt.exe`'s own `-input`
+    // list in `build_cpp_app_host` so the two projections see identical metadata.
+    let winmd_inputs: Vec<String> = args
+        .iter()
+        .zip(args.iter().skip(1))
+        .filter(|(flag, _)| *flag == "--in")
+        .map(|(_, value)| value.clone())
+        .filter(|value| value != "default")
+        .collect();
+
     args.extend([
         "--reference".to_owned(),
         "crate,full,Windows.UI.Xaml.Interop".to_owned(),
@@ -98,6 +109,8 @@ fn main() {
         "Microsoft.UI.Dispatching.DispatcherQueueHandler".to_owned(),
         "Microsoft.UI.Xaml.Application".to_owned(),
         "Microsoft.UI.Xaml.ApplicationInitializationCallback".to_owned(),
+        "Microsoft.UI.Xaml.ResourceDictionary".to_owned(),
+        "Microsoft.UI.Xaml.Controls.XamlControlsResources".to_owned(),
         "Microsoft.Windows.ApplicationModel.Resources.IResourceManager".to_owned(),
         "Microsoft.UI.Input.InputKeyboardSource".to_owned(),
         "Microsoft.UI.Input.InputObject".to_owned(),
@@ -108,6 +121,8 @@ fn main() {
         "Microsoft.UI.Xaml.SizeChangedEventHandler".to_owned(),
         "Microsoft.UI.Xaml.TextAlignment".to_owned(),
         "Microsoft.UI.Xaml.TextWrapping".to_owned(),
+        "Microsoft.UI.Xaml.HorizontalAlignment".to_owned(),
+        "Microsoft.UI.Xaml.VerticalAlignment".to_owned(),
         "Microsoft.UI.Xaml.UIElement".to_owned(),
         "Microsoft.UI.Xaml.Window".to_owned(),
         "Microsoft.UI.Xaml.WindowEventArgs".to_owned(),
@@ -186,6 +201,8 @@ fn main() {
     std::fs::write(&interop_path, interop.replacen("#![allow(", "#[allow(", 1))
         .expect("write generated XAML interop bindings");
     copy_win2d_runtime(&out_dir);
+    generate_resources_pri(&out_dir);
+    build_cpp_app_host(&out_dir, &winmd_inputs);
     if !warnings.is_empty() || !interop_warnings.is_empty() {
         println!("cargo:warning=WinUI binding generation omitted {} unsupported metadata member(s)", warnings.len());
     }
@@ -277,6 +294,186 @@ fn copy_win2d_runtime(out_dir: &str) {
     std::fs::copy(&source, &target)
         .expect("copy Microsoft.WindowsAppRuntime.Bootstrap.dll beside application binary");
     println!("cargo:rerun-if-changed={}", source.display());
+}
+
+/// An unpackaged Windows App SDK process cannot resolve *any* `ms-appx://` resource — including a
+/// framework package's own bundled resources, such as WinUI 3's default control theme
+/// (`ms-appx:///Microsoft.UI.Xaml/Themes/themeresources.xaml`, consulted by
+/// `install_default_control_resources` in `src/inner.rs`) — unless a `resources.pri` sits next to
+/// its own executable to bootstrap MRT resource-context resolution. This generates a minimal one
+/// (indexing none of this crate's own resources — it exists purely to make that resolution
+/// possible at all) and copies it beside the built exe, the same way `copy_win2d_runtime` places
+/// `Microsoft.Graphics.Canvas.dll` there. Requires `makepri.exe` from the Windows SDK, i.e.
+/// `tools/setup-vs-env.ps1` sourced first — same precondition the whole crate already has for MSVC.
+#[cfg(target_os = "windows")]
+fn generate_resources_pri(out_dir: &str) {
+    let makepri = find_makepri()
+        .expect("makepri.exe was not found; source tools/setup-vs-env.ps1 first");
+    let profile_dir = std::path::Path::new(out_dir).ancestors().nth(3).expect("target profile directory");
+    let pri_root = std::path::Path::new(out_dir).join("resources_pri");
+    std::fs::create_dir_all(&pri_root).expect("create resources.pri project root");
+
+    let config = pri_root.join("priconfig.xml");
+    let status = std::process::Command::new(&makepri)
+        .arg("createconfig")
+        .arg("/cf").arg(&config)
+        .arg("/dq").arg("en-US")
+        .arg("/pv").arg("10.0.0")
+        .arg("/o")
+        .status()
+        .expect("run makepri.exe createconfig");
+    assert!(status.success(), "makepri.exe createconfig failed");
+
+    let generated = pri_root.join("resources.pri");
+    let status = std::process::Command::new(&makepri)
+        .arg("new")
+        .arg("/pr").arg(&pri_root)
+        .arg("/cf").arg(&config)
+        .arg("/of").arg(&generated)
+        .arg("/o")
+        .status()
+        .expect("run makepri.exe new");
+    assert!(status.success(), "makepri.exe new failed");
+
+    std::fs::copy(&generated, profile_dir.join("resources.pri"))
+        .expect("copy resources.pri beside application binary");
+}
+
+/// Generates a C++/WinRT projection (via `cppwinrt.exe`) for just enough of the WinUI 3 surface to
+/// host `Application`, and compiles `cpp/app_host.cpp` against it — see that file's own doc comment
+/// (and `src/composed_application.rs`'s) for why this exists at all (microsoft/windows-rs#3404).
+#[cfg(target_os = "windows")]
+fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
+    let cppwinrt = find_sdk_tool("cppwinrt.exe")
+        .expect("cppwinrt.exe was not found; source tools/setup-vs-env.ps1 first");
+    let projection_dir = std::path::Path::new(out_dir).join("cppwinrt_include");
+
+    let mut args: Vec<String> = vec!["-input".to_owned(), "sdk+".to_owned()];
+    for winmd in winmd_inputs {
+        args.push("-input".to_owned());
+        args.push(winmd.clone());
+    }
+    // `Microsoft.UI.Xaml.winmd`'s own `IWebView2` interface references WebView2's winmd even
+    // though this shim never touches WebView2 — cppwinrt validates the whole input database
+    // up front, so the reference has to resolve even when `-exclude` drops the type from output.
+    if let Some(webview2) = find_package_lib_winmd("microsoft.web.webview2", "Microsoft.Web.WebView2.Core.winmd") {
+        args.push("-input".to_owned());
+        args.push(webview2.to_string_lossy().into_owned());
+    }
+    for namespace in [
+        "Microsoft.UI",
+        "Windows.Foundation",
+        "Windows.Foundation.Collections",
+        "Windows.UI",
+        "Windows.System",
+    ] {
+        args.push("-include".to_owned());
+        args.push(namespace.to_owned());
+    }
+    // Excludes types this shim never touches whose own metadata references external winmd files
+    // this build doesn't provide (e.g. WebView2's own winmd, only needed by real WebView2 users).
+    for excluded in ["Microsoft.UI.Xaml.Controls.WebView2", "Microsoft.UI.Xaml.Controls.IWebView2"] {
+        args.push("-exclude".to_owned());
+        args.push(excluded.to_owned());
+    }
+    args.push("-output".to_owned());
+    args.push(projection_dir.to_string_lossy().into_owned());
+    args.push("-overwrite".to_owned());
+
+    let status = std::process::Command::new(&cppwinrt).args(&args).status().expect("run cppwinrt.exe");
+    assert!(status.success(), "cppwinrt.exe failed generating the C++/WinRT projection");
+
+    cc::Build::new()
+        .cpp(true)
+        .std("c++20")
+        .file("cpp/app_host.cpp")
+        .include(&projection_dir)
+        .flag_if_supported("/await:strict")
+        .flag_if_supported("/EHsc")
+        .flag_if_supported("/utf-8")
+        .compile("elwindui_winui3_app_host");
+
+    println!("cargo:rustc-link-lib=WindowsApp");
+    println!("cargo:rerun-if-changed=cpp/app_host.cpp");
+}
+
+/// Looks for `<nuget_packages>/<package>/<version>/lib/<filename>` (the WebView2 package's own
+/// layout — a flat `lib/` with no per-TFM subfolder, unlike `find_package_winmd`'s `lib/<target>/`).
+#[cfg(target_os = "windows")]
+fn find_package_lib_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("NUGET_PACKAGES")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages")))?
+        .join(package);
+    let mut candidates = Vec::new();
+    for version in std::fs::read_dir(root).ok()?.flatten() {
+        let winmd = version.path().join("lib").join(filename);
+        if winmd.is_file() {
+            candidates.push(winmd);
+        }
+    }
+    candidates.sort();
+    candidates.pop()
+}
+
+#[cfg(target_os = "windows")]
+fn find_sdk_tool(name: &str) -> Option<std::path::PathBuf> {
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86") => "x86",
+        Ok("aarch64") => "arm64",
+        _ => "x64",
+    };
+    if let (Ok(sdk_dir), Ok(sdk_version)) =
+        (std::env::var("WindowsSdkDir"), std::env::var("WindowsSDKVersion"))
+    {
+        let candidate = std::path::Path::new(&sdk_dir)
+            .join("bin")
+            .join(sdk_version.trim_end_matches('\\'))
+            .join(arch)
+            .join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let bin_root = std::path::Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin");
+    let mut candidates: Vec<_> = std::fs::read_dir(bin_root)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join(arch).join(name))
+        .filter(|path| path.is_file())
+        .collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+#[cfg(target_os = "windows")]
+fn find_makepri() -> Option<std::path::PathBuf> {
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86") => "x86",
+        Ok("aarch64") => "arm64",
+        _ => "x64",
+    };
+    if let (Ok(sdk_dir), Ok(sdk_version)) =
+        (std::env::var("WindowsSdkDir"), std::env::var("WindowsSDKVersion"))
+    {
+        let candidate = std::path::Path::new(&sdk_dir)
+            .join("bin")
+            .join(sdk_version.trim_end_matches('\\'))
+            .join(arch)
+            .join("makepri.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let bin_root = std::path::Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin");
+    let mut candidates: Vec<_> = std::fs::read_dir(bin_root)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join(arch).join("makepri.exe"))
+        .filter(|path| path.is_file())
+        .collect();
+    candidates.sort();
+    candidates.pop()
 }
 
 #[cfg(target_os = "windows")]

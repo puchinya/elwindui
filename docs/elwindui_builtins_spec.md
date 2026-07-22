@@ -549,11 +549,17 @@ Grid {
 `row`/`column`は`#[attached]`フィールド(§3)——`Grid`自身のインスタンスデータにはならず、任意の
 子要素が`Grid::row: <expr>`/`Grid::column: <expr>`で自分自身に設定するスキーマ宣言である。設定
 された値は各子要素自身の`UIElementBase.grid_cell`(`elwindui_core::layout::GridCell`)に格納され、
-`Grid::measure_override`/`arrange_override`(`elwindui_core::layout`の`grid_natural_size`/
-`grid_arrange`——`stack_natural_size`/`stack_arrange`と同じ、ウィジェット非依存の純粋関数)がそこから
-読み取って行/列トラックのサイズと各子の配置矩形を計算する。`Fixed`トラックは指定値、`Auto`トラックは
-そのトラックに属する子の自然サイズの最大値、`Star`トラックは`Fixed`/`Auto`分を除いた残り領域を
-重み比率で配分する。
+`Grid::measure_override`/`arrange_override`(`elwindui_core::layout`の`grid_measure_pass1_available`/
+`grid_resolve_track_sizes`/`grid_pass2_available`/`grid_arrange`——`stack_natural_size`/
+`stack_arrange`と同じ、ウィジェット非依存の純粋関数)がそこから読み取って行/列トラックのサイズと
+各子の配置矩形を計算する。`measure_override`は本物のWPF/WinUI3 `Grid`と同じ2パス方式:
+1パス目は各子要素を「自分のトラックだけで分かる制約」で測る(`Fixed`トラックはその指定値、`Auto`/
+`Star`トラックは無制約 = 無限大——`HorizontalLayout`/`VerticalLayout`の主軸無制約化と同じ発想)。
+その結果から`Fixed`は指定値、`Auto`はそのトラックに属する子の自然サイズの最大値、`Star`は
+`Fixed`/`Auto`分を除いた残り領域を重み比率で配分して行/列サイズを確定する(`available`が
+その軸で無制約の場合、`Star`も`Auto`同様に子の自然サイズへフォールバックする)。2パス目は
+確定したセルサイズで全子要素を再度測り直し、`measured_size()`が実際に配置されるサイズを
+反映するようにする(折り返しテキストなど、サイズに依存する子要素の内容が正しくなるため)。
 
 行/列スパン(WPFの`Grid.RowSpan`/`ColumnSpan`)は現時点では未実装——1セルにつき1子要素のみ
 対応する。同じ`#[attached]`の仕組みで`row_span`/`column_span`フィールドを追加すれば拡張できる。

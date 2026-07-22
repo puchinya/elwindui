@@ -124,6 +124,7 @@ include!(concat!(env!("OUT_DIR"), "/rounded_panel.rs"));
 include!(concat!(env!("OUT_DIR"), "/document_view.rs"));
 include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
 
+#[elwindui::main]
 fn main() {
     elwindui::i18n::declare!();
 
@@ -135,8 +136,6 @@ fn main() {
     vm.new_tab();
     let window = NotepadWindow::new(vm);
     window.show();
-
-    elwindui::application::run();
 }
 
 #[cfg(test)]

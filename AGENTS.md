@@ -81,3 +81,7 @@ screencapture -x -l"$id" /tmp/window.png
 Note: simulating clicks via `osascript`/System Events requires Accessibility permission, which is a separate grant
 from Screen Recording and may not be available — if clicking programmatically fails with error -25211, ask the user
 to perform the click manually and then capture the window screenshot afterward.
+
+## Windows
+
+When working on Windows, follow the additional instructions in [`docs/agents/windows.md`](docs/agents/windows.md).

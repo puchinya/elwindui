@@ -498,7 +498,8 @@ impl TabView {
                 if let Some(content) = entry.content.borrow_mut().take() {
                     content_host.set_tree(content);
                 }
-                displayed.insert(target_index.min(displayed.len()), *key);
+                let insertion_index = target_index.min(displayed.len());
+                displayed.insert(insertion_index, *key);
             }
         }
         drop(displayed);

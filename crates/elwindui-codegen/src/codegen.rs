@@ -48,6 +48,15 @@ pub struct TypeInfo {
     /// `routed_handlers()` into the `NativeControl`/virtual-builtin `UIElementBase` wrapping it,
     /// rather than starting that wrapper with a fresh, empty one.
     pub routed_fields: HashSet<String>,
+    /// Names of `#[bindable]` fields (`ast::Attr::Bindable`'s own doc comment,
+    /// `docs/elwindui_gui_framework_design.md` §7.2) — a component field injecting a viewmodel by
+    /// syntax marker rather than type resolution. `collection_uses_rc_identity` consults this on a
+    /// `for`-loop body's child element types to decide `replace_rc_items` vs `replace_items`
+    /// without ever needing to resolve the loop's *element* type (only the child component type,
+    /// e.g. `DocumentView`, which is always in scope — unlike the viewmodel type it injects, which
+    /// may not be, exactly the same visibility gap `#[bindable]` itself exists to route around).
+    /// Empty for a `viewmodel` (never itself has `#[bindable]` fields — only components inject).
+    pub bindable_fields: HashSet<String>,
     /// `field_name -> name of the component that *directly* declares it` (the component whose own
     /// `ComponentDef::fields` literally lists it, not merely inherits it) — `resolve_effective_fields`
     /// flattens the whole `inherits` chain into one list and loses this, so it's tracked separately
@@ -355,6 +364,14 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         })
                         .map(|f| f.name.clone())
                         .collect();
+                    let bindable_fields = effective_fields
+                        .iter()
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && f.attrs.iter().any(|a| matches!(a, Attr::Bindable))
+                        })
+                        .map(|f| f.name.clone())
+                        .collect();
                     let onetime_fields = effective_fields
                         .iter()
                         .filter(|f| {
@@ -385,6 +402,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             param_fields,
                             two_way_fields,
                             routed_fields,
+                            bindable_fields,
                             onetime_fields,
                             // A "virtual builtin" is exactly: an `#[embedded]` shape declaration
                             // from `builtins.elwind`, with no `view` of its own, that isn't native
@@ -481,6 +499,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             param_fields,
                             two_way_fields,
                             routed_fields,
+                            bindable_fields: HashSet::new(),
                             declaring_types: HashMap::new(),
                             onetime_fields: HashSet::new(),
                             is_virtual_builtin: false,
@@ -4366,7 +4385,34 @@ fn dynamic_collection_item_trait(
 /// iterable values are still valid dynamic sources, but refresh by rebuilding just their slot.
 /// Keeping this conservative is intentional: an unresolved expression must never be treated as
 /// identity-stable merely because it happens to yield `Rc` values at runtime.
+///
+/// Two independent ways to prove that: the collection's own declared type textually says
+/// `Vec<Rc<T>>` (checked here directly), or the loop body hands the item to some child element's
+/// `#[bindable]` field (`for_body_binds_item_to_a_bindable_field`, below) — the latter deliberately
+/// never resolves the *item*'s own type (e.g. `DocumentViewModel`) at all, only the *receiving
+/// component*'s (e.g. `DocumentView`), for the same reason `#[bindable]` itself exists: a
+/// `#[elwindui::viewmodel]` type is commonly declared in a plain `.rs` file (or a sibling
+/// `#[elwindui::component]` proc-macro invocation) that the `for` loop's own file/module never has
+/// a `use` for and was never going to need one, since it only ever references the item through the
+/// loop variable — so a resolve-by-name check against *that* type is fragile in a way a check
+/// against the always-in-scope receiving component type isn't (see
+/// `docs/agents/winui3_current_state.md`'s "Root cause of 'text not reflected after Open'" for the
+/// concrete bug this replaced).
 fn collection_uses_rc_identity(
+    collection: &ViewExpr,
+    body: &[ChildEntry],
+    binding: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> bool {
+    if collection_type_is_vec_rc(collection, ctx, from, table) {
+        return true;
+    }
+    for_body_binds_item_to_a_bindable_field(body, binding, from, table)
+}
+
+fn collection_type_is_vec_rc(
     collection: &ViewExpr,
     ctx: &ViewCtx,
     from: &Module,
@@ -4391,25 +4437,48 @@ fn collection_uses_rc_identity(
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>();
-    if compact.starts_with("Vec<Rc<")
+    compact.starts_with("Vec<Rc<")
         || compact.starts_with("Vec<std::rc::Rc<")
         || compact.starts_with("Vec<rc::Rc<")
-    {
-        return true;
-    }
+}
 
-    // `#[viewmodel]` deliberately exposes `Vec<Document>` at its declaration boundary while
-    // storing each observable viewmodel item as `Rc<Document>` internally. Recognize that
-    // collection shape too, so the view has the same identity semantics as explicit `Vec<Rc<T>>`.
-    let Some(inner) = compact
-        .strip_prefix("Vec<")
-        .and_then(|value| value.strip_suffix('>'))
-    else {
-        return false;
-    };
-    table
-        .resolve(from, inner)
-        .is_some_and(|info| info.is_viewmodel)
+/// Whether `binding` (the `for`-loop's own bare loop variable) is passed, anywhere in `body`
+/// (recursing into nested elements and `if`/`match` branches, but not into a nested `for`'s own
+/// body — a shadowing or unrelated inner loop variable can't carry the outer one), as the exact
+/// value of some attribute whose receiving element's resolved type declares that field
+/// `#[bindable]`. See `collection_uses_rc_identity`'s doc comment for why this is checked against
+/// the *receiving* component's type rather than the item's own.
+fn for_body_binds_item_to_a_bindable_field(
+    body: &[ChildEntry],
+    binding: &str,
+    from: &Module,
+    table: &SymbolTable,
+) -> bool {
+    body.iter().any(|entry| match entry {
+        ChildEntry::Literal(element) => {
+            let bound_here = table
+                .resolve(from, &element.type_path)
+                .is_some_and(|info| {
+                    element.attributes.iter().any(|(name, value)| {
+                        matches!(value, ViewExpr::Path(path) if path.len() == 1 && path[0] == binding)
+                            && info.bindable_fields.contains(name)
+                    })
+                });
+            bound_here || for_body_binds_item_to_a_bindable_field(&element.children, binding, from, table)
+        }
+        ChildEntry::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            for_body_binds_item_to_a_bindable_field(then_branch, binding, from, table)
+                || for_body_binds_item_to_a_bindable_field(else_branch, binding, from, table)
+        }
+        ChildEntry::Match { arms, .. } => arms
+            .iter()
+            .any(|arm| for_body_binds_item_to_a_bindable_field(&arm.body, binding, from, table)),
+        ChildEntry::For { .. } | ChildEntry::Ref(_) => false,
+    })
 }
 
 fn dynamic_child_binding(
@@ -5093,7 +5162,7 @@ fn plan_dynamic_entry(
                 dynamic: None,
             };
             let item_trait = dynamic_collection_item_trait(&parent, from, table);
-            let rc_identity = collection_uses_rc_identity(collection, ctx, from, table);
+            let rc_identity = collection_uses_rc_identity(collection, body, binding, ctx, from, table);
             let renderer =
                 emit_for_renderer(binding, body, ctx, from, table, &item_trait, rc_identity);
             let node_binding = format_ident!("__node_{}", out.len());
@@ -8634,6 +8703,151 @@ view NotepadWindow {
         assert!(window_str.contains("source . subscribe_property_changed"));
         assert!(window_str.contains("item . set_header"));
         assert!(!window_str.contains("set_items_source"));
+    }
+
+    /// Unlike `viewmodel_module_from_rust` (used by other tests), registers the viewmodel module at
+    /// `path: vec![mod_name]` — matching what `attr_frontend::viewmodel_defs_from_rs_file` (the real
+    /// `compile_dir_with_extra_viewmodels` production path) actually does, not the shared test
+    /// helper's simplified `path: []`. Needed by `for_loop_identity_survives_when_element_type_isnt_
+    /// used_by_the_for_loops_own_file` below to reproduce the real bug: with `path: []` (same as
+    /// every `.elwind`-parsed module), the element type would be trivially visible to *any* module
+    /// with no `use` needed at all, masking the exact cross-module scoping gap this test exists to
+    /// catch.
+    fn viewmodel_module_from_rust_at_its_own_module_path(src: &str) -> Module {
+        let item_mod: syn::ItemMod = syn::parse_str(src).expect("mod should parse as valid Rust");
+        let mod_name = item_mod.ident.to_string();
+        let def = crate::attr_frontend::viewmodel_def_from_item_mod(&item_mod)
+            .expect("should build a ViewModelDef");
+        Module {
+            path: vec![mod_name],
+            uses: Vec::new(),
+            items: vec![Item::ViewModel(def)],
+            ..Default::default()
+        }
+    }
+
+    /// Regression test for the real `examples/notepad` bug this session root-caused: a `for` loop
+    /// (`notepad_window.elwind`) over a `#[elwindui::viewmodel]`-declared `Vec<DocumentViewModel>`
+    /// (no `Rc<..>` spelled in the field type — the declaration-boundary shape `#[elwindui::
+    /// viewmodel]` is documented to use) generated `replace_items` (full rebuild every refresh,
+    /// discarding native control state) instead of `replace_rc_items`, because the *element* type
+    /// (`Document`, standing in for `DocumentViewModel`) was never `use`d by the `for` loop's own
+    /// file — only `DocumentView` (the child component actually receiving it) was. Fixed by basing
+    /// the identity decision on `DocumentView.doc`'s `#[bindable]` marker (see `collection_uses_rc_
+    /// identity`'s doc comment) instead of resolving the element type by name.
+    #[test]
+    fn for_loop_identity_survives_when_element_type_isnt_used_by_the_for_loops_own_file() {
+        let notepad_viewmodel_module = viewmodel_module_from_rust_at_its_own_module_path(
+            r#"
+            mod notepad_view_model {
+                struct NotepadViewModel {
+                    #[observable(default = Vec::new())]
+                    documents: Vec<Document>,
+
+                    #[observable(default = 0usize)]
+                    active_tab: usize,
+                }
+
+                impl NotepadViewModel {
+                    fn new_tab(&self) {
+                        documents.push(Document::new());
+                        active_tab = documents.len() - 1;
+                    }
+
+                    fn select_tab(&self, index: usize) {
+                        active_tab = index;
+                    }
+                }
+            }
+        "#,
+        );
+        let document_module = viewmodel_module_from_rust_at_its_own_module_path(
+            r#"
+            mod document_view_model {
+                struct Document {
+                    #[observable(default = String::new())]
+                    content: String,
+
+                    #[observable(default = "untitled.txt")]
+                    file_name: String,
+                }
+            }
+        "#,
+        );
+        // Mirrors `document_view.elwind`: `#[bindable]` (not `#[param] #[inject]`), and `use`s
+        // `Document` since it names the type directly in its own field declaration.
+        let document_view_src = r#"
+use crate::document_view_model::Document;
+
+component DocumentView {
+    #[bindable]
+    doc: std::rc::Rc<Document>,
+
+    content: String = bind!(doc.content, TwoWay),
+}
+
+view DocumentView {
+    VerticalLayout {
+        TextArea { text: content }
+    }
+}
+"#;
+        // Mirrors `notepad_window.elwind`: `use`s `NotepadViewModel` and `DocumentView`, but never
+        // `Document` — `doc` is only ever referenced through the `for` loop's own binding.
+        let window_src = r#"
+use crate::notepad_view_model::NotepadViewModel;
+use crate::DocumentView;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+}
+
+view NotepadWindow {
+    Window {
+        title: t!("notepad-window-title")
+
+        TabView {
+            for doc in vm.documents {
+                TabViewItem {
+                    header: doc.file_name
+                    DocumentView { doc: doc }
+                }
+            }
+            selected_index: vm.active_tab
+            on_select: |index| vm.select_tab(index)
+            on_new_tab: vm.new_tab
+        }
+    }
+}
+"#;
+        let document_view_module =
+            parse_module(document_view_src).expect("document view should parse");
+        let window_module = parse_module(window_src).expect("window should parse");
+        let modules = [
+            notepad_viewmodel_module.clone(),
+            document_module.clone(),
+            document_view_module.clone(),
+            window_module.clone(),
+        ];
+        let all_modules: Vec<_> = modules
+            .iter()
+            .cloned()
+            .chain(crate::builtin_modules())
+            .collect();
+        let table = build_symbol_table(&all_modules);
+
+        assert_eq!(crate::validate::validate(&all_modules), Ok(()));
+
+        let window_code = generate_module(&window_module, &table);
+        assert_valid_rust("for_loop_identity_window", &window_code);
+        let window_str = window_code.to_string();
+        assert!(
+            window_str.contains("replace_rc_items"),
+            "window_str: {window_str}"
+        );
+        assert!(!window_str.contains("replace_items"));
     }
 
     #[test]

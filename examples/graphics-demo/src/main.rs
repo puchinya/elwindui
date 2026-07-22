@@ -167,7 +167,13 @@ impl GraphicsDemoCanvas {
                 width: (card.width - 16.0).max(0.0),
                 height: (card.height - LABEL_HEIGHT - 18.0).max(0.0),
             };
-            (entry.draw)(context, demo_rect);
+            // Without this, a demo whose own fit mode legitimately overflows its `demo_rect`
+            // (`Cover`, e.g. "Partial (Crop)") bleeds sideways into neighboring cards — since
+            // `render()` draws every card into the same one `RenderContext`/`RenderGroup`, nothing
+            // stops one card's content from painting over the *next* card's background/content.
+            context.with_clip(Clip::Rect(card), |ctx| {
+                (entry.draw)(ctx, demo_rect);
+            });
         }
     }
     #[inherent]
@@ -815,6 +821,7 @@ struct GraphicsDemoWindow {
     },
 }
 
+#[elwindui::main]
 fn main() {
     let vm = GraphicsDemoViewModel::new();
     let window = GraphicsDemoWindow::new(
@@ -828,5 +835,4 @@ fn main() {
         GraphicsDemoCanvas::new(GraphicsDemoCategory::Svg),
     );
     window.show();
-    elwindui::application::run();
 }

@@ -25,6 +25,7 @@ mod counter_vm {
 }
 
 fn main() {
+    elwindui::init().expect("initialize elwindui");
     let c = Counter::new();
     assert_eq!(c.count(), 0);
     assert_eq!(c.doubled(), 0);

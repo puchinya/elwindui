@@ -8,8 +8,14 @@ elwindui-core = { path = "../elwindui-core" }
 elwindui-macros = { path = "../elwindui-macros" }
 elwindui-i18n = { path = "../elwindui-i18n" }
 elwindui-svg = { path = "../elwindui-svg", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
 elwindui-backend-winui3 = { path = "../elwindui-backend-winui3", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 elwindui-backend-appkit = { path = "../elwindui-backend-appkit", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 elwindui-backend-gtk4 = { path = "../elwindui-backend-gtk4", optional = true }
 
 [features]

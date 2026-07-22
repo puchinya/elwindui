@@ -20,15 +20,55 @@ pub use elwindui_svg as svg;
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the
 /// viewmodel half (付録O.2). `view!` is not a real macro (never invoked/expanded — see
 /// `elwindui_macros::component`'s own doc comment); its tokens are read as `.elwind`-DSL text.
-pub use elwindui_macros::{class, component, viewmodel};
+pub use elwindui_macros::{class, component, main, viewmodel};
 
-/// See the `backend-appkit`/`backend-winui3` re-export below — `elwindui-backend-gtk4` is still an
-/// empty stub (no `builtins`/`platform`/`application` of its own yet), so there is no
-/// `backend-gtk4` arm here.
-#[cfg(feature = "backend-appkit")]
+/// Initializes the native UI runtime selected for the current operating system.
+///
+/// Call this once at the start of `main`, before creating a window. On Windows it activates the
+/// Windows App SDK dynamic dependency required by WinUI 3 and Win2D; the other native backends
+/// currently need no process-wide bootstrap.
+#[derive(Debug, Clone)]
+pub struct InitError(String);
+
+impl std::fmt::Display for InitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InitError {}
+
+#[cfg(all(target_os = "windows", feature = "backend-winui3"))]
+pub fn init() -> Result<(), InitError> {
+    elwindui_backend_winui3::init().map_err(|error| InitError(error.to_string()))
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "backend-appkit"),
+    all(target_os = "linux", feature = "backend-gtk4"),
+))]
+pub fn init() -> Result<(), InitError> {
+    #[cfg(all(target_os = "macos", feature = "backend-appkit"))]
+    return elwindui_backend_appkit::init().map_err(|error| InitError(error.to_string()));
+    #[cfg(all(target_os = "linux", feature = "backend-gtk4"))]
+    return elwindui_backend_gtk4::init().map_err(|error| InitError(error.to_string()));
+}
+
+#[cfg(all(target_os = "macos", feature = "backend-appkit"))]
 pub use elwindui_backend_appkit as backend;
-#[cfg(feature = "backend-winui3")]
+#[cfg(all(target_os = "windows", feature = "backend-winui3"))]
 pub use elwindui_backend_winui3 as backend;
+#[cfg(all(target_os = "linux", feature = "backend-gtk4"))]
+pub use elwindui_backend_gtk4 as backend;
+
+#[cfg(all(target_os = "macos", not(feature = "backend-appkit")))]
+compile_error!("elwindui on macOS requires the `backend-appkit` feature");
+#[cfg(all(target_os = "windows", not(feature = "backend-winui3")))]
+compile_error!("elwindui on Windows requires the `backend-winui3` feature");
+#[cfg(all(target_os = "linux", not(feature = "backend-gtk4")))]
+compile_error!("elwindui on Linux requires the `backend-gtk4` feature");
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+compile_error!("elwindui supports only macOS, Windows, and Linux");
 
 /// `elwindui_core::ui`(共通トレイト/仮想 builtin)と、有効化中バックエンドの
 /// ネイティブ builtin 実装(`Window`/`Button`等)を1つの名前空間にまとめたもの。
@@ -36,37 +76,43 @@ pub use elwindui_backend_winui3 as backend;
 /// 内容をクレートルート直下に再エクスポートしている(各クレートの`src/lib.rs`参照)ため、
 /// ここではそのクレートルートを丸ごとglobする。
 pub mod ui {
-    #[cfg(feature = "backend-appkit")]
+    #[cfg(all(target_os = "macos", feature = "backend-appkit"))]
     pub use elwindui_backend_appkit::*;
-    #[cfg(feature = "backend-winui3")]
+    #[cfg(all(target_os = "windows", feature = "backend-winui3"))]
     pub use elwindui_backend_winui3::*;
+    #[cfg(all(target_os = "linux", feature = "backend-gtk4"))]
+    pub use elwindui_backend_gtk4::*;
     pub use elwindui_core::ui::*;
 }
 
 /// `platform::clipboard`/`platform::file_dialog` etc. See docs/elwindui_spec.md 付録T.
-#[cfg(feature = "backend-appkit")]
+#[cfg(all(target_os = "macos", feature = "backend-appkit"))]
 pub mod platform {
     pub use elwindui_backend_appkit::platform::file_dialog;
 }
 
 /// See the `backend-appkit` `platform` module above. `elwindui-backend-winui3` is best-effort/
 /// unverified (see its crate-level doc comment) — not built or run on a real Windows machine.
-#[cfg(feature = "backend-winui3")]
+#[cfg(all(target_os = "windows", feature = "backend-winui3"))]
 pub mod platform {
     pub use elwindui_backend_winui3::platform::file_dialog;
 }
 
-/// `application::run()` enters the platform's event loop — call once, after showing every
-/// top-level window. See docs/elwindui_spec.md 付録P.5, `elwindui-backend-appkit`'s `application`
-/// module.
-#[cfg(feature = "backend-appkit")]
+/// `application::run(startup)` initializes the native GUI loop and invokes `startup` on its UI
+/// thread. `init()` and `run()` must be called from that same OS thread.
+#[cfg(all(target_os = "macos", feature = "backend-appkit"))]
 pub mod application {
     pub use elwindui_backend_appkit::application::run;
 }
 
 /// See the `backend-appkit` `application` module above. `elwindui-backend-winui3` is best-effort/
 /// unverified (see its crate-level doc comment) — not built or run on a real Windows machine.
-#[cfg(feature = "backend-winui3")]
+#[cfg(all(target_os = "windows", feature = "backend-winui3"))]
 pub mod application {
     pub use elwindui_backend_winui3::application::run;
+}
+
+#[cfg(all(target_os = "linux", feature = "backend-gtk4"))]
+pub mod application {
+    pub use elwindui_backend_gtk4::application::run;
 }

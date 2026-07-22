@@ -420,6 +420,30 @@ but leaving a layer open into the *next* `Draw` call would be worse than a `Resu
 clear error here). Verified: `graphics-demo`'s Compositing tab (all three demos — Clip, Transform,
 Opacity) and SVG tab (Contain/Cover/Affine Transform/Opacity, including the ~164k-primitive pattern
 expansion) both render correctly with no crash.
+
+### `graphics-demo`'s Images tab "Normal" card visually bled — an application-level missing-clip bug, not a backend bug, fixed the same session
+
+The "Normal" card (leftmost, Images tab) appeared to have no visible card background and an oversized
+character image overflowing its own boundary. Initially suspected as a `win2d_fitted_image_rect`
+`Contain`-fit math bug or a "first card"/"first primitive" pattern matching earlier session bugs.
+Logging `dest`/`bitmap_size`/`source`/`fit`/`placed` for every `DrawImage` call in the tab (temporary,
+removed after use) showed "Normal"'s own computed `placed` rect was already correct — a properly
+centered 106x106 square. The actual culprit was the next card, "Partial (Crop)": its `Cover` fit
+legitimately computes `placed` as a 351x351 square (`scale = max(106/560, 351/560)`), and centering
+math places it at `x=39.5` — far enough left to overlap "Normal"'s card region entirely.
+
+**Root cause**: `GraphicsDemoCanvas::render()` (`examples/graphics-demo/src/main.rs`) draws every
+demo card into one shared `RenderContext`/`RenderGroup` with no per-card clip, so nothing stops a
+demo whose fit mode legitimately overflows its own `demo_rect` (`Cover`, by design, for a
+"Partial (Crop)"-style demo) from painting over an earlier-drawn neighboring card. Not a
+`win2d_fitted_image_rect`/backend rendering bug — the fit math for both cards was already correct.
+
+**Fix**: wrap each card's `(entry.draw)(context, demo_rect)` call in
+`context.with_clip(Clip::Rect(card), |ctx| { (entry.draw)(ctx, demo_rect); })`. Verified via
+screenshot: "Normal" now shows its own small centered image with visible card background;
+"Partial (Crop)" still shows its intentionally-cropped oversized content, now contained within its
+own card.
+
 - **Deferred from the same investigation as the `Width`/`Height`-reset fix above — not attempted
   this session, each individually reasoned through and cross-referenced against source but not
   implemented or tested:**

@@ -337,6 +337,16 @@ fn generate_resources_pri(out_dir: &str) {
 
     std::fs::copy(&generated, profile_dir.join("resources.pri"))
         .expect("copy resources.pri beside application binary");
+    // `cargo test`/`cargo bench` binaries run from `target/<profile>/deps/`, not
+    // `target/<profile>/` itself — MRT resource-context resolution looks beside the actual running
+    // executable, so a Windows-only test that touches any native control (anything going through
+    // `install_default_control_resources`) needs its own copy here too, or it fails with
+    // `Cannot locate resource from 'ms-appx:///Microsoft.UI.Xaml/Themes/themeresources.xaml'`
+    // despite the example binaries (which do live directly in `target/<profile>/`) working fine.
+    let deps_dir = profile_dir.join("deps");
+    std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
+    std::fs::copy(&generated, deps_dir.join("resources.pri"))
+        .expect("copy resources.pri beside test binaries");
 }
 
 /// Generates a C++/WinRT projection (via `cppwinrt.exe`) for just enough of the WinUI 3 surface to

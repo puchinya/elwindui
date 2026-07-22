@@ -2352,6 +2352,93 @@ impl InnerButton {
     }
 }
 
+/// Windows-only regression test for the `AnyView::measure`/`arrange` `Width`/`Height`-stickiness
+/// bug — see that method's own doc comment and `docs/agents/winui3_current_state.md`'s "`AnyView::
+/// measure` resets `Width`/`Height` to `NaN`..." section for the full root cause. Needs a real,
+/// fully-hosted `Application` (via `crate::application::run`/the C++/WinRT shim) — not just COM/
+/// Bootstrap `init()` — because `Button`'s default style/template only resolves once `Application.
+/// Resources` actually has `XamlControlsResources` merged in; without that, `Button::new()` would
+/// either fail outright or always measure at 0 regardless of this bug, defeating the test.
+#[cfg(test)]
+mod button_measure_regression_tests {
+    use super::*;
+    use elwindui_core::base::{Rect, Size as CoreSize};
+
+    #[test]
+    fn button_recovers_a_nonzero_natural_width_after_a_zero_size_arrange() {
+        // `RoutedEventHandler::new`'s generated wrapper requires `Send`, whereas `AnyView`/`Rc` are
+        // deliberately UI-thread-local (same constraint `application::run`'s own `STARTUP`/
+        // `WINDOWS` TLS work around — see that module's doc comment). Keeping both the view and the
+        // recorded width in TLS lets the `Loaded` handler below capture nothing and stay genuinely
+        // zero-argument, rather than moving a non-`Send` `AnyView` into the callback directly.
+        thread_local! {
+            static VIEW: RefCell<Option<AnyView>> = const { RefCell::new(None) };
+            static WIDTH: RefCell<Option<f32>> = const { RefCell::new(None) };
+        }
+
+        crate::init().expect("elwindui_backend_winui3::init");
+
+        crate::application::run(move || {
+            // A bare, unparented `FrameworkElement` never resolves real text metrics (no
+            // `XamlRoot`) — attach it to a real `Window.Content` first, exactly like
+            // `reconcile_native_children` does in the real render path, so `Measure()` here
+            // exercises the same conditions a real relayout pass does.
+            let window = XamlWindow::new().expect("Window::new");
+            let canvas = Canvas::new().expect("Canvas::new");
+            let _ = window.SetContent(&canvas);
+
+            let button = InnerButton::new();
+            // A genuinely distinguishing label, not "Save"/"Open" — both already happen to exceed
+            // the Fluent `Button`'s minimum width, which wouldn't by itself prove content is
+            // contributing to the measured size (see this test's own history in
+            // docs/agents/winui3_current_state.md).
+            button.set_text("a very long button label");
+            let view = button.handle();
+            let element = view.as_element();
+            let _ = canvas
+                .Children()
+                .expect("Canvas.Children")
+                .Append(&element);
+            VIEW.with(|slot| *slot.borrow_mut() = Some(view));
+
+            // A `FrameworkElement` isn't genuinely ready to report real content-driven
+            // `DesiredSize`s until its `Loaded` event fires (template application/text layout are
+            // only guaranteed complete by then) — `Activate()` alone doesn't guarantee this
+            // synchronously, and this backend's real relayout passes only ever happen once a
+            // window is already live for the same reason. Do the actual arrange/measure sequence
+            // from inside `Loaded` so this test reflects genuine already-connected-window
+            // conditions instead of an arbitrary earlier point.
+            let loaded = RoutedEventHandler::new(move |_, _| {
+                VIEW.with(|slot| {
+                    if let Some(mut view) = slot.borrow_mut().take() {
+                        // Reproduces the exact poisoning condition this regression guards
+                        // against: the very first relayout pass runs before the window has a real
+                        // size, so `arrange` sets `Width`/`Height` to 0 — and, without the fix,
+                        // every subsequent `measure()` would report 0 forever after regardless of
+                        // how much `available` space or content follows.
+                        view.arrange(Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
+                        let desired = view.measure(CoreSize { width: 500.0, height: 200.0 });
+                        WIDTH.with(|slot| *slot.borrow_mut() = Some(desired.width));
+                    }
+                });
+
+                bindings::Microsoft::UI::Xaml::Application::Current()?.Exit()?;
+                Ok(())
+            });
+            let _ = element.Loaded(&loaded);
+            let _ = window.Activate();
+        });
+
+        let width = WIDTH
+            .with(|slot| *slot.borrow())
+            .expect("the Loaded handler should have run and recorded a width");
+        assert!(
+            width > 10.0,
+            "Button must recover a nonzero natural width after a zero-size arrange, got {width}"
+        );
+    }
+}
+
 /// See docs/elwindui_builtins_spec.md 付録Y. `Microsoft.UI.Xaml.Controls.TabView` is a real native
 /// tabbed-document control (unlike AppKit, which has none — `elwindui_backend_appkit::inner`'s
 /// `TabStripImpl`/`TabChipImpl` hand-roll one from `Button`s), so this wraps it directly instead of

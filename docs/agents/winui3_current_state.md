@@ -480,12 +480,27 @@ own card.
     theoretical one), root cause of the `graphics-demo` first-selected-tab `CanvasControl` never
     drawing. Fixed via `reconcile_native_children` (identity-keyed diff, `Append`/`RemoveAt` only for
     genuine adds/removes) plus never touching `draw_canvas` outside `TreeHostPanel::new` at all.
-  - A Windows-only regression test asserting an `InnerButton` recovers a nonzero natural width after
-    a zero-width `arrange()` followed by a real-sized `measure()` — guards specifically against
-    reintroducing the `Width`/`Height`-stickiness bug above. Use a genuinely distinguishing label
-    (e.g. `"a very long button label"` vs. a single character) rather than `"Save"`/`"Open"`, since
-    both of those already happened to be past the Fluent `Button`'s minimum width and wouldn't by
-    themselves prove content is contributing to the measured size.
+  - ~~A Windows-only regression test asserting an `InnerButton` recovers a nonzero natural width
+    after a zero-width `arrange()` followed by a real-sized `measure()`~~ — **done**:
+    `inner::button_measure_regression_tests::
+    button_recovers_a_nonzero_natural_width_after_a_zero_size_arrange` in `inner.rs`, guarding
+    specifically against reintroducing the `Width`/`Height`-stickiness bug above. Uses
+    `"a very long button label"`, not `"Save"`/`"Open"`, since both of those already happened to be
+    past the Fluent `Button`'s minimum width and wouldn't by themselves prove content is
+    contributing to the measured size. Needs a real, fully-hosted `Application`
+    (`crate::application::run`, through the C++/WinRT shim) — bare COM/Bootstrap `init()` isn't
+    enough, since `Button`'s default style/template only resolves once `Application.Resources` has
+    `XamlControlsResources` merged in. Also needs the button attached to a live `Window.Content`
+    with the actual arrange+measure assertion done from inside the button's own `Loaded` event —
+    empirically, both an unparented element and one measured immediately after `Activate()` (before
+    `Loaded`) reported width `0` even at baseline (before any zero-arrange step), unrelated to the
+    bug under test. `RoutedEventHandler::new`'s generated wrapper requires `Send`, so the `AnyView`
+    and recorded result are threaded through `thread_local!`s rather than captured directly,
+    mirroring `application::run`'s own `STARTUP`/`WINDOWS` TLS pattern. Confirmed the test fails
+    when the `NaN`-reset is removed. Also required a `build.rs` fix: `cargo test` binaries run from
+    `target/<profile>/deps/`, not `target/<profile>/` itself, so `resources.pri` (needed for any
+    unpackaged process to resolve `ms-appx://` resources at all, including WinUI's own default
+    control theme) now gets copied into both locations, not just the former.
 - `crates/elwindui-backend-winui3/src/inner.rs` still logs that SVG group blend modes that do not
   map directly to `CanvasBlend`, isolation, and filters need an offscreen effect graph. Luminance
   masks currently fall back to geometry clipping rather than alpha/luminance mask rasterization.

@@ -438,15 +438,12 @@ expansion) both render correctly with no crash.
     `Fixed` tracks, measure `Auto` tracks at their natural size, distribute remaining space across
     `Star` tracks by weight, then measure/arrange `Star`-track children against their *resolved*
     track size). Also `elwindui-core`-wide, same cross-backend caveat as above.
-  - `TreeHostPanel::relayout_static` (`inner.rs`) detaches every native control from `Canvas.Children`
-    (`children.Clear()`) and rebuilds from scratch on *every* relayout pass, rather than diffing
-    against what's already attached. Not confirmed to cause any concrete bug (the `Width`/`Height`
-    fix above is what actually mattered for `Button`), but is a plausible source of
-    template-realization/`Loaded`-`Unloaded`/focus/`TextBox`-selection churn worth revisiting if
-    further WinUI3-specific control misbehavior shows up — reconciling by native-object identity
-    (skip unchanged, `RemoveAt`+`InsertAt` for moved, `Append`/`Remove` for added/removed) instead of
-    a full clear+rebuild would be the fix, likely alongside moving the clear/rebuild to *after*
-    `layout_root`'s measure pass rather than before it.
+  - ~~`TreeHostPanel::relayout_static` detaches every native control from `Canvas.Children` and
+    rebuilds from scratch on every relayout pass~~ — **done**, see "never touch visual-tree structure
+    from relayout_static" above: this turned out to be an actual, confirmed bug (not just a
+    theoretical one), root cause of the `graphics-demo` first-selected-tab `CanvasControl` never
+    drawing. Fixed via `reconcile_native_children` (identity-keyed diff, `Append`/`RemoveAt` only for
+    genuine adds/removes) plus never touching `draw_canvas` outside `TreeHostPanel::new` at all.
   - A Windows-only regression test asserting an `InnerButton` recovers a nonzero natural width after
     a zero-width `arrange()` followed by a real-sized `measure()` — guards specifically against
     reintroducing the `Width`/`Height`-stickiness bug above. Use a genuinely distinguishing label

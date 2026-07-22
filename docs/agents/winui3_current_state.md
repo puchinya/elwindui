@@ -490,10 +490,12 @@ own card.
   map directly to `CanvasBlend`, isolation, and filters need an offscreen effect graph. Luminance
   masks currently fall back to geometry clipping rather than alpha/luminance mask rasterization.
   These are real implementation gaps; do not call the backend complete while they remain.
-- Verify the final-window close path with an actual user close operation (a real mouse click on the
-  native close button); the retention/`Exit()` code compiles and `release_window` now resolves
-  `Application::Current()` fresh each time, but that exact runtime path has not yet been observed
-  since the C++/WinRT shim change.
+- ~~Verify the final-window close path with an actual user close operation~~ — **done**: a real
+  mouse click (via `SetCursorPos`+`mouse_event`, no Accessibility permission needed on Windows) on
+  the native title-bar close button was verified against both `graphics-demo` (single-window) and
+  `notepad` (menu bar + `TabView` chrome) — both processes exit cleanly with no crash dialog and no
+  stderr output, confirming `Window::Closed` → `release_window` →
+  `Application::Current().Exit()` fires correctly end-to-end with the C++/WinRT shim in place.
 - Continue a requirement-by-requirement audit of the backend against `elwindui-core` traits and the
   AppKit implementation. Search for semantic gaps, not only TODO comments — this session's
   `TextArea`/`Button` findings came from actually screenshotting (and, for `TextArea`, typing into)

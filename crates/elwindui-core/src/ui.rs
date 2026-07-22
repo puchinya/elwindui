@@ -38,8 +38,9 @@ use crate::base::{CornerRadius, Point, Rect, Size};
 use crate::input::{FocusState, RoutedEventArgs};
 use crate::layout::{
     GridCell, GridLength, HorizontalAlignment, Orientation, VerticalAlignment, Visibility,
-    align_within, apply_size_constraints, grid_arrange, grid_natural_size, grow_by_margin,
-    shrink_by_margin, shrink_rect_by_margin, stack_arrange, stack_natural_size,
+    align_within, apply_size_constraints, grid_arrange, grid_measure_pass1_available,
+    grid_pass2_available, grid_resolve_track_sizes, grow_by_margin, shrink_by_margin,
+    shrink_rect_by_margin, stack_arrange, stack_natural_size,
 };
 #[cfg(test)]
 use crate::graphics::RenderCommand;
@@ -2076,19 +2077,38 @@ impl Grid {
     fn measure_override(&self, available: Size) -> Size {
         let children = self.children().to_vec();
         let cells: Vec<GridCell> = children.iter().map(grid_cell_of).collect();
-        let child_sizes: Vec<Size> = children
+        let rows = self.rows.borrow();
+        let columns = self.columns.borrow();
+
+        // Pass 1: each child's own natural size, constrained only by its own track where that
+        // track already has a known size (`Fixed`) — see `grid_measure_pass1_available`'s own doc
+        // comment.
+        let pass1_available = grid_measure_pass1_available(&rows, &columns, &cells);
+        for (child, avail) in children.iter().zip(&pass1_available) {
+            child.measure(*avail);
+        }
+        let pass1_sizes: Vec<Size> = children
             .iter()
-            .map(|c| {
-                c.measure(available);
-                c.measured_size().unwrap_or_default()
-            })
+            .map(|c| c.measured_size().unwrap_or_default())
             .collect();
-        grid_natural_size(
-            &self.rows.borrow(),
-            &self.columns.borrow(),
-            &cells,
-            &child_sizes,
-        )
+
+        let (row_sizes, col_sizes) =
+            grid_resolve_track_sizes(&rows, &columns, &cells, &pass1_sizes, available);
+
+        // Pass 2: re-measure every child against its now-fully-resolved cell size, so
+        // `measured_size()` afterward — read back by `arrange_override`'s own track resolution
+        // below, and by whatever measured this `Grid` for its own desired size returned here —
+        // reflects the size each child will actually occupy, not pass 1's Auto/Star-unconstrained
+        // probe size.
+        let pass2_available = grid_pass2_available(&rows, &columns, &cells, &row_sizes, &col_sizes);
+        for (child, avail) in children.iter().zip(&pass2_available) {
+            child.measure(*avail);
+        }
+
+        Size {
+            width: col_sizes.iter().sum(),
+            height: row_sizes.iter().sum(),
+        }
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
@@ -2976,16 +2996,15 @@ mod tests {
         assert!(paints.is_empty());
     }
 
-    /// Records the `available` it was actually measured with, so
-    /// `vertical_layout_measures_children_with_unconstrained_main_axis`/
-    /// `horizontal_layout_measures_children_with_unconstrained_main_axis` below can assert on it
-    /// directly instead of inferring it indirectly through a returned size. Deliberately not built
-    /// on `FakeHandle`/`FakeNativeControl` — `FakeHandle` derives `PartialEq` and is compared
-    /// structurally by several other tests, so adding a recording field there would need every one
-    /// of those to account for it too.
+    /// Records every `available` it's actually measured with (in call order), so tests below can
+    /// assert on it directly instead of inferring it indirectly through a returned size — including
+    /// `Grid`'s two-pass measurement, where the same child is measured twice and both calls matter.
+    /// Deliberately not built on `FakeHandle`/`FakeNativeControl` — `FakeHandle` derives `PartialEq`
+    /// and is compared structurally by several other tests, so adding a recording field there would
+    /// need every one of those to account for it too.
     #[elwindui_macros::class(struct_only = crate::ui::NativeControlExt, inherits = crate::ui::UIElement)]
     struct MeasureProbe {
-        last_available: Cell<Size>,
+        calls: RefCell<Vec<Size>>,
         reported: Size,
     }
 
@@ -2993,15 +3012,21 @@ mod tests {
     impl MeasureProbe {
         #[overrides]
         fn measure_override(&self, available: Size) -> Size {
-            self.last_available.set(available);
+            self.calls.borrow_mut().push(available);
             self.reported
         }
         fn construct(reported: Size) -> Self {
             Self {
                 base: UIElement::construct(),
-                last_available: Cell::new(Size::default()),
+                calls: RefCell::new(Vec::new()),
                 reported,
             }
+        }
+    }
+
+    impl MeasureProbe {
+        fn last_available(&self) -> Size {
+            *self.calls.borrow().last().expect("measure_override was never called")
         }
     }
 
@@ -3016,7 +3041,7 @@ mod tests {
         let root = VerticalLayout::new();
         root.children().add(child);
         root.measure(size(200.0, 50.0));
-        let last = probe.last_available.get();
+        let last = probe.last_available();
         assert_eq!(
             last.width, 200.0,
             "cross axis (width) must stay constrained to the container's own available width"
@@ -3035,7 +3060,7 @@ mod tests {
         let root = HorizontalLayout::new();
         root.children().add(child);
         root.measure(size(50.0, 200.0));
-        let last = probe.last_available.get();
+        let last = probe.last_available();
         assert_eq!(
             last.height, 200.0,
             "cross axis (height) must stay constrained to the container's own available height"
@@ -3044,6 +3069,70 @@ mod tests {
             last.width.is_infinite() && last.width > 0.0,
             "main axis (width) must be unconstrained, got {:?}",
             last.width
+        );
+    }
+
+    #[test]
+    fn grid_measures_children_in_two_passes_per_track_kind() {
+        // Single Auto row; Fixed(50)/Auto/Star(1.0) columns, one child per column.
+        let root = Grid::new();
+        root.set_rows(vec![GridLength::Auto]);
+        root.set_columns(vec![
+            GridLength::Fixed(50.0),
+            GridLength::Auto,
+            GridLength::Star(1.0),
+        ]);
+
+        let fixed_child = MeasureProbe::new(size(10.0, 10.0));
+        fixed_child.set_attached("Grid", "column", 0i32);
+        let auto_child = MeasureProbe::new(size(30.0, 10.0));
+        auto_child.set_attached("Grid", "column", 1i32);
+        let star_child = MeasureProbe::new(size(20.0, 10.0));
+        star_child.set_attached("Grid", "column", 2i32);
+
+        root.children().add(fixed_child.clone());
+        root.children().add(auto_child.clone());
+        root.children().add(star_child.clone());
+
+        root.measure(size(300.0, 100.0));
+
+        // Pass 1: `Fixed` measures at its own literal size; `Auto`/`Star` measure unconstrained
+        // (on both axes -- the row is `Auto` too) so each child's own natural size is exactly what
+        // comes back to resolve its track.
+        assert_eq!(
+            fixed_child.calls.borrow()[0],
+            Size {
+                width: 50.0,
+                height: f32::INFINITY
+            }
+        );
+        assert!(auto_child.calls.borrow()[0].width.is_infinite());
+        assert!(star_child.calls.borrow()[0].width.is_infinite());
+
+        // Pass 2: every child is re-measured at its now-fully-resolved cell size — `Fixed` column
+        // stays 50, `Auto` column becomes its own natural width (30), `Star` column gets whatever's
+        // left (300 - 50 - 30 = 220). The `Auto` row resolves to 10 (every child's own natural
+        // height) and every child is re-measured at that height too.
+        assert_eq!(
+            fixed_child.last_available(),
+            Size {
+                width: 50.0,
+                height: 10.0
+            }
+        );
+        assert_eq!(
+            auto_child.last_available(),
+            Size {
+                width: 30.0,
+                height: 10.0
+            }
+        );
+        assert_eq!(
+            star_child.last_available(),
+            Size {
+                width: 220.0,
+                height: 10.0
+            }
         );
     }
 

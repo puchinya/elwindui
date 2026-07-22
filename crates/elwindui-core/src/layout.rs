@@ -241,20 +241,20 @@ pub struct GridCell {
 
 /// Clamps a possibly out-of-range attached-property index into `0..track_count` — an empty
 /// `row_definitions`/`column_definitions` is treated as a single implicit `Auto` track (see
-/// `grid_natural_size`/`grid_arrange`'s own `.max(1)` on `track_count`), so this never divides by
-/// (or indexes into) zero.
+/// `grid_resolve_track_sizes`/`grid_arrange`'s own `.max(1)` on `track_count`), so this never
+/// divides by (or indexes into) zero.
 fn clamp_track_index(index: i32, track_count: usize) -> usize {
     let last = track_count.max(1) - 1;
     (index.max(0) as usize).min(last)
 }
 
 /// Per-axis track sizes with `Star` tracks treated exactly like `Auto` (their own children's max
-/// natural size) — correct for `grid_natural_size` (no known final size to distribute "remaining
-/// space" from yet, so a `Star` track can only report what its content actually needs, the same
-/// way WPF's own `Grid.MeasureOverride` treats `*` columns when measured against infinite
-/// available space) but *not* for `grid_arrange`, which needs `Star` tracks to start at `0.0` so
-/// leftover space can be computed and redistributed — see `fixed_and_auto_track_sizes` for that
-/// variant.
+/// natural size) — used by `grid_resolve_track_sizes` when `available` is unconstrained on that
+/// axis (no known final size to distribute "remaining space" from yet, so a `Star` track can only
+/// report what its content actually needs, the same way WPF's own `Grid.MeasureOverride` treats `*`
+/// columns when measured against infinite available space) but *not* for `grid_arrange`, which
+/// needs `Star` tracks to start at `0.0` so leftover space can be computed and redistributed — see
+/// `fixed_and_auto_track_sizes` for that variant.
 fn natural_track_sizes(defs: &[GridLength], indices: &[usize], dims: &[f32]) -> Vec<f32> {
     let n = defs.len().max(1);
     let mut sizes = vec![0.0_f32; n];
@@ -331,16 +331,43 @@ fn prefix_offsets(sizes: &[f32]) -> Vec<f32> {
     offsets
 }
 
-/// The natural (intrinsic) size a `Grid` wants, independent of any `available` space — sum of
-/// every column's/row's own natural size (`Star` tracks behave like `Auto` here, see
-/// `natural_track_sizes`). `cells`/`child_sizes` are parallel, one entry per child (`Grid`'s own
-/// `measure_override`/`arrange_override` build both from its `children`).
-pub fn grid_natural_size(
+/// `Grid::measure_override`'s first-pass measurement constraint for each child: a `Fixed` track
+/// measures its own child at the fixed size; an `Auto`/`Star` track measures unconstrained so the
+/// child's own natural size is exactly what comes back to resolve the track (mirrors
+/// `HorizontalLayout`/`VerticalLayout`'s own main-axis-unconstrained fix — see that fix's own doc
+/// comment). One entry per `cells`/child, same order — `cells` is `Grid`'s per-child
+/// `Grid::row`/`Grid::column` attached-property values (`elwindui_core::ui::grid_cell_of`).
+pub fn grid_measure_pass1_available(
     rows: &[GridLength],
     columns: &[GridLength],
     cells: &[GridCell],
-    child_sizes: &[Size],
-) -> Size {
+) -> Vec<Size> {
+    let axis_available = |def: Option<&GridLength>| match def {
+        Some(GridLength::Fixed(v)) => *v,
+        _ => f32::INFINITY,
+    };
+    cells
+        .iter()
+        .map(|c| Size {
+            width: axis_available(columns.get(clamp_track_index(c.column, columns.len()))),
+            height: axis_available(rows.get(clamp_track_index(c.row, rows.len()))),
+        })
+        .collect()
+}
+
+/// Resolves every row's/column's actual size for `Grid::measure_override`, given `pass1_sizes` (the
+/// children's own sizes when measured per `grid_measure_pass1_available`): `Fixed` as given, `Auto`
+/// from `pass1_sizes`' natural sizes, `Star` from whatever `available` has left over on that axis —
+/// or, if `available` is unconstrained (infinite) on that axis, `Star` falls back to natural sizing
+/// like `Auto`, since there's no concrete final size yet to distribute (`natural_track_sizes`
+/// already implements exactly that fallback). Returns `(row_sizes, col_sizes)`.
+pub fn grid_resolve_track_sizes(
+    rows: &[GridLength],
+    columns: &[GridLength],
+    cells: &[GridCell],
+    pass1_sizes: &[Size],
+    available: Size,
+) -> (Vec<f32>, Vec<f32>) {
     let row_indices: Vec<usize> = cells
         .iter()
         .map(|c| clamp_track_index(c.row, rows.len()))
@@ -349,15 +376,49 @@ pub fn grid_natural_size(
         .iter()
         .map(|c| clamp_track_index(c.column, columns.len()))
         .collect();
-    let heights: Vec<f32> = child_sizes.iter().map(|s| s.height).collect();
-    let widths: Vec<f32> = child_sizes.iter().map(|s| s.width).collect();
+    let heights: Vec<f32> = pass1_sizes.iter().map(|s| s.height).collect();
+    let widths: Vec<f32> = pass1_sizes.iter().map(|s| s.width).collect();
 
-    let row_sizes = natural_track_sizes(rows, &row_indices, &heights);
-    let col_sizes = natural_track_sizes(columns, &col_indices, &widths);
-    Size {
-        width: col_sizes.iter().sum(),
-        height: row_sizes.iter().sum(),
-    }
+    let row_sizes = if available.height.is_finite() {
+        let mut sizes = fixed_and_auto_track_sizes(rows, &row_indices, &heights);
+        distribute_star(rows, &mut sizes, available.height);
+        sizes
+    } else {
+        natural_track_sizes(rows, &row_indices, &heights)
+    };
+    let col_sizes = if available.width.is_finite() {
+        let mut sizes = fixed_and_auto_track_sizes(columns, &col_indices, &widths);
+        distribute_star(columns, &mut sizes, available.width);
+        sizes
+    } else {
+        natural_track_sizes(columns, &col_indices, &widths)
+    };
+    (row_sizes, col_sizes)
+}
+
+/// `Grid::measure_override`'s second-pass measurement constraint for each child, once
+/// `grid_resolve_track_sizes` has resolved every row's/column's actual size: the second pass of a
+/// real two-pass Grid algorithm, so each child's own `measured_size()` afterward reflects the cell
+/// size it will actually occupy (matters for wrapping/auto-sizing content) rather than the first
+/// pass's Auto/Star-unconstrained probe size. One entry per `cells`/child, same order.
+pub fn grid_pass2_available(
+    rows: &[GridLength],
+    columns: &[GridLength],
+    cells: &[GridCell],
+    row_sizes: &[f32],
+    col_sizes: &[f32],
+) -> Vec<Size> {
+    cells
+        .iter()
+        .map(|c| {
+            let row = clamp_track_index(c.row, rows.len());
+            let col = clamp_track_index(c.column, columns.len());
+            Size {
+                width: col_sizes[col],
+                height: row_sizes[row],
+            }
+        })
+        .collect()
 }
 
 /// Pure `Grid` arrangement math (see `stack_arrange`'s own doc comment on why this is a free
@@ -688,28 +749,38 @@ mod tests {
     }
 
     #[test]
-    fn grid_natural_size_sums_fixed_and_auto_tracks_treating_star_as_auto() {
+    fn grid_resolve_track_sizes_treats_star_as_auto_when_available_is_unconstrained() {
         let rows = [GridLength::Auto];
         let columns = [GridLength::Fixed(50.0), GridLength::Star(1.0)];
         let cells = [cell(0, 0), cell(0, 1)];
         let sizes = [size(10.0, 20.0), size(30.0, 40.0)];
 
-        // Fixed column reports its literal 50; Star column (no known final size yet) reports its
-        // own content's natural width (30), same treatment as an Auto column would get.
-        assert_eq!(
-            grid_natural_size(&rows, &columns, &cells, &sizes),
-            size(80.0, 40.0)
+        // Fixed column reports its literal 50; Star column, measured with no known final size
+        // (available is unconstrained here), reports its own content's natural width (30) — same
+        // treatment as an Auto column would get.
+        let (row_sizes, col_sizes) = grid_resolve_track_sizes(
+            &rows,
+            &columns,
+            &cells,
+            &sizes,
+            size(f32::INFINITY, f32::INFINITY),
         );
+        assert_eq!(row_sizes, vec![40.0]);
+        assert_eq!(col_sizes, vec![50.0, 30.0]);
     }
 
     #[test]
     fn grid_empty_rows_and_columns_are_treated_as_a_single_implicit_auto_track() {
         let cells = [cell(0, 0), cell(0, 0)];
         let sizes = [size(10.0, 20.0), size(30.0, 5.0)];
-        assert_eq!(
-            grid_natural_size(&[], &[], &cells, &sizes),
-            size(30.0, 20.0)
+        let (row_sizes, col_sizes) = grid_resolve_track_sizes(
+            &[],
+            &[],
+            &cells,
+            &sizes,
+            size(f32::INFINITY, f32::INFINITY),
         );
+        assert_eq!((col_sizes[0], row_sizes[0]), (30.0, 20.0));
 
         let rects = grid_arrange(size(100.0, 100.0), &[], &[], &cells, &sizes);
         assert_eq!(

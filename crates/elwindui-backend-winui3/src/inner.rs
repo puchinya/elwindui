@@ -340,6 +340,11 @@ pub struct TreeHostPanel {
     draw_list: Arc<Mutex<Vec<Win2dPrimitive>>>,
     tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     render_tree: Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
+    /// The `Text`/`NativeControl` children currently reflected into `canvas.Children()` — see
+    /// `reconcile_native_children`'s own doc comment for why this exists (in short: so relayout
+    /// never has to `Clear()`/rebuild `canvas.Children()` wholesale, which is what broke Win2D's
+    /// `CanvasControl` device creation for whichever tab started out selected).
+    native_children: Rc<RefCell<NativeChildMap>>,
     /// Turns `canvas`'s own raw `KeyDown`/`KeyUp`/`CharacterReceived` events into
     /// `elwindui_core::ui::dispatch_routed` calls against whichever element currently has focus,
     /// and owns the `FocusTracker`/`ShortcutRegistry` for whatever tree this panel hosts — mirrors
@@ -1153,6 +1158,7 @@ struct WinUI3RelayoutHost {
     draw_list: Arc<Mutex<Vec<Win2dPrimitive>>>,
     tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     render_tree: Weak<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
+    native_children: Weak<RefCell<NativeChildMap>>,
     /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
     /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
     /// (and clears it right before doing so).
@@ -1179,8 +1185,12 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             return;
         };
         this.pending.set(false);
-        if let (Some(tree), Some(render_tree)) = (this.tree.upgrade(), this.render_tree.upgrade()) {
-            TreeHostPanel::relayout_static(&this.canvas, &this.draw_canvas, &this.draw_list, &tree, &render_tree);
+        if let (Some(tree), Some(render_tree), Some(native_children)) = (
+            this.tree.upgrade(),
+            this.render_tree.upgrade(),
+            this.native_children.upgrade(),
+        ) {
+            TreeHostPanel::relayout_static(&this.canvas, &this.draw_canvas, &this.draw_list, &tree, &render_tree, &native_children);
         }
     }
 }
@@ -1201,6 +1211,144 @@ impl FocusHost for WinUI3FocusHost {
             None => false,
         }
     }
+}
+
+/// A `RenderCommand::Text`/`NativeControl` command's reflection as a real XAML child, kept across
+/// relayout passes so it can be updated in place instead of torn down and recreated — see
+/// `reconcile_native_children`'s own doc comment for why.
+#[derive(Clone)]
+enum NativeChildElement {
+    Text(TextBlock),
+    Native(AnyView),
+}
+
+impl NativeChildElement {
+    fn framework_element(&self) -> FrameworkElement {
+        match self {
+            NativeChildElement::Text(t) => t.clone().cast().expect("TextBlock is a FrameworkElement"),
+            NativeChildElement::Native(v) => v.as_element(),
+        }
+    }
+}
+
+/// Keyed by `(originating RenderGroup id, index of the command within that group's own
+/// `commands`)` — stable across relayout passes for the common case of a UIElement's `render()`
+/// always emitting the same shape of commands, so a `Text`/`NativeControl` producer that's merely
+/// being updated in place (content, position, size) is told apart from one that's genuinely new or
+/// gone. Reused directly as `HashMap` keys by both `TreeHostPanel` (owns it) and `WinUI3RelayoutHost`
+/// (holds a `Weak` reference, same pattern as `tree`/`render_tree`).
+type NativeChildKey = (u64, usize);
+type NativeChildMap = HashMap<NativeChildKey, NativeChildElement>;
+
+/// Reconciles `canvas`'s native `Text`/`NativeControl` children against `wanted` (this pass's
+/// fresh set, in paint order) by diffing against `existing` (the previous pass's set) — added ones
+/// are `Append`ed once, removed ones are individually detached, and anything present in both passes
+/// is updated *in place* (content/position/size) without ever touching `canvas.Children()` at all.
+///
+/// This deliberately never touches `draw_canvas` (appended to `canvas.Children()` exactly once, in
+/// `TreeHostPanel::new`, and never again) or does a wholesale `Children.Clear()` — see
+/// `docs/agents/winui3_current_state.md`'s CanvasControl investigation for why a `Clear()`-then-
+/// rebuild every pass was the actual root cause of the initially-selected `TabView` tab's
+/// `CanvasControl` never firing `CreateResources`/`Draw`: it forced a fresh native `Unloaded`/
+/// `Loaded` cycle for `draw_canvas` on *every single relayout pass*, not just when content actually
+/// changed, and one specific timing of that churn left Win2D's device never (re)created for that
+/// one instance. Visual-tree structure changes now happen only for a `Text`/`NativeControl` command
+/// that's genuinely new or genuinely gone — never for `draw_canvas`, never wholesale.
+fn reconcile_native_children(
+    canvas: &Canvas,
+    existing: &RefCell<NativeChildMap>,
+    wanted: Vec<(NativeChildKey, RenderedNativeChild)>,
+) {
+    let Ok(children) = canvas.Children() else {
+        return;
+    };
+    let mut existing = existing.borrow_mut();
+    let mut still_wanted: std::collections::HashSet<NativeChildKey> = std::collections::HashSet::new();
+    for (key, wanted_child) in wanted {
+        still_wanted.insert(key);
+        match (existing.get(&key), wanted_child) {
+            (Some(NativeChildElement::Text(text_block)), RenderedNativeChild::Text { content, rect, color, alignment }) => {
+                let _ = text_block.SetText(&HSTRING::from(content.as_str()));
+                if let Ok(brush) = solid_color_brush(color.unwrap_or(elwindui_core::graphics::Color::black())) {
+                    let _ = text_block.SetForeground(&brush);
+                }
+                let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
+                let fe: FrameworkElement = text_block.clone().cast().expect("TextBlock is a FrameworkElement");
+                let _ = fe.SetWidth(rect.width as f64);
+                let _ = fe.SetHeight(rect.height as f64);
+                let _ = Canvas::SetLeft(&fe, rect.x as f64);
+                let _ = Canvas::SetTop(&fe, rect.y as f64);
+            }
+            (Some(NativeChildElement::Native(view)), RenderedNativeChild::Native { view: new_view, rect }) => {
+                let _ = new_view; // same underlying handle identity as `view` — see the key match above
+                let mut view = view.clone();
+                view.arrange(rect);
+            }
+            (_, wanted_child) => {
+                // Either genuinely new (no `existing` entry) or the command's *kind* changed at
+                // this exact key (rare — only if a UIElement's own `render()` emits a different
+                // shape of commands than last time); either way, build fresh and attach once.
+                let element = match wanted_child {
+                    RenderedNativeChild::Text { content, rect, color, alignment } => {
+                        let text_block = TextBlock::new().expect("TextBlock::new");
+                        let _ = text_block.SetText(&HSTRING::from(content.as_str()));
+                        if let Ok(brush) = solid_color_brush(color.unwrap_or(elwindui_core::graphics::Color::black())) {
+                            let _ = text_block.SetForeground(&brush);
+                        }
+                        let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
+                        let fe: FrameworkElement = text_block.clone().cast().expect("TextBlock is a FrameworkElement");
+                        let _ = fe.SetWidth(rect.width as f64);
+                        let _ = fe.SetHeight(rect.height as f64);
+                        let _ = Canvas::SetLeft(&fe, rect.x as f64);
+                        let _ = Canvas::SetTop(&fe, rect.y as f64);
+                        NativeChildElement::Text(text_block)
+                    }
+                    RenderedNativeChild::Native { view, rect } => {
+                        let mut view = view;
+                        view.arrange(rect);
+                        NativeChildElement::Native(view)
+                    }
+                };
+                // Only reached with a stale `existing` entry if the command's *kind* changed at
+                // this key (Text <-> NativeControl) — detach the old element first in that case.
+                if let Some(old) = existing.remove(&key) {
+                    let old_fe = old.framework_element();
+                    let mut index = 0u32;
+                    if children.IndexOf(&old_fe, &mut index).unwrap_or(false) {
+                        let _ = children.RemoveAt(index);
+                    }
+                }
+                let _ = children.Append(&element.framework_element());
+                existing.insert(key, element);
+            }
+        }
+    }
+    existing.retain(|key, element| {
+        if still_wanted.contains(key) {
+            return true;
+        }
+        let fe = element.framework_element();
+        let mut index = 0u32;
+        if children.IndexOf(&fe, &mut index).unwrap_or(false) {
+            let _ = children.RemoveAt(index);
+        }
+        false
+    });
+}
+
+/// One `RenderCommand::Text`/`NativeControl`, resolved to absolute (origin-adjusted) coordinates —
+/// the value half of `reconcile_native_children`'s diff (the key half is `NativeChildKey`).
+enum RenderedNativeChild {
+    Text {
+        content: String,
+        rect: elwindui_core::base::Rect,
+        color: Option<elwindui_core::graphics::Color>,
+        alignment: elwindui_core::graphics::TextAlignment,
+    },
+    Native {
+        view: AnyView,
+        rect: elwindui_core::base::Rect,
+    },
 }
 
 impl TreeHostPanel {
@@ -1389,6 +1537,7 @@ impl TreeHostPanel {
             draw_list,
             tree: Rc::new(RefCell::new(None)),
             render_tree: Rc::new(RefCell::new(None)),
+            native_children: Rc::new(RefCell::new(NativeChildMap::new())),
             keyboard: Rc::new(KeyboardDispatcher::new()),
         };
         let _ = this.draw_canvas.Invalidate();
@@ -1477,12 +1626,13 @@ impl TreeHostPanel {
         {
         let weak = Rc::downgrade(&this.tree);
         let weak_render_tree = Rc::downgrade(&this.render_tree);
+        let weak_native_children = Rc::downgrade(&this.native_children);
         let canvas_for_handler = this.canvas.clone();
         let draw_canvas_for_handler = this.draw_canvas.clone();
         let draw_list_for_handler = this.draw_list.clone();
         let callback_id = register_ui_event_callback(Rc::new(move || {
-            if let (Some(tree), Some(render_tree)) =
-                (weak.upgrade(), weak_render_tree.upgrade())
+            if let (Some(tree), Some(render_tree), Some(native_children)) =
+                (weak.upgrade(), weak_render_tree.upgrade(), weak_native_children.upgrade())
             {
                 Self::relayout_static(
                     &canvas_for_handler,
@@ -1490,6 +1640,7 @@ impl TreeHostPanel {
                     &draw_list_for_handler,
                     &tree,
                     &render_tree,
+                    &native_children,
                 );
             }
         }));
@@ -1518,26 +1669,24 @@ impl TreeHostPanel {
     /// `InvalidateMeasure`/`InvalidateArrange`) on such a `Canvas` does not, in practice, make its
     /// `SizeChanged` fire on any later frame either — logged and observed directly, not assumed.
     pub(crate) fn force_relayout(&self) {
-        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree);
+        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children);
     }
 
-    /// Replaces this host's entire content, discarding whatever native children were there before
-    /// — a full swap rather than a diff, matching `NativeTabView`'s wholesale content swap between
-    /// tabs and `Window::set_content` only ever being called once (see `TreeHostView::set_tree`'s
-    /// doc comment on the AppKit side for the same reasoning).
+    /// Replaces this host's entire content. `draw_canvas` itself is never touched here (appended
+    /// exactly once, in `new`, for its whole lifetime) — only the `Text`/`NativeControl` children
+    /// change, and even those go through `reconcile_native_children`'s diff (via the
+    /// `relayout_static` call below) rather than an explicit `Children.Clear()`: a genuinely new
+    /// tree's `RenderGroup` ids never match the old tree's, so the diff naturally tears down every
+    /// old native child and builds every new one on its own — no separate wholesale-clear step
+    /// needed. See `reconcile_native_children`'s doc comment for why avoiding `Clear()` matters.
     pub(crate) fn set_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElementExt>) {
-        if let Ok(children) = self.canvas.Children() {
-            let _ = children.Clear();
-            if let Ok(visual) = self.draw_canvas.cast::<UIElement>() {
-                let _ = children.Append(&visual);
-            }
-        }
         let host = Rc::new(WinUI3RelayoutHost {
             canvas: self.canvas.clone(),
             draw_canvas: self.draw_canvas.clone(),
             draw_list: self.draw_list.clone(),
             tree: Rc::downgrade(&self.tree),
             render_tree: Rc::downgrade(&self.render_tree),
+            native_children: Rc::downgrade(&self.native_children),
             pending: Cell::new(false),
             weak_self: RefCell::new(Weak::new()),
         });
@@ -1552,7 +1701,7 @@ impl TreeHostPanel {
         collect_shortcuts_into(&tree, self.keyboard.shortcuts());
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
-        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree);
+        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children);
     }
 
     fn relayout_static(
@@ -1561,6 +1710,7 @@ impl TreeHostPanel {
         draw_list: &Arc<Mutex<Vec<Win2dPrimitive>>>,
         tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
         retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
+        native_children: &Rc<RefCell<NativeChildMap>>,
     ) {
         use elwindui_core::base::Size as LSize;
 
@@ -1612,13 +1762,6 @@ impl TreeHostPanel {
             return;
         };
 
-        let Ok(children) = canvas.Children() else {
-            return;
-        };
-        let _ = children.Clear();
-        if let Ok(visual) = draw_canvas.cast::<UIElement>() {
-            let _ = children.Append(&visual);
-        }
         let mut primitives = Vec::new();
         let mut transforms = vec![elwindui_core::base::AffineTransform::identity()];
         let mut opacities = vec![1.0_f32];
@@ -1627,10 +1770,16 @@ impl TreeHostPanel {
         });
         primitives.push(Win2dPrimitive::SetOpacity(1.0));
 
+        // Keyed by `(group.id, index within that group's own commands)` — see `NativeChildKey`'s
+        // doc comment — so `reconcile_native_children` can tell a `Text`/`NativeControl` command
+        // that's merely being updated in place apart from one that's genuinely new or gone,
+        // without ever needing to `Clear()`/rebuild `canvas.Children()` wholesale.
         fn collect_commands<'a>(
             group: &'a elwindui_core::graphics::RenderGroup,
             origin: elwindui_core::base::Point,
             out: &mut Vec<(
+                u64,
+                usize,
                 &'a elwindui_core::graphics::RenderCommand,
                 elwindui_core::base::Point,
             )>,
@@ -1639,8 +1788,8 @@ impl TreeHostPanel {
                 x: origin.x + group.offset.x,
                 y: origin.y + group.offset.y,
             };
-            for command in &group.commands {
-                out.push((command, origin));
+            for (index, command) in group.commands.iter().enumerate() {
+                out.push((group.id, index, command, origin));
             }
             for child in &group.children {
                 collect_commands(child, origin, out);
@@ -1652,10 +1801,12 @@ impl TreeHostPanel {
             elwindui_core::base::Point { x: 0.0, y: 0.0 },
             &mut commands,
         );
+        let mut native_wanted: Vec<(NativeChildKey, RenderedNativeChild)> = Vec::new();
         // Win2D commands are retained as plain values and replayed from CanvasControl::Draw.
         // This keeps primitive figures, images, SVG paths, and clip/opacity layers on the same
-        // device/context, while XAML controls and text remain normal children of the host Canvas.
-        for (command, origin) in commands {
+        // device/context, while XAML controls and text remain normal children of the host Canvas
+        // (reconciled in place afterward — see `native_wanted`/`reconcile_native_children` below).
+        for (group_id, command_index, command, origin) in commands {
             match command {
                 elwindui_core::graphics::RenderCommand::PushTransform { transform } => {
                     let next = transforms.last().expect("transform stack").concat(transform);
@@ -1744,28 +1895,35 @@ impl TreeHostPanel {
                     alignment,
                     ..
                 } => {
-                    let text_block = TextBlock::new().expect("TextBlock::new");
-                    let _ = text_block.SetText(&HSTRING::from(content));
-                    if let Ok(brush) = solid_color_brush(color.unwrap_or(elwindui_core::graphics::Color::black())) {
-                        let _ = text_block.SetForeground(&brush);
-                    }
-                    let _ = text_block.SetTextAlignment(xaml_text_alignment(*alignment));
-                    let fe: FrameworkElement = text_block.cast().expect("TextBlock must be a FrameworkElement");
-                    let _ = fe.SetWidth(rect.width as f64);
-                    let _ = fe.SetHeight(rect.height as f64);
-                    let _ = Canvas::SetLeft(&fe, (origin.x + rect.x) as f64);
-                    let _ = Canvas::SetTop(&fe, (origin.y + rect.y) as f64);
-                    let _ = children.Append(&fe);
+                    native_wanted.push((
+                        (group_id, command_index),
+                        RenderedNativeChild::Text {
+                            content: content.clone(),
+                            rect: elwindui_core::base::Rect {
+                                x: origin.x + rect.x,
+                                y: origin.y + rect.y,
+                                width: rect.width,
+                                height: rect.height,
+                            },
+                            color: *color,
+                            alignment: *alignment,
+                        },
+                    ));
                 }
                 elwindui_core::graphics::RenderCommand::NativeControl { handle, rect, .. } => {
-                    if let Some(mut view) = handle.downcast_ref::<AnyView>().cloned() {
-                        view.arrange(elwindui_core::base::Rect {
-                            x: origin.x + rect.x,
-                            y: origin.y + rect.y,
-                            width: rect.width,
-                            height: rect.height,
-                        });
-                        let _ = children.Append(&view.as_element());
+                    if let Some(view) = handle.downcast_ref::<AnyView>().cloned() {
+                        native_wanted.push((
+                            (group_id, command_index),
+                            RenderedNativeChild::Native {
+                                view,
+                                rect: elwindui_core::base::Rect {
+                                    x: origin.x + rect.x,
+                                    y: origin.y + rect.y,
+                                    width: rect.width,
+                                    height: rect.height,
+                                },
+                            },
+                        ));
                     }
                 }
                 elwindui_core::graphics::RenderCommand::FillPath { path, brush, rule } => primitives.push(Win2dPrimitive::FillPath {
@@ -1807,6 +1965,7 @@ impl TreeHostPanel {
                 }
             }
         }
+        reconcile_native_children(canvas, native_children, native_wanted);
         *draw_list.lock().expect("Win2D draw list poisoned") = primitives;
         let _ = draw_canvas.Invalidate();
     }
@@ -1847,8 +2006,6 @@ fn xaml_text_alignment(
     }
 }
 
-/// Raw `XamlWindow` + content host — composed by `native_ui::Window`.
-#[derive(Clone)]
 #[cfg(test)]
 mod vector_view_box_tests {
     use super::*;

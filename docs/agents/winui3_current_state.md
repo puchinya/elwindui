@@ -346,6 +346,57 @@ lasting change:
   of 'text not reflected after Open'" above. The remaining, deliberately-out-of-scope
   `#[elwindui::component]`+`view!{..}` viewmodel-registration gap (`same_crate_viewmodels()`,
   documented in that same section) is still open.
+- **`graphics-demo`'s first-selected `TabView` tab (`Fills`) never actually paints its Win2D content
+  — investigated at length this session, root cause identified but no working fix found yet.**
+  Only text labels (real `TextBlock`s, `RenderCommand::Text` in `relayout_static` — see below) render
+  for `Fills`; every actual shape/gradient (`Win2dPrimitive`s, replayed from `CanvasControl.Draw`)
+  stays blank. `Strokes`/`Paths`/etc. (any tab actually clicked into) render correctly. Not caused by
+  this session's `elwindui-codegen` fix (`graphics-demo` uses `#[elwindui::component]`+`view!{..}`,
+  no `.elwind`/`for`-loop at all) and not a regression — this is the first time `graphics-demo` has
+  been screenshotted this session before today.
+  - **Evidence, via temporary `eprintln!` instrumentation (since reverted) tagging each
+    `TreeHostPanel`'s `draw_canvas` by its raw COM pointer** (`windows_core::Interface::as_raw`), so
+    individual `CanvasControl`s could be told apart across log lines: `relayout_static` correctly
+    computes and sets `draw_list` with real content for `Fills`' `CanvasControl` (`len=6`, matching
+    its 2 demo cards' worth of primitives, confirmed identical to the *working* `Strokes`/`Paths`
+    counts) — the layout/`RenderTree`/reconcile pipeline is not the problem, ruling out an earlier
+    hypothesis about `RenderTree::reconcile` mishandling a group that had zero commands on its first
+    (`0×0`) pass. `CanvasControl.Invalidate()` is called every time, correctly. But that specific
+    `CanvasControl`'s own `Draw` event **never fires**, across the whole session, no matter how many
+    times `relayout_static` re-runs for it (3 times just during startup) — only the window-level
+    content host's `CanvasControl` (trivial, 2 baseline primitives, no real shapes — the window's own
+    root tree is just the native `TabView`) and any tab's `CanvasControl` that gets actually clicked
+    into (`Strokes`, confirmed: `Draw` fires immediately with the right primitive count) ever fire.
+  - **Five fix attempts tried, all ineffective — do not re-attempt without a new idea**:
+    1. `FrameworkElement::InvalidateMeasure`/`InvalidateArrange` on `draw_canvas` itself (not just
+       `Invalidate()`) right before/instead of `Invalidate()`.
+    2. Synchronously toggling `TabView.SelectedIndex` away to a sibling and back, once, the first
+       time the window's real `SizeChanged` fires (simulating the "real transition" a click
+       produces) — executes correctly (confirmed via log: reads `selected=Ok(0)`, both
+       `SetSelectedIndex` calls return `Ok(())`), triggers one more `relayout_static` pass for
+       `Fills`, but still no `Draw`.
+    3. Same toggle, deferred one tick via `DispatcherQueue::GetForCurrentThread().TryEnqueue(..)`
+       instead of running synchronously inside the `SizeChanged` handler.
+    4. Deferred toggle via `SetSelectedIndex(-1)` (explicit deselect) then back to the original
+       index, instead of a sibling round-trip — same non-result.
+    5. `canvas.UpdateLayout()` (the outer host `Canvas`, forcing a synchronous native layout pass)
+       right after `Invalidate()` in `relayout_static`, for every content host uniformly.
+  - **Ruled out**: not a `.elwind`/for-loop/`elwindui-codegen` issue (see above); not a sizing
+    problem (`draw_canvas`'s own `Width`/`Height` read back correctly as `844`/`421`, matching
+    `Strokes`); not a `RenderTree`/command-collection problem (`draw_list` length is correct).
+  - **Not yet tried / plausible next steps for whoever picks this up**: a native debugger attached to
+    `graphics-demo.exe` to step through why `ICanvasControl`'s `Draw` event specifically doesn't fire
+    for this one instance (likely the most reliable path — this smells like a genuine Win2D/
+    `CanvasControl` device-attachment quirk specific to a `TabViewItem.Content` that's been selected
+    since construction, not something fixable by poking WinUI's public layout/selection API from
+    outside); checking whether Win2D's `CanvasControl` exposes a `CreateResources`/device-ready event
+    at all in this project's generated bindings (a quick grep during this session did not find an
+    `add_CreateResources`-style method surfaced, unlike `RemoveCreateResources` which is present —
+    possibly filtered out by `build.rs`'s WinUI binding `--filter` list, worth checking first);
+    reproducing with a minimal 2-tab repro to rule out anything specific to `graphics-demo`'s 7-tab/
+    `164275`-primitive SVG tab scale; comparing against how `elwindui-backend-appkit` avoids this
+    class of bug entirely (its `TabView` doesn't have a native swap-chain-backed drawing surface with
+    this kind of lazy-attachment behavior).
 - **Deferred from the same investigation as the `Width`/`Height`-reset fix above — not attempted
   this session, each individually reasoned through and cross-referenced against source but not
   implemented or tested:**

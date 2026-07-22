@@ -460,11 +460,20 @@ own card.
     `horizontal_layout_measures_children_with_unconstrained_main_axis` (a `MeasureProbe` leaf records
     the `available` it's actually measured with; both were confirmed to fail under the old
     pass-through behavior before the fix).
-  - `Grid`'s measure/arrange (`elwindui-core`) hands every child the same `available` regardless of
-    `Fixed`/`Auto`/`Star` row/column sizing, instead of the standard two-pass algorithm (resolve
-    `Fixed` tracks, measure `Auto` tracks at their natural size, distribute remaining space across
-    `Star` tracks by weight, then measure/arrange `Star`-track children against their *resolved*
-    track size). Also `elwindui-core`-wide, same cross-backend caveat as above.
+  - ~~`Grid`'s measure (`elwindui-core`) hands every child the same `available` regardless of
+    `Fixed`/`Auto`/`Star` row/column sizing~~ — **done**: `Grid::measure_override` now runs the
+    standard two-pass algorithm — `Fixed` tracks measure at their literal size, `Auto`/`Star` tracks
+    measure unconstrained to read back their own natural size (pass 1), then every row's/column's
+    actual size is resolved (`Fixed` as given, `Auto` from pass 1, `Star` from whatever `available`
+    has left over, or falling back to natural sizing if `available` is itself unconstrained on that
+    axis), then every child is re-measured against its now-resolved cell size (pass 2). Three new
+    pure functions in `layout.rs` (`grid_measure_pass1_available`/`grid_resolve_track_sizes`/
+    `grid_pass2_available`), same "widget-independent free function" pattern as
+    `stack_natural_size`/`stack_arrange`. `arrange_override` needed no changes — it already resolved
+    row/column sizes independently from `final_size` and arranged each child into its own correctly
+    resolved per-cell rect. Regression test: `elwindui-core`'s
+    `grid_measures_children_in_two_passes_per_track_kind` (confirmed to fail against the old
+    single-pass behavior before the fix).
   - ~~`TreeHostPanel::relayout_static` detaches every native control from `Canvas.Children` and
     rebuilds from scratch on every relayout pass~~ — **done**, see "never touch visual-tree structure
     from relayout_static" above: this turned out to be an actual, confirmed bug (not just a

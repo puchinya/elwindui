@@ -388,19 +388,38 @@ File>New-then-back-to-tab-1 regression check (this session's earlier dialog-free
 method) still passes — the diff-based native-children reconciliation didn't regress dynamic content
 updates.
 
-**A separate, pre-existing bug this fix exposed, not caused — not fixed this session**: clicking
-`graphics-demo`'s **Compositing** or **SVG** tab now reaches `Draw` successfully (unlike before) but
-then **crashes the process** with no panic message (a native crash, not a Rust panic — nothing in
-stderr). Both tabs' demos use `Win2dPrimitive::PushOpacityLayer`/`PushClip` (→
-`CanvasActiveLayer`/`CreateLayerWithOpacityAndClipGeometry` in the `Draw` handler, `inner.rs`) or (for
-SVG) the vector-image/pattern-tiling path — neither of which this session's fix touched at all.
-Since these tabs' `Draw` never used to fire before this fix (the bug above), this crash was always
-latent, just never reached. Suspect an unbalanced/mismanaged `CanvasActiveLayer` stack (Win2D layers
-need to be closed in strict LIFO order; a `Vec<CanvasActiveLayer>` that doesn't guarantee that on
-every code path, including early-return/error paths, is a classic source of D2D-level access
-violations) or something in `emit_vector_image`'s pattern-tile expansion (recall the existing
-`"SVG pattern tile expansion reached its safety limit"` log elsewhere in this same file — a related
-area already known to be fragile). Needs its own investigation.
+### `graphics-demo`'s Compositing/SVG native crash — a separate, pre-existing bug this fix exposed, fixed the same session
+
+Once the fix above let `Compositing`/`SVG` reach `Draw` for the first time (previously they never
+did), clicking either tab crashed the process natively — no panic message, nothing in stderr, just
+gone. Isolated by trimming `graphics-demo`'s `COMPOSITING` demo list down to one entry at a time: the
+**Clip** demo (`with_clip`/`PushClip`) reproduced it on its own, with a single `fill_rect` inside a
+plain `Clip::Rect` (ruled out: primitive volume — a 200+-tile checkerboard vs. one fill made no
+difference; `RoundedRect` geometry specifically — a plain `Rect` crashed identically). **Opacity**
+(`PushOpacityLayer`, no clip) did not crash on its own, narrowing it to whatever's different between
+`CreateLayerWithOpacity` and `CreateLayerWithOpacityAndClipGeometry`.
+
+**Root cause**: `Microsoft.Graphics.Canvas.CanvasActiveLayer` implements `Windows::Foundation::
+IClosable` — Win2D's own binding requires an explicit `.Close()` call to actually pop the layer from
+the drawing session's native layer stack (the `Layer.Dispose()`/`using`-block pattern real Win2D/.NET
+code always uses). `inner.rs`'s `Draw` handler was only ever doing `active_layers.pop()` (a plain
+`Vec::pop`, i.e. just dropping the value — in `windows-rs` terms, a bare `Release()` on the COM
+reference) for both `PopClip` and `PopOpacityLayer`, never calling `.Close()`. Never explicitly
+closing a clip-geometry layer left Direct2D's internal layer/clip stack in a state a subsequent
+operation (another primitive, or `EndDraw` when the session ends) could easily read as corrupted,
+which is exactly the kind of thing that surfaces as a silent native access violation rather than a
+catchable Rust `Result`/panic. (Plain opacity-only layers evidently tolerated this more gracefully in
+practice — not a guarantee, just why `Opacity` alone didn't reproduce it — but the missing `Close()`
+call is the same regardless of which `CreateLayerWith...` variant created the layer.)
+
+**Fix**: `PopClip`/`PopOpacityLayer` now call `layer.Close()?` on the popped `CanvasActiveLayer`
+instead of just dropping it; a defensive `while let Some(layer) = active_layers.pop() { layer.
+Close()?; }` also runs at the very end of the `Draw` handler in case any push/pop pair is ever
+unbalanced (shouldn't happen — `RenderContext::with_clip`/`with_opacity` always emit matched pairs —
+but leaving a layer open into the *next* `Draw` call would be worse than a `Result` propagating a
+clear error here). Verified: `graphics-demo`'s Compositing tab (all three demos — Clip, Transform,
+Opacity) and SVG tab (Contain/Cover/Affine Transform/Opacity, including the ~164k-primitive pattern
+expansion) both render correctly with no crash.
 - **Deferred from the same investigation as the `Width`/`Height`-reset fix above — not attempted
   this session, each individually reasoned through and cross-referenced against source but not
   implemented or tested:**

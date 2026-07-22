@@ -1482,13 +1482,27 @@ impl TreeHostPanel {
                                 }
                             }
                             Win2dPrimitive::PopClip => {
-                                active_layers.pop();
+                                // `CanvasActiveLayer` implements `IClosable` — Win2D's layer stack
+                                // is only actually popped by an explicit `Close()` call (the
+                                // `Layer.Dispose()`/`using` pattern .NET Win2D code relies on);
+                                // simply dropping the value here only releases the COM reference,
+                                // leaving the layer open on the drawing session's stack. Any push
+                                // after that (or `EndDraw` when the session ends) then sees a
+                                // corrupted/imbalanced layer stack — this is what was crashing
+                                // Compositing's Clip demo and every other `PushClip`/
+                                // `PushOpacityLayer` user natively, with no panic message, since
+                                // the corruption is entirely on Direct2D's native side.
+                                if let Some(layer) = active_layers.pop() {
+                                    layer.Close()?;
+                                }
                             }
                             Win2dPrimitive::PushOpacityLayer(layer_opacity) => {
                                 active_layers.push(session.CreateLayerWithOpacity(*layer_opacity)?);
                             }
                             Win2dPrimitive::PopOpacityLayer => {
-                                active_layers.pop();
+                                if let Some(layer) = active_layers.pop() {
+                                    layer.Close()?;
+                                }
                             }
                             Win2dPrimitive::DrawImage { image, dest, source, options, x, y } => {
                                 if let Some(creator) = creator.as_ref() {
@@ -1524,6 +1538,14 @@ impl TreeHostPanel {
                                 }
                             }
                         }
+                    }
+                    // Defensive only: `Win2dPrimitive`'s own push/pop commands are always emitted
+                    // in balanced pairs (`RenderContext::with_clip`/`with_opacity`), so this
+                    // shouldn't ever run — but leaving any `CanvasActiveLayer` un-`Close()`d would
+                    // corrupt Direct2D's layer stack for the *next* `Draw` call, so close whatever
+                    // is left, in reverse (LIFO) order, rather than let `active_layers` just drop.
+                    while let Some(layer) = active_layers.pop() {
+                        layer.Close()?;
                     }
                 }
                 Ok(())

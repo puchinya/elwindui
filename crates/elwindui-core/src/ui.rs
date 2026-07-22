@@ -1422,11 +1422,21 @@ pub struct VerticalLayout {
 impl VerticalLayout {
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
+        // Main axis (height) is unconstrained: a content-sized `VerticalLayout` must size itself
+        // from each child's own natural height, not from whatever finite `available` its own
+        // parent happened to hand it — passing `available.height` straight through here would let
+        // a large parent silently inflate every child's measured height. Cross axis (width) is
+        // still constrained, since `stack_arrange` gives every child the container's full cross
+        // extent as its slot.
+        let child_available = Size {
+            width: available.width,
+            height: f32::INFINITY,
+        };
         let child_sizes: Vec<Size> = self
             .visual_children()
             .iter()
             .map(|c| {
-                c.measure(available);
+                c.measure(child_available);
                 c.measured_size().unwrap_or_default()
             })
             .collect();
@@ -1473,11 +1483,17 @@ pub struct HorizontalLayout {
 impl HorizontalLayout {
     #[overrides]
     fn measure_override(&self, available: Size) -> Size {
+        // Main axis (width) is unconstrained — see `VerticalLayout::measure_override`'s own doc
+        // comment for why. Cross axis (height) is still constrained.
+        let child_available = Size {
+            width: f32::INFINITY,
+            height: available.height,
+        };
         let child_sizes: Vec<Size> = self
             .visual_children()
             .iter()
             .map(|c| {
-                c.measure(available);
+                c.measure(child_available);
                 c.measured_size().unwrap_or_default()
             })
             .collect();
@@ -2958,6 +2974,77 @@ mod tests {
         let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
         assert!(natives.is_empty());
         assert!(paints.is_empty());
+    }
+
+    /// Records the `available` it was actually measured with, so
+    /// `vertical_layout_measures_children_with_unconstrained_main_axis`/
+    /// `horizontal_layout_measures_children_with_unconstrained_main_axis` below can assert on it
+    /// directly instead of inferring it indirectly through a returned size. Deliberately not built
+    /// on `FakeHandle`/`FakeNativeControl` — `FakeHandle` derives `PartialEq` and is compared
+    /// structurally by several other tests, so adding a recording field there would need every one
+    /// of those to account for it too.
+    #[elwindui_macros::class(struct_only = crate::ui::NativeControlExt, inherits = crate::ui::UIElement)]
+    struct MeasureProbe {
+        last_available: Cell<Size>,
+        reported: Size,
+    }
+
+    #[elwindui_macros::class]
+    impl MeasureProbe {
+        #[overrides]
+        fn measure_override(&self, available: Size) -> Size {
+            self.last_available.set(available);
+            self.reported
+        }
+        fn construct(reported: Size) -> Self {
+            Self {
+                base: UIElement::construct(),
+                last_available: Cell::new(Size::default()),
+                reported,
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_layout_measures_children_with_unconstrained_main_axis() {
+        // A content-sized `VerticalLayout` must size itself from each child's own natural height,
+        // not from whatever finite `available` its own parent happened to hand it — passing
+        // `available.height` straight through to children would let a large parent silently
+        // inflate every child's measured height.
+        let probe = MeasureProbe::new(size(10.0, 20.0));
+        let child: Rc<dyn UIElementExt> = probe.clone();
+        let root = VerticalLayout::new();
+        root.children().add(child);
+        root.measure(size(200.0, 50.0));
+        let last = probe.last_available.get();
+        assert_eq!(
+            last.width, 200.0,
+            "cross axis (width) must stay constrained to the container's own available width"
+        );
+        assert!(
+            last.height.is_infinite() && last.height > 0.0,
+            "main axis (height) must be unconstrained, got {:?}",
+            last.height
+        );
+    }
+
+    #[test]
+    fn horizontal_layout_measures_children_with_unconstrained_main_axis() {
+        let probe = MeasureProbe::new(size(20.0, 10.0));
+        let child: Rc<dyn UIElementExt> = probe.clone();
+        let root = HorizontalLayout::new();
+        root.children().add(child);
+        root.measure(size(50.0, 200.0));
+        let last = probe.last_available.get();
+        assert_eq!(
+            last.height, 200.0,
+            "cross axis (height) must stay constrained to the container's own available height"
+        );
+        assert!(
+            last.width.is_infinite() && last.width > 0.0,
+            "main axis (width) must be unconstrained, got {:?}",
+            last.width
+        );
     }
 
     #[test]

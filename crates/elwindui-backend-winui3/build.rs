@@ -191,6 +191,10 @@ fn main() {
         "Microsoft.Graphics.Canvas.Geometry.CanvasCapStyle".to_owned(),
         "Microsoft.Graphics.Canvas.Geometry.CanvasLineJoin".to_owned(),
         "Microsoft.Graphics.Canvas.Geometry.CanvasDashStyle".to_owned(),
+        "Microsoft.Graphics.Canvas.CanvasCommandList".to_owned(),
+        "Microsoft.Graphics.Canvas.Effects.BlendEffect".to_owned(),
+        "Microsoft.Graphics.Canvas.Effects.BlendEffectMode".to_owned(),
+        "Microsoft.Graphics.Canvas.Effects.LuminanceToAlphaEffect".to_owned(),
         "--implement".to_owned(),
     ]);
     let warnings = windows_bindgen::bindgen(&args);

@@ -447,16 +447,19 @@ own card.
 - **Deferred from the same investigation as the `Width`/`Height`-reset fix above — not attempted
   this session, each individually reasoned through and cross-referenced against source but not
   implemented or tested:**
-  - `elwindui_core::ui::HorizontalLayout`/`VerticalLayout::measure_override`
-    (`crates/elwindui-core/src/ui.rs`) pass their own `available` straight through to every child's
-    `measure(available)` uninflated on the main axis, instead of measuring each child with
-    `f32::INFINITY` on the main axis (cross axis still constrained) the way a real stack panel does.
-    Not the direct cause of the `Button` bug above (`Button` already receives ample `available`
-    width by the time it's measured) but worth fixing for correctness — a content-sized
-    `HorizontalLayout` should size itself from its children's *natural* widths, not from whatever
-    finite `available` its own parent happened to hand it. This is `elwindui-core`, so it affects
-    every backend (including `elwindui-backend-appkit`, which currently works) — verify AppKit's own
-    behavior isn't inadvertently relying on the current pass-through semantics before changing this.
+  - ~~`elwindui_core::ui::HorizontalLayout`/`VerticalLayout::measure_override` pass their own
+    `available` straight through to every child's `measure(available)` uninflated on the main
+    axis~~ — **done**: both now measure children with `f32::INFINITY` on the main axis (cross axis
+    still constrained to the container's own `available`), so a content-sized `VerticalLayout`/
+    `HorizontalLayout` sizes itself from its children's natural size on the main axis instead of
+    whatever finite `available` its own parent happened to hand it.
+    `elwindui-backend-appkit` has no override for either type (`VerticalLayout`/`HorizontalLayout`
+    have no backend-specific type at all — plain `elwindui_core::ui::UIElement` values reflected
+    directly), so the fix applies uniformly with no backend-specific follow-up. Regression tests:
+    `elwindui-core`'s `vertical_layout_measures_children_with_unconstrained_main_axis`/
+    `horizontal_layout_measures_children_with_unconstrained_main_axis` (a `MeasureProbe` leaf records
+    the `available` it's actually measured with; both were confirmed to fail under the old
+    pass-through behavior before the fix).
   - `Grid`'s measure/arrange (`elwindui-core`) hands every child the same `available` regardless of
     `Fixed`/`Auto`/`Star` row/column sizing, instead of the standard two-pass algorithm (resolve
     `Fixed` tracks, measure `Auto` tracks at their natural size, distribute remaining space across

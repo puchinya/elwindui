@@ -9,9 +9,9 @@
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, TabView as XamlTabView,
-    TabViewCloseButtonOverlayMode, TabViewItem, TabViewTabCloseRequestedEventArgs, TextBlock,
-    TextBox as XamlTextBox,
+    Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, PasswordBox as XamlPasswordBox,
+    TabView as XamlTabView, TabViewCloseButtonOverlayMode, TabViewItem,
+    TabViewTabCloseRequestedEventArgs, TextBlock, TextBox as XamlTextBox,
 };
 use crate::bindings::Microsoft::UI::Xaml::Input::{
     CharacterReceivedRoutedEventArgs, KeyEventHandler, KeyboardAccelerator,
@@ -222,6 +222,11 @@ trait WinUiHandle: elwindui_core::base::AsAny {
 impl WinUiHandle for XamlTextBox {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TextBox implements FrameworkElement")
+    }
+}
+impl WinUiHandle for XamlPasswordBox {
+    fn as_element(&self) -> FrameworkElement {
+        self.cast().expect("PasswordBox implements FrameworkElement")
     }
 }
 impl WinUiHandle for XamlButton {
@@ -2472,6 +2477,96 @@ impl InnerTextBox {
             }
             Ok(())
         }));
+    }
+}
+
+/// Raw `PasswordBox` + change-notification wiring — composed by `native_ui::PasswordBox`.
+/// Structurally mirrors `elwindui-backend-appkit::inner::InnerPasswordBox`; unverified on this
+/// machine (no Windows environment — see `docs/elwindui_nativecontrol_expansion_status.md`). Unlike
+/// `InnerTextBox`/`InnerTextArea`, `PasswordBox` is a genuinely distinct XAML class (not the same
+/// class configured differently), so there's no bare-name import collision to rename here — the
+/// `PasswordBox as XamlPasswordBox` alias at the top of this file was chosen from the start.
+pub(crate) struct InnerPasswordBox {
+    handle: AnyView,
+    password_box: XamlPasswordBox,
+    on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+}
+
+impl InnerPasswordBox {
+    pub(crate) fn new() -> Self {
+        let password_box = XamlPasswordBox::new().expect("PasswordBox::new");
+        let handle = AnyView::from(password_box.clone());
+        let this = Self {
+            handle,
+            password_box,
+            on_change: Rc::new(RefCell::new(None)),
+        };
+        {
+            let callback = this.on_change.clone();
+            let password_box_for_handler = this.password_box.clone();
+            let callback_id = register_ui_event_callback(Rc::new(move || {
+                if let Some(callback) = callback.borrow().as_ref() {
+                    let password = password_box_for_handler
+                        .Password()
+                        .map(|value| value.to_string_lossy())
+                        .unwrap_or_default();
+                    callback(password);
+                }
+            }));
+            // `PasswordChanged`'s event type is the plain `RoutedEventHandler` `Button.Click`
+            // already uses (see `build.rs`'s own comment on this allow-list entry) — not
+            // `TextChangedEventHandler`.
+            let _ = this
+                .password_box
+                .PasswordChanged(&RoutedEventHandler::new(move |_, _| {
+                    invoke_ui_event_callback(callback_id);
+                    Ok(())
+                }));
+        }
+        this
+    }
+
+    pub(crate) fn handle(&self) -> AnyView {
+        self.handle.clone()
+    }
+
+    /// Same value-compare guard as `InnerTextBox::set_text`/`InnerTextArea::set_text` — see those
+    /// methods' own doc comments.
+    pub(crate) fn set_password(&self, password: &str) {
+        let current = self
+            .password_box
+            .Password()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        if current == password {
+            return;
+        }
+        let _ = self.password_box.SetPassword(&HSTRING::from(password));
+    }
+
+    pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+        *self.on_change.borrow_mut() = Some(callback);
+    }
+
+    pub(crate) fn set_placeholder(&self, text: &str) {
+        let _ = self.password_box.SetPlaceholderText(&HSTRING::from(text));
+    }
+
+    pub(crate) fn set_max_length(&self, max_length: Option<u32>) {
+        let _ = self.password_box.SetMaxLength(max_length.unwrap_or(0) as i32);
+    }
+
+    /// `PasswordBox.PasswordRevealMode` is native (`Peek`/`Hidden`) — the full-support side of the
+    /// asymmetry `elwindui-backend-appkit::inner::InnerPasswordBox::set_reveal_enabled`'s own doc
+    /// comment describes (AppKit's `NSSecureTextField` has no equivalent and is a documented no-op
+    /// there).
+    pub(crate) fn set_reveal_enabled(&self, enabled: bool) {
+        let mode = if enabled {
+            bindings::Microsoft::UI::Xaml::Controls::PasswordRevealMode::Peek
+        } else {
+            bindings::Microsoft::UI::Xaml::Controls::PasswordRevealMode::Hidden
+        };
+        let _ = self.password_box.SetPasswordRevealMode(mode);
     }
 }
 

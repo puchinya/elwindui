@@ -1105,6 +1105,25 @@ pub trait TextBox {
     fn set_text_alignment(&self, alignment: TextAlignment);
 }
 
+/// Secure single-line text input (masked entry). Deliberately narrower than `TextBox`: no
+/// `read_only`/`text_alignment` (neither platform's password widget meaningfully supports them the
+/// way a text field does, and adding dead setters would misrepresent what's actually usable), and
+/// no `selection_start`/`selection_length` (same rationale as `TextBox`, doubly so here — selection
+/// semantics on obscured text are rarely product-relevant). The field/method is named `password`,
+/// not `text`, everywhere (trait, `builtins.elwind`, backend structs) — a deliberate naming
+/// divergence from `TextBox` so nothing can accidentally get routed through a code path that
+/// assumes plaintext display is fine. See `docs/elwindui_nativecontrol_expansion_status.md` for the
+/// `reveal_enabled` AppKit/WinUI3 asymmetry this control has (WinUI3's `PasswordRevealMode` is
+/// native; AppKit's `NSSecureTextField` has no equivalent, so `true` is a documented no-op there).
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+pub trait PasswordBox {
+    fn set_password(&self, password: &str);
+    fn set_on_change(&self, callback: Box<dyn Fn(String)>);
+    fn set_placeholder(&self, text: &str);
+    fn set_max_length(&self, max_length: Option<u32>);
+    fn set_reveal_enabled(&self, enabled: bool);
+}
+
 #[elwindui_macros::class(trait_only)]
 pub trait MenuItem {
     fn set_text(&self, text: &str);
@@ -2691,6 +2710,78 @@ mod tests {
         widget.set_text("hello");
         widget.set_text("hello world");
         assert_eq!(*seen.borrow(), vec!["hello".to_string(), "hello world".to_string()]);
+    }
+
+    /// Backend-independent stand-in for `PasswordBox` — see `FakeTextBoxWidget`'s own doc comment
+    /// for the pattern. `PasswordBoxExt`'s dispatch is exercised the same way; the test below
+    /// additionally checks the no-leak policy (`docs/elwindui_nativecontrol_expansion_status.md`)
+    /// that every `PasswordBox` implementation — fake or real — must uphold: nothing about this
+    /// fake ever prints or `Debug`s the password value.
+    struct FakePasswordBoxState {
+        password: RefCell<String>,
+        on_change: RefCell<Option<Box<dyn Fn(String)>>>,
+    }
+
+    #[elwindui_macros::class(struct_only = crate::ui::PasswordBoxExt, inherits = crate::ui::tests::FakeNativeControl)]
+    struct FakePasswordBoxWidget {
+        state: FakePasswordBoxState,
+    }
+
+    #[elwindui_macros::class]
+    impl FakePasswordBoxWidget {
+        fn construct(handle: FakeHandle) -> Self {
+            Self {
+                base: FakeNativeControl::construct(handle),
+                state: FakePasswordBoxState {
+                    password: RefCell::new(String::new()),
+                    on_change: RefCell::new(None),
+                },
+            }
+        }
+
+        fn set_password(&self, password: &str) {
+            *self.state.password.borrow_mut() = password.to_string();
+            if let Some(callback) = self.state.on_change.borrow().as_ref() {
+                callback(password.to_string());
+            }
+        }
+        fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+            *self.state.on_change.borrow_mut() = Some(callback);
+        }
+        fn set_placeholder(&self, _text: &str) {}
+        fn set_max_length(&self, _max_length: Option<u32>) {}
+        fn set_reveal_enabled(&self, _enabled: bool) {}
+    }
+
+    #[test]
+    fn fake_password_box_measures_through_inherited_native_control_base() {
+        let widget = FakePasswordBoxWidget::new(FakeHandle("passwordbox", size(80.0, 20.0)));
+        let widget: Rc<dyn UIElementExt> = widget;
+        assert_eq!(natural_size(&*widget), size(80.0, 20.0));
+        assert!(widget.try_as_native_control().is_some());
+    }
+
+    /// No-leak policy check: only the *length* of what `on_change` observed is asserted, and every
+    /// assertion in this test uses a fixed, content-free message (never `assert_eq!`'s default
+    /// panic message, which would print the actual value on failure) — the same discipline
+    /// `docs/elwindui_nativecontrol_expansion_status.md` requires of the real AppKit/WinUI3
+    /// implementations too.
+    #[test]
+    fn fake_password_box_set_password_dispatches_on_change_without_exposing_it_on_failure() {
+        let widget = FakePasswordBoxWidget::new(FakeHandle("passwordbox", size(80.0, 20.0)));
+        let seen_lengths = Rc::new(RefCell::new(Vec::new()));
+        {
+            let seen_lengths = Rc::clone(&seen_lengths);
+            widget.set_on_change(Box::new(move |password| {
+                seen_lengths.borrow_mut().push(password.chars().count())
+            }));
+        }
+        widget.set_password("hunter2");
+        widget.set_password("");
+        assert!(
+            *seen_lengths.borrow() == vec![7, 0],
+            "password change callback fired the wrong number of times or with the wrong lengths"
+        );
     }
 
     /// `#[overridable]`/`#[overrides]` usage example, exercised across a genuine 3-hop chain

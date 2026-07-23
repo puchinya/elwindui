@@ -326,6 +326,20 @@ component TextBox inherits NativeControl {
     text_alignment: Option<TextAlignment>,
 }
 
+// Secure single-line text input. `password`, not `text`, everywhere (deliberate naming divergence
+// from `TextBox` — see `elwindui_core::ui::PasswordBox`'s own doc comment). No `read_only`/
+// `text_alignment` (neither platform's password widget meaningfully supports them).
+#[embedded]
+#[sealed]
+component PasswordBox inherits NativeControl {
+    #[two_way]
+    password: String,
+
+    placeholder: Option<String>,
+    max_length: Option<u32>,
+    reveal_enabled: Option<bool>,
+}
+
 #[embedded]
 #[sealed]
 component Button inherits NativeControl {

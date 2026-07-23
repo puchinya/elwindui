@@ -137,6 +137,13 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.MenuFlyoutItemBase".to_owned(),
         "Microsoft.UI.Xaml.Controls.MenuBar".to_owned(),
         "Microsoft.UI.Xaml.Controls.MenuBarItem".to_owned(),
+        // `PasswordBox.PasswordChanged`'s event type is the same plain `RoutedEventHandler`
+        // `Button.Click`/`TabView` already use (unlike `TextBox.TextChanged`, which has its own
+        // `TextChangedEventHandler`) — no separate event-args/handler type needs listing here. If
+        // that turns out wrong once this actually builds on Windows, `windows-bindgen`'s own error
+        // will name the missing type to add.
+        "Microsoft.UI.Xaml.Controls.PasswordBox".to_owned(),
+        "Microsoft.UI.Xaml.Controls.PasswordRevealMode".to_owned(),
         "Microsoft.UI.Xaml.Controls.ListViewItem".to_owned(),
         "Microsoft.UI.Xaml.Controls.Panel".to_owned(),
         "Microsoft.UI.Xaml.Controls.UIElementCollection".to_owned(),

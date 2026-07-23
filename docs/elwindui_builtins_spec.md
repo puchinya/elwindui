@@ -36,11 +36,12 @@ UIElement (trait, elwindui-core::ui)
  │
  ├─ NativeControl<H>   実ハンドル(H)を持ちビジュアルツリーに`Rc<dyn UIElement>`として実際に埋め込ま
  │                      れる葉ノードのみ(常にleaf、children()は空)。`.elwind`側で
- │                      `inherits NativeControl`を宣言するのはこの4つ(TextBoxはNativeControl拡充
- │                      Phase 1で追加、`docs/elwindui_nativecontrol_expansion_status.md`参照):
+ │                      `inherits NativeControl`を宣言するのはこの5つ(TextBox/PasswordBoxは
+ │                      NativeControl拡充Phase 1で追加、`docs/elwindui_nativecontrol_expansion_status.md`参照):
  │   ├─ Button                    (付録F.6, #[routed] on_click)
  │   ├─ TextArea                  (付録F.4, #[two_way] text)
  │   ├─ TextBox                   (付録F.12, #[two_way] text)
+ │   ├─ PasswordBox               (付録F.13, #[two_way] password)
  │   └─ TabView                   (付録Y)
  │
  │   ビジュアルツリーに参加しない(measure/arrangeが呼ばれない)ため`inherits NativeControl`ではなく
@@ -643,6 +644,70 @@ view TextBox {
 - AppKit/WinUI3で`max_length`のネイティブ対応が非対称——WinUI3は`TextBox.MaxLength`が
   ネイティブAPIとして存在するが、AppKitの`NSTextField`には無いためデリゲート側で事後的に
   切り詰める実装になっている(キャレット位置が動く可能性がある)。
+
+## F.13 `builtin::PasswordBox`
+
+NativeControl派生コントロール拡充Phase 1で追加。`TextBox`(F.12)と共通のAppKit実装基盤
+(`NativeTextFieldCommon`)を再利用するが、`.elwind`部品としては独立しており、フィールド名も
+`text`ではなく`password`(実装意図の取り違えを防ぐための意図的な命名の違い、
+`docs/elwindui_nativecontrol_expansion_status.md`参照)。
+
+```rust
+component PasswordBox {
+    password: String = bind!(self.password, TwoWay),
+    placeholder: Option<String>,
+    max_length: Option<u32>,
+    reveal_enabled: Option<bool>,
+}
+
+view PasswordBox {
+    match target::backend() {
+        Backend::Winui3 => native! {
+            let box_ = microsoft::ui::xaml::controls::PasswordBox::new()?;
+            box_.SetPassword(&password)?;
+            box_.SetPlaceholderText(&placeholder.unwrap_or_default())?;
+            box_.SetMaxLength(max_length.unwrap_or(0) as i32)?;
+            box_.SetPasswordRevealMode(if reveal_enabled.unwrap_or(false) {
+                PasswordRevealMode::Peek
+            } else {
+                PasswordRevealMode::Hidden
+            })?;
+            box_.PasswordChanged(&RoutedEventHandler::new(move |_, _| { password = box_.Password(); }))?;
+            box_
+        }
+        Backend::Appkit => native! {
+            let field = NSSecureTextField::new();
+            field.setStringValue(&password);
+            field.setPlaceholderString(&placeholder.unwrap_or_default());
+            // NSSecureTextFieldにreveal_enabled相当のネイティブAPIは無い。true側は現状no-op。
+            field.set_delegate_on_change_with_max_length(max_length, move |new_password| { password = new_password; });
+            field
+        }
+        Backend::Gtk4 => native! {
+            // 未実装 — GTK4基盤構築フォローアップ完了後に着手する。
+            unimplemented!()
+        }
+    }
+}
+```
+
+**パスワード内容を絶対にログ・表示しない**——フレームワーク自身のコード(デリゲートivars、
+ログ・フォーマットマクロ、テストのアサーションメッセージ)がパスワード文字列を出力する経路を
+作らない。AppKit実装側テスト・コアレベルテストとも、この方針を明示的にコメントで固定している。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`cargo build`/`cargo test`で検証済み(`NSSecureTextField`ベース、`NativeTextFieldCommon`を`TextBox`と共有) |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし)。`build.rs`に`PasswordBox`/`PasswordRevealMode`のallow-listを追加済み |
+| GTK4 | 未実装(GTK4バックエンド自体が基盤未構築) |
+
+**既知の非対称性(意図的な縮小スコープ、隠していない)**:
+- `reveal_enabled`(パスワード表示切替)——WinUI3は`PasswordRevealMode`がネイティブに存在し
+  フル対応。AppKitの`NSSecureTextField`には同等機能が無く、独自の「目アイコン」トグルボタンを
+  合成し表示中は生の`NSTextField`に切り替える実装が必要になるが、Phase 1としては過大なスコープと
+  判断し、setterは配線するが`true`はAppKit側で意図的にno-opとした(コメント付き)。
 
 ---
 

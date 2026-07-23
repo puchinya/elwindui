@@ -19,9 +19,9 @@ use objc2::{
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
     NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem,
-    NSResponder, NSScreen, NSScrollView, NSStackView, NSTextDelegate, NSTextField,
-    NSTextFieldDelegate, NSTextView, NSTextViewDelegate, NSTrackingArea, NSTrackingAreaOptions,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSResponder, NSScreen, NSScrollView, NSSecureTextField, NSStackView, NSTextDelegate,
+    NSTextField, NSTextFieldDelegate, NSTextView, NSTextViewDelegate, NSTrackingArea,
+    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGColor, CGColorSpace, CGDataProvider, CGImage, CGMutablePath};
@@ -2681,6 +2681,69 @@ impl InnerTextBox {
     pub(crate) fn set_on_submit(&self, callback: Box<dyn Fn()>) {
         self.common.set_on_submit(callback);
     }
+}
+
+/// Raw `NSSecureTextField` + change-notification delegate — composed by `native_ui::PasswordBox`.
+/// `NSSecureTextField` is a direct `NSTextField` subclass (see `AppKitHandle for
+/// Retained<NSTextField>` above), so it's upcast once at construction and handed to the exact same
+/// `NativeTextFieldCommon` `InnerTextBox` uses — see that shared type's own doc comment for why this
+/// reuse, rather than a second copy of the same delegate/value-guard/max-length machinery, is
+/// deliberate.
+pub(crate) struct InnerPasswordBox {
+    handle: AnyView,
+    field: Retained<NSSecureTextField>,
+    common: NativeTextFieldCommon,
+}
+
+impl InnerPasswordBox {
+    pub(crate) fn new() -> Self {
+        let m = mtm();
+        let field = NSSecureTextField::new(m);
+        field.setBezeled(true);
+        field.setEditable(true);
+        // `AppKitHandle` is only implemented for `Retained<NSTextField>` (not
+        // `Retained<NSSecureTextField>` — see that impl's own doc comment on why one impl per raw
+        // widget type, not per class-hierarchy level), so `AnyView` wraps the upcast handle too,
+        // not `field` itself.
+        let upcast: Retained<NSTextField> = Retained::into_super(field.clone());
+        let handle = AnyView::from(upcast.clone());
+        let common = NativeTextFieldCommon::new(upcast);
+        Self {
+            handle,
+            field,
+            common,
+        }
+    }
+
+    pub(crate) fn handle(&self) -> AnyView {
+        self.handle.clone()
+    }
+
+    pub(crate) fn set_password(&self, password: &str) {
+        self.common.set_string_value(password);
+    }
+
+    pub(crate) fn set_placeholder(&self, text: &str) {
+        self.field
+            .setPlaceholderString(Some(&NSString::from_str(text)));
+    }
+
+    pub(crate) fn set_max_length(&self, max_length: Option<u32>) {
+        self.common.set_max_length(max_length);
+    }
+
+    pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+        self.common.set_on_change(callback);
+    }
+
+    /// `NSSecureTextField` has no native "reveal password" toggle, unlike WinUI3's
+    /// `PasswordRevealMode` (`native_ui::PasswordBox`'s own doc comment has the full asymmetry).
+    /// A full implementation would compose a custom "eye" toggle button that swaps the live
+    /// obscured field for a plain `NSTextField` showing the same string — real, but disproportionate
+    /// scope for this control's Phase 1 first cut (see
+    /// docs/elwindui_nativecontrol_expansion_status.md). `true` is therefore silently a no-op here;
+    /// the setter stays wired so a future pass has a real place to land.
+    pub(crate) fn set_reveal_enabled(&self, _enabled: bool) {}
 }
 
 /// Raw `NSButton` + click target — composed by `native_ui::Button` (and used directly, not through

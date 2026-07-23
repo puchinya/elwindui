@@ -20,6 +20,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSControl",
     "NSButton",
     "NSTextField",
+    "NSSecureTextField",
     "NSText",
     "NSTextView",
     "NSScrollView",

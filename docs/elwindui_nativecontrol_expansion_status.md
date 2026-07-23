@@ -26,7 +26,7 @@
 | 既存TextArea/TabView/Buttonの回帰確認(AppKit) | ✅ `cargo build`/`cargo test -p elwindui-core -p elwindui-backend-appkit`(174件)通過。`rust-analyzer diagnostics .`で新規warning/error無し。`notepad`を2回起動し数秒間クラッシュなしを確認、CoreGraphics window list上に正常なウィンドウ生成を確認 | - | 🟡 **クリック操作・TextArea入力・TabView切り替えなどの対話的動作の目視確認は未実施** — このマシンの実行環境に画面収録・アクセシビリティ権限が付与されておらず、`screencapture`/`osascript`によるスクリーンショット・自動クリックがいずれも失敗した。ユーザーによる手動確認待ち |
 | Tab/Shift+Tabでネイティブコントロールから抜ける動作 | ⬜ 未対応(Phase 1スコープ外、既知の制限として記録) | ⬜ 同左 | ネイティブウィジェットの既定キー処理が優先されるため、elwindui側の`FocusTracker::move_focus`に到達しない。AppKitのkey-view-loopチェーン等、より侵襲的な変更が必要 |
 
-**未完了(このドキュメント作成時点で未着手)**: §2 TextArea/TabViewの対話的回帰確認(権限待ち)、§4 PasswordBox、§5 ScrollView、§6 ドキュメント追加の残り(`elwindui_gui_framework_design.md`新§5.1b)、§7 `examples/controls-demo`。
+**未完了(このドキュメント作成時点で未着手)**: §2 TextArea/TabViewの対話的回帰確認(権限待ち)、§5 ScrollView、§6 ドキュメント追加の残り(`elwindui_gui_framework_design.md`新§5.1b)、§7 `examples/controls-demo`。
 
 ---
 
@@ -45,6 +45,24 @@
 | `docs/elwindui_builtins_spec.md` F.12 | ✅ | ✅(同一ドキュメント) |
 | `selection_start`/`selection_length` | ⬜ 意図的に見送り(既知のギャップとして明記) | ⬜ 同左 |
 | max_length非対称性 | 🟡 デリゲート側で事後的に切り詰め(ネイティブAPI無し) | ✅ `TextBox.MaxLength`ネイティブ対応(未検証) |
+
+---
+
+## 1.6 PasswordBox(§4 完了)
+
+| 項目 | AppKit | WinUI3 |
+|---|---|---|
+| `elwindui-core::ui::PasswordBox`トレイト | ✅ | ✅(バックエンド非依存) |
+| `builtins.elwind`の`PasswordBox`宣言(`#[two_way] password`) | ✅ | ✅(バックエンド非依存) |
+| `InnerPasswordBox`(`NSSecureTextField`をアップキャストして`NativeTextFieldCommon`を再利用、TextBoxと同じデリゲート・値比較ガード・max_length切り詰めロジックを重複実装せず) | ✅ `cargo build`/`cargo test`通過 | 🟡 未検証(`XamlPasswordBox`、`PasswordBox`は`TextBox`とは別の実XAMLクラス) |
+| `native_ui::PasswordBox` | ✅ | 🟡 未検証 |
+| `objc2-app-kit`の`NSSecureTextField`機能追加 | ✅ | N/A |
+| `build.rs`の`PasswordBox`/`PasswordRevealMode`allow-list追加 | N/A | 🟡 未検証(型名は実際のWindows環境でのビルドで最終確認が必要) |
+| `reveal_enabled` | 🟡 setterは配線するが`true`は意図的にno-op(`NSSecureTextField`にネイティブ相当機能無し、コメント付き) | ✅ `PasswordRevealMode::Peek`/`Hidden`にネイティブ対応(未検証) |
+| コアレベルテスト(`FakePasswordBoxWidget`) | ✅ `cargo test -p elwindui-core`通過。**漏洩防止方針を明示**——テストのアサーションは固定メッセージのみ使用し、パスワード文字列や実際の値を`assert_eq!`のデフォルトpanicメッセージ等で出力しない | - |
+| パスワード内容の非露出(`Debug`/`Display`実装なし、ログ出力経路なし) | ✅ | ✅(構造ミラー) |
+| AppKit実機能ライフサイクルテスト | ⬜ TextBoxと同じ理由で未着手(§1.5参照) | - |
+| `docs/elwindui_builtins_spec.md` F.13 | ✅ | ✅(同一ドキュメント) |
 
 ---
 

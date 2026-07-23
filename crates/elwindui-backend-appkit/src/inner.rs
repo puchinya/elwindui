@@ -12,15 +12,15 @@ use elwindui_core::input::{
 use elwindui_core::graphics::{RenderCommand, RenderGroup};
 use elwindui_core::ui::{FocusHost, RelayoutHost, UIElementExt, layout_root};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Bool};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSScreen, NSScrollView, NSStackView,
-    NSTextDelegate, NSTextView, NSTextViewDelegate, NSTrackingArea, NSTrackingAreaOptions,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSResponder, NSScreen, NSScrollView,
+    NSStackView, NSTextDelegate, NSTextView, NSTextViewDelegate, NSTrackingArea,
+    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGColor, CGColorSpace, CGDataProvider, CGImage, CGMutablePath};
@@ -257,6 +257,12 @@ pub struct TreeHostIvars {
     /// Native compositor islands, keyed by `AnyView` identity. They must survive ordinary
     /// relayouts so the first responder is not detached from the view hierarchy.
     native_containers: RefCell<HashMap<usize, Retained<NSView>>>,
+    /// `AnyView` identity -> the owning `UIElement`'s `render_group_id`
+    /// (`RenderCommand::NativeControl::owner_id`) — populated/pruned in lockstep with
+    /// `native_containers`. Lets `ElwinduiWindow::makeFirstResponder:` resolve "which elwindui
+    /// element does this native container belong to" without a second registry of its own; see
+    /// `resolve_native_owner_id`.
+    native_owner_ids: RefCell<HashMap<usize, u64>>,
     /// Decoded-image cache (`RenderCommand::DrawImage`'s `elwindui_core::graphics::Image` -> real
     /// `CGImage`), keyed by the `Image`'s own pointer identity — see `resolve_cgimage`'s own doc
     /// comment. Never cleared piecemeal (unlike `native_containers`): a stale entry for an
@@ -504,6 +510,7 @@ impl TreeHostView {
             tree: RefCell::new(None),
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
+            native_owner_ids: RefCell::new(HashMap::new()),
             image_cache: RefCell::new(HashMap::new()),
             vector_raster_cache: RefCell::new(HashMap::new()),
             group_layers: RefCell::new(HashMap::new()),
@@ -552,6 +559,7 @@ impl TreeHostView {
         let Some(tree) = tree.as_ref() else { return };
         self.ivars().pointer.handle(
             tree,
+            &self.ivars().keyboard.focus,
             RawPointerEvent {
                 kind,
                 position,
@@ -613,6 +621,7 @@ impl TreeHostView {
             old.removeFromSuperview();
         }
         self.ivars().native_containers.borrow_mut().clear();
+        self.ivars().native_owner_ids.borrow_mut().clear();
         self.ivars().group_layers.borrow_mut().clear();
         self.ivars().group_layer_cache_keys.borrow_mut().clear();
         self.ivars().group_native_controls.borrow_mut().clear();
@@ -693,6 +702,10 @@ impl TreeHostView {
                     false
                 }
             });
+        self.ivars()
+            .native_owner_ids
+            .borrow_mut()
+            .retain(|identity, _| live_native_controls.contains(identity));
         self.ivars().group_layers.borrow_mut().retain(|id, container| {
             if live_group_ids.contains(id) {
                 true
@@ -709,6 +722,23 @@ impl TreeHostView {
             .group_native_controls
             .borrow_mut()
             .retain(|id, _| live_group_ids.contains(id));
+    }
+
+    /// Looks up which live native leaf `container` (one of `native_containers`' own values — the
+    /// per-widget island `host.addSubview`ed directly, not the leaf's own inner `NSView`) belongs
+    /// to, returning that leaf's owning element's `render_group_id`. Used by
+    /// `ElwinduiWindow::makeFirstResponder:` (see that method's own doc comment) to bridge a native
+    /// OS focus change back into `elwindui_core::focus`. A linear scan is fine here — a single
+    /// window typically hosts at most a handful of native controls at once.
+    pub(crate) fn resolve_native_owner_id(&self, container: &NSView) -> Option<u64> {
+        let identity = self
+            .ivars()
+            .native_containers
+            .borrow()
+            .iter()
+            .find(|(_, v)| std::ptr::eq(&***v, container))
+            .map(|(identity, _)| *identity)?;
+        self.ivars().native_owner_ids.borrow().get(&identity).copied()
     }
 }
 
@@ -955,7 +985,11 @@ fn replay_commands(
                     vector_raster_cache,
                 );
             }
-            RenderCommand::NativeControl { handle, rect, .. } => {
+            RenderCommand::NativeControl {
+                owner_id,
+                handle,
+                rect,
+            } => {
                 let Some(mut view) = handle.downcast_ref::<AnyView>().cloned() else {
                     idx += 1;
                     continue;
@@ -984,6 +1018,10 @@ fn replay_commands(
                     } else {
                         let container = NSView::new(mtm());
                         containers.insert(identity, container.clone());
+                        host.ivars()
+                            .native_owner_ids
+                            .borrow_mut()
+                            .insert(identity, *owner_id);
                         (container, true)
                     }
                 };
@@ -2143,6 +2181,85 @@ pub(crate) fn decode_cgimage(image: &elwindui_core::graphics::Image) -> Option<C
     }
 }
 
+/// Walks up from `responder`'s own `NSView` ancestor chain looking for the nearest `TreeHostView`
+/// (the window's own top-level content host, or a nested one — `InnerTabView`'s per-tab host,
+/// `InnerScrollView`'s content host once that exists, ...) that has `responder`'s *immediate child*
+/// registered as one of its own native leaf islands (`TreeHostView::native_containers`). Returns
+/// that host together with the owning element's `render_group_id`, ready for
+/// `elwindui_core::focus::native_focus_gained`/`native_focus_lost`. Returns `None` for anything not
+/// reachable this way — most commonly a `TabView` chip/close button (an `InnerButton` created
+/// directly by `create_tab_chip`, never wrapped in a `RenderCommand::NativeControl`) or the
+/// `TreeHostView`/`NSWindow` itself becoming first responder (e.g. on window activation with
+/// nothing else focused yet) — both are correctly not elwindui-visible focus targets.
+fn resolve_focus_owner(
+    responder: Option<Retained<NSResponder>>,
+) -> Option<(Retained<TreeHostView>, u64)> {
+    let mut previous: Option<Retained<NSView>> = None;
+    let mut current: Option<Retained<NSView>> = responder.and_then(|r| r.downcast::<NSView>().ok());
+    while let Some(view) = current {
+        match view.downcast::<TreeHostView>() {
+            Ok(host) => {
+                let owner_id = previous.as_deref().and_then(|c| host.resolve_native_owner_id(c))?;
+                return Some((host, owner_id));
+            }
+            Err(view) => {
+                current = unsafe { view.superview() };
+                previous = Some(view);
+            }
+        }
+    }
+    None
+}
+
+define_class!(
+    /// A plain `NSWindow` subclass whose only job is bridging AppKit's own first-responder changes
+    /// into `elwindui_core::focus::FocusTracker` — see `docs/elwindui_gui_framework_design.md` §5.5.
+    /// Subclassing the window (rather than every individual native leaf class) is the standard,
+    /// minimal-surface-area AppKit technique for observing "did some view anywhere in this window
+    /// become/stop being first responder" without per-widget-class overrides, and mirrors this same
+    /// file's own `TreeHostView` subclassing convention.
+    #[unsafe(super(NSWindow))]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = ()]
+    pub(crate) struct ElwinduiWindow;
+
+    unsafe impl NSObjectProtocol for ElwinduiWindow {}
+
+    impl ElwinduiWindow {
+        /// Detects a real, click/API-driven focus change (`ok == true`) and bridges it into
+        /// `elwindui_core::focus`. Whether `responder` lands on a *native leaf* window's own
+        /// `resolve_focus_owner` decides whether anything happens at all — see that function's own
+        /// doc comment for what's intentionally excluded. `FocusState::Pointer` is used
+        /// unconditionally for the gained side (Phase 1 simplification — distinguishing a real
+        /// mouse click from AppKit's own Tab-driven key-view-loop focus change would need
+        /// inspecting `NSApp.currentEvent`, and no such key-view loop is wired between elwindui
+        /// elements yet regardless — see `docs/elwindui_gui_framework_design.md` §5.5/§8.1's "known
+        /// limitation" notes on Tab/Shift+Tab out of a focused native control).
+        #[unsafe(method(makeFirstResponder:))]
+        fn make_first_responder(&self, responder: Option<&NSResponder>) -> Bool {
+            let old = self.firstResponder();
+            let ok: Bool = unsafe { msg_send![super(self), makeFirstResponder: responder] };
+            if !ok.as_bool() {
+                return ok;
+            }
+            let new = self.firstResponder();
+            if let Some((host, owner_id)) = resolve_focus_owner(new) {
+                if let Some(render_tree) = host.ivars().render_tree.borrow().as_ref() {
+                    elwindui_core::focus::native_focus_gained(
+                        render_tree,
+                        &host.ivars().keyboard.focus,
+                        owner_id,
+                        FocusState::Pointer,
+                    );
+                }
+            } else if let Some((host, owner_id)) = resolve_focus_owner(old) {
+                elwindui_core::focus::native_focus_lost(&host.ivars().keyboard.focus, owner_id);
+            }
+            ok
+        }
+    }
+);
+
 /// Raw `NSWindow` + content host — composed by `native_ui::Window`.
 #[derive(Clone)]
 pub(crate) struct InnerWindow {
@@ -2161,15 +2278,18 @@ impl InnerWindow {
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
             | NSWindowStyleMask::Resizable;
-        let ns = unsafe {
-            let alloc = mtm.alloc::<NSWindow>();
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                alloc,
-                content_rect,
-                style,
-                NSBackingStoreType::Buffered,
-                false,
-            )
+        // `ElwinduiWindow` (not a stock `NSWindow`) so `makeFirstResponder:` can bridge native
+        // focus changes into `elwindui_core::focus` — see that type's own doc comment.
+        let ns: Retained<NSWindow> = unsafe {
+            let alloc = ElwinduiWindow::alloc(mtm).set_ivars(());
+            let window: Retained<ElwinduiWindow> = msg_send![
+                super(alloc),
+                initWithContentRect: content_rect,
+                styleMask: style,
+                backing: NSBackingStoreType::Buffered,
+                defer: false,
+            ];
+            Retained::into_super(window)
         };
         let content_host = TreeHostView::new();
         // `Window` property setters can resize the NSWindow after this content view has been

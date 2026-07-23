@@ -1,7 +1,8 @@
+use crate::graphics::RenderTree;
 use crate::input::{FocusState, RoutedEventArgs};
 use crate::ui::UIElementExt;
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 /// See docs/elwindui_gui_framework_design.md §5.5. `Up`/`Down`/`Left`/`Right` are declared for API
 /// completeness but not yet implemented by `FocusTracker::move_focus` — 2D spatial navigation needs
@@ -155,6 +156,37 @@ impl FocusTracker {
             | FocusDirection::Right => return false,
         };
         self.set_focus(next, FocusState::Keyboard)
+    }
+}
+
+/// Bridges a native leaf's own OS focus-in notification (AppKit's `NSWindow.makeFirstResponder:`,
+/// WinUI3's `FrameworkElement.GotFocus`) into `FocusTracker`. `owner_id` is the focused native
+/// widget's `RenderCommand::NativeControl::owner_id`, resolved back to the owning element via
+/// `RenderTree::visual_index` — the same reverse lookup either backend would otherwise have to
+/// duplicate itself. Each backend's own OS-level detection mechanism is necessarily backend-specific
+/// (there is no portable "did this widget become first responder" signal), but what happens once
+/// that's detected is identical, so it lives here once rather than in each backend crate.
+pub fn native_focus_gained(
+    render_tree: &RenderTree,
+    focus: &FocusTracker,
+    owner_id: u64,
+    state: FocusState,
+) {
+    if let Some(element) = render_tree.visual_index.get(&owner_id).and_then(Weak::upgrade) {
+        focus.set_focus(&element, state);
+    }
+}
+
+/// The counterpart to `native_focus_gained` for a native leaf's own OS focus-out notification.
+/// Only clears if the currently-focused element is still the one identified by `owner_id` — a
+/// focus-out notification for a widget that isn't the current focus target anymore (e.g. focus has
+/// already moved to a different element by the time this fires) must not clobber that newer focus.
+pub fn native_focus_lost(focus: &FocusTracker, owner_id: u64) {
+    if focus
+        .focused()
+        .is_some_and(|f| f.render_group_id() == owner_id)
+    {
+        focus.clear_focus();
     }
 }
 

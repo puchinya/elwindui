@@ -4071,19 +4071,20 @@ mod tests {
         let b_exited = count_calls::<crate::input::PointerEventArgs>(&leaf_b, "on_pointer_exited");
 
         let dispatcher = crate::input::PointerDispatcher::new();
-        dispatcher.handle(&root, move_event(5.0, 5.0));
+        let focus = crate::focus::FocusTracker::new();
+        dispatcher.handle(&root, &focus, move_event(5.0, 5.0));
         assert_eq!((*root_entered.borrow(), *a_entered.borrow()), (1, 1));
 
         // Moving from `a` to `b` (both under the same `root`) must not re-fire `root`'s own
         // Entered/Exited — it was, and remains, hovered throughout.
-        dispatcher.handle(&root, move_event(5.0, 15.0));
+        dispatcher.handle(&root, &focus, move_event(5.0, 15.0));
         assert_eq!(*a_exited.borrow(), 1);
         assert_eq!(*b_entered.borrow(), 1);
         assert_eq!((*root_entered.borrow(), *root_exited.borrow()), (1, 0));
 
         // Moving off the tree entirely (into the layout's own transparent empty space) exits
         // everything, `root` included.
-        dispatcher.handle(&root, move_event(5.0, 90.0));
+        dispatcher.handle(&root, &focus, move_event(5.0, 90.0));
         assert_eq!(*b_exited.borrow(), 1);
         assert_eq!(*root_exited.borrow(), 1);
     }
@@ -4095,15 +4096,18 @@ mod tests {
         let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
 
         let dispatcher = crate::input::PointerDispatcher::new();
+        let focus = crate::focus::FocusTracker::new();
         dispatcher.handle(
             &leaf,
+            &focus,
             press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
         );
         // Wanders far outside `leaf`'s own bounds mid-drag — implicit capture must keep routing
         // `Moved`/`Released` to `leaf` regardless.
-        dispatcher.handle(&leaf, move_event(500.0, 500.0));
+        dispatcher.handle(&leaf, &focus, move_event(500.0, 500.0));
         dispatcher.handle(
             &leaf,
+            &focus,
             release_event(6.0, 6.0, crate::input::MouseButton::Left, 10.0),
         );
 
@@ -4119,12 +4123,15 @@ mod tests {
         let released = count_calls::<crate::input::PointerEventArgs>(&leaf, "on_pointer_released");
 
         let dispatcher = crate::input::PointerDispatcher::new();
+        let focus = crate::focus::FocusTracker::new();
         dispatcher.handle(
             &leaf,
+            &focus,
             press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
         );
         dispatcher.handle(
             &leaf,
+            &focus,
             release_event(20.0, 20.0, crate::input::MouseButton::Left, 10.0),
         );
 
@@ -4141,20 +4148,25 @@ mod tests {
         let double_tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_double_tapped");
 
         let dispatcher = crate::input::PointerDispatcher::new();
+        let focus = crate::focus::FocusTracker::new();
         dispatcher.handle(
             &leaf,
+            &focus,
             press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
         );
         dispatcher.handle(
             &leaf,
+            &focus,
             release_event(5.0, 5.0, crate::input::MouseButton::Left, 10.0),
         );
         dispatcher.handle(
             &leaf,
+            &focus,
             press_event(6.0, 6.0, crate::input::MouseButton::Left, 100.0),
         );
         dispatcher.handle(
             &leaf,
+            &focus,
             release_event(6.0, 6.0, crate::input::MouseButton::Left, 110.0),
         );
 
@@ -4164,10 +4176,12 @@ mod tests {
         // A third tap right after pairs with nothing (the second tap's own record was consumed).
         dispatcher.handle(
             &leaf,
+            &focus,
             press_event(6.0, 6.0, crate::input::MouseButton::Left, 150.0),
         );
         dispatcher.handle(
             &leaf,
+            &focus,
             release_event(6.0, 6.0, crate::input::MouseButton::Left, 155.0),
         );
         assert_eq!(*tapped.borrow(), 3);
@@ -4182,12 +4196,15 @@ mod tests {
         let right_tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_right_tapped");
 
         let dispatcher = crate::input::PointerDispatcher::new();
+        let focus = crate::focus::FocusTracker::new();
         dispatcher.handle(
             &leaf,
+            &focus,
             press_event(5.0, 5.0, crate::input::MouseButton::Right, 0.0),
         );
         dispatcher.handle(
             &leaf,
+            &focus,
             release_event(5.0, 5.0, crate::input::MouseButton::Right, 10.0),
         );
 

@@ -171,8 +171,15 @@ impl PointerDispatcher {
     /// Feeds one raw mouse event through hit-testing/hover-diffing/gesture-recognition and
     /// dispatches whichever `on_pointer_*`/`on_tapped`/`on_double_tapped`/`on_right_tapped` routed
     /// events result, bubbling from the affected element via `elwindui_core::ui::dispatch_routed`
-    /// (see that function's own doc comment).
-    pub fn handle(&self, root: &Rc<dyn UIElementExt>, event: RawPointerEvent) {
+    /// (see that function's own doc comment). `focus` is the sibling `KeyboardDispatcher`'s own
+    /// `FocusTracker` (both dispatchers are owned by the same host, e.g.
+    /// `elwindui-backend-appkit`'s `TreeHostIvars`) — on `Pressed`, a hit target that
+    /// `is_tab_stop()` is focused with `FocusState::Pointer`, WinUI3's own click-to-focus behavior.
+    /// Native leaves (`Button`/`TextArea`/`TabView`) never reach this dispatcher at all (they
+    /// receive the OS pointer event directly via ordinary native hit-testing — see
+    /// `TreeHostIvars::pointer`'s own doc comment), so their own focus-on-click is handled entirely
+    /// separately (`elwindui_core::focus::native_focus_gained`).
+    pub fn handle(&self, root: &Rc<dyn UIElementExt>, focus: &crate::focus::FocusTracker, event: RawPointerEvent) {
         match event.kind {
             RawPointerEventKind::Moved => {
                 let hit = crate::ui::hit_test(root, event.position);
@@ -196,6 +203,9 @@ impl PointerDispatcher {
                 self.update_hover(hit.clone(), event.position, event.modifiers);
                 let target = self.captured_or(hit);
                 if let Some(target) = &target {
+                    if target.is_tab_stop() {
+                        focus.set_focus(target, FocusState::Pointer);
+                    }
                     let payload = PointerEventArgs {
                         position: event.position,
                         button: Some(button),

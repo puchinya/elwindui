@@ -1159,6 +1159,10 @@ struct WinUI3RelayoutHost {
     tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     render_tree: Weak<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
     native_children: Weak<RefCell<NativeChildMap>>,
+    /// Threaded through to `relayout_static`/`reconcile_native_children` so a genuinely new native
+    /// child discovered during this relayout pass can wire its own `GotFocus`/`LostFocus` — see
+    /// `reconcile_native_children`'s own doc comment on that wiring.
+    keyboard: Weak<KeyboardDispatcher>,
     /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
     /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
     /// (and clears it right before doing so).
@@ -1185,12 +1189,13 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             return;
         };
         this.pending.set(false);
-        if let (Some(tree), Some(render_tree), Some(native_children)) = (
+        if let (Some(tree), Some(render_tree), Some(native_children), Some(keyboard)) = (
             this.tree.upgrade(),
             this.render_tree.upgrade(),
             this.native_children.upgrade(),
+            this.keyboard.upgrade(),
         ) {
-            TreeHostPanel::relayout_static(&this.canvas, &this.draw_canvas, &this.draw_list, &tree, &render_tree, &native_children);
+            TreeHostPanel::relayout_static(&this.canvas, &this.draw_canvas, &this.draw_list, &tree, &render_tree, &native_children, &keyboard);
         }
     }
 }
@@ -1258,6 +1263,8 @@ fn reconcile_native_children(
     canvas: &Canvas,
     existing: &RefCell<NativeChildMap>,
     wanted: Vec<(NativeChildKey, RenderedNativeChild)>,
+    render_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
+    keyboard: &Rc<KeyboardDispatcher>,
 ) {
     let Ok(children) = canvas.Children() else {
         return;
@@ -1306,6 +1313,52 @@ fn reconcile_native_children(
                     RenderedNativeChild::Native { view, rect } => {
                         let mut view = view;
                         view.arrange(rect);
+                        // Wired exactly once, right here (this whole match arm only runs for a
+                        // genuinely new native child — an existing one takes the sibling arm above,
+                        // which only calls `view.arrange(rect)`), mirroring
+                        // `elwindui_backend_appkit::inner::ElwinduiWindow::make_first_responder`'s
+                        // own one-time-wiring shape. `key.0` (the owner element's own
+                        // `render_group_id` — see `NativeChildKey`'s own doc comment and
+                        // `elwindui_core::ui::record_group_commands`, which always emits a
+                        // `NativeControl` command as its owning element's *own* group) is the
+                        // `owner_id` `elwindui_core::focus::native_focus_gained`/`native_focus_lost`
+                        // need. See `elwindui_backend_appkit::inner::resolve_focus_owner`'s own doc
+                        // comment for why AppKit needs a window-level responder-chain walk to get
+                        // this same information WinUI3 already has for free here: `GotFocus`/
+                        // `LostFocus` are ordinary bubbling routed events on any `FrameworkElement`,
+                        // no subclassing needed.
+                        let owner_id = key.0;
+                        let element = view.as_element();
+                        let render_tree_for_gained = Rc::downgrade(render_tree);
+                        let keyboard_for_gained = Rc::downgrade(keyboard);
+                        let got_focus_id = register_ui_event_callback(Rc::new(move || {
+                            if let (Some(render_tree), Some(keyboard)) =
+                                (render_tree_for_gained.upgrade(), keyboard_for_gained.upgrade())
+                            {
+                                if let Some(render_tree) = render_tree.borrow().as_ref() {
+                                    elwindui_core::focus::native_focus_gained(
+                                        render_tree,
+                                        &keyboard.focus,
+                                        owner_id,
+                                        FocusState::Pointer,
+                                    );
+                                }
+                            }
+                        }));
+                        let _ = element.GotFocus(&RoutedEventHandler::new(move |_, _| {
+                            invoke_ui_event_callback(got_focus_id);
+                            Ok(())
+                        }));
+                        let keyboard_for_lost = Rc::downgrade(keyboard);
+                        let lost_focus_id = register_ui_event_callback(Rc::new(move || {
+                            if let Some(keyboard) = keyboard_for_lost.upgrade() {
+                                elwindui_core::focus::native_focus_lost(&keyboard.focus, owner_id);
+                            }
+                        }));
+                        let _ = element.LostFocus(&RoutedEventHandler::new(move |_, _| {
+                            invoke_ui_event_callback(lost_focus_id);
+                            Ok(())
+                        }));
                         NativeChildElement::Native(view)
                     }
                 };
@@ -1649,13 +1702,17 @@ impl TreeHostPanel {
         let weak = Rc::downgrade(&this.tree);
         let weak_render_tree = Rc::downgrade(&this.render_tree);
         let weak_native_children = Rc::downgrade(&this.native_children);
+        let weak_keyboard = Rc::downgrade(&this.keyboard);
         let canvas_for_handler = this.canvas.clone();
         let draw_canvas_for_handler = this.draw_canvas.clone();
         let draw_list_for_handler = this.draw_list.clone();
         let callback_id = register_ui_event_callback(Rc::new(move || {
-            if let (Some(tree), Some(render_tree), Some(native_children)) =
-                (weak.upgrade(), weak_render_tree.upgrade(), weak_native_children.upgrade())
-            {
+            if let (Some(tree), Some(render_tree), Some(native_children), Some(keyboard)) = (
+                weak.upgrade(),
+                weak_render_tree.upgrade(),
+                weak_native_children.upgrade(),
+                weak_keyboard.upgrade(),
+            ) {
                 Self::relayout_static(
                     &canvas_for_handler,
                     &draw_canvas_for_handler,
@@ -1663,6 +1720,7 @@ impl TreeHostPanel {
                     &tree,
                     &render_tree,
                     &native_children,
+                    &keyboard,
                 );
             }
         }));
@@ -1691,7 +1749,7 @@ impl TreeHostPanel {
     /// `InvalidateMeasure`/`InvalidateArrange`) on such a `Canvas` does not, in practice, make its
     /// `SizeChanged` fire on any later frame either — logged and observed directly, not assumed.
     pub(crate) fn force_relayout(&self) {
-        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children);
+        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children, &self.keyboard);
     }
 
     /// Replaces this host's entire content. `draw_canvas` itself is never touched here (appended
@@ -1709,6 +1767,7 @@ impl TreeHostPanel {
             tree: Rc::downgrade(&self.tree),
             render_tree: Rc::downgrade(&self.render_tree),
             native_children: Rc::downgrade(&self.native_children),
+            keyboard: Rc::downgrade(&self.keyboard),
             pending: Cell::new(false),
             weak_self: RefCell::new(Weak::new()),
         });
@@ -1723,7 +1782,7 @@ impl TreeHostPanel {
         collect_shortcuts_into(&tree, self.keyboard.shortcuts());
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
-        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children);
+        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children, &self.keyboard);
     }
 
     fn relayout_static(
@@ -1733,6 +1792,7 @@ impl TreeHostPanel {
         tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
         retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
         native_children: &Rc<RefCell<NativeChildMap>>,
+        keyboard: &Rc<KeyboardDispatcher>,
     ) {
         use elwindui_core::base::Size as LSize;
 
@@ -1779,8 +1839,12 @@ impl TreeHostPanel {
                 *retained_tree = Some(elwindui_core::graphics::RenderTree::new::<AnyView>(tree));
             }
         }
-        let retained_tree = retained_tree.borrow();
-        let Some(render_tree) = retained_tree.as_ref() else {
+        // Named distinctly from the `retained_tree: &Rc<RefCell<Option<RenderTree>>>` parameter
+        // (not shadowed, unlike the `borrow_mut()` above whose own shadow already goes out of scope
+        // at the end of its block) so that parameter is still reachable below, to pass into
+        // `reconcile_native_children`.
+        let retained_tree_ref = retained_tree.borrow();
+        let Some(render_tree) = retained_tree_ref.as_ref() else {
             return;
         };
 
@@ -1987,7 +2051,7 @@ impl TreeHostPanel {
                 }
             }
         }
-        reconcile_native_children(canvas, native_children, native_wanted);
+        reconcile_native_children(canvas, native_children, native_wanted, retained_tree, keyboard);
         *draw_list.lock().expect("Win2D draw list poisoned") = primitives;
         let _ = draw_canvas.Invalidate();
     }

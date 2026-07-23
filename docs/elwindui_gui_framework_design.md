@@ -627,7 +627,7 @@ TextArea {
 pub enum FocusState { Unfocused, Pointer, Keyboard, Programmatic }
 ```
 
-`UIElementExt::focus_state(&self) -> FocusState`で命令的に読める。`FocusTracker::set_focus`が更新し、`Keyboard`の場合はTabキー経由(`KeyboardDispatcher`)、`Programmatic`の場合は後述の`focus()`経由——マウスクリックによる`Pointer`はポインタ側にフォーカス移譲の配線がまだ無いため現状発生しない(将来課題)。
+`UIElementExt::focus_state(&self) -> FocusState`で命令的に読める。`FocusTracker::set_focus`が更新し、`Keyboard`の場合はTabキー経由(`KeyboardDispatcher`)、`Programmatic`の場合は後述の`focus()`経由。**マウスクリックによる`Pointer`は実装済み**(NativeControl拡充Phase 1、`docs/elwindui_nativecontrol_expansion_status.md`参照)——自前描画要素は`PointerDispatcher::handle`の`Pressed`分岐が`is_tab_stop()`な要素を直接`set_focus(.., FocusState::Pointer)`し、ネイティブリーフ(`Button`/`TextArea`/`TabView`)はOS側の実フォーカスイン通知(下記)を`elwindui_core::focus::native_focus_gained`経由で橋渡しする。両経路とも`FocusState::Pointer`固定(実際にマウスクリックかキーボードのタブ移動かをOSイベントから区別する処理はPhase 1では簡略化のため省略)。
 
 **強制フォーカス(`UIElementExt::focus()`)**: WinUI3の`Control.Focus()`相当。`RelayoutHost`(§5.4)と対になる`FocusHost`トレイトを新設し、`invalidate_host`と同じ「ホストの`set_tree`がルート要素に1つだけ登録し、任意のノードが`visual_parent`を根まで辿って発見する」パターンで実装した:
 
@@ -640,7 +640,7 @@ pub trait FocusHost {
 
 DSL側で見た目にフォーカス状態を反映したい場合は、新しいバインディング機構を作らず既存の`on_got_focus`/`on_lost_focus`(§8.1)で自分の`prop`を更新して`if`分岐する——`on_pointer_entered`/`on_pointer_exited`にホバー専用の組み込みpropが無いのと同じ理由。
 
-ネイティブ系バックエンドはOS標準のフォーカス機構(AppKitの`NSResponder`チェーン、WinUI3の`FocusManager`)へのミラー同期を行っていない——自前描画系要素のキーボードフォーカスは完全に仮想(`FocusTracker`のみが真実)で、実OSキーボードフォーカスは常にホストビュー自身(`TreeHostView`/`Canvas`)が持つ(§8.1の「既知の制限」参照)。
+**ネイティブ系バックエンドのOS標準フォーカス機構(AppKitの`NSResponder`チェーン、WinUI3の`GotFocus`/`LostFocus`)への片方向ミラー(OS→`FocusTracker`)は実装済み**(NativeControl拡充Phase 1)。AppKitは`ElwinduiWindow: NSWindow`サブクラスが`makeFirstResponder:`をオーバーライドし、新しいresponderのsuperview鎖を辿って追跡中の`TreeHostView`祖先(ネストしたホストも含む)を探し、`RenderCommand::NativeControl.owner_id`→`RenderTree::visual_index`経由で要素を解決して`elwindui_core::focus::native_focus_gained`/`native_focus_lost`を呼ぶ(`crates/elwindui-backend-appkit/src/inner.rs`の`resolve_focus_owner`/`ElwinduiWindow`)。WinUI3は`FrameworkElement`が標準で持つ`GotFocus`/`LostFocus`ルーテッドイベントに、ネイティブ子要素の初回アタッチ時に一度だけ配線する(サブクラス化不要、`reconcile_native_children`)——ただしWindows環境が無いため未検証。自前描画系要素のキーボードフォーカスは引き続き完全に仮想(`FocusTracker`のみが真実)。既知の制限として、(1) 方向キー(`Up`/`Down`/`Left`/`Right`)によるフォーカス移動は未実装(前述)、(2) **ネイティブリーフがフォーカスを持っている間のTab/Shift+Tabキーはそのウィジェットのネイティブ既定動作(例: `NSTextView`はタブ文字を挿入する)に委ねられたままで、`FocusTracker::move_focus`には到達しない** — ネイティブコントロールから「抜ける」方向のTab移動はPhase 1では対応しておらず、AppKitのkey-view-loopチェーン等より侵襲的な変更が必要になる(§8.1参照)。
 
 ### 5.6 アクセシビリティ
 
@@ -1069,7 +1069,7 @@ TextArea {
 
 これらのイベントを受け取るには、当該要素がフォーカスを持っている必要がある(§5.5の`FocusTracker`と連動する)。
 
-**既知の制限**: 自前描画系要素(`Layout`/`Control`/`Shape`/`TextBlock`)のキーボードフォーカスは完全に仮想(`FocusTracker`のみが真実)——実OSキーボードフォーカスは常にホストビュー自身(`TreeHostView`/`Canvas`)が持つ。`Button`/`TextArea`/`TabView`等ネイティブリーフは実OSキーボードフォーカスを自分自身で受け取れる(タイピング自体は元々ネイティブに動く)が、`on_key_down`等をDSLで拾うにはバックエンドごとの個別配線が必要で今回は未着手(§5.10の`on_click`と同じ制約)。クリックでフォーカスを移す配線(WinUI3の既定動作)も同様に未着手——現状Tab移動と`focus()`の明示呼び出しのみでフォーカスが動く。
+**既知の制限**: 自前描画系要素(`Layout`/`Control`/`Shape`/`TextBlock`)のキーボードフォーカスは完全に仮想(`FocusTracker`のみが真実)——実OSキーボードフォーカスは常にホストビュー自身(`TreeHostView`/`Canvas`)が持つ。`Button`/`TextArea`/`TabView`等ネイティブリーフは実OSキーボードフォーカスを自分自身で受け取れる(タイピング自体は元々ネイティブに動く)が、`on_key_down`等をDSLで拾うにはバックエンドごとの個別配線が必要で今回は未着手(§5.10の`on_click`と同じ制約)。**クリックでフォーカスを移す配線はNativeControl拡充Phase 1で実装済み**(自前描画要素・ネイティブリーフ双方、詳細は§5.5参照)——ただし、ネイティブリーフがフォーカスを持っている間のTab/Shift+Tabキーがそのウィジェット自身の既定キー処理に委ねられたままで`FocusTracker::move_focus`に到達しない、という新しい既知の制限が残る(§5.5参照)。
 
 **グローバルショートカット:**
 

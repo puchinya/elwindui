@@ -26,7 +26,25 @@
 | 既存TextArea/TabView/Buttonの回帰確認(AppKit) | ✅ `cargo build`/`cargo test -p elwindui-core -p elwindui-backend-appkit`(174件)通過。`rust-analyzer diagnostics .`で新規warning/error無し。`notepad`を2回起動し数秒間クラッシュなしを確認、CoreGraphics window list上に正常なウィンドウ生成を確認 | - | 🟡 **クリック操作・TextArea入力・TabView切り替えなどの対話的動作の目視確認は未実施** — このマシンの実行環境に画面収録・アクセシビリティ権限が付与されておらず、`screencapture`/`osascript`によるスクリーンショット・自動クリックがいずれも失敗した。ユーザーによる手動確認待ち |
 | Tab/Shift+Tabでネイティブコントロールから抜ける動作 | ⬜ 未対応(Phase 1スコープ外、既知の制限として記録) | ⬜ 同左 | ネイティブウィジェットの既定キー処理が優先されるため、elwindui側の`FocusTracker::move_focus`に到達しない。AppKitのkey-view-loopチェーン等、より侵襲的な変更が必要 |
 
-**未完了(このドキュメント作成時点で未着手)**: §2 TextArea/TabViewの対話的回帰確認(権限待ち)、§3.0 テキスト入力系共通化、§3 TextBox、§4 PasswordBox、§5 ScrollView、§6 ドキュメント追加(`elwindui_builtins_spec.md`新規付録・`elwindui_gui_framework_design.md`§5.5/§8.1/新§5.1b更新)、§7 `examples/controls-demo`。
+**未完了(このドキュメント作成時点で未着手)**: §2 TextArea/TabViewの対話的回帰確認(権限待ち)、§4 PasswordBox、§5 ScrollView、§6 ドキュメント追加の残り(`elwindui_gui_framework_design.md`新§5.1b)、§7 `examples/controls-demo`。
+
+---
+
+## 1.5 TextBox(§3.0 共通化 + §3 実装 完了)
+
+| 項目 | AppKit | WinUI3 |
+|---|---|---|
+| `elwindui-core::ui::TextBox`トレイト | ✅ | ✅(バックエンド非依存) |
+| `builtins.elwind`の`TextBox`宣言 | ✅ | ✅(バックエンド非依存、codegenは完全に汎用) |
+| §3.0a 共通`NativeTextFieldCommon`/`NativeTextFieldDelegate`(NSTextField系ウィジェットの値比較ガード付きset_string_value・max_length切り詰め・単一デリゲートでon_change/on_submit両対応) | ✅ 実装・`cargo build`/`cargo test`通過 | N/A(WinUI3はTextBox/PasswordBoxで別クラス・別イベント名のため共通化の対象が少なく、新規共通化コードは追加していない) |
+| `InnerTextBox`(`NSTextField`ラップ) | ✅ | 🟡 未検証(`XamlTextBox`、`TextArea`と同一クラスを設定違いで共用) |
+| `native_ui::TextBox` | ✅ | 🟡 未検証 |
+| submit-on-Enter(`on_key_down`経由、専用イベントなし) | ✅ `control:textView:doCommandBySelector:`でTextBox専用に対応 | 🟡 未検証(`TextBox.KeyDown`はネイティブに発火するため特別な配線不要) |
+| コアレベルテスト(`FakeTextBoxWidget`、`FakeNativeControl`継承) | ✅ `cargo test -p elwindui-core`通過(measure/try_as_native_control/on_change dispatchを検証) | - |
+| AppKit実機能ライフサイクルテスト(§3.0c/§3e) | ⬜ **未着手** — `MainThreadMarker::new()`が`cargo test`のデフォルトテストハーネス(ワーカースレッド)では`None`を返すことを実機で確認済み(空の`#[test]`で検証)。`harness = false`のカスタムテストバイナリが必要だが、`inner`/`native_ui`モジュールの型が`pub(crate)`のため外部`tests/`統合テストからはアクセスできず、設計に追加検討が必要。デモアプリ(`examples/controls-demo`、§7)による手動確認で代替する方針 | - |
+| `docs/elwindui_builtins_spec.md` F.12 | ✅ | ✅(同一ドキュメント) |
+| `selection_start`/`selection_length` | ⬜ 意図的に見送り(既知のギャップとして明記) | ⬜ 同左 |
+| max_length非対称性 | 🟡 デリゲート側で事後的に切り詰め(ネイティブAPI無し) | ✅ `TextBox.MaxLength`ネイティブ対応(未検証) |
 
 ---
 

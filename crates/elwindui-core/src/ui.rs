@@ -1085,6 +1085,26 @@ pub trait Button {
     fn set_text(&self, text: &str);
 }
 
+/// Single-line text input — see `docs/elwindui_nativecontrol_expansion_status.md` for the wider
+/// NativeControl expansion this is part of. Deliberately narrower than the original spec's
+/// `TextBox` sketch: `selection_start`/`selection_length` are not included (AppKit's `NSTextField`
+/// selection lives on its *field editor*, which only exists while actively being edited — a shared
+/// method here would either be AppKit-only-half-working or need a `NativeControl`-wide "is there an
+/// active editor right now" concept this codebase doesn't have yet; revisit once a second consumer
+/// needs it). `submit`-on-Enter is likewise not a dedicated trait method — `UIElement`'s existing
+/// `on_key_down` (`#[routed]`) already covers it the same way any other element's own key handling
+/// would (see `TextBox` in `builtins.elwind` and `native_ui::TextBox::on_constructed`'s own doc
+/// comment on why AppKit needs one narrow, TextBox-specific addition to make that work in practice).
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+pub trait TextBox {
+    fn set_text(&self, text: &str);
+    fn set_on_change(&self, callback: Box<dyn Fn(String)>);
+    fn set_placeholder(&self, text: &str);
+    fn set_read_only(&self, read_only: bool);
+    fn set_max_length(&self, max_length: Option<u32>);
+    fn set_text_alignment(&self, alignment: TextAlignment);
+}
+
 #[elwindui_macros::class(trait_only)]
 pub trait MenuItem {
     fn set_text(&self, text: &str);
@@ -2603,6 +2623,74 @@ mod tests {
                 handle,
             }
         }
+    }
+
+    /// Backend-independent stand-in for a real backend's `TextBox` leaf (e.g.
+    /// `elwindui-backend-appkit::native_ui::TextBox`) — exercises `elwindui_core::ui::TextBoxExt`'s
+    /// generated dispatch (measure/try_as_native_control via the inherited `FakeNativeControl` base,
+    /// plus the `TextBox`-specific setters) without needing a real AppKit/WinUI3 widget.
+    struct FakeTextBoxState {
+        text: RefCell<String>,
+        on_change: RefCell<Option<Box<dyn Fn(String)>>>,
+    }
+
+    #[elwindui_macros::class(struct_only = crate::ui::TextBoxExt, inherits = crate::ui::tests::FakeNativeControl)]
+    struct FakeTextBoxWidget {
+        state: FakeTextBoxState,
+    }
+
+    #[elwindui_macros::class]
+    impl FakeTextBoxWidget {
+        fn construct(handle: FakeHandle) -> Self {
+            Self {
+                base: FakeNativeControl::construct(handle),
+                state: FakeTextBoxState {
+                    text: RefCell::new(String::new()),
+                    on_change: RefCell::new(None),
+                },
+            }
+        }
+
+        fn set_text(&self, text: &str) {
+            *self.state.text.borrow_mut() = text.to_string();
+            if let Some(callback) = self.state.on_change.borrow().as_ref() {
+                callback(text.to_string());
+            }
+        }
+        fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+            *self.state.on_change.borrow_mut() = Some(callback);
+        }
+        fn set_placeholder(&self, _text: &str) {}
+        fn set_read_only(&self, _read_only: bool) {}
+        fn set_max_length(&self, _max_length: Option<u32>) {}
+        fn set_text_alignment(&self, _alignment: TextAlignment) {}
+    }
+
+    #[test]
+    fn fake_text_box_measures_through_inherited_native_control_base() {
+        let widget = FakeTextBoxWidget::new(FakeHandle("textbox", size(80.0, 20.0)));
+        let widget: Rc<dyn UIElementExt> = widget;
+        // `natural_size` measures with an unconstrained `{0, 0}` available size and reads back
+        // `measured_size()` directly — unlike `arranged_width`/`arranged_height` below, it isn't
+        // affected by the default `Stretch` alignment filling `layout_tree`'s own `available`, so
+        // it verifies `measure_override`/`FakeHandle::measure` ran with the right handle in
+        // isolation.
+        assert_eq!(natural_size(&*widget), size(80.0, 20.0));
+        layout_tree::<FakeHandle>(&widget, size(200.0, 200.0));
+        assert!(widget.try_as_native_control().is_some());
+    }
+
+    #[test]
+    fn fake_text_box_set_text_dispatches_on_change() {
+        let widget = FakeTextBoxWidget::new(FakeHandle("textbox", size(80.0, 20.0)));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        {
+            let seen = Rc::clone(&seen);
+            widget.set_on_change(Box::new(move |text| seen.borrow_mut().push(text)));
+        }
+        widget.set_text("hello");
+        widget.set_text("hello world");
+        assert_eq!(*seen.borrow(), vec!["hello".to_string(), "hello world".to_string()]);
     }
 
     /// `#[overridable]`/`#[overrides]` usage example, exercised across a genuine 3-hop chain

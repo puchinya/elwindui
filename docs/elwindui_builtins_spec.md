@@ -36,9 +36,11 @@ UIElement (trait, elwindui-core::ui)
  │
  ├─ NativeControl<H>   実ハンドル(H)を持ちビジュアルツリーに`Rc<dyn UIElement>`として実際に埋め込ま
  │                      れる葉ノードのみ(常にleaf、children()は空)。`.elwind`側で
- │                      `inherits NativeControl`を宣言するのはこの3つだけ:
+ │                      `inherits NativeControl`を宣言するのはこの4つ(TextBoxはNativeControl拡充
+ │                      Phase 1で追加、`docs/elwindui_nativecontrol_expansion_status.md`参照):
  │   ├─ Button                    (付録F.6, #[routed] on_click)
  │   ├─ TextArea                  (付録F.4, #[two_way] text)
+ │   ├─ TextBox                   (付録F.12, #[two_way] text)
  │   └─ TabView                   (付録Y)
  │
  │   ビジュアルツリーに参加しない(measure/arrangeが呼ばれない)ため`inherits NativeControl`ではなく
@@ -572,6 +574,75 @@ Grid {
 子はいずれも自分自身の`UIElementBase`を`Grid`の使用箇所とは別の場所(ネイティブ側の`new()`、または
 その子自身が生成する`new()`)で組み立てるため(`elwindui-codegen`の`grid_cell_expr`のスコープ注記
 参照)。
+
+## F.12 `builtin::TextBox`
+
+NativeControl派生コントロール拡充Phase 1(`docs/elwindui_nativecontrol_expansion_status.md`)で追加。
+`TextArea`(F.4)の単一行版——別のネイティブウィジェットを使う(WinUI3のみ同一XAMLクラスを設定違いで共用)、
+独立した`.elwind`部品であり、`TextArea`へ`multiline`のようなフラグを追加して統合してはいない。
+
+```rust
+component TextBox {
+    text: String = bind!(self.text, TwoWay),
+    placeholder: Option<String>,
+    read_only: Option<bool>,
+    max_length: Option<u32>,
+    text_alignment: Option<TextAlignment>,
+}
+
+view TextBox {
+    match target::backend() {
+        Backend::Winui3 => native! {
+            // TextAreaと全く同じXAMLクラス。SetAcceptsReturn/SetTextWrappingを設定しないだけ。
+            let box_ = microsoft::ui::xaml::controls::TextBox::new()?;
+            box_.SetText(&text)?;
+            box_.SetPlaceholderText(&placeholder.unwrap_or_default())?;
+            box_.SetIsReadOnly(read_only.unwrap_or(false))?;
+            box_.SetMaxLength(max_length.unwrap_or(0) as i32)?; // 0 = 無制限、ネイティブ実装
+            box_.TextChanged(&TextChangedHandler::new(move |new_text| { text = new_text; }))?;
+            box_.KeyDown(&KeyEventHandler::new(move |args| {
+                if args.Key() == VirtualKey::Enter { dispatch_on_key_down(Key::Enter); }
+            }))?;
+            box_
+        }
+        Backend::Appkit => native! {
+            let field = NSTextField::new();
+            field.setStringValue(&text);
+            field.setPlaceholderString(&placeholder.unwrap_or_default());
+            field.setEditable(!read_only.unwrap_or(false));
+            // NSTextFieldにmax_lengthのネイティブAPIは無い。デリゲート側でtruncateする。
+            field.set_delegate_on_change_with_max_length(max_length, move |new_text| { text = new_text; });
+            // NSTextFieldにEnterキー専用イベントは無い。control:textView:doCommandBySelector:で
+            // insertNewline:を検知し、on_key_downへ転送する(TextBox専用の狭い追加対応)。
+            field.set_delegate_on_submit(move || { dispatch_on_key_down(Key::Enter); });
+            field
+        }
+        Backend::Gtk4 => native! {
+            // 未実装 — docs/elwindui_nativecontrol_expansion_status.md §3のGTK4基盤構築フォロー
+            // アップ完了後に着手する。
+            unimplemented!()
+        }
+    }
+}
+```
+
+**submit(Enter)は専用フィールドではない** — `component UIElement`が既に持つ`on_key_down`(`#[routed]`)を
+`Key::Enter`で判定すれば十分なため、`TextBox`固有の`on_submit`イベントは追加していない。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`cargo build`/`cargo test`で検証済み(`NSTextField`ベース)。対話的な目視確認(IME・選択・Undo/Redo等)は未実施——`docs/elwindui_nativecontrol_expansion_status.md`参照 |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし)。`TextArea`と同一XAMLクラスを設定違いで共用 |
+| GTK4 | 未実装(GTK4バックエンド自体が基盤未構築) |
+
+**既知のギャップ(意図的な縮小スコープ、隠していない)**:
+- `selection_start`/`selection_length`は未実装。AppKitの`NSTextField`は選択情報がfield editor
+  (`currentEditor()`)側にあり、編集中以外は存在しないという非対称性があるため。
+- AppKit/WinUI3で`max_length`のネイティブ対応が非対称——WinUI3は`TextBox.MaxLength`が
+  ネイティブAPIとして存在するが、AppKitの`NSTextField`には無いためデリゲート側で事後的に
+  切り詰める実装になっている(キャレット位置が動く可能性がある)。
 
 ---
 

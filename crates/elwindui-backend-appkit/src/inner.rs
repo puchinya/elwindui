@@ -17,10 +17,11 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventModifierFlags, NSImage, NSMenu, NSMenuItem, NSResponder, NSScreen, NSScrollView,
-    NSStackView, NSTextDelegate, NSTextView, NSTextViewDelegate, NSTrackingArea,
-    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
+    NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem,
+    NSResponder, NSScreen, NSScrollView, NSStackView, NSTextDelegate, NSTextField,
+    NSTextFieldDelegate, NSTextView, NSTextViewDelegate, NSTrackingArea, NSTrackingAreaOptions,
+    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGColor, CGColorSpace, CGDataProvider, CGImage, CGMutablePath};
@@ -32,7 +33,7 @@ use objc2_quartz_core::{
     kCAGradientLayerAxial, kCAGradientLayerRadial, kCALineCapButt, kCALineCapRound,
     kCALineCapSquare, kCALineJoinBevel, kCALineJoinMiter, kCALineJoinRound,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -128,6 +129,12 @@ impl AppKitHandle for Retained<NSButton> {
 impl AppKitHandle for Retained<NSStackView> {
     fn as_nsview(&self) -> Retained<NSView> {
         Retained::into_super(self.clone())
+    }
+}
+impl AppKitHandle for Retained<NSTextField> {
+    fn as_nsview(&self) -> Retained<NSView> {
+        let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
+        Retained::into_super(control)
     }
 }
 
@@ -2471,6 +2478,208 @@ impl TextViewDelegate {
     fn new(mtm: MainThreadMarker, ivars: TextDelegateIvars) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Shared machinery for any `NSTextField`-family single-line native leaf: `TextBox`'s own
+/// `NSTextField`, and `PasswordBox`'s `NSSecureTextField` (a direct `NSTextField` subclass — see
+/// `AppKitHandle for Retained<NSTextField>` above and `InnerPasswordBox`, which upcasts its own
+/// `Retained<NSSecureTextField>` via `Retained::into_super` before wrapping it here). Built once for
+/// `InnerTextBox` and reused verbatim by `InnerPasswordBox` — both widgets need the exact same
+/// value-compare-guarded `set_string_value`/delegate-wiring/`max_length`-truncation logic, and
+/// writing it twice would just be two copies of the same bug surface (see
+/// `docs/elwindui_nativecontrol_expansion_status.md` on the "generalize before duplicating" policy
+/// this follows).
+///
+/// Unlike `InnerTextArea`'s `TextViewDelegate` (constructed fresh, once, inside `set_on_change`
+/// alone), this widget family also needs an optional submit-on-Enter callback (`TextBox` only, see
+/// `InnerTextBox::set_on_submit`) that a *second* setter call must be able to wire without
+/// clobbering whichever of `set_on_change`/`set_on_submit` was set first — `NSControl.delegate` is a
+/// single slot, so two separately-constructed delegate objects each calling `setDelegate:` would
+/// silently drop whichever wired second. The delegate here is therefore built exactly once, in
+/// `NativeTextFieldCommon::new`, and every setter only ever mutates that one delegate's own interior
+/// `RefCell`/`Cell` state — never re-registers a new delegate object.
+struct NativeTextFieldCommon {
+    field: Retained<NSTextField>,
+    delegate: Retained<NativeTextFieldDelegate>,
+}
+
+impl NativeTextFieldCommon {
+    fn new(field: Retained<NSTextField>) -> Self {
+        let ivars = NativeTextFieldDelegateIvars {
+            field: field.clone(),
+            max_length: Cell::new(None),
+            on_change: RefCell::new(None),
+            on_submit: RefCell::new(None),
+        };
+        let delegate = NativeTextFieldDelegate::new(mtm(), ivars);
+        let protocol_obj: &objc2::runtime::ProtocolObject<dyn NSTextFieldDelegate> =
+            objc2::runtime::ProtocolObject::from_ref(&*delegate);
+        // `NSTextField.delegate` is an unretained (weak) reference, so this delegate is only kept
+        // alive by `self.delegate` for as long as this `NativeTextFieldCommon` (and, transitively,
+        // its owning `InnerTextBox`/`InnerPasswordBox`) lives.
+        unsafe { field.setDelegate(Some(protocol_obj)) };
+        Self { field, delegate }
+    }
+
+    /// Same value-compare-guard idiom as `InnerTextArea::set_text` — see that method's own doc
+    /// comment for why: a `#[two_way]`-bound field re-syncs on every model change, including the one
+    /// the native edit itself just caused, so an identical model→widget update must be a no-op.
+    fn set_string_value(&self, text: &str) {
+        if self.field.stringValue().to_string() == text {
+            return;
+        }
+        self.field.setStringValue(&NSString::from_str(text));
+    }
+
+    fn set_max_length(&self, max_length: Option<u32>) {
+        self.delegate.ivars().max_length.set(max_length);
+    }
+
+    fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+        *self.delegate.ivars().on_change.borrow_mut() = Some(callback);
+    }
+
+    /// `TextBox`-only (see `InnerTextBox::set_on_submit`'s own doc comment) — harmless to expose
+    /// here too rather than duplicating this setter, since `PasswordBox` simply never calls it.
+    fn set_on_submit(&self, callback: Box<dyn Fn()>) {
+        *self.delegate.ivars().on_submit.borrow_mut() = Some(callback);
+    }
+}
+
+struct NativeTextFieldDelegateIvars {
+    field: Retained<NSTextField>,
+    max_length: Cell<Option<u32>>,
+    on_change: RefCell<Option<Box<dyn Fn(String)>>>,
+    on_submit: RefCell<Option<Box<dyn Fn()>>>,
+}
+
+define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[ivars = NativeTextFieldDelegateIvars]
+    struct NativeTextFieldDelegate;
+
+    unsafe impl NSObjectProtocol for NativeTextFieldDelegate {}
+
+    unsafe impl NSControlTextEditingDelegate for NativeTextFieldDelegate {
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, _notification: &NSNotification) {
+            let field = &self.ivars().field;
+            // AppKit has no native max-length primitive on `NSTextField`, unlike WinUI3's
+            // `TextBox.MaxLength` (`native_ui::TextBox`'s own doc comment on this asymmetry) — so a
+            // limit is enforced here, after the fact, by truncating straight back. This can move
+            // the caret; that's an accepted (and, without a native primitive, unavoidable) cost of
+            // enforcing the limit at all, and only happens on the one edit that actually exceeds it.
+            if let Some(max_length) = self.ivars().max_length.get() {
+                let current = field.stringValue().to_string();
+                if current.chars().count() > max_length as usize {
+                    let truncated: String = current.chars().take(max_length as usize).collect();
+                    field.setStringValue(&NSString::from_str(&truncated));
+                }
+            }
+            let s = field.stringValue();
+            if let Some(callback) = self.ivars().on_change.borrow().as_ref() {
+                callback(s.to_string());
+            }
+        }
+
+        /// `TextBox`-only submit-on-Enter (`InnerTextBox::set_on_submit`'s own doc comment on the
+        /// narrow scope of this addition). `on_submit` stays `None` for `PasswordBox`, so this is a
+        /// no-op there — the same single delegate serves both widgets regardless.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        unsafe fn control_text_view_do_command_by_selector(
+            &self,
+            _control: &objc2_app_kit::NSControl,
+            _text_view: &NSTextView,
+            command_selector: objc2::runtime::Sel,
+        ) -> bool {
+            if command_selector == sel!(insertNewline:) {
+                if let Some(callback) = self.ivars().on_submit.borrow().as_ref() {
+                    callback();
+                }
+            }
+            false
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for NativeTextFieldDelegate {}
+);
+
+impl NativeTextFieldDelegate {
+    fn new(mtm: MainThreadMarker, ivars: NativeTextFieldDelegateIvars) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ivars);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Raw `NSTextField` + change-notification delegate — composed by `native_ui::TextBox`. Contrast
+/// with `InnerTextArea` (`NSTextView` wrapped in an `NSScrollView` via `scrollableTextView`): this
+/// wraps a bare `NSTextField` directly, no scrolling concept at all, single line only.
+pub(crate) struct InnerTextBox {
+    handle: AnyView,
+    field: Retained<NSTextField>,
+    common: NativeTextFieldCommon,
+}
+
+impl InnerTextBox {
+    pub(crate) fn new() -> Self {
+        let m = mtm();
+        let field = NSTextField::new(m);
+        field.setBezeled(true);
+        field.setEditable(true);
+        let handle = AnyView::from(field.clone());
+        let common = NativeTextFieldCommon::new(field.clone());
+        Self {
+            handle,
+            field,
+            common,
+        }
+    }
+
+    pub(crate) fn handle(&self) -> AnyView {
+        self.handle.clone()
+    }
+
+    pub(crate) fn set_text(&self, text: &str) {
+        self.common.set_string_value(text);
+    }
+
+    pub(crate) fn set_placeholder(&self, text: &str) {
+        self.field
+            .setPlaceholderString(Some(&NSString::from_str(text)));
+    }
+
+    pub(crate) fn set_read_only(&self, read_only: bool) {
+        self.field.setEditable(!read_only);
+    }
+
+    pub(crate) fn set_max_length(&self, max_length: Option<u32>) {
+        self.common.set_max_length(max_length);
+    }
+
+    pub(crate) fn set_text_alignment(&self, alignment: elwindui_core::ui::TextAlignment) {
+        use elwindui_core::ui::TextAlignment;
+        use objc2_app_kit::NSTextAlignment;
+        self.field.setAlignment(match alignment {
+            TextAlignment::Left => NSTextAlignment::Left,
+            TextAlignment::Center => NSTextAlignment::Center,
+            TextAlignment::Right => NSTextAlignment::Right,
+        });
+    }
+
+    pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+        self.common.set_on_change(callback);
+    }
+
+    /// TextBox-specific, narrowly-scoped addition (not the general native-keyboard-forwarding
+    /// problem `docs/elwindui_gui_framework_design.md` §5.5/§8.1 documents as a known limitation for
+    /// Tab-out-of-a-focused-native-leaf): detects the Enter key via
+    /// `NSControlTextEditingDelegate::control:textView:doCommandBySelector:` (`insertNewline:`) and
+    /// forwards it through `callback`, letting `native_ui::TextBox::on_constructed` dispatch it as an
+    /// ordinary `on_key_down` — see that method's own doc comment.
+    pub(crate) fn set_on_submit(&self, callback: Box<dyn Fn()>) {
+        self.common.set_on_submit(callback);
     }
 }
 

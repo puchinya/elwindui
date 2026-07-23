@@ -11,7 +11,7 @@ use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
     Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, TabView as XamlTabView,
     TabViewCloseButtonOverlayMode, TabViewItem, TabViewTabCloseRequestedEventArgs, TextBlock,
-    TextBox,
+    TextBox as XamlTextBox,
 };
 use crate::bindings::Microsoft::UI::Xaml::Input::{
     CharacterReceivedRoutedEventArgs, KeyEventHandler, KeyboardAccelerator,
@@ -204,7 +204,7 @@ fn collect_shortcuts_into(
 }
 
 /// The capability a type needs to be usable as an `AnyView` — implemented once per raw XAML element
-/// type (`TextBox`/`XamlButton`/`XamlTabView`) instead of matched on centrally, so a future native
+/// type (`XamlTextBox`/`XamlButton`/`XamlTabView`) instead of matched on centrally, so a future native
 /// leaf (`Dialog`, `VirtualList`, ...) only needs its own `impl WinUiHandle`, never a change to
 /// `AnyView` itself or to any `match` over it — mirrors `elwindui-backend-appkit`'s `AppKitHandle`
 /// (see that trait's own doc comment for the rationale).
@@ -219,7 +219,7 @@ trait WinUiHandle: elwindui_core::base::AsAny {
     fn as_element(&self) -> FrameworkElement;
 }
 
-impl WinUiHandle for TextBox {
+impl WinUiHandle for XamlTextBox {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TextBox implements FrameworkElement")
     }
@@ -2298,16 +2298,18 @@ impl InnerWindow {
     }
 }
 
-/// Raw `TextBox` + change-notification wiring — composed by `native_ui::TextArea`.
+/// Raw `TextBox` (multi-line configured — `SetAcceptsReturn(true)`/`SetTextWrapping(Wrap)`, unlike
+/// `InnerTextBox`'s single-line configuration of the exact same underlying XAML class below) +
+/// change-notification wiring — composed by `native_ui::TextArea`.
 pub(crate) struct InnerTextArea {
     handle: AnyView,
-    text_box: TextBox,
+    text_box: XamlTextBox,
     on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
 }
 
 impl InnerTextArea {
     pub(crate) fn new() -> Self {
-        let text_box = TextBox::new().expect("TextBox::new");
+        let text_box = XamlTextBox::new().expect("TextBox::new");
         let _ = text_box.SetAcceptsReturn(true);
         let _ = text_box.SetTextWrapping(bindings::Microsoft::UI::Xaml::TextWrapping::Wrap);
         let handle = AnyView::from(text_box.clone());
@@ -2365,6 +2367,111 @@ impl InnerTextArea {
 
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
         *self.on_change.borrow_mut() = Some(callback);
+    }
+}
+
+/// Raw single-line `TextBox` — the exact same underlying XAML class `InnerTextArea` wraps above,
+/// just without `SetAcceptsReturn(true)`/`SetTextWrapping(Wrap)` (see that struct's own doc
+/// comment) — composed by `native_ui::TextBox`. Structurally mirrors
+/// `elwindui-backend-appkit::inner::InnerTextBox`; unverified on this machine (no Windows
+/// environment — see `docs/elwindui_nativecontrol_expansion_status.md`).
+pub(crate) struct InnerTextBox {
+    handle: AnyView,
+    text_box: XamlTextBox,
+    on_change: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+}
+
+impl InnerTextBox {
+    pub(crate) fn new() -> Self {
+        let text_box = XamlTextBox::new().expect("TextBox::new");
+        let handle = AnyView::from(text_box.clone());
+        let this = Self {
+            handle,
+            text_box,
+            on_change: Rc::new(RefCell::new(None)),
+        };
+        {
+            let callback = this.on_change.clone();
+            let text_box_for_handler = this.text_box.clone();
+            let callback_id = register_ui_event_callback(Rc::new(move || {
+                if let Some(callback) = callback.borrow().as_ref() {
+                    let text = text_box_for_handler
+                        .Text()
+                        .map(|value| value.to_string_lossy())
+                        .unwrap_or_default();
+                    callback(text);
+                }
+            }));
+            let _ = this.text_box.TextChanged(&TextChangedEventHandler::new(
+                move |_, _| {
+                    invoke_ui_event_callback(callback_id);
+                    Ok(())
+                },
+            ));
+        }
+        this
+    }
+
+    pub(crate) fn handle(&self) -> AnyView {
+        self.handle.clone()
+    }
+
+    /// Same value-compare guard as `InnerTextArea::set_text` — see that method's own doc comment.
+    pub(crate) fn set_text(&self, text: &str) {
+        let current = self
+            .text_box
+            .Text()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default();
+        if current == text {
+            return;
+        }
+        let _ = self.text_box.SetText(&HSTRING::from(text));
+    }
+
+    pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(String)>) {
+        *self.on_change.borrow_mut() = Some(callback);
+    }
+
+    pub(crate) fn set_placeholder(&self, text: &str) {
+        let _ = self.text_box.SetPlaceholderText(&HSTRING::from(text));
+    }
+
+    pub(crate) fn set_read_only(&self, read_only: bool) {
+        let _ = self.text_box.SetIsReadOnly(read_only);
+    }
+
+    /// `TextBox.MaxLength` is a native WinUI3 property (`0` = unlimited) — a direct improvement
+    /// over AppKit's manual delegate-based truncation
+    /// (`elwindui-backend-appkit::inner::NativeTextFieldDelegate`'s own doc comment) — this
+    /// AppKit/WinUI3 asymmetry is recorded in `docs/elwindui_nativecontrol_expansion_status.md`.
+    pub(crate) fn set_max_length(&self, max_length: Option<u32>) {
+        let _ = self.text_box.SetMaxLength(max_length.unwrap_or(0) as i32);
+    }
+
+    pub(crate) fn set_text_alignment(&self, alignment: elwindui_core::ui::TextAlignment) {
+        let _ = self.text_box.SetTextAlignment(xaml_text_alignment(alignment));
+    }
+
+    /// Submit-on-Enter — unlike AppKit (which needs
+    /// `elwindui-backend-appkit::inner::InnerTextBox::set_on_submit`'s own
+    /// `control:textView:doCommandBySelector:` workaround, see that method's own doc comment for
+    /// why), WinUI3's own `TextBox.KeyDown` fires natively regardless of focus and needs no
+    /// special-casing.
+    pub(crate) fn set_on_submit(&self, callback: Box<dyn Fn()>) {
+        let callback_id = register_ui_event_callback(Rc::new(move || callback()));
+        let _ = self.text_box.KeyDown(&KeyEventHandler::new(move |_sender, args| {
+            let Some(args) = args.cloned() else {
+                return Ok(());
+            };
+            let Ok(virtual_key) = args.Key() else {
+                return Ok(());
+            };
+            if virtual_key == VirtualKey::Enter {
+                invoke_ui_event_callback(callback_id);
+            }
+            Ok(())
+        }));
     }
 }
 

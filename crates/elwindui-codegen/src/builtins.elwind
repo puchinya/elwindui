@@ -308,6 +308,24 @@ component TextArea inherits NativeControl {
     text: String,
 }
 
+// Single-line counterpart to `TextArea` above — a distinct native widget per backend (AppKit:
+// `NSTextField`, not `NSTextView`; WinUI3: the same `TextBox` XAML class as `TextArea` itself, just
+// without `AcceptsReturn`/`TextWrapping`), never unified into one control with a `multiline` flag
+// (see docs/elwindui_nativecontrol_expansion_status.md). `submit`-on-Enter rides the ordinary
+// inherited `on_key_down` (`UIElement`, above) rather than a dedicated field — see
+// `elwindui_core::ui::TextBox`'s own doc comment.
+#[embedded]
+#[sealed]
+component TextBox inherits NativeControl {
+    #[two_way]
+    text: String,
+
+    placeholder: Option<String>,
+    read_only: Option<bool>,
+    max_length: Option<u32>,
+    text_alignment: Option<TextAlignment>,
+}
+
 #[embedded]
 #[sealed]
 component Button inherits NativeControl {

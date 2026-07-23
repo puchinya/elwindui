@@ -26,7 +26,7 @@
 | 既存TextArea/TabView/Buttonの回帰確認(AppKit) | ✅ `cargo build`/`cargo test -p elwindui-core -p elwindui-backend-appkit`(174件)通過。`rust-analyzer diagnostics .`で新規warning/error無し。`notepad`を2回起動し数秒間クラッシュなしを確認、CoreGraphics window list上に正常なウィンドウ生成を確認 | - | 🟡 **クリック操作・TextArea入力・TabView切り替えなどの対話的動作の目視確認は未実施** — このマシンの実行環境に画面収録・アクセシビリティ権限が付与されておらず、`screencapture`/`osascript`によるスクリーンショット・自動クリックがいずれも失敗した。ユーザーによる手動確認待ち |
 | Tab/Shift+Tabでネイティブコントロールから抜ける動作 | ⬜ 未対応(Phase 1スコープ外、既知の制限として記録) | ⬜ 同左 | ネイティブウィジェットの既定キー処理が優先されるため、elwindui側の`FocusTracker::move_focus`に到達しない。AppKitのkey-view-loopチェーン等、より侵襲的な変更が必要 |
 
-**未完了(このドキュメント作成時点で未着手)**: §2 TextArea/TabViewの対話的回帰確認(権限待ち)、§7 `examples/controls-demo`。
+**未完了(このドキュメント作成時点で未着手)**: §2 TextArea/TabViewの対話的回帰確認(権限待ち)。§7 `examples/controls-demo`は§1.8参照(作成済み、対話的な目視確認は同じ権限問題のため未実施)。
 
 ---
 
@@ -84,6 +84,25 @@
 | AppKit実機能ライフサイクルテスト | ⬜ TextBox/PasswordBoxと同じ理由で未着手(§1.5参照) | - |
 | スクロール位置取得・設定、`scroll_changed`イベント | ⬜ 意図的に見送り(既知のギャップとして明記) | ⬜ 同左 |
 | `docs/elwindui_builtins_spec.md` F.14、`elwindui_gui_framework_design.md`新§5.1b | ✅ | ✅(同一ドキュメント) |
+
+---
+
+## 1.8 `examples/controls-demo`(§7 完了)
+
+`examples/graphics-demo`と同じ構造(単一`main.rs`、`#[elwindui::viewmodel]`、`TabView`+タブごとの機能領域)で新規クレートを作成した。TextBox/PasswordBox/ScrollViewそれぞれのタブに加え、既存TextArea/Buttonの回帰確認用タブを含む。
+
+| 項目 | 状態 |
+|---|---|
+| クレート作成(`examples/controls-demo/{Cargo.toml,src/main.rs}`) | ✅ |
+| `cargo build -p controls-demo` | ✅ 成功 |
+| TextBoxタブ(値・placeholder・focus状態表示・event log・submit-on-Enter) | ✅ 実装 |
+| PasswordBoxタブ(値の長さのみ表示、実際の値は一切表示しない) | ✅ 実装(§1.6の漏洩防止方針をデモ自身が実演) |
+| ScrollViewタブ(ビューポートより高いコンテンツ、ネストした`TextBox`でネスト内フォーカスを確認可能) | ✅ 実装 |
+| 回帰確認タブ(既存`TextArea`/`Button`) | ✅ 実装 |
+| アプリ起動確認(`cargo run -p controls-demo`、プロセス生存・ウィンドウ生成をCoreGraphics window listで確認) | ✅ 数秒間クラッシュなし、ウィンドウ生成確認 |
+| 対話的な目視確認(クリック・入力・フォーカス切り替え・スクロール) | ⬜ **未実施** — §2と同じ理由(このマシンの実行環境に画面収録・アクセシビリティ権限が付与されていない)。ユーザーによる手動確認待ち |
+
+**デモ構築中に発見したDSLの既知の制約(NativeControl拡充自体とは無関係、`elwindui_dsl_spec.md`側の話)**: `.elwind`/`view!`のフィールド値構文は、`Option<T>`型のプロパティ(`max_length: Option<u32>`等)に対して裸のリテラル値(`40`や`40u32`)を直接書いても`Some(..)`への自動ラップが効かず型エラーになる。`vm.some_field`のような変数参照(`bind!`経由)は`Option<bool>`等で自動ラップが確認できた(`Button.enabled: vm.save_can_execute`、既存`examples/notepad`)ため、自動ラップの対象は変数参照のみで、リテラル値には適用されないと見られる。`Some(40u32)`のような関数呼び出し形の式もDSLパーサーが受け付けない(識別子を期待するパースエラー)。今回のデモでは`TextBox`/`PasswordBox`の`max_length`指定を省略して回避した。DSL側の恒久的な修正は本Phaseのスコープ外。
 
 ---
 

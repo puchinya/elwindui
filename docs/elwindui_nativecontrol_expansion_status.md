@@ -26,7 +26,7 @@
 | 既存TextArea/TabView/Buttonの回帰確認(AppKit) | ✅ `cargo build`/`cargo test -p elwindui-core -p elwindui-backend-appkit`(174件)通過。`rust-analyzer diagnostics .`で新規warning/error無し。`notepad`を2回起動し数秒間クラッシュなしを確認、CoreGraphics window list上に正常なウィンドウ生成を確認 | - | 🟡 **クリック操作・TextArea入力・TabView切り替えなどの対話的動作の目視確認は未実施** — このマシンの実行環境に画面収録・アクセシビリティ権限が付与されておらず、`screencapture`/`osascript`によるスクリーンショット・自動クリックがいずれも失敗した。ユーザーによる手動確認待ち |
 | Tab/Shift+Tabでネイティブコントロールから抜ける動作 | ⬜ 未対応(Phase 1スコープ外、既知の制限として記録) | ⬜ 同左 | ネイティブウィジェットの既定キー処理が優先されるため、elwindui側の`FocusTracker::move_focus`に到達しない。AppKitのkey-view-loopチェーン等、より侵襲的な変更が必要 |
 
-**未完了(このドキュメント作成時点で未着手)**: §2 TextArea/TabViewの対話的回帰確認(権限待ち)、§5 ScrollView、§6 ドキュメント追加の残り(`elwindui_gui_framework_design.md`新§5.1b)、§7 `examples/controls-demo`。
+**未完了(このドキュメント作成時点で未着手)**: §2 TextArea/TabViewの対話的回帰確認(権限待ち)、§7 `examples/controls-demo`。
 
 ---
 
@@ -63,6 +63,27 @@
 | パスワード内容の非露出(`Debug`/`Display`実装なし、ログ出力経路なし) | ✅ | ✅(構造ミラー) |
 | AppKit実機能ライフサイクルテスト | ⬜ TextBoxと同じ理由で未着手(§1.5参照) | - |
 | `docs/elwindui_builtins_spec.md` F.13 | ✅ | ✅(同一ドキュメント) |
+
+---
+
+## 1.7 ScrollView(§5 完了)
+
+`ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content`という3層構造(`docs/elwindui_gui_framework_design.md`新§5.1b、`docs/elwindui_builtins_spec.md`付録F.14参照)。TextBox/PasswordBoxと異なり新規アーキテクチャ機構(`unconstrained_axes`)が必要だった唯一のコントロール。
+
+| 項目 | AppKit | WinUI3 |
+|---|---|---|
+| `elwindui-core::ui::ScrollView`トレイト(`set_content`/`set_horizontal_scroll_enabled`/`set_vertical_scroll_enabled`) | ✅ | ✅(バックエンド非依存) |
+| `builtins.elwind`の`ScrollView`宣言(`#[content(content)] content: Rc<dyn UIElement>`) | ✅ | ✅(バックエンド非依存) |
+| `TreeHostIvars`/`TreeHostPanel`への`unconstrained_axes`追加(スクロールする軸のMeasureを無制約にし、`layout_root`後に自然サイズへホスト自身を成長させる) | ✅ `cargo build`/`cargo test -p elwindui-backend-appkit`(47件)通過、`relayout()`の既存(false, false)経路が無変更であることも確認済み | 🟡 未検証。`relayout_static`のシグネチャに`unconstrained_axes: (bool, bool)`引数を追加し、全4呼び出し箇所(`WinUI3RelayoutHost::request_relayout`・`SizeChanged`クロージャ・`force_relayout`・`set_tree`)を更新 |
+| `InnerScrollView`(`NSScrollView`+ネストした`TreeHostView`) | ✅ | 🟡 未検証(`ScrollViewer`+ネストした`TreeHostPanel`) |
+| スクロールしない軸のクロス軸追従 | ✅ `NSAutoresizingMaskOptions`(`ViewWidthSizable`/`ViewHeightSizable`)による自動追従、`NSNotificationCenter`購読は不要と判断 | 🟡 未検証。`Canvas`は自動追従しないため`ScrollViewer.SizeChanged`ハンドラで明示的に`Width`/`Height`を同期(`InnerTabView::insert_tab`と同じ既知の問題への同じ対処) |
+| `native_ui::ScrollView` | ✅ | 🟡 未検証 |
+| ネストしたコンテンツ内のネイティブコントロールへのフォーカス | ✅ 追加コード不要(1aの`makeFirstResponder:`責任者チェーン走査が任意の`TreeHostView`祖先を発見する設計のため) | 🟡 未検証(理論上は同様に追加コード不要のはずだが、WinUI3側の`GotFocus`/`LostFocus`配線同様、実機確認できていない) |
+| `build.rs`の`ScrollViewer`/`ScrollMode`allow-list追加 | N/A | 🟡 未検証 |
+| コアレベルテスト(`FakeScrollViewWidget`、`visual_children()`オーバーライドでcontentの到達可能性を検証) | ✅ `cargo test -p elwindui-core`通過(133件) | - |
+| AppKit実機能ライフサイクルテスト | ⬜ TextBox/PasswordBoxと同じ理由で未着手(§1.5参照) | - |
+| スクロール位置取得・設定、`scroll_changed`イベント | ⬜ 意図的に見送り(既知のギャップとして明記) | ⬜ 同左 |
+| `docs/elwindui_builtins_spec.md` F.14、`elwindui_gui_framework_design.md`新§5.1b | ✅ | ✅(同一ドキュメント) |
 
 ---
 

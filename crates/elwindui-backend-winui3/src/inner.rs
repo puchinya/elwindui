@@ -10,7 +10,7 @@ use crate::bindings;
 use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
     Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, PasswordBox as XamlPasswordBox,
-    TabView as XamlTabView, TabViewCloseButtonOverlayMode, TabViewItem,
+    ScrollMode, ScrollViewer, TabView as XamlTabView, TabViewCloseButtonOverlayMode, TabViewItem,
     TabViewTabCloseRequestedEventArgs, TextBlock, TextBox as XamlTextBox,
 };
 use crate::bindings::Microsoft::UI::Xaml::Input::{
@@ -229,6 +229,11 @@ impl WinUiHandle for XamlPasswordBox {
         self.cast().expect("PasswordBox implements FrameworkElement")
     }
 }
+impl WinUiHandle for ScrollViewer {
+    fn as_element(&self) -> FrameworkElement {
+        self.cast().expect("ScrollViewer implements FrameworkElement")
+    }
+}
 impl WinUiHandle for XamlButton {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("Button implements FrameworkElement")
@@ -359,6 +364,17 @@ pub struct TreeHostPanel {
     /// wiring (see `native_ui.rs`'s `Button`/`TextArea`) — `canvas`'s own `KeyDown`/`KeyUp` below
     /// never even fire while one is focused.
     keyboard: Rc<KeyboardDispatcher>,
+    /// `(width_unconstrained, height_unconstrained)` — mirrors
+    /// `elwindui_backend_appkit::inner::TreeHostIvars::unconstrained_axes` (see that field's own
+    /// doc comment for the full rationale). `false`/`false` (the default, every existing host) means
+    /// `relayout_static` measures against `canvas`'s current explicit `Width`/`Height` (or
+    /// `ActualWidth`/`ActualHeight` if unset), same as always. `true` on an axis measures that axis
+    /// as unconstrained instead, growing `canvas` to the resulting natural size on that axis —
+    /// `InnerScrollView`'s content host uses this. `Rc<Cell<..>>`, not a plain `Cell<..>` field on
+    /// `TreeHostPanel` itself, because `relayout_static`'s own closures (`SizeChanged`, ...) need
+    /// their own weak-captured handle to read it at fire time, the same pattern `render_tree`/
+    /// `native_children` already use.
+    unconstrained_axes: Rc<Cell<(bool, bool)>>,
 }
 
 #[derive(Clone)]
@@ -1168,6 +1184,8 @@ struct WinUI3RelayoutHost {
     /// child discovered during this relayout pass can wire its own `GotFocus`/`LostFocus` — see
     /// `reconcile_native_children`'s own doc comment on that wiring.
     keyboard: Weak<KeyboardDispatcher>,
+    /// See `TreeHostPanel::unconstrained_axes`'s own doc comment.
+    unconstrained_axes: Weak<Cell<(bool, bool)>>,
     /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
     /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
     /// (and clears it right before doing so).
@@ -1194,13 +1212,14 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             return;
         };
         this.pending.set(false);
-        if let (Some(tree), Some(render_tree), Some(native_children), Some(keyboard)) = (
+        if let (Some(tree), Some(render_tree), Some(native_children), Some(keyboard), Some(unconstrained_axes)) = (
             this.tree.upgrade(),
             this.render_tree.upgrade(),
             this.native_children.upgrade(),
             this.keyboard.upgrade(),
+            this.unconstrained_axes.upgrade(),
         ) {
-            TreeHostPanel::relayout_static(&this.canvas, &this.draw_canvas, &this.draw_list, &tree, &render_tree, &native_children, &keyboard);
+            TreeHostPanel::relayout_static(&this.canvas, &this.draw_canvas, &this.draw_list, &tree, &render_tree, &native_children, &keyboard, unconstrained_axes.get());
         }
     }
 }
@@ -1619,6 +1638,7 @@ impl TreeHostPanel {
             render_tree: Rc::new(RefCell::new(None)),
             native_children: Rc::new(RefCell::new(NativeChildMap::new())),
             keyboard: Rc::new(KeyboardDispatcher::new()),
+            unconstrained_axes: Rc::new(Cell::new((false, false))),
         };
         let _ = this.draw_canvas.Invalidate();
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
@@ -1708,15 +1728,17 @@ impl TreeHostPanel {
         let weak_render_tree = Rc::downgrade(&this.render_tree);
         let weak_native_children = Rc::downgrade(&this.native_children);
         let weak_keyboard = Rc::downgrade(&this.keyboard);
+        let weak_unconstrained_axes = Rc::downgrade(&this.unconstrained_axes);
         let canvas_for_handler = this.canvas.clone();
         let draw_canvas_for_handler = this.draw_canvas.clone();
         let draw_list_for_handler = this.draw_list.clone();
         let callback_id = register_ui_event_callback(Rc::new(move || {
-            if let (Some(tree), Some(render_tree), Some(native_children), Some(keyboard)) = (
+            if let (Some(tree), Some(render_tree), Some(native_children), Some(keyboard), Some(unconstrained_axes)) = (
                 weak.upgrade(),
                 weak_render_tree.upgrade(),
                 weak_native_children.upgrade(),
                 weak_keyboard.upgrade(),
+                weak_unconstrained_axes.upgrade(),
             ) {
                 Self::relayout_static(
                     &canvas_for_handler,
@@ -1726,6 +1748,7 @@ impl TreeHostPanel {
                     &render_tree,
                     &native_children,
                     &keyboard,
+                    unconstrained_axes.get(),
                 );
             }
         }));
@@ -1754,7 +1777,15 @@ impl TreeHostPanel {
     /// `InvalidateMeasure`/`InvalidateArrange`) on such a `Canvas` does not, in practice, make its
     /// `SizeChanged` fire on any later frame either — logged and observed directly, not assumed.
     pub(crate) fn force_relayout(&self) {
-        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children, &self.keyboard);
+        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children, &self.keyboard, self.unconstrained_axes.get());
+    }
+
+    /// See `TreeHostPanel::unconstrained_axes`'s own doc comment. `InnerScrollView` calls this once,
+    /// at construction, on its nested content host; every other host leaves both `false` (the
+    /// default). Structurally mirrors
+    /// `elwindui_backend_appkit::inner::TreeHostView::set_unconstrained_axes`.
+    pub(crate) fn set_unconstrained_axes(&self, width: bool, height: bool) {
+        self.unconstrained_axes.set((width, height));
     }
 
     /// Replaces this host's entire content. `draw_canvas` itself is never touched here (appended
@@ -1773,6 +1804,7 @@ impl TreeHostPanel {
             render_tree: Rc::downgrade(&self.render_tree),
             native_children: Rc::downgrade(&self.native_children),
             keyboard: Rc::downgrade(&self.keyboard),
+            unconstrained_axes: Rc::downgrade(&self.unconstrained_axes),
             pending: Cell::new(false),
             weak_self: RefCell::new(Weak::new()),
         });
@@ -1787,7 +1819,7 @@ impl TreeHostPanel {
         collect_shortcuts_into(&tree, self.keyboard.shortcuts());
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
-        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children, &self.keyboard);
+        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children, &self.keyboard, self.unconstrained_axes.get());
     }
 
     fn relayout_static(
@@ -1798,6 +1830,7 @@ impl TreeHostPanel {
         retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
         native_children: &Rc<RefCell<NativeChildMap>>,
         keyboard: &Rc<KeyboardDispatcher>,
+        unconstrained_axes: (bool, bool),
     ) {
         use elwindui_core::base::Size as LSize;
 
@@ -1819,17 +1852,45 @@ impl TreeHostPanel {
         } else {
             canvas.ActualHeight().unwrap_or(0.0) as f32
         };
-        let available = LSize { width, height };
-        if let Ok(surface) = draw_canvas.cast::<FrameworkElement>() {
-            let _ = surface.SetWidth(width as f64);
-            let _ = surface.SetHeight(height as f64);
-        }
+        let (unconstrained_width, unconstrained_height) = unconstrained_axes;
+        // `InnerScrollView`'s content host (`unconstrained_axes`, set via
+        // `TreeHostPanel::set_unconstrained_axes`) measures the scrolling axis/axes as unconstrained
+        // instead of clamped to `width`/`height` — mirrors
+        // `elwindui_backend_appkit::inner::TreeHostView::relayout`'s own `unconstrained_axes`
+        // handling; every other host has both `false` and this is a no-op.
+        let available = LSize {
+            width: if unconstrained_width { f32::INFINITY } else { width },
+            height: if unconstrained_height { f32::INFINITY } else { height },
+        };
 
         let tree_ref = tree.borrow();
         let Some(tree) = tree_ref.as_ref() else {
             return;
         };
         elwindui_core::ui::layout_root(tree, available);
+        // Grows `canvas` (and the Win2D `draw_canvas` surface layered on top of it) to the
+        // resulting natural size on any unconstrained axis — the WinUI3-side counterpart of
+        // AppKit's own post-`layout_root` `setFrame` in `TreeHostView::relayout`. Ordinary
+        // (non-unconstrained) hosts keep sizing `draw_canvas` from `width`/`height` exactly as
+        // before this change.
+        let final_width = if unconstrained_width {
+            tree.arranged_width().unwrap_or(0.0)
+        } else {
+            width
+        };
+        let final_height = if unconstrained_height {
+            tree.arranged_height().unwrap_or(0.0)
+        } else {
+            height
+        };
+        if unconstrained_width || unconstrained_height {
+            let _ = canvas.SetWidth(final_width as f64);
+            let _ = canvas.SetHeight(final_height as f64);
+        }
+        if let Ok(surface) = draw_canvas.cast::<FrameworkElement>() {
+            let _ = surface.SetWidth(final_width as f64);
+            let _ = surface.SetHeight(final_height as f64);
+        }
         {
             let mut retained_tree = retained_tree.borrow_mut();
             if retained_tree
@@ -2568,6 +2629,135 @@ impl InnerPasswordBox {
         };
         let _ = self.password_box.SetPasswordRevealMode(mode);
     }
+}
+
+/// Raw `ScrollViewer` + nested `TreeHostPanel` (`ElwinduiContentRoot`) — composed by
+/// `native_ui::ScrollView`. See `elwindui_core::ui::ScrollView`'s own doc comment for the
+/// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content` structure this implements.
+/// Structurally mirrors `elwindui-backend-appkit::inner::InnerScrollView`; unverified on this
+/// machine (no Windows environment — see `docs/elwindui_nativecontrol_expansion_status.md`).
+/// `content_host` is a second, independent `TreeHostPanel` instance — the same nested-hosting
+/// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHostPanel::new()` already establishes, not
+/// a one-off special case. Unlike AppKit (where a plain `NSAutoresizingMaskOptions` bit keeps the
+/// cross axis tracking the clip view automatically, no notification/event wiring needed), WinUI3's
+/// `Canvas` has no autoresizing equivalent — its `Width`/`Height` must be pushed in explicitly,
+/// the exact same issue (and the exact same `SizeChanged` + `force_relayout` fix)
+/// `InnerTabView::insert_tab`'s own doc comment already documents for `TabViewItem.Content`.
+pub(crate) struct InnerScrollView {
+    handle: AnyView,
+    scroll_viewer: ScrollViewer,
+    content_host: TreeHostPanel,
+    /// `(horizontal_scroll_enabled, vertical_scroll_enabled)` — see
+    /// `elwindui_backend_appkit::inner::InnerScrollView::axes`'s own doc comment for the naming
+    /// rationale (same booleans `TreeHostPanel::unconstrained_axes` uses, phrased from the opposite
+    /// perspective). `Rc<Cell<..>>`, not a plain `Cell<..>`, so the `SizeChanged` closure below can
+    /// read the current value at fire time rather than a snapshot from construction — the same
+    /// reason `TreeHostPanel::unconstrained_axes` itself is `Rc`-wrapped.
+    axes: Rc<Cell<(bool, bool)>>,
+}
+
+impl InnerScrollView {
+    pub(crate) fn new() -> Self {
+        let scroll_viewer = ScrollViewer::new().expect("ScrollViewer::new");
+        let content_host = TreeHostPanel::new();
+        let _ = scroll_viewer.SetContent(&content_host.as_element());
+        let handle = AnyView::from(scroll_viewer.clone());
+        // Vertical-only scrolling by default — matches `ScrollView` in `builtins.elwind`'s own
+        // default.
+        let axes = Rc::new(Cell::new((false, true)));
+        let this = Self {
+            handle,
+            scroll_viewer,
+            content_host,
+            axes,
+        };
+        this.apply_axes();
+        {
+            let content_host_for_handler = this.content_host.clone();
+            let scroll_viewer_for_handler = this.scroll_viewer.clone();
+            let axes_for_handler = this.axes.clone();
+            let callback_id = register_ui_event_callback(Rc::new(move || {
+                sync_scroll_view_cross_axis(
+                    &content_host_for_handler,
+                    &scroll_viewer_for_handler,
+                    axes_for_handler.get(),
+                );
+            }));
+            let _ = this
+                .scroll_viewer
+                .SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
+                    invoke_ui_event_callback(callback_id);
+                    Ok(())
+                }));
+        }
+        this
+    }
+
+    /// Applies `axes` to the native scroll-mode properties and `content_host`'s own
+    /// unconstrained-measure axes, then immediately re-syncs the cross axis and force-relays-out —
+    /// needed here too (not just from the `SizeChanged` handler above), since toggling an axis at
+    /// runtime via `set_horizontal_scroll_enabled`/`set_vertical_scroll_enabled` doesn't itself fire
+    /// `SizeChanged`.
+    fn apply_axes(&self) {
+        let (horizontal, vertical) = self.axes.get();
+        self.content_host.set_unconstrained_axes(horizontal, vertical);
+        let _ = self.scroll_viewer.SetHorizontalScrollMode(if horizontal {
+            ScrollMode::Auto
+        } else {
+            ScrollMode::Disabled
+        });
+        let _ = self.scroll_viewer.SetVerticalScrollMode(if vertical {
+            ScrollMode::Auto
+        } else {
+            ScrollMode::Disabled
+        });
+        sync_scroll_view_cross_axis(&self.content_host, &self.scroll_viewer, (horizontal, vertical));
+    }
+
+    pub(crate) fn handle(&self) -> AnyView {
+        self.handle.clone()
+    }
+
+    pub(crate) fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
+        self.content_host.set_tree(content);
+    }
+
+    pub(crate) fn set_horizontal_scroll_enabled(&self, enabled: bool) {
+        let (_, vertical) = self.axes.get();
+        self.axes.set((enabled, vertical));
+        self.apply_axes();
+    }
+
+    pub(crate) fn set_vertical_scroll_enabled(&self, enabled: bool) {
+        let (horizontal, _) = self.axes.get();
+        self.axes.set((horizontal, enabled));
+        self.apply_axes();
+    }
+}
+
+/// Pushes `scroll_viewer`'s own current viewport size into `content_host`'s explicit `Width`/
+/// `Height` on whichever axis does *not* scroll, resets the scrolling axis/axes back to the
+/// `NaN` ("unset") sentinel (so a stale explicit size doesn't linger across a runtime axis-toggle —
+/// `relayout_static`'s own `explicit_width.is_finite()` check, this function's counterpart), and
+/// force-relays-out. Shared by `InnerScrollView::new`'s `SizeChanged` handler and
+/// `InnerScrollView::apply_axes`, rather than duplicated between them.
+fn sync_scroll_view_cross_axis(
+    content_host: &TreeHostPanel,
+    scroll_viewer: &ScrollViewer,
+    (horizontal, vertical): (bool, bool),
+) {
+    let element = content_host.as_element();
+    if horizontal {
+        let _ = element.SetWidth(f64::NAN);
+    } else {
+        let _ = element.SetWidth(scroll_viewer.ActualWidth().unwrap_or(0.0));
+    }
+    if vertical {
+        let _ = element.SetHeight(f64::NAN);
+    } else {
+        let _ = element.SetHeight(scroll_viewer.ActualHeight().unwrap_or(0.0));
+    }
+    content_host.force_relayout();
 }
 
 /// Raw `XamlButton` + click wiring — composed by `native_ui::Button`.

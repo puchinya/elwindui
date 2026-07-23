@@ -1124,6 +1124,29 @@ pub trait PasswordBox {
     fn set_reveal_enabled(&self, enabled: bool);
 }
 
+/// Hosts arbitrary elwindui content inside a native scrolling container —
+/// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content`
+/// (`docs/elwindui_nativecontrol_expansion_status.md`). Unlike every other `NativeControl` leaf so
+/// far (`Button`/`TextArea`/`TextBox`/`PasswordBox`/`TabView`, all self-contained native widgets),
+/// `ScrollView`'s own content is a full elwindui subtree with its own layout/paint/hit-test/focus —
+/// each backend's `ElwinduiContentRoot` is a second, nested instance of that same backend's own
+/// "reflect an `Rc<dyn UIElement>` into real native views" host (AppKit's `TreeHostView`, WinUI3's
+/// `TreeHostPanel`), the same pattern `TabView`'s own per-tab content host already establishes —
+/// not a one-off special case. The one genuinely new piece is that this nested host's own Measure
+/// must run *unconstrained* on the scrolling axis/axes (so the content reports/gets arranged at its
+/// true natural size, letting the native container's own scroll physics do the rest) rather than
+/// "fill exactly this frame", which is every other host's contract today.
+///
+/// Scroll-position get/set and a `scroll_changed` event are deliberately not part of this trait —
+/// same "ship the minimal, honestly-scoped surface, document the gap" call as `TextBox`/
+/// `PasswordBox`'s deferred selection APIs; a real, understood follow-up, not a silent omission.
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+pub trait ScrollView {
+    fn set_content(&self, content: Rc<dyn UIElementExt>);
+    fn set_horizontal_scroll_enabled(&self, enabled: bool);
+    fn set_vertical_scroll_enabled(&self, enabled: bool);
+}
+
 #[elwindui_macros::class(trait_only)]
 pub trait MenuItem {
     fn set_text(&self, text: &str);
@@ -2782,6 +2805,66 @@ mod tests {
             *seen_lengths.borrow() == vec![7, 0],
             "password change callback fired the wrong number of times or with the wrong lengths"
         );
+    }
+
+    /// Backend-independent stand-in for `ScrollView` — see `FakeTextBoxWidget`'s own doc comment
+    /// for the pattern. Unlike every other `Fake*Widget` here, `ScrollView`'s own content is a full
+    /// child subtree, not a plain value — this fake models that by overriding the already-
+    /// `#[overridable]` `visual_children()` (see that trait method's own doc comment) to expose
+    /// `content`, the same way `elwindui-test::tree`'s tree-dump helper would discover it on a real
+    /// backend's `InnerScrollView`.
+    struct FakeScrollViewState {
+        content: RefCell<Option<Rc<dyn UIElementExt>>>,
+    }
+
+    #[elwindui_macros::class(struct_only = crate::ui::ScrollViewExt, inherits = crate::ui::tests::FakeNativeControl)]
+    struct FakeScrollViewWidget {
+        state: FakeScrollViewState,
+    }
+
+    #[elwindui_macros::class]
+    impl FakeScrollViewWidget {
+        #[overrides]
+        fn visual_children(&self) -> Vec<Rc<dyn UIElementExt>> {
+            self.state.content.borrow().iter().cloned().collect()
+        }
+
+        fn construct(handle: FakeHandle) -> Self {
+            Self {
+                base: FakeNativeControl::construct(handle),
+                state: FakeScrollViewState {
+                    content: RefCell::new(None),
+                },
+            }
+        }
+
+        fn set_content(&self, content: Rc<dyn UIElementExt>) {
+            *self.state.content.borrow_mut() = Some(content);
+        }
+        fn set_horizontal_scroll_enabled(&self, _enabled: bool) {}
+        fn set_vertical_scroll_enabled(&self, _enabled: bool) {}
+    }
+
+    #[test]
+    fn fake_scroll_view_measures_through_inherited_native_control_base() {
+        let widget = FakeScrollViewWidget::new(FakeHandle("scrollview", size(300.0, 200.0)));
+        let widget: Rc<dyn UIElementExt> = widget;
+        assert_eq!(natural_size(&*widget), size(300.0, 200.0));
+        assert!(widget.try_as_native_control().is_some());
+    }
+
+    /// Verifies `content` stays reachable via `visual_children()` once set — the property a real
+    /// backend's nested `TreeHostView`/`TreeHostPanel` content host relies on for hit-testing/
+    /// tree-dump purposes (`docs/elwindui_nativecontrol_expansion_status.md`).
+    #[test]
+    fn fake_scroll_view_content_reachable_via_visual_children() {
+        let widget = FakeScrollViewWidget::new(FakeHandle("scrollview", size(300.0, 200.0)));
+        let content = native("inner", size(50.0, 50.0));
+        widget.set_content(Rc::clone(&content));
+        let widget: Rc<dyn UIElementExt> = widget;
+        let children = widget.visual_children();
+        assert_eq!(children.len(), 1);
+        assert!(Rc::ptr_eq(&children[0], &content));
     }
 
     /// `#[overridable]`/`#[overrides]` usage example, exercised across a genuine 3-hop chain

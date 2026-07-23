@@ -144,6 +144,8 @@ fn main() {
         // will name the missing type to add.
         "Microsoft.UI.Xaml.Controls.PasswordBox".to_owned(),
         "Microsoft.UI.Xaml.Controls.PasswordRevealMode".to_owned(),
+        "Microsoft.UI.Xaml.Controls.ScrollViewer".to_owned(),
+        "Microsoft.UI.Xaml.Controls.ScrollMode".to_owned(),
         "Microsoft.UI.Xaml.Controls.ListViewItem".to_owned(),
         "Microsoft.UI.Xaml.Controls.Panel".to_owned(),
         "Microsoft.UI.Xaml.Controls.UIElementCollection".to_owned(),

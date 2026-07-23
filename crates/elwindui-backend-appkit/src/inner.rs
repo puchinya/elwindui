@@ -337,6 +337,14 @@ pub struct TreeHostIvars {
     /// can remove the previous one before installing a freshly-sized replacement rather than
     /// accumulating a new one on every resize.
     tracking_area: RefCell<Option<Retained<NSTrackingArea>>>,
+    /// `(width_unconstrained, height_unconstrained)` — `false`/`false` (the default, every existing
+    /// host) means `relayout` measures against `self.frame()`'s own size, same as always. `true` on
+    /// an axis means `relayout` measures that axis as `f32::INFINITY` instead, then grows `self`'s
+    /// own frame to the resulting natural size on that axis — `InnerScrollView`'s content host uses
+    /// this so its content reports/gets arranged at its true natural size, letting the enclosing
+    /// `NSScrollView`'s native scroll physics do the rest, rather than being clamped to whatever
+    /// viewport size happens to be available. See `set_unconstrained_axes`.
+    unconstrained_axes: Cell<(bool, bool)>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
@@ -527,6 +535,7 @@ impl TreeHostView {
             pointer: PointerDispatcher::new(),
             keyboard: KeyboardDispatcher::new(),
             tracking_area: RefCell::new(None),
+            unconstrained_axes: Cell::new((false, false)),
         };
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =
@@ -646,17 +655,58 @@ impl TreeHostView {
         self.relayout();
     }
 
+    /// Opts this host's own `relayout` into measuring `width`/`height` unconstrained (`f32::
+    /// INFINITY`) rather than against `self.frame()`'s current size — see `TreeHostIvars::
+    /// unconstrained_axes`'s own doc comment. `InnerScrollView` calls this once, at construction,
+    /// on its nested content host; every other host leaves both `false` (the default).
+    pub(crate) fn set_unconstrained_axes(&self, width: bool, height: bool) {
+        self.ivars().unconstrained_axes.set((width, height));
+    }
+
     fn relayout(&self) {
         use elwindui_core::base::Size;
 
         let frame = self.frame();
+        let (unconstrained_width, unconstrained_height) = self.ivars().unconstrained_axes.get();
         let available = Size {
-            width: frame.size.width as f32,
-            height: frame.size.height as f32,
+            width: if unconstrained_width {
+                f32::INFINITY
+            } else {
+                frame.size.width as f32
+            },
+            height: if unconstrained_height {
+                f32::INFINITY
+            } else {
+                frame.size.height as f32
+            },
         };
         let tree = self.ivars().tree.borrow();
         let Some(tree) = tree.as_ref() else { return };
         layout_root(tree, available);
+        // `InnerScrollView`'s content host (`unconstrained_axes` set via
+        // `set_unconstrained_axes`) grows to its own content's natural size on whichever axis is
+        // unconstrained, rather than staying clamped to `frame`'s (possibly stale, possibly
+        // zero-on-first-layout) size — every other host has both axes `false` and this is a no-op.
+        if unconstrained_width || unconstrained_height {
+            let natural_width = tree.arranged_width().unwrap_or(0.0) as f64;
+            let natural_height = tree.arranged_height().unwrap_or(0.0) as f64;
+            let new_width = if unconstrained_width {
+                natural_width
+            } else {
+                frame.size.width
+            };
+            let new_height = if unconstrained_height {
+                natural_height
+            } else {
+                frame.size.height
+            };
+            if new_width != frame.size.width || new_height != frame.size.height {
+                self.setFrame(NSRect::new(
+                    frame.origin,
+                    objc2_foundation::NSSize::new(new_width, new_height),
+                ));
+            }
+        }
         {
             let mut retained_tree = self.ivars().render_tree.borrow_mut();
             if retained_tree
@@ -2744,6 +2794,93 @@ impl InnerPasswordBox {
     /// docs/elwindui_nativecontrol_expansion_status.md). `true` is therefore silently a no-op here;
     /// the setter stays wired so a future pass has a real place to land.
     pub(crate) fn set_reveal_enabled(&self, _enabled: bool) {}
+}
+
+/// Raw `NSScrollView` + nested `TreeHostView` (`ElwinduiContentRoot`) — composed by
+/// `native_ui::ScrollView`. See `elwindui_core::ui::ScrollView`'s own doc comment for the
+/// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content` structure this implements.
+/// `content_host` is a second, independent `TreeHostView` instance — the same nested-hosting
+/// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHostView::new()` already establishes, not a
+/// one-off special case — with its own `set_tree`, its own `AppKitRelayoutHost`/`AppKitFocusHost`
+/// registration (falls out of `TreeHostView::set_tree` unchanged, no new focus-chain code needed:
+/// `ElwinduiWindow::make_first_responder`'s responder-chain walk already finds *any* `TreeHostView`
+/// ancestor, nested ones included), and — the one genuinely new piece — `unconstrained_axes` set on
+/// whichever axis scrolls, so that axis measures/arranges at its true natural size instead of being
+/// clamped to the viewport.
+pub(crate) struct InnerScrollView {
+    handle: AnyView,
+    scroll: Retained<NSScrollView>,
+    content_host: Retained<TreeHostView>,
+    /// `(horizontal_scroll_enabled, vertical_scroll_enabled)` — mirrors the `.elwind`-visible
+    /// property names directly (unlike `TreeHostIvars::unconstrained_axes`, which is phrased as
+    /// "width/height unconstrained" — the same booleans, just named from the opposite perspective:
+    /// scrolling enabled on an axis is exactly what makes that axis unconstrained).
+    axes: Cell<(bool, bool)>,
+}
+
+impl InnerScrollView {
+    pub(crate) fn new() -> Self {
+        let m = mtm();
+        let scroll = NSScrollView::new(m);
+        let content_host = TreeHostView::new();
+        content_host.setTranslatesAutoresizingMaskIntoConstraints(true);
+        scroll.setDocumentView(Some(&content_host));
+        let handle = AnyView::from(scroll.clone());
+        let this = Self {
+            handle,
+            scroll,
+            content_host,
+            // Vertical-only scrolling by default — matches both platforms' own scroll-widget
+            // defaults and the overwhelmingly common product case (`ScrollView` in
+            // `builtins.elwind`'s own default).
+            axes: Cell::new((false, true)),
+        };
+        this.apply_axes();
+        this
+    }
+
+    /// Applies `axes` to the native scroller visibility, `content_host`'s own unconstrained-measure
+    /// axes, and its autoresizing mask — the "classic pre-Auto-Layout fill" technique
+    /// `InnerTabView::insert_tab`/`InnerWindow::new` already use elsewhere in this file, here used
+    /// to track the *non*-scrolling axis (axes) to the scroll view's own viewport size automatically
+    /// on every resize, no `NSNotificationCenter` observation needed: a scrolling axis gets no
+    /// autoresizing bit at all (so it stays whatever size `relayout`'s own unconstrained measurement
+    /// just set it to), while a non-scrolling axis keeps its `ViewWidthSizable`/`ViewHeightSizable`
+    /// bit so AppKit's ordinary autoresizing machinery keeps that axis synced to the clip view.
+    fn apply_axes(&self) {
+        let (horizontal, vertical) = self.axes.get();
+        self.content_host.set_unconstrained_axes(horizontal, vertical);
+        let mut mask = objc2_app_kit::NSAutoresizingMaskOptions::ViewNotSizable;
+        if !horizontal {
+            mask |= objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable;
+        }
+        if !vertical {
+            mask |= objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable;
+        }
+        self.content_host.setAutoresizingMask(mask);
+        self.scroll.setHasHorizontalScroller(horizontal);
+        self.scroll.setHasVerticalScroller(vertical);
+    }
+
+    pub(crate) fn handle(&self) -> AnyView {
+        self.handle.clone()
+    }
+
+    pub(crate) fn set_content(&self, content: Rc<dyn UIElementExt>) {
+        self.content_host.set_tree(content);
+    }
+
+    pub(crate) fn set_horizontal_scroll_enabled(&self, enabled: bool) {
+        let (_, vertical) = self.axes.get();
+        self.axes.set((enabled, vertical));
+        self.apply_axes();
+    }
+
+    pub(crate) fn set_vertical_scroll_enabled(&self, enabled: bool) {
+        let (horizontal, _) = self.axes.get();
+        self.axes.set((horizontal, enabled));
+        self.apply_axes();
+    }
 }
 
 /// Raw `NSButton` + click target — composed by `native_ui::Button` (and used directly, not through

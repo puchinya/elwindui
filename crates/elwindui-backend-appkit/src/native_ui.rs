@@ -11,7 +11,7 @@
 use crate::AnyView;
 use crate::inner::{
     InnerButton, InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem, InnerPasswordBox,
-    InnerTabView, InnerTextArea, InnerTextBox, InnerWindow, TabChipImpl,
+    InnerScrollView, InnerTabView, InnerTextArea, InnerTextBox, InnerWindow, TabChipImpl,
 };
 // Deliberately *not* `use elwindui_core::base::AsAny;` here — see the doc comment on
 // `MenuBarItem::set_submenu` (the one place that pattern is explained in full) for why importing
@@ -290,6 +290,41 @@ impl PasswordBox {
         // AppKit's `NSSecureTextField`/WinUI3's `PasswordBox` are tab stops by default — see
         // docs/elwindui_gui_framework_design.md §5.5.
         self.set_tab_stop(true);
+    }
+}
+
+/// `content: std::rc::Rc<dyn UIElement>` (`ScrollView` in `builtins.elwind`, `#[content(content)]`)
+/// resolves to `Rc<dyn UIElementExt>` here — the same type every other `visual_children()`/
+/// `#[content(..)]` slot in this crate already uses.
+#[elwindui_macros::class(struct_only = elwindui_core::ui::ScrollViewExt, inherits = crate::NativeControl)]
+pub struct ScrollView {
+    inner: InnerScrollView,
+}
+
+#[elwindui_macros::class]
+impl ScrollView {
+    #[inherent]
+    pub fn into_any_view(&self) -> AnyView {
+        self.inner.handle()
+    }
+
+    fn set_content(&self, content: Rc<dyn UIElementExt>) {
+        self.inner.set_content(content);
+    }
+    fn set_horizontal_scroll_enabled(&self, enabled: bool) {
+        self.inner.set_horizontal_scroll_enabled(enabled);
+    }
+    fn set_vertical_scroll_enabled(&self, enabled: bool) {
+        self.inner.set_vertical_scroll_enabled(enabled);
+    }
+
+    fn construct() -> Self {
+        let inner = InnerScrollView::new();
+        let handle = inner.handle();
+        Self {
+            base: NativeControl::construct(handle),
+            inner,
+        }
     }
 }
 

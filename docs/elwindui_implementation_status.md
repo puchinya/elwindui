@@ -47,7 +47,7 @@
 
 ### 実装済み(`.elwind`宣言 + バックエンド実体あり)
 
-`Window` / `VerticalLayout` / `HorizontalLayout`(`Row`/`Column`という名称ではない) / `Shape`(抽象) / `Rectangle` / `Ellipse` / `Image`(2026-07-20新規) / `Control` / `ContentControl` / `Grid` / `TextArea` / `TextBox`(NativeControl拡充Phase 1で新規、AppKit検証済み・WinUI3未検証・GTK4未着手) / `PasswordBox`(同上) / `Button` / `TextBlock` / `MenuBar` / `MenuBarItem` / `Menu` / `MenuItem` / `TabView` / `TabViewItem` — TextBox/PasswordBoxの詳細は`docs/elwindui_nativecontrol_expansion_status.md`参照
+`Window` / `VerticalLayout` / `HorizontalLayout`(`Row`/`Column`という名称ではない) / `Shape`(抽象) / `Rectangle` / `Ellipse` / `Image`(2026-07-20新規) / `Control` / `ContentControl` / `Grid` / `TextArea` / `TextBox`(NativeControl拡充Phase 1で新規、AppKit検証済み・WinUI3未検証・GTK4未着手) / `PasswordBox`(同上) / `ScrollView`(同上、ネストした`TreeHostView`/`TreeHostPanel`による`ElwinduiContentRoot`構造) / `Button` / `TextBlock` / `MenuBar` / `MenuBarItem` / `Menu` / `MenuItem` / `TabView` / `TabViewItem` — TextBox/PasswordBox/ScrollViewの詳細は`docs/elwindui_nativecontrol_expansion_status.md`参照
 
 - `Image`は`Rectangle`/`Ellipse`と同じくバックエンド非依存の自己描画builtin(`elwindui_core::ui::Image`、ネイティブウィジェットを持たない)。`source: Option<ImageSource>`(`Raster(Image)`/`Vector(VectorImage)`)、`stretch: Option<Stretch>`、`rasterize: Option<VectorRasterizeMode>`(2026-07-20新規、`Vector`ソースのみ有効。§5のSVG節参照)。ヒットテストは`Shape`同様bounding-box精度のみ(`UIElement::hit_test_content`が点を受け取らない既存シグネチャのため、path形状ベースの精密ヒットテストは別タスク)。
 - `Menu`/`MenuItem`は`MenuBarItem.submenu`経由での利用は実装済みだが、任意要素に`context_menu`属性で汎用的に付けるコンテキストメニュー機構は未実装。

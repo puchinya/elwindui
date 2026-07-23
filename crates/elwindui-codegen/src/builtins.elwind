@@ -340,6 +340,19 @@ component PasswordBox inherits NativeControl {
     reveal_enabled: Option<bool>,
 }
 
+// Hosts arbitrary elwindui content inside a native scrolling container — see
+// `elwindui_core::ui::ScrollView`'s own doc comment for the `NativeScrollHost`/
+// `ElwinduiContentRoot` structure. Default is vertical-only scrolling, matching both platforms' own
+// scroll-widget defaults and the overwhelmingly common product case.
+#[embedded]
+#[sealed]
+#[content(content)]
+component ScrollView inherits NativeControl {
+    content: std::rc::Rc<dyn UIElement>,
+    horizontal_scroll_enabled: Option<bool>,
+    vertical_scroll_enabled: Option<bool>,
+}
+
 #[embedded]
 #[sealed]
 component Button inherits NativeControl {

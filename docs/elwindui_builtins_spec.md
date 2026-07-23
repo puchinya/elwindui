@@ -36,12 +36,13 @@ UIElement (trait, elwindui-core::ui)
  │
  ├─ NativeControl<H>   実ハンドル(H)を持ちビジュアルツリーに`Rc<dyn UIElement>`として実際に埋め込ま
  │                      れる葉ノードのみ(常にleaf、children()は空)。`.elwind`側で
- │                      `inherits NativeControl`を宣言するのはこの5つ(TextBox/PasswordBoxは
- │                      NativeControl拡充Phase 1で追加、`docs/elwindui_nativecontrol_expansion_status.md`参照):
+ │                      `inherits NativeControl`を宣言するのはこの6つ(TextBox/PasswordBox/ScrollView
+ │                      はNativeControl拡充Phase 1で追加、`docs/elwindui_nativecontrol_expansion_status.md`参照):
  │   ├─ Button                    (付録F.6, #[routed] on_click)
  │   ├─ TextArea                  (付録F.4, #[two_way] text)
  │   ├─ TextBox                   (付録F.12, #[two_way] text)
  │   ├─ PasswordBox               (付録F.13, #[two_way] password)
+ │   ├─ ScrollView                (付録F.14, #[content(content)] content)
  │   └─ TabView                   (付録Y)
  │
  │   ビジュアルツリーに参加しない(measure/arrangeが呼ばれない)ため`inherits NativeControl`ではなく
@@ -708,6 +709,108 @@ view PasswordBox {
   フル対応。AppKitの`NSSecureTextField`には同等機能が無く、独自の「目アイコン」トグルボタンを
   合成し表示中は生の`NSTextField`に切り替える実装が必要になるが、Phase 1としては過大なスコープと
   判断し、setterは配線するが`true`はAppKit側で意図的にno-opとした(コメント付き)。
+
+---
+
+## F.14 `builtin::ScrollView`
+
+NativeControl派生コントロール拡充Phase 1で追加。Button/TextArea/TextBox/PasswordBoxと違い、
+`ScrollView`自身のコンテンツは単一の値ではなく、独自のlayout/paint/hit-test/focusを持つ
+elwindui部分木そのものである。この違いを吸収するため、以下の3層構造を取る:
+
+```
+ScrollView            .elwindから見える NativeControl 葉ノード
+ └─ NativeScrollHost   バックエンドのネイティブスクロールコンテナ本体
+     (AppKit: NSScrollView / WinUI3: ScrollViewer / GTK4: 未実装)
+     └─ ElwinduiContentRoot   ネストしたTreeHostView(AppKit)/TreeHostPanel(WinUI3)
+         └─ content           .elwind側で宣言される任意の子要素
+```
+
+`ElwinduiContentRoot`は目新しい発明ではなく、`TabView`(付録Y)の各タブが既に持っている
+「タブごとに独立したTreeHostView/TreeHostPanelインスタンス」というネストホスト構造の
+2つ目の適用である。新規に必要になったのは1点だけ:スクロールする軸のMeasureを「利用可能領域に
+クランプする」のではなく「無制約(無限大)」で行い、その結果得られた自然サイズへコンテンツホスト
+自身を成長させる、という挙動(`elwindui_backend_appkit::inner::TreeHostIvars::unconstrained_axes`/
+`elwindui_backend_winui3::inner::TreeHostPanel::unconstrained_axes`)。
+
+```rust
+component ScrollView {
+    content: Rc<dyn UIElement>,
+    horizontal_scroll_enabled: bool = false,
+    vertical_scroll_enabled: bool = true,
+}
+
+view ScrollView {
+    match target::backend() {
+        Backend::Winui3 => native! {
+            let content_host = TreeHostPanel::new(); // ElwinduiContentRoot
+            content_host.set_tree(content);
+            content_host.set_unconstrained_axes(horizontal_scroll_enabled, vertical_scroll_enabled);
+            let scroll_viewer = ScrollViewer::new()?;
+            scroll_viewer.SetContent(&content_host.as_element())?;
+            scroll_viewer.SetVerticalScrollMode(if vertical_scroll_enabled { Auto } else { Disabled })?;
+            scroll_viewer.SetHorizontalScrollMode(if horizontal_scroll_enabled { Auto } else { Disabled })?;
+            // CanvasはWinUI3のレイアウトシステムに参加しないため、スクロールしない側の軸幅/高さを
+            // ScrollViewer.SizeChangedで明示的に押し込む必要がある(TabViewItem.Contentと同じ問題)。
+            scroll_viewer
+        }
+        Backend::Appkit => native! {
+            let content_host = TreeHostView::new(); // ElwinduiContentRoot
+            content_host.set_tree(content);
+            content_host.set_unconstrained_axes(horizontal_scroll_enabled, vertical_scroll_enabled);
+            let scroll = NSScrollView::new();
+            scroll.setDocumentView(Some(&content_host));
+            // スクロールしない側の軸は NSAutoresizingMaskOptions(ViewWidthSizable/ViewHeightSizable)
+            // でclip viewへ自動追従させる。NSNotificationCenterの購読は不要。
+            scroll
+        }
+        Backend::Gtk4 => native! {
+            // 未実装 — GTK4基盤構築フォローアップ完了後に着手する。
+            unimplemented!()
+        }
+    }
+}
+```
+
+**基本構文例**:
+
+```
+ScrollView {
+    VerticalLayout {
+        for item in items {
+            TextBlock { text: item.label }
+        }
+    }
+}
+```
+
+デフォルトは垂直スクロールのみ(`vertical_scroll_enabled`既定`true`、`horizontal_scroll_enabled`
+既定`false`)。スクロール位置の取得・設定・`scroll_changed`イベントは、`TextBox`/`PasswordBox`の
+`selection_start`/`selection_length`と同じ理由(Phase 1としての意図的な縮小スコープ)で未実装。
+
+**実装メカニズム**:
+
+- elwindui主導のレイアウト権を守るため、ネイティブスクロールコンテナに画面全体のレイアウトを
+  委ねることは一切していない(禁止事項§10)。スクロールしない軸の幅・高さは、ネイティブの
+  自動レイアウト(AppKitのautoresizing mask/WinUI3の明示的なWidth/Height同期)によって
+  elwindui側のMeasureへ「利用可能サイズ」として伝わるだけで、Arrange結果自体は常に
+  `elwindui_core::ui::layout_root`が決定する。
+- `content`内のネイティブコントロール(例: `ScrollView`の中の`TextBox`)へのフォーカスも、
+  1a(共通基盤のフォーカス配線)がAppKitの`makeFirstResponder:`responderチェーン走査で
+  「任意の`TreeHostView`祖先」を探す設計になっているため、追加コードなしで自動的にカバーされる。
+- 破棄時は、`ScrollView`要素自体が親ツリーから削除されれば、既存の生存確認pruningが
+  `NSScrollView`/`ScrollViewer`島全体(内部の`content_host`ごと)を削除する。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`cargo build`/`cargo test`で検証済み(`NSScrollView`+ネストした`TreeHostView`) |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし)。`build.rs`に`ScrollViewer`/`ScrollMode`のallow-listを追加済み |
+| GTK4 | 未実装(GTK4バックエンド自体が基盤未構築) |
+
+**既知のギャップ(意図的な縮小スコープ、隠していない)**: スクロール位置の取得・設定・
+`scroll_changed`イベントは未実装。
 
 ---
 

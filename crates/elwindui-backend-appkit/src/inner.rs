@@ -2292,6 +2292,19 @@ define_class!(
         /// inspecting `NSApp.currentEvent`, and no such key-view loop is wired between elwindui
         /// elements yet regardless — see `docs/elwindui_gui_framework_design.md` §5.5/§8.1's "known
         /// limitation" notes on Tab/Shift+Tab out of a focused native control).
+        ///
+        /// Resolves the target through `host.ivars().render_tree.borrow()` in its own `let`
+        /// statement, ending that borrow *before* calling `native_focus_gained` — this used to be
+        /// one `if let Some(render_tree) = ...borrow().as_ref() { native_focus_gained(render_tree,
+        /// ..) }`, which held the borrow for the whole call. `native_focus_gained` dispatches
+        /// `on_got_focus`, which can run arbitrary user code; in `examples/controls-demo`'s TextBox
+        /// tab, that handler sets an `#[observable]` field bound to another `TextBlock`, whose
+        /// property-change notification synchronously calls `AppKitRelayoutHost::request_relayout`
+        /// — which itself needs `render_tree.borrow_mut()` to mark the tree dirty (only the actual
+        /// AppKit layout pass is deferred via `setNeedsLayout`, not this). With the borrow still
+        /// held from the outer `if let`, that `borrow_mut()` panicked with `BorrowMutError` on every
+        /// click or Enter-driven focus change that touched a bound sibling element — crashing the
+        /// whole app, since the panic then unwound across this method's own ObjC callback boundary.
         #[unsafe(method(makeFirstResponder:))]
         fn make_first_responder(&self, responder: Option<&NSResponder>) -> Bool {
             let old = self.firstResponder();
@@ -2301,11 +2314,16 @@ define_class!(
             }
             let new = self.firstResponder();
             if let Some((host, owner_id)) = resolve_focus_owner(new) {
-                if let Some(render_tree) = host.ivars().render_tree.borrow().as_ref() {
+                let target = host
+                    .ivars()
+                    .render_tree
+                    .borrow()
+                    .as_ref()
+                    .and_then(|rt| elwindui_core::focus::resolve_native_focus_target(rt, owner_id));
+                if let Some(target) = target {
                     elwindui_core::focus::native_focus_gained(
-                        render_tree,
+                        &target,
                         &host.ivars().keyboard.focus,
-                        owner_id,
                         FocusState::Pointer,
                     );
                 }

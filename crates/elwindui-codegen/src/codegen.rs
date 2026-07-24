@@ -1738,8 +1738,15 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             #struct_fields
             // `active` is separate from the callback borrow. `on_property_changed` snapshots this
             // list before invocation, so a callback may cancel itself or another callback without
-            // conflicting with a RefCell borrow held by the notifier.
-            __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#property_enum)>>>)>>>,
+            // conflicting with a RefCell borrow held by the notifier. Each handler itself is a bare
+            // `Rc<dyn Fn(..)>`, not `Rc<RefCell<Box<dyn Fn(..)>>>` — it's write-once (only ever
+            // constructed inside `subscribe_property_changed`, never replaced in place), so wrapping
+            // it in a `RefCell` bought nothing and was actively unsafe: `on_property_changed` calling
+            // through a `.borrow()` of it (`(handler.borrow())(property)`) holds that `Ref` for the
+            // whole statement — including the callback's own execution — so any handler that
+            // (directly or via a nested dispatch) re-entered this same subscription would panic with
+            // `BorrowMutError`.
+            __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(#property_enum)>)>>>,
             // Lets an async action body upgrade to an owned `Rc<Self>` before spawning (see the
             // `FieldKind::Action` `is_async` arm) instead of capturing a borrowed `&self` that
             // can't outlive this call. Unused (and so `#[allow(dead_code)]`) on a viewmodel with
@@ -1773,7 +1780,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 f: impl Fn(#property_enum) + 'static,
             ) -> elwindui::core::reactive::Subscription {
                 let active = std::rc::Rc::new(std::cell::Cell::new(true));
-                let handler = std::rc::Rc::new(std::cell::RefCell::new(Box::new(f) as Box<dyn Fn(#property_enum)>));
+                let handler: std::rc::Rc<dyn Fn(#property_enum)> = std::rc::Rc::new(f);
                 self.__property_changed_handlers.borrow_mut().push((active.clone(), handler));
                 elwindui::core::reactive::Subscription::new(move || {
                     active.set(false);
@@ -1784,7 +1791,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 let handlers = self.__property_changed_handlers.borrow().clone();
                 for (active, handler) in handlers {
                     if active.get() {
-                        (handler.borrow())(property);
+                        handler(property);
                     }
                 }
             }
@@ -2014,7 +2021,19 @@ fn rewrite_action_body(
                             let setter = format_ident!("set_{}", ident);
                             let mut value = (*assign.right).clone();
                             self.visit_expr_mut(&mut value);
-                            *node = syn::parse_quote! { #receiver.#setter(#value) };
+                            // `#value` is bound to a `let` in its own statement rather than
+                            // embedded directly as the setter's argument: if `#value` itself reads
+                            // the same field (e.g. `field = format!("{}x", self.field.borrow())`),
+                            // the `Ref` temporary that produces would otherwise live until the end
+                            // of the *whole* `#receiver.#setter(#value)` statement (Rust drops
+                            // temporaries at statement end, not at the end of the sub-expression
+                            // that created them) — so it would still be alive when the setter's own
+                            // `borrow_mut()` runs, panicking with `BorrowMutError`. Ending the `let`
+                            // statement first drops that temporary before the setter call.
+                            *node = syn::parse_quote! {{
+                                let __elwindui_value = #value;
+                                #receiver.#setter(__elwindui_value)
+                            }};
                             return;
                         }
                     }
@@ -2038,7 +2057,20 @@ fn rewrite_action_body(
                             for arg in args.iter_mut() {
                                 self.visit_expr_mut(arg);
                             }
-                            *node = syn::parse_quote! { #receiver.#helper(#args) };
+                            // Same "bind to a `let` before calling the mutating helper" reasoning
+                            // as the `Expr::Assign` arm above: an arg expression that itself reads
+                            // the same `field` (e.g. `documents.push(make_doc(self.documents.borrow().len()))`)
+                            // would otherwise keep a `Ref` temporary alive across the whole
+                            // `#receiver.#helper(#args)` statement, clashing with the helper's own
+                            // internal `borrow_mut()`.
+                            let arg_idents: Vec<syn::Ident> = (0..args.len())
+                                .map(|i| format_ident!("__elwindui_arg{}", i))
+                                .collect();
+                            let arg_values: Vec<&syn::Expr> = args.iter().collect();
+                            *node = syn::parse_quote! {{
+                                #( let #arg_idents = #arg_values; )*
+                                #receiver.#helper(#(#arg_idents),*)
+                            }};
                             return;
                         }
                     }
@@ -2297,7 +2329,7 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
 
         pub struct #struct_name {
             #struct_fields
-            __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#component_property_enum)>>>)>>>,
+            __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(#component_property_enum)>)>>>,
         }
 
         impl #struct_name {
@@ -2314,9 +2346,7 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                 f: impl Fn(#component_property_enum) + 'static,
             ) -> elwindui::core::reactive::Subscription {
                 let active = std::rc::Rc::new(std::cell::Cell::new(true));
-                let handler = std::rc::Rc::new(std::cell::RefCell::new(
-                    Box::new(f) as Box<dyn Fn(#component_property_enum)>
-                ));
+                let handler: std::rc::Rc<dyn Fn(#component_property_enum)> = std::rc::Rc::new(f);
                 self.__property_changed_handlers
                     .borrow_mut()
                     .push((active.clone(), handler));
@@ -2328,7 +2358,7 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                 let handlers = self.__property_changed_handlers.borrow().clone();
                 for (active, handler) in handlers {
                     if active.get() {
-                        (handler.borrow())(property);
+                        handler(property);
                     }
                 }
             }
@@ -3030,9 +3060,7 @@ fn generate_view(
             f: impl Fn(#component_property_enum) + 'static,
         ) -> elwindui::core::reactive::Subscription {
             let active = std::rc::Rc::new(std::cell::Cell::new(true));
-            let handler = std::rc::Rc::new(std::cell::RefCell::new(
-                Box::new(f) as Box<dyn Fn(#component_property_enum)>
-            ));
+            let handler: std::rc::Rc<dyn Fn(#component_property_enum)> = std::rc::Rc::new(f);
             self.__property_changed_handlers
                 .borrow_mut()
                 .push((active.clone(), handler));
@@ -3044,7 +3072,7 @@ fn generate_view(
             let handlers = self.__property_changed_handlers.borrow().clone();
             for (active, handler) in handlers {
                 if active.get() {
-                    (handler.borrow())(property);
+                    handler(property);
                 }
             }
         }
@@ -3873,7 +3901,7 @@ fn generate_view(
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
-                __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#component_property_enum)>>>)>>>,
+                __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(#component_property_enum)>)>>>,
                 // Erased to `dyn Any` (not e.g. `dyn elwindui::core::ui::UIElementExt`) so this same
                 // field shape works uniformly whether `#target`'s own chain reaches `UIElementExt`
                 // (shape/template composition) or not (host composition, `inherits Window` — `Window`
@@ -3991,7 +4019,7 @@ fn generate_view(
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
-                __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<std::cell::RefCell<Box<dyn Fn(#component_property_enum)>>>)>>>,
+                __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(#component_property_enum)>)>>>,
             }
         }
     }

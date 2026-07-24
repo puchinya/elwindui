@@ -166,15 +166,25 @@ impl FocusTracker {
 /// duplicate itself. Each backend's own OS-level detection mechanism is necessarily backend-specific
 /// (there is no portable "did this widget become first responder" signal), but what happens once
 /// that's detected is identical, so it lives here once rather than in each backend crate.
-pub fn native_focus_gained(
+/// Resolves `owner_id` to its owning element via `RenderTree::visual_index` — the lookup half of
+/// what used to be `native_focus_gained`'s whole job, split out so a caller can drop its own
+/// (backend-local) `RenderTree` borrow *before* calling `native_focus_gained`. `FocusTracker::
+/// set_focus` dispatches `on_got_focus`, which runs arbitrary user code — including code that can
+/// re-enter the very `RenderTree` a caller might otherwise still be holding borrowed, e.g. an
+/// observable field bound to some other element synchronously calling `RelayoutHost::
+/// request_relayout`, which itself needs to `borrow_mut()` the render tree to mark it dirty. Both
+/// backends' own focus-gained call sites resolve through this function first, let that borrow end,
+/// then call `native_focus_gained` separately — see `elwindui_backend_appkit::inner::
+/// ElwinduiWindow::make_first_responder`'s own doc comment for the concrete crash this avoids.
+pub fn resolve_native_focus_target(
     render_tree: &RenderTree,
-    focus: &FocusTracker,
     owner_id: u64,
-    state: FocusState,
-) {
-    if let Some(element) = render_tree.visual_index.get(&owner_id).and_then(Weak::upgrade) {
-        focus.set_focus(&element, state);
-    }
+) -> Option<Rc<dyn UIElementExt>> {
+    render_tree.visual_index.get(&owner_id).and_then(Weak::upgrade)
+}
+
+pub fn native_focus_gained(target: &Rc<dyn UIElementExt>, focus: &FocusTracker, state: FocusState) {
+    focus.set_focus(target, state);
 }
 
 /// The counterpart to `native_focus_gained` for a native leaf's own OS focus-out notification.
@@ -217,6 +227,74 @@ mod tests {
         let target: Rc<dyn UIElementExt> = VerticalLayout::new();
         assert!(!tracker.set_focus(&target, FocusState::Programmatic));
         assert!(tracker.focused().is_none());
+    }
+
+    /// Regression test for the crash `examples/controls-demo`'s TextBox tab hit on every click:
+    /// both backends used to resolve+call in one step —
+    /// `if let Some(rt) = render_tree.borrow().as_ref() { native_focus_gained(rt, ..) }` — holding
+    /// the `RenderTree` `RefCell` borrowed for the whole call. `native_focus_gained` dispatches
+    /// `on_got_focus`, which can run arbitrary user code; here that handler calls `leaf.invalidate()`,
+    /// which reaches a `RelayoutHost::request_relayout` that itself needs `render_tree.borrow_mut()`
+    /// to mark the tree dirty — exactly what `AppKitRelayoutHost`/its WinUI3 mirror do synchronously
+    /// (only the actual native layout pass is deferred). With the old one-step call, that
+    /// `borrow_mut()` would panic with `BorrowMutError`. This test wires the same shape through the
+    /// current two-step API (`resolve_native_focus_target` then `native_focus_gained`, matching both
+    /// backends' fixed call sites) and asserts it completes without panicking.
+    #[test]
+    fn native_focus_gained_survives_a_got_focus_handler_that_triggers_relayout() {
+        use crate::graphics::{RenderGroup, RenderTree};
+
+        struct ReentrantRelayoutHost {
+            render_tree: Rc<RefCell<Option<RenderTree>>>,
+        }
+        impl crate::ui::RelayoutHost for ReentrantRelayoutHost {
+            fn request_relayout(&self, dirty_group_id: u64) {
+                if let Some(rt) = self.render_tree.borrow_mut().as_mut() {
+                    rt.mark_dirty(dirty_group_id);
+                }
+            }
+        }
+
+        let leaf = tab_stop();
+        let owner_id = leaf.as_ui_element().render_group_id;
+
+        let render_tree = Rc::new(RefCell::new(Some(RenderTree::with_root(RenderGroup::new(
+            owner_id,
+            crate::base::Point { x: 0.0, y: 0.0 },
+            None,
+        )))));
+        let leaf_dyn: Rc<dyn UIElementExt> = Rc::clone(&leaf) as Rc<dyn UIElementExt>;
+        render_tree
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .visual_index
+            .insert(owner_id, Rc::downgrade(&leaf_dyn));
+
+        leaf.as_ui_element()
+            .set_invalidate_host(Some(Rc::new(ReentrantRelayoutHost {
+                render_tree: Rc::clone(&render_tree),
+            })));
+        let leaf_for_handler = Rc::clone(&leaf);
+        leaf.register_routed_handler::<()>(
+            "on_got_focus",
+            Box::new(move |_, _| {
+                leaf_for_handler.invalidate();
+            }),
+        );
+
+        let focus = FocusTracker::new();
+
+        // The fixed two-step call: resolve while briefly borrowed, then call `native_focus_gained`
+        // only after that borrow has ended (see this test's own doc comment).
+        let target = render_tree
+            .borrow()
+            .as_ref()
+            .and_then(|rt| resolve_native_focus_target(rt, owner_id));
+        let target = target.expect("visual_index should resolve the leaf");
+        native_focus_gained(&target, &focus, FocusState::Pointer);
+
+        assert!(Rc::ptr_eq(&focus.focused().unwrap(), &leaf_dyn));
     }
 
     #[test]

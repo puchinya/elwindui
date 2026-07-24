@@ -63,9 +63,20 @@ is the authoritative spec for `#[elwindui_macros::class]` and takes precedence o
 
 ## Taking screenshots of a running example app (AppKit backend etc.)
 
-Always capture the specific window, not the full screen — a full-screen `screencapture` pulls in the menu bar,
-desktop, and unrelated windows and wastes context. Get the target window's `CGWindowID` via a tiny Swift snippet
-(no Accessibility permission needed, only Screen Recording), then pass it to `screencapture -l<id>`:
+**Preferred: `tools/macos-ui-driver`** (see `docs/elwindui_macos_gui_test_driver_status.md` for what's implemented — Phase 1 only: launch/terminate/list-windows/capture-window/doctor; Phase 2+, Accessibility-tree walking and control interaction, is not yet built). Build once with `swift build` inside that directory, then:
+
+```bash
+BIN=$(cd tools/macos-ui-driver && swift build --show-bin-path)/macos-ui-driver
+"$BIN" doctor   # check Screen Recording / Accessibility permission state first
+"$BIN" launch --path target/debug/notepad --wait-window-timeout 5   # polls for the window, no fixed sleep
+# -> pull "pid"/"window"."window_id" out of the printed JSON
+"$BIN" capture-window --window-id <id> --out /tmp/window.png   # crops to just that window, Retina-correct
+"$BIN" terminate --pid <pid>
+```
+
+Every command prints one JSON object (`{"success": true, ...}` / `{"success": false, "error": "..."}`) and sets the exit code accordingly — always capture the specific window, never the full screen (a full-screen capture pulls in the menu bar, desktop, and unrelated windows and wastes context), which is exactly what `capture-window` does.
+
+**Fallback** (no build step, useful for a one-off manual check): get the target window's `CGWindowID` via a tiny Swift snippet (no Accessibility permission needed, only Screen Recording), then pass it to `screencapture -l<id>`:
 
 ```bash
 cat > /tmp/winid.swift << 'EOF'
@@ -87,4 +98,5 @@ screencapture -x -l"$id" /tmp/window.png
 
 Note: simulating clicks via `osascript`/System Events requires Accessibility permission, which is a separate grant
 from Screen Recording and may not be available — if clicking programmatically fails with error -25211, ask the user
-to perform the click manually and then capture the window screenshot afterward.
+to perform the click manually and then capture the window screenshot afterward. `macos-ui-driver`'s own `doctor`
+command is the fastest way to check both permissions' current state before attempting either path.

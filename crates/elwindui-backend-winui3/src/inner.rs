@@ -1355,15 +1355,24 @@ fn reconcile_native_children(
                         let element = view.as_element();
                         let render_tree_for_gained = Rc::downgrade(render_tree);
                         let keyboard_for_gained = Rc::downgrade(keyboard);
+                        // Resolves through `render_tree.borrow()` in its own `let` statement, ending
+                        // that borrow *before* calling `native_focus_gained` — mirrors
+                        // `elwindui_backend_appkit::inner::ElwinduiWindow::make_first_responder`'s
+                        // own fix; see that method's doc comment for the concrete double-borrow
+                        // crash this avoids (`native_focus_gained` dispatches `on_got_focus`, which
+                        // can run user code that synchronously re-enters this same `render_tree` via
+                        // `RelayoutHost::request_relayout`).
                         let got_focus_id = register_ui_event_callback(Rc::new(move || {
                             if let (Some(render_tree), Some(keyboard)) =
                                 (render_tree_for_gained.upgrade(), keyboard_for_gained.upgrade())
                             {
-                                if let Some(render_tree) = render_tree.borrow().as_ref() {
+                                let target = render_tree.borrow().as_ref().and_then(|rt| {
+                                    elwindui_core::focus::resolve_native_focus_target(rt, owner_id)
+                                });
+                                if let Some(target) = target {
                                     elwindui_core::focus::native_focus_gained(
-                                        render_tree,
+                                        &target,
                                         &keyboard.focus,
-                                        owner_id,
                                         FocusState::Pointer,
                                     );
                                 }

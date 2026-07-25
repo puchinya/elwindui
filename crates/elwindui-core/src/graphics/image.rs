@@ -184,6 +184,78 @@ pub enum ImageFit {
     None,
 }
 
+/// `ImageBrush::stretch` -> `ImageFit` — the same four cases under the vocabulary
+/// [`fitted_image_rect`] speaks, so an `ImageBrush` fill can reuse that placement helper as-is.
+impl From<super::brush::Stretch> for ImageFit {
+    fn from(stretch: super::brush::Stretch) -> Self {
+        use super::brush::Stretch;
+        match stretch {
+            Stretch::None => ImageFit::None,
+            Stretch::Fill => ImageFit::Fill,
+            Stretch::Uniform => ImageFit::Contain,
+            Stretch::UniformToFill => ImageFit::Cover,
+        }
+    }
+}
+
+/// Where an image of `image_size` (already-cropped pixel dimensions) actually lands inside `dest`
+/// once `fit`/`alignment_x`/`alignment_y` are applied, in the same coordinate space as `dest`.
+///
+/// `Fill` always returns `dest` unchanged; `Contain`/`Cover` scale `image_size` to fit inside /
+/// cover `dest` while preserving aspect ratio; `None` draws at intrinsic size. Leftover space
+/// (`Contain`/`None`) or overflow (`Cover`/`None`) is distributed per the alignments — overflow is
+/// why a caller drawing this generally needs its own clip-to-`dest` container rather than handing
+/// the result straight to `dest`'s own layer.
+///
+/// A degenerate `image_size` (either axis `<= 0`) falls back to `dest`'s own size rather than
+/// producing `NaN`/`inf` from the division.
+///
+/// Backend-independent (pure `f32` geometry over `elwindui_core` value types), so it lives here
+/// rather than being re-derived per backend — AppKit, Win2D, and the WinUI3 Composition renderer
+/// all place images with exactly this rule.
+pub fn fitted_image_rect(
+    dest: crate::base::Rect,
+    image_size: (f32, f32),
+    fit: ImageFit,
+    alignment_x: super::brush::AlignmentX,
+    alignment_y: super::brush::AlignmentY,
+) -> crate::base::Rect {
+    use super::brush::{AlignmentX, AlignmentY};
+    let (iw, ih) = image_size;
+    let (width, height) = if iw <= 0.0 || ih <= 0.0 {
+        (dest.width, dest.height)
+    } else {
+        match fit {
+            ImageFit::Fill => (dest.width, dest.height),
+            ImageFit::None => (iw, ih),
+            ImageFit::Contain => {
+                let scale = (dest.width / iw).min(dest.height / ih);
+                (iw * scale, ih * scale)
+            }
+            ImageFit::Cover => {
+                let scale = (dest.width / iw).max(dest.height / ih);
+                (iw * scale, ih * scale)
+            }
+        }
+    };
+    let x = match alignment_x {
+        AlignmentX::Left => dest.x,
+        AlignmentX::Center => dest.x + (dest.width - width) / 2.0,
+        AlignmentX::Right => dest.x + dest.width - width,
+    };
+    let y = match alignment_y {
+        AlignmentY::Top => dest.y,
+        AlignmentY::Center => dest.y + (dest.height - height) / 2.0,
+        AlignmentY::Bottom => dest.y + dest.height - height,
+    };
+    crate::base::Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImageDrawOptions {
     pub opacity: f32,

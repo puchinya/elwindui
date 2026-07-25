@@ -522,10 +522,28 @@ fn inherit_macro_prefix(bare_name: &str, ty: &Type) -> Option<TokenStream2> {
 /// construction) that calls a target class's macro trio directly. Never use this *inside* another
 /// `macro_rules!` body — see `inherit_macro_self_ref_path`. `ty` is this class's own `inherits =`/
 /// `struct_only =` argument naming the target (see `inherit_macro_prefix`'s doc comment on why).
+///
+/// The same-crate case emits `crate::#ident`, not a bare `#ident`. Both compile under rustc, but a
+/// bare name resolves purely by textual `macro_rules!` scope — which only reaches from the macro's
+/// definition point through the rest of *that file*. The moment a class moves into a submodule
+/// (`native_ui/text.rs` inheriting `crate::NativeControl` declared in `native_ui/mod.rs`), rustc
+/// still accepts it — `#[macro_use]` on the sibling module makes it work — but **rust-analyzer
+/// reports `unresolved macro __elwindui_inherit_NativeControl!`** on every such class, a
+/// whole-crate IDE breakage invisible to `cargo build` and `cargo test`. `#[macro_export]` already
+/// places the macro at the defining crate's root, so an absolute `crate::` path is reachable from
+/// any module in that crate and both engines resolve it identically. (This is what
+/// `#![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]` in each `#[class]`-using
+/// crate's root is for.)
+///
+/// Note this must *not* be pushed down into `inherit_macro_prefix`: that helper is shared with
+/// `inherit_macro_self_ref_path`, where the same-crate case has to stay `$crate::`. A literal
+/// `crate::` inside a `macro_rules!` body resolves against the *invoking* crate, so making the
+/// prefix itself `crate` breaks every cross-crate consumer (`notepad`'s generated components fail
+/// with `cannot find __elwindui_inherit_Control in crate`).
 fn inherit_macro_path(bare_name: &str, ty: &Type, ident: Ident) -> TokenStream2 {
     match inherit_macro_prefix(bare_name, ty) {
         Some(prefix) => quote! { #prefix::#ident },
-        None => quote! { #ident },
+        None => quote! { crate::#ident },
     }
 }
 

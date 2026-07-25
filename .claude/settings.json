@@ -13,7 +13,9 @@
       "Bash(swift build*)",
       "Bash(swift /tmp/*.swift *)",
       "Bash(swift /private/tmp/*.swift *)",
-      "Bash(screencapture *)"
+      "Bash(screencapture *)",
+      "mcp__context-mode",
+      "plugin__context-mode__*"
     ],
     "additionalDirectories": [
       "/private/tmp",

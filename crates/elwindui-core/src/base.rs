@@ -38,6 +38,38 @@ pub struct Rect {
     pub height: f32,
 }
 
+impl Rect {
+    /// The smallest rect containing both — used by backends to accumulate the bounds a filter
+    /// chain or a group of primitives needs to cover.
+    pub fn union(self, other: Self) -> Self {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = (self.x + self.width).max(other.x + other.width);
+        let bottom = (self.y + self.height).max(other.y + other.height);
+        Self {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        }
+    }
+
+    /// The overlapping region, or `None` when the two don't overlap. Zero-area touching (shared
+    /// edge only) counts as no overlap, since a clip reduced to it would draw nothing anyway.
+    pub fn intersect(self, other: Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = (self.x + self.width).min(other.x + other.width);
+        let bottom = (self.y + self.height).min(other.y + other.height);
+        (right > x && bottom > y).then_some(Self {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        })
+    }
+}
+
 /// A direction/magnitude pair, as distinct from `Point` (a location) — WinUI3's
 /// `Windows.Foundation.Numerics.Vector2` role for offsets and deltas.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

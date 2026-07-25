@@ -747,3 +747,35 @@ rust-analyzer本体(`rustup component add rust-analyzer`で導入可能)の`rust
 この種の漏れは決して再現しない(2つ以上の相互依存クレートが同じproc-macro-srvプロセス内で
 解析されて初めて顕在化する)ため、`rust-analyzer diagnostics`をワークスペース全体に対して
 実行しない限り気づけない。
+
+### 15.3 `inherits =`のマクロ呼び出しパスとサブモジュール分割
+
+**症状**: `#[class]`を使うクラスを同一クレート内のサブモジュールへ移すと、`cargo build`と
+`cargo test`は通るのに`rust-analyzer diagnostics`だけが
+`unresolved macro __elwindui_inherit_NativeControl!` を各クラスで報告する。
+
+**原因**: `inherit_macro_path`(item位置の*直接*呼び出し形)は、`inherits =`の対象が同一クレート
+宣言だった場合に`__elwindui_inherit_X!`/`__elwindui_check_not_sealed_X!`を**裸の名前**で
+展開していた。裸の`macro_rules!`はtextualスコープ——定義地点からそのファイルの終わりまで——
+でしか解決されないため、親が`native_ui/mod.rs`、子が`native_ui/text.rs`のように別ファイルへ
+分かれた瞬間に成立しなくなる。rustcは`#[macro_use] mod parent;`で回避できてしまうが、
+rust-analyzerはその形を解決できない。
+
+**修正(実装済み)**: 同一クレートの場合も`crate::__elwindui_inherit_X!`という絶対パスで展開する。
+`#[macro_export]`は既にマクロを定義側クレートのルートへ置いているので、そのクレートのどの
+モジュールからでも到達でき、rustcとrust-analyzerの解釈が一致する。各`#[class]`利用クレートの
+ルートにある`#![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]`はこのための
+ものである。
+
+**この修正を`inherit_macro_prefix`側へ押し下げてはならない**: あのヘルパは
+`inherit_macro_self_ref_path`(生成された`macro_rules!`の*本体内*から他のマクロを参照する形)と
+共有されており、そちらの同一クレートケースは`$crate::`のままでなければならない。
+`macro_rules!`本体内のリテラルな`crate::`は*呼び出し側*クレートを指すため、prefix自体を
+`crate`にすると全てのクロスクレート利用者が壊れる(notepadの生成コンポーネントが
+`cannot find __elwindui_inherit_Control in crate`で失敗する形で顕在化した)。
+
+**帰結**: `#[class]`のクラスは同一クレート内の任意のサブモジュールに置いてよい。ただし
+`inherits = crate::X`が展開するsupertrait境界は`crate::XExt`なので、`XExt`がそのクレートの
+ルートから名前解決できる必要がある(`X`が`struct_only`クラスでExtトレイトが別クレートにある
+場合は、`pub use`で明示的に再エクスポートする——
+`elwindui-backend-appkit/src/native_ui/mod.rs`の`NativeControlExt`がその例)。

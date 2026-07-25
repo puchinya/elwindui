@@ -1,8 +1,7 @@
-//! Native-side AppKit plumbing — every type here is `Inner`-prefixed and, except for `AnyView`
-//! itself (re-exported at the crate root; see `lib.rs`'s own doc comment), private to this crate.
-//! `native_ui.rs` composes these as plain fields and calls into them; this module owns every bit
-//! of genuinely AppKit-specific complexity (NSTextView delegates, tab strip bookkeeping, ...) so
-//! `native_ui.rs` stays a thin, uniform "implement the core-side trait by delegating" layer.
+//! Raw per-control AppKit plumbing — every type here is `Inner`-prefixed and private to
+//! this crate. `native_ui` composes these as plain fields and calls into them.
+//!
+//! One file per control family; see `lib.rs` for the crate's layering.
 
 
 mod button;

@@ -1,13 +1,13 @@
-//! Implements every `elwindui_core::ui` builtin trait this backend provides, by composing the
-//! matching `crate::inner` type (see that module's own doc comment) — each class here is a thin
-//! "call into `self.inner`" layer; all genuinely WinUI3-specific complexity lives in `inner.rs`.
-//! See docs/elwindui_spec.md 付録A, 付録C, docs/elwindui_gui_framework_design.md §3. Mirrors
-//! `elwindui_backend_appkit::native_ui`'s structure exactly.
+//! The public façade: one class per builtin this backend provides, each implementing the
+//! matching `elwindui_core::ui` `*Ext` trait by delegating to its `crate::inner` twin.
 //!
-//! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no type here at all:
-//! they're `elwindui_core::ui::UIElement` values that `elwindui-codegen` builds directly, reflected
-//! into real XAML elements by `inner::TreeHostPanel` (used by both `Window`'s content view and
-//! `TabView`'s per-tab content area).
+//! Deliberately free of XAML calls — every bit of genuinely toolkit-specific complexity
+//! lives one layer down in `inner`. That boundary is why this layer is ~70% identical between
+//! the two backends and is the natural candidate if it is ever shared outright.
+//!
+//! `VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock` have no type here at
+//! all: they are plain `elwindui_core::ui::UIElement` values that `elwindui-codegen` builds
+//! directly, reflected into native views by `crate::host`.
 
 use crate::AnyView;
 use crate::inner::{

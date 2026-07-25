@@ -1,20 +1,23 @@
-//! WinUI 3 (Windows App SDK) implementation of the widget surface `elwindui-codegen` targets,
-//! mirroring `elwindui-backend-appkit`'s shape (see that crate's doc comment for the overall
-//! native-vs-virtual design this implements: `VerticalLayout`/`HorizontalLayout`/
-//! `Rectangle`/`Ellipse`/`TextBlock` have no widget here at all, just `elwindui_core::ui::UIElement`
-//! values `elwindui-codegen` builds directly (`TextBlock` is self-drawn, using the real XAML
-//! `TextBlock` class only as a paint primitive inside `TreeHostPanel::relayout_static`, never as a
-//! wrapped builtin widget — see `elwindui-backend-appkit`'s `CATextLayer` use for the same role);
-//! only `Window`/`Button`/`TextArea`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`NativeTabView` are real
-//! native widgets).
+//! WinUI 3 backend — the concrete widget surface `elwindui-codegen` targets on Windows.
+//! See docs/elwindui_gui_framework_design.md §3.
 //!
-//! Split into `inner` (private — raw WinRT/XAML plumbing, `Inner`-prefixed types) and `native_ui`
-//! (public, re-exported here — implements every `elwindui_core::ui` builtin trait this backend
-//! provides by composing the matching `inner` type). See each module's own doc comment — mirrors
-//! `elwindui-backend-appkit`'s own split exactly.
+//! Layering — dependencies run one way only, `native_ui -> inner -> host -> render -> ffi`:
 //!
-//! The WinUI projection is generated at build time from the Windows App SDK metadata. `build.rs`
-//! resolves the metadata from `WINDOWS_APP_SDK_WINMD` or a normal NuGet package-cache install.
+//! | module      | owns |
+//! |-------------|------|
+//! | `native_ui` | the public façade: one `#[class]` per builtin, implementing the matching
+//! |             | `elwindui_core::ui` `*Ext` trait by delegating to its `inner` twin |
+//! | `inner`     | raw per-control plumbing, `Inner`-prefixed |
+//! | `host`      | the tree host view: layout/render driving, native event -> core input |
+//! | `render`    | drawing only — knows nothing about `UIElement`, focus or any control |
+//! | `ffi`       | the toolkit seam: the erased native handle (`AnyView`) |
+//! | `app`       | dispatcher, app delegate, event-loop entry |
+//! | `platform`  | OS services that are not UI elements (file dialogs) |
+//! | `bindings`  | the generated WinRT projection (`windows-bindgen` output) |
+//!
+//! `elwindui-backend-appkit` mirrors this file-for-file; keep the two in step. NOTE: this crate
+//! is `#![cfg(target_os = "windows")]` and has never been built — see
+//! docs/elwindui_implementation_status.md.
 
 #![cfg(target_os = "windows")]
 // `#[elwindui_macros::class]`'s `__elwindui_inherit_*!` chain mechanism needs a same-crate

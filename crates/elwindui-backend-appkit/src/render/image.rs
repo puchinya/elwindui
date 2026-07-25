@@ -4,9 +4,7 @@
 
 
 use objc2::rc::Retained;
-use objc2::{
-    AnyThread,
-};
+use objc2::AnyThread;
 use objc2_app_kit::NSImage;
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGColorSpace, CGDataProvider, CGImage};

@@ -18,9 +18,9 @@
 | `elwindui-languageserver` | 約990行 | 部分実装。診断(`elwindui-codegen`の`parser`/`validate`を再利用)、シンタックスハイライト(semantic tokens)、メンバー補完(`vm.field`)が実働。hover、生成コードプレビュー、オフスクリーンレンダリングと連携したインスタンス生成パイプラインは未実装 |
 | `elwindui-hotreload` | 32行 | スタブのみ。`param`/`prop`差分からremount/patchを判定する純粋関数(`decide_reload_action`)だけが存在し、`hot-lib-reloader`統合・実際のdylib差し替えは未実装 |
 | `elwindui-test` | 79行 | 部分実装。`render_tree`(`UIElement`ツリーの、各ノードを`type_name()`でラベル付けしたインデントダンプ)のみ実装。`render_canvas_snapshot`/`assert_image_snapshot!`は未実装(`canvas.rs`はdocコメントのみのスタブ) |
-| `elwindui-backend-appkit` | 約4400行 | 実装済み・実機検証済み。本機で`cargo build`/実行/スクリーンショット確認済みの唯一のバックエンド。描画replay(`inner.rs`の`replay_group`/`replay_commands`)は`RenderCommand`ごとに`CAShapeLayer`(fill/stroke/dash/cap/join/miter/nonzero-evenodd)・`CAGradientLayer`(実グラデーション、`try_add_gradient_fill_layer`)・`CATextLayer`・画像用`CALayer`を組み立てるCALayer合成方式(`NSView.draw(_:)`+`CGContext`直接記述ではない)。clipは`CAShapeLayer`マスクによる実ピクセル単位([`docs/elwindui_implementation_status.md`旧版の「bounding-box交差判定のみ」という記述は誤り・要修正済み——`clip_mask_layer`が実パス形状マスクを構築する])。**SVGベクター画像描画**(`vector_renderer.rs`、2026-07-20追加、同日中に2回目の追加実装あり): `RenderCommand::DrawVectorImage`をフル実装。group transform/opacity/clip/mask(alpha・luminance、オフスクリーンraster化)/blend-mode(`CALayer.compositingFilter`+Core Image blend filter)/filter graph(Core Imageへマッピング、`GaussianBlur`/`Offset`/`Merge`/`Composite`(Over/In/Out/Atop/**Xor**/**Arithmetic**、後者2つは`CISourceOutCompositing`の組み合わせと`CIMultiplyCompositing`+`CIColorMatrix`+`CIAdditionCompositing`の組み合わせで追加実装)/`Blend`/`Flood`/`ColorMatrix`/`Morphology`/`ConvolveMatrix`(3x3/5x5)/`DropShadow`/`ComponentTransfer`(Linear限定)/`Image`/**`Tile`**(`CIAffineTile`で追加実装)primitiveは実装、`Turbulence`/`DiffuseLighting`/`SpecularLighting`/`DisplacementMap`/非3x3・5x5の`ConvolveMatrix`は非推奨`CIKernel`文字列コンパイルAPIが必要なためユーザーの判断で対象外のまま、明示的diagnostic(`report_unsupported`、silent skipしない)で入力をそのまま通す)、path塗り(単色・グラデーション、任意の回転/拡大縮小変換下でも正しく動作——既存`try_add_gradient_fill_layer`の純平行移動限定を`position`/`bounds`/`affineTransform`方式で解消)、pattern(**真の無限タイリング**——塗り対象の境界を覆うタイル格子を計算し、`ImageBrush`タイル塗りの`add_tiled_image_layers`と同じ「`CALayer`を複数敷き詰める」技法を回転/拡大縮小対応の形へ一般化して適用、`inner.rs`の1768行目参照)、埋め込みラスター画像を実装。SVG読み込み(`elwindui-svg`/`usvg`)への依存はproduction経路に一切無い(dev-dependency経由のgolden testのみ)。オフスクリーン`CGBitmapContext`+`CALayer.renderInContext`によるgolden-imageテスト: 既存`golden_tests`モジュール(4シーン)に加え、`svg_golden_tests`モジュール(`resvg`参照描画とのサンプル点比較、8シーン: 単色/線形グラデーション/groupopacity/clipPath/patternタイリング/feComposite Xor/feComposite Arithmetic/feTile)を追加 |
-| `elwindui-backend-winui3` | 約1760行 | 実装コードあり・未検証。appkitと同じ`inner`(非公開・生のWinRT/XAML配線)/`native_ui`(公開・Ext実装)の2ファイル分割構成を持つが、Windows環境が無いためビルド・動作とも未確認。描画replayは新`RenderCommand`形状に追随済みだが、既存の「コマンド毎にXAML `Rectangle`/`Ellipse`/`Line`/`TextBlock`を`Canvas`へ直置きする」方式のまま(Win2D/`CanvasControl`への刷新は行っていない)——グラデーション/パス塗り/画像/`DrawVectorImage`/clip・transform・opacityスタックはデバッグビルドで`eprintln!`する明示的unsupportedマーカーに留まる(2026-07-20: `DrawVectorImage`アーム追加、ソースレベルのみ・このマシンではコンパイル確認不可) |
-| `elwindui-backend-gtk4` | 2行 | 未着手。`src/lib.rs`が2行のみのスタブで、`builtins`/`platform`/`application`モジュールが一切存在しない。`RenderCommand`を扱うコード自体が無いため`DrawVectorImage`も未着手のまま(既存の他コマンドと同列) |
+| `elwindui-backend-appkit` | 約7900行 | 実装済み・実機検証済み。本機で`cargo build`/実行/スクリーンショット確認済みの唯一のバックエンド。描画replay(`host/replay.rs`の`replay_group`/`replay_commands`)は`RenderCommand`ごとに`CAShapeLayer`(fill/stroke/dash/cap/join/miter/nonzero-evenodd)・`CAGradientLayer`(実グラデーション、`try_add_gradient_fill_layer`)・`CATextLayer`・画像用`CALayer`を組み立てるCALayer合成方式(`NSView.draw(_:)`+`CGContext`直接記述ではない)。clipは`CAShapeLayer`マスクによる実ピクセル単位([`docs/elwindui_implementation_status.md`旧版の「bounding-box交差判定のみ」という記述は誤り・要修正済み——`clip_mask_layer`が実パス形状マスクを構築する])。**SVGベクター画像描画**(`render/vector/`、2026-07-20追加、同日中に2回目の追加実装あり): `RenderCommand::DrawVectorImage`をフル実装。group transform/opacity/clip/mask(alpha・luminance、オフスクリーンraster化)/blend-mode(`CALayer.compositingFilter`+Core Image blend filter)/filter graph(Core Imageへマッピング、`GaussianBlur`/`Offset`/`Merge`/`Composite`(Over/In/Out/Atop/**Xor**/**Arithmetic**、後者2つは`CISourceOutCompositing`の組み合わせと`CIMultiplyCompositing`+`CIColorMatrix`+`CIAdditionCompositing`の組み合わせで追加実装)/`Blend`/`Flood`/`ColorMatrix`/`Morphology`/`ConvolveMatrix`(3x3/5x5)/`DropShadow`/`ComponentTransfer`(Linear限定)/`Image`/**`Tile`**(`CIAffineTile`で追加実装)primitiveは実装、`Turbulence`/`DiffuseLighting`/`SpecularLighting`/`DisplacementMap`/非3x3・5x5の`ConvolveMatrix`は非推奨`CIKernel`文字列コンパイルAPIが必要なためユーザーの判断で対象外のまま、明示的diagnostic(`report_unsupported`、silent skipしない)で入力をそのまま通す)、path塗り(単色・グラデーション、任意の回転/拡大縮小変換下でも正しく動作——既存`try_add_gradient_fill_layer`の純平行移動限定を`position`/`bounds`/`affineTransform`方式で解消)、pattern(**真の無限タイリング**——塗り対象の境界を覆うタイル格子を計算し、`ImageBrush`タイル塗りの`add_tiled_image_layers`と同じ「`CALayer`を複数敷き詰める」技法を回転/拡大縮小対応の形へ一般化して適用、`render/paint.rs`の`add_tiled_image_layers`参照)、埋め込みラスター画像を実装。SVG読み込み(`elwindui-svg`/`usvg`)への依存はproduction経路に一切無い(dev-dependency経由のgolden testのみ)。オフスクリーン`CGBitmapContext`+`CALayer.renderInContext`によるgolden-imageテスト: `testsupport/golden.rs`(4シーン)に加え、`testsupport/svg_golden.rs`(`resvg`参照描画とのサンプル点比較、8シーン: 単色/線形グラデーション/groupopacity/clipPath/patternタイリング/feComposite Xor/feComposite Arithmetic/feTile)を追加 |
+| `elwindui-backend-winui3` | 約8200行 | 実装コードあり・未検証。appkitと同じ層構成(`native_ui`/`inner`/`host`/`render`/`ffi`/`app`/`platform`、2026-07-25にファイル単位で揃えた)を持つが、Windows環境が無いためビルド・動作とも未確認。Win2Dコマンドリスト(`render/win2d.rs`)+ `Microsoft.UI.Composition`のretainedレンダラ(`render/composition/`)+ SVGベクター描画(`render/vector.rs`)を実装済み。`build.rs`(576行)が`windows-bindgen`でWinRT projectionを生成し、`cpp/app_host.cpp`(C++/WinRT)が`Application`のcomposable-class集約を担う(windows-rsが未対応のため、microsoft/windows-rs#3404)。**この行数・構成はソースを数えた実測値であり、動作の裏付けは一切無い** |
+| `elwindui-backend-gtk4` | 19行 | 未着手。`src/lib.rs`が19行のみのスタブ(`init()`と、`startup`をそのまま呼ぶだけの`application::run`)で、`native_ui`/`inner`/`host`/`render`/`platform`は一切存在せず、`gtk4` crateへの依存すら無い。`RenderCommand`を扱うコード自体が無いため`DrawVectorImage`も未着手のまま(既存の他コマンドと同列) |
 | `elwindui`(ファサード) | 68行 | 実装済み。`backend-appkit`/`backend-winui3`/`backend-gtk4`のCargoフィーチャで`core`/`i18n`/`backend`/`ui`を再エクスポートする。`svg`フィーチャ(2026-07-20追加)で`elwindui::svg`として`elwindui-svg`を再エクスポート |
 | プレビューツール(`elwindui-preview`相当) | - | **ワークスペースに存在しない**。`docs/elwindui_tool_preview_design.md`は100%未着手のフォワードルッキング設計 |
 
@@ -122,6 +122,52 @@
 | `elwindui-languageserver`(LSP) | 部分実装。診断・シンタックスハイライト・メンバー補完まで実働。hover・プレビュー用インスタンス生成パイプラインは未実装 |
 | ホットリロード(`elwindui-hotreload`) | スタブのみ。remount/patch判定ロジックのみ存在、dylib差し替えは未実装 |
 | リアルタイムプレビュー | **クレート自体が存在しない**。100%未着手 |
+
+---
+
+## 6.9 バックエンドcrateのファイル構成(2026-07-25 再編成)
+
+`elwindui-backend-appkit`/`elwindui-backend-winui3`は、どちらも当初の
+`lib.rs` + `inner.rs` + `native_ui.rs`という3ファイル構成に機能を積み増した結果、
+`inner.rs`が4884行/3457行の「何でも入れ」になっていた。両者を同じ層構成へ再編成した。
+
+| モジュール | 責務 | 依存してよい先 |
+|---|---|---|
+| `native_ui/` | 公開ファサード。builtinごとに`#[class]`1つ、`*Ext`トレイトを`inner`への委譲で実装 | `inner`, `host` |
+| `inner/` | コントロール別の生プラグイン(`Inner`接頭辞)。1ファイル1コントロール系統 | `host`, `render`, `ffi` |
+| `host/` | ツリーホストビュー。`layout_root`/`RenderTree`駆動、OSイベント→core入力 | `render`, `ffi` |
+| `render/` | 描画のみ。`UIElement`/フォーカス/コントロールを一切知らない | `ffi` |
+| `ffi/` | ツールキットとの境界。型消去ハンドル`AnyView` | (なし) |
+| `app.rs` | Dispatcher、アプリデリゲート、イベントループ入口 | |
+| `platform/` | UI要素ではないOSサービス(ファイルダイアログ) | |
+
+依存は上から下への一方向のみ。再編成前は`inner ⇄ vector_renderer`の循環があった。
+
+**プラットフォーム非依存ロジックの`elwindui-core`への移動**(両バックエンドで重複していたもの):
+`base::Rect::union`/`intersect`、`graphics::fitted_image_rect` + `impl From<Stretch> for ImageFit`、
+`input::ShortcutRegistry::collect_from_tree`、`ui::ChildList<T>`(`ListExt`実装の裏側の記憶域)。
+
+**検証状況**: appkitは`cargo test`(332件)・`rust-analyzer diagnostics`(0エラー)・
+notepad/graphics-demoのスクリーンショットまで確認済み。winui3は
+`#![cfg(target_os = "windows")]`のため本機では空crateにコンパイルされ、**型検査すらされていない**
+── 全ファイルが構文解析を通ること、層の依存方向、モジュール間参照の静的監査のみ実施。
+Windows上でのビルド確認が済むまで未検証扱いとすること。
+
+**未着手として残したもの**: `fitted_image_rect`は3つの変種(原点がdest相対か絶対か、入力が
+`ImageFit`か`ImageDrawOptions`か`ImageBrush`か、退化サイズのガード有無)があり、統合は
+「移動」ではなく挙動変更になるため、winui3側の2つは手つかずのまま。
+
+### 6.9.1 ドキュメント参照の負債(未解決)
+
+コードベース全体のdocコメントに**存在しないファイル**`docs/elwindui_spec.md`への参照が約134箇所
+残っている(`AGENTS.md`を含む)。旧spec分割時に引き継がれなかったもので、内訳:
+
+- 現行docsに実在する節: 付録A(→`elwindui_dsl_spec.md`)、付録T/F/G/L/M/N/Q/X/Y(→`elwindui_builtins_spec.md`) ── 計6箇所程度
+- **どのdocsにも存在しない節**: 付録H(64箇所)、付録E(17箇所)、付録B/C/I/O/P/S/V ── 約95箇所
+
+後者はファイル名を差し替えても参照先の節自体が無いため、機械的な修正ができない。付録Hは
+`base.rs`等から`付録H.2.1a`として大量に参照されており(幾何プリミティブの定義と思われる)、
+内容の行方を知る人による対応が必要。
 
 ---
 

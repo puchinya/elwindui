@@ -1,9 +1,20 @@
-//! AppKit implementation of the widget surface `elwindui-codegen` targets for the `notepad`
-//! example. See docs/elwindui_spec.md 付録A, 付録C, docs/elwindui_gui_framework_design.md §3.
+//! AppKit backend — the concrete widget surface `elwindui-codegen` targets on macOS.
+//! See docs/elwindui_gui_framework_design.md §3.
 //!
-//! Split into `inner` (private — raw AppKit plumbing, `Inner`-prefixed types) and `native_ui`
-//! (public, re-exported here — implements every `elwindui_core::ui` builtin trait this backend
-//! provides by composing the matching `inner` type). See each module's own doc comment.
+//! Layering — dependencies run one way only, `native_ui -> inner -> host -> render -> ffi`:
+//!
+//! | module      | owns |
+//! |-------------|------|
+//! | `native_ui` | the public façade: one `#[class]` per builtin, implementing the matching
+//! |             | `elwindui_core::ui` `*Ext` trait by delegating to its `inner` twin |
+//! | `inner`     | raw per-control plumbing, `Inner`-prefixed |
+//! | `host`      | the tree host view: layout/render driving, native event -> core input |
+//! | `render`    | drawing only — knows nothing about `UIElement`, focus or any control |
+//! | `ffi`       | the toolkit seam: the erased native handle (`AnyView`) |
+//! | `app`       | dispatcher, app delegate, event-loop entry |
+//! | `platform`  | OS services that are not UI elements (file dialogs) |
+//!
+//! `elwindui-backend-winui3` mirrors this file-for-file; keep the two in step.
 
 #![cfg(target_os = "macos")]
 // `#[elwindui_macros::class]`'s `__elwindui_inherit_*!` chain mechanism needs a same-crate

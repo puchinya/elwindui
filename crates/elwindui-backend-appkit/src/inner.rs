@@ -1249,7 +1249,7 @@ fn replay_paint_command(
             source,
             options,
         } => {
-            crate::vector_renderer::draw_vector_image(
+            crate::render::draw_vector_image(
                 layer, image, *dest, *source, options, &world, opacity, image_cache,
                 vector_raster_cache,
             );
@@ -3587,7 +3587,7 @@ mod svg_golden_tests {
         };
         let mut cache = HashMap::new();
         let mut vector_raster_cache = HashMap::new();
-        crate::vector_renderer::draw_vector_image(
+        crate::render::draw_vector_image(
             &root,
             &image,
             dest,
@@ -3795,7 +3795,7 @@ mod svg_golden_tests {
                 objc2_core_foundation::CGPoint::new(0.0, 0.0),
                 objc2_core_foundation::CGSize::new(64.0, 64.0),
             ));
-            crate::vector_renderer::draw_vector_image(
+            crate::render::draw_vector_image(
                 &root,
                 image,
                 dest,

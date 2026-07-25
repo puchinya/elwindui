@@ -25,7 +25,6 @@ pub fn init() -> Result<(), std::convert::Infallible> {
 mod inner;
 mod native_ui;
 mod render;
-mod vector_renderer;
 
 pub use native_ui::*;
 

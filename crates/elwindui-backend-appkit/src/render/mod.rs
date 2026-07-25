@@ -14,8 +14,10 @@ mod geometry;
 mod image;
 mod paint;
 mod path;
+mod vector;
 
 pub(crate) use geometry::{ca_alignment_mode, clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, parse_color, transform_point};
 pub(crate) use image::{build_image_container_layer, fitted_image_rect, resolve_cgimage};
 pub(crate) use paint::{GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, gradient_unit_point, try_add_gradient_fill_layer, try_add_image_fill_layer};
+pub(crate) use vector::draw_vector_image;
 pub(crate) use path::{ellipse_cgpath, path_to_cgpath, rounded_rect_cgpath};

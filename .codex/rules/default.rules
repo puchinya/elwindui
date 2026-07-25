@@ -1,0 +1,82 @@
+# ==============================================================================
+# Codex / AI Agent Recommended Allowlist Rules (default.rules)
+# Cross-Platform Support: macOS / Linux / Windows (PowerShell & CMD)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. File & Directory Reading (Read-Only)
+# ------------------------------------------------------------------------------
+# Unix / macOS
+prefix_rule(pattern = ["cat"], decision = "allow", justification = "Read file content")
+prefix_rule(pattern = ["head"], decision = "allow", justification = "Read top lines of file")
+prefix_rule(pattern = ["tail"], decision = "allow", justification = "Read bottom lines of file")
+prefix_rule(pattern = ["less"], decision = "allow", justification = "View file with pager")
+prefix_rule(pattern = ["more"], decision = "allow", justification = "View file page-by-page")
+
+# Windows (PowerShell & CMD)
+prefix_rule(pattern = ["Get-Content"], decision = "allow", justification = "Read file content (PowerShell)")
+prefix_rule(pattern = ["gc"], decision = "allow", justification = "Read file content (PowerShell alias)")
+prefix_rule(pattern = ["type"], decision = "allow", justification = "Display file content (CMD / PowerShell alias)")
+
+# ------------------------------------------------------------------------------
+# 2. Directory Listing & File Search
+# ------------------------------------------------------------------------------
+# Unix / macOS
+prefix_rule(pattern = ["ls"], decision = "allow", justification = "List directory contents")
+prefix_rule(pattern = ["pwd"], decision = "allow", justification = "Print working directory")
+prefix_rule(pattern = ["find"], decision = "allow", justification = "Search files in directory hierarchy")
+prefix_rule(pattern = ["grep"], decision = "allow", justification = "Search text matching pattern")
+prefix_rule(pattern = ["rg"], decision = "allow", justification = "Ripgrep fast text search")
+
+# Windows (PowerShell & CMD)
+prefix_rule(pattern = ["dir"], decision = "allow", justification = "List directory contents")
+prefix_rule(pattern = ["Get-ChildItem"], decision = "allow", justification = "List items in directory (PowerShell)")
+prefix_rule(pattern = ["gci"], decision = "allow", justification = "List items in directory (PowerShell alias)")
+prefix_rule(pattern = ["Get-Location"], decision = "allow", justification = "Get current working location (PowerShell)")
+prefix_rule(pattern = ["gl"], decision = "allow", justification = "Get current working location (PowerShell alias)")
+prefix_rule(pattern = ["findstr"], decision = "allow", justification = "Search text in files (CMD)")
+
+# ------------------------------------------------------------------------------
+# 3. Git Operations (Read-Only & Local Status)
+# ------------------------------------------------------------------------------
+prefix_rule(pattern = ["git", "status"], decision = "allow", justification = "Check repository status")
+prefix_rule(pattern = ["git", "log"], decision = "allow", justification = "View commit history")
+prefix_rule(pattern = ["git", "diff"], decision = "allow", justification = "View working tree diff")
+prefix_rule(pattern = ["git", "show"], decision = "allow", justification = "Show commit or object details")
+prefix_rule(pattern = ["git", "branch"], decision = "allow", justification = "List git branches")
+prefix_rule(pattern = ["git", "tag"], decision = "allow", justification = "List git tags")
+
+# ------------------------------------------------------------------------------
+# 4. Package Managers & Project Diagnostics
+# ------------------------------------------------------------------------------
+# Node.js / JavaScript
+prefix_rule(pattern = ["node", "-v"], decision = "allow", justification = "Check Node.js version")
+prefix_rule(pattern = ["node", "--version"], decision = "allow", justification = "Check Node.js version")
+prefix_rule(pattern = ["npm", "list"], decision = "allow", justification = "List installed npm packages")
+prefix_rule(pattern = ["npm", "test"], decision = "allow", justification = "Run project unit tests")
+prefix_rule(pattern = ["npm", "run", "test"], decision = "allow", justification = "Run npm test script")
+
+# Flutter / Dart
+prefix_rule(pattern = ["flutter", "doctor"], decision = "allow", justification = "Check Flutter environment diagnostics")
+prefix_rule(pattern = ["flutter", "analyze"], decision = "allow", justification = "Analyze Flutter project code")
+prefix_rule(pattern = ["dart", "analyze"], decision = "allow", justification = "Analyze Dart code")
+
+# Python
+prefix_rule(pattern = ["python", "--version"], decision = "allow", justification = "Check Python version")
+prefix_rule(pattern = ["python3", "--version"], decision = "allow", justification = "Check Python3 version")
+prefix_rule(pattern = ["pip", "list"], decision = "allow", justification = "List installed pip packages")
+
+# ------------------------------------------------------------------------------
+# 5. System Environment & Diagnostics
+# ------------------------------------------------------------------------------
+# Cross-Platform
+prefix_rule(pattern = ["echo"], decision = "allow", justification = "Print text or variable values")
+
+# Unix / macOS
+prefix_rule(pattern = ["whoami"], decision = "allow", justification = "Check current user name")
+prefix_rule(pattern = ["uname"], decision = "allow", justification = "Check operating system info")
+prefix_rule(pattern = ["which"], decision = "allow", justification = "Locate executable command")
+
+# Windows (PowerShell & CMD)
+prefix_rule(pattern = ["where"], decision = "allow", justification = "Locate executable command (Windows)")
+prefix_rule(pattern = ["hostname"], decision = "allow", justification = "Print system host name")

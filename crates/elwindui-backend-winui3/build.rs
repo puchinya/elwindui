@@ -167,14 +167,55 @@ fn main() {
         "Microsoft.UI.Xaml.Input.KeyEventHandler".to_owned(),
         "Microsoft.UI.Xaml.Input.KeyboardAccelerator".to_owned(),
         "Microsoft.UI.Xaml.Media.Brush".to_owned(),
+        "Microsoft.UI.Xaml.Media.LoadedImageSurface".to_owned(),
+        "Microsoft.UI.Xaml.Media.LoadedImageSourceLoadCompletedEventArgs".to_owned(),
+        "Microsoft.UI.Xaml.Media.LoadedImageSourceLoadStatus".to_owned(),
         "Microsoft.UI.Xaml.Media.SolidColorBrush".to_owned(),
+        "Microsoft.UI.Xaml.Hosting.ElementCompositionPreview".to_owned(),
         "Microsoft.UI.Xaml.Shapes.Ellipse".to_owned(),
         "Microsoft.UI.Xaml.Shapes.Line".to_owned(),
         "Microsoft.UI.Xaml.Shapes.Rectangle".to_owned(),
         "Microsoft.UI.Xaml.Shapes.Shape".to_owned(),
-        "Microsoft.Graphics.Canvas.UI.Xaml.CanvasControl".to_owned(),
-        "Microsoft.Graphics.Canvas.UI.Xaml.CanvasDrawEventArgs".to_owned(),
+        "Microsoft.UI.Composition.Compositor".to_owned(),
+        "Microsoft.UI.Composition.CompositionObject".to_owned(),
+        "Microsoft.UI.Composition.Visual".to_owned(),
+        "Microsoft.UI.Composition.ContainerVisual".to_owned(),
+        "Microsoft.UI.Composition.SpriteVisual".to_owned(),
+        "Microsoft.UI.Composition.ShapeVisual".to_owned(),
+        "Microsoft.UI.Composition.CompositionShape".to_owned(),
+        "Microsoft.UI.Composition.CompositionSpriteShape".to_owned(),
+        "Microsoft.UI.Composition.CompositionGeometry".to_owned(),
+        "Microsoft.UI.Composition.CompositionRectangleGeometry".to_owned(),
+        "Microsoft.UI.Composition.CompositionRoundedRectangleGeometry".to_owned(),
+        "Microsoft.UI.Composition.CompositionEllipseGeometry".to_owned(),
+        "Microsoft.UI.Composition.CompositionLineGeometry".to_owned(),
+        "Microsoft.UI.Composition.CompositionPathGeometry".to_owned(),
+        "Microsoft.UI.Composition.CompositionPath".to_owned(),
+        "Microsoft.UI.Composition.CompositionBrush".to_owned(),
+        "Microsoft.UI.Composition.CompositionColorBrush".to_owned(),
+        "Microsoft.UI.Composition.CompositionGradientBrush".to_owned(),
+        "Microsoft.UI.Composition.CompositionLinearGradientBrush".to_owned(),
+        "Microsoft.UI.Composition.CompositionRadialGradientBrush".to_owned(),
+        "Microsoft.UI.Composition.CompositionColorGradientStop".to_owned(),
+        "Microsoft.UI.Composition.CompositionColorGradientStopCollection".to_owned(),
+        "Microsoft.UI.Composition.CompositionSurfaceBrush".to_owned(),
+        "Microsoft.UI.Composition.CompositionClip".to_owned(),
+        "Microsoft.UI.Composition.InsetClip".to_owned(),
+        "Microsoft.UI.Composition.CompositionGeometricClip".to_owned(),
+        "Microsoft.UI.Composition.VisualCollection".to_owned(),
+        "Microsoft.UI.Composition.CompositionShapeCollection".to_owned(),
+        "Microsoft.UI.Composition.CompositionStrokeCap".to_owned(),
+        "Microsoft.UI.Composition.CompositionStrokeLineJoin".to_owned(),
+        "Microsoft.UI.Composition.CompositionStrokeDashArray".to_owned(),
+        "Microsoft.UI.Composition.CompositionStretch".to_owned(),
+        "Microsoft.UI.Composition.CompositionMappingMode".to_owned(),
+        "Microsoft.UI.Composition.CompositionGradientExtendMode".to_owned(),
+        "Microsoft.UI.Composition.ICompositionSurface".to_owned(),
+        "Microsoft.UI.Composition.CompositionGraphicsDevice".to_owned(),
+        "Microsoft.UI.Composition.CompositionDrawingSurface".to_owned(),
+        "Microsoft.Graphics.Canvas.UI.Composition.CanvasComposition".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasDrawingSession".to_owned(),
+        "Microsoft.Graphics.Canvas.CanvasDevice".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasActiveLayer".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasBitmap".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasAlphaMode".to_owned(),
@@ -191,6 +232,7 @@ fn main() {
         "Microsoft.Graphics.Canvas.Brushes.CanvasRadialGradientBrush".to_owned(),
         "Microsoft.Graphics.Canvas.Geometry.CanvasPathBuilder".to_owned(),
         "Microsoft.Graphics.Canvas.Geometry.CanvasGeometry".to_owned(),
+        "Microsoft.Graphics.Canvas.Geometry.CanvasGeometryCombine".to_owned(),
         "Microsoft.Graphics.Canvas.Geometry.CanvasFigureFill".to_owned(),
         "Microsoft.Graphics.Canvas.Geometry.CanvasFigureLoop".to_owned(),
         "Microsoft.Graphics.Canvas.Geometry.CanvasFilledRegionDetermination".to_owned(),
@@ -208,7 +250,18 @@ fn main() {
     ]);
     let warnings = windows_bindgen::bindgen(&args);
     let generated = std::fs::read_to_string(&out_path).expect("read generated WinUI bindings");
-    std::fs::write(&out_path, generated.replacen("#![allow(", "#[allow(", 1))
+    std::fs::write(
+        &out_path,
+        generated
+            .replacen("#![allow(", "#[allow(", 1)
+            // windows-bindgen 0.62 emits this WinRT ABI type through the optional
+            // `windows_numerics` crate, which has no Quaternion definition. The `windows`
+            // crate provides the same official Windows.Foundation.Numerics ABI type.
+            .replace(
+                "windows_numerics::Quaternion",
+                "windows::Foundation::Numerics::Quaternion",
+            ),
+    )
         .expect("write generated WinUI bindings");
     let interop = std::fs::read_to_string(&interop_path).expect("read generated XAML interop bindings");
     std::fs::write(&interop_path, interop.replacen("#![allow(", "#[allow(", 1))

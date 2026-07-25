@@ -1064,20 +1064,7 @@ fn filters_bounds(filters: &[VectorFilter]) -> Option<Rect> {
     filters
         .iter()
         .map(|f| f.bounds)
-        .reduce(|a, b| union_rect(a, b))
-}
-
-fn union_rect(a: Rect, b: Rect) -> Rect {
-    let x = a.x.min(b.x);
-    let y = a.y.min(b.y);
-    let right = (a.x + a.width).max(b.x + b.width);
-    let bottom = (a.y + a.height).max(b.y + b.height);
-    Rect {
-        x,
-        y,
-        width: right - x,
-        height: bottom - y,
-    }
+        .reduce(|a, b| a.union(b))
 }
 
 fn render_filtered_content(

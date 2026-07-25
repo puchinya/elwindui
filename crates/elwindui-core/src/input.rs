@@ -558,6 +558,20 @@ impl ShortcutRegistry {
             .push((chord, scope, target, event_name));
     }
 
+    /// Registers every `#[shortcut(...)]` declared anywhere under `tree`, via a depth-first
+    /// `visual_children()` walk feeding each element's own `UIElementExt::declared_shortcuts()`
+    /// into [`Self::register`] — see `ShortcutDecl`'s own doc comment for why this can't happen at
+    /// construction time. Backends call this from their tree host after `set_tree`, so the walk
+    /// itself belongs here rather than being re-implemented identically per backend.
+    pub fn collect_from_tree(&self, tree: &Rc<dyn UIElementExt>) {
+        for decl in tree.declared_shortcuts() {
+            self.register(decl.chord, decl.scope, tree.clone(), decl.event_name);
+        }
+        for child in tree.visual_children() {
+            self.collect_from_tree(&child);
+        }
+    }
+
     /// `Global` bindings are always eligible. `Local` bindings are only eligible while their own
     /// `target` is somewhere on `focused`'s own ancestor chain (`target` itself, or an ancestor of
     /// it) — matching `#[shortcut(.., scope: local)]`'s documented "only while the declaring

@@ -26,7 +26,7 @@ pub use command::{Clip, Font, RenderCommand, TextAlignment};
 pub use context::{Fill, RenderContext, SaveGuard, Stroke};
 pub use image::{
     AlphaMode, BackendImageHandle, Image, ImageData, ImageDrawOptions, ImageError, ImageFit,
-    ImageFormat, ImageSampling,
+    ImageFormat, ImageSampling, fitted_image_rect,
 };
 pub use path::{
     ArcSegment, FillRule, GeometryCombineMode, GeometryError, Path, PathBuilder, PathCommand,

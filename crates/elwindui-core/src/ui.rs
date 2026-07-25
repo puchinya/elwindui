@@ -1177,6 +1177,77 @@ pub trait ListExt<T: ?Sized> {
     fn to_vec(&self) -> Vec<Rc<T>>;
 }
 
+/// Backing storage for a [`ListExt`] implementation: an ordered `Rc<T>` list with identity
+/// (`Rc::ptr_eq`) removal, and nothing else.
+///
+/// Every backend's `Menu::items` / `MenuBar::items` / `TabView::children` needs exactly this same
+/// bookkeeping plus one backend-specific "now re-sync the native widget" call, so the bookkeeping
+/// half lives here and each backend's `ListExt` impl becomes delegation + its own `rebuild()`.
+/// Deliberately hook-free — a caller that needs a pre-step (`TabView::add`'s header-listener
+/// attach, say) does it around the delegation rather than handing this type a callback, keeping it
+/// a plain container. This is `UIElementCollection`'s sibling for lists that are *not* part of the
+/// visual tree and therefore have no parent/visual-collection wiring to maintain.
+pub struct ChildList<T: ?Sized> {
+    items: RefCell<Vec<Rc<T>>>,
+}
+
+impl<T: ?Sized> Default for ChildList<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: ?Sized> ChildList<T> {
+    pub fn new() -> Self {
+        Self {
+            items: RefCell::new(Vec::new()),
+        }
+    }
+    pub fn add(&self, item: Rc<T>) {
+        self.items.borrow_mut().push(item);
+    }
+    /// `index` is clamped to the current length, so an out-of-range insert appends rather than
+    /// panicking the way `Vec::insert` would.
+    pub fn insert(&self, index: usize, item: Rc<T>) {
+        let mut items = self.items.borrow_mut();
+        let index = index.min(items.len());
+        items.insert(index, item);
+    }
+    /// Identity-based (`Rc::ptr_eq`), not value-based — `T` is a trait object with no `PartialEq`.
+    pub fn remove(&self, item: &Rc<T>) -> bool {
+        let mut items = self.items.borrow_mut();
+        let Some(index) = items.iter().position(|candidate| Rc::ptr_eq(candidate, item)) else {
+            return false;
+        };
+        items.remove(index);
+        true
+    }
+    pub fn remove_at(&self, index: usize) -> Rc<T> {
+        self.items.borrow_mut().remove(index)
+    }
+    pub fn clear(&self) {
+        self.items.borrow_mut().clear();
+    }
+    /// Swaps the whole contents in one shot. The reconciling `set_children` implementations use
+    /// this with a vector they built from [`Self::to_vec`], so the native add/remove calls their
+    /// diff triggers happen with *no* borrow of this list outstanding — holding a `RefCell` borrow
+    /// across a call back into backend/user code is the shape that produced the `makeFirstResponder`
+    /// double-borrow panic (see `focus`'s own notes), so this type offers no `retain`-style
+    /// borrow-holding callback API.
+    pub fn replace_all(&self, items: Vec<Rc<T>>) {
+        *self.items.borrow_mut() = items;
+    }
+    pub fn len(&self) -> usize {
+        self.items.borrow().len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.items.borrow().is_empty()
+    }
+    pub fn to_vec(&self) -> Vec<Rc<T>> {
+        self.items.borrow().clone()
+    }
+}
+
 /// State owned by a generated dynamic child range. It is deliberately not a `UIElement`: callers
 /// pass the resolved parent collection on every update, so `for`/`if`/`match` insert their actual
 /// children directly into that collection. For `Vec<Rc<U>>` sources, unchanged source identities

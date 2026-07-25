@@ -7,7 +7,7 @@
 use elwindui_core::base::{AsAny, Point};
 use elwindui_core::input::{
     FocusState, Key, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
-    RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent, ShortcutRegistry,
+    RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
 use elwindui_core::graphics::{RenderCommand, RenderGroup};
 use elwindui_core::ui::{FocusHost, RelayoutHost, UIElementExt, layout_root};
@@ -90,18 +90,6 @@ fn nsevent_key(event: &NSEvent) -> Option<Key> {
             .and_then(|s| s.to_string().chars().next())
             .map(Key::Character)
     })
-}
-
-/// Depth-first, `visual_children()`-based walk feeding every element's own
-/// `UIElementExt::declared_shortcuts()` into `registry` — see `crate::input::ShortcutDecl`'s own
-/// doc comment for why this can't happen at construction time.
-fn collect_shortcuts_into(tree: &Rc<dyn UIElementExt>, registry: &ShortcutRegistry) {
-    for decl in tree.declared_shortcuts() {
-        registry.register(decl.chord, decl.scope, tree.clone(), decl.event_name);
-    }
-    for child in tree.visual_children() {
-        collect_shortcuts_into(&child, registry);
-    }
 }
 
 pub(crate) fn mtm() -> MainThreadMarker {
@@ -222,22 +210,6 @@ fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
         _ => (0.0, 0.0, 0.0, 255.0),
     };
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
-}
-
-pub(crate) fn intersect_rect(
-    a: elwindui_core::base::Rect,
-    b: elwindui_core::base::Rect,
-) -> Option<elwindui_core::base::Rect> {
-    let x = a.x.max(b.x);
-    let y = a.y.max(b.y);
-    let right = (a.x + a.width).min(b.x + b.width);
-    let bottom = (a.y + a.height).min(b.y + b.height);
-    (right > x && bottom > y).then_some(elwindui_core::base::Rect {
-        x,
-        y,
-        width: right - x,
-        height: bottom - y,
-    })
 }
 
 /// `elwindui_core::ui::TextAlignment` -> `CATextLayer.alignmentMode` — the `kCAAlignment*` values
@@ -660,7 +632,7 @@ impl TreeHostView {
             .set_focus_host(Some(Rc::new(AppKitFocusHost(weak_self))));
         self.ivars().keyboard.focus.clear_focus();
         self.ivars().keyboard.shortcuts().clear();
-        collect_shortcuts_into(&tree, self.ivars().keyboard.shortcuts());
+        self.ivars().keyboard.shortcuts().collect_from_tree(&tree);
         *self.ivars().tree.borrow_mut() = Some(tree);
         *self.ivars().render_tree.borrow_mut() = None;
         self.invalidateIntrinsicContentSize();
@@ -874,7 +846,7 @@ fn replay_group(
         height: clip.height,
     });
     let effective_clip = match (inherited_clip, group_clip) {
-        (Some(a), Some(b)) => intersect_rect(a, b),
+        (Some(a), Some(b)) => a.intersect(b),
         (Some(clip), None) | (None, Some(clip)) => Some(clip),
         (None, None) => None,
     };
@@ -991,7 +963,7 @@ fn replay_commands(
             RenderCommand::PushClip { clip: pushed } => {
                 let pushed_rect = clip_bounds(pushed, origin);
                 let new_clip = match (clip, pushed_rect) {
-                    (Some(a), Some(b)) => intersect_rect(a, b),
+                    (Some(a), Some(b)) => a.intersect(b),
                     (Some(c), None) | (None, Some(c)) => Some(c),
                     (None, None) => None,
                 };
@@ -1072,7 +1044,7 @@ fn replay_commands(
                     height: rect.height,
                 };
                 let visible_rect = clip
-                    .and_then(|clip| intersect_rect(rect, clip))
+                    .and_then(|clip| rect.intersect(clip))
                     .unwrap_or(rect);
                 if visible_rect.width <= 0.0 || visible_rect.height <= 0.0 {
                     idx += 1;
@@ -1118,7 +1090,7 @@ fn replay_commands(
             }
             command => {
                 if geometry_bounds(command, origin).is_none_or(|bounds| {
-                    clip.is_none_or(|clip| intersect_rect(bounds, clip).is_some())
+                    clip.is_none_or(|clip| bounds.intersect(clip).is_some())
                 }) {
                     replay_paint_command(
                         host,
@@ -1456,7 +1428,7 @@ fn crop_cgimage(
         width: CGImage::width(Some(cg_image)) as f32,
         height: CGImage::height(Some(cg_image)) as f32,
     };
-    let clamped = intersect_rect(source, image_bounds)?;
+    let clamped = source.intersect(image_bounds)?;
     CGImage::with_image_in_rect(
         Some(cg_image),
         objc2_core_foundation::CGRect::new(
@@ -1483,40 +1455,18 @@ pub(crate) fn fitted_image_rect(
     alignment_x: elwindui_core::graphics::AlignmentX,
     alignment_y: elwindui_core::graphics::AlignmentY,
 ) -> elwindui_core::base::Rect {
-    use elwindui_core::graphics::{AlignmentX, AlignmentY, ImageFit};
-    let (iw, ih) = image_size;
-    let (w, h) = if iw <= 0.0 || ih <= 0.0 {
-        (dest.width, dest.height)
-    } else {
-        match fit {
-            ImageFit::Fill => (dest.width, dest.height),
-            ImageFit::None => (iw, ih),
-            ImageFit::Contain => {
-                let scale = (dest.width / iw).min(dest.height / ih);
-                (iw * scale, ih * scale)
-            }
-            ImageFit::Cover => {
-                let scale = (dest.width / iw).max(dest.height / ih);
-                (iw * scale, ih * scale)
-            }
-        }
-    };
-    let x = match alignment_x {
-        AlignmentX::Left => 0.0,
-        AlignmentX::Center => (dest.width - w) / 2.0,
-        AlignmentX::Right => dest.width - w,
-    };
-    let y = match alignment_y {
-        AlignmentY::Top => 0.0,
-        AlignmentY::Center => (dest.height - h) / 2.0,
-        AlignmentY::Bottom => dest.height - h,
-    };
-    elwindui_core::base::Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    }
+    elwindui_core::graphics::fitted_image_rect(
+        elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: dest.width,
+            height: dest.height,
+        },
+        image_size,
+        fit,
+        alignment_x,
+        alignment_y,
+    )
 }
 
 /// Builds the `masksToBounds` container + inner image `CALayer` for one `RenderCommand::DrawImage`
@@ -1777,19 +1727,6 @@ pub(crate) fn gradient_unit_point(
     }
 }
 
-/// `ImageBrush::stretch` -> `ImageFit` — same four cases, `fitted_image_rect` just knows them
-/// under the `ImageFit` name (the `Fill`/`Contain`/`Cover`/`None` vocabulary `draw_image` itself
-/// uses), so an `ImageBrush` fill can reuse that placement helper as-is.
-fn stretch_to_image_fit(stretch: elwindui_core::graphics::Stretch) -> elwindui_core::graphics::ImageFit {
-    use elwindui_core::graphics::{ImageFit, Stretch};
-    match stretch {
-        Stretch::None => ImageFit::None,
-        Stretch::Fill => ImageFit::Fill,
-        Stretch::Uniform => ImageFit::Contain,
-        Stretch::UniformToFill => ImageFit::Cover,
-    }
-}
-
 /// Realizes an `ImageBrush` fill as a real image `CALayer`, masked to `shape`'s outline — the
 /// `Brush::Image` sibling of `try_add_gradient_fill_layer` above, same masked-sublayer strategy
 /// (see that function's own doc comment for why the mask needs its own local-space path). Returns
@@ -1838,7 +1775,7 @@ fn try_add_image_fill_layer(
             let placed = fitted_image_rect(
                 local_bounds,
                 image_size,
-                stretch_to_image_fit(image_brush.stretch),
+                image_brush.stretch.into(),
                 image_brush.alignment_x,
                 image_brush.alignment_y,
             );

@@ -419,7 +419,7 @@ impl Button {
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TabViewExt, inherits = crate::NativeControl)]
 pub struct TabView {
     inner: InnerTabView,
-    children: RefCell<Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>>>,
+    children: elwindui_core::ui::ChildList<dyn elwindui_core::ui::TabViewItemExt>,
     selected_index: Cell<usize>,
     /// Parallel to `displayed` below — each currently-displayed entry's chip + persistent content
     /// host, in the same order.
@@ -501,7 +501,7 @@ impl TabView {
         Self {
             base: NativeControl::construct(handle),
             inner,
-            children: RefCell::new(Vec::new()),
+            children: elwindui_core::ui::ChildList::new(),
             selected_index: Cell::new(0),
             chips: RefCell::new(Vec::new()),
             displayed: RefCell::new(Vec::new()),
@@ -539,10 +539,12 @@ impl TabView {
                 &(Rc::clone(item) as Rc<dyn elwindui_core::ui::TabViewItemExt>),
             );
         }
-        *self.children.borrow_mut() = children
-            .into_iter()
-            .map(|item| item as Rc<dyn elwindui_core::ui::TabViewItemExt>)
-            .collect();
+        self.children.replace_all(
+            children
+                .into_iter()
+                .map(|item| item as Rc<dyn elwindui_core::ui::TabViewItemExt>)
+                .collect(),
+        );
         self.rebuild();
     }
 
@@ -604,10 +606,9 @@ impl TabView {
         };
         let Some(item) = self
             .children
-            .borrow()
-            .iter()
+            .to_vec()
+            .into_iter()
             .find(|item| tab_view_item_key(item) == key)
-            .cloned()
         else {
             return;
         };
@@ -627,7 +628,7 @@ impl TabView {
             .borrow()
             .upgrade()
             .expect("elwindui: TabView dropped while rebuilding");
-        let children = self.children.borrow();
+        let children = self.children.to_vec();
         let selected = self.selected_index.get();
         let new_keys: Vec<usize> = children.iter().map(tab_view_item_key).collect();
 
@@ -653,7 +654,7 @@ impl TabView {
                 Box::new(move || {
                     let index = this
                         .children
-                        .borrow()
+                        .to_vec()
                         .iter()
                         .position(|e| tab_view_item_key(e) == key);
                     if let (Some(index), Some(cb)) = (index, this.on_select.borrow().as_ref()) {
@@ -664,7 +665,7 @@ impl TabView {
             let on_close: Box<dyn Fn()> = {
                 let this = Rc::clone(&this);
                 Box::new(move || {
-                    let children = this.children.borrow();
+                    let children = this.children.to_vec();
                     let Some(index) = children.iter().position(|e| tab_view_item_key(e) == key)
                     else {
                         return;
@@ -731,49 +732,43 @@ fn tab_view_item_key(item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) -> usize 
 impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> for TabView {
     fn add(&self, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
         self.attach_header_listener(&item);
-        self.children.borrow_mut().push(item);
+        self.children.add(item);
         self.rebuild();
     }
 
     fn insert(&self, index: usize, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
         self.attach_header_listener(&item);
-        let mut children = self.children.borrow_mut();
-        let index = index.min(children.len());
-        children.insert(index, item);
-        drop(children);
+        self.children.insert(index, item);
         self.rebuild();
     }
 
     fn remove(&self, item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) -> bool {
-        let mut children = self.children.borrow_mut();
-        let Some(index) = children.iter().position(|child| Rc::ptr_eq(child, item)) else {
+        if !self.children.remove(item) {
             return false;
-        };
-        children.remove(index);
-        drop(children);
+        }
         self.rebuild();
         true
     }
 
     fn remove_at(&self, index: usize) -> Rc<dyn elwindui_core::ui::TabViewItemExt> {
-        let item = self.children.borrow_mut().remove(index);
+        let item = self.children.remove_at(index);
         self.rebuild();
         item
     }
 
     fn clear(&self) {
-        self.children.borrow_mut().clear();
+        self.children.clear();
         self.rebuild();
     }
 
     fn len(&self) -> usize {
-        self.children.borrow().len()
+        self.children.len()
     }
     fn is_empty(&self) -> bool {
-        self.children.borrow().is_empty()
+        self.children.is_empty()
     }
     fn to_vec(&self) -> Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>> {
-        self.children.borrow().clone()
+        self.children.to_vec()
     }
 }
 
@@ -787,7 +782,7 @@ pub struct MenuBar {
     /// this crate itself always actually constructs) to match `items()`'s `elwindui_core`-shared
     /// signature, the same way `UIElementCollection` stores `Rc<dyn UIElementExt>` rather than a
     /// concrete leaf type.
-    children: RefCell<Vec<Rc<dyn elwindui_core::ui::MenuBarItemExt>>>,
+    children: elwindui_core::ui::ChildList<dyn elwindui_core::ui::MenuBarItemExt>,
 }
 
 #[elwindui_macros::class]
@@ -795,7 +790,7 @@ impl MenuBar {
     fn construct() -> Self {
         Self {
             inner: InnerMenuBar::new(),
-            children: RefCell::new(Vec::new()),
+            children: elwindui_core::ui::ChildList::new(),
         }
     }
 
@@ -805,7 +800,7 @@ impl MenuBar {
     /// list is added.
     #[inherent]
     pub fn set_children(&self, children: Vec<Rc<MenuBarItem>>) {
-        let mut current = self.children.borrow_mut();
+        let mut current = self.children.to_vec();
         current.retain(|old| {
             let keep = children.iter().any(|new| {
                 Rc::ptr_eq(
@@ -826,6 +821,7 @@ impl MenuBar {
                 current.push(item_ext);
             }
         }
+        self.children.replace_all(current);
     }
 
     fn add_item(&self, item: &dyn elwindui_core::ui::MenuBarItemExt) {
@@ -849,49 +845,43 @@ fn downcast_menu_bar_item(item: &dyn elwindui_core::ui::MenuBarItemExt) -> &Menu
 impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuBarItemExt> for MenuBar {
     fn add(&self, item: Rc<dyn elwindui_core::ui::MenuBarItemExt>) {
         self.inner.add_item(&downcast_menu_bar_item(&*item).inner);
-        self.children.borrow_mut().push(item);
+        self.children.add(item);
     }
     fn insert(&self, index: usize, item: Rc<dyn elwindui_core::ui::MenuBarItemExt>) {
         // AppKit's `InnerMenuBar` has no positional insert — appended, then reconciled into
         // logical position via a fresh `set_children` pass (matching `set_children`'s own
         // reconciliation, not a real native reorder).
         self.inner.add_item(&downcast_menu_bar_item(&*item).inner);
-        let mut children = self.children.borrow_mut();
-        let index = index.min(children.len());
-        children.insert(index, item);
+        self.children.insert(index, item);
     }
     fn remove(&self, item: &Rc<dyn elwindui_core::ui::MenuBarItemExt>) -> bool {
-        let mut children = self.children.borrow_mut();
-        let Some(pos) = children.iter().position(|old| Rc::ptr_eq(old, item)) else {
+        if !self.children.remove(item) {
             return false;
-        };
-        self.inner
-            .remove_item(&downcast_menu_bar_item(&*children[pos]).inner);
-        children.remove(pos);
+        }
+        self.inner.remove_item(&downcast_menu_bar_item(&**item).inner);
         true
     }
     fn remove_at(&self, index: usize) -> Rc<dyn elwindui_core::ui::MenuBarItemExt> {
-        let mut children = self.children.borrow_mut();
-        let item = children.remove(index);
+        let item = self.children.remove_at(index);
         self.inner
             .remove_item(&downcast_menu_bar_item(&*item).inner);
         item
     }
     fn clear(&self) {
-        let mut children = self.children.borrow_mut();
-        for item in children.drain(..) {
+        for item in self.children.to_vec() {
             self.inner
                 .remove_item(&downcast_menu_bar_item(&*item).inner);
         }
+        self.children.clear();
     }
     fn len(&self) -> usize {
-        self.children.borrow().len()
+        self.children.len()
     }
     fn is_empty(&self) -> bool {
-        self.children.borrow().is_empty()
+        self.children.is_empty()
     }
     fn to_vec(&self) -> Vec<Rc<dyn elwindui_core::ui::MenuBarItemExt>> {
-        self.children.borrow().clone()
+        self.children.to_vec()
     }
 }
 
@@ -941,7 +931,7 @@ pub struct Menu {
     /// See `MenuBar::children`'s doc comment — same reconciliation pattern and same
     /// trait-object-typed storage rationale (also `items()`'s backing storage, `ListExt` impl
     /// below).
-    children: RefCell<Vec<Rc<dyn elwindui_core::ui::MenuItemExt>>>,
+    children: elwindui_core::ui::ChildList<dyn elwindui_core::ui::MenuItemExt>,
 }
 
 #[elwindui_macros::class]
@@ -949,14 +939,14 @@ impl Menu {
     fn construct() -> Self {
         Self {
             inner: InnerMenu::new(),
-            children: RefCell::new(Vec::new()),
+            children: elwindui_core::ui::ChildList::new(),
         }
     }
 
     /// See `MenuBar::set_children`'s doc comment — same reconciliation pattern.
     #[inherent]
     pub fn set_children(&self, children: Vec<Rc<MenuItem>>) {
-        let mut current = self.children.borrow_mut();
+        let mut current = self.children.to_vec();
         current.retain(|old| {
             let keep = children.iter().any(|new| {
                 Rc::ptr_eq(
@@ -976,6 +966,7 @@ impl Menu {
                 current.push(item_ext);
             }
         }
+        self.children.replace_all(current);
     }
 
     fn add_item(&self, item: &dyn elwindui_core::ui::MenuItemExt) {
@@ -999,45 +990,39 @@ fn downcast_menu_item(item: &dyn elwindui_core::ui::MenuItemExt) -> &MenuItem {
 impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuItemExt> for Menu {
     fn add(&self, item: Rc<dyn elwindui_core::ui::MenuItemExt>) {
         self.inner.add_item(&downcast_menu_item(&*item).inner);
-        self.children.borrow_mut().push(item);
+        self.children.add(item);
     }
     fn insert(&self, index: usize, item: Rc<dyn elwindui_core::ui::MenuItemExt>) {
         // See `MenuBar`'s own `ListExt::insert` — same "append, then reconcile position" caveat.
         self.inner.add_item(&downcast_menu_item(&*item).inner);
-        let mut children = self.children.borrow_mut();
-        let index = index.min(children.len());
-        children.insert(index, item);
+        self.children.insert(index, item);
     }
     fn remove(&self, item: &Rc<dyn elwindui_core::ui::MenuItemExt>) -> bool {
-        let mut children = self.children.borrow_mut();
-        let Some(pos) = children.iter().position(|old| Rc::ptr_eq(old, item)) else {
+        if !self.children.remove(item) {
             return false;
-        };
-        self.inner
-            .remove_item(&downcast_menu_item(&*children[pos]).inner);
-        children.remove(pos);
+        }
+        self.inner.remove_item(&downcast_menu_item(&**item).inner);
         true
     }
     fn remove_at(&self, index: usize) -> Rc<dyn elwindui_core::ui::MenuItemExt> {
-        let mut children = self.children.borrow_mut();
-        let item = children.remove(index);
+        let item = self.children.remove_at(index);
         self.inner.remove_item(&downcast_menu_item(&*item).inner);
         item
     }
     fn clear(&self) {
-        let mut children = self.children.borrow_mut();
-        for item in children.drain(..) {
+        for item in self.children.to_vec() {
             self.inner.remove_item(&downcast_menu_item(&*item).inner);
         }
+        self.children.clear();
     }
     fn len(&self) -> usize {
-        self.children.borrow().len()
+        self.children.len()
     }
     fn is_empty(&self) -> bool {
-        self.children.borrow().is_empty()
+        self.children.is_empty()
     }
     fn to_vec(&self) -> Vec<Rc<dyn elwindui_core::ui::MenuItemExt>> {
-        self.children.borrow().clone()
+        self.children.to_vec()
     }
 }
 

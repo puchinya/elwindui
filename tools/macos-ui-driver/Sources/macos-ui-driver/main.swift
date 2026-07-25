@@ -1,7 +1,10 @@
-// macos-ui-driver — Phase 1 of docs/elwindui_macos_gui_test_driver.md (AI-agent-drivable macOS GUI
-// test CLI). Phase 1 scope only: app launch/terminate, window enumeration, per-window screenshot
-// capture, and permission diagnostics ("doctor"). Accessibility-tree walking, elwindui-internal
-// state introspection, and image-diff regression testing are later phases, not implemented here.
+// macos-ui-driver — Phase 1 + Phase 2 of docs/elwindui_macos_gui_test_driver.md (AI-agent-drivable
+// macOS GUI test CLI). Phase 1: app launch/terminate, window enumeration, per-window screenshot
+// capture, and permission diagnostics ("doctor"). Phase 2: Accessibility-tree walking
+// (`dump-tree`/`find`) and control interaction (`set-focus`/`click`/`type-text`/`press-key`/
+// `wait-for`) — driver-side only, see docs/elwindui_macos_gui_test_driver_status.md for scope notes.
+// elwindui-internal state introspection and image-diff regression testing are later phases, not
+// implemented here.
 //
 // Every command prints exactly one JSON object to stdout and sets the process exit code (0 on
 // success, 1 on failure) — never partial/streaming output, so a caller can always just parse
@@ -14,6 +17,7 @@
 
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -207,6 +211,13 @@ func cmdLaunch(_ args: Args) -> Never {
     if let cwd = args.string("cwd") {
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
     }
+    // Without this, the child inherits this process's own stdout (the fd behind our one-line JSON
+    // response) and, being a long-lived GUI app, keeps its write end open indefinitely — so a
+    // caller reading our output via a shell pipe or `$(...)` blocks until the *launched app* exits,
+    // not until we do. See docs/elwindui_macos_gui_test_driver_status.md's "呼び出し側の既知の落とし穴"
+    // for the hang this caused in practice. `.standardError` gets the same treatment for symmetry.
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
     do {
         try process.run()
     } catch {
@@ -449,12 +460,649 @@ func cmdCaptureWindow(_ args: Args) -> Never {
         ])
 }
 
+// MARK: - Phase 2: AX tree model
+
+/// A richer per-element snapshot than the Phase 1 `axCopyAttribute`/`axBool`/`axString` quartet
+/// (which stays as-is for `focus-window`'s own 2-attribute reads — not worth churning verified
+/// code). Every Phase 2 command builds and serializes these instead of touching raw `AXUIElement`
+/// attributes ad hoc.
+struct AXElement {
+    let element: AXUIElement
+    let role: String
+    let subrole: String
+    let title: String
+    let value: Any?
+    let identifier: String
+    let position: CGPoint?
+    let size: CGSize?
+    let enabled: Bool
+    let focused: Bool
+    let childCount: Int
+
+    init(_ element: AXUIElement) {
+        self.element = element
+        role = axString(element, kAXRoleAttribute as String)
+        subrole = axString(element, kAXSubroleAttribute as String)
+        title = axString(element, kAXTitleAttribute as String)
+        identifier = axString(element, kAXIdentifierAttribute as String)
+        value = axJSONValue(axCopyAttribute(element, kAXValueAttribute as String))
+        position = axPoint(element, kAXPositionAttribute as String)
+        size = axSize(element, kAXSizeAttribute as String)
+        enabled = (axCopyAttribute(element, kAXEnabledAttribute as String) as? Bool) ?? true
+        focused = axBool(element, kAXFocusedAttribute as String)
+        childCount = (axCopyAttribute(element, kAXChildrenAttribute as String) as? [AXUIElement])?.count ?? 0
+    }
+
+    func jsonObject(includeChildren children: [[String: Any]]? = nil) -> [String: Any] {
+        var obj: [String: Any] = [
+            "role": role, "subrole": subrole, "title": title, "identifier": identifier,
+            "enabled": enabled, "focused": focused, "value": value ?? NSNull(), "child_count": childCount,
+        ]
+        obj["position"] = position.map { ["x": $0.x, "y": $0.y] } ?? NSNull()
+        obj["size"] = size.map { ["width": $0.width, "height": $0.height] } ?? NSNull()
+        if let children { obj["children"] = children }
+        return obj
+    }
+}
+
+/// Decodes an `AXValue`-wrapped `CGPoint` attribute (e.g. `kAXPositionAttribute`) — Phase 1 never
+/// needed position/size, so this decode step didn't exist before Phase 2.
+func axPoint(_ element: AXUIElement, _ attribute: String) -> CGPoint? {
+    guard let raw = axCopyAttribute(element, attribute), CFGetTypeID(raw) == AXValueGetTypeID() else {
+        return nil
+    }
+    let axValue = raw as! AXValue
+    guard AXValueGetType(axValue) == .cgPoint else { return nil }
+    var point = CGPoint.zero
+    return AXValueGetValue(axValue, .cgPoint, &point) ? point : nil
+}
+
+/// Decodes an `AXValue`-wrapped `CGSize` attribute (e.g. `kAXSizeAttribute`).
+func axSize(_ element: AXUIElement, _ attribute: String) -> CGSize? {
+    guard let raw = axCopyAttribute(element, attribute), CFGetTypeID(raw) == AXValueGetTypeID() else {
+        return nil
+    }
+    let axValue = raw as! AXValue
+    guard AXValueGetType(axValue) == .cgSize else { return nil }
+    var size = CGSize.zero
+    return AXValueGetValue(axValue, .cgSize, &size) ? size : nil
+}
+
+/// Best-effort JSON coercion of a raw `kAXValueAttribute` read: String/Bool/NSNumber map directly;
+/// anything else falls back to `String(describing:)` (distinguishable by callers, since it won't
+/// parse as the expected type).
+func axJSONValue(_ raw: CFTypeRef?) -> Any? {
+    guard let raw else { return nil }
+    if let s = raw as? String { return s }
+    if let b = raw as? Bool { return b }
+    if let n = raw as? NSNumber { return n }
+    return String(describing: raw)
+}
+
+/// String form of an `AXElement.value` for equality/comparison purposes (`click`'s before/after
+/// diff, `wait-for`'s `value-equals` condition) — avoids `Any?`-vs-`Any?` comparison pitfalls.
+func axValueDescription(_ v: Any?) -> String {
+    guard let v else { return "" }
+    return "\(v)"
+}
+
+struct AXNode {
+    let axElement: AXElement
+    let children: [AXNode]
+
+    var jsonObject: [String: Any] { axElement.jsonObject(includeChildren: children.map { $0.jsonObject }) }
+
+    /// Pre-order flatten — used by every selector-matching command (`find`/`click`/etc.) to search
+    /// the whole subtree as a flat list.
+    func flattened() -> [AXNode] { [self] + children.flatMap { $0.flattened() } }
+}
+
+/// Depth-first, pre-order recursive walk of `kAXChildrenAttribute`. `maxDepth` is the primary
+/// cycle/pathological-tree guard; `maxNodes` (checked via the shared `inout` counter) independently
+/// bounds a very wide/bushy tree that a depth cap alone wouldn't catch. AX trees for a single
+/// on-screen app window are not expected to be cyclic — this is a cheap, unconditional safety net,
+/// not a targeted fix for an observed cycle.
+func buildAXTree(_ element: AXUIElement, depth: Int, maxDepth: Int, nodeCount: inout Int, maxNodes: Int)
+    -> AXNode
+{
+    nodeCount += 1
+    let info = AXElement(element)
+    guard depth < maxDepth, nodeCount < maxNodes else { return AXNode(axElement: info, children: []) }
+    let rawChildren = (axCopyAttribute(element, kAXChildrenAttribute as String) as? [AXUIElement]) ?? []
+    let children = rawChildren.map {
+        buildAXTree($0, depth: depth + 1, maxDepth: maxDepth, nodeCount: &nodeCount, maxNodes: maxNodes)
+    }
+    return AXNode(axElement: info, children: children)
+}
+
+// MARK: - Phase 2: element selector
+
+/// Shared by `find`/`click`/`type-text`/`press-key`/`set-focus` — the same four selector flags
+/// everywhere, resolved consistently by `filterNodes`/`resolveElement` below.
+struct ElementSelector {
+    let role: String?
+    let title: String?
+    let titleContains: String?
+    let identifier: String?
+    let index: Int?
+
+    init(_ args: Args) {
+        role = args.string("role")
+        title = args.string("title")
+        titleContains = args.string("title-contains")
+        identifier = args.string("identifier")
+        index = args.int("index")
+    }
+
+    var isEmpty: Bool { role == nil && title == nil && titleContains == nil && identifier == nil }
+}
+
+/// Pure, non-failing filter — used directly by `find`/`wait-for` (which must observe "0 matches so
+/// far" without aborting) and internally by `resolveElement` below.
+func filterNodes(_ nodes: [AXNode], matching s: ElementSelector) -> [AXNode] {
+    nodes.filter { node in
+        if let role = s.role, node.axElement.role.caseInsensitiveCompare(role) != .orderedSame {
+            return false
+        }
+        if let title = s.title, node.axElement.title.caseInsensitiveCompare(title) != .orderedSame {
+            return false
+        }
+        if let tc = s.titleContains, !node.axElement.title.localizedCaseInsensitiveContains(tc) {
+            return false
+        }
+        if let id = s.identifier, node.axElement.identifier != id { return false }
+        return true
+    }
+}
+
+/// Strict single-match requirement used by `click`/`type-text`/`press-key`/`set-focus` — these
+/// commands cause a real side effect on a live element, so they never guess among multiple matches
+/// and never silently no-op on zero. `Never`-returning on failure, matching `Args.requireString`'s
+/// own idiom.
+func resolveElement(in root: AXUIElement, selector: ElementSelector, maxDepth: Int) -> AXUIElement {
+    guard !selector.isEmpty else {
+        fail("at least one of --role/--title/--title-contains/--identifier is required")
+    }
+    var nodeCount = 0
+    let tree = buildAXTree(root, depth: 0, maxDepth: maxDepth, nodeCount: &nodeCount, maxNodes: 2000)
+    let matches = filterNodes(tree.flattened(), matching: selector)
+    if let index = selector.index {
+        guard matches.indices.contains(index) else {
+            fail("--index \(index) out of range (\(matches.count) matches)", ["match_count": matches.count])
+        }
+        return matches[index].axElement.element
+    }
+    guard matches.count == 1 else {
+        fail(
+            matches.isEmpty
+                ? "no element matched selector"
+                : "\(matches.count) elements matched selector — add --index or narrow the selector",
+            [
+                "match_count": matches.count,
+                "matches": Array(matches.prefix(20).map { $0.axElement.jsonObject() }),
+            ])
+    }
+    return matches[0].axElement.element
+}
+
+// MARK: - Phase 2: window resolution
+
+/// Core geometry+title matching algorithm, used only when an app has more than one AX window (the
+/// common single-window case short-circuits elsewhere with zero ambiguity risk). Deliberately no
+/// private API (`_AXUIElementGetWindow`) — matches the already-existing `CGWindowID` (from
+/// `listOnScreenWindows()`, shared with `list-windows`/`capture-window`) against `axWindows`
+/// entries by `kAXTitleAttribute` + `kAXPositionAttribute`/`kAXSizeAttribute`, within a small
+/// epsilon absorbing CG-vs-AX rounding differences. Tradeoff: two on-screen windows with identical
+/// title AND identical frame would collide — judged acceptable since this project's example apps
+/// are single-window (this path exists for forward compatibility, not because it's exercised
+/// today).
+func resolveWindow(
+    pid: pid_t, appElement: AXUIElement, windowID: CGWindowID?, windowTitleContains: String?
+) -> AXUIElement? {
+    let windows = axWindows(appElement)
+    if let windowTitleContains {
+        return windows.first {
+            axString($0, kAXTitleAttribute as String).localizedCaseInsensitiveContains(
+                windowTitleContains)
+        }
+    }
+    guard let windowID else { return windows.first }
+    if windows.count == 1 { return windows[0] }
+    guard let info = listOnScreenWindows().first(where: { $0.windowID == windowID && $0.ownerPID == pid })
+    else { return nil }
+    let epsilon = 2.0
+    return windows.first { candidate in
+        let title = axString(candidate, kAXTitleAttribute as String)
+        guard title == info.title else { return false }
+        guard let pos = axPoint(candidate, kAXPositionAttribute as String),
+            let size = axSize(candidate, kAXSizeAttribute as String)
+        else { return false }
+        return abs(pos.x - info.x) < epsilon && abs(pos.y - info.y) < epsilon
+            && abs(size.width - info.width) < epsilon && abs(size.height - info.height) < epsilon
+    }
+}
+
+/// Shared entry point every Phase 2 command calls to turn `--window-id`/`--window-title` into a
+/// target `AXUIElement` window. Stricter than `focus-window`'s unconditional `windows[0]` fallback:
+/// with no qualifier and more than one AX window, this `fail()`s rather than guessing, since these
+/// commands cause real side effects.
+func resolveTargetWindow(_ args: Args, pid: pid_t, appElement: AXUIElement) -> AXUIElement {
+    let windows = axWindows(appElement)
+    guard !windows.isEmpty else {
+        fail(
+            "application has no AX windows (is Accessibility permission granted? see `doctor`)",
+            ["pid": Int(pid)])
+    }
+    let windowID = args.int("window-id").map { CGWindowID($0) }
+    let windowTitle = args.string("window-title")
+    if windowID == nil && windowTitle == nil {
+        if windows.count == 1 { return windows[0] }
+        fail(
+            "multiple AX windows for pid \(pid); pass --window-id or --window-title",
+            ["window_titles": windows.map { axString($0, kAXTitleAttribute as String) }])
+    }
+    guard
+        let resolved = resolveWindow(
+            pid: pid, appElement: appElement, windowID: windowID, windowTitleContains: windowTitle)
+    else {
+        fail(
+            "could not resolve target window",
+            ["window_titles": windows.map { axString($0, kAXTitleAttribute as String) }])
+    }
+    return resolved
+}
+
+/// Shared setup every Phase 2 command performs first: validate `--pid`, get the running app's AX
+/// application element, resolve the target window from `--window-id`/`--window-title`.
+func resolveContext(_ args: Args) -> (pid: pid_t, appElement: AXUIElement, window: AXUIElement) {
+    let pid = pid_t(args.int("pid") ?? { fail("missing or invalid --pid") }())
+    guard NSRunningApplication(processIdentifier: pid) != nil else {
+        fail("no running application with pid \(pid)", ["pid": Int(pid)])
+    }
+    let appElement = AXUIElementCreateApplication(pid)
+    let window = resolveTargetWindow(args, pid: pid, appElement: appElement)
+    return (pid, appElement, window)
+}
+
+/// Shared mouse-click synthesis used by `click --via mouse`, `type-text --focus-via click`, and
+/// `press-key --focus-via click` — a real `CGEventPost` down/up pair at `.cghidEventTap`, computed
+/// from the element's own `AXPosition`/`AXSize` center. Deliberately not `postToPid`-targeted: the
+/// whole point is to exercise real hit-testing/focus routing, which targeted delivery would bypass.
+/// Returns the click point if the element had position/size to click, else `nil`.
+@discardableResult
+func synthesizeClick(on element: AXUIElement) -> CGPoint? {
+    guard let pos = axPoint(element, kAXPositionAttribute as String),
+        let size = axSize(element, kAXSizeAttribute as String)
+    else { return nil }
+    let point = CGPoint(x: pos.x + size.width / 2, y: pos.y + size.height / 2)
+    let down = CGEvent(
+        mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
+    let up = CGEvent(
+        mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+    down?.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.05)
+    up?.post(tap: .cghidEventTap)
+    return point
+}
+
+// MARK: - dump-tree
+
+func cmdDumpTree(_ args: Args) -> Never {
+    let (pid, _, window) = resolveContext(args)
+    let maxDepth = args.int("max-depth") ?? 40
+    var nodeCount = 0
+    let tree = buildAXTree(window, depth: 0, maxDepth: maxDepth, nodeCount: &nodeCount, maxNodes: 2000)
+    emit(
+        success: true,
+        [
+            "pid": Int(pid),
+            "node_count": nodeCount,
+            "truncated": nodeCount >= 2000,
+            "root": tree.jsonObject,
+        ])
+}
+
+// MARK: - find
+
+func cmdFind(_ args: Args) -> Never {
+    let (pid, _, window) = resolveContext(args)
+    let maxDepth = args.int("max-depth") ?? 40
+    let selector = ElementSelector(args)
+    var nodeCount = 0
+    let tree = buildAXTree(window, depth: 0, maxDepth: maxDepth, nodeCount: &nodeCount, maxNodes: 2000)
+    let matches = filterNodes(tree.flattened(), matching: selector)
+    emit(
+        success: true,
+        [
+            "pid": Int(pid),
+            "match_count": matches.count,
+            "matches": matches.map { $0.axElement.jsonObject() },
+        ])
+}
+
+// MARK: - set-focus
+
+/// Directly requests keyboard focus via `AXUIElementSetAttributeValue(kAXFocusedAttribute)`,
+/// bypassing mouse-based hit-testing entirely. Exists specifically to let a caller distinguish
+/// "click doesn't focus this control" (a mouse/hit-test/first-responder bug) from "nothing can put
+/// focus on this control at all" (a deeper wiring bug) by trying both `click` and `set-focus`
+/// independently against the identical selector — see this driver's real-machine finding against
+/// `examples/controls-demo`'s `TextBox`, recorded in `docs/elwindui_macos_gui_test_driver_status.md`.
+/// Same request-then-verify idiom as `focus-window`: the `AXUIElementSetAttributeValue` return code
+/// is recorded but not trusted as proof; only a re-read of `AXFocused` counts.
+func cmdSetFocus(_ args: Args) -> Never {
+    let (pid, _, window) = resolveContext(args)
+    let maxDepth = args.int("max-depth") ?? 40
+    let selector = ElementSelector(args)
+    let timeout = args.double("timeout") ?? 1.0
+    let element = resolveElement(in: window, selector: selector, maxDepth: maxDepth)
+
+    let before = AXElement(element)
+    let status = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    let confirmed =
+        pollUntil(timeout: timeout) { () -> Bool? in
+            axBool(element, kAXFocusedAttribute as String) ? true : nil
+        } == true
+    let after = AXElement(element)
+
+    emit(
+        success: confirmed,
+        [
+            "pid": Int(pid),
+            "set_attribute_status_ok": status == .success,
+            "focus_confirmed": confirmed,
+            "before": before.jsonObject(),
+            "after": after.jsonObject(),
+        ])
+}
+
+// MARK: - click
+
+/// Real user-facing click, faithfully synthesized via `synthesizeClick` (real `CGEventPost` at
+/// `.cghidEventTap` — the same tap Accessibility trust, reported by `doctor`, already gates, so no
+/// new permission story). `--via ax-press` performs `AXUIElementPerformAction(kAXPressAction)`
+/// instead, for elements where a synthetic mouse event is unnecessary (plain buttons) — both modes
+/// exist specifically so a caller can trial either independently against the same selector.
+///
+/// There is no universal AX signal for "did the click semantically succeed" — clicking a button vs.
+/// a text field means different things. So `click` reports a before/after diff (`changed.focused`,
+/// `changed.value`) as diagnostic data for the caller to interpret, rather than guessing a pass/fail
+/// itself; `success` here reflects only "the element was found and the event was sent without
+/// error".
+func cmdClick(_ args: Args) -> Never {
+    let (pid, _, window) = resolveContext(args)
+    let maxDepth = args.int("max-depth") ?? 40
+    let selector = ElementSelector(args)
+    let timeout = args.double("timeout") ?? 1.0
+    let via = args.string("via") ?? "mouse"
+    let element = resolveElement(in: window, selector: selector, maxDepth: maxDepth)
+
+    let before = AXElement(element)
+    var fields: [String: Any] = ["pid": Int(pid), "via": via]
+
+    switch via {
+    case "mouse":
+        guard let point = synthesizeClick(on: element) else {
+            fail(
+                "element has no position/size — cannot compute click point",
+                ["element": before.jsonObject()])
+        }
+        fields["click_point"] = ["x": point.x, "y": point.y]
+    case "ax-press":
+        let status = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        fields["ax_press_status_ok"] = (status == .success)
+    default:
+        fail("unknown --via \(via) (expected mouse or ax-press)")
+    }
+
+    // No universal "click landed" signal exists — poll briefly for *any* observable change, then
+    // report before/after regardless, per this function's own doc comment.
+    _ = pollUntil(timeout: timeout) { () -> Bool? in
+        AXElement(element).focused != before.focused ? true : nil
+    }
+    let after = AXElement(element)
+
+    fields["before"] = before.jsonObject()
+    fields["after"] = after.jsonObject()
+    fields["changed"] = [
+        "focused": after.focused != before.focused,
+        "value": axValueDescription(before.value) != axValueDescription(after.value),
+    ]
+    emit(success: true, fields)
+}
+
+// MARK: - type-text
+
+/// Synthesizes real keyboard input character-by-character (not one bulk
+/// `CGEventKeyboardSetUnicodeString` call for the whole string) to mimic real keystroke cadence and
+/// reliably exercise `elwindui-backend-appkit`'s live change-notification delegate the same way an
+/// actual keypress would, rather than risking it being treated like a paste. `virtualKey: 0` +
+/// `keyboardSetUnicodeString` is the standard idiom for injecting arbitrary Unicode text independent
+/// of keyboard layout.
+///
+/// `success` is gated on BOTH the requested focus step being verified (when `--focus-via != none`)
+/// AND the post-typing value matching what was expected — a true request-then-verify command, and
+/// the most decisive tool for diagnosing whether a text control's focus/input wiring actually works.
+func cmdTypeText(_ args: Args) -> Never {
+    let (pid, _, window) = resolveContext(args)
+    let maxDepth = args.int("max-depth") ?? 40
+    let selector = ElementSelector(args)
+    let text = args.requireString("text")
+    let clear = args.flag("clear")
+    let focusVia = args.string("focus-via") ?? "ax-attribute"
+    let keyDelay = args.double("key-delay") ?? 0.02
+    let timeout = args.double("timeout") ?? 1.0
+    let element = resolveElement(in: window, selector: selector, maxDepth: maxDepth)
+
+    var focusConfirmed = true
+    if focusVia != "none" {
+        switch focusVia {
+        case "ax-attribute":
+            _ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        case "click":
+            synthesizeClick(on: element)
+        default:
+            fail("unknown --focus-via \(focusVia) (expected ax-attribute, click, or none)")
+        }
+        focusConfirmed =
+            pollUntil(timeout: timeout) { () -> Bool? in
+                axBool(element, kAXFocusedAttribute as String) ? true : nil
+            } == true
+        guard focusConfirmed else {
+            fail(
+                "could not confirm focus via --focus-via \(focusVia) within \(timeout)s — typing into unconfirmed focus is not meaningful",
+                [
+                    "pid": Int(pid), "focus_confirmed": false,
+                    "element": AXElement(element).jsonObject(),
+                ])
+        }
+    }
+
+    let beforeValue = axString(element, kAXValueAttribute as String)
+    if clear {
+        _ = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, "" as CFString)
+    }
+
+    let src = CGEventSource(stateID: .hidSystemState)
+    for ch in text {
+        var utf16 = Array(String(ch).utf16)
+        let down = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: true)
+        let up = CGEvent(keyboardEventSource: src, virtualKey: 0, keyDown: false)
+        down?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: keyDelay)
+    }
+
+    let afterValue = axString(element, kAXValueAttribute as String)
+    let expected = clear ? text : beforeValue + text
+    let matches = afterValue == expected || afterValue.hasSuffix(text)
+
+    emit(
+        success: focusConfirmed && matches,
+        [
+            "pid": Int(pid),
+            "focus_confirmed": focusConfirmed,
+            "before_value": beforeValue,
+            "after_value": afterValue,
+            "value_matches_expected": matches,
+            "element": AXElement(element).jsonObject(),
+        ])
+}
+
+// MARK: - press-key
+
+/// Named-key → virtual keycode table using `Carbon.HIToolbox` constants — a system framework
+/// already bundled with the macOS SDK/Xcode command line tools, so importing it does not violate
+/// this tool's "no external SwiftPM dependency" constraint (that constraint is about package
+/// resolution, not first-party frameworks; Phase 1 already imports `AppKit`/`ApplicationServices`
+/// on the same basis).
+let namedVirtualKeys: [String: CGKeyCode] = [
+    "enter": CGKeyCode(kVK_Return), "return": CGKeyCode(kVK_Return),
+    "tab": CGKeyCode(kVK_Tab),
+    "escape": CGKeyCode(kVK_Escape), "esc": CGKeyCode(kVK_Escape),
+    "backspace": CGKeyCode(kVK_Delete), "delete": CGKeyCode(kVK_Delete),
+    "forward-delete": CGKeyCode(kVK_ForwardDelete),
+    "space": CGKeyCode(kVK_Space),
+    "left": CGKeyCode(kVK_LeftArrow), "right": CGKeyCode(kVK_RightArrow),
+    "up": CGKeyCode(kVK_UpArrow), "down": CGKeyCode(kVK_DownArrow),
+]
+
+func cmdPressKey(_ args: Args) -> Never {
+    let (pid, appElement, window) = resolveContext(args)
+    let maxDepth = args.int("max-depth") ?? 40
+    let selector = ElementSelector(args)
+    let keyName = args.requireString("key")
+    guard let keyCode = namedVirtualKeys[keyName.lowercased()] else {
+        fail(
+            "unknown --key \(keyName) (expected one of: \(namedVirtualKeys.keys.sorted().joined(separator: ", ")))"
+        )
+    }
+    let modifierNames = (args.string("modifiers") ?? "")
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+    var flags: CGEventFlags = []
+    for m in modifierNames {
+        switch m {
+        case "cmd": flags.insert(.maskCommand)
+        case "shift": flags.insert(.maskShift)
+        case "alt": flags.insert(.maskAlternate)
+        case "ctrl": flags.insert(.maskControl)
+        default: fail("unknown --modifiers entry \(m) (expected cmd/shift/alt/ctrl)")
+        }
+    }
+    let focusVia = args.string("focus-via") ?? "none"
+    let timeout = args.double("timeout") ?? 1.0
+
+    if !selector.isEmpty {
+        let element = resolveElement(in: window, selector: selector, maxDepth: maxDepth)
+        switch focusVia {
+        case "none": break
+        case "ax-attribute":
+            _ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            _ = pollUntil(timeout: timeout) {
+                axBool(element, kAXFocusedAttribute as String) ? true : nil
+            }
+        case "click":
+            synthesizeClick(on: element)
+            _ = pollUntil(timeout: timeout) {
+                axBool(element, kAXFocusedAttribute as String) ? true : nil
+            }
+        default:
+            fail("unknown --focus-via \(focusVia) (expected ax-attribute, click, or none)")
+        }
+    }
+
+    func focusedElementJSON() -> [String: Any] {
+        guard let raw = axCopyAttribute(appElement, kAXFocusedUIElementAttribute as String) else {
+            return ["role": "", "title": "", "identifier": ""]
+        }
+        return AXElement(raw as! AXUIElement).jsonObject()
+    }
+
+    let before = focusedElementJSON()
+    let src = CGEventSource(stateID: .hidSystemState)
+    let down = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true)
+    let up = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false)
+    down?.flags = flags
+    up?.flags = flags
+    down?.post(tap: .cghidEventTap)
+    up?.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.05)
+    let after = focusedElementJSON()
+
+    emit(
+        success: true,
+        [
+            "pid": Int(pid),
+            "key": keyName,
+            "modifiers": modifierNames,
+            "focused_element_before": before,
+            "focused_element_after": after,
+        ])
+}
+
+// MARK: - wait-for
+
+func cmdWaitFor(_ args: Args) -> Never {
+    let (pid, _, window) = resolveContext(args)
+    let maxDepth = args.int("max-depth") ?? 40
+    let selector = ElementSelector(args)
+    let condition = args.requireString("condition")
+    let validConditions = ["exists", "not-exists", "enabled", "focused", "value-equals"]
+    guard validConditions.contains(condition) else {
+        fail(
+            "unknown --condition \(condition) (expected one of: \(validConditions.joined(separator: ", ")))"
+        )
+    }
+    let expectedValue = args.string("value")
+    if condition == "value-equals" && expectedValue == nil {
+        fail("--condition value-equals requires --value")
+    }
+    let timeout = args.double("timeout") ?? 5.0
+    let interval = args.double("interval") ?? 0.1
+
+    let start = Date()
+    var lastMatchCount = 0
+    let matched =
+        pollUntil(timeout: timeout, interval: interval) { () -> Bool? in
+            var nodeCount = 0
+            let tree = buildAXTree(
+                window, depth: 0, maxDepth: maxDepth, nodeCount: &nodeCount, maxNodes: 2000)
+            let matches = filterNodes(tree.flattened(), matching: selector)
+            lastMatchCount = matches.count
+            switch condition {
+            case "exists": return matches.count >= 1 ? true : nil
+            case "not-exists": return matches.isEmpty ? true : nil
+            case "enabled": return (matches.count == 1 && matches[0].axElement.enabled) ? true : nil
+            case "focused": return (matches.count == 1 && matches[0].axElement.focused) ? true : nil
+            case "value-equals":
+                return (matches.count == 1
+                    && axValueDescription(matches[0].axElement.value) == expectedValue) ? true : nil
+            default: return nil  // unreachable — validated above
+            }
+        } == true
+    let elapsed = Date().timeIntervalSince(start)
+
+    emit(
+        success: matched,
+        [
+            "pid": Int(pid),
+            "condition": condition,
+            "matched": matched,
+            "timed_out": !matched,
+            "elapsed_seconds": elapsed,
+            "match_count": lastMatchCount,
+        ])
+}
+
 // MARK: - entry point
 
 let argv = Array(CommandLine.arguments.dropFirst())
 guard let command = argv.first else {
     fail(
-        "usage: macos-ui-driver <doctor|launch|terminate|list-windows|capture-window|focus-window> [options]"
+        "usage: macos-ui-driver <doctor|launch|terminate|list-windows|capture-window|focus-window|dump-tree|find|set-focus|click|type-text|press-key|wait-for> [options]"
     )
 }
 let args = Args(Array(argv.dropFirst()))
@@ -466,6 +1114,13 @@ case "terminate": cmdTerminate(args)
 case "list-windows": cmdListWindows(args)
 case "capture-window": cmdCaptureWindow(args)
 case "focus-window": cmdFocusWindow(args)
+case "dump-tree": cmdDumpTree(args)
+case "find": cmdFind(args)
+case "set-focus": cmdSetFocus(args)
+case "click": cmdClick(args)
+case "type-text": cmdTypeText(args)
+case "press-key": cmdPressKey(args)
+case "wait-for": cmdWaitFor(args)
 default:
     fail("unknown command: \(command)")
 }

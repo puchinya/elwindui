@@ -423,7 +423,7 @@ pub struct TabView {
     selected_index: Cell<usize>,
     /// Parallel to `displayed` below — each currently-displayed entry's chip + persistent content
     /// host, in the same order.
-    chips: RefCell<Vec<(TabChipImpl, Retained<crate::inner::TreeHostView>)>>,
+    chips: RefCell<Vec<(TabChipImpl, Retained<crate::host::TreeHostView>)>>,
     /// Pointer identities (`Rc::as_ptr`, as `usize`) of the entries currently reflected as real
     /// chips/hosts, in display order — the "before" side of `rebuild`'s diff against `entries`'
     /// current pointers (the "after" side). Mirrors `winui3::tab_view`'s `displayed`.

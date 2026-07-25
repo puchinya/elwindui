@@ -22,6 +22,8 @@ pub fn init() -> Result<(), std::convert::Infallible> {
     Ok(())
 }
 
+mod ffi;
+mod host;
 mod inner;
 mod native_ui;
 mod render;
@@ -31,7 +33,7 @@ pub use native_ui::*;
 // `elwindui-codegen`'s generated code references `elwindui::backend::AnyView` directly (see
 // `inner::AnyView`'s own doc comment), so it needs to stay reachable at this crate's own root even
 // though the rest of `inner` is private.
-pub use inner::AnyView;
+pub use ffi::AnyView;
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -47,7 +49,7 @@ use std::cell::RefCell;
 /// (docs/elwindui_gui_framework_design.md §7.3) is for.
 pub mod platform {
     pub mod file_dialog {
-        use crate::inner::mtm;
+        use crate::ffi::mtm;
         use objc2_app_kit::{NSModalResponseOK, NSOpenPanel, NSSavePanel};
         use std::path::PathBuf;
 
@@ -125,7 +127,7 @@ impl AppDelegate {
 /// once, after showing the app's window(s).
 pub mod application {
     use super::{APP_DELEGATE, AppDelegate, AppKitDispatcher};
-    use crate::inner::mtm;
+    use crate::ffi::mtm;
     use elwindui_core::task::LocalExecutor;
     use objc2_app_kit::NSApplication;
 

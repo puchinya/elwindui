@@ -9,20 +9,11 @@
 //! all: they are plain `elwindui_core::ui::UIElement` values that `elwindui-codegen` builds
 //! directly, reflected into native views by `crate::host`.
 
-use crate::AnyView;
-use crate::inner::{
-    InnerButton, InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem, InnerPasswordBox,
-    InnerScrollView, InnerTabView, InnerTextArea, InnerTextBox, InnerWindow,
-};
 // Deliberately *not* `use elwindui_core::base::AsAny;` here — see
 // `elwindui_backend_appkit::native_ui::MenuBarItem::set_submenu`'s doc comment (the one place that
 // pattern is explained in full) for why importing `AsAny` directly, rather than relying on it as
 // `MenuBarItemExt`/`MenuExt`/etc.'s own supertrait, silently breaks every
 // `.as_any().downcast_ref::<T>()` call in this file.
-use elwindui_core::ui::UIElementExt;
-use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
 
 // `#[class(inherits = crate::NativeControl)]` in the submodules below expands its supertrait
 // bound to `crate::NativeControlExt`, so that trait has to be nameable at *this crate's* root.

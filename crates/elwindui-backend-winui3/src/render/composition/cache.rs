@@ -3,7 +3,6 @@
 
 
 use super::geometry::*;
-use super::node::*;
 use super::*;
 
 use crate::bindings::Microsoft::Graphics::Canvas::Geometry::{
@@ -12,44 +11,32 @@ use crate::bindings::Microsoft::Graphics::Canvas::Geometry::{
     CanvasPathBuilder, CanvasSweepDirection,
 };
 use crate::bindings::Microsoft::Graphics::Canvas::{
-    CanvasBitmap, CanvasDevice, CanvasEdgeBehavior, CanvasImageInterpolation,
+    CanvasDevice,
     ICanvasResourceCreator,
 };
-use crate::bindings::Microsoft::Graphics::Canvas::Brushes::{CanvasImageBrush, ICanvasBrush};
-use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::UI::Composition::{
     Compositor, CompositionBrush, CompositionClip, CompositionColorBrush,
     CompositionColorGradientStopCollection, CompositionEllipseGeometry,
     CompositionGeometricClip, CompositionGeometry, CompositionGradientBrush,
-    CompositionDrawingSurface, CompositionGraphicsDevice,
     CompositionGradientExtendMode, CompositionLineGeometry, CompositionLinearGradientBrush,
     CompositionMappingMode, CompositionPath, CompositionPathGeometry,
     CompositionRadialGradientBrush, CompositionRectangleGeometry,
-    CompositionRoundedRectangleGeometry, CompositionShape, CompositionSpriteShape,
-    CompositionStrokeCap, CompositionStrokeLineJoin, CompositionStretch,
-    CompositionSurfaceBrush, ContainerVisual, ICompositionSurface, ShapeVisual, SpriteVisual,
-    Visual,
+    CompositionRoundedRectangleGeometry, CompositionSpriteShape,
+    CompositionStrokeCap, CompositionStrokeLineJoin,
 };
-use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
-use crate::bindings::Microsoft::UI::Xaml::Hosting::ElementCompositionPreview;
 use crate::bindings::Microsoft::UI::Xaml::Media::{
     LoadedImageSourceLoadCompletedEventArgs, LoadedImageSurface,
 };
-use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, UIElement};
 use elwindui_core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui_core::graphics::{
     Brush, BrushMappingMode, FillRule, GradientSpreadMethod, LineCap, LineJoin, PathCommand,
-    StrokeStyle, Image, ImageData, Stretch, TileMode, VectorImage, VectorImageDrawOptions,
+    StrokeStyle, Image, ImageData,
 };
 use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
-use windows::core::{Interface, Result, Type};
-use windows::Foundation::{Size as WinSize, TypedEventHandler};
-use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
-use windows::Foundation::Rect as WinRect;
-use windows::UI::Color as WinColor;
+use windows::core::{Interface, Result};
+use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, IRandomAccessStream};
-use windows_numerics::{Matrix3x2, Matrix4x4, Vector2};
+use windows_numerics::Matrix3x2;
 
 /// Keeps the WinRT stream alive until WinUI has finished decoding the corresponding surface.
 /// Entries are owned by the renderer, so a retained Composition node never recreates an image
@@ -66,7 +53,7 @@ pub(crate) struct ImageSurfaceCache {
 }
 
 impl ImageSurfaceCache {
-    fn retain_for(&mut self, islands: &[DesiredCompositionIsland]) {
+    pub(crate) fn retain_for(&mut self, islands: &[DesiredCompositionIsland]) {
         let mut live = HashSet::new();
         for node in islands.iter().flat_map(|island| &island.nodes) {
             for brush in std::iter::once(node.fill.as_ref())
@@ -94,7 +81,7 @@ impl ImageSurfaceCache {
         }
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         for (_, entry) in self.entries.drain() {
             if let Some(token) = entry.load_completed_token {
                 let _ = entry.surface.RemoveLoadCompleted(token);
@@ -103,7 +90,7 @@ impl ImageSurfaceCache {
         }
     }
 
-    fn surface_for(&mut self, image: &Image) -> std::result::Result<LoadedImageSurface, &'static str> {
+    pub(crate) fn surface_for(&mut self, image: &Image) -> std::result::Result<LoadedImageSurface, &'static str> {
         let key = image.data() as *const ImageData as usize;
         if let Some(entry) = self.entries.get(&key) {
             return Ok(entry.surface.clone());
@@ -190,7 +177,7 @@ pub(crate) struct ClipState {
 }
 
 impl ClipState {
-    fn create(
+    pub(crate) fn create(
         compositor: &Compositor,
         canvas_device: &CanvasDevice,
         specs: &[CompositionClipSpec],
@@ -241,7 +228,7 @@ impl ClipState {
         })
     }
 
-    fn as_clip(&self) -> Result<CompositionClip> {
+    pub(crate) fn as_clip(&self) -> Result<CompositionClip> {
         self.clip.clone().cast()
     }
 }
@@ -268,7 +255,7 @@ pub(crate) fn canvas_clip_geometry(
 }
 
 impl GeometryState {
-    fn update(&self, primitive: &CompositionPrimitive) -> Result<()> {
+    pub(crate) fn update(&self, primitive: &CompositionPrimitive) -> Result<()> {
         match (self, primitive) {
             (Self::Rectangle(geometry), CompositionPrimitive::Rectangle { rect }) => {
                 geometry.SetOffset(vector2(rect.x, rect.y))?;
@@ -308,7 +295,7 @@ impl GeometryState {
     }
 
     #[cfg(not(rust_analyzer))]
-    fn create(
+    pub(crate) fn create(
         compositor: &Compositor,
         canvas_device: &CanvasDevice,
         primitive: &CompositionPrimitive,
@@ -409,7 +396,7 @@ impl GeometryState {
     // the retained renderer; real builds always compile the implementation
     // above. This mirrors the workspace's established rust_analyzer shadows.
     #[cfg(rust_analyzer)]
-    fn create(
+    pub(crate) fn create(
         _compositor: &Compositor,
         _canvas_device: &CanvasDevice,
         _primitive: &CompositionPrimitive,
@@ -417,7 +404,7 @@ impl GeometryState {
         Err("GeometryState construction is evaluated only by the real WinRT build")
     }
 
-    fn as_geometry(&self) -> Result<CompositionGeometry> {
+    pub(crate) fn as_geometry(&self) -> Result<CompositionGeometry> {
         match self {
             Self::Rectangle(value) => value.clone().cast(),
             Self::RoundedRectangle(value) => value.clone().cast(),
@@ -435,7 +422,7 @@ pub(crate) enum BrushState {
 }
 
 impl BrushState {
-    fn create(
+    pub(crate) fn create(
         compositor: &Compositor,
         brush: &Brush,
         opacity: f32,
@@ -487,7 +474,7 @@ impl BrushState {
         }
     }
 
-    fn as_brush(&self) -> Result<CompositionBrush> {
+    pub(crate) fn as_brush(&self) -> Result<CompositionBrush> {
         match self {
             Self::Solid(value) => value.clone().cast(),
             Self::Linear(value) => value.clone().cast(),

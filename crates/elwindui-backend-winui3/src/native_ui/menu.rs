@@ -1,18 +1,14 @@
 //! `builtin::MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` and their `ListExt` collections.
 
-use crate::AnyView;
 use crate::inner::{
-    InnerButton, InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem, InnerPasswordBox,
-    InnerScrollView, InnerTabView, InnerTextArea, InnerTextBox, InnerWindow,
+    InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem,
 };
-use elwindui_core::ui::UIElementExt;
-use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBarExt)]
 pub struct MenuBar {
-    inner: InnerMenuBar,
+    pub(crate) inner: InnerMenuBar,
     /// The currently-installed children, in display order — the "before" side of `set_children`'s
     /// diff against its own new `children` argument (the "after" side), mirroring `TabView`'s own
     /// `entries`/reconciliation pattern. Also `items()`'s own backing storage (`ListExt` impl

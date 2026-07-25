@@ -3,29 +3,11 @@
 //! control.
 
 use crate::bindings;
-use crate::render::composition::{
-    CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
-    DesiredCompositionNode, IslandId,
-};
-use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
-use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, PasswordBox as XamlPasswordBox,
-    ScrollMode, ScrollViewer, TabView as XamlTabView, TabViewCloseButtonOverlayMode, TabViewItem,
-    TabViewTabCloseRequestedEventArgs, TextBlock, TextBox as XamlTextBox,
-};
-use crate::bindings::Microsoft::UI::Xaml::Input::{
-    CharacterReceivedRoutedEventArgs, KeyEventHandler, KeyboardAccelerator,
-};
 use crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
-use crate::bindings::Microsoft::UI::Xaml::{
-    FrameworkElement, RoutedEventHandler, SizeChangedEventHandler, UIElement, Window as XamlWindow,
-};
-use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::Graphics::Canvas::{
-    CanvasActiveLayer, CanvasAntialiasing, CanvasBitmap, CanvasBlend, CanvasEdgeBehavior, CanvasImageInterpolation,
+    CanvasBitmap, CanvasBlend, CanvasEdgeBehavior, CanvasImageInterpolation,
     ICanvasResourceCreator,
 };
-use crate::bindings::Microsoft::UI::Composition::CompositionDrawingSurface;
 use crate::bindings::Microsoft::Graphics::Canvas::Brushes::{
     CanvasGradientStop, CanvasImageBrush, CanvasLinearGradientBrush, CanvasRadialGradientBrush,
     CanvasSolidColorBrush, ICanvasBrush,
@@ -34,25 +16,11 @@ use crate::bindings::Microsoft::Graphics::Canvas::Geometry::{
     CanvasArcSize, CanvasFigureLoop, CanvasFilledRegionDetermination, CanvasGeometry,
     CanvasPathBuilder, CanvasSweepDirection,
 };
-use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    SelectionChangedEventHandler, TextChangedEventHandler,
-};
-use windows::Foundation::{PropertyValue, Size, TypedEventHandler};
-use windows::Graphics::{PointInt32, SizeInt32};
-use windows::System::{VirtualKey, VirtualKeyModifiers};
-use windows::UI::{Color, Core::CoreVirtualKeyStates};
+use windows::Foundation::PropertyValue;
+use windows::UI::Color;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, IRandomAccessStream};
-use elwindui_core::input::{
-    FocusState, Key, KeyModifiers, KeyboardDispatcher, RawKeyEvent, RawKeyEventKind,
-    RawTextInputEvent, ShortcutRegistry,
-};
-use elwindui_core::ui::{FocusHost, UIElementExt as _};
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use windows::core::{HSTRING, Interface, Result};
+use windows::core::{Interface, Result};
 
 #[derive(Clone)]
 pub(crate) enum Win2dPrimitive {

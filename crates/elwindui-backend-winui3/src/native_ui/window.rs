@@ -1,15 +1,8 @@
 //! `builtin::Window` — the `WindowExt` implementation.
 
 use super::MenuBar;
-use crate::AnyView;
-use crate::inner::{
-    InnerButton, InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem, InnerPasswordBox,
-    InnerScrollView, InnerTabView, InnerTextArea, InnerTextBox, InnerWindow,
-};
-use elwindui_core::ui::UIElementExt;
-use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use crate::inner::InnerWindow;
+use std::rc::Rc;
 
 /// `component X inherits Window` ("host composition", docs/elwindui_spec.md 付録H.2.1a) is what
 /// actually inherits this — hence `struct_only`'s target being `elwindui_core::ui::WindowExt`

@@ -6,50 +6,19 @@ use super::cache::*;
 use super::geometry::*;
 use super::*;
 
-use crate::bindings::Microsoft::Graphics::Canvas::Geometry::{
-    CanvasArcSize, CanvasFigureLoop, CanvasFilledRegionDetermination, CanvasGeometry,
-    CanvasGeometryCombine,
-    CanvasPathBuilder, CanvasSweepDirection,
-};
-use crate::bindings::Microsoft::Graphics::Canvas::{
-    CanvasBitmap, CanvasDevice, CanvasEdgeBehavior, CanvasImageInterpolation,
-    ICanvasResourceCreator,
-};
-use crate::bindings::Microsoft::Graphics::Canvas::Brushes::{CanvasImageBrush, ICanvasBrush};
+use crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice;
 use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::UI::Composition::{
-    Compositor, CompositionBrush, CompositionClip, CompositionColorBrush,
-    CompositionColorGradientStopCollection, CompositionEllipseGeometry,
-    CompositionGeometricClip, CompositionGeometry, CompositionGradientBrush,
-    CompositionDrawingSurface, CompositionGraphicsDevice,
-    CompositionGradientExtendMode, CompositionLineGeometry, CompositionLinearGradientBrush,
-    CompositionMappingMode, CompositionPath, CompositionPathGeometry,
-    CompositionRadialGradientBrush, CompositionRectangleGeometry,
-    CompositionRoundedRectangleGeometry, CompositionShape, CompositionSpriteShape,
-    CompositionStrokeCap, CompositionStrokeLineJoin, CompositionStretch,
-    CompositionSurfaceBrush, ContainerVisual, ICompositionSurface, ShapeVisual, SpriteVisual,
+    Compositor, CompositionBrush, CompositionClip,
+    CompositionGeometricClip,
+    CompositionDrawingSurface, CompositionGraphicsDevice, CompositionShape, CompositionSpriteShape, CompositionStretch,
+    CompositionSurfaceBrush, ICompositionSurface, ShapeVisual, SpriteVisual,
     Visual,
 };
-use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
-use crate::bindings::Microsoft::UI::Xaml::Hosting::ElementCompositionPreview;
-use crate::bindings::Microsoft::UI::Xaml::Media::{
-    LoadedImageSourceLoadCompletedEventArgs, LoadedImageSurface,
-};
-use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, UIElement};
-use elwindui_core::base::{AffineTransform, CornerRadius, Point, Rect};
-use elwindui_core::graphics::{
-    Brush, BrushMappingMode, FillRule, GradientSpreadMethod, LineCap, LineJoin, PathCommand,
-    StrokeStyle, Image, ImageData, Stretch, TileMode, VectorImage, VectorImageDrawOptions,
-};
-use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
-use windows::core::{Interface, Result, Type};
-use windows::Foundation::{Size as WinSize, TypedEventHandler};
-use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
-use windows::Foundation::Rect as WinRect;
-use windows::UI::Color as WinColor;
-use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, IRandomAccessStream};
-use windows_numerics::{Matrix3x2, Matrix4x4, Vector2};
+use crate::bindings::Microsoft::UI::Xaml::Media::LoadedImageSurface;
+use elwindui_core::base::Rect;
+use std::collections::HashMap;
+use windows::core::{Interface, Result};
 
 pub(crate) enum CompositionNodeState {
     Shape(ShapeNodeState),
@@ -58,7 +27,7 @@ pub(crate) enum CompositionNodeState {
 }
 
 impl CompositionNodeState {
-    fn create(
+    pub(crate) fn create(
         compositor: &Compositor,
         canvas_device: &CanvasDevice,
         desired: &DesiredCompositionNode,
@@ -90,7 +59,7 @@ impl CompositionNodeState {
         ShapeNodeState::create(compositor, canvas_device, desired, island_bounds).map(Self::Shape)
     }
 
-    fn can_update(&self, desired: &DesiredCompositionNode, rasterization_scale: f32) -> bool {
+    pub(crate) fn can_update(&self, desired: &DesiredCompositionNode, rasterization_scale: f32) -> bool {
         match self {
             Self::Shape(node) => !is_image_node(desired) && node.can_update(desired),
             Self::Image(node) => {
@@ -100,7 +69,7 @@ impl CompositionNodeState {
         }
     }
 
-    fn update(
+    pub(crate) fn update(
         &mut self,
         compositor: &Compositor,
         desired: &DesiredCompositionNode,
@@ -120,7 +89,7 @@ impl CompositionNodeState {
         }
     }
 
-    fn visual(&self) -> Result<Visual> {
+    pub(crate) fn visual(&self) -> Result<Visual> {
         match self {
             Self::Shape(_) => unreachable!("shape nodes are owned by ShapeRunState"),
             Self::Image(node) => node.visual(),
@@ -134,7 +103,7 @@ pub(crate) struct ShapeNodeState {
     _geometry: GeometryState,
     fill: Option<BrushState>,
     stroke: Option<BrushState>,
-    snapshot: DesiredCompositionNode,
+    pub(crate) snapshot: DesiredCompositionNode,
 }
 
 impl ShapeNodeState {
@@ -637,13 +606,13 @@ pub(crate) fn shape_run_descriptors<T: Copy>(
 }
 
 pub(crate) struct ShapeRunState {
-    visual: ShapeVisual,
-    node_ids: Vec<RenderNodeId>,
-    opacity: f32,
+    pub(crate) visual: ShapeVisual,
+    pub(crate) node_ids: Vec<RenderNodeId>,
+    pub(crate) opacity: f32,
 }
 
 impl ShapeRunState {
-    fn create(
+    pub(crate) fn create(
         compositor: &Compositor,
         nodes: &HashMap<RenderNodeId, CompositionNodeState>,
         node_ids: Vec<RenderNodeId>,

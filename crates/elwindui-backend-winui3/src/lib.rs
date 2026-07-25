@@ -40,6 +40,12 @@ mod native_ui;
 pub mod platform;
 mod render;
 
+// `windows-bindgen` emits references to XAML interop types through `crate::Windows`.
+// Keep that compatibility namespace at the crate root even though the generated
+// projection itself lives in the private `bindings` module.
+#[allow(unused_imports)]
+pub(crate) use bindings::Windows;
+
 pub use native_ui::*;
 
 // `elwindui-codegen`'s generated code references `elwindui::backend::AnyView` directly (see

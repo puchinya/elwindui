@@ -3,13 +3,10 @@
 use super::NativeControl;
 use crate::AnyView;
 use crate::inner::{
-    InnerButton, InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem, InnerPasswordBox,
-    InnerScrollView, InnerTabView, InnerTextArea, InnerTextBox, InnerWindow,
+    InnerPasswordBox, InnerTextArea, InnerTextBox,
 };
 use elwindui_core::ui::UIElementExt;
-use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 #[elwindui_macros::class(struct_only = elwindui_core::ui::TextAreaExt, inherits = crate::NativeControl)]
 pub struct TextArea {

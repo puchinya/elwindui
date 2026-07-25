@@ -13,50 +13,27 @@ use cache::*;
 use geometry::*;
 use node::*;
 
-use crate::bindings::Microsoft::Graphics::Canvas::Geometry::{
-    CanvasArcSize, CanvasFigureLoop, CanvasFilledRegionDetermination, CanvasGeometry,
-    CanvasGeometryCombine,
-    CanvasPathBuilder, CanvasSweepDirection,
-};
-use crate::bindings::Microsoft::Graphics::Canvas::{
-    CanvasBitmap, CanvasDevice, CanvasEdgeBehavior, CanvasImageInterpolation,
-    ICanvasResourceCreator,
-};
-use crate::bindings::Microsoft::Graphics::Canvas::Brushes::{CanvasImageBrush, ICanvasBrush};
+use crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice;
 use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::UI::Composition::{
-    Compositor, CompositionBrush, CompositionClip, CompositionColorBrush,
-    CompositionColorGradientStopCollection, CompositionEllipseGeometry,
-    CompositionGeometricClip, CompositionGeometry, CompositionGradientBrush,
-    CompositionDrawingSurface, CompositionGraphicsDevice,
-    CompositionGradientExtendMode, CompositionLineGeometry, CompositionLinearGradientBrush,
-    CompositionMappingMode, CompositionPath, CompositionPathGeometry,
-    CompositionRadialGradientBrush, CompositionRectangleGeometry,
-    CompositionRoundedRectangleGeometry, CompositionShape, CompositionSpriteShape,
-    CompositionStrokeCap, CompositionStrokeLineJoin, CompositionStretch,
-    CompositionSurfaceBrush, ContainerVisual, ICompositionSurface, ShapeVisual, SpriteVisual,
+    Compositor,
+    CompositionDrawingSurface, CompositionGraphicsDevice, ContainerVisual,
     Visual,
 };
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::Hosting::ElementCompositionPreview;
-use crate::bindings::Microsoft::UI::Xaml::Media::{
-    LoadedImageSourceLoadCompletedEventArgs, LoadedImageSurface,
-};
 use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, UIElement};
 use elwindui_core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui_core::graphics::{
-    Brush, BrushMappingMode, FillRule, GradientSpreadMethod, LineCap, LineJoin, PathCommand,
-    StrokeStyle, Image, ImageData, Stretch, TileMode, VectorImage, VectorImageDrawOptions,
+    Brush, FillRule, PathCommand,
+    StrokeStyle, VectorImage, VectorImageDrawOptions,
 };
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use windows::core::{Interface, Result, Type};
-use windows::Foundation::{Size as WinSize, TypedEventHandler};
+use windows::Foundation::Size as WinSize;
 use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
-use windows::Foundation::Rect as WinRect;
-use windows::UI::Color as WinColor;
-use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, IRandomAccessStream};
-use windows_numerics::{Matrix3x2, Matrix4x4, Vector2};
+use windows_numerics::Vector2;
 
 pub(crate) type RenderNodeId = (u64, usize);
 pub(crate) type IslandId = RenderNodeId;

@@ -7,6 +7,10 @@
 //! `elwindui_backend_appkit::inner`'s own doc comment.
 
 use crate::bindings;
+use crate::composition::{
+    CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
+    DesiredCompositionNode, IslandId,
+};
 use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
     Button as XamlButton, Canvas, MenuFlyoutItem, MenuFlyoutItemBase, TabView as XamlTabView,
@@ -20,11 +24,12 @@ use crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
 use crate::bindings::Microsoft::UI::Xaml::{
     FrameworkElement, RoutedEventHandler, SizeChangedEventHandler, UIElement, Window as XamlWindow,
 };
-use crate::bindings::Microsoft::Graphics::Canvas::UI::Xaml::{CanvasControl, CanvasDrawEventArgs};
+use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::Graphics::Canvas::{
     CanvasActiveLayer, CanvasAntialiasing, CanvasBitmap, CanvasBlend, CanvasEdgeBehavior, CanvasImageInterpolation,
     ICanvasResourceCreator,
 };
+use crate::bindings::Microsoft::UI::Composition::CompositionDrawingSurface;
 use crate::bindings::Microsoft::Graphics::Canvas::Brushes::{
     CanvasGradientStop, CanvasImageBrush, CanvasLinearGradientBrush, CanvasRadialGradientBrush,
     CanvasSolidColorBrush, ICanvasBrush,
@@ -50,7 +55,6 @@ use elwindui_core::ui::{FocusHost, UIElementExt as _};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use windows::core::{HSTRING, Interface, Result};
 
@@ -336,14 +340,13 @@ impl<T: WinUiHandle + 'static> From<T> for AnyView {
 #[derive(Clone)]
 pub struct TreeHostPanel {
     canvas: Canvas,
-    draw_canvas: CanvasControl,
-    draw_list: Arc<Mutex<Vec<Win2dPrimitive>>>,
+    composition: Rc<RefCell<CompositionRenderer>>,
     tree: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     render_tree: Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
     /// The `Text`/`NativeControl` children currently reflected into `canvas.Children()` — see
     /// `reconcile_native_children`'s own doc comment for why this exists (in short: so relayout
     /// never has to `Clear()`/rebuild `canvas.Children()` wholesale, which is what broke Win2D's
-    /// `CanvasControl` device creation for whichever tab started out selected).
+    /// device creation for whichever tab started out selected).
     native_children: Rc<RefCell<NativeChildMap>>,
     /// Turns `canvas`'s own raw `KeyDown`/`KeyUp`/`CharacterReceived` events into
     /// `elwindui_core::ui::dispatch_routed` calls against whichever element currently has focus,
@@ -362,13 +365,6 @@ enum Win2dPrimitive {
     SetOpacity(f32),
     SetAntialiasing(bool),
     SetBlend(CanvasBlend),
-    FillRect { x: f32, y: f32, width: f32, height: f32, brush: elwindui_core::graphics::Brush },
-    StrokeRect { x: f32, y: f32, width: f32, height: f32, brush: elwindui_core::graphics::Brush, stroke: elwindui_core::graphics::StrokeStyle },
-    FillRoundedRect { x: f32, y: f32, width: f32, height: f32, radius: f32, brush: elwindui_core::graphics::Brush },
-    StrokeRoundedRect { x: f32, y: f32, width: f32, height: f32, radius: f32, brush: elwindui_core::graphics::Brush, stroke: elwindui_core::graphics::StrokeStyle },
-    FillEllipse { x: f32, y: f32, radius_x: f32, radius_y: f32, brush: elwindui_core::graphics::Brush },
-    StrokeEllipse { x: f32, y: f32, radius_x: f32, radius_y: f32, brush: elwindui_core::graphics::Brush, stroke: elwindui_core::graphics::StrokeStyle },
-    Line { x0: f32, y0: f32, x1: f32, y1: f32, brush: elwindui_core::graphics::Brush, stroke: elwindui_core::graphics::StrokeStyle },
     FillPath { commands: Vec<elwindui_core::graphics::PathCommand>, x: f32, y: f32, brush: elwindui_core::graphics::Brush, rule: elwindui_core::graphics::FillRule },
     StrokePath { commands: Vec<elwindui_core::graphics::PathCommand>, x: f32, y: f32, brush: elwindui_core::graphics::Brush, stroke: elwindui_core::graphics::StrokeStyle },
     PushClip { clip: elwindui_core::graphics::Clip, x: f32, y: f32 },
@@ -545,7 +541,7 @@ fn win2d_path_bounds(commands: &[elwindui_core::graphics::PathCommand]) -> elwin
         .unwrap_or(elwindui_core::base::Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 })
 }
 
-/// Materializes one core brush inside the current CanvasControl draw callback. Win2D resources
+/// Materializes one core brush inside a transient Win2D drawing session. Win2D resources
 /// are deliberately not retained in `Win2dPrimitive`: that keeps the retained scene device-loss
 /// safe and ensures every resource belongs to the drawing session's own device.
 fn win2d_brush(
@@ -881,7 +877,7 @@ fn win2d_vector_blend(mode: elwindui_core::graphics::VectorBlendMode) -> Option<
 
 /// Expands a retained SVG pattern into its visible tiles and clips those tiles to one path. This
 /// stays in the ordinary retained Win2D command stream: no bitmap cache is needed, so the result
-/// remains sharp under CanvasControl DPI/device changes.
+/// remains sharp under the drawing surface's DPI/device changes.
 fn emit_vector_pattern_fill(
     pattern: &elwindui_core::graphics::VectorPattern,
     path: &elwindui_core::graphics::Path,
@@ -1138,6 +1134,103 @@ fn emit_vector_image(
     push_win2d_transform(out, parent_transform);
 }
 
+/// Replays one complex `VectorImage` into a tightly sized CompositionDrawingSurface. This is a
+/// fallback for SVG features that are not yet lowered to Composition shapes; the surface itself is
+/// hosted by a retained SpriteVisual, so this function is never called from an XAML draw event.
+pub(crate) fn draw_vector_image_surface(
+    surface: &CompositionDrawingSurface,
+    desired: &DesiredCompositionNode,
+    rasterization_scale: f32,
+) -> Result<()> {
+    let CompositionPrimitive::VectorImage { image, dest, source, options } = &desired.primitive else {
+        return Err(windows::core::Error::new(
+            windows::core::HRESULT(0x80070057_u32 as i32),
+            "vector surface node received a non-vector primitive",
+        ));
+    };
+    let mut primitives = vec![
+        Win2dPrimitive::SetTransform { m11: 1.0, m12: 0.0, m21: 0.0, m22: 1.0, dx: 0.0, dy: 0.0 },
+        Win2dPrimitive::SetOpacity(1.0),
+    ];
+    emit_vector_image(
+        image,
+        elwindui_core::base::Rect { x: 0.0, y: 0.0, width: dest.width, height: dest.height },
+        *source,
+        options,
+        elwindui_core::base::AffineTransform::identity(),
+        1.0,
+        &mut primitives,
+    );
+    let session = CanvasComposition::CreateDrawingSession(surface)?;
+    session.Clear(Color { A: 0, R: 0, G: 0, B: 0 })?;
+    let creator: ICanvasResourceCreator = session.clone().cast()?;
+    let mut opacity = 1.0_f32;
+    let mut active_layers = Vec::<CanvasActiveLayer>::new();
+    for primitive in &primitives {
+        match primitive {
+            Win2dPrimitive::SetTransform { m11, m12, m21, m22, dx, dy } => session.SetTransform(windows_numerics::Matrix3x2 {
+                // The CompositionDrawingSurface extent is in physical pixels,
+                // while SVG lowering produces DIPs. Compose the XAML scale into
+                // every scene transform so geometry, clips, and brushes replay
+                // at the surface's native resolution.
+                M11: *m11 * rasterization_scale,
+                M12: *m12 * rasterization_scale,
+                M21: *m21 * rasterization_scale,
+                M22: *m22 * rasterization_scale,
+                M31: *dx * rasterization_scale,
+                M32: *dy * rasterization_scale,
+            })?,
+            Win2dPrimitive::SetOpacity(value) => opacity = *value,
+            Win2dPrimitive::SetAntialiasing(aliased) => session.SetAntialiasing(
+                if *aliased { CanvasAntialiasing::Aliased } else { CanvasAntialiasing::Antialiased },
+            )?,
+            Win2dPrimitive::SetBlend(blend) => session.SetBlend(*blend)?,
+            Win2dPrimitive::FillPath { commands, x, y, brush, rule } => {
+                let geometry = win2d_path_geometry(&creator, commands, *x, *y, *rule)?;
+                let bounds = win2d_path_bounds(commands);
+                let brush = win2d_brush(&creator, brush, elwindui_core::base::Rect { x: bounds.x + *x, y: bounds.y + *y, ..bounds }, opacity)?;
+                session.FillGeometryAtCoordsWithBrush(&geometry, 0.0, 0.0, &brush)?;
+            }
+            Win2dPrimitive::StrokePath { commands, x, y, brush, stroke } => {
+                let geometry = win2d_path_geometry(&creator, commands, *x, *y, elwindui_core::graphics::FillRule::NonZero)?;
+                let bounds = win2d_path_bounds(commands);
+                let brush = win2d_brush(&creator, brush, elwindui_core::base::Rect { x: bounds.x + *x, y: bounds.y + *y, ..bounds }, opacity)?;
+                let style = win2d_stroke_style(stroke)?;
+                session.DrawGeometryWithBrushAndStrokeWidthAndStrokeStyle(&geometry, windows_numerics::Vector2 { X: 0.0, Y: 0.0 }, &brush, stroke.width, &style)?;
+            }
+            Win2dPrimitive::PushClip { clip, x, y } => {
+                let geometry = win2d_clip_geometry(&creator, clip, *x, *y)?;
+                active_layers.push(session.CreateLayerWithOpacityAndClipGeometry(1.0, &geometry)?);
+            }
+            Win2dPrimitive::PushPathStrokeClip { commands, x, y, width_px } => {
+                let geometry = win2d_path_geometry(&creator, commands, *x, *y, elwindui_core::graphics::FillRule::NonZero)?;
+                let stroke_geometry = geometry.Stroke(*width_px)?;
+                active_layers.push(session.CreateLayerWithOpacityAndClipGeometry(1.0, &stroke_geometry)?);
+            }
+            Win2dPrimitive::PopClip | Win2dPrimitive::PopOpacityLayer => {
+                if let Some(layer) = active_layers.pop() { layer.Close()?; }
+            }
+            Win2dPrimitive::PushOpacityLayer(layer_opacity) => {
+                active_layers.push(session.CreateLayerWithOpacity(*layer_opacity)?);
+            }
+            Win2dPrimitive::DrawImage { image, dest, source, options, x, y } => {
+                let bitmap = win2d_bitmap(&creator, image)?;
+                let size = bitmap.SizeInPixels()?;
+                let source = source.unwrap_or(elwindui_core::base::Rect { x: 0.0, y: 0.0, width: size.Width as f32, height: size.Height as f32 });
+                let placed = win2d_fitted_image_rect(elwindui_core::base::Rect { x: *x + dest.x, y: *y + dest.y, width: dest.width, height: dest.height }, (source.width, source.height), options);
+                let interpolation = match options.sampling {
+                    elwindui_core::graphics::ImageSampling::Nearest => CanvasImageInterpolation::NearestNeighbor,
+                    elwindui_core::graphics::ImageSampling::Linear => CanvasImageInterpolation::Linear,
+                    elwindui_core::graphics::ImageSampling::Cubic => CanvasImageInterpolation::HighQualityCubic,
+                };
+                session.DrawImageToRectWithSourceRectAndOpacityAndInterpolation(&bitmap, windows::Foundation::Rect { X: placed.x, Y: placed.y, Width: placed.width, Height: placed.height }, windows::Foundation::Rect { X: source.x, Y: source.y, Width: source.width, Height: source.height }, (opacity * options.opacity).clamp(0.0, 1.0), interpolation)?;
+            }
+        }
+    }
+    while let Some(layer) = active_layers.pop() { layer.Close()?; }
+    session.Close()
+}
+
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
 /// panel's own tree storage (not a full owned `TreeHostPanel` clone) since a strong one would
 /// create a reference cycle: this panel's own `tree` strongly holds the hosted tree's root, and
@@ -1154,8 +1247,7 @@ fn emit_vector_image(
 /// deferred relayout pass, not one synchronous pass per call.
 struct WinUI3RelayoutHost {
     canvas: Canvas,
-    draw_canvas: CanvasControl,
-    draw_list: Arc<Mutex<Vec<Win2dPrimitive>>>,
+    composition: Weak<RefCell<CompositionRenderer>>,
     tree: Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
     render_tree: Weak<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
     native_children: Weak<RefCell<NativeChildMap>>,
@@ -1185,12 +1277,19 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             return;
         };
         this.pending.set(false);
-        if let (Some(tree), Some(render_tree), Some(native_children)) = (
+        if let (Some(tree), Some(render_tree), Some(native_children), Some(composition)) = (
             this.tree.upgrade(),
             this.render_tree.upgrade(),
             this.native_children.upgrade(),
+            this.composition.upgrade(),
         ) {
-            TreeHostPanel::relayout_static(&this.canvas, &this.draw_canvas, &this.draw_list, &tree, &render_tree, &native_children);
+            TreeHostPanel::relayout_static(
+                &this.canvas,
+                &composition,
+                &tree,
+                &render_tree,
+                &native_children,
+            );
         }
     }
 }
@@ -1240,6 +1339,12 @@ impl NativeChildElement {
 type NativeChildKey = (u64, usize);
 type NativeChildMap = HashMap<NativeChildKey, NativeChildElement>;
 
+#[derive(Clone, Copy)]
+enum RenderLayerKey {
+    Composition(IslandId),
+    Native(NativeChildKey),
+}
+
 /// Reconciles `canvas`'s native `Text`/`NativeControl` children against `wanted` (this pass's
 /// fresh set, in paint order) by diffing against `existing` (the previous pass's set) — added ones
 /// are `Append`ed once, removed ones are individually detached, and anything present in both passes
@@ -1247,9 +1352,9 @@ type NativeChildMap = HashMap<NativeChildKey, NativeChildElement>;
 ///
 /// This deliberately never touches `draw_canvas` (appended to `canvas.Children()` exactly once, in
 /// `TreeHostPanel::new`, and never again) or does a wholesale `Children.Clear()` — see
-/// `docs/agents/winui3_current_state.md`'s CanvasControl investigation for why a `Clear()`-then-
+/// the prior Win2D host investigation for why a `Clear()`-then-
 /// rebuild every pass was the actual root cause of the initially-selected `TabView` tab's
-/// `CanvasControl` never firing `CreateResources`/`Draw`: it forced a fresh native `Unloaded`/
+/// host never initializing its drawing resources: it forced a fresh native `Unloaded`/
 /// `Loaded` cycle for `draw_canvas` on *every single relayout pass*, not just when content actually
 /// changed, and one specific timing of that churn left Win2D's device never (re)created for that
 /// one instance. Visual-tree structure changes now happen only for a `Text`/`NativeControl` command
@@ -1354,215 +1459,15 @@ enum RenderedNativeChild {
 impl TreeHostPanel {
     pub(crate) fn new() -> Self {
         let canvas = Canvas::new().expect("Canvas::new");
-        let draw_canvas = CanvasControl::new().expect("CanvasControl::new");
-        let draw_list = Arc::new(Mutex::new(Vec::<Win2dPrimitive>::new()));
-        let draw_list_for_handler = draw_list.clone();
-        let _ = draw_canvas.Draw(&TypedEventHandler::<CanvasControl, CanvasDrawEventArgs>::new(
-            move |control, args| {
-                if let Some(args) = args.as_ref() {
-                    let session = args.DrawingSession()?;
-                    let creator = control
-                        .as_ref()
-                        .and_then(|control| control.cast::<ICanvasResourceCreator>().ok());
-                    let mut opacity = 1.0_f32;
-                    let mut active_layers = Vec::<CanvasActiveLayer>::new();
-                    for primitive in draw_list_for_handler.lock().expect("Win2D draw list poisoned").iter() {
-                        match primitive {
-                            Win2dPrimitive::SetTransform { m11, m12, m21, m22, dx, dy } => session.SetTransform(windows_numerics::Matrix3x2 {
-                                M11: *m11, M12: *m12, M21: *m21, M22: *m22, M31: *dx, M32: *dy,
-                            })?,
-                            Win2dPrimitive::SetOpacity(value) => opacity = *value,
-                            Win2dPrimitive::SetAntialiasing(aliased) => session.SetAntialiasing(
-                                if *aliased { CanvasAntialiasing::Aliased } else { CanvasAntialiasing::Antialiased },
-                            )?,
-                            Win2dPrimitive::SetBlend(blend) => session.SetBlend(*blend)?,
-                            Win2dPrimitive::FillRect { x, y, width, height, brush } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let brush = win2d_brush(creator, brush, elwindui_core::base::Rect { x: *x, y: *y, width: *width, height: *height }, opacity)?;
-                                    session.FillRectangleAtCoordsWithBrush(*x, *y, *width, *height, &brush)?;
-                                }
-                            }
-                            Win2dPrimitive::StrokeRect { x, y, width, height, brush, stroke } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let brush = win2d_brush(creator, brush, elwindui_core::base::Rect { x: *x, y: *y, width: *width, height: *height }, opacity)?;
-                                    let style = win2d_stroke_style(stroke)?;
-                                    session.DrawRectangleAtCoordsWithBrushAndStrokeWidthAndStrokeStyle(
-                                        *x, *y, *width, *height, &brush, stroke.width, &style,
-                                    )?;
-                                }
-                            }
-                            Win2dPrimitive::FillRoundedRect { x, y, width, height, radius, brush } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let brush = win2d_brush(creator, brush, elwindui_core::base::Rect { x: *x, y: *y, width: *width, height: *height }, opacity)?;
-                                    session.FillRoundedRectangleAtCoordsWithBrush(*x, *y, *width, *height, *radius, *radius, &brush)?;
-                                }
-                            }
-                            Win2dPrimitive::StrokeRoundedRect { x, y, width, height, radius, brush, stroke } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let brush = win2d_brush(creator, brush, elwindui_core::base::Rect { x: *x, y: *y, width: *width, height: *height }, opacity)?;
-                                    let style = win2d_stroke_style(stroke)?;
-                                    session.DrawRoundedRectangleAtCoordsWithBrushAndStrokeWidthAndStrokeStyle(
-                                        *x, *y, *width, *height, *radius, *radius, &brush, stroke.width, &style,
-                                    )?;
-                                }
-                            }
-                            Win2dPrimitive::FillEllipse { x, y, radius_x, radius_y, brush } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let bounds = elwindui_core::base::Rect { x: *x - *radius_x, y: *y - *radius_y, width: *radius_x * 2.0, height: *radius_y * 2.0 };
-                                    let brush = win2d_brush(creator, brush, bounds, opacity)?;
-                                    session.FillEllipseAtCoordsWithBrush(*x, *y, *radius_x, *radius_y, &brush)?;
-                                }
-                            }
-                            Win2dPrimitive::StrokeEllipse { x, y, radius_x, radius_y, brush, stroke } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let bounds = elwindui_core::base::Rect { x: *x - *radius_x, y: *y - *radius_y, width: *radius_x * 2.0, height: *radius_y * 2.0 };
-                                    let brush = win2d_brush(creator, brush, bounds, opacity)?;
-                                    let style = win2d_stroke_style(stroke)?;
-                                    session.DrawEllipseAtCoordsWithBrushAndStrokeWidthAndStrokeStyle(
-                                        *x, *y, *radius_x, *radius_y, &brush, stroke.width, &style,
-                                    )?;
-                                }
-                            }
-                            Win2dPrimitive::Line { x0, y0, x1, y1, brush, stroke } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let bounds = elwindui_core::base::Rect { x: x0.min(*x1), y: y0.min(*y1), width: (*x1 - *x0).abs(), height: (*y1 - *y0).abs() };
-                                    let brush = win2d_brush(creator, brush, bounds, opacity)?;
-                                    let style = win2d_stroke_style(stroke)?;
-                                    session.DrawLineAtCoordsWithBrushAndStrokeWidthAndStrokeStyle(
-                                        *x0, *y0, *x1, *y1, &brush, stroke.width, &style,
-                                    )?;
-                                }
-                            }
-                            Win2dPrimitive::FillPath { commands, x, y, brush, rule } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let geometry = win2d_path_geometry(creator, commands, *x, *y, *rule)?;
-                                    let bounds = win2d_path_bounds(commands);
-                                    let brush = win2d_brush(creator, brush, elwindui_core::base::Rect { x: bounds.x + *x, y: bounds.y + *y, ..bounds }, opacity)?;
-                                    session.FillGeometryAtCoordsWithBrush(&geometry, 0.0, 0.0, &brush)?;
-                                }
-                            }
-                            Win2dPrimitive::StrokePath { commands, x, y, brush, stroke } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let geometry = win2d_path_geometry(
-                                        creator,
-                                        commands,
-                                        *x,
-                                        *y,
-                                        elwindui_core::graphics::FillRule::NonZero,
-                                    )?;
-                                    let bounds = win2d_path_bounds(commands);
-                                    let brush = win2d_brush(creator, brush, elwindui_core::base::Rect { x: bounds.x + *x, y: bounds.y + *y, ..bounds }, opacity)?;
-                                    let style = win2d_stroke_style(stroke)?;
-                                    session.DrawGeometryWithBrushAndStrokeWidthAndStrokeStyle(
-                                        &geometry,
-                                        windows_numerics::Vector2 { X: 0.0, Y: 0.0 },
-                                        &brush,
-                                        stroke.width,
-                                        &style,
-                                    )?;
-                                }
-                            }
-                            Win2dPrimitive::PushClip { clip, x, y } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let geometry = win2d_clip_geometry(creator, clip, *x, *y)?;
-                                    active_layers.push(session.CreateLayerWithOpacityAndClipGeometry(1.0, &geometry)?);
-                                }
-                            }
-                            Win2dPrimitive::PushPathStrokeClip { commands, x, y, width_px } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let geometry = win2d_path_geometry(
-                                        creator,
-                                        commands,
-                                        *x,
-                                        *y,
-                                        elwindui_core::graphics::FillRule::NonZero,
-                                    )?;
-                                    let stroke_geometry = geometry.Stroke(*width_px)?;
-                                    active_layers.push(session.CreateLayerWithOpacityAndClipGeometry(1.0, &stroke_geometry)?);
-                                }
-                            }
-                            Win2dPrimitive::PopClip => {
-                                // `CanvasActiveLayer` implements `IClosable` — Win2D's layer stack
-                                // is only actually popped by an explicit `Close()` call (the
-                                // `Layer.Dispose()`/`using` pattern .NET Win2D code relies on);
-                                // simply dropping the value here only releases the COM reference,
-                                // leaving the layer open on the drawing session's stack. Any push
-                                // after that (or `EndDraw` when the session ends) then sees a
-                                // corrupted/imbalanced layer stack — this is what was crashing
-                                // Compositing's Clip demo and every other `PushClip`/
-                                // `PushOpacityLayer` user natively, with no panic message, since
-                                // the corruption is entirely on Direct2D's native side.
-                                if let Some(layer) = active_layers.pop() {
-                                    layer.Close()?;
-                                }
-                            }
-                            Win2dPrimitive::PushOpacityLayer(layer_opacity) => {
-                                active_layers.push(session.CreateLayerWithOpacity(*layer_opacity)?);
-                            }
-                            Win2dPrimitive::PopOpacityLayer => {
-                                if let Some(layer) = active_layers.pop() {
-                                    layer.Close()?;
-                                }
-                            }
-                            Win2dPrimitive::DrawImage { image, dest, source, options, x, y } => {
-                                if let Some(creator) = creator.as_ref() {
-                                    let bitmap = win2d_bitmap(creator, image)?;
-                                    let size = bitmap.SizeInPixels()?;
-                                    let source = source.unwrap_or(elwindui_core::base::Rect {
-                                        x: 0.0, y: 0.0, width: size.Width as f32, height: size.Height as f32,
-                                    });
-                                    let placed = win2d_fitted_image_rect(
-                                        elwindui_core::base::Rect {
-                                            x: *x + dest.x, y: *y + dest.y,
-                                            width: dest.width, height: dest.height,
-                                        },
-                                        (source.width, source.height),
-                                        options,
-                                    );
-                                    let interpolation = match options.sampling {
-                                        elwindui_core::graphics::ImageSampling::Nearest => CanvasImageInterpolation::NearestNeighbor,
-                                        elwindui_core::graphics::ImageSampling::Linear => CanvasImageInterpolation::Linear,
-                                        elwindui_core::graphics::ImageSampling::Cubic => CanvasImageInterpolation::HighQualityCubic,
-                                    };
-                                    session.DrawImageToRectWithSourceRectAndOpacityAndInterpolation(
-                                        &bitmap,
-                                        windows::Foundation::Rect {
-                                            X: placed.x, Y: placed.y, Width: placed.width, Height: placed.height,
-                                        },
-                                        windows::Foundation::Rect {
-                                            X: source.x, Y: source.y, Width: source.width, Height: source.height,
-                                        },
-                                        (opacity * options.opacity).clamp(0.0, 1.0),
-                                        interpolation,
-                                    )?;
-                                }
-                            }
-                        }
-                    }
-                    // Defensive only: `Win2dPrimitive`'s own push/pop commands are always emitted
-                    // in balanced pairs (`RenderContext::with_clip`/`with_opacity`), so this
-                    // shouldn't ever run — but leaving any `CanvasActiveLayer` un-`Close()`d would
-                    // corrupt Direct2D's layer stack for the *next* `Draw` call, so close whatever
-                    // is left, in reverse (LIFO) order, rather than let `active_layers` just drop.
-                    while let Some(layer) = active_layers.pop() {
-                        layer.Close()?;
-                    }
-                }
-                Ok(())
-            },
-        ));
-        let visual: UIElement = draw_canvas.cast().expect("CanvasControl must be a UIElement");
-        canvas.Children().expect("Canvas.Children").Append(&visual).expect("append CanvasControl");
+        let composition = CompositionRenderer::new(&canvas).expect("CompositionRenderer::new");
         let this = Self {
             canvas,
-            draw_canvas,
-            draw_list,
+            composition: Rc::new(RefCell::new(composition)),
             tree: Rc::new(RefCell::new(None)),
             render_tree: Rc::new(RefCell::new(None)),
             native_children: Rc::new(RefCell::new(NativeChildMap::new())),
             keyboard: Rc::new(KeyboardDispatcher::new()),
         };
-        let _ = this.draw_canvas.Invalidate();
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
         // allows the host to receive OS keyboard focus, mirroring AppKit's TreeHostView.
         let _ = this.canvas.SetIsTabStop(true);
@@ -1649,17 +1554,20 @@ impl TreeHostPanel {
         let weak = Rc::downgrade(&this.tree);
         let weak_render_tree = Rc::downgrade(&this.render_tree);
         let weak_native_children = Rc::downgrade(&this.native_children);
+        let weak_composition = Rc::downgrade(&this.composition);
         let canvas_for_handler = this.canvas.clone();
-        let draw_canvas_for_handler = this.draw_canvas.clone();
-        let draw_list_for_handler = this.draw_list.clone();
         let callback_id = register_ui_event_callback(Rc::new(move || {
-            if let (Some(tree), Some(render_tree), Some(native_children)) =
-                (weak.upgrade(), weak_render_tree.upgrade(), weak_native_children.upgrade())
+            if let (Some(tree), Some(render_tree), Some(native_children), Some(composition)) =
+                (
+                    weak.upgrade(),
+                    weak_render_tree.upgrade(),
+                    weak_native_children.upgrade(),
+                    weak_composition.upgrade(),
+                )
             {
                 Self::relayout_static(
                     &canvas_for_handler,
-                    &draw_canvas_for_handler,
-                    &draw_list_for_handler,
+                    &composition,
                     &tree,
                     &render_tree,
                     &native_children,
@@ -1691,7 +1599,13 @@ impl TreeHostPanel {
     /// `InvalidateMeasure`/`InvalidateArrange`) on such a `Canvas` does not, in practice, make its
     /// `SizeChanged` fire on any later frame either — logged and observed directly, not assumed.
     pub(crate) fn force_relayout(&self) {
-        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children);
+        Self::relayout_static(
+            &self.canvas,
+            &self.composition,
+            &self.tree,
+            &self.render_tree,
+            &self.native_children,
+        );
     }
 
     /// Replaces this host's entire content. `draw_canvas` itself is never touched here (appended
@@ -1704,8 +1618,7 @@ impl TreeHostPanel {
     pub(crate) fn set_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElementExt>) {
         let host = Rc::new(WinUI3RelayoutHost {
             canvas: self.canvas.clone(),
-            draw_canvas: self.draw_canvas.clone(),
-            draw_list: self.draw_list.clone(),
+            composition: Rc::downgrade(&self.composition),
             tree: Rc::downgrade(&self.tree),
             render_tree: Rc::downgrade(&self.render_tree),
             native_children: Rc::downgrade(&self.native_children),
@@ -1723,13 +1636,18 @@ impl TreeHostPanel {
         collect_shortcuts_into(&tree, self.keyboard.shortcuts());
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
-        Self::relayout_static(&self.canvas, &self.draw_canvas, &self.draw_list, &self.tree, &self.render_tree, &self.native_children);
+        Self::relayout_static(
+            &self.canvas,
+            &self.composition,
+            &self.tree,
+            &self.render_tree,
+            &self.native_children,
+        );
     }
 
     fn relayout_static(
         canvas: &Canvas,
-        draw_canvas: &CanvasControl,
-        draw_list: &Arc<Mutex<Vec<Win2dPrimitive>>>,
+        composition: &Rc<RefCell<CompositionRenderer>>,
         tree: &Rc<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
         retained_tree: &Rc<RefCell<Option<elwindui_core::graphics::RenderTree>>>,
         native_children: &Rc<RefCell<NativeChildMap>>,
@@ -1755,10 +1673,6 @@ impl TreeHostPanel {
             canvas.ActualHeight().unwrap_or(0.0) as f32
         };
         let available = LSize { width, height };
-        if let Ok(surface) = draw_canvas.cast::<FrameworkElement>() {
-            let _ = surface.SetWidth(width as f64);
-            let _ = surface.SetHeight(height as f64);
-        }
 
         let tree_ref = tree.borrow();
         let Some(tree) = tree_ref.as_ref() else {
@@ -1784,13 +1698,8 @@ impl TreeHostPanel {
             return;
         };
 
-        let mut primitives = Vec::new();
         let mut transforms = vec![elwindui_core::base::AffineTransform::identity()];
         let mut opacities = vec![1.0_f32];
-        primitives.push(Win2dPrimitive::SetTransform {
-            m11: 1.0, m12: 0.0, m21: 0.0, m22: 1.0, dx: 0.0, dy: 0.0,
-        });
-        primitives.push(Win2dPrimitive::SetOpacity(1.0));
 
         // Keyed by `(group.id, index within that group's own commands)` — see `NativeChildKey`'s
         // doc comment — so `reconcile_native_children` can tell a `Text`/`NativeControl` command
@@ -1824,92 +1733,335 @@ impl TreeHostPanel {
             &mut commands,
         );
         let mut native_wanted: Vec<(NativeChildKey, RenderedNativeChild)> = Vec::new();
-        // Win2D commands are retained as plain values and replayed from CanvasControl::Draw.
-        // This keeps primitive figures, images, SVG paths, and clip/opacity layers on the same
-        // device/context, while XAML controls and text remain normal children of the host Canvas
-        // (reconciled in place afterward — see `native_wanted`/`reconcile_native_children` below).
+        let mut composition_islands = Vec::<DesiredCompositionIsland>::new();
+        let mut composition_nodes = Vec::<DesiredCompositionNode>::new();
+        let mut layer_order = Vec::<RenderLayerKey>::new();
+        let mut clip_stack = Vec::<CompositionClipSpec>::new();
+
+        fn flush_composition_island(
+            nodes: &mut Vec<DesiredCompositionNode>,
+            islands: &mut Vec<DesiredCompositionIsland>,
+            order: &mut Vec<RenderLayerKey>,
+            clips: &[CompositionClipSpec],
+        ) {
+            if let Some(island) =
+                DesiredCompositionIsland::from_nodes(std::mem::take(nodes), clips.to_vec())
+            {
+                order.push(RenderLayerKey::Composition(island.id));
+                islands.push(island);
+            }
+        }
+
+        // Composition handles every custom-drawn node. XAML controls and text remain normal
+        // children of the host Canvas and are reconciled in place afterward.
         for (group_id, command_index, command, origin) in commands {
             match command {
                 elwindui_core::graphics::RenderCommand::PushTransform { transform } => {
                     let next = transforms.last().expect("transform stack").concat(transform);
                     transforms.push(next);
-                    primitives.push(Win2dPrimitive::SetTransform {
-                        m11: next.m11, m12: next.m12, m21: next.m21, m22: next.m22,
-                        dx: next.dx, dy: next.dy,
-                    });
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PopTransform => {
                     if transforms.len() > 1 { transforms.pop(); }
-                    let current = *transforms.last().expect("transform stack");
-                    primitives.push(Win2dPrimitive::SetTransform {
-                        m11: current.m11, m12: current.m12, m21: current.m21, m22: current.m22,
-                        dx: current.dx, dy: current.dy,
-                    });
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PushOpacity { opacity } => {
                     let next = opacities.last().expect("opacity stack") * opacity;
                     opacities.push(next);
-                    primitives.push(Win2dPrimitive::SetOpacity(next));
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PushClip { clip } => {
-                    primitives.push(Win2dPrimitive::PushClip { clip: clip.clone(), x: origin.x, y: origin.y });
+                    flush_composition_island(
+                        &mut composition_nodes,
+                        &mut composition_islands,
+                        &mut layer_order,
+                        &clip_stack,
+                    );
+                    let transform = *transforms.last().expect("transform stack");
+                    let spec = match clip {
+                        elwindui_core::graphics::Clip::Rect(rect) => {
+                            CompositionClipSpec::Rect {
+                                rect: elwindui_core::base::Rect {
+                                    x: origin.x + rect.x,
+                                    y: origin.y + rect.y,
+                                    width: rect.width,
+                                    height: rect.height,
+                                },
+                                transform,
+                            }
+                        }
+                        elwindui_core::graphics::Clip::RoundedRect { rect, radii } => {
+                            CompositionClipSpec::RoundedRect {
+                                rect: elwindui_core::base::Rect {
+                                    x: origin.x + rect.x,
+                                    y: origin.y + rect.y,
+                                    width: rect.width,
+                                    height: rect.height,
+                                },
+                                radii: *radii,
+                                transform,
+                            }
+                        }
+                        elwindui_core::graphics::Clip::Path { path, rule } => {
+                            CompositionClipSpec::Path {
+                                commands: path.commands().to_vec(),
+                                rule: *rule,
+                                origin,
+                                transform,
+                            }
+                        }
+                    };
+                    clip_stack.push(spec);
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PopClip => {
-                    primitives.push(Win2dPrimitive::PopClip);
+                    flush_composition_island(
+                        &mut composition_nodes,
+                        &mut composition_islands,
+                        &mut layer_order,
+                        &clip_stack,
+                    );
+                    clip_stack.pop();
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PopOpacity => {
                     if opacities.len() > 1 { opacities.pop(); }
-                    primitives.push(Win2dPrimitive::SetOpacity(*opacities.last().expect("opacity stack")));
                     continue;
                 }
                 _ => {}
             }
-            match command {
-                elwindui_core::graphics::RenderCommand::FillRect { rect, brush } => primitives.push(Win2dPrimitive::FillRect {
-                    x: origin.x + rect.x, y: origin.y + rect.y, width: rect.width, height: rect.height,
-                    brush: brush.clone(),
-                }),
-                elwindui_core::graphics::RenderCommand::StrokeRect { rect, brush, stroke } => primitives.push(Win2dPrimitive::StrokeRect {
-                    x: origin.x + rect.x, y: origin.y + rect.y, width: rect.width, height: rect.height,
-                    brush: brush.clone(), stroke: stroke.clone(),
-                }),
-                elwindui_core::graphics::RenderCommand::FillRoundedRect { rect, radii, brush } => primitives.push(Win2dPrimitive::FillRoundedRect {
-                    x: origin.x + rect.x, y: origin.y + rect.y, width: rect.width, height: rect.height,
-                    radius: (radii.top_left + radii.top_right + radii.bottom_right + radii.bottom_left) / 4.0,
-                    brush: brush.clone(),
-                }),
-                elwindui_core::graphics::RenderCommand::StrokeRoundedRect { rect, radii, brush, stroke } => primitives.push(Win2dPrimitive::StrokeRoundedRect {
-                    x: origin.x + rect.x, y: origin.y + rect.y, width: rect.width, height: rect.height,
-                    radius: (radii.top_left + radii.top_right + radii.bottom_right + radii.bottom_left) / 4.0,
-                    brush: brush.clone(), stroke: stroke.clone(),
-                }),
-                elwindui_core::graphics::RenderCommand::FillEllipse { rect, brush } => primitives.push(Win2dPrimitive::FillEllipse {
-                    x: origin.x + rect.x + rect.width / 2.0, y: origin.y + rect.y + rect.height / 2.0,
-                    radius_x: rect.width / 2.0, radius_y: rect.height / 2.0,
-                    brush: brush.clone(),
-                }),
-                elwindui_core::graphics::RenderCommand::StrokeEllipse { rect, brush, stroke } => primitives.push(Win2dPrimitive::StrokeEllipse {
-                    x: origin.x + rect.x + rect.width / 2.0, y: origin.y + rect.y + rect.height / 2.0,
-                    radius_x: rect.width / 2.0, radius_y: rect.height / 2.0,
-                    brush: brush.clone(), stroke: stroke.clone(),
-                }),
+
+            let node_id = (group_id, command_index);
+            let transform = *transforms.last().expect("transform stack");
+            let opacity = *opacities.last().expect("opacity stack");
+            let absolute_rect = |rect: &elwindui_core::base::Rect| elwindui_core::base::Rect {
+                x: origin.x + rect.x,
+                y: origin.y + rect.y,
+                width: rect.width,
+                height: rect.height,
+            };
+            // The active clip is applied at the island root. Adjacent commands are flushed at
+            // every clip boundary, so each node belongs to the innermost active clip island and
+            // remains a retained Composition primitive. General intersecting nested clips still
+            // need a dedicated nested-container representation before this can preserve arbitrary
+            // overlapping clip regions without a surface fallback.
+            let fallback_if_clipped = |primitive: CompositionPrimitive| primitive;
+
+            let composition_node = match command {
+                elwindui_core::graphics::RenderCommand::FillRect { rect, brush } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::Rectangle {
+                            rect: absolute_rect(rect),
+                        }),
+                        fill: Some(brush.clone()),
+                        stroke: None,
+                        transform,
+                        opacity,
+                    })
+                }
+                elwindui_core::graphics::RenderCommand::StrokeRect { rect, brush, stroke } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::Rectangle {
+                            rect: absolute_rect(rect),
+                        }),
+                        fill: None,
+                        stroke: Some((brush.clone(), stroke.clone())),
+                        transform,
+                        opacity,
+                    })
+                }
+                elwindui_core::graphics::RenderCommand::FillRoundedRect { rect, radii, brush } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::RoundedRectangle {
+                            rect: absolute_rect(rect),
+                            radii: *radii,
+                        }),
+                        fill: Some(brush.clone()),
+                        stroke: None,
+                        transform,
+                        opacity,
+                    })
+                }
+                elwindui_core::graphics::RenderCommand::StrokeRoundedRect { rect, radii, brush, stroke } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::RoundedRectangle {
+                            rect: absolute_rect(rect),
+                            radii: *radii,
+                        }),
+                        fill: None,
+                        stroke: Some((brush.clone(), stroke.clone())),
+                        transform,
+                        opacity,
+                    })
+                }
+                elwindui_core::graphics::RenderCommand::FillEllipse { rect, brush } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::Ellipse {
+                            rect: absolute_rect(rect),
+                        }),
+                        fill: Some(brush.clone()),
+                        stroke: None,
+                        transform,
+                        opacity,
+                    })
+                }
+                elwindui_core::graphics::RenderCommand::StrokeEllipse { rect, brush, stroke } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::Ellipse {
+                            rect: absolute_rect(rect),
+                        }),
+                        fill: None,
+                        stroke: Some((brush.clone(), stroke.clone())),
+                        transform,
+                        opacity,
+                    })
+                }
                 elwindui_core::graphics::RenderCommand::DrawLine {
                     from,
                     to,
                     brush,
                     stroke,
-                } => {
-                    primitives.push(Win2dPrimitive::Line {
-                        x0: origin.x + from.x, y0: origin.y + from.y,
-                        x1: origin.x + to.x, y1: origin.y + to.y,
-                        brush: brush.clone(), stroke: stroke.clone(),
-                    });
+                } => Some(DesiredCompositionNode {
+                    id: node_id,
+                    primitive: fallback_if_clipped(CompositionPrimitive::Line {
+                        from: elwindui_core::base::Point {
+                            x: origin.x + from.x,
+                            y: origin.y + from.y,
+                        },
+                        to: elwindui_core::base::Point {
+                            x: origin.x + to.x,
+                            y: origin.y + to.y,
+                        },
+                    }),
+                    fill: None,
+                    stroke: Some((brush.clone(), stroke.clone())),
+                    transform,
+                    opacity,
+                }),
+                elwindui_core::graphics::RenderCommand::FillPath { path, brush, rule } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::Path {
+                            commands: path.commands().to_vec(),
+                            rule: *rule,
+                            origin,
+                        }),
+                        fill: Some(brush.clone()),
+                        stroke: None,
+                        transform,
+                        opacity,
+                    })
                 }
+                elwindui_core::graphics::RenderCommand::StrokePath { path, brush, stroke } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::Path {
+                            commands: path.commands().to_vec(),
+                            rule: elwindui_core::graphics::FillRule::NonZero,
+                            origin,
+                        }),
+                        fill: None,
+                        stroke: Some((brush.clone(), stroke.clone())),
+                        transform,
+                        opacity,
+                    })
+                }
+                elwindui_core::graphics::RenderCommand::DrawImage {
+                    image,
+                    dest,
+                    source,
+                    options,
+                } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: fallback_if_clipped(CompositionPrimitive::Rectangle {
+                            rect: absolute_rect(dest),
+                        }),
+                        fill: Some(elwindui_core::graphics::Brush::Image(
+                            elwindui_core::graphics::ImageBrush {
+                                image: image.clone(),
+                                source_rect: *source,
+                                stretch: match options.fit {
+                                    elwindui_core::graphics::ImageFit::Fill => {
+                                        elwindui_core::graphics::Stretch::Fill
+                                    }
+                                    elwindui_core::graphics::ImageFit::Contain => {
+                                        elwindui_core::graphics::Stretch::Uniform
+                                    }
+                                    elwindui_core::graphics::ImageFit::Cover => {
+                                        elwindui_core::graphics::Stretch::UniformToFill
+                                    }
+                                    elwindui_core::graphics::ImageFit::None => {
+                                        elwindui_core::graphics::Stretch::None
+                                    }
+                                },
+                                alignment_x: options.alignment_x,
+                                alignment_y: options.alignment_y,
+                                tile_mode: options.repeat,
+                                opacity: options.opacity,
+                                transform: elwindui_core::base::AffineTransform::IDENTITY,
+                            },
+                        )),
+                        stroke: None,
+                        transform,
+                        opacity,
+                    })
+                }
+                elwindui_core::graphics::RenderCommand::DrawVectorImage { image, dest, source, options } => {
+                    Some(DesiredCompositionNode {
+                        id: node_id,
+                        primitive: CompositionPrimitive::VectorImage {
+                            image: image.clone(),
+                            dest: absolute_rect(dest),
+                            source: *source,
+                            options: *options,
+                        },
+                        fill: None,
+                        stroke: None,
+                        transform,
+                        opacity,
+                    })
+                }
+                elwindui_core::graphics::RenderCommand::Text { .. } => {
+                    flush_composition_island(
+                        &mut composition_nodes,
+                        &mut composition_islands,
+                        &mut layer_order,
+                        &clip_stack,
+                    );
+                    layer_order.push(RenderLayerKey::Native(node_id));
+                    None
+                }
+                elwindui_core::graphics::RenderCommand::NativeControl { handle, .. } => {
+                    flush_composition_island(
+                        &mut composition_nodes,
+                        &mut composition_islands,
+                        &mut layer_order,
+                        &clip_stack,
+                    );
+                    if handle.downcast_ref::<AnyView>().is_some() {
+                        layer_order.push(RenderLayerKey::Native(node_id));
+                    }
+                    None
+                }
+                elwindui_core::graphics::RenderCommand::PushClip { .. }
+                | elwindui_core::graphics::RenderCommand::PopClip
+                | elwindui_core::graphics::RenderCommand::PushTransform { .. }
+                | elwindui_core::graphics::RenderCommand::PopTransform
+                | elwindui_core::graphics::RenderCommand::PushOpacity { .. }
+                | elwindui_core::graphics::RenderCommand::PopOpacity => None,
+            };
+            if let Some(node) = composition_node {
+                composition_nodes.push(node);
+            }
+
+            match command {
                 elwindui_core::graphics::RenderCommand::Text {
                     content,
                     rect,
@@ -1948,48 +2100,48 @@ impl TreeHostPanel {
                         ));
                     }
                 }
-                elwindui_core::graphics::RenderCommand::FillPath { path, brush, rule } => primitives.push(Win2dPrimitive::FillPath {
-                    commands: path.commands().to_vec(), x: origin.x, y: origin.y,
-                    brush: brush.clone(), rule: *rule,
-                }),
-                elwindui_core::graphics::RenderCommand::StrokePath { path, brush, stroke } => primitives.push(Win2dPrimitive::StrokePath {
-                    commands: path.commands().to_vec(), x: origin.x, y: origin.y,
-                    brush: brush.clone(), stroke: stroke.clone(),
-                }),
-                elwindui_core::graphics::RenderCommand::DrawImage { image, dest, source, options } => primitives.push(Win2dPrimitive::DrawImage {
-                    image: image.clone(), dest: *dest, source: *source, options: *options,
-                    x: origin.x, y: origin.y,
-                }),
-                elwindui_core::graphics::RenderCommand::DrawVectorImage { image, dest, source, options } => {
-                    let dest = elwindui_core::base::Rect {
-                        x: origin.x + dest.x,
-                        y: origin.y + dest.y,
-                        width: dest.width,
-                        height: dest.height,
-                    };
-                    emit_vector_image(
-                        image,
-                        dest,
-                        *source,
-                        options,
-                        *transforms.last().expect("transform stack"),
-                        *opacities.last().expect("opacity stack"),
-                        &mut primitives,
+                _ => {}
+            }
+        }
+        flush_composition_island(
+            &mut composition_nodes,
+            &mut composition_islands,
+            &mut layer_order,
+            &clip_stack,
+        );
+        let composition_hosts = match composition
+            .borrow_mut()
+            .reconcile(canvas, composition_islands)
+        {
+            Ok((hosts, unsupported)) => {
+                for unsupported in unsupported {
+                    eprintln!(
+                        "elwindui-winui3: render node {:?} routed to surface fallback: {}",
+                        unsupported.id, unsupported.reason
                     );
                 }
-                elwindui_core::graphics::RenderCommand::PushClip { .. }
-                | elwindui_core::graphics::RenderCommand::PopClip
-                | elwindui_core::graphics::RenderCommand::PushTransform { .. }
-                | elwindui_core::graphics::RenderCommand::PopTransform
-                | elwindui_core::graphics::RenderCommand::PushOpacity { .. }
-                | elwindui_core::graphics::RenderCommand::PopOpacity => {
-                    unreachable!("state commands are handled by the preceding replay branch")
+                hosts.into_iter().collect::<HashMap<IslandId, UIElement>>()
+            }
+            Err(error) => {
+                eprintln!("elwindui-winui3: Composition reconciliation failed: {error}");
+                HashMap::new()
+            }
+        };
+        reconcile_native_children(canvas, native_children, native_wanted);
+        {
+            let native_children = native_children.borrow();
+            for (z, layer) in layer_order.into_iter().enumerate() {
+                let element = match layer {
+                    RenderLayerKey::Composition(id) => composition_hosts.get(&id).cloned(),
+                    RenderLayerKey::Native(id) => native_children
+                        .get(&id)
+                        .and_then(|child| child.framework_element().cast::<UIElement>().ok()),
+                };
+                if let Some(element) = element {
+                    let _ = Canvas::SetZIndex(&element, z as i32);
                 }
             }
         }
-        reconcile_native_children(canvas, native_children, native_wanted);
-        *draw_list.lock().expect("Win2D draw list poisoned") = primitives;
-        let _ = draw_canvas.Invalidate();
     }
 }
 
@@ -2462,6 +2614,12 @@ pub(crate) struct InnerTabView {
     content_hosts: Rc<RefCell<Vec<TreeHostPanel>>>,
 }
 
+// `TabView` lays out each item content below its tab strip, but the manually
+// sized TreeHostPanel is otherwise given the TabView's full height. Reserve the
+// native strip height so a custom-drawn card keeps its lower margin and rounded
+// corners inside the content presenter instead of being clipped by the window.
+const TAB_VIEW_CONTENT_TOP_INSET: f64 = 40.0;
+
 impl InnerTabView {
     pub(crate) fn new() -> Self {
         let xaml = XamlTabView::new().expect("NativeTabView::new");
@@ -2486,7 +2644,9 @@ impl InnerTabView {
         let xaml_for_resize = this.xaml.clone();
         let callback_id = register_ui_event_callback(Rc::new(move || {
             let width = xaml_for_resize.ActualWidth().unwrap_or(0.0);
-            let height = xaml_for_resize.ActualHeight().unwrap_or(0.0);
+            let height = (xaml_for_resize.ActualHeight().unwrap_or(0.0)
+                - TAB_VIEW_CONTENT_TOP_INSET)
+                .max(0.0);
             for content_host in content_hosts.borrow().iter() {
                 let element = content_host.as_element();
                 let _ = element.SetWidth(width);
@@ -2606,7 +2766,8 @@ impl InnerTabView {
         // selected.
         self.content_hosts.borrow_mut().push(content_host.clone());
         let width = self.xaml.ActualWidth().unwrap_or(0.0);
-        let height = self.xaml.ActualHeight().unwrap_or(0.0);
+        let height = (self.xaml.ActualHeight().unwrap_or(0.0) - TAB_VIEW_CONTENT_TOP_INSET)
+            .max(0.0);
         let _ = content_host.as_element().SetWidth(width);
         let _ = content_host.as_element().SetHeight(height);
         content_host.force_relayout();

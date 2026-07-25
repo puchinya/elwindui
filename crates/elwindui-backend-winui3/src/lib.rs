@@ -39,6 +39,7 @@ mod xaml_interop {
 pub(crate) use xaml_interop::Windows;
 
 mod inner;
+mod composition;
 mod native_ui;
 
 pub use native_ui::*;

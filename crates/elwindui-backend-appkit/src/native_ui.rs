@@ -131,6 +131,15 @@ pub struct TextArea {
 
 #[elwindui_macros::class]
 impl TextArea {
+    /// Overrides `NativeControl::measure_override`'s generic `fittingSize()`-based measurement —
+    /// see `InnerTextArea::measure`'s own doc comment for why `TextArea` specifically can't share
+    /// that path (its handle is an `NSScrollView`, whose `fittingSize()` doesn't reflect the
+    /// wrapped `NSTextView`'s natural size).
+    #[overrides]
+    fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.inner.measure(available)
+    }
+
     /// `#[two_way] text` (`TextArea` in `builtins.elwind`) — the change-back half of the binding;
     /// `elwindui_core::ui::TextArea::set_text` is the model→widget half.
     #[inherent]

@@ -193,7 +193,7 @@ struct ControlsDemoWindow {
                     spacing: 6.0
                     TextBlock { text: "ScrollView wrapping content taller than the viewport:" }
                     ScrollView {
-                        height: 320.0
+                        height: 150.0
                         content: VerticalLayout {
                             spacing: 8.0
                             TextBlock { text: "Row 1 — scroll down to see more" }

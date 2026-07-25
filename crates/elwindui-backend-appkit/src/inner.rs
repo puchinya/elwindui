@@ -18,10 +18,11 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
-    NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSImage, NSMenu, NSMenuItem,
-    NSResponder, NSScreen, NSScrollView, NSSecureTextField, NSStackView, NSTextDelegate,
-    NSTextField, NSTextFieldDelegate, NSTextView, NSTextViewDelegate, NSTrackingArea,
-    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags, NSFont, NSImage, NSMenu,
+    NSMenuItem, NSResponder, NSScreen, NSScrollView, NSSecureTextField, NSStackView,
+    NSTextDelegate, NSTextField, NSTextFieldDelegate, NSTextView, NSTextViewDelegate,
+    NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGColor, CGColorSpace, CGDataProvider, CGImage, CGMutablePath};
@@ -507,6 +508,17 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
+            // Unlike `mouseDown:`/`mouseUp:`/etc. above, this one must call `super` — `dispatch_pointer`
+            // is elwindui's own internal wheel-event path (for a self-drawn element that wants raw wheel
+            // deltas), but AppKit's own default `NSView.scrollWheel:` is what walks the view hierarchy
+            // to find and scroll an *enclosing* `NSScrollView` (see `InnerScrollView`'s own doc comment:
+            // "letting the enclosing NSScrollView's native scroll physics do the rest"). This view is the
+            // one that actually receives the event first — as `Window`'s own content host, as a `TabView`
+            // tab's content host, and as `InnerScrollView`'s `content_host` (its `NSScrollView`'s document
+            // view) alike — so without forwarding to `super` here, a `ScrollView`'s content never scrolls.
+            unsafe {
+                let _: () = msg_send![super(self), scrollWheel: event];
+            }
             self.dispatch_pointer(
                 event,
                 RawPointerEventKind::WheelChanged {
@@ -2469,6 +2481,9 @@ pub(crate) struct InnerTextArea {
     handle: AnyView,
     text_view: Retained<NSTextView>,
     delegate_storage: Rc<RefCell<Option<Retained<TextViewDelegate>>>>,
+    /// See `measure`'s own doc comment for why these exist and how they're computed.
+    default_width: f32,
+    default_height: f32,
 }
 
 impl InnerTextArea {
@@ -2480,16 +2495,58 @@ impl InnerTextArea {
             .expect("scrollableTextView always has a document view")
             .downcast::<NSTextView>()
             .expect("scrollableTextView's document view is an NSTextView");
+
+        // `NSScrollView.fittingSize()` reports `{0,0}` regardless of the view's current frame —
+        // unlike a plain `NSView`/`NSControl`, it does not fall back to echoing frame.size when
+        // unconstrained (verified empirically: setting a non-zero frame here has no effect on what
+        // `fittingSize()` later reports). So `TextArea` cannot rely on the generic
+        // `NativeControl::measure_override` -> `AnyView::measure` -> `fittingSize()` path every
+        // other native leaf shares (see that method's own doc comment) — `native_ui::TextArea`
+        // overrides `measure_override` itself and calls `InnerTextArea::measure` below instead.
+        // The height is derived from the text view's own font metrics (not a hardcoded pixel
+        // constant) once, at construction, matching how `NSTextField` (`InnerTextBox`) gets a
+        // non-zero default from its cell's real `intrinsicContentSize`, and mirroring how WinUI3's
+        // `TextArea` (`elwindui-backend-winui3::inner::InnerTextArea`) always has a non-zero
+        // minimum height from its default style (it isn't wrapped in a `ScrollViewer` there).
+        let font = text_view
+            .font()
+            .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
+        let line_height = unsafe { text_view.layoutManager() }
+            .map(|lm| lm.defaultLineHeightForFont(&font))
+            .unwrap_or_else(|| font.pointSize());
+        let inset = text_view.textContainerInset();
+        let default_height = (line_height + inset.height * 2.0) as f32;
+        // No single metric analogous to `defaultLineHeightForFont` exists for "typical text
+        // width" short of measuring an actual reference string (which would pull in
+        // `NSAttributedString`/`NSDictionary` bindings this crate doesn't otherwise need). Derive
+        // a reasonably wide default from the same line-height metric instead of a bare pixel
+        // constant — used by both `VerticalLayout` (whose cross-axis stretch — see
+        // `crates/elwindui-core/src/layout.rs`'s stack-arrange doc comment — makes this value
+        // largely moot there) and `HorizontalLayout`, whose *main* axis is width, so a `TextArea`
+        // inside one has no such stretch to fall back on and needs a real measured value here.
+        let default_width = default_height * 20.0;
+
         let handle = AnyView::from(scroll);
         Self {
             handle,
             text_view,
             delegate_storage: Rc::new(RefCell::new(None)),
+            default_width,
+            default_height,
         }
     }
 
     pub(crate) fn handle(&self) -> AnyView {
         self.handle.clone()
+    }
+
+    /// See the doc comment on `default_width`/`default_height` (set in `new`) for why this exists
+    /// instead of `native_ui::NativeControl`'s shared `fittingSize()`-based `measure_override`.
+    pub(crate) fn measure(&self, _available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        elwindui_core::base::Size {
+            width: self.default_width,
+            height: self.default_height,
+        }
     }
 
     /// `NSTextView.setString:` resets the caret/selection. In the normal two-way input path the

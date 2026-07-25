@@ -8,7 +8,12 @@
       "Bash(xargs ls -la)",
       "Bash(osascript -e ' *)",
       "Bash(pkill -f \"target/debug/notepad-inline\")",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(tools/macos-ui-driver/.build/*/macos-ui-driver *)",
+      "Bash(swift build*)",
+      "Bash(swift /tmp/*.swift *)",
+      "Bash(swift /private/tmp/*.swift *)",
+      "Bash(screencapture *)"
     ],
     "additionalDirectories": [
       "/private/tmp",

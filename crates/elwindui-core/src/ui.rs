@@ -2310,11 +2310,26 @@ fn build_render_group<H: Clone + 'static>(
 /// its RenderTree and calls `RenderTree::new` once, then `RenderTree::reconcile` after each layout.
 pub fn layout_root(root: &Rc<dyn UIElementExt>, available: Size) {
     root.measure(available);
+    // `available` may be infinite on an axis (e.g. `InnerScrollView`'s content host measures its
+    // scrolling axis unconstrained, so the hosted tree reports its own natural size instead of
+    // being clamped to the viewport — see that type's own doc comment). Arranging into that same
+    // infinite rect would make `arranged_width`/`arranged_height` report infinity too, instead of
+    // the finite natural size `measure` just resolved — so any non-finite axis falls back to the
+    // measured size here, and `arrange` always receives a real, finite rect.
+    let measured = root.measured_size().unwrap_or(available);
     let allotted = Rect {
         x: 0.0,
         y: 0.0,
-        width: available.width,
-        height: available.height,
+        width: if available.width.is_finite() {
+            available.width
+        } else {
+            measured.width
+        },
+        height: if available.height.is_finite() {
+            available.height
+        } else {
+            measured.height
+        },
     };
     root.arrange(allotted);
 }

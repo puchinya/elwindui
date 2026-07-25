@@ -15,7 +15,7 @@
 //! and report once via [`report_unsupported`] rather than aborting the whole filter chain or
 //! silently producing a wrong-looking result.
 
-use crate::inner::{
+use crate::render::{
     add_shape_layer, apply_stroke, build_image_container_layer, clip_mask_layer, color_to_cgcolor,
     fitted_image_rect, gradient_unit_point, path_to_cgpath, resolve_cgimage,
 };

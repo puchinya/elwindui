@@ -60,8 +60,11 @@ impl NativeControl {
         }
         let computed = self.resolved_text_style();
         if self.applied.borrow().as_ref() != Some(&computed) {
-            self.handle.apply_text_style(&computed);
-            *self.applied.borrow_mut() = Some(computed);
+            // Only cache a style after the native handle accepted it. Otherwise a transient XAML
+            // failure would permanently suppress retries on later layout passes.
+            if self.handle.apply_text_style(&computed).is_ok() {
+                *self.applied.borrow_mut() = Some(computed);
+            }
         }
     }
 }

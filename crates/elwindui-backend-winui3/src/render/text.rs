@@ -11,24 +11,29 @@
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::{Control, TextBlock};
 use crate::bindings::Microsoft::UI::Xaml::Media::FontFamily as XamlFontFamily;
-use crate::render::solid_color_brush;
-use elwindui_core::graphics::{
-    Brush, Color, ComputedTextStyle, FontStretch, FontStyle, FontWeight, TextBackend,
-    TextMeasureRequest, TextMeasureResult, TextWrapping,
-};
-use windows::UI::Text::{
+use crate::bindings::winui_text::{
     FontStretch as XamlFontStretch, FontStyle as XamlFontStyle, FontWeight as XamlFontWeight,
 };
+use crate::render::solid_color_brush;
+use elwindui_core::graphics::{
+    Brush, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle, FontWeight, TextBackend,
+    TextMeasureRequest, TextMeasureResult, TextWrapping,
+};
 use windows::Foundation::Size;
-use windows::core::{HSTRING, Result};
+use windows::core::{HSTRING, Interface, Result};
 
 /// §16: never pin a concrete platform family name in common code — but here, on the WinUI3 side,
-/// `FontFamily::is_system()` maps to *not calling* `SetFontFamily` at all, letting XAML's own
-/// `Control.FontFamily` default (`XamlAutoFontFamily`, itself language/Segoe-UI-fallback-aware)
-/// apply — see `apply_text_style_to_control`'s own doc comment for why every other property is
-/// still always pushed (resolved-value, not local-value, semantics).
-fn xaml_font_family(spec: &str) -> Result<XamlFontFamily> {
-    XamlFontFamily::CreateInstanceWithName(&HSTRING::from(spec))
+/// `FontFamily::is_system()` maps to XAML's dedicated `XamlAutoFontFamily`, rather than skipping
+/// `SetFontFamily`. Skipping leaves an old explicitly-set family behind when a reused native
+/// control (or the measurement scratch block) switches back to the system profile.
+fn xaml_font_family(family: &FontFamily) -> Result<XamlFontFamily> {
+    if family.is_system() {
+        XamlFontFamily::XamlAutoFontFamily()
+    } else {
+        // WinUI accepts a comma-separated fallback list in one `FontFamily` source string. Keep
+        // the complete core value instead of throwing away every candidate after the first.
+        XamlFontFamily::CreateInstanceWithName(&HSTRING::from(family.as_str()))
+    }
 }
 
 fn xaml_font_weight(weight: FontWeight) -> XamlFontWeight {
@@ -84,14 +89,11 @@ fn flat_foreground_color(brush: &Brush) -> Color {
 /// `docs/elwindui_font_status.md` §10) as "only write a property whose resolved value differs
 /// from this element's own current value" — the `ClearValue`-avoidance §18 actually cares about —
 /// which the equality check below approximates for the common "nothing changed" case.
-pub(crate) fn apply_text_style_to_control(control: &Control, style: &ComputedTextStyle) -> Result<()> {
-    if !style.font_family.is_system() {
-        if let Some(first) = style.font_family.families().next() {
-            if let Ok(family) = xaml_font_family(first) {
-                control.SetFontFamily(&family)?;
-            }
-        }
-    }
+pub(crate) fn apply_text_style_to_control(
+    control: &Control,
+    style: &ComputedTextStyle,
+) -> Result<()> {
+    control.SetFontFamily(&xaml_font_family(&style.font_family)?)?;
     control.SetFontSize(style.font_size as f64)?;
     control.SetFontWeight(xaml_font_weight(style.font_weight))?;
     control.SetFontStyle(xaml_font_style(style.font_style))?;
@@ -107,14 +109,11 @@ pub(crate) fn apply_text_style_to_control(control: &Control, style: &ComputedTex
 /// becomes (`host::replay::reconcile_native_children`) — `TextBlock` doesn't derive `Control`
 /// (WinUI3's own `TextBlock : FrameworkElement`), so it needs its own setter list rather than
 /// reusing `apply_text_style_to_control`, even though every property name matches 1:1.
-pub(crate) fn apply_text_style_to_text_block(text_block: &TextBlock, style: &ComputedTextStyle) -> Result<()> {
-    if !style.font_family.is_system() {
-        if let Some(first) = style.font_family.families().next() {
-            if let Ok(family) = xaml_font_family(first) {
-                text_block.SetFontFamily(&family)?;
-            }
-        }
-    }
+pub(crate) fn apply_text_style_to_text_block(
+    text_block: &TextBlock,
+    style: &ComputedTextStyle,
+) -> Result<()> {
+    text_block.SetFontFamily(&xaml_font_family(&style.font_family)?)?;
     text_block.SetFontSize(style.font_size as f64)?;
     text_block.SetFontWeight(xaml_font_weight(style.font_weight))?;
     text_block.SetFontStyle(xaml_font_style(style.font_style))?;
@@ -156,11 +155,17 @@ impl TextBackend for WinUi3TextBackend {
     fn measure_text(&self, req: &TextMeasureRequest<'_>) -> TextMeasureResult {
         SCRATCH_TEXT_BLOCK.with(|text_block| {
             let _ = text_block.SetText(&HSTRING::from(req.text));
-            let _ = apply_text_style_to_text_block(text_block, req.style);
+            // Every property, including the system-family reset, is applied before measuring.
+            // A style application failure must not silently reuse the previous scratch style.
+            if apply_text_style_to_text_block(text_block, req.style).is_err() {
+                return TextMeasureResult {
+                    size: elwindui_core::base::Size::default(),
+                    baseline: 0.0,
+                    line_count: 0,
+                };
+            }
             let _ = text_block.SetTextWrapping(match req.wrapping {
-                TextWrapping::NoWrap => {
-                    crate::bindings::Microsoft::UI::Xaml::TextWrapping::NoWrap
-                }
+                TextWrapping::NoWrap => crate::bindings::Microsoft::UI::Xaml::TextWrapping::NoWrap,
                 TextWrapping::Wrap | TextWrapping::WrapWholeWords => {
                     crate::bindings::Microsoft::UI::Xaml::TextWrapping::Wrap
                 }
@@ -170,18 +175,19 @@ impl TextBackend for WinUi3TextBackend {
             // method's own doc comment has the full explanation of the feedback-loop hazard this
             // avoids) — an explicit `Width`/`Height` from a *previous* measurement otherwise
             // permanently overrides this element's natural size regardless of new content.
-            let element: crate::bindings::Microsoft::UI::Xaml::FrameworkElement =
-                text_block.clone().cast().expect("TextBlock is a FrameworkElement");
+            let element: crate::bindings::Microsoft::UI::Xaml::FrameworkElement = text_block
+                .clone()
+                .cast()
+                .expect("TextBlock is a FrameworkElement");
             let _ = element.SetWidth(f64::NAN);
             let _ = element.SetHeight(f64::NAN);
             let _ = element.InvalidateMeasure();
-            let constraint_width = if req.wrapping == TextWrapping::NoWrap
-                || !req.available.width.is_finite()
-            {
-                f32::MAX
-            } else {
-                req.available.width
-            };
+            let constraint_width =
+                if req.wrapping == TextWrapping::NoWrap || !req.available.width.is_finite() {
+                    f32::MAX
+                } else {
+                    req.available.width
+                };
             let _ = element.Measure(Size {
                 Width: constraint_width,
                 Height: f32::MAX,
@@ -203,5 +209,40 @@ impl TextBackend for WinUi3TextBackend {
                 line_count: 1,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_weight_preserves_the_full_u16_value() {
+        assert_eq!(xaml_font_weight(FontWeight(650)).Weight, 650);
+    }
+
+    #[test]
+    fn font_style_maps_each_supported_variant() {
+        assert_eq!(xaml_font_style(FontStyle::Normal), XamlFontStyle::Normal);
+        assert_eq!(xaml_font_style(FontStyle::Italic), XamlFontStyle::Italic);
+        assert_eq!(xaml_font_style(FontStyle::Oblique), XamlFontStyle::Oblique);
+    }
+
+    #[test]
+    fn font_stretch_maps_all_nine_variants() {
+        let cases = [
+            (FontStretch::UltraCondensed, XamlFontStretch::UltraCondensed),
+            (FontStretch::ExtraCondensed, XamlFontStretch::ExtraCondensed),
+            (FontStretch::Condensed, XamlFontStretch::Condensed),
+            (FontStretch::SemiCondensed, XamlFontStretch::SemiCondensed),
+            (FontStretch::Normal, XamlFontStretch::Normal),
+            (FontStretch::SemiExpanded, XamlFontStretch::SemiExpanded),
+            (FontStretch::Expanded, XamlFontStretch::Expanded),
+            (FontStretch::ExtraExpanded, XamlFontStretch::ExtraExpanded),
+            (FontStretch::UltraExpanded, XamlFontStretch::UltraExpanded),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(xaml_font_stretch(input), expected);
+        }
     }
 }

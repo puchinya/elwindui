@@ -6,7 +6,7 @@
 
 ## 0. 完了条件に対する要約
 
-指示書§35の完了条件はおおむね満たしている。バックエンド別には **AppKitのみ実装・実機テスト検証済み**、**WinUI3はコード記述のみで型チェック・ビルド・実行いずれも未検証**、**GTK4は設計のみで実装なし**。DPI/表示スケール/テキストスケールはelwindui-coreに概念が存在しないため対応していない。詳細は §6/§9 の未対応事項一覧を参照。
+指示書§35の完了条件はおおむね満たしている。AppKitは実装・実機テスト検証済み、WinUI3はWindows上でビルドと単一ApplicationホストによるXAML round-tripテストまで検証済み、GTK4は設計のみで実装なし。DPI/表示スケール/テキストスケールはelwindui-coreに概念が存在しないため対応していない。詳細は §6/§9 の未対応事項一覧を参照。
 
 ---
 
@@ -128,15 +128,15 @@ pub fn text_backend() -> Rc<dyn TextBackend>; // 未登録なら DummyTextBacken
 
 | プロパティ | AppKit | WinUI3 | GTK4 |
 |---|---|---|---|
-| `font_family` | ✅ 実装・テスト済み | 📝 コードのみ・未検証 | ❌ 未実装(バックエンド自体が20行スタブ) |
-| `font_size` | ✅ | 📝 | ❌ |
-| `font_weight` | ✅ | 📝 | ❌ |
-| `font_style`(italic) | ✅ | 📝 | ❌ |
-| `font_stretch` | ✅ | 📝 | ❌ |
-| `character_spacing` | ✅(TextBlock/Button/TextField。TextView/TextAreaの編集可能テキストは未対応、後述) | 📝 | ❌ |
-| `foreground` | ✅(Solidは正確。Gradient/Imageはフラット色へ縮退) | 📝 | ❌ |
-| 実測(`measure_text`) | ✅ `NSAttributedString.boundingRectWithSize:options:context:` | 📝 XAML `TextBlock`スクラッチ計測(設計のみ) | ❌ |
-| 既定フォント取得 | ✅ `NSFont::systemFontOfSize(NSFont::systemFontSize())` | 📝 | ❌ |
+| `font_family` | ✅ 実装・テスト済み | ✅ フォールバック列・system復帰を含め実行テスト済み | ❌ 未実装(バックエンド自体が20行スタブ) |
+| `font_size` | ✅ | ✅ | ❌ |
+| `font_weight` | ✅ | ✅ | ❌ |
+| `font_style`(italic) | ✅ | ✅ | ❌ |
+| `font_stretch` | ✅ | ✅ | ❌ |
+| `character_spacing` | ✅(TextBlock/Button/TextField。TextView/TextAreaの編集可能テキストは未対応、後述) | ✅ | ❌ |
+| `foreground` | ✅(Solidは正確。Gradient/Imageはフラット色へ縮退) | ✅(Solid Brush) | ❌ |
+| 実測(`measure_text`) | ✅ `NSAttributedString.boundingRectWithSize:options:context:` | ✅ XAML `TextBlock`スクラッチ計測 | ❌ |
+| 既定フォント取得 | ✅ `NSFont::systemFontOfSize(NSFont::systemFontSize())` | ✅ `XamlAutoFontFamily()` | ❌ |
 
 ### AppKit実装詳細(`crates/elwindui-backend-appkit/src/render/text.rs`)
 
@@ -148,6 +148,13 @@ pub fn text_backend() -> Rc<dyn TextBackend>; // 未登録なら DummyTextBacken
 - 描画は`CATextLayer.setString:`に`NSAttributedString`を渡す方式に変更した。**`NSAttributedString`を設定すると`CATextLayer`自身の`font`/`fontSize`/`foregroundColor`/`alignmentMode`は無視される**ため、旧来の`setFontSize(14.0)`等の呼び出しは削除した(残すと「黙って死んでいる第二の真実の源」になるため)。整列(`TextAlignment`)は`NSMutableParagraphStyle`経由でアトリビュートに含める。
 - `text_layer.setContentsScale(layer.contentsScale())`をRetina対応として追加(`render::vector`の既存パターンを踏襲)。
 - Gradient/Image foregroundは`first_gradient_stop_color`によるフラット色へ縮退させている(`render::paint::apply_fill`の既存の同種の縮退と同じ精神)。マスクベースのグラデーション文字描画(`try_add_gradient_fill_layer`の`CATextLayer`マスク化)は本パスでは実装していない——未対応事項として§9に記録。
+
+### WinUI3実装・検証詳細(`crates/elwindui-backend-winui3/src/render/text.rs`)
+
+- `windows-bindgen`が生成した`Windows::UI::Text`の型を`bindings::winui_text`として一元利用し、XAML側の`FontWeight`/`FontStyle`/`FontStretch`と型を揃えた。数値`FontWeight(u16)`は値を失わずに変換する。
+- `FontFamily`は先頭候補だけを抜き出さず、`"Consolas, Segoe UI"`のようなカンマ区切り列全体を`XamlFontFamily::CreateInstanceWithName`へ渡す。`FontFamily::system()`は適用のたびに`XamlAutoFontFamily()`へ変換して設定するため、名前付きフォントから既定フォントへ切り替えても以前の値が残らない。
+- `TextBlock`描画、スクラッチ`TextBlock`による計測、ネイティブ`Button`/`TextBox`/`PasswordBox`/`TextArea`は同じ`apply_text_style_to_control`経路で7項目を設定する。ネイティブコントロールの適用済みスタイルキャッシュは、WinRT呼び出しが成功したときだけ更新する。
+- Windows上の単一`Application`ホスト回帰テストで、7項目のXAML round-trip、フォールバック列、名前付き→system切替、サイズと字間による計測変化、存在しないフォントの安全なフォールバックを検証している。
 
 ### ネイティブコントロールへの反映(pull方式)
 
@@ -198,7 +205,7 @@ Foreground の変更   -> invalidate()          (再描画のみ)
 ## 9. 未対応事項(明示)
 
 - **GTK4バックエンド全体** — `crates/elwindui-backend-gtk4`はgtk4/pango依存すら無い20行のスタブ。フォント対応の抽象化(`TextBackend`等)はGTK4実装可能な形にしてあるが、実装コードは書いていない。
-- **WinUI3バックエンド** — §6の対応表に記載した内容はコード記述のみ。`#![cfg(target_os = "windows")]`のためmacOS上では`cargo build`/`rust-analyzer diagnostics`とも一切コンパイル・型チェックされない。指示書§18(「未設定のプロパティはDependencyPropertyを設定しない」)は、elwindui のツリーがXAMLツリーそのものではない(`Control`/`Grid`はXAMLピアを持たない仮想ビルトイン、ネイティブリーフは`Canvas`のフラットな子)ため文字通りには実装できず、「解決済み`ComputedTextStyle`を常にpushし、XAML既定値と異なる値だけ書く」と再解釈した(ユーザー確認済み、§10参照)。
+- **WinUI3の適用粒度** — 本機能はWindows上で検証済みだが、elwindui のツリーはXAMLツリーそのものではない(`Control`/`Grid`はXAMLピアを持たない仮想ビルトイン、ネイティブリーフは`Canvas`のフラットな子)。そのため指示書§18の「未設定のプロパティはDependencyPropertyを設定しない」は文字通りには実装できず、解決済み`ComputedTextStyle`を常に適用する設計を採る(§10参照)。
 - **DPI / 表示スケール / テキストスケール** — elwindui-coreにこの概念自体が存在しない。`TextMeasureRequest::scale`は常に`1.0`。該当する指示書§32の動的変更テスト(29・30番)は実施不能。
 - **`TextBlock.text_wrapping`** — 決定した7プロパティの範囲外のため、DSLフィールドとしては追加していない。`TextMeasureRequest`に`wrapping: TextWrapping`の枠は用意済みなので、追加時のシグネチャ変更は不要。
 - **`Brush::Image`のforeground** — AppKit側はフラット色へのフォールバックのみ(グラデーションと同じ縮退)。
@@ -228,8 +235,11 @@ Foreground の変更   -> invalidate()          (再描画のみ)
 - `crates/elwindui-core/src/ui.rs`: 継承・`TextStyleOwner`・`inheritance_parent`・invalidateの単体テスト(12件、`content_control_inherits_text_style_from_its_base_control`を含む)
 - `crates/elwindui-codegen/src/parser.rs`: `#[text_style]`のパース・注入・拒否ルール(3件)
 - `crates/elwindui-codegen/src/validate.rs`: builtin外拒否・重複フィールド拒否(2件)
-- `crates/elwindui-codegen/src/codegen.rs`: setterディスパッチ・hexリテラル変換・`ContentControl`の`declaring_types`(4件)
+- `crates/elwindui-codegen/src/codegen.rs`: setterディスパッチ・hexリテラル変換・`ContentControl`の`declaring_types`、動的`FontFamily`/`Brush`の所有値・`Some(Brush)`展開
 - `crates/elwindui-backend-appkit/src/render/text.rs`: `ns_font`のサイズ/weight/italic/フォールバック、計測の伸長・折り返し・カーニング(9件、実機で実行・検証済み)
+- `crates/elwindui-backend-winui3/src/render/text.rs`: 数値weight、全style/stretch変換の単体テスト
+- `crates/elwindui-backend-winui3/src/inner/button.rs`: 単一WinUI `Application`ホストでの7項目XAML round-trip、フォールバック列、system復帰、計測変化、不在フォントの回帰テスト
+- `examples/font-demo`: System / Display / Monoの3プロファイルを実行時に切り替え、`TextBlock`と`Button`/`TextBox`/`PasswordBox`/`TextArea`への7項目の反映を確認するためのデモ
 - `crates/elwindui-backend-appkit/src/testsupport/golden.rs`のピクセルレベルインク被覆率ゴールデン(既定/bold+large/kerned)は**実装したが撤去した**——`CATextLayer`による実際のグリフラスタライズ(`renderInContext:`)が、`cargo test`のワーカースレッド(実際のAppKitメインスレッドではないことを`MainThreadMarker::new()`が`None`を返すことで実証確認済み)上で断続的にデッドロックしたため。`NSAttributedString.boundingRectWithSize:options:context:`によるテキスト**計測**(グリフを実際にラスタライズしない)は同じ非メインスレッド環境で毎回安定して高速動作しており、`render/text.rs`側の単体テストがこの問題の影響を受けないのはこの違いによる。本番コードは`elwindui-backend-appkit::app::run`経由で常に実際のメインスレッド+動作中のランループ上で実行されるため実害は無いが、テストハーネス自体の制約としてピクセルゴールデンは断念した。実機での見た目確認は`tools/macos-ui-driver`でのスクリーンショット検証(§0参照)で代替する。
 
 `cargo build --workspace`/`cargo test --workspace`は全てグリーン。`rust-analyzer diagnostics .`も実行済み(詳細は本ドキュメントの更新履歴、または実装コミットのコミットメッセージを参照)。

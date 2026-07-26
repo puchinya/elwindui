@@ -1446,7 +1446,10 @@ fn is_copy_type(ty: &str) -> bool {
         // known non-Copy std type is assumed to be one of this file's own enums (all generated with
         // `derive(Copy)`, see `generate_enum`).
         ty.chars().next().is_some_and(|c| c.is_uppercase())
-            && ty != "String"
+            // These backend-independent graphics value types are intentionally Clone but not
+            // Copy. Attribute-macro viewmodels commonly import them under these bare names, where
+            // full type resolution is unavailable to this frontend.
+            && !matches!(ty, "String" | "FontFamily" | "Brush")
             && !ty.contains('<')
             && !ty.contains("::")
     }
@@ -3688,53 +3691,54 @@ fn generate_view(
     // the outer `Rc` exists (`set_content`'s own parent-pointer wiring needs a real, upgradable
     // self-weak — see `UIElement::construct`'s own `__self_weak` doc comment), so this always runs
     // from the generated `on_constructed`, never from `construct` itself.
-    let (content_capture_stmt, content_attach_stmt) =
-        if is_shape_composition && resolved_root.type_path == "ContentControl" {
-            let (content_binding, content_type) = plan
-                .last()
-                .and_then(|root| root.child_bindings.first())
-                .unwrap_or_else(|| panic!("ContentControl composition requires one content child"));
-            // `#content_binding` is a real, already-stored struct field (see `struct_fields`/
-            // `field_inits` above), reachable directly off `&self` — no capture step needed.
-            let content = into_node_if_needed(
-                quote! { self.#content_binding.clone() },
-                content_type,
-                from,
-                table,
-            );
-            (
-                TokenStream::new(),
-                quote! {
-                    {
-                        use elwindui::core::ui::ContentControlExt as _;
-                        self.set_content(#content);
-                    }
-                },
-            )
-        } else if is_template_composition && component.base.as_deref() == Some("ContentControl") {
-            // Unlike the shape-composition case above, `content`/`padding` are `construct`'s own
-            // parameters, not stored fields — `on_constructed` has no parameters of its own to read
-            // them back from, so `construct` stashes them in this hidden field for `on_constructed`
-            // to drain exactly once.
-            struct_fields.extend(quote! {
+    let (content_capture_stmt, content_attach_stmt) = if is_shape_composition
+        && resolved_root.type_path == "ContentControl"
+    {
+        let (content_binding, content_type) = plan
+            .last()
+            .and_then(|root| root.child_bindings.first())
+            .unwrap_or_else(|| panic!("ContentControl composition requires one content child"));
+        // `#content_binding` is a real, already-stored struct field (see `struct_fields`/
+        // `field_inits` above), reachable directly off `&self` — no capture step needed.
+        let content = into_node_if_needed(
+            quote! { self.#content_binding.clone() },
+            content_type,
+            from,
+            table,
+        );
+        (
+            TokenStream::new(),
+            quote! {
+                {
+                    use elwindui::core::ui::ContentControlExt as _;
+                    self.set_content(#content);
+                }
+            },
+        )
+    } else if is_template_composition && component.base.as_deref() == Some("ContentControl") {
+        // Unlike the shape-composition case above, `content`/`padding` are `construct`'s own
+        // parameters, not stored fields — `on_constructed` has no parameters of its own to read
+        // them back from, so `construct` stashes them in this hidden field for `on_constructed`
+        // to drain exactly once.
+        struct_fields.extend(quote! {
                 __deferred_content_attach: std::cell::RefCell<Option<(Option<f32>, std::rc::Rc<dyn elwindui::core::ui::UIElementExt>)>>,
             });
-            field_inits.extend(quote! {
-                __deferred_content_attach: std::cell::RefCell::new(Some((padding, content.clone()))),
-            });
-            (
-                TokenStream::new(),
-                quote! {
-                    if let Some((padding, content)) = self.__deferred_content_attach.borrow_mut().take() {
-                        use elwindui::core::ui::ContentControlExt as _;
-                        self.set_padding(padding.unwrap_or_default());
-                        self.set_content(content);
-                    }
-                },
-            )
-        } else {
-            (TokenStream::new(), TokenStream::new())
-        };
+        field_inits.extend(quote! {
+            __deferred_content_attach: std::cell::RefCell::new(Some((padding, content.clone()))),
+        });
+        (
+            TokenStream::new(),
+            quote! {
+                if let Some((padding, content)) = self.__deferred_content_attach.borrow_mut().take() {
+                    use elwindui::core::ui::ContentControlExt as _;
+                    self.set_padding(padding.unwrap_or_default());
+                    self.set_content(content);
+                }
+            },
+        )
+    } else {
+        (TokenStream::new(), TokenStream::new())
+    };
 
     // `#target`'s own class-hierarchy declaration (docs/elwindui_spec.md 付録H.2.1a). A composed
     // component (`is_shape_composition`/`is_template_composition`/`is_host_composition`) is declared
@@ -4489,15 +4493,14 @@ fn for_body_binds_item_to_a_bindable_field(
 ) -> bool {
     body.iter().any(|entry| match entry {
         ChildEntry::Literal(element) => {
-            let bound_here = table
-                .resolve(from, &element.type_path)
-                .is_some_and(|info| {
-                    element.attributes.iter().any(|(name, value)| {
-                        matches!(value, ViewExpr::Path(path) if path.len() == 1 && path[0] == binding)
-                            && info.bindable_fields.contains(name)
-                    })
-                });
-            bound_here || for_body_binds_item_to_a_bindable_field(&element.children, binding, from, table)
+            let bound_here = table.resolve(from, &element.type_path).is_some_and(|info| {
+                element.attributes.iter().any(|(name, value)| {
+                    matches!(value, ViewExpr::Path(path) if path.len() == 1 && path[0] == binding)
+                        && info.bindable_fields.contains(name)
+                })
+            });
+            bound_here
+                || for_body_binds_item_to_a_bindable_field(&element.children, binding, from, table)
         }
         ChildEntry::If {
             then_branch,
@@ -5195,7 +5198,8 @@ fn plan_dynamic_entry(
                 dynamic: None,
             };
             let item_trait = dynamic_collection_item_trait(&parent, from, table);
-            let rc_identity = collection_uses_rc_identity(collection, body, binding, ctx, from, table);
+            let rc_identity =
+                collection_uses_rc_identity(collection, body, binding, ctx, from, table);
             let renderer =
                 emit_for_renderer(binding, body, ctx, from, table, &item_trait, rc_identity);
             let node_binding = format_ident!("__node_{}", out.len());
@@ -5418,7 +5422,14 @@ fn bare_own_field_type(expr: &ViewExpr, ctx: &ViewCtx) -> Option<String> {
         }
         _ => ty.as_str(),
     };
-    Some(inner.rsplit("::").next().unwrap_or(inner).trim().to_string())
+    Some(
+        inner
+            .rsplit("::")
+            .next()
+            .unwrap_or(inner)
+            .trim()
+            .to_string(),
+    )
 }
 
 fn into_node_if_needed(
@@ -5976,7 +5987,11 @@ fn build_component_args(
             }
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
-                    coerced
+                    if name == "foreground" {
+                        quote! { Some(#coerced) }
+                    } else {
+                        coerced
+                    }
                 } else {
                     let value = emit_expr(other, ctx, &EmitMode::Construction);
                     // A `String`-shaped param takes `&str` in every *hand-written* builtin (matching
@@ -6148,8 +6163,14 @@ fn build_component_setters(
                 emit_closure_value(params, body, ctx, from, table)
             }
             Some(other) => {
-                let value = emit_expr(other, ctx, &EmitMode::Construction);
-                if inner_ty == "String" {
+                let value = if let Some(coerced) = coerce_color_literal(inner_ty, other) {
+                    coerced
+                } else {
+                    emit_expr(other, ctx, &EmitMode::Construction)
+                };
+                if name == "foreground" {
+                    quote! { Some(#value) }
+                } else if inner_ty == "String" {
                     quote! { &(#value) }
                 } else if inner_ty.contains("dyn UIElement") {
                     // Mirrors `build_component_args`/`build_virtual_value`'s identically-named
@@ -6253,7 +6274,9 @@ fn build_component_optional_setters(
                     // type, e.g. `String` — not `&str` the way a hand-written builtin's setter does
                     // (`build_component_setters`) — matching `build_component_args`'s own
                     // `has_view`-conditional `.to_string()` convention.
-                    if inner_ty == "String" {
+                    if name == "foreground" {
+                        quote! { Some(#value) }
+                    } else if inner_ty == "String" {
                         quote! { (#value).to_string() }
                     } else {
                         value
@@ -6752,7 +6775,12 @@ fn build_virtual_value(
             }
         } else {
             let value = emit_expr(expr, ctx, &EmitMode::Construction);
-            if is_option && inner_ty == "String" {
+            if is_option && name == "foreground" {
+                // `TextStyleOwner::set_foreground` records a local brush as `Some(Brush)`.
+                // Unlike the other six text-style setters, it deliberately keeps that Option in
+                // its public signature, so a dynamic Brush expression needs an explicit wrapper.
+                quote! { Some(#value) }
+            } else if is_option && inner_ty == "String" {
                 if is_own_option_field(expr) {
                     value
                 } else {
@@ -7582,6 +7610,27 @@ fn emit_resync(
             continue;
         }
         let value = emit_expr(expr, ctx, &self_mode);
+        if crate::text_style::is_text_style_field_name(name) {
+            // The style-owner API consumes the six font values. `foreground` keeps its Option so
+            // a caller can distinguish an explicit local brush from an unset inherited value.
+            // Do this before the generic native-control branch, which normally borrows non-Copy
+            // values for `&str`-style setters and would make `FontFamily`/`Brush` fail to compile.
+            let value = if name == "foreground" {
+                quote! { Some(#value) }
+            } else {
+                value
+            };
+            out.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                value,
+                &receiver,
+                from,
+                table,
+            ));
+            continue;
+        }
         let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
         if is_copy {
             out.extend(emit_field_setter_call(
@@ -7990,6 +8039,50 @@ view NotepadWindow {
         assert!(rendered.contains("Brush :: Solid"));
         assert!(rendered.contains("Color :: rgba"));
         assert!(rendered.contains("set_foreground"));
+    }
+
+    #[test]
+    fn dynamic_font_family_and_foreground_are_owned_text_style_arguments() {
+        let module = parse_module(
+            r#"
+                component FontHost {
+                    #[bindable]
+                    vm: FontDemoViewModel,
+                }
+                view FontHost {
+                    VerticalLayout {
+                        TextBlock {
+                            text: "sample"
+                            font_family: vm.font_family
+                            foreground: vm.foreground
+                        }
+                        Button {
+                            text: "sample"
+                            font_family: vm.font_family
+                            foreground: vm.foreground
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("dynamic_text_style_values", &generated);
+        let rendered = generated.to_string();
+        // `FontFamily` must be passed by value, and `foreground` must preserve the local-value
+        // marker expected by TextStyleOwner rather than following the generic native `&str`
+        // setter path.
+        assert!(rendered.contains("set_font_family (self . vm . font_family ())"));
+        assert!(rendered.contains("set_foreground (Some (self . vm . foreground ()))"));
+        assert!(!rendered.contains("set_font_family (& (self . vm . font_family ()))"));
+    }
+
+    #[test]
+    fn font_family_and_brush_are_not_assumed_copy_by_viewmodels() {
+        assert!(!is_copy_type("FontFamily"));
+        assert!(!is_copy_type("Brush"));
+        assert!(is_copy_type("FontWeight"));
     }
 
     #[test]

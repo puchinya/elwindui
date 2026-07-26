@@ -6,15 +6,16 @@
 //! `elwindui::backend::AnyView` directly — that path must stay stable.
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    Button as XamlButton, Canvas, PasswordBox as XamlPasswordBox, ScrollViewer, TabView as XamlTabView, TextBox as XamlTextBox,
+    Button as XamlButton, Canvas, PasswordBox as XamlPasswordBox, ScrollViewer,
+    TabView as XamlTabView, TextBox as XamlTextBox,
 };
 use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
-use windows::Foundation::Size;
 use elwindui_core::input::RawKeyEvent;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use windows::Foundation::Size;
 use windows::core::Interface;
 
 pub(crate) static NEXT_UI_EVENT_CALLBACK: AtomicUsize = AtomicUsize::new(1);
@@ -51,7 +52,9 @@ pub(crate) fn invoke_ui_event_callback(id: usize) {
 
 pub(crate) fn register_ui_index_event_callback(callback: Rc<dyn Fn(usize)>) -> usize {
     let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
-    UI_INDEX_EVENT_CALLBACKS.with(|callbacks| { callbacks.borrow_mut().insert(id, callback); });
+    UI_INDEX_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
     id
 }
 
@@ -65,7 +68,9 @@ pub(crate) fn invoke_ui_index_event_callback(id: usize, index: usize) {
 
 pub(crate) fn register_ui_key_event_callback(callback: Rc<dyn Fn(RawKeyEvent)>) -> usize {
     let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
-    UI_KEY_EVENT_CALLBACKS.with(|callbacks| { callbacks.borrow_mut().insert(id, callback); });
+    UI_KEY_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
     id
 }
 
@@ -79,7 +84,9 @@ pub(crate) fn invoke_ui_key_event_callback(id: usize, event: RawKeyEvent) {
 
 pub(crate) fn register_ui_text_event_callback(callback: Rc<dyn Fn(String)>) -> usize {
     let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
-    UI_TEXT_EVENT_CALLBACKS.with(|callbacks| { callbacks.borrow_mut().insert(id, callback); });
+    UI_TEXT_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
     id
 }
 
@@ -111,7 +118,12 @@ pub(crate) trait WinUiHandle: elwindui_core::base::AsAny {
     /// `elwindui-backend-appkit::ffi::AppKitHandle::apply_text_style`'s own doc comment for the
     /// full pull-based rationale this mirrors — identical here. **Unverifiable on this machine**;
     /// see `render::text`'s own doc comment.
-    fn apply_text_style(&self, _style: &elwindui_core::graphics::ComputedTextStyle) {}
+    fn apply_text_style(
+        &self,
+        _style: &elwindui_core::graphics::ComputedTextStyle,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
 
     /// Whether this handle actually has somewhere to put a text style (指示書 §17: never treat
     /// "discarded" as "applied").
@@ -124,10 +136,13 @@ impl WinUiHandle for XamlTextBox {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TextBox implements FrameworkElement")
     }
-    fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+    fn apply_text_style(
+        &self,
+        style: &elwindui_core::graphics::ComputedTextStyle,
+    ) -> windows::core::Result<()> {
         let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
             self.cast().expect("TextBox implements Control");
-        let _ = crate::render::apply_text_style_to_control(&control, style);
+        crate::render::apply_text_style_to_control(&control, style)
     }
     fn supports_text_style(&self) -> bool {
         true
@@ -136,12 +151,16 @@ impl WinUiHandle for XamlTextBox {
 
 impl WinUiHandle for XamlPasswordBox {
     fn as_element(&self) -> FrameworkElement {
-        self.cast().expect("PasswordBox implements FrameworkElement")
+        self.cast()
+            .expect("PasswordBox implements FrameworkElement")
     }
-    fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+    fn apply_text_style(
+        &self,
+        style: &elwindui_core::graphics::ComputedTextStyle,
+    ) -> windows::core::Result<()> {
         let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
             self.cast().expect("PasswordBox implements Control");
-        let _ = crate::render::apply_text_style_to_control(&control, style);
+        crate::render::apply_text_style_to_control(&control, style)
     }
     fn supports_text_style(&self) -> bool {
         true
@@ -150,9 +169,13 @@ impl WinUiHandle for XamlPasswordBox {
 
 impl WinUiHandle for ScrollViewer {
     fn as_element(&self) -> FrameworkElement {
-        self.cast().expect("ScrollViewer implements FrameworkElement")
+        self.cast()
+            .expect("ScrollViewer implements FrameworkElement")
     }
-    fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+    fn apply_text_style(
+        &self,
+        style: &elwindui_core::graphics::ComputedTextStyle,
+    ) -> windows::core::Result<()> {
         // `ScrollView`'s own content is a nested `ElwinduiContentRoot` host, not text — mirrors
         // `elwindui-backend-appkit`'s identical `NSScrollView` no-op for the `ScrollView` case.
         // `ScrollViewer` still derives `Control`, so pushing the style is harmless (it would only
@@ -160,7 +183,7 @@ impl WinUiHandle for ScrollViewer {
         // costs nothing to keep consistent with the other three handles.
         let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
             self.cast().expect("ScrollViewer implements Control");
-        let _ = crate::render::apply_text_style_to_control(&control, style);
+        crate::render::apply_text_style_to_control(&control, style)
     }
     fn supports_text_style(&self) -> bool {
         false
@@ -171,10 +194,13 @@ impl WinUiHandle for XamlButton {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("Button implements FrameworkElement")
     }
-    fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+    fn apply_text_style(
+        &self,
+        style: &elwindui_core::graphics::ComputedTextStyle,
+    ) -> windows::core::Result<()> {
         let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
             self.cast().expect("Button implements Control");
-        let _ = crate::render::apply_text_style_to_control(&control, style);
+        crate::render::apply_text_style_to_control(&control, style)
     }
     fn supports_text_style(&self) -> bool {
         true
@@ -203,8 +229,11 @@ impl AnyView {
 
     /// Forwards to the wrapped handle's own `WinUiHandle::apply_text_style` — called by
     /// `NativeControl::sync_text_style` (`native_ui/control.rs`).
-    pub(crate) fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
-        self.0.apply_text_style(style);
+    pub(crate) fn apply_text_style(
+        &self,
+        style: &elwindui_core::graphics::ComputedTextStyle,
+    ) -> windows::core::Result<()> {
+        self.0.apply_text_style(style)
     }
 
     /// Forwards to the wrapped handle's own `WinUiHandle::supports_text_style`.

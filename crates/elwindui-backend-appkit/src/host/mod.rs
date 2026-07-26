@@ -20,8 +20,7 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send,
 };
 use objc2_app_kit::{
-    NSEvent,
-    NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSAppearanceCustomization, NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
@@ -198,6 +197,20 @@ define_class!(
             true
         }
 
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn view_did_change_effective_appearance(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), viewDidChangeEffectiveAppearance];
+            }
+            let name = self.effectiveAppearance().name().to_string();
+            let appearance = if name.contains("Dark") {
+                elwindui_core::theme::ThemeAppearance::Dark
+            } else {
+                elwindui_core::theme::ThemeAppearance::Light
+            };
+            self.theme_handle().set_appearance(appearance);
+        }
+
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking_areas(&self) {
             unsafe {
@@ -336,6 +349,18 @@ impl TreeHostView {
             unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
         *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
         this
+    }
+
+    /// Returns the Window-inherited theme for the hosted tree, or the application theme before a
+    /// tree is attached.
+    pub(crate) fn theme_handle(&self) -> elwindui_core::theme::ThemeHandle {
+        self.ivars()
+            .tree
+            .borrow()
+            .as_ref()
+            .map_or_else(elwindui_core::theme::application_theme, |tree| {
+                tree.theme_handle()
+            })
     }
 
     /// Converts `event`'s own position/modifiers/timestamp and feeds it, together with `kind`, to
@@ -573,6 +598,21 @@ impl TreeHostView {
             .group_native_controls
             .borrow_mut()
             .retain(|id, _| live_group_ids.contains(id));
+        // Every repainted `RenderGroup` container above just moved back to the front of
+        // `root_layer`'s sublayers (`replay_group`'s own doc comment on why: re-`addSublayer`ing
+        // an already-attached container is what keeps *paint* z-order correct across a mix of
+        // rebuilt and cache-hit groups). A native leaf's own island, though, is only ever
+        // `host.addSubview`ed once, the first time it appears (`replay_commands`' `is_new` guard)
+        // — so after any later pass repaints a sibling paint layer (e.g. a themed, now-opaque
+        // `window_background`/`layout_background`), that paint layer ends up stacked back on top
+        // of every native control, hiding it, even though the control itself is still correctly
+        // laid out and attached. Re-adding every still-live native container here brings it back
+        // to the front of `self`'s subviews (AppKit moves an already-attached subview to the top
+        // of the z-order rather than duplicating it), keeping native controls visually above all
+        // painted content on every pass, not just the first.
+        for container in self.ivars().native_containers.borrow().values() {
+            self.addSubview(container);
+        }
     }
 
     /// Looks up which live native leaf `container` (one of `native_containers`' own values — the

@@ -183,6 +183,34 @@ pub struct TextStyleValues {
     pub foreground: Option<Brush>,
 }
 
+/// The property-wise result of local values and Visual-parent inheritance, before backend
+/// defaults are materialized. A remaining `None` is semantically significant: native controls
+/// must clear that platform property instead of receiving a framework-chosen fixed value.
+pub type CascadedTextStyle = TextStyleValues;
+
+impl TextStyleValues {
+    /// Fills only values that are still absent after Visual inheritance.
+    pub fn materialize(&self, fallback: &ComputedTextStyle) -> ComputedTextStyle {
+        ComputedTextStyle {
+            font_family: self
+                .font_family
+                .clone()
+                .unwrap_or_else(|| fallback.font_family.clone()),
+            font_size: self.font_size.unwrap_or(fallback.font_size),
+            font_weight: self.font_weight.unwrap_or(fallback.font_weight),
+            font_style: self.font_style.unwrap_or(fallback.font_style),
+            font_stretch: self.font_stretch.unwrap_or(fallback.font_stretch),
+            character_spacing: self
+                .character_spacing
+                .unwrap_or(fallback.character_spacing),
+            foreground: self
+                .foreground
+                .clone()
+                .unwrap_or_else(|| fallback.foreground.clone()),
+        }
+    }
+}
+
 /// All seven properties resolved — no `Option`s. This is what measurement and drawing consume;
 /// `TextBlock::render`/`measure_override` and every backend's `apply_text_style` take this, never
 /// `TextStyleValues` (指示書 §7: "描画および計測では...解決済みTextStyleを使用すること").
@@ -379,6 +407,26 @@ impl TextStyleStorage {
                 .foreground
                 .clone()
                 .unwrap_or_else(|| inherited.foreground.clone()),
+        }
+    }
+
+    /// Overlays local values onto an inherited cascade without inventing backend defaults.
+    pub fn cascade_onto(&self, inherited: &CascadedTextStyle) -> CascadedTextStyle {
+        let local = self.local.borrow();
+        CascadedTextStyle {
+            font_family: local
+                .font_family
+                .clone()
+                .or_else(|| inherited.font_family.clone()),
+            font_size: local.font_size.or(inherited.font_size),
+            font_weight: local.font_weight.or(inherited.font_weight),
+            font_style: local.font_style.or(inherited.font_style),
+            font_stretch: local.font_stretch.or(inherited.font_stretch),
+            character_spacing: local.character_spacing.or(inherited.character_spacing),
+            foreground: local
+                .foreground
+                .clone()
+                .or_else(|| inherited.foreground.clone()),
         }
     }
 }

@@ -20,7 +20,25 @@ pub use elwindui_svg as svg;
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the
 /// viewmodel half (付録O.2). `view!` is not a real macro (never invoked/expanded — see
 /// `elwindui_macros::component`'s own doc comment); its tokens are read as `.elwind`-DSL text.
-pub use elwindui_macros::{class, component, main, viewmodel};
+pub use elwindui_macros::{class, component, main, theme_definition, viewmodel};
+
+/// Resolves a typed token from the current application theme.
+///
+/// Inside a `view!` body this expression is recognized by the Rust component frontend. A theme
+/// revision then re-applies only attributes whose value uses this macro; `PlatformDefault` takes
+/// the matching property clear path.
+///
+/// # Example
+///
+/// ```ignore
+/// background: theme!(AppTheme::layout_background)
+/// ```
+#[macro_export]
+macro_rules! theme {
+    ($token:path) => {
+        $crate::core::theme::resolve_application_theme($token)
+    };
+}
 
 /// Initializes the native UI runtime selected for the current operating system.
 ///

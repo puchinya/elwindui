@@ -3046,6 +3046,7 @@ fn generate_view(
     let mut field_inits = TokenStream::new();
     let mut wiring_stmts = TokenStream::new();
     let mut resync_stmts = TokenStream::new();
+    let mut theme_resync_stmts = TokenStream::new();
     // `#[id("...")]` bindings (§13) — a monomorphized `pub fn <id>(&self) -> Rc<ConcreteType>`
     // per binding, not a runtime string-keyed lookup (every `#[id(...)]` name is fixed at compile
     // time, so a plain accessor is strictly sufficient — see docs/elwindui_spec.md §13 and
@@ -3450,8 +3451,17 @@ fn generate_view(
                 &ctx,
                 from,
                 table,
-                None,
+                ResyncFilter::All,
                 &mut resync_stmts,
+                self_is_node,
+            );
+            emit_resync(
+                node,
+                &ctx,
+                from,
+                table,
+                ResyncFilter::Theme,
+                &mut theme_resync_stmts,
                 self_is_node,
             );
         }
@@ -3572,6 +3582,36 @@ fn generate_view(
             }
         })
         .collect();
+    let uses_theme = plan.iter().any(|node| {
+        node.attributes
+            .iter()
+            .any(|(_, expression)| theme_token_path(expression).is_some())
+    });
+    // A Window host always tracks the application handle, even when its view has no explicit
+    // `theme!` expression. Native controls resolve their standard tokens automatically, so a
+    // variant change must still invalidate and restyle that hosted tree.
+    if is_host_composition {
+        let sync_window_theme = quote! {
+            elwindui::core::ui::WindowExt::set_theme(
+                self,
+                Some(elwindui::core::theme::application_theme()),
+            );
+        };
+        resync_stmts.extend(sync_window_theme.clone());
+        theme_resync_stmts.extend(sync_window_theme);
+    }
+    let theme_subscribe_stmt = (uses_theme || is_host_composition).then(|| {
+        quote! {
+            {
+                let weak = std::rc::Rc::downgrade(&this);
+                elwindui::core::theme::subscribe_application_theme(move |_| {
+                    if let Some(this) = weak.upgrade() {
+                        this.__resync_theme();
+                    }
+                });
+            }
+        }
+    });
     // Only real-anchored (top-level) dynamic nodes get their own top-level statement here — a
     // nested one (Phase 1) has no entry in any real element's own `child_bindings`, so the `find`
     // below returns `None` for it and `?` skips it; it's reached instead through
@@ -3831,7 +3871,7 @@ fn generate_view(
                     &ctx,
                     from,
                     table,
-                    Some(("", &property_name)),
+                    ResyncFilter::Property("", &property_name),
                     &mut statements,
                     self_is_node,
                 );
@@ -3887,6 +3927,9 @@ fn generate_view(
         let resync_method = mark_inherent(quote! {
             fn resync(&self) {
                 #resync_stmts
+            }
+            fn __resync_theme(&self) {
+                #theme_resync_stmts
             }
         });
         let root_embed_method = mark_inherent(root_embed_method);
@@ -3962,6 +4005,7 @@ fn generate_view(
                     this.resync();
                     #component_self_subscription
                     #subscribe_stmts
+                    #theme_subscribe_stmt
                     #on_mount_stmt
                 }
 
@@ -3998,12 +4042,17 @@ fn generate_view(
                     this.__refresh_dynamic_regions();
                     #component_self_subscription
                     #subscribe_stmts
+                    #theme_subscribe_stmt
                     #on_mount_stmt
                     this
                 }
 
                 fn resync(&self) {
                     #resync_stmts
+                }
+
+                fn __resync_theme(&self) {
+                    #theme_resync_stmts
                 }
 
                 #property_resync_methods
@@ -5690,6 +5739,64 @@ fn emit_field_setter_call(
     }
 }
 
+/// Returns the typed associated-const path inside `theme!(ThemeType::token)`. The component
+/// attribute consumes `view!` before ordinary macro expansion, so theme references must be
+/// recognized structurally here.
+fn theme_token_path(expr: &ViewExpr) -> Option<syn::Path> {
+    let ViewExpr::Expr(syn::Expr::Macro(expr_macro)) = expr else {
+        return None;
+    };
+    if !expr_macro
+        .mac
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "theme" || segment.ident == "theme_value")
+    {
+        return None;
+    }
+    syn::parse2(expr_macro.mac.tokens.clone()).ok()
+}
+
+/// Emits the reset half of a themed property assignment. Text style values use their orthogonal
+/// owner trait; ordinary inherited fields use the same declaring-trait UFCS disambiguation as
+/// `emit_field_setter_call`.
+fn emit_field_clear_call(
+    name: &str,
+    node_type: &str,
+    receiver: &TokenStream,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let clear = format_ident!("clear_{name}");
+    if crate::text_style::is_text_style_field_name(name) {
+        return quote! {
+            elwindui::core::ui::UIElementExt::as_text_style_owner(&*(#receiver))
+                .expect(concat!(
+                    "`", #name, "` was declared with #[text_style] but the resolved node has no \
+                     TextStyleOwner at runtime"
+                ))
+                .#clear();
+        };
+    }
+    let declaring_type = table
+        .resolve(from, node_type)
+        .and_then(|info| info.declaring_types.get(name));
+    match declaring_type {
+        Some(declarer) if declarer != node_type => {
+            let declarer_info = table.resolve(from, declarer);
+            let ext_ident = format_ident!("{declarer}Ext");
+            let ext_path = if declarer_info.is_some_and(|info| info.is_builtin) {
+                quote! { elwindui::ui::#ext_ident }
+            } else {
+                quote! { #ext_ident }
+            };
+            quote! { #ext_path::#clear(&*(#receiver)); }
+        }
+        _ => quote! { #receiver.#clear(); },
+    }
+}
+
 fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
     if info.is_some_and(|i| i.is_native || i.is_virtual_builtin) {
         let ext_ident = format_ident!("{type_path}Ext");
@@ -5970,6 +6077,14 @@ fn build_component_args(
 
         let (inner_ty, is_option) = strip_option(ty);
         let attr = find_attr(node, name);
+        // A theme reference on an optional generated-component field is applied by the ordinary
+        // post-construction `resync()` setter/clear path. Construct the component with no local
+        // value first so `PlatformDefault` has an honest representation and the raw
+        // `ThemeValue<T>` is never forced into `Option<T>`.
+        if is_option && attr.and_then(theme_token_path).is_some() {
+            args.push(quote! { None });
+            continue;
+        }
         let value = match attr {
             Some(ViewExpr::Element(_)) => {
                 let (nested_binding, nested_ty) = node
@@ -6147,6 +6262,32 @@ fn build_component_setters(
 
         let (inner_ty, is_option) = strip_option(ty);
         let attr = find_attr(node, name);
+        if let Some(token) = attr.and_then(theme_token_path) {
+            let themed_value = if name == "foreground" {
+                quote! { Some(__theme_value) }
+            } else {
+                quote! { __theme_value }
+            };
+            let receiver = quote! { #binding };
+            let set = emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter_ident,
+                themed_value,
+                &receiver,
+                from,
+                table,
+            );
+            let clear =
+                emit_field_clear_call(name, &node.type_path, &receiver, from, table);
+            setters.push(quote! {
+                match #binding.theme_handle().resolve(#token) {
+                    elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
+                    elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
+                }
+            });
+            continue;
+        }
         let value = match attr {
             Some(ViewExpr::Element(_)) => {
                 let (nested_binding, nested_ty) = node
@@ -6767,6 +6908,43 @@ fn build_virtual_value(
             }
             panic!("`{}` requires attribute `{name}`", node.type_path);
         };
+        if let Some(token) = theme_token_path(expr) {
+            if crate::text_style::is_text_style_field_name(name) {
+                needs_text_style_trait = true;
+            } else if common_field_names.contains(name.as_str()) {
+                needs_ui_element_ext = true;
+            } else {
+                needs_type_trait = true;
+            }
+            let themed_value = if name == "foreground"
+                || (is_option
+                    && !crate::text_style::is_text_style_field_name(name)
+                    && !is_copy_type(inner_ty))
+            {
+                quote! { Some(__theme_value) }
+            } else {
+                quote! { __theme_value }
+            };
+            let receiver = quote! { __v };
+            let set = emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                themed_value,
+                &receiver,
+                from,
+                table,
+            );
+            let clear =
+                emit_field_clear_call(name, &node.type_path, &receiver, from, table);
+            setters.extend(quote! {
+                match __v.theme_handle().resolve(#token) {
+                    elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
+                    elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
+                }
+            });
+            continue;
+        }
         let value = if let Some(coerced) = coerce_color_literal(inner_ty, expr) {
             if is_option {
                 quote! { Some(#coerced) }
@@ -7406,7 +7584,7 @@ fn property_resync_methods_for(
                             ctx,
                             from,
                             table,
-                            Some((&owner_name, property_name)),
+                            ResyncFilter::Property(&owner_name, property_name),
                             &mut statements,
                             self_is_node,
                         );
@@ -7486,12 +7664,19 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
     }
 }
 
+#[derive(Clone, Copy)]
+enum ResyncFilter<'a> {
+    All,
+    Property(&'a str, &'a str),
+    Theme,
+}
+
 fn emit_resync(
     node: &PlannedNode,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
-    filter: Option<(&str, &str)>,
+    filter: ResyncFilter<'_>,
     out: &mut TokenStream,
     self_is_node: bool,
 ) {
@@ -7543,10 +7728,15 @@ fn emit_resync(
         if matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. }) {
             continue;
         }
-        if let Some((owner, property)) = filter {
-            if !view_expr_depends_on(expr, ctx, owner, property) {
+        match filter {
+            ResyncFilter::All => {}
+            ResyncFilter::Property(owner, property)
+                if !view_expr_depends_on(expr, ctx, owner, property) =>
+            {
                 continue;
             }
+            ResyncFilter::Theme if theme_token_path(expr).is_none() => continue,
+            ResyncFilter::Property(_, _) | ResyncFilter::Theme => {}
         }
         // `#[onetime]` fields (`Window`'s own `left`/`top`/`width`/`height`,
         // docs/elwindui_builtins_spec.md 付録F.1) are one-time initial-placement/size setters,
@@ -7588,6 +7778,42 @@ fn emit_resync(
         let field_ty = info
             .and_then(|i| i.field_types.get(name))
             .map(String::as_str);
+        if let Some(token) = theme_token_path(expr) {
+            let themed_value = if crate::text_style::is_text_style_field_name(name) {
+                if name == "foreground" {
+                    quote! { Some(__theme_value) }
+                } else {
+                    quote! { __theme_value }
+                }
+            } else if field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0)) {
+                quote! { __theme_value }
+            } else if node_uses_owned_setters {
+                virtual_builtin_resync_value(
+                    field_ty.unwrap_or(""),
+                    quote! { __theme_value },
+                )
+            } else {
+                quote! { __theme_value }
+            };
+            let set = emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                themed_value,
+                &receiver,
+                from,
+                table,
+            );
+            let clear =
+                emit_field_clear_call(name, &node.type_path, &receiver, from, table);
+            out.extend(quote! {
+                match #receiver.theme_handle().resolve(#token) {
+                    elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
+                    elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
+                }
+            });
+            continue;
+        }
         if let Some(coerced) = coerce_color_literal(strip_option(field_ty.unwrap_or("")).0, expr) {
             // `virtual_builtin_resync_value` would otherwise splice the raw (uncoerced) literal
             // straight into `Some(..)`/the bare setter argument — this mirrors its own
@@ -8079,6 +8305,42 @@ view NotepadWindow {
     }
 
     #[test]
+    fn theme_references_generate_typed_set_clear_and_theme_only_resync() {
+        let module = parse_module(
+            r#"
+                component ThemeHost { }
+                view ThemeHost {
+                    VerticalLayout {
+                        background: theme!(AppTheme::layout_background)
+                        spacing: theme!(AppTheme::layout_spacing)
+                        TextBlock {
+                            text: "sample"
+                            foreground: theme!(AppTheme::text_block_foreground)
+                        }
+                        Button {
+                            text: "native"
+                            background: theme!(AppTheme::button_background)
+                            foreground: theme!(AppTheme::button_foreground)
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("theme source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("typed_theme_references", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("theme_handle () . resolve"));
+        assert!(rendered.contains("ThemeValue :: Value"));
+        assert!(rendered.contains("ThemeValue :: PlatformDefault"));
+        assert!(rendered.contains("clear_background"));
+        assert!(rendered.contains("clear_foreground"));
+        assert!(rendered.contains("subscribe_application_theme"));
+        assert!(rendered.contains("fn __resync_theme"));
+    }
+
+    #[test]
     fn font_family_and_brush_are_not_assumed_copy_by_viewmodels() {
         assert!(!is_copy_type("FontFamily"));
         assert!(!is_copy_type("Brush"));
@@ -8389,6 +8651,8 @@ view NotepadWindow {
         let rendered = generated.to_string();
         assert!(rendered.contains("fn __refresh_dynamic_regions"));
         assert!(rendered.contains("set_content"));
+        assert!(rendered.contains("subscribe_application_theme"));
+        assert!(rendered.contains("WindowExt :: set_theme"));
         assert!(!rendered.contains("DynamicChildSlot"));
     }
 

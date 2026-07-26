@@ -2,6 +2,8 @@
 
 use super::MenuBar;
 use crate::inner::InnerWindow;
+use elwindui_core::theme::{ThemeContext, ThemeHandle};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// `component X inherits Window` ("host composition", docs/elwindui_spec.md 付録H.2.1a) is what
@@ -11,6 +13,8 @@ use std::rc::Rc;
 #[elwindui_macros::class(struct_only = elwindui_core::ui::WindowExt)]
 pub struct Window {
     inner: InnerWindow,
+    theme: RefCell<Option<ThemeHandle>>,
+    content: RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>,
 }
 
 #[elwindui_macros::class]
@@ -21,6 +25,8 @@ impl Window {
     fn construct() -> Self {
         Self {
             inner: InnerWindow::new(),
+            theme: RefCell::new(None),
+            content: RefCell::new(None),
         }
     }
 
@@ -37,7 +43,29 @@ impl Window {
     }
 
     fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
-        self.inner.set_content(content);
+        content.set_theme_context(
+            self.theme
+                .borrow()
+                .clone()
+                .map(ThemeContext::new),
+        );
+        self.inner.set_content(content.clone());
+        *self.content.borrow_mut() = Some(content);
+    }
+
+    fn set_theme(&self, theme: Option<ThemeHandle>) {
+        *self.theme.borrow_mut() = theme.clone();
+        if let Some(content) = self.content.borrow().as_ref() {
+            content.set_theme_context(theme.map(ThemeContext::new));
+        }
+        // Do not keep the RefCell borrow alive while asking the backend for `ActualTheme`.
+        // Reporting a changed effective appearance publishes another theme revision, which
+        // synchronously re-enters this setter through the generated component subscription.
+        let preference = self.theme.borrow().as_ref().map_or_else(
+            || elwindui_core::theme::application_theme().preference(),
+            ThemeHandle::preference,
+        );
+        self.inner.set_theme_preference(preference);
     }
 
     fn show(&self) {

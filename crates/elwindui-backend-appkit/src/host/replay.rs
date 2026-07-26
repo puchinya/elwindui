@@ -534,6 +534,7 @@ pub(crate) fn replay_paint_command(
             content,
             rect,
             style,
+            foreground,
             alignment,
         } => {
             let text_layer = CATextLayer::new();
@@ -556,7 +557,10 @@ pub(crate) fn replay_paint_command(
             // painted glyphs always match what was measured.
             unsafe {
                 text_layer.setString(Some(&crate::render::attributed_string(
-                    content, style, *alignment,
+                    content,
+                    style,
+                    foreground.as_ref(),
+                    *alignment,
                 )));
             }
             // Matches `render::vector`'s own `contentsScale` inheritance (see that module's doc

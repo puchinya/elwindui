@@ -80,6 +80,46 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Declares a typed Rust theme.
+///
+/// The annotated struct is a declaration surface; its fields become typed tokens and the
+/// expansion emits a variant enum plus a live `ThemeController`. The name is intentionally
+/// `theme_definition` because Rust uses one macro namespace for attribute and function-like
+/// macros, while token references reserve the shorter `theme!(...)` spelling.
+///
+/// # Example
+///
+/// ```ignore
+/// #[elwindui::theme_definition(
+///     extends = SystemTheme,
+///     variants(Default, Ocean)
+/// )]
+/// struct AppTheme {
+///     #[theme(default = platform_default, Ocean = Brush::Solid(Color::rgb(0, 80, 120)))]
+///     layout_background: Brush,
+///
+///     #[theme(default = Brush::Solid(Color::rgb(39, 103, 216)))]
+///     brand: Brush,
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn theme_definition(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item_struct = match syn::parse::<syn::ItemStruct>(item) {
+        Ok(item) => item,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    match elwindui_codegen::theme_frontend::generate_theme_from_item_struct(
+        attr.into(),
+        &item_struct,
+    ) {
+        Ok(output) => output.into(),
+        Err(error) => syn::Error::new_spanned(item_struct, error)
+            .to_compile_error()
+            .into(),
+    }
+}
+
+
 /// Parses `#[component]`'s own argument list: empty (no base), or exactly `inherits Base` (no
 /// `=`, matching the DSL's own `component Name inherits Base` spelling — unlike `#[class]`'s
 /// `inherits = ..` convention).

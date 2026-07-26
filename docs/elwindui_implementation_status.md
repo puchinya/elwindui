@@ -107,7 +107,7 @@
 | MVVM(`viewmodel`/アクション) | `docs/elwindui_gui_framework_design.md`§7.2 | 実装済み。`#[observable]`/`#[computed]`と、`impl`ブロックの`fn`/`async fn`から自動検出されるアクションが動作し、`examples/notepad`のMVVM構成で実際に使われている |
 | 非同期処理 | `docs/elwindui_gui_framework_design.md`§7.3 | 部分実装。`spawn`相当(`spawn_local`)は実装済みで`examples/notepad`が使用。`AsyncState<T>`/`#[async_computed]`/`task!`マクロは未実装 |
 | リスト仮想化(`VirtualList`) | `docs/elwindui_builtins_spec.md`付録Q | 未実装 |
-| テーマ/デザイントークン(`theme`) | `docs/elwindui_gui_framework_design.md`§8.5 | 未実装 |
+| テーマ/デザイントークン(`#[elwindui::theme_definition]` / `theme!`) | `docs/elwindui_theme_status.md` | Rust属性ベースの型付きtheme runtime、application/Window context、標準・独自token、variant/appearance、backend既定値へのclear、Layout背景、WinUI 3/AppKit adapterとappearance監視、`examples/theme-demo`、Windows UI Automation操作テストまで実装済み。GTK4、WinUI High Contrast通知、公開setterが未実装のnative state token適用は未対応 |
 | エラーバウンダリ(`ErrorBoundary`) | `docs/elwindui_gui_framework_design.md`§8.6 | 未実装(`.elwind`宣言なし) |
 | クリップボード/D&D/ファイルダイアログ | `docs/elwindui_builtins_spec.md`付録T | §3参照(file_dialogのみ実装) |
 | Undo/Redo(`#[undoable]`) | `docs/elwindui_gui_framework_design.md`§7.4 | 未実装 |

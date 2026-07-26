@@ -308,6 +308,30 @@ impl<'a> RenderContext<'a> {
             content: text.into(),
             rect,
             style: style.clone(),
+            foreground: Some(style.foreground.clone()),
+            alignment,
+        });
+    }
+
+    /// Records text whose foreground may remain a platform default.
+    ///
+    /// [`UIElement`](crate::ui::UIElement) implementations use this when text inheritance leaves
+    /// `foreground` unset. `style` remains fully materialized so measurement is deterministic,
+    /// but a `None` value lets native text renderers clear a previous local foreground and follow
+    /// the active platform appearance.
+    pub fn draw_text_with_foreground(
+        &mut self,
+        text: &str,
+        rect: Rect,
+        style: &ComputedTextStyle,
+        foreground: Option<&Brush>,
+        alignment: TextAlignment,
+    ) {
+        self.commands.push(RenderCommand::Text {
+            content: text.into(),
+            rect,
+            style: style.clone(),
+            foreground: foreground.cloned(),
             alignment,
         });
     }

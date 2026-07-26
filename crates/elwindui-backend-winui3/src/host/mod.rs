@@ -319,6 +319,17 @@ impl TreeHostPanel {
         this
     }
 
+    /// Returns the Window-inherited theme for the hosted tree, or the application theme before a
+    /// tree is attached.
+    pub(crate) fn theme_handle(&self) -> elwindui_core::theme::ThemeHandle {
+        self.tree
+            .borrow()
+            .as_ref()
+            .map_or_else(elwindui_core::theme::application_theme, |tree| {
+                tree.theme_handle()
+            })
+    }
+
     pub(crate) fn as_element(&self) -> FrameworkElement {
         self.canvas.cast().expect("Canvas must be a FrameworkElement")
     }
@@ -840,6 +851,7 @@ impl TreeHostPanel {
                     content,
                     rect,
                     style,
+                    foreground,
                     alignment,
                 } => {
                     native_wanted.push((
@@ -853,6 +865,7 @@ impl TreeHostPanel {
                                 height: rect.height,
                             },
                             style: style.clone(),
+                            foreground: foreground.clone(),
                             alignment: *alignment,
                         },
                     ));
@@ -923,6 +936,4 @@ impl TreeHostPanel {
         }
     }
 }
-
-
 

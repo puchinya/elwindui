@@ -36,6 +36,11 @@ headers):
 
 ## Core architectural rules to preserve when implementing
 
+- **Public APIs require rustdoc**: every newly added or changed public type, trait, enum variant,
+  field, function, method, macro, and generated public item must have useful `///`/`//!`
+  documentation written in English. Document behavioral contracts and sentinel/reset semantics
+  (for example, `PlatformDefault`) rather than merely repeating the item name; add a compilable
+  example when the API is not self-explanatory.
 - **`param` vs `prop`**: `#[param]` fields are fixed at instantiation and may only use static-evaluable expressions (literals, other params, pure builtins, `env::*`, `once` values) — never `bind!`, prop references, or impure calls. Default (`prop`) fields are runtime-mutable and support `bind!`/`#[computed]`. This split is what the §14 rules exist to enforce; don't weaken it for convenience.
 - **Enums are the only value-set mechanism** — no anonymous unions. `match` over an enum must be exhaustive; missing arms are a compile error by design. Note: the spec's built-in `Backend` and `Route` enums (and `target::backend()`/`NavigationHost` themselves) are **not implemented yet** — see `docs/elwindui_implementation_status.md` — so this exhaustiveness rule currently only bites for user-defined enums, not those two.
 - **`native!` and `target::backend()` are restricted**: only reachable from `#[overrides(builtin::X)]` components or other builtins — arbitrary user components must not call into backend-specific code directly (rules 9/15). This is a forward-looking rule: `target::backend()` itself doesn't exist in code yet (backend selection today is Cargo feature flags — `backend-appkit`/`backend-winui3`/`backend-gtk4` on the `elwindui` facade crate), so there's nothing to enforce this against currently.

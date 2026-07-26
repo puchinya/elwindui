@@ -690,7 +690,9 @@ pub(crate) fn resolve_effective_fields<'m>(
             base_fields
                 .into_iter()
                 .filter(|f| {
-                    f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                    f.attrs
+                        .iter()
+                        .any(|a| matches!(a, Attr::Routed | Attr::TextStyle))
                         || common_fields.contains(f.name.as_str())
                         || view_references_bare_name(view, &f.name)
                 })
@@ -736,7 +738,9 @@ fn resolve_field_declaring_types(
                     let kept_names: HashSet<&str> = base_fields
                         .iter()
                         .filter(|f| {
-                            f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                            f.attrs
+                                .iter()
+                                .any(|a| matches!(a, Attr::Routed | Attr::TextStyle))
                                 || common_fields.contains(f.name.as_str())
                                 || view_references_bare_name(view, &f.name)
                         })
@@ -1382,7 +1386,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                     fields: info.effective_fields.clone(),
                     methods: info.effective_methods.clone(),
                     // Irrelevant downstream: `generate_component`/`generate_view` never consult
-                    // `embedded`/`sealed`/`native`/`is_abstract`/`content_field` (only
+                    // `embedded`/`sealed`/`native`/`is_abstract`/`text_style`/`content_field` (only
                     // `validate::validate`/`TypeInfo::sealed`/`TypeInfo::is_native`/
                     // `TypeInfo::is_abstract`/`TypeInfo::content_field`, all already checked/computed
                     // against the *original* `c`, do).
@@ -1390,6 +1394,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                     sealed: false,
                     native: false,
                     is_abstract: false,
+                    text_style: false,
                     content_field: None,
                 };
                 match &info.effective_view {
@@ -1441,7 +1446,10 @@ fn is_copy_type(ty: &str) -> bool {
         // known non-Copy std type is assumed to be one of this file's own enums (all generated with
         // `derive(Copy)`, see `generate_enum`).
         ty.chars().next().is_some_and(|c| c.is_uppercase())
-            && ty != "String"
+            // These backend-independent graphics value types are intentionally Clone but not
+            // Copy. Attribute-macro viewmodels commonly import them under these bare names, where
+            // full type resolution is unavailable to this frontend.
+            && !matches!(ty, "String" | "FontFamily" | "Brush")
             && !ty.contains('<')
             && !ty.contains("::")
     }
@@ -3683,53 +3691,54 @@ fn generate_view(
     // the outer `Rc` exists (`set_content`'s own parent-pointer wiring needs a real, upgradable
     // self-weak — see `UIElement::construct`'s own `__self_weak` doc comment), so this always runs
     // from the generated `on_constructed`, never from `construct` itself.
-    let (content_capture_stmt, content_attach_stmt) =
-        if is_shape_composition && resolved_root.type_path == "ContentControl" {
-            let (content_binding, content_type) = plan
-                .last()
-                .and_then(|root| root.child_bindings.first())
-                .unwrap_or_else(|| panic!("ContentControl composition requires one content child"));
-            // `#content_binding` is a real, already-stored struct field (see `struct_fields`/
-            // `field_inits` above), reachable directly off `&self` — no capture step needed.
-            let content = into_node_if_needed(
-                quote! { self.#content_binding.clone() },
-                content_type,
-                from,
-                table,
-            );
-            (
-                TokenStream::new(),
-                quote! {
-                    {
-                        use elwindui::core::ui::ContentControlExt as _;
-                        self.set_content(#content);
-                    }
-                },
-            )
-        } else if is_template_composition && component.base.as_deref() == Some("ContentControl") {
-            // Unlike the shape-composition case above, `content`/`padding` are `construct`'s own
-            // parameters, not stored fields — `on_constructed` has no parameters of its own to read
-            // them back from, so `construct` stashes them in this hidden field for `on_constructed`
-            // to drain exactly once.
-            struct_fields.extend(quote! {
+    let (content_capture_stmt, content_attach_stmt) = if is_shape_composition
+        && resolved_root.type_path == "ContentControl"
+    {
+        let (content_binding, content_type) = plan
+            .last()
+            .and_then(|root| root.child_bindings.first())
+            .unwrap_or_else(|| panic!("ContentControl composition requires one content child"));
+        // `#content_binding` is a real, already-stored struct field (see `struct_fields`/
+        // `field_inits` above), reachable directly off `&self` — no capture step needed.
+        let content = into_node_if_needed(
+            quote! { self.#content_binding.clone() },
+            content_type,
+            from,
+            table,
+        );
+        (
+            TokenStream::new(),
+            quote! {
+                {
+                    use elwindui::core::ui::ContentControlExt as _;
+                    self.set_content(#content);
+                }
+            },
+        )
+    } else if is_template_composition && component.base.as_deref() == Some("ContentControl") {
+        // Unlike the shape-composition case above, `content`/`padding` are `construct`'s own
+        // parameters, not stored fields — `on_constructed` has no parameters of its own to read
+        // them back from, so `construct` stashes them in this hidden field for `on_constructed`
+        // to drain exactly once.
+        struct_fields.extend(quote! {
                 __deferred_content_attach: std::cell::RefCell<Option<(Option<f32>, std::rc::Rc<dyn elwindui::core::ui::UIElementExt>)>>,
             });
-            field_inits.extend(quote! {
-                __deferred_content_attach: std::cell::RefCell::new(Some((padding, content.clone()))),
-            });
-            (
-                TokenStream::new(),
-                quote! {
-                    if let Some((padding, content)) = self.__deferred_content_attach.borrow_mut().take() {
-                        use elwindui::core::ui::ContentControlExt as _;
-                        self.set_padding(padding.unwrap_or_default());
-                        self.set_content(content);
-                    }
-                },
-            )
-        } else {
-            (TokenStream::new(), TokenStream::new())
-        };
+        field_inits.extend(quote! {
+            __deferred_content_attach: std::cell::RefCell::new(Some((padding, content.clone()))),
+        });
+        (
+            TokenStream::new(),
+            quote! {
+                if let Some((padding, content)) = self.__deferred_content_attach.borrow_mut().take() {
+                    use elwindui::core::ui::ContentControlExt as _;
+                    self.set_padding(padding.unwrap_or_default());
+                    self.set_content(content);
+                }
+            },
+        )
+    } else {
+        (TokenStream::new(), TokenStream::new())
+    };
 
     // `#target`'s own class-hierarchy declaration (docs/elwindui_spec.md 付録H.2.1a). A composed
     // component (`is_shape_composition`/`is_template_composition`/`is_host_composition`) is declared
@@ -4484,15 +4493,14 @@ fn for_body_binds_item_to_a_bindable_field(
 ) -> bool {
     body.iter().any(|entry| match entry {
         ChildEntry::Literal(element) => {
-            let bound_here = table
-                .resolve(from, &element.type_path)
-                .is_some_and(|info| {
-                    element.attributes.iter().any(|(name, value)| {
-                        matches!(value, ViewExpr::Path(path) if path.len() == 1 && path[0] == binding)
-                            && info.bindable_fields.contains(name)
-                    })
-                });
-            bound_here || for_body_binds_item_to_a_bindable_field(&element.children, binding, from, table)
+            let bound_here = table.resolve(from, &element.type_path).is_some_and(|info| {
+                element.attributes.iter().any(|(name, value)| {
+                    matches!(value, ViewExpr::Path(path) if path.len() == 1 && path[0] == binding)
+                        && info.bindable_fields.contains(name)
+                })
+            });
+            bound_here
+                || for_body_binds_item_to_a_bindable_field(&element.children, binding, from, table)
         }
         ChildEntry::If {
             then_branch,
@@ -5190,7 +5198,8 @@ fn plan_dynamic_entry(
                 dynamic: None,
             };
             let item_trait = dynamic_collection_item_trait(&parent, from, table);
-            let rc_identity = collection_uses_rc_identity(collection, body, binding, ctx, from, table);
+            let rc_identity =
+                collection_uses_rc_identity(collection, body, binding, ctx, from, table);
             let renderer =
                 emit_for_renderer(binding, body, ctx, from, table, &item_trait, rc_identity);
             let node_binding = format_ident!("__node_{}", out.len());
@@ -5413,7 +5422,14 @@ fn bare_own_field_type(expr: &ViewExpr, ctx: &ViewCtx) -> Option<String> {
         }
         _ => ty.as_str(),
     };
-    Some(inner.rsplit("::").next().unwrap_or(inner).trim().to_string())
+    Some(
+        inner
+            .rsplit("::")
+            .next()
+            .unwrap_or(inner)
+            .trim()
+            .to_string(),
+    )
 }
 
 fn into_node_if_needed(
@@ -5620,6 +5636,32 @@ fn emit_field_setter_call(
     from: &Module,
     table: &SymbolTable,
 ) -> TokenStream {
+    // One of the seven `#[text_style]`-injected properties: the real setter always lives on the
+    // hand-written `TextStyleOwner` trait (`crates/elwindui-core/src/ui.rs`), never on whichever
+    // builtin's own `..Ext` trait `declaring_types` would otherwise point at (`NativeControlExt`/
+    // `ControlExt`/`TextBlockExt` don't declare `set_font_size` etc. at all — `#[class]` never
+    // generated them, `TextStyleOwner` is a plain hand-written trait orthogonal to that whole
+    // mechanism). `receiver`'s own concrete type is *not* guaranteed to implement `TextStyleOwner`
+    // directly — a user `component X inherits Control` (or `inherits ContentControl`) generates a
+    // struct composing `base: Control` (shape/template composition, `ComponentDef`'s own doc
+    // comment) with no `impl TextStyleOwner for X` of its own. `UIElementExt::as_text_style_owner`
+    // *is* part of the `#[class]` ancestor-forwarding chain (declared `#[overridable]` on
+    // `UIElement`, overridden by `Control`/`TextBlock`/each backend's `NativeControl`), so it
+    // already resolves correctly through any such composition without needing a matching
+    // `TextStyleOwner` impl on every intermediate generated struct — going through it here (rather
+    // than `TextStyleOwner::#setter` directly) is what makes this work for a composed type, not
+    // just the three classes that implement `TextStyleOwner` by hand. Always fully path-qualified,
+    // so no `use` needs to be threaded through for it (mirrors the ordinary UFCS branch below).
+    if crate::text_style::is_text_style_field_name(name) {
+        return quote! {
+            elwindui::core::ui::UIElementExt::as_text_style_owner(&*(#receiver))
+                .expect(concat!(
+                    "`", #name, "` was declared with #[text_style] but the resolved node has no \
+                     TextStyleOwner at runtime — this is an elwindui-codegen bug, not a user error"
+                ))
+                .#setter(#args);
+        };
+    }
     let declaring_type = table
         .resolve(from, node_type)
         .and_then(|info| info.declaring_types.get(name));
@@ -5945,7 +5987,11 @@ fn build_component_args(
             }
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
-                    coerced
+                    if name == "foreground" {
+                        quote! { Some(#coerced) }
+                    } else {
+                        coerced
+                    }
                 } else {
                     let value = emit_expr(other, ctx, &EmitMode::Construction);
                     // A `String`-shaped param takes `&str` in every *hand-written* builtin (matching
@@ -6117,8 +6163,14 @@ fn build_component_setters(
                 emit_closure_value(params, body, ctx, from, table)
             }
             Some(other) => {
-                let value = emit_expr(other, ctx, &EmitMode::Construction);
-                if inner_ty == "String" {
+                let value = if let Some(coerced) = coerce_color_literal(inner_ty, other) {
+                    coerced
+                } else {
+                    emit_expr(other, ctx, &EmitMode::Construction)
+                };
+                if name == "foreground" {
+                    quote! { Some(#value) }
+                } else if inner_ty == "String" {
                     quote! { &(#value) }
                 } else if inner_ty.contains("dyn UIElement") {
                     // Mirrors `build_component_args`/`build_virtual_value`'s identically-named
@@ -6222,7 +6274,9 @@ fn build_component_optional_setters(
                     // type, e.g. `String` — not `&str` the way a hand-written builtin's setter does
                     // (`build_component_setters`) — matching `build_component_args`'s own
                     // `has_view`-conditional `.to_string()` convention.
-                    if inner_ty == "String" {
+                    if name == "foreground" {
+                        quote! { Some(#value) }
+                    } else if inner_ty == "String" {
                         quote! { (#value).to_string() }
                     } else {
                         value
@@ -6682,6 +6736,12 @@ fn build_virtual_value(
     // its setter lives on `UIElementExt`, not `#ext_ident` (`{type_path}Ext`), so it needs its own
     // trait import.
     let mut needs_ui_element_ext = false;
+    // One of `#[text_style]`'s seven injected properties (`font_size`/`foreground`/...) — its
+    // setter lives on the hand-written `TextStyleOwner` trait (`crates/elwindui-core/src/ui.rs`),
+    // never on `#ext_ident` (`#[class]` never generates a text-style setter onto `TextBlockExt`/
+    // `ControlExt` — see `emit_field_setter_call`'s own matching branch for the native-leaf/
+    // `emit_resync` side of this same rule), so a dot-call here needs its own trait import too.
+    let mut needs_text_style_trait = false;
     for (name, ty) in &info.param_fields {
         let setter = format_ident!("set_{name}");
         let is_content = info.content_field.as_deref() == Some(name.as_str());
@@ -6715,7 +6775,12 @@ fn build_virtual_value(
             }
         } else {
             let value = emit_expr(expr, ctx, &EmitMode::Construction);
-            if is_option && inner_ty == "String" {
+            if is_option && name == "foreground" {
+                // `TextStyleOwner::set_foreground` records a local brush as `Some(Brush)`.
+                // Unlike the other six text-style setters, it deliberately keeps that Option in
+                // its public signature, so a dynamic Brush expression needs an explicit wrapper.
+                quote! { Some(#value) }
+            } else if is_option && inner_ty == "String" {
                 if is_own_option_field(expr) {
                     value
                 } else {
@@ -6738,7 +6803,9 @@ fn build_virtual_value(
                 value
             }
         };
-        if common_field_names.contains(name.as_str()) {
+        if crate::text_style::is_text_style_field_name(name) {
+            needs_text_style_trait = true;
+        } else if common_field_names.contains(name.as_str()) {
             needs_ui_element_ext = true;
         } else {
             needs_type_trait = true;
@@ -6755,12 +6822,15 @@ fn build_virtual_value(
     });
     let ui_element_ext_use =
         needs_ui_element_ext.then(|| quote! { use elwindui::core::ui::UIElementExt as _; });
+    let text_style_trait_use =
+        needs_text_style_trait.then(|| quote! { use elwindui::core::ui::TextStyleOwner as _; });
 
     quote! {
         {
             #type_trait_use
             #ui_element_trait_use
             #ui_element_ext_use
+            #text_style_trait_use
             let __v = elwindui::core::ui::#type_ident::new();
             #setters
             __v
@@ -7540,6 +7610,27 @@ fn emit_resync(
             continue;
         }
         let value = emit_expr(expr, ctx, &self_mode);
+        if crate::text_style::is_text_style_field_name(name) {
+            // The style-owner API consumes the six font values. `foreground` keeps its Option so
+            // a caller can distinguish an explicit local brush from an unset inherited value.
+            // Do this before the generic native-control branch, which normally borrows non-Copy
+            // values for `&str`-style setters and would make `FontFamily`/`Brush` fail to compile.
+            let value = if name == "foreground" {
+                quote! { Some(#value) }
+            } else {
+                value
+            };
+            out.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter,
+                value,
+                &receiver,
+                from,
+                table,
+            ));
+            continue;
+        }
         let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
         if is_copy {
             out.extend(emit_field_setter_call(
@@ -7898,6 +7989,151 @@ view NotepadWindow {
     fn assert_valid_rust(label: &str, ts: &TokenStream) {
         if let Err(e) = syn::parse2::<syn::File>(ts.clone()) {
             panic!("{label} did not generate valid Rust: {e}\n---\n{ts}");
+        }
+    }
+
+    // --- Font/text-style codegen tests (指示書 §32) ---------------------------------------------
+
+    #[test]
+    fn text_block_font_size_emits_as_text_style_owner_dispatch() {
+        let module = parse_module(
+            r#"
+                component FontHost { }
+                view FontHost {
+                    TextBlock { text: "hi" font_size: 20.0 }
+                }
+            "#,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("text_block_font_size", &generated);
+        let rendered = generated.to_string();
+        // The seven text-style properties always dispatch through `as_text_style_owner()` — never
+        // a bare `.set_font_size(..)` dot-call or a `TextBlockExt`-qualified one, since the real
+        // setter lives on `TextStyleOwner`, not any `#[class]`-generated `..Ext` trait (see
+        // `emit_field_setter_call`'s own doc comment).
+        assert!(rendered.contains("as_text_style_owner"));
+        assert!(rendered.contains("set_font_size"));
+        assert!(rendered.contains("20.0"));
+    }
+
+    #[test]
+    fn foreground_hex_literal_coerces_to_brush_solid() {
+        let module = parse_module(
+            r##"
+                component FontHost { }
+                view FontHost {
+                    TextBlock { text: "hi" foreground: "#3a3a3c" }
+                }
+            "##,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("foreground_hex_literal", &generated);
+        let rendered = generated.to_string();
+        // `coerce_color_literal` only recognizes the `Brush` target when `#[text_style]`'s
+        // `foreground` type string is byte-identical to `Shape.fill`'s own — this is the
+        // regression guard for that.
+        assert!(rendered.contains("Brush :: Solid"));
+        assert!(rendered.contains("Color :: rgba"));
+        assert!(rendered.contains("set_foreground"));
+    }
+
+    #[test]
+    fn dynamic_font_family_and_foreground_are_owned_text_style_arguments() {
+        let module = parse_module(
+            r#"
+                component FontHost {
+                    #[bindable]
+                    vm: FontDemoViewModel,
+                }
+                view FontHost {
+                    VerticalLayout {
+                        TextBlock {
+                            text: "sample"
+                            font_family: vm.font_family
+                            foreground: vm.foreground
+                        }
+                        Button {
+                            text: "sample"
+                            font_family: vm.font_family
+                            foreground: vm.foreground
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("dynamic_text_style_values", &generated);
+        let rendered = generated.to_string();
+        // `FontFamily` must be passed by value, and `foreground` must preserve the local-value
+        // marker expected by TextStyleOwner rather than following the generic native `&str`
+        // setter path.
+        assert!(rendered.contains("set_font_family (self . vm . font_family ())"));
+        assert!(rendered.contains("set_foreground (Some (self . vm . foreground ()))"));
+        assert!(!rendered.contains("set_font_family (& (self . vm . font_family ()))"));
+    }
+
+    #[test]
+    fn font_family_and_brush_are_not_assumed_copy_by_viewmodels() {
+        assert!(!is_copy_type("FontFamily"));
+        assert!(!is_copy_type("Brush"));
+        assert!(is_copy_type("FontWeight"));
+    }
+
+    #[test]
+    fn button_font_size_dispatches_through_native_control_owner() {
+        // `Button` doesn't declare `font_size` itself (`#[text_style]` is only on `NativeControl`,
+        // §E's own rationale) — its use site must still compile and dispatch through
+        // `as_text_style_owner()`, not a `ButtonExt`-qualified call (which doesn't exist).
+        let module = parse_module(
+            r#"
+                component FontHost { }
+                view FontHost {
+                    Button { text: "Click" font_size: 16.0 }
+                }
+            "#,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("button_font_size", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("as_text_style_owner"));
+        assert!(!rendered.contains("ButtonExt :: set_font_size"));
+    }
+
+    #[test]
+    fn content_control_declares_seven_text_style_fields_via_control_base() {
+        // Regression guard for the `Attr::TextStyle` exemption in `resolve_effective_fields`/
+        // `resolve_field_declaring_types` — `ContentControl` has its own `view` (`builtins.elwind`)
+        // that never bare-references `font_size`/etc., so without the exemption these seven fields
+        // would silently vanish from its effective field set (no compile error — just a missing
+        // setter downstream).
+        let table = build_symbol_table_with_builtins(&[]);
+        let builtins = crate::builtin_modules();
+        let module = builtins.first().expect("builtins module should exist");
+        let info = table
+            .resolve(module, "ContentControl")
+            .expect("ContentControl should resolve");
+        for name in [
+            "font_family",
+            "font_size",
+            "font_weight",
+            "font_style",
+            "font_stretch",
+            "character_spacing",
+            "foreground",
+        ] {
+            assert!(
+                info.declaring_types.contains_key(name),
+                "ContentControl should inherit `{name}` from Control"
+            );
+            assert_eq!(info.declaring_types[name], "Control");
         }
     }
 

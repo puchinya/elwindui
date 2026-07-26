@@ -1000,3 +1000,15 @@ fn nested_push_opacity_multiplies_both_levels() {
     assert!(a < 100, "nested 0.5*0.5 opacity should be far below ~127, got {a}");
     assert!(a > 20, "nested opacity should still be visibly painted, got {a}");
 }
+
+// A pixel-level `CATextLayer`/`renderInContext:` ink-coverage golden (default/bold+large/kerned)
+// was attempted here and removed: off the real AppKit main thread — which `cargo test`'s worker
+// threads are not, confirmed empirically (`MainThreadMarker::new()` returns `None` there) — actual
+// glyph rasterization through `CATextLayer` intermittently deadlocked (`render/text.rs`'s own
+// `NSAttributedString`-based *measurement* tests, which never rasterize a glyph, never showed
+// this). Production code always runs on the true main thread under a live run loop
+// (`elwindui-backend-appkit::app::run`), so this is a test-harness-only constraint, not a
+// production bug — but it makes a headless pixel golden for real text rendering unreliable in this
+// environment. `render/text.rs`'s `ns_font`/`measure_text` unit tests (weight/italic/stretch/
+// fallback/growth/wrap/kerning) are the real-machine verification for this feature instead; see
+// `docs/elwindui_font_status.md` §11/§9 for the full record of what was tried and why.

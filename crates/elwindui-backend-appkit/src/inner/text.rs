@@ -19,9 +19,11 @@ pub(crate) struct InnerTextArea {
     handle: AnyView,
     text_view: Retained<NSTextView>,
     delegate_storage: Rc<RefCell<Option<Retained<TextViewDelegate>>>>,
-    /// See `measure`'s own doc comment for why these exist and how they're computed.
-    default_width: f32,
-    default_height: f32,
+    /// See `measure`'s own doc comment for why these exist and how they're computed. `Cell`, not a
+    /// plain field: `recompute_default_size` (called from `apply_text_style`, since a font change
+    /// changes the text view's own line-height metrics) refreshes them through `&self`.
+    default_width: Cell<f32>,
+    default_height: Cell<f32>,
 }
 
 impl InnerTextArea {
@@ -34,18 +36,34 @@ impl InnerTextArea {
             .downcast::<NSTextView>()
             .expect("scrollableTextView's document view is an NSTextView");
 
-        // `NSScrollView.fittingSize()` reports `{0,0}` regardless of the view's current frame —
-        // unlike a plain `NSView`/`NSControl`, it does not fall back to echoing frame.size when
-        // unconstrained (verified empirically: setting a non-zero frame here has no effect on what
-        // `fittingSize()` later reports). So `TextArea` cannot rely on the generic
-        // `NativeControl::measure_override` -> `AnyView::measure` -> `fittingSize()` path every
-        // other native leaf shares (see that method's own doc comment) — `native_ui::TextArea`
-        // overrides `measure_override` itself and calls `InnerTextArea::measure` below instead.
-        // The height is derived from the text view's own font metrics (not a hardcoded pixel
-        // constant) once, at construction, matching how `NSTextField` (`InnerTextBox`) gets a
-        // non-zero default from its cell's real `intrinsicContentSize`, and mirroring how WinUI3's
-        // `TextArea` (`elwindui-backend-winui3::inner::InnerTextArea`) always has a non-zero
-        // minimum height from its default style (it isn't wrapped in a `ScrollViewer` there).
+        let (default_width, default_height) = Self::compute_default_size(&text_view);
+
+        let handle = AnyView::from(scroll);
+        Self {
+            handle,
+            text_view,
+            delegate_storage: Rc::new(RefCell::new(None)),
+            default_width: Cell::new(default_width),
+            default_height: Cell::new(default_height),
+        }
+    }
+
+    /// `NSScrollView.fittingSize()` reports `{0,0}` regardless of the view's current frame — unlike
+    /// a plain `NSView`/`NSControl`, it does not fall back to echoing frame.size when unconstrained
+    /// (verified empirically: setting a non-zero frame here has no effect on what `fittingSize()`
+    /// later reports). So `TextArea` cannot rely on the generic `NativeControl::measure_override`
+    /// -> `AnyView::measure` -> `fittingSize()` path every other native leaf shares (see that
+    /// method's own doc comment) — `native_ui::TextArea` overrides `measure_override` itself and
+    /// calls `InnerTextArea::measure` below instead. The height is derived from the text view's
+    /// own current font metrics, matching how `NSTextField` (`InnerTextBox`) gets a non-zero
+    /// default from its cell's real `intrinsicContentSize`, and mirroring how WinUI3's `TextArea`
+    /// (`elwindui-backend-winui3::inner::InnerTextArea`) always has a non-zero minimum height from
+    /// its default style (it isn't wrapped in a `ScrollViewer` there).
+    ///
+    /// Recomputed (not just computed once at construction) because a `font_size`/`font_family`
+    /// change after construction would otherwise leave these — and therefore `measure`'s result —
+    /// silently stale; see `apply_text_style`'s call site.
+    fn compute_default_size(text_view: &NSTextView) -> (f32, f32) {
         let font = text_view
             .font()
             .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
@@ -63,27 +81,31 @@ impl InnerTextArea {
         // largely moot there) and `HorizontalLayout`, whose *main* axis is width, so a `TextArea`
         // inside one has no such stretch to fall back on and needs a real measured value here.
         let default_width = default_height * 20.0;
-
-        let handle = AnyView::from(scroll);
-        Self {
-            handle,
-            text_view,
-            delegate_storage: Rc::new(RefCell::new(None)),
-            default_width,
-            default_height,
-        }
+        (default_width, default_height)
     }
 
     pub(crate) fn handle(&self) -> AnyView {
         self.handle.clone()
     }
 
-    /// See the doc comment on `default_width`/`default_height` (set in `new`) for why this exists
-    /// instead of `native_ui::NativeControl`'s shared `fittingSize()`-based `measure_override`.
+    /// Refreshes `default_width`/`default_height` from the text view's *current* font metrics.
+    /// `native_ui::TextArea::measure_override` calls this right after `sync_text_style()` — the
+    /// generic `AppKitHandle::apply_text_style` impl on `Retained<NSScrollView>` (`ffi.rs`) already
+    /// pushed any new font onto this same `text_view` by that point, but has no way to reach back
+    /// into `InnerTextArea`'s own cached size fields; this closes that loop so a `font_size`/
+    /// `font_family` change doesn't leave `measure`'s result silently stale.
+    pub(crate) fn refresh_default_size(&self) {
+        let (width, height) = Self::compute_default_size(&self.text_view);
+        self.default_width.set(width);
+        self.default_height.set(height);
+    }
+
+    /// See the doc comment on `default_width`/`default_height` for why this exists instead of
+    /// `native_ui::NativeControl`'s shared `fittingSize()`-based `measure_override`.
     pub(crate) fn measure(&self, _available: elwindui_core::base::Size) -> elwindui_core::base::Size {
         elwindui_core::base::Size {
-            width: self.default_width,
-            height: self.default_height,
+            width: self.default_width.get(),
+            height: self.default_height.get(),
         }
     }
 

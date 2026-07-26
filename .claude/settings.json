@@ -14,8 +14,9 @@
       "Bash(swift /tmp/*.swift *)",
       "Bash(swift /private/tmp/*.swift *)",
       "Bash(screencapture *)",
-      "mcp__context-mode",
-      "plugin__context-mode__*"
+      "Bash(grep *)",
+      "Bash(find *)",
+      "mcp__plugin_context-mode_context-mode__*"
     ],
     "additionalDirectories": [
       "/private/tmp",

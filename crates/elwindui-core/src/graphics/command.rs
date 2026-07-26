@@ -1,8 +1,8 @@
 use super::brush::Brush;
-use super::color::Color;
 use super::image::{Image, ImageDrawOptions};
 use super::path::{FillRule, Path};
 use super::stroke::StrokeStyle;
+use super::text::ComputedTextStyle;
 use super::vector_image::{VectorImage, VectorImageDrawOptions};
 use crate::base::{AffineTransform, CornerRadius, Rect};
 use std::any::Any;
@@ -19,12 +19,6 @@ impl Default for TextAlignment {
         Self::Left
     }
 }
-
-/// Backend-independent font placeholder — font selection/shaping/measurement is out of scope for
-/// this graphics API revision (painter design doc §1/§22); `Font` stays a zero-sized marker until
-/// that work happens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Font;
 
 /// A clip region pushed via [`super::context::RenderContext::with_clip`]. `Path` is
 /// `Arc`-backed internally, so cloning a `Path` variant is cheap — no indirection trickery needed
@@ -100,11 +94,12 @@ pub enum RenderCommand {
         source: Option<Rect>,
         options: VectorImageDrawOptions,
     },
+    /// The paint (`style.foreground`) is part of the resolved style by definition — a separate
+    /// `color` field would let the two disagree, so `style` carries both the font and the paint.
     Text {
         content: String,
         rect: Rect,
-        font: Font,
-        color: Option<Color>,
+        style: ComputedTextStyle,
         alignment: TextAlignment,
     },
     PushClip {

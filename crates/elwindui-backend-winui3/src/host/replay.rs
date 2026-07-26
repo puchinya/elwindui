@@ -5,7 +5,7 @@
 //! bookkeeping — it is this panel's rendering pass, not stateless translation.
 
 
-use crate::render::{solid_color_brush, xaml_text_alignment};
+use crate::render::xaml_text_alignment;
 use crate::ffi::AnyView;
 use super::*;
 
@@ -81,11 +81,12 @@ pub(crate) fn reconcile_native_children(
     for (key, wanted_child) in wanted {
         still_wanted.insert(key);
         match (existing.get(&key), wanted_child) {
-            (Some(NativeChildElement::Text(text_block)), RenderedNativeChild::Text { content, rect, color, alignment }) => {
+            (Some(NativeChildElement::Text(text_block)), RenderedNativeChild::Text { content, rect, style, alignment }) => {
                 let _ = text_block.SetText(&HSTRING::from(content.as_str()));
-                if let Ok(brush) = solid_color_brush(color.unwrap_or(elwindui_core::graphics::Color::black())) {
-                    let _ = text_block.SetForeground(&brush);
-                }
+                // Font/foreground all come from the same `apply_text_style_to_text_block` helper
+                // `WinUi3TextBackend::measure_text` used to measure this same content — see that
+                // function's own doc comment for why measurement and drawing must never diverge.
+                let _ = crate::render::apply_text_style_to_text_block(text_block, &style);
                 let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
                 let fe: FrameworkElement = text_block.clone().cast().expect("TextBlock is a FrameworkElement");
                 let _ = fe.SetWidth(rect.width as f64);
@@ -103,12 +104,10 @@ pub(crate) fn reconcile_native_children(
                 // this exact key (rare — only if a UIElement's own `render()` emits a different
                 // shape of commands than last time); either way, build fresh and attach once.
                 let element = match wanted_child {
-                    RenderedNativeChild::Text { content, rect, color, alignment } => {
+                    RenderedNativeChild::Text { content, rect, style, alignment } => {
                         let text_block = TextBlock::new().expect("TextBlock::new");
                         let _ = text_block.SetText(&HSTRING::from(content.as_str()));
-                        if let Ok(brush) = solid_color_brush(color.unwrap_or(elwindui_core::graphics::Color::black())) {
-                            let _ = text_block.SetForeground(&brush);
-                        }
+                        let _ = crate::render::apply_text_style_to_text_block(&text_block, &style);
                         let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
                         let fe: FrameworkElement = text_block.clone().cast().expect("TextBlock is a FrameworkElement");
                         let _ = fe.SetWidth(rect.width as f64);
@@ -211,7 +210,7 @@ pub(crate) enum RenderedNativeChild {
     Text {
         content: String,
         rect: elwindui_core::base::Rect,
-        color: Option<elwindui_core::graphics::Color>,
+        style: elwindui_core::graphics::ComputedTextStyle,
         alignment: elwindui_core::graphics::TextAlignment,
     },
     Native {

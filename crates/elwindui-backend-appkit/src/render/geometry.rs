@@ -7,11 +7,7 @@ use super::path::*;
 use elwindui_core::graphics::RenderCommand;
 use objc2::rc::Retained;
 use objc2_core_graphics::CGColor;
-use objc2_quartz_core::{
-    CALayer, CAShapeLayer,
-    CATextLayerAlignmentMode, kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight,
-    kCAFillRuleEvenOdd, kCAFillRuleNonZero,
-};
+use objc2_quartz_core::{CALayer, CAShapeLayer, kCAFillRuleEvenOdd, kCAFillRuleNonZero};
 
 /// Parses a `"#RRGGBB"`/`"#RRGGBBAA"` hex color (the only form `Rectangle`/`Ellipse`'s `fill`/
 /// `stroke` params accept — see docs/elwindui_builtins_spec.md 付録N/G) into a `CGColor`. An
@@ -35,21 +31,6 @@ pub(crate) fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColo
         _ => (0.0, 0.0, 0.0, 255.0),
     };
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
-}
-
-/// `elwindui_core::ui::TextAlignment` -> `CATextLayer.alignmentMode` — the `kCAAlignment*` values
-/// are `extern "C"` globals (`&'static NSString`), hence the `unsafe` read.
-pub(crate) fn ca_alignment_mode(
-    alignment: elwindui_core::ui::TextAlignment,
-) -> &'static CATextLayerAlignmentMode {
-    use elwindui_core::ui::TextAlignment;
-    unsafe {
-        match alignment {
-            TextAlignment::Left => kCAAlignmentLeft,
-            TextAlignment::Center => kCAAlignmentCenter,
-            TextAlignment::Right => kCAAlignmentRight,
-        }
-    }
 }
 
 /// The (already origin-adjusted, pre-transform) bounding rect a paint command occupies — used

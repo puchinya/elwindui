@@ -135,8 +135,20 @@ component Layout inherits UIElement {
 // `elwindui-codegen`'s `is_native` computation (`#[native]` and `inherits NativeControl` are
 // equivalent for `is_native` purposes; they differ only in whether a real Rust `NativeControl`
 // backend-owned base is expected).
+// `#[text_style]` (docs/elwindui_dsl_spec.md 付録A) injects font_family/font_size/font_weight/
+// font_style/font_stretch/character_spacing/foreground onto every native leaf that inherits this
+// (`Button`/`TextArea`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView`) — matching WinUI3, where
+// these are `Control` dependency properties every derived control inherits. Declared on
+// `NativeControl` rather than on the individual leaves: the real Rust `TextStyleStorage` lives on
+// each backend's own `NativeControl` struct (`elwindui-backend-appkit`/`-winui3`'s
+// `native_ui::control::NativeControl`), so `elwindui-codegen`'s `emit_field_setter_call` can only
+// resolve a UFCS `NativeControlExt::set_font_size(&*(binding), ..)` call when `declaring_types`
+// says `NativeControl` declared it — declaring it on e.g. `Button` instead would emit
+// `ButtonExt::set_font_size`, which doesn't exist (`ButtonExt: NativeControlExt` doesn't bring the
+// method into dot-call scope), an `E0599`.
 #[embedded]
 #[abstract]
+#[text_style]
 component NativeControl inherits UIElement {
 }
 
@@ -244,9 +256,13 @@ view Ellipse {
 }
 
 // `children` is the Logical-tree child list this component declares (`UIElementCollection`,
-// WinUI3's own type, docs/elwindui_spec.md 付録H.2.2).
+// WinUI3's own type, docs/elwindui_spec.md 付録H.2.2). `#[text_style]` (docs/elwindui_dsl_spec.md
+// 付録A) lets a `Control`-derived component set font/foreground properties directly — inherited by
+// any Visual descendant regardless of what non-owning elements (`Grid`/`VerticalLayout`/...) sit
+// in between (指示書 §10/§11).
 #[embedded]
 #[content(children)]
+#[text_style]
 component Control inherits UIElement {
     children: UIElementCollection,
     padding: Option<f32>,
@@ -364,10 +380,13 @@ component Button inherits NativeControl {
     on_click: fn(),
 }
 
+// `color` (a bare `Color`) was replaced by `#[text_style]`'s `foreground` (a `Brush`, inherited
+// like every other font property — docs/elwindui_font_status.md) — use `foreground: "#3a3a3c"` (or
+// a `Brush::...` expression) instead of the old `color:`.
 #[embedded]
+#[text_style]
 component TextBlock inherits UIElement {
     text: String,
-    color: Option<elwindui::core::graphics::Color>,
     text_alignment: Option<TextAlignment>,
 }
 

@@ -1,9 +1,9 @@
 use super::brush::Brush;
-use super::color::Color;
-use super::command::{Clip, Font, RenderCommand, TextAlignment};
+use super::command::{Clip, RenderCommand, TextAlignment};
 use super::image::{Image, ImageDrawOptions};
 use super::path::{FillRule, Path};
 use super::stroke::StrokeStyle;
+use super::text::ComputedTextStyle;
 use super::vector_image::{VectorImage, VectorImageDrawOptions};
 use crate::base::{AffineTransform, CornerRadius, Point, Rect};
 
@@ -301,14 +301,13 @@ impl<'a> RenderContext<'a> {
         &mut self,
         text: &str,
         rect: Rect,
-        color: Option<Color>,
+        style: &ComputedTextStyle,
         alignment: TextAlignment,
     ) {
         self.commands.push(RenderCommand::Text {
             content: text.into(),
             rect,
-            font: Font,
-            color,
+            style: style.clone(),
             alignment,
         });
     }

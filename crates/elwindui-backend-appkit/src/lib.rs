@@ -27,9 +27,14 @@
 /// Performs process-wide AppKit setup required before creating views.
 ///
 /// AppKit performs this lazily when the application object is created, so this is intentionally
-/// idempotent and currently has no eager work. It exists to keep the facade's `elwindui::init()`
-/// contract uniform across native backends.
+/// idempotent and has one piece of eager work: registering this crate's
+/// `elwindui_core::graphics::TextBackend` so `TextBlock::measure_override` (and every
+/// `NativeControl::sync_text_style` call) gets real font metrics instead of the core-only
+/// deterministic fallback (`DummyTextBackend`). Runs on the main thread — this same guarantee is
+/// what every subsequent `measure_text`/`default_text_style` call (always during a main-thread
+/// layout pass) relies on to call `NSFont`/`NSFontDescriptor` APIs without its own `mtm()` check.
 pub fn init() -> Result<(), std::convert::Infallible> {
+    elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::AppKitTextBackend));
     Ok(())
 }
 

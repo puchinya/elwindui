@@ -94,12 +94,16 @@ pub enum RenderCommand {
         source: Option<Rect>,
         options: VectorImageDrawOptions,
     },
-    /// The paint (`style.foreground`) is part of the resolved style by definition — a separate
-    /// `color` field would let the two disagree, so `style` carries both the font and the paint.
+    /// `style` is materialized for measurement, while `foreground` preserves whether the text
+    /// paint was actually specified by the ElwindUI cascade. A `None` foreground instructs a
+    /// native backend to retain or restore its platform text resource instead of pinning the
+    /// materialization fallback color.
     Text {
         content: String,
         rect: Rect,
         style: ComputedTextStyle,
+        /// `None` means the backend must use its platform-default text paint.
+        foreground: Option<Brush>,
         alignment: TextAlignment,
     },
     PushClip {

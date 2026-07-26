@@ -135,6 +135,9 @@ unsafe extern "C" {
         inspectable: *mut core::ffi::c_void,
         mask: u32,
     ) -> i32;
+    fn elwindui_winui3_clear_text_block_foreground(
+        inspectable: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Applies or clears a native `Control.Background` value.
@@ -222,14 +225,32 @@ pub(crate) fn apply_text_style_to_text_block(
     text_block: &TextBlock,
     style: &ComputedTextStyle,
 ) -> Result<()> {
+    apply_text_style_to_text_block_with_foreground(text_block, style, Some(&style.foreground))
+}
+
+/// Applies all font metrics and either an explicit foreground or the live XAML foreground
+/// resource. `None` clears an old local value so a reused `TextBlock` follows Light/Dark and
+/// High Contrast resources again.
+pub(crate) fn apply_text_style_to_text_block_with_foreground(
+    text_block: &TextBlock,
+    style: &ComputedTextStyle,
+    foreground: Option<&Brush>,
+) -> Result<()> {
     text_block.SetFontFamily(&xaml_font_family(&style.font_family)?)?;
     text_block.SetFontSize(style.font_size as f64)?;
     text_block.SetFontWeight(xaml_font_weight(style.font_weight))?;
     text_block.SetFontStyle(xaml_font_style(style.font_style))?;
     text_block.SetFontStretch(xaml_font_stretch(style.font_stretch))?;
     text_block.SetCharacterSpacing(style.character_spacing)?;
-    if let Ok(brush) = solid_color_brush(flat_foreground_color(&style.foreground)) {
-        text_block.SetForeground(&brush)?;
+    if let Some(foreground) = foreground {
+        if let Ok(brush) = solid_color_brush(flat_foreground_color(foreground)) {
+            text_block.SetForeground(&brush)?;
+        }
+    } else {
+        let code = unsafe {
+            elwindui_winui3_clear_text_block_foreground(text_block.as_raw())
+        };
+        windows::core::HRESULT(code).ok()?;
     }
     Ok(())
 }

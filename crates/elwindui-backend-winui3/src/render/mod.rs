@@ -16,9 +16,9 @@ mod win2d;
 
 pub(crate) use text::{
     WinUi3TextBackend, apply_cascaded_text_style_to_control, apply_control_background,
-    apply_text_style_to_text_block,
+    apply_text_style_to_text_block_with_foreground,
 };
 #[cfg(test)]
-pub(crate) use text::apply_text_style_to_control;
+pub(crate) use text::{apply_text_style_to_control, apply_text_style_to_text_block};
 pub(crate) use vector::*;
 pub(crate) use win2d::*;

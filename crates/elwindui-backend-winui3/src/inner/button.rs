@@ -81,7 +81,7 @@ mod hosted_xaml_regression_tests {
     use crate::bindings::winui_text::{FontStretch as XamlFontStretch, FontStyle as XamlFontStyle};
     use crate::render::{
         WinUi3TextBackend, apply_cascaded_text_style_to_control, apply_text_style_to_control,
-        apply_text_style_to_text_block,
+        apply_text_style_to_text_block, apply_text_style_to_text_block_with_foreground,
     };
     use elwindui_core::base::{Rect, Size as CoreSize};
     use elwindui_core::graphics::{
@@ -144,6 +144,25 @@ mod hosted_xaml_regression_tests {
             .expect("solid foreground brush");
         let color = foreground.Color().expect("SolidColorBrush.Color");
         assert_eq!((color.R, color.G, color.B), (0, 102, 204));
+
+        // An absent ElwindUI foreground must remove this local blue brush rather than retaining
+        // it on the reused XAML child. The resource-backed value is intentionally not compared to
+        // a fixed RGB value: its exact color is owned by the active Windows appearance.
+        apply_text_style_to_text_block_with_foreground(&text, &style, None)
+            .expect("clear TextBlock foreground");
+        let cleared_foreground: SolidColorBrush = text
+            .Foreground()
+            .expect("cleared TextBlock.Foreground")
+            .cast()
+            .expect("solid cleared foreground brush");
+        let cleared_color = cleared_foreground
+            .Color()
+            .expect("cleared SolidColorBrush.Color");
+        assert_ne!(
+            (cleared_color.R, cleared_color.G, cleared_color.B),
+            (0, 102, 204),
+            "clear must not retain the prior explicit foreground"
+        );
 
         let native = XamlTextBox::new().expect("TextBox::new");
         let control: Control = native.clone().cast().expect("TextBox implements Control");

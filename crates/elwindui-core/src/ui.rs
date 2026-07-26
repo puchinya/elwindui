@@ -2426,8 +2426,10 @@ impl TextBlock {
         // and render within one pass, so the two resolutions are identical, and re-resolving avoids
         // a second, potentially-stale source of truth if a render pass ever runs without a
         // preceding full layout pass (see `docs/elwindui_font_status.md`).
-        let style = self.resolved_text_style();
-        context.draw_text(
+        let cascaded_style = self.cascaded_text_style();
+        let style = cascaded_style
+            .materialize(&crate::graphics::text_backend().default_text_style());
+        context.draw_text_with_foreground(
             &self.text.borrow(),
             Rect {
                 x: 0.0,
@@ -2436,6 +2438,7 @@ impl TextBlock {
                 height: self.arranged_height().unwrap_or(0.0),
             },
             &style,
+            cascaded_style.foreground.as_ref(),
             self.alignment.get(),
         );
     }
@@ -4268,6 +4271,13 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            commands[0],
+            RenderCommand::Text {
+                foreground: None,
+                ..
+            }
+        ));
 
         text_block.set_text_alignment(TextAlignment::Center);
         commands.clear();
@@ -4280,6 +4290,21 @@ mod tests {
             commands[0],
             RenderCommand::Text {
                 alignment: TextAlignment::Center,
+                ..
+            }
+        ));
+
+        text_block.set_foreground(Some(Brush::Solid(Color::rgb(1, 2, 3))));
+        commands.clear();
+        text_block.render(&mut RenderContext::begin_group(
+            &mut commands,
+            Point { x: 0.0, y: 0.0 },
+            None,
+        ));
+        assert!(matches!(
+            commands[0],
+            RenderCommand::Text {
+                foreground: Some(Brush::Solid(Color { r: 1, g: 2, b: 3, .. })),
                 ..
             }
         ));

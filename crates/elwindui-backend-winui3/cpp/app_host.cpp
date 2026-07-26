@@ -119,6 +119,18 @@ extern "C" __declspec(dllexport) int32_t elwindui_winui3_clear_control_text_styl
     }
 }
 
+extern "C" __declspec(dllexport) int32_t elwindui_winui3_clear_text_block_foreground(
+    void* inspectable) {
+    try {
+        TextBlock text_block{nullptr};
+        copy_from_abi(text_block, inspectable);
+        text_block.ClearValue(TextBlock::ForegroundProperty());
+        return 0;
+    } catch (hresult_error const& error) {
+        return error.code().value;
+    }
+}
+
 extern "C" __declspec(dllexport) int32_t elwindui_winui3_set_element_theme(
     void* inspectable,
     int32_t requested,

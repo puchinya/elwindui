@@ -851,6 +851,7 @@ impl TreeHostPanel {
                     content,
                     rect,
                     style,
+                    foreground,
                     alignment,
                 } => {
                     native_wanted.push((
@@ -864,6 +865,7 @@ impl TreeHostPanel {
                                 height: rect.height,
                             },
                             style: style.clone(),
+                            foreground: foreground.clone(),
                             alignment: *alignment,
                         },
                     ));
@@ -934,5 +936,4 @@ impl TreeHostPanel {
         }
     }
 }
-
 

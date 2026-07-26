@@ -10,16 +10,17 @@
 //! this machine at all — see `docs/elwindui_implementation_status.md` — so a true cross-backend
 //! image diff isn't achievable here regardless).
 
+use crate::render::fitted_image_rect;
+use crate::render::{
+    GradientMaskShape, add_shape_layer, apply_fill, build_image_container_layer, ellipse_cgpath,
+    path_to_cgpath, resolve_cgimage, rounded_rect_cgpath, try_add_gradient_fill_layer,
+};
+use crate::testsupport::bitmap::Bitmap;
 use objc2::rc::Retained;
-use crate::render::{GradientMaskShape, add_shape_layer, apply_fill, ellipse_cgpath,
-    path_to_cgpath, rounded_rect_cgpath, try_add_gradient_fill_layer, build_image_container_layer, resolve_cgimage};
-use objc2_quartz_core::{CALayer, kCAFillRuleEvenOdd, kCAFillRuleNonZero};
 use objc2_core_graphics::CGMutablePath;
 use objc2_quartz_core::CAShapeLayer;
+use objc2_quartz_core::{CALayer, kCAFillRuleEvenOdd, kCAFillRuleNonZero};
 use std::collections::HashMap;
-use crate::render::fitted_image_rect;
-use crate::testsupport::bitmap::Bitmap;
-
 
 /// `CALayer.renderInContext:` against a `CGBitmapContext` renders **Y-flipped** relative to
 /// the logical/path coordinates fed to `add_shape_layer`/`rounded_rect_cgpath`/etc — a shape
@@ -198,7 +199,15 @@ fn fitted_image_rect_fill_always_matches_dest_regardless_of_image_size() {
         elwindui_core::graphics::AlignmentX::Center,
         elwindui_core::graphics::AlignmentY::Center,
     );
-    assert_eq!(placed, elwindui_core::base::Rect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 });
+    assert_eq!(
+        placed,
+        elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0
+        }
+    );
 }
 
 #[test]
@@ -409,10 +418,7 @@ fn line_cap_round_extends_past_the_segment_endpoint() {
 /// Builds a narrow, acute-angled "V" (two segments meeting at `(32, 10)`, opening downward)
 /// stroked with `join`/`miter_limit` — shared by the miter/bevel/miter-limit tests below, since
 /// they only differ in that one `StrokeStyle`.
-fn stroke_acute_v(
-    join: elwindui_core::graphics::LineJoin,
-    miter_limit: f32,
-) -> (u8, u8, u8, u8) {
+fn stroke_acute_v(join: elwindui_core::graphics::LineJoin, miter_limit: f32) -> (u8, u8, u8, u8) {
     let bitmap = Bitmap::new(64, 64);
     let root = CALayer::new();
     root.setBounds(objc2_core_foundation::CGRect::new(
@@ -662,7 +668,9 @@ fn quadratic_bezier_bows_away_from_the_straight_chord_between_its_endpoints() {
         elwindui_core::base::Point { x: 32.0, y: 10.0 },
         elwindui_core::base::Point { x: 54.0, y: 50.0 },
     );
-    let path = builder.build().expect("a moved-to, curved path is never empty");
+    let path = builder
+        .build()
+        .expect("a moved-to, curved path is never empty");
     let cg_path = path_to_cgpath(&world, &path);
     let stroke = elwindui_core::graphics::StrokeStyle {
         width: 6.0,
@@ -703,7 +711,9 @@ fn cubic_bezier_bows_away_from_the_straight_chord_between_its_endpoints() {
         elwindui_core::base::Point { x: 44.0, y: 10.0 },
         elwindui_core::base::Point { x: 54.0, y: 50.0 },
     );
-    let path = builder.build().expect("a moved-to, curved path is never empty");
+    let path = builder
+        .build()
+        .expect("a moved-to, curved path is never empty");
     let cg_path = path_to_cgpath(&world, &path);
     let stroke = elwindui_core::graphics::StrokeStyle {
         width: 6.0,
@@ -814,14 +824,8 @@ fn radial_gradient_interpolates_from_center_to_edge() {
         .unwrap(),
     );
     let world = elwindui_core::base::AffineTransform::identity();
-    let realized = try_add_gradient_fill_layer(
-        &root,
-        &brush,
-        rect,
-        GradientMaskShape::Ellipse,
-        &world,
-        1.0,
-    );
+    let realized =
+        try_add_gradient_fill_layer(&root, &brush, rect, GradientMaskShape::Ellipse, &world, 1.0);
     assert!(realized);
     render_layer(&root, &bitmap);
     approx(bitmap.pixel(32, 32), (255, 0, 0, 255), 60); // center: close to stop 0
@@ -849,8 +853,7 @@ fn draw_image_contain_letterboxes_and_leaves_the_gap_unpainted() {
     )
     .expect("valid RGBA8 buffer");
     let mut image_cache = HashMap::new();
-    let resolved =
-        resolve_cgimage(&image, &mut image_cache).expect("valid RGBA8 buffer decodes");
+    let resolved = resolve_cgimage(&image, &mut image_cache).expect("valid RGBA8 buffer decodes");
     let dest = elwindui_core::base::Rect {
         x: 2.0,
         y: 2.0,
@@ -864,11 +867,73 @@ fn draw_image_contain_letterboxes_and_leaves_the_gap_unpainted() {
     let world = elwindui_core::base::AffineTransform::identity();
     let container = build_image_container_layer(&resolved, dest, None, &options, &world, 1.0)
         .expect("no source crop means there's always something to draw");
+    assert!(
+        unsafe { container.sublayers() }.is_none_or(|layers| layers.is_empty()),
+        "a fully contained image must be represented by one direct image layer"
+    );
     root.addSublayer(&container);
     render_layer(&root, &bitmap);
     // `render_layer`'s own Y-flip note applies (logical y -> pixel row 64-y).
     approx(bitmap.pixel(12, 52), (0, 0, 255, 255), 50); // inside the letterboxed image
     approx(bitmap.pixel(12, 60), (0, 0, 0, 0), 10); // top letterbox gap: left unpainted
+}
+
+#[test]
+fn transformed_image_uses_a_container_layer() {
+    let image = elwindui_core::graphics::Image::from_rgba8(
+        1,
+        1,
+        4,
+        vec![0, 0, 255, 255],
+        elwindui_core::graphics::AlphaMode::Opaque,
+    )
+    .expect("valid RGBA8 buffer");
+    let mut image_cache = HashMap::new();
+    let resolved = resolve_cgimage(&image, &mut image_cache).expect("valid RGBA8 buffer decodes");
+    let dest = elwindui_core::base::Rect {
+        x: -10.0,
+        y: -10.0,
+        width: 20.0,
+        height: 20.0,
+    };
+    let world = elwindui_core::base::AffineTransform::translation(32.0, 32.0)
+        .concat(&elwindui_core::base::AffineTransform::rotation(0.25));
+    let layer = build_image_container_layer(
+        &resolved,
+        dest,
+        None,
+        &elwindui_core::graphics::ImageDrawOptions::default(),
+        &world,
+        1.0,
+    )
+    .expect("the image is drawable");
+    assert_eq!(
+        unsafe { layer.sublayers() }.map_or(0, |layers| layers.len()),
+        1,
+        "a transformed image keeps its local-coordinate container"
+    );
+}
+
+#[test]
+fn resolving_cloned_images_keeps_one_decoded_cache_entry() {
+    let image = elwindui_core::graphics::Image::from_rgba8(
+        1,
+        1,
+        4,
+        vec![0, 0, 0, 255],
+        elwindui_core::graphics::AlphaMode::Opaque,
+    )
+    .expect("valid RGBA8 buffer");
+    let mut image_cache = HashMap::new();
+    let first = resolve_cgimage(&image, &mut image_cache).expect("first decode succeeds");
+    let second =
+        resolve_cgimage(&image.clone(), &mut image_cache).expect("clone cache hit succeeds");
+    assert_eq!(image_cache.len(), 1);
+    assert_eq!(
+        objc2_core_foundation::CFRetained::as_ptr(&first),
+        objc2_core_foundation::CFRetained::as_ptr(&second),
+        "a clone must reuse the same decoded CGImage"
+    );
 }
 
 #[test]
@@ -890,8 +955,7 @@ fn draw_image_source_crop_only_shows_the_cropped_region() {
     )
     .expect("valid RGBA8 buffer");
     let mut image_cache = HashMap::new();
-    let resolved =
-        resolve_cgimage(&image, &mut image_cache).expect("valid RGBA8 buffer decodes");
+    let resolved = resolve_cgimage(&image, &mut image_cache).expect("valid RGBA8 buffer decodes");
     let dest = elwindui_core::base::Rect {
         x: 2.0,
         y: 2.0,
@@ -997,8 +1061,14 @@ fn nested_push_opacity_multiplies_both_levels() {
     // 0.5 * 0.5 = 0.25 net opacity, far below what a single 0.5 level would give (~127) —
     // proving the two `PushOpacity` levels multiplied instead of only the inner (or outer)
     // value winning.
-    assert!(a < 100, "nested 0.5*0.5 opacity should be far below ~127, got {a}");
-    assert!(a > 20, "nested opacity should still be visibly painted, got {a}");
+    assert!(
+        a < 100,
+        "nested 0.5*0.5 opacity should be far below ~127, got {a}"
+    );
+    assert!(
+        a > 20,
+        "nested opacity should still be visibly painted, got {a}"
+    );
 }
 
 // A pixel-level `CATextLayer`/`renderInContext:` ink-coverage golden (default/bold+large/kerned)

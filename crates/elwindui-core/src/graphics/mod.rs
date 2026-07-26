@@ -25,15 +25,9 @@ pub use brush::{
 pub use color::{Color, ParseColorError};
 pub use command::{Clip, RenderCommand, TextAlignment};
 pub use context::{Fill, RenderContext, SaveGuard, Stroke};
-pub use text::{
-    CascadedTextStyle, ComputedTextStyle, DummyTextBackend, FontFamily, FontStretch, FontStyle,
-    FontWeight, TextBackend, TextMeasureRequest, TextMeasureResult, TextStyleProperty,
-    TextStyleStorage, TextStyleValues, TextWrapping, clear_text_backend, set_text_backend,
-    text_backend,
-};
 pub use image::{
     AlphaMode, BackendImageHandle, Image, ImageData, ImageDrawOptions, ImageError, ImageFit,
-    ImageFormat, ImageSampling, fitted_image_rect,
+    ImageFormat, ImageId, ImageSampling, fitted_image_rect,
 };
 pub use path::{
     ArcSegment, FillRule, GeometryCombineMode, GeometryError, Path, PathBuilder, PathCommand,
@@ -41,6 +35,12 @@ pub use path::{
 };
 pub use render_tree::{RenderGroup, RenderTree};
 pub use stroke::{LineCap, LineJoin, StrokeError, StrokeStyle};
+pub use text::{
+    CascadedTextStyle, ComputedTextStyle, DummyTextBackend, FontFamily, FontStretch, FontStyle,
+    FontWeight, TextBackend, TextMeasureRequest, TextMeasureResult, TextStyleProperty,
+    TextStyleStorage, TextStyleValues, TextWrapping, clear_text_backend, set_text_backend,
+    text_backend,
+};
 pub use vector_filter::{
     VectorBlendFilter, VectorColorChannel, VectorColorInterpolation, VectorColorMatrixFilter,
     VectorColorMatrixKind, VectorComponentTransferFilter, VectorCompositeFilter,
@@ -49,8 +49,8 @@ pub use vector_filter::{
     VectorFilterImage, VectorFilterInput, VectorFilterPrimitive, VectorFilterPrimitiveNode,
     VectorFilterResultId, VectorFloodFilter, VectorGaussianBlurFilter, VectorLightSource,
     VectorMergeFilter, VectorMorphologyFilter, VectorMorphologyOperator, VectorOffsetFilter,
-    VectorSpecularLightingFilter, VectorTileFilter, VectorTransferFunction,
-    VectorTurbulenceFilter, VectorTurbulenceKind,
+    VectorSpecularLightingFilter, VectorTileFilter, VectorTransferFunction, VectorTurbulenceFilter,
+    VectorTurbulenceKind,
 };
 pub use vector_image::{
     ImageSource, PreserveAspectRatio, PreserveAspectRatioAlign, PreserveAspectRatioMeetOrSlice,

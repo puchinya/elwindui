@@ -2,16 +2,13 @@
 //! `CGImage`, plus the `masksToBounds` container layer a `DrawImage` command needs so a
 //! `Cover`/`None` fit can overflow its destination rect without bleeding outside it.
 
-
-use objc2::rc::Retained;
 use objc2::AnyThread;
+use objc2::rc::Retained;
 use objc2_app_kit::NSImage;
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGColorSpace, CGDataProvider, CGImage};
-use objc2_foundation::{NSRect, NSString};
-use objc2_quartz_core::{
-    CALayer, kCAFilterLinear, kCAFilterNearest,
-};
+use objc2_foundation::NSRect;
+use objc2_quartz_core::{CALayer, kCAFilterLinear, kCAFilterNearest};
 use std::collections::HashMap;
 
 /// Crops `cg_image` to `source` (image-pixel coordinates, top-left origin — `CGImage::
@@ -74,7 +71,7 @@ pub(crate) fn fitted_image_rect(
     )
 }
 
-/// Builds the `masksToBounds` container + inner image `CALayer` for one `RenderCommand::DrawImage`
+/// Builds the layer or `masksToBounds` container needed for one `RenderCommand::DrawImage`
 /// — factored out of `replay_paint_command`'s own arm so `crop_cgimage`/`fitted_image_rect`'s
 /// actual `CALayer` construction (not just their own pure-value-level unit tests) is directly
 /// exercisable from `golden_tests` without needing a real `TreeHostView`/`NSView`. Returns `None`
@@ -101,6 +98,17 @@ pub(crate) fn build_image_container_layer(
         options.alignment_y,
     );
 
+    let needs_clip = options.repeat != elwindui_core::graphics::TileMode::None
+        || placed.x < 0.0
+        || placed.y < 0.0
+        || placed.x + placed.width > dest.width
+        || placed.y + placed.height > dest.height;
+    let filter = match options.sampling {
+        elwindui_core::graphics::ImageSampling::Nearest => unsafe { kCAFilterNearest },
+        elwindui_core::graphics::ImageSampling::Linear
+        | elwindui_core::graphics::ImageSampling::Cubic => unsafe { kCAFilterLinear },
+    };
+
     // A `dest`-sized, `masksToBounds` container keeps `Cover`/`None` overflow (the placed image
     // can be larger than `dest`) from bleeding into neighboring content — `placed` is already
     // expressed in this container's own local (dest-relative) coordinate space, the same
@@ -120,8 +128,44 @@ pub(crate) fn build_image_container_layer(
     // exact regardless of how `world` itself was built up). For a pure-translation `world` (the
     // common case) this reduces to exactly the old `setFrame` placement: identity linear part plus
     // a `position` that is `dest`'s translated center.
+    // A direct contents layer is the leanest representation for the ordinary, untransformed
+    // case.  A non-translation `world` still needs the container: its child is laid out in the
+    // destination's local coordinate system before the container applies the affine transform.
+    // Applying that transform directly to a contents layer makes AppKit drop transformed raster
+    // contents (and the rasterized `VectorImage` path delegates here too), as demonstrated by the
+    // graphics demo's affine image cards.
+    let has_identity_linear_transform =
+        world.m11 == 1.0 && world.m12 == 0.0 && world.m21 == 0.0 && world.m22 == 1.0;
+    if !needs_clip && has_identity_linear_transform {
+        let image_layer = CALayer::new();
+        image_layer.setBounds(objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(placed.width as f64, placed.height as f64),
+        ));
+        let center = world.transform_point(elwindui_core::base::Point {
+            x: dest.x + placed.x + placed.width / 2.0,
+            y: dest.y + placed.y + placed.height / 2.0,
+        });
+        image_layer.setPosition(objc2_core_foundation::CGPoint::new(
+            center.x as f64,
+            center.y as f64,
+        ));
+        image_layer.setAffineTransform(objc2_core_foundation::CGAffineTransform {
+            a: world.m11 as f64,
+            b: world.m12 as f64,
+            c: world.m21 as f64,
+            d: world.m22 as f64,
+            tx: 0.0,
+            ty: 0.0,
+        });
+        unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
+        image_layer.setMagnificationFilter(filter);
+        image_layer.setMinificationFilter(filter);
+        image_layer.setOpacity(opacity);
+        return Some(image_layer);
+    }
+
     let container = CALayer::new();
-    container.setName(Some(&NSString::from_str("elwindui-paint")));
     container.setMasksToBounds(true);
     container.setBounds(objc2_core_foundation::CGRect::new(
         objc2_core_foundation::CGPoint::new(0.0, 0.0),
@@ -150,12 +194,6 @@ pub(crate) fn build_image_container_layer(
         objc2_foundation::NSSize::new(placed.width as f64, placed.height as f64),
     ));
     unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
-    let filter = match options.sampling {
-        elwindui_core::graphics::ImageSampling::Nearest => unsafe { kCAFilterNearest },
-        elwindui_core::graphics::ImageSampling::Linear | elwindui_core::graphics::ImageSampling::Cubic => unsafe {
-            kCAFilterLinear
-        },
-    };
     image_layer.setMagnificationFilter(filter);
     image_layer.setMinificationFilter(filter);
     container.addSublayer(&image_layer);
@@ -164,14 +202,12 @@ pub(crate) fn build_image_container_layer(
 }
 
 /// Resolves an `Image` to a `CGImage`, decoding at most once per distinct `Image` (`image_cache`,
-/// keyed by the `Image`'s own `Arc` pointer identity — cheap and stable since `Image` is
-/// `Arc`-backed and the same logical image reuses the same `Arc` across relayouts unless the
-/// application constructs a fresh one).
+/// keyed by the `Image`'s stable [`elwindui_core::graphics::ImageId`].
 pub(crate) fn resolve_cgimage(
     image: &elwindui_core::graphics::Image,
-    cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) -> Option<CFRetained<CGImage>> {
-    let key = image as *const _ as usize;
+    let key = image.id();
     if let Some(cached) = cache.get(&key) {
         return Some(cached.clone());
     }
@@ -195,7 +231,9 @@ pub(crate) unsafe extern "C-unwind" fn release_boxed_pixels(
     }
 }
 
-pub(crate) fn decode_cgimage(image: &elwindui_core::graphics::Image) -> Option<CFRetained<CGImage>> {
+pub(crate) fn decode_cgimage(
+    image: &elwindui_core::graphics::Image,
+) -> Option<CFRetained<CGImage>> {
     match image.data() {
         elwindui_core::graphics::ImageData::Rgba8 {
             width,

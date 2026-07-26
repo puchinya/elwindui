@@ -4,12 +4,11 @@
 
 use elwindui_core::base::{AffineTransform, Rect};
 use elwindui_core::graphics::{
-    VectorFilter, VectorFilterInput, VectorFilterPrimitive,
-    VectorFilterPrimitiveNode, VectorNode,
+    VectorFilter, VectorFilterInput, VectorFilterPrimitive, VectorFilterPrimitiveNode, VectorNode,
 };
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::AnyThread;
 use objc2_core_foundation::{CFRetained, CGAffineTransform, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGImage;
 use objc2_core_image::{CIColor, CIImage, CIVector};
@@ -17,14 +16,11 @@ use objc2_foundation::{NSDictionary, NSNumber, NSString, NSValue};
 use objc2_quartz_core::CALayer;
 use std::collections::HashMap;
 
-use super::*;
 use super::raster::*;
+use super::*;
 
 pub(crate) fn filters_bounds(filters: &[VectorFilter]) -> Option<Rect> {
-    filters
-        .iter()
-        .map(|f| f.bounds)
-        .reduce(|a, b| a.union(b))
+    filters.iter().map(|f| f.bounds).reduce(|a, b| a.union(b))
 }
 
 pub(crate) fn render_filtered_content(
@@ -32,7 +28,7 @@ pub(crate) fn render_filtered_content(
     children: &[VectorNode],
     filters: &[VectorFilter],
     world: &AffineTransform,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     let Some(local_rect) = filters_bounds(filters) else {
         for child in children {
@@ -40,7 +36,9 @@ pub(crate) fn render_filtered_content(
         }
         return;
     };
-    let Some((pixels, width, height)) = rasterize_nodes_to_pixels(children, local_rect, image_cache) else {
+    let Some((pixels, width, height)) =
+        rasterize_nodes_to_pixels(children, local_rect, image_cache)
+    else {
         return;
     };
     let Some(source_cgimage) = pixels_to_cgimage(pixels, width, height) else {
@@ -64,8 +62,10 @@ pub(crate) fn render_filtered_content(
     for filter in filters {
         let mut results: Vec<Retained<CIImage>> = Vec::with_capacity(filter.primitives.len());
         for primitive in filter.primitives.iter() {
-            let output = apply_filter_primitive(primitive, &current, &source_ci, &results, local_rect);
-            let output = output.unwrap_or_else(|| results.last().cloned().unwrap_or_else(|| current.clone()));
+            let output =
+                apply_filter_primitive(primitive, &current, &source_ci, &results, local_rect);
+            let output = output
+                .unwrap_or_else(|| results.last().cloned().unwrap_or_else(|| current.clone()));
             results.push(output);
         }
         if let Some(last) = results.last() {
@@ -177,9 +177,13 @@ pub(crate) fn apply_filter_primitive(
             let input2 = resolve_filter_input(&fe.input2, source_graphic, results)?;
             match ci_blend_mode_filter_name(fe.mode) {
                 Some(name) => {
-                    let params = ci_dict(&[("inputBackgroundImage", input2.as_ref() as &AnyObject)]);
+                    let params =
+                        ci_dict(&[("inputBackgroundImage", input2.as_ref() as &AnyObject)]);
                     Some(unsafe {
-                        input1.imageByApplyingFilter_withInputParameters(&NSString::from_str(name), &params)
+                        input1.imageByApplyingFilter_withInputParameters(
+                            &NSString::from_str(name),
+                            &params,
+                        )
                     })
                 }
                 None => Some(unsafe { input1.imageByCompositingOverImage(&input2) }),
@@ -214,7 +218,9 @@ pub(crate) fn apply_filter_primitive(
             let radius = ((fe.radius_x + fe.radius_y) / 2.0).max(0.0);
             let radius_num = NSNumber::new_f64(radius as f64);
             let params = ci_dict(&[("inputRadius", radius_num.as_ref() as &AnyObject)]);
-            Some(unsafe { input.imageByApplyingFilter_withInputParameters(&NSString::from_str(name), &params) })
+            Some(unsafe {
+                input.imageByApplyingFilter_withInputParameters(&NSString::from_str(name), &params)
+            })
         }
         VectorFilterPrimitive::ConvolveMatrix(fe) => {
             let input = resolve_filter_input(&fe.input, source_graphic, results)?;
@@ -239,7 +245,10 @@ pub(crate) fn apply_filter_primitive(
             });
             let params = ci_dict(&[("inputTransform", identity.as_ref() as &AnyObject)]);
             Some(unsafe {
-                input.imageByApplyingFilter_withInputParameters(&NSString::from_str("CIAffineTile"), &params)
+                input.imageByApplyingFilter_withInputParameters(
+                    &NSString::from_str("CIAffineTile"),
+                    &params,
+                )
             })
         }
         VectorFilterPrimitive::Turbulence(_) => {
@@ -337,7 +346,11 @@ pub(crate) fn composite(
 /// `CIMultiplyCompositing`, `CIAdditionCompositing`, ...) — `image` is `inputImage`, `other` is
 /// `inputBackgroundImage`, matching every two-input filter this module already uses this same
 /// parameter-name convention for.
-pub(crate) fn apply_named(image: &Retained<CIImage>, name: &str, other: &Retained<CIImage>) -> Retained<CIImage> {
+pub(crate) fn apply_named(
+    image: &Retained<CIImage>,
+    name: &str,
+    other: &Retained<CIImage>,
+) -> Retained<CIImage> {
     let params = ci_dict(&[("inputBackgroundImage", other.as_ref() as &AnyObject)]);
     unsafe { image.imageByApplyingFilter_withInputParameters(&NSString::from_str(name), &params) }
 }
@@ -349,23 +362,45 @@ pub(crate) fn apply_named(image: &Retained<CIImage>, name: &str, other: &Retaine
 pub(crate) fn scale_all_channels(image: &Retained<CIImage>, k: f32) -> Retained<CIImage> {
     let zero = ci_vector4(0.0, 0.0, 0.0, 0.0);
     let params = ci_dict(&[
-        ("inputRVector", ci_vector4(k, 0.0, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputGVector", ci_vector4(0.0, k, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputBVector", ci_vector4(0.0, 0.0, k, 0.0).as_ref() as &AnyObject),
-        ("inputAVector", ci_vector4(0.0, 0.0, 0.0, k).as_ref() as &AnyObject),
+        (
+            "inputRVector",
+            ci_vector4(k, 0.0, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputGVector",
+            ci_vector4(0.0, k, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputBVector",
+            ci_vector4(0.0, 0.0, k, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputAVector",
+            ci_vector4(0.0, 0.0, 0.0, k).as_ref() as &AnyObject,
+        ),
         ("inputBiasVector", zero.as_ref() as &AnyObject),
     ]);
-    unsafe { image.imageByApplyingFilter_withInputParameters(&NSString::from_str("CIColorMatrix"), &params) }
+    unsafe {
+        image.imageByApplyingFilter_withInputParameters(
+            &NSString::from_str("CIColorMatrix"),
+            &params,
+        )
+    }
 }
 
 /// A solid, uniform-color `CIImage` covering exactly `extent` — the `k4` constant term in
 /// `composite`'s `Arithmetic` arm, and the same `CIColor`+`CIImage::initWithColor`+
 /// `imageByCroppingToRect` technique the `Flood` filter primitive arm already uses (a bare
 /// `CIImage` color fill has infinite extent until cropped).
-pub(crate) fn flat_color_image(r: f32, g: f32, b: f32, a: f32, extent: CGRect) -> Retained<CIImage> {
-    let color = unsafe {
-        CIColor::colorWithRed_green_blue_alpha(r as f64, g as f64, b as f64, a as f64)
-    };
+pub(crate) fn flat_color_image(
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+    extent: CGRect,
+) -> Retained<CIImage> {
+    let color =
+        unsafe { CIColor::colorWithRed_green_blue_alpha(r as f64, g as f64, b as f64, a as f64) };
     let image = unsafe { CIImage::initWithColor(CIImage::alloc(), &color) };
     unsafe { image.imageByCroppingToRect(extent) }
 }
@@ -385,7 +420,14 @@ pub(crate) fn apply_color_matrix(
     let g = ci_vector4(matrix[5], matrix[6], matrix[7], matrix[8]);
     let b = ci_vector4(matrix[10], matrix[11], matrix[12], matrix[13]);
     let a = ci_vector4(matrix[15], matrix[16], matrix[17], matrix[18]);
-    let bias = unsafe { CIVector::vectorWithX_Y_Z_W(matrix[4] as f64, matrix[9] as f64, matrix[14] as f64, matrix[19] as f64) };
+    let bias = unsafe {
+        CIVector::vectorWithX_Y_Z_W(
+            matrix[4] as f64,
+            matrix[9] as f64,
+            matrix[14] as f64,
+            matrix[19] as f64,
+        )
+    };
     let params = ci_dict(&[
         ("inputRVector", r.as_ref() as &AnyObject),
         ("inputGVector", g.as_ref() as &AnyObject),
@@ -394,22 +436,41 @@ pub(crate) fn apply_color_matrix(
         ("inputBiasVector", bias.as_ref() as &AnyObject),
     ]);
     Some(unsafe {
-        input.imageByApplyingFilter_withInputParameters(&NSString::from_str("CIColorMatrix"), &params)
+        input.imageByApplyingFilter_withInputParameters(
+            &NSString::from_str("CIColorMatrix"),
+            &params,
+        )
     })
 }
 
 pub(crate) const LUMINANCE_TO_ALPHA_MATRIX: [f32; 20] = [
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2125, 0.7154, 0.0721,
-    0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2125, 0.7154,
+    0.0721, 0.0, 0.0,
 ];
 
 /// Standard SVG `feColorMatrix type="saturate"` matrix (SVG 1.1 §15.10).
 pub(crate) fn saturate_matrix(s: f32) -> [f32; 20] {
     [
-        0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s, 0.0, 0.0,
-        0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s, 0.0, 0.0,
-        0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s, 0.0, 0.0,
-        0.0, 0.0, 0.0, 1.0, 0.0,
+        0.213 + 0.787 * s,
+        0.715 - 0.715 * s,
+        0.072 - 0.072 * s,
+        0.0,
+        0.0,
+        0.213 - 0.213 * s,
+        0.715 + 0.285 * s,
+        0.072 - 0.072 * s,
+        0.0,
+        0.0,
+        0.213 - 0.213 * s,
+        0.715 - 0.715 * s,
+        0.072 + 0.928 * s,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
     ]
 }
 
@@ -432,7 +493,11 @@ pub(crate) fn hue_rotate_matrix(degrees: f32) -> [f32; 20] {
         0.072 + c * 0.928 + s * 0.072,
         0.0,
         0.0,
-        0.0, 0.0, 0.0, 1.0, 0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
     ]
 }
 
@@ -444,12 +509,18 @@ pub(crate) fn apply_convolve_matrix(
         (3, 3) => "CIConvolution3X3",
         (5, 5) => "CIConvolution5X5",
         _ => {
-            report_unsupported("feConvolveMatrix with an order other than 3x3/5x5 (input passed through)");
+            report_unsupported(
+                "feConvolveMatrix with an order other than 3x3/5x5 (input passed through)",
+            );
             return Some(input.clone());
         }
     };
     let count = fe.kernel.len();
-    let mut values: Vec<f64> = fe.kernel.iter().map(|&v| v as f64 / fe.divisor.max(1e-6) as f64).collect();
+    let mut values: Vec<f64> = fe
+        .kernel
+        .iter()
+        .map(|&v| v as f64 / fe.divisor.max(1e-6) as f64)
+        .collect();
     values.reverse(); // SVG kernels are specified in reading order; Core Image expects the flipped orientation.
     let values_ptr = std::ptr::NonNull::new(values.as_mut_ptr()).expect("non-empty kernel");
     let weights = unsafe { CIVector::vectorWithValues_count(values_ptr, count) };
@@ -458,7 +529,9 @@ pub(crate) fn apply_convolve_matrix(
         ("inputWeights", weights.as_ref() as &AnyObject),
         ("inputBias", bias_num.as_ref() as &AnyObject),
     ]);
-    Some(unsafe { input.imageByApplyingFilter_withInputParameters(&NSString::from_str(name), &params) })
+    Some(unsafe {
+        input.imageByApplyingFilter_withInputParameters(&NSString::from_str(name), &params)
+    })
 }
 
 pub(crate) fn apply_drop_shadow(
@@ -469,10 +542,22 @@ pub(crate) fn apply_drop_shadow(
     // (SVG 1.1 §15.15's own "equivalent to" definition), built directly from `CIImage` steps
     // rather than a single named CIFilter (Core Image has no exact `feDropShadow` counterpart).
     let alpha_matrix = ci_dict(&[
-        ("inputRVector", ci_vector4(0.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputGVector", ci_vector4(0.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputBVector", ci_vector4(0.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputAVector", ci_vector4(0.0, 0.0, 0.0, 1.0).as_ref() as &AnyObject),
+        (
+            "inputRVector",
+            ci_vector4(0.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputGVector",
+            ci_vector4(0.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputBVector",
+            ci_vector4(0.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputAVector",
+            ci_vector4(0.0, 0.0, 0.0, 1.0).as_ref() as &AnyObject,
+        ),
         (
             "inputBiasVector",
             unsafe {
@@ -487,7 +572,10 @@ pub(crate) fn apply_drop_shadow(
         ),
     ]);
     let tinted = unsafe {
-        input.imageByApplyingFilter_withInputParameters(&NSString::from_str("CIColorMatrix"), &alpha_matrix)
+        input.imageByApplyingFilter_withInputParameters(
+            &NSString::from_str("CIColorMatrix"),
+            &alpha_matrix,
+        )
     };
     let sigma = ((fe.std_dev_x + fe.std_dev_y) / 2.0).max(0.0) as f64;
     let blurred = unsafe { tinted.imageByApplyingGaussianBlurWithSigma(sigma) };
@@ -502,14 +590,32 @@ pub(crate) fn apply_drop_shadow(
         })
     };
     let opacity_matrix = ci_dict(&[
-        ("inputRVector", ci_vector4(1.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputGVector", ci_vector4(0.0, 1.0, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputBVector", ci_vector4(0.0, 0.0, 1.0, 0.0).as_ref() as &AnyObject),
-        ("inputAVector", ci_vector4(0.0, 0.0, 0.0, fe.opacity).as_ref() as &AnyObject),
-        ("inputBiasVector", ci_vector4(0.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject),
+        (
+            "inputRVector",
+            ci_vector4(1.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputGVector",
+            ci_vector4(0.0, 1.0, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputBVector",
+            ci_vector4(0.0, 0.0, 1.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputAVector",
+            ci_vector4(0.0, 0.0, 0.0, fe.opacity).as_ref() as &AnyObject,
+        ),
+        (
+            "inputBiasVector",
+            ci_vector4(0.0, 0.0, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
     ]);
     let shadow = unsafe {
-        offset.imageByApplyingFilter_withInputParameters(&NSString::from_str("CIColorMatrix"), &opacity_matrix)
+        offset.imageByApplyingFilter_withInputParameters(
+            &NSString::from_str("CIColorMatrix"),
+            &opacity_matrix,
+        )
     };
     Some(unsafe { input.imageByCompositingOverImage(&shadow) })
 }
@@ -533,17 +639,37 @@ pub(crate) fn apply_component_transfer(
         linear(&fe.blue),
         linear(&fe.alpha),
     ) else {
-        report_unsupported("feComponentTransfer with a Table/Discrete/Gamma function (input passed through)");
+        report_unsupported(
+            "feComponentTransfer with a Table/Discrete/Gamma function (input passed through)",
+        );
         return Some(input.clone());
     };
     let params = ci_dict(&[
-        ("inputRVector", ci_vector4(rs, 0.0, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputGVector", ci_vector4(0.0, gs, 0.0, 0.0).as_ref() as &AnyObject),
-        ("inputBVector", ci_vector4(0.0, 0.0, bs, 0.0).as_ref() as &AnyObject),
-        ("inputAVector", ci_vector4(0.0, 0.0, 0.0, as_).as_ref() as &AnyObject),
-        ("inputBiasVector", ci_vector4(ri, gi, bi, ai).as_ref() as &AnyObject),
+        (
+            "inputRVector",
+            ci_vector4(rs, 0.0, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputGVector",
+            ci_vector4(0.0, gs, 0.0, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputBVector",
+            ci_vector4(0.0, 0.0, bs, 0.0).as_ref() as &AnyObject,
+        ),
+        (
+            "inputAVector",
+            ci_vector4(0.0, 0.0, 0.0, as_).as_ref() as &AnyObject,
+        ),
+        (
+            "inputBiasVector",
+            ci_vector4(ri, gi, bi, ai).as_ref() as &AnyObject,
+        ),
     ]);
     Some(unsafe {
-        input.imageByApplyingFilter_withInputParameters(&NSString::from_str("CIColorMatrix"), &params)
+        input.imageByApplyingFilter_withInputParameters(
+            &NSString::from_str("CIColorMatrix"),
+            &params,
+        )
     })
 }

@@ -17,9 +17,14 @@ mod path;
 mod text;
 mod vector;
 
-pub(crate) use geometry::{clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, parse_color, transform_point};
+pub(crate) use geometry::{
+    clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, parse_color, transform_point,
+};
 pub(crate) use image::{build_image_container_layer, fitted_image_rect, resolve_cgimage};
-pub(crate) use paint::{GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, first_gradient_stop_color, gradient_unit_point, try_add_gradient_fill_layer, try_add_image_fill_layer};
-pub(crate) use text::{AppKitTextBackend, attributed_string, ns_font};
-pub(crate) use vector::draw_vector_image;
+pub(crate) use paint::{
+    GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, first_gradient_stop_color,
+    gradient_unit_point, try_add_gradient_fill_layer, try_add_image_fill_layer,
+};
 pub(crate) use path::{ellipse_cgpath, path_to_cgpath, rounded_rect_cgpath};
+pub(crate) use text::{AppKitTextBackend, attributed_string, ns_font};
+pub(crate) use vector::{draw_vector_image, pixels_to_cgimage, rasterize_calayer_to_pixels};

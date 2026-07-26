@@ -4,34 +4,22 @@
 //! ivars (`group_layers`, `group_layer_cache_keys`, `group_native_controls`,
 //! `native_containers`) — it is this view's rendering pass, not stateless translation.
 
-
 use crate::ffi::{AnyView, mtm};
 use crate::render::{
-    GradientMaskShape,
-    add_shape_layer,
-    apply_fill,
-    apply_stroke,
-    build_image_container_layer,
-    clip_bounds,
-    clip_mask_layer,
-    ellipse_cgpath,
-    geometry_bounds,
-    path_to_cgpath,
-    resolve_cgimage,
-    rounded_rect_cgpath,
-    transform_point,
-    try_add_gradient_fill_layer,
-    try_add_image_fill_layer,
+    GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, build_image_container_layer,
+    clip_bounds, clip_mask_layer, ellipse_cgpath, geometry_bounds, path_to_cgpath, resolve_cgimage,
+    rounded_rect_cgpath, transform_point, try_add_gradient_fill_layer, try_add_image_fill_layer,
 };
-use elwindui_core::graphics::{RenderCommand, RenderGroup};
-use objc2::rc::Retained;
+use elwindui_core::graphics::{Brush, ImageId, RenderCommand, RenderGroup, VectorImageId};
+use elwindui_core::ui::TextAlignment;
 use objc2::DefinedClass;
+use objc2::rc::Retained;
 use objc2_app_kit::NSView;
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGImage, CGMutablePath};
 use objc2_foundation::{NSRect, NSString};
 use objc2_quartz_core::{
-    CALayer, CAShapeLayer, CATextLayer,
+    CALayer, CAShapeLayer, CATextLayer, kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight,
     kCAFillRuleEvenOdd, kCAFillRuleNonZero,
 };
 use std::collections::{HashMap, HashSet};
@@ -47,6 +35,60 @@ pub(crate) struct GroupCacheKey {
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
     generation: u64,
+}
+
+/// Returns the raster and vector resources a group's command list can resolve. The result is
+/// stored alongside the cached layer so a cache hit can restore liveness without replaying the
+/// command list.
+fn resource_ids(commands: &[RenderCommand]) -> (Vec<ImageId>, Vec<VectorImageId>) {
+    fn add_image(images: &mut Vec<ImageId>, id: ImageId) {
+        if !images.contains(&id) {
+            images.push(id);
+        }
+    }
+
+    let mut images = Vec::new();
+    let mut vectors = Vec::new();
+    let add_brush = |brush: &Brush, images: &mut Vec<ImageId>| {
+        if let Brush::Image(image_brush) = brush {
+            add_image(images, image_brush.image.id());
+        }
+    };
+    for command in commands {
+        match command {
+            RenderCommand::FillRect { brush, .. }
+            | RenderCommand::StrokeRect { brush, .. }
+            | RenderCommand::FillRoundedRect { brush, .. }
+            | RenderCommand::StrokeRoundedRect { brush, .. }
+            | RenderCommand::FillEllipse { brush, .. }
+            | RenderCommand::StrokeEllipse { brush, .. }
+            | RenderCommand::DrawLine { brush, .. }
+            | RenderCommand::FillPath { brush, .. }
+            | RenderCommand::StrokePath { brush, .. } => add_brush(brush, &mut images),
+            RenderCommand::DrawImage { image, .. } => {
+                add_image(&mut images, image.id());
+            }
+            RenderCommand::DrawVectorImage { image, .. } => {
+                let id = image.id();
+                if !vectors.contains(&id) {
+                    vectors.push(id);
+                }
+            }
+            RenderCommand::Text { foreground, .. } => {
+                if let Some(brush) = foreground {
+                    add_brush(brush, &mut images);
+                }
+            }
+            RenderCommand::PushClip { .. }
+            | RenderCommand::PopClip
+            | RenderCommand::PushTransform { .. }
+            | RenderCommand::PopTransform
+            | RenderCommand::PushOpacity { .. }
+            | RenderCommand::PopOpacity
+            | RenderCommand::NativeControl { .. } => {}
+        }
+    }
+    (images, vectors)
 }
 
 /// One retained-render replay pass over a `RenderGroup` tree, appending real `CALayer`s to
@@ -87,8 +129,10 @@ pub(crate) fn replay_group(
     opacity: f32,
     live_native_controls: &mut HashSet<usize>,
     live_group_ids: &mut HashSet<u64>,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
-    vector_raster_cache: &mut HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, CFRetained<CGImage>)>,
+    live_image_ids: &mut HashSet<ImageId>,
+    live_vector_image_ids: &mut HashSet<VectorImageId>,
+    image_cache: &mut HashMap<ImageId, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
 ) {
     let origin = elwindui_core::base::Point {
         x: origin.x + group.offset.x,
@@ -129,8 +173,7 @@ pub(crate) fn replay_group(
         opacity,
         generation: group.generation,
     };
-    let stale =
-        is_new || host.ivars().group_layer_cache_keys.borrow().get(&group.id) != Some(&key);
+    let stale = is_new || host.ivars().group_layer_cache_keys.borrow().get(&group.id) != Some(&key);
     if stale {
         if let Some(existing) = unsafe { container.sublayers() } {
             // `removeFromSuperlayer` while iterating `existing` (a live view onto `container`'s
@@ -163,12 +206,29 @@ pub(crate) fn replay_group(
             .group_native_controls
             .borrow_mut()
             .insert(group.id, discovered_native_controls);
+        let (image_ids, vector_image_ids) = resource_ids(&group.commands);
+        live_image_ids.extend(image_ids.iter().copied());
+        live_vector_image_ids.extend(vector_image_ids.iter().copied());
+        host.ivars()
+            .group_image_ids
+            .borrow_mut()
+            .insert(group.id, image_ids);
+        host.ivars()
+            .group_vector_image_ids
+            .borrow_mut()
+            .insert(group.id, vector_image_ids);
         host.ivars()
             .group_layer_cache_keys
             .borrow_mut()
             .insert(group.id, key);
     } else if let Some(ids) = host.ivars().group_native_controls.borrow().get(&group.id) {
         live_native_controls.extend(ids);
+        if let Some(ids) = host.ivars().group_image_ids.borrow().get(&group.id) {
+            live_image_ids.extend(ids);
+        }
+        if let Some(ids) = host.ivars().group_vector_image_ids.borrow().get(&group.id) {
+            live_vector_image_ids.extend(ids);
+        }
     }
 
     for child in &group.children {
@@ -182,6 +242,8 @@ pub(crate) fn replay_group(
             opacity,
             live_native_controls,
             live_group_ids,
+            live_image_ids,
+            live_vector_image_ids,
             image_cache,
             vector_raster_cache,
         );
@@ -206,8 +268,8 @@ pub(crate) fn replay_commands(
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
     live_native_controls: &mut HashSet<usize>,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
-    vector_raster_cache: &mut HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, CFRetained<CGImage>)>,
+    image_cache: &mut HashMap<ImageId, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
 ) -> usize {
     let mut idx = start;
     while idx < commands.len() {
@@ -298,9 +360,7 @@ pub(crate) fn replay_commands(
                     width: rect.width,
                     height: rect.height,
                 };
-                let visible_rect = clip
-                    .and_then(|clip| rect.intersect(clip))
-                    .unwrap_or(rect);
+                let visible_rect = clip.and_then(|clip| rect.intersect(clip)).unwrap_or(rect);
                 if visible_rect.width <= 0.0 || visible_rect.height <= 0.0 {
                     idx += 1;
                     continue;
@@ -344,9 +404,11 @@ pub(crate) fn replay_commands(
                 idx += 1;
             }
             command => {
-                if geometry_bounds(command, origin).is_none_or(|bounds| {
-                    clip.is_none_or(|clip| bounds.intersect(clip).is_some())
-                }) {
+                let world = elwindui_core::base::AffineTransform::translation(origin.x, origin.y)
+                    .concat(&transform);
+                if geometry_bounds(command, &world)
+                    .is_none_or(|bounds| clip.is_none_or(|clip| bounds.intersect(clip).is_some()))
+                {
                     replay_paint_command(
                         host,
                         layer,
@@ -378,8 +440,8 @@ pub(crate) fn replay_paint_command(
     origin: elwindui_core::base::Point,
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
-    vector_raster_cache: &mut HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, CFRetained<CGImage>)>,
+    image_cache: &mut HashMap<ImageId, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
 ) {
     let world =
         elwindui_core::base::AffineTransform::translation(origin.x, origin.y).concat(&transform);
@@ -389,9 +451,22 @@ pub(crate) fn replay_paint_command(
     };
     match command {
         RenderCommand::FillRect { rect, brush } => {
-            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(elwindui_core::base::CornerRadius::default()), &world, opacity)
-                && !try_add_image_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(elwindui_core::base::CornerRadius::default()), &world, opacity, image_cache)
-            {
+            if !try_add_gradient_fill_layer(
+                layer,
+                brush,
+                *rect,
+                GradientMaskShape::RoundedRect(elwindui_core::base::CornerRadius::default()),
+                &world,
+                opacity,
+            ) && !try_add_image_fill_layer(
+                layer,
+                brush,
+                *rect,
+                GradientMaskShape::RoundedRect(elwindui_core::base::CornerRadius::default()),
+                &world,
+                opacity,
+                image_cache,
+            ) {
                 let path = rounded_rect_path(rect, elwindui_core::base::CornerRadius::default());
                 add_shape_layer(layer, &path, Some(brush), None, opacity, *rect);
             }
@@ -405,9 +480,22 @@ pub(crate) fn replay_paint_command(
             add_shape_layer(layer, &path, None, Some((brush, stroke)), opacity, *rect);
         }
         RenderCommand::FillRoundedRect { rect, radii, brush } => {
-            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(*radii), &world, opacity)
-                && !try_add_image_fill_layer(layer, brush, *rect, GradientMaskShape::RoundedRect(*radii), &world, opacity, image_cache)
-            {
+            if !try_add_gradient_fill_layer(
+                layer,
+                brush,
+                *rect,
+                GradientMaskShape::RoundedRect(*radii),
+                &world,
+                opacity,
+            ) && !try_add_image_fill_layer(
+                layer,
+                brush,
+                *rect,
+                GradientMaskShape::RoundedRect(*radii),
+                &world,
+                opacity,
+                image_cache,
+            ) {
                 let path = rounded_rect_path(rect, *radii);
                 add_shape_layer(layer, &path, Some(brush), None, opacity, *rect);
             }
@@ -422,9 +510,22 @@ pub(crate) fn replay_paint_command(
             add_shape_layer(layer, &path, None, Some((brush, stroke)), opacity, *rect);
         }
         RenderCommand::FillEllipse { rect, brush } => {
-            if !try_add_gradient_fill_layer(layer, brush, *rect, GradientMaskShape::Ellipse, &world, opacity)
-                && !try_add_image_fill_layer(layer, brush, *rect, GradientMaskShape::Ellipse, &world, opacity, image_cache)
-            {
+            if !try_add_gradient_fill_layer(
+                layer,
+                brush,
+                *rect,
+                GradientMaskShape::Ellipse,
+                &world,
+                opacity,
+            ) && !try_add_image_fill_layer(
+                layer,
+                brush,
+                *rect,
+                GradientMaskShape::Ellipse,
+                &world,
+                opacity,
+                image_cache,
+            ) {
                 let path = ellipse_cgpath(&world, *rect);
                 add_shape_layer(layer, &path, Some(brush), None, opacity, *rect);
             }
@@ -526,7 +627,14 @@ pub(crate) fn replay_paint_command(
             options,
         } => {
             crate::render::draw_vector_image(
-                layer, image, *dest, *source, options, &world, opacity, image_cache,
+                layer,
+                image,
+                *dest,
+                *source,
+                options,
+                &world,
+                opacity,
+                image_cache,
                 vector_raster_cache,
             );
         }
@@ -549,12 +657,15 @@ pub(crate) fn replay_paint_command(
                 ),
                 objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
             ));
-            // Once an `NSAttributedString` is set, `CATextLayer` ignores its own `font`/
-            // `fontSize`/`foregroundColor`/`alignmentMode` entirely — those setters are
-            // deliberately *not* called here (they'd be a silently-dead second source of truth).
-            // Font/foreground/kerning/alignment all come from the same `text_attributes` a
-            // `TextBlock`'s own measurement (`AppKitTextBackend::measure_text`) used, so the
-            // painted glyphs always match what was measured.
+            // The attributed string remains the source of font, foreground, and kerning. Its
+            // paragraph alignment is required for AppKit measurement, but CATextLayer's actual
+            // paint layout follows `alignmentMode`; set the equivalent native value explicitly
+            // so a `RenderCommand::Text` with `Center` or `Right` is not painted as left-aligned.
+            text_layer.setAlignmentMode(match alignment {
+                TextAlignment::Left => unsafe { kCAAlignmentLeft },
+                TextAlignment::Center => unsafe { kCAAlignmentCenter },
+                TextAlignment::Right => unsafe { kCAAlignmentRight },
+            });
             unsafe {
                 text_layer.setString(Some(&crate::render::attributed_string(
                     content,

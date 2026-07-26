@@ -4,9 +4,7 @@
 
 use crate::render::image::release_boxed_pixels;
 use elwindui_core::base::{AffineTransform, Point, Rect};
-use elwindui_core::graphics::{
-    VectorImage, VectorNode,
-};
+use elwindui_core::graphics::{VectorImage, VectorNode};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::{CFRetained, CGAffineTransform, CGPoint, CGRect, CGSize};
@@ -29,7 +27,7 @@ pub(crate) fn rasterize_vector_image_to_cgimage(
     src_rect: Rect,
     pixel_width: usize,
     pixel_height: usize,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) -> Option<CFRetained<CGImage>> {
     if pixel_width == 0
         || pixel_height == 0
@@ -57,15 +55,18 @@ pub(crate) fn rasterize_vector_image_to_cgimage(
 /// Decides whether `VectorRasterizeMode::Auto` needs to (re)rasterize, and at what size, given
 /// the previous cache entry's size (if any, `cached`) and the size actually being requested now
 /// (`requested`) — `draw_vector_image`'s own `Auto` arm. `None` means "reuse the existing cached
-/// bitmap unchanged": shrinking (or an unchanged size) never triggers a rerasterization, since
-/// `build_image_container_layer` downscales a larger cached bitmap to fit `dest` with no quality
-/// loss (unlike upscaling, which would blur). `Some(size)` means a fresh rasterization is needed —
+/// bitmap unchanged". A much smaller request rerasterizes only after its caller has observed it
+/// for three consecutive replays, avoiding allocation churn during live resize. `Some(size)`
+/// means a fresh rasterization is needed —
 /// on growth, padded to 1.5x the *previous* cached size (rounded up) as long as the newly
 /// requested size still fits under that margin, so a gradual, continuous enlargement (e.g. a live
 /// window resize drag) doesn't force a rasterization on every single size change; a jump past the
 /// 1.5x margin just rasterizes at the size actually requested, rather than over-allocating a
 /// buffer that wouldn't even cover it.
-pub(crate) fn auto_raster_target_size(cached: Option<(u32, u32)>, requested: (u32, u32)) -> Option<(u32, u32)> {
+pub(crate) fn auto_raster_target_size(
+    cached: Option<(u32, u32)>,
+    requested: (u32, u32),
+) -> Option<(u32, u32)> {
     let Some((cached_width, cached_height)) = cached else {
         return Some(requested);
     };
@@ -79,6 +80,12 @@ pub(crate) fn auto_raster_target_size(cached: Option<(u32, u32)>, requested: (u3
     } else {
         Some(requested)
     }
+}
+
+/// Whether `requested` is small enough relative to `cached` to count toward an `Auto` cache
+/// shrink. This deliberately uses area rather than either single dimension.
+pub(crate) fn is_materially_smaller(cached: (u32, u32), requested: (u32, u32)) -> bool {
+    u64::from(requested.0) * u64::from(requested.1) * 4 <= u64::from(cached.0) * u64::from(cached.1)
 }
 
 #[cfg(test)]
@@ -96,6 +103,12 @@ mod auto_raster_target_size_tests {
     }
 
     #[test]
+    fn materially_smaller_uses_the_cache_area_threshold() {
+        assert!(super::is_materially_smaller((100, 100), (50, 50)));
+        assert!(!super::is_materially_smaller((100, 100), (51, 50)));
+    }
+
+    #[test]
     fn unchanged_size_reuses_the_existing_cache() {
         assert_eq!(auto_raster_target_size(Some((100, 100)), (100, 100)), None);
     }
@@ -109,19 +122,28 @@ mod auto_raster_target_size_tests {
     fn growth_within_1_5x_margin_pads_to_1_5x_the_cached_size() {
         // 100 * 1.5 = 150, 80 * 1.5 = 120 — both requested dims (120, 100) sit strictly under
         // that margin, so the target is the margin itself, not the raw request.
-        assert_eq!(auto_raster_target_size(Some((100, 80)), (120, 100)), Some((150, 120)));
+        assert_eq!(
+            auto_raster_target_size(Some((100, 80)), (120, 100)),
+            Some((150, 120))
+        );
     }
 
     #[test]
     fn growth_at_or_past_the_1_5x_margin_in_either_axis_uses_the_exact_requested_size() {
         // Width alone (200 >= 150) already exceeds its margin, even though height (90) doesn't.
-        assert_eq!(auto_raster_target_size(Some((100, 80)), (200, 90)), Some((200, 90)));
+        assert_eq!(
+            auto_raster_target_size(Some((100, 80)), (200, 90)),
+            Some((200, 90))
+        );
     }
 
     #[test]
     fn margin_rounds_up_for_odd_cached_sizes() {
         // 101 * 1.5 = 151.5 -> ceil 152.
-        assert_eq!(auto_raster_target_size(Some((101, 101)), (110, 110)), Some((152, 152)));
+        assert_eq!(
+            auto_raster_target_size(Some((101, 101)), (110, 110)),
+            Some((152, 152))
+        );
     }
 }
 
@@ -131,16 +153,23 @@ mod auto_raster_target_size_tests {
 pub(crate) fn rasterize_nodes_to_pixels(
     children: &[VectorNode],
     local_rect: Rect,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) -> Option<(Vec<u8>, usize, usize)> {
     let width = local_rect.width.ceil().max(1.0) as usize;
     let height = local_rect.height.ceil().max(1.0) as usize;
-    if width == 0 || height == 0 || width > MAX_OFFSCREEN_DIMENSION || height > MAX_OFFSCREEN_DIMENSION {
+    if width == 0
+        || height == 0
+        || width > MAX_OFFSCREEN_DIMENSION
+        || height > MAX_OFFSCREEN_DIMENSION
+    {
         return None;
     }
 
     let root = CALayer::new();
-    root.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width as f64, height as f64)));
+    root.setBounds(CGRect::new(
+        CGPoint::new(0.0, 0.0),
+        CGSize::new(width as f64, height as f64),
+    ));
     let local_to_pixel = AffineTransform::translation(-local_rect.x, -local_rect.y);
     for child in children {
         render_node(&root, child, &local_to_pixel, 1.0, image_cache);
@@ -179,14 +208,23 @@ pub(crate) fn rasterize_calayer_to_pixels(
     Some((pixels, width, height))
 }
 
-pub(crate) fn pixels_to_cgimage(pixels: Vec<u8>, width: usize, height: usize) -> Option<CFRetained<CGImage>> {
+pub(crate) fn pixels_to_cgimage(
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+) -> Option<CFRetained<CGImage>> {
     let bytes_per_row = width * 4;
     let mut owned = pixels.into_boxed_slice();
     let len = owned.len();
     let ptr = owned.as_mut_ptr();
     std::mem::forget(owned);
     let provider = unsafe {
-        CGDataProvider::with_data(std::ptr::null_mut(), ptr as *const _, len, Some(release_boxed_pixels))
+        CGDataProvider::with_data(
+            std::ptr::null_mut(),
+            ptr as *const _,
+            len,
+            Some(release_boxed_pixels),
+        )
     }?;
     let color_space = CGColorSpace::new_device_rgb()?;
     #[allow(deprecated)]

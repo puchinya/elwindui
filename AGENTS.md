@@ -6,6 +6,72 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 When asking the user a question (clarifying questions, `AskUserQuestion`, plan checkpoints, etc.), always ask in Japanese.
 
+<!-- BEGIN ISSUE-DRIVEN AGENT WORKFLOW -->
+## Issue-driven development workflow
+
+Use this workflow only for requests expected to modify this repository. Do not create an Issue for explanation, research, exploratory design discussion, or code-reading tasks unless the user explicitly asks to track the work.
+
+### Common rules
+
+- Search for an existing relevant Issue before creating a new one.
+- Every repository-changing task must be associated with one GitHub Issue.
+- Create or locate the Issue before modifying source code or documentation.
+- For Rust work, assign the Issue to the GitHub Milestone whose title exactly matches the root `Cargo.toml` version. Prefer `[workspace.package].version`, otherwise `[package].version`. Do not add a `v` prefix. Create the Milestone if it does not exist. Use `scripts/agent/ensure-version-milestone.sh <issue-number>` on macOS/Linux or `scripts/agent/ensure-version-milestone.ps1 <issue-number>` in PowerShell.
+- If an exact-title Milestone exists but is closed, do not create a duplicate or reopen it silently; report the inconsistency for a release-version decision.
+- For source-code changes, create a dedicated branch named `feature/<issue-number>-<short-slug>` from the current remote default branch before editing. Never edit source code directly on the default branch. Use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` on macOS/Linux or `scripts/agent/start-feature-branch.ps1 <issue-number> <short-description>` in PowerShell.
+- Documentation-only or workflow-only changes may use a `docs/` or `agent/` branch instead.
+- Use at most one `phase:*` label at a time:
+  - `phase:requirements`
+  - `phase:design`
+  - `phase:ready`
+  - `phase:implementation`
+  - `phase:review`
+- `blocked` and `needs-user-decision` are orthogonal labels; they do not replace the current phase.
+- Do not update the Issue body after every conversation turn.
+- Update the Issue body when requirements and design are approved, or when an approved specification materially changes.
+- Do not report a GitHub write as successful unless the operation actually succeeded.
+- If GitHub write access is unavailable, report the limitation instead of silently substituting a local tracking file.
+- Close the Issue only after the associated Pull Request is merged into the default branch.
+- Prefer `Closes #<issue-number>` in the Pull Request body.
+
+### Phase routing
+
+Determine the effective phase from the Issue labels, linked Pull Request state, and explicit user instructions. Repository state takes precedence over stale labels: an open associated Pull Request normally means review, and a merged Pull Request means the implementation lifecycle has finished.
+
+Read only the workflow document needed for the effective phase. Do not load every workflow document.
+
+`docs_only_human/` contains human-facing documentation. Do not load files from that directory during ordinary agent work unless the user explicitly requests the human-facing explanation.
+
+- `phase:requirements`: read `docs/agent-workflow/requirements.md`
+- `phase:design`: read `docs/agent-workflow/design.md`
+- `phase:ready` or `phase:implementation`: read `docs/agent-workflow/implementation.md`
+- `phase:review` or an open associated Pull Request: read `docs/agent-workflow/review.md`
+- merged Pull Request and closed Issue: no phase workflow document is required
+
+Reconcile stale labels before continuing.
+
+### Required lifecycle
+
+```text
+Request
+  -> Issue created or located
+  -> Requirements
+  -> Design
+  -> Approval
+  -> Ready
+  -> Implementation and verification
+  -> Pull Request and review
+  -> Merge
+  -> Issue closed
+```
+
+The initial Issue may contain only the original request and a note that planning is in progress. Keep draft requirements and design in the active conversation during a short planning session.
+
+If planning must continue in another session and information loss would be risky, add one concise checkpoint comment with decisions, remaining questions, and the next action. Do not repeatedly rewrite the Issue body.
+
+After approval, update the Issue with the approved requirements, non-goals, design summary, and verifiable acceptance criteria before implementation. Detailed implementation and test evidence belong primarily in the Pull Request.
+<!-- END ISSUE-DRIVEN AGENT WORKFLOW -->
+
 ## Project state
 
 This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to native OS toolkit backends (WinUI 3 / AppKit / GTK4). This is a Cargo workspace (`crates/*` + `examples/*`, no root `src/`) with a real, substantial implementation — not just a spec: `elwindui-codegen` (the `.elwind` → Rust compiler, both a `build.rs`-driven path and a `component!`/`#[viewmodel]` proc-macro path), `elwindui-core` (the `UIElement` runtime), `elwindui-macros`, `elwindui-i18n`, `elwindui-languageserver`, and `elwindui-backend-appkit` (built, run, and screenshot-verified on this machine) are all real. `elwindui-backend-winui3` has code but is unverified (no Windows environment); `elwindui-backend-gtk4` and hot reload (`elwindui-hotreload`) are stubs; there is no preview-tool crate at all yet. See `docs/elwindui_implementation_status.md` for the full, regularly-stale-prone breakdown of what's implemented vs. still just spec — check it, and re-verify against `crates/` directly, before assuming a feature described in the spec docs actually exists.

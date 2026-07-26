@@ -12,7 +12,7 @@ Before editing:
    - name it `feature/<issue-number>-<short-slug>`;
    - create it from the current remote default branch;
    - never edit source code directly on the default branch;
-   - use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` when available.
+   - use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` on macOS/Linux or `scripts/agent/start-feature-branch.ps1 <issue-number> <short-description>` in PowerShell.
 4. Documentation-only or workflow-only changes may use a `docs/` or `agent/` branch instead.
 5. Replace `phase:ready` with `phase:implementation`.
 

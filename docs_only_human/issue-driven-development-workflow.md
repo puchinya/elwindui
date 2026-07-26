@@ -181,10 +181,16 @@ Create the branch from the current remote default branch, not from an arbitrary
 local branch. Do not edit source code directly on `master`, `main`, or another
 default branch.
 
-Use:
+Use on macOS/Linux:
 
 ```bash
 scripts/agent/start-feature-branch.sh 123 "graphics path"
+```
+
+Use in Windows PowerShell:
+
+```powershell
+.\scripts\agent\start-feature-branch.ps1 123 "graphics path"
 ```
 
 Documentation-only or workflow-only changes may use a `docs/` or `agent/`
@@ -281,13 +287,19 @@ Examples:
 
 Do not add a `v` prefix.
 
-Use:
+Use on macOS/Linux:
 
 ```bash
 scripts/agent/ensure-version-milestone.sh <issue-number>
 ```
 
-The helper:
+Use in Windows PowerShell:
+
+```powershell
+.\scripts\agent\ensure-version-milestone.ps1 <issue-number>
+```
+
+Both helpers:
 
 - reads the root Cargo version;
 - finds an exact-title Milestone;
@@ -299,6 +311,17 @@ The helper:
 A closed matching Milestone usually means either the Milestone must be
 reopened intentionally or `Cargo.toml` should move to the next development
 version. The helper does not make that release decision automatically.
+
+## Cross-platform helper scripts
+
+| Operation | macOS/Linux | Windows PowerShell |
+|---|---|---|
+| Start feature branch | `scripts/agent/start-feature-branch.sh` | `scripts/agent/start-feature-branch.ps1` |
+| Ensure version milestone | `scripts/agent/ensure-version-milestone.sh` | `scripts/agent/ensure-version-milestone.ps1` |
+
+Both variants implement the same repository rules. Use the native script for
+the current operating system rather than invoking the other platform through
+an emulation layer.
 
 ## Agent instruction files
 
@@ -336,7 +359,7 @@ gh issue edit "$ISSUE_NUMBER" \
   --add-label "phase:ready"
 ```
 
-When implementation starts:
+When implementation starts on macOS/Linux:
 
 ```bash
 scripts/agent/start-feature-branch.sh \
@@ -345,6 +368,18 @@ scripts/agent/start-feature-branch.sh \
 
 gh issue edit "$ISSUE_NUMBER" \
   --remove-label "phase:ready" \
+  --add-label "phase:implementation"
+```
+
+When implementation starts in Windows PowerShell:
+
+```powershell
+.\scripts\agent\start-feature-branch.ps1 `
+  $IssueNumber `
+  "graphics path"
+
+gh issue edit $IssueNumber `
+  --remove-label "phase:ready" `
   --add-label "phase:implementation"
 ```
 

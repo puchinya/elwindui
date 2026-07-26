@@ -16,7 +16,7 @@ Turn the initial request into a bounded, testable problem statement without star
    - use the version string exactly as the GitHub Milestone title, without adding a `v` prefix;
    - create the Milestone when no exact-title Milestone exists;
    - assign the Issue to that Milestone.
-   Use `scripts/agent/ensure-version-milestone.sh <issue-number>` when available.
+   Use `scripts/agent/ensure-version-milestone.sh <issue-number>` on macOS/Linux or `scripts/agent/ensure-version-milestone.ps1 <issue-number>` in PowerShell.
 4. Keep the initial Issue small:
    - original request;
    - current planning state;

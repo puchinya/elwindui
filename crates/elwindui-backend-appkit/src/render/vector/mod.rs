@@ -9,14 +9,11 @@
 //! so it can share `render`'s path/paint/image helpers without either side importing the other
 //! — the arrangement that removed the original `inner` <-> `vector_renderer` cycle.
 
-use crate::render::{
-    build_image_container_layer, clip_mask_layer,
-    fitted_image_rect,
-};
+use crate::render::{build_image_container_layer, clip_mask_layer, fitted_image_rect};
 use elwindui_core::base::{AffineTransform, Rect};
 use elwindui_core::graphics::{
-    Clip, FillRule, ImageDrawOptions,
-    VectorBlendMode, VectorGroup, VectorImage, VectorImageDrawOptions, VectorImageId, VectorNode, VectorRasterizeMode,
+    Clip, FillRule, ImageDrawOptions, VectorBlendMode, VectorGroup, VectorImage,
+    VectorImageDrawOptions, VectorImageId, VectorNode, VectorRasterizeMode,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -34,6 +31,8 @@ mod raster;
 use filter::*;
 use paint::*;
 use raster::*;
+
+pub(crate) use raster::{pixels_to_cgimage, rasterize_calayer_to_pixels};
 
 /// The largest offscreen buffer dimension (mask/pattern-tile/filter rasterization) allowed in
 /// either axis — a defensive cap against a pathological `mask`/`filter` region blowing up memory,
@@ -71,8 +70,8 @@ pub(crate) fn draw_vector_image(
     options: &VectorImageDrawOptions,
     world: &AffineTransform,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
-    vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, CFRetained<CGImage>)>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
 ) {
     let src_rect = source.unwrap_or_else(|| image.view_box());
     if src_rect.width <= 0.0 || src_rect.height <= 0.0 {
@@ -118,7 +117,13 @@ pub(crate) fn draw_vector_image(
                 .concat(&AffineTransform::scale(scale_x, scale_y))
                 .concat(&AffineTransform::translation(-src_rect.x, -src_rect.y));
             let root_world = world.concat(&root_local);
-            render_group(&container, image.root(), &root_world, combined_opacity, image_cache);
+            render_group(
+                &container,
+                image.root(),
+                &root_world,
+                combined_opacity,
+                image_cache,
+            );
         }
         VectorRasterizeMode::Auto | VectorRasterizeMode::Fixed { .. } => {
             let cg_image = match options.rasterize {
@@ -140,12 +145,30 @@ pub(crate) fn draw_vector_image(
                         (placed.width * scale).round().max(1.0) as u32,
                         (placed.height * scale).round().max(1.0) as u32,
                     );
-                    let cached_size = vector_raster_cache.get(&image.id()).map(|(w, h, _)| (*w, *h));
-                    match auto_raster_target_size(cached_size, requested) {
+                    let cached_size = vector_raster_cache
+                        .get(&image.id())
+                        .map(|(w, h, _, _)| (*w, *h));
+                    let shrink =
+                        cached_size.is_some_and(|cached| is_materially_smaller(cached, requested));
+                    let target = if shrink {
+                        let entry = vector_raster_cache
+                            .get_mut(&image.id())
+                            .expect("cached size was present");
+                        entry.2 = entry.2.saturating_add(1);
+                        (entry.2 >= 3).then_some(requested)
+                    } else {
+                        if let Some(entry) = vector_raster_cache.get_mut(&image.id()) {
+                            entry.2 = 0;
+                        }
+                        auto_raster_target_size(cached_size, requested)
+                    };
+                    match target {
                         None => vector_raster_cache
                             .get(&image.id())
-                            .map(|(_, _, cg_image)| cg_image.clone())
-                            .expect("cached_size was Some when auto_raster_target_size returned None"),
+                            .map(|(_, _, _, cg_image)| cg_image.clone())
+                            .expect(
+                                "cached_size was Some when auto_raster_target_size returned None",
+                            ),
                         Some((target_width, target_height)) => {
                             let Some(cg_image) = rasterize_vector_image_to_cgimage(
                                 image,
@@ -156,17 +179,22 @@ pub(crate) fn draw_vector_image(
                             ) else {
                                 return;
                             };
-                            vector_raster_cache
-                                .insert(image.id(), (target_width, target_height, cg_image.clone()));
+                            vector_raster_cache.insert(
+                                image.id(),
+                                (target_width, target_height, 0, cg_image.clone()),
+                            );
                             cg_image
                         }
                     }
                 }
-                VectorRasterizeMode::Fixed { pixel_width, pixel_height } => {
+                VectorRasterizeMode::Fixed {
+                    pixel_width,
+                    pixel_height,
+                } => {
                     let cached = vector_raster_cache
                         .get(&image.id())
-                        .filter(|(w, h, _)| *w == pixel_width && *h == pixel_height)
-                        .map(|(_, _, cg_image)| cg_image.clone());
+                        .filter(|(w, h, _, _)| *w == pixel_width && *h == pixel_height)
+                        .map(|(_, _, _, cg_image)| cg_image.clone());
                     match cached {
                         Some(cg_image) => cg_image,
                         None => {
@@ -179,8 +207,10 @@ pub(crate) fn draw_vector_image(
                             ) else {
                                 return;
                             };
-                            vector_raster_cache
-                                .insert(image.id(), (pixel_width, pixel_height, cg_image.clone()));
+                            vector_raster_cache.insert(
+                                image.id(),
+                                (pixel_width, pixel_height, 0, cg_image.clone()),
+                            );
                             cg_image
                         }
                     }
@@ -208,11 +238,13 @@ pub(crate) fn render_node(
     node: &VectorNode,
     world: &AffineTransform,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     match node {
         VectorNode::Group(child) => render_group(layer, child, world, opacity, image_cache),
-        VectorNode::Path(path_node) => render_path_node(layer, path_node, world, opacity, image_cache),
+        VectorNode::Path(path_node) => {
+            render_path_node(layer, path_node, world, opacity, image_cache)
+        }
         VectorNode::RasterImage(raster_node) => {
             render_raster_node(layer, raster_node, world, opacity, image_cache)
         }
@@ -225,7 +257,7 @@ pub(crate) fn render_group_content(
     target: &Retained<CALayer>,
     group: &VectorGroup,
     world: &AffineTransform,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     if group.filters.is_empty() {
         for child in group.children.iter() {
@@ -244,7 +276,7 @@ pub(crate) fn render_group(
     group: &VectorGroup,
     parent_world: &AffineTransform,
     parent_opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     let world = parent_world.concat(&group.transform);
 

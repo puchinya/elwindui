@@ -6,7 +6,6 @@
 //! Depends downward on `render` for all drawing; `replay` below is the pass that consumes this
 //! view's own layer caches, which is why it lives here rather than under `render`.
 
-
 use crate::ffi::{AnyView, mtm};
 use elwindui_core::base::Point;
 use elwindui_core::input::{
@@ -16,9 +15,7 @@ use elwindui_core::input::{
 use elwindui_core::ui::{FocusHost, RelayoutHost, UIElementExt, layout_root};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{
-    AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send,
-};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
@@ -53,22 +50,20 @@ pub struct TreeHostIvars {
     /// `resolve_native_owner_id`.
     pub(crate) native_owner_ids: RefCell<HashMap<usize, u64>>,
     /// Decoded-image cache (`RenderCommand::DrawImage`'s `elwindui_core::graphics::Image` -> real
-    /// `CGImage`), keyed by the `Image`'s own pointer identity — see `resolve_cgimage`'s own doc
-    /// comment. Never cleared piecemeal (unlike `native_containers`): a stale entry for an
-    /// `Image` no longer referenced by the current tree is simply harmless dead weight, not
-    /// incorrect, and pruning it would need the same kind of `retain`-by-liveness bookkeeping
-    /// `native_containers` has for comparatively little benefit (a decoded `CGImage` is far
-    /// cheaper to keep around than a live `NSView` island).
-    pub(crate) image_cache: RefCell<HashMap<usize, CFRetained<CGImage>>>,
+    /// `CGImage`), keyed by the image's stable `ImageId`. Entries are pruned after each relayout
+    /// to the image resources referenced by the currently retained render tree.
+    pub(crate) image_cache: RefCell<HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>>,
     /// `RenderCommand::DrawVectorImage`'s `VectorRasterizeMode::Auto`/`Fixed` cache — the
     /// rasterized-bitmap counterpart to `image_cache` above, keyed by `VectorImageId` rather than
     /// pointer identity since the *same* `VectorImage` may legitimately need re-rasterizing at a
     /// different pixel size (unlike a decoded raster `Image`, which has one fixed native size).
     /// At most one entry per id — `Auto` mode simply overwrites the entry when the requested size
     /// changes (see `VectorRasterizeMode::Auto`'s own doc comment); `Fixed` mode never changes
-    /// size so its entry never gets overwritten after the first rasterization. Never pruned, same
-    /// reasoning as `image_cache` above.
-    pub(crate) vector_raster_cache: RefCell<HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, CFRetained<CGImage>)>>,
+    /// size so its entry never gets overwritten after the first rasterization. Entries are pruned
+    /// after each relayout to vectors still referenced by the retained render tree.
+    pub(crate) vector_raster_cache: RefCell<
+        HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
+    >,
     /// Per-`RenderGroup` id, the persistent container `CALayer` holding that group's own painted
     /// sublayers — a flat sibling of the root paint layer (`frame` always exactly matches the
     /// root's own `bounds()`, a zero-offset "namespace" rather than a real nested coordinate
@@ -94,6 +89,12 @@ pub struct TreeHostIvars {
     /// `native_containers`' own liveness-based pruning at the end of `relayout` doesn't tear down a
     /// native control just because its owning group happened to be skipped this pass.
     pub(crate) group_native_controls: RefCell<HashMap<u64, Vec<usize>>>,
+    /// Raster image resources used by each cached group. Replayed on cache hits so decoded images
+    /// remain live without rewalking commands.
+    pub(crate) group_image_ids: RefCell<HashMap<u64, Vec<elwindui_core::graphics::ImageId>>>,
+    /// Vector resources used by each cached group, for vector-raster cache liveness tracking.
+    pub(crate) group_vector_image_ids:
+        RefCell<HashMap<u64, Vec<elwindui_core::graphics::VectorImageId>>>,
     /// Set once, right after construction — lets `set_tree` hand out an `AppKitRelayoutHost`
     /// wrapping a weak reference back to this same view, without needing a `Retained<Self>` in
     /// hand at that point.
@@ -338,6 +339,8 @@ impl TreeHostView {
             group_layers: RefCell::new(HashMap::new()),
             group_layer_cache_keys: RefCell::new(HashMap::new()),
             group_native_controls: RefCell::new(HashMap::new()),
+            group_image_ids: RefCell::new(HashMap::new()),
+            group_vector_image_ids: RefCell::new(HashMap::new()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
             pointer: PointerDispatcher::new(),
             keyboard: KeyboardDispatcher::new(),
@@ -460,6 +463,10 @@ impl TreeHostView {
         self.ivars().group_layers.borrow_mut().clear();
         self.ivars().group_layer_cache_keys.borrow_mut().clear();
         self.ivars().group_native_controls.borrow_mut().clear();
+        self.ivars().group_image_ids.borrow_mut().clear();
+        self.ivars().group_vector_image_ids.borrow_mut().clear();
+        self.ivars().image_cache.borrow_mut().clear();
+        self.ivars().vector_raster_cache.borrow_mut().clear();
         let weak_self = self.ivars().weak_self.borrow().clone();
         tree.as_ui_element()
             .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self.clone()))));
@@ -550,6 +557,8 @@ impl TreeHostView {
 
         let mut live_native_controls = HashSet::new();
         let mut live_group_ids = HashSet::new();
+        let mut live_image_ids = HashSet::new();
+        let mut live_vector_image_ids = HashSet::new();
         let mut image_cache = self.ivars().image_cache.borrow_mut();
         let mut vector_raster_cache = self.ivars().vector_raster_cache.borrow_mut();
         replay_group(
@@ -562,9 +571,13 @@ impl TreeHostView {
             1.0,
             &mut live_native_controls,
             &mut live_group_ids,
+            &mut live_image_ids,
+            &mut live_vector_image_ids,
             &mut image_cache,
             &mut vector_raster_cache,
         );
+        image_cache.retain(|id, _| live_image_ids.contains(id));
+        vector_raster_cache.retain(|id, _| live_vector_image_ids.contains(id));
         drop(image_cache);
         drop(vector_raster_cache);
         self.ivars()
@@ -582,20 +595,31 @@ impl TreeHostView {
             .native_owner_ids
             .borrow_mut()
             .retain(|identity, _| live_native_controls.contains(identity));
-        self.ivars().group_layers.borrow_mut().retain(|id, container| {
-            if live_group_ids.contains(id) {
-                true
-            } else {
-                container.removeFromSuperlayer();
-                false
-            }
-        });
+        self.ivars()
+            .group_layers
+            .borrow_mut()
+            .retain(|id, container| {
+                if live_group_ids.contains(id) {
+                    true
+                } else {
+                    container.removeFromSuperlayer();
+                    false
+                }
+            });
         self.ivars()
             .group_layer_cache_keys
             .borrow_mut()
             .retain(|id, _| live_group_ids.contains(id));
         self.ivars()
             .group_native_controls
+            .borrow_mut()
+            .retain(|id, _| live_group_ids.contains(id));
+        self.ivars()
+            .group_image_ids
+            .borrow_mut()
+            .retain(|id, _| live_group_ids.contains(id));
+        self.ivars()
+            .group_vector_image_ids
             .borrow_mut()
             .retain(|id, _| live_group_ids.contains(id));
         // Every repainted `RenderGroup` container above just moved back to the front of
@@ -629,6 +653,10 @@ impl TreeHostView {
             .iter()
             .find(|(_, v)| std::ptr::eq(&***v, container))
             .map(|(identity, _)| *identity)?;
-        self.ivars().native_owner_ids.borrow().get(&identity).copied()
+        self.ivars()
+            .native_owner_ids
+            .borrow()
+            .get(&identity)
+            .copied()
     }
 }

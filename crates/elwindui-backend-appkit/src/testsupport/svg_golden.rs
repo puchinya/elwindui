@@ -10,11 +10,10 @@
 //! that's Y-flip-invariant and safe to compare directly against `CALayer.renderInContext`'s
 //! flipped output without correcting for it.
 
-use objc2_quartz_core::CALayer;
-use std::collections::HashMap;
 use crate::testsupport::bitmap::Bitmap;
 use elwindui_core::graphics::VectorImageDrawOptions;
-
+use objc2_quartz_core::CALayer;
+use std::collections::HashMap;
 
 fn approx(actual: (u8, u8, u8, u8), expected: (u8, u8, u8, u8), tolerance: u8) {
     let close = |a: u8, b: u8| a.abs_diff(b) <= tolerance;
@@ -71,7 +70,9 @@ fn render_via_resvg(svg: &str, size: u32) -> resvg::tiny_skia::Pixmap {
 }
 
 fn resvg_pixel(pixmap: &resvg::tiny_skia::Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
-    let c = pixmap.pixel(x, y).unwrap_or(resvg::tiny_skia::PremultipliedColorU8::TRANSPARENT);
+    let c = pixmap
+        .pixel(x, y)
+        .unwrap_or(resvg::tiny_skia::PremultipliedColorU8::TRANSPARENT);
     (c.red(), c.green(), c.blue(), c.alpha())
 }
 
@@ -235,20 +236,20 @@ fn fe_tile_filter_primitive_runs_without_error_and_preserves_flood_color() {
 /// cached bitmap is reused vs. rebuilt.
 mod rasterize_mode {
     use super::*;
-    
+
+    use elwindui_core::graphics::VectorRasterizeMode;
     use objc2_core_foundation::CFRetained;
     use objc2_core_graphics::CGImage;
     use std::collections::HashMap;
-    use elwindui_core::graphics::VectorRasterizeMode;
 
     fn draw_into(
         image: &elwindui_core::graphics::VectorImage,
         dest: elwindui_core::base::Rect,
         rasterize: VectorRasterizeMode,
-        image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+        image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
         vector_raster_cache: &mut HashMap<
             elwindui_core::graphics::VectorImageId,
-            (u32, u32, CFRetained<CGImage>),
+            (u32, u32, u8, CFRetained<CGImage>),
         >,
     ) {
         let root = CALayer::new();
@@ -277,7 +278,12 @@ mod rasterize_mode {
     }
 
     fn dest(size: f32) -> elwindui_core::base::Rect {
-        elwindui_core::base::Rect { x: 0.0, y: 0.0, width: size, height: size }
+        elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: size,
+            height: size,
+        }
     }
 
     #[test]
@@ -285,10 +291,25 @@ mod rasterize_mode {
         let image = small_rect_image();
         let mut image_cache = HashMap::new();
         let mut cache = HashMap::new();
-        draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
-        let (w1, h1, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
-        draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
-        let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
+        draw_into(
+            &image,
+            dest(64.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (w1, h1, _, cg1) = cache
+            .get(&image.id())
+            .cloned()
+            .expect("first draw caches a bitmap");
+        draw_into(
+            &image,
+            dest(64.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (w2, h2, _, cg2) = cache.get(&image.id()).cloned().expect("still cached");
         assert_eq!((w1, h1), (w2, h2));
         assert_eq!(
             CFRetained::as_ptr(&cg1),
@@ -302,12 +323,27 @@ mod rasterize_mode {
         let image = small_rect_image();
         let mut image_cache = HashMap::new();
         let mut cache = HashMap::new();
-        draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
-        let (_, _, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
+        draw_into(
+            &image,
+            dest(64.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (_, _, _, cg1) = cache
+            .get(&image.id())
+            .cloned()
+            .expect("first draw caches a bitmap");
         // 128 >= 64 * 1.5 (96), so this isn't a "gradual" enlargement the margin should
         // absorb — the fresh rasterization lands exactly on the requested size.
-        draw_into(&image, dest(128.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
-        let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
+        draw_into(
+            &image,
+            dest(128.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (w2, h2, _, cg2) = cache.get(&image.id()).cloned().expect("still cached");
         assert_eq!((w2, h2), (128, 128));
         assert_ne!(
             CFRetained::as_ptr(&cg1),
@@ -317,22 +353,52 @@ mod rasterize_mode {
     }
 
     #[test]
-    fn auto_mode_never_rerasterizes_when_the_drawn_size_shrinks() {
+    fn auto_mode_shrinks_after_three_consecutive_much_smaller_draws() {
         let image = small_rect_image();
         let mut image_cache = HashMap::new();
         let mut cache = HashMap::new();
-        draw_into(&image, dest(128.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
-        let (_, _, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
-        draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
-        let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
-        // The larger bitmap is kept as-is — `build_image_container_layer` just downscales it
-        // to fit the smaller `dest`, so there is nothing to gain from rerasterizing smaller.
+        draw_into(
+            &image,
+            dest(128.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (_, _, _, cg1) = cache
+            .get(&image.id())
+            .cloned()
+            .expect("first draw caches a bitmap");
+        draw_into(
+            &image,
+            dest(64.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        draw_into(
+            &image,
+            dest(64.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (w2, h2, _, cg2) = cache.get(&image.id()).cloned().expect("still cached");
         assert_eq!((w2, h2), (128, 128));
         assert_eq!(
             CFRetained::as_ptr(&cg1),
             CFRetained::as_ptr(&cg2),
-            "shrinking the drawn size must never trigger a rerasterization"
+            "two smaller draws must remain below the hysteresis threshold"
         );
+        draw_into(
+            &image,
+            dest(64.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (w3, h3, _, cg3) = cache.get(&image.id()).cloned().expect("shrunk bitmap");
+        assert_eq!((w3, h3), (64, 64));
+        assert_ne!(CFRetained::as_ptr(&cg2), CFRetained::as_ptr(&cg3));
     }
 
     #[test]
@@ -340,15 +406,36 @@ mod rasterize_mode {
         let image = small_rect_image();
         let mut image_cache = HashMap::new();
         let mut cache = HashMap::new();
-        draw_into(&image, dest(64.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
+        draw_into(
+            &image,
+            dest(64.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
         // 80 < 64 * 1.5 (96) — growth within the margin pads to 96, not the raw 80 requested.
-        draw_into(&image, dest(80.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
-        let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("padded rasterization cached");
+        draw_into(
+            &image,
+            dest(80.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (w2, h2, _, cg2) = cache
+            .get(&image.id())
+            .cloned()
+            .expect("padded rasterization cached");
         assert_eq!((w2, h2), (96, 96));
         // A further, still-modest enlargement that fits inside the 96x96 padding must reuse
         // it without rerasterizing — this is the whole point of padding on growth.
-        draw_into(&image, dest(90.0), VectorRasterizeMode::Auto, &mut image_cache, &mut cache);
-        let (w3, h3, cg3) = cache.get(&image.id()).cloned().expect("still cached");
+        draw_into(
+            &image,
+            dest(90.0),
+            VectorRasterizeMode::Auto,
+            &mut image_cache,
+            &mut cache,
+        );
+        let (w3, h3, _, cg3) = cache.get(&image.id()).cloned().expect("still cached");
         assert_eq!((w3, h3), (96, 96));
         assert_eq!(
             CFRetained::as_ptr(&cg2),
@@ -362,14 +449,20 @@ mod rasterize_mode {
         let image = small_rect_image();
         let mut image_cache = HashMap::new();
         let mut cache = HashMap::new();
-        let fixed = VectorRasterizeMode::Fixed { pixel_width: 32, pixel_height: 32 };
+        let fixed = VectorRasterizeMode::Fixed {
+            pixel_width: 32,
+            pixel_height: 32,
+        };
         draw_into(&image, dest(64.0), fixed, &mut image_cache, &mut cache);
-        let (w1, h1, cg1) = cache.get(&image.id()).cloned().expect("first draw caches a bitmap");
+        let (w1, h1, _, cg1) = cache
+            .get(&image.id())
+            .cloned()
+            .expect("first draw caches a bitmap");
         assert_eq!((w1, h1), (32, 32));
         // A `dest` resize that would have changed `Auto`'s target pixel size must not affect
         // `Fixed` at all — that's the whole point of specifying a fixed rasterization size.
         draw_into(&image, dest(128.0), fixed, &mut image_cache, &mut cache);
-        let (w2, h2, cg2) = cache.get(&image.id()).cloned().expect("still cached");
+        let (w2, h2, _, cg2) = cache.get(&image.id()).cloned().expect("still cached");
         assert_eq!((w2, h2), (32, 32));
         assert_eq!(
             CFRetained::as_ptr(&cg1),
@@ -383,7 +476,13 @@ mod rasterize_mode {
         let image = small_rect_image();
         let mut image_cache = HashMap::new();
         let mut cache = HashMap::new();
-        draw_into(&image, dest(64.0), VectorRasterizeMode::Vector, &mut image_cache, &mut cache);
+        draw_into(
+            &image,
+            dest(64.0),
+            VectorRasterizeMode::Vector,
+            &mut image_cache,
+            &mut cache,
+        );
         assert!(
             cache.is_empty(),
             "Vector mode should render the live CALayer tree, never touching the raster cache"

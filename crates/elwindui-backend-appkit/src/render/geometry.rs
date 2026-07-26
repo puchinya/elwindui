@@ -2,7 +2,6 @@
 //! translate `elwindui_core::base`/`graphics` values into Core Graphics/Core Animation equivalents
 //! without themselves building any layer tree.
 
-
 use super::path::*;
 use elwindui_core::graphics::RenderCommand;
 use objc2::rc::Retained;
@@ -33,19 +32,60 @@ pub(crate) fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColo
     CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
 }
 
-/// The (already origin-adjusted, pre-transform) bounding rect a paint command occupies — used
-/// only for the clip bounding-box overlap test in `replay_commands`, so a command with no
-/// meaningful rect (nothing today) can return `None` to always pass.
+fn transformed_rect_bounds(
+    rect: &elwindui_core::base::Rect,
+    world: &elwindui_core::base::AffineTransform,
+) -> elwindui_core::base::Rect {
+    let corners = [
+        elwindui_core::base::Point {
+            x: rect.x,
+            y: rect.y,
+        },
+        elwindui_core::base::Point {
+            x: rect.x + rect.width,
+            y: rect.y,
+        },
+        elwindui_core::base::Point {
+            x: rect.x,
+            y: rect.y + rect.height,
+        },
+        elwindui_core::base::Point {
+            x: rect.x + rect.width,
+            y: rect.y + rect.height,
+        },
+    ]
+    .map(|corner| world.transform_point(corner));
+    let min_x = corners
+        .iter()
+        .map(|corner| corner.x)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|corner| corner.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners
+        .iter()
+        .map(|corner| corner.y)
+        .fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|corner| corner.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    elwindui_core::base::Rect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
+}
+
+/// The transformed bounding rect a paint command occupies — used only for the clip bounding-box
+/// overlap test in `replay_commands`, so a command with no meaningful rect (nothing today) can
+/// return `None` to always pass.
 pub(crate) fn geometry_bounds(
     command: &RenderCommand,
-    origin: elwindui_core::base::Point,
+    world: &elwindui_core::base::AffineTransform,
 ) -> Option<elwindui_core::base::Rect> {
-    let offset = |r: &elwindui_core::base::Rect| elwindui_core::base::Rect {
-        x: origin.x + r.x,
-        y: origin.y + r.y,
-        width: r.width,
-        height: r.height,
-    };
     match command {
         RenderCommand::FillRect { rect, .. }
         | RenderCommand::StrokeRect { rect, .. }
@@ -53,9 +93,9 @@ pub(crate) fn geometry_bounds(
         | RenderCommand::StrokeRoundedRect { rect, .. }
         | RenderCommand::FillEllipse { rect, .. }
         | RenderCommand::StrokeEllipse { rect, .. }
-        | RenderCommand::Text { rect, .. } => Some(offset(rect)),
+        | RenderCommand::Text { rect, .. } => Some(transformed_rect_bounds(rect, world)),
         RenderCommand::DrawImage { dest, .. } | RenderCommand::DrawVectorImage { dest, .. } => {
-            Some(offset(dest))
+            Some(transformed_rect_bounds(dest, world))
         }
         RenderCommand::DrawLine { .. }
         | RenderCommand::FillPath { .. }
@@ -67,6 +107,26 @@ pub(crate) fn geometry_bounds(
         | RenderCommand::PopTransform
         | RenderCommand::PushOpacity { .. }
         | RenderCommand::PopOpacity => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transformed_rect_bounds_follow_rotation_and_translation() {
+        let rect = elwindui_core::base::Rect {
+            x: -10.0,
+            y: -10.0,
+            width: 20.0,
+            height: 20.0,
+        };
+        let world = elwindui_core::base::AffineTransform::translation(100.0, 50.0)
+            .concat(&elwindui_core::base::AffineTransform::rotation(0.25));
+        let bounds = transformed_rect_bounds(&rect, &world);
+        assert!(bounds.x < 100.0 && bounds.x + bounds.width > 100.0);
+        assert!(bounds.y < 50.0 && bounds.y + bounds.height > 50.0);
     }
 }
 
@@ -104,9 +164,10 @@ pub(crate) fn clip_mask_layer(
             rounded_rect_cgpath(world, *rect, elwindui_core::base::CornerRadius::default()),
             elwindui_core::graphics::FillRule::NonZero,
         ),
-        elwindui_core::graphics::Clip::RoundedRect { rect, radii } => {
-            (rounded_rect_cgpath(world, *rect, *radii), elwindui_core::graphics::FillRule::NonZero)
-        }
+        elwindui_core::graphics::Clip::RoundedRect { rect, radii } => (
+            rounded_rect_cgpath(world, *rect, *radii),
+            elwindui_core::graphics::FillRule::NonZero,
+        ),
         elwindui_core::graphics::Clip::Path { path, rule } => (path_to_cgpath(world, path), *rule),
     };
     mask_layer.setPath(Some(&path));
@@ -114,7 +175,9 @@ pub(crate) fn clip_mask_layer(
         elwindui_core::graphics::FillRule::NonZero => unsafe { kCAFillRuleNonZero },
         elwindui_core::graphics::FillRule::EvenOdd => unsafe { kCAFillRuleEvenOdd },
     });
-    mask_layer.setFillColor(Some(&color_to_cgcolor(elwindui_core::graphics::Color::black())));
+    mask_layer.setFillColor(Some(&color_to_cgcolor(
+        elwindui_core::graphics::Color::black(),
+    )));
     Retained::into_super(mask_layer)
 }
 

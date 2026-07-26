@@ -22,6 +22,8 @@ Turn the initial request into a bounded, testable problem statement without star
    - current planning state;
    - known links or affected areas;
    - unresolved questions that block progress.
+   When the request includes a file that defines or materially constrains the work (for example,
+   an implementation directive), attach the original file to the Issue before implementation.
 5. Inspect the relevant code and only the relevant sections of long specification documents.
 6. Separate the following explicitly:
    - background;

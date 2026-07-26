@@ -2,13 +2,14 @@
 //! (solid, gradient, pattern) and the mask layers a `clip-path`/`mask` needs.
 
 use crate::render::{
-    add_shape_layer, apply_stroke, build_image_container_layer, color_to_cgcolor, gradient_unit_point, path_to_cgpath, resolve_cgimage,
+    add_shape_layer, apply_stroke, build_image_container_layer, color_to_cgcolor,
+    gradient_unit_point, path_to_cgpath, resolve_cgimage,
 };
 use elwindui_core::base::{AffineTransform, Point, Rect};
 use elwindui_core::graphics::{
-    Brush, Color, FillRule, GradientStop, Path, StrokeStyle, VectorFill,
-    VectorMask, VectorMaskType, VectorNode, VectorPaint, VectorPathNode, VectorPattern,
-    VectorRasterNode, VectorStroke,
+    Brush, Color, FillRule, GradientStop, Path, StrokeStyle, VectorFill, VectorMask,
+    VectorMaskType, VectorNode, VectorPaint, VectorPathNode, VectorPattern, VectorRasterNode,
+    VectorStroke,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -21,18 +22,21 @@ use objc2_quartz_core::{
 };
 use std::collections::HashMap;
 
-use super::*;
 use super::raster::*;
+use super::*;
 
 pub(crate) fn build_mask_layer(
     mask: &VectorMask,
     world: &AffineTransform,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) -> Option<Retained<CALayer>> {
     let local_rect = mask.bounds;
     let mask_world = world.concat(&mask.transform);
-    let (mut pixels, width, height) =
-        rasterize_nodes_to_pixels(std::slice::from_ref(&VectorNode::Group(mask.root.clone())), local_rect, image_cache)?;
+    let (mut pixels, width, height) = rasterize_nodes_to_pixels(
+        std::slice::from_ref(&VectorNode::Group(mask.root.clone())),
+        local_rect,
+        image_cache,
+    )?;
 
     if mask.mask_type == VectorMaskType::Luminance {
         // Premultiplied R/G/B already carry a factor of the original alpha, so the standard sRGB
@@ -54,7 +58,8 @@ pub(crate) fn build_mask_layer(
             let (mut nested_pixels, nested_w, nested_h) = nested_layer_pixels;
             if nested.mask_type == VectorMaskType::Luminance {
                 for px in nested_pixels.chunks_exact_mut(4) {
-                    let luminance = 0.2125 * px[0] as f32 + 0.7154 * px[1] as f32 + 0.0721 * px[2] as f32;
+                    let luminance =
+                        0.2125 * px[0] as f32 + 0.7154 * px[1] as f32 + 0.0721 * px[2] as f32;
                     px[3] = luminance.round().clamp(0.0, 255.0) as u8;
                 }
             }
@@ -63,7 +68,10 @@ pub(crate) fn build_mask_layer(
             // bounds (the common case); a size mismatch degrades to the outer mask alone rather
             // than attempting a misaligned resample.
             if nested_w == width && nested_h == height {
-                for (outer, inner) in pixels.chunks_exact_mut(4).zip(nested_pixels.chunks_exact(4)) {
+                for (outer, inner) in pixels
+                    .chunks_exact_mut(4)
+                    .zip(nested_pixels.chunks_exact(4))
+                {
                     outer[3] = ((outer[3] as u32 * inner[3] as u32) / 255) as u8;
                 }
             } else {
@@ -73,7 +81,12 @@ pub(crate) fn build_mask_layer(
     }
 
     let cgimage = pixels_to_cgimage(pixels, width, height)?;
-    Some(place_offscreen_image(&cgimage, local_rect, &mask_world, 1.0))
+    Some(place_offscreen_image(
+        &cgimage,
+        local_rect,
+        &mask_world,
+        1.0,
+    ))
 }
 
 pub(crate) fn render_raster_node(
@@ -81,7 +94,7 @@ pub(crate) fn render_raster_node(
     node: &VectorRasterNode,
     parent_world: &AffineTransform,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     let world = parent_world.concat(&node.transform);
     let Some(resolved) = resolve_cgimage(&node.image, image_cache) else {
@@ -107,7 +120,7 @@ pub(crate) fn render_path_node(
     node: &VectorPathNode,
     parent_world: &AffineTransform,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     if !node.visibility || (node.fill.is_none() && node.stroke.is_none()) {
         return;
@@ -130,7 +143,9 @@ pub(crate) fn render_path_node(
             layer,
             &cg_path,
             solid_fill_brush(node.fill.as_ref()).as_ref(),
-            solid_stroke(node.stroke.as_ref()).as_ref().map(|(b, s)| (b, s)),
+            solid_stroke(node.stroke.as_ref())
+                .as_ref()
+                .map(|(b, s)| (b, s)),
             opacity,
             local_bounds,
         );
@@ -138,10 +153,26 @@ pub(crate) fn render_path_node(
     }
 
     if let Some(fill) = &node.fill {
-        render_fill(layer, &node.path, &world, local_bounds, fill, opacity, image_cache);
+        render_fill(
+            layer,
+            &node.path,
+            &world,
+            local_bounds,
+            fill,
+            opacity,
+            image_cache,
+        );
     }
     if let Some(stroke) = &node.stroke {
-        render_stroke(layer, &node.path, &world, local_bounds, stroke, opacity, image_cache);
+        render_stroke(
+            layer,
+            &node.path,
+            &world,
+            local_bounds,
+            stroke,
+            opacity,
+            image_cache,
+        );
     }
 }
 
@@ -184,7 +215,7 @@ pub(crate) fn render_fill(
     local_bounds: Rect,
     fill: &VectorFill,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     match &fill.paint {
         VectorPaint::Brush(Brush::Solid(color)) => {
@@ -200,7 +231,14 @@ pub(crate) fn render_fill(
         }
         VectorPaint::Brush(brush @ (Brush::LinearGradient(_) | Brush::RadialGradient(_))) => {
             add_gradient_shape_layer(
-                layer, path, world, local_bounds, brush, fill.opacity, fill.rule, opacity,
+                layer,
+                path,
+                world,
+                local_bounds,
+                brush,
+                fill.opacity,
+                fill.rule,
+                opacity,
             );
         }
         VectorPaint::Brush(Brush::Image(_)) => {
@@ -208,7 +246,14 @@ pub(crate) fn render_fill(
         }
         VectorPaint::Pattern(pattern) => {
             add_pattern_shape_layer(
-                layer, path, world, local_bounds, pattern, fill.rule, fill.opacity, opacity,
+                layer,
+                path,
+                world,
+                local_bounds,
+                pattern,
+                fill.rule,
+                fill.opacity,
+                opacity,
                 image_cache,
             );
         }
@@ -223,7 +268,7 @@ pub(crate) fn render_stroke(
     local_bounds: Rect,
     stroke: &VectorStroke,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     let _ = image_cache;
     // Gradient/pattern strokes render via their first available color, matching `inner.rs`'s own
@@ -276,7 +321,10 @@ pub(crate) fn add_gradient_shape_layer(
         x: local_bounds.x + local_bounds.width / 2.0,
         y: local_bounds.y + local_bounds.height / 2.0,
     });
-    ca_layer.setPosition(CGPoint::new(center_absolute.x as f64, center_absolute.y as f64));
+    ca_layer.setPosition(CGPoint::new(
+        center_absolute.x as f64,
+        center_absolute.y as f64,
+    ));
     ca_layer.setAffineTransform(CGAffineTransform {
         a: world.m11 as f64,
         b: world.m12 as f64,
@@ -299,7 +347,9 @@ pub(crate) fn add_gradient_shape_layer(
             let center = gradient_unit_point(g.center, g.mapping, local_bounds);
             gradient_layer.setStartPoint(center);
             let (rx, ry) = match g.mapping {
-                elwindui_core::graphics::BrushMappingMode::RelativeToBounds => (g.radius_x, g.radius_y),
+                elwindui_core::graphics::BrushMappingMode::RelativeToBounds => {
+                    (g.radius_x, g.radius_y)
+                }
                 elwindui_core::graphics::BrushMappingMode::Absolute => (
                     g.radius_x / local_bounds.width.max(1e-6),
                     g.radius_y / local_bounds.height.max(1e-6),
@@ -322,8 +372,10 @@ pub(crate) fn add_gradient_shape_layer(
         .map(|c| c.as_ref())
         .collect();
     unsafe { gradient_layer.setColors(Some(&objc2_foundation::NSArray::from_slice(&color_refs))) };
-    let locations: Vec<Retained<NSNumber>> =
-        stops.iter().map(|s| NSNumber::new_f64(s.offset as f64)).collect();
+    let locations: Vec<Retained<NSNumber>> = stops
+        .iter()
+        .map(|s| NSNumber::new_f64(s.offset as f64))
+        .collect();
     let location_refs: Vec<&NSNumber> = locations.iter().map(|n| n.as_ref()).collect();
     gradient_layer.setLocations(Some(&objc2_foundation::NSArray::from_slice(&location_refs)));
 
@@ -371,7 +423,7 @@ pub(crate) fn add_pattern_shape_layer(
     fill_rule: FillRule,
     paint_opacity: f32,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) {
     let tile_rect = pattern.tile_rect;
     if tile_rect.width <= 0.0 || tile_rect.height <= 0.0 {
@@ -395,10 +447,12 @@ pub(crate) fn add_pattern_shape_layer(
     // with `local_bounds`'s own top-left) needed to cover the fill shape's bounding box, in both
     // directions.
     let start_col = ((local_bounds.x - tile_rect.x) / tile_rect.width).floor() as i32;
-    let end_col = (((local_bounds.x + local_bounds.width - tile_rect.x) / tile_rect.width).ceil() as i32)
+    let end_col = (((local_bounds.x + local_bounds.width - tile_rect.x) / tile_rect.width).ceil()
+        as i32)
         .max(start_col + 1);
     let start_row = ((local_bounds.y - tile_rect.y) / tile_rect.height).floor() as i32;
-    let end_row = (((local_bounds.y + local_bounds.height - tile_rect.y) / tile_rect.height).ceil() as i32)
+    let end_row = (((local_bounds.y + local_bounds.height - tile_rect.y) / tile_rect.height).ceil()
+        as i32)
         .max(start_row + 1);
     let start_col = start_col.max(end_col - MAX_PATTERN_TILES_PER_AXIS);
     let start_row = start_row.max(end_row - MAX_PATTERN_TILES_PER_AXIS);

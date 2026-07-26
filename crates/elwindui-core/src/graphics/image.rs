@@ -1,5 +1,20 @@
 use std::fmt;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+/// Stable identity of one logical [`Image`] resource.
+///
+/// Clones of an image share its ID. Independently created images intentionally receive distinct
+/// IDs even when their pixel contents are identical, so backends can cache decoded native images
+/// without hashing potentially large buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageId(u64);
+
+fn next_image_id() -> ImageId {
+    static NEXT_IMAGE_ID: OnceLock<AtomicU64> = OnceLock::new();
+    let next = NEXT_IMAGE_ID.get_or_init(|| AtomicU64::new(1));
+    ImageId(next.fetch_add(1, Ordering::Relaxed))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageFormat {
@@ -85,27 +100,48 @@ impl std::error::Error for ImageError {}
 
 /// A decode-agnostic, cheaply-`Clone`able (via `Arc`) image handle — never re-decoded/re-uploaded
 /// on repaint (painter design doc §13.1/§14 "画像・pathリソースをフレーム再生成しない").
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Image {
-    inner: Arc<ImageData>,
+    inner: Arc<ImageResource>,
+}
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.data() == other.data()
+    }
+}
+
+#[derive(Debug)]
+struct ImageResource {
+    id: ImageId,
+    data: ImageData,
+}
+
+impl ImageResource {
+    fn new(data: ImageData) -> Self {
+        Self {
+            id: next_image_id(),
+            data,
+        }
+    }
 }
 
 impl Image {
     pub fn from_encoded(bytes: impl Into<Arc<[u8]>>) -> Self {
         Self {
-            inner: Arc::new(ImageData::Encoded {
+            inner: Arc::new(ImageResource::new(ImageData::Encoded {
                 bytes: bytes.into(),
                 format_hint: None,
-            }),
+            })),
         }
     }
 
     pub fn from_encoded_with_format(bytes: impl Into<Arc<[u8]>>, format: ImageFormat) -> Self {
         Self {
-            inner: Arc::new(ImageData::Encoded {
+            inner: Arc::new(ImageResource::new(ImageData::Encoded {
                 bytes: bytes.into(),
                 format_hint: Some(format),
-            }),
+            })),
         }
     }
 
@@ -118,7 +154,10 @@ impl Image {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
         let path = path.as_ref();
         let bytes = std::fs::read(path)?;
-        Ok(Self::from_encoded_with_format(bytes, image_format_from_extension(path)))
+        Ok(Self::from_encoded_with_format(
+            bytes,
+            image_format_from_extension(path),
+        ))
     }
 
     pub fn from_rgba8(
@@ -134,35 +173,44 @@ impl Image {
             return Err(ImageError);
         }
         Ok(Self {
-            inner: Arc::new(ImageData::Rgba8 {
+            inner: Arc::new(ImageResource::new(ImageData::Rgba8 {
                 width,
                 height,
                 stride,
                 pixels,
                 alpha,
-            }),
+            })),
         })
     }
 
     pub fn from_backend_handle(handle: BackendImageHandle) -> Self {
         Self {
-            inner: Arc::new(ImageData::Backend(handle)),
+            inner: Arc::new(ImageResource::new(ImageData::Backend(handle))),
         }
     }
 
+    /// Returns this logical image resource's stable cache identity.
+    ///
+    /// The value is shared by every clone and is distinct for separately constructed images;
+    /// callers must not interpret it as a content hash or a serialization format.
+    pub fn id(&self) -> ImageId {
+        self.inner.id
+    }
+
+    /// Returns the decode-agnostic data associated with this image.
     pub fn data(&self) -> &ImageData {
-        &self.inner
+        &self.inner.data
     }
 
     pub fn pixel_size(&self) -> Option<(u32, u32)> {
-        match &*self.inner {
+        match &self.inner.data {
             ImageData::Rgba8 { width, height, .. } => Some((*width, *height)),
             _ => None,
         }
     }
 
     pub fn is_opaque(&self) -> Option<bool> {
-        match &*self.inner {
+        match &self.inner.data {
             ImageData::Rgba8 { alpha, .. } => Some(*alpha == AlphaMode::Opaque),
             _ => None,
         }
@@ -284,6 +332,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clones_share_a_stable_image_id_for_rgba_images() {
+        let image = Image::from_rgba8(1, 1, 4, vec![0, 0, 0, 255], AlphaMode::Premultiplied)
+            .expect("valid RGBA image");
+        assert_eq!(image.id(), image.clone().id());
+    }
+
+    #[test]
+    fn separately_created_images_have_distinct_ids() {
+        let first = Image::from_encoded(vec![1, 2, 3]);
+        let second = Image::from_encoded(vec![1, 2, 3]);
+        assert_ne!(first.id(), second.id());
+    }
+
+    #[test]
+    fn encoded_images_keep_their_id_when_cloned() {
+        let image = Image::from_encoded_with_format(vec![1, 2, 3], ImageFormat::Png);
+        assert_eq!(image.id(), image.clone().id());
+    }
+
+    #[test]
     fn rgba8_validates_buffer_size() {
         let pixels = vec![0u8; 4 * 4 * 4];
         assert!(Image::from_rgba8(4, 4, 16, pixels.clone(), AlphaMode::Straight).is_ok());
@@ -326,7 +394,9 @@ mod tests {
         let image = Image::from_file(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         match image.data() {
-            ImageData::Encoded { format_hint, .. } => assert_eq!(*format_hint, Some(ImageFormat::Unknown)),
+            ImageData::Encoded { format_hint, .. } => {
+                assert_eq!(*format_hint, Some(ImageFormat::Unknown))
+            }
             other => panic!("expected ImageData::Encoded, got {other:?}"),
         }
     }

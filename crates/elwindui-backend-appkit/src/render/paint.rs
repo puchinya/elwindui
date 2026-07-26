@@ -2,7 +2,6 @@
 //! and strokes set directly on a `CAShapeLayer`, gradients and image brushes as masked sublayers
 //! (Core Animation has no gradient/image *fill* on a shape layer, only whole-layer ones).
 
-
 use super::geometry::*;
 use super::image::*;
 use super::path::*;
@@ -11,8 +10,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGColor, CGImage, CGMutablePath};
 use objc2_foundation::{NSArray, NSNumber, NSRect, NSString};
 use objc2_quartz_core::{
-    CAGradientLayer, CALayer, CAShapeLayer,
-    kCAGradientLayerAxial, kCAGradientLayerRadial,
+    CAGradientLayer, CALayer, CAShapeLayer, kCAGradientLayerAxial, kCAGradientLayerRadial,
 };
 use std::collections::HashMap;
 
@@ -83,7 +81,10 @@ pub(crate) fn try_add_gradient_fill_layer(
     if !is_pure_translation(world) {
         return false;
     }
-    let absolute_origin = world.transform_point(elwindui_core::base::Point { x: bounds.x, y: bounds.y });
+    let absolute_origin = world.transform_point(elwindui_core::base::Point {
+        x: bounds.x,
+        y: bounds.y,
+    });
     let gradient_layer = CAGradientLayer::new();
     gradient_layer.setName(Some(&NSString::from_str("elwindui-paint")));
     let ca_layer: &CALayer = &gradient_layer;
@@ -105,7 +106,9 @@ pub(crate) fn try_add_gradient_fill_layer(
             let center = gradient_unit_point(g.center, g.mapping, bounds);
             gradient_layer.setStartPoint(center);
             let (rx, ry) = match g.mapping {
-                elwindui_core::graphics::BrushMappingMode::RelativeToBounds => (g.radius_x, g.radius_y),
+                elwindui_core::graphics::BrushMappingMode::RelativeToBounds => {
+                    (g.radius_x, g.radius_y)
+                }
                 elwindui_core::graphics::BrushMappingMode::Absolute => (
                     g.radius_x / bounds.width.max(1e-6),
                     g.radius_y / bounds.height.max(1e-6),
@@ -127,7 +130,8 @@ pub(crate) fn try_add_gradient_fill_layer(
         return false;
     }
 
-    let colors: Vec<CFRetained<CGColor>> = stops.iter().map(|s| color_to_cgcolor(s.color)).collect();
+    let colors: Vec<CFRetained<CGColor>> =
+        stops.iter().map(|s| color_to_cgcolor(s.color)).collect();
     let color_refs: Vec<&objc2::runtime::AnyObject> = colors
         .iter()
         .map(|c| c.as_ref() as &objc2_core_foundation::CFType)
@@ -136,7 +140,10 @@ pub(crate) fn try_add_gradient_fill_layer(
     let colors_array = NSArray::from_slice(&color_refs);
     unsafe { gradient_layer.setColors(Some(&colors_array)) };
 
-    let locations: Vec<Retained<NSNumber>> = stops.iter().map(|s| NSNumber::new_f64(s.offset as f64)).collect();
+    let locations: Vec<Retained<NSNumber>> = stops
+        .iter()
+        .map(|s| NSNumber::new_f64(s.offset as f64))
+        .collect();
     let location_refs: Vec<&NSNumber> = locations.iter().map(|n| n.as_ref()).collect();
     gradient_layer.setLocations(Some(&NSArray::from_slice(&location_refs)));
 
@@ -147,13 +154,21 @@ pub(crate) fn try_add_gradient_fill_layer(
     // leaving nothing visible at all (an *empty* intersection, not just a misaligned one).
     let mask_layer = CAShapeLayer::new();
     let identity = elwindui_core::base::AffineTransform::identity();
-    let local_bounds = elwindui_core::base::Rect { x: 0.0, y: 0.0, ..bounds };
+    let local_bounds = elwindui_core::base::Rect {
+        x: 0.0,
+        y: 0.0,
+        ..bounds
+    };
     let mask_path = match mask_shape {
-        GradientMaskShape::RoundedRect(radii) => rounded_rect_cgpath(&identity, local_bounds, radii),
+        GradientMaskShape::RoundedRect(radii) => {
+            rounded_rect_cgpath(&identity, local_bounds, radii)
+        }
         GradientMaskShape::Ellipse => ellipse_cgpath(&identity, local_bounds),
     };
     mask_layer.setPath(Some(&mask_path));
-    mask_layer.setFillColor(Some(&color_to_cgcolor(elwindui_core::graphics::Color::black())));
+    mask_layer.setFillColor(Some(&color_to_cgcolor(
+        elwindui_core::graphics::Color::black(),
+    )));
     let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
     unsafe { ca_layer.setMask(Some(&mask_layer)) };
 
@@ -190,7 +205,7 @@ pub(crate) fn try_add_image_fill_layer(
     mask_shape: GradientMaskShape,
     world: &elwindui_core::base::AffineTransform,
     opacity: f32,
-    image_cache: &mut HashMap<usize, CFRetained<CGImage>>,
+    image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) -> bool {
     use elwindui_core::graphics::Brush;
     let Brush::Image(image_brush) = brush else {
@@ -210,7 +225,10 @@ pub(crate) fn try_add_image_fill_layer(
         CGImage::height(Some(&cg_image)) as f32,
     );
 
-    let absolute_origin = world.transform_point(elwindui_core::base::Point { x: bounds.x, y: bounds.y });
+    let absolute_origin = world.transform_point(elwindui_core::base::Point {
+        x: bounds.x,
+        y: bounds.y,
+    });
     let container = CALayer::new();
     container.setName(Some(&NSString::from_str("elwindui-paint")));
     container.setMasksToBounds(true);
@@ -220,7 +238,11 @@ pub(crate) fn try_add_image_fill_layer(
     ));
     container.setOpacity(opacity * image_brush.opacity);
 
-    let local_bounds = elwindui_core::base::Rect { x: 0.0, y: 0.0, ..bounds };
+    let local_bounds = elwindui_core::base::Rect {
+        x: 0.0,
+        y: 0.0,
+        ..bounds
+    };
     match image_brush.tile_mode {
         elwindui_core::graphics::TileMode::None => {
             let placed = fitted_image_rect(
@@ -235,14 +257,103 @@ pub(crate) fn try_add_image_fill_layer(
                 objc2_foundation::NSPoint::new(placed.x as f64, placed.y as f64),
                 objc2_foundation::NSSize::new(placed.width as f64, placed.height as f64),
             ));
-            unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
+            unsafe {
+                image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject))
+            };
             container.addSublayer(&image_layer);
         }
         tile_mode @ (elwindui_core::graphics::TileMode::Tile
         | elwindui_core::graphics::TileMode::FlipX
         | elwindui_core::graphics::TileMode::FlipY
         | elwindui_core::graphics::TileMode::FlipXY) => {
-            add_tiled_image_layers(&container, &cg_image, image_size, image_brush.transform, tile_mode, local_bounds);
+            let width = local_bounds.width.ceil().max(1.0) as usize;
+            let height = local_bounds.height.ceil().max(1.0) as usize;
+            if width <= crate::render::vector::MAX_OFFSCREEN_DIMENSION
+                && height <= crate::render::vector::MAX_OFFSCREEN_DIMENSION
+            {
+                // Keep the retained tree bounded: the per-cell layers exist only while Core
+                // Animation rasterizes this brush, then one CGImage-backed layer replaces them.
+                let tile_root = CALayer::new();
+                tile_root.setBounds(objc2_core_foundation::CGRect::new(
+                    objc2_core_foundation::CGPoint::new(0.0, 0.0),
+                    objc2_core_foundation::CGSize::new(width as f64, height as f64),
+                ));
+                add_tiled_image_layers(
+                    &tile_root,
+                    &cg_image,
+                    image_size,
+                    image_brush.transform,
+                    tile_mode,
+                    local_bounds,
+                );
+                if let Some((pixels, pixel_width, pixel_height)) =
+                    crate::render::rasterize_calayer_to_pixels(&tile_root, width, height)
+                {
+                    if let Some(tiled_image) =
+                        crate::render::pixels_to_cgimage(pixels, pixel_width, pixel_height)
+                    {
+                        let image_layer = CALayer::new();
+                        image_layer.setFrame(NSRect::new(
+                            objc2_foundation::NSPoint::new(
+                                local_bounds.x as f64,
+                                local_bounds.y as f64,
+                            ),
+                            objc2_foundation::NSSize::new(
+                                local_bounds.width as f64,
+                                local_bounds.height as f64,
+                            ),
+                        ));
+                        // `rasterize_calayer_to_pixels` returns a top-down bitmap, while a
+                        // CGImage used as CALayer contents is interpreted in the opposite Y
+                        // direction.  The temporary per-tile layers therefore look correct, but
+                        // their single aggregated replacement is vertically inverted unless its
+                        // contents layer is flipped back around its default center anchor.
+                        image_layer.setAffineTransform(objc2_core_foundation::CGAffineTransform {
+                            a: 1.0,
+                            b: 0.0,
+                            c: 0.0,
+                            d: -1.0,
+                            tx: 0.0,
+                            ty: 0.0,
+                        });
+                        unsafe {
+                            image_layer.setContents(Some(
+                                tiled_image.as_ref() as &objc2::runtime::AnyObject
+                            ))
+                        };
+                        container.addSublayer(&image_layer);
+                    } else {
+                        add_tiled_image_layers(
+                            &container,
+                            &cg_image,
+                            image_size,
+                            image_brush.transform,
+                            tile_mode,
+                            local_bounds,
+                        );
+                    }
+                } else {
+                    add_tiled_image_layers(
+                        &container,
+                        &cg_image,
+                        image_size,
+                        image_brush.transform,
+                        tile_mode,
+                        local_bounds,
+                    );
+                }
+            } else {
+                // Explicit bounded fallback for oversized target regions: preserve rendering with
+                // the existing capped grid rather than allocating an unbounded bitmap.
+                add_tiled_image_layers(
+                    &container,
+                    &cg_image,
+                    image_size,
+                    image_brush.transform,
+                    tile_mode,
+                    local_bounds,
+                );
+            }
         }
     }
 
@@ -252,11 +363,15 @@ pub(crate) fn try_add_image_fill_layer(
     let mask_layer = CAShapeLayer::new();
     let identity = elwindui_core::base::AffineTransform::identity();
     let mask_path = match mask_shape {
-        GradientMaskShape::RoundedRect(radii) => rounded_rect_cgpath(&identity, local_bounds, radii),
+        GradientMaskShape::RoundedRect(radii) => {
+            rounded_rect_cgpath(&identity, local_bounds, radii)
+        }
         GradientMaskShape::Ellipse => ellipse_cgpath(&identity, local_bounds),
     };
     mask_layer.setPath(Some(&mask_path));
-    mask_layer.setFillColor(Some(&color_to_cgcolor(elwindui_core::graphics::Color::black())));
+    mask_layer.setFillColor(Some(&color_to_cgcolor(
+        elwindui_core::graphics::Color::black(),
+    )));
     let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
     unsafe { container.setMask(Some(&mask_layer)) };
 
@@ -319,7 +434,9 @@ pub(crate) fn add_tiled_image_layers(
                 tx: 0.0,
                 ty: 0.0,
             });
-            unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
+            unsafe {
+                image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject))
+            };
             container.addSublayer(&image_layer);
         }
     }
@@ -373,7 +490,9 @@ pub(crate) fn apply_stroke(
 ) {
     let color = match brush {
         elwindui_core::graphics::Brush::Solid(color) => *color,
-        other => first_gradient_stop_color(other).unwrap_or(elwindui_core::graphics::Color::black()),
+        other => {
+            first_gradient_stop_color(other).unwrap_or(elwindui_core::graphics::Color::black())
+        }
     };
     shape_layer.setStrokeColor(Some(&color_to_cgcolor(color)));
     shape_layer.setLineWidth(style.width as f64);

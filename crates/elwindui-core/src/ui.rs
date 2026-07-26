@@ -36,6 +36,9 @@
 
 use crate::base::{CornerRadius, Point, Rect, Size};
 use crate::input::{FocusState, RoutedEventArgs};
+use crate::theme::{
+    SystemTheme, ThemeChangeImpact, ThemeContext, ThemeHandle, ThemeValue,
+};
 use crate::layout::{
     GridCell, GridLength, HorizontalAlignment, Orientation, VerticalAlignment, Visibility,
     align_within, apply_size_constraints, grid_arrange, grid_measure_pass1_available,
@@ -219,6 +222,9 @@ pub struct UIElement {
     /// The `FocusHost` counterpart to `invalidate_host` — see that field's own doc comment and
     /// `FocusHost`'s own.
     pub focus_host: RefCell<Option<Rc<dyn FocusHost>>>,
+    /// Window-level override for this hosted root. Descendants resolve it through the Visual
+    /// parent chain; `None` reaches the current application theme.
+    pub theme_context: RefCell<Option<ThemeContext>>,
     /// `#[shortcut(...)]`-annotated fields declared on this element, registered here by
     /// `elwindui-codegen`'s generated `new()` — not yet reachable from any `ShortcutRegistry` (this
     /// element doesn't know which tree/window it'll end up hosted under yet). A host's own
@@ -278,6 +284,7 @@ impl std::fmt::Debug for UIElement {
             .field("focus_order", &self.focus_order.get())
             .field("focus_state", &self.focus_state.get())
             .field("focus_host", &self.focus_host.borrow().is_some())
+            .field("theme_context", &self.theme_context.borrow().is_some())
             .finish()
     }
 }
@@ -337,6 +344,7 @@ impl UIElement {
             focus_order: Cell::new(None),
             focus_state: Cell::new(FocusState::Unfocused),
             focus_host: RefCell::new(None),
+            theme_context: RefCell::new(None),
             declared_shortcuts: RefCell::new(Vec::new()),
         }
     }
@@ -675,6 +683,32 @@ impl UIElement {
     fn set_focus_host(&self, host: Option<Rc<dyn FocusHost>>) {
         *self.as_ui_element().focus_host.borrow_mut() = host;
     }
+    /// Stores a Window-specific theme only on a hosted root. A nested host does not need to copy
+    /// it: its content remains in the same Visual-parent chain and resolves this context lazily.
+    fn set_theme_context(&self, context: Option<ThemeContext>) {
+        let impact = context
+            .as_ref()
+            .map_or(ThemeChangeImpact::NativeStyle, |context| {
+                context.theme().last_change_impact()
+            });
+        *self.as_ui_element().theme_context.borrow_mut() = context;
+        match impact {
+            ThemeChangeImpact::Paint => self.invalidate(),
+            ThemeChangeImpact::Measure | ThemeChangeImpact::NativeStyle => {
+                self.invalidate_measure()
+            }
+        }
+    }
+    /// Resolves the nearest Window theme, falling back to the application default.
+    fn theme_handle(&self) -> ThemeHandle {
+        if let Some(context) = self.as_ui_element().theme_context.borrow().as_ref() {
+            return context.theme();
+        }
+        if let Some(parent) = self.visual_parent() {
+            return parent.theme_handle();
+        }
+        crate::theme::application_theme()
+    }
     /// Registers a `#[shortcut(...)]`-annotated field's binding on this element — see
     /// `UIElement::declared_shortcuts`'s own doc comment.
     fn declare_shortcut(&self, decl: crate::input::ShortcutDecl) {
@@ -882,9 +916,9 @@ pub enum InheritanceParentKind {
 /// need this", rather than threading it through the `inherits =` chain.
 ///
 /// `TextStyleOwner` intentionally does *not* expose one `text_style` property to the DSL (指示書
-/// §8 rules this out) — its only job is: hold a [`TextStyleStorage`], forward each of the seven
-/// individual setters to it with per-property change notification, and resolve this element's own
-/// [`ComputedTextStyle`] against its inherited value.
+/// §8 rules this out) — its only job is: hold a [`crate::graphics::TextStyleStorage`], forward each
+/// of the seven individual setters to it with per-property change notification, and resolve this
+/// element's own [`crate::graphics::ComputedTextStyle`] against its inherited value.
 pub trait TextStyleOwner: UIElementExt {
     /// The single piece of real state an implementor provides.
     fn text_style_storage(&self) -> &crate::graphics::TextStyleStorage;
@@ -1038,22 +1072,28 @@ pub trait TextStyleOwner: UIElementExt {
         }
     }
 
-    /// This element's fully-resolved style: its own local values overlaid, property-by-property,
-    /// onto whatever its nearest `TextStyleOwner` ancestor already resolved (指示書 §7 — never a
-    /// wholesale "inherit the whole struct" replacement).
+    /// This element's inherited/local cascade without backend defaults. Native adapters consume
+    /// this form so an absent value can clear a platform property.
+    fn cascaded_text_style(&self) -> crate::graphics::CascadedTextStyle {
+        let inherited = inherited_cascaded_text_style(self.as_ui_element());
+        self.text_style_storage().cascade_onto(&inherited)
+    }
+
+    /// This element's fully materialized style for framework-owned measurement and painting.
     fn resolved_text_style(&self) -> crate::graphics::ComputedTextStyle {
-        let inherited = inherited_text_style(self.as_ui_element());
-        self.text_style_storage().resolve_onto(&inherited)
+        self.cascaded_text_style()
+            .materialize(&crate::graphics::text_backend().default_text_style())
     }
 }
 
-/// The style this element itself inherits — the nearest `TextStyleOwner` ancestor's own already-
-/// resolved style (which, transitively, already folds in *its* ancestors), or the registered
-/// backend's platform default if none exists. Always walks the **Visual** tree (指示書 §13): a
+/// The style this element inherits before backend defaults are materialized. Always walks the
+/// **Visual** tree: a
 /// `Grid`/`Layout`/`Shape`/`Image` in between is transparent (its `as_text_style_owner()` is `None`,
 /// so the walk simply continues past it) — inheritance is never blocked by a non-owning element
 /// (指示書 §11).
-pub fn inherited_text_style(base: &UIElement) -> crate::graphics::ComputedTextStyle {
+pub fn inherited_cascaded_text_style(
+    base: &UIElement,
+) -> crate::graphics::CascadedTextStyle {
     // `base` is the bare `UIElement` struct, not a `dyn UIElementExt` — read its `visual_parent`
     // field directly for this first hop (mirroring `request_relayout`'s identical first step);
     // every subsequent hop is a real `Rc<dyn UIElementExt>`, which does implement the trait method.
@@ -1064,11 +1104,60 @@ pub fn inherited_text_style(base: &UIElement) -> crate::graphics::ComputedTextSt
         .and_then(|w| w.upgrade());
     while let Some(element) = current {
         if let Some(owner) = element.as_text_style_owner() {
-            return owner.resolved_text_style();
+            return owner.cascaded_text_style();
         }
         current = element.inheritance_parent(InheritanceParentKind::Visual);
     }
-    crate::graphics::text_backend().default_text_style()
+    crate::graphics::CascadedTextStyle::default()
+}
+
+fn apply_standard_text_theme(
+    theme: &ThemeHandle,
+    kind: &str,
+    style: &mut crate::graphics::CascadedTextStyle,
+) {
+    macro_rules! fill {
+        ($field:ident, $token:expr) => {
+            if style.$field.is_none() {
+                if let ThemeValue::Value(value) = theme.resolve($token) {
+                    style.$field = Some(value);
+                }
+            }
+        };
+    }
+    match kind {
+        "text_block" => {
+            fill!(font_family, SystemTheme::text_block_font_family);
+            fill!(font_size, SystemTheme::text_block_font_size);
+            fill!(font_weight, SystemTheme::text_block_font_weight);
+            fill!(font_style, SystemTheme::text_block_font_style);
+            fill!(font_stretch, SystemTheme::text_block_font_stretch);
+            fill!(
+                character_spacing,
+                SystemTheme::text_block_character_spacing
+            );
+            fill!(foreground, SystemTheme::text_block_foreground);
+        }
+        "control" => {
+            fill!(font_family, SystemTheme::control_font_family);
+            fill!(font_size, SystemTheme::control_font_size);
+            fill!(font_weight, SystemTheme::control_font_weight);
+            fill!(font_style, SystemTheme::control_font_style);
+            fill!(font_stretch, SystemTheme::control_font_stretch);
+            fill!(character_spacing, SystemTheme::control_character_spacing);
+            fill!(foreground, SystemTheme::control_foreground);
+        }
+        _ => {}
+    }
+}
+
+/// Returns the inherited text style materialized for framework-owned drawing and measurement.
+///
+/// Native controls should use [`inherited_cascaded_text_style`] instead, preserving unset values
+/// until their platform property adapter.
+pub fn inherited_text_style(base: &UIElement) -> crate::graphics::ComputedTextStyle {
+    inherited_cascaded_text_style(base)
+        .materialize(&crate::graphics::text_backend().default_text_style())
 }
 
 /// The Visual tree's actual child storage (the low-level
@@ -1292,7 +1381,13 @@ impl ListExt<dyn UIElementExt> for UIElementCollection {
 /// `try_as_native_control()` result directly to `H` (see that trait method's own doc comment) — no
 /// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement)]
-pub trait NativeControl {}
+pub trait NativeControl {
+    /// Sets an explicit native-control background.
+    fn set_background(&self, background: Brush);
+
+    /// Removes an explicit background so the backend control theme can supply it again.
+    fn clear_background(&self);
+}
 
 /// The property-setter traits below (`TextArea`/`Button`/`MenuItem`/`Menu`/`MenuBar`/`MenuBarItem`/
 /// `Window`) are declared once here rather than duplicated per backend crate.
@@ -1722,6 +1817,8 @@ pub trait Window {
     fn set_title(&self, title: &str);
     fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>);
     fn set_content(&self, content: Rc<dyn UIElementExt>);
+    /// Sets a Window-local theme, or restores inheritance from the application theme.
+    fn set_theme(&self, theme: Option<ThemeHandle>);
     fn show(&self);
     fn left(&self) -> f32;
     fn set_left(&self, left: f32);
@@ -1737,7 +1834,9 @@ pub trait Window {
 /// implemented by every layout-container virtual builtin (`VerticalLayout`/
 /// `HorizontalLayout`/`Grid`), the same way `NativeControl` groups every native leaf.
 ///
-/// Holds only `children` — the one field every layout-container virtual builtin needs
+/// Holds `children` plus an optional, explicitly assigned background shared by every layout
+/// container. An unset background remains transparent; `SystemTheme::layout_background` is never
+/// applied implicitly.
 /// (docs/elwindui_spec.md 1426行目). `spacing` is *not* here: it only means anything to
 /// `VerticalLayout`/`HorizontalLayout` (`Grid` has no use for it), so each of those two declares
 /// its own `spacing` field instead of it living on this shared base. `VerticalLayout`/
@@ -1757,6 +1856,8 @@ pub trait Window {
 pub struct Layout {
     /// Logical children for this layout. Its mutations update the owner's Visual collection.
     pub children: UIElementCollection,
+    /// An explicitly assigned background, or `None` for transparent platform-neutral layout.
+    pub background: RefCell<Option<Brush>>,
 }
 
 #[elwindui_macros::class]
@@ -1770,20 +1871,54 @@ impl Layout {
         &self.children
     }
 
-    /// `Layout` (and every subclass — `VerticalLayout`/`HorizontalLayout`/`Grid`) has no
-    /// `Background`/`Fill` concept in `builtins.elwind` at all, so it's never itself a hit-test
-    /// candidate — a click in the empty space between children falls through to whatever's behind
-    /// it, matching WinUI3/WPF's "unset Background isn't hit-testable" panel behavior. See
-    /// `UIElement::hit_test_content`'s own doc comment.
+    /// Returns the explicitly assigned layout background.
+    fn background(&self) -> Option<Brush> {
+        self.background.borrow().clone()
+    }
+
+    /// Sets an explicit background drawn behind arranged children.
+    fn set_background(&self, background: Option<Brush>) {
+        *self.background.borrow_mut() = background;
+        self.invalidate();
+    }
+
+    /// Restores the layout's transparent default background.
+    fn clear_background(&self) {
+        self.set_background(None);
+    }
+
+    /// Matching WinUI Panel behavior, only a layout with an actual background participates in
+    /// hit-testing. `None` is both visually transparent and hit-test transparent.
     #[overrides]
     fn hit_test_content(&self) -> bool {
-        false
+        self.background.borrow().is_some()
+    }
+
+    /// A retained group's own commands precede all child groups, so this fill is guaranteed to be
+    /// behind the layout's children.
+    #[overrides]
+    fn render(&self, context: &mut RenderContext<'_>) {
+        if let Some(background) = self.background.borrow().as_ref() {
+            context.fill_rect(
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: self.arranged_width().unwrap_or(0.0),
+                    height: self.arranged_height().unwrap_or(0.0),
+                },
+                background,
+            );
+        }
     }
 
     fn construct() -> Self {
         let base = UIElement::construct();
         let children = UIElementCollection::new(__self_weak.clone());
-        Self { base, children }
+        Self {
+            base,
+            children,
+            background: RefCell::new(None),
+        }
     }
 }
 
@@ -1840,6 +1975,10 @@ impl VerticalLayout {
     fn set_spacing(&self, spacing: f32) {
         self.spacing.set(spacing);
         self.invalidate_measure();
+    }
+    /// Restores zero spacing.
+    fn clear_spacing(&self) {
+        self.set_spacing(0.0);
     }
     fn construct() -> Self {
         Self {
@@ -1898,6 +2037,10 @@ impl HorizontalLayout {
         self.spacing.set(spacing);
         self.invalidate_measure();
     }
+    /// Restores zero spacing.
+    fn clear_spacing(&self) {
+        self.set_spacing(0.0);
+    }
     fn construct() -> Self {
         Self {
             base: Layout::construct(),
@@ -1943,13 +2086,25 @@ impl Shape {
         *self.fill.borrow_mut() = fill;
         self.invalidate();
     }
+    /// Removes the explicit fill.
+    fn clear_fill(&self) {
+        self.set_fill(None);
+    }
     fn set_stroke(&self, stroke: Option<Brush>) {
         *self.stroke.borrow_mut() = stroke;
         self.invalidate();
     }
+    /// Removes the explicit stroke.
+    fn clear_stroke(&self) {
+        self.set_stroke(None);
+    }
     fn set_stroke_width(&self, stroke_width: f32) {
         self.stroke_width.set(stroke_width);
         self.invalidate();
+    }
+    /// Restores zero stroke width.
+    fn clear_stroke_width(&self) {
+        self.set_stroke_width(0.0);
     }
     fn construct() -> Self {
         Self {
@@ -1967,7 +2122,7 @@ impl Shape {
 #[elwindui_macros::class(inherits = crate::ui::Shape)]
 pub struct Rectangle {
     stroke_width: Option<f32>,
-    corner_radius: Option<f32>,
+    corner_radius: Cell<Option<f32>>,
 }
 
 #[elwindui_macros::class]
@@ -1982,7 +2137,17 @@ impl Rectangle {
         self.stroke_width.clone()
     }
     fn corner_radius(&self) -> Option<f32> {
-        self.corner_radius.clone()
+        self.corner_radius.get()
+    }
+    /// Sets the radius used for all four corners.
+    fn set_corner_radius(&self, corner_radius: f32) {
+        self.corner_radius.set(Some(corner_radius));
+        self.invalidate();
+    }
+    /// Restores the platform-neutral square-corner default.
+    fn clear_corner_radius(&self) {
+        self.corner_radius.set(None);
+        self.invalidate();
     }
     #[overrides]
     fn render(&self, context: &mut RenderContext<'_>) {
@@ -1992,7 +2157,7 @@ impl Rectangle {
             width: self.arranged_width().unwrap_or(0.0),
             height: self.arranged_height().unwrap_or(0.0),
         };
-        let radii = CornerRadius::uniform(self.corner_radius.unwrap_or(0.0));
+        let radii = CornerRadius::uniform(self.corner_radius.get().unwrap_or(0.0));
         if let Some(fill) = self.base.fill.borrow().as_ref() {
             context.fill_rounded_rect(rect, radii, fill);
         }
@@ -2025,7 +2190,7 @@ impl Rectangle {
         Self {
             base: shape,
             stroke_width,
-            corner_radius,
+            corner_radius: Cell::new(corner_radius),
         }
     }
 }
@@ -2300,6 +2465,13 @@ impl TextStyleOwner for TextBlock {
     fn text_style_storage(&self) -> &crate::graphics::TextStyleStorage {
         &self.text_style
     }
+
+    fn cascaded_text_style(&self) -> crate::graphics::CascadedTextStyle {
+        let inherited = inherited_cascaded_text_style(self.as_ui_element());
+        let mut style = self.text_style_storage().cascade_onto(&inherited);
+        apply_standard_text_theme(&self.theme_handle(), "text_block", &mut style);
+        style
+    }
 }
 
 /// A composable, multi-part component (WinUI3's `Control`) — Visually built from any number of
@@ -2404,6 +2576,13 @@ impl Control {
 impl TextStyleOwner for Control {
     fn text_style_storage(&self) -> &crate::graphics::TextStyleStorage {
         &self.text_style
+    }
+
+    fn cascaded_text_style(&self) -> crate::graphics::CascadedTextStyle {
+        let inherited = inherited_cascaded_text_style(self.as_ui_element());
+        let mut style = self.text_style_storage().cascade_onto(&inherited);
+        apply_standard_text_theme(&self.theme_handle(), "control", &mut style);
+        style
     }
 }
 
@@ -4036,6 +4215,39 @@ mod tests {
         assert!(matches!(
             render_tree.root.children[0].commands[0],
             RenderCommand::NativeControl { .. }
+        ));
+    }
+
+    #[test]
+    fn layout_background_is_transparent_by_default_and_paints_before_children() {
+        let layout = VerticalLayout::new();
+        let child = Rectangle::new(
+            Some(Brush::Solid(Color::rgb(10, 20, 30))),
+            None,
+            None,
+            None,
+        );
+        child.set_width(20.0);
+        child.set_height(20.0);
+        layout.children().add(child);
+
+        let root: Rc<dyn UIElementExt> = layout.clone();
+        let transparent = layout_tree::<FakeHandle>(&root, size(40.0, 40.0));
+        assert!(transparent.root.commands.is_empty());
+        assert!(matches!(
+            transparent.root.children[0].commands[0],
+            RenderCommand::FillRoundedRect { .. }
+        ));
+
+        layout.set_background(Some(Brush::Solid(Color::rgb(1, 2, 3))));
+        let painted = layout_tree::<FakeHandle>(&root, size(40.0, 40.0));
+        assert!(matches!(
+            painted.root.commands[0],
+            RenderCommand::FillRect { .. }
+        ));
+        assert!(matches!(
+            painted.root.children[0].commands[0],
+            RenderCommand::FillRoundedRect { .. }
         ));
     }
 

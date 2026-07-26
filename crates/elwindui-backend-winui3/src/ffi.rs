@@ -113,6 +113,21 @@ pub(crate) fn invoke_ui_text_event_callback(id: usize, text: String) {
 pub(crate) trait WinUiHandle: elwindui_core::base::AsAny {
     fn as_element(&self) -> FrameworkElement;
 
+    /// Returns the ElwindUI standard-token prefix for this concrete native control.
+    fn theme_prefix(&self) -> &'static str {
+        "native_control"
+    }
+
+    /// Applies an explicit background or clears it back to the native control default.
+    fn apply_background(
+        &self,
+        background: Option<&elwindui_core::graphics::Brush>,
+    ) -> windows::core::Result<()> {
+        let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
+            self.as_element().cast()?;
+        crate::render::apply_control_background(&control, background)
+    }
+
     /// Pushes a resolved text style onto the real widget this handle wraps. No-op by default — a
     /// handle with no text of its own (`XamlTabView`) simply doesn't participate. See
     /// `elwindui-backend-appkit::ffi::AppKitHandle::apply_text_style`'s own doc comment for the
@@ -120,7 +135,7 @@ pub(crate) trait WinUiHandle: elwindui_core::base::AsAny {
     /// see `render::text`'s own doc comment.
     fn apply_text_style(
         &self,
-        _style: &elwindui_core::graphics::ComputedTextStyle,
+        _style: &elwindui_core::graphics::CascadedTextStyle,
     ) -> windows::core::Result<()> {
         Ok(())
     }
@@ -136,13 +151,16 @@ impl WinUiHandle for XamlTextBox {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TextBox implements FrameworkElement")
     }
+    fn theme_prefix(&self) -> &'static str {
+        "text_box"
+    }
     fn apply_text_style(
         &self,
-        style: &elwindui_core::graphics::ComputedTextStyle,
+        style: &elwindui_core::graphics::CascadedTextStyle,
     ) -> windows::core::Result<()> {
         let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
             self.cast().expect("TextBox implements Control");
-        crate::render::apply_text_style_to_control(&control, style)
+        crate::render::apply_cascaded_text_style_to_control(&control, style)
     }
     fn supports_text_style(&self) -> bool {
         true
@@ -154,13 +172,16 @@ impl WinUiHandle for XamlPasswordBox {
         self.cast()
             .expect("PasswordBox implements FrameworkElement")
     }
+    fn theme_prefix(&self) -> &'static str {
+        "password_box"
+    }
     fn apply_text_style(
         &self,
-        style: &elwindui_core::graphics::ComputedTextStyle,
+        style: &elwindui_core::graphics::CascadedTextStyle,
     ) -> windows::core::Result<()> {
         let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
             self.cast().expect("PasswordBox implements Control");
-        crate::render::apply_text_style_to_control(&control, style)
+        crate::render::apply_cascaded_text_style_to_control(&control, style)
     }
     fn supports_text_style(&self) -> bool {
         true
@@ -172,9 +193,16 @@ impl WinUiHandle for ScrollViewer {
         self.cast()
             .expect("ScrollViewer implements FrameworkElement")
     }
+    fn theme_prefix(&self) -> &'static str {
+        if self.supports_text_style() {
+            "text_area"
+        } else {
+            "scroll_view"
+        }
+    }
     fn apply_text_style(
         &self,
-        style: &elwindui_core::graphics::ComputedTextStyle,
+        style: &elwindui_core::graphics::CascadedTextStyle,
     ) -> windows::core::Result<()> {
         // `ScrollView`'s own content is a nested `ElwinduiContentRoot` host, not text — mirrors
         // `elwindui-backend-appkit`'s identical `NSScrollView` no-op for the `ScrollView` case.
@@ -183,7 +211,7 @@ impl WinUiHandle for ScrollViewer {
         // costs nothing to keep consistent with the other three handles.
         let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
             self.cast().expect("ScrollViewer implements Control");
-        crate::render::apply_text_style_to_control(&control, style)
+        crate::render::apply_cascaded_text_style_to_control(&control, style)
     }
     fn supports_text_style(&self) -> bool {
         false
@@ -194,13 +222,16 @@ impl WinUiHandle for XamlButton {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("Button implements FrameworkElement")
     }
+    fn theme_prefix(&self) -> &'static str {
+        "button"
+    }
     fn apply_text_style(
         &self,
-        style: &elwindui_core::graphics::ComputedTextStyle,
+        style: &elwindui_core::graphics::CascadedTextStyle,
     ) -> windows::core::Result<()> {
         let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
             self.cast().expect("Button implements Control");
-        crate::render::apply_text_style_to_control(&control, style)
+        crate::render::apply_cascaded_text_style_to_control(&control, style)
     }
     fn supports_text_style(&self) -> bool {
         true
@@ -210,6 +241,9 @@ impl WinUiHandle for XamlButton {
 impl WinUiHandle for XamlTabView {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TabView implements FrameworkElement")
+    }
+    fn theme_prefix(&self) -> &'static str {
+        "tab_view"
     }
 }
 
@@ -231,7 +265,7 @@ impl AnyView {
     /// `NativeControl::sync_text_style` (`native_ui/control.rs`).
     pub(crate) fn apply_text_style(
         &self,
-        style: &elwindui_core::graphics::ComputedTextStyle,
+        style: &elwindui_core::graphics::CascadedTextStyle,
     ) -> windows::core::Result<()> {
         self.0.apply_text_style(style)
     }
@@ -239,6 +273,19 @@ impl AnyView {
     /// Forwards to the wrapped handle's own `WinUiHandle::supports_text_style`.
     pub(crate) fn supports_text_style(&self) -> bool {
         self.0.supports_text_style()
+    }
+
+    /// Returns the standard-token prefix for the concrete wrapped control.
+    pub(crate) fn theme_prefix(&self) -> &'static str {
+        self.0.theme_prefix()
+    }
+
+    /// Applies an explicit background or restores the native toolkit default.
+    pub(crate) fn apply_background(
+        &self,
+        background: Option<&elwindui_core::graphics::Brush>,
+    ) -> windows::core::Result<()> {
+        self.0.apply_background(background)
     }
 }
 

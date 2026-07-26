@@ -117,6 +117,7 @@ component UIElement {
 #[abstract]
 component Layout inherits UIElement {
     children: UIElementCollection,
+    background: Option<elwindui::core::graphics::Brush>,
 }
 
 // A field-less category marker, not a real widget. Only native leaves that actually get embedded
@@ -150,6 +151,7 @@ component Layout inherits UIElement {
 #[abstract]
 #[text_style]
 component NativeControl inherits UIElement {
+    background: Option<elwindui::core::graphics::Brush>,
 }
 
 // `Window` has no meaningful `Control`-family ancestor (see `NativeControl` above), so it declares
@@ -167,6 +169,8 @@ component Window {
     menu_bar: Option<MenuBar>,
 
     content: std::rc::Rc<dyn UIElement>,
+
+    theme: Option<elwindui::core::theme::ThemeHandle>,
 
     // WinUI3-style position/size — top-left-origin, Y increasing downward. Each backend's own
     // `Window` also exposes these as plain getters (`left()`/`top()`/`width()`/`height()`,

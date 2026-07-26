@@ -20,8 +20,7 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send,
 };
 use objc2_app_kit::{
-    NSEvent,
-    NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSAppearanceCustomization, NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
@@ -198,6 +197,20 @@ define_class!(
             true
         }
 
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn view_did_change_effective_appearance(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), viewDidChangeEffectiveAppearance];
+            }
+            let name = self.effectiveAppearance().name().to_string();
+            let appearance = if name.contains("Dark") {
+                elwindui_core::theme::ThemeAppearance::Dark
+            } else {
+                elwindui_core::theme::ThemeAppearance::Light
+            };
+            self.theme_handle().set_appearance(appearance);
+        }
+
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking_areas(&self) {
             unsafe {
@@ -336,6 +349,18 @@ impl TreeHostView {
             unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
         *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
         this
+    }
+
+    /// Returns the Window-inherited theme for the hosted tree, or the application theme before a
+    /// tree is attached.
+    pub(crate) fn theme_handle(&self) -> elwindui_core::theme::ThemeHandle {
+        self.ivars()
+            .tree
+            .borrow()
+            .as_ref()
+            .map_or_else(elwindui_core::theme::application_theme, |tree| {
+                tree.theme_handle()
+            })
     }
 
     /// Converts `event`'s own position/modifiers/timestamp and feeds it, together with `kind`, to

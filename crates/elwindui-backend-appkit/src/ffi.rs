@@ -6,7 +6,9 @@
 
 
 use elwindui_core::base::AsAny;
-use elwindui_core::graphics::{Brush, Color, ComputedTextStyle};
+use elwindui_core::graphics::{
+    Brush, CascadedTextStyle, Color, ComputedTextStyle, TextBackend,
+};
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
@@ -23,10 +25,15 @@ pub(crate) fn mtm() -> MainThreadMarker {
 /// The one flat foreground color a handle can actually apply through a plain (non-attributed)
 /// `NSColor` setter — same gradient/image degrade as `render::text::foreground_ns_color` (a
 /// `Brush::Solid` is exact, anything else falls back to a representative flat color).
-fn flat_foreground_nscolor(
-    style: &ComputedTextStyle,
-) -> Retained<objc2_app_kit::NSColor> {
-    let color = match &style.foreground {
+fn materialized_text_style(style: &CascadedTextStyle) -> ComputedTextStyle {
+    style.materialize(&crate::render::AppKitTextBackend.default_text_style())
+}
+
+fn flat_foreground_nscolor(style: &CascadedTextStyle) -> Retained<objc2_app_kit::NSColor> {
+    let Some(foreground) = style.foreground.as_ref() else {
+        return objc2_app_kit::NSColor::labelColor();
+    };
+    let color = match foreground {
         Brush::Solid(color) => *color,
         other => crate::render::first_gradient_stop_color(other).unwrap_or(Color::black()),
     };
@@ -45,12 +52,35 @@ fn flat_foreground_nscolor(
 pub(crate) trait AppKitHandle: AsAny {
     fn as_nsview(&self) -> Retained<NSView>;
 
+    /// Returns the ElwindUI standard-token prefix for this concrete native control.
+    fn theme_prefix(&self) -> &'static str {
+        "native_control"
+    }
+
+    /// Applies an explicit background or clears the layer to restore the native default.
+    fn apply_background(&self, background: Option<&Brush>) {
+        let view = self.as_nsview();
+        view.setWantsLayer(true);
+        let Some(layer) = view.layer() else {
+            return;
+        };
+        let color = background.map(|background| {
+            let color = match background {
+                Brush::Solid(color) => *color,
+                other => crate::render::first_gradient_stop_color(other)
+                    .unwrap_or(Color::transparent()),
+            };
+            crate::render::color_to_cgcolor(color)
+        });
+        layer.setBackgroundColor(color.as_deref());
+    }
+
     /// Pushes a resolved text style onto the real widget this handle wraps. No-op by default — a
     /// handle with no text of its own (`NSStackView`) simply inherits its font for any *content* it
     /// hosts, not for itself. Called from `NativeControl::sync_text_style`
     /// (`native_ui/control.rs`), itself pulled from `measure_override` — see that method's own doc
     /// comment for why this is pull-based rather than pushed from the storage side.
-    fn apply_text_style(&self, _style: &ComputedTextStyle) {}
+    fn apply_text_style(&self, _style: &CascadedTextStyle) {}
 
     /// Whether this handle actually has somewhere to put a text style — used so a font-incapable
     /// native leaf can be told apart from one that silently ignored the request (指示書 §17: never
@@ -64,7 +94,14 @@ impl AppKitHandle for Retained<NSScrollView> {
     fn as_nsview(&self) -> Retained<NSView> {
         Retained::into_super(self.clone())
     }
-    fn apply_text_style(&self, style: &ComputedTextStyle) {
+    fn theme_prefix(&self) -> &'static str {
+        if self.supports_text_style() {
+            "text_area"
+        } else {
+            "scroll_view"
+        }
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) {
         // `ScrollView`'s own document view is `ElwinduiContentRoot` (a nested tree host, not
         // text) — this only actually does anything when the wrapped leaf is `TextArea`'s
         // `NSTextView`, so it's a natural no-op for `ScrollView` itself.
@@ -74,7 +111,8 @@ impl AppKitHandle for Retained<NSScrollView> {
         let Ok(text_view) = document.downcast::<NSTextView>() else {
             return;
         };
-        text_view.setFont(Some(&crate::render::ns_font(style)));
+        let materialized = materialized_text_style(style);
+        text_view.setFont(Some(&crate::render::ns_font(&materialized)));
         text_view.setTextColor(Some(&flat_foreground_nscolor(style)));
         // `character_spacing` isn't applied here: `NSTextView`'s kerning would need a
         // whole-text-storage attribute rewrite (or `typingAttributes`, which only affects text
@@ -92,20 +130,29 @@ impl AppKitHandle for Retained<NSButton> {
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
         Retained::into_super(control)
     }
-    fn apply_text_style(&self, style: &ComputedTextStyle) {
-        self.setFont(Some(&crate::render::ns_font(style)));
+    fn theme_prefix(&self) -> &'static str {
+        "button"
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) {
+        let materialized = materialized_text_style(style);
+        self.setFont(Some(&crate::render::ns_font(&materialized)));
         // A plain `title`/`setFont` pair can't express kerning or an explicit foreground — only
         // an attributed title can. Rebuilding it unconditionally would also silently discard the
         // system's own tinting for special bezel styles, so this only happens when kerning is
         // actually non-zero (the one property a plain title genuinely cannot represent at all).
-        if style.character_spacing != 0 {
+        if style.character_spacing.is_some_and(|spacing| spacing != 0)
+            || style.foreground.is_some()
+        {
             let plain = self.title().to_string();
             let attributed = crate::render::attributed_string(
                 &plain,
-                style,
+                &materialized,
                 elwindui_core::ui::TextAlignment::Left,
             );
             self.setAttributedTitle(&attributed);
+        } else {
+            let plain = self.title();
+            self.setTitle(&plain);
         }
     }
     fn supports_text_style(&self) -> bool {
@@ -122,8 +169,14 @@ impl AppKitHandle for Retained<NSTextField> {
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
         Retained::into_super(control)
     }
-    fn apply_text_style(&self, style: &ComputedTextStyle) {
-        self.setFont(Some(&crate::render::ns_font(style)));
+    fn theme_prefix(&self) -> &'static str {
+        // AppKit uses NSTextField for both TextBox and PasswordBox. Password controls are secure
+        // text fields, but both share the same base foreground/background fallback behavior.
+        "text_box"
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) {
+        let materialized = materialized_text_style(style);
+        self.setFont(Some(&crate::render::ns_font(&materialized)));
         self.setTextColor(Some(&flat_foreground_nscolor(style)));
         // Same narrower scope as `NSTextView` above: kerning isn't applied to an editable
         // `NSTextField`'s plain `stringValue` (an `attributedStringValue` rewrite would fight with
@@ -154,13 +207,23 @@ impl AnyView {
 
     /// Forwards to the wrapped handle's own `AppKitHandle::apply_text_style` — called by
     /// `NativeControl::sync_text_style` (`native_ui/control.rs`).
-    pub(crate) fn apply_text_style(&self, style: &ComputedTextStyle) {
+    pub(crate) fn apply_text_style(&self, style: &CascadedTextStyle) {
         self.0.apply_text_style(style);
     }
 
     /// Forwards to the wrapped handle's own `AppKitHandle::supports_text_style`.
     pub(crate) fn supports_text_style(&self) -> bool {
         self.0.supports_text_style()
+    }
+
+    /// Returns the standard-token prefix for the concrete wrapped control.
+    pub(crate) fn theme_prefix(&self) -> &'static str {
+        self.0.theme_prefix()
+    }
+
+    /// Applies an explicit background or restores the native toolkit default.
+    pub(crate) fn apply_background(&self, background: Option<&Brush>) {
+        self.0.apply_background(background);
     }
 
     /// Lets every native leaf's `measure_override` (in `native_ui.rs::NativeControl`) measure any

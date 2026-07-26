@@ -5,6 +5,7 @@ use super::InnerMenuBar;
 use crate::ffi::mtm;
 use crate::host::TreeHostView;
 use elwindui_core::input::FocusState;
+use elwindui_core::theme::{ThemeAppearance, ThemePreference};
 use elwindui_core::ui::UIElementExt;
 use objc2::rc::Retained;
 use objc2::runtime::Bool;
@@ -12,8 +13,9 @@ use objc2::{
     DefinedClass, MainThreadOnly, define_class, msg_send,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSResponder, NSScreen, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSResponder, NSScreen,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSObjectProtocol, NSRect, NSString};
 use std::rc::Rc;
@@ -174,6 +176,30 @@ impl InnerWindow {
 
     pub(crate) fn set_title(&self, title: &str) {
         self.ns.setTitle(&NSString::from_str(title));
+    }
+
+    /// `None` restores AppKit appearance inheritance, so System keeps following the OS. Aqua and
+    /// DarkAqua remain dynamic AppKit appearances rather than colors captured at switch time.
+    pub(crate) fn set_theme_preference(&self, preference: ThemePreference) {
+        let appearance = match preference {
+            ThemePreference::System => None,
+            ThemePreference::Light => NSAppearance::appearanceNamed(NSAppearanceNameAqua),
+            ThemePreference::Dark => NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua),
+        };
+        self.ns.setAppearance(appearance.as_deref());
+        let appearance = match preference {
+            ThemePreference::Dark => ThemeAppearance::Dark,
+            ThemePreference::Light => ThemeAppearance::Light,
+            ThemePreference::System => {
+                let name = self.ns.effectiveAppearance().name().to_string();
+                if name.contains("Dark") {
+                    ThemeAppearance::Dark
+                } else {
+                    ThemeAppearance::Light
+                }
+            }
+        };
+        self.content_host.theme_handle().set_appearance(appearance);
     }
 
     /// Sets `NSApplication.mainMenu` (macOS has one global top menu bar, not a per-window one).

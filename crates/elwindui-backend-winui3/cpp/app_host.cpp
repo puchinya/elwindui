@@ -98,3 +98,40 @@ extern "C" __declspec(dllexport) void elwindui_winui3_run(void (*startup)()) {
     // `elwindui::init()`) — reused as-is, not re-initialized here.
     Application::Start([](auto&&) { winrt::make<App>(); });
 }
+
+extern "C" __declspec(dllexport) int32_t elwindui_winui3_clear_control_text_style(
+    void* inspectable,
+    uint32_t mask) {
+    try {
+        Control control{nullptr};
+        copy_from_abi(control, inspectable);
+        if (mask & (1u << 0)) control.ClearValue(Control::FontFamilyProperty());
+        if (mask & (1u << 1)) control.ClearValue(Control::FontSizeProperty());
+        if (mask & (1u << 2)) control.ClearValue(Control::FontWeightProperty());
+        if (mask & (1u << 3)) control.ClearValue(Control::FontStyleProperty());
+        if (mask & (1u << 4)) control.ClearValue(Control::FontStretchProperty());
+        if (mask & (1u << 5)) control.ClearValue(Control::CharacterSpacingProperty());
+        if (mask & (1u << 6)) control.ClearValue(Control::ForegroundProperty());
+        if (mask & (1u << 7)) control.ClearValue(Control::BackgroundProperty());
+        return 0;
+    } catch (hresult_error const& error) {
+        return error.code().value;
+    }
+}
+
+extern "C" __declspec(dllexport) int32_t elwindui_winui3_set_element_theme(
+    void* inspectable,
+    int32_t requested,
+    int32_t* actual) {
+    try {
+        FrameworkElement element{nullptr};
+        copy_from_abi(element, inspectable);
+        element.RequestedTheme(static_cast<ElementTheme>(requested));
+        if (actual != nullptr) {
+            *actual = static_cast<int32_t>(element.ActualTheme());
+        }
+        return 0;
+    } catch (hresult_error const& error) {
+        return error.code().value;
+    }
+}

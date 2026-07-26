@@ -26,9 +26,10 @@ pub use color::{Color, ParseColorError};
 pub use command::{Clip, RenderCommand, TextAlignment};
 pub use context::{Fill, RenderContext, SaveGuard, Stroke};
 pub use text::{
-    ComputedTextStyle, DummyTextBackend, FontFamily, FontStretch, FontStyle, FontWeight,
-    TextBackend, TextMeasureRequest, TextMeasureResult, TextStyleProperty, TextStyleStorage,
-    TextStyleValues, TextWrapping, clear_text_backend, set_text_backend, text_backend,
+    CascadedTextStyle, ComputedTextStyle, DummyTextBackend, FontFamily, FontStretch, FontStyle,
+    FontWeight, TextBackend, TextMeasureRequest, TextMeasureResult, TextStyleProperty,
+    TextStyleStorage, TextStyleValues, TextWrapping, clear_text_backend, set_text_backend,
+    text_backend,
 };
 pub use image::{
     AlphaMode, BackendImageHandle, Image, ImageData, ImageDrawOptions, ImageError, ImageFit,

@@ -3,6 +3,7 @@ pub mod attr_frontend;
 pub mod codegen;
 pub mod component_frontend;
 pub mod parser;
+pub mod theme_frontend;
 mod text_style;
 pub mod validate;
 

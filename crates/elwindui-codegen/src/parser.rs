@@ -948,6 +948,19 @@ impl<'a> Parser<'a> {
             return Ok(ViewExpr::Element(Box::new(element)));
         }
 
+        // `theme!(AppTheme::token)` is a self-delimiting Rust expression. Preserve it as a
+        // `syn::Expr::Macro`; codegen uses that structure to generate Value/set and
+        // PlatformDefault/clear branches plus theme-only resynchronization.
+        if self.eat_keyword_bang("theme") {
+            self.expect_char('(')?;
+            let token = self.take_balanced_until(&[')'])?;
+            self.expect_char(')')?;
+            let source = format!("theme!({token})");
+            let expr = syn::parse_str::<syn::Expr>(&source)
+                .map_err(|error| format!("invalid theme token reference `{source}`: {error}"))?;
+            return Ok(ViewExpr::Expr(expr));
+        }
+
         // A `::`-qualified path (`elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: .. }`,
         // an enum struct/tuple-variant construction, or any other multi-segment Rust path) — none
         // of this parser's other sugars understand `::` (the dotted-path fallback below only
@@ -1481,6 +1494,17 @@ mod tests {
             "Option<f32>"
         );
         assert!(c.fields[1].attrs.iter().any(|a| matches!(a, Attr::TextStyle)));
+    }
+
+    #[test]
+    fn parses_theme_macro_as_a_rust_macro_expression() {
+        let mut parser = Parser::new("theme!(AppTheme::layout_background)");
+        let expression = parser.parse_view_expr().expect("theme reference should parse");
+        assert!(matches!(
+            expression,
+            ViewExpr::Expr(syn::Expr::Macro(_))
+        ));
+        assert!(parser.at_eof());
     }
 
     #[test]

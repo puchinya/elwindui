@@ -703,6 +703,16 @@ fn check_static_view_expr(expr: &syn::Expr, component_name: &str, errors: &mut V
             syn::Expr::Unary(unary) => allowed(&unary.expr),
             syn::Expr::Binary(binary) => allowed(&binary.left) && allowed(&binary.right),
             syn::Expr::Cast(cast) => allowed(&cast.expr),
+            syn::Expr::Macro(expression)
+                if expression
+                    .mac
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "theme") =>
+            {
+                syn::parse2::<syn::Path>(expression.mac.tokens.clone()).is_ok()
+            }
             // Optional shape fields in the builtin declarations use this pure normalization
             // before constructing their enum value.
             syn::Expr::MethodCall(call) if call.method == "unwrap_or" => {

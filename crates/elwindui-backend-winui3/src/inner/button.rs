@@ -80,12 +80,13 @@ mod hosted_xaml_regression_tests {
     use crate::bindings::Microsoft::UI::Xaml::Window as XamlWindow;
     use crate::bindings::winui_text::{FontStretch as XamlFontStretch, FontStyle as XamlFontStyle};
     use crate::render::{
-        WinUi3TextBackend, apply_text_style_to_control, apply_text_style_to_text_block,
+        WinUi3TextBackend, apply_cascaded_text_style_to_control, apply_text_style_to_control,
+        apply_text_style_to_text_block,
     };
     use elwindui_core::base::{Rect, Size as CoreSize};
     use elwindui_core::graphics::{
-        Brush, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle, FontWeight,
-        TextBackend, TextMeasureRequest, TextWrapping,
+        Brush, CascadedTextStyle, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle,
+        FontWeight, TextBackend, TextMeasureRequest, TextWrapping,
     };
     use windows::core::{HSTRING, Interface};
 
@@ -146,6 +147,7 @@ mod hosted_xaml_regression_tests {
 
         let native = XamlTextBox::new().expect("TextBox::new");
         let control: Control = native.clone().cast().expect("TextBox implements Control");
+        let default_font_size = control.FontSize().expect("default Control.FontSize");
         apply_text_style_to_control(&control, &style).expect("apply native control text style");
         assert_eq!(control.FontSize().expect("Control.FontSize"), 24.0);
         assert_eq!(
@@ -155,6 +157,16 @@ mod hosted_xaml_regression_tests {
         assert_eq!(
             control.FontStyle().expect("Control.FontStyle"),
             XamlFontStyle::Italic
+        );
+
+        // A theme's `PlatformDefault` branch clears every local text DependencyProperty rather
+        // than materializing a fixed ElwindUI default. The resolved value therefore returns to
+        // the live XAML theme resource on the same reused control.
+        apply_cascaded_text_style_to_control(&control, &CascadedTextStyle::default())
+            .expect("clear native control text style");
+        assert_eq!(
+            control.FontSize().expect("cleared Control.FontSize"),
+            default_font_size
         );
 
         // A named family must be replaceable with the backend default on the same reused element.

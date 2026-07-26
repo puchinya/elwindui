@@ -207,18 +207,24 @@ WinUI3の`UIElement`階層(`UIElement => TextBlock (プリミティブ描画(非
 `elwindui-codegen/src/builtins.elwind`内の`TextBlock`):
 
 ```
+#[text_style]
 component TextBlock {
     text: String,
-    color: Option<elwindui::core::graphics::Color>,
     text_alignment: Option<TextAlignment>,
 }
 ```
 
-`color`(`Rectangle`/`Ellipse`の`fill`/`stroke`と同様、`elwindui_core::graphics`の描画API刷新に伴い
-`Option<String>`から`Option<Color>`/`Option<Brush>`へ移行済み——`docs/elwindui_gui_framework_design.md`
-§5.7の`RenderContext`拡張参照)だが、`color: "#ffffff"`のような16進文字列リテラルは
-`elwindui-codegen`がコード生成時に検証し`Color::rgba(..)`/`Brush::Solid(Color::rgba(..))`へ変換するため、
-`.elwind`側の構文は従来どおり変更不要。不正な16進文字列はコード生成時エラーになる(実行時パニックにはならない)。
+**(2026-07-26更新)** 旧`color: Option<Color>`フィールドは廃止された。フォント機能実装
+(`docs/elwindui_font_status.md`)により`#[text_style]`(`docs/elwindui_dsl_spec.md`付録A.9)が
+`font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/
+`foreground`の7プロパティを注入するようになり、旧`color`はそのうちの`foreground`
+(`Option<elwindui::core::graphics::Brush>`——`Color`ではなく`Brush`)に統合された。
+`foreground: "#ffffff"`のような16進文字列リテラルは`Rectangle`/`Ellipse`の`fill`/`stroke`と
+同じ`elwindui-codegen`の変換機構(`coerce_color_literal`)で`Brush::Solid(Color::rgba(..))`へ
+変換される(不正な16進文字列はコード生成時エラー、実行時パニックにはならない)。
+`font_*`/`foreground`の7プロパティは`TextBlock`自身が`Visual Parent`から継承する側にも
+なる——`Control`に設定したフォントは`Grid`等を挟んでも`TextBlock`へ届く。詳細・継承の仕組みは
+`docs/elwindui_font_status.md`参照。
 
 `text_alignment`(`elwindui_core::ui::TextAlignment` — `Left`/`Center`/`Right`、省略時は`Left`)は
 テキスト自身が自分の描画領域内でどう揃うかを指定する。要素自体を親の割り当て領域内でどう配置するか
@@ -231,19 +237,20 @@ component TextBlock {
 elwindui_core::ui::TextBlock::new(/* setters applied after construction */)
     base: elwindui_core::ui::UIElementBase { margin: /* ... */, ..Default::default() },
     content: text.to_string(),
-    color: /* color属性(#RRGGBB[AA]形式)、省略時はNone */,
+    text_style: /* #[text_style]の7プロパティ、省略時は全てNone(=Visual Parentから継承) */,
     alignment: /* text_alignment属性、省略時はTextAlignment::Left */,
 })
 ```
 
-`TextBlock::render()`は`RenderContext`へローカル座標の`RenderCommand::Text`を追加するだけで、
-実際の文字計測・描画は各バックエンドの責務になる(`elwindui-core`はフォントも描画方法も知らない
-——F.6の`Rectangle`/`Ellipse`と同じ役割分担):
+`TextBlock::render()`/`measure_override()`は、`TextStyleOwner::resolved_text_style()`
+(Visual Parentを辿って解決した`ComputedTextStyle`——`docs/elwindui_font_status.md`§2参照)を
+`RenderContext`へ渡す。実際の文字計測・描画は各バックエンドの責務になる点は変わらない
+(`elwindui-core`自体はフォントエンジンを持たない——F.6の`Rectangle`/`Ellipse`と同じ役割分担):
 
 | バックエンド | 実装方法 |
 |---|---|
-| AppKit | `CATextLayer`(`NSAttributedString`ではなく`CALayer`ベース)を`TreeHostView`が`CAShapeLayer`と同じ要領で配置・生成。`alignment`は`CATextLayer.alignmentMode`(`kCAAlignmentLeft`/`Center`/`Right`)に反映 |
-| WinUI3 | 実際のXAML`TextBlock`クラスを、ウィジェットとしてではなく`TreeHostPanel`内の描画プリミティブとしてのみ利用(`Canvas.Left`/`Canvas.Top`で手動配置)。`alignment`は`TextBlock.TextAlignment`(`Microsoft.UI.Xaml.TextAlignment`)に反映 |
+| AppKit(2026-07-26更新) | `CATextLayer`に`NSAttributedString`(font/foreground/kerning/paragraph styleを一括含む)を設定して描画。旧`CATextLayer.fontSize`等の直接設定は廃止(`NSAttributedString`設定後は無視されるため)。実測は`NSAttributedString.boundingRectWithSize:options:context:`。`alignment`は属性内の`NSParagraphStyle`経由 |
+| WinUI3(コードのみ・未検証) | 実際のXAML`TextBlock`クラスを、ウィジェットとしてではなく`TreeHostPanel`内の描画プリミティブとしてのみ利用(`Canvas.Left`/`Canvas.Top`で手動配置)。`FontFamily`/`FontSize`/`FontWeight`/`FontStyle`/`FontStretch`/`CharacterSpacing`/`Foreground`を都度設定。`alignment`は`TextBlock.TextAlignment`(`Microsoft.UI.Xaml.TextAlignment`)に反映 |
 
 `Text`という名前ではなく、WinUI3の実際のクラス名に合わせて`TextBlock`という名前に統一されている。
 
@@ -332,7 +339,7 @@ view Dropdown {
 `fill`/`stroke`は`Option<elwindui::core::graphics::Brush>`(`Color`単色に限らずグラデーション等も
 表現できる`Brush`型 — `docs/elwindui_gui_framework_design.md`§5.7)——`fill: "#3a3a3c"`のような16進
 文字列リテラルは`elwindui-codegen`がコード生成時に検証し`Brush::Solid(Color::rgba(..))`へ変換するため
-(`TextBlock.color`のF.3節と同じ規則)、`.elwind`側の構文は従来どおり変更不要。
+(`TextBlock.foreground`のF.3節と同じ規則)、`.elwind`側の構文は従来どおり変更不要。
 詳細はG章・N章(Canvas/Painterによるカスタム描画)を参照。
 
 ## F.7 部品の全体依存関係(メモ帳の例)
@@ -355,7 +362,7 @@ NotepadWindow
 |---|---|
 | `Window` | `#[param] direction = env::direction()`、`match target::backend()`の網羅性検査 |
 | `VerticalLayout`/`HorizontalLayout` | 専用のネイティブ実体を持たない仮想ツリー(`elwindui_core::ui::UIElement`実装の`Stack`)、交差軸配置は子ごとの`HorizontalAlignment`/`VerticalAlignment` |
-| `TextBlock` | 自前描画のプリミティブ(非native)、`Option<String>`のカラー指定、backendごとの描画実装(`CATextLayer`/XAML`TextBlock`を描画専用に利用) |
+| `TextBlock` | 自前描画のプリミティブ(非native)、`#[text_style]`によるフォント/`foreground`(`Option<Brush>`)、backendごとの描画実装(`CATextLayer`/XAML`TextBlock`を描画専用に利用) |
 | `TextArea` | `bind!(self.text, TwoWay)`による双方向バインディング |
 | `Dropdown` / `Option` | `Vec<Option>`という複合型プロパティ、backendごとの選択状態同期 |
 
@@ -369,6 +376,7 @@ WinUI3の`Control`(複数パーツからなる汎用コンポジション)に相
 
 ```
 #[content(children)]
+#[text_style]
 component Control inherits UIElement {
     children: UIElementCollection,
     padding: Option<f32>,
@@ -384,6 +392,13 @@ view Control {
     }
 }
 ```
+
+**(2026-07-26追加)** `#[text_style]`(`docs/elwindui_dsl_spec.md`付録A.9)により
+`font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/
+`foreground`の7プロパティが利用可能——`Control`に設定したフォントは、`children`配下の
+`Grid`/`VerticalLayout`等(いずれも`TextStyleOwner`を実装しない透過的な要素)を何段挟んでも、
+末端の`TextBlock`/ネイティブコントロールへVisual Parent経由で継承される。詳細は
+`docs/elwindui_font_status.md`参照。
 
 > **実装状況**: `template`/`ControlTemplate<Self>`は設計のみ・未実装(`docs/elwindui_dsl_spec.md`§4、`docs/elwindui_gui_framework_design.md`§5.12参照)。`crates/elwindui-core/src/ui.rs`の`Control`構造体に対応するフィールドはまだ無い(同ファイルのdocコメントに"template replacement is future work"と明記されている)。以下は`children: UIElementCollection`だけを組み立てる、現在実装済みの挙動。
 

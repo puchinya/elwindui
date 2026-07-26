@@ -34,10 +34,10 @@
 
 use elwindui::core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui::core::graphics::{
-    Brush, Clip, Color, FillRule, GeometryCombineMode, GradientStop, Image, ImageBrush,
-    ImageDrawOptions, ImageFit, LineCap, LineJoin, LinearGradientBrush, Path, PathBuilder,
-    RadialGradientBrush, RenderContext, Stretch, StrokeStyle, TextAlignment, TileMode, VectorImage,
-    VectorImageDrawOptions,
+    Brush, Clip, Color, ComputedTextStyle, FillRule, GeometryCombineMode, GradientStop, Image,
+    ImageBrush, ImageDrawOptions, ImageFit, LineCap, LineJoin, LinearGradientBrush, Path,
+    PathBuilder, RadialGradientBrush, RenderContext, Stretch, StrokeStyle, TextAlignment, TileMode,
+    VectorImage, VectorImageDrawOptions,
 };
 use elwindui::core::ui::UIElementExt;
 use elwindui::ui::WindowExt;
@@ -160,7 +160,15 @@ impl GraphicsDemoCanvas {
                 width: card.width,
                 height: LABEL_HEIGHT,
             };
-            context.draw_text(entry.label, label_rect, Some(LABEL_COLOR), TextAlignment::Center);
+            context.draw_text(
+                entry.label,
+                label_rect,
+                &ComputedTextStyle {
+                    foreground: Brush::Solid(LABEL_COLOR),
+                    ..ComputedTextStyle::fallback()
+                },
+                TextAlignment::Center,
+            );
             let demo_rect = Rect {
                 x: card.x + 8.0,
                 y: card.y + LABEL_HEIGHT + 10.0,

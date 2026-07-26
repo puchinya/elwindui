@@ -582,6 +582,52 @@ fn __elwindui_run_on_constructed(&self) {  // Button自身
   将来hard errorへ格上げされた場合、`$crate::`自己参照に依存するこの仕組み全体の再設計が
   必要になる。
 
+### `struct_only`クラスで`#[overridable]`が使えない(既知の制限、修正しない方針を確認済み)
+
+`struct_only`クラス(例: `elwindui-backend-appkit::native_ui::control::NativeControl`——
+`struct_only = elwindui_core::ui::NativeControlExt`)が自分自身の新しい`#[overridable]`
+メソッド(例:「`apply_text_style`のような、`Button`/`TextArea`等の子孫`struct_only`クラスに
+オーバーライドさせたい仮想メソッド」)を宣言しても、正しく動作しない。
+
+**根本原因**: `ordinary`/`root`クラスモードは`impl`展開のたびに**自分専用の新しい**
+`pub trait {ClassName}Ext { .. }`を宣言するため、`#[overridable]`メソッドごとの
+`__dyn_x_for_<method>`アクセサ(§5)をそのトレイト自身に自由に追加できる
+(`class.rs`の`overridable_accessor_impls`、ordinary/root両分岐に存在)。
+一方`struct_only`は**既に他クレートで宣言済みの既存トレイト**
+(`elwindui_core::ui::NativeControlExt`のような`trait_only`宣言)を実装するだけで、
+自分自身のトレイトを新規宣言しない(`class.rs`の`struct_only`分岐、`trait_decl`は空
+トークン列のまま)。既存トレイトの宣言はダウンストリームクレート(バックエンドクレート)
+から後付けで拡張できないため、`struct_only`分岐には`overridable_accessor_impls`に相当する
+コードが存在せず、`#[overridable]`を付けても対応する`__dyn_x_for_<method>`アクセサが
+一切生成されない。
+
+`build_inherit_macros`(§8)は`struct_only`かどうかに関わらず`overridable_names`を
+受け取ってclassifyマンチャを生成するため、`#[overridable]`付きメソッドを1つでも宣言した
+`struct_only`クラスを他クラスが`inherits`すると、その子孫は「トレイトに存在しない
+アクセサメソッドの実装」を要求され`E0407`になる。
+
+**2026-07-26、フォント機能実装時にユーザー確認済みの方針**: このマクロ自体は修正しない。
+`struct_only`クラスで真にオーバーライド可能な仮想メソッドが必要になった場合は、
+マクロにアクセサ自動生成の特別分岐を追加するのではなく、**共有基底となる
+`trait_only`宣言(例:`elwindui_core::ui::NativeControlExt`)側へ手動でメソッドを追加し、
+各バックエンドの`struct_only`実装で個別に(`#[overrides]`ではなく通常のtrait実装として)
+揃える**。理由: `struct_only`が実装する既存トレイトを新規生成した別名の補助トレイト
+(例:`{ClassName}OwnExt`)で拡張する案も検討したが、`Button`/`TextArea`のような子孫も
+`struct_only`(`ButtonExt`/`TextAreaExt`をそれぞれ実装)であるため、この補助トレイトを
+`__elwindui_inherit_*!`の祖先転送チェーンへ正しく組み込むには複数箇所への波及が必要になり、
+このマクロの複雑さ・既存の脆弱さ(rust-analyzerとの既知の食い違い、§15参照)に対して
+リスクに見合わないと判断した。
+
+実例: `docs/elwindui_font_status.md`のフォント機能実装では、この制限に一度当たった
+(`NativeControl`に「解決済みスタイルをネイティブハンドルへpushする」仮想フックが
+最初は必要に見えた)が、**pull方式**(`NativeControl::measure_override`の中から
+`sync_text_style()`という`#[class]`管理外の普通の`impl NativeControl { .. }`メソッドを
+呼び、実際のプラットフォーム適用は`AppKitHandle`/`WinUiHandle`という**別の、
+`#[class]`と無関係な手書きトレイト**——`fn apply_text_style(&self, ..) {}`という
+既定no-op実装を持つ——に振り分ける設計に変更することで、この制限を回避した。
+`#[overridable]`/`#[overrides]`のマクロ糖衣を一切使わずに済んでおり、今回のフォント機能
+自体はこの制限の影響を受けていない。
+
 ### `AsAny`/`.as_any()`利用時の既知の罠(「as-any hack」)
 
 `#[class]`自体のバグではないが、`struct_only`クラスが典型的に書く

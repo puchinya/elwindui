@@ -3,6 +3,7 @@ pub mod attr_frontend;
 pub mod codegen;
 pub mod component_frontend;
 pub mod parser;
+mod text_style;
 pub mod validate;
 
 use std::fs;

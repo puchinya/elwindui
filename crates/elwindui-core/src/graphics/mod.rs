@@ -13,6 +13,7 @@ mod path;
 mod path_combine;
 mod render_tree;
 mod stroke;
+mod text;
 mod vector_filter;
 mod vector_image;
 mod vector_scene;
@@ -22,8 +23,13 @@ pub use brush::{
     GradientStop, ImageBrush, LinearGradientBrush, RadialGradientBrush, Stretch, TileMode,
 };
 pub use color::{Color, ParseColorError};
-pub use command::{Clip, Font, RenderCommand, TextAlignment};
+pub use command::{Clip, RenderCommand, TextAlignment};
 pub use context::{Fill, RenderContext, SaveGuard, Stroke};
+pub use text::{
+    ComputedTextStyle, DummyTextBackend, FontFamily, FontStretch, FontStyle, FontWeight,
+    TextBackend, TextMeasureRequest, TextMeasureResult, TextStyleProperty, TextStyleStorage,
+    TextStyleValues, TextWrapping, clear_text_backend, set_text_backend, text_backend,
+};
 pub use image::{
     AlphaMode, BackendImageHandle, Image, ImageData, ImageDrawOptions, ImageError, ImageFit,
     ImageFormat, ImageSampling, fitted_image_rect,

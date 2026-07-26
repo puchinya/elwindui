@@ -105,11 +105,32 @@ pub(crate) fn invoke_ui_text_event_callback(id: usize, text: String) {
 /// built (`AnyView::from(xaml.clone())`) before the rest of the widget struct exists.
 pub(crate) trait WinUiHandle: elwindui_core::base::AsAny {
     fn as_element(&self) -> FrameworkElement;
+
+    /// Pushes a resolved text style onto the real widget this handle wraps. No-op by default — a
+    /// handle with no text of its own (`XamlTabView`) simply doesn't participate. See
+    /// `elwindui-backend-appkit::ffi::AppKitHandle::apply_text_style`'s own doc comment for the
+    /// full pull-based rationale this mirrors — identical here. **Unverifiable on this machine**;
+    /// see `render::text`'s own doc comment.
+    fn apply_text_style(&self, _style: &elwindui_core::graphics::ComputedTextStyle) {}
+
+    /// Whether this handle actually has somewhere to put a text style (指示書 §17: never treat
+    /// "discarded" as "applied").
+    fn supports_text_style(&self) -> bool {
+        false
+    }
 }
 
 impl WinUiHandle for XamlTextBox {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TextBox implements FrameworkElement")
+    }
+    fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+        let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
+            self.cast().expect("TextBox implements Control");
+        let _ = crate::render::apply_text_style_to_control(&control, style);
+    }
+    fn supports_text_style(&self) -> bool {
+        true
     }
 }
 
@@ -117,17 +138,46 @@ impl WinUiHandle for XamlPasswordBox {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("PasswordBox implements FrameworkElement")
     }
+    fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+        let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
+            self.cast().expect("PasswordBox implements Control");
+        let _ = crate::render::apply_text_style_to_control(&control, style);
+    }
+    fn supports_text_style(&self) -> bool {
+        true
+    }
 }
 
 impl WinUiHandle for ScrollViewer {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("ScrollViewer implements FrameworkElement")
     }
+    fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+        // `ScrollView`'s own content is a nested `ElwinduiContentRoot` host, not text — mirrors
+        // `elwindui-backend-appkit`'s identical `NSScrollView` no-op for the `ScrollView` case.
+        // `ScrollViewer` still derives `Control`, so pushing the style is harmless (it would only
+        // ever matter if some future hosted-content font-inheritance path read it back), and
+        // costs nothing to keep consistent with the other three handles.
+        let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
+            self.cast().expect("ScrollViewer implements Control");
+        let _ = crate::render::apply_text_style_to_control(&control, style);
+    }
+    fn supports_text_style(&self) -> bool {
+        false
+    }
 }
 
 impl WinUiHandle for XamlButton {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("Button implements FrameworkElement")
+    }
+    fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+        let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
+            self.cast().expect("Button implements Control");
+        let _ = crate::render::apply_text_style_to_control(&control, style);
+    }
+    fn supports_text_style(&self) -> bool {
+        true
     }
 }
 
@@ -149,6 +199,17 @@ pub struct AnyView(Rc<dyn WinUiHandle>);
 impl AnyView {
     pub(crate) fn as_element(&self) -> FrameworkElement {
         self.0.as_element()
+    }
+
+    /// Forwards to the wrapped handle's own `WinUiHandle::apply_text_style` — called by
+    /// `NativeControl::sync_text_style` (`native_ui/control.rs`).
+    pub(crate) fn apply_text_style(&self, style: &elwindui_core::graphics::ComputedTextStyle) {
+        self.0.apply_text_style(style);
+    }
+
+    /// Forwards to the wrapped handle's own `WinUiHandle::supports_text_style`.
+    pub(crate) fn supports_text_style(&self) -> bool {
+        self.0.supports_text_style()
     }
 }
 

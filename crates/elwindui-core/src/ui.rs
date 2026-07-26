@@ -43,10 +43,12 @@ use crate::layout::{
     shrink_rect_by_margin, stack_arrange, stack_natural_size,
 };
 #[cfg(test)]
+use crate::graphics::Color;
+#[cfg(test)]
 use crate::graphics::RenderCommand;
 pub use crate::graphics::TextAlignment;
 use crate::graphics::{
-    Brush, Color, ImageDrawOptions, ImageFit, ImageSource, RenderContext, RenderGroup, RenderTree,
+    Brush, ImageDrawOptions, ImageFit, ImageSource, RenderContext, RenderGroup, RenderTree,
     Stretch, StrokeStyle, VectorImageDrawOptions, VectorRasterizeMode,
 };
 use std::any::Any;
@@ -781,6 +783,32 @@ impl UIElement {
         }));
         self.arrange_override(own_size);
     }
+    /// The parent property-inheritance (font, and any future inherited property) should walk from
+    /// this element — which tree to follow is the *caller's* choice (指示書 §14), not a fixed
+    /// per-element policy: font resolution always passes `Visual` (指示書 §13), while some future
+    /// consumer wanting `DataContext`-style inheritance would pass `Logical`. `Logical` falls back to
+    /// `Visual` when there's no logical parent, matching WinUI3's own
+    /// `GetInheritanceParentInternal()` fallback behavior (指示書 §14).
+    ///
+    /// Overridable so a Popup/Portal/ControlTemplate-style element whose *visual* parent doesn't
+    /// reach its real inheritance source (指示書 §28) can substitute its own answer — no such
+    /// override exists yet (未対応, see `docs/elwindui_font_status.md`), but the hook is here.
+    #[overridable]
+    fn inheritance_parent(&self, kind: InheritanceParentKind) -> Option<Rc<dyn UIElementExt>> {
+        match kind {
+            InheritanceParentKind::Visual => self.visual_parent(),
+            InheritanceParentKind::Logical => self.parent().or_else(|| self.visual_parent()),
+        }
+    }
+    /// Downcast hook for the font-inheritance walk (`inherited_text_style`) — the `TextStyleOwner`
+    /// analogue of `try_as_native_control` just above, same shape and same rationale: `None` for
+    /// every `UIElement` that doesn't hold a `TextStyleStorage` of its own (`Grid`/`Layout`/`Shape`/
+    /// `Image`/... — 指示書 §11 requires these stay transparent to inheritance, not blocking it),
+    /// `Some(self)` for `Control`/`TextBlock`/each backend's own `NativeControl`.
+    #[overridable]
+    fn as_text_style_owner(&self) -> Option<&dyn TextStyleOwner> {
+        None
+    }
 }
 
 /// Shared implementation for `UIElement::invalidate`/`invalidate_arrange`/`invalidate_measure` —
@@ -826,6 +854,221 @@ fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
         Some(host) => host.request_focus(target),
         None => false,
     }
+}
+
+/// Which parent link `UIElementExt::inheritance_parent` should follow (指示書 §13/§14). WinUI3
+/// doesn't keep a dedicated third "inheritance parent" pointer — it picks, at each inheritance walk,
+/// between the two links every element already has (`GetInheritanceParentInternal()`):
+///
+/// ```text
+/// Visual:  VisualTreeHelper.GetParent — the normal path. Font inheritance always uses this.
+/// Logical: the logical parent, falling back to Visual if there is none — used by properties like
+///          DataContext that prefer logical ownership (ContentControl.Content, Popup boundaries, ...).
+/// ```
+///
+/// Font inheritance must not be hardcoded to the Logical tree (指示書 §13 forbids this explicitly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InheritanceParentKind {
+    Visual,
+    Logical,
+}
+
+/// Capability trait for an element that can hold its own local font/text-style values — `Control`,
+/// `TextBlock`, and each backend's own `NativeControl` all implement this (指示書 §5/§8). Not a
+/// `#[class]`-managed class: those three are siblings on the single-inheritance chain (`Control`/
+/// `TextBlock` both inherit `UIElement` directly; a backend's `NativeControl` also inherits
+/// `UIElement`, not `Control`), so this is a plain, hand-written, orthogonal capability trait —
+/// exactly the shape `AsAny`/`RelayoutHost`/`FocusHost` already use for "some but not all elements
+/// need this", rather than threading it through the `inherits =` chain.
+///
+/// `TextStyleOwner` intentionally does *not* expose one `text_style` property to the DSL (指示書
+/// §8 rules this out) — its only job is: hold a [`TextStyleStorage`], forward each of the seven
+/// individual setters to it with per-property change notification, and resolve this element's own
+/// [`ComputedTextStyle`] against its inherited value.
+pub trait TextStyleOwner: UIElementExt {
+    /// The single piece of real state an implementor provides.
+    fn text_style_storage(&self) -> &crate::graphics::TextStyleStorage;
+
+    fn font_family(&self) -> Option<crate::graphics::FontFamily> {
+        self.text_style_storage().font_family()
+    }
+    // Bare (non-`Option`) setter argument, matching the house convention every other
+    // `Option<T>`-declared-in-the-DSL/scalar-or-enum-typed common property already uses
+    // (`UIElement::set_width(&self, width: f32)`, `set_margin`, ...): "unset" is expressed purely
+    // by never calling the setter (or by calling `clear_font_family()`), never by passing an
+    // explicit `None` — no DSL syntax spells that anyway, and this keeps `elwindui-codegen`'s
+    // generic per-field setter emission (`build_component_setters`/`build_virtual_value`) applying
+    // uniformly with no per-field-name special case. `set_foreground` below is the one exception,
+    // matching `Shape::set_fill`/`set_stroke`'s own established `Option<Brush>` convention instead.
+    fn set_font_family(&self, value: crate::graphics::FontFamily) {
+        if self.text_style_storage().set_font_family(Some(value)) {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontFamily);
+        }
+    }
+    fn clear_font_family(&self) {
+        if self
+            .text_style_storage()
+            .clear(crate::graphics::TextStyleProperty::FontFamily)
+        {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontFamily);
+        }
+    }
+
+    fn font_size(&self) -> Option<f32> {
+        self.text_style_storage().font_size()
+    }
+    fn set_font_size(&self, value: f32) {
+        if self.text_style_storage().set_font_size(Some(value)) {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontSize);
+        }
+    }
+    fn clear_font_size(&self) {
+        if self
+            .text_style_storage()
+            .clear(crate::graphics::TextStyleProperty::FontSize)
+        {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontSize);
+        }
+    }
+
+    fn font_weight(&self) -> Option<crate::graphics::FontWeight> {
+        self.text_style_storage().font_weight()
+    }
+    fn set_font_weight(&self, value: crate::graphics::FontWeight) {
+        if self.text_style_storage().set_font_weight(Some(value)) {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontWeight);
+        }
+    }
+    fn clear_font_weight(&self) {
+        if self
+            .text_style_storage()
+            .clear(crate::graphics::TextStyleProperty::FontWeight)
+        {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontWeight);
+        }
+    }
+
+    fn font_style(&self) -> Option<crate::graphics::FontStyle> {
+        self.text_style_storage().font_style()
+    }
+    fn set_font_style(&self, value: crate::graphics::FontStyle) {
+        if self.text_style_storage().set_font_style(Some(value)) {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontStyle);
+        }
+    }
+    fn clear_font_style(&self) {
+        if self
+            .text_style_storage()
+            .clear(crate::graphics::TextStyleProperty::FontStyle)
+        {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontStyle);
+        }
+    }
+
+    fn font_stretch(&self) -> Option<crate::graphics::FontStretch> {
+        self.text_style_storage().font_stretch()
+    }
+    fn set_font_stretch(&self, value: crate::graphics::FontStretch) {
+        if self.text_style_storage().set_font_stretch(Some(value)) {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontStretch);
+        }
+    }
+    fn clear_font_stretch(&self) {
+        if self
+            .text_style_storage()
+            .clear(crate::graphics::TextStyleProperty::FontStretch)
+        {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::FontStretch);
+        }
+    }
+
+    fn character_spacing(&self) -> Option<i32> {
+        self.text_style_storage().character_spacing()
+    }
+    fn set_character_spacing(&self, value: i32) {
+        if self.text_style_storage().set_character_spacing(Some(value)) {
+            self.on_text_style_property_changed(
+                crate::graphics::TextStyleProperty::CharacterSpacing,
+            );
+        }
+    }
+    fn clear_character_spacing(&self) {
+        if self
+            .text_style_storage()
+            .clear(crate::graphics::TextStyleProperty::CharacterSpacing)
+        {
+            self.on_text_style_property_changed(
+                crate::graphics::TextStyleProperty::CharacterSpacing,
+            );
+        }
+    }
+
+    fn foreground(&self) -> Option<crate::graphics::Brush> {
+        self.text_style_storage().foreground()
+    }
+    fn set_foreground(&self, value: Option<crate::graphics::Brush>) {
+        if self.text_style_storage().set_foreground(value) {
+            self.on_text_style_property_changed(crate::graphics::TextStyleProperty::Foreground);
+        }
+    }
+    fn clear_foreground(&self) {
+        self.set_foreground(None);
+    }
+
+    /// Clears exactly one property's local value.
+    fn clear_text_style_property(&self, property: crate::graphics::TextStyleProperty) {
+        if self.text_style_storage().clear(property) {
+            self.on_text_style_property_changed(property);
+        }
+    }
+    /// Clears every local text-style value on this element, reverting all seven to inheritance.
+    fn clear_text_style(&self) {
+        for property in crate::graphics::TextStyleProperty::ALL {
+            self.clear_text_style_property(property);
+        }
+    }
+
+    /// Change notification + invalidation hook (指示書 §23). The default routes each property to
+    /// the weakest sufficient invalidation: `Foreground` only ever affects painting, everything
+    /// else can affect measured size (a wider/heavier/larger glyph run).
+    fn on_text_style_property_changed(&self, property: crate::graphics::TextStyleProperty) {
+        match property {
+            crate::graphics::TextStyleProperty::Foreground => self.invalidate(),
+            _ => self.invalidate_measure(),
+        }
+    }
+
+    /// This element's fully-resolved style: its own local values overlaid, property-by-property,
+    /// onto whatever its nearest `TextStyleOwner` ancestor already resolved (指示書 §7 — never a
+    /// wholesale "inherit the whole struct" replacement).
+    fn resolved_text_style(&self) -> crate::graphics::ComputedTextStyle {
+        let inherited = inherited_text_style(self.as_ui_element());
+        self.text_style_storage().resolve_onto(&inherited)
+    }
+}
+
+/// The style this element itself inherits — the nearest `TextStyleOwner` ancestor's own already-
+/// resolved style (which, transitively, already folds in *its* ancestors), or the registered
+/// backend's platform default if none exists. Always walks the **Visual** tree (指示書 §13): a
+/// `Grid`/`Layout`/`Shape`/`Image` in between is transparent (its `as_text_style_owner()` is `None`,
+/// so the walk simply continues past it) — inheritance is never blocked by a non-owning element
+/// (指示書 §11).
+pub fn inherited_text_style(base: &UIElement) -> crate::graphics::ComputedTextStyle {
+    // `base` is the bare `UIElement` struct, not a `dyn UIElementExt` — read its `visual_parent`
+    // field directly for this first hop (mirroring `request_relayout`'s identical first step);
+    // every subsequent hop is a real `Rc<dyn UIElementExt>`, which does implement the trait method.
+    let mut current = base
+        .visual_parent
+        .borrow()
+        .as_ref()
+        .and_then(|w| w.upgrade());
+    while let Some(element) = current {
+        if let Some(owner) = element.as_text_style_owner() {
+            return owner.resolved_text_style();
+        }
+        current = element.inheritance_parent(InheritanceParentKind::Visual);
+    }
+    crate::graphics::text_backend().default_text_style()
 }
 
 /// The Visual tree's actual child storage (the low-level
@@ -1974,25 +2217,39 @@ impl Image {
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
 /// `TextBlock`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `TextBlock` has no
 /// further DSL-level subclass today.
+///
+/// `text_style` replaces the old `color: RefCell<Option<Color>>` field — foreground is now one of
+/// the seven properties [`TextStyleOwner`] manages (`foreground: Option<Brush>`, not a bare
+/// `Color`), inherited the same way `font_size`/`font_family`/etc. are (指示書 §2/§8). There is no
+/// DSL `color:` property anymore; use `foreground:` instead.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 pub struct TextBlock {
     pub text: RefCell<String>,
-    pub color: RefCell<Option<Color>>,
+    pub text_style: crate::graphics::TextStyleStorage,
     pub alignment: Cell<TextAlignment>,
 }
 
 #[elwindui_macros::class]
 impl TextBlock {
     #[overrides]
-    fn measure_override(&self, _available: Size) -> Size {
-        // `elwindui-core` has no font metrics of its own (measurement, like painting, is a
-        // backend concern for self-drawn content — see `Shape`'s same split) — a rough per-
-        // character estimate is enough to avoid collapsing to zero size; a backend may still
-        // render a string that overflows this estimate.
-        Size {
-            width: self.text.borrow().chars().count() as f32 * 8.0,
-            height: 16.0,
-        }
+    fn measure_override(&self, available: Size) -> Size {
+        let style = self.resolved_text_style();
+        let text = self.text.borrow();
+        crate::graphics::text_backend()
+            .measure_text(&crate::graphics::TextMeasureRequest {
+                text: &text,
+                style: &style,
+                available,
+                // `TextBlock` has no `text_wrapping` DSL property yet (未対応, outside the seven
+                // properties this pass covers — see `docs/elwindui_font_status.md`); the request
+                // shape already has the field so adding it later needs no signature change here.
+                wrapping: crate::graphics::TextWrapping::NoWrap,
+                alignment: self.alignment.get(),
+                max_lines: None,
+                // No DPI/text-scale concept exists anywhere in `elwindui-core` yet (未対応).
+                scale: 1.0,
+            })
+            .size
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
@@ -2000,6 +2257,11 @@ impl TextBlock {
     }
     #[overrides]
     fn render(&self, context: &mut RenderContext<'_>) {
+        // Re-resolved rather than cached from `measure_override` — nothing mutates between measure
+        // and render within one pass, so the two resolutions are identical, and re-resolving avoids
+        // a second, potentially-stale source of truth if a render pass ever runs without a
+        // preceding full layout pass (see `docs/elwindui_font_status.md`).
+        let style = self.resolved_text_style();
         context.draw_text(
             &self.text.borrow(),
             Rect {
@@ -2008,17 +2270,17 @@ impl TextBlock {
                 width: self.arranged_width().unwrap_or(0.0),
                 height: self.arranged_height().unwrap_or(0.0),
             },
-            *self.color.borrow(),
+            &style,
             self.alignment.get(),
         );
+    }
+    #[overrides]
+    fn as_text_style_owner(&self) -> Option<&dyn TextStyleOwner> {
+        Some(self)
     }
     fn set_text(&self, text: String) {
         *self.text.borrow_mut() = text;
         self.invalidate_measure();
-    }
-    fn set_color(&self, color: Option<Color>) {
-        *self.color.borrow_mut() = color;
-        self.invalidate();
     }
     fn set_text_alignment(&self, alignment: TextAlignment) {
         self.alignment.set(alignment);
@@ -2028,9 +2290,15 @@ impl TextBlock {
         Self {
             base: UIElement::construct(),
             text: RefCell::new(String::new()),
-            color: RefCell::new(None),
+            text_style: crate::graphics::TextStyleStorage::new(),
             alignment: Cell::new(TextAlignment::Left),
         }
+    }
+}
+
+impl TextStyleOwner for TextBlock {
+    fn text_style_storage(&self) -> &crate::graphics::TextStyleStorage {
+        &self.text_style
     }
 }
 
@@ -2054,6 +2322,10 @@ pub struct Control {
     pub padding: Cell<f32>,
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
     pub content_vertical_alignment: Cell<VerticalAlignment>,
+    /// `Control`-level font/foreground properties (指示書 §10: "Control派生型からも、基底の
+    /// フォントプロパティをDSLで直接指定できること") — inherited by any Visual descendant via
+    /// [`TextStyleOwner`], regardless of whether the elements in between are themselves owners.
+    pub text_style: crate::graphics::TextStyleStorage,
 }
 
 #[elwindui_macros::class]
@@ -2102,6 +2374,10 @@ impl Control {
     fn hit_test_content(&self) -> bool {
         false
     }
+    #[overrides]
+    fn as_text_style_owner(&self) -> Option<&dyn TextStyleOwner> {
+        Some(self)
+    }
     fn set_padding(&self, padding: f32) {
         self.padding.set(padding);
         self.invalidate_measure();
@@ -2120,7 +2396,14 @@ impl Control {
             padding: Cell::new(0.0),
             content_horizontal_alignment: Cell::new(HorizontalAlignment::Stretch),
             content_vertical_alignment: Cell::new(VerticalAlignment::Stretch),
+            text_style: crate::graphics::TextStyleStorage::new(),
         }
+    }
+}
+
+impl TextStyleOwner for Control {
+    fn text_style_storage(&self) -> &crate::graphics::TextStyleStorage {
+        &self.text_style
     }
 }
 
@@ -3675,6 +3958,14 @@ mod tests {
         fn __dyn_x_for_hit_test_content(&self) -> &dyn UIElementExt {
             self.base.__dyn_x_for_hit_test_content()
         }
+        // Neither overridden here, so both forward to `self.base` — same reasoning as
+        // `__dyn_ui_element` above.
+        fn __dyn_x_for_inheritance_parent(&self) -> &dyn UIElementExt {
+            self.base.__dyn_x_for_inheritance_parent()
+        }
+        fn __dyn_x_for_as_text_style_owner(&self) -> &dyn UIElementExt {
+            self.base.__dyn_x_for_as_text_style_owner()
+        }
         fn measure_override(&self, available: Size) -> Size {
             self.base
                 .visual_children()
@@ -3972,6 +4263,207 @@ mod tests {
             &control
         ));
         assert_eq!(content_control.visual_children().len(), 1);
+    }
+
+    // --- Font/text-style tests (指示書 §14-30, §32) ---------------------------------------------
+
+    #[test]
+    fn as_text_style_owner_is_none_for_non_owning_elements() {
+        // Grid/Layout/Shape must stay transparent to inheritance (指示書 §11) — verified directly
+        // via the downcast hook rather than only indirectly through an inheritance chain.
+        let grid = Grid::new();
+        assert!(grid.as_text_style_owner().is_none());
+        let stack = VerticalLayout::new();
+        assert!(stack.as_text_style_owner().is_none());
+        let rect = Rectangle::new(None, None, None, None);
+        assert!(rect.as_text_style_owner().is_none());
+    }
+
+    #[test]
+    fn as_text_style_owner_is_some_for_control_and_text_block() {
+        let control = Control::new();
+        assert!(control.as_text_style_owner().is_some());
+        let text_block = TextBlock::new();
+        assert!(text_block.as_text_style_owner().is_some());
+    }
+
+    #[test]
+    fn orphan_text_block_resolves_to_backend_default() {
+        let text_block = TextBlock::new();
+        let style = text_block.resolved_text_style();
+        assert_eq!(style, crate::graphics::text_backend().default_text_style());
+    }
+
+    #[test]
+    fn control_font_size_inherits_through_grid_to_nested_text_block() {
+        // Control -(Visual)-> Grid -(Visual)-> TextBlock: Grid is not a TextStyleOwner, so it must
+        // not block inheritance (指示書 §11's own worked example).
+        let control = Control::new();
+        control.set_font_size(24.0);
+        let grid = Grid::new();
+        let text_block = TextBlock::new();
+        grid.children().add(text_block.clone());
+        control.as_ui_element().visual_collection.add(grid.clone());
+
+        let style = text_block.resolved_text_style();
+        assert_eq!(style.font_size, 24.0);
+    }
+
+    #[test]
+    fn child_local_value_wins_over_inherited() {
+        let control = Control::new();
+        control.set_font_size(24.0);
+        let text_block = TextBlock::new();
+        text_block.set_font_size(12.0);
+        control.as_ui_element().visual_collection.add(text_block.clone());
+
+        assert_eq!(text_block.resolved_text_style().font_size, 12.0);
+    }
+
+    #[test]
+    fn child_partial_override_leaves_other_properties_inherited() {
+        // Setting only `font_size` locally must not disturb `font_family`/`font_weight`/etc. —
+        // each of the seven properties resolves independently (指示書 §7/§19, never a wholesale
+        // "inherit the whole struct" replacement).
+        let control = Control::new();
+        control.set_font_size(24.0);
+        control.set_font_family(crate::graphics::FontFamily::new("Helvetica"));
+        control.set_font_weight(crate::graphics::FontWeight::BOLD);
+        let text_block = TextBlock::new();
+        text_block.set_font_size(12.0);
+        control.as_ui_element().visual_collection.add(text_block.clone());
+
+        let style = text_block.resolved_text_style();
+        assert_eq!(style.font_size, 12.0); // local wins
+        assert_eq!(style.font_family, crate::graphics::FontFamily::new("Helvetica")); // inherited
+        assert_eq!(style.font_weight, crate::graphics::FontWeight::BOLD); // inherited
+    }
+
+    #[test]
+    fn clear_font_size_reverts_to_inherited_value() {
+        let control = Control::new();
+        control.set_font_size(24.0);
+        let text_block = TextBlock::new();
+        text_block.set_font_size(12.0);
+        control.as_ui_element().visual_collection.add(text_block.clone());
+        assert_eq!(text_block.resolved_text_style().font_size, 12.0);
+
+        text_block.clear_font_size();
+        assert_eq!(text_block.resolved_text_style().font_size, 24.0);
+    }
+
+    #[test]
+    fn setting_font_size_invalidates_measure_but_foreground_only_invalidates_arrange() {
+        let text_block = TextBlock::new();
+        let host = Rc::new(RecordingRelayoutHost::default());
+        text_block.set_invalidate_host(Some(host.clone() as Rc<dyn RelayoutHost>));
+        layout_root(&(text_block.clone() as Rc<dyn UIElementExt>), size(100.0, 100.0));
+        assert!(text_block.measured_size().is_some());
+        assert!(text_block.arranged_width().is_some());
+
+        text_block.set_font_size(20.0);
+        assert!(
+            text_block.measured_size().is_none(),
+            "a font-size change must invalidate measure"
+        );
+
+        layout_root(&(text_block.clone() as Rc<dyn UIElementExt>), size(100.0, 100.0));
+        assert!(text_block.measured_size().is_some());
+        text_block.set_foreground(Some(crate::graphics::Brush::Solid(crate::graphics::Color::white())));
+        assert!(
+            text_block.measured_size().is_some(),
+            "a foreground-only change must not invalidate measure"
+        );
+        assert!(text_block.arranged_width().is_none());
+    }
+
+    #[test]
+    fn reparenting_text_block_re_resolves_from_the_new_parent() {
+        let old_parent = Control::new();
+        old_parent.set_font_size(10.0);
+        let new_parent = Control::new();
+        new_parent.set_font_size(30.0);
+        let text_block = TextBlock::new();
+        old_parent.as_ui_element().visual_collection.add(text_block.clone());
+        assert_eq!(text_block.resolved_text_style().font_size, 10.0);
+
+        old_parent.as_ui_element().visual_collection.remove(&(text_block.clone() as Rc<dyn UIElementExt>));
+        new_parent.as_ui_element().visual_collection.add(text_block.clone());
+        assert_eq!(text_block.resolved_text_style().font_size, 30.0);
+    }
+
+    #[test]
+    fn removed_from_parent_falls_back_to_backend_default() {
+        let parent = Control::new();
+        parent.set_font_size(30.0);
+        let text_block = TextBlock::new();
+        parent.as_ui_element().visual_collection.add(text_block.clone());
+        assert_eq!(text_block.resolved_text_style().font_size, 30.0);
+
+        parent.as_ui_element().visual_collection.remove(&(text_block.clone() as Rc<dyn UIElementExt>));
+        assert_eq!(
+            text_block.resolved_text_style().font_size,
+            crate::graphics::text_backend().default_text_style().font_size
+        );
+    }
+
+    #[test]
+    fn inheritance_parent_logical_falls_back_to_visual_when_no_logical_parent() {
+        let root = VerticalLayout::new();
+        let child = native("a", size(10.0, 10.0));
+        root.as_ui_element().visual_collection.add(child.clone());
+        // `child` has a Visual parent (`root`, via the raw visual collection) but no Logical
+        // parent (never added through `UIElementCollection`) — `Logical` must still find `root`
+        // by falling back to Visual (指示書 §14).
+        assert!(child.parent().is_none());
+        let via_logical = child
+            .inheritance_parent(InheritanceParentKind::Logical)
+            .expect("Logical must fall back to Visual when there is no logical parent");
+        assert!(Rc::ptr_eq(&via_logical, &(root.clone() as Rc<dyn UIElementExt>)));
+        let via_visual = child
+            .inheritance_parent(InheritanceParentKind::Visual)
+            .expect("Visual parent must be reachable directly");
+        assert!(Rc::ptr_eq(&via_visual, &(root as Rc<dyn UIElementExt>)));
+    }
+
+    #[test]
+    fn content_control_inherits_text_style_from_its_base_control() {
+        // Regression guard for the `Attr::TextStyle` exemption in `resolve_effective_fields`/
+        // `resolve_field_declaring_types` (`elwindui-codegen`'s `codegen.rs`) — without it, a
+        // `has_view` component like `ContentControl` would silently lose all seven text-style
+        // setters (they'd never even compile-error; the DSL setter would just not exist). This
+        // exercises the *runtime* half: `ContentControl::as_text_style_owner()` must resolve
+        // through the `#[class]` ancestor-forwarding chain to its embedded `base: Control`, which
+        // really implements `TextStyleOwner` — not `ContentControl` itself (see
+        // `emit_field_setter_call`'s own doc comment on why `elwindui-codegen` always goes through
+        // `as_text_style_owner()` rather than assuming `TextStyleOwner` is implemented directly).
+        let content_control = ContentControl::new();
+        let owner = content_control
+            .as_text_style_owner()
+            .expect("ContentControl must resolve a TextStyleOwner through its Control base");
+        owner.set_font_size(18.0);
+        assert_eq!(
+            content_control
+                .as_text_style_owner()
+                .unwrap()
+                .resolved_text_style()
+                .font_size,
+            18.0
+        );
+
+        let inner = TextBlock::new();
+        content_control.set_content(inner.clone());
+        assert_eq!(inner.resolved_text_style().font_size, 18.0);
+    }
+
+    #[derive(Default)]
+    struct RecordingRelayoutHost {
+        requests: RefCell<Vec<u64>>,
+    }
+    impl RelayoutHost for RecordingRelayoutHost {
+        fn request_relayout(&self, dirty_group_id: u64) {
+            self.requests.borrow_mut().push(dirty_group_id);
+        }
     }
 
     #[test]

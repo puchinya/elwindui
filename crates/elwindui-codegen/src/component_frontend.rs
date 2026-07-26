@@ -91,6 +91,7 @@ pub fn component_and_view_from_item_struct(
         sealed: false,
         native: false,
         is_abstract: false,
+        text_style: false,
         content_field: None,
     };
 

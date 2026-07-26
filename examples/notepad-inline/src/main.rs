@@ -120,7 +120,7 @@ struct CustomCheckBox {
                     stroke_width: 1.0
                 }
             }
-            TextBlock { text: label, color: "#ffffff" }
+            TextBlock { text: label, foreground: "#ffffff" }
         }
     },
 }

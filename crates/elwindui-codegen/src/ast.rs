@@ -114,6 +114,12 @@ pub struct ComponentDef {
     /// (`UIElement`/`NativeControl`/`Layout`/`Shape`) — a concrete virtual builtin meant to be used
     /// directly (`VerticalLayout`/`HorizontalLayout`/`Control`/`Grid`/`TextBlock`) does not set this.
     pub is_abstract: bool,
+    /// `#[text_style]` (same position, docs/elwindui_dsl_spec.md 付録A): injects the seven font/
+    /// foreground properties (`TEXT_STYLE_FIELDS`) as this component's own fields — see
+    /// `crates/elwindui-codegen/src/text_style.rs`. `validate::validate` rejects it outside
+    /// `Module::is_builtin` (real Rust `TextStyleStorage` backing only exists on hand-written
+    /// classes) and combined with an own field sharing one of the seven names.
+    pub text_style: bool,
     /// `#[content(field_name)]` (same position, docs/elwindui_spec.md 付録E): WinUI3's
     /// `ContentPropertyAttribute` equivalent — names which of this component's own fields a bare
     /// nested child element (`Type { .. }` written directly inside `{}`, no `name:` attribute)
@@ -240,6 +246,12 @@ pub enum Attr {
     /// way to check that itself; a mismatched type is a real `rustc` trait-bound error in the
     /// generated code instead.
     Bindable,
+    /// Marks a field injected by `#[text_style]` (`text_style::text_style_field_defs`) — not
+    /// user-writable syntax. `codegen::resolve_effective_fields`/`resolve_field_declaring_types`
+    /// treat this exactly like `Attr::Routed`: kept even when the declaring component's own `view`
+    /// doesn't bare-reference it, so a `#[text_style]` component with its own `view`
+    /// (`ContentControl`, any user component) doesn't silently lose these seven setters.
+    TextStyle,
 }
 
 /// See `ElementNode::attribute_shortcuts`'s own doc comment.

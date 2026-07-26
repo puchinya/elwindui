@@ -37,6 +37,8 @@
 
 現在のバックエンド候補は上記のネイティブ3種(+将来のモバイル2種)のみ。
 
+**フォント/テキストスタイル(2026-07-26追加)**: `docs/elwindui_font_status.md`が単一の真実の源。AppKitは実装・実機検証済み(`NSFontDescriptor`/`NSAttributedString`ベース)。WinUI3はコード記述のみで、上記の「未検証」に同じくこの機能も含まれる。GTK4はバックエンド自体が未着手のため対象外。
+
 **重要な設計と実装の乖離**: `docs/elwindui_gui_framework_design.md`§3.3が説明する`enum Backend` + `target::backend()`(コンパイル時定数、`match`網羅性検査による新バックエンド追加時の安全弁)は**コード中のどこにも実体が存在しない**。実際のバックエンド選択は`elwindui`ファサードクレートのCargoフィーチャフラグ(`backend-appkit`/`backend-winui3`/`backend-gtk4`)による`#[cfg(feature = ...)]`のみで行われている。これに伴い、`native!`/`match target::backend()`をビルトイン限定にする14章ルール9、`NavigationHost`の`Route`網羅性ルール14、オーバーレイ系ビルトインの分岐制限ルール15なども、前提となる仕組み自体が無いため検証しようがない。
 
 ---
@@ -53,6 +55,7 @@
 - `Menu`/`MenuItem`は`MenuBarItem.submenu`経由での利用は実装済みだが、任意要素に`context_menu`属性で汎用的に付けるコンテキストメニュー機構は未実装。
 - `tooltip`共通属性も未実装。
 - `Control`の`template: Option<ControlTemplate<Self>>`(WinUI3の`Control.Template`相当の視覚ツリー実行時差し替え、`docs/elwindui_builtins_spec.md`付録F.9.1・`docs/elwindui_dsl_spec.md`§4・`docs/elwindui_gui_framework_design.md`§5.12)は**設計のみ・未実装**。`crates/elwindui-core/src/ui.rs`の`Control`構造体に対応フィールドは無く、現状は`children`をそのままVisual子要素にする挙動のみ実装済み。
+- **フォント/テキストスタイル(2026-07-26実装)**: `Control`/`TextBlock`/各バックエンドの`NativeControl`に`font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/`foreground`の7プロパティが実装済み(`#[text_style]` DSLコンポーネント属性、`docs/elwindui_dsl_spec.md`付録A)。プロパティ単位で独立にVisual Parent経由で継承される。`TextBlock`の旧`color: Option<Color>`は`foreground: Option<Brush>`に置き換わり廃止された(`color:`はもう使えない)。`TextBlock::measure_override`は旧`chars().count() * 8.0`固定近似を廃し、登録済み`TextBackend`(AppKit実装済み)による実測に置き換わった。詳細は`docs/elwindui_font_status.md`参照。
 
 ### 未実装(仕様のみ、`.elwind`宣言なし)
 
@@ -110,6 +113,7 @@
 | Undo/Redo(`#[undoable]`) | `docs/elwindui_gui_framework_design.md`§7.4 | 未実装 |
 | スナップショットテスト | `docs/elwindui_gui_framework_design.md`§9 | `render_tree`のみ実装。`render_canvas_snapshot`は未実装(§1参照) |
 | モバイル対応(iOS/Android) | `docs/elwindui_gui_framework_design.md`§8.8 | 未実装(設計のみ) |
+| フォント/テキストスタイル継承(`TextStyleOwner`、`font_*`/`foreground`) | `docs/elwindui_font_status.md` | 実装済み(AppKit実機検証済み)。WinUI3はコード記述のみ・未検証、GTK4は未対応。DPI/表示スケール/テキストスケールの概念自体がelwindui-coreに無いため対応していない |
 | SVGベクター画像対応(`VectorImage`/`elwindui-svg`/`builtin::Image`) | 本節末尾の指示書(`elwindui_svg_support_implementation_instructions.md`) | 実装済み(AppKit)。`elwindui-core`のコア型・新規crate`elwindui-svg`(usvgベースローダー、リソースセキュリティポリシー、SvgLimits)・AppKitの`vector_renderer.rs`(group/path/gradient/pattern/mask/blend/filter graph)・`builtin::Image`・`graphics-demo`のSVGタブ(実イラストで視覚検証済み)・golden/securityテストまで実装済み。WinUI3/GTK4は型のコンパイル整合性のみ(明示的unsupported、未実装)。**pattern塗りは真の無限タイリングに対応済み(2026-07-20追加実装)**。**`VectorRasterizeMode`(`builtin::Image`の`rasterize`属性)によるラスタライズ+キャッシュ描画モードを実装済み(2026-07-20追加、WinUI3の`SvgImageSource`に相当)——既定の`Auto`(描画時のピクセルサイズでラスタライズしキャッシュ)、`Fixed{pixel_width,pixel_height}`(WinUI3の`RasterizePixelWidth`/`RasterizePixelHeight`相当、固定サイズで一度だけラスタライズしその後のリサイズでは再生成しない=事前キャッシュ相当)、`Vector`(既存のライブ`CALayer`ツリー描画にオプトイン)の3モード。ラスタライズ自体は既存の`render_group`をオフスクリーン合成する形で再利用しているため、mask/pattern/filterなど既存機能はそのまま動作する。`Auto`は描画サイズの縮小方向には再ラスタライズせず既存の大きいビットマップをそのまま縮小表示し、拡大方向でも要求サイズが現在のキャッシュの1.5倍未満に収まる場合はキャッシュサイズの1.5倍で先読み的にラスタライズする(`vector_renderer.rs`の`auto_raster_target_size`)——ライブウィンドウリサイズのような連続的なサイズ変化で毎フレーム再ラスタライズが走るのを避けるため(2026-07-20追加)。**既知の制限: filter primitiveのうち`Turbulence`/`DiffuseLighting`/`SpecularLighting`/`DisplacementMap`/非3x3・5x5の`ConvolveMatrix`は、Appleが非推奨化した`CIKernel`文字列コンパイルAPIによるカスタムシェーダー実装が必要なため対象外(ユーザーの明示的判断、実装量・リスクとも大きいため)——明示的diagnosticで入力を素通しする近似のまま(`Tile`/`Composite`のXor・Arithmeticは既存のCore Image組み込みフィルターの組み合わせで2026-07-20に解消済み)。path形状ベースの精密ヒットテストは未実装(§3参照) |
 
 ---
@@ -179,3 +183,4 @@ Windows上でのビルド確認が済むまで未検証扱いとすること。
 - **`store`/`viewmodel`のうち`viewmodel`(MVVM)は実装済みだが`store`(グローバル状態)は未実装**——`examples/notepad`のMVVMは`viewmodel`のみで構成されている。
 - **`Backend` enum / `target::backend()`が存在しないため、これに依存する多くの静的検証ルール・ビルトイン(`NavigationHost`、ダイアログ/メニューのバックエンド分岐等)が「未実装」の根本原因になっている。** 将来この仕組みを実装する際は、影響範囲がドキュメント全体に及ぶことに留意する。
 - **`Control.template`(WinUI3方式`ControlTemplate`、`docs/elwindui_dsl_spec.md`§4・`docs/elwindui_gui_framework_design.md`§5.12・`docs/elwindui_builtins_spec.md`付録F.9.1)は設計のみ・未実装。** 前提となる「値計算コールバックがネストした要素を構築する」構文(`VirtualList`の`render_item`と共通)自体も未実装のため、実装時はまずそちらから着手が必要。広域既定値(WinUI3の`Style`代替)は`store`(同じく未実装)への依存として設計されている。
+- **フォント機能はGTK4未対応・WinUI3未検証・DPI非対応。** `docs/elwindui_font_status.md`に詳細と未対応事項の一覧がある。`ScrollView`/`TabView`がホストする入れ子`TreeHostView`配下のコンテンツにはフォント継承が届かない(visualチェーンがそこで途切れるため)。

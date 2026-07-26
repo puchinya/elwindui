@@ -63,6 +63,40 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         ));
                     }
 
+                    // `#[text_style]` (docs/elwindui_dsl_spec.md 付録A, `ComponentDef::text_style`'s
+                    // own doc comment) injects `TEXT_STYLE_FIELDS` (font_family/font_size/
+                    // font_weight/font_style/font_stretch/character_spacing/foreground) — real
+                    // Rust `TextStyleStorage` backing only exists on `elwindui-core`'s own hand-
+                    // written classes (`Control`/`TextBlock`/each backend's `NativeControl`), so
+                    // (mirroring `#[embedded]`/`#[native]` above) it only makes sense on this
+                    // crate's own builtin shape declarations.
+                    if c.text_style {
+                        if !module.is_builtin {
+                            errors.push(format!(
+                                "{}: #[text_style] can only be used on a component from elwindui-codegen's \
+                                 own BUILTIN_SHAPE_SOURCE, not a consumer's own `.elwind` file",
+                                c.name
+                            ));
+                        }
+                        // The injected fields are prepended ahead of the component's own
+                        // hand-written ones (`parser.rs`'s `component` branch), so a same-named own
+                        // field appears *twice* in `c.fields` instead of being silently shadowed —
+                        // reported here rather than left for a confusing duplicate-setter error
+                        // downstream.
+                        let mut seen: HashSet<&str> = HashSet::new();
+                        for f in &c.fields {
+                            if crate::text_style::is_text_style_field_name(&f.name)
+                                && !seen.insert(f.name.as_str())
+                            {
+                                errors.push(format!(
+                                    "{}: #[text_style] already declares `{}` — remove this component's own \
+                                     field with the same name",
+                                    c.name, f.name
+                                ));
+                            }
+                        }
+                    }
+
                     // `#[native]` (docs/elwindui_spec.md 付録E, `ComponentDef::native`'s doc
                     // comment) marks a base-less, `view`-less leaf whose real implementation is
                     // hand-written per backend crate — `Window` is the motivating case (WinUI3's
@@ -2177,6 +2211,47 @@ component Foo {
         assert!(
             errs.iter()
                 .any(|e| e.contains("#[native]") && e.contains("BUILTIN_SHAPE_SOURCE")),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_text_style_attribute_outside_builtin_module() {
+        let src = r#"
+#[text_style]
+component Foo {
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::builtin_modules())
+            .collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("#[text_style]") && e.contains("BUILTIN_SHAPE_SOURCE")),
+            "errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_text_style_attribute_combined_with_own_field_of_the_same_name() {
+        let mut module = parse_module(
+            r#"
+#[text_style]
+component Foo {
+    font_size: Option<f32>,
+}
+"#,
+        )
+        .unwrap();
+        module.is_builtin = true;
+        let modules: Vec<_> = std::iter::once(module)
+            .chain(crate::builtin_modules())
+            .collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("#[text_style]") && e.contains("font_size")),
             "errors: {errs:?}"
         );
     }

@@ -69,6 +69,12 @@ pub fn init() -> windows::core::Result<()> {
     // subsequently be created on the same STA thread by `application::run`.
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
 
+    // Registers this crate's `elwindui_core::graphics::TextBackend` — see
+    // `elwindui-backend-appkit::lib.rs::init()`'s identical registration and
+    // `docs/elwindui_font_status.md` §6 for why this needs to happen before any `TextBlock`
+    // measurement or `NativeControl::sync_text_style` call.
+    elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::WinUi3TextBackend));
+
     static BOOTSTRAP: OnceLock<std::result::Result<(), HRESULT>> = OnceLock::new();
     let result = BOOTSTRAP.get_or_init(|| unsafe {
         let module = LoadLibraryW(w!("Microsoft.WindowsAppRuntime.Bootstrap.dll"))

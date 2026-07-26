@@ -18,9 +18,14 @@ impl TextArea {
     /// Overrides `NativeControl::measure_override`'s generic `fittingSize()`-based measurement —
     /// see `InnerTextArea::measure`'s own doc comment for why `TextArea` specifically can't share
     /// that path (its handle is an `NSScrollView`, whose `fittingSize()` doesn't reflect the
-    /// wrapped `NSTextView`'s natural size).
+    /// wrapped `NSTextView`'s natural size). Since this override bypasses `NativeControl`'s own
+    /// `measure_override` entirely, it must call `sync_text_style()` itself first — every other
+    /// `NativeControl` leaf (`Button`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView`) gets it for
+    /// free from the base.
     #[overrides]
     fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+        self.base.sync_text_style();
+        self.inner.refresh_default_size();
         self.inner.measure(available)
     }
 

@@ -816,6 +816,7 @@ WinUI3バックエンドでの実配線は引き続き将来の課題として�
 | 独自部品(付録G)との整合 | `Canvas`ベースの部品は`#[accessible(...)]`の明示を推奨(付けない場合は静的警告)(§5.7) |
 | WinUI3ライクな基盤全体 | `elwindui-core`という共通クレートに集約し、各バックエンドがこれを実装する構成(§5.9) |
 | `ControlTemplate`(WinUI3方式の再テンプレート化) | `Control`の視覚ツリーを実行時に丸ごと差し替え可能にする`prop`。動的子範囲の入れ替えを流用して再構築、`LogicalNode`をLogical表現に使う(§5.12・**設計のみ**) |
+| フォント/テキストスタイルの継承(WinUI3方式) | `TextStyleOwner`トレイト(`Control`/`TextBlock`/各バックエンドの`NativeControl`が実装)+ プロパティ単位の`Option<T>`ローカル値 + `inheritance_parent(kind)`によるVisual Parent経由の解決 + `TextBackend`計測シーム(§5.13・**AppKit実装済み、WinUI3コードのみ未検証**) |
 
 ### 5.12 テンプレート機構(`ControlTemplate`)
 
@@ -826,6 +827,16 @@ WinUI3バックエンドでの実配線は引き続き将来の課題として�
 - **再構築の仕組み**: `template`の値変更(`set_template(..)`)は通常の属性再代入とは異なり、`body: template(Self)`配下の視覚ツリーを丸ごと差し替える必要がある。新しい再構築エンジンは作らず、`if`/`match`の動的子要素領域の入れ替え(`docs/elwindui_dsl_spec.md`§5、本書§7.2の`{Component}Property`通知機構と同型)を、常に1分岐だけを持つ特殊ケースとして流用する——`template`の`PropertyChanged`通知を受けたら、既存の動的子範囲と同じ経路で「今の子を外し、`template(self)`を呼び直した結果を新しい子として挿入する」。
 - **Logicalツリー表現**: §5.2で「将来のテンプレート機能の受け皿」として予約されている`LogicalNode { type_name, children }`(現状コード生成からは未使用)を、この機能のLogicalツリー表現として使う——Logical上は「テンプレートを持つコンポーネント自身」が1ノード、Visual上は`template`が返した要素以下の展開木、という対応になる。
 - **`TemplateBinding`相当**: WinUI3の`TemplateBinding`(リフレクションベースの動的束縛)に対応するのは、テンプレートを構成するクロージャ内から`control.content`/`control.padding()`のように、既存の「`#[param]`フィールドへの名前付きアクセサ自動生成」(`docs/elwindui_builtins_spec.md`付録F補足)を直接呼び出す形——静的に型付けされ、リフレクションを一切必要としない。
+
+### 5.13 フォント/テキストスタイルの継承ランタイム契約(実装済み・2026-07-26)
+
+**単一の真実の源は`docs/elwindui_font_status.md`**——本節はそこへの導線となる、ランタイム契約の要約のみを記す(実装詳細・バックエンド別対応表・未対応事項は重複させない)。
+
+- **`TextStyleOwner`トレイト**(`crates/elwindui-core/src/ui.rs`、手書き・`#[class]`管理外): `Control`/`TextBlock`/各バックエンドの`NativeControl`の3クラスだけが実装する、直交する能力トレイト(§5.5の`FocusHost`/`AsAny`と同じ形)。フォント/foreground7プロパティそれぞれの`get`/`set`/`clear`と、`resolved_text_style() -> ComputedTextStyle`を提供する。
+- **`UIElementExt::as_text_style_owner()`**: `UIElement`が`#[overridable]`宣言し、`Control`/`TextBlock`/`NativeControl`が`#[overrides]`で`Some(self)`を返す(既存の`try_as_native_control`と同型)。`Grid`/`Layout`/`Shape`のような`TextStyleOwner`非実装要素は`None`のままで、継承の通過点として透過的に振る舞う。
+- **`UIElementExt::inheritance_parent(kind: InheritanceParentKind)`**: `Visual`/`Logical`のどちらを辿るか呼び出し側が指定する(§5.2のLogical/Visual分離と同じ区別軸)。フォント解決は常に`Visual`を渡す——`Logical`はLogical Parentが無ければVisualへフォールバックする。Popup/ControlTemplateのような要素が将来この関数をオーバーライドして継承元を差し替える窓口になる(§5.12のテンプレート機構と将来接続しうるが、現状は未配線)。
+- **`TextBackend`計測シーム**(`crates/elwindui-core/src/graphics/text.rs`): `elwindui-core`自身はフォントエンジンを持たないため、`thread_local`で登録されたバックエンド実装(各バックエンドの`init()`が登録)を通じて実測・既定値取得を行う。未登録時は決定的な`DummyTextBackend`にフォールバックする。
+- **キャッシュ**: 世代番号等のキャッシュ機構は導入していない——`UIElementExt::measure`が毎レイアウトパスで無条件に`measure_override`を再実行する既存設計(§5.3)により、`clip_to_bounds`と同じ無キャッシュ再帰解決で正しさを保てるため。
 
 **型消去についての注記**: `ControlTemplate<Self>`は`Rc<dyn Fn(&Self) -> Rc<dyn UIElement>>`に展開される。§7.2で述べる「アクション本体を具体的なクロージャ型として単相化し`dyn Trait`を使わない」という一般方針への**意図的で限定的な例外**——`template`は`prop`として実行時に差し替え可能でなければ意味がなく(値が構築後に変わりうる)、単相化(1インスタンス化ごとに型が固定されるクロージャ)ではその要件を満たせないため。
 

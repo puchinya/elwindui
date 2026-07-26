@@ -690,7 +690,9 @@ pub(crate) fn resolve_effective_fields<'m>(
             base_fields
                 .into_iter()
                 .filter(|f| {
-                    f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                    f.attrs
+                        .iter()
+                        .any(|a| matches!(a, Attr::Routed | Attr::TextStyle))
                         || common_fields.contains(f.name.as_str())
                         || view_references_bare_name(view, &f.name)
                 })
@@ -736,7 +738,9 @@ fn resolve_field_declaring_types(
                     let kept_names: HashSet<&str> = base_fields
                         .iter()
                         .filter(|f| {
-                            f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                            f.attrs
+                                .iter()
+                                .any(|a| matches!(a, Attr::Routed | Attr::TextStyle))
                                 || common_fields.contains(f.name.as_str())
                                 || view_references_bare_name(view, &f.name)
                         })
@@ -1382,7 +1386,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                     fields: info.effective_fields.clone(),
                     methods: info.effective_methods.clone(),
                     // Irrelevant downstream: `generate_component`/`generate_view` never consult
-                    // `embedded`/`sealed`/`native`/`is_abstract`/`content_field` (only
+                    // `embedded`/`sealed`/`native`/`is_abstract`/`text_style`/`content_field` (only
                     // `validate::validate`/`TypeInfo::sealed`/`TypeInfo::is_native`/
                     // `TypeInfo::is_abstract`/`TypeInfo::content_field`, all already checked/computed
                     // against the *original* `c`, do).
@@ -1390,6 +1394,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                     sealed: false,
                     native: false,
                     is_abstract: false,
+                    text_style: false,
                     content_field: None,
                 };
                 match &info.effective_view {
@@ -5620,6 +5625,32 @@ fn emit_field_setter_call(
     from: &Module,
     table: &SymbolTable,
 ) -> TokenStream {
+    // One of the seven `#[text_style]`-injected properties: the real setter always lives on the
+    // hand-written `TextStyleOwner` trait (`crates/elwindui-core/src/ui.rs`), never on whichever
+    // builtin's own `..Ext` trait `declaring_types` would otherwise point at (`NativeControlExt`/
+    // `ControlExt`/`TextBlockExt` don't declare `set_font_size` etc. at all — `#[class]` never
+    // generated them, `TextStyleOwner` is a plain hand-written trait orthogonal to that whole
+    // mechanism). `receiver`'s own concrete type is *not* guaranteed to implement `TextStyleOwner`
+    // directly — a user `component X inherits Control` (or `inherits ContentControl`) generates a
+    // struct composing `base: Control` (shape/template composition, `ComponentDef`'s own doc
+    // comment) with no `impl TextStyleOwner for X` of its own. `UIElementExt::as_text_style_owner`
+    // *is* part of the `#[class]` ancestor-forwarding chain (declared `#[overridable]` on
+    // `UIElement`, overridden by `Control`/`TextBlock`/each backend's `NativeControl`), so it
+    // already resolves correctly through any such composition without needing a matching
+    // `TextStyleOwner` impl on every intermediate generated struct — going through it here (rather
+    // than `TextStyleOwner::#setter` directly) is what makes this work for a composed type, not
+    // just the three classes that implement `TextStyleOwner` by hand. Always fully path-qualified,
+    // so no `use` needs to be threaded through for it (mirrors the ordinary UFCS branch below).
+    if crate::text_style::is_text_style_field_name(name) {
+        return quote! {
+            elwindui::core::ui::UIElementExt::as_text_style_owner(&*(#receiver))
+                .expect(concat!(
+                    "`", #name, "` was declared with #[text_style] but the resolved node has no \
+                     TextStyleOwner at runtime — this is an elwindui-codegen bug, not a user error"
+                ))
+                .#setter(#args);
+        };
+    }
     let declaring_type = table
         .resolve(from, node_type)
         .and_then(|info| info.declaring_types.get(name));
@@ -6682,6 +6713,12 @@ fn build_virtual_value(
     // its setter lives on `UIElementExt`, not `#ext_ident` (`{type_path}Ext`), so it needs its own
     // trait import.
     let mut needs_ui_element_ext = false;
+    // One of `#[text_style]`'s seven injected properties (`font_size`/`foreground`/...) — its
+    // setter lives on the hand-written `TextStyleOwner` trait (`crates/elwindui-core/src/ui.rs`),
+    // never on `#ext_ident` (`#[class]` never generates a text-style setter onto `TextBlockExt`/
+    // `ControlExt` — see `emit_field_setter_call`'s own matching branch for the native-leaf/
+    // `emit_resync` side of this same rule), so a dot-call here needs its own trait import too.
+    let mut needs_text_style_trait = false;
     for (name, ty) in &info.param_fields {
         let setter = format_ident!("set_{name}");
         let is_content = info.content_field.as_deref() == Some(name.as_str());
@@ -6738,7 +6775,9 @@ fn build_virtual_value(
                 value
             }
         };
-        if common_field_names.contains(name.as_str()) {
+        if crate::text_style::is_text_style_field_name(name) {
+            needs_text_style_trait = true;
+        } else if common_field_names.contains(name.as_str()) {
             needs_ui_element_ext = true;
         } else {
             needs_type_trait = true;
@@ -6755,12 +6794,15 @@ fn build_virtual_value(
     });
     let ui_element_ext_use =
         needs_ui_element_ext.then(|| quote! { use elwindui::core::ui::UIElementExt as _; });
+    let text_style_trait_use =
+        needs_text_style_trait.then(|| quote! { use elwindui::core::ui::TextStyleOwner as _; });
 
     quote! {
         {
             #type_trait_use
             #ui_element_trait_use
             #ui_element_ext_use
+            #text_style_trait_use
             let __v = elwindui::core::ui::#type_ident::new();
             #setters
             __v
@@ -7898,6 +7940,107 @@ view NotepadWindow {
     fn assert_valid_rust(label: &str, ts: &TokenStream) {
         if let Err(e) = syn::parse2::<syn::File>(ts.clone()) {
             panic!("{label} did not generate valid Rust: {e}\n---\n{ts}");
+        }
+    }
+
+    // --- Font/text-style codegen tests (指示書 §32) ---------------------------------------------
+
+    #[test]
+    fn text_block_font_size_emits_as_text_style_owner_dispatch() {
+        let module = parse_module(
+            r#"
+                component FontHost { }
+                view FontHost {
+                    TextBlock { text: "hi" font_size: 20.0 }
+                }
+            "#,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("text_block_font_size", &generated);
+        let rendered = generated.to_string();
+        // The seven text-style properties always dispatch through `as_text_style_owner()` — never
+        // a bare `.set_font_size(..)` dot-call or a `TextBlockExt`-qualified one, since the real
+        // setter lives on `TextStyleOwner`, not any `#[class]`-generated `..Ext` trait (see
+        // `emit_field_setter_call`'s own doc comment).
+        assert!(rendered.contains("as_text_style_owner"));
+        assert!(rendered.contains("set_font_size"));
+        assert!(rendered.contains("20.0"));
+    }
+
+    #[test]
+    fn foreground_hex_literal_coerces_to_brush_solid() {
+        let module = parse_module(
+            r##"
+                component FontHost { }
+                view FontHost {
+                    TextBlock { text: "hi" foreground: "#3a3a3c" }
+                }
+            "##,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("foreground_hex_literal", &generated);
+        let rendered = generated.to_string();
+        // `coerce_color_literal` only recognizes the `Brush` target when `#[text_style]`'s
+        // `foreground` type string is byte-identical to `Shape.fill`'s own — this is the
+        // regression guard for that.
+        assert!(rendered.contains("Brush :: Solid"));
+        assert!(rendered.contains("Color :: rgba"));
+        assert!(rendered.contains("set_foreground"));
+    }
+
+    #[test]
+    fn button_font_size_dispatches_through_native_control_owner() {
+        // `Button` doesn't declare `font_size` itself (`#[text_style]` is only on `NativeControl`,
+        // §E's own rationale) — its use site must still compile and dispatch through
+        // `as_text_style_owner()`, not a `ButtonExt`-qualified call (which doesn't exist).
+        let module = parse_module(
+            r#"
+                component FontHost { }
+                view FontHost {
+                    Button { text: "Click" font_size: 16.0 }
+                }
+            "#,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("button_font_size", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("as_text_style_owner"));
+        assert!(!rendered.contains("ButtonExt :: set_font_size"));
+    }
+
+    #[test]
+    fn content_control_declares_seven_text_style_fields_via_control_base() {
+        // Regression guard for the `Attr::TextStyle` exemption in `resolve_effective_fields`/
+        // `resolve_field_declaring_types` — `ContentControl` has its own `view` (`builtins.elwind`)
+        // that never bare-references `font_size`/etc., so without the exemption these seven fields
+        // would silently vanish from its effective field set (no compile error — just a missing
+        // setter downstream).
+        let table = build_symbol_table_with_builtins(&[]);
+        let builtins = crate::builtin_modules();
+        let module = builtins.first().expect("builtins module should exist");
+        let info = table
+            .resolve(module, "ContentControl")
+            .expect("ContentControl should resolve");
+        for name in [
+            "font_family",
+            "font_size",
+            "font_weight",
+            "font_style",
+            "font_stretch",
+            "character_spacing",
+            "foreground",
+        ] {
+            assert!(
+                info.declaring_types.contains_key(name),
+                "ContentControl should inherit `{name}` from Control"
+            );
+            assert_eq!(info.declaring_types[name], "Control");
         }
     }
 

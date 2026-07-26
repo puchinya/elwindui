@@ -12,10 +12,8 @@ use crate::render::{
     apply_fill,
     apply_stroke,
     build_image_container_layer,
-    ca_alignment_mode,
     clip_bounds,
     clip_mask_layer,
-    color_to_cgcolor,
     ellipse_cgpath,
     geometry_bounds,
     path_to_cgpath,
@@ -535,9 +533,8 @@ pub(crate) fn replay_paint_command(
         RenderCommand::Text {
             content,
             rect,
-            color,
+            style,
             alignment,
-            ..
         } => {
             let text_layer = CATextLayer::new();
             text_layer.setName(Some(&NSString::from_str("elwindui-paint")));
@@ -551,14 +548,21 @@ pub(crate) fn replay_paint_command(
                 ),
                 objc2_foundation::NSSize::new(rect.width as f64, rect.height as f64),
             ));
-            text_layer.setFontSize(14.0);
-            text_layer.setForegroundColor(Some(&color_to_cgcolor(
-                color.unwrap_or(elwindui_core::graphics::Color::black()),
-            )));
-            text_layer.setAlignmentMode(ca_alignment_mode(*alignment));
+            // Once an `NSAttributedString` is set, `CATextLayer` ignores its own `font`/
+            // `fontSize`/`foregroundColor`/`alignmentMode` entirely — those setters are
+            // deliberately *not* called here (they'd be a silently-dead second source of truth).
+            // Font/foreground/kerning/alignment all come from the same `text_attributes` a
+            // `TextBlock`'s own measurement (`AppKitTextBackend::measure_text`) used, so the
+            // painted glyphs always match what was measured.
             unsafe {
-                text_layer.setString(Some(&NSString::from_str(content)));
+                text_layer.setString(Some(&crate::render::attributed_string(
+                    content, style, *alignment,
+                )));
             }
+            // Matches `render::vector`'s own `contentsScale` inheritance (see that module's doc
+            // comment) — this sublayer would otherwise default to `1.0` and render blurry on a
+            // Retina display regardless of the group layer's own scale.
+            text_layer.setContentsScale(layer.contentsScale());
             text_layer.setOpacity(opacity);
             let text_layer: Retained<CALayer> = Retained::into_super(text_layer);
             layer.addSublayer(&text_layer);

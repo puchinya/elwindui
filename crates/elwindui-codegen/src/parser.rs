@@ -67,13 +67,15 @@ impl<'a> Parser<'a> {
             if self.at_eof() {
                 break;
             }
-            let (embedded, sealed, native, is_abstract, content_field) = self.parse_item_attrs()?;
+            let (embedded, sealed, native, is_abstract, text_style, content_field) =
+                self.parse_item_attrs()?;
             if self.eat_keyword("use") {
                 self.reject_item_attrs(
                     embedded,
                     sealed,
                     native,
                     is_abstract,
+                    text_style,
                     &content_field,
                     "use",
                 )?;
@@ -84,6 +86,7 @@ impl<'a> Parser<'a> {
                     sealed,
                     native,
                     is_abstract,
+                    text_style,
                     &content_field,
                     "enum",
                 )?;
@@ -91,16 +94,28 @@ impl<'a> Parser<'a> {
             } else if self.eat_keyword("component") {
                 items.push(Item::Component(self.parse_fields_block(
                     FieldKind::Prop,
-                    |name, base, fields, methods| ComponentDef {
-                        name,
-                        base,
-                        fields,
-                        methods,
-                        embedded,
-                        sealed,
-                        native,
-                        is_abstract,
-                        content_field,
+                    |name, base, mut fields, methods| {
+                        // Injected first, ahead of the component's own hand-written fields, so
+                        // `resolve_effective_fields`'s "first still-unclaimed field" positional
+                        // fallbacks (bare-nested-child, etc.) see them in the same relative order
+                        // every other builtin field appears in (指示書 §9).
+                        if text_style {
+                            let mut injected = crate::text_style::text_style_field_defs();
+                            injected.append(&mut fields);
+                            fields = injected;
+                        }
+                        ComponentDef {
+                            name,
+                            base,
+                            fields,
+                            methods,
+                            embedded,
+                            sealed,
+                            native,
+                            is_abstract,
+                            text_style,
+                            content_field,
+                        }
                     },
                 )?));
             } else if self.eat_keyword("viewmodel") {
@@ -109,6 +124,7 @@ impl<'a> Parser<'a> {
                     sealed,
                     native,
                     is_abstract,
+                    text_style,
                     &content_field,
                     "viewmodel",
                 )?;
@@ -122,6 +138,7 @@ impl<'a> Parser<'a> {
                     sealed,
                     native,
                     is_abstract,
+                    text_style,
                     &content_field,
                     "view",
                 )?;
@@ -142,15 +159,20 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[content(field_name)]`
-    /// (docs/elwindui_spec.md 付録E), written immediately before a top-level item — only meaningful
-    /// on `component` (see `reject_item_attrs`). Zero or more, any order; unknown attribute names
-    /// are a parse error just like the field-level `#[...]` loop (`parse_field_def`) this mirrors.
-    fn parse_item_attrs(&mut self) -> Result<(bool, bool, bool, bool, Option<String>), String> {
+    /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(field_name)]`
+    /// (docs/elwindui_dsl_spec.md 付録A/E), written immediately before a top-level item — only
+    /// meaningful on `component` (see `reject_item_attrs`). Zero or more, any order; unknown
+    /// attribute names are a parse error just like the field-level `#[...]` loop
+    /// (`parse_field_def`) this mirrors.
+    #[allow(clippy::type_complexity)]
+    fn parse_item_attrs(
+        &mut self,
+    ) -> Result<(bool, bool, bool, bool, bool, Option<String>), String> {
         let mut embedded = false;
         let mut sealed = false;
         let mut native = false;
         let mut is_abstract = false;
+        let mut text_style = false;
         let mut content_field = None;
         loop {
             self.skip_trivia();
@@ -164,6 +186,7 @@ impl<'a> Parser<'a> {
                 "sealed" => sealed = true,
                 "native" => native = true,
                 "abstract" => is_abstract = true,
+                "text_style" => text_style = true,
                 "content" => {
                     self.expect_char('(')?;
                     content_field = Some(self.parse_ident()?);
@@ -171,31 +194,33 @@ impl<'a> Parser<'a> {
                 }
                 other => {
                     return Err(self.err(&format!(
-                        "unknown item attribute #[{other}] (expected `embedded`, `sealed`, `native`, `abstract`, or `content(field_name)`)"
+                        "unknown item attribute #[{other}] (expected `embedded`, `sealed`, `native`, `abstract`, `text_style`, or `content(field_name)`)"
                     )))
                 }
             }
             self.expect_char(']')?;
             self.skip_trivia();
         }
-        Ok((embedded, sealed, native, is_abstract, content_field))
+        Ok((embedded, sealed, native, is_abstract, text_style, content_field))
     }
 
-    /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[content(..)]` only make sense on
-    /// `component` — reject them (with a clear error naming the offending keyword) if
-    /// `parse_item_attrs` found any ahead of anything else.
+    /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(..)]` only
+    /// make sense on `component` — reject them (with a clear error naming the offending keyword)
+    /// if `parse_item_attrs` found any ahead of anything else.
+    #[allow(clippy::too_many_arguments)]
     fn reject_item_attrs(
         &self,
         embedded: bool,
         sealed: bool,
         native: bool,
         is_abstract: bool,
+        text_style: bool,
         content_field: &Option<String>,
         keyword: &str,
     ) -> Result<(), String> {
-        if embedded || sealed || native || is_abstract || content_field.is_some() {
+        if embedded || sealed || native || is_abstract || text_style || content_field.is_some() {
             return Err(self.err(&format!(
-                "`#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[content(..)]` may only precede `component`, not `{keyword}`"
+                "`#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(..)]` may only precede `component`, not `{keyword}`"
             )));
         }
         Ok(())
@@ -1421,6 +1446,78 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_style_attribute_injects_seven_fields_ahead_of_own_fields() {
+        let module = parse_module(
+            r#"
+                #[text_style]
+                component FontHost {
+                    label: String,
+                }
+            "#,
+        )
+        .expect("#[text_style] source should parse");
+        let Item::Component(c) = &module.items[0] else {
+            panic!("expected component");
+        };
+        assert!(c.text_style);
+        let names: Vec<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "font_family",
+                "font_size",
+                "font_weight",
+                "font_style",
+                "font_stretch",
+                "character_spacing",
+                "foreground",
+                "label",
+            ]
+        );
+        assert_eq!(
+            c.fields[1].ty, // font_size
+            "Option<f32>"
+        );
+        assert!(c.fields[1].attrs.iter().any(|a| matches!(a, Attr::TextStyle)));
+    }
+
+    #[test]
+    fn text_style_attribute_rejected_before_use_enum_viewmodel_view() {
+        for keyword_src in [
+            "#[text_style] use foo::Bar;",
+            "#[text_style] enum E { A }",
+            "#[text_style] viewmodel V { }",
+            "#[text_style] view V { TextBlock { text: \"a\" } }",
+        ] {
+            let err = parse_module(keyword_src)
+                .expect_err("#[text_style] should be rejected outside `component`");
+            assert!(
+                err.contains("text_style"),
+                "error should mention text_style: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_style_combines_with_embedded_and_abstract() {
+        let module = parse_module(
+            r#"
+                #[embedded]
+                #[abstract]
+                #[text_style]
+                component FontHost { }
+            "#,
+        )
+        .expect("combined attributes should parse");
+        let Item::Component(c) = &module.items[0] else {
+            panic!("expected component");
+        };
+        assert!(c.embedded);
+        assert!(c.is_abstract);
+        assert!(c.text_style);
+    }
 
     #[test]
     fn parses_dynamic_if_match_and_for_children() {

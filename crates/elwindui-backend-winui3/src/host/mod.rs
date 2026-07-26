@@ -839,9 +839,8 @@ impl TreeHostPanel {
                 elwindui_core::graphics::RenderCommand::Text {
                     content,
                     rect,
-                    color,
+                    style,
                     alignment,
-                    ..
                 } => {
                     native_wanted.push((
                         (group_id, command_index),
@@ -853,7 +852,7 @@ impl TreeHostPanel {
                                 width: rect.width,
                                 height: rect.height,
                             },
-                            color: *color,
+                            style: style.clone(),
                             alignment: *alignment,
                         },
                     ));

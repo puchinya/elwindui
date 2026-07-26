@@ -8,7 +8,7 @@ elwindui-core = { path = "../elwindui-core" }
 elwindui-macros = { path = "../elwindui-macros" }
 objc2 = "0.6"
 dispatch2 = "0.3"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSNotification", "NSURL", "NSDictionary", "NSValue"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSNotification", "NSURL", "NSDictionary", "NSValue", "NSAttributedString"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
     "NSResponder",
@@ -38,6 +38,14 @@ objc2-app-kit = { version = "0.3", features = [
     "NSBitmapImageRep",
     "NSGraphicsContext",
     "objc2-quartz-core",
+    # Font model support (see crates/elwindui-backend-appkit/src/render/text.rs). Deliberately no
+    # `objc2-core-text` dependency: `NSFontDescriptor`'s traits dictionary (weight/width/symbolic
+    # traits) already covers everything `ComputedTextStyle` needs without Core Text.
+    "NSAttributedString",
+    "NSStringDrawing",
+    "NSParagraphStyle",
+    "NSFontDescriptor",
+    "NSColor",
 ] }
 objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAShapeLayer", "CATextLayer", "CAGradientLayer"] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGPath", "CGColor", "CGColorSpace", "CGGeometry", "CGAffineTransform", "CGGradient", "CGImage", "CGDataProvider", "CGBitmapContext", "CGContext"] }

@@ -13,6 +13,9 @@ Use this workflow only for requests expected to modify this repository. Do not c
 
 ### Common rules
 
+- Before starting a new requirement or separate work item, check out `master` and run
+  `git pull --ff-only origin master`. Only then create or locate its Issue and start work on the
+  appropriate branch.
 - Search for an existing relevant Issue before creating a new one.
 - Every repository-changing task must be associated with one GitHub Issue.
 - Create or locate the Issue before modifying source code or documentation.

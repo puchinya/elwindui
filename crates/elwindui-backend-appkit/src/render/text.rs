@@ -85,11 +85,17 @@ fn color_to_nscolor(color: Color) -> Retained<NSColor> {
     )
 }
 
-/// A flat foreground color for `style.foreground`. `Brush::Solid` is exact; a gradient/image brush
-/// degrades to one representative color — real masked-gradient text is a documented gap (see this
-/// module's own doc comment) — rather than being silently dropped to black.
-fn foreground_ns_color(style: &ComputedTextStyle) -> Retained<NSColor> {
-    let color = match &style.foreground {
+/// A flat foreground color for an explicit `foreground` override, or `NSColor::labelColor()`
+/// when `None` — the same "unset means follow the platform appearance" fallback
+/// `ffi.rs::flat_foreground_nscolor` already applies for native controls. `Brush::Solid` is exact;
+/// a gradient/image brush degrades to one representative color — real masked-gradient text is a
+/// documented gap (see this module's own doc comment) — rather than being silently dropped to
+/// black.
+fn foreground_ns_color(foreground: Option<&Brush>) -> Retained<NSColor> {
+    let Some(brush) = foreground else {
+        return NSColor::labelColor();
+    };
+    let color = match brush {
         Brush::Solid(color) => *color,
         other => super::first_gradient_stop_color(other).unwrap_or(Color::black()),
     };
@@ -193,10 +199,11 @@ fn ns_text_alignment(alignment: TextAlignment) -> NSTextAlignment {
 /// measurement can never see a different set of attributes for the same resolved style.
 pub(crate) fn text_attributes(
     style: &ComputedTextStyle,
+    foreground: Option<&Brush>,
     alignment: TextAlignment,
 ) -> Retained<NSDictionary<NSAttributedStringKey, AnyObject>> {
     let font = ns_font(style);
-    let color = foreground_ns_color(style);
+    let color = foreground_ns_color(foreground);
     // `character_spacing` is 1/1000 em (WinUI3's own `CharacterSpacing` unit — see
     // `crates/elwindui-core/src/graphics/text.rs`'s own doc comment); AppKit's `NSKernAttributeName`
     // wants points, converted through the font's own point size once, here.
@@ -221,14 +228,17 @@ pub(crate) fn text_attributes(
     NSDictionary::from_slices(&keys, &values)
 }
 
-/// `text`/`style`/`alignment` -> a fully-attributed string, ready either to hand to a
+/// `text`/`style`/`foreground`/`alignment` -> a fully-attributed string, ready either to hand to a
 /// `CATextLayer` (`host::replay`) or to measure (`boundingRectWithSize:options:context:` below).
+/// `foreground` is the cascade's own (possibly unset) paint — `None` follows the platform
+/// appearance (`NSColor::labelColor()`) rather than pinning `style`'s materialized fallback color.
 pub(crate) fn attributed_string(
     text: &str,
     style: &ComputedTextStyle,
+    foreground: Option<&Brush>,
     alignment: TextAlignment,
 ) -> Retained<NSAttributedString> {
-    let attrs = text_attributes(style, alignment);
+    let attrs = text_attributes(style, foreground, alignment);
     unsafe {
         NSAttributedString::initWithString_attributes(
             NSAttributedString::alloc(),
@@ -255,7 +265,8 @@ impl TextBackend for AppKitTextBackend {
     }
 
     fn measure_text(&self, req: &TextMeasureRequest<'_>) -> TextMeasureResult {
-        let attributed = attributed_string(req.text, req.style, req.alignment);
+        let attributed =
+            attributed_string(req.text, req.style, Some(&req.style.foreground), req.alignment);
         let constraint_width = if req.wrapping == TextWrapping::NoWrap || !req.available.width.is_finite()
         {
             CGFloat::MAX

@@ -598,6 +598,21 @@ impl TreeHostView {
             .group_native_controls
             .borrow_mut()
             .retain(|id, _| live_group_ids.contains(id));
+        // Every repainted `RenderGroup` container above just moved back to the front of
+        // `root_layer`'s sublayers (`replay_group`'s own doc comment on why: re-`addSublayer`ing
+        // an already-attached container is what keeps *paint* z-order correct across a mix of
+        // rebuilt and cache-hit groups). A native leaf's own island, though, is only ever
+        // `host.addSubview`ed once, the first time it appears (`replay_commands`' `is_new` guard)
+        // — so after any later pass repaints a sibling paint layer (e.g. a themed, now-opaque
+        // `window_background`/`layout_background`), that paint layer ends up stacked back on top
+        // of every native control, hiding it, even though the control itself is still correctly
+        // laid out and attached. Re-adding every still-live native container here brings it back
+        // to the front of `self`'s subviews (AppKit moves an already-attached subview to the top
+        // of the z-order rather than duplicating it), keeping native controls visually above all
+        // painted content on every pass, not just the first.
+        for container in self.ivars().native_containers.borrow().values() {
+            self.addSubview(container);
+        }
     }
 
     /// Looks up which live native leaf `container` (one of `native_containers`' own values — the

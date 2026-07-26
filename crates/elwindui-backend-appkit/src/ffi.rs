@@ -57,23 +57,16 @@ pub(crate) trait AppKitHandle: AsAny {
         "native_control"
     }
 
-    /// Applies an explicit background or clears the layer to restore the native default.
-    fn apply_background(&self, background: Option<&Brush>) {
-        let view = self.as_nsview();
-        view.setWantsLayer(true);
-        let Some(layer) = view.layer() else {
-            return;
-        };
-        let color = background.map(|background| {
-            let color = match background {
-                Brush::Solid(color) => *color,
-                other => crate::render::first_gradient_stop_color(other)
-                    .unwrap_or(Color::transparent()),
-            };
-            crate::render::color_to_cgcolor(color)
-        });
-        layer.setBackgroundColor(color.as_deref());
-    }
+    /// Deliberately a no-op: a real AppKit native control (`NSButton`/`NSTextField`/`NSTextView`/
+    /// `NSTabView`/...) has no supported way to take an arbitrary background color without
+    /// abandoning native rendering. Forcing `wantsLayer(true)` on these system-drawn controls to
+    /// paint a custom `CALayer` background corrupts their own internal Cocoa-managed drawing —
+    /// observed as the control's whole content silently disappearing after a later redraw/
+    /// appearance-invalidation pass, not merely the wrong color. Native controls on this backend
+    /// therefore always keep the system's own Light/Dark-following background; only non-native,
+    /// ElwindUI-painted elements (`Window`/layout backgrounds, `Rectangle`, ...) apply a themed
+    /// `Brush` background.
+    fn apply_background(&self, _background: Option<&Brush>) {}
 
     /// Pushes a resolved text style onto the real widget this handle wraps. No-op by default — a
     /// handle with no text of its own (`NSStackView`) simply inherits its font for any *content* it
@@ -147,6 +140,7 @@ impl AppKitHandle for Retained<NSButton> {
             let attributed = crate::render::attributed_string(
                 &plain,
                 &materialized,
+                style.foreground.as_ref(),
                 elwindui_core::ui::TextAlignment::Left,
             );
             self.setAttributedTitle(&attributed);

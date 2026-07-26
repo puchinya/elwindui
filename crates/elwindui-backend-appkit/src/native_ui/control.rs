@@ -108,11 +108,13 @@ impl NativeControl {
             return;
         }
         let mut cascaded = self.cascaded_text_style();
-        apply_theme_text_style(
-            &self.theme_handle(),
-            self.handle.theme_prefix(),
-            &mut cascaded,
-        );
+        apply_theme_text_style(&self.theme_handle(), &mut cascaded);
+        // AppKit native controls have no supported way to take an arbitrary custom text color
+        // without abandoning their own system-drawn appearance — same platform constraint as
+        // `AppKitHandle::apply_background`'s own doc comment. They always keep the system's own
+        // Light/Dark-following text color; a `foreground` requested via `set_foreground`/`theme!`
+        // (explicit or theme-resolved) is intentionally discarded here, never reaching `handle`.
+        cascaded.foreground = None;
         if self.applied.borrow().as_ref() != Some(&cascaded) {
             self.handle.apply_text_style(&cascaded);
             *self.applied.borrow_mut() = Some(cascaded);
@@ -132,22 +134,9 @@ fn background_token(prefix: &str) -> ThemeToken<Brush> {
     }
 }
 
-fn foreground_token(prefix: &str) -> ThemeToken<Brush> {
-    match prefix {
-        "button" => SystemTheme::button_foreground,
-        "text_box" => SystemTheme::text_box_foreground,
-        "password_box" => SystemTheme::password_box_foreground,
-        "text_area" => SystemTheme::text_area_foreground,
-        "tab_view" => SystemTheme::tab_view_foreground,
-        _ => SystemTheme::native_control_foreground,
-    }
-}
-
-fn apply_theme_text_style(
-    theme: &ThemeHandle,
-    prefix: &str,
-    style: &mut CascadedTextStyle,
-) {
+/// Fills only font metrics from the theme — never `foreground` (see `sync_text_style`'s own doc
+/// comment on why a native control's text color always stays platform-default).
+fn apply_theme_text_style(theme: &ThemeHandle, style: &mut CascadedTextStyle) {
     macro_rules! fill {
         ($field:ident, $token:expr) => {
             if style.$field.is_none() {
@@ -166,7 +155,6 @@ fn apply_theme_text_style(
         character_spacing,
         SystemTheme::native_control_character_spacing
     );
-    fill!(foreground, foreground_token(prefix));
 }
 
 impl TextStyleOwner for NativeControl {

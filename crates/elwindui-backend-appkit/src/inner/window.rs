@@ -183,8 +183,10 @@ impl InnerWindow {
     pub(crate) fn set_theme_preference(&self, preference: ThemePreference) {
         let appearance = match preference {
             ThemePreference::System => None,
-            ThemePreference::Light => NSAppearance::appearanceNamed(NSAppearanceNameAqua),
-            ThemePreference::Dark => NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua),
+            ThemePreference::Light => NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }),
+            ThemePreference::Dark => {
+                NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua })
+            }
         };
         self.ns.setAppearance(appearance.as_deref());
         let appearance = match preference {

@@ -398,3 +398,31 @@ Closes #<issue-number>
 ```
 
 After merge, GitHub closes the Issue automatically.
+
+<!-- BEGIN LOCAL STATE AND EVIDENCE HUMAN GUIDE -->
+## Local state, screenshots, and logs
+
+Incomplete work is stored locally under:
+
+```text
+.agent-state/issues/<issue-number>/
+  checkpoint.md
+  screenshots/
+  logs/
+```
+
+Use native helpers:
+
+| Operation | macOS/Linux | Windows PowerShell |
+|---|---|---|
+| Save checkpoint | `scripts/agent/save-work-checkpoint.sh N` | `.\\scripts\\agent\\save-work-checkpoint.ps1 N` |
+| Resume and compare | `scripts/agent/resume-work.sh N` | `.\\scripts\\agent\\resume-work.ps1 N` |
+| Prepare evidence folders | `scripts/agent/prepare-work-evidence.sh N` | `.\\scripts\\agent\\prepare-work-evidence.ps1 N` |
+
+`.agent-state/` is excluded only in the current clone. Before moving work
+between macOS and Windows, post one concise `Work checkpoint` Issue comment.
+
+Commit only small screenshots needed for review under
+`docs/issues/<issue>-<slug>/evidence/`. Keep raw logs and investigation images
+local; use CI artifacts for large logs, videos, dumps, and image sets.
+<!-- END LOCAL STATE AND EVIDENCE HUMAN GUIDE -->

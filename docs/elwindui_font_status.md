@@ -140,7 +140,8 @@ pub fn text_backend() -> Rc<dyn TextBackend>; // 未登録なら DummyTextBacken
 
 ### AppKit実装詳細(`crates/elwindui-backend-appkit/src/render/text.rs`)
 
-- `ns_font(&ComputedTextStyle) -> Retained<NSFont>`: システムファミリ(`FontFamily::is_system()`)は`NSFont::systemFontOfSize`起点、指定ファミリは`NSFontDescriptor::fontDescriptorWithFamily`起点。どちらも`NSFontTraitsAttribute`(weight/width)と`symbolicTraits`(italic)を`fontDescriptorByAddingAttributes`/`fontDescriptorWithSymbolicTraits`で追加してから`NSFont::fontWithDescriptor_size`で実体化。解決に失敗したら`NSFont::systemFontOfSize`にフォールバック(指示書§31:フォント不在でクラッシュしない)。
+- `ns_font(&ComputedTextStyle) -> Retained<NSFont>`: システムファミリ(`FontFamily::is_system()`)は`NSFont::systemFontOfSize`起点、指定ファミリは`NSFontDescriptor::fontDescriptorWithFamily`起点。どちらも`NSFontTraitsAttribute`(weight/width)と`symbolicTraits`(italic)を`fontDescriptorByAddingAttributes`/`fontDescriptorWithSymbolicTraits`で追加してから`NSFont::fontWithDescriptor_size`で実体化。後者が`nil`を返すフォント記述子では italic 化前の記述子を使い、解決に失敗したら`NSFont::systemFontOfSize`にフォールバックする(指示書§31:フォント不在でクラッシュしない)。
+- `secure_text_font(&ComputedTextStyle) -> Retained<NSFont>`: `NSSecureTextField`専用。パスワードマスクはAppKit内部グリフで描画されるため、指定された`FontFamily`とフォールバック列を使わず、システムフォント基準でsize/weight/stretchを適用する。descriptor経由の italic 合成は内部マスクグリフを欠落させるため、PasswordBoxでは安全側に倒して適用しない。これによりマスク文字が missing glyph になることを防ぐ。
 - 指定ファミリ名が存在しない場合、AppKit自身は「最も近い」フォントへ黙って置換するため、実体化したフォントの`familyName()`が要求名と一致するか確認し、一致しなければ次のフォールバック候補(`FontFamily::families()`の次のカンマ区切り要素)へ進む。
 - weight変換(`nsfont_weight`): `FontWeight(u16)`の100〜900を、Appleの`NSFontWeight*`名前付き定数(UltraLight=-0.8 〜 Black=0.62)に対応する9点の間で**線形補間**する。可変フォントの中間値(450等)もなめらかに変換できるのがこの補間の狙い——`FontWeight`を数値型にした直接の理由。
 - stretch変換(`nsfont_width`): `FontStretch::percent()`(50〜200%)を`NSFontWidthTrait`(-1.0〜1.0)へ線形変換。
@@ -168,7 +169,8 @@ pub fn text_backend() -> Rc<dyn TextBackend>; // 未登録なら DummyTextBacken
 | ハンドル | font | foreground | character_spacing |
 |---|---|---|---|
 | `NSButton` | `setFont:` | `character_spacing != 0`のときだけ`setAttributedTitle:`経由(通常の`title`/`setFont:`ペアではカーニング/前景色を表現できないため。頻繁に発生しない限り、ベゼルスタイルの既定ティントを崩さない) | 同上 |
-| `NSTextField`(TextBox/PasswordBox) | `setFont:` | `setTextColor:` | 未対応(編集可能な`stringValue`への属性付け替えは編集中の挙動と衝突するため、意図的に対象外) |
+| `NSTextField`(TextBox) | 指定FontFamilyとフォールバックを含む`setFont:` | `setTextColor:` | 未対応(編集可能な`stringValue`への属性付け替えは編集中の挙動と衝突するため、意図的に対象外) |
+| `NSSecureTextField`(PasswordBox) | システムフォント基準の`setFont:`（size/weight/stretch。italic は内部マスク保護のため適用しない） | `setTextColor:` | 未対応。内部マスクグリフを守るためFontFamilyとcharacter_spacingは意図的に無視する |
 | `NSScrollView`(TextArea) | `documentView()`を`NSTextView`へdowncastして`setFont:` | `setTextColor:` | 未対応(同上の理由。`NSLayoutManager`の一時属性か`textStorage`全体への属性適用が必要で、本パスの対象外) |
 
 `InnerTextArea::default_width`/`default_height`は構築時に一度だけフォントメトリクスから算出され、以後フォントが変わっても再計算されないバグがあった。`Cell<f32>`化し、`native_ui::TextArea::measure_override`から`sync_text_style()`の直後に`InnerTextArea::refresh_default_size()`を呼ぶよう修正した。

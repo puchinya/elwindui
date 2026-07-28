@@ -73,6 +73,17 @@ The initial Issue may contain only the original request and a note that planning
 If planning must continue in another session and information loss would be risky, add one concise checkpoint comment with decisions, remaining questions, and the next action. Do not repeatedly rewrite the Issue body.
 
 After approval, update the Issue with the approved requirements, non-goals, design summary, and verifiable acceptance criteria before implementation. Detailed implementation and test evidence belong primarily in the Pull Request.
+<!-- BEGIN LOCAL STATE AND EVIDENCE -->
+### Local state and evidence
+
+- For resuming or pausing incomplete Issue work, read `docs/agent-workflow/checkpoint.md`; otherwise do not load it.
+- Store local state under `.agent-state/issues/<issue-number>/`; never commit `.agent-state/`.
+- On resume, compare the checkpoint with Issue/PR, branch, HEAD, and worktree. Git and GitHub override stale local state.
+- Before pausing, record completed work, current state, one concrete next action, checks, uncommitted files, and blockers.
+- For screenshots or logs, read `docs/agent-workflow/evidence.md`; otherwise do not load it.
+- Keep temporary screenshots and logs under `.agent-state/`. Commit only small durable review evidence; use CI artifacts for large data.
+- Local state is not shared between macOS and Windows. Add one concise Issue checkpoint comment before cross-machine handoff.
+<!-- END LOCAL STATE AND EVIDENCE -->
 <!-- END ISSUE-DRIVEN AGENT WORKFLOW -->
 
 ## Project state

@@ -26,5 +26,5 @@ pub(crate) use paint::{
     gradient_unit_point, try_add_gradient_fill_layer, try_add_image_fill_layer,
 };
 pub(crate) use path::{ellipse_cgpath, path_to_cgpath, rounded_rect_cgpath};
-pub(crate) use text::{AppKitTextBackend, attributed_string, ns_font};
+pub(crate) use text::{AppKitTextBackend, attributed_string, ns_font, secure_text_font};
 pub(crate) use vector::{draw_vector_image, pixels_to_cgimage, rasterize_calayer_to_pixels};

@@ -12,8 +12,8 @@ use elwindui_core::graphics::{
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSButton, NSScrollView, NSStackView, NSTextField, NSTextView, NSUserInterfaceLayoutOrientation,
-    NSView,
+    NSButton, NSScrollView, NSSecureTextField, NSStackView, NSTextField, NSTextView,
+    NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::NSRect;
 use std::rc::Rc;
@@ -175,6 +175,29 @@ impl AppKitHandle for Retained<NSTextField> {
         // Same narrower scope as `NSTextView` above: kerning isn't applied to an editable
         // `NSTextField`'s plain `stringValue` (an `attributedStringValue` rewrite would fight with
         // in-place editing) — documented, not silently dropped.
+    }
+    fn supports_text_style(&self) -> bool {
+        true
+    }
+}
+impl AppKitHandle for Retained<NSSecureTextField> {
+    fn as_nsview(&self) -> Retained<NSView> {
+        let text_field: Retained<NSTextField> = Retained::into_super(self.clone());
+        let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(text_field);
+        Retained::into_super(control)
+    }
+    fn theme_prefix(&self) -> &'static str {
+        "password_box"
+    }
+    fn apply_text_style(&self, style: &CascadedTextStyle) {
+        let materialized = materialized_text_style(style);
+        let text_field: Retained<NSTextField> = Retained::into_super(self.clone());
+        // NSSecureTextField renders its password mask using internal glyphs. Applying an
+        // arbitrary fallback family can replace those glyphs with missing-glyph boxes, so retain
+        // AppKit's system font cascade while preserving size, weight, and width.
+        text_field.setFont(Some(&crate::render::secure_text_font(&materialized)));
+        text_field.setTextColor(Some(&flat_foreground_nscolor(style)));
+        // Like TextBox, character spacing is deliberately unsupported for editable secure text.
     }
     fn supports_text_style(&self) -> bool {
         true

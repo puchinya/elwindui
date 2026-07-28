@@ -16,7 +16,7 @@ use elwindui_core::graphics::{
     TextMeasureResult, TextWrapping,
 };
 use elwindui_core::ui::TextAlignment;
-use objc2::AnyThread;
+use objc2::{AnyThread, msg_send};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
@@ -123,7 +123,14 @@ fn apply_traits(
     let descriptor = unsafe { base.fontDescriptorByAddingAttributes(&attrs_dict) };
     if italic {
         let symbolic = descriptor.symbolicTraits() | NSFontDescriptorSymbolicTraits::TraitItalic;
-        descriptor.fontDescriptorWithSymbolicTraits(symbolic)
+        // AppKit documents this selector as nullable: a descriptor may not be able to realize the
+        // requested symbolic traits. objc2-app-kit currently declares it as non-null, so using the
+        // generated method would panic before we could fall back. Send it with an explicitly
+        // nullable result and retain the pre-italic descriptor when AppKit returns `nil`.
+        let italic_descriptor: Option<Retained<NSFontDescriptor>> = unsafe {
+            msg_send![&descriptor, fontDescriptorWithSymbolicTraits: symbolic]
+        };
+        italic_descriptor.unwrap_or(descriptor)
     } else {
         descriptor
     }
@@ -180,9 +187,39 @@ pub(crate) fn ns_font(style: &ComputedTextStyle) -> Retained<NSFont> {
         // family below instead of returning nothing.
     }
 
+    system_font_with_traits(size, weight, width, italic)
+}
+
+/// Resolves the font used by secure native text fields. `NSSecureTextField` draws its password
+/// mask with AppKit-owned glyphs; using a caller-selected fallback family for that field can leave
+/// those glyphs unavailable and render missing-glyph boxes. Keep AppKit's system family cascade
+/// while preserving the requested size, weight, and width through AppKit's system-font API.
+pub(crate) fn secure_text_font(style: &ComputedTextStyle) -> Retained<NSFont> {
+    let size: CGFloat = if style.font_size.is_finite() && style.font_size > 0.0 {
+        style.font_size as CGFloat
+    } else {
+        NSFont::systemFontSize()
+    };
+    // Do not rebuild a descriptor here. `NSSecureTextField` relies on the concrete system font
+    // object to resolve its private mask glyph through AppKit's cascade; descriptor-based italic
+    // synthesis can replace it with a font that lacks that glyph.
+    NSFont::systemFontOfSize_weight_width(
+        size,
+        nsfont_weight(style.font_weight),
+        nsfont_width(style.font_stretch),
+    )
+}
+
+fn system_font_with_traits(
+    size: CGFloat,
+    weight: CGFloat,
+    width: CGFloat,
+    italic: bool,
+) -> Retained<NSFont> {
     let base = NSFont::systemFontOfSize(size).fontDescriptor();
     let descriptor = apply_traits(&base, weight, width, italic);
-    NSFont::fontWithDescriptor_size(&descriptor, size).unwrap_or_else(|| NSFont::systemFontOfSize(size))
+    NSFont::fontWithDescriptor_size(&descriptor, size)
+        .unwrap_or_else(|| NSFont::systemFontOfSize(size))
 }
 
 fn ns_text_alignment(alignment: TextAlignment) -> NSTextAlignment {
@@ -371,6 +408,47 @@ mod tests {
             ..style(16.0)
         });
         assert_eq!(font.pointSize(), 16.0);
+    }
+
+    #[test]
+    fn ns_font_missing_family_with_italic_falls_back_without_panicking() {
+        // Some unresolved-family descriptors return `nil` when asked for an italic symbolic
+        // trait. That nullable AppKit result must not cross the objc2 non-null binding as a panic.
+        let font = ns_font(&ComputedTextStyle {
+            font_family: FontFamily::new("Definitely Not A Real Font Family XYZ"),
+            font_style: FontStyle::Italic,
+            ..style(16.0)
+        });
+        assert_eq!(font.pointSize(), 16.0);
+    }
+
+    #[test]
+    fn secure_text_font_uses_the_system_family_for_a_requested_fallback() {
+        let font = secure_text_font(&ComputedTextStyle {
+            font_family: FontFamily::new("Definitely Not A Real Font Family XYZ"),
+            ..style(22.0)
+        });
+        let system = NSFont::systemFontOfSize(22.0);
+        assert_eq!(font.pointSize(), 22.0);
+        assert_eq!(
+            font.familyName().map(|family| family.to_string()),
+            system.familyName().map(|family| family.to_string())
+        );
+    }
+
+    #[test]
+    fn secure_text_font_uses_the_system_font_when_italic_is_requested() {
+        let font = secure_text_font(&ComputedTextStyle {
+            font_family: FontFamily::new("Definitely Not A Real Font Family XYZ"),
+            font_style: FontStyle::Italic,
+            ..style(22.0)
+        });
+        let system = NSFont::systemFontOfSize(22.0);
+        assert_eq!(font.pointSize(), 22.0);
+        assert_eq!(
+            font.familyName().map(|family| family.to_string()),
+            system.familyName().map(|family| family.to_string())
+        );
     }
 
     #[test]

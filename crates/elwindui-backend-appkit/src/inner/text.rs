@@ -386,12 +386,11 @@ impl InnerPasswordBox {
         let field = NSSecureTextField::new(m);
         field.setBezeled(true);
         field.setEditable(true);
-        // `AppKitHandle` is only implemented for `Retained<NSTextField>` (not
-        // `Retained<NSSecureTextField>` — see that impl's own doc comment on why one impl per raw
-        // widget type, not per class-hierarchy level), so `AnyView` wraps the upcast handle too,
-        // not `field` itself.
+        // Keep the `NSSecureTextField` handle distinct for style application: secure fields must
+        // retain AppKit's system font cascade for their internal password-mask glyphs. The shared
+        // `NativeTextFieldCommon` still receives the upcast solely for delegate and value plumbing.
         let upcast: Retained<NSTextField> = Retained::into_super(field.clone());
-        let handle = AnyView::from(upcast.clone());
+        let handle = AnyView::from(field.clone());
         let common = NativeTextFieldCommon::new(upcast);
         Self {
             handle,

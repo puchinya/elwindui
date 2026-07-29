@@ -1414,7 +1414,7 @@ impl ListExt<dyn UIElementExt> for UIElementCollection {
 /// `try_as_native_control()` result directly to `H` (see that trait method's own doc comment) — no
 /// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement)]
-#[dsl(embedded, abstract_)]
+#[dsl(embedded, abstract_, text_style)]
 #[dsl_prop(background: Option<crate::graphics::Brush>)]
 pub trait NativeControl {
     /// Sets an explicit native-control background.
@@ -1446,6 +1446,8 @@ pub trait NativeControl {
 /// WinUI3's own equivalents have no common signature to share without associated types this crate
 /// doesn't need yet) — each backend keeps declaring its own local `TabView` trait.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[dsl(embedded, sealed)]
+#[dsl_prop(two_way, text: String)]
 pub trait TextArea {
     fn set_text(&self, text: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
@@ -1477,6 +1479,12 @@ pub trait Button {
 /// would (see `TextBox` in `builtins.elwind` and `native_ui::TextBox::on_constructed`'s own doc
 /// comment on why AppKit needs one narrow, TextBox-specific addition to make that work in practice).
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[dsl(embedded, sealed)]
+#[dsl_prop(two_way, text: String)]
+#[dsl_prop(placeholder: Option<String>)]
+#[dsl_prop(read_only: Option<bool>)]
+#[dsl_prop(max_length: Option<u32>)]
+#[dsl_prop(text_alignment: Option<crate::ui::TextAlignment>)]
 pub trait TextBox {
     fn set_text(&self, text: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
@@ -1497,6 +1505,11 @@ pub trait TextBox {
 /// `reveal_enabled` AppKit/WinUI3 asymmetry this control has (WinUI3's `PasswordRevealMode` is
 /// native; AppKit's `NSSecureTextField` has no equivalent, so `true` is a documented no-op there).
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[dsl(embedded, sealed)]
+#[dsl_prop(two_way, password: String)]
+#[dsl_prop(placeholder: Option<String>)]
+#[dsl_prop(max_length: Option<u32>)]
+#[dsl_prop(reveal_enabled: Option<bool>)]
 pub trait PasswordBox {
     fn set_password(&self, password: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
@@ -1522,6 +1535,10 @@ pub trait PasswordBox {
 /// same "ship the minimal, honestly-scoped surface, document the gap" call as `TextBox`/
 /// `PasswordBox`'s deferred selection APIs; a real, understood follow-up, not a silent omission.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[dsl(embedded, sealed, content = content)]
+#[dsl_prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
+#[dsl_prop(horizontal_scroll_enabled: Option<bool>)]
+#[dsl_prop(vertical_scroll_enabled: Option<bool>)]
 pub trait ScrollView {
     fn set_content(&self, content: Rc<dyn UIElementExt>);
     fn set_horizontal_scroll_enabled(&self, enabled: bool);
@@ -1529,6 +1546,11 @@ pub trait ScrollView {
 }
 
 #[elwindui_macros::class(trait_only)]
+#[dsl(embedded, native)]
+#[dsl_prop(text: String)]
+#[dsl_prop(shortcut: Option<String>)]
+#[dsl_prop(enabled: Option<bool>)]
+#[dsl_prop(on_select: fn())]
 pub trait MenuItem {
     fn set_text(&self, text: &str);
     fn set_enabled(&self, enabled: bool);
@@ -1807,6 +1829,8 @@ impl<T: ?Sized> DynamicChildSlot<T> {
 }
 
 #[elwindui_macros::class(trait_only)]
+#[dsl(embedded, native, content = items)]
+#[dsl_prop(items: crate::ui::ListExt<dyn crate::ui::MenuItemExt>)]
 pub trait Menu {
     fn add_item(&self, item: &dyn MenuItemExt);
     fn remove_item(&self, item: &dyn MenuItemExt);
@@ -1822,12 +1846,17 @@ pub trait Menu {
 }
 
 #[elwindui_macros::class(trait_only)]
+#[dsl(embedded, native, content = submenu)]
+#[dsl_prop(text: String)]
+#[dsl_prop(submenu: std::rc::Rc<dyn crate::ui::MenuExt>)]
 pub trait MenuBarItem {
     fn set_text(&self, text: &str);
     fn set_submenu(&self, submenu: Rc<dyn MenuExt>);
 }
 
 #[elwindui_macros::class(trait_only)]
+#[dsl(embedded, native, content = items)]
+#[dsl_prop(items: crate::ui::ListExt<dyn crate::ui::MenuBarItemExt>)]
 pub trait MenuBar {
     fn add_item(&self, item: &dyn MenuBarItemExt);
     fn remove_item(&self, item: &dyn MenuBarItemExt);
@@ -1840,6 +1869,11 @@ pub trait MenuBar {
 /// collection of `TabViewItem`s. Dynamic child ranges update this collection directly; the
 /// backend reconciles the corresponding native tabs.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[dsl(embedded, sealed, content = children)]
+#[dsl_prop(children: Vec<std::rc::Rc<dyn crate::ui::TabViewItemExt>>)]
+#[dsl_prop(selected_index: usize)]
+#[dsl_prop(on_select: fn(usize))]
+#[dsl_prop(on_new_tab: fn())]
 pub trait TabView {
     fn children(&self) -> &dyn ListExt<dyn TabViewItemExt>;
 }
@@ -1848,6 +1882,11 @@ pub trait TabView {
 /// `TabViewItem` is never itself embedded as a real `Rc<dyn UIElement>` node (see its own
 /// `builtins.elwind` doc comment), so it has no meaningful `NativeControl`/`UIElement` ancestor.
 #[elwindui_macros::class(trait_only)]
+#[dsl(embedded, sealed, native, content = content)]
+#[dsl_prop(header: String)]
+#[dsl_prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
+#[dsl_prop(closable: Option<bool>)]
+#[dsl_prop(on_close: fn())]
 pub trait TabViewItem {}
 
 /// `Window`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — also the `component X inherits
@@ -1856,6 +1895,15 @@ pub trait TabViewItem {}
 /// `Menu`/`MenuBar`/`MenuBarItem` just above (see this module's own doc comment on that group) —
 /// `impl Window for WindowImpl` downcasts it back to its own concrete `MenuBarImpl` internally.
 #[elwindui_macros::class(trait_only)]
+#[dsl(embedded, native, content = content)]
+#[dsl_prop(title: String)]
+#[dsl_prop(menu_bar: Option<std::rc::Rc<dyn crate::ui::MenuBarExt>>)]
+#[dsl_prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
+#[dsl_prop(theme: Option<crate::theme::ThemeHandle>)]
+#[dsl_prop(onetime, left: Option<f32>)]
+#[dsl_prop(onetime, top: Option<f32>)]
+#[dsl_prop(onetime, width: Option<f32>)]
+#[dsl_prop(onetime, height: Option<f32>)]
 pub trait Window {
     fn set_title(&self, title: &str);
     fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>);
@@ -1896,6 +1944,9 @@ pub trait Window {
 /// construct()` for their own `base` field (see e.g. `Shape::construct`/`Control::construct` for the
 /// same shape one level up the hierarchy, where the base *is* directly instantiable).
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
+#[dsl(embedded, abstract_)]
+#[dsl_prop(children: crate::ui::UIElementCollection)]
+#[dsl_prop(background: Option<crate::graphics::Brush>)]
 pub struct Layout {
     /// Logical children for this layout. Its mutations update the owner's Visual collection.
     pub children: UIElementCollection,
@@ -1969,6 +2020,8 @@ impl Layout {
 /// (not on `Layout`) since it's meaningless to `Grid`, `Layout`'s other concrete subclass — see
 /// `Layout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[dsl(embedded, content = children)]
+#[dsl_prop(spacing: Option<f32>)]
 pub struct VerticalLayout {
     spacing: Cell<f32>,
 }
@@ -2034,6 +2087,8 @@ impl VerticalLayout {
 /// `HorizontalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). `spacing` lives here
 /// (not on `Layout`) — see `VerticalLayout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[dsl(embedded, content = children)]
+#[dsl_prop(spacing: Option<f32>)]
 pub struct HorizontalLayout {
     spacing: Cell<f32>,
 }
@@ -2098,6 +2153,10 @@ impl HorizontalLayout {
 /// `Shape`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `Shape` has no further
 /// DSL-level subclass today.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[dsl(embedded, abstract_)]
+#[dsl_prop(fill: Option<crate::graphics::Brush>)]
+#[dsl_prop(stroke: Option<crate::graphics::Brush>)]
+#[dsl_prop(stroke_width: Option<f32>)]
 pub struct Shape {
     pub fill: RefCell<Option<Brush>>,
     pub stroke: RefCell<Option<Brush>>,
@@ -2163,6 +2222,8 @@ impl Shape {
 /// としてここに手書きする。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
 /// 自身の共通描画メソッドを`base`委譲として登録している。
 #[elwindui_macros::class(inherits = crate::ui::Shape)]
+#[dsl(embedded, sealed)]
+#[dsl_prop(corner_radius: Option<f32>)]
 pub struct Rectangle {
     stroke_width: Option<f32>,
     corner_radius: Cell<Option<f32>>,
@@ -2240,6 +2301,7 @@ impl Rectangle {
 
 /// `builtin::Ellipse`(docs/elwindui_builtins_spec.md 付録G/N)。`Rectangle`の doc comment 参照。
 #[elwindui_macros::class(inherits = crate::ui::Shape)]
+#[dsl(embedded, sealed)]
 pub struct Ellipse {
     stroke_width: Option<f32>,
 }
@@ -2311,6 +2373,10 @@ fn stretch_to_image_fit(stretch: Stretch) -> ImageFit {
 /// `draw_vector_image` directly depending on which `ImageSource` variant `source` holds, so no
 /// per-backend construction code is needed at all (unlike `NativeControl`-family builtins).
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[dsl(embedded)]
+#[dsl_prop(source: Option<crate::graphics::ImageSource>)]
+#[dsl_prop(stretch: Option<crate::graphics::Stretch>)]
+#[dsl_prop(rasterize: Option<crate::graphics::VectorRasterizeMode>)]
 pub struct Image {
     source: RefCell<Option<ImageSource>>,
     stretch: Cell<Stretch>,
@@ -2431,6 +2497,9 @@ impl Image {
 /// `Color`), inherited the same way `font_size`/`font_family`/etc. are (指示書 §2/§8). There is no
 /// DSL `color:` property anymore; use `foreground:` instead.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[dsl(embedded, text_style)]
+#[dsl_prop(text: String)]
+#[dsl_prop(text_alignment: Option<crate::ui::TextAlignment>)]
 pub struct TextBlock {
     pub text: RefCell<String>,
     pub text_style: crate::graphics::TextStyleStorage,
@@ -2536,6 +2605,9 @@ impl TextStyleOwner for TextBlock {
 /// DSL-level subclass composed via `base: Control` (e.g. `builtin::ContentControl`,
 /// `crates/elwindui-builtins/src/builtins.elwind`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[dsl(embedded, text_style, content = children)]
+#[dsl_prop(children: crate::ui::UIElementCollection)]
+#[dsl_prop(padding: Option<f32>)]
 pub struct Control {
     pub padding: Cell<f32>,
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
@@ -2636,6 +2708,8 @@ impl TextStyleOwner for Control {
 /// `Control`の薄いラッパー。二重管理を避けるため、バックエンド非依存な合成 builtin としてここに直接手書きする。
 /// Content is a single Visual child managed directly by this type.
 #[elwindui_macros::class(inherits = crate::ui::Control)]
+#[dsl(embedded, content = content)]
+#[dsl_prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
 pub struct ContentControl {
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
 }
@@ -2707,6 +2781,11 @@ fn grid_cell_of(child: &Rc<dyn UIElementExt>) -> GridCell {
 }
 
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[dsl(embedded, content = children)]
+#[dsl_prop(rows: Vec<crate::layout::GridLength>)]
+#[dsl_prop(columns: Vec<crate::layout::GridLength>)]
+#[dsl_prop(attached, row: i32 = 0)]
+#[dsl_prop(attached, column: i32 = 0)]
 pub struct Grid {
     pub rows: RefCell<Vec<GridLength>>,
     pub columns: RefCell<Vec<GridLength>>,

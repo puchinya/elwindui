@@ -946,17 +946,10 @@ fn take_dsl_shape(attrs: &[syn::Attribute]) -> syn::Result<(DslShape, Vec<syn::A
         seen.push(name);
     }
 
-    if let Some(content) = &shape.content_field {
-        let content_name = content.to_string();
-        if !shape.props.iter().any(|p| p.name == content_name) {
-            return Err(syn::Error::new_spanned(
-                content,
-                format!(
-                    "#[dsl(content = {content_name})]: no `#[dsl_prop]` declares `{content_name}`"
-                ),
-            ));
-        }
-    }
+    // Note there is deliberately *no* "the content field must be declared on this item" check here:
+    // `#[dsl(content = children)]` routinely names a property an *ancestor* declares (`VerticalLayout`
+    // inherits `children` from `Layout`), and this macro cannot see an ancestor's declarations. It is
+    // checked by a deferred `@assert_declared` probe instead — see `build_shape_macro`.
 
     Ok((shape, rest))
 }
@@ -1162,7 +1155,20 @@ fn build_shape_macro(
         })
         .collect();
 
-    let (fallback, assert_fallback) = match parent {
+    // `@assert_declared` is `@assert_undeclared`'s mirror: it succeeds where the other fails. It
+    // backs `#[dsl(content = ..)]`, whose target is routinely an *inherited* property
+    // (`VerticalLayout`'s `content = children` names `Layout`'s `children`), so it cannot be checked
+    // locally any more than a collision can.
+    let declared_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            quote! { (@assert_declared $origin:ident, #name) => {}; }
+        })
+        .collect();
+
+    let (fallback, assert_fallback, declared_fallback) = match parent {
         Some((parent_bare, parent_ty)) => {
             let parent_macro =
                 inherit_macro_self_ref_path(parent_bare, parent_ty, shape_macro_ident(parent_bare));
@@ -1175,6 +1181,11 @@ fn build_shape_macro(
                 quote! {
                     (@assert_undeclared $origin:ident, $name:ident) => {
                         #parent_macro!(@assert_undeclared $origin, $name);
+                    };
+                },
+                quote! {
+                    (@assert_declared $origin:ident, $name:ident) => {
+                        #parent_macro!(@assert_declared $origin, $name);
                     };
                 },
             )
@@ -1194,26 +1205,39 @@ fn build_shape_macro(
             quote! {
                 (@assert_undeclared $origin:ident, $name:ident) => {};
             },
+            quote! {
+                (@assert_declared $origin:ident, $name:ident) => {
+                    compile_error!(concat!(
+                        "#[dsl(content = ",
+                        stringify!($name),
+                        ")] on `",
+                        stringify!($origin),
+                        "`: neither it nor any ancestor declares a `",
+                        stringify!($name),
+                        "` property"
+                    ));
+                };
+            },
         ),
     };
 
-    // The probes themselves, emitted in item position next to the class. Only a class that *has* an
-    // ancestor emits any — a root class has nothing to collide with.
-    let probes: Vec<TokenStream2> = match parent {
-        Some((parent_bare, parent_ty)) => {
-            let parent_macro =
-                inherit_macro_path(parent_bare, parent_ty, shape_macro_ident(parent_bare));
-            shape
-                .props
-                .iter()
-                .map(|p| {
-                    let name = &p.name;
-                    quote! { #parent_macro!(@assert_undeclared #bare_ident, #name); }
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
+    // The probes themselves, emitted in item position next to the class.
+    let mut probes: Vec<TokenStream2> = Vec::new();
+    // Collision probe: only a class that *has* an ancestor emits any — a root class has nothing to
+    // collide with.
+    if let Some((parent_bare, parent_ty)) = parent {
+        let parent_macro = inherit_macro_path(parent_bare, parent_ty, shape_macro_ident(parent_bare));
+        probes.extend(shape.props.iter().map(|p| {
+            let name = &p.name;
+            quote! { #parent_macro!(@assert_undeclared #bare_ident, #name); }
+        }));
+    }
+    // Content probe: aimed at this class's *own* macro, so a content field declared right here
+    // matches a literal arm and a merely inherited one forwards up the chain from there.
+    if let Some(content) = &shape.content_field {
+        let own_macro = inherit_macro_path_for_self(bare_name);
+        probes.push(quote! { #own_macro!(@assert_declared #bare_ident, #content); });
+    }
 
     quote! {
         #[doc(hidden)]
@@ -1227,9 +1251,20 @@ fn build_shape_macro(
             #fallback
             #(#assert_arms)*
             #assert_fallback
+            #(#declared_arms)*
+            #declared_fallback
         }
         #(#probes)*
     }
+}
+
+/// The item-position path to a class's *own* shape macro. Always same-crate by construction, so it
+/// is always `crate::` — the absolute form `inherit_macro_path` uses for the same reason (a bare
+/// name resolves only within the defining file, which breaks the moment a class moves into a
+/// submodule; see that function's own doc comment).
+fn inherit_macro_path_for_self(bare_name: &str) -> TokenStream2 {
+    let ident = shape_macro_ident(bare_name);
+    quote! { crate::#ident }
 }
 
 /// Whether a `#[dsl_prop]`'s declared type is exactly `String` — see `build_shape_macro`'s setter

@@ -1153,6 +1153,65 @@ fn build_props_macro(
         })
         .collect();
 
+    // `@children` attaches bare nested child elements to whichever property `#[content(..)]` names.
+    // It takes two hops on purpose: the *designation* is local (`VerticalLayout` says
+    // `#[content(children)]`) but the designated property's declared *type* — which decides how
+    // children are attached — may live several classes up (`children` is `Layout`'s). So `@children`
+    // resolves the name here and hands off to `@children_into`, which walks the chain until it finds
+    // the class that actually declares that property.
+    let children_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let setter = format_ident!("set_{}", name);
+            let body = match attach_kind(&p.ty) {
+                // A live collection (`UIElementCollection`, `ListExt<T>`): append through the
+                // accessor, mirroring the `.children().add(..)` convention virtual builtins already
+                // use, rather than replacing the whole collection.
+                AttachKind::Collection => quote! {
+                    $( $recv.#name().add($child); )*
+                },
+                // A `Vec<T>` property is replaced wholesale by its setter (`TabView`'s `children`).
+                AttachKind::VecProperty => quote! {
+                    $recv.#setter(::std::vec![$($child),*]);
+                },
+                // A single slot (`Rc<dyn ..>`): exactly one child, enforced by the arity of the
+                // dedicated arm below rather than by a runtime check.
+                AttachKind::SingleSlot => quote! {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` takes exactly one child element, but got several"
+                    ));
+                },
+            };
+            let single_slot_arm = matches!(attach_kind(&p.ty), AttachKind::SingleSlot).then(|| {
+                quote! {
+                    (@children_into $origin:ident, #name, $recv:expr, [$child:expr]) => {
+                        $recv.#setter($child);
+                    };
+                }
+            });
+            quote! {
+                #single_slot_arm
+                (@children_into $origin:ident, #name, $recv:expr, [$($child:expr),* $(,)?]) => {
+                    #body
+                };
+            }
+        })
+        .collect();
+
+    // A class that designates content resolves the name here; one that doesn't lets the catch-all
+    // below carry the whole `@children` call up to an ancestor that does.
+    let children_entry = shape.content_field().map(|content| {
+        quote! {
+            (@children $recv:expr, [$($child:expr),* $(,)?]) => {
+                $crate::#macro_ident!(@children_into #bare_ident, #content, $recv, [$($child),*]);
+            };
+        }
+    });
+
     // `@assert_declared` is `@assert_undeclared`'s mirror: it succeeds where the other fails. It
     // backs `#[prop(content, ..)]`, whose designation is routinely *inherited*
     // (`VerticalLayout`'s `content = children` names `Layout`'s `children`), so it cannot be checked
@@ -1166,7 +1225,7 @@ fn build_props_macro(
         })
         .collect();
 
-    let (fallback, assert_fallback, declared_fallback) = match parent {
+    let (fallback, assert_fallback, declared_fallback, children_fallback) = match parent {
         Some((parent_bare, parent_ty)) => {
             let parent_macro =
                 inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
@@ -1184,6 +1243,14 @@ fn build_props_macro(
                 quote! {
                     (@assert_declared $origin:ident, $name:ident) => {
                         #parent_macro!(@assert_declared $origin, $name);
+                    };
+                },
+                quote! {
+                    (@children $recv:expr, [$($child:expr),* $(,)?]) => {
+                        #parent_macro!(@children $recv, [$($child),*]);
+                    };
+                    (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
+                        #parent_macro!(@children_into $origin, $name, $recv, [$($child),*]);
                     };
                 },
             )
@@ -1207,6 +1274,25 @@ fn build_props_macro(
                 (@assert_declared $origin:ident, $name:ident) => {
                     compile_error!(concat!(
                         "#[prop(content, ",
+                        stringify!($name),
+                        ")] on `",
+                        stringify!($origin),
+                        "`: neither it nor any ancestor declares a `",
+                        stringify!($name),
+                        "` property"
+                    ));
+                };
+            },
+            quote! {
+                (@children $recv:expr, [$($child:expr),* $(,)?]) => {
+                    compile_error!(
+                        "this element takes no nested child elements — no `#[content(..)]` is \
+                         declared on it or any ancestor"
+                    );
+                };
+                (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
+                    compile_error!(concat!(
+                        "#[content(",
                         stringify!($name),
                         ")] on `",
                         stringify!($origin),
@@ -1251,6 +1337,9 @@ fn build_props_macro(
             #assert_fallback
             #(#declared_arms)*
             #declared_fallback
+            #children_entry
+            #(#children_into_arms)*
+            #children_fallback
         }
         #(#probes)*
     }
@@ -1263,6 +1352,29 @@ fn build_props_macro(
 fn inherit_macro_path_for_self(bare_name: &str) -> TokenStream2 {
     let ident = props_macro_ident(bare_name);
     quote! { crate::#ident }
+}
+
+/// How a content property receives its children, decided by the property's declared type — the same
+/// distinction `elwindui_codegen::codegen::build_component_setters` draws, moved to the declaration
+/// that actually knows the type.
+enum AttachKind {
+    /// A live collection appended through its accessor (`UIElementCollection`, `ListExt<T>`).
+    Collection,
+    /// A `Vec<T>` property replaced wholesale by its setter.
+    VecProperty,
+    /// A single slot (`Rc<dyn ..>`) holding exactly one child.
+    SingleSlot,
+}
+
+fn attach_kind(ty: &Type) -> AttachKind {
+    let spelled = quote! { #ty }.to_string();
+    if spelled.contains("UIElementCollection") || spelled.contains("ListExt") {
+        AttachKind::Collection
+    } else if spelled.trim_start().starts_with("Vec <") {
+        AttachKind::VecProperty
+    } else {
+        AttachKind::SingleSlot
+    }
 }
 
 /// Whether a `#[prop]`'s declared type is exactly `String` — see `build_props_macro`'s setter

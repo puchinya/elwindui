@@ -66,3 +66,76 @@ fn props_macro_forwards_through_the_whole_ancestor_chain() {
     elwindui_core::__elwindui_props_Button!(@set button, margin, 4.0f32);
     assert_eq!(*button.margin.borrow(), Some(4.0));
 }
+
+// --- `@children`: attaching bare nested child elements ------------------------------------------
+
+/// Stands in for a single-slot content host (`Window`/`ContentControl`/`TabViewItem`, whose content
+/// property is an `Rc<dyn ..>`).
+#[derive(Default)]
+struct FakeWindow {
+    content: RefCell<Option<&'static str>>,
+}
+
+impl FakeWindow {
+    fn set_content(&self, content: &'static str) {
+        *self.content.borrow_mut() = Some(content);
+    }
+}
+
+/// Stands in for a live-collection host. `VerticalLayout` designates `children` via
+/// `#[content(children)]` but does *not* declare the property — `Layout` does — so this exercises
+/// the two-hop path: the designation resolves locally, the attach shape one class up.
+#[derive(Default)]
+struct FakeLayout {
+    added: RefCell<Vec<&'static str>>,
+}
+
+struct FakeCollection<'a>(&'a FakeLayout);
+
+impl FakeLayout {
+    fn children(&self) -> FakeCollection<'_> {
+        FakeCollection(self)
+    }
+}
+
+impl FakeCollection<'_> {
+    fn add(&self, child: &'static str) {
+        self.0.added.borrow_mut().push(child);
+    }
+}
+
+#[test]
+fn children_go_into_a_single_slot_through_its_setter() {
+    let window = FakeWindow::default();
+    elwindui_core::__elwindui_props_Window!(@children window, ["body"]);
+    assert_eq!(*window.content.borrow(), Some("body"));
+}
+
+#[test]
+fn children_are_appended_to_a_collection_declared_by_an_ancestor() {
+    let layout = FakeLayout::default();
+    // `VerticalLayout` designates `children`; `Layout` declares it as a `UIElementCollection`, so
+    // the attach shape is the `.children().add(..)` accessor loop, not a bulk setter.
+    elwindui_core::__elwindui_props_VerticalLayout!(@children layout, ["a", "b"]);
+    assert_eq!(*layout.added.borrow(), vec!["a", "b"]);
+}
+
+/// The third attach shape: a `Vec<T>` content property (`TabView`'s `children`) is replaced
+/// wholesale through its setter, rather than appended to through an accessor.
+#[derive(Default)]
+struct FakeTabView {
+    children: RefCell<Vec<&'static str>>,
+}
+
+impl FakeTabView {
+    fn set_children(&self, children: Vec<&'static str>) {
+        *self.children.borrow_mut() = children;
+    }
+}
+
+#[test]
+fn children_of_a_vec_property_are_set_in_bulk() {
+    let tabs = FakeTabView::default();
+    elwindui_core::__elwindui_props_TabView!(@children tabs, ["one", "two", "three"]);
+    assert_eq!(*tabs.children.borrow(), vec!["one", "two", "three"]);
+}

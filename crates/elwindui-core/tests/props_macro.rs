@@ -225,6 +225,55 @@ fn routed_forwards_a_one_parameter_callback_declared_two_hops_up() {
 // owning class explicitly (`Grid::row`), so `elwindui-codegen` calls straight into `Grid`'s own
 // props macro.
 
+// --- `@set` on a `#[routed]` property: bare closure in, adapter built by the declaration --------
+//
+// `elwindui-codegen`'s whole point in having this: for an *external* element it has no `TypeInfo`
+// for at all, it can call `@set` uniformly for every attribute the DSL wrote — whether it's a plain
+// value or a `#[routed]` callback — without ever needing to know which. It builds a bare
+// closure/callable matching the DSL's own written arity either way; the declaration (not the caller)
+// decides whether that becomes a direct setter call or a routed registration.
+
+#[test]
+fn set_on_a_routed_property_accepts_a_bare_zero_parameter_closure() {
+    use elwindui_core::ui::UIElementExt;
+    let widget = elwindui_core::ui::VerticalLayout::new();
+    let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+    let fired2 = fired.clone();
+    // No `Box::new`, no `&RoutedEventArgs` parameter -- exactly the plain closure `elwindui-codegen`
+    // already builds today for `Button.on_click: fn()`'s own DSL syntax (`on_click: || { .. }`).
+    elwindui_core::__elwindui_props_Button!(@set widget, on_click, move || { fired2.set(true); });
+    let node: std::rc::Rc<dyn UIElementExt> = widget.clone();
+    elwindui_core::ui::dispatch_routed(
+        &node,
+        "on_click",
+        &(),
+        &elwindui_core::input::RoutedEventArgs::default(),
+    );
+    assert!(fired.get());
+}
+
+#[test]
+fn set_on_a_routed_property_accepts_a_bare_one_parameter_closure() {
+    use elwindui_core::ui::UIElementExt;
+    let widget = elwindui_core::ui::VerticalLayout::new();
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let seen2 = seen.clone();
+    elwindui_core::__elwindui_props_Button!(@set widget, on_key_down, move |e| { *seen2.borrow_mut() = Some(e); });
+    let args = elwindui_core::input::KeyEventArgs {
+        key: elwindui_core::input::Key::Escape,
+        modifiers: elwindui_core::input::KeyModifiers::default(),
+        is_repeat: true,
+    };
+    let node: std::rc::Rc<dyn UIElementExt> = widget.clone();
+    elwindui_core::ui::dispatch_routed(
+        &node,
+        "on_key_down",
+        &args,
+        &elwindui_core::input::RoutedEventArgs::default(),
+    );
+    assert_eq!(*seen.borrow(), Some(args));
+}
+
 #[test]
 fn attached_set_stores_a_value_readable_back_through_get_attached() {
     use elwindui_core::ui::UIElementExt;

@@ -1094,36 +1094,54 @@ fn build_props_macro(
     let macro_ident = props_macro_ident(bare_name);
     let bare_ident = format_ident!("{bare_name}");
 
-    // Only plain scalar properties take part in the `@set` protocol. The rest each need their own
-    // emission shape and are deliberately left without an arm here rather than given a wrong one:
-    // - `routed` callbacks are registered via `dispatch_routed`, not assigned;
+    // Only plain scalar properties and `#[routed]` callbacks take part in the `@set` protocol. The
+    // rest each need their own emission shape and are deliberately left without an arm here rather
+    // than given a wrong one:
     // - `attached` properties are set by a *child* onto its parent, through
-    //   `UIElement::set_attached::<T>`, so they never reach this receiver at all;
+    //   `UIElement::set_attached::<T>`, so they never reach this receiver at all — `@attached_set`;
     // - the `#[prop(content, ..)]` property and a `children` collection receive nested *elements*,
-    //   whose emission differs by declared type (`Vec<T>` bulk-set vs `ListExt<T>` add-loop) — that
-    //   is a separate `@children` protocol, still to be designed.
+    //   whose emission differs by declared type (`Vec<T>` bulk-set vs `ListExt<T>` add-loop) — `@children`.
     // Reaching one of these through `@set` falls through to the catch-all and is reported as an
     // unknown property, which is honest: `@set` genuinely cannot express it.
     let takes_set_arm = |p: &PropDecl| {
         let name = p.name.to_string();
-        !p.routed
-            && !p.attached
+        !p.attached
             && name != "children"
             && shape.content_field().map(|c| c.to_string()).as_deref() != Some(name.as_str())
     };
 
+    // A `#[routed]` property's `@set_from` arm has a fundamentally different job than a plain one:
+    // `elwindui-codegen` hands it a *bare* closure/callable matching the DSL's own written arity (the
+    // same value it would build for an ordinary callback property — see `wrap_prop_value`'s doc
+    // comment on why this, and not `dyn UIElementExt`-typed values, is the one case that still needs
+    // this macro's help beyond a plain pass-through), never a pre-built `Box<dyn Fn(&T,
+    // &RoutedEventArgs)>`. The arm itself builds the routed adapter and calls
+    // `register_routed_handler` — `elwindui-codegen` never has to know a property is `#[routed]` at
+    // all, only that it wrote a callback-shaped value; whether that dispatches to a setter or a
+    // routed registration is entirely this declaration's own business. `@routed`/`@routed_from`
+    // (below) stay as the lower-level primitive this delegates to, for a caller that already has a
+    // fully-built handler in hand.
     let set_arms: Vec<TokenStream2> = shape
         .props
         .iter()
         .filter(|p| takes_set_arm(p))
         .map(|p| {
             let name = &p.name;
-            let setter = format_ident!("set_{}", name);
-            let value = wrap_prop_value(&p.ty, quote! { $value });
-            quote! {
-                (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
-                    $recv.#setter(#value);
-                };
+            if p.routed {
+                let handler = routed_handler_from_bare_callable(&p.ty);
+                quote! {
+                    (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                        $crate::#macro_ident!(@routed_from $origin, $recv, #name, #handler);
+                    };
+                }
+            } else {
+                let setter = format_ident!("set_{}", name);
+                let value = wrap_prop_value(&p.ty, quote! { $value });
+                quote! {
+                    (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                        $recv.#setter(#value);
+                    };
+                }
             }
         })
         .collect();
@@ -1439,6 +1457,44 @@ fn build_props_macro(
 /// against `elwindui-core`) needs `$crate::` once embedded here. `wrap_prop_value`'s conversions
 /// never have this problem: `.into()` needs no explicit target-type annotation of its own — Rust
 /// infers it from the real setter's own parameter type at the call site.
+/// Wraps a bare closure/callable `$value` (matching the DSL's own written arity, `elwindui-codegen`'s
+/// ordinary callback-value convention — see `wrap_prop_value`'s doc comment) into the fixed
+/// `Box<dyn Fn(&Payload, &RoutedEventArgs)>` shape `register_routed_handler` needs, ready to hand to
+/// `@routed_from`. Arity comes from `ty`'s own `fn(..)` declaration, exactly like
+/// `routed_payload_type` — a 0-parameter routed property (`on_click: fn()`) ignores the payload
+/// entirely; a 1-parameter one (`on_key_down: fn(KeyEventArgs)`) calls `$value` with it dereferenced.
+/// Both leave the payload parameter's own type unannotated, relying on `@routed_from`'s own
+/// `register_routed_handler::<Payload>` turbofish to pin it down (verified: this inference reaches
+/// through an unannotated closure parameter even across the `Box<dyn Fn>` coercion).
+fn routed_handler_from_bare_callable(ty: &Type) -> TokenStream2 {
+    let one_param = matches!(ty, Type::BareFn(f) if f.inputs.len() == 1);
+    // `$value` is evaluated exactly once, into `__handler`, *before* the outer `move` closure --
+    // not re-spliced as source text directly into the outer closure's body. Splicing `$value`
+    // there would re-evaluate (re-construct) it on every invocation of the outer `Fn` closure,
+    // which for a `move`-capturing DSL closure means re-*moving* its own captured state out of an
+    // already-captured (by-reference-called) environment on the second call — exactly the "cannot
+    // move out of a captured variable in an `Fn` closure" error this construction avoids.
+    if one_param {
+        quote! {
+            {
+                let __handler = $value;
+                Box::new(move |__payload, _args: &$crate::input::RoutedEventArgs| {
+                    (__handler)(*__payload);
+                })
+            }
+        }
+    } else {
+        quote! {
+            {
+                let __handler = $value;
+                Box::new(move |_payload, _args: &$crate::input::RoutedEventArgs| {
+                    (__handler)();
+                })
+            }
+        }
+    }
+}
+
 fn routed_payload_type(ty: &Type) -> TokenStream2 {
     let Type::BareFn(f) = ty else {
         return quote! { () };

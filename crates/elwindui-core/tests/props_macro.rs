@@ -4,6 +4,7 @@
 //! proc-macro can never read another crate's expansion results. An integration test is a separate
 //! crate from `elwindui-core`, so it exercises exactly that boundary.
 
+use elwindui_core::graphics::{Brush, Color};
 use std::cell::RefCell;
 
 /// Stands in for a backend's real `Button`: the props macro emits plain method syntax
@@ -12,8 +13,11 @@ use std::cell::RefCell;
 struct FakeButton {
     text: RefCell<String>,
     enabled: RefCell<Option<bool>>,
-    /// Declared by `NativeControl`, one hop up the chain — not by `Button` itself.
-    background: RefCell<Option<u32>>,
+    /// Declared by `NativeControl`, one hop up the chain — not by `Button` itself. Real type
+    /// (`Option<Brush>`, matching `NativeControl::set_background`'s own signature), not a stand-in
+    /// — this doubles as the cross-crate check that `wrap_prop_value`'s `.into()`/`Some(..)`
+    /// wrapping for Brush/Color-typed props is generated correctly.
+    background: RefCell<Option<Brush>>,
     /// Declared by `UIElement`, at the very top of the chain.
     margin: RefCell<Option<f32>>,
 }
@@ -25,8 +29,8 @@ impl FakeButton {
     fn set_enabled(&self, enabled: bool) {
         *self.enabled.borrow_mut() = Some(enabled);
     }
-    fn set_background(&self, background: u32) {
-        *self.background.borrow_mut() = Some(background);
+    fn set_background(&self, background: Option<Brush>) {
+        *self.background.borrow_mut() = background;
     }
     fn set_margin(&self, margin: f32) {
         *self.margin.borrow_mut() = Some(margin);
@@ -50,12 +54,28 @@ fn props_macro_sets_a_non_string_prop_by_value() {
 
 /// A property `Button` doesn't declare is forwarded, unexamined, to its own ancestor's props macro
 /// — the same "what isn't mine goes up the chain" muncher shape `#[overrides]` routing already uses.
+/// Also exercises `wrap_prop_value`'s `Option<Brush>` handling: a hex-string DSL literal reaches the
+/// setter via `Brush`'s own `From<&str>`, `Some`-wrapped since the DSL convention writes the inner
+/// value, never `Option` itself.
 #[test]
 fn props_macro_forwards_an_undeclared_prop_one_hop_up() {
     let button = FakeButton::default();
     // `background` belongs to `NativeControl`, not `Button`.
-    elwindui_core::__elwindui_props_Button!(@set button, background, 0x336699u32);
-    assert_eq!(*button.background.borrow(), Some(0x336699));
+    elwindui_core::__elwindui_props_Button!(@set button, background, "#336699");
+    assert_eq!(
+        *button.background.borrow(),
+        Some(Brush::Solid(Color::parse_hex("#336699").unwrap()))
+    );
+}
+
+/// `.into()` is a no-op (std's reflexive `From<T> for T`) when the DSL value is already the target
+/// type, not just when it's a hex-string literal.
+#[test]
+fn props_macro_passes_an_already_typed_brush_through_into() {
+    let button = FakeButton::default();
+    let brush = Brush::Solid(Color::parse_hex("#abcdef").unwrap());
+    elwindui_core::__elwindui_props_Button!(@set button, background, brush.clone());
+    assert_eq!(*button.background.borrow(), Some(brush));
 }
 
 /// Forwarding is not limited to one hop: `margin` is declared all the way up on `UIElement`, so this

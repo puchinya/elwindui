@@ -1119,15 +1119,7 @@ fn build_props_macro(
         .map(|p| {
             let name = &p.name;
             let setter = format_ident!("set_{}", name);
-            // A `String`-shaped property's real setter takes `&str` by convention (see
-            // `elwindui_codegen::codegen::emit_construction`'s own `&(..)`-wrapping) — everything
-            // else is passed by value. `Option<T>` describes optionality *at the use site*, not the
-            // setter's own argument, so it passes the inner value through unchanged.
-            let value = if is_string_type(&p.ty) {
-                quote! { &($value) }
-            } else {
-                quote! { $value }
-            };
+            let value = wrap_prop_value(&p.ty, quote! { $value });
             quote! {
                 (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
                     $recv.#setter(#value);
@@ -1381,6 +1373,75 @@ fn attach_kind(ty: &Type) -> AttachKind {
 /// argument convention.
 fn is_string_type(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.is_ident("String"))
+}
+
+/// `ty`'s last path segment, ignoring any qualified-self (`<T as Trait>::X`) form — `#[prop]`
+/// types are always plain paths (`crate::graphics::Brush`, `Option<T>`, ...), never that.
+fn last_type_segment(ty: &Type) -> Option<&syn::PathSegment> {
+    match ty {
+        Type::Path(p) if p.qself.is_none() => p.path.segments.last(),
+        _ => None,
+    }
+}
+
+/// If `ty` is `Option<Inner>`, `Inner`'s own type; otherwise `None`.
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let seg = last_type_segment(ty)?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+/// Whether `ty`'s last path segment is literally `name` — a coarse, name-only check (not a real
+/// path comparison), matching a `#[prop]` type regardless of which of its several equivalent
+/// spellings a builtin happens to use (`crate::graphics::Brush` from within `elwindui-core`,
+/// `elwindui::core::graphics::Brush` from a consumer, or a future bare `Brush` behind a `use`).
+fn is_named(ty: &Type, name: &str) -> bool {
+    last_type_segment(ty).is_some_and(|s| s.ident == name)
+}
+
+/// How a `#[prop]`'s DSL-authored value must be transformed before it reaches the real setter —
+/// decided once, here, from the property's own declared `Type` (known at `#[class]` macro-expansion
+/// time, i.e. once per *declaration*), instead of by `elwindui-codegen` once per *use site* (which,
+/// once a builtin's shape lives only here, no longer has this type information available at all).
+///
+/// - `String` — real hand-written-native/virtual-builtin setters take `&str` by convention; `&(..)`
+///   derefs an owned `String` down to it, and is a harmless reborrow when the value is already a
+///   `&str` literal.
+/// - `Brush`/`Color`, bare or `Option`-wrapped — `.into()` lets a hex-string DSL literal
+///   (`fill: "#3a3a3c"`) reach the setter via `Color`/`Brush`'s own `From<&str>` (elwindui-core),
+///   and is a no-op (std's reflexive `From<T> for T`) when the value already is the target type.
+///   `Option`-wrapped targets additionally need `Some(..)` — the DSL convention (matching
+///   `elwindui-codegen`'s pre-existing `foreground`/`background` special-casing) is that a DSL
+///   author always writes the *inner* value, never `Option` themselves.
+/// - anything else (`dyn UIElementExt`-typed content/attached values included) — passed through
+///   unchanged. A concrete `Rc<Concrete: UIElementExt>` value coerces to `Rc<dyn UIElementExt>`
+///   automatically at this call-argument position (ordinary Rust unsized coercion), so no explicit
+///   conversion is needed here, unlike `elwindui-codegen`'s own `into_node_if_needed`.
+fn wrap_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
+    if is_string_type(ty) {
+        return quote! { &(#value) };
+    }
+    let (target, wrap_in_some) = match option_inner(ty) {
+        Some(inner) => (inner, true),
+        None => (ty, false),
+    };
+    if is_named(target, "Brush") || is_named(target, "Color") {
+        let converted = quote! { (#value).into() };
+        return if wrap_in_some {
+            quote! { Some(#converted) }
+        } else {
+            converted
+        };
+    }
+    value
 }
 
 fn build_inherit_macros(

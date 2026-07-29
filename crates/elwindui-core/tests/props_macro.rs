@@ -159,3 +159,62 @@ fn children_of_a_vec_property_are_set_in_bulk() {
     elwindui_core::__elwindui_props_TabView!(@children tabs, ["one", "two", "three"]);
     assert_eq!(*tabs.children.borrow(), vec!["one", "two", "three"]);
 }
+
+// --- `@routed`: registering a #[routed] callback instead of assigning it ------------------------
+//
+// `register_routed_handler` is a default `UIElementExt` method (`self.as_ui_element()...`), so it
+// needs a *real* `UIElementExt` implementor to call against — a stand-in struct would have to
+// reimplement the whole trait. `VerticalLayout` is a genuine, already-existing one; which concrete
+// type it is doesn't matter here, only that it implements `UIElementExt`.
+
+#[test]
+fn routed_registers_a_zero_parameter_callback_declared_on_the_target_itself() {
+    use elwindui_core::ui::UIElementExt;
+    let widget = elwindui_core::ui::VerticalLayout::new();
+    let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+    let fired2 = fired.clone();
+    // `Button.on_click: fn()` -- declared directly on Button, zero parameters.
+    elwindui_core::__elwindui_props_Button!(
+        @routed widget, on_click,
+        Box::new(move |_payload, _args: &elwindui_core::input::RoutedEventArgs| {
+            fired2.set(true);
+        })
+    );
+    let node: std::rc::Rc<dyn UIElementExt> = widget.clone();
+    elwindui_core::ui::dispatch_routed(
+        &node,
+        "on_click",
+        &(),
+        &elwindui_core::input::RoutedEventArgs::default(),
+    );
+    assert!(fired.get());
+}
+
+#[test]
+fn routed_forwards_a_one_parameter_callback_declared_two_hops_up() {
+    use elwindui_core::ui::UIElementExt;
+    let widget = elwindui_core::ui::VerticalLayout::new();
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let seen2 = seen.clone();
+    // `on_key_down: fn(KeyEventArgs)` is declared on `UIElement`, two hops above `Button`
+    // (`Button` -> `NativeControl` -> `UIElement`) -- not on `Button` itself.
+    elwindui_core::__elwindui_props_Button!(
+        @routed widget, on_key_down,
+        Box::new(move |payload, _args: &elwindui_core::input::RoutedEventArgs| {
+            *seen2.borrow_mut() = Some(*payload);
+        })
+    );
+    let args = elwindui_core::input::KeyEventArgs {
+        key: elwindui_core::input::Key::Enter,
+        modifiers: elwindui_core::input::KeyModifiers::default(),
+        is_repeat: false,
+    };
+    let node: std::rc::Rc<dyn UIElementExt> = widget.clone();
+    elwindui_core::ui::dispatch_routed(
+        &node,
+        "on_key_down",
+        &args,
+        &elwindui_core::input::RoutedEventArgs::default(),
+    );
+    assert_eq!(*seen.borrow(), Some(args));
+}

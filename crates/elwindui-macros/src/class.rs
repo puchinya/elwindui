@@ -1128,6 +1128,31 @@ fn build_props_macro(
         })
         .collect();
 
+    // `@routed` registers a `#[routed]` callback (`dispatch_routed`-style bubbling) instead of
+    // assigning it — the same two-hop entry/forward shape as `@set`, but dispatching to
+    // `UIElementExt::register_routed_handler::<Payload>(name, handler)` instead of a setter. The
+    // payload type comes from the property's own declared `fn(..)`/`fn()` signature, known here at
+    // declaration time — `elwindui-codegen` no longer needs to derive it from a use site's resolved
+    // `TypeInfo`. `$value` is expected to already be a fully-built `Box<dyn Fn(&Payload,
+    // &RoutedEventArgs)>`; its inner closure may leave `Payload` unannotated and let this call's own
+    // turbofish infer it (verified: rustc resolves an untyped closure parameter through a generic
+    // function's explicit turbofish even across a `Box<dyn Fn>` coercion).
+    let routed_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| p.routed)
+        .map(|p| {
+            let name = &p.name;
+            let name_str = name.to_string();
+            let payload_ty = routed_payload_type(&p.ty);
+            quote! {
+                (@routed_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                    $recv.register_routed_handler::<#payload_ty>(#name_str, $value);
+                };
+            }
+        })
+        .collect();
+
     // One arm per declared property — *every* property, not just the `@set`-able ones: a name
     // collision is a collision whether the ancestor's version is a setter, a routed callback, or an
     // attached property.
@@ -1217,85 +1242,104 @@ fn build_props_macro(
         })
         .collect();
 
-    let (fallback, assert_fallback, declared_fallback, children_fallback) = match parent {
-        Some((parent_bare, parent_ty)) => {
-            let parent_macro =
-                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
-            (
+    let (fallback, routed_fallback, assert_fallback, declared_fallback, children_fallback) =
+        match parent {
+            Some((parent_bare, parent_ty)) => {
+                let parent_macro = inherit_macro_self_ref_path(
+                    parent_bare,
+                    parent_ty,
+                    props_macro_ident(parent_bare),
+                );
+                (
+                    quote! {
+                        (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                            #parent_macro!(@set_from $origin, $recv, $name, $value);
+                        };
+                    },
+                    quote! {
+                        (@routed_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                            #parent_macro!(@routed_from $origin, $recv, $name, $value);
+                        };
+                    },
+                    quote! {
+                        (@assert_undeclared $origin:ident, $name:ident) => {
+                            #parent_macro!(@assert_undeclared $origin, $name);
+                        };
+                    },
+                    quote! {
+                        (@assert_declared $origin:ident, $name:ident) => {
+                            #parent_macro!(@assert_declared $origin, $name);
+                        };
+                    },
+                    quote! {
+                        (@children $recv:expr, [$($child:expr),* $(,)?]) => {
+                            #parent_macro!(@children $recv, [$($child),*]);
+                        };
+                        (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
+                            #parent_macro!(@children_into $origin, $name, $recv, [$($child),*]);
+                        };
+                    },
+                )
+            }
+            None => (
                 quote! {
                     (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
-                        #parent_macro!(@set_from $origin, $recv, $name, $value);
+                        compile_error!(concat!(
+                            "`",
+                            stringify!($origin),
+                            "` (or any of its ancestors) has no such property: ",
+                            stringify!($name)
+                        ));
                     };
                 },
                 quote! {
-                    (@assert_undeclared $origin:ident, $name:ident) => {
-                        #parent_macro!(@assert_undeclared $origin, $name);
+                    (@routed_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                        compile_error!(concat!(
+                            "`",
+                            stringify!($origin),
+                            "` (or any of its ancestors) has no such #[routed] event: ",
+                            stringify!($name)
+                        ));
                     };
+                },
+                // Reached the top of the chain without a collision: the name is free.
+                quote! {
+                    (@assert_undeclared $origin:ident, $name:ident) => {};
                 },
                 quote! {
                     (@assert_declared $origin:ident, $name:ident) => {
-                        #parent_macro!(@assert_declared $origin, $name);
+                        compile_error!(concat!(
+                            "#[prop(content, ",
+                            stringify!($name),
+                            ")] on `",
+                            stringify!($origin),
+                            "`: neither it nor any ancestor declares a `",
+                            stringify!($name),
+                            "` property"
+                        ));
                     };
                 },
                 quote! {
                     (@children $recv:expr, [$($child:expr),* $(,)?]) => {
-                        #parent_macro!(@children $recv, [$($child),*]);
+                        compile_error!(
+                            "this element takes no nested child elements — no `#[content(..)]` is \
+                             declared on it or any ancestor"
+                        );
                     };
                     (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
-                        #parent_macro!(@children_into $origin, $name, $recv, [$($child),*]);
+                        compile_error!(concat!(
+                            "#[content(",
+                            stringify!($name),
+                            ")] on `",
+                            stringify!($origin),
+                            "`: neither it nor any ancestor declares a `",
+                            stringify!($name),
+                            "` property"
+                        ));
                     };
                 },
-            )
-        }
-        None => (
-            quote! {
-                (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
-                    compile_error!(concat!(
-                        "`",
-                        stringify!($origin),
-                        "` (or any of its ancestors) has no such property: ",
-                        stringify!($name)
-                    ));
-                };
-            },
-            // Reached the top of the chain without a collision: the name is free.
-            quote! {
-                (@assert_undeclared $origin:ident, $name:ident) => {};
-            },
-            quote! {
-                (@assert_declared $origin:ident, $name:ident) => {
-                    compile_error!(concat!(
-                        "#[prop(content, ",
-                        stringify!($name),
-                        ")] on `",
-                        stringify!($origin),
-                        "`: neither it nor any ancestor declares a `",
-                        stringify!($name),
-                        "` property"
-                    ));
-                };
-            },
-            quote! {
-                (@children $recv:expr, [$($child:expr),* $(,)?]) => {
-                    compile_error!(
-                        "this element takes no nested child elements — no `#[content(..)]` is \
-                         declared on it or any ancestor"
-                    );
-                };
-                (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
-                    compile_error!(concat!(
-                        "#[content(",
-                        stringify!($name),
-                        ")] on `",
-                        stringify!($origin),
-                        "`: neither it nor any ancestor declares a `",
-                        stringify!($name),
-                        "` property"
-                    ));
-                };
-            },
-        ),
-    };
+            ),
+        };
 
     // The probes themselves, emitted in item position next to the class.
     let mut probes: Vec<TokenStream2> = Vec::new();
@@ -1325,6 +1369,11 @@ fn build_props_macro(
             };
             #(#set_arms)*
             #fallback
+            (@routed $recv:expr, $name:ident, $value:expr) => {
+                $crate::#macro_ident!(@routed_from #bare_ident, $recv, $name, $value);
+            };
+            #(#routed_arms)*
+            #routed_fallback
             #(#assert_arms)*
             #assert_fallback
             #(#declared_arms)*
@@ -1334,6 +1383,33 @@ fn build_props_macro(
             #children_fallback
         }
         #(#probes)*
+    }
+}
+
+/// A `#[prop(routed, on_x: fn(T0, ...))]`'s payload type — mirrors
+/// `elwindui_codegen::codegen::callback_param_types`, operating directly on the already-parsed
+/// `syn::Type` this macro has instead of a re-parsed type string. `fn()` (no parameters) has payload
+/// `()`, matching `register_routed_handler::<()>`'s existing zero-parameter convention
+/// (`elwindui_codegen::codegen::emit_generic_on_click_routing`). Only 0-or-1 parameters are
+/// supported today, the same limit `emit_routed_registration` already enforces.
+///
+/// `rewrite_crate_segment` matters here in a way it doesn't for `wrap_prop_value`: this type is
+/// spliced as an explicit turbofish (`register_routed_handler::<#payload_ty>`) into the *generated*
+/// `@routed_from` arm, so it must resolve from whichever crate eventually invokes that arm — e.g.
+/// `crate::input::KeyEventArgs` (as spelled in `UIElement`'s own `#[prop]` declaration, resolving
+/// against `elwindui-core`) needs `$crate::` once embedded here. `wrap_prop_value`'s conversions
+/// never have this problem: `.into()` needs no explicit target-type annotation of its own — Rust
+/// infers it from the real setter's own parameter type at the call site.
+fn routed_payload_type(ty: &Type) -> TokenStream2 {
+    let Type::BareFn(f) = ty else {
+        return quote! { () };
+    };
+    match f.inputs.len() {
+        1 => {
+            let arg_ty = &f.inputs[0].ty;
+            rewrite_crate_segment(quote! { #arg_ty })
+        }
+        _ => quote! { () },
     }
 }
 

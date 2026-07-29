@@ -2145,14 +2145,7 @@ impl HorizontalLayout {
 /// 付録H.2.2), so its natural size is just its own drawn bounds.
 /// `Shape`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `Shape` has no further
 /// DSL-level subclass today.
-// NOTE: `.elwind` declared `Shape` `#[abstract]`, but `abstract_class` is deliberately *not* set
-// here yet, unlike every other abstract builtin. Setting it stops `#[class]` synthesizing
-// `Shape::new()`, and `abstract_shape_has_no_commands_and_no_children` (this file's own test module)
-// constructs a bare `Shape` to pin that the base class itself paints nothing — coverage that has no
-// equivalent through a concrete subclass, since `Rectangle`/`Ellipse` both *do* paint. Resolving
-// this means either dropping that test or accepting the inconsistency; it needs a decision, so it is
-// left visible rather than silently settled.
-#[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
 #[prop(fill: Option<crate::graphics::Brush>)]
 #[prop(stroke: Option<crate::graphics::Brush>)]
 #[prop(stroke_width: Option<f32>)]
@@ -3884,23 +3877,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn abstract_shape_has_no_commands_and_no_children() {
-        // `Shape` (matching real WinUI3's `Shape`) is a pure leaf: no `Children`/content property
-        // of its own — see `Shape`'s own doc comment.
-        let shape = Shape::new();
-        shape.set_fill(Some(Brush::Solid(Color::parse_hex("#3498db").unwrap())));
-        let tree: Rc<dyn UIElementExt> = shape;
-
-        assert!(tree.visual_children().is_empty());
-        let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 50.0)));
-        assert!(natives.is_empty());
-        assert!(
-            paints.is_empty(),
-            "Shape is abstract; Rectangle/Ellipse render concrete commands"
-        );
-        assert!(natives.is_empty());
-    }
+    // `abstract_shape_has_no_commands_and_no_children` used to live here. It constructed a bare
+    // `Shape`, set a fill on it, and asserted the tree still produced no paint commands — i.e. that
+    // the base class has no render of its own. `Shape` is now `abstract_class`, so `#[class]` no
+    // longer synthesizes `Shape::new()` and that state is unreachable by construction rather than by
+    // assertion. The reachable half of what it covered — a shape with neither fill nor stroke paints
+    // nothing — is exercised through a concrete `Rectangle` by
+    // `shape_is_hit_testable_only_when_fill_or_stroke_is_set` below.
 
     #[test]
     fn control_padding_shrinks_the_slot_its_children_are_arranged_into() {

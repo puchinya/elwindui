@@ -218,3 +218,23 @@ fn routed_forwards_a_one_parameter_callback_declared_two_hops_up() {
     );
     assert_eq!(*seen.borrow(), Some(args));
 }
+
+// --- `@attached_set`: `Owner::field: value` attached properties ---------------------------------
+//
+// Unlike `@set`/`@routed`/`@children`, no ancestor chain to walk: the DSL syntax always names the
+// owning class explicitly (`Grid::row`), so `elwindui-codegen` calls straight into `Grid`'s own
+// props macro.
+
+#[test]
+fn attached_set_stores_a_value_readable_back_through_get_attached() {
+    use elwindui_core::ui::UIElementExt;
+    let widget = elwindui_core::ui::VerticalLayout::new();
+    // `Grid::row: i32` -- the turbofish on `set_attached::<i32>` comes from `#[prop(attached, row:
+    // i32 = 0)]`'s own declared type, not anything elwindui-codegen still knows.
+    elwindui_core::__elwindui_props_Grid!(@attached_set row, widget, 2);
+    assert_eq!(
+        widget.as_ui_element().get_attached::<i32>("Grid", "row", 0),
+        2
+    );
+}
+

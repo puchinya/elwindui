@@ -1153,6 +1153,43 @@ fn build_props_macro(
         })
         .collect();
 
+    // `@attached_set` needs no forwarding chain, unlike `@set`/`@routed`/`@children`: the DSL's
+    // `Owner::field: value` syntax always names its owning class explicitly (`Grid::row`, never
+    // inherited/shadowed), so `elwindui-codegen` calls straight into `Owner`'s own props macro — no
+    // ambiguity to resolve by walking ancestors. The turbofish on `set_attached::<T>` is exactly why
+    // this needs to be a macro at all: `T` is `#[prop(attached, ..)]`'s own declared type, known
+    // here and nowhere `elwindui-codegen` can still see once a builtin's shape lives only here.
+    let attached_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| p.attached)
+        .map(|p| {
+            let name = &p.name;
+            let name_str = name.to_string();
+            // Same reasoning as `routed_payload_type`: this type is spliced as an explicit
+            // turbofish into generated code that may be invoked from any crate, so a leading
+            // `crate::` in how the attached type was spelled needs `$crate::` here.
+            let prop_ty = &p.ty;
+            let ty = rewrite_crate_segment(quote! { #prop_ty });
+            quote! {
+                (@attached_set #name, $binding:expr, $value:expr) => {
+                    $binding.as_ui_element().set_attached::<#ty>(#bare_name, #name_str, $value);
+                };
+            }
+        })
+        .collect();
+    let attached_fallback = quote! {
+        (@attached_set $name:ident, $binding:expr, $value:expr) => {
+            compile_error!(concat!(
+                "`",
+                #bare_name,
+                "` has no `#[attached]` property named `",
+                stringify!($name),
+                "`"
+            ));
+        };
+    };
+
     // One arm per declared property — *every* property, not just the `@set`-able ones: a name
     // collision is a collision whether the ancestor's version is a setter, a routed callback, or an
     // attached property.
@@ -1374,6 +1411,8 @@ fn build_props_macro(
             };
             #(#routed_arms)*
             #routed_fallback
+            #(#attached_arms)*
+            #attached_fallback
             #(#assert_arms)*
             #assert_fallback
             #(#declared_arms)*

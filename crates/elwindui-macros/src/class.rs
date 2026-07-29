@@ -759,6 +759,140 @@ fn sealed_check_ident(bare_name: &str) -> Ident {
     format_ident!("__elwindui_check_not_sealed_{}", bare_name)
 }
 
+/// `Button` -> `__elwindui_shape_Button`: the DSL-shape muncher this class declares for its own
+/// `#[dsl_prop(..)]` properties — the shape-layer counterpart to `inherit_macro_ident`'s
+/// hierarchy-layer trio. See `build_shape_macro`.
+fn shape_macro_ident(bare_name: &str) -> Ident {
+    format_ident!("__elwindui_shape_{}", bare_name)
+}
+
+/// One `#[dsl_prop(..)]` declaration: the DSL-visible surface of a builtin, declared right on the
+/// `#[class]` item that actually implements it rather than in a separate shape table.
+///
+/// Accepted forms (each argument before the final `name: Type` is a flag):
+/// - `#[dsl_prop(text: String)]` — a plain settable property
+/// - `#[dsl_prop(routed, on_click: fn())]` — a `#[routed]` callback (bubbles via `dispatch_routed`)
+/// - `#[dsl_prop(onetime, left: Option<f32>)]` — applied once at construction, never re-pushed by
+///   a later resync (`Window`'s geometry — the window manager owns the live value)
+/// - `#[dsl_prop(two_way, text: String)]` — opts into automatic two-way wiring
+struct DslProp {
+    name: Ident,
+    ty: Type,
+    routed: bool,
+    // `onetime`/`two_way` are accepted and recorded here so a builtin's declaration can already be
+    // written in full, but the layers that consume them (`emit_resync`'s onetime skip, `emit_wiring`'s
+    // two-way rule) still read them from `elwindui-codegen`'s own shape table and haven't moved to
+    // this macro yet — see `build_shape_macro`.
+    #[allow(dead_code)]
+    onetime: bool,
+    #[allow(dead_code)]
+    two_way: bool,
+}
+
+impl Parse for DslProp {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut routed = false;
+        let mut onetime = false;
+        let mut two_way = false;
+        // Flags come first and are all bare idents; the property itself is the one `name: Type`
+        // pair, so "an ident *not* followed by `:`" is unambiguously a flag.
+        loop {
+            let ident: Ident = input.parse()?;
+            if input.peek(Token![:]) {
+                input.parse::<Token![:]>()?;
+                let ty: Type = input.parse()?;
+                return Ok(DslProp {
+                    name: ident,
+                    ty,
+                    routed,
+                    onetime,
+                    two_way,
+                });
+            }
+            match ident.to_string().as_str() {
+                "routed" => routed = true,
+                "onetime" => onetime = true,
+                "two_way" => two_way = true,
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!(
+                            "#[dsl_prop]: unknown flag `{other}` — expected `routed`, `onetime`, \
+                             `two_way`, or a `name: Type` property declaration"
+                        ),
+                    ));
+                }
+            }
+            input.parse::<Token![,]>()?;
+        }
+    }
+}
+
+/// Everything `#[dsl(..)]`/`#[dsl_prop(..)]` declared on one `#[class]` item, plus the leftover
+/// attributes that must still be re-emitted onto the generated item.
+#[derive(Default)]
+struct DslShape {
+    props: Vec<DslProp>,
+    /// `#[dsl(content = field_name)]` — which property receives bare nested children.
+    content_field: Option<Ident>,
+    embedded: bool,
+    sealed: bool,
+    native: bool,
+    text_style: bool,
+    abstract_: bool,
+}
+
+impl DslShape {
+    fn is_declared(&self) -> bool {
+        !self.props.is_empty()
+            || self.content_field.is_some()
+            || self.embedded
+            || self.sealed
+            || self.native
+            || self.text_style
+            || self.abstract_
+    }
+}
+
+/// Splits `#[dsl(..)]`/`#[dsl_prop(..)]` out of an item's attribute list. Both are inert markers
+/// consumed entirely here — they must never survive into the generated item, since neither is a real
+/// registered attribute anywhere.
+fn take_dsl_shape(attrs: &[syn::Attribute]) -> syn::Result<(DslShape, Vec<syn::Attribute>)> {
+    let mut shape = DslShape::default();
+    let mut rest = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("dsl_prop") {
+            shape.props.push(attr.parse_args::<DslProp>()?);
+        } else if attr.path().is_ident("dsl") {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("content") {
+                    let value = meta.value()?;
+                    shape.content_field = Some(value.parse()?);
+                } else if meta.path.is_ident("embedded") {
+                    shape.embedded = true;
+                } else if meta.path.is_ident("sealed") {
+                    shape.sealed = true;
+                } else if meta.path.is_ident("native") {
+                    shape.native = true;
+                } else if meta.path.is_ident("text_style") {
+                    shape.text_style = true;
+                } else if meta.path.is_ident("abstract_") {
+                    shape.abstract_ = true;
+                } else {
+                    return Err(meta.error(
+                        "#[dsl]: expected `embedded`, `sealed`, `native`, `text_style`, \
+                         `abstract_`, or `content = field_name`",
+                    ));
+                }
+                Ok(())
+            })?;
+        } else {
+            rest.push(attr.clone());
+        }
+    }
+    Ok((shape, rest))
+}
+
 /// Builds the `fn #dyn_ident(&self) -> &dyn #ext_ty;` (no default) plus one default method per `sig`
 /// — shared by `expand_trait_only` and `expand_impl`'s ordinary-class branch, the two places that
 /// declare a *new* `{Name}Ext` trait (`struct_only` never does; root mode has its own pre-existing,
@@ -852,6 +986,109 @@ fn build_dyn_default_methods(
 /// skipped, exactly mirroring the old (pre-unification) behavior where an unrelated, always-
 /// unconditional blind forward to `UIElementExt` meant a `no_ancestor_forward` hop never blocked
 /// anything beyond itself.
+/// Builds `__elwindui_shape_{bare_name}!` — the DSL **shape** layer's counterpart to
+/// `build_inherit_macros`'s hierarchy layer, and the reason a builtin no longer needs a separate
+/// entry in a compiler-side shape table.
+///
+/// The problem it solves: `#[elwindui::component]` expands in the *consumer's* crate, and a
+/// proc-macro can never read another crate's macro-expansion results (separate compilation units).
+/// So a builtin declared in `elwindui-core` cannot hand its DSL surface to the consumer's
+/// `#[component]` expansion directly. The same deferred, token-level composition
+/// `__elwindui_inherit_*!` already uses for the class hierarchy works here too: the *generated code*
+/// invokes this macro, and rustc expands it later, in the consumer's crate, against the definition
+/// that lives here.
+///
+/// Shape:
+/// - `(@set $recv, $name, $value)` — the entry callers use. It only seeds `$origin` (this class's
+///   own name) and hands off to `@set_from`.
+/// - `(@set_from $origin, $recv, <prop>, $value)` — one arm per declared `#[dsl_prop]`, expanding to
+///   that property's real setter call.
+/// - `(@set_from $origin, $recv, $name:ident, $value)` — the catch-all, forwarding anything this
+///   class doesn't declare to its own ancestor's shape macro, `$origin` unchanged. Same "forward
+///   what isn't mine up the chain" muncher shape `build_inherit_macros`'s `classify` uses for
+///   `#[overrides]`.
+/// - at the end of the chain (a class with no `inherits`) that catch-all becomes a `compile_error!`
+///   instead. It reports `$origin` — the type the *use site* actually named — not this terminal
+///   class, which the user may never have heard of (`Button { titel: .. }` must blame `Button`, not
+///   `UIElement`).
+///
+/// Setter calls are emitted in *method* syntax (`$recv.set_text(..)`) rather than a fully-qualified
+/// trait path: the `{Name}Ext` trait's own module path isn't knowable from inside this macro, and
+/// the generated view code already brings the right `..Ext` traits into scope at the call site.
+fn build_shape_macro(
+    bare_name: &str,
+    shape: &DslShape,
+    parent: Option<(&str, &Type)>,
+) -> TokenStream2 {
+    let macro_ident = shape_macro_ident(bare_name);
+    let bare_ident = format_ident!("{bare_name}");
+
+    let set_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| !p.routed)
+        .map(|p| {
+            let name = &p.name;
+            let setter = format_ident!("set_{}", name);
+            // A `String`-shaped property's real setter takes `&str` by convention (see
+            // `elwindui_codegen::codegen::emit_construction`'s own `&(..)`-wrapping) — everything
+            // else is passed by value. `Option<T>` describes optionality *at the use site*, not the
+            // setter's own argument, so it passes the inner value through unchanged.
+            let value = if is_string_type(&p.ty) {
+                quote! { &($value) }
+            } else {
+                quote! { $value }
+            };
+            quote! {
+                (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                    $recv.#setter(#value);
+                };
+            }
+        })
+        .collect();
+
+    let fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, shape_macro_ident(parent_bare));
+            quote! {
+                (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                    #parent_macro!(@set_from $origin, $recv, $name, $value);
+                };
+            }
+        }
+        None => quote! {
+            (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                compile_error!(concat!(
+                    "`",
+                    stringify!($origin),
+                    "` (or any of its ancestors) has no such property: ",
+                    stringify!($name)
+                ));
+            };
+        },
+    };
+
+    quote! {
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #macro_ident {
+            (@set $recv:expr, $name:ident, $value:expr) => {
+                $crate::#macro_ident!(@set_from #bare_ident, $recv, $name, $value);
+            };
+            #(#set_arms)*
+            #fallback
+        }
+    }
+}
+
+/// Whether a `#[dsl_prop]`'s declared type is exactly `String` — see `build_shape_macro`'s setter
+/// argument convention.
+fn is_string_type(ty: &Type) -> bool {
+    matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.is_ident("String"))
+}
+
 fn build_inherit_macros(
     bare_name: &str,
     dyn_ident: &Ident,
@@ -1166,7 +1403,14 @@ fn core_path() -> TokenStream2 {
 fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     let class_name = &item.ident;
     let vis = &item.vis;
-    let attrs = &item.attrs;
+    // Same inert-marker split `expand_trait_only` does — a builtin whose real implementation is an
+    // ordinary `struct` in this crate (`UIElement`/`Layout`/`Grid`/...) declares its DSL surface
+    // here rather than on a `trait_only` interface. See `build_shape_macro`.
+    let (dsl_shape, attrs) = match take_dsl_shape(&item.attrs) {
+        Ok(split) => split,
+        Err(e) => return e.to_compile_error(),
+    };
+    let attrs = &attrs;
     let generics = &item.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -1197,6 +1441,18 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     // dependency of its own — it always succeeds from its own single invocation's args alone,
     // regardless of rust-analyzer's expansion order, so nothing extra is needed to make this part
     // reliable.
+    let shape_macro = dsl_shape.is_declared().then(|| {
+        let parent = args
+            .inherits
+            .as_ref()
+            .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
+        build_shape_macro(
+            &class_name.to_string(),
+            &dsl_shape,
+            parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
+        )
+    });
+
     let deref_shadow = args.inherits.as_ref().map(|ty| {
         quote! {
             #[cfg(rust_analyzer)]
@@ -1215,6 +1471,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
             #(#existing_fields,)*
         }
         #deref_shadow
+        #shape_macro
     }
 }
 
@@ -1237,7 +1494,13 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     let bare_name = class_name.to_string();
     let ext_name = to_ext_ident(&bare_name, class_name.span());
     let vis = &item.vis;
-    let attrs = &item.attrs;
+    // `#[dsl(..)]`/`#[dsl_prop(..)]` are inert markers consumed here — they declare this builtin's
+    // DSL surface (see `build_shape_macro`) and must not survive onto the generated trait.
+    let (dsl_shape, attrs) = match take_dsl_shape(&item.attrs) {
+        Ok(split) => split,
+        Err(e) => return e.to_compile_error(),
+    };
+    let attrs = &attrs;
     let generics = &item.generics;
     let where_clause = &item.generics.where_clause;
     let items = &item.items;
@@ -1286,11 +1549,29 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     // here beyond that.
     let _ = owns_inherit_macros;
 
+    // The shape layer *is* generated for `trait_only` (unlike the inherit trio above): the
+    // backend-agnostic DSL surface of every native leaf is declared here in `elwindui-core`, and
+    // each backend's own `struct_only` implementor deliberately declares none — so there is exactly
+    // one `__elwindui_shape_{Name}!` per builtin workspace-wide, with no cross-crate bare-name
+    // collision for `#[macro_export]` to trip over.
+    let shape_macro = dsl_shape.is_declared().then(|| {
+        let parent = args
+            .inherits
+            .as_ref()
+            .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
+        build_shape_macro(
+            &bare_name,
+            &dsl_shape,
+            parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
+        )
+    });
+
     quote! {
         #(#attrs)*
         #vis trait #ext_name #generics #colon_bound #where_clause {
             #(#dyn_methods)*
         }
+        #shape_macro
     }
 }
 

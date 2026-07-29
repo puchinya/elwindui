@@ -119,7 +119,40 @@ pub trait FocusHost {
 /// other `#[class(inherits = ..)]`-managed subclass inherits all of them for free via Rust's own
 /// default-method dispatch — only `base` (synthesized by the macro; its concrete location differs
 /// per implementor) is a genuinely required method.
+///
+/// The `#[dsl_prop(..)]` lines are this class's DSL-visible surface — the properties every element,
+/// builtin or user-defined, picks up for free. They terminate the `__elwindui_shape_*!` forwarding
+/// chain: a property no descendant declares ends up here, and anything this class doesn't declare
+/// either becomes a `compile_error!` naming it (see `build_shape_macro`).
 #[elwindui_macros::class]
+#[dsl(embedded, abstract_)]
+#[dsl_prop(margin: Option<f32>)]
+#[dsl_prop(horizontal_alignment: Option<crate::layout::HorizontalAlignment>)]
+#[dsl_prop(vertical_alignment: Option<crate::layout::VerticalAlignment>)]
+#[dsl_prop(visibility: Option<crate::layout::Visibility>)]
+#[dsl_prop(width: Option<f32>)]
+#[dsl_prop(height: Option<f32>)]
+#[dsl_prop(min_width: Option<f32>)]
+#[dsl_prop(min_height: Option<f32>)]
+#[dsl_prop(max_width: Option<f32>)]
+#[dsl_prop(max_height: Option<f32>)]
+#[dsl_prop(hit_test_visible: Option<bool>)]
+#[dsl_prop(tab_stop: Option<bool>)]
+#[dsl_prop(focus_order: Option<i32>)]
+#[dsl_prop(routed, on_key_down: fn(crate::input::KeyEventArgs))]
+#[dsl_prop(routed, on_key_up: fn(crate::input::KeyEventArgs))]
+#[dsl_prop(routed, on_text_input: fn(crate::input::TextInputEventArgs))]
+#[dsl_prop(routed, on_got_focus: fn())]
+#[dsl_prop(routed, on_lost_focus: fn())]
+#[dsl_prop(routed, on_pointer_pressed: fn(crate::input::PointerEventArgs))]
+#[dsl_prop(routed, on_pointer_released: fn(crate::input::PointerEventArgs))]
+#[dsl_prop(routed, on_pointer_moved: fn(crate::input::PointerEventArgs))]
+#[dsl_prop(routed, on_pointer_entered: fn(crate::input::PointerEventArgs))]
+#[dsl_prop(routed, on_pointer_exited: fn(crate::input::PointerEventArgs))]
+#[dsl_prop(routed, on_pointer_wheel_changed: fn(crate::input::PointerWheelEventArgs))]
+#[dsl_prop(routed, on_tapped: fn(crate::input::TappedEventArgs))]
+#[dsl_prop(routed, on_double_tapped: fn(crate::input::TappedEventArgs))]
+#[dsl_prop(routed, on_right_tapped: fn(crate::input::TappedEventArgs))]
 pub struct UIElement {
     /// Stable identity of this Visual's retained RenderGroup. Never reused within a process.
     pub render_group_id: u64,
@@ -1381,6 +1414,8 @@ impl ListExt<dyn UIElementExt> for UIElementCollection {
 /// `try_as_native_control()` result directly to `H` (see that trait method's own doc comment) — no
 /// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement)]
+#[dsl(embedded, abstract_)]
+#[dsl_prop(background: Option<crate::graphics::Brush>)]
 pub trait NativeControl {
     /// Sets an explicit native-control background.
     fn set_background(&self, background: Brush);
@@ -1416,7 +1451,15 @@ pub trait TextArea {
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
 }
 
+/// `builtin::Button`. The `#[dsl(..)]`/`#[dsl_prop(..)]` lines below are this builtin's DSL-visible
+/// surface, declared here on the interface itself rather than duplicated in a separate compiler-side
+/// shape table — `#[class]` turns them into `__elwindui_shape_Button!`, which the generated view
+/// code invokes (see `build_shape_macro` for why the shape has to reach consumers as a macro).
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[dsl(embedded, sealed)]
+#[dsl_prop(text: String)]
+#[dsl_prop(enabled: Option<bool>)]
+#[dsl_prop(routed, on_click: fn())]
 pub trait Button {
     fn set_enabled(&self, enabled: bool);
     fn set_on_click(&self, callback: Box<dyn Fn()>);

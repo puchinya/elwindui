@@ -775,10 +775,16 @@ fn shape_macro_ident(bare_name: &str) -> Ident {
 /// - `#[dsl_prop(onetime, left: Option<f32>)]` — applied once at construction, never re-pushed by
 ///   a later resync (`Window`'s geometry — the window manager owns the live value)
 /// - `#[dsl_prop(two_way, text: String)]` — opts into automatic two-way wiring
+/// - `#[dsl_prop(attached, row: i32 = 0)]` — an attached property (`Grid::row`), which a *child*
+///   element sets on itself to address its parent. Always needs a default value.
 struct DslProp {
     name: Ident,
     ty: Type,
     routed: bool,
+    attached: bool,
+    /// `= expr` — required for `attached`, rejected otherwise (see `Parse`).
+    #[allow(dead_code)]
+    default: Option<syn::Expr>,
     // `onetime`/`two_way` are accepted and recorded here so a builtin's declaration can already be
     // written in full, but the layers that consume them (`emit_resync`'s onetime skip, `emit_wiring`'s
     // two-way rule) still read them from `elwindui-codegen`'s own shape table and haven't moved to
@@ -794,6 +800,7 @@ impl Parse for DslProp {
         let mut routed = false;
         let mut onetime = false;
         let mut two_way = false;
+        let mut attached = false;
         // Flags come first and are all bare idents; the property itself is the one `name: Type`
         // pair, so "an ident *not* followed by `:`" is unambiguously a flag.
         loop {
@@ -801,10 +808,40 @@ impl Parse for DslProp {
             if input.peek(Token![:]) {
                 input.parse::<Token![:]>()?;
                 let ty: Type = input.parse()?;
+                let default = if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    Some(input.parse::<syn::Expr>()?)
+                } else {
+                    None
+                };
+                // Mirrors `validate.rs`'s `rejects_attached_field_without_default_value`: an
+                // attached property is read off any child that never mentions it, so it has nothing
+                // to fall back on but its declared default.
+                if attached && default.is_none() {
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!(
+                            "#[dsl_prop]: attached property `{ident}` needs a default value \
+                             (e.g. `attached, {ident}: i32 = 0`)"
+                        ),
+                    ));
+                }
+                if !attached && default.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!(
+                            "#[dsl_prop]: `{ident}` is not `attached`, so it cannot declare a \
+                             default value — an ordinary property's default comes from the type's \
+                             own constructor"
+                        ),
+                    ));
+                }
                 return Ok(DslProp {
                     name: ident,
                     ty,
                     routed,
+                    attached,
+                    default,
                     onetime,
                     two_way,
                 });
@@ -813,12 +850,13 @@ impl Parse for DslProp {
                 "routed" => routed = true,
                 "onetime" => onetime = true,
                 "two_way" => two_way = true,
+                "attached" => attached = true,
                 other => {
                     return Err(syn::Error::new_spanned(
                         &ident,
                         format!(
                             "#[dsl_prop]: unknown flag `{other}` — expected `routed`, `onetime`, \
-                             `two_way`, or a `name: Type` property declaration"
+                             `two_way`, `attached`, or a `name: Type` property declaration"
                         ),
                     ));
                 }
@@ -890,6 +928,36 @@ fn take_dsl_shape(attrs: &[syn::Attribute]) -> syn::Result<(DslShape, Vec<syn::A
             rest.push(attr.clone());
         }
     }
+
+    // Two `#[dsl_prop]`s with the same name on one item would generate two identical `@set` arms,
+    // and `macro_rules!`'s first-match-wins would silently drop the second — a typo'd duplicate
+    // would look like it took effect. Reject it here instead. (This only sees *one* class's own
+    // declarations; a descendant shadowing an *ancestor's* property is a separate question — see
+    // `build_shape_macro`'s doc comment.)
+    let mut seen: Vec<String> = Vec::new();
+    for prop in &shape.props {
+        let name = prop.name.to_string();
+        if seen.contains(&name) {
+            return Err(syn::Error::new_spanned(
+                &prop.name,
+                format!("#[dsl_prop]: `{name}` is declared twice on this item"),
+            ));
+        }
+        seen.push(name);
+    }
+
+    if let Some(content) = &shape.content_field {
+        let content_name = content.to_string();
+        if !shape.props.iter().any(|p| p.name == content_name) {
+            return Err(syn::Error::new_spanned(
+                content,
+                format!(
+                    "#[dsl(content = {content_name})]: no `#[dsl_prop]` declares `{content_name}`"
+                ),
+            ));
+        }
+    }
+
     Ok((shape, rest))
 }
 
@@ -1015,6 +1083,18 @@ fn build_dyn_default_methods(
 /// Setter calls are emitted in *method* syntax (`$recv.set_text(..)`) rather than a fully-qualified
 /// trait path: the `{Name}Ext` trait's own module path isn't knowable from inside this macro, and
 /// the generated view code already brings the right `..Ext` traits into scope at the call site.
+///
+/// **Ancestor shadowing is rejected, not silently allowed.** A class's own literal arms are matched
+/// before the forwarding catch-all, so a descendant redeclaring a property name an *ancestor* also
+/// declares would win silently and make the ancestor's setter unreachable — diverging from the rule
+/// the table-based path enforces (`validate::validate_field_overrides`: a same-named inherited field
+/// is an error unless the redeclaration is marked `#[override]`). A proc-macro cannot see the
+/// ancestor's property list at declaration time — that is precisely what isn't readable across
+/// crates, and the reason this macro exists at all. So the check is deferred the same way everything
+/// else here is: each class emits one `@assert_undeclared` probe per declared property against its
+/// parent's shape macro, and rustc resolves it later. An ancestor that declares the name expands the
+/// probe to a `compile_error!`; one that doesn't forwards it further up; the chain's terminal
+/// expands it to nothing. Cost is one item-position macro call per declared property.
 fn build_shape_macro(
     bare_name: &str,
     shape: &DslShape,
@@ -1023,10 +1103,28 @@ fn build_shape_macro(
     let macro_ident = shape_macro_ident(bare_name);
     let bare_ident = format_ident!("{bare_name}");
 
+    // Only plain scalar properties take part in the `@set` protocol. The rest each need their own
+    // emission shape and are deliberately left without an arm here rather than given a wrong one:
+    // - `routed` callbacks are registered via `dispatch_routed`, not assigned;
+    // - `attached` properties are set by a *child* onto its parent, through
+    //   `UIElement::set_attached::<T>`, so they never reach this receiver at all;
+    // - the `#[dsl(content = ..)]` field and a `children` collection receive nested *elements*,
+    //   whose emission differs by declared type (`Vec<T>` bulk-set vs `ListExt<T>` add-loop) — that
+    //   is a separate `@children` protocol, still to be designed.
+    // Reaching one of these through `@set` falls through to the catch-all and is reported as an
+    // unknown property, which is honest: `@set` genuinely cannot express it.
+    let takes_set_arm = |p: &DslProp| {
+        let name = p.name.to_string();
+        !p.routed
+            && !p.attached
+            && name != "children"
+            && shape.content_field.as_ref().map(|c| c.to_string()).as_deref() != Some(name.as_str())
+    };
+
     let set_arms: Vec<TokenStream2> = shape
         .props
         .iter()
-        .filter(|p| !p.routed)
+        .filter(|p| takes_set_arm(p))
         .map(|p| {
             let name = &p.name;
             let setter = format_ident!("set_{}", name);
@@ -1047,26 +1145,74 @@ fn build_shape_macro(
         })
         .collect();
 
-    let fallback = match parent {
+    // One arm per declared property — *every* property, not just the `@set`-able ones: a name
+    // collision is a collision whether the ancestor's version is a setter, a routed callback, or an
+    // attached property.
+    let assert_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let msg = format!("` redeclares `{name}`, already declared by its ancestor `{bare_name}` — pick a different name, or extend the ancestor's declaration instead");
+            quote! {
+                (@assert_undeclared $origin:ident, #name) => {
+                    compile_error!(concat!("`", stringify!($origin), #msg));
+                };
+            }
+        })
+        .collect();
+
+    let (fallback, assert_fallback) = match parent {
         Some((parent_bare, parent_ty)) => {
             let parent_macro =
                 inherit_macro_self_ref_path(parent_bare, parent_ty, shape_macro_ident(parent_bare));
+            (
+                quote! {
+                    (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                        #parent_macro!(@set_from $origin, $recv, $name, $value);
+                    };
+                },
+                quote! {
+                    (@assert_undeclared $origin:ident, $name:ident) => {
+                        #parent_macro!(@assert_undeclared $origin, $name);
+                    };
+                },
+            )
+        }
+        None => (
             quote! {
                 (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
-                    #parent_macro!(@set_from $origin, $recv, $name, $value);
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` (or any of its ancestors) has no such property: ",
+                        stringify!($name)
+                    ));
                 };
-            }
+            },
+            // Reached the top of the chain without a collision: the name is free.
+            quote! {
+                (@assert_undeclared $origin:ident, $name:ident) => {};
+            },
+        ),
+    };
+
+    // The probes themselves, emitted in item position next to the class. Only a class that *has* an
+    // ancestor emits any — a root class has nothing to collide with.
+    let probes: Vec<TokenStream2> = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro =
+                inherit_macro_path(parent_bare, parent_ty, shape_macro_ident(parent_bare));
+            shape
+                .props
+                .iter()
+                .map(|p| {
+                    let name = &p.name;
+                    quote! { #parent_macro!(@assert_undeclared #bare_ident, #name); }
+                })
+                .collect()
         }
-        None => quote! {
-            (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
-                compile_error!(concat!(
-                    "`",
-                    stringify!($origin),
-                    "` (or any of its ancestors) has no such property: ",
-                    stringify!($name)
-                ));
-            };
-        },
+        None => Vec::new(),
     };
 
     quote! {
@@ -1079,7 +1225,10 @@ fn build_shape_macro(
             };
             #(#set_arms)*
             #fallback
+            #(#assert_arms)*
+            #assert_fallback
         }
+        #(#probes)*
     }
 }
 

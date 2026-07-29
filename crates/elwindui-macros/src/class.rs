@@ -759,25 +759,36 @@ fn sealed_check_ident(bare_name: &str) -> Ident {
     format_ident!("__elwindui_check_not_sealed_{}", bare_name)
 }
 
-/// `Button` -> `__elwindui_shape_Button`: the DSL-shape muncher this class declares for its own
-/// `#[dsl_prop(..)]` properties — the shape-layer counterpart to `inherit_macro_ident`'s
-/// hierarchy-layer trio. See `build_shape_macro`.
-fn shape_macro_ident(bare_name: &str) -> Ident {
-    format_ident!("__elwindui_shape_{}", bare_name)
+/// `Button` -> `__elwindui_props_Button`: the property muncher this class declares for its own
+/// `#[prop(..)]` declarations — the property-layer counterpart to `inherit_macro_ident`'s
+/// hierarchy-layer trio. See `build_props_macro`.
+fn props_macro_ident(bare_name: &str) -> Ident {
+    format_ident!("__elwindui_props_{}", bare_name)
 }
 
-/// One `#[dsl_prop(..)]` declaration: the DSL-visible surface of a builtin, declared right on the
-/// `#[class]` item that actually implements it rather than in a separate shape table.
+/// One `#[prop(..)]` declaration: a DSL-visible property of a builtin, declared right on the
+/// `#[class]` item that actually implements it rather than restated in a separate table.
 ///
 /// Accepted forms (each argument before the final `name: Type` is a flag):
-/// - `#[dsl_prop(text: String)]` — a plain settable property
-/// - `#[dsl_prop(routed, on_click: fn())]` — a `#[routed]` callback (bubbles via `dispatch_routed`)
-/// - `#[dsl_prop(onetime, left: Option<f32>)]` — applied once at construction, never re-pushed by
-///   a later resync (`Window`'s geometry — the window manager owns the live value)
-/// - `#[dsl_prop(two_way, text: String)]` — opts into automatic two-way wiring
-/// - `#[dsl_prop(attached, row: i32 = 0)]` — an attached property (`Grid::row`), which a *child*
-///   element sets on itself to address its parent. Always needs a default value.
-struct DslProp {
+/// - `#[prop(text: String)]` — a plain settable property
+/// - `#[prop(routed, on_click: fn())]` — a routed callback (bubbles via `dispatch_routed`)
+/// - `#[prop(onetime, left: Option<f32>)]` — applied once at construction, never re-pushed by a
+///   later resync (`Window`'s geometry — the window manager owns the live value)
+/// - `#[prop(two_way, text: String)]` — opts into automatic two-way wiring
+/// - `#[prop(attached, row: i32 = 0)]` — an attached property (`Grid::row`), which a *child* element
+///   sets on itself to address its parent. Always needs a default value.
+///
+/// Class-level markers live in their own attributes next to these: `#[content(children)]` names the
+/// property that receives bare nested child elements, and `#[text_style]` marks a text-styling owner.
+///
+/// Class-level facts deliberately do *not* live here — they are either already `#[class]` arguments
+/// (`sealed`, `abstract_class`, `text_style`) or derivable:
+/// - **`native`** ≡ `trait_only` with no `inherits` — a base-less interface whose implementation is
+///   hand-written per backend. Verified to hold for all 25 builtins at the time this was written; if
+///   a future `trait_only` root class is *not* native, this derivation has to become explicit again.
+/// - **`embedded`** carried no information once declarations moved onto the implementation itself:
+///   every class declaring properties here is, by construction, hand-written Rust.
+struct PropDecl {
     name: Ident,
     ty: Type,
     routed: bool,
@@ -788,14 +799,14 @@ struct DslProp {
     // `onetime`/`two_way` are accepted and recorded here so a builtin's declaration can already be
     // written in full, but the layers that consume them (`emit_resync`'s onetime skip, `emit_wiring`'s
     // two-way rule) still read them from `elwindui-codegen`'s own shape table and haven't moved to
-    // this macro yet — see `build_shape_macro`.
+    // this macro yet — see `build_props_macro`.
     #[allow(dead_code)]
     onetime: bool,
     #[allow(dead_code)]
     two_way: bool,
 }
 
-impl Parse for DslProp {
+impl Parse for PropDecl {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut routed = false;
         let mut onetime = false;
@@ -821,7 +832,7 @@ impl Parse for DslProp {
                     return Err(syn::Error::new_spanned(
                         &ident,
                         format!(
-                            "#[dsl_prop]: attached property `{ident}` needs a default value \
+                            "#[prop]: attached property `{ident}` needs a default value \
                              (e.g. `attached, {ident}: i32 = 0`)"
                         ),
                     ));
@@ -830,13 +841,13 @@ impl Parse for DslProp {
                     return Err(syn::Error::new_spanned(
                         &ident,
                         format!(
-                            "#[dsl_prop]: `{ident}` is not `attached`, so it cannot declare a \
-                             default value — an ordinary property's default comes from the type's \
-                             own constructor"
+                            "#[prop]: `{ident}` is not `attached`, so it cannot declare a default \
+                             value — an ordinary property's default comes from the type's own \
+                             constructor"
                         ),
                     ));
                 }
-                return Ok(DslProp {
+                return Ok(PropDecl {
                     name: ident,
                     ty,
                     routed,
@@ -855,7 +866,7 @@ impl Parse for DslProp {
                     return Err(syn::Error::new_spanned(
                         &ident,
                         format!(
-                            "#[dsl_prop]: unknown flag `{other}` — expected `routed`, `onetime`, \
+                            "#[prop]: unknown flag `{other}` — expected `routed`, `onetime`, \
                              `two_way`, `attached`, or a `name: Type` property declaration"
                         ),
                     ));
@@ -866,90 +877,77 @@ impl Parse for DslProp {
     }
 }
 
-/// Everything `#[dsl(..)]`/`#[dsl_prop(..)]` declared on one `#[class]` item, plus the leftover
-/// attributes that must still be re-emitted onto the generated item.
+/// A builtin's DSL declaration on one `#[class]` item: its `#[prop(..)]` properties plus the two
+/// class-level markers that are neither `#[class]` arguments nor derivable.
 #[derive(Default)]
-struct DslShape {
-    props: Vec<DslProp>,
-    /// `#[dsl(content = field_name)]` — which property receives bare nested children.
+struct PropDecls {
+    props: Vec<PropDecl>,
+    /// `#[content(children)]` — which property receives bare nested child elements. Routinely names
+    /// a property an *ancestor* declares (`VerticalLayout`'s content is `Layout`'s `children`), so
+    /// it is validated by the deferred `@assert_declared` probe rather than locally.
     content_field: Option<Ident>,
-    embedded: bool,
-    sealed: bool,
-    native: bool,
+    /// `#[text_style]` — this class owns text styling (`TextStyleOwner`) for the font-inheritance
+    /// walk. Not derivable: the real `impl TextStyleOwner for ..` lives in a separate block this
+    /// macro never sees.
+    #[allow(dead_code)]
     text_style: bool,
-    abstract_: bool,
 }
 
-impl DslShape {
+impl PropDecls {
     fn is_declared(&self) -> bool {
-        !self.props.is_empty()
-            || self.content_field.is_some()
-            || self.embedded
-            || self.sealed
-            || self.native
-            || self.text_style
-            || self.abstract_
+        !self.props.is_empty() || self.content_field.is_some() || self.text_style
+    }
+
+    fn content_field(&self) -> Option<&Ident> {
+        self.content_field.as_ref()
     }
 }
 
-/// Splits `#[dsl(..)]`/`#[dsl_prop(..)]` out of an item's attribute list. Both are inert markers
-/// consumed entirely here — they must never survive into the generated item, since neither is a real
-/// registered attribute anywhere.
-fn take_dsl_shape(attrs: &[syn::Attribute]) -> syn::Result<(DslShape, Vec<syn::Attribute>)> {
-    let mut shape = DslShape::default();
+/// Splits the DSL declaration attributes — `#[prop(..)]`, `#[content(..)]`, `#[text_style]` — out of
+/// an item's attribute list. All three are inert markers consumed entirely here; none may survive
+/// into the generated item, since none is a real registered attribute anywhere.
+fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn::Attribute>)> {
+    let mut shape = PropDecls::default();
     let mut rest = Vec::new();
     for attr in attrs {
-        if attr.path().is_ident("dsl_prop") {
-            shape.props.push(attr.parse_args::<DslProp>()?);
-        } else if attr.path().is_ident("dsl") {
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("content") {
-                    let value = meta.value()?;
-                    shape.content_field = Some(value.parse()?);
-                } else if meta.path.is_ident("embedded") {
-                    shape.embedded = true;
-                } else if meta.path.is_ident("sealed") {
-                    shape.sealed = true;
-                } else if meta.path.is_ident("native") {
-                    shape.native = true;
-                } else if meta.path.is_ident("text_style") {
-                    shape.text_style = true;
-                } else if meta.path.is_ident("abstract_") {
-                    shape.abstract_ = true;
-                } else {
-                    return Err(meta.error(
-                        "#[dsl]: expected `embedded`, `sealed`, `native`, `text_style`, \
-                         `abstract_`, or `content = field_name`",
-                    ));
-                }
-                Ok(())
-            })?;
+        if attr.path().is_ident("prop") {
+            shape.props.push(attr.parse_args::<PropDecl>()?);
+        } else if attr.path().is_ident("content") {
+            if shape.content_field.is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "#[content]: declared more than once — a class designates exactly one property \
+                     to receive nested child elements",
+                ));
+            }
+            shape.content_field = Some(attr.parse_args::<Ident>()?);
+        } else if attr.path().is_ident("text_style") {
+            shape.text_style = true;
         } else {
             rest.push(attr.clone());
         }
     }
 
-    // Two `#[dsl_prop]`s with the same name on one item would generate two identical `@set` arms,
-    // and `macro_rules!`'s first-match-wins would silently drop the second — a typo'd duplicate
-    // would look like it took effect. Reject it here instead. (This only sees *one* class's own
-    // declarations; a descendant shadowing an *ancestor's* property is a separate question — see
-    // `build_shape_macro`'s doc comment.)
+    // Two `#[prop]`s with the same name on one item would generate two identical `@set` arms, and
+    // `macro_rules!`'s first-match-wins would silently drop the second — a typo'd duplicate would
+    // look like it took effect. Reject it here instead. (This only sees *one* class's own
+    // declarations; a descendant shadowing an *ancestor's* property is caught by the deferred
+    // `@assert_undeclared` probe — see `build_props_macro`.)
     let mut seen: Vec<String> = Vec::new();
     for prop in &shape.props {
         let name = prop.name.to_string();
         if seen.contains(&name) {
             return Err(syn::Error::new_spanned(
                 &prop.name,
-                format!("#[dsl_prop]: `{name}` is declared twice on this item"),
+                format!("#[prop]: `{name}` is declared twice on this item"),
             ));
         }
         seen.push(name);
     }
 
-    // Note there is deliberately *no* "the content field must be declared on this item" check here:
-    // `#[dsl(content = children)]` routinely names a property an *ancestor* declares (`VerticalLayout`
-    // inherits `children` from `Layout`), and this macro cannot see an ancestor's declarations. It is
-    // checked by a deferred `@assert_declared` probe instead — see `build_shape_macro`.
+    // Note there is deliberately *no* "somebody must designate a content property" check here: a
+    // class routinely inherits its ancestor's designation (`VerticalLayout` takes `Layout`'s
+    // `children`), and this macro cannot see an ancestor's declarations.
 
     Ok((shape, rest))
 }
@@ -1062,7 +1060,7 @@ fn build_dyn_default_methods(
 /// Shape:
 /// - `(@set $recv, $name, $value)` — the entry callers use. It only seeds `$origin` (this class's
 ///   own name) and hands off to `@set_from`.
-/// - `(@set_from $origin, $recv, <prop>, $value)` — one arm per declared `#[dsl_prop]`, expanding to
+/// - `(@set_from $origin, $recv, <prop>, $value)` — one arm per declared `#[prop]`, expanding to
 ///   that property's real setter call.
 /// - `(@set_from $origin, $recv, $name:ident, $value)` — the catch-all, forwarding anything this
 ///   class doesn't declare to its own ancestor's shape macro, `$origin` unchanged. Same "forward
@@ -1088,12 +1086,12 @@ fn build_dyn_default_methods(
 /// parent's shape macro, and rustc resolves it later. An ancestor that declares the name expands the
 /// probe to a `compile_error!`; one that doesn't forwards it further up; the chain's terminal
 /// expands it to nothing. Cost is one item-position macro call per declared property.
-fn build_shape_macro(
+fn build_props_macro(
     bare_name: &str,
-    shape: &DslShape,
+    shape: &PropDecls,
     parent: Option<(&str, &Type)>,
 ) -> TokenStream2 {
-    let macro_ident = shape_macro_ident(bare_name);
+    let macro_ident = props_macro_ident(bare_name);
     let bare_ident = format_ident!("{bare_name}");
 
     // Only plain scalar properties take part in the `@set` protocol. The rest each need their own
@@ -1101,17 +1099,17 @@ fn build_shape_macro(
     // - `routed` callbacks are registered via `dispatch_routed`, not assigned;
     // - `attached` properties are set by a *child* onto its parent, through
     //   `UIElement::set_attached::<T>`, so they never reach this receiver at all;
-    // - the `#[dsl(content = ..)]` field and a `children` collection receive nested *elements*,
+    // - the `#[prop(content, ..)]` property and a `children` collection receive nested *elements*,
     //   whose emission differs by declared type (`Vec<T>` bulk-set vs `ListExt<T>` add-loop) — that
     //   is a separate `@children` protocol, still to be designed.
     // Reaching one of these through `@set` falls through to the catch-all and is reported as an
     // unknown property, which is honest: `@set` genuinely cannot express it.
-    let takes_set_arm = |p: &DslProp| {
+    let takes_set_arm = |p: &PropDecl| {
         let name = p.name.to_string();
         !p.routed
             && !p.attached
             && name != "children"
-            && shape.content_field.as_ref().map(|c| c.to_string()).as_deref() != Some(name.as_str())
+            && shape.content_field().map(|c| c.to_string()).as_deref() != Some(name.as_str())
     };
 
     let set_arms: Vec<TokenStream2> = shape
@@ -1156,7 +1154,7 @@ fn build_shape_macro(
         .collect();
 
     // `@assert_declared` is `@assert_undeclared`'s mirror: it succeeds where the other fails. It
-    // backs `#[dsl(content = ..)]`, whose target is routinely an *inherited* property
+    // backs `#[prop(content, ..)]`, whose designation is routinely *inherited*
     // (`VerticalLayout`'s `content = children` names `Layout`'s `children`), so it cannot be checked
     // locally any more than a collision can.
     let declared_arms: Vec<TokenStream2> = shape
@@ -1171,7 +1169,7 @@ fn build_shape_macro(
     let (fallback, assert_fallback, declared_fallback) = match parent {
         Some((parent_bare, parent_ty)) => {
             let parent_macro =
-                inherit_macro_self_ref_path(parent_bare, parent_ty, shape_macro_ident(parent_bare));
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
             (
                 quote! {
                     (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
@@ -1208,7 +1206,7 @@ fn build_shape_macro(
             quote! {
                 (@assert_declared $origin:ident, $name:ident) => {
                     compile_error!(concat!(
-                        "#[dsl(content = ",
+                        "#[prop(content, ",
                         stringify!($name),
                         ")] on `",
                         stringify!($origin),
@@ -1226,7 +1224,7 @@ fn build_shape_macro(
     // Collision probe: only a class that *has* an ancestor emits any — a root class has nothing to
     // collide with.
     if let Some((parent_bare, parent_ty)) = parent {
-        let parent_macro = inherit_macro_path(parent_bare, parent_ty, shape_macro_ident(parent_bare));
+        let parent_macro = inherit_macro_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
         probes.extend(shape.props.iter().map(|p| {
             let name = &p.name;
             quote! { #parent_macro!(@assert_undeclared #bare_ident, #name); }
@@ -1234,7 +1232,7 @@ fn build_shape_macro(
     }
     // Content probe: aimed at this class's *own* macro, so a content field declared right here
     // matches a literal arm and a merely inherited one forwards up the chain from there.
-    if let Some(content) = &shape.content_field {
+    if let Some(content) = shape.content_field() {
         let own_macro = inherit_macro_path_for_self(bare_name);
         probes.push(quote! { #own_macro!(@assert_declared #bare_ident, #content); });
     }
@@ -1263,11 +1261,11 @@ fn build_shape_macro(
 /// name resolves only within the defining file, which breaks the moment a class moves into a
 /// submodule; see that function's own doc comment).
 fn inherit_macro_path_for_self(bare_name: &str) -> TokenStream2 {
-    let ident = shape_macro_ident(bare_name);
+    let ident = props_macro_ident(bare_name);
     quote! { crate::#ident }
 }
 
-/// Whether a `#[dsl_prop]`'s declared type is exactly `String` — see `build_shape_macro`'s setter
+/// Whether a `#[prop]`'s declared type is exactly `String` — see `build_props_macro`'s setter
 /// argument convention.
 fn is_string_type(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.is_ident("String"))
@@ -1589,8 +1587,8 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     let vis = &item.vis;
     // Same inert-marker split `expand_trait_only` does — a builtin whose real implementation is an
     // ordinary `struct` in this crate (`UIElement`/`Layout`/`Grid`/...) declares its DSL surface
-    // here rather than on a `trait_only` interface. See `build_shape_macro`.
-    let (dsl_shape, attrs) = match take_dsl_shape(&item.attrs) {
+    // here rather than on a `trait_only` interface. See `build_props_macro`.
+    let (prop_decls, attrs) = match take_prop_decls(&item.attrs) {
         Ok(split) => split,
         Err(e) => return e.to_compile_error(),
     };
@@ -1625,14 +1623,14 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     // dependency of its own — it always succeeds from its own single invocation's args alone,
     // regardless of rust-analyzer's expansion order, so nothing extra is needed to make this part
     // reliable.
-    let shape_macro = dsl_shape.is_declared().then(|| {
+    let shape_macro = prop_decls.is_declared().then(|| {
         let parent = args
             .inherits
             .as_ref()
             .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
-        build_shape_macro(
+        build_props_macro(
             &class_name.to_string(),
-            &dsl_shape,
+            &prop_decls,
             parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
         )
     });
@@ -1678,9 +1676,9 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     let bare_name = class_name.to_string();
     let ext_name = to_ext_ident(&bare_name, class_name.span());
     let vis = &item.vis;
-    // `#[dsl(..)]`/`#[dsl_prop(..)]` are inert markers consumed here — they declare this builtin's
-    // DSL surface (see `build_shape_macro`) and must not survive onto the generated trait.
-    let (dsl_shape, attrs) = match take_dsl_shape(&item.attrs) {
+    // `#[prop(..)]` are inert markers consumed here — they declare this builtin's
+    // DSL surface (see `build_props_macro`) and must not survive onto the generated trait.
+    let (prop_decls, attrs) = match take_prop_decls(&item.attrs) {
         Ok(split) => split,
         Err(e) => return e.to_compile_error(),
     };
@@ -1738,14 +1736,14 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     // each backend's own `struct_only` implementor deliberately declares none — so there is exactly
     // one `__elwindui_shape_{Name}!` per builtin workspace-wide, with no cross-crate bare-name
     // collision for `#[macro_export]` to trip over.
-    let shape_macro = dsl_shape.is_declared().then(|| {
+    let shape_macro = prop_decls.is_declared().then(|| {
         let parent = args
             .inherits
             .as_ref()
             .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
-        build_shape_macro(
+        build_props_macro(
             &bare_name,
-            &dsl_shape,
+            &prop_decls,
             parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
         )
     });

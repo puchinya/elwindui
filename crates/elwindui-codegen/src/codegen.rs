@@ -6263,7 +6263,13 @@ fn build_component_setters(
         let (inner_ty, is_option) = strip_option(ty);
         let attr = find_attr(node, name);
         if let Some(token) = attr.and_then(theme_token_path) {
-            let themed_value = if name == "foreground" {
+            // `foreground` (`TextStyleOwner::set_foreground`) and `background`
+            // (`NativeControl::set_background`) are the two hand-written-native fields whose real
+            // setter keeps `Option<Brush>` in its own signature rather than the bare-inner-type
+            // convention every other hand-written-native field's setter uses — see
+            // `NativeControl::set_background`'s own doc comment for why `background` needed this
+            // widened from a `foreground`-only check.
+            let themed_value = if name == "foreground" || name == "background" {
                 quote! { Some(__theme_value) }
             } else {
                 quote! { __theme_value }
@@ -6309,7 +6315,7 @@ fn build_component_setters(
                 } else {
                     emit_expr(other, ctx, &EmitMode::Construction)
                 };
-                if name == "foreground" {
+                if name == "foreground" || name == "background" {
                     quote! { Some(#value) }
                 } else if inner_ty == "String" {
                     quote! { &(#value) }
@@ -7785,6 +7791,14 @@ fn emit_resync(
                 } else {
                     quote! { __theme_value }
                 }
+            } else if name == "background" {
+                // `NativeControl::set_background`'s own doc comment: unlike every other
+                // hand-written-native field's bare-inner-type setter, `background` keeps
+                // `Option<Brush>` in its real signature, matching `foreground` above. Checked
+                // before the `is_copy_type`/`node_uses_owned_setters` branches below since those
+                // exist for hand-written-native fields whose setter takes the *bare* inner type —
+                // `background`, alongside `foreground`, is the one exception.
+                quote! { Some(__theme_value) }
             } else if field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0)) {
                 quote! { __theme_value }
             } else if node_uses_owned_setters {

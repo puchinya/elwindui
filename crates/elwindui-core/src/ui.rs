@@ -1416,8 +1416,15 @@ impl ListExt<dyn UIElementExt> for UIElementCollection {
 #[text_style]
 #[prop(background: Option<crate::graphics::Brush>)]
 pub trait NativeControl {
-    /// Sets an explicit native-control background.
-    fn set_background(&self, background: Brush);
+    /// Sets an explicit native-control background, or removes it (`None`) so the backend control
+    /// theme can supply it again — matching `#[prop(background: Option<Brush>)]`'s own declared
+    /// type exactly, unlike the virtual-builtin/native-leaf signature mismatch this used to have
+    /// (`Layout::set_background` always took `Option<Brush>`; this took a bare `Brush`, relying on
+    /// the separate `clear_background` below for the `None` case). `clear_background` stays a
+    /// distinct method rather than folding away into `set_background(None)`'s body — `emit_resync`'s
+    /// generic `clear_<name>()` convention calls it directly, unconditionally, wherever a DSL value
+    /// transitions from `Some` to not-written across a re-render.
+    fn set_background(&self, background: Option<Brush>);
 
     /// Removes an explicit background so the backend control theme can supply it again.
     fn clear_background(&self);

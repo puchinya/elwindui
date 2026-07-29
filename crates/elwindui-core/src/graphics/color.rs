@@ -100,7 +100,27 @@ impl Color {
     pub fn hex(s: &str) -> Self {
         Self::parse_hex(s).expect("invalid hex color")
     }
+}
 
+/// Lets a `#[prop(fill: Option<Brush>)]`-style DSL value written as a hex-string literal
+/// (`fill: "#3a3a3c"`) reach a `Color`-typed setter without `elwindui-codegen` needing to know the
+/// field's type — `__elwindui_props_*!`'s generated `@set` arm calls `.into()` uniformly for every
+/// Color/Brush-typed property, deferring to this impl (see `elwindui_macros::class::build_props_macro`'s
+/// `wraps_with_into`). Unrelated to the deprecated `Color::hex`/`to_hex` pair, which is about
+/// backend-interchange serialization, not DSL literal sugar — this stays a first-class, non-deprecated
+/// conversion. Panics on malformed hex, same as `Color::hex` did — a real behavior change from the
+/// pre-macro pipeline, which caught a malformed literal at `elwindui-codegen`'s own build-script/
+/// proc-macro-expansion time; here the same mistake surfaces as a runtime panic the first time the
+/// element is constructed, since `.into()` runs when the generated code executes, not when it's
+/// generated. Accepted as part of moving builtin property validation off `elwindui-codegen`'s own
+/// tables entirely (see `docs/elwindui_implementation_status.md`).
+impl From<&str> for Color {
+    fn from(s: &str) -> Self {
+        Self::parse_hex(s).unwrap_or_else(|e| panic!("invalid hex color {s:?}: {e}"))
+    }
+}
+
+impl Color {
     /// Prefer constructing a [`crate::graphics::Brush`] directly rather than round-tripping through
     /// a hex string for backend consumption.
     #[deprecated(

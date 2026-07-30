@@ -192,6 +192,7 @@ pub fn sibling_component_modules(skip_name: &str) -> Vec<Module> {
                     ast::Item::Component(component_def),
                     ast::Item::View(view_def),
                 ],
+                allows_external_builtins: true,
                 ..Default::default()
             }
         })
@@ -216,6 +217,7 @@ mod tests {
                 crate::ast::Item::Component(component_def),
                 crate::ast::Item::View(view_def),
             ],
+            allows_external_builtins: true,
             ..Default::default()
         };
         let all_modules: Vec<_> = std::iter::once(module.clone())

@@ -16,6 +16,18 @@ pub struct Module {
     /// `validate::validate` uses this to reject a `#[embedded]` component declared outside the
     /// actual builtin sources (docs/elwindui_spec.md 付録E).
     pub is_builtin: bool,
+    /// Whether this module was built by `component_frontend.rs` from a real `#[elwindui::component]`
+    /// Rust struct (`generate_component_from_item_struct`'s own module, or one of
+    /// `component_frontend::sibling_component_modules`), as opposed to `parser::parse_module`'s
+    /// text-based `.elwind` frontend. Defaults to `false` (`Module`'s `Default`), matching every
+    /// `parser::parse_module` output — real `.elwind` text has no notion of "a type that exists in
+    /// real Rust but isn't declared anywhere in this compilation unit's own AST", so an unresolved
+    /// name there is always a genuine typo (`check_element_value`'s `None` arm relies on this to
+    /// keep catching them). A proc-macro-built module, by contrast, may legitimately reference a
+    /// builtin/class declared entirely in `elwindui-core`/a backend crate with no local `TypeInfo`
+    /// at all (`codegen::emit_external_construction`'s whole reason for existing) — `check_element_value`
+    /// uses this flag, not `table.resolve`'s `None` alone, to tell that apart from a typo.
+    pub allows_external_builtins: bool,
 }
 
 /// `use components::card::Card;` / `use a::b::{C, D};` (§12). Only the flat form is needed for

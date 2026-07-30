@@ -1110,6 +1110,15 @@ fn check_element_value(
                 ));
             }
         }
+        // External (no local `TypeInfo`, e.g. a builtin declared entirely in `elwindui-core`): only
+        // legitimate on `from.allows_external_builtins` (a proc-macro-built module — see that
+        // field's own doc comment). This validation genuinely cannot check is_abstract-ness or
+        // required-attribute completeness without a shape table, the same tradeoff
+        // `emit_external_construction`/`check_shortcut_attrs` already make — a genuinely wrong
+        // reference still fails to compile, just later, via `elwindui::ui::{Name}::new()` itself.
+        // On the `.elwind` text path (`allows_external_builtins == false`), no such escape hatch
+        // exists — every type there must resolve through `table`, so `None` still means a typo.
+        None if from.allows_external_builtins => {}
         None => errors.push(format!(
             "{component_name}: `{}` is an unknown or out-of-scope component — add a `use` for it",
             elem.type_path

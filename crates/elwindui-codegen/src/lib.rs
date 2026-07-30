@@ -90,6 +90,7 @@ pub fn generate_component_from_item_struct(
             ast::Item::Component(component_def),
             ast::Item::View(view_def),
         ],
+        allows_external_builtins: true,
         ..Default::default()
     };
     let sibling_modules = component_frontend::sibling_component_modules(&name);

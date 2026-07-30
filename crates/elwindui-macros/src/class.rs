@@ -1121,6 +1121,26 @@ fn build_props_macro(
     // routed registration is entirely this declaration's own business. `@routed`/`@routed_from`
     // (below) stay as the lower-level primitive this delegates to, for a caller that already has a
     // fully-built handler in hand.
+    // `@clear` resets a property to its platform default (`clear_<name>()`, no arguments) — the
+    // other half of a themed property's dispatch (`ThemeValue::PlatformDefault`), alongside `@set`'s
+    // `ThemeValue::Value` half. Same forwarding shape as `@set`, minus a value to carry. Routed
+    // properties are excluded (unlike `@set`, which handles them too) — an event registration has no
+    // "reset to platform default" concept.
+    let clear_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| takes_set_arm(p) && !p.routed)
+        .map(|p| {
+            let name = &p.name;
+            let clear = format_ident!("clear_{}", name);
+            quote! {
+                (@clear_from $origin:ident, $recv:expr, #name) => {
+                    $recv.#clear();
+                };
+            }
+        })
+        .collect();
+
     let set_arms: Vec<TokenStream2> = shape
         .props
         .iter()
@@ -1297,7 +1317,7 @@ fn build_props_macro(
         })
         .collect();
 
-    let (fallback, routed_fallback, assert_fallback, declared_fallback, children_fallback) =
+    let (fallback, clear_fallback, routed_fallback, assert_fallback, declared_fallback, children_fallback) =
         match parent {
             Some((parent_bare, parent_ty)) => {
                 let parent_macro = inherit_macro_self_ref_path(
@@ -1309,6 +1329,11 @@ fn build_props_macro(
                     quote! {
                         (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
                             #parent_macro!(@set_from $origin, $recv, $name, $value);
+                        };
+                    },
+                    quote! {
+                        (@clear_from $origin:ident, $recv:expr, $name:ident) => {
+                            #parent_macro!(@clear_from $origin, $recv, $name);
                         };
                     },
                     quote! {
@@ -1339,6 +1364,16 @@ fn build_props_macro(
             None => (
                 quote! {
                     (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                        compile_error!(concat!(
+                            "`",
+                            stringify!($origin),
+                            "` (or any of its ancestors) has no such property: ",
+                            stringify!($name)
+                        ));
+                    };
+                },
+                quote! {
+                    (@clear_from $origin:ident, $recv:expr, $name:ident) => {
                         compile_error!(concat!(
                             "`",
                             stringify!($origin),
@@ -1424,6 +1459,11 @@ fn build_props_macro(
             };
             #(#set_arms)*
             #fallback
+            (@clear $recv:expr, $name:ident) => {
+                $crate::#macro_ident!(@clear_from #bare_ident, $recv, $name);
+            };
+            #(#clear_arms)*
+            #clear_fallback
             (@routed $recv:expr, $name:ident, $value:expr) => {
                 $crate::#macro_ident!(@routed_from #bare_ident, $recv, $name, $value);
             };

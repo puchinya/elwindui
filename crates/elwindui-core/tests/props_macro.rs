@@ -32,6 +32,9 @@ impl FakeButton {
     fn set_background(&self, background: Option<Brush>) {
         *self.background.borrow_mut() = background;
     }
+    fn clear_background(&self) {
+        *self.background.borrow_mut() = None;
+    }
     fn set_margin(&self, margin: f32) {
         *self.margin.borrow_mut() = Some(margin);
     }
@@ -85,6 +88,18 @@ fn props_macro_forwards_through_the_whole_ancestor_chain() {
     let button = FakeButton::default();
     elwindui_core::__elwindui_props_Button!(@set button, margin, 4.0f32);
     assert_eq!(*button.margin.borrow(), Some(4.0));
+}
+
+// --- `@clear`: resetting a themed property to its platform default ------------------------------
+
+#[test]
+fn clear_resets_a_property_declared_by_an_ancestor() {
+    let button = FakeButton::default();
+    // `background` belongs to `NativeControl`, not `Button` -- same forwarding as `@set`.
+    elwindui_core::__elwindui_props_Button!(@set button, background, "#336699");
+    assert!(button.background.borrow().is_some());
+    elwindui_core::__elwindui_props_Button!(@clear button, background);
+    assert_eq!(*button.background.borrow(), None);
 }
 
 // --- `@children`: attaching bare nested child elements ------------------------------------------

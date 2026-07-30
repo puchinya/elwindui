@@ -1,0 +1,35 @@
+// Demonstrates a custom component built by composing over another already-composed DSL component
+// (docs/elwindui_gui_framework_design.md §5, 付録H.2.1a in the old spec numbering) —
+// `RoundedPanel inherits ContentControl`, own `view!` body implicitly `ContentControl`'s (no
+// wrapper element written — the implicit-composition sugar), with a `Grid` overlaying a background
+// `Rectangle` and the `TextBlock` label in the same (default `(0, 0)`) cell. `elwindui-codegen`
+// generates the real struct as the bare `RoundedPanel` name itself (its auto-derived
+// `pub trait RoundedPanelExt: UIElementExt + ControlExt` lives alongside it) with a
+// `base: ContentControl` field, delegating to it one hop further than `ContentControl` itself
+// delegates to `Control` — `self` *is* the tree node at any composition depth (`into_node()` just
+// returns `self`), not a wrapper around a separately-erased `Rc<dyn UIElement>`. `document_view.rs`'s
+// own `RoundedPanel { ... }` reference still compiles unchanged — `emit_construction`'s
+// `concrete_type_ident` resolves it to `RoundedPanel::new(..)`.
+#[elwindui::component(inherits ContentControl)]
+struct RoundedPanel {
+    // Not `#[param]`: the label displays a value (notepad's live character count, via
+    // `document_view.rs`'s `t!("notepad-status-chars", count: doc.char_count)`) that changes after
+    // construction, so it needs to stay resyncable — a `#[param]` field is fixed at instantiation
+    // and would silently freeze the very first value forever.
+    label: String,
+
+    body: view! {
+        Grid {
+            rows: [elwindui::core::layout::GridLength::Star(1.0)]
+            columns: [elwindui::core::layout::GridLength::Star(1.0)]
+            Rectangle {
+                fill: "#3a3a3c"
+                corner_radius: 8.0
+            }
+            TextBlock {
+                text: label
+                text_alignment: elwindui::core::ui::TextAlignment::Center
+            }
+        }
+    },
+}

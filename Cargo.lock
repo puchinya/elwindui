@@ -717,14 +717,6 @@ name = "notepad"
 version = "0.1.0"
 dependencies = [
  "elwindui",
- "elwindui-codegen",
-]
-
-[[package]]
-name = "notepad-inline"
-version = "0.1.0"
-dependencies = [
- "elwindui",
 ]
 
 [[package]]

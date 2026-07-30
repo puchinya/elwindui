@@ -132,7 +132,7 @@ headers):
 ## Commands
 
 - `cargo build --workspace` / `cargo test --workspace` — build/test every crate and example.
-- `cargo run -p notepad` / `cargo run -p notepad-inline` — run the example apps (AppKit backend on macOS; see the screenshot section below).
+- `cargo run -p notepad` — run the example apps (AppKit backend on macOS; see the screenshot section below).
 - Edition 2024. Root `Cargo.toml` is workspace-only (`members = ["crates/*", "examples/*"]`) — there is no root `src/`.
 
 ## Verifying with rust-analyzer after code changes

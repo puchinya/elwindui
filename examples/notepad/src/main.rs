@@ -120,9 +120,8 @@ mod notepad_view_model {
     }
 }
 
-include!(concat!(env!("OUT_DIR"), "/rounded_panel.rs"));
-include!(concat!(env!("OUT_DIR"), "/document_view.rs"));
-include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
+mod ui;
+use ui::NotepadWindow;
 
 #[elwindui::main]
 fn main() {

@@ -5496,7 +5496,21 @@ fn into_node_if_needed(
     let info = table.resolve(from, source_type_path);
     let is_native = info.is_some_and(|i| i.is_native);
     let is_native_control_leaf = info.is_some_and(|i| i.is_native_control_leaf);
-    if is_native_control_leaf {
+    if info.is_none() {
+        // External (no local `TypeInfo`): assume it's UIElement-implementing, the same shape
+        // `is_native_control_leaf`/`is_virtual_builtin` both already get below — every *actual*
+        // builtin either is one of those or doesn't implement `UIElementExt` at all (`Window`/
+        // `MenuBar`/...), and this function has no ancestor/classification info left to tell them
+        // apart. Genuine misuse (nesting a non-UIElement builtin in a `dyn UIElement` slot) fails to
+        // compile on the coercion below with a real type error instead of this function's own
+        // `panic!` — the same "defer validation to rustc" tradeoff the rest of this migration makes.
+        quote! {
+            {
+                let __node: std::rc::Rc<dyn elwindui::core::ui::UIElementExt> = #base.clone();
+                __node
+            }
+        }
+    } else if is_native_control_leaf {
         quote! {
             {
                 let __node: std::rc::Rc<dyn elwindui::core::ui::UIElementExt> = #base.clone();
@@ -5829,6 +5843,132 @@ fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
 ///     `TypeInfo::content_field`) with no matching attribute binds the element's single bare nested
 ///     child (`MenuBarItem`'s single nested `Menu`, bound to its `#[content(submenu)]` field);
 ///   - anything else is an ordinary `emit_expr` value.
+/// Constructs an *external* element: `table.resolve` found nothing for `node.type_path` in this
+/// compilation's own `.elwind`/`#[component]` AST, so it is treated as a builtin declared entirely
+/// elsewhere (`elwindui-core`'s `#[class]`/`#[prop]` items, or a future crate declaring one the same
+/// way) — the counterpart to `is_hand_written_native`'s branch below, but knowing none of what
+/// `TypeInfo` used to supply. Every DSL-surface decision that used to come from a builtin's
+/// `TypeInfo` (which properties exist, their types, whether they're `#[routed]`, how a value should
+/// be wrapped before reaching the real setter) is deferred to the `__elwindui_props_{Name}!` macro
+/// (`elwindui_macros::class::build_props_macro`) — this function's only job is to compute *values*
+/// from the DSL's own syntax (an `emit_expr`/theme-token/closure concern, never a type concern) and
+/// hand them to `@set`/`@clear`/`@children`.
+///
+/// `on_*`-prefixed attributes are skipped entirely here, mirroring `param_fields`'s own exclusion —
+/// `emit_wiring` handles every callback attribute (routed or not) on its own, via the same `@set`
+/// unification (see `build_props_macro`'s own doc comment on why `@set` accepts a bare callable for
+/// a `#[routed]` property too).
+///
+/// **Known gaps, deliberately not yet handled** (no current builtin construction needs them — see
+/// `docs/elwindui_implementation_status.md`'s tracking of this rewrite): a named attribute matching a
+/// `#[content(..)]`-designated property (`Window { content: SomeElement { .. } }` — as opposed to a
+/// *bare* nested child, which `emit_construction`'s own caller already routes through `@children`
+/// separately), a `ViewExpr::Element`-valued named attribute (`menu_bar: MenuBar { .. }`), and a
+/// dynamic/`for`-driven single-child content slot. Each panics with a specific message rather than
+/// silently emitting something wrong.
+fn emit_external_construction(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut TokenStream,
+) {
+    let binding = &node.binding;
+    let binding_ts = quote! { #binding };
+    let type_ident = format_ident!("{}", node.type_path);
+    let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+    let mut sets = TokenStream::new();
+    for (name, expr) in &node.attributes {
+        if name.starts_with("on_") {
+            continue;
+        }
+        let name_ident = format_ident!("{name}");
+        // The seven `#[text_style]`-injected properties (`font_size`/`foreground`/...) are never a
+        // real `#[prop]` on any single builtin — they're injected uniformly onto any `#[text_style]`
+        // class by `parser.rs`/`component_frontend.rs`, so no `__elwindui_props_*!` macro knows about
+        // them at all. `is_text_style_field_name` is a fixed, table-independent name list — the same
+        // one `build_component_setters`/`emit_resync` already dispatch through
+        // `emit_field_setter_call`/`emit_field_clear_call`, whose own text-style branch is *already*
+        // `TypeInfo`-free (routes through `TextStyleOwner::as_text_style_owner()`, not a declaring
+        // type). Reused verbatim here — no reason for this function to have its own copy.
+        let is_text_style = crate::text_style::is_text_style_field_name(name);
+        if let Some(token) = theme_token_path(expr) {
+            let setter_ident = format_ident!("set_{name}");
+            // Matches `build_component_setters`'s own `foreground`/`background` special-case
+            // (`NativeControl::set_background`/`TextStyleOwner::set_foreground` are the two
+            // builtin-facing setters that keep `Option<..>` in their own signature) — a themed
+            // value is already the real target type, never a DSL literal needing `wrap_prop_value`'s
+            // `.into()`, so this dispatches straight to `emit_field_setter_call` rather than `@set`.
+            let themed_value = if name == "foreground" || name == "background" {
+                quote! { Some(__theme_value) }
+            } else {
+                quote! { __theme_value }
+            };
+            let set = emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter_ident,
+                themed_value,
+                &binding_ts,
+                from,
+                table,
+            );
+            let clear = emit_field_clear_call(name, &node.type_path, &binding_ts, from, table);
+            sets.extend(quote! {
+                match #binding.theme_handle().resolve(#token) {
+                    elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
+                    elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
+                }
+            });
+            continue;
+        }
+        if matches!(expr, ViewExpr::Element(_)) {
+            panic!(
+                "`{}`: a named element-valued attribute (`{name}: SomeElement {{ .. }}`) on an \
+                 external (builtin) element isn't supported yet — this is a known, tracked gap in \
+                 the .elwind-to-macro migration, not a user error",
+                node.type_path
+            );
+        }
+        if is_text_style {
+            let setter_ident = format_ident!("set_{name}");
+            let raw = emit_expr(expr, ctx, &EmitMode::Construction);
+            let value = if name == "foreground" {
+                quote! { Some(#raw) }
+            } else {
+                raw
+            };
+            sets.extend(emit_field_setter_call(
+                name,
+                &node.type_path,
+                &setter_ident,
+                value,
+                &binding_ts,
+                from,
+                table,
+            ));
+            continue;
+        }
+        let value = match expr {
+            ViewExpr::Closure { params, body } => emit_closure_value(params, body, ctx, from, table),
+            other => emit_expr(other, ctx, &EmitMode::Construction),
+        };
+        sets.extend(quote! {
+            elwindui::core::#props_macro!(@set #binding, #name_ident, #value);
+        });
+    }
+    out.extend(quote! {
+        // Brings every builtin's `{Name}Ext` trait into scope at once — `#sets`'s method calls may
+        // resolve against *any* ancestor's trait (`background` lives on `NativeControlExt`, not
+        // `ButtonExt`), and without `TypeInfo` this function has no ancestor chain to import
+        // specific traits from. Scoped to this block only.
+        #[allow(unused_imports)]
+        use elwindui::ui::*;
+        let #binding = elwindui::ui::#type_ident::new();
+        #sets
+    });
+}
+
 fn emit_construction(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -5837,6 +5977,18 @@ fn emit_construction(
     out: &mut TokenStream,
     plan: &[PlannedNode],
 ) {
+    if table.resolve(from, &node.type_path).is_none() {
+        emit_external_construction(node, ctx, from, table, out);
+        if !node.child_bindings.is_empty() {
+            let binding = &node.binding;
+            let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+            let items = node.child_bindings.iter().map(|(c, _)| quote! { #c.clone() });
+            out.extend(quote! {
+                elwindui::core::#props_macro!(@children #binding, [#(#items),*]);
+            });
+        }
+        return;
+    }
     if table
         .resolve(from, &node.type_path)
         .is_some_and(|i| i.is_virtual_builtin)
@@ -7036,8 +7188,12 @@ fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> TokenStream 
     // is_builtin`'s own doc comment) — qualifying it there means callers never need a bare `use` for
     // it. A consumer-defined component has no such fixed path (codegen doesn't know where the
     // consumer's build.rs/proc-macro path puts it), so it stays bare, resolved via the existing
-    // flat crate-root convention instead.
-    if info.is_some_and(|i| i.is_builtin) {
+    // flat crate-root convention instead. `info.is_none()` (external, no local `TypeInfo`) is
+    // treated the same as a known builtin — every name `table.resolve` doesn't find locally *is*
+    // one, by construction (see `emit_construction`'s own dispatch: a name is only ever unresolved
+    // here because it's declared entirely outside this compilation's own `.elwind`/`#[component]`
+    // AST).
+    if info.is_none() || info.is_some_and(|i| i.is_builtin) {
         quote! { elwindui::ui::#ident }
     } else {
         quote! { #ident }
@@ -7122,6 +7278,45 @@ fn emit_wiring(
     // closure argument, which the borrow checker rejects.
     for (name, expr) in &node.attributes {
         if let Some(_event) = name.strip_prefix("on_") {
+            // External (`info.is_none()`) target: no `TypeInfo` to check `routed_fields`/
+            // `field_types` against, so this builds the same bare closure/callable
+            // `build_props_macro`'s `@set` arm for a `#[routed]` property now accepts (see that
+            // function's own doc comment) and lets the declaration — not this call site — decide
+            // whether it becomes a direct setter call or a routed registration. Always followed by
+            // `__refresh_dynamic_regions()`: the non-routed branch below already always does this;
+            // unconditionally doing it here too (rather than only for whichever shape the property
+            // happens to have, which this function no longer knows) costs nothing when it turns out
+            // to be a no-op and is never wrong to call after a user action.
+            if info.is_none() {
+                let name_ident = format_ident!("{name}");
+                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+                let call = match expr {
+                    ViewExpr::Closure { params, body } => {
+                        emit_on_event_closure_body(body, params, ctx, &self_mode)
+                    }
+                    other => emit_expr(other, ctx, &self_mode),
+                };
+                let closure_params = match expr {
+                    ViewExpr::Closure { params, .. } => params
+                        .iter()
+                        .map(|p| format_ident!("{p}"))
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                out.extend(quote! {
+                    {
+                        #[allow(unused_imports)]
+                        use elwindui::ui::*;
+                        let widget = #widget_binding;
+                        let this = std::rc::Rc::clone(&this);
+                        elwindui::core::#props_macro!(@set widget, #name_ident, move |#(#closure_params),*| {
+                            #call;
+                            this.__refresh_dynamic_regions();
+                        });
+                    }
+                });
+                continue;
+            }
             let setter = format_ident!("set_{name}");
             // `#[routed]` (docs/elwindui_spec.md 4章): registered on the widget's own storage
             // (`Button::register_routed_handler`, delegating to its own `routed_handlers`) instead
@@ -7705,7 +7900,22 @@ fn emit_resync(
     // `build_virtual_value`'s own inline copy for a virtual builtin) doesn't carry over here, so
     // any hand-written native or virtual builtin whose setters are shared-trait-only needs its own
     // copy of the same import for this function's own `self.#binding.#setter(..)` calls below.
-    out.extend(builtin_trait_use(&node.type_path, info));
+    //
+    // `info.is_none()` (external/builtin, no local `TypeInfo`): a resync'd theme value is already
+    // fully typed (resolved from a real theme definition, never a DSL hex-string literal needing
+    // `wrap_prop_value`'s `.into()` conversion), so `emit_field_setter_call`'s existing
+    // `declaring_type`-less fallback (a plain `#receiver.#setter(#args)` call — no `@set` needed
+    // here) is already the right shape; it only needs *some* ancestor's trait in scope, and without
+    // `TypeInfo` this function has no ancestor chain to name specific ones from — same glob-import
+    // reasoning as `emit_external_construction`'s own `use elwindui::ui::*;`.
+    out.extend(if info.is_none() {
+        quote! {
+            #[allow(unused_imports)]
+            use elwindui::ui::*;
+        }
+    } else {
+        builtin_trait_use(&node.type_path, info)
+    });
     // A deferred field inherited from `UIElement` itself (`margin`/`width`/`height`/... —
     // `resolve_effective_fields`'s own doc comment) is set through `UIElementExt`, a shared trait
     // method — needed here for the same reason as `emit_construction`'s own matching `use` (this
@@ -7869,6 +8079,21 @@ fn emit_resync(
                 from,
                 table,
             ));
+            continue;
+        }
+        if info.is_none() {
+            // External (no local `TypeInfo`): none of `is_copy`/`Vec<..>`/`node_uses_owned_setters`
+            // below can be decided (`field_ty` is always `None`, so every one of those checks would
+            // silently default to the *last*, `&(..)`-wrapping `else` branch regardless of the
+            // property's real type — the exact bug this branch exists to avoid: a `bool`/`f32`/enum
+            // resync value would get wrongly borrowed as if it were `String`-shaped). `@set` already
+            // carries the right wrapping decision from the `#[prop]` declaration itself — reuse it
+            // here instead of re-deriving anything.
+            let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+            let name_ident = format_ident!("{name}");
+            out.extend(quote! {
+                elwindui::core::#props_macro!(@set #receiver, #name_ident, #value);
+            });
             continue;
         }
         let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));

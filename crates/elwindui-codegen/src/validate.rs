@@ -973,10 +973,16 @@ fn check_shortcut_attrs(
                 "{component_name}: #[shortcut(...)] on `{}.{name}` — `{name}` is not a #[routed] attribute",
                 node.type_path
             )),
-            None => errors.push(format!(
-                "{component_name}: #[shortcut(...)] on `{}.{name}` — `{}` is not a known component/builtin (missing `use`?)",
-                node.type_path, node.type_path
-            )),
+            // External (no local `TypeInfo`, e.g. a builtin declared entirely in `elwindui-core`):
+            // this validation genuinely cannot check "is `{name}` really `#[routed]`" without a
+            // shape table — `emit_wiring`'s own external-path codegen (`build_props_macro`'s doc
+            // comment on why `@set` accepts a bare callable either way) already defers exactly this
+            // question to the generated `@set`/`@routed` dispatch, so there is nothing left for this
+            // *earlier* validation pass to usefully reject here. A genuinely wrong assumption still
+            // fails to compile, just later and with a less specific message — the same tradeoff
+            // every other builtin-shape check already makes once a builtin's shape lives only in its
+            // own `#[prop]` declarations.
+            None => {}
         }
         for (backend, spec) in chords {
             if let Err(e) = codegen::parse_shortcut_spec(spec) {

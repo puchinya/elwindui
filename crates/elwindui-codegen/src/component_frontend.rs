@@ -166,6 +166,71 @@ pub fn register_same_crate_component(
         .insert((compiling_crate_key(), name.to_string()), stored);
 }
 
+/// A registered `#[elwindui::viewmodel] mod foo { .. }` — kept as reparseable source text for the
+/// same reason `StoredComponent` is (a `ViewModelDef` is full of non-`Send`/`Sync` `syn` types a
+/// `static`-held `Mutex` can't store).
+struct StoredViewModel {
+    item_mod_src: String,
+}
+
+/// Keyed by `(compiling_crate_key(), viewmodel type name)` — mirrors `same_crate_components`, but
+/// for `#[elwindui::viewmodel] mod foo { struct Foo { .. } }` (`elwindui-macros`'s `viewmodel`
+/// attribute macro doesn't keep the `mod` wrapper past expansion, so `Foo` itself is what a sibling
+/// `#[elwindui::component]`'s field type or `bind!` target actually names — see
+/// `register_same_crate_viewmodel`'s own doc comment). Populated by
+/// `lib.rs::generate_viewmodel_from_item_mod`; read by `sibling_viewmodel_modules` so a
+/// `#[bindable]`/`bind!`-using component elsewhere in the same crate can be checked against the
+/// viewmodel's real fields instead of silently going unchecked (the gap 05d4861-era `validate.rs`
+/// comments call out: without this, `vm.typo_field` never gets caught on the proc-macro path). Same
+/// declaration-order requirement as `same_crate_components` — a viewmodel must be declared before
+/// the component(s) that reference it.
+fn same_crate_viewmodels() -> &'static Mutex<HashMap<(String, String), StoredViewModel>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredViewModel>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers `name`'s already-successfully-generated `#[elwindui::viewmodel] mod item_mod { .. }` so
+/// a later same-crate `#[elwindui::component]`/`#[elwindui::viewmodel]` invocation can resolve it —
+/// see `same_crate_viewmodels`'s own doc comment. `name` is the viewmodel *struct's* name (e.g.
+/// `DocumentViewModel`), not the enclosing `mod`'s name (e.g. `document_view_model`) — the two
+/// usually differ, and it's the struct name real Rust code (field types, `bind!` targets) actually
+/// references. Only call this after this viewmodel's own codegen has actually succeeded.
+pub fn register_same_crate_viewmodel(name: &str, item_mod: &syn::ItemMod) {
+    let stored = StoredViewModel {
+        item_mod_src: quote::quote! { #item_mod }.to_string(),
+    };
+    same_crate_viewmodels()
+        .lock()
+        .unwrap()
+        .insert((compiling_crate_key(), name.to_string()), stored);
+}
+
+/// Every same-crate `#[elwindui::viewmodel]` registered so far, rebuilt as one `Module` each — see
+/// `same_crate_viewmodels`'s own doc comment. Unlike `sibling_component_modules`, there's no
+/// `skip_name` guard: a viewmodel never references itself as a sibling type the way a component's
+/// `view!` can reference another component.
+pub fn sibling_viewmodel_modules() -> Vec<Module> {
+    let key = compiling_crate_key();
+    let store = same_crate_viewmodels().lock().unwrap();
+    store
+        .iter()
+        .filter(|((crate_key, _), _)| crate_key == &key)
+        .map(|(_, stored)| {
+            let item_mod: syn::ItemMod = syn::parse_str(&stored.item_mod_src)
+                .expect("internal: failed to reparse a registered sibling viewmodel's mod text");
+            let def = attr_frontend::viewmodel_def_from_item_mod(&item_mod)
+                .expect("internal: failed to rebuild a registered sibling viewmodel");
+            Module {
+                path: Vec::new(),
+                uses: Vec::new(),
+                items: vec![ast::Item::ViewModel(def)],
+                allows_external_builtins: true,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
 /// Every same-crate sibling `#[elwindui::component]` registered so far (via
 /// `register_same_crate_component`), other than `skip_name` itself, rebuilt as one `Module` each
 /// (`path: []`, matching the flat crate-root visibility every `#[elwindui::component]`-generated type

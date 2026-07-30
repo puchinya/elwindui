@@ -50,6 +50,7 @@ pub fn generate_viewmodel_from_item_mod(
     item_mod: &syn::ItemMod,
 ) -> Result<proc_macro2::TokenStream, String> {
     let def = attr_frontend::viewmodel_def_from_item_mod(item_mod)?;
+    let name = def.name.clone();
     // A single macro invocation has no directory of sibling modules to cross-reference (`use`
     // resolution is moot with only one module), so the exact real path doesn't matter here — `[]`
     // (crate root) is as good as any.
@@ -61,7 +62,9 @@ pub fn generate_viewmodel_from_item_mod(
     };
     validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(std::slice::from_ref(&module));
-    Ok(codegen::generate_module(&module, &table))
+    let generated = codegen::generate_module(&module, &table);
+    component_frontend::register_same_crate_viewmodel(&name, item_mod);
+    Ok(generated)
 }
 
 /// The attribute-macro counterpart for `component`/`view` (the struct+`view!` frontend, successor
@@ -94,8 +97,10 @@ pub fn generate_component_from_item_struct(
         ..Default::default()
     };
     let sibling_modules = component_frontend::sibling_component_modules(&name);
+    let sibling_viewmodels = component_frontend::sibling_viewmodel_modules();
     let all_modules: Vec<_> = std::iter::once(module.clone())
         .chain(sibling_modules)
+        .chain(sibling_viewmodels)
         .chain(builtin_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;

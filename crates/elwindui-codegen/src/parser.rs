@@ -1412,6 +1412,17 @@ impl<'a> Parser<'a> {
     /// (`parse_element_node`'s trailing `,` is optional; one-attribute-per-line with no comma is
     /// the DSL's own convention), so only `,`/`}` would otherwise swallow the following attributes'
     /// text as part of the expression.
+    ///
+    /// The newline check alone isn't enough when this text came from `view!`-macro token recovery
+    /// (`TokenStream::to_string()`, `component_frontend.rs`) rather than a real `.elwind` file —
+    /// `to_string()` never preserves original source line breaks, and doesn't reliably insert space
+    /// between every adjacent token pair either (`take_bracketed_src`'s own doc comment notes the
+    /// same line-break gap for array literals, fixed there by that value being self-delimiting; a
+    /// closure body has no such delimiter of its own). So at every unnested position this also
+    /// checks whether what's ahead looks like the *next* attribute starting — a bare identifier
+    /// immediately followed by `:` (not `::`), or a `#[` shortcut-attribute prefix — exactly the
+    /// grammar `parse_element_node`'s own attribute loop uses to begin one, checked regardless of
+    /// whether any whitespace actually separates it from the expression text so far.
     fn take_expr_until_line_end_or(&mut self, terminators: &[char]) -> Result<String, String> {
         self.skip_trivia();
         let start = self.pos;
@@ -1425,6 +1436,7 @@ impl<'a> Parser<'a> {
                 }
                 Some('\n') if depth == 0 => break,
                 Some(c) if depth == 0 && terminators.contains(&c) => break,
+                Some(_) if depth == 0 && self.looks_like_next_attribute_ahead() => break,
                 Some('(') | Some('[') | Some('{') => {
                     depth += 1;
                     self.pos += 1;
@@ -1437,6 +1449,23 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(self.src[start..self.pos].to_string())
+    }
+
+    /// Lookahead-and-rewind (same idiom as `looks_like_element`), called at every unnested position
+    /// inside a closure body's raw-text capture: skips the trivia and checks whether what follows is
+    /// the start of a new view attribute (`ident:`, not `::`) or a `#[shortcut]`-style attribute,
+    /// without consuming anything either way.
+    fn looks_like_next_attribute_ahead(&mut self) -> bool {
+        let save = self.pos;
+        self.skip_trivia();
+        let looks_like_attribute = self.peek_str("#[") || {
+            self.parse_ident().is_ok() && {
+                self.skip_trivia();
+                self.peek_char() == Some(':') && !self.peek_str("::")
+            }
+        };
+        self.pos = save;
+        looks_like_attribute
     }
 
     fn err(&self, msg: &str) -> String {

@@ -191,12 +191,6 @@ pub struct TypeInfo {
     /// (mirroring `resolve_composed_shape`'s own root-match requirement) — see
     /// `resolve_host_composition_base`.
     pub host_composition_base: Option<String>,
-    /// Whether *this* type is itself referenced as some other component's `host_composition_base`
-    /// (the base side of that pair, e.g. `Window` once `NotepadWindow inherits Window` exists) —
-    /// `concrete_type_ident` renames such a type to `{Name}Impl` and expects a paired empty-marker
-    /// trait to exist under its bare name, exactly like `composed_shape.is_some()` already does for
-    /// the composing side.
-    pub is_host_composition_base: bool,
     /// Whether this component is `#[sealed]` (docs/elwindui_spec.md 付録E) — `validate.rs`'s
     /// `validate_inherits` rejects `component X inherits Name` when this is `true`. `false` for a
     /// `viewmodel` (never a valid `inherits` target at all).
@@ -435,7 +429,6 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             // Finalized in the same later pass as `is_native`, for the same reason.
                             composed_shape: None,
                             host_composition_base: None,
-                            is_host_composition_base: false,
                             sealed: c.sealed,
                             is_abstract: c.is_abstract,
                             content_field: c.content_field.clone(),
@@ -521,7 +514,6 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             own_on_unmount: None,
                             composed_shape: None,
                             host_composition_base: None,
-                            is_host_composition_base: false,
                             sealed: false,
                             is_abstract: false,
                             content_field: None,
@@ -564,11 +556,6 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
             )
         })
         .collect();
-    let host_composition_base_keys: HashSet<(Vec<String>, String)> = host_composition_memo
-        .values()
-        .filter_map(|v| v.as_ref().map(|(_, base_key)| base_key.clone()))
-        .collect();
-
     let mut types = table.types;
     for (key, info) in types.iter_mut() {
         info.is_native = memo.get(key).copied().unwrap_or(false);
@@ -578,7 +565,6 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
             .cloned()
             .flatten()
             .map(|(name, _)| name);
-        info.is_host_composition_base = host_composition_base_keys.contains(key);
     }
     SymbolTable { types }
 }
@@ -1304,15 +1290,28 @@ fn resolve_composed_shape(
             return Some(base.to_string());
         }
 
-        let base_key = table.resolve_key(from, base)?;
-        // Direct composition against an *already-composed DSL component*, one delegation hop
-        // further out (`RoundedPanel inherits ContentControl`) — the same shape as the
-        // virtual-builtin case above, just one level up the chain. `generate_view`'s
-        // `is_shape_composition`/`is_template_composition` don't otherwise care whether `base` is a
-        // hand-written primitive or another composed DSL component, since both always delegate
-        // through `self.base` regardless of that type's own nature — see this function's own
-        // `has_own_view` split there, not here.
-        resolve_composed_shape(&base_key, component_meta, modules, table, memo)
+        match table.resolve_key(from, base) {
+            Some(base_key) => {
+                // Direct composition against an *already-composed DSL component*, one delegation
+                // hop further out (`RoundedPanel inherits ContentControl`) — the same shape as the
+                // virtual-builtin case above, just one level up the chain. `generate_view`'s
+                // `is_shape_composition`/`is_template_composition` don't otherwise care whether
+                // `base` is a hand-written primitive or another composed DSL component, since both
+                // always delegate through `self.base` regardless of that type's own nature — see
+                // this function's own `has_own_view` split there, not here.
+                resolve_composed_shape(&base_key, component_meta, modules, table, memo)
+            }
+            // External (no local `TypeInfo`, e.g. a builtin declared entirely in `elwindui-core`)
+            // and not the one host-composition-eligible builtin (`resolve_host_composition_base`
+            // handles `Window` instead): assume shape composition, the same treatment a virtual
+            // builtin gets just above. Every real `#[elwindui::component(inherits ..)]` in this
+            // codebase composes over either `Window` or `ContentControl` — there is no actual
+            // "ordinary, single-root-element" usage to preserve a narrower default for — and a base
+            // that turns out not to implement `UIElement` fails to compile on `#[class]`'s own
+            // generated delegation (`self.base.as_ui_element()` etc.) instead of being caught here.
+            None if base != "Window" => Some(base.to_string()),
+            None => None,
+        }
     })();
 
     memo.insert(key.clone(), result.clone());
@@ -1346,13 +1345,25 @@ fn resolve_host_composition_base(
     {
         return None;
     }
-    let base_key = table.resolve_key(from, base)?;
-    let base_info = table.types.get(&base_key)?;
-    let base_is_native = is_native_memo.get(&base_key).copied().unwrap_or(false);
-    if base_is_native && !base_info.has_view && !base_info.is_native_control_leaf {
-        Some((base.to_string(), base_key))
-    } else {
-        None
+    match table.resolve_key(from, base) {
+        Some(base_key) => {
+            let base_info = table.types.get(&base_key)?;
+            let base_is_native = is_native_memo.get(&base_key).copied().unwrap_or(false);
+            if base_is_native && !base_info.has_view && !base_info.is_native_control_leaf {
+                Some((base.to_string(), base_key))
+            } else {
+                None
+            }
+        }
+        // External (no local `TypeInfo`): `Window` is the one builtin this ever actually
+        // applies to (see this function's own doc comment — a hand-written native host with no
+        // `UIElement` of its own), matching `generate_view`'s own pre-existing
+        // `resolved_root.type_path == "Window"` fallback. The returned key is never a real
+        // lookup target — nothing in this crate dereferences the base-key half of this pairing
+        // (the now-removed `is_host_composition_base` field was the only reader, dead code even
+        // before this).
+        None if base == "Window" => Some((base.to_string(), (Vec::new(), "Window".to_string()))),
+        None => None,
     }
 }
 

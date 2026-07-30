@@ -1224,10 +1224,20 @@ fn validate_inherits(
     errors: &mut Vec<String>,
 ) {
     let Some(base_info) = table.resolve(from, base) else {
-        errors.push(format!(
-            "{}: inherits `{base}`, but `{base}` is not a known component/builtin (missing `use`?)",
-            c.name
-        ));
+        // External (no local `TypeInfo`, e.g. a builtin declared entirely in `elwindui-core`): the
+        // deeper checks below (sealed, category-tag exemptions, "`X`'s own `view` root must
+        // construct `base`") all need `base_info`, which isn't available. For the proc-macro path
+        // this loses nothing real — `component_frontend.rs` already requires every
+        // `#[elwindui::component]` struct to carry exactly one `body: view! { .. }` field, so the
+        // "has its own view" check this function's deepest fallback performs is structurally
+        // guaranteed to pass regardless of `base` — and a genuinely `#[sealed]` base still fails to
+        // compile on its own, via `#[class]`'s own inherit-macro mechanism (a sealed class emits no
+        // `__elwindui_inherit_*!` trio, so naming it as `inherits = ..` fails with "macro not found"
+        // rather than silently succeeding). The `.elwind` file path (where a component may
+        // legitimately have no `view` of its own, relying on an inherited template) loses real
+        // checking here — accepted since that whole path is being phased out (`examples/notepad` is
+        // its only remaining user, migrating to `#[component]` — see `docs/
+        // elwindui_implementation_status.md`), not extended with new capability.
         return;
     };
 
@@ -2013,8 +2023,15 @@ view RoundedPanel {
         );
     }
 
+    /// An `inherits` base this compilation has no local `TypeInfo` for is no longer flagged here —
+    /// deliberately, not an oversight (see `validate_inherits`'s own doc comment on its `None` arm).
+    /// `elwindui-codegen` cannot tell "a builtin declared entirely in `elwindui-core`" apart from a
+    /// genuine typo without a shape table, so it assumes the former, the same way every other
+    /// builtin-shape decision in this codebase now does. A genuine typo (`inherits DoesNotExist`)
+    /// still fails to compile — just later, at `#[class]`'s own generated-code level (`cannot find
+    /// macro __elwindui_inherit_DoesNotExist`) rather than here.
     #[test]
-    fn rejects_inherits_of_unknown_base() {
+    fn accepts_inherits_of_an_unresolved_base_deferring_to_the_generated_code() {
         let src = r#"
 component Foo inherits DoesNotExist {
 }
@@ -2026,11 +2043,9 @@ view Foo {
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
             .chain(crate::builtin_modules())
             .collect();
-        let errs = validate(&modules).unwrap_err();
         assert!(
-            errs.iter()
-                .any(|e| e.contains("not a known component/builtin")),
-            "errors: {errs:?}"
+            validate(&modules).is_ok(),
+            "an unresolved `inherits` base should no longer be rejected by this pass"
         );
     }
 

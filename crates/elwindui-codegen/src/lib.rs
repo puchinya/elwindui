@@ -341,3 +341,86 @@ mod dsl_enum_tests {
         );
     }
 }
+
+/// Phase 4: confirms the same-crate viewmodel registry (`component_frontend::same_crate_viewmodels`,
+/// populated by `generate_viewmodel_from_item_mod`) actually catches, on the Rust-macro path, the
+/// two mistakes its own doc comment claims it fixes — a typo'd `vm.field` reference and a
+/// `#[bindable]` field whose type isn't a `viewmodel` at all — mirroring `validate.rs`'s own
+/// `rejects_reference_to_unknown_vm_field`/`rejects_bindable_field_whose_type_is_not_a_viewmodel`
+/// tests for the `.elwind`-text frontend. Names are unique per test for the same reason
+/// `dsl_enum_tests` uses unique names (shared process-global registries).
+#[cfg(test)]
+mod viewmodel_registry_tests {
+    use super::*;
+
+    fn register_viewmodel(src: &str) {
+        let item_mod: syn::ItemMod = syn::parse_str(src).expect("mod should parse");
+        generate_viewmodel_from_item_mod(&item_mod).expect("viewmodel generation should succeed");
+    }
+
+    #[test]
+    fn typo_vm_field_reference_is_rejected_on_macro_path() {
+        register_viewmodel(
+            r#"
+            mod vm_typo_a_mod {
+                struct VmTypoA {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+            "#,
+        );
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct ScreenTypoA {
+                #[param]
+                #[inject]
+                vm: VmTypoA,
+                body: view! {
+                    VerticalLayout {
+                        TextBlock { text: vm.no_such_field }
+                    }
+                },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let err = generate_component_from_item_struct(None, &item_struct)
+            .expect_err("a typo'd vm field reference should be rejected");
+        assert!(err.contains("no_such_field"), "error: {err}");
+    }
+
+    #[test]
+    fn bindable_field_on_non_viewmodel_type_is_rejected_on_macro_path() {
+        // A plain sibling component (not a viewmodel), registered exactly like any other
+        // #[elwindui::component] would be.
+        let not_vm_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct NotAViewModelB {
+                #[param]
+                label: String,
+                body: view! { TextBlock { text: label } },
+            }
+            "#,
+        )
+        .unwrap();
+        generate_component_from_item_struct(None, &not_vm_struct)
+            .expect("sibling component should build");
+
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct WindowBindableB {
+                #[bindable]
+                thing: std::rc::Rc<NotAViewModelB>,
+                body: view! {
+                    Window { TextBlock { text: "x" } }
+                },
+            }
+            "#,
+        )
+        .unwrap();
+        let err = generate_component_from_item_struct(None, &item_struct)
+            .expect_err("#[bindable] on a non-viewmodel type should be rejected");
+        assert!(err.contains("isn't a `viewmodel`"), "error: {err}");
+    }
+}

@@ -786,6 +786,31 @@ fn named_accessor_ident(bare_name: &str) -> Ident {
     format_ident!("as_{}", to_snake_case(bare_name))
 }
 
+/// `ContentControl` -> `into_content_control_node`: the upcast default method every
+/// `{ClassName}Ext` trait declaration gets, one per class, converting `Rc<Self>` to
+/// `Rc<dyn {ClassName}Ext>`. Because it lives as a *default method on the trait itself* (not
+/// something `build_inherit_macros`'s per-ancestor forwarding `impl` has to emit), a descendant
+/// gets one such method per ancestor it actually `impl`s (root, ordinary, and `trait_only` classes
+/// alike — `struct_only` implementors inherit it for free from the existing trait they implement)
+/// via Rust's own default-method inheritance through the supertrait chain, with no method at all
+/// for an ancestor it doesn't have — e.g. `MenuItem`/`Window` never gain `into_ui_element_node`,
+/// since neither ever `impl`s `UIElementExt`. `Self: Sized` keeps every one of these out of the
+/// trait's vtable, so traits already used as `dyn {ClassName}Ext` elsewhere stay object-safe.
+fn into_node_ident(bare_name: &str) -> Ident {
+    format_ident!("into_{}_node", to_snake_case(bare_name))
+}
+
+fn build_into_node_default(into_ident: &Ident, ext_ty: &TokenStream2) -> TokenStream2 {
+    quote! {
+        fn #into_ident(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn #ext_ty>
+        where
+            Self: Sized + 'static,
+        {
+            self
+        }
+    }
+}
+
 /// `ContentControl` -> `__elwindui_inherit_ContentControl`: the main entry point a subclass invokes
 /// (see this module's own doc comment on the `__elwindui_inherit_*!` mechanism).
 fn inherit_macro_ident(bare_name: &str) -> Ident {
@@ -2258,6 +2283,8 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     // (`#[overridable]` is only meaningful on an `impl ClassName { .. }` method) — so there are
     // never any per-method accessors to build here, only the one shared `dyn_ident`.
     let dyn_methods = build_dyn_default_methods(&dyn_ident, &ext_ty, &sigs, &[]);
+    let into_node_ident = into_node_ident(&bare_name);
+    let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
 
     // Unlike `expand_impl`, `trait_only` never generates its own `__elwindui_inherit_*!` trio (or
     // the matching `macro_reexport_mod_ident` wrapper module): `trait_only` has no `prelude` at
@@ -2297,6 +2324,7 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
         #(#attrs)*
         #vis trait #ext_name #generics #colon_bound #where_clause {
             #(#dyn_methods)*
+            #into_node_default
         }
         #shape_macro
     }
@@ -2913,12 +2941,15 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             let accessor = per_method_accessor_ident(name);
             quote! { fn #accessor(&self) -> &dyn #ext_ty { self } }
         });
+        let into_node_ident = into_node_ident(&bare_name);
+        let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
         (
             quote! {
                 pub trait #ext_ident #impl_generics #bound #where_clause {
                     fn as_ui_element(&self) -> &#impl_name;
                     #(#overridable_defaults)*
                     #(#plain_defaults)*
+                    #into_node_default
                 }
             },
             // `ClassName` is a genuine `ClassNameExt` implementor itself — trivially for both
@@ -2971,8 +3002,15 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             let accessor = per_method_accessor_ident(name);
             quote! { fn #accessor(&self) -> &dyn #ext_ty { self } }
         });
+        let into_node_ident = into_node_ident(&bare_name);
+        let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
         (
-            quote! { pub trait #ext_ident #impl_generics #bound #where_clause { #(#dyn_methods)* } },
+            quote! {
+                pub trait #ext_ident #impl_generics #bound #where_clause {
+                    #(#dyn_methods)*
+                    #into_node_default
+                }
+            },
             quote! {
                 impl #impl_generics #ext_ident #ty_generics for #impl_name #ty_generics #where_clause {
                     fn #dyn_ident(&self) -> &dyn #ext_ty { self }
@@ -3568,6 +3606,85 @@ mod self_weak_on_constructed_tests {
             parent_s.contains("fn on_constructed (& self)")
                 || parent_s.contains("fn on_constructed(&self)"),
             "on_constructed's own body must still be emitted as a plain method: {parent_s}"
+        );
+    }
+
+    // A root class (no `inherits`) gets its own `into_<name>_node` upcast as a default method on
+    // its own `{Name}Ext` trait declaration — `Rc<Self> -> Rc<dyn {Name}Ext>`, gated `Self: Sized`
+    // so the trait stays object-safe wherever it's already used as `dyn {Name}Ext`.
+    #[test]
+    fn into_node_upcast_generated_for_root_class() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct IntoNodeTestRoot { value: i32 } },
+            quote! {
+                impl IntoNodeTestRoot {
+                    fn construct() -> Self { Self { value: 0 } }
+                }
+            },
+        );
+        let s = impl_out.to_string();
+        assert!(!is_real_compile_error(&impl_out), "unexpected error: {s}");
+        let trait_start = s
+            .find("pub trait IntoNodeTestRootExt")
+            .expect("trait declaration must exist");
+        let trait_slice = &s[trait_start..];
+        assert!(
+            trait_slice.contains("into_into_node_test_root_node"),
+            "root class's own trait should declare its into_<name>_node upcast: {trait_slice}"
+        );
+        assert!(
+            trait_slice.contains("self : std :: rc :: Rc < Self >")
+                || trait_slice.contains("self: std::rc::Rc<Self>"),
+            "into_node upcast should take self: Rc<Self>: {trait_slice}"
+        );
+        assert!(
+            trait_slice.contains("Self : Sized") || trait_slice.contains("Self: Sized"),
+            "into_node upcast should be Self: Sized-gated to preserve object safety: {trait_slice}"
+        );
+        syn::parse2::<syn::File>(impl_out.clone())
+            .unwrap_or_else(|e| panic!("expansion must be valid Rust syntax: {e}\n{s}"));
+    }
+
+    // An ordinary (non-root) class gets its own `into_<name>_node` upcast too, named after
+    // *itself* — not the root's — one such method per ancestor level, each declared once on that
+    // ancestor's own trait and inherited down through Rust's ordinary default-method/supertrait
+    // mechanism (no per-hop generation needed in `build_inherit_macros`).
+    #[test]
+    fn into_node_upcast_generated_for_ordinary_class_named_after_itself() {
+        let _ = expand_pair(
+            quote! {},
+            quote! { pub struct IntoNodeTestParent { value: i32 } },
+            quote! {
+                impl IntoNodeTestParent {
+                    fn construct() -> Self { Self { value: 0 } }
+                }
+            },
+        );
+        let (_child_struct_out, child_impl_out) = expand_pair(
+            quote! { inherits = crate::class::self_weak_on_constructed_tests::IntoNodeTestParent },
+            quote! { pub struct IntoNodeTestChild { extra: i32 } },
+            quote! {
+                impl IntoNodeTestChild {
+                    fn construct() -> Self { Self { extra: 0 } }
+                }
+            },
+        );
+        let s = child_impl_out.to_string();
+        assert!(!is_real_compile_error(&child_impl_out), "unexpected error: {s}");
+        let trait_start = s
+            .find("pub trait IntoNodeTestChildExt")
+            .expect("trait declaration must exist");
+        let trait_slice = &s[trait_start..];
+        assert!(
+            trait_slice.contains("into_into_node_test_child_node"),
+            "child class's own trait should declare its own into_<name>_node upcast (not the \
+             parent's): {trait_slice}"
+        );
+        assert!(
+            !trait_slice.contains("into_into_node_test_parent_node"),
+            "child's own trait must not redeclare the parent's upcast method (inherited via the \
+             supertrait bound instead): {trait_slice}"
         );
     }
 }

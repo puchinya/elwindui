@@ -148,6 +148,11 @@ component ContentControl inherits Control {
 
 ### Rustファイル内での代替記法:`#[elwindui::component]`
 
+**2026-07-31時点の実装注**: 「代替記法」という節タイトルだが、`.elwind`テキスト形式は本番から削除済み
+(`docs/elwindui_tool_codegen_design.md`参照)であり、以下が実際には**唯一サポートされる記法**になっている。
+節タイトルはこの節が元々書かれた時点の位置づけをそのまま残しているが、内容そのものは現状の唯一の入力
+経路として読むこと。
+
 `component`/`view`ブロックのペアは、`.elwind`テキストとして書く代わりに、通常のRustファイル中で
 属性マクロ`#[elwindui::component(inherits Base)]`を使って1つの`struct`として書くこともできる
 (`inherits`が無い場合は引数省略)。フィールドは`#[param]`/`#[prop]`等の属性を伴う通常のフィールドと
@@ -184,10 +189,11 @@ struct VolumeControl {
   対応する属性自身の名前付き引数として渡す——`viewmodel`側の`#[observable(default = expr)]`/
   `#[computed(expr = expr)]`(`docs/elwindui_gui_framework_design.md`§7.2)と同じ仕組み
   (`crates/elwindui-codegen/src/attr_frontend.rs`が両方の`struct`フロントエンドで共有)
-- `#[param]`フィールドは現状この属性マクロ経由ではデフォルト値を持てない(対応する`default = expr`
-  引数が実装されていない)ため、`orientation`は常に必須のコンストラクタ引数になる——`.elwind`
-  テキスト形式の`#[param] orientation: Orientation = Orientation::Horizontal`のようなデフォルト付き
-  `#[param]`は、この記法では今のところ表現できない
+- `#[param]`フィールドも`#[prop]`と同様に`#[param(default = expr)]`でデフォルト値を持てる(2026-07-31
+  実装、`#[prop(default = expr)]`と同じ`parser::parse_initializer`を経由するため`bind!(..)`も構文上は
+  書ける——ただし`#[param]`が本来求める「静的評価式のみ」制限を`validate::validate`が実際に検証する
+  仕組みはこの2フロントエンド共通でまだ存在しない、既知のギャップとして残る)。この例の`orientation`は
+  デフォルトを持たない設計のため必須のコンストラクタ引数のまま
 - `volume`は`#[prop(default = 50)]`という通常の(実行時可変な)`prop`——ここでは自己完結した例にする
   ため固定値をデフォルトにしているが、外部の`store`/`viewmodel`へ結びつけたい場合は呼び出し側で
   `bind!`を使う(`#[prop(default = bind!(..))]`のようにフィールド宣言自体に埋め込むのではなく、
@@ -214,11 +220,16 @@ struct VolumeControl {
 - 呼び出し側(インスタンス化)は`.elwind`形式で書いた場合と完全に同一——通常のRustの`let`束縛を使う
 - `viewmodel`にも同様の代替記法(`#[elwindui::viewmodel] mod foo { .. }`)があり、`#[bindable]`
   (`docs/elwindui_gui_framework_design.md`§7.2)経由で`component`側と結線する
-- `#[virtual]`/`#[override]`メソッドはこの記法では未対応——バインドできる`impl`本体の置き場所が
-  自然には定まらないため(`.elwind`テキスト形式でのみサポート)
-- `.elwind`テキスト形式(build.rs方式)との比較・使い分けの指針は`docs/elwindui_tool_codegen_design.md`
-  §4を参照。実装は`elwindui_macros::component`(`elwindui::component`として再エクスポート)で、
-  `examples/notepad-inline`が実例
+- `#[virtual]`/`#[override]`メソッド(上記§、122〜147行目)はこの記法では未対応——バインドできる
+  `impl`本体の置き場所が自然には定まらないため(`.elwind`テキスト形式でのみサポート)。**紛らわしい
+  同名の別機構との混同に注意**:`#[elwindui_macros::class]`(ビルトインのRustクラス階層マクロ、
+  `docs/elwindui_macro_class_spec.md`§8.3)にも`#[overridable]`/`#[overrides]`という属性があるが、
+  これは全くの別物——実Rustの`impl`ブロックのメソッドに対する仕組みで、`.elwind`/`component_frontend.rs`
+  のこの`#[virtual]`/`#[override]`(コンポーネント継承チェーン上のメソッドオーバーライド、AST上の
+  `MethodDef`)とは実装もスコープも独立している。両者が同じ「オーバーライド」という語を使っているだけの
+  偶然の一致であり、どちらか一方が他方の代替になる関係ではない
+- `.elwind`テキスト形式(旧build.rs方式、削除済み)との比較は`docs/elwindui_tool_codegen_design.md`
+  を参照。実装は`elwindui_macros::component`(`elwindui::component`として再エクスポート)
 
 ### `#[elwindui::template]`:再利用可能な名前付きテンプレート(Rustファイル内の代替記法)
 

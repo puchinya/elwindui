@@ -1,7 +1,7 @@
 //! End-to-end proof that the real `elwindui-languageserver` binary speaks LSP correctly: spawn it
 //! as a subprocess (a real client would talk to it exactly this way over stdio), drive it through
 //! `initialize` -> `initialized` -> `textDocument/didOpen`, and confirm a
-//! `textDocument/publishDiagnostics` notification for a broken `.elwind` file actually arrives.
+//! `textDocument/publishDiagnostics` notification for a broken `.rs` file actually arrives.
 //! Reuses `lsp_server::Message::read`/`write` (public API, same framing the server itself uses)
 //! instead of hand-rolling `Content-Length` header parsing for the test client.
 
@@ -41,15 +41,17 @@ fn spawn_reader(mut reader: impl std::io::BufRead + Send + 'static) -> mpsc::Rec
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
-fn publishes_diagnostics_for_a_broken_elwind_file() {
+fn publishes_diagnostics_for_a_broken_rust_file() {
     let dir = std::env::temp_dir().join(format!(
         "elwindui_lsp_integration_test_{}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    let file_path = dir.join("broken.elwind");
-    let broken_src = "viewmodel { #[observable] }";
-    std::fs::write(&file_path, broken_src).expect("write broken.elwind");
+    let file_path = dir.join("broken.rs");
+    // Deliberately unparseable as Rust (unclosed struct body) -- exercises diagnostics.rs's
+    // syn::parse_file error path, not validate::validate's.
+    let broken_src = "struct Broken {\n    field:\n";
+    std::fs::write(&file_path, broken_src).expect("write broken.rs");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_elwindui-languageserver"))
         .stdin(Stdio::piped())
@@ -94,7 +96,7 @@ fn publishes_diagnostics_for_a_broken_elwind_file() {
         DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri,
-                language_id: "elwind".to_string(),
+                language_id: "rust".to_string(),
                 version: 0,
                 text: broken_src.to_string(),
             },
@@ -144,6 +146,6 @@ fn publishes_diagnostics_for_a_broken_elwind_file() {
 
     assert!(
         found,
-        "expected a non-empty textDocument/publishDiagnostics for the broken .elwind file"
+        "expected a non-empty textDocument/publishDiagnostics for the broken .rs file"
     );
 }

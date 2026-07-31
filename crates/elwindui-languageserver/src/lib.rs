@@ -1,15 +1,20 @@
-//! Incremental parse/diagnostics/hover and preview-instance generation for `.elwind` files.
+//! Incremental parse/diagnostics/`vm.field` completion for `.rs` files using elwindui's
+//! Rust-macro frontend (`#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`).
 //! See docs/elwindui_tool_languageserver_design.md.
 //!
-//! Phase 1 (this crate, currently): real-time diagnostics (付録B.2 item 1, reusing
-//! `elwindui_codegen::{parser, validate}` as-is via the `diagnostics` module), syntax highlighting
-//! (`semantic_tokens`), and `vm.field` member completion (`completion`, built on
-//! `elwindui_codegen::codegen::SymbolTable::resolve`). Generated-code preview and hover (付録B.2
-//! items 2/3) and the offscreen-rendering pipeline (付録B.3) are later phases, not attempted here.
+//! Phase 7 (`docs/elwindui_implementation_status.md`) retargeted this crate from the retired
+//! `.elwind`-directory model to a single-`.rs`-file model, matching elwindui's own unification onto
+//! the Rust-macro frontend — real-time diagnostics (`diagnostics`, reusing
+//! `elwindui_codegen::{component_frontend, validate}`) and `vm.field` member completion
+//! (`completion`, built on `elwindui_codegen::codegen::SymbolTable::resolve`). There is no semantic-
+//! tokens provider: a `.rs` file already gets real Rust syntax highlighting from rust-analyzer, and
+//! retrofitting the old `.elwind`-specific tokenizer for a `view! { .. }` macro body's worth of
+//! text wasn't judged worth the added complexity (see the removed `semantic_tokens.rs`, deleted
+//! along with this retarget). Generated-code preview and hover (付録B.2 items 2/3) and the
+//! offscreen-rendering pipeline (付録B.3) remain later phases, not attempted here.
 
 pub mod completion;
 pub mod diagnostics;
-pub mod semantic_tokens;
 
 use lsp_server::{
     Connection, Message, Notification as ServerNotification, Request as ServerRequest, RequestId,
@@ -19,32 +24,19 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidOpenTextDocument, DidSaveTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, Request as _, SemanticTokensFullRequest};
+use lsp_types::request::{Completion, Request as _};
 use lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, PublishDiagnosticsParams, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, PublishDiagnosticsParams,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::path::PathBuf;
 
 pub fn run() {
     let (connection, io_threads) = Connection::stdio();
 
     let server_capabilities = serde_json::to_value(ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
-        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
-            SemanticTokensOptions {
-                legend: SemanticTokensLegend {
-                    token_types: semantic_tokens::TOKEN_TYPES.to_vec(),
-                    token_modifiers: vec![],
-                },
-                full: Some(SemanticTokensFullOptions::Bool(true)),
-                ..Default::default()
-            },
-        )),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_string()]),
             ..Default::default()
@@ -87,26 +79,10 @@ fn main_loop(connection: &Connection) {
 
 fn handle_request(connection: &Connection, req: ServerRequest) {
     match req.method.as_str() {
-        SemanticTokensFullRequest::METHOD => handle_semantic_tokens_request(connection, req),
         Completion::METHOD => handle_completion_request(connection, req),
-        // Phase 1 handles no other requests (no hover/etc. yet).
+        // Phase 7 handles no other requests (no hover/etc. yet).
         _ => {}
     }
-}
-
-fn handle_semantic_tokens_request(connection: &Connection, req: ServerRequest) {
-    let Ok(params) = serde_json::from_value::<SemanticTokensParams>(req.params) else {
-        return;
-    };
-    let result = uri_to_path(&params.text_document.uri)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .map(|src| {
-            SemanticTokensResult::Tokens(SemanticTokens {
-                result_id: None,
-                data: semantic_tokens::semantic_tokens_for_source(&src),
-            })
-        });
-    send_response(connection, req.id, serde_json::to_value(result));
 }
 
 fn handle_completion_request(connection: &Connection, req: ServerRequest) {
@@ -115,10 +91,9 @@ fn handle_completion_request(connection: &Connection, req: ServerRequest) {
     };
     let position = params.text_document_position.position;
     let result = uri_to_path(&params.text_document_position.text_document.uri).and_then(|path| {
-        let dir = path.parent()?;
         let src = std::fs::read_to_string(&path).ok()?;
         Some(CompletionResponse::Array(completion::completions_at(
-            dir, &path, &src, position,
+            &src, position,
         )))
     });
     send_response(connection, req.id, serde_json::to_value(result));
@@ -158,36 +133,28 @@ fn handle_notification(connection: &Connection, not: ServerNotification) {
     }
 }
 
-/// Re-checks the whole directory `uri` lives in (cross-file `bind!`/`vm.field` references need
-/// every `.elwind` file in it visible at once — the same unit `compile_dir`/`diagnostics_for_dir`
-/// process) and publishes each file's diagnostics, including empty lists for files that turned out
-/// clean (so previously-reported problems get cleared once fixed).
+/// Re-checks just the one file `uri` names (Phase 7 — the old directory-wide re-check is gone along
+/// with the `.elwind`-directory model it existed for, see `diagnostics.rs`'s own doc comment) and
+/// publishes its diagnostics, including an empty list when it turned out clean (so previously
+/// reported problems get cleared once fixed).
 fn publish_for_document(connection: &Connection, uri: &Uri) {
     let Some(path) = uri_to_path(uri) else {
         return;
     };
-    let Some(dir) = path.parent() else {
+    let Ok(src) = std::fs::read_to_string(&path) else {
         return;
     };
 
-    for (file_path, diags) in diagnostics::diagnostics_for_dir(dir) {
-        let Some(file_uri) = path_to_uri(&file_path) else {
-            continue;
-        };
-        let params = PublishDiagnosticsParams {
-            uri: file_uri,
-            diagnostics: diags,
-            version: None,
-        };
-        let notification = ServerNotification::new(PublishDiagnostics::METHOD.to_string(), params);
-        if connection
-            .sender
-            .send(Message::Notification(notification))
-            .is_err()
-        {
-            return; // client disconnected
-        }
-    }
+    let params = PublishDiagnosticsParams {
+        uri: uri.clone(),
+        diagnostics: diagnostics::diagnostics_for_source(&src),
+        version: None,
+    };
+    let notification = ServerNotification::new(PublishDiagnostics::METHOD.to_string(), params);
+    connection
+        .sender
+        .send(Message::Notification(notification))
+        .ok();
 }
 
 /// `lsp_types::Uri` (0.97+) is a thin `fluent_uri` wrapper with no `to_file_path`/`from_file_path`
@@ -196,9 +163,4 @@ fn publish_for_document(connection: &Connection, uri: &Uri) {
 /// `fluent_uri`'s lower-level API.
 fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     url::Url::parse(uri.as_str()).ok()?.to_file_path().ok()
-}
-
-fn path_to_uri(path: &Path) -> Option<Uri> {
-    let url = url::Url::from_file_path(path).ok()?;
-    Uri::from_str(url.as_str()).ok()
 }

@@ -257,7 +257,9 @@ dependencies = [
  "elwindui-codegen",
  "lsp-server",
  "lsp-types",
+ "proc-macro2",
  "serde_json",
+ "syn 2.0.118",
  "url",
 ]
 

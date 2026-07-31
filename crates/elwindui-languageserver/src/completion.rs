@@ -6,10 +6,11 @@
 //!
 //! `ast.rs` has no span info (see `diagnostics.rs`'s doc comment), so this doesn't know which
 //! element the cursor is structurally inside. Instead it takes every `#[param]` field of every
-//! `component` in the current file whose type resolves via `codegen::SymbolTable::resolve` (locally
-//! defined or brought into scope by a `use`, §12) as a completion-worthy "vm-like" name — accurate
-//! enough for the current codebase's one-`component`-per-file convention, and a false positive here
-//! only means an unrelated field name shows up in the candidate list, never a wrong resolution.
+//! `#[elwindui::component]` struct in the current file whose type resolves via
+//! `codegen::SymbolTable::resolve` (declared earlier in the same file, §12) as a completion-worthy
+//! "vm-like" name — accurate enough for the current codebase's one-`component`-per-file convention,
+//! and a false positive here only means an unrelated field name shows up in the candidate list,
+//! never a wrong resolution.
 //!
 //! Only one dotted-path depth is supported, matching what `check_vm_expr` validates: `vm.|`
 //! (complete `vm`'s fields). Deeper paths and recursing into a field's own type (e.g. a nested
@@ -19,20 +20,13 @@ use elwindui_codegen::ast::{FieldKind, Item, Module};
 use elwindui_codegen::codegen;
 use lsp_types::{CompletionItem, CompletionItemKind, Position};
 use std::collections::HashMap;
-use std::path::Path;
 
 /// A placeholder identifier `vm.`/`vm.sa`/`vm.save.` gets replaced with before parsing (see
 /// `completions_at`). Long and DSL-namespaced enough that it will never collide with a real
 /// user identifier by accident.
 const PLACEHOLDER_IDENT: &str = "__elwindui_completion_placeholder";
 
-pub fn completions_at(
-    dir: impl AsRef<Path>,
-    current_file: impl AsRef<Path>,
-    src: &str,
-    position: Position,
-) -> Vec<CompletionItem> {
-    let current_file = current_file.as_ref();
+pub fn completions_at(src: &str, position: Position) -> Vec<CompletionItem> {
     let Some(offset) = utf16_position_to_byte_offset(src, position) else {
         return Vec::new();
     };
@@ -41,41 +35,37 @@ pub fn completions_at(
     };
 
     // The text right at the cursor (`vm.`, `vm.sa`, `vm.save.`, ...) is, by construction, an
-    // incomplete expression — `parser.rs`'s `parse_view_expr` requires an identifier after every
-    // `.`, so the file as typed will *not* parse. Swap the in-progress chain for a placeholder
-    // identifier before parsing, so the rest of the file's structure (the `component`'s field
-    // declarations, its `use`s — everything completion actually needs) still comes through; only
-    // the dotted-path info already extracted above (`owner_path`/`filter`) is used for resolution.
+    // incomplete expression — a `view! { .. }` body's own DSL-text parsing requires an identifier
+    // after every `.`, so the file as typed will *not* parse. Swap the in-progress chain for a
+    // placeholder identifier before parsing, so the rest of the file's structure (the component's
+    // field declarations, its sibling items — everything completion actually needs) still comes
+    // through; only the dotted-path info already extracted above (`owner_path`/`filter`) is used
+    // for resolution. Operates on the raw file text (not just the `view!` macro body), so no
+    // span-mapping through `syn::Macro::tokens` is needed — the same trick the old `.elwind`-text
+    // version of this function used, just at whole-file granularity instead of whole-`.elwind`-file
+    // granularity.
     let mut patched = String::with_capacity(src.len());
     patched.push_str(&src[..chain_start]);
     patched.push_str(PLACEHOLDER_IDENT);
     patched.push_str(&src[offset..]);
-    let Ok(current_module) = elwindui_codegen::parser::parse_module(&patched) else {
+    let Ok(file) = syn::parse_file(&patched) else {
         return Vec::new();
     };
-
-    let mut modules: Vec<Module> = crate::diagnostics::parse_dir_modules(dir)
-        .into_iter()
-        .filter(|(path, _)| path != current_file)
-        .map(|(_, m)| m)
-        .collect();
-    modules.push(current_module);
-    let current_module = modules.last().expect("just pushed");
+    let Ok(modules) = elwindui_codegen::component_frontend::modules_from_file(&file) else {
+        return Vec::new();
+    };
     let table = codegen::build_symbol_table(&modules);
 
-    // Every `#[param]` field, across every `component` in this file, whose type actually resolves
-    // from this module's scope — the same idea as `elwindui_codegen::validate::find_vm_fields`.
-    let vm_fields: HashMap<&str, &str> = current_module
-        .items
+    // Every `#[param]` field, across every `#[elwindui::component]` struct in this file, whose type
+    // actually resolves from its own module's scope — the same idea as
+    // `elwindui_codegen::validate::find_vm_fields`.
+    let vm_fields: HashMap<&str, &str> = modules
         .iter()
-        .filter_map(|item| match item {
-            Item::Component(c) => Some(c),
-            _ => None,
-        })
-        .flat_map(|c| &c.fields)
-        .filter_map(|f| {
+        .flat_map(|m| components_in(m).map(move |c| (m, c)))
+        .flat_map(|(m, c)| c.fields.iter().map(move |f| (m, f)))
+        .filter_map(|(m, f)| {
             table
-                .resolve(current_module, &f.ty)
+                .resolve(m, &f.ty)
                 .map(|_| (f.name.as_str(), f.ty.as_str()))
         })
         .collect();
@@ -85,7 +75,13 @@ pub fn completions_at(
             let Some(&ty) = vm_fields.get(vm_name.as_str()) else {
                 return Vec::new();
             };
-            let Some(info) = table.resolve(current_module, ty) else {
+            // Any module in scope can resolve `ty` — they all share the same flat, crate-root-like
+            // symbol table (`build_symbol_table` doesn't distinguish which module a lookup "comes
+            // from" beyond `use` resolution, and none of these modules declare any `use`s).
+            let Some(module) = modules.first() else {
+                return Vec::new();
+            };
+            let Some(info) = table.resolve(module, ty) else {
                 return Vec::new();
             };
             info.fields
@@ -96,6 +92,13 @@ pub fn completions_at(
         }
         _ => Vec::new(),
     }
+}
+
+fn components_in(module: &Module) -> impl Iterator<Item = &elwindui_codegen::ast::ComponentDef> {
+    module.items.iter().filter_map(|item| match item {
+        Item::Component(c) => Some(c),
+        _ => None,
+    })
 }
 
 fn field_completion_item(name: &str, kind: FieldKind) -> CompletionItem {
@@ -112,8 +115,7 @@ fn field_completion_item(name: &str, kind: FieldKind) -> CompletionItem {
 }
 
 /// LSP `Position` (0-based line, UTF-16 code-unit character) -> byte offset into `src`, matching
-/// `semantic_tokens.rs::Scanner`'s UTF-16 column tracking (`char::len_utf16`) so the two stay
-/// consistent with how the client counts columns.
+/// how the client counts columns.
 fn utf16_position_to_byte_offset(src: &str, pos: Position) -> Option<usize> {
     let mut line = 0u32;
     let mut col = 0u32;
@@ -168,41 +170,30 @@ fn preceding_dotted_path(src: &str, offset: usize) -> Option<(usize, Vec<String>
 mod tests {
     use super::*;
 
-    fn write_dir(files: &[(&str, &str)]) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "elwindui_lsp_completion_test_{}_{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        for (name, contents) in files {
-            std::fs::write(dir.join(name), contents).unwrap();
-        }
-        dir
-    }
-
     const VM_SRC: &str = r#"
-viewmodel Vm {
-    #[observable]
-    content: String = String::new(),
+        #[elwindui::viewmodel]
+        mod vm_mod {
+            struct Vm {
+                #[observable(default = String::new())]
+                content: String,
 
-    #[computed]
-    save_can_execute: bool = true,
-}
-"#;
+                #[computed(expr = true)]
+                save_can_execute: bool,
+            }
+        }
+    "#;
 
     fn window_src(body_after_vm_dot: &str) -> String {
         format!(
             r#"
-component Window {{
-    #[param]
-    #[inject]
-    vm: Vm,
-}}
-view Window {{ Window {{ Text {{ text: {body_after_vm_dot} }} }} }}
-"#
+            #[elwindui::component(inherits Window)]
+            struct WindowC {{
+                #[param]
+                #[inject]
+                vm: Vm,
+                body: view! {{ TextArea {{ text: {body_after_vm_dot} }} }},
+            }}
+            "#
         )
     }
 
@@ -210,74 +201,6 @@ view Window {{ Window {{ Text {{ text: {body_after_vm_dot} }} }} }}
         let mut v: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         v.sort();
         v
-    }
-
-    #[test]
-    fn completes_vm_fields_after_vm_dot() {
-        let src = window_src("vm.");
-        let dir = write_dir(&[("vm.elwind", VM_SRC), ("window.elwind", &src)]);
-        let window_path = dir.join("window.elwind");
-        let dot_offset = src.find("vm.").unwrap() + "vm.".len();
-        let position = byte_offset_to_position(&src, dot_offset);
-
-        let items = completions_at(&dir, &window_path, &src, position);
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert_eq!(labels(&items), vec!["content", "save_can_execute"]);
-    }
-
-    #[test]
-    fn filters_by_partial_input() {
-        let src = window_src("vm.sa");
-        let dir = write_dir(&[("vm.elwind", VM_SRC), ("window.elwind", &src)]);
-        let window_path = dir.join("window.elwind");
-        let offset = src.find("vm.sa").unwrap() + "vm.sa".len();
-        let position = byte_offset_to_position(&src, offset);
-
-        let items = completions_at(&dir, &window_path, &src, position);
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert_eq!(labels(&items), vec!["save_can_execute"]);
-    }
-
-    #[test]
-    fn no_completions_after_a_field_dot() {
-        // No 2-level drilling of any kind anymore (actions resolve exactly like any other field,
-        // with no `.execute()`/`.can_execute` member form to complete).
-        let src = window_src("vm.content.");
-        let dir = write_dir(&[("vm.elwind", VM_SRC), ("window.elwind", &src)]);
-        let window_path = dir.join("window.elwind");
-        let offset = src.find("vm.content.").unwrap() + "vm.content.".len();
-        let position = byte_offset_to_position(&src, offset);
-
-        let items = completions_at(&dir, &window_path, &src, position);
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert!(items.is_empty());
-    }
-
-    #[test]
-    fn no_completions_when_the_vm_type_does_not_resolve() {
-        // `vm`'s declared type `NoSuchType` isn't defined anywhere in the compilation unit, so
-        // `SymbolTable::resolve` can't find it — `vm` never makes it into `vm_fields`, and no
-        // completions should be offered.
-        let src = r#"
-component Window {
-    #[param]
-    #[inject]
-    vm: NoSuchType,
-}
-view Window { Window { Text { text: vm. } } }
-"#;
-        let dir = write_dir(&[("window.elwind", src)]);
-        let window_path = dir.join("window.elwind");
-        let offset = src.find("vm.").unwrap() + "vm.".len();
-        let position = byte_offset_to_position(src, offset);
-
-        let items = completions_at(&dir, &window_path, src, position);
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert!(items.is_empty());
     }
 
     fn byte_offset_to_position(src: &str, offset: usize) -> Position {
@@ -301,6 +224,63 @@ view Window { Window { Text { text: vm. } } }
             line,
             character: col,
         }
+    }
+
+    #[test]
+    fn completes_vm_fields_after_vm_dot() {
+        let src = format!("{VM_SRC}\n{}", window_src("vm."));
+        let dot_offset = src.rfind("vm.").unwrap() + "vm.".len();
+        let position = byte_offset_to_position(&src, dot_offset);
+
+        let items = completions_at(&src, position);
+
+        assert_eq!(labels(&items), vec!["content", "save_can_execute"]);
+    }
+
+    #[test]
+    fn filters_by_partial_input() {
+        let src = format!("{VM_SRC}\n{}", window_src("vm.sa"));
+        let offset = src.rfind("vm.sa").unwrap() + "vm.sa".len();
+        let position = byte_offset_to_position(&src, offset);
+
+        let items = completions_at(&src, position);
+
+        assert_eq!(labels(&items), vec!["save_can_execute"]);
+    }
+
+    #[test]
+    fn no_completions_after_a_field_dot() {
+        // No 2-level drilling of any kind anymore (actions resolve exactly like any other field,
+        // with no `.execute()`/`.can_execute` member form to complete).
+        let src = format!("{VM_SRC}\n{}", window_src("vm.content."));
+        let offset = src.rfind("vm.content.").unwrap() + "vm.content.".len();
+        let position = byte_offset_to_position(&src, offset);
+
+        let items = completions_at(&src, position);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn no_completions_when_the_vm_type_does_not_resolve() {
+        // `vm`'s declared type `NoSuchType` isn't defined anywhere in the file, so
+        // `SymbolTable::resolve` can't find it — `vm` never makes it into `vm_fields`, and no
+        // completions should be offered.
+        let src = r#"
+            #[elwindui::component(inherits Window)]
+            struct WindowD {
+                #[param]
+                #[inject]
+                vm: NoSuchType,
+                body: view! { TextArea { text: vm. } },
+            }
+        "#;
+        let offset = src.find("vm. ").unwrap() + "vm.".len();
+        let position = byte_offset_to_position(src, offset);
+
+        let items = completions_at(src, position);
+
+        assert!(items.is_empty());
     }
 
     #[test]

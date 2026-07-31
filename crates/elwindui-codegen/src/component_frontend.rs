@@ -372,6 +372,110 @@ pub fn enum_def_from_item_enum(item_enum: &syn::ItemEnum) -> Result<ast::EnumDef
     Ok(ast::EnumDef { name, variants })
 }
 
+/// Matches an attribute whose path's *last* segment is `name` — recognizes both `#[elwindui::
+/// component]` and a bare `#[component]` (as written after `use elwindui::component;`), the same
+/// way real Rust attribute-macro resolution would, without actually resolving anything (this is a
+/// read-only, no-macro-expansion caller — `elwindui-languageserver`, which has a whole `.rs` file's
+/// text but no compiled crate to resolve paths against).
+fn attr_path_ends_with(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.path().segments.last().is_some_and(|s| s.ident == name))
+}
+
+/// Finds the `#[..component(inherits Base)]`/`#[..component]` attribute among `attrs` (see
+/// `attr_path_ends_with`) and parses its `inherits Base` argument, if any — the
+/// `elwindui-languageserver`-side counterpart to `elwindui_macros::parse_inherits_arg`, which
+/// instead receives the attribute's own argument tokens directly from the proc-macro system rather
+/// than having to find the attribute itself first.
+fn inherits_arg_from_component_attrs(attrs: &[syn::Attribute]) -> Result<Option<String>, String> {
+    let Some(attr) = attrs
+        .iter()
+        .find(|attr| attr.path().segments.last().is_some_and(|s| s.ident == "component"))
+    else {
+        return Ok(None);
+    };
+    let syn::Meta::List(list) = &attr.meta else {
+        return Ok(None);
+    };
+    if list.tokens.is_empty() {
+        return Ok(None);
+    }
+    use syn::parse::Parser;
+    (|input: syn::parse::ParseStream| {
+        let kw: syn::Ident = input.parse()?;
+        if kw != "inherits" {
+            return Err(syn::Error::new(kw.span(), "expected `inherits <Base>`"));
+        }
+        let base: syn::Ident = input.parse()?;
+        Ok(Some(base.to_string()))
+    })
+    .parse2(list.tokens.clone())
+    .map_err(|e| e.to_string())
+}
+
+/// Builds one `Module` per `#[elwindui::component]` struct / `#[elwindui::viewmodel]` mod /
+/// `#[elwindui::dsl_enum]` enum found among `file`'s top-level items, in source order — the
+/// `elwindui-languageserver` counterpart to the real macro-expansion path
+/// (`generate_component_from_item_struct`/`generate_viewmodel_from_item_mod`/
+/// `generate_dsl_enum_from_item_enum`), minus the actual code generation and the same-crate
+/// registries (a language server sees one file's text, not a real compiled crate — see
+/// `attr_path_ends_with`'s own doc comment). Reuses the exact same conversion functions those
+/// entry points call (`component_and_view_from_item_struct`/`attr_frontend::
+/// viewmodel_def_from_item_mod`/`enum_def_from_item_enum`), so a file that *would* macro-expand
+/// cleanly gets the identical `ComponentDef`/`ViewModelDef`/`EnumDef` shapes here. Every returned
+/// `Module` sets `allows_external_builtins: true` for the same reason the real entry points do —
+/// there is no builtin `Module` to resolve `Window`/`VerticalLayout`/etc. against (see
+/// `crate::TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment).
+///
+/// Items that don't parse as a `ComponentDef`/`ViewModelDef`/`EnumDef` (a malformed `view!` body, a
+/// non-unit enum variant, ...) make the whole call fail — matching how a real macro invocation
+/// would fail to expand that one item, except surfaced as one error for the whole file rather than
+/// pinpointed to the offending item (no span info flows through these conversions — see
+/// `docs/elwindui_tool_languageserver_design.md` for why this is an accepted precision limit, same
+/// as `validate::validate`'s own error messages).
+pub fn modules_from_file(file: &syn::File) -> Result<Vec<Module>, String> {
+    let mut modules = Vec::new();
+    for item in &file.items {
+        match item {
+            syn::Item::Struct(item_struct) if attr_path_ends_with(&item_struct.attrs, "component") => {
+                let base = inherits_arg_from_component_attrs(&item_struct.attrs)?;
+                let (component_def, view_def) =
+                    component_and_view_from_item_struct(base, item_struct)?;
+                modules.push(Module {
+                    path: Vec::new(),
+                    uses: Vec::new(),
+                    items: component_module_items(component_def, view_def),
+                    allows_external_builtins: true,
+                    ..Default::default()
+                });
+            }
+            syn::Item::Mod(item_mod) if attr_path_ends_with(&item_mod.attrs, "viewmodel") => {
+                let def = attr_frontend::viewmodel_def_from_item_mod(item_mod)?;
+                modules.push(Module {
+                    path: Vec::new(),
+                    uses: Vec::new(),
+                    items: vec![ast::Item::ViewModel(def)],
+                    allows_external_builtins: true,
+                    ..Default::default()
+                });
+            }
+            syn::Item::Enum(item_enum) if attr_path_ends_with(&item_enum.attrs, "dsl_enum") => {
+                let def = enum_def_from_item_enum(item_enum)?;
+                modules.push(Module {
+                    path: Vec::new(),
+                    uses: Vec::new(),
+                    items: vec![ast::Item::Enum(def)],
+                    allows_external_builtins: true,
+                    ..Default::default()
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(modules)
+}
+
 /// Every same-crate sibling `#[elwindui::component]` registered so far (via
 /// `register_same_crate_component`), other than `skip_name` itself, rebuilt as one `Module` each
 /// (`path: []`, matching the flat crate-root visibility every `#[elwindui::component]`-generated type
@@ -804,5 +908,79 @@ component Settings {
         syn::parse2::<syn::File>(generated.clone())
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         generated.to_string()
+    }
+}
+
+/// `modules_from_file` — the `elwindui-languageserver` counterpart to real macro expansion,
+/// finding every `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` item in
+/// a whole `.rs` file's worth of `syn::File` without actually expanding any of them.
+#[cfg(test)]
+mod modules_from_file_tests {
+    use super::*;
+
+    #[test]
+    fn finds_component_viewmodel_and_dsl_enum_in_one_file() {
+        let src = r#"
+            #[elwindui::dsl_enum]
+            enum StatusC { Loading, Ready }
+
+            #[elwindui::viewmodel]
+            mod vm_mod_c {
+                struct VmC {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+
+            #[elwindui::component(inherits Window)]
+            struct ScreenC {
+                #[param]
+                #[inject]
+                vm: VmC,
+                #[prop]
+                status: StatusC,
+                body: view! {
+                    VerticalLayout {
+                        match status {
+                            StatusC::Loading => TextBlock { text: "loading" },
+                            StatusC::Ready => TextBlock { text: vm.content },
+                        }
+                    }
+                },
+            }
+
+            fn main() {}
+        "#;
+        let file: syn::File = syn::parse_str(src).expect("should parse as a real Rust file");
+        let modules = modules_from_file(&file).expect("should build Modules");
+        assert_eq!(modules.len(), 3);
+
+        let has_enum = modules
+            .iter()
+            .any(|m| m.items.iter().any(|i| matches!(i, ast::Item::Enum(e) if e.name == "StatusC")));
+        let has_vm = modules.iter().any(|m| {
+            m.items
+                .iter()
+                .any(|i| matches!(i, ast::Item::ViewModel(v) if v.name == "VmC"))
+        });
+        let has_component = modules.iter().any(|m| {
+            m.items
+                .iter()
+                .any(|i| matches!(i, ast::Item::Component(c) if c.name == "ScreenC"))
+        });
+        assert!(has_enum && has_vm && has_component, "modules: {modules:?}");
+
+        crate::validate::validate(&modules).expect("should validate cleanly");
+    }
+
+    #[test]
+    fn plain_rust_items_are_ignored() {
+        let src = r#"
+            struct NotDsl { x: i32 }
+            fn helper() {}
+        "#;
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let modules = modules_from_file(&file).expect("should succeed with zero DSL items");
+        assert!(modules.is_empty());
     }
 }

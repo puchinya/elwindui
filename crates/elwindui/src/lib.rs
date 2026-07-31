@@ -1,11 +1,11 @@
 //! End-user facing facade crate. See docs/elwindui_gui_framework_design.md §1.
 //!
-//! A consumer crate needs only `elwindui` itself in `[dependencies]` — `elwindui-codegen`
-//! (`compile_dir`/`compile_dir_with_extra_viewmodels`, called from build.rs) and `elwindui-macros`'
-//! `#[component]`/`#[viewmodel]` proc-macros both emit generated code that refers exclusively to
-//! `elwindui::core::..`/`elwindui::backend::..`/`elwindui::i18n::..` (never `elwindui_core::..`/
-//! `elwindui_backend_*::..`/`elwindui_i18n::..` directly), which resolve through the re-exports
-//! below regardless of how many crates deep `elwindui` itself pulls them in from.
+//! A consumer crate needs only `elwindui` itself in `[dependencies]` — `elwindui-macros`'
+//! `#[component]`/`#[viewmodel]`/`#[dsl_enum]` proc-macros (backed by `elwindui-codegen`) emit
+//! generated code that refers exclusively to `elwindui::core::..`/`elwindui::backend::..`/
+//! `elwindui::i18n::..` (never `elwindui_core::..`/`elwindui_backend_*::..`/`elwindui_i18n::..`
+//! directly), which resolve through the re-exports below regardless of how many crates deep
+//! `elwindui` itself pulls them in from.
 
 pub use elwindui_core as core;
 pub use elwindui_core::visual_tree;

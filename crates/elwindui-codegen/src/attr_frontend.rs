@@ -18,10 +18,13 @@ use std::path::Path;
 /// a `ViewModelDef` for each, paired with the enclosing `mod`'s own name (`"foo"`) — **without**
 /// actually expanding the attribute macro. This is `syn` parsing the file's *source text* as data,
 /// the same way `viewmodel_def_from_item_mod` reads a macro's input; it never runs
-/// `elwindui-macros`, so there's no dependency on Rust's proc-macro expansion order (which matters
-/// here: `build.rs` — the caller of `compile_dir_with_extra_viewmodels`, `lib.rs` — always runs
-/// *before* the crate's own source, including this file, gets compiled and macro-expanded, so
-/// waiting for the real macro to run is not an option).
+/// `elwindui-macros`, so there's no dependency on Rust's proc-macro expansion order — useful for
+/// any caller that needs a viewmodel's shape *before* the crate's own macro expansion has run (a
+/// `build.rs`, or a language server processing a file in isolation — see
+/// `docs/elwindui_implementation_status.md` for whether such a caller currently exists; the
+/// `.elwind`-era `build.rs` caller this was originally written for, `compile_dir_with_extra_
+/// viewmodels`, was removed once `.elwind` text compilation itself was, so this is currently
+/// exercised only by its own test below).
 ///
 /// The mod name is what lets a caller build this viewmodel's real, crate-relative path (`Module::path`,
 /// e.g. `["notepad_view_model"]` for `main.rs`'s `mod notepad_view_model { .. }`), so a `.elwind`

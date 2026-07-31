@@ -80,17 +80,41 @@ pub fn generate_viewmodel_from_item_mod(
     Ok(generated)
 }
 
+/// `#[elwindui::dsl_enum] enum Name { A, B, C }` — the opt-in that makes a plain Rust `enum`
+/// visible to `validate::validate`'s `match`-exhaustiveness checking the same way `.elwind`'s own
+/// `enum Name { .. }` syntax always was (§14's user-enum rule; see
+/// `component_frontend::same_crate_enums`'s own doc comment for why an opt-in is needed at all —
+/// unlike a `#[elwindui::component]` struct or `#[elwindui::viewmodel]` mod, nothing about a bare
+/// `enum` item marks it as DSL-relevant to any proc-macro). Transparent passthrough: the enum body
+/// is emitted completely unchanged (it's real Rust, matched with real Rust `match`/`if let`) — the
+/// only effect is registering it via `component_frontend::register_same_crate_enum` so a later
+/// same-crate `#[elwindui::component]`'s `view!` can be checked against it. Same
+/// declared-before-use ordering constraint as the component/viewmodel registries.
+pub fn generate_dsl_enum_from_item_enum(
+    item_enum: &syn::ItemEnum,
+) -> Result<proc_macro2::TokenStream, String> {
+    let name = item_enum.ident.to_string();
+    // Built purely to validate the enum shape up front (bare unit variants only) — the real
+    // `EnumDef` a `view!` elsewhere gets checked against is rebuilt fresh, from the registered
+    // source text, by `sibling_enum_modules` itself.
+    component_frontend::enum_def_from_item_enum(item_enum)?;
+    component_frontend::register_same_crate_enum(&name, item_enum);
+    Ok(quote::quote! { #item_enum })
+}
+
 /// The attribute-macro counterpart for `component`/`view` (the struct+`view!` frontend, successor
 /// to the removed `elwindui::component!` bang macro): takes an already-parsed
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` (`base`
 /// from the attribute's own `inherits Base` argument, `item_struct` parsed by the
 /// `elwindui-macros` proc-macro) and builds the matching `ComponentDef`/`ViewDef` pair (see
 /// `component_frontend`). Unlike `generate_viewmodel_from_item_mod`, this also chains in
-/// `component_frontend::sibling_component_modules()`/`sibling_viewmodel_modules()`, so a `view!` can
-/// reference an *earlier* same-crate `#[elwindui::component]`/`#[elwindui::viewmodel]` as a plain
-/// element type or `bind!`/field target (each attribute-macro invocation otherwise only ever sees its
-/// own single annotated item — see `component_frontend::same_crate_components`'s own doc comment for
-/// the full mechanism and its declaration-order requirement). A `view!` body routinely references
+/// `component_frontend::sibling_component_modules()`/`sibling_viewmodel_modules()`/
+/// `sibling_enum_modules()`, so a `view!` can reference an *earlier* same-crate
+/// `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` as a plain element
+/// type, `bind!`/field target, or `match`/`if let` subject (each attribute-macro invocation
+/// otherwise only ever sees its own single annotated item — see
+/// `component_frontend::same_crate_components`'s own doc comment for the full mechanism and its
+/// declaration-order requirement). A `view!` body routinely references
 /// `Window`/`VerticalLayout`/etc. too, but those resolve with no `Module` chained in for them at all —
 /// see `TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment on why, and
 /// `codegen::emit_external_construction`.
@@ -104,18 +128,17 @@ pub fn generate_component_from_item_struct(
     let module = ast::Module {
         path: Vec::new(),
         uses: Vec::new(),
-        items: vec![
-            ast::Item::Component(component_def),
-            ast::Item::View(view_def),
-        ],
+        items: component_frontend::component_module_items(component_def, view_def),
         allows_external_builtins: true,
         ..Default::default()
     };
     let sibling_modules = component_frontend::sibling_component_modules(&name);
     let sibling_viewmodels = component_frontend::sibling_viewmodel_modules();
+    let sibling_enums = component_frontend::sibling_enum_modules();
     let all_modules: Vec<_> = std::iter::once(module.clone())
         .chain(sibling_modules)
         .chain(sibling_viewmodels)
+        .chain(sibling_enums)
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(&all_modules);
@@ -245,4 +268,76 @@ fn compile_dir_impl(
     // (`elwindui-i18n`, re-exported by the `elwindui` facade) rather than per-consumer generated code.
 
     Ok(())
+}
+
+/// Phase 4 (`docs/elwindui_implementation_status.md`): exercises `#[elwindui::dsl_enum]` end to
+/// end through the exact same path `generate_component_from_item_struct` uses in production
+/// (register the enum via `generate_dsl_enum_from_item_enum`, then chain it in via
+/// `component_frontend::sibling_enum_modules()` while building a sibling component) — confirming a
+/// `match` in a Rust-macro-path `view!` gets real exhaustiveness checking against a same-crate
+/// `#[elwindui::dsl_enum]`, the gap `component_frontend::same_crate_enums`'s own doc comment
+/// describes. Names are unique per test (`DslEnumTest*`) — `same_crate_enums`/
+/// `same_crate_components` are process-global statics keyed by `compiling_crate_key()`, which is
+/// constant across every test in this one crate's test binary, so two tests reusing the same enum/
+/// component name would leak state into each other (same constraint `component_frontend.rs`'s own
+/// tests already live with).
+#[cfg(test)]
+mod dsl_enum_tests {
+    use super::*;
+
+    fn register_enum(src: &str) {
+        let item_enum: syn::ItemEnum = syn::parse_str(src).expect("enum should parse");
+        generate_dsl_enum_from_item_enum(&item_enum).expect("dsl_enum generation should succeed");
+    }
+
+    #[test]
+    fn exhaustive_match_against_sibling_dsl_enum_validates() {
+        register_enum("enum DslEnumTestStatusA { Loading, Ready }");
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct DslEnumTestScreenA {
+                #[prop]
+                status: DslEnumTestStatusA,
+                body: view! {
+                    VerticalLayout {
+                        match status {
+                            DslEnumTestStatusA::Loading => TextBlock { text: "loading" },
+                            DslEnumTestStatusA::Ready => TextBlock { text: "ready" },
+                        }
+                    }
+                },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let result = generate_component_from_item_struct(None, &item_struct);
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn non_exhaustive_match_against_sibling_dsl_enum_is_rejected() {
+        register_enum("enum DslEnumTestStatusB { Loading, Ready }");
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct DslEnumTestScreenB {
+                #[prop]
+                status: DslEnumTestStatusB,
+                body: view! {
+                    VerticalLayout {
+                        match status {
+                            DslEnumTestStatusB::Loading => TextBlock { text: "loading" },
+                        }
+                    }
+                },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let err = generate_component_from_item_struct(None, &item_struct)
+            .expect_err("non-exhaustive match should be rejected");
+        assert!(
+            err.contains("not exhaustive") && err.contains("Ready"),
+            "error should name the missing variant: {err}"
+        );
+    }
 }

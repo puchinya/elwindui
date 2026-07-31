@@ -20,7 +20,10 @@ pub use elwindui_svg as svg;
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the
 /// viewmodel half (付録O.2). `view!` is not a real macro (never invoked/expanded — see
 /// `elwindui_macros::component`'s own doc comment); its tokens are read as `.elwind`-DSL text.
-pub use elwindui_macros::{class, component, main, theme_definition, viewmodel};
+/// `#[elwindui::dsl_enum] enum Name { A, B, C }` opts a plain user `enum` into the same
+/// `match`/`if let` exhaustiveness checking a `.elwind`-text `enum` always got — see
+/// `elwindui_macros::dsl_enum`'s own doc comment.
+pub use elwindui_macros::{class, component, dsl_enum, main, theme_definition, viewmodel};
 
 /// Resolves a typed token from the current application theme.
 ///

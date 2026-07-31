@@ -141,7 +141,15 @@ pub(crate) fn fields_from_item_struct(
                 return Err(format!("field `{name}`: expected a simple attribute name"));
             };
             match attr_name.as_str() {
-                "param" => kind = FieldKind::Param,
+                "param" => {
+                    kind = FieldKind::Param;
+                    if let Some(tokens) = parse_name_value_tokens(attr, "default")? {
+                        initializer =
+                            Some(parser::parse_initializer(&tokens.to_string()).map_err(|e| {
+                                format!("field `{name}`: invalid #[param(default = ...)]: {e}")
+                            })?);
+                    }
+                }
                 "prop" => {
                     kind = FieldKind::Prop;
                     if let Some(tokens) = parse_name_value_tokens(attr, "default")? {

@@ -935,6 +935,11 @@ fn check_attached_properties(
             Some(_) => errors.push(format!(
                 "{component_name}: `{owner}::{field}` — `{owner}` has no #[attached] property named `{field}`"
             )),
+            // External (no local `TypeInfo`) — same tradeoff as `check_element_value`'s own `None`
+            // arm: only legitimate on the proc-macro path (`from.allows_external_builtins`), where
+            // this can't be checked without a shape table at all; a genuinely wrong `Owner::field`
+            // still fails to compile, just later, via `@attached_set`'s own generated dispatch.
+            None if from.allows_external_builtins => {}
             None => errors.push(format!(
                 "{component_name}: `{owner}::{field}` — `{owner}` is not a known component/builtin (missing `use`?)"
             )),
@@ -1857,7 +1862,7 @@ view RoundedPanel {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
@@ -1878,7 +1883,7 @@ view Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -1903,7 +1908,7 @@ view Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -1934,7 +1939,7 @@ view RoundedPanel {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
@@ -1961,7 +1966,7 @@ view DynamicHost {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -1997,7 +2002,7 @@ view DynamicHost {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2023,7 +2028,7 @@ view RoundedPanel {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2050,7 +2055,7 @@ view Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert!(
             validate(&modules).is_ok(),
@@ -2072,7 +2077,7 @@ view Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2092,7 +2097,7 @@ view Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
@@ -2111,7 +2116,7 @@ view DocumentViewLike {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let table = codegen::build_symbol_table(&modules);
         let info = table
@@ -2134,7 +2139,7 @@ view DocumentViewLike {
     /// fallback must still resolve it to native.
     #[test]
     fn window_is_native_via_native_attribute_without_inherits() {
-        let modules = crate::builtin_modules();
+        let modules = crate::test_builtin_modules();
         let window_module = modules
             .iter()
             .find(|m| {
@@ -2179,7 +2184,7 @@ component Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2200,7 +2205,7 @@ component Foo inherits NativeControl {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2224,7 +2229,7 @@ view Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2245,7 +2250,7 @@ component Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2263,7 +2268,7 @@ component Foo {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2286,7 +2291,7 @@ component Foo {
         .unwrap();
         module.is_builtin = true;
         let modules: Vec<_> = std::iter::once(module)
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2309,7 +2314,7 @@ component MyWindow inherits Window {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2334,7 +2339,7 @@ view MyWindow {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
@@ -2349,7 +2354,7 @@ component MyButton inherits Button {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
@@ -2370,7 +2375,7 @@ component LabeledPanel inherits ContentControl {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
@@ -2391,7 +2396,7 @@ view LabeledPanel {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
@@ -2641,7 +2646,7 @@ view SaveField {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
         assert!(
@@ -2662,7 +2667,7 @@ view SaveField {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
         assert!(
@@ -2683,7 +2688,7 @@ view SaveField {
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
     }

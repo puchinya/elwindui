@@ -3347,16 +3347,23 @@ fn generate_view(
         // stateless `set_<field>(..)` swap, so it gets no struct field here (see
         // `dynamic_region_refresh_method`'s own scalar/list split).
         let parent = find_dynamic_region_anchor(&plan, &node.binding);
-        if !table
+        // External (no local `TypeInfo`): can't check `content_field_is_list` at all without a
+        // shape table, so this assumes list-shaped — true for every real external parent a dynamic
+        // region actually reaches today (`TabView`'s `Vec<..>`, `VerticalLayout`/`HorizontalLayout`/
+        // `Grid`'s inherited `UIElementCollection`; a genuinely scalar-content external parent under
+        // dynamic control flow isn't exercised by any current builtin/example). A real fix needs
+        // `@content_item_dyn`'s own shape-macro query extended with a matching "is this list-shaped"
+        // one — not attempted here; Refs #14.
+        let is_list = table
             .resolve(from, &parent.type_path)
-            .is_some_and(content_field_is_list)
-        {
+            .map_or(true, content_field_is_list);
+        if !is_list {
             continue;
         }
         let slot = dynamic_slot_ident(&node.binding);
-        let item_ext = dynamic_collection_item_trait(parent, from, table);
+        let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
         struct_fields.extend(quote! {
-            #slot: elwindui::core::ui::DynamicChildSlot<dyn elwindui::core::ui::#item_ext>,
+            #slot: elwindui::core::ui::DynamicChildSlot<#item_ext>,
         });
         field_inits.extend(quote! {
             #slot: elwindui::core::ui::DynamicChildSlot::default(),
@@ -3411,20 +3418,31 @@ fn generate_view(
             // per-node loop.
             if is_host_composition && i == root_index {
                 let binding = &node.binding;
-                let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
-                    panic!(
-                        "unknown or out-of-scope element `{}` — is a `use` for it missing?",
-                        node.type_path
-                    )
-                });
-                let type_ident = concrete_type_ident(&node.type_path, Some(info));
-                let setters = build_component_setters(node, &ctx, from, table, info, &plan);
-                let trait_use = builtin_trait_use(&node.type_path, Some(info));
-                construct_stmts.extend(quote! {
-                    #trait_use
-                    let #binding: #type_ident = #type_ident::construct();
-                    #(#setters)*
-                });
+                match table.resolve(from, &node.type_path) {
+                    Some(info) => {
+                        let type_ident = concrete_type_ident(&node.type_path, Some(info));
+                        let setters = build_component_setters(node, &ctx, from, table, info, &plan);
+                        let trait_use = builtin_trait_use(&node.type_path, Some(info));
+                        construct_stmts.extend(quote! {
+                            #trait_use
+                            let #binding: #type_ident = #type_ident::construct();
+                            #(#setters)*
+                        });
+                    }
+                    // External (no local `TypeInfo`) — same construction shape
+                    // `emit_external_construction` uses for an ordinary node, just `construct()`
+                    // (bare value, for `Self`'s own `base` field) instead of `new()` (`Rc<Self>`).
+                    None => {
+                        let type_ident = format_ident!("{}", node.type_path);
+                        let sets = emit_external_attribute_sets(node, &ctx, from, table);
+                        construct_stmts.extend(quote! {
+                            #[allow(unused_imports)]
+                            use elwindui::ui::*;
+                            let #binding = elwindui::ui::#type_ident::construct();
+                            #sets
+                        });
+                    }
+                }
                 continue;
             }
             emit_construction(node, &ctx, from, table, &mut construct_stmts, &plan);
@@ -3639,9 +3657,12 @@ fn generate_view(
             })?;
             let parent_binding = &parent.binding;
             let parent_ext = format_ident!("{}Ext", parent.type_path);
-            let item_ext = dynamic_collection_item_trait(parent, from, table);
+            let item_ext = dynamic_collection_item_trait_ty(parent, from, table);
             let parent_info = table.resolve(from, &parent.type_path);
-            let body = if parent_info.is_some_and(content_field_is_list) {
+            // External (no local `TypeInfo`): assumes list-shaped — see the matching struct-field
+            // creation site's own doc comment (a few dozen lines up) for why.
+            let is_list = parent_info.map_or(true, content_field_is_list);
+            let body = if is_list {
                 let host = quote! { self.#parent_binding.children() };
                 emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table)
             } else {
@@ -3673,9 +3694,17 @@ fn generate_view(
             // import. Not needed for `TabView` (the only other `content_field_is_list` type), whose
             // own `children()` is declared directly on `TabViewExt` — gated instead of unconditional
             // to avoid an always-unused import there.
-            let layout_children_use = parent_info
-                .is_some_and(|i| i.is_virtual_builtin)
-                .then(|| quote! { use elwindui::core::ui::LayoutExt as _; });
+            // External (no local `TypeInfo`): can't tell a `Layout`-family parent (needs this) from
+            // a `TabView`-family one (doesn't) without a shape table, so this always includes it —
+            // `#[allow(unused_imports)]` absorbs the case where it turns out not needed, the same
+            // harmless-when-unused convention `emit_external_construction`'s own glob import uses.
+            let layout_children_use = if parent_info.is_some_and(|i| i.is_virtual_builtin) {
+                quote! { use elwindui::core::ui::LayoutExt as _; }
+            } else if parent_info.is_none() {
+                quote! { #[allow(unused_imports)] use elwindui::core::ui::LayoutExt as _; }
+            } else {
+                TokenStream::new()
+            };
             Some(quote! {
                 {
                     use elwindui::core::ui::#parent_ext as _;
@@ -3820,7 +3849,11 @@ fn generate_view(
     // to every ancestor through the supertrait chain.
     let base_trait_path = |name: &str| -> TokenStream {
         let ident = format_ident!("{}", name);
-        if table.resolve(from, name).is_some_and(|i| i.is_builtin) {
+        // `info.is_none()` (external, no local `TypeInfo`) treated the same as a known builtin —
+        // same rule `concrete_type_ident` already applies, for the same reason (see its own doc
+        // comment): every name unresolved here is one, by construction.
+        let info = table.resolve(from, name);
+        if info.is_none() || info.is_some_and(|i| i.is_builtin) {
             quote! { elwindui::ui::#ident }
         } else {
             quote! { #ident }
@@ -4275,7 +4308,7 @@ fn emit_for_renderer(
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
-    item_trait: &syn::Ident,
+    item_trait: &ItemTraitTokens,
     subscribe_to_item_changes: bool,
 ) -> TokenStream {
     let param_ident = format_ident!("{}", binding);
@@ -4437,9 +4470,50 @@ fn content_field_is_list(info: &TypeInfo) -> bool {
     })
 }
 
+/// The trait-object element type of a parent's declared content collection, in whichever form
+/// `dynamic_collection_item_trait_ty` (this function's own dispatcher, and every real caller's
+/// entry point) can actually produce for it — a bare `Ident` when a shape table resolves the
+/// parent (`table.resolve`'s `Some`, `.elwind`-text-path-only since production dropped
+/// `builtins.elwind` — Refs #14), or opaque already-`dyn`-wrapped tokens from the `@content_item_dyn`
+/// shape-macro query (`content_item_dyn_type`, `elwindui-macros`) when it isn't. `dynamic_child_binding`
+/// is the only reader that needs to tell the two apart (the `KnownIdent(UIElementExt)` case has its
+/// own `into_node_if_needed`-based shortcut) — every other caller treats both uniformly as "already
+/// the trait-object element type this dynamic region's `DynamicChildSlot<..>` is generic over".
+enum ItemTraitTokens {
+    KnownIdent(syn::Ident),
+    External(TokenStream),
+}
+
+impl quote::ToTokens for ItemTraitTokens {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        match self {
+            ItemTraitTokens::KnownIdent(ident) => {
+                tokens.extend(quote! { dyn elwindui::core::ui::#ident })
+            }
+            ItemTraitTokens::External(dyn_ty) => tokens.extend(quote! { #dyn_ty }),
+        }
+    }
+}
+
+/// Dispatches to `dynamic_collection_item_trait` (a shape table resolves `parent`) or the
+/// `@content_item_dyn` shape-macro query (it doesn't) — see `ItemTraitTokens`'s own doc comment.
+fn dynamic_collection_item_trait_ty(
+    parent: &PlannedNode,
+    from: &Module,
+    table: &SymbolTable,
+) -> ItemTraitTokens {
+    if table.resolve(from, &parent.type_path).is_none() {
+        let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
+        return ItemTraitTokens::External(quote! { elwindui::core::#props_macro!(@content_item_dyn) });
+    }
+    ItemTraitTokens::KnownIdent(dynamic_collection_item_trait(parent, from, table))
+}
+
 /// Resolves the trait-object element type of a parent's declared content collection. This is driven
 /// by the resolved `#[content]` field rather than a widget-name branch: `Vec<TabViewItem>` becomes
-/// `TabViewItemExt`, while layout `Vec<Rc<dyn UIElement>>` becomes `UIElementExt`.
+/// `TabViewItemExt`, while layout `Vec<Rc<dyn UIElement>>` becomes `UIElementExt`. Only ever called
+/// (via `dynamic_collection_item_trait_ty`) once a shape table has already resolved `parent` — see
+/// that function's own doc comment for the external/no-`TypeInfo` counterpart.
 fn dynamic_collection_item_trait(
     parent: &PlannedNode,
     from: &Module,
@@ -4580,16 +4654,16 @@ fn for_body_binds_item_to_a_bindable_field(
 fn dynamic_child_binding(
     binding: TokenStream,
     child_type: &str,
-    item_trait: &syn::Ident,
+    item_trait: &ItemTraitTokens,
     from: &Module,
     table: &SymbolTable,
 ) -> TokenStream {
-    if item_trait == &format_ident!("UIElementExt") {
+    if matches!(item_trait, ItemTraitTokens::KnownIdent(ident) if ident == "UIElementExt") {
         return into_node_if_needed(binding, child_type, from, table);
     }
     quote! {
         {
-            let __child: std::rc::Rc<dyn elwindui::core::ui::#item_trait> = #binding;
+            let __child: std::rc::Rc<#item_trait> = #binding;
             __child
         }
     }
@@ -4874,7 +4948,7 @@ fn emit_dynamic_node_refresh(
     plan: &[PlannedNode],
     node: &PlannedNode,
     host: &TokenStream,
-    item_ext: &syn::Ident,
+    item_ext: &ItemTraitTokens,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
@@ -5011,7 +5085,7 @@ fn emit_scalar_dynamic_node_refresh(
     node: &PlannedNode,
     owner_binding: &syn::Ident,
     setter: &syn::Ident,
-    item_ext: &syn::Ident,
+    item_ext: &ItemTraitTokens,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
@@ -5085,7 +5159,7 @@ fn emit_scalar_branch_value(
     entry: &(syn::Ident, String),
     owner_binding: &syn::Ident,
     setter: &syn::Ident,
-    item_ext: &syn::Ident,
+    item_ext: &ItemTraitTokens,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
@@ -5257,7 +5331,7 @@ fn plan_dynamic_entry(
                 id: None,
                 dynamic: None,
             };
-            let item_trait = dynamic_collection_item_trait(&parent, from, table);
+            let item_trait = dynamic_collection_item_trait_ty(&parent, from, table);
             let rc_identity =
                 collection_uses_rc_identity(collection, body, binding, ctx, from, table);
             let renderer =
@@ -5885,8 +5959,36 @@ fn emit_external_construction(
     out: &mut TokenStream,
 ) {
     let binding = &node.binding;
-    let binding_ts = quote! { #binding };
     let type_ident = format_ident!("{}", node.type_path);
+    let sets = emit_external_attribute_sets(node, ctx, from, table);
+    out.extend(quote! {
+        // Brings every builtin's `{Name}Ext` trait into scope at once — `#sets`'s method calls may
+        // resolve against *any* ancestor's trait (`background` lives on `NativeControlExt`, not
+        // `ButtonExt`), and without `TypeInfo` this function has no ancestor chain to import
+        // specific traits from. Scoped to this block only.
+        #[allow(unused_imports)]
+        use elwindui::ui::*;
+        let #binding = elwindui::ui::#type_ident::new();
+        #sets
+    });
+}
+
+/// The attribute-handling core of `emit_external_construction`, factored out so
+/// `generate_view`'s host-composition root branch can reuse it too (`Type::construct()` there
+/// instead of `Type::new()`, everything else identical — see that branch's own doc comment). Builds
+/// every plain-value `@set` call (theme tokens, `#[text_style]`-injected properties, named
+/// element-valued slots, ordinary expressions/closures) for `node`'s attributes; `on_*` attributes
+/// are skipped (event wiring is `emit_wiring`'s own, separate pass, uniformly for every construction
+/// path). Does not itself construct `node` or open the `use elwindui::ui::*;` scope its emitted
+/// method calls need — callers own their own construction statement and glob import.
+fn emit_external_attribute_sets(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let binding = &node.binding;
+    let binding_ts = quote! { #binding };
     let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
     let mut sets = TokenStream::new();
     for (name, expr) in &node.attributes {
@@ -5904,48 +6006,91 @@ fn emit_external_construction(
         // type). Reused verbatim here — no reason for this function to have its own copy.
         let is_text_style = crate::text_style::is_text_style_field_name(name);
         if let Some(token) = theme_token_path(expr) {
-            let setter_ident = format_ident!("set_{name}");
-            // Matches `build_component_setters`'s own `foreground`/`background` special-case
-            // (`NativeControl::set_background`/`TextStyleOwner::set_foreground` are the two
-            // builtin-facing setters that keep `Option<..>` in their own signature) — a themed
-            // value is already the real target type, never a DSL literal needing `wrap_prop_value`'s
-            // `.into()`, so this dispatches straight to `emit_field_setter_call` rather than `@set`.
-            let themed_value = if name == "foreground" || name == "background" {
-                quote! { Some(__theme_value) }
-            } else {
-                quote! { __theme_value }
-            };
-            let set = emit_field_setter_call(
-                name,
-                &node.type_path,
-                &setter_ident,
-                themed_value,
-                &binding_ts,
-                from,
-                table,
-            );
-            let clear = emit_field_clear_call(name, &node.type_path, &binding_ts, from, table);
+            if is_text_style {
+                // A text-style field's real setter lives on `TextStyleOwner`, never on this
+                // type's own `__elwindui_props_*!` macro (see this fn's own doc comment on
+                // `is_text_style`) — `emit_field_setter_call`/`emit_field_clear_call` already
+                // special-case it, table-independently, so this keeps using them directly rather
+                // than routing through `@set`/`@clear` (which have no arm for it at all).
+                let setter_ident = format_ident!("set_{name}");
+                let themed_value = if name == "foreground" {
+                    quote! { Some(__theme_value) }
+                } else {
+                    quote! { __theme_value }
+                };
+                let set = emit_field_setter_call(
+                    name,
+                    &node.type_path,
+                    &setter_ident,
+                    themed_value,
+                    &binding_ts,
+                    from,
+                    table,
+                );
+                let clear = emit_field_clear_call(name, &node.type_path, &binding_ts, from, table);
+                sets.extend(quote! {
+                    match #binding.theme_handle().resolve(#token) {
+                        elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
+                        elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
+                    }
+                });
+                continue;
+            }
+            // An ordinary (non-text-style) themed property (`background`, `fill`/`stroke`, ...) —
+            // routed through `@set`/`@clear` rather than `emit_field_setter_call`/
+            // `emit_field_clear_call` directly: those need `TypeInfo` to know whether the real
+            // setter's own parameter is `Option`-wrapped (`build_virtual_value`'s own `is_option`
+            // check, unavailable here), while `@set`'s `wrap_prop_value` already makes that same
+            // decision from the property's *declared* type, at macro-expansion time — a themed
+            // value resolved to `__theme_value` is already the real inner type (never a DSL literal
+            // needing `.into()`), but `Option`-wrapping it when the target is `Option<Brush>` is
+            // exactly what `wrap_prop_value` already does unconditionally for any such field.
             sets.extend(quote! {
                 match #binding.theme_handle().resolve(#token) {
-                    elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
-                    elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
+                    elwindui::core::theme::ThemeValue::Value(__theme_value) => {
+                        elwindui::core::#props_macro!(@set #binding, #name_ident, __theme_value);
+                    }
+                    elwindui::core::theme::ThemeValue::PlatformDefault => {
+                        elwindui::core::#props_macro!(@clear #binding, #name_ident);
+                    }
                 }
             });
             continue;
         }
-        if matches!(expr, ViewExpr::Element(_)) {
-            panic!(
-                "`{}`: a named element-valued attribute (`{name}: SomeElement {{ .. }}`) on an \
-                 external (builtin) element isn't supported yet — this is a known, tracked gap in \
-                 the .elwind-to-macro migration, not a user error",
-                node.type_path
-            );
+        // A named single-child slot (`content: Grid { .. }`, `menu_bar: MenuBar { .. }`) —
+        // `plan_element` already planned and will separately construct the nested element as its
+        // own `PlannedNode`, recorded here by name (mirrors `build_component_args`'s own
+        // `Some(ViewExpr::Element(_))` arm, the known-`TypeInfo` equivalent of this same case). No
+        // `into_node_if_needed`/`into_any_view_if_needed` conversion is needed the way that arm
+        // does: without a `TypeInfo` this function has no declared field type to convert *to*, but
+        // it doesn't need one either — passed as an argument to `@set`'s generated `self.set_*`
+        // call, `nested_binding`'s own concrete type unsizes to whatever trait-object parameter the
+        // real setter declares (e.g. `Rc<MenuBar>` -> `Rc<dyn MenuBarExt>`) the same way any other
+        // function-call argument does, entirely on rustc's own account. `.clone()` (an `Rc` refcount
+        // bump, not a bare move) — same reason `into_node_if_needed`'s own `PASSTHROUGH_NODE` arm
+        // clones: this binding is also separately stored on `Self` (`generate_view`'s own
+        // `field_inits`), so the original must stay valid for that later use.
+        if let ViewExpr::Element(_) = expr {
+            let (nested_binding, _nested_ty) =
+                node.element_attr_bindings.get(name.as_str()).unwrap_or_else(|| {
+                    panic!("planned element binding for `{name}` must exist")
+                });
+            sets.extend(quote! {
+                elwindui::core::#props_macro!(@set #binding, #name_ident, #nested_binding.clone());
+            });
+            continue;
         }
         if is_text_style {
             let setter_ident = format_ident!("set_{name}");
             let raw = emit_expr(expr, ctx, &EmitMode::Construction);
+            // `foreground` is always `Option<Brush>` (`TextStyleOwner::set_foreground`, one of the
+            // seven fixed, universal `TEXT_STYLE_FIELDS` — never builtin-specific, so this needs no
+            // shape table to know, the same reasoning `common_routed_payload_type` documents for
+            // the common routed events) — `.into()` lets a hex-string DSL literal (`foreground:
+            // "#ffffff"`) reach it via `Brush`'s own `From<&str>`, mirroring `wrap_prop_value`'s
+            // identical Brush/Color handling for every *non*-text-style property.
             let value = if name == "foreground" {
-                quote! { Some(#raw) }
+                quote! { Some((#raw).into()) }
             } else {
                 raw
             };
@@ -5962,22 +6107,30 @@ fn emit_external_construction(
         }
         let value = match expr {
             ViewExpr::Closure { params, body } => emit_closure_value(params, body, ctx, from, table),
-            other => emit_expr(other, ctx, &EmitMode::Construction),
+            other => {
+                let value = emit_expr(other, ctx, &EmitMode::Construction);
+                // A bare-forwarded own field (`content: fills_canvas`, `ViewExpr::Path`) — mirrors
+                // `build_component_args`/`build_virtual_value`'s identically-named branch
+                // (`bare_own_field_type`'s own doc comment): the referenced field is *also* kept on
+                // `Self` (`generate_view`'s own `field_inits`), so this needs `.clone()` (an `Rc`
+                // refcount bump, not a bare move) the same way any other reused planned binding
+                // does — see this fn's own `element_attr_bindings` branch above. Unlike that known-
+                // `TypeInfo` branch, this one can't check whether the *target* field wants `dyn
+                // UIElement` specifically (no shape table here at all) — `.clone()` is correct
+                // either way, since the target's real setter's own unsized coercion (or an identical
+                // concrete type) accepts it regardless.
+                if bare_own_field_type(other, ctx).is_some() {
+                    quote! { (#value).clone() }
+                } else {
+                    value
+                }
+            }
         };
         sets.extend(quote! {
             elwindui::core::#props_macro!(@set #binding, #name_ident, #value);
         });
     }
-    out.extend(quote! {
-        // Brings every builtin's `{Name}Ext` trait into scope at once — `#sets`'s method calls may
-        // resolve against *any* ancestor's trait (`background` lives on `NativeControlExt`, not
-        // `ButtonExt`), and without `TypeInfo` this function has no ancestor chain to import
-        // specific traits from. Scoped to this block only.
-        #[allow(unused_imports)]
-        use elwindui::ui::*;
-        let #binding = elwindui::ui::#type_ident::new();
-        #sets
-    });
+    sets
 }
 
 fn emit_construction(
@@ -5990,10 +6143,20 @@ fn emit_construction(
 ) {
     if table.resolve(from, &node.type_path).is_none() {
         emit_external_construction(node, ctx, from, table, out);
-        if !node.child_bindings.is_empty() {
+        // `DYNAMIC_CHILD_SLOT_MARKER` bindings are never actually constructed (`build_component_setters`'s
+        // own identically-filtered `children` loop doc comment: a list-based dynamic region starts
+        // genuinely empty at construction, populated for the first time by the initial
+        // `__refresh_dynamic_regions()` call `new()` already makes) — embedding one here would
+        // reference a binding that was never bound at all.
+        let non_dynamic_children: Vec<_> = node
+            .child_bindings
+            .iter()
+            .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+            .collect();
+        if !non_dynamic_children.is_empty() {
             let binding = &node.binding;
             let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
-            let items = node.child_bindings.iter().map(|(c, _)| quote! { #c.clone() });
+            let items = non_dynamic_children.iter().map(|(c, _)| quote! { #c.clone() });
             out.extend(quote! {
                 elwindui::core::#props_macro!(@children #binding, [#(#items),*]);
             });
@@ -6623,12 +6786,21 @@ fn build_component_value(
     table: &SymbolTable,
     plan: &[PlannedNode],
 ) -> TokenStream {
-    let info = table.resolve(from, &node.type_path).unwrap_or_else(|| {
-        panic!(
-            "unknown or out-of-scope element `{}` — is a `use` for it missing?",
-            node.type_path
-        )
-    });
+    let Some(info) = table.resolve(from, &node.type_path) else {
+        // External (no local `TypeInfo`) — same rule every other construction path applies
+        // (`concrete_type_ident`'s own doc comment): unresolved here means declared entirely
+        // outside this compilation's own AST, so treated the same as a known builtin. Every real
+        // builtin's own `construct()` takes no arguments (the project-wide "no-args factory +
+        // setters" convention this crate's own doc comment on `emit_hand_written_native`/
+        // `TypeInfo` references) — the same shape this function already special-cased for
+        // `ContentControl` specifically before any builtin lost its `TypeInfo`; that special case
+        // was never really about `ContentControl`'s *name*, just the only shape-composition base a
+        // real `.elwind`/`#[component]` file happened to use with args. `build_component_args`
+        // needs a real field list to decide what's required/positional, which — as with every other
+        // external path — no longer exists to consult.
+        let construct_path = composed_construct_path(&node.type_path, true);
+        return quote! { #construct_path() };
+    };
     let construct_path = composed_construct_path(&node.type_path, info.is_builtin);
     if info.is_builtin && node.type_path == "ContentControl" {
         return quote! { #construct_path() };
@@ -7314,13 +7486,32 @@ fn emit_wiring(
                         .collect::<Vec<_>>(),
                     _ => Vec::new(),
                 };
+                // A single-param DSL closure (`|e| { ... e.key ... }`) needs `e`'s own type
+                // annotated here — without `TypeInfo`, this is the only place that can still do it
+                // (`elwindui-macros`' own `routed_handler_from_bare_callable` receives this whole
+                // closure as an opaque, already-parsed `$value:expr` fragment, so it can't reach
+                // inside to add one). Whenever the DSL body uses the payload only as a value passed
+                // straight to an already-typed function (`vm.select_tab(index)`), rustc infers `e`'s
+                // type from that call site and an explicit annotation isn't needed — but a *field*
+                // access (`e.key`) can't work backwards like that (a field projection needs its
+                // base's type known first, unlike a call argument), so it must be spelled out. Only
+                // `UIElement`'s own common `#[routed]` properties (never a per-builtin-varying one)
+                // reach this — their payload type is fixed and universal regardless of which
+                // concrete element `node.type_path` names, so no shape table is needed to know it.
+                let annotated_params: Vec<TokenStream> = closure_params
+                    .iter()
+                    .map(|p| match common_routed_payload_type(name) {
+                        Some(ty) if closure_params.len() == 1 => quote! { #p: #ty },
+                        _ => quote! { #p },
+                    })
+                    .collect();
                 out.extend(quote! {
                     {
                         #[allow(unused_imports)]
                         use elwindui::ui::*;
                         let widget = #widget_binding;
                         let this = std::rc::Rc::clone(&this);
-                        elwindui::core::#props_macro!(@set widget, #name_ident, move |#(#closure_params),*| {
+                        elwindui::core::#props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
                             #call;
                             this.__refresh_dynamic_regions();
                         });
@@ -7474,6 +7665,29 @@ fn emit_wiring(
             }
         }
     }
+}
+
+/// The payload type of `UIElement`'s own common single-param `#[routed]` properties (`ui.rs`'s own
+/// `#[prop(routed, on_key_down: fn(crate::input::KeyEventArgs))]` and its siblings) — the only
+/// ones `emit_wiring`'s external (`info.is_none()`) branch can name without a shape table, since
+/// they're fixed and universal across every `UIElement`, never varying per concrete builtin the
+/// way `Button.on_click`/`TabView.on_select` do. See that branch's own doc comment for why this is
+/// needed at all: a DSL closure body that uses its payload parameter via field access (`e.key`)
+/// can't have its type inferred from later usage the way one passed straight to an already-typed
+/// function call can.
+fn common_routed_payload_type(attr_name: &str) -> Option<TokenStream> {
+    Some(match attr_name {
+        "on_key_down" | "on_key_up" => quote! { elwindui::core::input::KeyEventArgs },
+        "on_text_input" => quote! { elwindui::core::input::TextInputEventArgs },
+        "on_pointer_pressed"
+        | "on_pointer_released"
+        | "on_pointer_moved"
+        | "on_pointer_entered"
+        | "on_pointer_exited" => quote! { elwindui::core::input::PointerEventArgs },
+        "on_pointer_wheel_changed" => quote! { elwindui::core::input::PointerWheelEventArgs },
+        "on_tapped" | "on_double_tapped" => quote! { elwindui::core::input::TappedEventArgs },
+        _ => return None,
+    })
 }
 
 /// Parses an `on_*` field's declared `fn(T0, T1, ...)` sugar type string (stored raw in
@@ -8006,6 +8220,30 @@ fn emit_resync(
             .and_then(|i| i.field_types.get(name))
             .map(String::as_str);
         if let Some(token) = theme_token_path(expr) {
+            // External (no local `TypeInfo`) and not text-style: same reasoning as
+            // `emit_external_attribute_sets`'s own construction-time theme branch — resyncing a
+            // themed value still needs to know whether the real setter's parameter is
+            // `Option`-wrapped (`Shape::set_fill`/`set_stroke`, `Option<Brush>`), which
+            // `emit_field_setter_call` can't determine without `TypeInfo`. Route through `@set`/
+            // `@clear` instead, whose `wrap_prop_value` already makes that call from the
+            // property's declared type. `#[allow(unused_imports)] use elwindui::ui::*;` was already
+            // injected once above (this function's own `info.is_none()` branch) — no separate `use`
+            // needed here the way `emit_external_attribute_sets` needs its own scoped one.
+            if info.is_none() && !crate::text_style::is_text_style_field_name(name) {
+                let name_ident = format_ident!("{name}");
+                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+                out.extend(quote! {
+                    match #receiver.theme_handle().resolve(#token) {
+                        elwindui::core::theme::ThemeValue::Value(__theme_value) => {
+                            elwindui::core::#props_macro!(@set #receiver, #name_ident, __theme_value);
+                        }
+                        elwindui::core::theme::ThemeValue::PlatformDefault => {
+                            elwindui::core::#props_macro!(@clear #receiver, #name_ident);
+                        }
+                    }
+                });
+                continue;
+            }
             let themed_value = if crate::text_style::is_text_style_field_name(name) {
                 if name == "foreground" {
                     quote! { Some(__theme_value) }
@@ -8076,8 +8314,11 @@ fn emit_resync(
             // a caller can distinguish an explicit local brush from an unset inherited value.
             // Do this before the generic native-control branch, which normally borrows non-Copy
             // values for `&str`-style setters and would make `FontFamily`/`Brush` fail to compile.
+            // `.into()` (matching `emit_external_attribute_sets`'s identical construction-time
+            // branch): `foreground` is always `Option<Brush>` — a hex-string DSL literal needs
+            // `Brush`'s own `From<&str>` to reach it, same as any other Brush-typed property.
             let value = if name == "foreground" {
-                quote! { Some(#value) }
+                quote! { Some((#value).into()) }
             } else {
                 value
             };
@@ -8335,7 +8576,7 @@ mod tests {
         let all: Vec<Module> = modules
             .iter()
             .cloned()
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         build_symbol_table(&all)
     }
@@ -8548,9 +8789,13 @@ view NotepadWindow {
         let rendered = generated.to_string();
         // `FontFamily` must be passed by value, and `foreground` must preserve the local-value
         // marker expected by TextStyleOwner rather than following the generic native `&str`
-        // setter path.
+        // setter path. `.into()` (a no-op here — `vm.foreground()` is already `Brush`, reflexive
+        // `From<T> for T`) is now unconditional, needed for a genuine hex-string DSL literal to
+        // reach `Brush` on the external (no-`TypeInfo`) construction/resync path that has no other
+        // way to tell a `foreground` literal apart from an already-typed value — see
+        // `emit_external_attribute_sets`'s own matching construction-time branch.
         assert!(rendered.contains("set_font_family (self . vm . font_family ())"));
-        assert!(rendered.contains("set_foreground (Some (self . vm . foreground ()))"));
+        assert!(rendered.contains("set_foreground (Some ((self . vm . foreground ()) . into ()))"));
         assert!(!rendered.contains("set_font_family (& (self . vm . font_family ()))"));
     }
 
@@ -8627,7 +8872,7 @@ view NotepadWindow {
         // would silently vanish from its effective field set (no compile error — just a missing
         // setter downstream).
         let table = build_symbol_table_with_builtins(&[]);
-        let builtins = crate::builtin_modules();
+        let builtins = crate::test_builtin_modules();
         let module = builtins.first().expect("builtins module should exist");
         let info = table
             .resolve(module, "ContentControl")
@@ -8850,7 +9095,7 @@ view NotepadWindow {
         .expect("scalar dynamic content source should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(crate::validate::validate(&all_modules), Ok(()));
         let generated = generate_module(&module, &table);
@@ -8893,7 +9138,7 @@ view NotepadWindow {
         .expect("scalar dynamic content (host composition) source should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(crate::validate::validate(&all_modules), Ok(()));
         let generated = generate_module(&module, &table);
@@ -9446,7 +9691,7 @@ view NotepadWindow {
         let all_modules: Vec<_> = modules
             .iter()
             .cloned()
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let table = build_symbol_table(&all_modules);
 
@@ -9612,7 +9857,7 @@ view NotepadWindow {
         let all_modules: Vec<_> = modules
             .iter()
             .cloned()
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         let table = build_symbol_table(&all_modules);
 
@@ -9834,7 +10079,7 @@ view Foo {
         // module, so only `ContentControl`'s own `Item::Component`/`Item::View` pair is kept —
         // `generate_module` would otherwise also try (and fail) to generate every shape-only
         // builtin sharing that module (mirroring `compile_dir_impl`'s own filtering in `lib.rs`).
-        let builtins_module = crate::builtin_modules()
+        let builtins_module = crate::test_builtin_modules()
             .into_iter()
             .find(|m| {
                 m.items

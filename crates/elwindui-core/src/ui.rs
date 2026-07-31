@@ -2279,20 +2279,19 @@ impl Rectangle {
     // `component X inherits Rectangle` would embed unwrapped as its own `base` field, mirroring
     // `Control`/`Shape`'s own `construct` (`Rectangle` is `#[sealed]` today, so nothing actually
     // reaches this via that path yet, but the shape stays consistent with every other builtin).
-    fn construct(
-        fill: Option<Brush>,
-        stroke: Option<Brush>,
-        stroke_width: Option<f32>,
-        corner_radius: Option<f32>,
-    ) -> Self {
-        let shape = Shape::construct();
-        shape.set_fill(fill);
-        shape.set_stroke(stroke);
-        shape.set_stroke_width(stroke_width.unwrap_or(0.0));
+    //
+    // Zero-arg, like every other builtin's `construct()` (`#[class]`'s auto-generated `new()`
+    // always mirrors this signature verbatim — see `elwindui_macros::class`'s own doc comment on
+    // `auto_new` — so a non-zero-arg `construct()` here means a non-zero-arg `new()`, which
+    // `elwindui-codegen`'s `emit_external_construction` can never supply: with no `TypeInfo` to
+    // consult (builtins.elwind removed, Refs #14), it always calls `Type::new()` and configures
+    // everything through the already-existing `set_fill`/`set_stroke`/`set_stroke_width`/
+    // `set_corner_radius` setters instead).
+    fn construct() -> Self {
         Self {
-            base: shape,
-            stroke_width,
-            corner_radius: Cell::new(corner_radius),
+            base: Shape::construct(),
+            stroke_width: None,
+            corner_radius: Cell::new(None),
         }
     }
 }
@@ -2337,16 +2336,15 @@ impl Ellipse {
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
         self
     }
-    // The bare (not `Rc`-wrapped) value `#[class]`'s auto-generated `new` wraps — see `Rectangle`'s
-    // own `construct` doc comment for why this split exists.
-    fn construct(fill: Option<Brush>, stroke: Option<Brush>, stroke_width: Option<f32>) -> Self {
-        let shape = Shape::construct();
-        shape.set_fill(fill);
-        shape.set_stroke(stroke);
-        shape.set_stroke_width(stroke_width.unwrap_or(0.0));
+    // Zero-arg — see `Rectangle`'s own `construct` doc comment for why. `stroke_width` (this own
+    // field, distinct from `base.stroke_width`) has no setter of its own and nothing reads it
+    // internally (`render` above uses `self.base.stroke_width`, already configured through the
+    // inherited `Shape::set_stroke_width`) — it only ever echoed back whatever `construct` was
+    // originally given, so defaulting it to `None` here changes no observable behavior.
+    fn construct() -> Self {
         Self {
-            base: shape,
-            stroke_width,
+            base: Shape::construct(),
+            stroke_width: None,
         }
     }
 }
@@ -2468,16 +2466,13 @@ impl Image {
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
         self
     }
-    fn construct(
-        source: Option<ImageSource>,
-        stretch: Option<Stretch>,
-        rasterize: Option<VectorRasterizeMode>,
-    ) -> Self {
+    // Zero-arg — see `Rectangle`'s own `construct` doc comment for why.
+    fn construct() -> Self {
         Self {
             base: UIElement::construct(),
-            source: RefCell::new(source),
-            stretch: Cell::new(stretch.unwrap_or(Stretch::Uniform)),
-            rasterize: Cell::new(rasterize.unwrap_or_default()),
+            source: RefCell::new(None),
+            stretch: Cell::new(Stretch::Uniform),
+            rasterize: Cell::new(VectorRasterizeMode::default()),
         }
     }
 }
@@ -2554,8 +2549,8 @@ impl TextBlock {
     fn as_text_style_owner(&self) -> Option<&dyn TextStyleOwner> {
         Some(self)
     }
-    fn set_text(&self, text: String) {
-        *self.text.borrow_mut() = text;
+    fn set_text(&self, text: &str) {
+        *self.text.borrow_mut() = text.to_string();
         self.invalidate_measure();
     }
     fn set_text_alignment(&self, alignment: TextAlignment) {
@@ -4333,12 +4328,8 @@ mod tests {
     #[test]
     fn layout_background_is_transparent_by_default_and_paints_before_children() {
         let layout = VerticalLayout::new();
-        let child = Rectangle::new(
-            Some(Brush::Solid(Color::rgb(10, 20, 30))),
-            None,
-            None,
-            None,
-        );
+        let child = Rectangle::new();
+        child.set_fill(Some(Brush::Solid(Color::rgb(10, 20, 30))));
         child.set_width(20.0);
         child.set_height(20.0);
         layout.children().add(child);
@@ -4621,7 +4612,7 @@ mod tests {
         assert!(grid.as_text_style_owner().is_none());
         let stack = VerticalLayout::new();
         assert!(stack.as_text_style_owner().is_none());
-        let rect = Rectangle::new(None, None, None, None);
+        let rect = Rectangle::new();
         assert!(rect.as_text_style_owner().is_none());
     }
 
@@ -5110,7 +5101,10 @@ mod tests {
 
     fn rectangle(fill: Option<&str>, stroke: Option<&str>) -> Rc<dyn UIElementExt> {
         let to_brush = |hex: &str| Brush::Solid(Color::parse_hex(hex).unwrap());
-        Rectangle::new(fill.map(to_brush), stroke.map(to_brush), None, None)
+        let rect = Rectangle::new();
+        rect.set_fill(fill.map(to_brush));
+        rect.set_stroke(stroke.map(to_brush));
+        rect
     }
 
     #[test]

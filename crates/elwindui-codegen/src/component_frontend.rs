@@ -286,7 +286,7 @@ mod tests {
             ..Default::default()
         };
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("should validate");
         let table = build_symbol_table(&all_modules);
@@ -368,7 +368,7 @@ view Counter {
 "#;
         let module = crate::parser::parse_module(dsl_src).expect("dsl should parse");
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("dsl should validate");
         let table = build_symbol_table(&all_modules);
@@ -508,7 +508,7 @@ enum Orientation {
         module.items.push(crate::ast::Item::View(view_def));
 
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("should validate");
         let table = build_symbol_table(&all_modules);
@@ -544,7 +544,7 @@ component Settings {
 "#;
         let module = crate::parser::parse_module(src).expect("dsl should parse");
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("should validate");
         let table = build_symbol_table(&all_modules);
@@ -574,7 +574,7 @@ component Settings {
     fn generate_and_check(src: &str) -> String {
         let module = crate::parser::parse_module(src).expect("dsl should parse");
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("should validate");
         let table = build_symbol_table(&all_modules);

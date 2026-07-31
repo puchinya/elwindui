@@ -632,6 +632,62 @@ fn rewrite_crate_segment(tokens: TokenStream2) -> TokenStream2 {
     }
 }
 
+/// The `dyn TraitExt` element type of a content-collection field's declared type — backs
+/// `content_item_dyn_entry`'s `@content_item_dyn` arm. Two shapes, both already used across every
+/// real content-collection property (`elwindui-core::ui`'s own `#[prop(..)]` declarations):
+/// - `crate::ui::UIElementCollection` (`Layout`'s `children`, a live, heterogeneous collection) —
+///   the element type is always the fixed, universal `UIElementExt`, not derived from the
+///   collection's own (non-generic) type name at all.
+/// - `Vec<std::rc::Rc<dyn SomePath::SomeExt>>` / `ListExt<Rc<dyn ..>>` (`TabView`'s `children`,
+///   `Menu`'s `#[content(items)]` `items`) — the element type is whatever trait object the
+///   generic argument names, found by walking the type's own generic arguments for a
+///   `Type::TraitObject` at any nesting depth (works for either wrapper uniformly, rather than
+///   text-matching each spelling separately the way `elwindui-codegen`'s own now-`#[cfg(test)]`-
+///   only `dynamic_collection_item_trait` still does for the `.elwind` text path).
+///
+/// `rewrite_crate_segment` on the found trait object's own bounds (not the whole `dyn Trait`
+/// token, which starts with the `dyn` keyword, not `crate`) — same reasoning as
+/// `routed_payload_type`'s own doc comment: this type is spliced into a macro arm invoked from
+/// whichever crate eventually asks `@content_item_dyn`, so a `crate::`-relative path (as spelled
+/// in the declaring class's own `#[prop(..)]`, resolving against `elwindui-core`) needs `$crate::`
+/// once embedded here.
+fn content_item_dyn_type(ty: &Type) -> TokenStream2 {
+    if quote! { #ty }.to_string().contains("UIElementCollection") {
+        return quote! { dyn $crate::ui::UIElementExt };
+    }
+    fn find_trait_object(ty: &Type) -> Option<&syn::TypeTraitObject> {
+        match ty {
+            Type::TraitObject(to) => Some(to),
+            Type::Path(p) => {
+                let seg = p.path.segments.last()?;
+                let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                    return None;
+                };
+                args.args.iter().find_map(|a| match a {
+                    syn::GenericArgument::Type(t) => find_trait_object(t),
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
+    }
+    match find_trait_object(ty) {
+        Some(to) => {
+            let bounds = &to.bounds;
+            let rewritten = rewrite_crate_segment(quote! { #bounds });
+            quote! { dyn #rewritten }
+        }
+        // No `dyn`-wrapped element type found (shouldn't normally happen for a real dynamic-
+        // child-eligible content field) — fall back to the bare declared type itself, `dyn`-
+        // wrapped, so a genuinely wrong declaration still fails to compile with a specific error
+        // rather than this function panicking blind.
+        None => {
+            let rewritten = rewrite_crate_segment(quote! { #ty });
+            quote! { dyn #rewritten }
+        }
+    }
+}
+
 /// `elwindui_core::ui::NativeControl<AnyView>` -> `"NativeControl"`; the bare display name used for
 /// naming-convention-derived trait/macro identifiers and as an `as_<snake(name)>()` accessor's
 /// method name.
@@ -1099,15 +1155,28 @@ fn build_props_macro(
     // than given a wrong one:
     // - `attached` properties are set by a *child* onto its parent, through
     //   `UIElement::set_attached::<T>`, so they never reach this receiver at all — `@attached_set`;
-    // - the `#[prop(content, ..)]` property and a `children` collection receive nested *elements*,
-    //   whose emission differs by declared type (`Vec<T>` bulk-set vs `ListExt<T>` add-loop) — `@children`.
+    // - a `children`-named collection and a *collection-shaped* `#[prop(content, ..)]` property
+    //   receive nested *elements* whose emission differs by declared type (`Vec<T>` bulk-set vs
+    //   `ListExt<T>` add-loop) — `@children`, via `attach_kind`'s `Collection`/`VecProperty` cases.
     // Reaching one of these through `@set` falls through to the catch-all and is reported as an
     // unknown property, which is honest: `@set` genuinely cannot express it.
+    //
+    // A *single-slot* (`AttachKind::SingleSlot`, `Rc<dyn ..>`) `#[prop(content, ..)]` property is
+    // deliberately *not* excluded here, even though `@children` can reach it too (its
+    // `@children_into`'s single-slot arm) — the DSL only ever addresses a single-slot content field
+    // by a *named* element-valued attribute (`content: Grid { .. }`, one value; the `@children`,
+    // bare-nested-child spelling is how a `Vec`/`Collection`-shaped field is filled instead, never a
+    // single slot), and a named attribute's value always reaches this receiver through `@set` like
+    // any other named property — `elwindui-codegen`'s `emit_external_construction` has no shape
+    // table telling it which field is content-designated, so it needs `@set` to already accept it.
+    // Both paths emit the exact same `$recv.#setter($value)` call for this case, so there is nothing
+    // to reconcile between them.
     let takes_set_arm = |p: &PropDecl| {
         let name = p.name.to_string();
-        !p.attached
-            && name != "children"
-            && shape.content_field().map(|c| c.to_string()).as_deref() != Some(name.as_str())
+        let is_collection_shaped_content = shape.content_field().map(|c| c.to_string()).as_deref()
+            == Some(name.as_str())
+            && !matches!(attach_kind(&p.ty), AttachKind::SingleSlot);
+        !p.attached && name != "children" && !is_collection_shaped_content
     };
 
     // A `#[routed]` property's `@set_from` arm has a fundamentally different job than a plain one:
@@ -1304,6 +1373,37 @@ fn build_props_macro(
         }
     });
 
+    // `@content_item_dyn` expands to `dyn TraitExt` for the content-collection's element type
+    // (`TabView`'s `children: Vec<Rc<dyn TabViewItemExt>>` -> `dyn TabViewItemExt`, `Layout`'s
+    // `children: UIElementCollection` -> `dyn UIElementExt`) — used in *type* position
+    // (`DynamicChildSlot<$crate::#macro_ident!(@content_item_dyn)>`), the one piece of a dynamic
+    // `for`/`if`/`match` region's own generated struct field `elwindui-codegen` can no longer name
+    // without a shape table once a builtin's shape lives only here. Exactly `@children`'s own two-
+    // hop shape (this fn's own doc comment on `children_entry`/`@children_into`), for the identical
+    // reason: the class that *designates* the content field (`VerticalLayout`'s `#[content(children)]`)
+    // is routinely not the one that *declares* it (`Layout`'s own `#[prop(children: ..)]`) — so the
+    // entry only ever resolves the *name* here, and `@content_item_dyn_into` (mirroring
+    // `@children_into`) is what actually walks the chain to whichever class's `shape.props` really
+    // has it.
+    let content_item_dyn_entry = shape.content_field().map(|content| {
+        quote! {
+            (@content_item_dyn) => {
+                $crate::#macro_ident!(@content_item_dyn_into #bare_ident, #content)
+            };
+        }
+    });
+    let content_item_dyn_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let dyn_ty = content_item_dyn_type(&p.ty);
+            quote! {
+                (@content_item_dyn_into $origin:ident, #name) => { #dyn_ty };
+            }
+        })
+        .collect();
+
     // `@assert_declared` is `@assert_undeclared`'s mirror: it succeeds where the other fails. It
     // backs `#[prop(content, ..)]`, whose designation is routinely *inherited*
     // (`VerticalLayout`'s `content = children` names `Layout`'s `children`), so it cannot be checked
@@ -1431,6 +1531,47 @@ fn build_props_macro(
             ),
         };
 
+    // `@content_item_dyn`'s own fallback — same two-way split as `@set_from`/`@children` above: an
+    // ancestor forwards the query further up (`content_item_dyn_entry`'s own doc comment on why an
+    // unmatched name here isn't an error); the terminal class turns an unresolved query into a
+    // `compile_error!` naming the type that actually asked (`$origin`), same spirit as the others.
+    let content_item_dyn_fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro = inherit_macro_self_ref_path(
+                parent_bare,
+                parent_ty,
+                props_macro_ident(parent_bare),
+            );
+            quote! {
+                (@content_item_dyn) => {
+                    #parent_macro!(@content_item_dyn)
+                };
+                (@content_item_dyn_into $origin:ident, $name:ident) => {
+                    #parent_macro!(@content_item_dyn_into $origin, $name)
+                };
+            }
+        }
+        None => quote! {
+            (@content_item_dyn) => {
+                compile_error!(concat!(
+                    "`",
+                    #bare_name,
+                    "` (or any of its ancestors) declares no content-collection property to hold \
+                     a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+            (@content_item_dyn_into $origin:ident, $name:ident) => {
+                compile_error!(concat!(
+                    "`",
+                    stringify!($origin),
+                    "`: neither it nor any ancestor declares a `",
+                    stringify!($name),
+                    "` property to hold a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+        },
+    };
+
     // The probes themselves, emitted in item position next to the class.
     let mut probes: Vec<TokenStream2> = Vec::new();
     // Collision probe: only a class that *has* an ancestor emits any — a root class has nothing to
@@ -1478,6 +1619,9 @@ fn build_props_macro(
             #children_entry
             #(#children_into_arms)*
             #children_fallback
+            #content_item_dyn_entry
+            #(#content_item_dyn_into_arms)*
+            #content_item_dyn_fallback
         }
         #(#probes)*
     }
@@ -1632,6 +1776,9 @@ fn is_named(ty: &Type, name: &str) -> bool {
 ///   `Option`-wrapped targets additionally need `Some(..)` — the DSL convention (matching
 ///   `elwindui-codegen`'s pre-existing `foreground`/`background` special-casing) is that a DSL
 ///   author always writes the *inner* value, never `Option` themselves.
+/// - `Vec<T>` — a DSL array literal (`rows: [GridLength::Auto, ..]`) parses as a real Rust array
+///   expression, not a `Vec`; `.to_vec()` converts (a no-op when the value is already a `Vec`,
+///   e.g. an expression rather than a literal).
 /// - anything else (`dyn UIElementExt`-typed content/attached values included) — passed through
 ///   unchanged. A concrete `Rc<Concrete: UIElementExt>` value coerces to `Rc<dyn UIElementExt>`
 ///   automatically at this call-argument position (ordinary Rust unsized coercion), so no explicit
@@ -1639,6 +1786,20 @@ fn is_named(ty: &Type, name: &str) -> bool {
 fn wrap_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
     if is_string_type(ty) {
         return quote! { &(#value) };
+    }
+    if is_named(ty, "Vec") {
+        return quote! { (#value).to_vec() };
+    }
+    // A plain (non-`#[routed]`) `fn(..)`-sugared callback prop's real setter takes a
+    // `Box<dyn Fn(..)>` (`TabView.on_select`/`on_new_tab`, etc.) — `elwindui-codegen`'s
+    // `emit_wiring`/`emit_external_construction` (both `#[routed]` and plain paths alike) hand this
+    // arm a bare closure/callable value, matching what it already builds for a `#[routed]`
+    // property's own `@routed_from`-bound handler (see this fn's own module-level context — the
+    // `@set_from` doc comment on `p.routed`'s two branches). `Box::new(..)` coerces any concrete
+    // closure type to the declared `Box<dyn Fn(..)>` at this call site, the same unsized-coercion
+    // trick `into_node_if_needed`'s callers already rely on for trait-object arguments elsewhere.
+    if matches!(ty, Type::BareFn(_)) {
+        return quote! { Box::new(#value) };
     }
     let (target, wrap_in_some) = match option_inner(ty) {
         Some(inner) => (inner, true),

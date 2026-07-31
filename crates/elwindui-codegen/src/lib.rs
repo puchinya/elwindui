@@ -11,27 +11,40 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// Every builtin's shape-only `.elwind` declaration (`component Name { #[param] ... }`, no
-/// matching `view`), all in one file — embedded via `include_str!` from this same crate's own
-/// source directory (backend-agnostic compiler metadata, so it lives beside the compiler rather
-/// than beside any particular backend). These exist purely so `SymbolTable`/`validate` can resolve
-/// and check `Window`/`VerticalLayout`/`TextArea`/etc. exactly like any other component —
-/// `emit_construction`'s only construction mechanism is "resolve via `SymbolTable`, call
-/// `Type::new(args)`", so without these, no builtin would resolve at all. The real implementations
-/// live in each `elwindui-backend-*` crate as ordinary hand-written Rust. Adding a new builtin
-/// shape only ever means appending a `component` to that one file — nothing here needs to change
-/// to pick it up.
-const BUILTIN_SHAPE_SOURCE: &str = include_str!("builtins.elwind");
+/// Test-only stand-in for the old, workspace-wide `builtins.elwind`/`builtin_modules()` (removed —
+/// see 05d4861/29ced3d/c916322/d255f31/36292fb, `docs/elwindui_implementation_status.md`, Refs #14):
+/// every real builtin's shape now lives as `#[elwindui_macros::class]` DSL attributes on its actual
+/// `elwindui-core`/`elwindui-backend-*` declaration, propagated to a consumer crate via the
+/// `__elwindui_shape_*!` macro chain (`elwindui-macros::class::build_props_macro`) rather than a
+/// parsed text `Module` — so production code (`generate_component_from_item_struct`,
+/// `compile_dir_impl`) no longer chains a builtin `Module` in at all, relying entirely on
+/// `codegen::emit_external_construction`'s "no local `TypeInfo`, construct via `elwindui::ui::{Name}`
+/// and the shape macro's `@set`/`@clear`/`@children` protocol" path (validated end-to-end by
+/// temporarily emptying this exact file and confirming every real example still builds and runs).
+///
+/// What that production path structurally *can't* do is compiler-side validation that needs an
+/// actual field list (`is_abstract`/`#[sealed]`/required-attribute completeness/`#[routed]`-ness) —
+/// a real Rust `type` has no equivalent a proc-macro can read across a crate boundary, so those
+/// checks silently no-op for an external reference (`check_element_value`/`check_shortcut_attrs`/
+/// `validate_inherits`'s own doc comments). That's an acceptable trade for *production* code (a
+/// wrong reference still fails to compile, just later, via `elwindui::ui::{Name}::new()`/its shape
+/// macro directly) — but several of `codegen.rs`/`validate.rs`'s own unit tests exist specifically to
+/// exercise those richer checks, and unlike production they call `validate::validate`/
+/// `codegen::generate_module` directly (no later rustc pass to fall back on). This file — a private
+/// copy of the old real shape source, now allowed to drift out of sync with the real builtins without
+/// consequence, since nothing production-facing reads it — gives those tests real `TypeInfo` to
+/// check against again, exactly as `builtin_modules()` used to for everyone.
+#[cfg(test)]
+const TEST_BUILTIN_SHAPE_SOURCE: &str = include_str!("testdata/builtins.elwind");
 
-/// Parses the embedded builtin shape file into a `Module`. Registered with the same `path: []`
-/// (crate root) every ordinary `.elwind` file compiled by `compile_dir` already uses (付録B.1), so
-/// `Window`/`VerticalLayout`/etc. resolve via `SymbolTable::resolve`'s plain "defined locally in
-/// `from`" check — the same way two `.elwind` files in the same directory already see each other
-/// without a `use` — rather than needing a separate "implicit visibility" fallback mechanism.
-pub fn builtin_modules() -> Vec<ast::Module> {
+/// Test-only counterpart to the removed `builtin_modules()` — see `TEST_BUILTIN_SHAPE_SOURCE`'s own
+/// doc comment. `pub(crate)` (not `pub`): only `codegen.rs`/`validate.rs`/`component_frontend.rs`'s
+/// own `#[cfg(test)] mod tests` blocks call this, never production code.
+#[cfg(test)]
+pub(crate) fn test_builtin_modules() -> Vec<ast::Module> {
     // `parse_module` always defaults a freshly-parsed module's `path` to `[]` already.
-    let mut module = parser::parse_module(BUILTIN_SHAPE_SOURCE).unwrap_or_else(|e| {
-        panic!("failed to parse embedded builtin shapes: {e}\n---\n{BUILTIN_SHAPE_SOURCE}")
+    let mut module = parser::parse_module(TEST_BUILTIN_SHAPE_SOURCE).unwrap_or_else(|e| {
+        panic!("failed to parse test builtin shapes: {e}\n---\n{TEST_BUILTIN_SHAPE_SOURCE}")
     });
     // Marks every component parsed from here as eligible for `#[embedded]` — see
     // `ast::Module::is_builtin`'s doc comment and `validate::validate`'s check.
@@ -72,13 +85,15 @@ pub fn generate_viewmodel_from_item_mod(
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` (`base`
 /// from the attribute's own `inherits Base` argument, `item_struct` parsed by the
 /// `elwindui-macros` proc-macro) and builds the matching `ComponentDef`/`ViewDef` pair (see
-/// `component_frontend`). Unlike `generate_viewmodel_from_item_mod`, this chains in
-/// `builtin_modules()` — a view body routinely references `Window`/`VerticalLayout`/etc. — as well
-/// as `component_frontend::sibling_component_modules()`, so a `view!` can also reference an *earlier*
-/// same-crate `#[elwindui::component]` struct as a plain element type (each attribute-macro
-/// invocation otherwise only ever sees its own single annotated struct — see
-/// `component_frontend::same_crate_components`'s own doc comment for the full mechanism and its
-/// declaration-order requirement).
+/// `component_frontend`). Unlike `generate_viewmodel_from_item_mod`, this also chains in
+/// `component_frontend::sibling_component_modules()`/`sibling_viewmodel_modules()`, so a `view!` can
+/// reference an *earlier* same-crate `#[elwindui::component]`/`#[elwindui::viewmodel]` as a plain
+/// element type or `bind!`/field target (each attribute-macro invocation otherwise only ever sees its
+/// own single annotated item — see `component_frontend::same_crate_components`'s own doc comment for
+/// the full mechanism and its declaration-order requirement). A `view!` body routinely references
+/// `Window`/`VerticalLayout`/etc. too, but those resolve with no `Module` chained in for them at all —
+/// see `TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment on why, and
+/// `codegen::emit_external_construction`.
 pub fn generate_component_from_item_struct(
     base: Option<String>,
     item_struct: &syn::ItemStruct,
@@ -101,7 +116,6 @@ pub fn generate_component_from_item_struct(
     let all_modules: Vec<_> = std::iter::once(module.clone())
         .chain(sibling_modules)
         .chain(sibling_viewmodels)
-        .chain(builtin_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(&all_modules);
@@ -161,9 +175,8 @@ pub fn compile_dir_with_extra_viewmodels(
 fn compile_dir_impl(
     src: impl AsRef<Path>,
     out_dir: impl AsRef<Path>,
-    mut extra_modules: Vec<ast::Module>,
+    extra_modules: Vec<ast::Module>,
 ) -> io::Result<()> {
-    extra_modules.extend(builtin_modules());
     let src = src.as_ref();
     let out_dir = out_dir.as_ref();
 
@@ -179,11 +192,17 @@ fn compile_dir_impl(
         sources.push((entry.path(), text));
     }
 
+    // `allows_external_builtins: true` — same reason `generate_component_from_item_struct` sets it
+    // on its own module (see `TEST_BUILTIN_SHAPE_SOURCE`'s doc comment): there is no builtin `Module`
+    // to resolve `Window`/`VerticalLayout`/etc. against anymore, so an `.elwind` file needs the same
+    // "no local `TypeInfo`, treat as external" allowance the proc-macro frontend already gets.
     let elwind_modules: Vec<_> = sources
         .iter()
         .map(|(path, text)| {
-            parser::parse_module(text)
-                .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+            let mut module = parser::parse_module(text)
+                .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()));
+            module.allows_external_builtins = true;
+            module
         })
         .collect();
 
@@ -217,15 +236,13 @@ fn compile_dir_impl(
         fs::write(out_dir.join(format!("{out_name}.rs")), pretty)?;
     }
 
-    // Every composed builtin (`ContentControl`/`Rectangle`/`Ellipse`, `has_view == true` in
-    // `builtins.elwind`) is hand-written directly in `elwindui-core::ui` instead of being
-    // regenerated into each consumer's own `OUT_DIR` — their `view` blocks stay in
-    // `builtins.elwind` purely for `validate`/the symbol table (so use sites like
-    // `Rectangle { fill: .. }` still resolve/type-check), but are never fed to `generate_module`
-    // here. `i18n_support.rs` is likewise no longer generated — `elwindui-codegen`'s own emitted
-    // `t!(..)` calls resolve through `elwindui::i18n` (see `codegen::emit_expr`), which is a real
-    // crate (`elwindui-i18n`, re-exported by the `elwindui` facade) rather than per-consumer
-    // generated code.
+    // Every composed builtin (`ContentControl`/`Rectangle`/`Ellipse`) is hand-written directly in
+    // `elwindui-core::ui` instead of being regenerated into each consumer's own `OUT_DIR` — a bare
+    // reference to one (e.g. `Rectangle { fill: .. }`) resolves via `emit_external_construction`, not
+    // a builtin `Module`/the symbol table (see `TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment).
+    // `i18n_support.rs` is likewise no longer generated — `elwindui-codegen`'s own emitted `t!(..)`
+    // calls resolve through `elwindui::i18n` (see `codegen::emit_expr`), which is a real crate
+    // (`elwindui-i18n`, re-exported by the `elwindui` facade) rather than per-consumer generated code.
 
     Ok(())
 }

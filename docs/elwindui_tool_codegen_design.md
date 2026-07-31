@@ -1,6 +1,8 @@
 # ElwindUIL コード生成ツール(`elwindui-codegen`)設計書
 
-本書は、`.elwind`ファイルをRustソースコードへ変換するコンパイラ本体(`elwindui-codegen`)の設計を定める。DSL構文そのものは`docs/elwindui_dsl_spec.md`、バックエンド抽象化・ランタイム等のフレームワーク設計は`docs/elwindui_gui_framework_design.md`を正とし、本書では「コンパイラというツール」の入出力・内部パイプライン・起動方式・実装トレードオフに焦点を当てる。
+本書は、ElwindUILの`component`/`view`/`viewmodel`/`enum`定義をRustソースコードへ変換するコンパイラ本体(`elwindui-codegen`)の設計を定める。DSL構文そのものは`docs/elwindui_dsl_spec.md`、バックエンド抽象化・ランタイム等のフレームワーク設計は`docs/elwindui_gui_framework_design.md`を正とし、本書では「コンパイラというツール」の入出力・内部パイプライン・起動方式・実装トレードオフに焦点を当てる。
+
+**2026-07-29〜31 実施(Refs #14)**: 当初この文書が定めていた「`.elwind`テキストファイル方式」「build.rs方式」は本番から削除された。入力は`#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`という3つのRustプロシージャルマクロへの一本化が完了している。`.elwind`テキスト構文自体(§本書が旧版で説明していたもの)や`parser.rs`の存在は、`docs/elwindui_dsl_spec.md`の「Rustファイル内での代替記法」節が今なお指す構文の元ネタとして、また`parser.rs`/`validate.rs`/`codegen.rs`の大量のテストのフィクスチャ形式として内部に残っているが、いずれも**サポートされる入力形式ではない**。本書は以降、実装済みのプロシージャルマクロ経路を正として記述する。
 
 ElwindUILツールチェーン全体(本書・LSP・プレビュー・ホットリロード)のアーキテクチャ概観は§7を参照。
 
@@ -10,11 +12,11 @@ ElwindUILツールチェーン全体(本書・LSP・プレビュー・ホット�
 
 ### 1.1 責務
 
-- `.elwind`ソースの構文解析・共通AST構築
+- `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`が受け取るRustトークン列(`syn::ItemStruct`/`syn::ItemMod`/`syn::ItemEnum`)からの共通AST構築
 - `docs/elwindui_dsl_spec.md`1〜15章・付録Aに定義された静的検証(14章の検証ルール一覧)の実行
 - `#![backend(...)]` 指定・ビルドターゲットに基づく `target::backend()` の定数畳み込みと、非該当バックエンド分岐の静的除去(設計のみ、**未実装** — 下記実装状況の注を参照)
 - バックエンド(WinUI 3/AppKit/GTK4)向けRustソースの生成
-- 2つの起動方式(build.rs方式 / proc-macro方式)の提供
+- 3つのプロシージャルマクロ(`component`/`viewmodel`/`dsl_enum`)への入力フロントエンドの提供
 
 **実装状況の注**: 現時点の`elwindui-codegen`(`crates/elwindui-codegen/src/`)には`enum Backend`・`target::backend()`・`#![backend(...)]`属性のいずれも実装されていない。生成されるRustソースはバックエンド非依存(同一のソースがどのバックエンドクレートにもリンクできる)であり、実際にどのバックエンドを使うかは`elwindui`ファサードクレートのCargoフィーチャ(`backend-appkit`/`backend-winui3`/`backend-gtk4`)がどの`elwindui-backend-*`クレートをリンクするかだけで決まる(各バックエンドクレートが同名のビルトイン型を実装するため、コード生成器側でバックエンドごとに分岐する必要がない)。`docs/elwindui_gui_framework_design.md`§3.3が定義する定数畳み込み・分岐除去の仕組みは将来のフォワードルッキング設計であり、以下の記述はその設計を示すものである。
 
@@ -31,7 +33,7 @@ ElwindUILツールチェーン全体(本書・LSP・プレビュー・ホット�
 
 `elwindui-codegen`は「AST(`.elwind`が宣言した型情報)から機械的にRustコードを生成する」コンパイラであり、フレームワーク固有の属性名やペイロード型をコンパイラ自身に決め打ちで埋め込んではならない。特に`#[routed]`(4章、ルーティングイベント)のペイロード型は、常にその`.elwind`フィールド自身の`fn(T0, T1, ...)`宣言(`ast::Attr::Routed`)から`callback_param_types`で機械的に導出する——`codegen.rs`側に「このイベント名にはこの型」という固定テーブルを持たせてはならない。
 
-新しいルーティングイベントを追加する際の正しい手順は、対象コンポーネント(多くの場合、全コンポーネントに継承される共通`component UIElement`)へ`#[routed] on_x: fn(PayloadType)`という実フィールドを`builtins.elwind`に宣言することであり、`emit_wiring`等のコード生成側に`on_x`という名前を直接書き足すことではない。`Button.on_click`は現在も例外的にコンパイラ側の属性名マッチ(`emit_generic_on_click_routing`)で処理されている歴史的経緯があるが、これは新規追加すべきパターンではなく、将来的にはこの原則に沿って`UIElement`側の宣言フィールドへ統合されるべき負債として扱う。
+新しいルーティングイベントを追加する際の正しい手順は、対象コンポーネント(多くの場合、全コンポーネントに継承される共通`UIElement`)へ`#[routed] on_x: fn(PayloadType)`という実フィールドを`crates/elwindui-core/src/ui.rs`の`#[elwindui_macros::class]`宣言に足すことであり、`emit_wiring`等のコード生成側に`on_x`という名前を直接書き足すことではない。`Button.on_click`は現在も例外的にコンパイラ側の属性名マッチ(`emit_generic_on_click_routing`)で処理されている歴史的経緯があるが、これは新規追加すべきパターンではなく、将来的にはこの原則に沿って`UIElement`側の宣言フィールドへ統合されるべき負債として扱う。
 
 ---
 
@@ -39,19 +41,19 @@ ElwindUILツールチェーン全体(本書・LSP・プレビュー・ホット�
 
 | | 内容 |
 |---|---|
-| 入力 | `.elwind`ファイル(1つまたはディレクトリ配下一式) |
-| 出力 | バックエンドごとのRustソースファイル(`.rs`) |
-| 副作用 | build.rs方式では `OUT_DIR` 配下にファイルを書き出す。proc-macro方式ではコンパイル時にトークン列を直接展開する(中間ファイルなし) |
+| 入力 | `#[elwindui::component(inherits Base)] struct Name { .. }`/`#[elwindui::viewmodel] mod foo { .. }`/`#[elwindui::dsl_enum] enum Name { .. }`(いずれもRustトークン列、`elwindui-macros`がproc-macro展開時に受け取る) |
+| 出力 | コンパイル時に直接展開されるRustトークン列(バックエンド非依存) |
+| 副作用 | 無し。中間ファイルを生成せず、マクロ展開位置にトークン列を直接埋め込む |
 
-出力先ファイルは呼び出し側(`include!`マクロ、またはproc-macro展開位置)がRustモジュールとして取り込む前提とする。
+出力はproc-macro展開結果としてその場に埋め込まれるため、呼び出し側が別途取り込む操作は不要。
 
 ---
 
 ## 3. パイプライン
 
 ```
-.elwindソース
-   │ ① 構文解析
+#[elwindui::component]/#[elwindui::viewmodel]/#[elwindui::dsl_enum]のRustトークン列
+   │ ① フロントエンド変換(component_frontend.rs/attr_frontend.rs)
    ▼
 共通AST(フレームワーク非依存の要素ツリー)
    │ ② 静的検証(言語仕様14章のルール一覧)
@@ -65,7 +67,7 @@ ElwindUILツールチェーン全体(本書・LSP・プレビュー・ホット�
 Rustソース(WinUI3/AppKit/GTK4のいずれのバックエンドクレートにもリンク可能)
 ```
 
-- **①構文解析**: Rust構文に似た `.elwind` の字句・構文解析を行い、共通ASTを構築する。`use`宣言(12章)による他コンポーネントのインポートもこの段階で解決し、循環参照・未解決参照を検出する。
+- **①フロントエンド変換**: `syn`で解析済みのRustトークン列(`ItemStruct`/`ItemMod`/`ItemEnum`)から共通ASTを構築する(`component_frontend::component_and_view_from_item_struct`/`attr_frontend::viewmodel_def_from_item_mod`/`component_frontend::enum_def_from_item_enum`)。`view! { .. }`型フィールドの中身だけは`.elwind`と同じDSLテキストとして`parser::parse_view_body`にかけられる(§4.2参照)。他の同一クレート内`component`/`viewmodel`/`enum`の解決は、宣言順に populate される同一クレート内レジストリ(`component_frontend::same_crate_components`等)経由で行われる — `use`宣言によるモジュール解決自体は生成コードがRustコードである以上、最終的にはRustコンパイラに委譲される(§4.2脚注参照)。
 - **②静的検証**: 言語仕様14章に列挙された検証ルール(`#[param]`初期化式への`bind!`混入禁止、enum網羅性検査、制約違反の検出、`native!`の出現位置制限など)をASTに対して実行する。違反はビルド時エラーとしてコンパイルを停止させる。
 - **③定数畳み込み(未実装)**: `docs/elwindui_gui_framework_design.md`§3.3は、`target::backend()`をビルド設定(Cargoのfeature/target triple)から一意に確定し、該当しない `match target::backend() { ... }` の腕や `#[cfg(backend = "...")]` 付き `native!` ブロックを生成対象から静的に除去する設計を定めているが、現在の`elwindui-codegen`にはこの段階が存在しない(`enum Backend`/`target::backend()`はコード中どこにも実装されていない)。実際には生成コードはバックエンドを問わず同一であり、この段階は素通りする。
 - **④コード生成**: 検証済みASTから、バックエンドを問わず同一のRustコードを生成する。ビルトイン要素(`builtin::Window`/`Row`/`Text`等、`docs/elwindui_builtins_spec.md`付録F)は他コンポーネントと同じ`component`/`view`構文で書かれたリファレンス実装として同一パイプラインで処理される。生成コードが実際にどのバックエンドで動くかは、リンクされる`elwindui-backend-*`クレート(各バックエンドクレートが同名のビルトイン型を実装している)によって決まる——`docs/elwindui_gui_framework_design.md`§1・§3が想定する「バックエンドごとに異なるコードを生成する」段階は現状ここには存在しない。
@@ -74,31 +76,13 @@ Rustソース(WinUI3/AppKit/GTK4のいずれのバックエンドクレートに
 
 ## 4. 起動方式
 
-コード生成器は2つの起動方式のいずれからも呼び出せる形で実装する。
+コード生成器はプロシージャルマクロとしてのみ呼び出される(`.elwind`テキストファイル+`build.rs`方式は2026-07-31に本番から削除済み、Refs #14)。
 
-### 4.1 build.rs方式
+### 4.1 `component`/`viewmodel`/`dsl_enum`
 
-```rust
-// build.rs
-fn main() {
-    println!("cargo:rerun-if-changed=src/ui");
-    elwindui_codegen::compile_dir("src/ui", std::env::var("OUT_DIR").unwrap());
-}
-```
-
-```rust
-// main.rs
-include!(concat!(env!("OUT_DIR"), "/notepad_window.rs"));
-```
-
-- `cargo:rerun-if-changed` により `.elwind` 保存後の次回ビルドで自動再生成され、手動コマンドが不要になる。
-- `OUT_DIR` に生成済みRustソースが実体として残るため、IDE(rust-analyzer等)がそれを直接解析でき、生成コードに対する補完・型情報の精度が高い。
-
-### 4.2 proc-macro方式
-
-`component`/`view`を`.elwind`テキストとして書く代わりに、通常のRust `struct`定義として書く。
-フィールドは`#[param]`/`#[prop]`等の属性を伴う通常のフィールドとして、`view { .. }`要素ツリーは
-`view!`マクロ呼び出しを型に持つ1フィールドとして表現する。
+`component`/`view`を通常のRust `struct`定義として書く。フィールドは`#[param]`/`#[prop]`等の属性を
+伴う通常のフィールドとして、`view { .. }`要素ツリーは`view!`マクロ呼び出しを型に持つ1フィールド
+として表現する(このフィールドは省略可能 — view無しコンポーネントになる)。
 
 ```rust
 #[elwindui::component(inherits Window)]
@@ -121,21 +105,34 @@ struct NotepadWindow {
   .. }`は`syn::Type::Macro`としてパースされる)であることを利用したトリック。`view!`のトークンは
   `.elwind`テキストと同じ生のDSLテキストとして読み出され、既存のパーサ(`crates/elwindui-codegen/
   src/parser.rs`)へそのままかけられる。
-- 中間ファイルを生成せず、コンパイル時にトークン列として直接展開する。
-- ビルド構成がシンプルになる(`build.rs`の追加が不要)一方、生成コードが実ファイルとして残らないため、IDE補完の精度はbuild.rs方式に劣る。加えて`view!`の中身自体は、rust-analyzer自身による補完・型チェックの対象にもならない(`elwindui-languageserver`側の別途拡張が必要、未着手)。
+- 中間ファイルを生成せず、コンパイル時にトークン列として直接展開する。`view!`の中身自体は、
+  rust-analyzer自身による補完・型チェックの対象にはならない(`elwindui-languageserver`側で
+  `vm.field`補完のみ別途提供、`docs/elwindui_tool_languageserver_design.md`参照)。
+- viewmodelは`#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }`という、`mod`で
+  `struct`+`impl`を束ねた形で書く(1回のマクロ展開が受け取れる項目は1つだけなので、両方を一緒に
+  渡すために`mod`で包む — 展開後は`mod`自体は消え、中の`struct`/`impl`がそのまま元の位置に現れる)。
+  `impl`ブロックの`fn`/`async fn`はすべて自動的にviewmodelアクションとして検出される。
+- 同一クレート内の他の`component`/`viewmodel`/`enum`を`view!`から参照する(`bind!`/フィールド型/
+  `match`)には、それらが**このアイテムより前に**宣言されている必要がある — 各マクロ展開は自分の
+  同一クレート内レジストリ(`component_frontend::same_crate_components`/`same_crate_viewmodels`/
+  `same_crate_enums`)に自分自身を登録するため、後方参照は解決できない(宣言順依存)。
+- プレーンなRust `enum`は、`#[elwindui::dsl_enum]`を付けない限り`view!`の`match`網羅性検査から
+  見えない(nothing about a bare `enum` marks it as DSL-relevant to any proc-macro) —
+  `#[elwindui::dsl_enum] enum Name { A, B, C }`は本体を無変更のまま透過しつつ、上記のレジストリへ
+  登録するopt-inの属性。
 
-### 4.3 選択指針
+いずれの入力形式でも②〜④のパイプライン(静的検証・定数畳み込み・コード生成)は共通の内部実装
+(`elwindui-codegen`本体)を呼び出すのみとし、`component`/`viewmodel`/`dsl_enum`いずれから来た
+アイテムかによってコンパイラの検証結果や生成コードの意味が変わることはない。
 
-| 重視する観点 | 推奨方式 |
-|---|---|
-| IDE補完・生成コードの参照性 | build.rs方式 |
-| ビルド構成のシンプルさ | proc-macro方式 |
-
-いずれの方式でも②〜④のパイプライン(静的検証・定数畳み込み・コード生成)は共通の内部実装(`elwindui-codegen`本体)を呼び出すのみとし、起動方式の違いによってコンパイラの検証結果や生成コードの意味が変わることはない。
-
-**実装状況の注**: 両方式とも実装済みで、実サンプルで検証されている。build.rs方式は`elwindui_codegen::compile_dir`/`compile_dir_with_extra_viewmodels`(`crates/elwindui-codegen/src/lib.rs`)として実装され、`examples/notepad`が利用する。proc-macro方式は`elwindui_macros::component`/`#[elwindui_macros::viewmodel]`(`crates/elwindui-macros/src/lib.rs`、`elwindui::component`/`#[elwindui::viewmodel]`として再エクスポート)として実装され、`examples/notepad-inline`(component+view+viewmodel全て)と`examples/viewmodel-attr-demo`(`#[elwindui::viewmodel]`のみ、view層無し)が利用する。`component`は`struct`に付与する属性マクロで、`view`要素ツリーは`view!`型フィールド(`crates/elwindui-codegen/src/component_frontend.rs`が処理)として書く。
-
-`component`/`viewmodel`と同系統の3つ目のRust代替記法として、単一の`fn`に付与する`#[elwindui::template]`(再利用可能な名前付き`ControlTemplate<Self>`定義、`docs/elwindui_dsl_spec.md`§4「`#[elwindui::template]`」参照)が設計されている——**設計のみ・未実装**。
+**実装状況の注**: `elwindui_macros::component`/`elwindui_macros::viewmodel`/`elwindui_macros::
+dsl_enum`(`crates/elwindui-macros/src/lib.rs`、`elwindui::component`/`elwindui::viewmodel`/
+`elwindui::dsl_enum`として再エクスポート)として実装され、ワークスペース内の全example(`notepad`
+含む)が利用する。`component`は`struct`に付与する属性マクロで、`view`要素ツリーは`view!`型
+フィールド(`crates/elwindui-codegen/src/component_frontend.rs`が処理)として書く。`component`/
+`viewmodel`と同系統のもう1つのRust代替記法として、単一の`fn`に付与する`#[elwindui::template]`
+(再利用可能な名前付き`ControlTemplate<Self>`定義、`docs/elwindui_dsl_spec.md`§4「`#[elwindui::
+template]`」参照)が設計されている——**設計のみ・未実装**。
 
 ---
 
@@ -177,7 +174,7 @@ struct NotepadWindow {
 └──────────────────────────────────────────────┘
 ```
 
-本コンパイラ(`elwindui-codegen`)自体はこの図の中心には現れないが、LSPが再利用する構文解析・静的検証ロジック(§3の①②)、および実際の`cargo build`時に`.elwind`をRustソースへ変換する処理(build.rs方式・proc-macro方式のいずれも)の両方を提供し、上記の全経路の土台になっている。ここに挙げるツール群(本書・LSP・プレビュー・ホットリロード)はいずれも、DSLの言語仕様(`component`/`view`/`param`/`prop`/`Element`トレイト等、`docs/elwindui_dsl_spec.md`・`docs/elwindui_gui_framework_design.md`)自体を変更せずに構築できるツールチェーン層として位置づける。
+本コンパイラ(`elwindui-codegen`)自体はこの図の中心には現れないが、LSPが再利用するフロントエンド変換・静的検証ロジック(§3の①②)、および実際の`cargo build`時に`component`/`viewmodel`/`dsl_enum`をRustコードへ変換する処理の両方を提供し、上記の全経路の土台になっている。ここに挙げるツール群(本書・LSP・プレビュー・ホットリロード)はいずれも、DSLの言語仕様(`component`/`view`/`param`/`prop`/`Element`トレイト等、`docs/elwindui_dsl_spec.md`・`docs/elwindui_gui_framework_design.md`)自体を変更せずに構築できるツールチェーン層として位置づける。
 
 ---
 
@@ -185,8 +182,8 @@ struct NotepadWindow {
 
 | 要件 | 対応 |
 |---|---|
-| `.elwind` → Rust変換 | 構文解析→共通AST→静的検証→定数畳み込み→バックエンド別コード生成の4段パイプライン |
-| 起動方式 | build.rs方式(IDE補完重視)/ proc-macro方式(シンプルさ重視)の2方式を提供 |
+| `component`/`viewmodel`/`dsl_enum` → Rust変換 | フロントエンド変換→共通AST→静的検証→定数畳み込み→バックエンド別コード生成の4段パイプライン |
+| 起動方式 | `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`プロシージャルマクロへ一本化(`.elwind`テキスト/build.rs方式は削除済み) |
 | 静的検証 | 言語仕様14章のルール一覧をASTに対して実行し、違反はビルド時エラー |
 | バックエンド分岐の除去 | `target::backend()`の定数畳み込みにより非該当分岐を静的除去(**未実装**。現状は生成コードがバックエンド非依存で、リンクする`elwindui-backend-*`クレートの選択のみでバックエンドが決まる) |
 | 他ツールとの関係 | LanguageServer/preview/hotreloadは本コンパイラの解析結果・生成コードを利用する側であり、検証ロジックの二重実装を避ける |

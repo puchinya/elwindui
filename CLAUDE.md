@@ -8,7 +8,7 @@ When asking the user a question (clarifying questions, `AskUserQuestion`, plan c
 
 ## Project state
 
-This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to native OS toolkit backends (WinUI 3 / AppKit / GTK4). This is a Cargo workspace (`crates/*` + `examples/*`, no root `src/`) with a real, substantial implementation — not just a spec: `elwindui-codegen` (the `.elwind` → Rust compiler, both a `build.rs`-driven path and a `component!`/`#[viewmodel]` proc-macro path), `elwindui-core` (the `UIElement` runtime), `elwindui-macros`, `elwindui-i18n`, `elwindui-languageserver`, and `elwindui-backend-appkit` (built, run, and screenshot-verified on this machine) are all real. `elwindui-backend-winui3` has code but is unverified (no Windows environment); `elwindui-backend-gtk4` and hot reload (`elwindui-hotreload`) are stubs; there is no preview-tool crate at all yet. See `docs/elwindui_implementation_status.md` for the full, regularly-stale-prone breakdown of what's implemented vs. still just spec — check it, and re-verify against `crates/` directly, before assuming a feature described in the spec docs actually exists.
+This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to native OS toolkit backends (WinUI 3 / AppKit / GTK4). This is a Cargo workspace (`crates/*` + `examples/*`, no root `src/`) with a real, substantial implementation — not just a spec: `elwindui-codegen` (the compiler backing three Rust proc-macros — `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` — the only supported input form as of 2026-07-31; the earlier `.elwind`-text-file + `build.rs` path was fully removed, Refs #14), `elwindui-core` (the `UIElement` runtime), `elwindui-macros`, `elwindui-i18n`, `elwindui-languageserver` (retargeted the same week onto a single-`.rs`-file model to match), and `elwindui-backend-appkit` (built, run, and screenshot-verified on this machine) are all real. `elwindui-backend-winui3` has code but is unverified (no Windows environment); `elwindui-backend-gtk4` and hot reload (`elwindui-hotreload`) are stubs; there is no preview-tool crate at all yet. See `docs/elwindui_implementation_status.md` for the full, regularly-stale-prone breakdown of what's implemented vs. still just spec — check it, and re-verify against `crates/` directly, before assuming a feature described in the spec docs actually exists.
 
 The authoritative source of truth is split across three Japanese-language docs, each scoped to a
 different concern. All three are long — read the relevant section rather than the whole file.
@@ -35,7 +35,7 @@ Section map (grep each file for these headers):
 - 付録T — `platform::clipboard`/`platform::file_dialog`, drag & drop.
 - 付録X/Y — `MenuBar`/`MenuBarItem` (native app menu bar) and `TabView`/`TabItem` (multi-document tabs), added for the notepad example.
 
-Toolchain design (`.elwind` → Rust codegen, LSP, live preview, hot-reload) lives in
+Toolchain design (proc-macro codegen, LSP, live preview, hot-reload) lives in
 `docs/elwindui_tool_*_design.md`, not in the three docs above. `docs/elwindui_macro_class_spec.md`
 is the authoritative spec for `#[elwindui_macros::class]` and takes precedence over
 `elwindui_gui_framework_design.md`'s §5.1a summary if the two ever disagree.

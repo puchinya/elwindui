@@ -210,7 +210,7 @@ struct ThemeDemoWindow {
 
     body: view! {
         title: "elwindui Theme Demo"
-        width: 1060.0
+        width: 1420.0
         height: 780.0
         menu_bar: MenuBar {
             MenuBarItem {
@@ -259,7 +259,17 @@ struct ThemeDemoWindow {
                 spacing: 20.0
 
                 VerticalLayout {
-                    width: 495.0
+                    // Wide enough for "Nested Layout: background is intentionally unset and
+                    // transparent." (below) at the Ocean/Solarized variants' own larger
+                    // `AppTheme::text_block_font_size` (18.0/17.0 vs the platform default this
+                    // unstyled TextBlock otherwise gets) — TextBlock has no word-wrap of its own
+                    // (docs/elwindui_builtins_spec.md 付録F.3), so a too-narrow column here just
+                    // silently clips the sentence instead of wrapping it. Solarized's own
+                    // `text_block_font_family` is an explicit monospace stack (`Consolas, Menlo,
+                    // monospace`), which needs noticeably more width per character than Ocean's
+                    // proportional `Segoe UI Variable` at a comparable point size — sized for that
+                    // worst case, not just Ocean's.
+                    width: 740.0
                     spacing: theme!(AppTheme::layout_spacing)
                     background: theme!(AppTheme::layout_background)
 
@@ -291,7 +301,10 @@ struct ThemeDemoWindow {
                 }
 
                 VerticalLayout {
-                    width: 495.0
+                    // See the left column's own width comment — "TabView selection and native
+                    // focus remain OS-controlled." below needs the same headroom for Solarized's
+                    // monospace `text_block_font_family`.
+                    width: 620.0
                     spacing: 10.0
 
                     TextBlock { text: "Native controls" font_size: 20.0 font_weight: FontWeight::BOLD }

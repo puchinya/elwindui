@@ -2,9 +2,10 @@
 name = "viewmodel-attr-demo"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
-elwindui = { path = "../../crates/elwindui" }
+elwindui = { path = "../../crates/elwindui", features = ["backend-appkit", "backend-winui3"] }
 
 [lints]
 workspace = true

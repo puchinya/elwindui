@@ -29,9 +29,12 @@ pub mod validate;
 /// `codegen::generate_module` directly (no later rustc pass to fall back on). This file — a private
 /// copy of the old real shape source, now allowed to drift out of sync with the real builtins without
 /// consequence, since nothing production-facing reads it — gives those tests real `TypeInfo` to
-/// check against again, exactly as `builtin_modules()` used to for everyone.
+/// check against again, exactly as `builtin_modules()` used to for everyone. Named `.txt`, not
+/// `.elwind` (Refs #14's first acceptance criterion, "0 `.elwind` files in the repo") — its content
+/// is still the same hand-written DSL text `parser::parse_module` (test-only, same Issue) parses;
+/// only the file extension changed.
 #[cfg(test)]
-const TEST_BUILTIN_SHAPE_SOURCE: &str = include_str!("testdata/builtins.elwind");
+const TEST_BUILTIN_SHAPE_SOURCE: &str = include_str!("testdata/builtins_dsl_text.txt");
 
 /// Test-only counterpart to the removed `builtin_modules()` — see `TEST_BUILTIN_SHAPE_SOURCE`'s own
 /// doc comment. `pub(crate)` (not `pub`): only `codegen.rs`/`validate.rs`/`component_frontend.rs`'s

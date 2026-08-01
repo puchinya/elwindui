@@ -877,13 +877,12 @@ struct PropDecl {
     /// `= expr` — required for `attached`, rejected otherwise (see `Parse`).
     #[allow(dead_code)]
     default: Option<syn::Expr>,
-    // `onetime`/`two_way` are accepted and recorded here so a builtin's declaration can already be
-    // written in full, but the layers that consume them (`emit_resync`'s onetime skip, `emit_wiring`'s
-    // two-way rule) still read them from `elwindui-codegen`'s own shape table and haven't moved to
-    // this macro yet — see `build_props_macro`.
+    // `onetime` is accepted and recorded here so a builtin's declaration can already be written in
+    // full, but the layer that consumes it (`emit_resync`'s onetime skip) still reads it from
+    // `elwindui-codegen`'s own shape table and hasn't moved to this macro yet — see
+    // `build_props_macro`. `two_way` *has* moved — see that function's own `@set_on_change` arms.
     #[allow(dead_code)]
     onetime: bool,
-    #[allow(dead_code)]
     two_way: bool,
 }
 
@@ -1322,6 +1321,37 @@ fn build_props_macro(
         };
     };
 
+    // `@set_on_change` wires a two-way property's own native "value changed" callback back into a
+    // DSL use site's bound path (`elwindui-codegen`'s `emit_wiring`, the counterpart to `@set`'s
+    // forward direction) — one arm per `#[prop(two_way, ..)]` field, calling that field's own
+    // `set_on_change` setter. Every current `#[prop(two_way, ..)]` declaration (`TextBox`/
+    // `TextArea`'s `text`, `PasswordBox`'s `password`) is a hand-written `NativeControl` leaf with
+    // exactly one two-way field, and its real backend method is uniformly the generic
+    // `set_on_change(&self, callback: Box<dyn Fn(String)>)` — never a per-field
+    // `set_on_<name>_change` — so this splices the fixed name, not one derived from `#name`. Unlike
+    // `@attached_set`'s fallback (a real property-name typo — every DSL use of `Owner::field` spells
+    // the owner explicitly, so there's no other class it could mean), this one's fallback is silent:
+    // `emit_wiring` cannot tell two-way-ness apart from any other bare-path attribute once a
+    // builtin's shape lives only here (no local `TypeInfo` to check `two_way_fields` against, see
+    // that function's own doc comment), so it calls this for *every* bare-path attribute an external
+    // node has — an ordinary (non-two-way) one is expected to land here and do nothing.
+    let two_way_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| p.two_way)
+        .map(|p| {
+            let name = &p.name;
+            quote! {
+                (@set_on_change #name, $widget:expr, $on_change:expr) => {
+                    $widget.set_on_change($on_change);
+                };
+            }
+        })
+        .collect();
+    let two_way_fallback = quote! {
+        (@set_on_change $name:ident, $widget:expr, $on_change:expr) => {};
+    };
+
     // One arm per declared property — *every* property, not just the `@set`-able ones: a name
     // collision is a collision whether the ancestor's version is a setter, a routed callback, or an
     // attached property.
@@ -1638,6 +1668,8 @@ fn build_props_macro(
             #routed_fallback
             #(#attached_arms)*
             #attached_fallback
+            #(#two_way_arms)*
+            #two_way_fallback
             #(#assert_arms)*
             #assert_fallback
             #(#declared_arms)*

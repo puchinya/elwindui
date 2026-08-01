@@ -7483,11 +7483,15 @@ fn emit_wiring(
     // Only inject the trait `use` when this node actually has something to wire up below — an
     // unconditional injection here left an always-unused import on any stored node with no `on_*`/
     // `#[two_way]` attribute at all (every branch of the loop below that actually emits tokens is
-    // mirrored by one of these two conditions).
+    // mirrored by one of these two conditions). An external (`info.is_none()`) target has no local
+    // `TypeInfo` to check `two_way_fields` against (a builtin's shape lives only in its own
+    // `__elwindui_props_{Name}!` macro now — see that macro's `@set_on_change` arms' own doc
+    // comment), so every bare-path attribute is a *candidate* here; the macro itself silently
+    // no-ops for whichever of those turn out not to be two-way.
     let needs_wiring = node.attributes.iter().any(|(name, expr)| {
         name.starts_with("on_")
-            || (info.is_some_and(|i| i.two_way_fields.contains(name))
-                && matches!(expr, ViewExpr::Path(_)))
+            || (matches!(expr, ViewExpr::Path(_))
+                && (info.is_some_and(|i| i.two_way_fields.contains(name)) || info.is_none()))
     });
     if !needs_wiring {
         return;
@@ -7688,22 +7692,71 @@ fn emit_wiring(
             continue;
         }
 
-        let is_two_way = info.is_some_and(|i| i.two_way_fields.contains(name));
-        if is_two_way {
-            if let ViewExpr::Path(path) = expr {
-                let bound = resolve_bind(path, &ctx.binds);
-                let setter = emit_setter(&bound, &self_mode);
+        let Some(path) = (match expr {
+            ViewExpr::Path(path) => Some(path),
+            _ => None,
+        }) else {
+            continue;
+        };
+        // Two-way wiring only ever makes sense for a genuine `vm.field`-shaped binding (or
+        // bind-sugar that resolves to one) — never a bare local reference like `RoundedPanel`'s
+        // `TextBlock { text: label }` (a 1-segment `#[param]`/own-field passthrough, not a
+        // reassignable observable). `emit_setter` panics on anything that isn't a real 2-segment
+        // path after `resolve_bind`, so check first and skip entirely rather than reach it —
+        // matches the old local-only branch's own implicit guarantee (only ever called after
+        // `TypeInfo.two_way_fields` confirmed `name` was a genuine two-way VM field, which was
+        // always this shape in practice), now that `resolve_bind`/`emit_setter` run for *every*
+        // bare-path attribute up front instead of only after a two-way check already narrowed it.
+        let bound = resolve_bind(path, &ctx.binds);
+        if bound.len() != 2 {
+            continue;
+        }
+        let setter = emit_setter(&bound, &self_mode);
+        let on_change = quote! {
+            Box::new(move |new_value| {
+                #setter(new_value);
+                // The model setter synchronously emits PropertyChanged. Its owning view
+                // subscription applies the model→widget update; forcing a second blanket resync
+                // here resets native editing state on AppKit.
+            })
+        };
+        match info {
+            // Local (known) target: `TypeInfo.two_way_fields` says definitively whether `name` is
+            // two-way, so only emit the wiring when it actually is.
+            Some(info) if info.two_way_fields.contains(name) => {
                 let change_setter = format_ident!("set_on_{name}_change");
                 out.extend(quote! {
                     {
                         let widget = #widget_binding;
                         let this = std::rc::Rc::clone(&this);
-                        widget.#change_setter(Box::new(move |new_value| {
-                            #setter(new_value);
-                            // The model setter synchronously emits PropertyChanged. Its owning
-                            // view subscription applies the model→widget update; forcing a second
-                            // blanket resync here resets native editing state on AppKit.
-                        }));
+                        widget.#change_setter(#on_change);
+                    }
+                });
+            }
+            Some(_) => {}
+            // External (`info.is_none()`) target: no local `TypeInfo` to check `two_way_fields`
+            // against, so every bare-path attribute is a candidate — hand the decision to
+            // `owner`'s own props macro's `@set_on_change` arms (`elwindui-macros::class::
+            // build_props_macro`, which *does* know per-property two-way-ness at its own
+            // declaration site), which either splices this closure into a real `set_on_change`
+            // call or silently discards it. `#[allow(unused)]`: the common (non-two-way) case
+            // constructs `widget`/`this`/the closure only to have the macro's own fallback arm
+            // throw them away unused — expected, not a bug. `use elwindui::ui::*;`: `set_on_change`
+            // is a trait method (`{Name}Ext`), not inherent — without `TypeInfo` this function has
+            // no ancestor chain to import a specific trait from, matching `emit_external_
+            // construction`'s own identical glob-import rationale.
+            None => {
+                let name_ident = format_ident!("{name}");
+                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+                out.extend(quote! {
+                    {
+                        #[allow(unused, clippy::redundant_clone, unused_imports)]
+                        {
+                            use elwindui::ui::*;
+                            let widget = #widget_binding;
+                            let this = std::rc::Rc::clone(&this);
+                            elwindui::core::#props_macro!(@set_on_change #name_ident, widget, #on_change);
+                        }
                     }
                 });
             }

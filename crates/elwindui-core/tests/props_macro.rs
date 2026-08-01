@@ -6,6 +6,7 @@
 
 use elwindui_core::graphics::{Brush, Color};
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Stands in for a backend's real `Button`: the props macro emits plain method syntax
 /// (`$recv.set_text(..)`), so anything with the right setters satisfies it.
@@ -104,15 +105,28 @@ fn clear_resets_a_property_declared_by_an_ancestor() {
 
 // --- `@children`: attaching bare nested child elements ------------------------------------------
 
+/// Stands in for whatever a real single-slot child provides through its own generated
+/// `into_ui_element_node` default method (`single_slot_child_value` in `elwindui-macros`, driven by
+/// `Window::content`'s real declared type, `Rc<dyn UIElementExt>`) — every concrete class gets this
+/// as an identity passthrough, so the single-slot `@children_into` arm now unconditionally calls it
+/// on the child expression before handing it to the setter.
+struct FakeElement(&'static str);
+
+impl FakeElement {
+    fn into_ui_element_node(self: Rc<Self>) -> Rc<Self> {
+        self
+    }
+}
+
 /// Stands in for a single-slot content host (`Window`/`ContentControl`/`TabViewItem`, whose content
 /// property is an `Rc<dyn ..>`).
 #[derive(Default)]
 struct FakeWindow {
-    content: RefCell<Option<&'static str>>,
+    content: RefCell<Option<Rc<FakeElement>>>,
 }
 
 impl FakeWindow {
-    fn set_content(&self, content: &'static str) {
+    fn set_content(&self, content: Rc<FakeElement>) {
         *self.content.borrow_mut() = Some(content);
     }
 }
@@ -142,8 +156,9 @@ impl FakeCollection<'_> {
 #[test]
 fn children_go_into_a_single_slot_through_its_setter() {
     let window = FakeWindow::default();
-    elwindui_core::__elwindui_props_Window!(@children window, ["body"]);
-    assert_eq!(*window.content.borrow(), Some("body"));
+    let body = Rc::new(FakeElement("body"));
+    elwindui_core::__elwindui_props_Window!(@children window, [body]);
+    assert_eq!(window.content.borrow().as_ref().map(|c| c.0), Some("body"));
 }
 
 #[test]

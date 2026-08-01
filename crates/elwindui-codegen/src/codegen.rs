@@ -5395,16 +5395,36 @@ fn emit_attached_setters(
 ) -> TokenStream {
     let mut out = TokenStream::new();
     for (owner, field, value) in &node.attached {
-        let ty_str = table
+        let value_ts = emit_expr(value, ctx, mode);
+        match table
             .resolve(from, owner)
             .and_then(|info| info.attached_field_types.get(field))
-            .unwrap_or_else(|| panic!("`{owner}::{field}` is not a known `#[attached]` field (should have been caught by validation)"));
-        let ty: syn::Type = syn::parse_str(ty_str)
-            .unwrap_or_else(|e| panic!("invalid attached field type `{ty_str}`: {e}"));
-        let value_ts = emit_expr(value, ctx, mode);
-        out.extend(
-            quote! { #binding.as_ui_element().set_attached::<#ty>(#owner, #field, #value_ts); },
-        );
+        {
+            Some(ty_str) => {
+                let ty: syn::Type = syn::parse_str(ty_str)
+                    .unwrap_or_else(|e| panic!("invalid attached field type `{ty_str}`: {e}"));
+                out.extend(quote! {
+                    #binding.as_ui_element().set_attached::<#ty>(#owner, #field, #value_ts);
+                });
+            }
+            // `owner` has no local `TypeInfo` (a real builtin — `Grid`, same as every other
+            // builtin since `builtins.elwind` was deleted, §see `emit_external_construction`'s
+            // own doc comment): its `#[attached]` field's declared type can't be looked up here
+            // any more, only inside `owner`'s own `#[elwindui_macros::class]`-generated
+            // `__elwindui_props_{owner}!` macro (`elwindui-macros::class::build_props_macro`'s
+            // `@attached_set` arm, which picks the turbofish `T` from the very same `#[prop]`
+            // declaration this used to read out of `TypeInfo`) — so hand the whole call to that
+            // macro instead of resolving `T` here. `field` is spliced as a bare identifier
+            // (matching `@attached_set`'s own `#name` arm pattern), not a string, since the arm
+            // is one-per-declared-field rather than taking `field` as data.
+            None => {
+                let props_macro = format_ident!("__elwindui_props_{owner}");
+                let field_ident = format_ident!("{field}");
+                out.extend(quote! {
+                    elwindui::core::#props_macro!(@attached_set #field_ident, #binding, #value_ts);
+                });
+            }
+        }
     }
     out
 }
@@ -5961,6 +5981,15 @@ fn emit_external_construction(
     let binding = &node.binding;
     let type_ident = format_ident!("{}", node.type_path);
     let sets = emit_external_attribute_sets(node, ctx, from, table);
+    let binding_ts = quote! { #binding };
+    // `Grid::row`/`Grid::column`/... — every real builtin now goes through this construction
+    // path (no `TypeInfo` left to route a virtual builtin through `emit_virtual_construction`'s
+    // own, otherwise-identical `emit_common_ui_element_setters` call instead), so this is the
+    // *only* place left that can apply a use site's attached properties to a builtin — omitting
+    // it silently drops them, leaving every builtin child at `GridCell::default()` (row 0, column
+    // 0) regardless of what the DSL wrote (`TabView { Grid::row: 1, .. }` colliding with row 0's
+    // own content instead of occupying its own row).
+    let attached = emit_common_ui_element_setters(node, ctx, from, table, &binding_ts);
     out.extend(quote! {
         // Brings every builtin's `{Name}Ext` trait into scope at once — `#sets`'s method calls may
         // resolve against *any* ancestor's trait (`background` lives on `NativeControlExt`, not
@@ -5969,6 +5998,7 @@ fn emit_external_construction(
         #[allow(unused_imports)]
         use elwindui::ui::*;
         let #binding = elwindui::ui::#type_ident::new();
+        #attached
         #sets
     });
 }
@@ -6060,23 +6090,37 @@ fn emit_external_attribute_sets(
         // A named single-child slot (`content: Grid { .. }`, `menu_bar: MenuBar { .. }`) —
         // `plan_element` already planned and will separately construct the nested element as its
         // own `PlannedNode`, recorded here by name (mirrors `build_component_args`'s own
-        // `Some(ViewExpr::Element(_))` arm, the known-`TypeInfo` equivalent of this same case). No
-        // `into_node_if_needed`/`into_any_view_if_needed` conversion is needed the way that arm
-        // does: without a `TypeInfo` this function has no declared field type to convert *to*, but
-        // it doesn't need one either — passed as an argument to `@set`'s generated `self.set_*`
-        // call, `nested_binding`'s own concrete type unsizes to whatever trait-object parameter the
-        // real setter declares (e.g. `Rc<MenuBar>` -> `Rc<dyn MenuBarExt>`) the same way any other
-        // function-call argument does, entirely on rustc's own account. `.clone()` (an `Rc` refcount
-        // bump, not a bare move) — same reason `into_node_if_needed`'s own `PASSTHROUGH_NODE` arm
-        // clones: this binding is also separately stored on `Self` (`generate_view`'s own
-        // `field_inits`), so the original must stay valid for that later use.
+        // `Some(ViewExpr::Element(_))` arm, the known-`TypeInfo` equivalent of this same case).
+        // Without this external parent's own `TypeInfo`, this function has no declared field type
+        // to convert *to* (`content` wants `Rc<dyn UIElementExt>`, `menu_bar` wants `Rc<dyn
+        // MenuBarExt>`, ...) — but it doesn't need one: whether the *nested value itself* needs
+        // `.into_node()` at all is a property of what that value resolves to, not of which slot
+        // it's headed for. A real builtin (native leaf, or anything genuinely external with no
+        // local `TypeInfo`, like `Grid`/`MenuBar` now that builtins live outside this table
+        // entirely) always `impl`s whatever trait its own real setter declares directly (`#[class]`
+        // gives it one), so plain unsized coercion at the eventual setter call already handles it.
+        // Only an ordinary `#[elwindui::component]`-frontend user struct (has local `TypeInfo`,
+        // isn't itself native/a virtual builtin) never `impl`s a `dyn` target trait directly —
+        // its own generated `into_node()` is the only way to erase it, and skipping that call
+        // here used to silently pass the raw concrete value through as an opaque, un-attached
+        // value (compiled fine, `@set`'s generated setter call is generic enough to accept it, but
+        // never actually reached the visual tree as a `dyn UIElementExt` child). Found via a real
+        // notepad screenshot regression (Refs #14) — `cargo test`'s string-level codegen assertions
+        // never caught this since the generated code is syntactically valid either way.
         if let ViewExpr::Element(_) = expr {
-            let (nested_binding, _nested_ty) =
+            let (nested_binding, nested_ty) =
                 node.element_attr_bindings.get(name.as_str()).unwrap_or_else(|| {
                     panic!("planned element binding for `{name}` must exist")
                 });
+            let info = table.resolve(from, nested_ty);
+            let needs_into_node = info.is_some_and(|i| !i.is_native && !i.is_virtual_builtin);
+            let value = if needs_into_node {
+                quote! { #nested_binding.clone().into_node() }
+            } else {
+                quote! { #nested_binding.clone() }
+            };
             sets.extend(quote! {
-                elwindui::core::#props_macro!(@set #binding, #name_ident, #nested_binding.clone());
+                elwindui::core::#props_macro!(@set #binding, #name_ident, #value);
             });
             continue;
         }

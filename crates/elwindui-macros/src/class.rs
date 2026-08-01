@@ -1373,9 +1373,10 @@ fn build_props_macro(
                 },
             };
             let single_slot_arm = matches!(attach_kind(&p.ty), AttachKind::SingleSlot).then(|| {
+                let child = single_slot_child_value(&p.ty, quote! { $child });
                 quote! {
                     (@children_into $origin:ident, #name, $recv:expr, [$child:expr]) => {
-                        $recv.#setter($child);
+                        $recv.#setter(#child);
                     };
                 }
             });
@@ -1839,6 +1840,68 @@ fn wrap_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
         };
     }
     value
+}
+
+/// A single-slot content field's real setter (`build_props_macro`'s `@children_into` single-slot
+/// arm — `content`/`submenu`/... — WPF/WinUI3's `ContentPropertyAttribute` pattern) takes `Rc<dyn
+/// SomeTraitExt>` directly. Plain unsized coercion at that setter call already handles a real
+/// builtin's own concrete value (`#[class]` gives it a direct `impl SomeTraitExt`), but not an
+/// `#[elwindui::component]`-frontend user struct (e.g. `content: MyPanel { .. }`), which never
+/// `impl`s that trait directly — only its own generated `into_node()` erases it. Calling
+/// `.into_<bare(SomeTraitExt)>_node()` unconditionally works for both without this macro needing
+/// to know which one it's looking at: every class this workspace generates — real builtins via
+/// `#[class]`'s own `into_<name>_node` default methods (this file's `into_node_ident`/
+/// `build_into_node_default`), and user components via their own, independently generated
+/// `{Name}Ext` ancestor-forwarding chain — implements every ancestor trait it has directly, so it
+/// always has that ancestor's own `into_<name>_node` default method (a trivial `{ self }` for
+/// anything that already *is* the target type, the same identity result unsized coercion would
+/// have produced). Deliberately **not** folded into `wrap_prop_value` (shared far more broadly by
+/// `@set`/`@set_from`, including resync/rebind call sites where the value may already be an
+/// erased trait object — `Self: Sized` on `into_<name>_node` excludes it from ever being callable
+/// through a `dyn` receiver, so forcing this there breaks those) — this helper's one caller
+/// (`children_into_arms`'s single-slot arm) only ever sees a freshly, concretely constructed
+/// nested element, never an already-erased handle, so the call is always safe here. Found via a
+/// real notepad screenshot regression (Refs #14): a `TabViewItem { DocumentView { .. } }` bare
+/// child compiled fine but the `DocumentView` never actually reached the visual tree.
+fn single_slot_child_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
+    let Some(bound) = rc_dyn_trait_bound(ty) else {
+        return value;
+    };
+    let Some(method) = bound
+        .bounds
+        .iter()
+        .find_map(|b| match b {
+            syn::TypeParamBound::Trait(t) => t.path.segments.last(),
+            _ => None,
+        })
+        .map(|seg| {
+            let name = seg.ident.to_string();
+            into_node_ident(name.strip_suffix("Ext").unwrap_or(&name))
+        })
+    else {
+        return value;
+    };
+    quote! { (#value).#method() }
+}
+
+/// If `ty` is `std::rc::Rc<dyn SomeTrait>`, returns that `dyn SomeTrait` bound — see
+/// `single_slot_child_value`'s own doc comment on why this matters. Deliberately narrower than
+/// `content_item_dyn_type`'s own recursive trait-object search (which also matches list-shaped
+/// wrappers like `ListExt<dyn X>`, a fundamentally different, per-item construction path this has
+/// no business touching): only a bare `Rc<dyn X>` denotes a single embedded node here.
+fn rc_dyn_trait_bound(ty: &Type) -> Option<&syn::TypeTraitObject> {
+    let Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "Rc" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(Type::TraitObject(to)) => Some(to),
+        _ => None,
+    })
 }
 
 fn build_inherit_macros(

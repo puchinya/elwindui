@@ -6,7 +6,7 @@
 
 ## 0. 完了条件に対する要約
 
-指示書§35の完了条件はおおむね満たしている。AppKitは実装・実機テスト検証済み、WinUI3はWindows上でビルドと単一ApplicationホストによるXAML round-tripテストまで検証済み、GTK4は設計のみで実装なし。DPI/表示スケール/テキストスケールはelwindui-coreに概念が存在しないため対応していない。詳細は §6/§9 の未対応事項一覧を参照。
+指示書§35の完了条件はおおむね満たしている。AppKitは実装・実機テスト検証済み、WinUI3はWindows上でビルドと単一ApplicationホストによるXAML round-tripテストまで検証済み、GTK4は設計のみで実装なし。elwindui-core自体にはDPI/表示スケール/テキストスケールの概念が存在せず(`TextMeasureRequest::scale`は常に`1.0`、計測・レイアウトへの影響なし)、この点は今後も対応しない設計判断だが、AppKitバックエンドの*描画解像度*(Retinaでのラスタライズ)は`render::add_sublayer_scaled`によるバックエンド内部の`contentsScale`伝播で対応済み(Issue #18)——「計測はcoreの責務・解像度はバックエンドの責務」という分離。詳細は §6/§9 の未対応事項一覧を参照。
 
 ---
 
@@ -147,7 +147,7 @@ pub fn text_backend() -> Rc<dyn TextBackend>; // 未登録なら DummyTextBacken
 - stretch変換(`nsfont_width`): `FontStretch::percent()`(50〜200%)を`NSFontWidthTrait`(-1.0〜1.0)へ線形変換。
 - `character_spacing`(1/1000 em)→ `NSKernAttributeName = spacing / 1000.0 * font_size`(ポイント換算はAppKit側で1度だけ行う。WinUI3は逆に無変換で渡せる——`CharacterSpacing`自体が1/1000 em単位のため)。
 - 描画は`CATextLayer.setString:`に`NSAttributedString`を渡す方式に変更した。**`NSAttributedString`を設定すると`CATextLayer`自身の`font`/`fontSize`/`foregroundColor`/`alignmentMode`は無視される**ため、旧来の`setFontSize(14.0)`等の呼び出しは削除した(残すと「黙って死んでいる第二の真実の源」になるため)。整列(`TextAlignment`)は`NSMutableParagraphStyle`経由でアトリビュートに含める。
-- `text_layer.setContentsScale(layer.contentsScale())`をRetina対応として追加(`render::vector`の既存パターンを踏襲)。
+- Retina対応: `CATextLayer`自体は`contentsScale`を自前で設定しない(2026-08、Issue #18)。`host::replay`が`CATextLayer`を`layer`へ追加する際、`render::add_sublayer_scaled`が親`layer`の`contentsScale`(`TreeHostView::backing_scale_factor`——`NSWindow.backingScaleFactor`起点、未アタッチ時は`NSScreen.mainScreen`にフォールバック)を再帰的に子へ伝播する共通機構を通す。以前は`text_layer.setContentsScale(layer.contentsScale())`を個別に呼んでいたが、`layer`(`RenderGroup`のコンテナ`CALayer`)自体が`CALayer::new()`直後で常に`1.0`のままだったため実質無効だった——このバグがRetinaでのテキストぼやけの直接原因。
 - Gradient/Image foregroundは`first_gradient_stop_color`によるフラット色へ縮退させている(`render::paint::apply_fill`の既存の同種の縮退と同じ精神)。マスクベースのグラデーション文字描画(`try_add_gradient_fill_layer`の`CATextLayer`マスク化)は本パスでは実装していない——未対応事項として§9に記録。
 
 ### WinUI3実装・検証詳細(`crates/elwindui-backend-winui3/src/render/text.rs`)
@@ -208,7 +208,7 @@ Foreground の変更   -> invalidate()          (再描画のみ)
 
 - **GTK4バックエンド全体** — `crates/elwindui-backend-gtk4`はgtk4/pango依存すら無い20行のスタブ。フォント対応の抽象化(`TextBackend`等)はGTK4実装可能な形にしてあるが、実装コードは書いていない。
 - **WinUI3の適用粒度** — 本機能はWindows上で検証済みだが、elwindui のツリーはXAMLツリーそのものではない(`Control`/`Grid`はXAMLピアを持たない仮想ビルトイン、ネイティブリーフは`Canvas`のフラットな子)。そのため指示書§18の「未設定のプロパティはDependencyPropertyを設定しない」は文字通りには実装できず、解決済み`ComputedTextStyle`を常に適用する設計を採る(§10参照)。
-- **DPI / 表示スケール / テキストスケール** — elwindui-coreにこの概念自体が存在しない。`TextMeasureRequest::scale`は常に`1.0`。該当する指示書§32の動的変更テスト(29・30番)は実施不能。
+- **DPI / 表示スケール / テキストスケール(計測・レイアウト層)** — elwindui-coreにこの概念自体が存在しない。`TextMeasureRequest::scale`は常に`1.0`(意図的にこのまま——スケールをcoreの計測へ持ち込むとモニタごとにレイアウトサイズが変わってしまう)。該当する指示書§32の動的変更テスト(29・30番)は実施不能。**なお2026-08(Issue #18)、AppKitバックエンドの*描画解像度*側は別途対応した**——`render::add_sublayer_scaled`/`render::layer`が`CALayer.contentsScale`を`TreeHostView::backing_scale_factor`から再帰的に伝播し、`TextBlock`を含む全描画がRetinaで正しい解像度になる。これは計測に影響しないバックエンド内部のラスタライズ詳細であり、上記の「未対応」の対象外。
 - **`TextBlock.text_wrapping`** — 決定した7プロパティの範囲外のため、DSLフィールドとしては追加していない。`TextMeasureRequest`に`wrapping: TextWrapping`の枠は用意済みなので、追加時のシグネチャ変更は不要。
 - **`Brush::Image`のforeground** — AppKit側はフラット色へのフォールバックのみ(グラデーションと同じ縮退)。
 - **`ScrollView`/`TabView`のホスト済みコンテンツへの継承** — これらは別の`TreeHostView`インスタンスにコンテンツをホストするため、visualチェーンがそこで途切れる。`InheritanceParentKind`を要素ごとにオーバーライド可能にする仕組み(§2)は将来この問題を解く手段になるが、ホスト済みルートに実際の配線をする作業は本実装のスコープ外。

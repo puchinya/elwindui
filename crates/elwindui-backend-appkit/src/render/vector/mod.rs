@@ -9,7 +9,10 @@
 //! so it can share `render`'s path/paint/image helpers without either side importing the other
 //! — the arrangement that removed the original `inner` <-> `vector_renderer` cycle.
 
-use crate::render::{build_image_container_layer, clip_mask_layer, fitted_image_rect};
+use crate::render::{
+    add_sublayer_scaled, build_image_container_layer, clip_mask_layer, fitted_image_rect,
+    set_mask_scaled,
+};
 use elwindui_core::base::{AffineTransform, Rect};
 use elwindui_core::graphics::{
     Clip, FillRule, ImageDrawOptions, VectorBlendMode, VectorGroup, VectorImage,
@@ -83,9 +86,12 @@ pub(crate) fn draw_vector_image(
         let clip_container = CALayer::new();
         clip_container.setName(Some(&NSString::from_str("elwindui-paint")));
         clip_container.setFrame(layer.bounds());
+        // Attach before masking — `add_sublayer_scaled` stamps `clip_container`'s scale from
+        // `layer` at attach time, which `set_mask_scaled` below needs already set to propagate
+        // correctly onto `mask`.
+        add_sublayer_scaled(layer, &clip_container);
         let mask = clip_mask_layer(world, &Clip::Rect(dest));
-        unsafe { clip_container.setMask(Some(&mask)) };
-        layer.addSublayer(&clip_container);
+        set_mask_scaled(&clip_container, &mask);
         clip_container
     } else {
         layer.clone()
@@ -129,10 +135,12 @@ pub(crate) fn draw_vector_image(
             let cg_image = match options.rasterize {
                 VectorRasterizeMode::Auto => {
                     // `dest`'s actually-displayed size (in points) times this layer's own
-                    // `contentsScale`, which AppKit keeps in sync with the hosting window's
-                    // `backingScaleFactor` for a layer-backed view, so a Retina display gets a
-                    // crisp (not upscaled/blurry) rasterization without this function needing its
-                    // own screen/window lookup.
+                    // `contentsScale` — `layer` here is always a layer already attached through
+                    // `render::add_sublayer_scaled`, which stamps it down from
+                    // `TreeHostView::backing_scale_factor` at attach time (Core Animation does
+                    // *not* propagate `contentsScale` from a superlayer on its own; see
+                    // `render::layer`'s doc comment), so `layer.contentsScale()` is authoritative
+                    // here without this function needing its own screen/window lookup.
                     let placed = fitted_image_rect(
                         dest,
                         (src_rect.width, src_rect.height),
@@ -227,7 +235,7 @@ pub(crate) fn draw_vector_image(
             if let Some(image_layer) =
                 build_image_container_layer(&cg_image, dest, None, &image_options, world, opacity)
             {
-                container.addSublayer(&image_layer);
+                add_sublayer_scaled(&container, &image_layer);
             }
         }
     }
@@ -303,7 +311,7 @@ pub(crate) fn render_group(
         let content = CALayer::new();
         content.setName(Some(&NSString::from_str("elwindui-paint")));
         content.setFrame(layer.bounds());
-        wrapper.addSublayer(&content);
+        add_sublayer_scaled(&wrapper, &content);
         content
     } else {
         wrapper.clone()
@@ -320,19 +328,20 @@ pub(crate) fn render_group(
                 rule: FillRule::NonZero,
             },
         );
-        unsafe { content_target.setMask(Some(&mask)) };
+        set_mask_scaled(&content_target, &mask);
     }
 
     if let Some(mask) = &group.mask {
-        if let Some(mask_layer) = build_mask_layer(mask, &world, image_cache) {
-            unsafe { wrapper.setMask(Some(&mask_layer)) };
+        if let Some(mask_layer) = build_mask_layer(mask, &world, layer.contentsScale() as f32, image_cache)
+        {
+            set_mask_scaled(&wrapper, &mask_layer);
         }
     }
 
     wrapper.setOpacity(parent_opacity * group.opacity);
     apply_blend_mode(&wrapper, group.blend_mode);
 
-    layer.addSublayer(&wrapper);
+    add_sublayer_scaled(layer, &wrapper);
 }
 
 /// True when `group` itself contributes nothing to the final image beyond grouping its

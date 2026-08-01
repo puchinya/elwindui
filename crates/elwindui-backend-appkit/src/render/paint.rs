@@ -4,6 +4,7 @@
 
 use super::geometry::*;
 use super::image::*;
+use super::layer::{add_sublayer_scaled, set_mask_scaled};
 use super::path::*;
 use objc2::rc::Retained;
 use objc2_core_foundation::CFRetained;
@@ -37,7 +38,7 @@ pub(crate) fn add_shape_layer(
     }
     shape_layer.setOpacity(opacity);
     let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
-    layer.addSublayer(&shape_layer);
+    add_sublayer_scaled(layer, &shape_layer);
 }
 
 /// Which built-in shape a gradient's clip mask should take — mirrors `replay_paint_command`'s own
@@ -147,6 +148,11 @@ pub(crate) fn try_add_gradient_fill_layer(
     let location_refs: Vec<&NSNumber> = locations.iter().map(|n| n.as_ref()).collect();
     gradient_layer.setLocations(Some(&NSArray::from_slice(&location_refs)));
 
+    // Attach before masking: `add_sublayer_scaled` stamps `ca_layer`'s scale from `layer` at
+    // attach time, and `set_mask_scaled` below needs that already-set scale on `ca_layer` to
+    // propagate correctly onto `mask_layer`.
+    add_sublayer_scaled(layer, ca_layer);
+
     // `local_bounds` is already `bounds` re-anchored at (0, 0) — the identity transform (not
     // another `translation(-bounds.x, -bounds.y)`) is what belongs alongside it; applying both
     // shifts the mask a second time; for a `bounds` far from the canvas origin (any cell but the
@@ -170,10 +176,8 @@ pub(crate) fn try_add_gradient_fill_layer(
         elwindui_core::graphics::Color::black(),
     )));
     let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
-    unsafe { ca_layer.setMask(Some(&mask_layer)) };
+    set_mask_scaled(ca_layer, &mask_layer);
 
-    let gradient_layer: Retained<CALayer> = Retained::into_super(gradient_layer);
-    layer.addSublayer(&gradient_layer);
     true
 }
 
@@ -260,7 +264,7 @@ pub(crate) fn try_add_image_fill_layer(
             unsafe {
                 image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject))
             };
-            container.addSublayer(&image_layer);
+            add_sublayer_scaled(&container, &image_layer);
         }
         tile_mode @ (elwindui_core::graphics::TileMode::Tile
         | elwindui_core::graphics::TileMode::FlipX
@@ -321,7 +325,7 @@ pub(crate) fn try_add_image_fill_layer(
                                 tiled_image.as_ref() as &objc2::runtime::AnyObject
                             ))
                         };
-                        container.addSublayer(&image_layer);
+                        add_sublayer_scaled(&container, &image_layer);
                     } else {
                         add_tiled_image_layers(
                             &container,
@@ -373,9 +377,14 @@ pub(crate) fn try_add_image_fill_layer(
         elwindui_core::graphics::Color::black(),
     )));
     let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
-    unsafe { container.setMask(Some(&mask_layer)) };
+    // `container`'s own scale isn't authoritative yet at this point (it isn't attached to `layer`
+    // until the next line) — `add_sublayer_scaled(layer, &container)` below recursively re-stamps
+    // `container`, this mask, and every sublayer already added to `container` above, so this
+    // `set_mask_scaled` call is a harmless (and cheap — a mask has no children of its own here)
+    // no-op that keeps every attach in this function going through the same helper.
+    set_mask_scaled(&container, &mask_layer);
 
-    layer.addSublayer(&container);
+    add_sublayer_scaled(layer, &container);
     true
 }
 
@@ -437,7 +446,7 @@ pub(crate) fn add_tiled_image_layers(
             unsafe {
                 image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject))
             };
-            container.addSublayer(&image_layer);
+            add_sublayer_scaled(container, &image_layer);
         }
     }
 }

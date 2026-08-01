@@ -6,16 +6,17 @@
 
 use crate::ffi::{AnyView, mtm};
 use crate::render::{
-    GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, build_image_container_layer,
-    clip_bounds, clip_mask_layer, ellipse_cgpath, geometry_bounds, path_to_cgpath, resolve_cgimage,
-    rounded_rect_cgpath, transform_point, try_add_gradient_fill_layer, try_add_image_fill_layer,
+    GradientMaskShape, add_shape_layer, add_sublayer_scaled, apply_fill, apply_stroke,
+    build_image_container_layer, clip_bounds, clip_mask_layer, ellipse_cgpath, geometry_bounds,
+    path_to_cgpath, resolve_cgimage, rounded_rect_cgpath, set_mask_scaled, transform_point,
+    try_add_gradient_fill_layer, try_add_image_fill_layer,
 };
 use elwindui_core::graphics::{Brush, ImageId, RenderCommand, RenderGroup, VectorImageId};
 use elwindui_core::ui::TextAlignment;
 use objc2::DefinedClass;
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
-use objc2_core_foundation::CFRetained;
+use objc2_core_foundation::{CFRetained, CGFloat};
 use objc2_core_graphics::{CGImage, CGMutablePath};
 use objc2_foundation::{NSRect, NSString};
 use objc2_quartz_core::{
@@ -28,6 +29,11 @@ use super::*;
 
 /// What `TreeHostIvars::group_layers[id]`'s sublayers were last rebuilt from — see that field's
 /// own doc comment for why `RenderGroup::generation` alone isn't a sufficient cache key.
+///
+/// `scale` (the host's `backing_scale_factor()` at the time of the last rebuild) is part of this
+/// key so a group whose geometry is byte-for-byte unchanged still rebuilds when the window moves
+/// to a display with a different backing scale — see `TreeHostView::backing_scale_factor` and
+/// `render::add_sublayer_scaled`.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct GroupCacheKey {
     origin: elwindui_core::base::Point,
@@ -35,6 +41,7 @@ pub(crate) struct GroupCacheKey {
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
     generation: u64,
+    scale: CGFloat,
 }
 
 /// Returns the raster and vector resources a group's command list can resolve. The result is
@@ -127,6 +134,7 @@ pub(crate) fn replay_group(
     inherited_clip: Option<elwindui_core::base::Rect>,
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
+    scale: CGFloat,
     live_native_controls: &mut HashSet<usize>,
     live_group_ids: &mut HashSet<u64>,
     live_image_ids: &mut HashSet<ImageId>,
@@ -164,6 +172,12 @@ pub(crate) fn replay_group(
         })
         .clone();
     container.setFrame(root_layer.bounds());
+    // Set directly from `scale` (not via `add_sublayer_scaled`, which would also recursively
+    // re-stamp every one of this container's *existing* sublayers on every single pass, including
+    // cache hits) — `GroupCacheKey::scale` below already forces a full rebuild, which re-attaches
+    // every descendant through `add_sublayer_scaled` and picks up this value, whenever the scale
+    // genuinely changes. This keeps a cache-hit pass exactly as cheap as it was before this fix.
+    container.setContentsScale(scale);
     root_layer.addSublayer(&container);
 
     let key = GroupCacheKey {
@@ -172,6 +186,7 @@ pub(crate) fn replay_group(
         transform,
         opacity,
         generation: group.generation,
+        scale,
     };
     let stale = is_new || host.ivars().group_layer_cache_keys.borrow().get(&group.id) != Some(&key);
     if stale {
@@ -240,6 +255,7 @@ pub(crate) fn replay_group(
             effective_clip,
             transform,
             opacity,
+            scale,
             live_native_controls,
             live_group_ids,
             live_image_ids,
@@ -296,9 +312,12 @@ pub(crate) fn replay_commands(
                 let container = CALayer::new();
                 container.setName(Some(&NSString::from_str("elwindui-paint")));
                 container.setFrame(layer.bounds());
+                // Attach before masking, not after: `add_sublayer_scaled` stamps `container`'s
+                // scale from `layer` at attach time, and `set_mask_scaled` needs that already-set
+                // scale on `container` to propagate correctly onto `mask_layer`.
+                add_sublayer_scaled(layer, &container);
                 let mask_layer = clip_mask_layer(&world, pushed);
-                unsafe { container.setMask(Some(&mask_layer)) };
-                layer.addSublayer(&container);
+                set_mask_scaled(&container, &mask_layer);
                 idx = replay_commands(
                     host,
                     &container,
@@ -581,7 +600,7 @@ pub(crate) fn replay_paint_command(
             apply_fill(&shape_layer, Some(brush), path.bounds());
             shape_layer.setOpacity(opacity);
             let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
-            layer.addSublayer(&shape_layer);
+            add_sublayer_scaled(layer, &shape_layer);
         }
         RenderCommand::StrokePath {
             path,
@@ -598,7 +617,7 @@ pub(crate) fn replay_paint_command(
             apply_stroke(&shape_layer, brush, stroke, path.bounds());
             shape_layer.setOpacity(opacity);
             let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
-            layer.addSublayer(&shape_layer);
+            add_sublayer_scaled(layer, &shape_layer);
         }
         RenderCommand::DrawImage {
             image,
@@ -618,7 +637,7 @@ pub(crate) fn replay_paint_command(
             else {
                 return;
             };
-            layer.addSublayer(&container);
+            add_sublayer_scaled(layer, &container);
         }
         RenderCommand::DrawVectorImage {
             image,
@@ -674,13 +693,12 @@ pub(crate) fn replay_paint_command(
                     *alignment,
                 )));
             }
-            // Matches `render::vector`'s own `contentsScale` inheritance (see that module's doc
-            // comment) — this sublayer would otherwise default to `1.0` and render blurry on a
-            // Retina display regardless of the group layer's own scale.
-            text_layer.setContentsScale(layer.contentsScale());
             text_layer.setOpacity(opacity);
             let text_layer: Retained<CALayer> = Retained::into_super(text_layer);
-            layer.addSublayer(&text_layer);
+            // `add_sublayer_scaled` stamps this layer's `contentsScale` from `layer`'s — this
+            // sublayer would otherwise default to `1.0` and render blurry on a Retina display
+            // regardless of the group layer's own scale (see `render::layer`'s doc comment).
+            add_sublayer_scaled(layer, &text_layer);
         }
         RenderCommand::NativeControl { .. }
         | RenderCommand::PushClip { .. }

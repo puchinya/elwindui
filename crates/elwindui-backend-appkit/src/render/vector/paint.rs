@@ -2,8 +2,8 @@
 //! (solid, gradient, pattern) and the mask layers a `clip-path`/`mask` needs.
 
 use crate::render::{
-    add_shape_layer, apply_stroke, build_image_container_layer, color_to_cgcolor,
-    gradient_unit_point, path_to_cgpath, resolve_cgimage,
+    add_shape_layer, add_sublayer_scaled, apply_stroke, build_image_container_layer,
+    color_to_cgcolor, gradient_unit_point, path_to_cgpath, resolve_cgimage, set_mask_scaled,
 };
 use elwindui_core::base::{AffineTransform, Point, Rect};
 use elwindui_core::graphics::{
@@ -28,6 +28,7 @@ use super::*;
 pub(crate) fn build_mask_layer(
     mask: &VectorMask,
     world: &AffineTransform,
+    scale: f32,
     image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) -> Option<Retained<CALayer>> {
     let local_rect = mask.bounds;
@@ -35,6 +36,7 @@ pub(crate) fn build_mask_layer(
     let (mut pixels, width, height) = rasterize_nodes_to_pixels(
         std::slice::from_ref(&VectorNode::Group(mask.root.clone())),
         local_rect,
+        scale,
         image_cache,
     )?;
 
@@ -53,6 +55,7 @@ pub(crate) fn build_mask_layer(
         if let Some(nested_layer_pixels) = rasterize_nodes_to_pixels(
             std::slice::from_ref(&VectorNode::Group(nested.root.clone())),
             nested.bounds,
+            scale,
             image_cache,
         ) {
             let (mut nested_pixels, nested_w, nested_h) = nested_layer_pixels;
@@ -111,7 +114,7 @@ pub(crate) fn render_raster_node(
     if let Some(container) =
         build_image_container_layer(&resolved, node.rect, None, &options, &world, opacity)
     {
-        layer.addSublayer(&container);
+        add_sublayer_scaled(layer, &container);
     }
 }
 
@@ -290,7 +293,7 @@ pub(crate) fn render_stroke(
     apply_stroke(&shape_layer, &brush, &stroke.style, local_bounds);
     shape_layer.setOpacity(opacity * stroke.opacity);
     let shape_layer: Retained<CALayer> = Retained::into_super(shape_layer);
-    layer.addSublayer(&shape_layer);
+    add_sublayer_scaled(layer, &shape_layer);
 }
 
 /// Gradient-on-arbitrary-path fill: a masked `CAGradientLayer` like `inner.rs`'s own
@@ -379,6 +382,11 @@ pub(crate) fn add_gradient_shape_layer(
     let location_refs: Vec<&NSNumber> = locations.iter().map(|n| n.as_ref()).collect();
     gradient_layer.setLocations(Some(&objc2_foundation::NSArray::from_slice(&location_refs)));
 
+    // Attach before masking: `add_sublayer_scaled` stamps `ca_layer`'s scale from `layer` at
+    // attach time, and `set_mask_scaled` below needs that already-set scale on `ca_layer` to
+    // propagate correctly onto `mask_layer`.
+    add_sublayer_scaled(layer, ca_layer);
+
     // Mask expressed in the gradient layer's own local (`bounds`-relative) space — same reasoning
     // as `try_add_gradient_fill_layer`'s own mask, built from the path's *local* geometry directly
     // (an arbitrary `VectorPathNode` has no simpler rect/ellipse primitive to fall back to).
@@ -392,10 +400,7 @@ pub(crate) fn add_gradient_shape_layer(
     });
     mask_layer.setFillColor(Some(&color_to_cgcolor(Color::BLACK)));
     let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
-    unsafe { ca_layer.setMask(Some(&mask_layer)) };
-
-    let gradient_layer: Retained<CALayer> = Retained::into_super(gradient_layer);
-    layer.addSublayer(&gradient_layer);
+    set_mask_scaled(ca_layer, &mask_layer);
 }
 
 /// Largest pattern tile grid extent allowed along either axis — same defensive cap
@@ -434,6 +439,7 @@ pub(crate) fn add_pattern_shape_layer(
     let Some((pixels, w, h)) = rasterize_nodes_to_pixels(
         std::slice::from_ref(&VectorNode::Group(pattern.root.clone())),
         tile_rect,
+        layer.contentsScale() as f32,
         image_cache,
     ) else {
         report_unsupported("pattern fill (offscreen render failed)");
@@ -503,7 +509,10 @@ pub(crate) fn add_pattern_shape_layer(
                 (local_y + tile_rect.height / 2.0) as f64,
             ));
             unsafe { tile_layer.setContents(Some(tile_cgimage.as_ref() as &AnyObject)) };
-            wrapper.addSublayer(&tile_layer);
+            // `wrapper` isn't attached to `layer` yet — see `render::layer`'s doc comment on
+            // subtrees built before they have a parent; the final `add_sublayer_scaled` below
+            // recursively corrects every tile's scale once `wrapper` itself is attached.
+            add_sublayer_scaled(&wrapper, &tile_layer);
         }
     }
 
@@ -516,7 +525,7 @@ pub(crate) fn add_pattern_shape_layer(
     });
     mask_layer.setFillColor(Some(&color_to_cgcolor(Color::BLACK)));
     let mask_layer: Retained<CALayer> = Retained::into_super(mask_layer);
-    unsafe { wrapper.setMask(Some(&mask_layer)) };
+    set_mask_scaled(&wrapper, &mask_layer);
 
-    layer.addSublayer(&wrapper);
+    add_sublayer_scaled(layer, &wrapper);
 }

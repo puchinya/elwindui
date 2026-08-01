@@ -6,15 +6,18 @@
 //! `.elwind`-directory model to a single-`.rs`-file model, matching elwindui's own unification onto
 //! the Rust-macro frontend — real-time diagnostics (`diagnostics`, reusing
 //! `elwindui_codegen::{component_frontend, validate}`) and `vm.field` member completion
-//! (`completion`, built on `elwindui_codegen::codegen::SymbolTable::resolve`). There is no semantic-
-//! tokens provider: a `.rs` file already gets real Rust syntax highlighting from rust-analyzer, and
-//! retrofitting the old `.elwind`-specific tokenizer for a `view! { .. }` macro body's worth of
-//! text wasn't judged worth the added complexity (see the removed `semantic_tokens.rs`, deleted
-//! along with this retarget). Generated-code preview and hover (付録B.2 items 2/3) and the
-//! offscreen-rendering pipeline (付録B.3) remain later phases, not attempted here.
+//! (`completion`, built on `elwindui_codegen::codegen::SymbolTable::resolve`). Semantic tokens
+//! (`semantic_tokens`) were dropped at that same retarget (a `.rs` file already gets real Rust
+//! syntax highlighting from rust-analyzer everywhere else) and later reinstated scoped to just
+//! `view! { .. }` macro bodies (Issue #14's "未解決の論点" — the one part of the file rust-analyzer
+//! can't highlight, since `view!` is never a real macro) rather than the whole file, avoiding any
+//! double-coloring/conflict with rust-analyzer's own semantic tokens. Generated-code preview and
+//! hover (付録B.2 items 2/3) and the offscreen-rendering pipeline (付録B.3) remain later phases, not
+//! attempted here.
 
 pub mod completion;
 pub mod diagnostics;
+pub mod semantic_tokens;
 
 use lsp_server::{
     Connection, Message, Notification as ServerNotification, Request as ServerRequest, RequestId,
@@ -24,10 +27,12 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidOpenTextDocument, DidSaveTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Completion, Request as _};
+use lsp_types::request::{Completion, Request as _, SemanticTokensFullRequest};
 use lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, PublishDiagnosticsParams,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
     ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use std::path::PathBuf;
@@ -41,6 +46,17 @@ pub fn run() {
             trigger_characters: Some(vec![".".to_string()]),
             ..Default::default()
         }),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                legend: SemanticTokensLegend {
+                    token_types: semantic_tokens::TOKEN_TYPES.to_vec(),
+                    token_modifiers: Vec::new(),
+                },
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: None,
+                work_done_progress_options: Default::default(),
+            },
+        )),
         ..Default::default()
     })
     .expect("ServerCapabilities always serializes");
@@ -80,6 +96,7 @@ fn main_loop(connection: &Connection) {
 fn handle_request(connection: &Connection, req: ServerRequest) {
     match req.method.as_str() {
         Completion::METHOD => handle_completion_request(connection, req),
+        SemanticTokensFullRequest::METHOD => handle_semantic_tokens_request(connection, req),
         // Phase 7 handles no other requests (no hover/etc. yet).
         _ => {}
     }
@@ -95,6 +112,20 @@ fn handle_completion_request(connection: &Connection, req: ServerRequest) {
         Some(CompletionResponse::Array(completion::completions_at(
             &src, position,
         )))
+    });
+    send_response(connection, req.id, serde_json::to_value(result));
+}
+
+fn handle_semantic_tokens_request(connection: &Connection, req: ServerRequest) {
+    let Ok(params) = serde_json::from_value::<SemanticTokensParams>(req.params) else {
+        return;
+    };
+    let result = uri_to_path(&params.text_document.uri).and_then(|path| {
+        let src = std::fs::read_to_string(&path).ok()?;
+        Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: semantic_tokens::semantic_tokens_for_file(&src),
+        }))
     });
     send_response(connection, req.id, serde_json::to_value(result));
 }

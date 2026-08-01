@@ -270,28 +270,48 @@ pub(crate) fn try_add_image_fill_layer(
         | elwindui_core::graphics::TileMode::FlipX
         | elwindui_core::graphics::TileMode::FlipY
         | elwindui_core::graphics::TileMode::FlipXY) => {
-            let width = local_bounds.width.ceil().max(1.0) as usize;
-            let height = local_bounds.height.ceil().max(1.0) as usize;
-            if width <= crate::render::vector::MAX_OFFSCREEN_DIMENSION
-                && height <= crate::render::vector::MAX_OFFSCREEN_DIMENSION
+            // Rasterized at `scale` pixels per point — same reasoning as `render::vector::raster::
+            // rasterize_nodes_to_pixels`: this bitmap is generated once and then displayed at a
+            // fixed point size (`local_bounds`), so the scale has to be baked into the raster
+            // itself, not just into the displaying `image_layer`'s `contentsScale` (which
+            // `add_sublayer_scaled` sets correctly below regardless, but that alone would just
+            // upscale an already-1x bitmap).
+            let scale = layer.contentsScale() as f32;
+            let pixel_width = (local_bounds.width * scale).ceil().max(1.0) as usize;
+            let pixel_height = (local_bounds.height * scale).ceil().max(1.0) as usize;
+            if pixel_width <= crate::render::vector::MAX_OFFSCREEN_DIMENSION
+                && pixel_height <= crate::render::vector::MAX_OFFSCREEN_DIMENSION
             {
                 // Keep the retained tree bounded: the per-cell layers exist only while Core
                 // Animation rasterizes this brush, then one CGImage-backed layer replaces them.
                 let tile_root = CALayer::new();
                 tile_root.setBounds(objc2_core_foundation::CGRect::new(
                     objc2_core_foundation::CGPoint::new(0.0, 0.0),
-                    objc2_core_foundation::CGSize::new(width as f64, height as f64),
+                    objc2_core_foundation::CGSize::new(pixel_width as f64, pixel_height as f64),
                 ));
+                // `tile_root` renders in pixel space, so both the tile grid's extent and each
+                // tile's own size (which `add_tiled_image_layers` derives from `tile_transform`'s
+                // diagonal) need the same `scale` folded in — `AffineTransform::scale` composed
+                // via `concat` scales `image_brush.transform`'s diagonal directly (the only part
+                // `add_tiled_image_layers` reads for sizing).
+                let pixel_local_bounds = elwindui_core::base::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: local_bounds.width * scale,
+                    height: local_bounds.height * scale,
+                };
+                let pixel_transform = elwindui_core::base::AffineTransform::scale(scale, scale)
+                    .concat(&image_brush.transform);
                 add_tiled_image_layers(
                     &tile_root,
                     &cg_image,
                     image_size,
-                    image_brush.transform,
+                    pixel_transform,
                     tile_mode,
-                    local_bounds,
+                    pixel_local_bounds,
                 );
                 if let Some((pixels, pixel_width, pixel_height)) =
-                    crate::render::rasterize_calayer_to_pixels(&tile_root, width, height)
+                    crate::render::rasterize_calayer_to_pixels(&tile_root, pixel_width, pixel_height)
                 {
                     if let Some(tiled_image) =
                         crate::render::pixels_to_cgimage(pixels, pixel_width, pixel_height)

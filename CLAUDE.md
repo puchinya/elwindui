@@ -6,6 +6,86 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 When asking the user a question (clarifying questions, `AskUserQuestion`, plan checkpoints, etc.), always ask in Japanese.
 
+<!-- BEGIN ISSUE-DRIVEN AGENT WORKFLOW -->
+## Issue-driven development workflow
+
+Use this workflow only for requests expected to modify this repository. Do not create an Issue for explanation, research, exploratory design discussion, or code-reading tasks unless the user explicitly asks to track the work.
+
+### Common rules
+
+- Before starting a new requirement or separate work item, check out `master` and run
+  `git pull --ff-only origin master`. Only then create or locate its Issue and start work on the
+  appropriate branch.
+- Search for an existing relevant Issue before creating a new one.
+- Every repository-changing task must be associated with one GitHub Issue.
+- Create or locate the Issue before modifying source code or documentation.
+- For Rust work, assign the Issue to the GitHub Milestone whose title exactly matches the root `Cargo.toml` version. Prefer `[workspace.package].version`, otherwise `[package].version`. Do not add a `v` prefix. Create the Milestone if it does not exist. Use `scripts/agent/ensure-version-milestone.sh <issue-number>` on macOS/Linux or `scripts/agent/ensure-version-milestone.ps1 <issue-number>` in PowerShell.
+- If an exact-title Milestone exists but is closed, do not create a duplicate or reopen it silently; report the inconsistency for a release-version decision.
+- For source-code changes, create a dedicated branch named `feature/<issue-number>-<short-slug>` from the current remote default branch before editing. Never edit source code directly on the default branch. Use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` on macOS/Linux or `scripts/agent/start-feature-branch.ps1 <issue-number> <short-description>` in PowerShell.
+- Documentation-only or workflow-only changes may use a `docs/` or `agent/` branch instead.
+- Use at most one `phase:*` label at a time:
+  - `phase:requirements`
+  - `phase:design`
+  - `phase:ready`
+  - `phase:implementation`
+  - `phase:review`
+- `blocked` and `needs-user-decision` are orthogonal labels; they do not replace the current phase.
+- Do not update the Issue body after every conversation turn.
+- Update the Issue body when requirements and design are approved, or when an approved specification materially changes.
+- Do not report a GitHub write as successful unless the operation actually succeeded.
+- If GitHub write access is unavailable, report the limitation instead of silently substituting a local tracking file.
+- Close the Issue only after the associated Pull Request is merged into the default branch.
+- Prefer `Closes #<issue-number>` in the Pull Request body.
+
+### Phase routing
+
+Determine the effective phase from the Issue labels, linked Pull Request state, and explicit user instructions. Repository state takes precedence over stale labels: an open associated Pull Request normally means review, and a merged Pull Request means the implementation lifecycle has finished.
+
+Read only the workflow document needed for the effective phase. Do not load every workflow document.
+
+`docs_only_human/` contains human-facing documentation. Do not load files from that directory during ordinary agent work unless the user explicitly requests the human-facing explanation.
+
+- `phase:requirements`: read `docs/agent-workflow/requirements.md`
+- `phase:design`: read `docs/agent-workflow/design.md`
+- `phase:ready` or `phase:implementation`: read `docs/agent-workflow/implementation.md`
+- `phase:review` or an open associated Pull Request: read `docs/agent-workflow/review.md`
+- merged Pull Request and closed Issue: no phase workflow document is required
+
+Reconcile stale labels before continuing.
+
+### Required lifecycle
+
+```text
+Request
+  -> Issue created or located
+  -> Requirements
+  -> Design
+  -> Approval
+  -> Ready
+  -> Implementation and verification
+  -> Pull Request and review
+  -> Merge
+  -> Issue closed
+```
+
+The initial Issue may contain only the original request and a note that planning is in progress. Keep draft requirements and design in the active conversation during a short planning session.
+
+If planning must continue in another session and information loss would be risky, add one concise checkpoint comment with decisions, remaining questions, and the next action. Do not repeatedly rewrite the Issue body.
+
+After approval, update the Issue with the approved requirements, non-goals, design summary, and verifiable acceptance criteria before implementation. Detailed implementation and test evidence belong primarily in the Pull Request.
+<!-- BEGIN LOCAL STATE AND EVIDENCE -->
+### Local state and evidence
+
+- For resuming or pausing incomplete Issue work, read `docs/agent-workflow/checkpoint.md`; otherwise do not load it.
+- Store local state under `.agent-state/issues/<issue-number>/`; never commit `.agent-state/`.
+- On resume, compare the checkpoint with Issue/PR, branch, HEAD, and worktree. Git and GitHub override stale local state.
+- Before pausing, record completed work, current state, one concrete next action, checks, uncommitted files, and blockers.
+- For screenshots or logs, read `docs/agent-workflow/evidence.md`; otherwise do not load it.
+- Keep temporary screenshots and logs under `.agent-state/`. Commit only small durable review evidence; use CI artifacts for large data.
+- Local state is not shared between macOS and Windows. Add one concise Issue checkpoint comment before cross-machine handoff.
+<!-- END LOCAL STATE AND EVIDENCE -->
+<!-- END ISSUE-DRIVEN AGENT WORKFLOW -->
+
 ## Project state
 
 This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to native OS toolkit backends (WinUI 3 / AppKit / GTK4). This is a Cargo workspace (`crates/*` + `examples/*`, no root `src/`) with a real, substantial implementation — not just a spec: `elwindui-codegen` (the compiler backing three Rust proc-macros — `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` — the only supported input form as of 2026-07-31; the earlier `.elwind`-text-file + `build.rs` path was fully removed, Refs #14), `elwindui-core` (the `UIElement` runtime), `elwindui-macros`, `elwindui-i18n`, `elwindui-languageserver` (retargeted the same week onto a single-`.rs`-file model to match), and `elwindui-backend-appkit` (built, run, and screenshot-verified on this machine) are all real. `elwindui-backend-winui3` has code but is unverified (no Windows environment); `elwindui-backend-gtk4` and hot reload (`elwindui-hotreload`) are stubs; there is no preview-tool crate at all yet. See `docs/elwindui_implementation_status.md` for the full, regularly-stale-prone breakdown of what's implemented vs. still just spec — check it, and re-verify against `crates/` directly, before assuming a feature described in the spec docs actually exists.
@@ -42,6 +122,11 @@ is the authoritative spec for `#[elwindui_macros::class]` and takes precedence o
 
 ## Core architectural rules to preserve when implementing
 
+- **Public APIs require rustdoc**: every newly added or changed public type, trait, enum variant,
+  field, function, method, macro, and generated public item must have useful `///`/`//!`
+  documentation written in English. Document behavioral contracts and sentinel/reset semantics
+  (for example, `PlatformDefault`) rather than merely repeating the item name; add a compilable
+  example when the API is not self-explanatory.
 - **`param` vs `prop`**: `#[param]` fields are fixed at instantiation and may only use static-evaluable expressions (literals, other params, pure builtins, `env::*`, `once` values) — never `bind!`, prop references, or impure calls. Default (`prop`) fields are runtime-mutable and support `bind!`/`#[computed]`. This split is what the §14 rules exist to enforce; don't weaken it for convenience.
 - **Enums are the only value-set mechanism** — no anonymous unions. `match` over an enum must be exhaustive; missing arms are a compile error by design. Note: the spec's built-in `Backend` and `Route` enums (and `target::backend()`/`NavigationHost` themselves) are **not implemented yet** — see `docs/elwindui_implementation_status.md` — so this exhaustiveness rule currently only bites for user-defined enums, not those two.
 - **`native!` and `target::backend()` are restricted**: only reachable from `#[overrides(builtin::X)]` components or other builtins — arbitrary user components must not call into backend-specific code directly (rules 9/15). This is a forward-looking rule: `target::backend()` itself doesn't exist in code yet (backend selection today is Cargo feature flags — `backend-appkit`/`backend-winui3`/`backend-gtk4` on the `elwindui` facade crate), so there's nothing to enforce this against currently.
@@ -101,3 +186,7 @@ Note: simulating clicks via `osascript`/System Events requires Accessibility per
 from Screen Recording and may not be available — if clicking programmatically fails with error -25211, ask the user
 to perform the click manually and then capture the window screenshot afterward. `macos-ui-driver`'s own `doctor`
 command is the fastest way to check both permissions' current state before attempting either path.
+
+## Windows
+
+When working on Windows, follow the additional instructions in [`docs/agents/windows.md`](docs/agents/windows.md).

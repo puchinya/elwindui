@@ -2,6 +2,7 @@
 //! component's field set — shared by `parser.rs` (injection) and `validate.rs` (duplicate-name
 //! checking) so the two can never drift out of sync with each other.
 
+#[cfg(test)]
 use crate::ast::{Attr, FieldDef, FieldKind};
 
 /// `(field name, declared DSL type)`. The `foreground` type string must stay byte-identical to
@@ -21,9 +22,12 @@ pub(crate) const TEXT_STYLE_FIELDS: [(&str, &str); 7] = [
     ("foreground", "Option<elwindui::core::graphics::Brush>"),
 ];
 
-/// Builds the seven injected `FieldDef`s, in the order above — `parser.rs` prepends these to a
-/// `#[text_style]` component's own hand-written fields (指示書 §9's ban on hand-writing the same
-/// six-plus-one properties per component).
+/// Builds the seven injected `FieldDef`s, in the order above — `parser.rs`'s test-only
+/// `Parser::parse_module` prepends these to a `#[text_style]` component's own hand-written fields
+/// (指示書 §9's ban on hand-writing the same six-plus-one properties per component). The macro-path
+/// frontend (`component_frontend.rs`, production) injects the same fields its own way and never
+/// calls this.
+#[cfg(test)]
 pub(crate) fn text_style_field_defs() -> Vec<FieldDef> {
     TEXT_STYLE_FIELDS
         .iter()

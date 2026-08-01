@@ -45,7 +45,11 @@ impl NativeControl {
     fn as_text_style_owner(&self) -> Option<&dyn TextStyleOwner> {
         Some(self)
     }
-    fn set_background(&self, background: Brush) {
+    fn set_background(&self, background: Option<Brush>) {
+        let Some(background) = background else {
+            self.clear_background();
+            return;
+        };
         if self.handle.apply_background(Some(&background)).is_ok() {
             *self.background.borrow_mut() = Some(background.clone());
             *self.applied_background.borrow_mut() = Some(ThemeValue::Value(background));

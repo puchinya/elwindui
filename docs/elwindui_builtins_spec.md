@@ -17,7 +17,7 @@ DSLの言語構文(`component`/`view`/`param`/`prop`・14章の静的検証ル�
 `UIElement`をそれへ委譲する形で実装する。`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem`
 (ビジュアルツリーに直接埋め込まれることはなく、measure/arrangeも呼ばれない)と`Window`(そもそも
 `UIElement`を実装しないホスト、後述)は、`inherits NativeControl`ではなく`#[native]`を直接宣言する
-——実ハンドルを持つ意味がない型に`NativeControl`合成を強いないための区別(`builtins.elwind`の
+——実ハンドルを持つ意味がない型に`NativeControl`合成を強いないための区別(`elwindui-core::ui`の
 `NativeControl`マーカー自身のコメント、`docs/elwindui_gui_framework_design.md`§5.1参照)。専用のネイティブ実体を
 持たない仮想ビルトインは`Stack`/`Shape`/`TextBlock`/`Control`のいずれかになる。一方`inherits`で
 `NativeControl`以外のbuiltin/ユーザーcomponentを継承する場合(`ContentControl inherits Control`
@@ -84,11 +84,11 @@ UIElement (trait, elwindui-core::ui)
 実際に継承**して実現している(付録F.10参照)。`padding`は`Control`から自動的にフィールド継承されるため、
 `ContentControl`自身は`content`だけを新規宣言すればよい。
 
-「※.elwind未実装・仕様のみ」と付記した部品は、`crates/elwindui-codegen/src/builtins.elwind`に対応する
-`component`宣言がまだ存在せず、本仕様書に記載された設計のみが正で、コード生成・バックエンド実装は
+「※.elwind未実装・仕様のみ」と付記した部品は、`elwindui-core::ui`/各`elwindui-backend-*`crateに対応する
+`#[elwindui_macros::class]`宣言がまだ存在せず、本仕様書に記載された設計のみが正で、コード生成・バックエンド実装は
 将来の作業として残っている。それ以外(`Window`/`Button`/`TextArea`/`MenuBar`/`MenuBarItem`/`Menu`/
 `MenuItem`/`TabView`/`TabViewItem`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/
-`TextBlock`/`Grid`)は`.elwind`・バックエンド双方とも実装済み(`Grid`は他の仮想ビルトインと同じく
+`TextBlock`/`Grid`)はコア宣言・バックエンド双方とも実装済み(`Grid`は他の仮想ビルトインと同じく
 `elwindui-codegen`が使用箇所ごとに`elwindui_core::ui::Grid`を直接組み立てるため、そもそも
 「バックエンド」固有の実装を要しない——付録F.11参照)。
 
@@ -140,8 +140,8 @@ view Window {
 }
 ```
 
-上記は`native!`分岐を使う説明用のサンプルで、実装(`crates/elwindui-codegen/src/builtins.elwind`の
-`#[native]`宣言、各バックエンドクレートの手書き`Window`構造体)とは既に構文が異なる。実際の`Window`は
+上記は`native!`分岐を使う説明用のサンプルで、実装(`elwindui-core::ui`の`#[native]`宣言、
+各バックエンドクレートの手書き`Window`構造体)とは既に構文が異なる。実際の`Window`は
 `title`/`menu_bar`/`content`に加え、WinUI3の`AppWindow.Position`/`Size`と同じ意味を持つ
 `left`/`top`/`width`/`height`(いずれも`Option<f32>`、省略時はOS/バックエンドの既定位置・既定
 サイズのまま)も持つ。他の`#[native]`フィールドと同様、値が指定された場合のみ構築後に
@@ -167,8 +167,8 @@ component VerticalLayout inherits Layout {
 }
 ```
 
-(`HorizontalLayout`も同じ形。実宣言は`elwindui-codegen/src/builtins.elwind`内の`VerticalLayout`/
-`HorizontalLayout`。`children: UIElementCollection`(Logicalツリーの子要素リスト、`docs/elwindui_gui_framework_design.md`§5.2)は
+(`HorizontalLayout`も同じ形。実宣言は`elwindui-core::ui`内の`VerticalLayout`/
+`HorizontalLayout`(`#[elwindui_macros::class]`宣言)。`children: UIElementCollection`(Logicalツリーの子要素リスト、`docs/elwindui_gui_framework_design.md`§5.2)は
 `VerticalLayout`/`HorizontalLayout`/`Grid`をまとめる共通親`Layout`が持ち、自前の`view`を持たない
 この3つへ無条件に継承される——`#[content(children)]`はフィールドと違い継承されないため、3つとも
 個別に宣言している)
@@ -204,7 +204,7 @@ WinUI3の`UIElement`階層(`UIElement => TextBlock (プリミティブ描画(非
 `NSTextField`/WinUI3の`TextBlock`コントロールのようなネイティブウィジェットを一切使わない
 **自前描画のプリミティブ**である。F.2の`VerticalLayout`/`HorizontalLayout`と同じく専用のネイティブ
 実体を持たず、`.elwind`側は以下のシェイプ宣言のみで完結する(実宣言は
-`elwindui-codegen/src/builtins.elwind`内の`TextBlock`):
+`elwindui-core::ui`内の`TextBlock`、`#[elwindui_macros::class]`宣言):
 
 ```
 #[text_style]
@@ -1190,7 +1190,7 @@ TextArea {
 }
 ```
 
-`Menu`/`MenuItem`自体は`builtins.elwind`に実装済み(現状は`MenuBarItem`の`submenu`経由でアプリメインメニューに使われている、付録X参照)。一方、上記の`context_menu`のように**任意のビルトイン要素に汎用属性として付けられる**仕組みはまだ実装されていない(`TextArea`をはじめ、どの`.elwind`宣言にも`context_menu`フィールドは存在しない)。
+`Menu`/`MenuItem`自体は実装済み(現状は`MenuBarItem`の`submenu`経由でアプリメインメニューに使われている、付録X参照)。一方、上記の`context_menu`のように**任意のビルトイン要素に汎用属性として付けられる**仕組みはまだ実装されていない(`TextArea`をはじめ、どのビルトイン宣言にも`context_menu`フィールドは存在しない)。
 
 ## M.3 `Tooltip`(未実装・仕様のみ)
 
@@ -1530,7 +1530,7 @@ TextArea {
 }
 ```
 
-- `on_drag_start` / `on_drop` / `draggable: bool` は任意のビルトイン要素が持てる共通属性として提供する(付録Mの`tooltip`/`context_menu`と同じ位置づけ)という設計だが、`builtins.elwind`側にこれらの属性は未宣言で、対応するバックエンド実装も存在しない。
+- `on_drag_start` / `on_drop` / `draggable: bool` は任意のビルトイン要素が持てる共通属性として提供する(付録Mの`tooltip`/`context_menu`と同じ位置づけ)という設計だが、ビルトイン側にこれらの属性は未宣言で、対応するバックエンド実装も存在しない。
 
 ## T.4 バックエンド対応
 
@@ -1672,7 +1672,7 @@ view NotepadWindow {
 
 `for` の各要素は `Rc<T>` のポインタ同一性で reconcile される。同じ `Rc<T>` が残る限り、その要素から生成した `TabViewItem` と内容 view は再利用されるため、タブ切替や collection の並べ替えで `TextArea` のカーソル位置・フォーカスを失わない。`if`/`match` と複数の `for` も、それぞれが親 `children` 内の自分の範囲だけを insert/remove する。
 
-`SelectedItem`/`SelectedContainer`(WinUI3の同名概念)は`.elwind`の宣言的プロパティ/`on_select`のコールバック引数としては公開していない — `emit_wiring`の`on_*`汎用配線は宣言側の`fn(T0, T1, ...)`型から引数の個数・型を汎用的に決めるが(`docs/elwindui_gui_framework_design.md`§7.2)、`TabView.on_select`自体が`fn(usize)`(単一引数)としてしか宣言されていないため、2引数化するには`builtins.elwind`側の宣言そのものを変える必要がある。かわりに各バックエンドRust実装(`elwindui-backend-appkit::native_ui::TabView`/`elwindui-backend-winui3::native_ui::TabView`)が`selected_item()`/`selected_container()`という素のメソッドを公開しており、手書きRustグルーコードから直接呼び出せる。
+`SelectedItem`/`SelectedContainer`(WinUI3の同名概念)は`.elwind`の宣言的プロパティ/`on_select`のコールバック引数としては公開していない — `emit_wiring`の`on_*`汎用配線は宣言側の`fn(T0, T1, ...)`型から引数の個数・型を汎用的に決めるが(`docs/elwindui_gui_framework_design.md`§7.2)、`TabView.on_select`自体が`fn(usize)`(単一引数)としてしか宣言されていないため、2引数化するには`elwindui-core::ui`側の`TabView`宣言そのものを変える必要がある。かわりに各バックエンドRust実装(`elwindui-backend-appkit::native_ui::TabView`/`elwindui-backend-winui3::native_ui::TabView`)が`selected_item()`/`selected_container()`という素のメソッドを公開しており、手書きRustグルーコードから直接呼び出せる。
 
 ## Y.3 バックエンド対応
 

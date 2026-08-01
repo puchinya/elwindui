@@ -632,6 +632,62 @@ fn rewrite_crate_segment(tokens: TokenStream2) -> TokenStream2 {
     }
 }
 
+/// The `dyn TraitExt` element type of a content-collection field's declared type — backs
+/// `content_item_dyn_entry`'s `@content_item_dyn` arm. Two shapes, both already used across every
+/// real content-collection property (`elwindui-core::ui`'s own `#[prop(..)]` declarations):
+/// - `crate::ui::UIElementCollection` (`Layout`'s `children`, a live, heterogeneous collection) —
+///   the element type is always the fixed, universal `UIElementExt`, not derived from the
+///   collection's own (non-generic) type name at all.
+/// - `Vec<std::rc::Rc<dyn SomePath::SomeExt>>` / `ListExt<Rc<dyn ..>>` (`TabView`'s `children`,
+///   `Menu`'s `#[content(items)]` `items`) — the element type is whatever trait object the
+///   generic argument names, found by walking the type's own generic arguments for a
+///   `Type::TraitObject` at any nesting depth (works for either wrapper uniformly, rather than
+///   text-matching each spelling separately the way `elwindui-codegen`'s own now-`#[cfg(test)]`-
+///   only `dynamic_collection_item_trait` still does for the `.elwind` text path).
+///
+/// `rewrite_crate_segment` on the found trait object's own bounds (not the whole `dyn Trait`
+/// token, which starts with the `dyn` keyword, not `crate`) — same reasoning as
+/// `routed_payload_type`'s own doc comment: this type is spliced into a macro arm invoked from
+/// whichever crate eventually asks `@content_item_dyn`, so a `crate::`-relative path (as spelled
+/// in the declaring class's own `#[prop(..)]`, resolving against `elwindui-core`) needs `$crate::`
+/// once embedded here.
+fn content_item_dyn_type(ty: &Type) -> TokenStream2 {
+    if quote! { #ty }.to_string().contains("UIElementCollection") {
+        return quote! { dyn $crate::ui::UIElementExt };
+    }
+    fn find_trait_object(ty: &Type) -> Option<&syn::TypeTraitObject> {
+        match ty {
+            Type::TraitObject(to) => Some(to),
+            Type::Path(p) => {
+                let seg = p.path.segments.last()?;
+                let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                    return None;
+                };
+                args.args.iter().find_map(|a| match a {
+                    syn::GenericArgument::Type(t) => find_trait_object(t),
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
+    }
+    match find_trait_object(ty) {
+        Some(to) => {
+            let bounds = &to.bounds;
+            let rewritten = rewrite_crate_segment(quote! { #bounds });
+            quote! { dyn #rewritten }
+        }
+        // No `dyn`-wrapped element type found (shouldn't normally happen for a real dynamic-
+        // child-eligible content field) — fall back to the bare declared type itself, `dyn`-
+        // wrapped, so a genuinely wrong declaration still fails to compile with a specific error
+        // rather than this function panicking blind.
+        None => {
+            let rewritten = rewrite_crate_segment(quote! { #ty });
+            quote! { dyn #rewritten }
+        }
+    }
+}
+
 /// `elwindui_core::ui::NativeControl<AnyView>` -> `"NativeControl"`; the bare display name used for
 /// naming-convention-derived trait/macro identifiers and as an `as_<snake(name)>()` accessor's
 /// method name.
@@ -730,6 +786,31 @@ fn named_accessor_ident(bare_name: &str) -> Ident {
     format_ident!("as_{}", to_snake_case(bare_name))
 }
 
+/// `ContentControl` -> `into_content_control_node`: the upcast default method every
+/// `{ClassName}Ext` trait declaration gets, one per class, converting `Rc<Self>` to
+/// `Rc<dyn {ClassName}Ext>`. Because it lives as a *default method on the trait itself* (not
+/// something `build_inherit_macros`'s per-ancestor forwarding `impl` has to emit), a descendant
+/// gets one such method per ancestor it actually `impl`s (root, ordinary, and `trait_only` classes
+/// alike — `struct_only` implementors inherit it for free from the existing trait they implement)
+/// via Rust's own default-method inheritance through the supertrait chain, with no method at all
+/// for an ancestor it doesn't have — e.g. `MenuItem`/`Window` never gain `into_ui_element_node`,
+/// since neither ever `impl`s `UIElementExt`. `Self: Sized` keeps every one of these out of the
+/// trait's vtable, so traits already used as `dyn {ClassName}Ext` elsewhere stay object-safe.
+fn into_node_ident(bare_name: &str) -> Ident {
+    format_ident!("into_{}_node", to_snake_case(bare_name))
+}
+
+fn build_into_node_default(into_ident: &Ident, ext_ty: &TokenStream2) -> TokenStream2 {
+    quote! {
+        fn #into_ident(self: std::rc::Rc<Self>) -> std::rc::Rc<dyn #ext_ty>
+        where
+            Self: Sized + 'static,
+        {
+            self
+        }
+    }
+}
+
 /// `ContentControl` -> `__elwindui_inherit_ContentControl`: the main entry point a subclass invokes
 /// (see this module's own doc comment on the `__elwindui_inherit_*!` mechanism).
 fn inherit_macro_ident(bare_name: &str) -> Ident {
@@ -757,6 +838,199 @@ fn inherit_macro_classify_ident(bare_name: &str) -> Ident {
 /// in `build_sealed_check_macro`/`expand_impl`.
 fn sealed_check_ident(bare_name: &str) -> Ident {
     format_ident!("__elwindui_check_not_sealed_{}", bare_name)
+}
+
+/// `Button` -> `__elwindui_props_Button`: the property muncher this class declares for its own
+/// `#[prop(..)]` declarations — the property-layer counterpart to `inherit_macro_ident`'s
+/// hierarchy-layer trio. See `build_props_macro`.
+fn props_macro_ident(bare_name: &str) -> Ident {
+    format_ident!("__elwindui_props_{}", bare_name)
+}
+
+/// One `#[prop(..)]` declaration: a DSL-visible property of a builtin, declared right on the
+/// `#[class]` item that actually implements it rather than restated in a separate table.
+///
+/// Accepted forms (each argument before the final `name: Type` is a flag):
+/// - `#[prop(text: String)]` — a plain settable property
+/// - `#[prop(routed, on_click: fn())]` — a routed callback (bubbles via `dispatch_routed`)
+/// - `#[prop(onetime, left: Option<f32>)]` — applied once at construction, never re-pushed by a
+///   later resync (`Window`'s geometry — the window manager owns the live value)
+/// - `#[prop(two_way, text: String)]` — opts into automatic two-way wiring
+/// - `#[prop(attached, row: i32 = 0)]` — an attached property (`Grid::row`), which a *child* element
+///   sets on itself to address its parent. Always needs a default value.
+///
+/// Class-level markers live in their own attributes next to these: `#[content(children)]` names the
+/// property that receives bare nested child elements, and `#[text_style]` marks a text-styling owner.
+///
+/// Class-level facts deliberately do *not* live here — they are either already `#[class]` arguments
+/// (`sealed`, `abstract_class`, `text_style`) or derivable:
+/// - **`native`** ≡ `trait_only` with no `inherits` — a base-less interface whose implementation is
+///   hand-written per backend. Verified to hold for all 25 builtins at the time this was written; if
+///   a future `trait_only` root class is *not* native, this derivation has to become explicit again.
+/// - **`embedded`** carried no information once declarations moved onto the implementation itself:
+///   every class declaring properties here is, by construction, hand-written Rust.
+struct PropDecl {
+    name: Ident,
+    ty: Type,
+    routed: bool,
+    attached: bool,
+    /// `= expr` — required for `attached`, rejected otherwise (see `Parse`).
+    #[allow(dead_code)]
+    default: Option<syn::Expr>,
+    // `onetime`/`two_way` are accepted and recorded here so a builtin's declaration can already be
+    // written in full, but the layers that consume them (`emit_resync`'s onetime skip, `emit_wiring`'s
+    // two-way rule) still read them from `elwindui-codegen`'s own shape table and haven't moved to
+    // this macro yet — see `build_props_macro`.
+    #[allow(dead_code)]
+    onetime: bool,
+    #[allow(dead_code)]
+    two_way: bool,
+}
+
+impl Parse for PropDecl {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut routed = false;
+        let mut onetime = false;
+        let mut two_way = false;
+        let mut attached = false;
+        // Flags come first and are all bare idents; the property itself is the one `name: Type`
+        // pair, so "an ident *not* followed by `:`" is unambiguously a flag.
+        loop {
+            let ident: Ident = input.parse()?;
+            if input.peek(Token![:]) {
+                input.parse::<Token![:]>()?;
+                let ty: Type = input.parse()?;
+                let default = if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    Some(input.parse::<syn::Expr>()?)
+                } else {
+                    None
+                };
+                // Mirrors `validate.rs`'s `rejects_attached_field_without_default_value`: an
+                // attached property is read off any child that never mentions it, so it has nothing
+                // to fall back on but its declared default.
+                if attached && default.is_none() {
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!(
+                            "#[prop]: attached property `{ident}` needs a default value \
+                             (e.g. `attached, {ident}: i32 = 0`)"
+                        ),
+                    ));
+                }
+                if !attached && default.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!(
+                            "#[prop]: `{ident}` is not `attached`, so it cannot declare a default \
+                             value — an ordinary property's default comes from the type's own \
+                             constructor"
+                        ),
+                    ));
+                }
+                return Ok(PropDecl {
+                    name: ident,
+                    ty,
+                    routed,
+                    attached,
+                    default,
+                    onetime,
+                    two_way,
+                });
+            }
+            match ident.to_string().as_str() {
+                "routed" => routed = true,
+                "onetime" => onetime = true,
+                "two_way" => two_way = true,
+                "attached" => attached = true,
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        &ident,
+                        format!(
+                            "#[prop]: unknown flag `{other}` — expected `routed`, `onetime`, \
+                             `two_way`, `attached`, or a `name: Type` property declaration"
+                        ),
+                    ));
+                }
+            }
+            input.parse::<Token![,]>()?;
+        }
+    }
+}
+
+/// A builtin's DSL declaration on one `#[class]` item: its `#[prop(..)]` properties plus the two
+/// class-level markers that are neither `#[class]` arguments nor derivable.
+#[derive(Default)]
+struct PropDecls {
+    props: Vec<PropDecl>,
+    /// `#[content(children)]` — which property receives bare nested child elements. Routinely names
+    /// a property an *ancestor* declares (`VerticalLayout`'s content is `Layout`'s `children`), so
+    /// it is validated by the deferred `@assert_declared` probe rather than locally.
+    content_field: Option<Ident>,
+    /// `#[text_style]` — this class owns text styling (`TextStyleOwner`) for the font-inheritance
+    /// walk. Not derivable: the real `impl TextStyleOwner for ..` lives in a separate block this
+    /// macro never sees.
+    #[allow(dead_code)]
+    text_style: bool,
+}
+
+impl PropDecls {
+    fn is_declared(&self) -> bool {
+        !self.props.is_empty() || self.content_field.is_some() || self.text_style
+    }
+
+    fn content_field(&self) -> Option<&Ident> {
+        self.content_field.as_ref()
+    }
+}
+
+/// Splits the DSL declaration attributes — `#[prop(..)]`, `#[content(..)]`, `#[text_style]` — out of
+/// an item's attribute list. All three are inert markers consumed entirely here; none may survive
+/// into the generated item, since none is a real registered attribute anywhere.
+fn take_prop_decls(attrs: &[syn::Attribute]) -> syn::Result<(PropDecls, Vec<syn::Attribute>)> {
+    let mut shape = PropDecls::default();
+    let mut rest = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("prop") {
+            shape.props.push(attr.parse_args::<PropDecl>()?);
+        } else if attr.path().is_ident("content") {
+            if shape.content_field.is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "#[content]: declared more than once — a class designates exactly one property \
+                     to receive nested child elements",
+                ));
+            }
+            shape.content_field = Some(attr.parse_args::<Ident>()?);
+        } else if attr.path().is_ident("text_style") {
+            shape.text_style = true;
+        } else {
+            rest.push(attr.clone());
+        }
+    }
+
+    // Two `#[prop]`s with the same name on one item would generate two identical `@set` arms, and
+    // `macro_rules!`'s first-match-wins would silently drop the second — a typo'd duplicate would
+    // look like it took effect. Reject it here instead. (This only sees *one* class's own
+    // declarations; a descendant shadowing an *ancestor's* property is caught by the deferred
+    // `@assert_undeclared` probe — see `build_props_macro`.)
+    let mut seen: Vec<String> = Vec::new();
+    for prop in &shape.props {
+        let name = prop.name.to_string();
+        if seen.contains(&name) {
+            return Err(syn::Error::new_spanned(
+                &prop.name,
+                format!("#[prop]: `{name}` is declared twice on this item"),
+            ));
+        }
+        seen.push(name);
+    }
+
+    // Note there is deliberately *no* "somebody must designate a content property" check here: a
+    // class routinely inherits its ancestor's designation (`VerticalLayout` takes `Layout`'s
+    // `children`), and this macro cannot see an ancestor's declarations.
+
+    Ok((shape, rest))
 }
 
 /// Builds the `fn #dyn_ident(&self) -> &dyn #ext_ty;` (no default) plus one default method per `sig`
@@ -852,6 +1126,784 @@ fn build_dyn_default_methods(
 /// skipped, exactly mirroring the old (pre-unification) behavior where an unrelated, always-
 /// unconditional blind forward to `UIElementExt` meant a `no_ancestor_forward` hop never blocked
 /// anything beyond itself.
+/// Builds `__elwindui_shape_{bare_name}!` — the DSL **shape** layer's counterpart to
+/// `build_inherit_macros`'s hierarchy layer, and the reason a builtin no longer needs a separate
+/// entry in a compiler-side shape table.
+///
+/// The problem it solves: `#[elwindui::component]` expands in the *consumer's* crate, and a
+/// proc-macro can never read another crate's macro-expansion results (separate compilation units).
+/// So a builtin declared in `elwindui-core` cannot hand its DSL surface to the consumer's
+/// `#[component]` expansion directly. The same deferred, token-level composition
+/// `__elwindui_inherit_*!` already uses for the class hierarchy works here too: the *generated code*
+/// invokes this macro, and rustc expands it later, in the consumer's crate, against the definition
+/// that lives here.
+///
+/// Shape:
+/// - `(@set $recv, $name, $value)` — the entry callers use. It only seeds `$origin` (this class's
+///   own name) and hands off to `@set_from`.
+/// - `(@set_from $origin, $recv, <prop>, $value)` — one arm per declared `#[prop]`, expanding to
+///   that property's real setter call.
+/// - `(@set_from $origin, $recv, $name:ident, $value)` — the catch-all, forwarding anything this
+///   class doesn't declare to its own ancestor's shape macro, `$origin` unchanged. Same "forward
+///   what isn't mine up the chain" muncher shape `build_inherit_macros`'s `classify` uses for
+///   `#[overrides]`.
+/// - at the end of the chain (a class with no `inherits`) that catch-all becomes a `compile_error!`
+///   instead. It reports `$origin` — the type the *use site* actually named — not this terminal
+///   class, which the user may never have heard of (`Button { titel: .. }` must blame `Button`, not
+///   `UIElement`).
+///
+/// Setter calls are emitted in *method* syntax (`$recv.set_text(..)`) rather than a fully-qualified
+/// trait path: the `{Name}Ext` trait's own module path isn't knowable from inside this macro, and
+/// the generated view code already brings the right `..Ext` traits into scope at the call site.
+///
+/// **Ancestor shadowing is rejected, not silently allowed.** A class's own literal arms are matched
+/// before the forwarding catch-all, so a descendant redeclaring a property name an *ancestor* also
+/// declares would win silently and make the ancestor's setter unreachable — diverging from the rule
+/// the table-based path enforces (`validate::validate_field_overrides`: a same-named inherited field
+/// is an error unless the redeclaration is marked `#[override]`). A proc-macro cannot see the
+/// ancestor's property list at declaration time — that is precisely what isn't readable across
+/// crates, and the reason this macro exists at all. So the check is deferred the same way everything
+/// else here is: each class emits one `@assert_undeclared` probe per declared property against its
+/// parent's shape macro, and rustc resolves it later. An ancestor that declares the name expands the
+/// probe to a `compile_error!`; one that doesn't forwards it further up; the chain's terminal
+/// expands it to nothing. Cost is one item-position macro call per declared property.
+fn build_props_macro(
+    bare_name: &str,
+    shape: &PropDecls,
+    parent: Option<(&str, &Type)>,
+) -> TokenStream2 {
+    let macro_ident = props_macro_ident(bare_name);
+    let bare_ident = format_ident!("{bare_name}");
+
+    // Only plain scalar properties and `#[routed]` callbacks take part in the `@set` protocol. The
+    // rest each need their own emission shape and are deliberately left without an arm here rather
+    // than given a wrong one:
+    // - `attached` properties are set by a *child* onto its parent, through
+    //   `UIElement::set_attached::<T>`, so they never reach this receiver at all — `@attached_set`;
+    // - a `children`-named collection and a *collection-shaped* `#[prop(content, ..)]` property
+    //   receive nested *elements* whose emission differs by declared type (`Vec<T>` bulk-set vs
+    //   `ListExt<T>` add-loop) — `@children`, via `attach_kind`'s `Collection`/`VecProperty` cases.
+    // Reaching one of these through `@set` falls through to the catch-all and is reported as an
+    // unknown property, which is honest: `@set` genuinely cannot express it.
+    //
+    // A *single-slot* (`AttachKind::SingleSlot`, `Rc<dyn ..>`) `#[prop(content, ..)]` property is
+    // deliberately *not* excluded here, even though `@children` can reach it too (its
+    // `@children_into`'s single-slot arm) — the DSL only ever addresses a single-slot content field
+    // by a *named* element-valued attribute (`content: Grid { .. }`, one value; the `@children`,
+    // bare-nested-child spelling is how a `Vec`/`Collection`-shaped field is filled instead, never a
+    // single slot), and a named attribute's value always reaches this receiver through `@set` like
+    // any other named property — `elwindui-codegen`'s `emit_external_construction` has no shape
+    // table telling it which field is content-designated, so it needs `@set` to already accept it.
+    // Both paths emit the exact same `$recv.#setter($value)` call for this case, so there is nothing
+    // to reconcile between them.
+    let takes_set_arm = |p: &PropDecl| {
+        let name = p.name.to_string();
+        let is_collection_shaped_content = shape.content_field().map(|c| c.to_string()).as_deref()
+            == Some(name.as_str())
+            && !matches!(attach_kind(&p.ty), AttachKind::SingleSlot);
+        !p.attached && name != "children" && !is_collection_shaped_content
+    };
+
+    // A `#[routed]` property's `@set_from` arm has a fundamentally different job than a plain one:
+    // `elwindui-codegen` hands it a *bare* closure/callable matching the DSL's own written arity (the
+    // same value it would build for an ordinary callback property — see `wrap_prop_value`'s doc
+    // comment on why this, and not `dyn UIElementExt`-typed values, is the one case that still needs
+    // this macro's help beyond a plain pass-through), never a pre-built `Box<dyn Fn(&T,
+    // &RoutedEventArgs)>`. The arm itself builds the routed adapter and calls
+    // `register_routed_handler` — `elwindui-codegen` never has to know a property is `#[routed]` at
+    // all, only that it wrote a callback-shaped value; whether that dispatches to a setter or a
+    // routed registration is entirely this declaration's own business. `@routed`/`@routed_from`
+    // (below) stay as the lower-level primitive this delegates to, for a caller that already has a
+    // fully-built handler in hand.
+    // `@clear` resets a property to its platform default (`clear_<name>()`, no arguments) — the
+    // other half of a themed property's dispatch (`ThemeValue::PlatformDefault`), alongside `@set`'s
+    // `ThemeValue::Value` half. Same forwarding shape as `@set`, minus a value to carry. Routed
+    // properties are excluded (unlike `@set`, which handles them too) — an event registration has no
+    // "reset to platform default" concept.
+    let clear_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| takes_set_arm(p) && !p.routed)
+        .map(|p| {
+            let name = &p.name;
+            let clear = format_ident!("clear_{}", name);
+            quote! {
+                (@clear_from $origin:ident, $recv:expr, #name) => {
+                    $recv.#clear();
+                };
+            }
+        })
+        .collect();
+
+    let set_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| takes_set_arm(p))
+        .map(|p| {
+            let name = &p.name;
+            if p.routed {
+                let handler = routed_handler_from_bare_callable(&p.ty);
+                quote! {
+                    (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                        $crate::#macro_ident!(@routed_from $origin, $recv, #name, #handler);
+                    };
+                }
+            } else {
+                let setter = format_ident!("set_{}", name);
+                let value = wrap_prop_value(&p.ty, quote! { $value });
+                quote! {
+                    (@set_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                        $recv.#setter(#value);
+                    };
+                }
+            }
+        })
+        .collect();
+
+    // `@routed` registers a `#[routed]` callback (`dispatch_routed`-style bubbling) instead of
+    // assigning it — the same two-hop entry/forward shape as `@set`, but dispatching to
+    // `UIElementExt::register_routed_handler::<Payload>(name, handler)` instead of a setter. The
+    // payload type comes from the property's own declared `fn(..)`/`fn()` signature, known here at
+    // declaration time — `elwindui-codegen` no longer needs to derive it from a use site's resolved
+    // `TypeInfo`. `$value` is expected to already be a fully-built `Box<dyn Fn(&Payload,
+    // &RoutedEventArgs)>`; its inner closure may leave `Payload` unannotated and let this call's own
+    // turbofish infer it (verified: rustc resolves an untyped closure parameter through a generic
+    // function's explicit turbofish even across a `Box<dyn Fn>` coercion).
+    let routed_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| p.routed)
+        .map(|p| {
+            let name = &p.name;
+            let name_str = name.to_string();
+            let payload_ty = routed_payload_type(&p.ty);
+            quote! {
+                (@routed_from $origin:ident, $recv:expr, #name, $value:expr) => {
+                    $recv.register_routed_handler::<#payload_ty>(#name_str, $value);
+                };
+            }
+        })
+        .collect();
+
+    // `@attached_set` needs no forwarding chain, unlike `@set`/`@routed`/`@children`: the DSL's
+    // `Owner::field: value` syntax always names its owning class explicitly (`Grid::row`, never
+    // inherited/shadowed), so `elwindui-codegen` calls straight into `Owner`'s own props macro — no
+    // ambiguity to resolve by walking ancestors. The turbofish on `set_attached::<T>` is exactly why
+    // this needs to be a macro at all: `T` is `#[prop(attached, ..)]`'s own declared type, known
+    // here and nowhere `elwindui-codegen` can still see once a builtin's shape lives only here.
+    let attached_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| p.attached)
+        .map(|p| {
+            let name = &p.name;
+            let name_str = name.to_string();
+            // Same reasoning as `routed_payload_type`: this type is spliced as an explicit
+            // turbofish into generated code that may be invoked from any crate, so a leading
+            // `crate::` in how the attached type was spelled needs `$crate::` here.
+            let prop_ty = &p.ty;
+            let ty = rewrite_crate_segment(quote! { #prop_ty });
+            quote! {
+                (@attached_set #name, $binding:expr, $value:expr) => {
+                    $binding.as_ui_element().set_attached::<#ty>(#bare_name, #name_str, $value);
+                };
+            }
+        })
+        .collect();
+    let attached_fallback = quote! {
+        (@attached_set $name:ident, $binding:expr, $value:expr) => {
+            compile_error!(concat!(
+                "`",
+                #bare_name,
+                "` has no `#[attached]` property named `",
+                stringify!($name),
+                "`"
+            ));
+        };
+    };
+
+    // One arm per declared property — *every* property, not just the `@set`-able ones: a name
+    // collision is a collision whether the ancestor's version is a setter, a routed callback, or an
+    // attached property.
+    let assert_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let msg = format!("` redeclares `{name}`, already declared by its ancestor `{bare_name}` — pick a different name, or extend the ancestor's declaration instead");
+            quote! {
+                (@assert_undeclared $origin:ident, #name) => {
+                    compile_error!(concat!("`", stringify!($origin), #msg));
+                };
+            }
+        })
+        .collect();
+
+    // `@children` attaches bare nested child elements to whichever property `#[content(..)]` names.
+    // It takes two hops on purpose: the *designation* is local (`VerticalLayout` says
+    // `#[content(children)]`) but the designated property's declared *type* — which decides how
+    // children are attached — may live several classes up (`children` is `Layout`'s). So `@children`
+    // resolves the name here and hands off to `@children_into`, which walks the chain until it finds
+    // the class that actually declares that property.
+    let children_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let setter = format_ident!("set_{}", name);
+            let body = match attach_kind(&p.ty) {
+                // A live collection (`UIElementCollection`, `ListExt<T>`): append through the
+                // accessor, mirroring the `.children().add(..)` convention virtual builtins already
+                // use, rather than replacing the whole collection.
+                AttachKind::Collection => quote! {
+                    $( $recv.#name().add($child); )*
+                },
+                // A `Vec<T>` property is replaced wholesale by its setter (`TabView`'s `children`).
+                AttachKind::VecProperty => quote! {
+                    $recv.#setter(::std::vec![$($child),*]);
+                },
+                // A single slot (`Rc<dyn ..>`): exactly one child, enforced by the arity of the
+                // dedicated arm below rather than by a runtime check.
+                AttachKind::SingleSlot => quote! {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` takes exactly one child element, but got several"
+                    ));
+                },
+            };
+            let single_slot_arm = matches!(attach_kind(&p.ty), AttachKind::SingleSlot).then(|| {
+                let child = single_slot_child_value(&p.ty, quote! { $child });
+                quote! {
+                    (@children_into $origin:ident, #name, $recv:expr, [$child:expr]) => {
+                        $recv.#setter(#child);
+                    };
+                }
+            });
+            quote! {
+                #single_slot_arm
+                (@children_into $origin:ident, #name, $recv:expr, [$($child:expr),* $(,)?]) => {
+                    #body
+                };
+            }
+        })
+        .collect();
+
+    // A class that designates content resolves the name here; one that doesn't lets the catch-all
+    // below carry the whole `@children` call up to an ancestor that does.
+    let children_entry = shape.content_field().map(|content| {
+        quote! {
+            (@children $recv:expr, [$($child:expr),* $(,)?]) => {
+                $crate::#macro_ident!(@children_into #bare_ident, #content, $recv, [$($child),*]);
+            };
+        }
+    });
+
+    // `@content_item_dyn` expands to `dyn TraitExt` for the content-collection's element type
+    // (`TabView`'s `children: Vec<Rc<dyn TabViewItemExt>>` -> `dyn TabViewItemExt`, `Layout`'s
+    // `children: UIElementCollection` -> `dyn UIElementExt`) — used in *type* position
+    // (`DynamicChildSlot<$crate::#macro_ident!(@content_item_dyn)>`), the one piece of a dynamic
+    // `for`/`if`/`match` region's own generated struct field `elwindui-codegen` can no longer name
+    // without a shape table once a builtin's shape lives only here. Exactly `@children`'s own two-
+    // hop shape (this fn's own doc comment on `children_entry`/`@children_into`), for the identical
+    // reason: the class that *designates* the content field (`VerticalLayout`'s `#[content(children)]`)
+    // is routinely not the one that *declares* it (`Layout`'s own `#[prop(children: ..)]`) — so the
+    // entry only ever resolves the *name* here, and `@content_item_dyn_into` (mirroring
+    // `@children_into`) is what actually walks the chain to whichever class's `shape.props` really
+    // has it.
+    let content_item_dyn_entry = shape.content_field().map(|content| {
+        quote! {
+            (@content_item_dyn) => {
+                $crate::#macro_ident!(@content_item_dyn_into #bare_ident, #content)
+            };
+        }
+    });
+    let content_item_dyn_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let dyn_ty = content_item_dyn_type(&p.ty);
+            quote! {
+                (@content_item_dyn_into $origin:ident, #name) => { #dyn_ty };
+            }
+        })
+        .collect();
+
+    // `@assert_declared` is `@assert_undeclared`'s mirror: it succeeds where the other fails. It
+    // backs `#[prop(content, ..)]`, whose designation is routinely *inherited*
+    // (`VerticalLayout`'s `content = children` names `Layout`'s `children`), so it cannot be checked
+    // locally any more than a collision can.
+    let declared_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            quote! { (@assert_declared $origin:ident, #name) => {}; }
+        })
+        .collect();
+
+    let (fallback, clear_fallback, routed_fallback, assert_fallback, declared_fallback, children_fallback) =
+        match parent {
+            Some((parent_bare, parent_ty)) => {
+                let parent_macro = inherit_macro_self_ref_path(
+                    parent_bare,
+                    parent_ty,
+                    props_macro_ident(parent_bare),
+                );
+                (
+                    quote! {
+                        (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                            #parent_macro!(@set_from $origin, $recv, $name, $value);
+                        };
+                    },
+                    quote! {
+                        (@clear_from $origin:ident, $recv:expr, $name:ident) => {
+                            #parent_macro!(@clear_from $origin, $recv, $name);
+                        };
+                    },
+                    quote! {
+                        (@routed_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                            #parent_macro!(@routed_from $origin, $recv, $name, $value);
+                        };
+                    },
+                    quote! {
+                        (@assert_undeclared $origin:ident, $name:ident) => {
+                            #parent_macro!(@assert_undeclared $origin, $name);
+                        };
+                    },
+                    quote! {
+                        (@assert_declared $origin:ident, $name:ident) => {
+                            #parent_macro!(@assert_declared $origin, $name);
+                        };
+                    },
+                    quote! {
+                        (@children $recv:expr, [$($child:expr),* $(,)?]) => {
+                            #parent_macro!(@children $recv, [$($child),*]);
+                        };
+                        (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
+                            #parent_macro!(@children_into $origin, $name, $recv, [$($child),*]);
+                        };
+                    },
+                )
+            }
+            None => (
+                quote! {
+                    (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                        compile_error!(concat!(
+                            "`",
+                            stringify!($origin),
+                            "` (or any of its ancestors) has no such property: ",
+                            stringify!($name)
+                        ));
+                    };
+                },
+                quote! {
+                    (@clear_from $origin:ident, $recv:expr, $name:ident) => {
+                        compile_error!(concat!(
+                            "`",
+                            stringify!($origin),
+                            "` (or any of its ancestors) has no such property: ",
+                            stringify!($name)
+                        ));
+                    };
+                },
+                quote! {
+                    (@routed_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                        compile_error!(concat!(
+                            "`",
+                            stringify!($origin),
+                            "` (or any of its ancestors) has no such #[routed] event: ",
+                            stringify!($name)
+                        ));
+                    };
+                },
+                // Reached the top of the chain without a collision: the name is free.
+                quote! {
+                    (@assert_undeclared $origin:ident, $name:ident) => {};
+                },
+                quote! {
+                    (@assert_declared $origin:ident, $name:ident) => {
+                        compile_error!(concat!(
+                            "#[prop(content, ",
+                            stringify!($name),
+                            ")] on `",
+                            stringify!($origin),
+                            "`: neither it nor any ancestor declares a `",
+                            stringify!($name),
+                            "` property"
+                        ));
+                    };
+                },
+                quote! {
+                    (@children $recv:expr, [$($child:expr),* $(,)?]) => {
+                        compile_error!(
+                            "this element takes no nested child elements — no `#[content(..)]` is \
+                             declared on it or any ancestor"
+                        );
+                    };
+                    (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
+                        compile_error!(concat!(
+                            "#[content(",
+                            stringify!($name),
+                            ")] on `",
+                            stringify!($origin),
+                            "`: neither it nor any ancestor declares a `",
+                            stringify!($name),
+                            "` property"
+                        ));
+                    };
+                },
+            ),
+        };
+
+    // `@content_item_dyn`'s own fallback — same two-way split as `@set_from`/`@children` above: an
+    // ancestor forwards the query further up (`content_item_dyn_entry`'s own doc comment on why an
+    // unmatched name here isn't an error); the terminal class turns an unresolved query into a
+    // `compile_error!` naming the type that actually asked (`$origin`), same spirit as the others.
+    let content_item_dyn_fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro = inherit_macro_self_ref_path(
+                parent_bare,
+                parent_ty,
+                props_macro_ident(parent_bare),
+            );
+            quote! {
+                (@content_item_dyn) => {
+                    #parent_macro!(@content_item_dyn)
+                };
+                (@content_item_dyn_into $origin:ident, $name:ident) => {
+                    #parent_macro!(@content_item_dyn_into $origin, $name)
+                };
+            }
+        }
+        None => quote! {
+            (@content_item_dyn) => {
+                compile_error!(concat!(
+                    "`",
+                    #bare_name,
+                    "` (or any of its ancestors) declares no content-collection property to hold \
+                     a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+            (@content_item_dyn_into $origin:ident, $name:ident) => {
+                compile_error!(concat!(
+                    "`",
+                    stringify!($origin),
+                    "`: neither it nor any ancestor declares a `",
+                    stringify!($name),
+                    "` property to hold a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+        },
+    };
+
+    // The probes themselves, emitted in item position next to the class.
+    let mut probes: Vec<TokenStream2> = Vec::new();
+    // Collision probe: only a class that *has* an ancestor emits any — a root class has nothing to
+    // collide with.
+    if let Some((parent_bare, parent_ty)) = parent {
+        let parent_macro = inherit_macro_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
+        probes.extend(shape.props.iter().map(|p| {
+            let name = &p.name;
+            quote! { #parent_macro!(@assert_undeclared #bare_ident, #name); }
+        }));
+    }
+    // Content probe: aimed at this class's *own* macro, so a content field declared right here
+    // matches a literal arm and a merely inherited one forwards up the chain from there.
+    if let Some(content) = shape.content_field() {
+        let own_macro = inherit_macro_path_for_self(bare_name);
+        probes.push(quote! { #own_macro!(@assert_declared #bare_ident, #content); });
+    }
+
+    quote! {
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #macro_ident {
+            (@set $recv:expr, $name:ident, $value:expr) => {
+                $crate::#macro_ident!(@set_from #bare_ident, $recv, $name, $value);
+            };
+            #(#set_arms)*
+            #fallback
+            (@clear $recv:expr, $name:ident) => {
+                $crate::#macro_ident!(@clear_from #bare_ident, $recv, $name);
+            };
+            #(#clear_arms)*
+            #clear_fallback
+            (@routed $recv:expr, $name:ident, $value:expr) => {
+                $crate::#macro_ident!(@routed_from #bare_ident, $recv, $name, $value);
+            };
+            #(#routed_arms)*
+            #routed_fallback
+            #(#attached_arms)*
+            #attached_fallback
+            #(#assert_arms)*
+            #assert_fallback
+            #(#declared_arms)*
+            #declared_fallback
+            #children_entry
+            #(#children_into_arms)*
+            #children_fallback
+            #content_item_dyn_entry
+            #(#content_item_dyn_into_arms)*
+            #content_item_dyn_fallback
+        }
+        #(#probes)*
+    }
+}
+
+/// A `#[prop(routed, on_x: fn(T0, ...))]`'s payload type — mirrors
+/// `elwindui_codegen::codegen::callback_param_types`, operating directly on the already-parsed
+/// `syn::Type` this macro has instead of a re-parsed type string. `fn()` (no parameters) has payload
+/// `()`, matching `register_routed_handler::<()>`'s existing zero-parameter convention
+/// (`elwindui_codegen::codegen::emit_generic_on_click_routing`). Only 0-or-1 parameters are
+/// supported today, the same limit `emit_routed_registration` already enforces.
+///
+/// `rewrite_crate_segment` matters here in a way it doesn't for `wrap_prop_value`: this type is
+/// spliced as an explicit turbofish (`register_routed_handler::<#payload_ty>`) into the *generated*
+/// `@routed_from` arm, so it must resolve from whichever crate eventually invokes that arm — e.g.
+/// `crate::input::KeyEventArgs` (as spelled in `UIElement`'s own `#[prop]` declaration, resolving
+/// against `elwindui-core`) needs `$crate::` once embedded here. `wrap_prop_value`'s conversions
+/// never have this problem: `.into()` needs no explicit target-type annotation of its own — Rust
+/// infers it from the real setter's own parameter type at the call site.
+/// Wraps a bare closure/callable `$value` (matching the DSL's own written arity, `elwindui-codegen`'s
+/// ordinary callback-value convention — see `wrap_prop_value`'s doc comment) into the fixed
+/// `Box<dyn Fn(&Payload, &RoutedEventArgs)>` shape `register_routed_handler` needs, ready to hand to
+/// `@routed_from`. Arity comes from `ty`'s own `fn(..)` declaration, exactly like
+/// `routed_payload_type` — a 0-parameter routed property (`on_click: fn()`) ignores the payload
+/// entirely; a 1-parameter one (`on_key_down: fn(KeyEventArgs)`) calls `$value` with it dereferenced.
+/// Both leave the payload parameter's own type unannotated, relying on `@routed_from`'s own
+/// `register_routed_handler::<Payload>` turbofish to pin it down (verified: this inference reaches
+/// through an unannotated closure parameter even across the `Box<dyn Fn>` coercion).
+fn routed_handler_from_bare_callable(ty: &Type) -> TokenStream2 {
+    let one_param = matches!(ty, Type::BareFn(f) if f.inputs.len() == 1);
+    // `$value` is evaluated exactly once, into `__handler`, *before* the outer `move` closure --
+    // not re-spliced as source text directly into the outer closure's body. Splicing `$value`
+    // there would re-evaluate (re-construct) it on every invocation of the outer `Fn` closure,
+    // which for a `move`-capturing DSL closure means re-*moving* its own captured state out of an
+    // already-captured (by-reference-called) environment on the second call — exactly the "cannot
+    // move out of a captured variable in an `Fn` closure" error this construction avoids.
+    if one_param {
+        quote! {
+            {
+                let __handler = $value;
+                Box::new(move |__payload, _args: &$crate::input::RoutedEventArgs| {
+                    (__handler)(*__payload);
+                })
+            }
+        }
+    } else {
+        quote! {
+            {
+                let __handler = $value;
+                Box::new(move |_payload, _args: &$crate::input::RoutedEventArgs| {
+                    (__handler)();
+                })
+            }
+        }
+    }
+}
+
+fn routed_payload_type(ty: &Type) -> TokenStream2 {
+    let Type::BareFn(f) = ty else {
+        return quote! { () };
+    };
+    match f.inputs.len() {
+        1 => {
+            let arg_ty = &f.inputs[0].ty;
+            rewrite_crate_segment(quote! { #arg_ty })
+        }
+        _ => quote! { () },
+    }
+}
+
+/// The item-position path to a class's *own* shape macro. Always same-crate by construction, so it
+/// is always `crate::` — the absolute form `inherit_macro_path` uses for the same reason (a bare
+/// name resolves only within the defining file, which breaks the moment a class moves into a
+/// submodule; see that function's own doc comment).
+fn inherit_macro_path_for_self(bare_name: &str) -> TokenStream2 {
+    let ident = props_macro_ident(bare_name);
+    quote! { crate::#ident }
+}
+
+/// How a content property receives its children, decided by the property's declared type — the same
+/// distinction `elwindui_codegen::codegen::build_component_setters` draws, moved to the declaration
+/// that actually knows the type.
+enum AttachKind {
+    /// A live collection appended through its accessor (`UIElementCollection`, `ListExt<T>`).
+    Collection,
+    /// A `Vec<T>` property replaced wholesale by its setter.
+    VecProperty,
+    /// A single slot (`Rc<dyn ..>`) holding exactly one child.
+    SingleSlot,
+}
+
+fn attach_kind(ty: &Type) -> AttachKind {
+    let spelled = quote! { #ty }.to_string();
+    if spelled.contains("UIElementCollection") || spelled.contains("ListExt") {
+        AttachKind::Collection
+    } else if spelled.trim_start().starts_with("Vec <") {
+        AttachKind::VecProperty
+    } else {
+        AttachKind::SingleSlot
+    }
+}
+
+/// Whether a `#[prop]`'s declared type is exactly `String` — see `build_props_macro`'s setter
+/// argument convention.
+fn is_string_type(ty: &Type) -> bool {
+    matches!(ty, Type::Path(p) if p.qself.is_none() && p.path.is_ident("String"))
+}
+
+/// `ty`'s last path segment, ignoring any qualified-self (`<T as Trait>::X`) form — `#[prop]`
+/// types are always plain paths (`crate::graphics::Brush`, `Option<T>`, ...), never that.
+fn last_type_segment(ty: &Type) -> Option<&syn::PathSegment> {
+    match ty {
+        Type::Path(p) if p.qself.is_none() => p.path.segments.last(),
+        _ => None,
+    }
+}
+
+/// If `ty` is `Option<Inner>`, `Inner`'s own type; otherwise `None`.
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let seg = last_type_segment(ty)?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+/// Whether `ty`'s last path segment is literally `name` — a coarse, name-only check (not a real
+/// path comparison), matching a `#[prop]` type regardless of which of its several equivalent
+/// spellings a builtin happens to use (`crate::graphics::Brush` from within `elwindui-core`,
+/// `elwindui::core::graphics::Brush` from a consumer, or a future bare `Brush` behind a `use`).
+fn is_named(ty: &Type, name: &str) -> bool {
+    last_type_segment(ty).is_some_and(|s| s.ident == name)
+}
+
+/// How a `#[prop]`'s DSL-authored value must be transformed before it reaches the real setter —
+/// decided once, here, from the property's own declared `Type` (known at `#[class]` macro-expansion
+/// time, i.e. once per *declaration*), instead of by `elwindui-codegen` once per *use site* (which,
+/// once a builtin's shape lives only here, no longer has this type information available at all).
+///
+/// - `String` — real hand-written-native/virtual-builtin setters take `&str` by convention; `&(..)`
+///   derefs an owned `String` down to it, and is a harmless reborrow when the value is already a
+///   `&str` literal.
+/// - `Brush`/`Color`, bare or `Option`-wrapped — `.into()` lets a hex-string DSL literal
+///   (`fill: "#3a3a3c"`) reach the setter via `Color`/`Brush`'s own `From<&str>` (elwindui-core),
+///   and is a no-op (std's reflexive `From<T> for T`) when the value already is the target type.
+///   `Option`-wrapped targets additionally need `Some(..)` — the DSL convention (matching
+///   `elwindui-codegen`'s pre-existing `foreground`/`background` special-casing) is that a DSL
+///   author always writes the *inner* value, never `Option` themselves.
+/// - `Vec<T>` — a DSL array literal (`rows: [GridLength::Auto, ..]`) parses as a real Rust array
+///   expression, not a `Vec`; `.to_vec()` converts (a no-op when the value is already a `Vec`,
+///   e.g. an expression rather than a literal).
+/// - anything else (`dyn UIElementExt`-typed content/attached values included) — passed through
+///   unchanged. A concrete `Rc<Concrete: UIElementExt>` value coerces to `Rc<dyn UIElementExt>`
+///   automatically at this call-argument position (ordinary Rust unsized coercion), so no explicit
+///   conversion is needed here, unlike `elwindui-codegen`'s own `into_node_if_needed`.
+fn wrap_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
+    if is_string_type(ty) {
+        return quote! { &(#value) };
+    }
+    if is_named(ty, "Vec") {
+        return quote! { (#value).to_vec() };
+    }
+    // A plain (non-`#[routed]`) `fn(..)`-sugared callback prop's real setter takes a
+    // `Box<dyn Fn(..)>` (`TabView.on_select`/`on_new_tab`, etc.) — `elwindui-codegen`'s
+    // `emit_wiring`/`emit_external_construction` (both `#[routed]` and plain paths alike) hand this
+    // arm a bare closure/callable value, matching what it already builds for a `#[routed]`
+    // property's own `@routed_from`-bound handler (see this fn's own module-level context — the
+    // `@set_from` doc comment on `p.routed`'s two branches). `Box::new(..)` coerces any concrete
+    // closure type to the declared `Box<dyn Fn(..)>` at this call site, the same unsized-coercion
+    // trick `into_node_if_needed`'s callers already rely on for trait-object arguments elsewhere.
+    if matches!(ty, Type::BareFn(_)) {
+        return quote! { Box::new(#value) };
+    }
+    let (target, wrap_in_some) = match option_inner(ty) {
+        Some(inner) => (inner, true),
+        None => (ty, false),
+    };
+    if is_named(target, "Brush") || is_named(target, "Color") {
+        let converted = quote! { (#value).into() };
+        return if wrap_in_some {
+            quote! { Some(#converted) }
+        } else {
+            converted
+        };
+    }
+    value
+}
+
+/// A single-slot content field's real setter (`build_props_macro`'s `@children_into` single-slot
+/// arm — `content`/`submenu`/... — WPF/WinUI3's `ContentPropertyAttribute` pattern) takes `Rc<dyn
+/// SomeTraitExt>` directly. Plain unsized coercion at that setter call already handles a real
+/// builtin's own concrete value (`#[class]` gives it a direct `impl SomeTraitExt`), but not an
+/// `#[elwindui::component]`-frontend user struct (e.g. `content: MyPanel { .. }`), which never
+/// `impl`s that trait directly — only its own generated `into_node()` erases it. Calling
+/// `.into_<bare(SomeTraitExt)>_node()` unconditionally works for both without this macro needing
+/// to know which one it's looking at: every class this workspace generates — real builtins via
+/// `#[class]`'s own `into_<name>_node` default methods (this file's `into_node_ident`/
+/// `build_into_node_default`), and user components via their own, independently generated
+/// `{Name}Ext` ancestor-forwarding chain — implements every ancestor trait it has directly, so it
+/// always has that ancestor's own `into_<name>_node` default method (a trivial `{ self }` for
+/// anything that already *is* the target type, the same identity result unsized coercion would
+/// have produced). Deliberately **not** folded into `wrap_prop_value` (shared far more broadly by
+/// `@set`/`@set_from`, including resync/rebind call sites where the value may already be an
+/// erased trait object — `Self: Sized` on `into_<name>_node` excludes it from ever being callable
+/// through a `dyn` receiver, so forcing this there breaks those) — this helper's one caller
+/// (`children_into_arms`'s single-slot arm) only ever sees a freshly, concretely constructed
+/// nested element, never an already-erased handle, so the call is always safe here. Found via a
+/// real notepad screenshot regression (Refs #14): a `TabViewItem { DocumentView { .. } }` bare
+/// child compiled fine but the `DocumentView` never actually reached the visual tree.
+fn single_slot_child_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
+    let Some(bound) = rc_dyn_trait_bound(ty) else {
+        return value;
+    };
+    let Some(method) = bound
+        .bounds
+        .iter()
+        .find_map(|b| match b {
+            syn::TypeParamBound::Trait(t) => t.path.segments.last(),
+            _ => None,
+        })
+        .map(|seg| {
+            let name = seg.ident.to_string();
+            into_node_ident(name.strip_suffix("Ext").unwrap_or(&name))
+        })
+    else {
+        return value;
+    };
+    quote! { (#value).#method() }
+}
+
+/// If `ty` is `std::rc::Rc<dyn SomeTrait>`, returns that `dyn SomeTrait` bound — see
+/// `single_slot_child_value`'s own doc comment on why this matters. Deliberately narrower than
+/// `content_item_dyn_type`'s own recursive trait-object search (which also matches list-shaped
+/// wrappers like `ListExt<dyn X>`, a fundamentally different, per-item construction path this has
+/// no business touching): only a bare `Rc<dyn X>` denotes a single embedded node here.
+fn rc_dyn_trait_bound(ty: &Type) -> Option<&syn::TypeTraitObject> {
+    let Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "Rc" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(Type::TraitObject(to)) => Some(to),
+        _ => None,
+    })
+}
+
 fn build_inherit_macros(
     bare_name: &str,
     dyn_ident: &Ident,
@@ -1166,7 +2218,14 @@ fn core_path() -> TokenStream2 {
 fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     let class_name = &item.ident;
     let vis = &item.vis;
-    let attrs = &item.attrs;
+    // Same inert-marker split `expand_trait_only` does — a builtin whose real implementation is an
+    // ordinary `struct` in this crate (`UIElement`/`Layout`/`Grid`/...) declares its DSL surface
+    // here rather than on a `trait_only` interface. See `build_props_macro`.
+    let (prop_decls, attrs) = match take_prop_decls(&item.attrs) {
+        Ok(split) => split,
+        Err(e) => return e.to_compile_error(),
+    };
+    let attrs = &attrs;
     let generics = &item.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
@@ -1197,6 +2256,18 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     // dependency of its own — it always succeeds from its own single invocation's args alone,
     // regardless of rust-analyzer's expansion order, so nothing extra is needed to make this part
     // reliable.
+    let shape_macro = prop_decls.is_declared().then(|| {
+        let parent = args
+            .inherits
+            .as_ref()
+            .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
+        build_props_macro(
+            &class_name.to_string(),
+            &prop_decls,
+            parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
+        )
+    });
+
     let deref_shadow = args.inherits.as_ref().map(|ty| {
         quote! {
             #[cfg(rust_analyzer)]
@@ -1215,6 +2286,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
             #(#existing_fields,)*
         }
         #deref_shadow
+        #shape_macro
     }
 }
 
@@ -1237,7 +2309,13 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     let bare_name = class_name.to_string();
     let ext_name = to_ext_ident(&bare_name, class_name.span());
     let vis = &item.vis;
-    let attrs = &item.attrs;
+    // `#[prop(..)]` are inert markers consumed here — they declare this builtin's
+    // DSL surface (see `build_props_macro`) and must not survive onto the generated trait.
+    let (prop_decls, attrs) = match take_prop_decls(&item.attrs) {
+        Ok(split) => split,
+        Err(e) => return e.to_compile_error(),
+    };
+    let attrs = &attrs;
     let generics = &item.generics;
     let where_clause = &item.generics.where_clause;
     let items = &item.items;
@@ -1268,6 +2346,8 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     // (`#[overridable]` is only meaningful on an `impl ClassName { .. }` method) — so there are
     // never any per-method accessors to build here, only the one shared `dyn_ident`.
     let dyn_methods = build_dyn_default_methods(&dyn_ident, &ext_ty, &sigs, &[]);
+    let into_node_ident = into_node_ident(&bare_name);
+    let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
 
     // Unlike `expand_impl`, `trait_only` never generates its own `__elwindui_inherit_*!` trio (or
     // the matching `macro_reexport_mod_ident` wrapper module): `trait_only` has no `prelude` at
@@ -1286,11 +2366,30 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     // here beyond that.
     let _ = owns_inherit_macros;
 
+    // The shape layer *is* generated for `trait_only` (unlike the inherit trio above): the
+    // backend-agnostic DSL surface of every native leaf is declared here in `elwindui-core`, and
+    // each backend's own `struct_only` implementor deliberately declares none — so there is exactly
+    // one `__elwindui_shape_{Name}!` per builtin workspace-wide, with no cross-crate bare-name
+    // collision for `#[macro_export]` to trip over.
+    let shape_macro = prop_decls.is_declared().then(|| {
+        let parent = args
+            .inherits
+            .as_ref()
+            .and_then(|ty| last_segment_name(ty).map(|name| (name, ty)));
+        build_props_macro(
+            &bare_name,
+            &prop_decls,
+            parent.as_ref().map(|(name, ty)| (name.as_str(), *ty)),
+        )
+    });
+
     quote! {
         #(#attrs)*
         #vis trait #ext_name #generics #colon_bound #where_clause {
             #(#dyn_methods)*
+            #into_node_default
         }
+        #shape_macro
     }
 }
 
@@ -1905,12 +3004,15 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             let accessor = per_method_accessor_ident(name);
             quote! { fn #accessor(&self) -> &dyn #ext_ty { self } }
         });
+        let into_node_ident = into_node_ident(&bare_name);
+        let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
         (
             quote! {
                 pub trait #ext_ident #impl_generics #bound #where_clause {
                     fn as_ui_element(&self) -> &#impl_name;
                     #(#overridable_defaults)*
                     #(#plain_defaults)*
+                    #into_node_default
                 }
             },
             // `ClassName` is a genuine `ClassNameExt` implementor itself — trivially for both
@@ -1963,8 +3065,15 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             let accessor = per_method_accessor_ident(name);
             quote! { fn #accessor(&self) -> &dyn #ext_ty { self } }
         });
+        let into_node_ident = into_node_ident(&bare_name);
+        let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
         (
-            quote! { pub trait #ext_ident #impl_generics #bound #where_clause { #(#dyn_methods)* } },
+            quote! {
+                pub trait #ext_ident #impl_generics #bound #where_clause {
+                    #(#dyn_methods)*
+                    #into_node_default
+                }
+            },
             quote! {
                 impl #impl_generics #ext_ident #ty_generics for #impl_name #ty_generics #where_clause {
                     fn #dyn_ident(&self) -> &dyn #ext_ty { self }
@@ -2560,6 +3669,85 @@ mod self_weak_on_constructed_tests {
             parent_s.contains("fn on_constructed (& self)")
                 || parent_s.contains("fn on_constructed(&self)"),
             "on_constructed's own body must still be emitted as a plain method: {parent_s}"
+        );
+    }
+
+    // A root class (no `inherits`) gets its own `into_<name>_node` upcast as a default method on
+    // its own `{Name}Ext` trait declaration — `Rc<Self> -> Rc<dyn {Name}Ext>`, gated `Self: Sized`
+    // so the trait stays object-safe wherever it's already used as `dyn {Name}Ext`.
+    #[test]
+    fn into_node_upcast_generated_for_root_class() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct IntoNodeTestRoot { value: i32 } },
+            quote! {
+                impl IntoNodeTestRoot {
+                    fn construct() -> Self { Self { value: 0 } }
+                }
+            },
+        );
+        let s = impl_out.to_string();
+        assert!(!is_real_compile_error(&impl_out), "unexpected error: {s}");
+        let trait_start = s
+            .find("pub trait IntoNodeTestRootExt")
+            .expect("trait declaration must exist");
+        let trait_slice = &s[trait_start..];
+        assert!(
+            trait_slice.contains("into_into_node_test_root_node"),
+            "root class's own trait should declare its into_<name>_node upcast: {trait_slice}"
+        );
+        assert!(
+            trait_slice.contains("self : std :: rc :: Rc < Self >")
+                || trait_slice.contains("self: std::rc::Rc<Self>"),
+            "into_node upcast should take self: Rc<Self>: {trait_slice}"
+        );
+        assert!(
+            trait_slice.contains("Self : Sized") || trait_slice.contains("Self: Sized"),
+            "into_node upcast should be Self: Sized-gated to preserve object safety: {trait_slice}"
+        );
+        syn::parse2::<syn::File>(impl_out.clone())
+            .unwrap_or_else(|e| panic!("expansion must be valid Rust syntax: {e}\n{s}"));
+    }
+
+    // An ordinary (non-root) class gets its own `into_<name>_node` upcast too, named after
+    // *itself* — not the root's — one such method per ancestor level, each declared once on that
+    // ancestor's own trait and inherited down through Rust's ordinary default-method/supertrait
+    // mechanism (no per-hop generation needed in `build_inherit_macros`).
+    #[test]
+    fn into_node_upcast_generated_for_ordinary_class_named_after_itself() {
+        let _ = expand_pair(
+            quote! {},
+            quote! { pub struct IntoNodeTestParent { value: i32 } },
+            quote! {
+                impl IntoNodeTestParent {
+                    fn construct() -> Self { Self { value: 0 } }
+                }
+            },
+        );
+        let (_child_struct_out, child_impl_out) = expand_pair(
+            quote! { inherits = crate::class::self_weak_on_constructed_tests::IntoNodeTestParent },
+            quote! { pub struct IntoNodeTestChild { extra: i32 } },
+            quote! {
+                impl IntoNodeTestChild {
+                    fn construct() -> Self { Self { extra: 0 } }
+                }
+            },
+        );
+        let s = child_impl_out.to_string();
+        assert!(!is_real_compile_error(&child_impl_out), "unexpected error: {s}");
+        let trait_start = s
+            .find("pub trait IntoNodeTestChildExt")
+            .expect("trait declaration must exist");
+        let trait_slice = &s[trait_start..];
+        assert!(
+            trait_slice.contains("into_into_node_test_child_node"),
+            "child class's own trait should declare its own into_<name>_node upcast (not the \
+             parent's): {trait_slice}"
+        );
+        assert!(
+            !trait_slice.contains("into_into_node_test_parent_node"),
+            "child's own trait must not redeclare the parent's upcast method (inherited via the \
+             supertrait bound instead): {trait_slice}"
         );
     }
 }

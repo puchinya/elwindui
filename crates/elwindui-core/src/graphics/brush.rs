@@ -20,6 +20,14 @@ impl From<Color> for Brush {
     }
 }
 
+/// See `Color`'s own matching `impl From<&str>` doc comment — same DSL-literal-sugar rationale and
+/// panic-on-malformed-hex tradeoff, one hop further through `Solid`.
+impl From<&str> for Brush {
+    fn from(s: &str) -> Self {
+        Brush::Solid(Color::from(s))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GradientStop {
     pub offset: f32,

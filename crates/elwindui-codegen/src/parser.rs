@@ -5,7 +5,19 @@
 
 use crate::ast::*;
 
-pub fn parse_module(src: &str) -> Result<Module, String> {
+/// Test-only (Refs #14's "未解決の論点"): production code no longer parses whole `.elwind`-style
+/// modules — the top-level `component`/`view`/`viewmodel`/`enum`/`use` structure `Parser::
+/// parse_module` (below) recognizes only ever existed to feed the removed `build.rs`/`compile_dir`
+/// path (see `lib.rs`'s own `TEST_BUILTIN_SHAPE_SOURCE` doc comment). `parse_view_body`/
+/// `parse_initializer` stay real production API — `view! { .. }`'s own *contents* are still this
+/// same hand-written DSL text, by design (Issue #14's own non-goals), just no longer wrapped in a
+/// top-level `component`/`view` pair. Kept `#[cfg(test)]` rather than deleted (and this crate's
+/// ~105 existing `parser.rs`/`validate.rs`/`codegen.rs`/`component_frontend.rs` tests rather than
+/// rewritten) since every one of them already exercises real parser/validator/codegen behavior
+/// through this same entry point — rewriting all of them to build `ast::Module` values by hand
+/// would trade a large, low-value mechanical diff for no behavioral coverage gained.
+#[cfg(test)]
+pub(crate) fn parse_module(src: &str) -> Result<Module, String> {
     Parser::new(src).parse_module()
 }
 
@@ -58,6 +70,7 @@ impl<'a> Parser<'a> {
         Parser { src, pos: 0 }
     }
 
+    #[cfg(test)]
     fn parse_module(&mut self) -> Result<Module, String> {
         let mut uses = Vec::new();
         let mut items = Vec::new();
@@ -164,6 +177,7 @@ impl<'a> Parser<'a> {
     /// meaningful on `component` (see `reject_item_attrs`). Zero or more, any order; unknown
     /// attribute names are a parse error just like the field-level `#[...]` loop
     /// (`parse_field_def`) this mirrors.
+    #[cfg(test)]
     #[allow(clippy::type_complexity)]
     fn parse_item_attrs(
         &mut self,
@@ -207,6 +221,7 @@ impl<'a> Parser<'a> {
     /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(..)]` only
     /// make sense on `component` — reject them (with a clear error naming the offending keyword)
     /// if `parse_item_attrs` found any ahead of anything else.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn reject_item_attrs(
         &self,
@@ -226,6 +241,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn parse_use_decl(&mut self) -> Result<UseDecl, String> {
         let mut path = vec![self.parse_ident()?];
         while self.eat_str("::") {
@@ -235,6 +251,7 @@ impl<'a> Parser<'a> {
         Ok(UseDecl { path })
     }
 
+    #[cfg(test)]
     fn parse_enum_def(&mut self) -> Result<EnumDef, String> {
         let name = self.parse_ident()?;
         self.expect_char('{')?;
@@ -258,6 +275,7 @@ impl<'a> Parser<'a> {
     /// comment) — parsed here regardless since the grammar up to `{` is otherwise identical, but
     /// `viewmodel`'s `build` closure simply discards it and `methods` (`fn`-shaped entries, §3's
     /// `#[virtual]`/`#[override]` hooks — only meaningful for `component`).
+    #[cfg(test)]
     fn parse_fields_block<T>(
         &mut self,
         default_kind: FieldKind,
@@ -292,6 +310,7 @@ impl<'a> Parser<'a> {
     /// Lookahead-and-rewind: a field/method entry both start with zero or more `#[...]`
     /// attributes; the entry is a method iff `fn` follows them (a field name can never be the
     /// literal identifier `fn`, since it's a reserved Rust keyword).
+    #[cfg(test)]
     fn looks_like_method(&mut self) -> bool {
         let save = self.pos;
         let is_method = self.try_skip_attrs_and_check_fn();
@@ -299,6 +318,7 @@ impl<'a> Parser<'a> {
         is_method
     }
 
+    #[cfg(test)]
     fn try_skip_attrs_and_check_fn(&mut self) -> bool {
         loop {
             self.skip_trivia();
@@ -319,6 +339,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `[#[virtual]|#[override]]? fn name(&self, param: Type, ...) [-> RetTy] { body }` (§3).
+    #[cfg(test)]
     fn parse_method_def(&mut self) -> Result<MethodDef, String> {
         let mut is_virtual = false;
         let mut is_override = false;
@@ -399,6 +420,7 @@ impl<'a> Parser<'a> {
         })
     }
 
+    #[cfg(test)]
     fn parse_field_def(&mut self, default_kind: FieldKind) -> Result<FieldDef, String> {
         let mut kind = default_kind;
         let mut attrs = Vec::new();
@@ -547,6 +569,7 @@ impl<'a> Parser<'a> {
         Ok(Initializer::Expr(expr))
     }
 
+    #[cfg(test)]
     fn parse_view_def(&mut self) -> Result<ViewDef, String> {
         let target = self.parse_ident()?;
         self.expect_char('{')?;
@@ -1412,6 +1435,17 @@ impl<'a> Parser<'a> {
     /// (`parse_element_node`'s trailing `,` is optional; one-attribute-per-line with no comma is
     /// the DSL's own convention), so only `,`/`}` would otherwise swallow the following attributes'
     /// text as part of the expression.
+    ///
+    /// The newline check alone isn't enough when this text came from `view!`-macro token recovery
+    /// (`TokenStream::to_string()`, `component_frontend.rs`) rather than a real `.elwind` file —
+    /// `to_string()` never preserves original source line breaks, and doesn't reliably insert space
+    /// between every adjacent token pair either (`take_bracketed_src`'s own doc comment notes the
+    /// same line-break gap for array literals, fixed there by that value being self-delimiting; a
+    /// closure body has no such delimiter of its own). So at every unnested position this also
+    /// checks whether what's ahead looks like the *next* attribute starting — a bare identifier
+    /// immediately followed by `:` (not `::`), or a `#[` shortcut-attribute prefix — exactly the
+    /// grammar `parse_element_node`'s own attribute loop uses to begin one, checked regardless of
+    /// whether any whitespace actually separates it from the expression text so far.
     fn take_expr_until_line_end_or(&mut self, terminators: &[char]) -> Result<String, String> {
         self.skip_trivia();
         let start = self.pos;
@@ -1425,6 +1459,7 @@ impl<'a> Parser<'a> {
                 }
                 Some('\n') if depth == 0 => break,
                 Some(c) if depth == 0 && terminators.contains(&c) => break,
+                Some(_) if depth == 0 && self.looks_like_next_attribute_ahead() => break,
                 Some('(') | Some('[') | Some('{') => {
                     depth += 1;
                     self.pos += 1;
@@ -1437,6 +1472,23 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(self.src[start..self.pos].to_string())
+    }
+
+    /// Lookahead-and-rewind (same idiom as `looks_like_element`), called at every unnested position
+    /// inside a closure body's raw-text capture: skips the trivia and checks whether what follows is
+    /// the start of a new view attribute (`ident:`, not `::`) or a `#[shortcut]`-style attribute,
+    /// without consuming anything either way.
+    fn looks_like_next_attribute_ahead(&mut self) -> bool {
+        let save = self.pos;
+        self.skip_trivia();
+        let looks_like_attribute = self.peek_str("#[") || {
+            self.parse_ident().is_ok() && {
+                self.skip_trivia();
+                self.peek_char() == Some(':') && !self.peek_str("::")
+            }
+        };
+        self.pos = save;
+        looks_like_attribute
     }
 
     fn err(&self, msg: &str) -> String {
@@ -2063,6 +2115,7 @@ view SaveField {
 }
 
 /// Parses `start..=end` / `start..end` for `#[length(...)]`/`#[range(...)]`-style attributes.
+#[cfg(test)]
 fn parse_range(src: &str) -> Result<(i64, i64, bool), String> {
     let src = src.trim();
     if let Some((start, rest)) = src.split_once("..=") {

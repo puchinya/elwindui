@@ -1,12 +1,29 @@
-//! Standalone tokenizer for `.elwind` syntax highlighting via LSP `textDocument/semanticTokens/full`.
+//! `textDocument/semanticTokens/full` — scoped to just each `view! { .. }` macro body's worth of
+//! text (Issue #14's "未解決の論点", resolved in favor of this option): a `.rs` file already gets
+//! real Rust syntax highlighting from rust-analyzer everywhere else, so providing tokens for the
+//! whole file would double-color ordinary Rust and could conflict with rust-analyzer's own semantic
+//! tokens. `view! { .. }`'s own contents are the one part of the file rust-analyzer can't highlight
+//! meaningfully — `view!` is never a real macro (see `component_frontend.rs`'s own doc comment), so
+//! it shows as an unexpanded, undecorated token stream to any ordinary Rust-aware tool.
 //!
-//! Deliberately NOT built on `elwindui_codegen::parser`: that parser is lexer-free by design (see
-//! its own doc comment) and throws away source positions once a token is recognized, since
-//! `ast.rs` has no span fields to put them in. Retrofitting span-tracking through the whole
-//! parser/AST just for coloring would be a much larger change than highlighting needs — a
-//! dedicated scanner that only classifies raw lexical spans is enough.
+//! The scanner (`Scanner`/`tokenize`/`RawToken`, classification logic and the `KEYWORDS`/
+//! `ATTR_NAMES`/`MACRO_NAMES` tables) is the pre-Phase-7 `.elwind`-file tokenizer, otherwise
+//! unchanged (see git history at `b648618^` for the original whole-file version) — deliberately not
+//! built on `elwindui_codegen::parser` (span-free by design, see that module's own doc comment), so
+//! a dedicated lexical scanner is the only way to recover per-character positions at all. What's new
+//! here is scoping: `tokenize` now takes `ranges` (each `view! { .. }`'s exact byte span in the
+//! *original* source, one `Range` per field) and only classifies characters that fall inside one —
+//! everywhere else is walked (to keep the running line/column count correct for whatever follows)
+//! but never classified, so nothing outside a `view!` body ever gets a token.
+//!
+//! Locating those ranges needs real source positions, which `syn::parse_file`'s AST doesn't carry by
+//! default — enabled here via `proc-macro2`'s `span-locations` feature (`Cargo.toml`), which gives
+//! accurate `Span::byte_range()`s even outside a real proc-macro invocation (this crate is an
+//! ordinary binary, never itself expanding as a proc-macro) — verified empirically before relying on
+//! it here.
 
 use lsp_types::{SemanticToken, SemanticTokenType};
+use std::ops::Range;
 
 pub const TOKEN_TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::KEYWORD,  // 0
@@ -40,6 +57,65 @@ const ATTR_NAMES: &[&str] = &[
 // DSL macro forms recognized by `peek_keyword_bang`/direct match: `bind!`, `t!`.
 const MACRO_NAMES: &[&str] = &["bind", "t"];
 
+/// Finds every `view! { .. }` field's exact byte range in `src` and returns semantic tokens for
+/// their contents only — see this module's own doc comment. Returns an empty `Vec` (rather than
+/// erroring) for a file that doesn't parse or has no `view!` fields at all; a broken file already
+/// gets a real diagnostic from `diagnostics.rs`, and semantic tokens degrading to "none" rather than
+/// erroring matches how an LSP client expects this request to behave.
+pub fn semantic_tokens_for_file(src: &str) -> Vec<SemanticToken> {
+    let Ok(file) = syn::parse_file(src) else {
+        return Vec::new();
+    };
+    let ranges = view_body_ranges(&file);
+    encode(tokenize(src, &ranges))
+}
+
+/// Every top-level struct field typed `view! { .. }`, matching `component_frontend.rs`'s own
+/// `is_view_macro_field` check — mirrors that module's flat, non-recursive-into-`mod` walk of
+/// `file.items` (a `view!` field only ever appears on a top-level `#[elwindui::component] struct`,
+/// same convention `component_frontend::modules_from_file` already relies on).
+fn view_body_ranges(file: &syn::File) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Struct(item_struct) => Some(item_struct),
+            _ => None,
+        })
+        .filter_map(|item_struct| match &item_struct.fields {
+            syn::Fields::Named(named) => Some(named),
+            _ => None,
+        })
+        .flat_map(|named| named.named.iter())
+        .filter_map(|field| match &field.ty {
+            syn::Type::Macro(tm) if tm.mac.path.is_ident("view") => {
+                token_stream_byte_range(&tm.mac.tokens)
+            }
+            _ => None,
+        })
+        .collect();
+    ranges.sort_by_key(|r| r.start);
+    ranges
+}
+
+/// The byte range spanning every token in `tokens` (a `view!` macro's own content, i.e. between —
+/// not including — its own `{`/`}` delimiters), from the first token's start to the last token's
+/// end. `None` for an empty `view! {}` (nothing to highlight).
+fn token_stream_byte_range(tokens: &proc_macro2::TokenStream) -> Option<Range<usize>> {
+    let mut iter = tokens.clone().into_iter();
+    let first = iter.next()?;
+    let start = first.span().byte_range().start;
+    let end = iter
+        .last()
+        .map(|last| last.span().byte_range().end)
+        .unwrap_or_else(|| first.span().byte_range().end);
+    Some(start..end)
+}
+
+fn in_ranges(ranges: &[Range<usize>], pos: usize) -> bool {
+    ranges.iter().any(|r| r.contains(&pos))
+}
+
 struct RawToken {
     line: u32,
     start: u32,
@@ -47,10 +123,11 @@ struct RawToken {
     ty: u32,
 }
 
-/// Cursor over `char`s tracking (line, UTF-16 column) so token spans line up with LSP's default
-/// position encoding (UTF-16 code units), not byte or `char` offsets.
+/// Cursor over `char`s tracking (line, UTF-16 column, byte offset) so token spans line up with
+/// LSP's default position encoding (UTF-16 code units) while still being comparable against
+/// `ranges`' byte offsets (`proc_macro2::Span::byte_range()`'s own unit).
 struct Scanner<'a> {
-    chars: std::iter::Peekable<std::str::Chars<'a>>,
+    iter: std::iter::Peekable<std::str::CharIndices<'a>>,
     line: u32,
     col: u32,
 }
@@ -58,18 +135,22 @@ struct Scanner<'a> {
 impl<'a> Scanner<'a> {
     fn new(src: &'a str) -> Self {
         Scanner {
-            chars: src.chars().peekable(),
+            iter: src.char_indices().peekable(),
             line: 0,
             col: 0,
         }
     }
 
     fn peek(&mut self) -> Option<char> {
-        self.chars.peek().copied()
+        self.iter.peek().map(|&(_, c)| c)
+    }
+
+    fn peek_pos(&mut self) -> Option<usize> {
+        self.iter.peek().map(|&(i, _)| i)
     }
 
     fn bump(&mut self) -> Option<char> {
-        let c = self.chars.next()?;
+        let (_, c) = self.iter.next()?;
         if c == '\n' {
             self.line += 1;
             self.col = 0;
@@ -80,8 +161,7 @@ impl<'a> Scanner<'a> {
     }
 }
 
-pub fn semantic_tokens_for_source(src: &str) -> Vec<SemanticToken> {
-    let raw = tokenize(src);
+fn encode(raw: Vec<RawToken>) -> Vec<SemanticToken> {
     let mut out = Vec::with_capacity(raw.len());
     let mut prev_line = 0u32;
     let mut prev_start = 0u32;
@@ -105,11 +185,17 @@ pub fn semantic_tokens_for_source(src: &str) -> Vec<SemanticToken> {
     out
 }
 
-fn tokenize(src: &str) -> Vec<RawToken> {
+fn tokenize(src: &str, ranges: &[Range<usize>]) -> Vec<RawToken> {
     let mut sc = Scanner::new(src);
     let mut raw = Vec::new();
 
     while let Some(c) = sc.peek() {
+        let pos = sc.peek_pos().expect("just peeked Some(c)");
+        if !in_ranges(ranges, pos) {
+            sc.bump();
+            continue;
+        }
+
         if c.is_whitespace() {
             sc.bump();
             continue;
@@ -246,7 +332,7 @@ mod tests {
     fn decode(src: &str) -> Vec<(u32, u32, u32, u32)> {
         let mut line = 0u32;
         let mut start = 0u32;
-        semantic_tokens_for_source(src)
+        semantic_tokens_for_file(src)
             .into_iter()
             .map(|t| {
                 line += t.delta_line;
@@ -260,52 +346,82 @@ mod tests {
             .collect()
     }
 
+    /// A struct field with an ordinary Rust type never contributes any token — only a `view! { .. }`
+    /// field's own contents do. Confirms the whole point of the scoping: `#[param]`/`vm: Vm`/etc.
+    /// (real Rust, already colored by rust-analyzer) produce nothing here.
     #[test]
-    fn classifies_keyword_type_and_attribute() {
-        let toks = decode("component NotepadWindow {\n    #[param]\n    vm: Vm,\n}\n");
-        assert_eq!(toks[0], (0, 0, "component".len() as u32, KEYWORD));
-        assert_eq!(toks[1], (0, 10, "NotepadWindow".len() as u32, TYPE));
-        assert_eq!(toks[2], (1, 6, "param".len() as u32, MACRO));
-        assert_eq!(toks[3], (2, 4, "vm".len() as u32, VARIABLE));
-        assert_eq!(toks[4], (2, 8, "Vm".len() as u32, TYPE));
+    fn only_the_view_macro_body_is_tokenized() {
+        let src = r#"
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[param]
+    vm: Vm,
+    body: view! { TextBlock { text: "hi" } },
+}
+"#;
+        let toks = decode(src);
+        // Nothing from `#[elwindui::component(inherits Window)]`, `struct NotepadWindow`,
+        // `#[param]`, or `vm: Vm` — only `TextBlock`/`text`/`"hi"` from inside `view! { .. }`.
+        assert_eq!(toks.len(), 3, "{toks:?}");
+        let types: Vec<u32> = toks.iter().map(|t| t.3).collect();
+        assert_eq!(types, vec![TYPE, VARIABLE, STRING]);
     }
 
     #[test]
-    fn classifies_string_number_comment_and_macro_bang() {
-        let toks = decode("// hello\nlength: 3,\nbind!(vm.content, TwoWay)\nt!(\"key\")\n");
-        assert_eq!(toks[0], (0, 0, "// hello".len() as u32, COMMENT));
-        // `length` here is a bare field name, not `#[length]`, so it's just a VARIABLE identifier.
-        assert_eq!(toks[1], (1, 0, "length".len() as u32, VARIABLE));
-        assert_eq!(toks[2], (1, 8, "3".len() as u32, NUMBER));
-        assert_eq!(toks[3], (2, 0, "bind!".len() as u32, MACRO));
-        let t_bang = toks.iter().find(|t| t.3 == MACRO && t.0 == 3).unwrap();
-        assert_eq!(*t_bang, (3, 0, "t!".len() as u32, MACRO));
-        assert!(toks.iter().any(|t| t.3 == STRING));
-    }
-
-    /// This scanner is deliberately not built on `elwindui_codegen::parser` (see the module doc
-    /// comment), so it has no idea `|doc| ...` is closure syntax (`ast::ViewExpr::Closure`) — but
-    /// it doesn't need to: `|` isn't alphanumeric/`_`/`"`/digit/`#`, so it falls into the same
-    /// harmless single-char skip as `:`/`{`/`}` (the final `sc.bump()` catch-all), and `doc` is
-    /// just an ordinary lowercase identifier both times it appears. Locks in that this already
-    /// works, so a future rewrite of this tokenizer doesn't regress closure highlighting.
-    #[test]
-    fn closure_syntax_has_no_special_casing_needed() {
-        let toks = decode("render_label: |doc| doc.file_name\n");
-        let doc_tokens: Vec<_> = toks
-            .iter()
-            .filter(|t| t.2 == "doc".len() as u32 && t.3 == VARIABLE)
-            .collect();
+    fn classifies_string_number_and_element_type_inside_view() {
+        let src = "struct Foo {\n    body: view! {\n        Rectangle { width: 3.0, fill: \"#000\" }\n    },\n}\n";
+        let toks = decode(src);
+        let types: Vec<u32> = toks.iter().map(|t| t.3).collect();
         assert_eq!(
-            doc_tokens.len(),
-            2,
-            "expected `doc` to tokenize as VARIABLE both times: {toks:?}"
+            types,
+            vec![TYPE, VARIABLE, NUMBER, VARIABLE, STRING],
+            "{toks:?}"
         );
-        // The two `|`s sit right at columns 14 and 18 (`render_label: ` is 14 chars, `|doc|` is 5
-        // more); no token should start at either position.
+    }
+
+    #[test]
+    fn recognizes_bind_and_t_macro_calls_inside_view() {
+        let src = r#"
+struct Foo {
+    body: view! { TextBlock { text: bind!(vm.content, TwoWay) } },
+}
+"#;
+        let toks = decode(src);
         assert!(
-            !toks.iter().any(|t| t.1 == 14 || t.1 == 18),
-            "expected no token emitted for either `|`: {toks:?}"
+            toks.iter()
+                .any(|t| t.3 == MACRO && t.2 == "bind!".len() as u32),
+            "{toks:?}"
         );
+    }
+
+    /// Two components in one file, each with their own `view!` field — both get tokenized, nothing
+    /// from the plain-Rust text between/around them does (mirrors a real multi-component `.rs` file
+    /// like `examples/notepad/src/ui/notepad_window.rs`).
+    #[test]
+    fn tokenizes_every_view_field_across_multiple_components_in_one_file() {
+        let src = r#"
+struct A {
+    body: view! { TextBlock { text: "a" } },
+}
+
+struct B {
+    body: view! { TextBlock { text: "b" } },
+}
+"#;
+        let toks = decode(src);
+        let strings: Vec<u32> = toks.iter().filter(|t| t.3 == STRING).map(|t| t.2).collect();
+        assert_eq!(strings.len(), 2, "{toks:?}");
+    }
+
+    #[test]
+    fn a_component_with_no_view_field_produces_no_tokens() {
+        let src = "struct A {\n    #[param]\n    label: String,\n}\n";
+        assert!(decode(src).is_empty());
+    }
+
+    #[test]
+    fn an_unparseable_file_produces_no_tokens_rather_than_panicking() {
+        let src = "struct A {\n    field:\n";
+        assert!(decode(src).is_empty());
     }
 }

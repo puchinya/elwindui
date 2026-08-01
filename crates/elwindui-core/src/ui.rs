@@ -119,7 +119,39 @@ pub trait FocusHost {
 /// other `#[class(inherits = ..)]`-managed subclass inherits all of them for free via Rust's own
 /// default-method dispatch — only `base` (synthesized by the macro; its concrete location differs
 /// per implementor) is a genuinely required method.
-#[elwindui_macros::class]
+///
+/// The `#[dsl_prop(..)]` lines are this class's DSL-visible surface — the properties every element,
+/// builtin or user-defined, picks up for free. They terminate the `__elwindui_shape_*!` forwarding
+/// chain: a property no descendant declares ends up here, and anything this class doesn't declare
+/// either becomes a `compile_error!` naming it (see `build_shape_macro`).
+#[elwindui_macros::class(abstract_class)]
+#[prop(margin: Option<f32>)]
+#[prop(horizontal_alignment: Option<crate::layout::HorizontalAlignment>)]
+#[prop(vertical_alignment: Option<crate::layout::VerticalAlignment>)]
+#[prop(visibility: Option<crate::layout::Visibility>)]
+#[prop(width: Option<f32>)]
+#[prop(height: Option<f32>)]
+#[prop(min_width: Option<f32>)]
+#[prop(min_height: Option<f32>)]
+#[prop(max_width: Option<f32>)]
+#[prop(max_height: Option<f32>)]
+#[prop(hit_test_visible: Option<bool>)]
+#[prop(tab_stop: Option<bool>)]
+#[prop(focus_order: Option<i32>)]
+#[prop(routed, on_key_down: fn(crate::input::KeyEventArgs))]
+#[prop(routed, on_key_up: fn(crate::input::KeyEventArgs))]
+#[prop(routed, on_text_input: fn(crate::input::TextInputEventArgs))]
+#[prop(routed, on_got_focus: fn())]
+#[prop(routed, on_lost_focus: fn())]
+#[prop(routed, on_pointer_pressed: fn(crate::input::PointerEventArgs))]
+#[prop(routed, on_pointer_released: fn(crate::input::PointerEventArgs))]
+#[prop(routed, on_pointer_moved: fn(crate::input::PointerEventArgs))]
+#[prop(routed, on_pointer_entered: fn(crate::input::PointerEventArgs))]
+#[prop(routed, on_pointer_exited: fn(crate::input::PointerEventArgs))]
+#[prop(routed, on_pointer_wheel_changed: fn(crate::input::PointerWheelEventArgs))]
+#[prop(routed, on_tapped: fn(crate::input::TappedEventArgs))]
+#[prop(routed, on_double_tapped: fn(crate::input::TappedEventArgs))]
+#[prop(routed, on_right_tapped: fn(crate::input::TappedEventArgs))]
 pub struct UIElement {
     /// Stable identity of this Visual's retained RenderGroup. Never reused within a process.
     pub render_group_id: u64,
@@ -1380,10 +1412,19 @@ impl ListExt<dyn UIElementExt> for UIElementCollection {
 /// shared "MeasureNode" abstraction. `collect_render_items<H>` downcasts a leaf's
 /// `try_as_native_control()` result directly to `H` (see that trait method's own doc comment) — no
 /// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
-#[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement, abstract_class)]
+#[text_style]
+#[prop(background: Option<crate::graphics::Brush>)]
 pub trait NativeControl {
-    /// Sets an explicit native-control background.
-    fn set_background(&self, background: Brush);
+    /// Sets an explicit native-control background, or removes it (`None`) so the backend control
+    /// theme can supply it again — matching `#[prop(background: Option<Brush>)]`'s own declared
+    /// type exactly, unlike the virtual-builtin/native-leaf signature mismatch this used to have
+    /// (`Layout::set_background` always took `Option<Brush>`; this took a bare `Brush`, relying on
+    /// the separate `clear_background` below for the `None` case). `clear_background` stays a
+    /// distinct method rather than folding away into `set_background(None)`'s body — `emit_resync`'s
+    /// generic `clear_<name>()` convention calls it directly, unconditionally, wherever a DSL value
+    /// transitions from `Some` to not-written across a re-render.
+    fn set_background(&self, background: Option<Brush>);
 
     /// Removes an explicit background so the backend control theme can supply it again.
     fn clear_background(&self);
@@ -1410,13 +1451,21 @@ pub trait NativeControl {
 /// are genuinely different in shape per backend (AppKit's `Retained<TreeHostView>`/`TabChipImpl` vs
 /// WinUI3's own equivalents have no common signature to share without associated types this crate
 /// doesn't need yet) — each backend keeps declaring its own local `TabView` trait.
-#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
+#[prop(two_way, text: String)]
 pub trait TextArea {
     fn set_text(&self, text: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
 }
 
-#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+/// `builtin::Button`. The `#[dsl(..)]`/`#[dsl_prop(..)]` lines below are this builtin's DSL-visible
+/// surface, declared here on the interface itself rather than duplicated in a separate compiler-side
+/// shape table — `#[class]` turns them into `__elwindui_shape_Button!`, which the generated view
+/// code invokes (see `build_shape_macro` for why the shape has to reach consumers as a macro).
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
+#[prop(text: String)]
+#[prop(enabled: Option<bool>)]
+#[prop(routed, on_click: fn())]
 pub trait Button {
     fn set_enabled(&self, enabled: bool);
     fn set_on_click(&self, callback: Box<dyn Fn()>);
@@ -1433,7 +1482,12 @@ pub trait Button {
 /// `on_key_down` (`#[routed]`) already covers it the same way any other element's own key handling
 /// would (see `TextBox` in `builtins.elwind` and `native_ui::TextBox::on_constructed`'s own doc
 /// comment on why AppKit needs one narrow, TextBox-specific addition to make that work in practice).
-#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
+#[prop(two_way, text: String)]
+#[prop(placeholder: Option<String>)]
+#[prop(read_only: Option<bool>)]
+#[prop(max_length: Option<u32>)]
+#[prop(text_alignment: Option<crate::ui::TextAlignment>)]
 pub trait TextBox {
     fn set_text(&self, text: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
@@ -1453,7 +1507,11 @@ pub trait TextBox {
 /// assumes plaintext display is fine. See `docs/elwindui_nativecontrol_expansion_status.md` for the
 /// `reveal_enabled` AppKit/WinUI3 asymmetry this control has (WinUI3's `PasswordRevealMode` is
 /// native; AppKit's `NSSecureTextField` has no equivalent, so `true` is a documented no-op there).
-#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
+#[prop(two_way, password: String)]
+#[prop(placeholder: Option<String>)]
+#[prop(max_length: Option<u32>)]
+#[prop(reveal_enabled: Option<bool>)]
 pub trait PasswordBox {
     fn set_password(&self, password: &str);
     fn set_on_change(&self, callback: Box<dyn Fn(String)>);
@@ -1478,7 +1536,11 @@ pub trait PasswordBox {
 /// Scroll-position get/set and a `scroll_changed` event are deliberately not part of this trait —
 /// same "ship the minimal, honestly-scoped surface, document the gap" call as `TextBox`/
 /// `PasswordBox`'s deferred selection APIs; a real, understood follow-up, not a silent omission.
-#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
+#[content(content)]
+#[prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
+#[prop(horizontal_scroll_enabled: Option<bool>)]
+#[prop(vertical_scroll_enabled: Option<bool>)]
 pub trait ScrollView {
     fn set_content(&self, content: Rc<dyn UIElementExt>);
     fn set_horizontal_scroll_enabled(&self, enabled: bool);
@@ -1486,6 +1548,10 @@ pub trait ScrollView {
 }
 
 #[elwindui_macros::class(trait_only)]
+#[prop(text: String)]
+#[prop(shortcut: Option<String>)]
+#[prop(enabled: Option<bool>)]
+#[prop(on_select: fn())]
 pub trait MenuItem {
     fn set_text(&self, text: &str);
     fn set_enabled(&self, enabled: bool);
@@ -1764,6 +1830,8 @@ impl<T: ?Sized> DynamicChildSlot<T> {
 }
 
 #[elwindui_macros::class(trait_only)]
+#[content(items)]
+#[prop(items: crate::ui::ListExt<dyn crate::ui::MenuItemExt>)]
 pub trait Menu {
     fn add_item(&self, item: &dyn MenuItemExt);
     fn remove_item(&self, item: &dyn MenuItemExt);
@@ -1779,12 +1847,17 @@ pub trait Menu {
 }
 
 #[elwindui_macros::class(trait_only)]
+#[prop(text: String)]
+#[content(submenu)]
+#[prop(submenu: std::rc::Rc<dyn crate::ui::MenuExt>)]
 pub trait MenuBarItem {
     fn set_text(&self, text: &str);
     fn set_submenu(&self, submenu: Rc<dyn MenuExt>);
 }
 
 #[elwindui_macros::class(trait_only)]
+#[content(items)]
+#[prop(items: crate::ui::ListExt<dyn crate::ui::MenuBarItemExt>)]
 pub trait MenuBar {
     fn add_item(&self, item: &dyn MenuBarItemExt);
     fn remove_item(&self, item: &dyn MenuBarItemExt);
@@ -1796,7 +1869,12 @@ pub trait MenuBar {
 /// `TabView`'s class trait (docs/elwindui_spec.md 付録H.2.1a). Its content is a live, ordered
 /// collection of `TabViewItem`s. Dynamic child ranges update this collection directly; the
 /// backend reconciles the corresponding native tabs.
-#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl)]
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
+#[content(children)]
+#[prop(children: Vec<std::rc::Rc<dyn crate::ui::TabViewItemExt>>)]
+#[prop(selected_index: usize)]
+#[prop(on_select: fn(usize))]
+#[prop(on_new_tab: fn())]
 pub trait TabView {
     fn children(&self) -> &dyn ListExt<dyn TabViewItemExt>;
 }
@@ -1804,7 +1882,12 @@ pub trait TabView {
 /// `TabViewItem`'s own class trait. No `inherits`: like `Window`,
 /// `TabViewItem` is never itself embedded as a real `Rc<dyn UIElement>` node (see its own
 /// `builtins.elwind` doc comment), so it has no meaningful `NativeControl`/`UIElement` ancestor.
-#[elwindui_macros::class(trait_only)]
+#[elwindui_macros::class(trait_only, sealed)]
+#[prop(header: String)]
+#[content(content)]
+#[prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
+#[prop(closable: Option<bool>)]
+#[prop(on_close: fn())]
 pub trait TabViewItem {}
 
 /// `Window`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — also the `component X inherits
@@ -1813,6 +1896,15 @@ pub trait TabViewItem {}
 /// `Menu`/`MenuBar`/`MenuBarItem` just above (see this module's own doc comment on that group) —
 /// `impl Window for WindowImpl` downcasts it back to its own concrete `MenuBarImpl` internally.
 #[elwindui_macros::class(trait_only)]
+#[prop(title: String)]
+#[prop(menu_bar: Option<std::rc::Rc<dyn crate::ui::MenuBarExt>>)]
+#[content(content)]
+#[prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
+#[prop(theme: Option<crate::theme::ThemeHandle>)]
+#[prop(onetime, left: Option<f32>)]
+#[prop(onetime, top: Option<f32>)]
+#[prop(onetime, width: Option<f32>)]
+#[prop(onetime, height: Option<f32>)]
 pub trait Window {
     fn set_title(&self, title: &str);
     fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>);
@@ -1853,6 +1945,8 @@ pub trait Window {
 /// construct()` for their own `base` field (see e.g. `Shape::construct`/`Control::construct` for the
 /// same shape one level up the hierarchy, where the base *is* directly instantiable).
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
+#[prop(children: crate::ui::UIElementCollection)]
+#[prop(background: Option<crate::graphics::Brush>)]
 pub struct Layout {
     /// Logical children for this layout. Its mutations update the owner's Visual collection.
     pub children: UIElementCollection,
@@ -1926,6 +2020,8 @@ impl Layout {
 /// (not on `Layout`) since it's meaningless to `Grid`, `Layout`'s other concrete subclass — see
 /// `Layout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[content(children)]
+#[prop(spacing: Option<f32>)]
 pub struct VerticalLayout {
     spacing: Cell<f32>,
 }
@@ -1991,6 +2087,8 @@ impl VerticalLayout {
 /// `HorizontalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). `spacing` lives here
 /// (not on `Layout`) — see `VerticalLayout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[content(children)]
+#[prop(spacing: Option<f32>)]
 pub struct HorizontalLayout {
     spacing: Cell<f32>,
 }
@@ -2054,7 +2152,10 @@ impl HorizontalLayout {
 /// 付録H.2.2), so its natural size is just its own drawn bounds.
 /// `Shape`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `Shape` has no further
 /// DSL-level subclass today.
-#[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
+#[prop(fill: Option<crate::graphics::Brush>)]
+#[prop(stroke: Option<crate::graphics::Brush>)]
+#[prop(stroke_width: Option<f32>)]
 pub struct Shape {
     pub fill: RefCell<Option<Brush>>,
     pub stroke: RefCell<Option<Brush>>,
@@ -2119,7 +2220,8 @@ impl Shape {
 /// `builtin::Rectangle`(docs/elwindui_builtins_spec.md 付録G/N)。バックエンド非依存な合成 builtin
 /// としてここに手書きする。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
 /// 自身の共通描画メソッドを`base`委譲として登録している。
-#[elwindui_macros::class(inherits = crate::ui::Shape)]
+#[elwindui_macros::class(inherits = crate::ui::Shape, sealed)]
+#[prop(corner_radius: Option<f32>)]
 pub struct Rectangle {
     stroke_width: Option<f32>,
     corner_radius: Cell<Option<f32>>,
@@ -2177,26 +2279,25 @@ impl Rectangle {
     // `component X inherits Rectangle` would embed unwrapped as its own `base` field, mirroring
     // `Control`/`Shape`'s own `construct` (`Rectangle` is `#[sealed]` today, so nothing actually
     // reaches this via that path yet, but the shape stays consistent with every other builtin).
-    fn construct(
-        fill: Option<Brush>,
-        stroke: Option<Brush>,
-        stroke_width: Option<f32>,
-        corner_radius: Option<f32>,
-    ) -> Self {
-        let shape = Shape::construct();
-        shape.set_fill(fill);
-        shape.set_stroke(stroke);
-        shape.set_stroke_width(stroke_width.unwrap_or(0.0));
+    //
+    // Zero-arg, like every other builtin's `construct()` (`#[class]`'s auto-generated `new()`
+    // always mirrors this signature verbatim — see `elwindui_macros::class`'s own doc comment on
+    // `auto_new` — so a non-zero-arg `construct()` here means a non-zero-arg `new()`, which
+    // `elwindui-codegen`'s `emit_external_construction` can never supply: with no `TypeInfo` to
+    // consult (builtins.elwind removed, Refs #14), it always calls `Type::new()` and configures
+    // everything through the already-existing `set_fill`/`set_stroke`/`set_stroke_width`/
+    // `set_corner_radius` setters instead).
+    fn construct() -> Self {
         Self {
-            base: shape,
-            stroke_width,
-            corner_radius: Cell::new(corner_radius),
+            base: Shape::construct(),
+            stroke_width: None,
+            corner_radius: Cell::new(None),
         }
     }
 }
 
 /// `builtin::Ellipse`(docs/elwindui_builtins_spec.md 付録G/N)。`Rectangle`の doc comment 参照。
-#[elwindui_macros::class(inherits = crate::ui::Shape)]
+#[elwindui_macros::class(inherits = crate::ui::Shape, sealed)]
 pub struct Ellipse {
     stroke_width: Option<f32>,
 }
@@ -2235,16 +2336,15 @@ impl Ellipse {
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
         self
     }
-    // The bare (not `Rc`-wrapped) value `#[class]`'s auto-generated `new` wraps — see `Rectangle`'s
-    // own `construct` doc comment for why this split exists.
-    fn construct(fill: Option<Brush>, stroke: Option<Brush>, stroke_width: Option<f32>) -> Self {
-        let shape = Shape::construct();
-        shape.set_fill(fill);
-        shape.set_stroke(stroke);
-        shape.set_stroke_width(stroke_width.unwrap_or(0.0));
+    // Zero-arg — see `Rectangle`'s own `construct` doc comment for why. `stroke_width` (this own
+    // field, distinct from `base.stroke_width`) has no setter of its own and nothing reads it
+    // internally (`render` above uses `self.base.stroke_width`, already configured through the
+    // inherited `Shape::set_stroke_width`) — it only ever echoed back whatever `construct` was
+    // originally given, so defaulting it to `None` here changes no observable behavior.
+    fn construct() -> Self {
         Self {
-            base: shape,
-            stroke_width,
+            base: Shape::construct(),
+            stroke_width: None,
         }
     }
 }
@@ -2268,6 +2368,9 @@ fn stretch_to_image_fit(stretch: Stretch) -> ImageFit {
 /// `draw_vector_image` directly depending on which `ImageSource` variant `source` holds, so no
 /// per-backend construction code is needed at all (unlike `NativeControl`-family builtins).
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[prop(source: Option<crate::graphics::ImageSource>)]
+#[prop(stretch: Option<crate::graphics::Stretch>)]
+#[prop(rasterize: Option<crate::graphics::VectorRasterizeMode>)]
 pub struct Image {
     source: RefCell<Option<ImageSource>>,
     stretch: Cell<Stretch>,
@@ -2363,16 +2466,13 @@ impl Image {
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
         self
     }
-    fn construct(
-        source: Option<ImageSource>,
-        stretch: Option<Stretch>,
-        rasterize: Option<VectorRasterizeMode>,
-    ) -> Self {
+    // Zero-arg — see `Rectangle`'s own `construct` doc comment for why.
+    fn construct() -> Self {
         Self {
             base: UIElement::construct(),
-            source: RefCell::new(source),
-            stretch: Cell::new(stretch.unwrap_or(Stretch::Uniform)),
-            rasterize: Cell::new(rasterize.unwrap_or_default()),
+            source: RefCell::new(None),
+            stretch: Cell::new(Stretch::Uniform),
+            rasterize: Cell::new(VectorRasterizeMode::default()),
         }
     }
 }
@@ -2388,6 +2488,9 @@ impl Image {
 /// `Color`), inherited the same way `font_size`/`font_family`/etc. are (指示書 §2/§8). There is no
 /// DSL `color:` property anymore; use `foreground:` instead.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[text_style]
+#[prop(text: String)]
+#[prop(text_alignment: Option<crate::ui::TextAlignment>)]
 pub struct TextBlock {
     pub text: RefCell<String>,
     pub text_style: crate::graphics::TextStyleStorage,
@@ -2446,8 +2549,8 @@ impl TextBlock {
     fn as_text_style_owner(&self) -> Option<&dyn TextStyleOwner> {
         Some(self)
     }
-    fn set_text(&self, text: String) {
-        *self.text.borrow_mut() = text;
+    fn set_text(&self, text: &str) {
+        *self.text.borrow_mut() = text.to_string();
         self.invalidate_measure();
     }
     fn set_text_alignment(&self, alignment: TextAlignment) {
@@ -2493,6 +2596,10 @@ impl TextStyleOwner for TextBlock {
 /// DSL-level subclass composed via `base: Control` (e.g. `builtin::ContentControl`,
 /// `crates/elwindui-builtins/src/builtins.elwind`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
+#[text_style]
+#[content(children)]
+#[prop(children: crate::ui::UIElementCollection)]
+#[prop(padding: Option<f32>)]
 pub struct Control {
     pub padding: Cell<f32>,
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
@@ -2593,6 +2700,8 @@ impl TextStyleOwner for Control {
 /// `Control`の薄いラッパー。二重管理を避けるため、バックエンド非依存な合成 builtin としてここに直接手書きする。
 /// Content is a single Visual child managed directly by this type.
 #[elwindui_macros::class(inherits = crate::ui::Control)]
+#[content(content)]
+#[prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
 pub struct ContentControl {
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
 }
@@ -2664,6 +2773,11 @@ fn grid_cell_of(child: &Rc<dyn UIElementExt>) -> GridCell {
 }
 
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[content(children)]
+#[prop(rows: Vec<crate::layout::GridLength>)]
+#[prop(columns: Vec<crate::layout::GridLength>)]
+#[prop(attached, row: i32 = 0)]
+#[prop(attached, column: i32 = 0)]
 pub struct Grid {
     pub rows: RefCell<Vec<GridLength>>,
     pub columns: RefCell<Vec<GridLength>>,
@@ -3765,23 +3879,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn abstract_shape_has_no_commands_and_no_children() {
-        // `Shape` (matching real WinUI3's `Shape`) is a pure leaf: no `Children`/content property
-        // of its own — see `Shape`'s own doc comment.
-        let shape = Shape::new();
-        shape.set_fill(Some(Brush::Solid(Color::parse_hex("#3498db").unwrap())));
-        let tree: Rc<dyn UIElementExt> = shape;
-
-        assert!(tree.visual_children().is_empty());
-        let (natives, paints) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 50.0)));
-        assert!(natives.is_empty());
-        assert!(
-            paints.is_empty(),
-            "Shape is abstract; Rectangle/Ellipse render concrete commands"
-        );
-        assert!(natives.is_empty());
-    }
+    // `abstract_shape_has_no_commands_and_no_children` used to live here. It constructed a bare
+    // `Shape`, set a fill on it, and asserted the tree still produced no paint commands — i.e. that
+    // the base class has no render of its own. `Shape` is now `abstract_class`, so `#[class]` no
+    // longer synthesizes `Shape::new()` and that state is unreachable by construction rather than by
+    // assertion. The reachable half of what it covered — a shape with neither fill nor stroke paints
+    // nothing — is exercised through a concrete `Rectangle` by
+    // `shape_is_hit_testable_only_when_fill_or_stroke_is_set` below.
 
     #[test]
     fn control_padding_shrinks_the_slot_its_children_are_arranged_into() {
@@ -4224,12 +4328,8 @@ mod tests {
     #[test]
     fn layout_background_is_transparent_by_default_and_paints_before_children() {
         let layout = VerticalLayout::new();
-        let child = Rectangle::new(
-            Some(Brush::Solid(Color::rgb(10, 20, 30))),
-            None,
-            None,
-            None,
-        );
+        let child = Rectangle::new();
+        child.set_fill(Some(Brush::Solid(Color::rgb(10, 20, 30))));
         child.set_width(20.0);
         child.set_height(20.0);
         layout.children().add(child);
@@ -4512,7 +4612,7 @@ mod tests {
         assert!(grid.as_text_style_owner().is_none());
         let stack = VerticalLayout::new();
         assert!(stack.as_text_style_owner().is_none());
-        let rect = Rectangle::new(None, None, None, None);
+        let rect = Rectangle::new();
         assert!(rect.as_text_style_owner().is_none());
     }
 
@@ -5001,7 +5101,10 @@ mod tests {
 
     fn rectangle(fill: Option<&str>, stroke: Option<&str>) -> Rc<dyn UIElementExt> {
         let to_brush = |hex: &str| Brush::Solid(Color::parse_hex(hex).unwrap());
-        Rectangle::new(fill.map(to_brush), stroke.map(to_brush), None, None)
+        let rect = Rectangle::new();
+        rect.set_fill(fill.map(to_brush));
+        rect.set_stroke(stroke.map(to_brush));
+        rect
     }
 
     #[test]

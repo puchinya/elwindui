@@ -383,9 +383,9 @@ const fn resolve_backend() -> Backend {
 
 ## 4. 標準ビルトイン部品
 
-`Window`/`Column`/`Row`/`Text`/`TextArea`/`Dropdown`等は`builtin`名前空間に属し、コード生成器が標準実装として提供する。内部実装は他コンポーネントと同じ`component`/`view`構文で表現でき、`match target::backend()`(§3.3)による網羅性検査と`native!`エスケープハッチがそのまま適用される設計だが、§3.3の通り`target::backend()`自体は未実装のため、実際の`crates/elwindui-codegen/src/builtins.elwind`はバックエンド分岐を持たず、バックエンドごとの実体はCargoフィーチャで選択される別クレート(`elwindui-backend-appkit`等)側に委ねられている。
+`Window`/`Column`/`Row`/`Text`/`TextArea`/`Dropdown`等は`builtin`名前空間に属し、コード生成器が標準実装として提供する。内部実装は他コンポーネントと同じ`component`/`view`構文(2026-07-31時点では、`elwindui-core`/各`elwindui-backend-*`crateの`#[elwindui_macros::class]`宣言というRust形式で書かれる——`docs/elwindui_tool_codegen_design.md`参照)で表現でき、`match target::backend()`(§3.3)による網羅性検査と`native!`エスケープハッチがそのまま適用される設計だが、§3.3の通り`target::backend()`自体は未実装のため、実際のビルトイン宣言はバックエンド分岐を持たず、バックエンドごとの実体はCargoフィーチャで選択される別クレート(`elwindui-backend-appkit`等)側に委ねられている。
 
-**実装状況**: `builtins.elwind`に実装済みなのは`Window`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`Control`/`ContentControl`/`Grid`/`TextArea`/`Button`/`TextBlock`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/`TabViewItem`(`Row`/`Column`という名称ではなく`HorizontalLayout`/`VerticalLayout`という名称で実装されている点に注意)。`Dropdown`/`Option`、`Canvas`、`NavigationHost`/`Route`、`Dialog`、`Tooltip`、`VirtualList`は仕様のみで未実装。詳細は`docs/elwindui_builtins_spec.md`冒頭の分類ツリーと`docs/elwindui_implementation_status.md`を参照。
+**実装状況**: 実装済みなのは`Window`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`Control`/`ContentControl`/`Grid`/`TextArea`/`Button`/`TextBlock`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/`TabViewItem`(`Row`/`Column`という名称ではなく`HorizontalLayout`/`VerticalLayout`という名称で実装されている点に注意)。`Dropdown`/`Option`、`Canvas`、`NavigationHost`/`Route`、`Dialog`、`Tooltip`、`VirtualList`は仕様のみで未実装。詳細は`docs/elwindui_builtins_spec.md`冒頭の分類ツリーと`docs/elwindui_implementation_status.md`を参照。
 
 **代表的な実装パターン(`Stack` → `Column`/`Row`)**: 共通の`Stack`部品に`orientation`を渡して処理を委譲し、`Column`/`Row`はその薄いラッパーとして定義する。
 
@@ -492,12 +492,13 @@ pub struct UIElement {
 
 ```
 UIElement (構造体、Margin/Alignment共通実装。baseなしの既定クラス。トレイトは`UIElementExt`。
- │        `builtins.elwind`上もDSLの`component UIElement {}`として存在する全ての根)
+ │        `elwindui-core::ui`上も`#[elwindui_macros::class] pub struct UIElement {}`として
+ │        存在する全ての根)
  ├─ NativeControl<H> => Button, TextArea, TabView, ... (実ハンドルHを保持する、ビジュアルツリーに
  │                       実際に埋め込まれる型のみ。MenuBar/MenuBarItem/Menu/MenuItem/TabViewItemは
  │                       ツリーに参加しない(measure/arrangeが呼ばれない)ため`#[native]`直接指定で
- │                       この枝に入らない——`Window`と同じ扱い、§5.1a・builtins.elwindの
- │                       `NativeControl`マーカー自身のコメント参照)
+ │                       この枝に入らない——`Window`と同じ扱い、§5.1a・`NativeControl`
+ │                       マーカー自身のコメント参照)
  ├─ TextBlock            (プリミティブ描画・非native、付録F.3)
  ├─ Shape => Rectangle, Ellipse (プリミティブ図形、子を持たない。付録F.6)
  ├─ Control              (Padding + ContentAlignmentを持つ、複数の小部品からなる複合部品。
@@ -506,9 +507,10 @@ UIElement (構造体、Margin/Alignment共通実装。baseなしの既定クラ�
  │   │                    差し替えは設計のみ・未実装、§5.12参照)
  │   └─ ContentControl   (Content1つだけを持つ複合部品、`inherits`によるDSL合成の実例。§2.1)
  └─ Layout => VerticalLayout, HorizontalLayout, Grid (レイアウトコンテナを束ねる共通親。
-                          `builtins.elwind`上もDSLの`component Layout inherits UIElement { children:
-                          UIElementCollection }`として存在し、`children`はVerticalLayout/
-                          HorizontalLayout/Gridへ自動的に継承される(§5.2)。付録F.2・付録F.11)
+                          `elwindui-core::ui`上も`#[elwindui_macros::class] pub struct Layout {
+                          children: UIElementCollection, .. }`(inherits UIElement)として存在し、
+                          `children`はVerticalLayout/HorizontalLayout/Gridへ自動的に継承される
+                          (§5.2)。付録F.2・付録F.11)
 ```
 
 `Layout`は`children: UIElementCollection`という1フィールドのみを持ち、`VerticalLayout`/`HorizontalLayout`/`Grid`構造体がこれを実装する。`VerticalLayout`/`HorizontalLayout`はさらに、DSL上には現れない共通の内部実装`Stack`(`orientation`/`spacing`/`children`を持つ)を`base`フィールドとして共有し、`UIElementExt`をそこへ委譲する——各バックエンドの`NativeControl`実装を`Button`/`TextArea`/`TabView`が共有するのと同じ trait+struct+base の形(§5.1a)。`Grid`は`rows`/`columns`/`children`を自前で持ち、`Stack`は経由しない。
@@ -754,13 +756,14 @@ elwindui-backend-gtk4   # 同上、gtk-rs経由(現状スタブのみ)
 
 ### 5.10 ルーティングイベント(WinUI3スタイル)
 
-WinUI3の`RoutedEvent`に倣い、`#[routed]`属性(`#[two_way]`と同じ、`.elwind`のコールバック型フィールドに付与するアトリビュート)を付けたイベントは、発生元の要素から祖先へバブルする。対象は`on_click`のような入力系イベントに限られ、`TabView`の`on_select(usize)`のようなウィジェット固有の型付きペイロードを持つコールバックはルーティング対象外(既存の直接配線のまま)。
+WinUI3の`RoutedEvent`に倣い、`#[routed]`属性(`#[two_way]`と同じ、コールバック型フィールドに付与するアトリビュート)を付けたイベントは、発生元の要素から祖先へバブルする。対象は`on_click`のような入力系イベントに限られ、`TabView`の`on_select(usize)`のようなウィジェット固有の型付きペイロードを持つコールバックはルーティング対象外(既存の直接配線のまま)。
 
 ```rust
-// crates/elwindui-codegen/src/builtins.elwind (Button)
-component Button inherits NativeControl {
-    #[routed]
-    on_click: fn(),
+// crates/elwindui-core/src/ui.rs (Button)
+#[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
+#[prop(routed, on_click: fn())]
+pub trait Button {
+    fn set_on_click(&self, callback: Box<dyn Fn()>);
 }
 ```
 
@@ -1108,7 +1111,7 @@ Button {
 }
 ```
 
-`#[shortcut(...)]`は`on_click`のようなコールバック型フィールドの**宣言**(`builtins.elwind`の`Button.on_click: fn()`)ではなく、`Button { ... }`という**要素の使用箇所**に付ける属性である点に注意——`#[routed]`(§5.10)がフィールド宣言そのものに付く(全`Button`インスタンス共通の配線方式を決める)のとは対照的に、ショートカットは本質的にインスタンスごとの決定(「このSaveボタンだけCtrl+S」)なので、`builtins.elwind`側の共有宣言には付けられない。構文上は`#[id("...")]`(付録I.1の`let`束縛)と同じく、要素の`{}`本体内で`属性名: 値`という行の直前に書く、通常の属性行に対する注釈という位置づけ。
+`#[shortcut(...)]`は`on_click`のようなコールバック型フィールドの**宣言**(`Button`の`on_click: fn()`、§5.10参照)ではなく、`Button { ... }`という**要素の使用箇所**に付ける属性である点に注意——`#[routed]`(§5.10)がフィールド宣言そのものに付く(全`Button`インスタンス共通の配線方式を決める)のとは対照的に、ショートカットは本質的にインスタンスごとの決定(「このSaveボタンだけCtrl+S」)なので、`Button`自身の共有宣言には付けられない。構文上は`#[id("...")]`(付録I.1の`let`束縛)と同じく、要素の`{}`本体内で`属性名: 値`という行の直前に書く、通常の属性行に対する注釈という位置づけ。
 
 `#[shortcut("...")]`はプラットフォーム非依存の修飾キー表記(`Ctrl`/`Shift`/`Alt`/`Meta`)を使う。コード生成時に、macOS向けビルド(`backend-appkit` Cargoフィーチャ)では`Ctrl`が自動的に`Cmd`に読み替えられる(WinUI3等の他backendではそのまま`Ctrl`として扱う)、というプラットフォーム変換規則を標準で持つ——`target::backend()`ではなく実在する仕組みである`elwindui`ファサードのCargoフィーチャで振り分ける(`docs/elwindui_implementation_status.md`参照)。明示的にOSごとの割り当てを変えたい場合は複数指定できる:
 
@@ -1195,7 +1198,7 @@ theme AppTheme {
 
 `view`内の予期しないエラーでアプリ全体をクラッシュさせず、該当部分だけフォールバック表示に切り替える。
 
-**実装状況**: `ErrorBoundary`ビルトイン・`#[catches(...)]`ともに`crates/elwindui-codegen/src/builtins.elwind`にはまだ定義がなく未実装。本節は設計のみ。
+**実装状況**: `ErrorBoundary`ビルトイン・`#[catches(...)]`ともに`elwindui-core`にはまだ定義がなく未実装。本節は設計のみ。
 
 ```rust
 ErrorBoundary {

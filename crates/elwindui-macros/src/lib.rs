@@ -80,6 +80,31 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// `#[elwindui::dsl_enum] enum Name { A, B, C }` — opts a plain Rust `enum` into `view!`'s
+/// `match`/`if let` exhaustiveness checking, the same way `.elwind` text's own `enum Name { .. }`
+/// syntax always got it. Nothing about a bare `enum` item is otherwise visible to any proc-macro
+/// (unlike a `#[elwindui::component]`/`#[elwindui::viewmodel]` item), so an opt-in attribute is the
+/// only way to register it into the same-crate symbol table a sibling `#[elwindui::component]`'s
+/// `view!` is checked against. Every variant must be a bare unit variant (no payload) — the enum
+/// body itself passes through unchanged, since it's real Rust, matched with real Rust `match`.
+#[proc_macro_attribute]
+pub fn dsl_enum(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item_enum = match syn::parse::<syn::ItemEnum>(item) {
+        Ok(item_enum) => item_enum,
+        Err(e) => {
+            let msg = format!("#[elwindui::dsl_enum]: expected a plain `enum Name {{ .. }}`: {e}");
+            return quote::quote! { compile_error!(#msg); }.into();
+        }
+    };
+    match elwindui_codegen::generate_dsl_enum_from_item_enum(&item_enum) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => {
+            let msg = format!("#[elwindui::dsl_enum]: {e}");
+            quote::quote! { compile_error!(#msg); }.into()
+        }
+    }
+}
+
 /// Declares a typed Rust theme.
 ///
 /// The annotated struct is a declaration surface; its fields become typed tokens and the

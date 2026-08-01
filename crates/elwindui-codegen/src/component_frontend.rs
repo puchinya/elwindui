@@ -25,12 +25,21 @@ use std::sync::{Mutex, OnceLock};
 
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` (already
 /// parsed as a `syn::ItemStruct` by the `elwindui-macros` proc-macro, `base` from the attribute's
-/// own `inherits Base` argument) — builds the matching `ComponentDef`/`ViewDef` pair.
+/// own `inherits Base` argument) — builds the matching `ComponentDef`/`ViewDef` pair. `Name` may
+/// omit the `view! { .. }` field entirely — same as a `.elwind` `component X { .. }` with no
+/// paired `view X { .. }` block — in which case the second return value is `None` (the great
+/// majority of builtins in `elwindui-core`/backend crates are `view`-less; this frontend's own
+/// callers only ever chain a real builtin through `#[elwindui_macros::class]` directly, not this
+/// one, but ordinary user components composed purely of `#[param]`/`#[prop]` fields with no view
+/// tree of their own — e.g. a pure data-holding leaf meant to be constructed and never rendered
+/// standalone — have the same legitimate shape).
 pub fn component_and_view_from_item_struct(
     base: Option<String>,
     item_struct: &syn::ItemStruct,
-) -> Result<(ComponentDef, ViewDef), String> {
+) -> Result<(ComponentDef, Option<ViewDef>), String> {
     let name = item_struct.ident.to_string();
+    let (embedded, sealed, native, is_abstract, text_style, content_field) =
+        component_item_attrs(&item_struct.attrs)?;
 
     let syn::Fields::Named(named) = &item_struct.fields else {
         return Err(format!("`{name}` must have named fields"));
@@ -42,34 +51,35 @@ pub fn component_and_view_from_item_struct(
         .filter(|f| is_view_macro_field(f))
         .collect();
     let view_field = match view_fields.as_slice() {
-        [only] => *only,
-        [] => {
-            return Err(format!(
-                "`{name}`: expected exactly one field typed `view! {{ .. }}` to supply the view body, found none"
-            ));
-        }
+        [only] => Some(*only),
+        [] => None,
         _ => {
             return Err(format!(
-                "`{name}`: expected exactly one field typed `view! {{ .. }}`, found {}",
+                "`{name}`: expected at most one field typed `view! {{ .. }}`, found {}",
                 view_fields.len()
             ));
         }
     };
 
-    let syn::Type::Macro(view_macro) = &view_field.ty else {
-        unreachable!("is_view_macro_field only returns fields whose type is a macro invocation");
-    };
-    let view_src = view_macro.mac.tokens.to_string();
-    let (on_mount, on_unmount, lets, root) = parser::parse_view_body(&view_src)
-        .map_err(|e| format!("`{name}`: invalid `view! {{ .. }}` body: {e}"))?;
-
-    let view_def = ViewDef {
-        target: name.clone(),
-        on_mount,
-        on_unmount,
-        lets,
-        root,
-    };
+    let view_def = view_field
+        .map(|view_field| {
+            let syn::Type::Macro(view_macro) = &view_field.ty else {
+                unreachable!(
+                    "is_view_macro_field only returns fields whose type is a macro invocation"
+                );
+            };
+            let view_src = view_macro.mac.tokens.to_string();
+            let (on_mount, on_unmount, lets, root) = parser::parse_view_body(&view_src)
+                .map_err(|e| format!("`{name}`: invalid `view! {{ .. }}` body: {e}"))?;
+            Ok::<_, String>(ViewDef {
+                target: name.clone(),
+                on_mount,
+                on_unmount,
+                lets,
+                root,
+            })
+        })
+        .transpose()?;
 
     let mut non_view_struct = item_struct.clone();
     if let syn::Fields::Named(named) = &mut non_view_struct.fields {
@@ -87,19 +97,72 @@ pub fn component_and_view_from_item_struct(
         base,
         fields,
         methods: Vec::new(),
-        embedded: false,
-        sealed: false,
-        native: false,
-        is_abstract: false,
-        text_style: false,
-        content_field: None,
+        embedded,
+        sealed,
+        native,
+        is_abstract,
+        text_style,
+        content_field,
     };
 
     Ok((component_def, view_def))
 }
 
+/// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract_]`/`#[text_style]`/`#[content(field_name)]`,
+/// read off `item_struct.attrs` — the Rust-macro-path counterpart of `parser.rs`'s
+/// `parse_item_attrs`, same vocabulary, minus the `.elwind`-text-only wart of `abstract` colliding
+/// with the reserved Rust keyword (spelled `abstract_` here instead — decided over introducing a
+/// raw-identifier `r#abstract`, since this whole attribute vocabulary is otherwise plain
+/// identifiers). Any other component-level attribute the user wrote (`#[derive(..)]`, doc
+/// comments, ...) is left alone/ignored — `#[elwindui::component]` replaces the whole struct with
+/// generated code, so nothing downstream ever re-emits `item_struct.attrs` verbatim.
+fn component_item_attrs(
+    attrs: &[syn::Attribute],
+) -> Result<(bool, bool, bool, bool, bool, Option<String>), String> {
+    let mut embedded = false;
+    let mut sealed = false;
+    let mut native = false;
+    let mut is_abstract = false;
+    let mut text_style = false;
+    let mut content_field = None;
+    for attr in attrs {
+        let Some(attr_name) = attr.path().get_ident().map(|i| i.to_string()) else {
+            continue;
+        };
+        match attr_name.as_str() {
+            "embedded" => embedded = true,
+            "sealed" => sealed = true,
+            "native" => native = true,
+            "abstract_" => is_abstract = true,
+            "text_style" => text_style = true,
+            "content" => {
+                let field: syn::Ident = attr.parse_args().map_err(|e| {
+                    format!("invalid #[content(field_name)] arguments: {e}")
+                })?;
+                content_field = Some(field.to_string());
+            }
+            _ => continue,
+        }
+    }
+    Ok((embedded, sealed, native, is_abstract, text_style, content_field))
+}
+
 fn is_view_macro_field(field: &syn::Field) -> bool {
     matches!(&field.ty, syn::Type::Macro(tm) if tm.mac.path.is_ident("view"))
+}
+
+/// `ast::Item::Component` plus, only when present, `ast::Item::View` — every call site building a
+/// `Module` from `component_and_view_from_item_struct`'s output needs this same conditional push
+/// now that a `view!`-less component is legal (see that function's own doc comment).
+pub(crate) fn component_module_items(
+    component_def: ComponentDef,
+    view_def: Option<ViewDef>,
+) -> Vec<ast::Item> {
+    let mut items = vec![ast::Item::Component(component_def)];
+    if let Some(view_def) = view_def {
+        items.push(ast::Item::View(view_def));
+    }
+    items
 }
 
 /// The identifier of the crate currently being compiled, read fresh from the environment variables
@@ -166,6 +229,253 @@ pub fn register_same_crate_component(
         .insert((compiling_crate_key(), name.to_string()), stored);
 }
 
+/// A registered `#[elwindui::viewmodel] mod foo { .. }` — kept as reparseable source text for the
+/// same reason `StoredComponent` is (a `ViewModelDef` is full of non-`Send`/`Sync` `syn` types a
+/// `static`-held `Mutex` can't store).
+struct StoredViewModel {
+    item_mod_src: String,
+}
+
+/// Keyed by `(compiling_crate_key(), viewmodel type name)` — mirrors `same_crate_components`, but
+/// for `#[elwindui::viewmodel] mod foo { struct Foo { .. } }` (`elwindui-macros`'s `viewmodel`
+/// attribute macro doesn't keep the `mod` wrapper past expansion, so `Foo` itself is what a sibling
+/// `#[elwindui::component]`'s field type or `bind!` target actually names — see
+/// `register_same_crate_viewmodel`'s own doc comment). Populated by
+/// `lib.rs::generate_viewmodel_from_item_mod`; read by `sibling_viewmodel_modules` so a
+/// `#[bindable]`/`bind!`-using component elsewhere in the same crate can be checked against the
+/// viewmodel's real fields instead of silently going unchecked (the gap 05d4861-era `validate.rs`
+/// comments call out: without this, `vm.typo_field` never gets caught on the proc-macro path). Same
+/// declaration-order requirement as `same_crate_components` — a viewmodel must be declared before
+/// the component(s) that reference it.
+fn same_crate_viewmodels() -> &'static Mutex<HashMap<(String, String), StoredViewModel>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredViewModel>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers `name`'s already-successfully-generated `#[elwindui::viewmodel] mod item_mod { .. }` so
+/// a later same-crate `#[elwindui::component]`/`#[elwindui::viewmodel]` invocation can resolve it —
+/// see `same_crate_viewmodels`'s own doc comment. `name` is the viewmodel *struct's* name (e.g.
+/// `DocumentViewModel`), not the enclosing `mod`'s name (e.g. `document_view_model`) — the two
+/// usually differ, and it's the struct name real Rust code (field types, `bind!` targets) actually
+/// references. Only call this after this viewmodel's own codegen has actually succeeded.
+pub fn register_same_crate_viewmodel(name: &str, item_mod: &syn::ItemMod) {
+    let stored = StoredViewModel {
+        item_mod_src: quote::quote! { #item_mod }.to_string(),
+    };
+    same_crate_viewmodels()
+        .lock()
+        .unwrap()
+        .insert((compiling_crate_key(), name.to_string()), stored);
+}
+
+/// Every same-crate `#[elwindui::viewmodel]` registered so far, rebuilt as one `Module` each — see
+/// `same_crate_viewmodels`'s own doc comment. Unlike `sibling_component_modules`, there's no
+/// `skip_name` guard: a viewmodel never references itself as a sibling type the way a component's
+/// `view!` can reference another component.
+pub fn sibling_viewmodel_modules() -> Vec<Module> {
+    let key = compiling_crate_key();
+    let store = same_crate_viewmodels().lock().unwrap();
+    store
+        .iter()
+        .filter(|((crate_key, _), _)| crate_key == &key)
+        .map(|(_, stored)| {
+            let item_mod: syn::ItemMod = syn::parse_str(&stored.item_mod_src)
+                .expect("internal: failed to reparse a registered sibling viewmodel's mod text");
+            let def = attr_frontend::viewmodel_def_from_item_mod(&item_mod)
+                .expect("internal: failed to rebuild a registered sibling viewmodel");
+            Module {
+                path: Vec::new(),
+                uses: Vec::new(),
+                items: vec![ast::Item::ViewModel(def)],
+                allows_external_builtins: true,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+/// A registered `#[elwindui::dsl_enum] enum Foo { .. }` — kept as reparseable source text for the
+/// same reason `StoredComponent`/`StoredViewModel` are.
+struct StoredEnum {
+    item_enum_src: String,
+}
+
+/// Keyed by `(compiling_crate_key(), enum name)` — mirrors `same_crate_viewmodels`, but for a plain
+/// Rust `enum` a `view!`'s `match`/`if let` needs exhaustiveness-checked against. Populated by
+/// `lib.rs::generate_dsl_enum_from_item_enum`; read by `sibling_enum_modules`. A bare `enum Name {
+/// .. }` is otherwise invisible to any proc-macro (unlike a `#[elwindui::component]`/`#[elwindui::
+/// viewmodel]` struct, nothing marks it as DSL-relevant) — `#[elwindui::dsl_enum]` is the opt-in:
+/// the enum body passes through untouched (it's still a real Rust `enum`, matched with real Rust
+/// `match`), this registry is the only side effect. Same declaration-order requirement as the other
+/// two registries — an enum must be declared before the component(s) that match over it.
+fn same_crate_enums() -> &'static Mutex<HashMap<(String, String), StoredEnum>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredEnum>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers `name`'s already-emitted `#[elwindui::dsl_enum] enum item_enum { .. }` — see
+/// `same_crate_enums`'s own doc comment.
+pub fn register_same_crate_enum(name: &str, item_enum: &syn::ItemEnum) {
+    let stored = StoredEnum {
+        item_enum_src: quote::quote! { #item_enum }.to_string(),
+    };
+    same_crate_enums()
+        .lock()
+        .unwrap()
+        .insert((compiling_crate_key(), name.to_string()), stored);
+}
+
+/// Every same-crate `#[elwindui::dsl_enum]` registered so far, rebuilt as one `Module` each — see
+/// `same_crate_enums`'s own doc comment.
+pub fn sibling_enum_modules() -> Vec<Module> {
+    let key = compiling_crate_key();
+    let store = same_crate_enums().lock().unwrap();
+    store
+        .iter()
+        .filter(|((crate_key, _), _)| crate_key == &key)
+        .map(|(_, stored)| {
+            let item_enum: syn::ItemEnum = syn::parse_str(&stored.item_enum_src)
+                .expect("internal: failed to reparse a registered sibling enum's item text");
+            let def = enum_def_from_item_enum(&item_enum)
+                .expect("internal: failed to rebuild a registered sibling enum");
+            Module {
+                path: Vec::new(),
+                uses: Vec::new(),
+                items: vec![ast::Item::Enum(def)],
+                allows_external_builtins: true,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+/// `#[elwindui::dsl_enum] enum Name { A, B, C }` -> `EnumDef { name: "Name", variants: ["A", "B",
+/// "C"] }`. Every variant must be a bare unit variant — same restriction `.elwind`'s own `enum`
+/// syntax has (§7 of the DSL spec: "no anonymous unions", enums are plain value sets), and there's
+/// no way to `match` a tuple/struct variant's payload from `view!`'s own limited match-arm syntax
+/// anyway.
+pub fn enum_def_from_item_enum(item_enum: &syn::ItemEnum) -> Result<ast::EnumDef, String> {
+    let name = item_enum.ident.to_string();
+    let variants = item_enum
+        .variants
+        .iter()
+        .map(|v| {
+            if !matches!(v.fields, syn::Fields::Unit) {
+                return Err(format!(
+                    "enum `{name}`: variant `{}` must be a bare unit variant (no payload)",
+                    v.ident
+                ));
+            }
+            Ok(v.ident.to_string())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(ast::EnumDef { name, variants })
+}
+
+/// Matches an attribute whose path's *last* segment is `name` — recognizes both `#[elwindui::
+/// component]` and a bare `#[component]` (as written after `use elwindui::component;`), the same
+/// way real Rust attribute-macro resolution would, without actually resolving anything (this is a
+/// read-only, no-macro-expansion caller — `elwindui-languageserver`, which has a whole `.rs` file's
+/// text but no compiled crate to resolve paths against).
+fn attr_path_ends_with(attrs: &[syn::Attribute], name: &str) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.path().segments.last().is_some_and(|s| s.ident == name))
+}
+
+/// Finds the `#[..component(inherits Base)]`/`#[..component]` attribute among `attrs` (see
+/// `attr_path_ends_with`) and parses its `inherits Base` argument, if any — the
+/// `elwindui-languageserver`-side counterpart to `elwindui_macros::parse_inherits_arg`, which
+/// instead receives the attribute's own argument tokens directly from the proc-macro system rather
+/// than having to find the attribute itself first.
+fn inherits_arg_from_component_attrs(attrs: &[syn::Attribute]) -> Result<Option<String>, String> {
+    let Some(attr) = attrs
+        .iter()
+        .find(|attr| attr.path().segments.last().is_some_and(|s| s.ident == "component"))
+    else {
+        return Ok(None);
+    };
+    let syn::Meta::List(list) = &attr.meta else {
+        return Ok(None);
+    };
+    if list.tokens.is_empty() {
+        return Ok(None);
+    }
+    use syn::parse::Parser;
+    (|input: syn::parse::ParseStream| {
+        let kw: syn::Ident = input.parse()?;
+        if kw != "inherits" {
+            return Err(syn::Error::new(kw.span(), "expected `inherits <Base>`"));
+        }
+        let base: syn::Ident = input.parse()?;
+        Ok(Some(base.to_string()))
+    })
+    .parse2(list.tokens.clone())
+    .map_err(|e| e.to_string())
+}
+
+/// Builds one `Module` per `#[elwindui::component]` struct / `#[elwindui::viewmodel]` mod /
+/// `#[elwindui::dsl_enum]` enum found among `file`'s top-level items, in source order — the
+/// `elwindui-languageserver` counterpart to the real macro-expansion path
+/// (`generate_component_from_item_struct`/`generate_viewmodel_from_item_mod`/
+/// `generate_dsl_enum_from_item_enum`), minus the actual code generation and the same-crate
+/// registries (a language server sees one file's text, not a real compiled crate — see
+/// `attr_path_ends_with`'s own doc comment). Reuses the exact same conversion functions those
+/// entry points call (`component_and_view_from_item_struct`/`attr_frontend::
+/// viewmodel_def_from_item_mod`/`enum_def_from_item_enum`), so a file that *would* macro-expand
+/// cleanly gets the identical `ComponentDef`/`ViewModelDef`/`EnumDef` shapes here. Every returned
+/// `Module` sets `allows_external_builtins: true` for the same reason the real entry points do —
+/// there is no builtin `Module` to resolve `Window`/`VerticalLayout`/etc. against (see
+/// `crate::TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment).
+///
+/// Items that don't parse as a `ComponentDef`/`ViewModelDef`/`EnumDef` (a malformed `view!` body, a
+/// non-unit enum variant, ...) make the whole call fail — matching how a real macro invocation
+/// would fail to expand that one item, except surfaced as one error for the whole file rather than
+/// pinpointed to the offending item (no span info flows through these conversions — see
+/// `docs/elwindui_tool_languageserver_design.md` for why this is an accepted precision limit, same
+/// as `validate::validate`'s own error messages).
+pub fn modules_from_file(file: &syn::File) -> Result<Vec<Module>, String> {
+    let mut modules = Vec::new();
+    for item in &file.items {
+        match item {
+            syn::Item::Struct(item_struct) if attr_path_ends_with(&item_struct.attrs, "component") => {
+                let base = inherits_arg_from_component_attrs(&item_struct.attrs)?;
+                let (component_def, view_def) =
+                    component_and_view_from_item_struct(base, item_struct)?;
+                modules.push(Module {
+                    path: Vec::new(),
+                    uses: Vec::new(),
+                    items: component_module_items(component_def, view_def),
+                    allows_external_builtins: true,
+                    ..Default::default()
+                });
+            }
+            syn::Item::Mod(item_mod) if attr_path_ends_with(&item_mod.attrs, "viewmodel") => {
+                let def = attr_frontend::viewmodel_def_from_item_mod(item_mod)?;
+                modules.push(Module {
+                    path: Vec::new(),
+                    uses: Vec::new(),
+                    items: vec![ast::Item::ViewModel(def)],
+                    allows_external_builtins: true,
+                    ..Default::default()
+                });
+            }
+            syn::Item::Enum(item_enum) if attr_path_ends_with(&item_enum.attrs, "dsl_enum") => {
+                let def = enum_def_from_item_enum(item_enum)?;
+                modules.push(Module {
+                    path: Vec::new(),
+                    uses: Vec::new(),
+                    items: vec![ast::Item::Enum(def)],
+                    allows_external_builtins: true,
+                    ..Default::default()
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(modules)
+}
+
 /// Every same-crate sibling `#[elwindui::component]` registered so far (via
 /// `register_same_crate_component`), other than `skip_name` itself, rebuilt as one `Module` each
 /// (`path: []`, matching the flat crate-root visibility every `#[elwindui::component]`-generated type
@@ -188,10 +498,8 @@ pub fn sibling_component_modules(skip_name: &str) -> Vec<Module> {
             Module {
                 path: Vec::new(),
                 uses: Vec::new(),
-                items: vec![
-                    ast::Item::Component(component_def),
-                    ast::Item::View(view_def),
-                ],
+                items: component_module_items(component_def, view_def),
+                allows_external_builtins: true,
                 ..Default::default()
             }
         })
@@ -212,14 +520,12 @@ mod tests {
         let module = crate::ast::Module {
             path: Vec::new(),
             uses: Vec::new(),
-            items: vec![
-                crate::ast::Item::Component(component_def),
-                crate::ast::Item::View(view_def),
-            ],
+            items: component_module_items(component_def, view_def),
+            allows_external_builtins: true,
             ..Default::default()
         };
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("should validate");
         let table = build_symbol_table(&all_modules);
@@ -250,8 +556,11 @@ mod tests {
         assert!(s.contains("impl"));
     }
 
+    // Phase 2: a `view!`-less component is legal (the Rust-macro-path counterpart of a `.elwind`
+    // `component X { .. }` with no paired `view X { .. }` block) — see
+    // `component_and_view_from_item_struct`'s own doc comment.
     #[test]
-    fn missing_view_field_is_an_error() {
+    fn missing_view_field_yields_a_view_less_component() {
         let src = r#"
             struct Counter {
                 #[param]
@@ -259,9 +568,27 @@ mod tests {
             }
         "#;
         let item_struct: syn::ItemStruct = syn::parse_str(src).unwrap();
+        let (component_def, view_def) =
+            component_and_view_from_item_struct(Some("Window".to_string()), &item_struct)
+                .expect("a view!-less component should build successfully");
+        assert_eq!(component_def.name, "Counter");
+        assert!(view_def.is_none());
+    }
+
+    #[test]
+    fn multiple_view_fields_is_an_error() {
+        let src = r#"
+            struct Counter {
+                #[param]
+                start: i32,
+                a: view! { TextBlock { text: "a" } },
+                b: view! { TextBlock { text: "b" } },
+            }
+        "#;
+        let item_struct: syn::ItemStruct = syn::parse_str(src).unwrap();
         let err = component_and_view_from_item_struct(Some("Window".to_string()), &item_struct)
             .unwrap_err();
-        assert!(err.contains("view!"), "error should mention view!: {err}");
+        assert!(err.contains("at most one"), "error should mention the cardinality: {err}");
     }
 
     /// The attribute-macro frontend must produce *the same* generated code as the equivalent
@@ -301,13 +628,77 @@ view Counter {
 "#;
         let module = crate::parser::parse_module(dsl_src).expect("dsl should parse");
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("dsl should validate");
         let table = build_symbol_table(&all_modules);
         let dsl_generated = generate_module(&module, &table).to_string();
 
         assert_eq!(attr_generated, dsl_generated);
+    }
+
+    // Phase 2: component-level attributes read straight off `item_struct.attrs`, the Rust-macro
+    // counterpart of `parser.rs`'s `#[embedded]`/`#[sealed]`/`#[native]`/`#[content(field)]`
+    // vocabulary (`abstract_` here, not `abstract` — a reserved Rust keyword). Checked directly
+    // against `component_and_view_from_item_struct`'s own return value, not through `generate()`'s
+    // full `validate` pipeline — `#[embedded]` is only valid on a `Module::is_builtin` module,
+    // which this test's ad hoc `Module` isn't.
+    #[test]
+    fn component_level_attrs_are_read_from_struct_attrs() {
+        let src = r#"
+            #[sealed]
+            #[native]
+            #[abstract_]
+            #[content(children)]
+            struct Toolbar {
+                #[prop]
+                children: i32,
+            }
+        "#;
+        let item_struct: syn::ItemStruct =
+            syn::parse_str(src).expect("struct should parse as valid Rust");
+        let (component_def, view_def) = component_and_view_from_item_struct(None, &item_struct)
+            .expect("should build a ComponentDef");
+        assert!(component_def.sealed, "#[sealed] should set ComponentDef::sealed");
+        assert!(component_def.native, "#[native] should set ComponentDef::native");
+        assert!(component_def.is_abstract, "#[abstract_] should set ComponentDef::is_abstract");
+        assert!(!component_def.embedded, "#[embedded] was not written, should stay false");
+        assert!(!component_def.text_style, "#[text_style] was not written, should stay false");
+        assert_eq!(
+            component_def.content_field.as_deref(),
+            Some("children"),
+            "#[content(children)] should set ComponentDef::content_field"
+        );
+        assert!(view_def.is_none(), "no `view! {{ .. }}` field, so the view should be None");
+    }
+
+    // Phase 2: `#[param(default = ...)]`, mirroring `#[prop(default = ...)]`'s existing
+    // token-based routing through `parser::parse_initializer` (so `bind!(..)` sugar parses the
+    // same way, even though `validate`'s param-staticness checks are a separate, pre-existing
+    // concern this frontend doesn't duplicate — see `attr_frontend::fields_from_item_struct`'s own
+    // doc comment).
+    #[test]
+    fn param_default_attribute_sets_initializer() {
+        let src = r#"
+            struct Greeting {
+                #[param(default = "hi".to_string())]
+                label: String,
+            }
+        "#;
+        let item_struct: syn::ItemStruct =
+            syn::parse_str(src).expect("struct should parse as valid Rust");
+        let (component_def, _view_def) = component_and_view_from_item_struct(None, &item_struct)
+            .expect("should build a ComponentDef");
+        let field = component_def
+            .fields
+            .iter()
+            .find(|f| f.name == "label")
+            .expect("field `label` should exist");
+        assert!(matches!(field.kind, FieldKind::Param));
+        assert!(
+            field.initializer.is_some(),
+            "#[param(default = ...)] should set an initializer"
+        );
     }
 }
 
@@ -437,11 +828,13 @@ enum Orientation {
         let mut module = deps_module;
         module
             .items
-            .push(crate::ast::Item::Component(component_def));
-        module.items.push(crate::ast::Item::View(view_def));
+            .extend(crate::component_frontend::component_module_items(
+                component_def,
+                view_def,
+            ));
 
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("should validate");
         let table = build_symbol_table(&all_modules);
@@ -477,7 +870,7 @@ component Settings {
 "#;
         let module = crate::parser::parse_module(src).expect("dsl should parse");
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("should validate");
         let table = build_symbol_table(&all_modules);
@@ -507,7 +900,7 @@ component Settings {
     fn generate_and_check(src: &str) -> String {
         let module = crate::parser::parse_module(src).expect("dsl should parse");
         let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::builtin_modules())
+            .chain(crate::test_builtin_modules())
             .collect();
         crate::validate::validate(&all_modules).expect("should validate");
         let table = build_symbol_table(&all_modules);
@@ -515,5 +908,79 @@ component Settings {
         syn::parse2::<syn::File>(generated.clone())
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         generated.to_string()
+    }
+}
+
+/// `modules_from_file` — the `elwindui-languageserver` counterpart to real macro expansion,
+/// finding every `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` item in
+/// a whole `.rs` file's worth of `syn::File` without actually expanding any of them.
+#[cfg(test)]
+mod modules_from_file_tests {
+    use super::*;
+
+    #[test]
+    fn finds_component_viewmodel_and_dsl_enum_in_one_file() {
+        let src = r#"
+            #[elwindui::dsl_enum]
+            enum StatusC { Loading, Ready }
+
+            #[elwindui::viewmodel]
+            mod vm_mod_c {
+                struct VmC {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+
+            #[elwindui::component(inherits Window)]
+            struct ScreenC {
+                #[param]
+                #[inject]
+                vm: VmC,
+                #[prop]
+                status: StatusC,
+                body: view! {
+                    VerticalLayout {
+                        match status {
+                            StatusC::Loading => TextBlock { text: "loading" },
+                            StatusC::Ready => TextBlock { text: vm.content },
+                        }
+                    }
+                },
+            }
+
+            fn main() {}
+        "#;
+        let file: syn::File = syn::parse_str(src).expect("should parse as a real Rust file");
+        let modules = modules_from_file(&file).expect("should build Modules");
+        assert_eq!(modules.len(), 3);
+
+        let has_enum = modules
+            .iter()
+            .any(|m| m.items.iter().any(|i| matches!(i, ast::Item::Enum(e) if e.name == "StatusC")));
+        let has_vm = modules.iter().any(|m| {
+            m.items
+                .iter()
+                .any(|i| matches!(i, ast::Item::ViewModel(v) if v.name == "VmC"))
+        });
+        let has_component = modules.iter().any(|m| {
+            m.items
+                .iter()
+                .any(|i| matches!(i, ast::Item::Component(c) if c.name == "ScreenC"))
+        });
+        assert!(has_enum && has_vm && has_component, "modules: {modules:?}");
+
+        crate::validate::validate(&modules).expect("should validate cleanly");
+    }
+
+    #[test]
+    fn plain_rust_items_are_ignored() {
+        let src = r#"
+            struct NotDsl { x: i32 }
+            fn helper() {}
+        "#;
+        let file: syn::File = syn::parse_str(src).unwrap();
+        let modules = modules_from_file(&file).expect("should succeed with zero DSL items");
+        assert!(modules.is_empty());
     }
 }

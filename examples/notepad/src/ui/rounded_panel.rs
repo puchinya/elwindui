@@ -1,5 +1,5 @@
 // Demonstrates a custom component built by composing over another already-composed DSL component
-// (docs/elwindui_gui_framework_design.md §5, 付録H.2.1a in the old spec numbering) —
+// (docs/design/gui_framework_design.md §5.1) —
 // `RoundedPanel inherits ContentControl`, own `view!` body implicitly `ContentControl`'s (no
 // wrapper element written — the implicit-composition sugar), with a `Grid` overlaying a background
 // `Rectangle` and the `TextBlock` label in the same (default `(0, 0)`) cell. `elwindui-codegen`

@@ -1,6 +1,6 @@
-//! A narrow slice of the ~24 static verification rules in docs/elwindui_spec.md §14 — only the
+//! A narrow slice of the ~24 static verification rules in docs/specs/dsl_spec.md §14 — only the
 //! ones reachable by the constructs the notepad example actually uses. See
-//! docs/elwindui_gui_framework_design.md §10 for the full rule list.
+//! docs/design/gui_framework_design.md §10 for the full rule list.
 
 use crate::ast::{
     Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer,
@@ -51,7 +51,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
         for item in &module.items {
             match item {
                 Item::Component(c) => {
-                    // `#[embedded]` (docs/elwindui_spec.md 付録E) claims this component is one of
+                    // `#[embedded]` (docs/specs/dsl_spec.md 付録A) claims this component is one of
                     // this crate's own builtin shape declarations — reject it on anything parsed
                     // from a consumer's own `.elwind` directory (`Module::is_builtin`, set only by
                     // `builtin_modules()`).
@@ -63,7 +63,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         ));
                     }
 
-                    // `#[text_style]` (docs/elwindui_dsl_spec.md 付録A, `ComponentDef::text_style`'s
+                    // `#[text_style]` (docs/specs/dsl_spec.md 付録A, `ComponentDef::text_style`'s
                     // own doc comment) injects `TEXT_STYLE_FIELDS` (font_family/font_size/
                     // font_weight/font_style/font_stretch/character_spacing/foreground) — real
                     // Rust `TextStyleStorage` backing only exists on `elwindui-core`'s own hand-
@@ -97,7 +97,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         }
                     }
 
-                    // `#[native]` (docs/elwindui_spec.md 付録E, `ComponentDef::native`'s doc
+                    // `#[native]` (docs/specs/dsl_spec.md 付録A, `ComponentDef::native`'s doc
                     // comment) marks a base-less, `view`-less leaf whose real implementation is
                     // hand-written per backend crate — `Window` is the motivating case (WinUI3's
                     // `Window` has no meaningful `Control`-family ancestor, unlike `Button`/
@@ -134,7 +134,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         }
                     }
 
-                    // `#[content(field_name)]` (docs/elwindui_spec.md 付録E, WinUI3's
+                    // `#[content(field_name)]` (docs/specs/dsl_spec.md 付録A, WinUI3's
                     // `ContentPropertyAttribute` equivalent, `ComponentDef::content_field`'s doc
                     // comment) must actually name one of this component's own effective fields
                     // (`codegen::resolve_effective_fields` — includes inherited ones, matching how
@@ -274,7 +274,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 &mut errors,
                             );
                         }
-                        // Phase 0 (docs/elwindui_spec.md 付録H.2.1a): `view.root` is now a bare
+                        // Phase 0 (docs/design/gui_framework_design.md §5.1): `view.root` is now a bare
                         // `ast::ViewBody` — resolve it to the concrete `ElementNode` every other
                         // check below still expects, exactly the way `codegen::generate_view` does
                         // (a composable `base` implicitly wraps the whole body; otherwise the body
@@ -521,7 +521,7 @@ fn find_vm_fields<'a>(
 
 /// Walks a `view { ... }` element tree checking every attribute expression's `vm.xxx` references
 /// (see `check_vm_expr`) against `table`, resolved from `from`'s scope, recursing into children.
-/// Also rejects `node` itself naming an `#[abstract]` component (docs/elwindui_spec.md 付録E) —
+/// Also rejects `node` itself naming an `#[abstract]` component (docs/specs/dsl_spec.md 付録A) —
 /// except when `node` is *this* call's own `exempt_root_type` (only ever set by the top-level
 /// `view.root` call in `validate`'s main loop, to exactly the enclosing component's own `base`):
 /// shape/host composition (`Rectangle inherits Shape`, `NotepadWindow inherits Window`) legitimately
@@ -605,7 +605,7 @@ fn check_child_vm_references(
     }
 }
 
-/// `#[abstract]` (docs/elwindui_spec.md 付録E): a pure category tag (`UIElement`/`NativeControl`/
+/// `#[abstract]` (docs/specs/dsl_spec.md 付録A): a pure category tag (`UIElement`/`NativeControl`/
 /// `Layout`/`Shape` in `builtins.elwind`) cannot be instantiated directly — only named as an
 /// `inherits` base, or (for a shape-composition base) as a component's own view root (see
 /// `check_vm_references`'s `exempt_root_type`). An unresolvable `node.type_path` is left to
@@ -825,7 +825,7 @@ fn check_dynamic_child_hosts(
                     || ty.trim_start().starts_with("Vec<")
                     || ty.contains("ListExt<")
             });
-            // Phase 2 (docs/elwindui_spec.md 付録H.2.1a): a *scalar* `#[content(...)]` field (e.g.
+            // Phase 2 (docs/design/gui_framework_design.md §5.1): a *scalar* `#[content(...)]` field (e.g.
             // `ContentControl`/`Window`'s `content: Rc<dyn UIElement>`) can also host `if`/`match`
             // dynamic children now — not `for` (a variable-length list can never fit one slot), and
             // only if every branch, recursively, resolves to exactly one element (no `for`
@@ -955,7 +955,7 @@ fn check_attached_properties(
     }
 }
 
-/// `#[shortcut(...)]` (docs/elwindui_gui_framework_design.md §8.1) only means anything on an
+/// `#[shortcut(...)]` (docs/design/gui_framework_design.md §8.1) only means anything on an
 /// attribute that's actually `#[routed]` on this element's resolved type (same reasoning as
 /// `on_click`/`on_key_down` themselves being callback-shaped, not arbitrary data) — checked here,
 /// against the concrete usage site, rather than in `parse_field_def`'s per-declaration checks: a
@@ -1198,7 +1198,7 @@ fn validate_bind_path(
     }
 }
 
-/// Checks `component X inherits Base { .. }` (docs/elwindui_spec.md §3): `Base` must resolve, then
+/// Checks `component X inherits Base { .. }` (docs/specs/dsl_spec.md §3): `Base` must resolve, then
 /// branches on what kind of base it is:
 /// - `X` itself is a hand-written virtual builtin (`codegen::is_virtual_builtin` —
 ///   `VerticalLayout`/`HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape`): unconditionally
@@ -1218,7 +1218,7 @@ fn validate_bind_path(
 ///   e.g. `Button`/`Window`) — falls through to the same "`X`'s own `view` root must literally
 ///   construct `Base`" check as the shape-composition case below (this is how a hand-written
 ///   native host like `Window` gets inherited — `codegen`'s `host_composition_base` resolution;
-///   docs/elwindui_spec.md 付録H.2.1a).
+///   docs/design/gui_framework_design.md §5.1).
 /// - A primitive shape family with no `view` of its own (`has_view == false`, has real fields,
 ///   e.g. `Control`/`Rectangle`) — unchanged from before real field inheritance: `X` must have its
 ///   own `view` whose root element is literally `Base` (the shape-composition use case,
@@ -1250,8 +1250,8 @@ fn validate_inherits(
         // rather than silently succeeding). The `.elwind` file path (where a component may
         // legitimately have no `view` of its own, relying on an inherited template) loses real
         // checking here — accepted since that whole path is being phased out (`examples/notepad` is
-        // its only remaining user, migrating to `#[component]` — see `docs/
-        // elwindui_implementation_status.md`), not extended with new capability.
+        // its only remaining user, migrating to `#[component]` — see
+        // `docs/status/implementation_status.md`), not extended with new capability.
         return;
     };
 
@@ -1277,9 +1277,10 @@ fn validate_inherits(
         return;
     }
 
-    // The three root category tags of the whole class hierarchy (docs/elwindui_spec.md 付録
-    // H.2.1a) — `UIElement` (the root), and its two immediate abstract branches `Layout`/
-    // `NativeControl` — are never themselves a `view`'s root anywhere (structurally: nothing
+    // The three root category tags of the whole class hierarchy
+    // (docs/design/gui_framework_design.md §5.1) — `UIElement` (the root), and its two immediate
+    // abstract branches `Layout`/`NativeControl` — are never themselves a `view`'s root anywhere
+    // (structurally: nothing
     // meaningfully "is" a bare `UIElement`/`Layout`/`NativeControl`, as opposed to some concrete
     // leaf/container beneath them), so inheriting one directly requires no evidence of a `view`
     // constructing it. This is a closed, stable set by construction — there is exactly one
@@ -1317,7 +1318,7 @@ fn validate_inherits(
     }
 
     // A primitive shape family (`has_view == false`, not native): `X` must have its own `view` —
-    // Phase 0's implicit-composition sugar (docs/elwindui_spec.md 付録H.2.1a) means that `view`'s
+    // Phase 0's implicit-composition sugar (docs/design/gui_framework_design.md §5.1) means that `view`'s
     // body is always implicitly `base`'s own attributes/children directly (no wrapper element to
     // check the shape of anymore); a virtual-builtin base has no `view` of its own to fall back to
     // as a template, so `X` must still declare one.
@@ -1842,7 +1843,7 @@ view Window11 {
         assert_eq!(validate(&modules), Ok(()));
     }
 
-    /// `inherits`'s shape-composition use case (docs/elwindui_spec.md §3, 付録H.2.1a): a component
+    /// `inherits`'s shape-composition use case (docs/specs/dsl_spec.md §3, docs/design/gui_framework_design.md §5.1): a component
     /// inheriting a primitive shape family with no `view` of its own must have its own `view`, whose
     /// body is always implicitly `Shape`'s own attributes/children (Phase 0's implicit-composition
     /// sugar — no `Shape { .. }` wrapper written) — `fill` is inherited from `Rectangle`
@@ -1867,7 +1868,7 @@ view RoundedPanel {
         assert_eq!(validate(&modules), Ok(()));
     }
 
-    /// `#[abstract]` (docs/elwindui_spec.md 付録E): `Shape` is a pure category tag that `Rectangle`/
+    /// `#[abstract]` (docs/specs/dsl_spec.md 付録A): `Shape` is a pure category tag that `Rectangle`/
     /// `Ellipse` shape-compose over — using it directly as a view root *without* declaring
     /// `inherits Shape` is not legitimate composition, so it's rejected the same as any other bare
     /// use (unlike `accepts_component_inheriting_a_shape_primitive_via_implicit_composition`, which
@@ -1918,7 +1919,7 @@ view Foo {
         );
     }
 
-    /// Phase 0 (docs/elwindui_spec.md 付録H.2.1a) removed the old "own `view`'s root element must
+    /// Phase 0 (docs/design/gui_framework_design.md §5.1) removed the old "own `view`'s root element must
     /// literally construct `base`" requirement entirely — a composable base's `view` body is always
     /// implicitly its own attributes/children now, so there's no longer a *root shape* for
     /// `validate::validate` to reject here. `Shape` has no `#[content(...)]` field to bind a bare
@@ -1944,7 +1945,7 @@ view RoundedPanel {
         assert_eq!(validate(&modules), Ok(()));
     }
 
-    /// Phase 2 (docs/elwindui_spec.md 付録H.2.1a): a scalar `#[content(...)]` field (`ContentControl`'s
+    /// Phase 2 (docs/design/gui_framework_design.md §5.1): a scalar `#[content(...)]` field (`ContentControl`'s
     /// `content: Rc<dyn UIElement>`) can host `if`/`match` dynamic children now, but never `for` — a
     /// variable-length list can never fit a single-value slot.
     #[test]
@@ -2344,7 +2345,7 @@ view MyWindow {
         assert_eq!(validate(&modules), Ok(()));
     }
 
-    /// `Button` is `#[sealed]` (docs/elwindui_spec.md 付録E) — `validate_inherits` must reject a
+    /// `Button` is `#[sealed]` (docs/specs/dsl_spec.md 付録A) — `validate_inherits` must reject a
     /// further `inherits Button` for that reason specifically, not just the more general
     /// native-backed-leaf rejection `rejects_inherits_of_a_native_leaf` covers.
     #[test]

@@ -2,7 +2,7 @@
 //! `parser.rs`'s hand-written recursive-descent parser produces from `.elwind` DSL text — but from
 //! real Rust syntax instead (a `syn::ItemMod` containing a `struct` + an `impl` block). This is
 //! what lets `viewmodel`s be written as ordinary Rust (matching how WPF-style MVVM keeps the
-//! ViewModel in the host language, not markup — see docs/elwindui_spec.md 付録O.2) while
+//! ViewModel in the host language, not markup — see docs/design/gui_framework_design.md §7.2) while
 //! `view { ... }` trees still need `.elwind`/`parser.rs` (bare nested child elements aren't valid
 //! Rust expression syntax, so that half can't move here).
 //!
@@ -21,7 +21,7 @@ use std::path::Path;
 /// `elwindui-macros`, so there's no dependency on Rust's proc-macro expansion order — useful for
 /// any caller that needs a viewmodel's shape *before* the crate's own macro expansion has run (a
 /// `build.rs`, or a language server processing a file in isolation — see
-/// `docs/elwindui_implementation_status.md` for whether such a caller currently exists; the
+/// `docs/status/implementation_status.md` for whether such a caller currently exists; the
 /// `.elwind`-era `build.rs` caller this was originally written for, `compile_dir_with_extra_
 /// viewmodels`, was removed once `.elwind` text compilation itself was, so this is currently
 /// exercised only by its own test below).
@@ -29,7 +29,7 @@ use std::path::Path;
 /// The mod name is what lets a caller build this viewmodel's real, crate-relative path (`Module::path`,
 /// e.g. `["notepad_view_model"]` for `main.rs`'s `mod notepad_view_model { .. }`), so a `.elwind`
 /// file's `use crate::notepad_view_model::NotepadViewModel;` can be resolved against it exactly like
-/// Rust's own name resolution (§12, 付録B.1) — the struct name alone isn't enough to know where it
+/// Rust's own name resolution (§12, docs/design/tools/codegen_design.md §3) — the struct name alone isn't enough to know where it
 /// actually lives.
 pub fn viewmodel_defs_from_rs_file(
     path: impl AsRef<Path>,

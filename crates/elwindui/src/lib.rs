@@ -1,4 +1,4 @@
-//! End-user facing facade crate. See docs/elwindui_gui_framework_design.md §1.
+//! End-user facing facade crate. See docs/design/gui_framework_design.md §1.
 //!
 //! A consumer crate needs only `elwindui` itself in `[dependencies]` — `elwindui-macros`'
 //! `#[component]`/`#[viewmodel]`/`#[dsl_enum]` proc-macros (backed by `elwindui-codegen`) emit
@@ -16,9 +16,9 @@ pub use elwindui_i18n as i18n;
 #[cfg(feature = "svg")]
 pub use elwindui_svg as svg;
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes
-/// a `component`+`view` pair (docs/elwindui_spec.md §3/§13) as a single ordinary Rust `struct`,
+/// a `component`+`view` pair (docs/specs/dsl_spec.md §3/§13) as a single ordinary Rust `struct`,
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the
-/// viewmodel half (付録O.2). `view!` is not a real macro (never invoked/expanded — see
+/// viewmodel half (docs/design/gui_framework_design.md §7.2). `view!` is not a real macro (never invoked/expanded — see
 /// `elwindui_macros::component`'s own doc comment); its tokens are read as `.elwind`-DSL text.
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` opts a plain user `enum` into the same
 /// `match`/`if let` exhaustiveness checking a `.elwind`-text `enum` always got — see
@@ -106,7 +106,7 @@ pub mod ui {
     pub use elwindui_core::ui::*;
 }
 
-/// `platform::clipboard`/`platform::file_dialog` etc. See docs/elwindui_spec.md 付録T.
+/// `platform::clipboard`/`platform::file_dialog` etc. See docs/specs/builtins_spec.md 付録T.
 #[cfg(all(target_os = "macos", feature = "backend-appkit"))]
 pub mod platform {
     pub use elwindui_backend_appkit::platform::file_dialog;

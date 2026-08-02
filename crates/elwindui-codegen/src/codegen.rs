@@ -1,7 +1,7 @@
-//! AST(検証済み) → backend別Rustソース。`target::backend()`の定数畳み込みは付録Dの通りCargo
+//! AST(検証済み) → backend別Rustソース。`target::backend()`の定数畳み込みは`docs/design/gui_framework_design.md` §3.3の通りCargo
 //! featureでの静的分岐に落とし込み、`elwindui-core`のトレイト境界に対して書かれたコードを生成する
 //! (今回はelwindui-backend-appkitのAPIを直接呼ぶ)。
-//! 依存関係グラフに基づくCell/RefCellベースの更新関数生成は付録O.5に対応する。
+//! 依存関係グラフに基づくCell/RefCellベースの更新関数生成は`docs/design/gui_framework_design.md` §7.2に対応する。
 
 use crate::ast::{
     Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef, FieldKind,
@@ -21,7 +21,7 @@ use syn::visit_mut::VisitMut;
 /// (see `ast::Module::path`) — rather than a bare item name, so two same-named types defined in
 /// different modules never collide, and a lookup must go through `resolve` (i.e. through a `use`,
 /// or be in the same module) instead of being visible from anywhere in the compilation unit. See
-/// docs/elwindui_spec.md §12, 付録B.1.
+/// docs/specs/dsl_spec.md §12, docs/design/tools/codegen_design.md §3.
 pub struct SymbolTable {
     types: HashMap<(Vec<String>, String), TypeInfo>,
 }
@@ -42,14 +42,14 @@ pub struct TypeInfo {
     /// Names of `#[param] #[two_way]` fields — a builtin shape's opt-in to automatic two-way
     /// wiring (see `emit_wiring`'s generic two-way rule). Empty for ordinary user components.
     pub two_way_fields: HashSet<String>,
-    /// Names of `#[routed]` fields (docs/elwindui_spec.md 4章) — a callback's opt-in to WinUI3-
+    /// Names of `#[routed]` fields (docs/specs/dsl_spec.md §4) — a callback's opt-in to WinUI3-
     /// style bubbling via `elwindui::core::ui::dispatch_routed` instead of being called directly.
     /// Non-empty exactly when this type needs `into_node_if_needed` to share its own
     /// `routed_handlers()` into the `NativeControl`/virtual-builtin `UIElementBase` wrapping it,
     /// rather than starting that wrapper with a fresh, empty one.
     pub routed_fields: HashSet<String>,
     /// Names of `#[bindable]` fields (`ast::Attr::Bindable`'s own doc comment,
-    /// `docs/elwindui_gui_framework_design.md` §7.2) — a component field injecting a viewmodel by
+    /// `docs/design/gui_framework_design.md` §7.2) — a component field injecting a viewmodel by
     /// syntax marker rather than type resolution. `collection_uses_rc_identity` consults this on a
     /// `for`-loop body's child element types to decide `replace_rc_items` vs `replace_items`
     /// without ever needing to resolve the loop's *element* type (only the child component type,
@@ -89,7 +89,7 @@ pub struct TypeInfo {
     /// Declared types for every stored value field, including observable fields with an
     /// initializer. Dynamic `for` uses this metadata to identify `Vec<Rc<T>>` sources.
     pub value_field_types: HashMap<String, String>,
-    /// `#[attached]` fields declared by this type (docs/elwindui_spec.md §3の添付プロパティ), mapped
+    /// `#[attached]` fields declared by this type (docs/specs/dsl_spec.md §3の添付プロパティ), mapped
     /// to their declared type — e.g. `Grid`'s own `{"row": "i32", "column": "i32"}`. Kept separate
     /// from `field_types` (rather than folded in) because that map filters out every field *with* an
     /// initializer, and `#[attached]` fields always have one (their required default value) —
@@ -115,7 +115,7 @@ pub struct TypeInfo {
     /// see `build_symbol_table`'s `resolve_is_native` — not merely whether `inherits NativeControl`/
     /// `#[native]` was written (either is checked for *consistency* against this in `validate.rs`,
     /// but a plain `component X { .. } view X { VerticalLayout { .. } }` with no `inherits` at all is
-    /// still correctly inferred as virtual). See docs/elwindui_spec.md 付録H.2.
+    /// still correctly inferred as virtual). See docs/design/gui_framework_design.md §5.3.
     pub is_native: bool,
     /// Whether this component's own declaration literally reads `inherits NativeControl`
     /// (`Button`/`TextArea`/`TabView` — as opposed to `#[native]` directly, e.g. `Window` or
@@ -123,7 +123,7 @@ pub struct TypeInfo {
     /// Unlike `is_native` (a recursively-inferred structural property), this is purely a shape-only
     /// declaration flag — only ever `true` for a hand-written builtin whose backend `XxxImpl` struct
     /// owns a real `base` (a backend-owned `NativeControlImpl`) and implements
-    /// `NativeControl`/`UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a).
+    /// `NativeControl`/`UIElement` by delegating to it (docs/design/gui_framework_design.md §5.1).
     /// `emit_construction` uses this to pass a use-site `base: UIElementImpl` as this type's
     /// `Type::new(..)`'s leading argument (mirroring `emit_virtual_construction`'s own `base` — see
     /// `build_ui_element_base`), and `into_node_if_needed` uses it to skip the external
@@ -166,7 +166,7 @@ pub struct TypeInfo {
     pub own_on_unmount: Option<syn::Block>,
     /// The DSL name of the virtual-builtin shape (`Control`/`Shape`/`TextBlock`/`Grid`/
     /// `VerticalLayout`/`HorizontalLayout`) this component's generated struct ultimately composes
-    /// over via a real `base: <Impl>` field (docs/elwindui_spec.md 付録H.2.1a), if any — see
+    /// over via a real `base: <Impl>` field (docs/design/gui_framework_design.md §5.1), if any — see
     /// `resolve_composed_shape`. `Some` in three cases, all "direct" ones collapsing into the same
     /// generated shape (`generate_view`'s `is_shape_composition` doesn't distinguish them):
     /// - Directly against a hand-written `elwindui::core::ui` primitive: this component's own
@@ -183,25 +183,25 @@ pub struct TypeInfo {
     pub composed_shape: Option<String>,
     /// The DSL name of a hand-written native host with no `UIElement` implementation of its own
     /// (only `Window` today — `is_native && !has_view && !is_native_control_leaf`) this component
-    /// composes over via a real `base: <Impl>` field, "host composition" (docs/elwindui_spec.md
-    /// 付録H.2.1a) — the same `base`-field shape as `composed_shape`, but for a base that isn't a
+    /// composes over via a real `base: <Impl>` field, "host composition" (docs/design/gui_framework_design.md
+    /// §5.1) — the same `base`-field shape as `composed_shape`, but for a base that isn't a
     /// `UIElement` at all (so no `impl UIElement` is generated), and kept as a separate resolution
     /// pass from `composed_shape` since the two bases are structurally distinct categories that
     /// never overlap. `Some` iff this component's own `view` root literally constructs the base
     /// (mirroring `resolve_composed_shape`'s own root-match requirement) — see
     /// `resolve_host_composition_base`.
     pub host_composition_base: Option<String>,
-    /// Whether this component is `#[sealed]` (docs/elwindui_spec.md 付録E) — `validate.rs`'s
+    /// Whether this component is `#[sealed]` (docs/specs/dsl_spec.md 付録A) — `validate.rs`'s
     /// `validate_inherits` rejects `component X inherits Name` when this is `true`. `false` for a
     /// `viewmodel` (never a valid `inherits` target at all).
     pub sealed: bool,
-    /// Whether this component is `#[abstract]` (docs/elwindui_spec.md 付録E) — a pure category tag
+    /// Whether this component is `#[abstract]` (docs/specs/dsl_spec.md 付録A) — a pure category tag
     /// (`UIElement`/`NativeControl`/`Layout`/`Shape` in `builtins.elwind`) that cannot be
     /// instantiated directly. `validate::check_element_value` rejects any `Type { .. }`/bare-child
     /// use site naming one; `generate_module` skips generating a `create_<snake case>(..)`/`new(..)`
     /// for it entirely. `false` for a `viewmodel`.
     pub is_abstract: bool,
-    /// This component's own `#[content(field_name)]` (docs/elwindui_spec.md 付録E, WinUI3's
+    /// This component's own `#[content(field_name)]` (docs/specs/dsl_spec.md 付録A, WinUI3's
     /// `ContentPropertyAttribute` equivalent), copied verbatim from `ComponentDef::content_field` —
     /// no recursive resolution needed (unlike `is_native`/`composed_shape`), since a bare nested
     /// child element only ever binds to *this* component's own declared field, never inherited from
@@ -264,7 +264,7 @@ impl SymbolTable {
 /// Strips a single `Rc<...>`/`std::rc::Rc<...>` wrapper so a `#[param] #[inject]` field declared
 /// as `doc: std::rc::Rc<DocumentViewModel>` still resolves against the bare `DocumentViewModel`
 /// entry in the symbol table — fields are commonly `Rc`-wrapped since `#[inject]`'s whole purpose
-/// is sharing one instance across owners (付録J.5/O.4). Leaves any other type string unchanged.
+/// is sharing one instance across owners (docs/design/gui_framework_design.md §7.1/§7.2). Leaves any other type string unchanged.
 pub(crate) fn strip_rc_wrapper(ty: &str) -> &str {
     let ty = ty.trim();
     for prefix in ["std::rc::Rc<", "rc::Rc<", "Rc<"] {
@@ -326,7 +326,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                     // Kind-agnostic (not `f.kind == FieldKind::Param`): now that builtins.elwind's
                     // own fields are plain (unattributed) `prop`s rather than `#[param]` (their
                     // backing Rust types are all zero-arg-constructed with post-construction
-                    // `set_<field>` setters regardless — docs/elwindui_spec.md 付録H.2.1a — so
+                    // `set_<field>` setters regardless — docs/design/gui_framework_design.md §5.1 — so
                     // `#[param]` fields remain fixed at instantiation, so this
                     // must select construction-time fields the same way `generate_view`'s own
                     // `param_names` already does (`f.initializer.is_none()`, kind-independent) for
@@ -653,7 +653,7 @@ pub(crate) fn resolve_effective_fields<'m>(
     };
     let base_fields = resolve_effective_fields(base_module, base_c, modules);
     let base_fields: Vec<FieldDef> = match find_view(from, &c.name) {
-        // `#[routed]` fields (docs/elwindui_gui_framework_design.md §5.10, e.g. `UIElement`'s own
+        // `#[routed]` fields (docs/design/gui_framework_design.md §5.10, e.g. `UIElement`'s own
         // `on_tapped`/`on_pointer_pressed`/...), and every field declared directly on the root
         // `UIElement` component itself (`margin`/`width`/`height`/... — `builtins.elwind`'s own doc
         // comment on that declaration: "every component — builtin or user-defined — picks them up
@@ -842,7 +842,7 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
 /// (e.g. `Rectangle`'s own `kind: ShapeKind::RoundedRect { corner_radius: corner_radius.unwrap_or
 /// (0.0) }` — `corner_radius` is not a *bare* forward there, but its value is still read eagerly,
 /// before `Self` exists). Used exclusively to decide whether a field's value is needed at
-/// construction time (docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention, Phase
+/// construction time (docs/design/gui_framework_design.md §5.1's post-construction setter convention, Phase
 /// 2's `is_deferred_field`/`generate_view`'s `is_deferred_own_field`) — deliberately *not* used by
 /// `resolve_effective_fields`'s own inherited-field-forwarding decision, which specifically wants
 /// the narrower "literal forward" notion (a field only *contributing* to some other computed value
@@ -1069,7 +1069,7 @@ pub(crate) fn resolve_view_for<'m>(
 /// `resolve_host_composition_base`), not just whether it's one of the three base-less category tags.
 ///
 /// `is_composed`: the body *is* `base`'s own attributes/children directly — Phase 0's
-/// implicit-composition sugar, no wrapper element written (docs/elwindui_spec.md 付録H.2.1a).
+/// implicit-composition sugar, no wrapper element written (docs/design/gui_framework_design.md §5.1).
 /// `!is_composed`: an ordinary (non-composing) component's `view`, which may only contain exactly
 /// one literal child — that child is the root.
 pub(crate) fn resolve_view_root_element(
@@ -1284,7 +1284,7 @@ fn resolve_composed_shape(
             // Direct shape composition against a hand-written `elwindui::core::ui` primitive
             // (`ContentControl inherits Control`): Phase 0's implicit-composition sugar means
             // there's no separate "own effective root literally constructs `base`" requirement to
-            // check anymore (docs/elwindui_spec.md 付録H.2.1a) — a composable `base` always
+            // check anymore (docs/design/gui_framework_design.md §5.1) — a composable `base` always
             // composes, and `generate_view`'s `resolve_view_root_element` supplies the missing
             // `Type { .. }` wrapper the view body no longer writes.
             return Some(base.to_string());
@@ -1383,7 +1383,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                 let info = table.resolve(module, &c.name).unwrap_or_else(|| {
                     panic!("component `{}` missing from its own symbol table", c.name)
                 });
-                // `#[abstract]` (docs/elwindui_spec.md 付録E): a pure category tag
+                // `#[abstract]` (docs/specs/dsl_spec.md 付録A): a pure category tag
                 // (`UIElement`/`NativeControl`/`Layout`/`Shape`) never gets a `create_<snake
                 // case>(..)`/`new(..)` of its own — `validate::check_element_value` already rejects
                 // any DSL use site that would need one, so this is a second, codegen-level guarantee
@@ -1446,7 +1446,7 @@ fn coerce_to_owned_string(ty: &str, expr: syn::Expr) -> syn::Expr {
     expr
 }
 
-/// Copy-able field types get `Cell<T>`, everything else gets `RefCell<T>` (付録O.5).
+/// Copy-able field types get `Cell<T>`, everything else gets `RefCell<T>` (docs/design/gui_framework_design.md §7.2).
 fn is_copy_type(ty: &str) -> bool {
     matches!(
         ty,
@@ -1475,7 +1475,7 @@ fn is_copy_type(ty: &str) -> bool {
 /// shared `Document`, so e.g. a `TabView`'s per-tab `TextArea` edits reach the real stored
 /// document. This is what lets a `viewmodel` hold a dynamic list of independently-reactive
 /// sub-viewmodels (needed for notepad's real multi-document tabs) without a general nested-list
-/// compiler feature; see docs/elwindui_builtins_spec.md 付録Y.2.
+/// compiler feature; see docs/specs/builtins_spec.md 付録Y.2.
 fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<String> {
     let inner = ty.strip_prefix("Vec<")?.strip_suffix(">")?.trim();
     // `resolve` only finds `inner` if it's locally defined in `from` or reachable through one of
@@ -1931,7 +1931,7 @@ fn rewrite_field_refs(
 
 /// Recognizes `t!("key", name: expr, ...)` (parsed as an opaque `syn::Expr::Macro` by the DSL
 /// parser, since `name: expr` argument lists aren't valid standalone Rust) and rewrites it into a
-/// call to the generated `t()` i18n helper (see `i18n_prelude`). See docs/elwindui_spec.md §11.
+/// call to the generated `t()` i18n helper (see `i18n_prelude`). See docs/specs/dsl_spec.md §11.
 ///
 /// `syn::visit_mut` never descends into a macro's token stream (it has no structure to visit), so
 /// [`rewrite_field_refs`] alone can't see field references nested inside `t!(...)`'s arguments —
@@ -2188,7 +2188,7 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
         match &f.initializer {
             None => {
                 // `#[param] #[inject]` field: supplied by the caller. `Option<T>`-typed fields
-                // (docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention,
+                // (docs/design/gui_framework_design.md §5.1's post-construction setter convention,
                 // extended from builtins to plain `component`s) are deferred instead — dropped from
                 // `new(..)`'s own argument list, stored `Cell`/`RefCell`-wrapped (`is_copy_type`)
                 // defaulting to `None`, and given a `set_<name>(&self, value: T)` setter — `None`
@@ -2451,7 +2451,7 @@ fn generate_view(
     // `Rectangle`/`Ellipse`/`TextBlock`/`Grid`/`VerticalLayout`/`HorizontalLayout` —
     // `is_virtual_builtin`) and `X`'s own view root is literally a construction of `Y`
     // (`validate::validate_inherits` already enforces this) — the real, load-bearing case of
-    // docs/elwindui_spec.md 付録H.2.1a's `struct XImpl { base: YImpl, .. }` composition: `X`'s
+    // docs/design/gui_framework_design.md §5.1's `struct XImpl { base: YImpl, .. }` composition: `X`'s
     // generated struct embeds `Y`'s real `elwindui::core::ui` `YImpl` as its own `base` field and
     // implements `UIElement` (and `Y`'s own trait) by delegating to it, instead of the ordinary
     // "wrapper owns a separately-`Rc`-erased root" shape every other `view`-having component uses
@@ -2465,7 +2465,7 @@ fn generate_view(
     let is_template_composition = !has_own_view && composed_shape.is_some();
     // `component X inherits Y` where `Y` is a hand-written native host with no `UIElement`
     // implementation of its own (only `Window` today) and `X`'s own view root literally constructs
-    // `Y` — "host composition" (docs/elwindui_spec.md 付録H.2.1a, `TypeInfo::host_composition_base`).
+    // `Y` — "host composition" (docs/design/gui_framework_design.md §5.1, `TypeInfo::host_composition_base`).
     // Follows the same `base`-field/`XImpl`-rename/synthesized-trait shape as shape composition
     // below, just without an `impl UIElement` (`Y` doesn't implement it either) — see this
     // function's dedicated branch further down.
@@ -2708,7 +2708,7 @@ fn generate_view(
         lets_map.insert(let_binding.name.clone(), resolved);
     }
 
-    // Phase 0 (docs/elwindui_spec.md 付録H.2.1a's "inherits" section): a composable `base` (virtual
+    // Phase 0 (docs/design/gui_framework_design.md §5.1's "inherits" section): a composable `base` (virtual
     // builtin / already-composed DSL component / hand-written native host) has no wrapper element
     // written in `view`'s body anymore — the body's own attributes/children directly *are* `base`'s
     // — so the concrete root `ElementNode` `plan_element` (and everything below) still expects is
@@ -2904,7 +2904,7 @@ fn generate_view(
 
     // A required own field (can't be deferred — `is_deferred_own_field` above already excluded it
     // because it's referenced somewhere in this component's own view) that's declared a plain
-    // `prop` (not `#[param]`, docs/elwindui_spec.md §4) still needs to stay externally updatable
+    // `prop` (not `#[param]`, docs/specs/dsl_spec.md §4) still needs to stay externally updatable
     // after construction — a `prop` field is runtime-mutable *by definition*, and "referenced at
     // construction time" doesn't change that (e.g. `RoundedPanel`'s `label`, used immediately to
     // build its own internal `TextBlock` but also meant to change on every `resync()` of whichever
@@ -3060,8 +3060,8 @@ fn generate_view(
     let mut theme_resync_stmts = TokenStream::new();
     // `#[id("...")]` bindings (§13) — a monomorphized `pub fn <id>(&self) -> Rc<ConcreteType>`
     // per binding, not a runtime string-keyed lookup (every `#[id(...)]` name is fixed at compile
-    // time, so a plain accessor is strictly sufficient — see docs/elwindui_spec.md §13 and
-    // 付録O.5's avoid-type-erasure convention).
+    // time, so a plain accessor is strictly sufficient — see docs/specs/dsl_spec.md §13 and
+    // docs/design/gui_framework_design.md §7.2's avoid-type-erasure convention).
     let mut named_accessors = TokenStream::new();
     // Populated instead of `named_accessors` for a composed target's own `#[param]`
     // getters/deferred setters (below) — `#[id(...)]`-tagged child accessors never move here (they
@@ -3109,8 +3109,8 @@ fn generate_view(
     // delegates to the base: a `is_template_composition` forward reads the base's own already-
     // generated accessor method of the same name (`self.base.<name>()`), while a
     // `shape_forwarded_names` one reads the field straight off the base's `elwindui::core::ui`
-    // struct instead — those structs' non-`Copy` fields are `RefCell`-wrapped (docs/elwindui_spec.md
-    // 付録H.2.1a's post-construction setter convention), so this reads `self.base.<name>.borrow()
+    // struct instead — those structs' non-`Copy` fields are `RefCell`-wrapped (docs/design/gui_framework_design.md
+    // §5.1's post-construction setter convention), so this reads `self.base.<name>.borrow()
     // .clone()`, not a plain `.clone()` (unlike a DSL-composed base's own accessor method).
     for (name, ty) in param_names.iter().zip(param_types.iter()) {
         let is_forwarded = !own_struct_param_names.contains(name);
@@ -3133,7 +3133,7 @@ fn generate_view(
         } else {
             quote! { self.#name.clone() }
         };
-        // A composed target's own class trait (docs/elwindui_spec.md 付録H.2.1a) gets this getter
+        // A composed target's own class trait (docs/design/gui_framework_design.md §5.1) gets this getter
         // as a real (untagged) `#[class]` method — reachable generically through `dyn #target`/any
         // bound on it — not just non-composed (plain) components stay purely inherent.
         if is_composed {
@@ -3269,7 +3269,7 @@ fn generate_view(
     }
 
     // Getter for a component's own `#[computed]` field (`own_computed_names`) — read-only (external
-    // assignment to a `#[computed]` field is already a static error, docs/elwindui_spec.md 14章
+    // assignment to a `#[computed]` field is already a static error, docs/specs/dsl_spec.md §14
     // ルール3), Cell/RefCell-backed under the *same* field name as the accessor (not a `_cache`-
     // suffixed one like `generate_viewmodel`'s own Computed arm uses): this generic own-field
     // bare-path branch (`emit_expr`) reads `self.#ident.get()`/`.borrow().clone()` directly off
@@ -3724,10 +3724,10 @@ fn generate_view(
         }
     };
 
-    // §3/付録I.1's lifecycle hooks. `on_mount` is spliced directly into `new()` (against the local
+    // §3/docs/design/gui_framework_design.md §6.1's lifecycle hooks. `on_mount` is spliced directly into `new()` (against the local
     // `this: Rc<Self>`, the same receiver `base::on_mount()` rewrites to — see below); `on_unmount`
     // is codegen'd as a real (if presently uncalled) `__run_on_unmount` method — `elwindui::core::ui`
-    // has no detach/teardown hook yet to wire it to, see docs/elwindui_spec.md 付録I.1.
+    // has no detach/teardown hook yet to wire it to, see docs/design/gui_framework_design.md §6.1.
     //
     // A `base::on_mount()`/`base::on_unmount()` call is only meaningful when *this* component wrote
     // its own `view` (an override of an inherited template) — a component with no `view` of its own
@@ -3820,7 +3820,7 @@ fn generate_view(
         (TokenStream::new(), TokenStream::new())
     };
 
-    // `#target`'s own class-hierarchy declaration (docs/elwindui_spec.md 付録H.2.1a). A composed
+    // `#target`'s own class-hierarchy declaration (docs/design/gui_framework_design.md §5.1). A composed
     // component (`is_shape_composition`/`is_template_composition`/`is_host_composition`) is declared
     // as `#[elwindui::class(inherits = <immediate base's own trait path>)] pub struct #target
     // { .. }` + a paired bare `#[elwindui::class] impl #target { .. }` (`elwindui::class` — not
@@ -3876,7 +3876,7 @@ fn generate_view(
     // consumer-defined base, `elwindui::ui::X` for a builtin — `concrete_type_ident`'s own
     // "is_builtin" rule — or `shape_composition_base_type`'s `elwindui::core::ui::X`
     // struct path for a raw virtual-builtin shape); the macro derives the matching `XExt` supertrait
-    // bound on `#target`'s own generated trait internally (docs/elwindui_spec.md 付録H.2.1a) — never
+    // bound on `#target`'s own generated trait internally (docs/design/gui_framework_design.md §5.1) — never
     // something this function needs to spell out itself. `#target: <immediate base>` already reaches
     // every deeper ancestor (down to `UIElement`) through the base's own supertrait chain — exactly
     // like `elwindui_core::ui::TextAreaExt: NativeControlExt` does — so there's no need to skip
@@ -4172,7 +4172,7 @@ struct PlannedNode {
     /// Bindings of the element's *bare* nested children (`Type { ... }` written directly inside
     /// `{}`, not as `name: value`). Used to fill a resolved shape's `children`-named `#[param]`
     /// (an implicit list) or, absent one, the single field named by the component's own
-    /// `#[content(field_name)]` (docs/elwindui_spec.md 付録E — e.g. `MenuBarItem`'s one nested
+    /// `#[content(field_name)]` (docs/specs/dsl_spec.md 付録A — e.g. `MenuBarItem`'s one nested
     /// `Menu`, bound to its `#[content(submenu)]` field; see `build_component_args`).
     /// Paired with each binding's own `type_path`, needed to decide (at the point it's used as
     /// someone else's argument) whether it's already an `elwindui::core::ui::Node<AnyView>` value
@@ -4455,7 +4455,7 @@ fn view_expr_references_closure_parameter(expr: &ViewExpr, parameter: &str) -> b
     }
 }
 
-/// Phase 2 (docs/elwindui_spec.md 付録H.2.1a): whether `info`'s own `#[content(...)]` field
+/// Phase 2 (docs/design/gui_framework_design.md §5.1): whether `info`'s own `#[content(...)]` field
 /// (`children` if unnamed) is list-shaped (`Vec<...>`/`ListExt<...>`/`UIElementCollection`) rather
 /// than scalar (e.g. `ContentControl`/`Window`'s `content: Rc<dyn UIElement>`) — mirrors
 /// `validate.rs`'s `check_dynamic_child_hosts`'s own `is_collection` check exactly, reused here to
@@ -4567,7 +4567,7 @@ fn dynamic_collection_item_trait(
 /// a `use` for and was never going to need one, since it only ever references the item through the
 /// loop variable — so a resolve-by-name check against *that* type is fragile in a way a check
 /// against the always-in-scope receiving component type isn't (see
-/// `docs/agents/winui3_current_state.md`'s "Root cause of 'text not reflected after Open'" for the
+/// `docs/status/winui3_backend_status.md`'s "Root cause of 'text not reflected after Open'" for the
 /// concrete bug this replaced).
 fn collection_uses_rc_identity(
     collection: &ViewExpr,
@@ -5711,7 +5711,7 @@ fn emit_closure_value(
 /// directly). These are the only components whose own `Type::new(..)` is hand-written Rust rather
 /// than `generate_view`-produced — `emit_construction` uses this to decide between the
 /// zero-argument-constructor-plus-setters convention (`build_component_setters`, docs/
-/// elwindui_spec.md 付録H.2.1a's post-construction setter convention extended to every builtin
+/// docs/design/gui_framework_design.md §5.1's post-construction setter convention extended to every builtin
 /// property) and the ordinary positional-argument `Type::new(args)` every `has_view` component
 /// (embedded/composed like `ContentControl`, or a plain user-defined component) still uses —
 /// unchanged, since `generate_view`'s own construction isn't part of this pass (see this crate's
@@ -5723,7 +5723,7 @@ fn is_hand_written_native(info: &TypeInfo) -> bool {
 /// A hand-written native's own DSL-attribute-driven setters (`build_component_setters`), or a
 /// virtual builtin's own `set_*` calls (`build_virtual_value`/`emit_resync`), may call one of
 /// `elwindui::core::ui`'s shared property-setter traits' methods via dot-syntax — declared there
-/// (docs/elwindui_spec.md 付録H.2.1a) rather than as a wrapper-only inherent method, so the trait
+/// (docs/design/gui_framework_design.md §5.1) rather than as a wrapper-only inherent method, so the trait
 /// needs to be in scope wherever that dot-call happens. Emitted as an anonymous `use ... as _;`
 /// (never binds a name of its own, so repeating it for multiple bindings of the same type in one
 /// function is harmless) right alongside `#binding`'s own `let` in `emit_construction`, which keeps
@@ -5944,7 +5944,7 @@ fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
 ///     already-planned/constructed binding (`element_attr_bindings`);
 ///   - a `ViewExpr::Closure`-valued attribute compiles to a real boxed closure (`emit_closure_value`);
 ///   - an `Option<..>`-typed param with no matching attribute becomes `None`;
-///   - the param named by the component's own `#[content(field_name)]` (docs/elwindui_spec.md 付録E,
+///   - the param named by the component's own `#[content(field_name)]` (docs/specs/dsl_spec.md 付録A,
 ///     `TypeInfo::content_field`) with no matching attribute binds the element's single bare nested
 ///     child (`MenuBarItem`'s single nested `Menu`, bound to its `#[content(submenu)]` field);
 ///   - anything else is an ordinary `emit_expr` value.
@@ -5965,7 +5965,7 @@ fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
 /// a `#[routed]` property too).
 ///
 /// **Known gaps, deliberately not yet handled** (no current builtin construction needs them — see
-/// `docs/elwindui_implementation_status.md`'s tracking of this rewrite): a named attribute matching a
+/// `docs/status/implementation_status.md`'s tracking of this rewrite): a named attribute matching a
 /// `#[content(..)]`-designated property (`Window { content: SomeElement { .. } }` — as opposed to a
 /// *bare* nested child, which `emit_construction`'s own caller already routes through `@children`
 /// separately), a `ViewExpr::Element`-valued named attribute (`menu_bar: MenuBar { .. }`), and a
@@ -6238,7 +6238,7 @@ fn emit_construction(
             #(#setters)*
         });
     } else {
-        // `has_view`/plain-component construction (docs/elwindui_spec.md 付録H.2.1a's
+        // `has_view`/plain-component construction (docs/design/gui_framework_design.md §5.1's
         // post-construction setter convention): `build_component_args` omits this
         // target's own deferred `Option<T>` fields (`is_deferred_field`) from the positional list —
         // `build_component_optional_setters` supplies the matching trailing `.set_<field>(value)`
@@ -6271,8 +6271,8 @@ fn emit_construction(
         }
     }
     // `Button`/`TextArea`/`TabView` (`inherits NativeControl`, `TypeInfo::is_native_control_leaf`)
-    // own a real `base` (a backend-owned `NativeControlImpl`) field (docs/elwindui_spec.md
-    // 付録H.2.1a) — this use site's margin/attached properties are applied to it right
+    // own a real `base` (a backend-owned `NativeControlImpl`) field (docs/design/gui_framework_design.md
+    // §5.1) — this use site's margin/attached properties are applied to it right
     // here, post-construction, exactly like `emit_virtual_construction` does for virtual builtins
     // (see `emit_common_ui_element_setters`). `MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`Window`
     // (`#[native]` directly, never entering the `UIElement` tree) don't get this at all.
@@ -6348,12 +6348,12 @@ fn is_deferred_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str
 ///   instead.
 /// - It's a required `prop` (not `#[param]`) field (`generate_view`'s `mutable_required_names`):
 ///   needed eagerly at construction (so it can't be deferred), but declared runtime-mutable per
-///   docs/elwindui_spec.md §4's param/prop split — `generate_view` keeps it a positional `new(..)`
+///   docs/specs/dsl_spec.md §4's param/prop split — `generate_view` keeps it a positional `new(..)`
 ///   argument *and* gives it a resync-triggering setter. Gated on `!info.is_builtin`: this rule
 ///   only holds for a genuinely `generate_view`-generated user component — `elwindui-codegen`'s own
 ///   embedded `builtins.elwind` also declares a `view` for `Rectangle`/`Ellipse`/`ContentControl`
 ///   (`has_view: true` too), but purely for symbol-table/validation purposes (docs/
-///   elwindui_spec.md 付録H.2.1a) — their real implementation is hand-written directly in
+///   docs/design/gui_framework_design.md §5.1) — their real implementation is hand-written directly in
 ///   `elwindui_core::ui`, never run through `generate_view`, so a "no `#[param]`" field there
 ///   (e.g. `Rectangle::corner_radius`) may have no real setter at all regardless of `FieldKind`.
 fn is_settable_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str) -> bool {
@@ -6392,7 +6392,7 @@ fn is_defaulted_settable_field(info: &TypeInfo, name: &str) -> bool {
 }
 
 /// Evaluates a resolved user-component node's own attributes into the positional argument list its
-/// generated `new(..)`/`create_<snake case>(..)` (docs/elwindui_spec.md 付録H.2.1a) expects, in
+/// generated `new(..)`/`create_<snake case>(..)` (docs/design/gui_framework_design.md §5.1) expects, in
 /// `info.param_fields`'s declared order — shared by `emit_construction` (wraps as `Type::new(args)`)
 /// and `build_component_value` (wraps as `create_<snake case>(args)`, for a shape-composition root
 /// whose base is itself a DSL component rather than a hand-written `elwindui::core::ui` primitive).
@@ -6552,8 +6552,8 @@ fn build_component_args(
 }
 
 /// The post-construction-setter analog of `build_component_args` — used by `emit_construction`'s
-/// `is_hand_written_native` branch instead of positional constructor args (docs/elwindui_spec.md
-/// 付録H.2.1a's post-construction setter convention, extended to every builtin's own declared
+/// `is_hand_written_native` branch instead of positional constructor args (docs/design/gui_framework_design.md
+/// §5.1's post-construction setter convention, extended to every builtin's own declared
 /// `#[param]`s, the same way `emit_common_ui_element_setters` already applies it to
 /// margin/grid_cell). Mirrors `build_component_args`'s field-by-field value
 /// computation exactly (same bare-children/`ViewExpr::Element`/`ViewExpr::Closure`/
@@ -6588,14 +6588,14 @@ fn build_component_setters(
     for (name, ty) in &info.param_fields {
         let setter_ident = format_ident!("set_{}", name);
         let is_this_field_content = info.content_field.as_deref() == Some(name.as_str());
-        // `docs/elwindui_spec.md` §3 (`#[content(field_name)]`'s own paragraph): bare nested
+        // `docs/specs/dsl_spec.md` §3 (`#[content(field_name)]`'s own paragraph): bare nested
         // children bind to *some* field either via an explicit `#[content(field_name)]`, or — the
         // spec's documented fallback — a plain field literally named `children` with a list type.
         // Which of the two *emission* shapes applies (bulk `set_<field>(vec![...])` vs a
         // `.{field}().add(child)` loop against a live accessor) is derived purely from the
         // destination field's own declared type, not from which of the two mechanisms named it —
         // `Vec<T>` (e.g. `TabView`'s `children`) uses the former; `ListExt<T>` (e.g. `Menu`/
-        // `MenuBar`'s `#[content(items)]` `items: ListExt<MenuItem>`, docs/elwindui_builtins_spec.md
+        // `MenuBar`'s `#[content(items)]` `items: ListExt<MenuItem>`, docs/specs/builtins_spec.md
         // 付録M) uses the latter, mirroring `Layout`/`Control`'s own `.children().add(..)`
         // convention for virtual builtins (`build_virtual_value`) one level up.
         if (name == "children" || is_this_field_content) && ty.trim_start().starts_with("Vec<") {
@@ -6853,7 +6853,7 @@ fn build_component_value(
     quote! { #construct_path(#(#args),*) }
 }
 
-/// Emits post-construction `set_attached::<T>(..)` calls (docs/elwindui_spec.md 付録H.2.1a) for
+/// Emits post-construction `set_attached::<T>(..)` calls (docs/design/gui_framework_design.md §5.1) for
 /// whichever attached properties `node` actually specifies — shared by `emit_virtual_construction`
 /// (virtual builtins) and `emit_construction`'s native-control-leaf branch (`Button`/`TextArea`/
 /// `TabView` — see `TypeInfo::is_native_control_leaf`). `margin`/`width`/`height`/... (every other
@@ -6888,7 +6888,7 @@ fn emit_common_ui_element_setters(
 }
 
 /// Emits `binding.as_ui_element().register_routed_handler::<()>("on_click", ..)` for the generic "any
-/// element can catch a routed `on_click`" common attribute (docs/elwindui_spec.md 4章) — used by
+/// element can catch a routed `on_click`" common attribute (docs/specs/dsl_spec.md §4) — used by
 /// `emit_virtual_construction` unconditionally, and by `emit_construction`'s native-control-leaf
 /// branch only when the type doesn't *already* declare `on_click` as a real `#[routed]` field of
 /// its own (`Button` — wired instead by `emit_wiring`'s dedicated `is_routed` branch; applying this
@@ -6965,7 +6965,7 @@ const SHORTCUT_NAMED_KEYS: &[&str] = &[
 
 /// Parses one `+`-separated `#[shortcut(...)]` key spec (`"Ctrl+Shift+S"`) into modifier flags plus
 /// the key itself. The last `+`-separated part is always the key; every part before it must be one
-/// of `Ctrl`/`Shift`/`Alt`/`Meta` (docs/elwindui_gui_framework_design.md §8.1's platform-neutral
+/// of `Ctrl`/`Shift`/`Alt`/`Meta` (docs/design/gui_framework_design.md §8.1's platform-neutral
 /// modifier vocabulary — never `Cmd`, which only exists as codegen's own macOS remap of `Ctrl`, see
 /// `resolve_shortcut_chord`).
 pub(crate) fn parse_shortcut_spec(spec: &str) -> Result<ParsedShortcut, String> {
@@ -7042,7 +7042,7 @@ fn resolve_shortcut_chord<'a>(
 }
 
 /// Builds the `elwindui::core::input::KeyChord { .. }` expression for `resolved`, applying
-/// docs/elwindui_gui_framework_design.md §8.1's platform remap ("macOS向けビルドでは`Ctrl`が自動的に
+/// docs/design/gui_framework_design.md §8.1's platform remap ("macOS向けビルドでは`Ctrl`が自動的に
 /// `Cmd`に読み替えられる") only to a `Fallback` chord (a backend-agnostic spec picking up macOS's own
 /// idiom automatically) on `backend_name == "appkit"` — an explicit `Specific` override (the author
 /// wrote `appkit: "..."` themselves) is always used exactly as written, remap or not.
@@ -7079,7 +7079,7 @@ fn emit_shortcut_chord_expr(resolved: &ResolvedShortcutChord, backend_name: &str
 
 /// Emits `<binding>.as_ui_element().declare_shortcut(..)` for every backend covered by `chords`
 /// (`resolve_shortcut_chord`), each under its own `#[cfg(feature = "backend-<name>")]` — mirrors the
-/// existing Cargo-feature-flag-driven backend selection (`docs/elwindui_implementation_status.md`'s
+/// existing Cargo-feature-flag-driven backend selection (`docs/status/implementation_status.md`'s
 /// noted stand-in for the not-yet-implemented `target::backend()`), not a `match` over some runtime
 /// backend enum. A backend with no applicable chord at all (`resolve_shortcut_chord` returning
 /// `None`) is silently skipped — `validate::validate_shortcut_fields` warns about that case ahead of
@@ -7214,11 +7214,11 @@ fn emit_virtual_construction(
 }
 
 /// Builds the plain `elwindui::core::ui::create_xxx()` (empty
-/// argument — docs/elwindui_spec.md 付録H.2.1a's post-construction setter convention, extended to
+/// argument — docs/design/gui_framework_design.md §5.1's post-construction setter convention, extended to
 /// every builtin property) followed by whichever `set_<field>(..)` calls this use site's own
 /// attributes supply, as a single block expression evaluating to the fully-configured value — the
 /// value `emit_virtual_construction` normally stores directly, but which a
-/// `component X inherits Y` shape-composition root (docs/elwindui_spec.md 付録H.2.1a) needs
+/// `component X inherits Y` shape-composition root (docs/design/gui_framework_design.md §5.1) needs
 /// unwrapped so it can be embedded directly as `X`'s own `base` field instead of erased into
 /// `Rc<dyn UIElement>` (see `generate_view`'s `is_shape_composition` branch).
 fn build_virtual_value(
@@ -7402,7 +7402,7 @@ fn build_virtual_value(
 }
 
 /// The concrete Rust struct to construct/store for a resolved component named `type_path` — plain
-/// `format_ident!("{type_path}")` (docs/elwindui_spec.md 付録H.2.1a: every `#[class]`-managed
+/// `format_ident!("{type_path}")` (docs/design/gui_framework_design.md §5.1: every `#[class]`-managed
 /// struct, composed or not, compiles under exactly its own bare DSL name now), qualified with
 /// `elwindui::ui::` when `info` says it's a builtin (a consumer-defined component has no such fixed
 /// path, so it stays bare, resolved via the existing flat crate-root convention instead).
@@ -7428,7 +7428,7 @@ fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> TokenStream 
 }
 
 /// `"ContentControl"` -> `ContentControl::construct` — the bare-value associated function a
-/// composed component's own struct pairs with (docs/elwindui_spec.md 付録H.2.1a), mirroring
+/// composed component's own struct pairs with (docs/design/gui_framework_design.md §5.1), mirroring
 /// `elwindui::core::ui`'s `Control::construct`/`Shape::construct`/etc. `#[class]`-generated
 /// convention. `is_builtin` mirrors `concrete_type_ident`'s own rule (`TypeInfo::is_builtin`'s doc
 /// comment): a builtin's struct always lives at the fixed `elwindui::ui::X` path, but a
@@ -7568,7 +7568,7 @@ fn emit_wiring(
                 continue;
             }
             let setter = format_ident!("set_{name}");
-            // `#[routed]` (docs/elwindui_spec.md 4章): registered on the widget's own storage
+            // `#[routed]` (docs/specs/dsl_spec.md §4): registered on the widget's own storage
             // (`Button::register_routed_handler`, delegating to its own `routed_handlers`) instead
             // of calling `set_<attr>` directly — `dispatch_routed` invokes it later, bubbling
             // through ancestors too, rather than this being the only thing that ever runs. The
@@ -7596,7 +7596,7 @@ fn emit_wiring(
                     &self_mode,
                     &quote! { widget.as_ui_element() },
                 );
-                // `#[shortcut(...)]` (docs/elwindui_gui_framework_design.md §8.1) — a per-usage-
+                // `#[shortcut(...)]` (docs/design/gui_framework_design.md §8.1) — a per-usage-
                 // site annotation on *this* element's own `on_click`/etc. attribute (`node.
                 // attribute_shortcuts`, not `TypeInfo`'s field-declaration-level metadata — see
                 // `ast::ElementNode::attribute_shortcuts`'s own doc comment for why). A host's own
@@ -8277,7 +8277,7 @@ fn emit_resync(
             ResyncFilter::Property(_, _) | ResyncFilter::Theme => {}
         }
         // `#[onetime]` fields (`Window`'s own `left`/`top`/`width`/`height`,
-        // docs/elwindui_builtins_spec.md 付録F.1) are one-time initial-placement/size setters,
+        // docs/specs/builtins_spec.md 付録F.1) are one-time initial-placement/size setters,
         // applied once at construction (`build_component_setters`) — never re-pushed here.
         // Re-applying them on every resync() would fight the OS window manager, snapping a
         // user-dragged/resized window back to its originally-declared value the next time
@@ -9159,7 +9159,7 @@ view NotepadWindow {
         assert!(rendered.contains("fn __refresh_dynamic_regions"));
     }
 
-    /// Phase 2 (docs/elwindui_spec.md 付録H.2.1a): a scalar `#[content(...)]` field
+    /// Phase 2 (docs/design/gui_framework_design.md §5.1): a scalar `#[content(...)]` field
     /// (`ContentControl`'s `content: Rc<dyn UIElement>`) can host an `if`/`match` dynamic region —
     /// combined with Phase 0's implicit-composition sugar, this is what used to be called "root
     /// self-dynamism": `component X inherits ContentControl { view X { if .. { A } else { B } } }`
@@ -9418,7 +9418,7 @@ view NotepadWindow {
     }
 
     /// The pointer/tap `#[routed]` fields added to the common `UIElement` component
-    /// (docs/elwindui_gui_framework_design.md §5.10) must be wired with the payload type each
+    /// (docs/design/gui_framework_design.md §5.10) must be wired with the payload type each
     /// field itself declares (`fn(elwindui_core::input::PointerEventArgs)`/`TappedEventArgs`/...) —
     /// derived purely from `TypeInfo::field_types` via `callback_param_types`, never a hardcoded
     /// event-name/type table in `elwindui-codegen` itself (the codegen design doc's own no-
@@ -10137,7 +10137,7 @@ view Foo {
         let _ = generate_module(&module, &table);
     }
 
-    /// `ContentControl inherits Control` (docs/elwindui_builtins_spec.md 付録F.10) — the
+    /// `ContentControl inherits Control` (docs/specs/builtins_spec.md 付録F.10) — the
     /// `#[param] content` field is forwarded as a bare child into `Control`'s own children via the
     /// `PASSTHROUGH_NODE`-tagged `lets_map` seeding in `generate_view`, and every `#[param]` field
     /// (not just `#[id(...)]` lets) gets a generated named accessor.
@@ -10160,7 +10160,7 @@ view Foo {
         assert_valid_rust("content_control", &generated);
 
         let generated_str = generated.to_string();
-        // `ContentControl` is composed (docs/elwindui_spec.md 付録H.2.1a) — its real struct is
+        // `ContentControl` is composed (docs/design/gui_framework_design.md §5.1) — its real struct is
         // always its own bare name (`ContentControlExt` is its auto-derived trait), so `Foo`'s own
         // generated code, resolving `ContentControl` as a child element, must construct that
         // concrete type (`emit_construction`'s `concrete_type_ident`).
@@ -10201,7 +10201,7 @@ view Foo {
         let content_control_str = content_control_code.to_string();
         assert!(content_control_str.contains("elwindui :: core :: ui :: Control :: new"));
         // `content`/`padding` are `#[class]`-managed own (untagged) methods now (docs/
-        // elwindui_spec.md 付録H.2.1a) — the macro derives the matching trait declaration/impl from
+        // docs/design/gui_framework_design.md §5.1) — the macro derives the matching trait declaration/impl from
         // these at expansion time, invisible in these pre-expansion generated tokens.
         assert!(
             content_control_str
@@ -10209,7 +10209,7 @@ view Foo {
         );
         assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
         // Real struct is always the bare `ContentControl` name itself — the *source* `#[class]` is
-        // written against that same bare name (docs/elwindui_spec.md 付録H.2.1a); the macro derives
+        // written against that same bare name (docs/design/gui_framework_design.md §5.1); the macro derives
         // its `ContentControlExt` trait alongside at expansion time — no `struct`/`trait` namespace
         // clash since the two are different identifiers.
         assert!(
@@ -10289,7 +10289,7 @@ component LabeledPanel inherits ContentControl {
 
         let generated_str = generated.to_string();
         // The compiled struct is always the bare `LabeledPanel` name itself — the *source* `#[class]`
-        // is written against that same bare name (docs/elwindui_spec.md 付録H.2.1a) — same reasoning
+        // is written against that same bare name (docs/design/gui_framework_design.md §5.1) — same reasoning
         // as `ContentControl`, and the macro derives `pub trait LabeledPanelExt: ..` itself at
         // expansion time, invisible in these pre-expansion generated tokens.
         assert!(
@@ -10427,7 +10427,7 @@ view Foo {
         );
     }
 
-    /// Verifies the attached-property behavior specified in docs/elwindui_spec.md §3:
+    /// Verifies the attached-property behavior specified in docs/specs/dsl_spec.md §3:
     /// a `has_view`/plain user-defined `component`+`view` pair (non-native-rooted, so it has a real
     /// `into_node()`) used as a `Grid` child must still have its `Grid::row`/`Grid::column` reach
     /// that child's own view-root `UIElementImpl`, not be silently dropped.

@@ -1,5 +1,5 @@
 //! Manual verification harness for the NativeControl expansion Phase 1 controls (TextBox/
-//! PasswordBox/ScrollView) added in `docs/elwindui_nativecontrol_expansion_status.md`, following
+//! PasswordBox/ScrollView) added in `docs/status/nativecontrol_status.md`, following
 //! `examples/graphics-demo`'s own structure (single `main.rs`, `#[elwindui::viewmodel]`, one
 //! `TabView` with one tab per area — see that file's own doc comment for why this shape was
 //! chosen). Unlike `graphics-demo` (which exercises custom-drawn `Canvas` content), every tab here
@@ -10,11 +10,11 @@
 //!
 //! `PasswordBox`'s own event log deliberately never shows the password value itself, only its
 //! length (`"changed (len=N)"`) — this demo's own source doubles as documentation of the no-leak
-//! policy `docs/elwindui_nativecontrol_expansion_status.md` requires (§1.6).
+//! policy `docs/status/nativecontrol_status.md` requires (§1.6).
 //!
 //! The "Regression" tab re-exercises the *existing* `TextArea`/`Button` controls (unchanged by this
 //! Phase, but affected by its common-infrastructure focus-wiring changes) as the demo counterpart
-//! to the `docs/elwindui_nativecontrol_expansion_status.md` §2 regression-check procedure.
+//! to the `docs/status/nativecontrol_status.md` §2 regression-check procedure.
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 

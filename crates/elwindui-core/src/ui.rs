@@ -9,7 +9,7 @@
 //! `Margin`/`HorizontalAlignment`/`VerticalAlignment` (`UIElement`) are common to every one of
 //! them, applied generically by this module's `measure`/`arrange` (WinUI3's
 //! `UIElement.Measure`/`Arrange` wrapping each type's own `MeasureOverride`/`ArrangeOverride`) —
-//! see docs/elwindui_spec.md 付録H.2.
+//! see docs/design/gui_framework_design.md §5.3.
 //!
 //! `H` (whatever a backend uses as its native widget handle, e.g. `elwindui-backend-appkit`'s
 //! `AnyView`) appears only while RenderTree builds or reconciles a native command,
@@ -82,7 +82,7 @@ pub trait RelayoutHost {
 /// on a hosted tree's root, set by the host's own `set_tree`), discovered the same way
 /// (`request_focus` walks `visual_parent` up to the root, mirroring `request_relayout`), and backed
 /// by the same "wrap a weak handle back to the host" convention. `UIElementExt::focus()` is the
-/// public entry point every element gets for free — see docs/elwindui_gui_framework_design.md §5.5.
+/// public entry point every element gets for free — see docs/design/gui_framework_design.md §5.5.
 pub trait FocusHost {
     /// Always requests `FocusState::Programmatic` — matching real WinUI3, where `Control.Focus()`'s
     /// public entry point only ever sets `Programmatic`; `Keyboard`/`Pointer` are set exclusively by
@@ -113,7 +113,7 @@ pub trait FocusHost {
 /// New kinds (a future `Grid`, say) are added by implementing this trait; nothing here or in
 /// `layout_root` needs to change.
 ///
-/// `UIElement` is the root of the class hierarchy (docs/elwindui_spec.md 付録H.2.1a) —
+/// `UIElement` is the root of the class hierarchy (docs/design/gui_framework_design.md §5.1) —
 /// `#[elwindui_macros::class]`'s "root class mode" (no `inherits`): every method on the paired
 /// `impl UIElement { .. }` below becomes a *default* method here, embedded body and all, so every
 /// other `#[class(inherits = ..)]`-managed subclass inherits all of them for free via Rust's own
@@ -195,14 +195,14 @@ pub struct UIElement {
     pub arranged_height: Cell<Option<f32>>,
     pub arranged_offset: Cell<Option<Point>>,
     /// `#[routed]`-tagged callback fields (`on_click`, and any future one — see
-    /// `docs/elwindui_spec.md` 4章), keyed by field name. Each value is a
+    /// `docs/specs/dsl_spec.md` 4章), keyed by field name. Each value is a
     /// `Box<dyn Fn(&T, &RoutedEventArgs)>` erased to `Box<dyn Any>` (`T` is that field's own
     /// payload type — `()` for `on_click`, `usize` for a hypothetical routed `on_select`, ...);
     /// generated call sites know `T` statically from the `.elwind` declaration, so the downcast in
     /// `dispatch_routed` always succeeds (matching generated dynamic child ranges' type-erasure
     /// pattern).
     pub routed_handlers: RoutedHandlers,
-    /// Generic, type-erased attached-property bag (docs/elwindui_spec.md §3の添付プロパティ), keyed
+    /// Generic, type-erased attached-property bag (docs/specs/dsl_spec.md §3の添付プロパティ), keyed
     /// by `(owner, field)` — e.g. `("Grid", "row")` — and populated right after construction from
     /// whatever `Owner::field: value` setters the `.elwind` source wrote on this specific element
     /// (`elwindui-codegen`'s `plan_element`/`emit_construction`/`emit_attached_setters`). Absent for
@@ -448,7 +448,7 @@ impl UIElement {
     fn arranged_offset(&self) -> Option<Point> {
         self.as_ui_element().arranged_offset.get()
     }
-    /// Post-construction setters (docs/elwindui_spec.md 付録H.2.1a) for every field this trait
+    /// Post-construction setters (docs/design/gui_framework_design.md §5.1) for every field this trait
     /// already exposes a getter for — declared here (not just as `UIElement`'s own inherent
     /// methods) so they're reachable generically through `dyn UIElement`/any bound on this trait,
     /// not only through the concrete backing struct.
@@ -528,7 +528,7 @@ impl UIElement {
             .and_then(|p| p.upgrade())
     }
     /// This element's own children in the **Visual tree** (WinUI3's own Visual-tree children,
-    /// docs/elwindui_spec.md 付録H.2.2) — the only tree any code ever actually walks (there is no
+    /// docs/design/gui_framework_design.md §5.2) — the only tree any code ever actually walks (there is no
     /// separate, generically-traversable Logical tree data structure; some components merely *have*
     /// Logical-tree-shaped children of their own — see `UIElementCollection`). A default method,
     /// not overridden by any concrete type: it reads `self.as_ui_element().visual_children` directly, which
@@ -590,7 +590,7 @@ impl UIElement {
     }
     /// `Some(&self.handle)` (the raw native handle itself, erased to `&dyn Any`) for a backend's own
     /// `NativeControlImpl { handle: AnyView, .. }` and for any type that composes one as its own
-    /// `base` field (docs/elwindui_spec.md 付録H.2.1a — e.g. a backend's `ButtonImpl { base:
+    /// `base` field (docs/design/gui_framework_design.md §5.1 — e.g. a backend's `ButtonImpl { base:
     /// NativeControlImpl, .. }` overrides this to return `Some(&self.base.handle)`); `None` for every
     /// other `UIElement` (the default). `collect_render_items<H>` downcasts this directly to `H`
     /// (`downcast_ref::<H>()`), not to any `elwindui-core`-defined wrapper struct — measuring/placing
@@ -858,7 +858,7 @@ impl UIElement {
     ///
     /// Overridable so a Popup/Portal/ControlTemplate-style element whose *visual* parent doesn't
     /// reach its real inheritance source (指示書 §28) can substitute its own answer — no such
-    /// override exists yet (未対応, see `docs/elwindui_font_status.md`), but the hook is here.
+    /// override exists yet (未対応, see `docs/status/font_status.md`), but the hook is here.
     #[overridable]
     fn inheritance_parent(&self, kind: InheritanceParentKind) -> Option<Rc<dyn UIElementExt>> {
         match kind {
@@ -1273,7 +1273,7 @@ impl UIElementVisualCollection {
 }
 
 /// The Logical-tree-shaped child list a container (`Layout`/`Control` family) declares in
-/// `.elwind` — WinUI3's own `UIElementCollection` (docs/elwindui_spec.md 付録H.2.2), e.g.
+/// `.elwind` — WinUI3's own `UIElementCollection` (docs/design/gui_framework_design.md §5.2), e.g.
 /// `Panel.Children`. There is no separate, generically-traversable Logical tree: this is simply the
 /// convenience API a *particular* component exposes for its own children, which automatically stays
 /// in sync with the real Visual tree — `add`/`insert`/`remove`/`remove_at`/`clear` all mutate the
@@ -1472,7 +1472,7 @@ pub trait Button {
     fn set_text(&self, text: &str);
 }
 
-/// Single-line text input — see `docs/elwindui_nativecontrol_expansion_status.md` for the wider
+/// Single-line text input — see `docs/status/nativecontrol_status.md` for the wider
 /// NativeControl expansion this is part of. Deliberately narrower than the original spec's
 /// `TextBox` sketch: `selection_start`/`selection_length` are not included (AppKit's `NSTextField`
 /// selection lives on its *field editor*, which only exists while actively being edited — a shared
@@ -1504,7 +1504,7 @@ pub trait TextBox {
 /// semantics on obscured text are rarely product-relevant). The field/method is named `password`,
 /// not `text`, everywhere (trait, `builtins.elwind`, backend structs) — a deliberate naming
 /// divergence from `TextBox` so nothing can accidentally get routed through a code path that
-/// assumes plaintext display is fine. See `docs/elwindui_nativecontrol_expansion_status.md` for the
+/// assumes plaintext display is fine. See `docs/status/nativecontrol_status.md` for the
 /// `reveal_enabled` AppKit/WinUI3 asymmetry this control has (WinUI3's `PasswordRevealMode` is
 /// native; AppKit's `NSSecureTextField` has no equivalent, so `true` is a documented no-op there).
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
@@ -1522,7 +1522,7 @@ pub trait PasswordBox {
 
 /// Hosts arbitrary elwindui content inside a native scrolling container —
 /// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content`
-/// (`docs/elwindui_nativecontrol_expansion_status.md`). Unlike every other `NativeControl` leaf so
+/// (`docs/status/nativecontrol_status.md`). Unlike every other `NativeControl` leaf so
 /// far (`Button`/`TextArea`/`TextBox`/`PasswordBox`/`TabView`, all self-contained native widgets),
 /// `ScrollView`'s own content is a full elwindui subtree with its own layout/paint/hit-test/focus —
 /// each backend's `ElwinduiContentRoot` is a second, nested instance of that same backend's own
@@ -1837,7 +1837,7 @@ pub trait Menu {
     fn remove_item(&self, item: &dyn MenuItemExt);
     /// A live handle onto the same backing collection `add_item`/`remove_item` mutate — added
     /// alongside them (not a replacement) so `.elwind`'s `#[content(items)]` mechanism
-    /// (`builtins.elwind`'s `Menu`, `docs/elwindui_builtins_spec.md` 付録M) can populate `Menu`'s
+    /// (`builtins.elwind`'s `Menu`, `docs/specs/builtins_spec.md` 付録M) can populate `Menu`'s
     /// nested `MenuItem { .. }` children through the same generic `ListExt`-typed
     /// content-field path every other multi-child builtin (`VerticalLayout`/`Grid`/`TabView`/...)
     /// already uses, instead of `elwindui-codegen` needing a `Menu`-specific construction branch.
@@ -1866,7 +1866,7 @@ pub trait MenuBar {
     fn items(&self) -> &dyn ListExt<dyn MenuBarItemExt>;
 }
 
-/// `TabView`'s class trait (docs/elwindui_spec.md 付録H.2.1a). Its content is a live, ordered
+/// `TabView`'s class trait (docs/design/gui_framework_design.md §5.1). Its content is a live, ordered
 /// collection of `TabViewItem`s. Dynamic child ranges update this collection directly; the
 /// backend reconciles the corresponding native tabs.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
@@ -1890,7 +1890,7 @@ pub trait TabView {
 #[prop(on_close: fn())]
 pub trait TabViewItem {}
 
-/// `Window`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — also the `component X inherits
+/// `Window`'s own class trait (docs/design/gui_framework_design.md §5.1) — also the `component X inherits
 /// Window` (host-composition) bare name every backend's own `WindowImpl` implements.
 /// `set_menu_bar`'s `Rc<dyn MenuBar>` follows the same trait-object-argument convention as
 /// `Menu`/`MenuBar`/`MenuBarItem` just above (see this module's own doc comment on that group) —
@@ -1922,14 +1922,14 @@ pub trait Window {
     fn set_height(&self, height: f32);
 }
 
-/// `Layout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — empty marker over `UIElement`,
+/// `Layout`'s own class trait (docs/design/gui_framework_design.md §5.1) — empty marker over `UIElement`,
 /// implemented by every layout-container virtual builtin (`VerticalLayout`/
 /// `HorizontalLayout`/`Grid`), the same way `NativeControl` groups every native leaf.
 ///
 /// Holds `children` plus an optional, explicitly assigned background shared by every layout
 /// container. An unset background remains transparent; `SystemTheme::layout_background` is never
 /// applied implicitly.
-/// (docs/elwindui_spec.md 1426行目). `spacing` is *not* here: it only means anything to
+/// (docs/specs/dsl_spec.md 1426行目). `spacing` is *not* here: it only means anything to
 /// `VerticalLayout`/`HorizontalLayout` (`Grid` has no use for it), so each of those two declares
 /// its own `spacing` field instead of it living on this shared base. `VerticalLayout`/
 /// `HorizontalLayout` do their own layout math directly against `elwindui_core::layout`'s
@@ -1957,7 +1957,7 @@ pub struct Layout {
 #[elwindui_macros::class]
 impl Layout {
     /// Not `#[inherent]` — a plain method here becomes a default `LayoutExt` trait method
-    /// (dispatched through `__dyn_layout`, docs/elwindui_macro_class_spec.md), so
+    /// (dispatched through `__dyn_layout`, docs/specs/macro_class_spec.md), so
     /// `VerticalLayout`/`HorizontalLayout`/`Grid` all get `self.children()` for free without
     /// redeclaring it themselves, the same way every `UIElement` (root class) method is inherited
     /// by every concrete leaf/container for free.
@@ -2016,7 +2016,7 @@ impl Layout {
     }
 }
 
-/// `VerticalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). `spacing` lives here
+/// `VerticalLayout`'s own class trait (docs/design/gui_framework_design.md §5.1). `spacing` lives here
 /// (not on `Layout`) since it's meaningless to `Grid`, `Layout`'s other concrete subclass — see
 /// `Layout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
@@ -2084,7 +2084,7 @@ impl VerticalLayout {
     }
 }
 
-/// `HorizontalLayout`'s own class trait (docs/elwindui_spec.md 付録H.2.1a). `spacing` lives here
+/// `HorizontalLayout`'s own class trait (docs/design/gui_framework_design.md §5.1). `spacing` lives here
 /// (not on `Layout`) — see `VerticalLayout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
 #[content(children)]
@@ -2148,9 +2148,9 @@ impl HorizontalLayout {
 }
 
 /// `Rectangle`/`Ellipse`. A pure leaf, like `TextBlock` — no children of its own (matching real
-/// WinUI3's `Shape`, which likewise has no `Children`/content property; see docs/elwindui_spec.md
-/// 付録H.2.2), so its natural size is just its own drawn bounds.
-/// `Shape`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `Shape` has no further
+/// WinUI3's `Shape`, which likewise has no `Children`/content property; see docs/design/gui_framework_design.md
+/// §5.2), so its natural size is just its own drawn bounds.
+/// `Shape`'s own class trait (docs/design/gui_framework_design.md §5.1); `Shape` has no further
 /// DSL-level subclass today.
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
 #[prop(fill: Option<crate::graphics::Brush>)]
@@ -2217,7 +2217,7 @@ impl Shape {
     }
 }
 
-/// `builtin::Rectangle`(docs/elwindui_builtins_spec.md 付録G/N)。バックエンド非依存な合成 builtin
+/// `builtin::Rectangle`(docs/specs/builtins_spec.md 付録G/N)。バックエンド非依存な合成 builtin
 /// としてここに手書きする。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
 /// 自身の共通描画メソッドを`base`委譲として登録している。
 #[elwindui_macros::class(inherits = crate::ui::Shape, sealed)]
@@ -2296,7 +2296,7 @@ impl Rectangle {
     }
 }
 
-/// `builtin::Ellipse`(docs/elwindui_builtins_spec.md 付録G/N)。`Rectangle`の doc comment 参照。
+/// `builtin::Ellipse`(docs/specs/builtins_spec.md 付録G/N)。`Rectangle`の doc comment 参照。
 #[elwindui_macros::class(inherits = crate::ui::Shape, sealed)]
 pub struct Ellipse {
     stroke_width: Option<f32>,
@@ -2480,7 +2480,7 @@ impl Image {
 /// Self-drawn primitive text (WinUI3's `TextBlock`) — no native widget. A leaf, like `NativeControlImpl`. Field named `text` (not `content`) to match `builtin::TextBlock`'s own `#[param]
 /// text` name — `elwindui-codegen`'s setter-based construction calls `.set_{param name}(..)`
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
-/// `TextBlock`'s own class trait (docs/elwindui_spec.md 付録H.2.1a); `TextBlock` has no
+/// `TextBlock`'s own class trait (docs/design/gui_framework_design.md §5.1); `TextBlock` has no
 /// further DSL-level subclass today.
 ///
 /// `text_style` replaces the old `color: RefCell<Option<Color>>` field — foreground is now one of
@@ -2509,7 +2509,7 @@ impl TextBlock {
                 style: &style,
                 available,
                 // `TextBlock` has no `text_wrapping` DSL property yet (未対応, outside the seven
-                // properties this pass covers — see `docs/elwindui_font_status.md`); the request
+                // properties this pass covers — see `docs/status/font_status.md`); the request
                 // shape already has the field so adding it later needs no signature change here.
                 wrapping: crate::graphics::TextWrapping::NoWrap,
                 alignment: self.alignment.get(),
@@ -2528,7 +2528,7 @@ impl TextBlock {
         // Re-resolved rather than cached from `measure_override` — nothing mutates between measure
         // and render within one pass, so the two resolutions are identical, and re-resolving avoids
         // a second, potentially-stale source of truth if a render pass ever runs without a
-        // preceding full layout pass (see `docs/elwindui_font_status.md`).
+        // preceding full layout pass (see `docs/status/font_status.md`).
         let cascaded_style = self.cascaded_text_style();
         let style = cascaded_style
             .materialize(&crate::graphics::text_backend().default_text_style());
@@ -2583,7 +2583,7 @@ impl TextStyleOwner for TextBlock {
 /// A composable, multi-part component (WinUI3's `Control`) — Visually built from any number of
 /// other `UIElement`s (`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/
 /// `NativeControlImpl`/other `Control`s), stored as its own `UIElementCollection` (the Logical
-/// tree this component declares, docs/elwindui_spec.md 付録H.2.2) — unlike `Shape`, which has
+/// tree this component declares, docs/design/gui_framework_design.md §5.2) — unlike `Shape`, which has
 /// no children at all. `padding` shrinks the area its children are overlaid into, the
 /// `Control`-level analog of `margin` on an individual element.
 ///
@@ -2592,7 +2592,7 @@ impl TextStyleOwner for TextBlock {
 /// child's *own* `horizontal_alignment`/`vertical_alignment`, applied generically by `arrange`
 /// below, already governs its placement within the padded content area); template
 /// replacement is future work.
-/// `Control`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — exposes the fields a
+/// `Control`'s own class trait (docs/design/gui_framework_design.md §5.1) — exposes the fields a
 /// DSL-level subclass composed via `base: Control` (e.g. `builtin::ContentControl`,
 /// `crates/elwindui-builtins/src/builtins.elwind`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
@@ -2696,7 +2696,7 @@ impl TextStyleOwner for Control {
     }
 }
 
-/// `builtin::ContentControl`(docs/elwindui_spec.md 付録H.2.1a)— 単一の子(`content`)を持つ
+/// `builtin::ContentControl`(docs/design/gui_framework_design.md §5.1)— 単一の子(`content`)を持つ
 /// `Control`の薄いラッパー。二重管理を避けるため、バックエンド非依存な合成 builtin としてここに直接手書きする。
 /// Content is a single Visual child managed directly by this type.
 #[elwindui_macros::class(inherits = crate::ui::Control)]
@@ -2745,7 +2745,7 @@ impl ContentControl {
     }
 }
 
-/// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/elwindui_spec.md §3). Each child's
+/// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/specs/dsl_spec.md §3). Each child's
 /// cell placement comes from its own `UIElement::attached` bag (the `Grid::row`/`Grid::column`
 /// attached properties it was constructed with, read back via `grid_cell_of` since only `Grid`
 /// itself knows those two fields are `i32`), not a field on `Grid` itself — see `attached`'s
@@ -2757,9 +2757,9 @@ impl ContentControl {
 /// `rows`/`columns` (not `row_definitions`/`column_definitions`) to match `builtin::Grid`'s own
 /// `#[param] rows`/`#[param] columns` names — `elwindui-codegen`'s setter-based construction calls
 /// `.set_{param name}(..)` generically, so the Rust field/setter name must agree with the DSL's.
-/// `Grid`'s own class trait (docs/elwindui_spec.md 付録H.2.1a) — inherits `Layout` (like
+/// `Grid`'s own class trait (docs/design/gui_framework_design.md §5.1) — inherits `Layout` (like
 /// `VerticalLayout`/`HorizontalLayout`), so `children` comes from that shared base rather than
-/// being declared on `Grid` itself (docs/elwindui_builtins_spec.md 付録F.11).
+/// being declared on `Grid` itself (docs/specs/builtins_spec.md 付録F.11).
 /// Reads a child's `Grid::row`/`Grid::column` attached-property values back out of its
 /// `UIElement::attached` bag — `Grid` is the only thing that knows those two fields are `i32`
 /// and default to `0`, so it (not `UIElement`) owns this downcast, mirroring how
@@ -3402,7 +3402,7 @@ mod tests {
 
     /// Backend-independent stand-in for `PasswordBox` — see `FakeTextBoxWidget`'s own doc comment
     /// for the pattern. `PasswordBoxExt`'s dispatch is exercised the same way; the test below
-    /// additionally checks the no-leak policy (`docs/elwindui_nativecontrol_expansion_status.md`)
+    /// additionally checks the no-leak policy (`docs/status/nativecontrol_status.md`)
     /// that every `PasswordBox` implementation — fake or real — must uphold: nothing about this
     /// fake ever prints or `Debug`s the password value.
     struct FakePasswordBoxState {
@@ -3452,7 +3452,7 @@ mod tests {
     /// No-leak policy check: only the *length* of what `on_change` observed is asserted, and every
     /// assertion in this test uses a fixed, content-free message (never `assert_eq!`'s default
     /// panic message, which would print the actual value on failure) — the same discipline
-    /// `docs/elwindui_nativecontrol_expansion_status.md` requires of the real AppKit/WinUI3
+    /// `docs/status/nativecontrol_status.md` requires of the real AppKit/WinUI3
     /// implementations too.
     #[test]
     fn fake_password_box_set_password_dispatches_on_change_without_exposing_it_on_failure() {
@@ -3520,7 +3520,7 @@ mod tests {
 
     /// Verifies `content` stays reachable via `visual_children()` once set — the property a real
     /// backend's nested `TreeHostView`/`TreeHostPanel` content host relies on for hit-testing/
-    /// tree-dump purposes (`docs/elwindui_nativecontrol_expansion_status.md`).
+    /// tree-dump purposes (`docs/status/nativecontrol_status.md`).
     #[test]
     fn fake_scroll_view_content_reachable_via_visual_children() {
         let widget = FakeScrollViewWidget::new(FakeHandle("scrollview", size(300.0, 200.0)));

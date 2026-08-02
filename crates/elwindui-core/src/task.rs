@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 /// Modeled on WinUI3's `DispatcherQueue.TryEnqueue`: marshals a closure onto the host's UI
-/// thread. Each backend implements this once; see docs/elwindui_spec.md 付録P.5 (WinUI3 →
+/// thread. Each backend implements this once; see docs/design/gui_framework_design.md §7.3 (WinUI3 →
 /// `DispatcherQueue`, AppKit → `DispatchQueue.main`, GTK4 → `glib::MainContext`, egui/iced →
 /// the host's own `tokio`/等 runtime). `enqueue`'s job must be `Send`: a `Waker` built on top of
 /// this (`LocalExecutor` below) may be woken from any thread — a background `tokio` task

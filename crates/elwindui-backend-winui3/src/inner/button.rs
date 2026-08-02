@@ -61,7 +61,7 @@ impl InnerButton {
 /// Windows-only hosted-XAML regression tests. The `AnyView::measure`/`arrange` `Width`/`Height`
 /// stickiness case below needs a real `Application`, and the text-style checks intentionally share
 /// that one application instance because WinUI 3 cannot be started twice in one test process.
-/// bug — see that method's own doc comment and `docs/agents/winui3_current_state.md`'s "`AnyView::
+/// bug — see that method's own doc comment and `docs/status/winui3_backend_status.md`'s "`AnyView::
 /// measure` resets `Width`/`Height` to `NaN`..." section for the full root cause. Needs a real,
 /// fully-hosted `Application` (via `crate::application::run`/the C++/WinRT shim) — not just COM/
 /// Bootstrap `init()` — because `Button`'s default style/template only resolves once `Application.
@@ -275,7 +275,7 @@ mod hosted_xaml_regression_tests {
             // A genuinely distinguishing label, not "Save"/"Open" — both already happen to exceed
             // the Fluent `Button`'s minimum width, which wouldn't by itself prove content is
             // contributing to the measured size (see this test's own history in
-            // docs/agents/winui3_current_state.md).
+            // docs/status/winui3_backend_status.md).
             button.set_text("a very long button label");
             let view = button.handle();
             let element = view.as_element();

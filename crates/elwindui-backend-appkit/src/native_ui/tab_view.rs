@@ -11,7 +11,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-/// See docs/elwindui_builtins_spec.md 付録Y. `TabView` owns an ordered collection of literal
+/// See docs/specs/builtins_spec.md 付録Y. `TabView` owns an ordered collection of literal
 /// `TabViewItem` children. Generated dynamic child slots reconcile that collection by `Rc`
 /// identity; this backend reconciles the corresponding native chips and content hosts.
 /// `struct_only = elwindui_core::ui::TabViewExt` (the shared trait exposes `children()`) —
@@ -133,7 +133,7 @@ impl TabView {
             .expect("TabView::on_constructed: owner must be this TabView");
         *self.weak_self.borrow_mut() = Rc::downgrade(&this);
         // WinUI3's `TabView` is a tab stop by default — see
-        // docs/elwindui_gui_framework_design.md §5.5.
+        // docs/design/gui_framework_design.md §5.5.
         self.set_tab_stop(true);
     }
 

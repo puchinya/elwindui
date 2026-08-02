@@ -11,7 +11,7 @@
 // out COM identity/forwarding as the cause and points at something `ApplicationT<App>` (cppwinrt's
 // own, real, widely-used composable-class support) does that neither Rust attempt replicated.
 //
-// Scope (deliberately minimal — see the project's own docs/agents/winui3_current_state.md "Do not
+// Scope (deliberately minimal — see the project's own docs/status/winui3_backend_status.md "Do not
 // use a C++ adapter before exhausting this direct windows-bindgen approach": this exists only
 // because that direct approach was exhausted for this one specific problem, not as a general
 // precedent):

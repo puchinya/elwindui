@@ -1,12 +1,12 @@
 # elwindui GUIフレームワーク設計書
 
-本ドキュメントは**GUIフレームワーク本体**(バックエンド抽象化・`elwindui-core`ランタイム・ライフサイクル・Store/ViewModel/MVVM・UI機能拡張)の設計における正(authoritative source)である。「誰が何を実装するのか」「各機能はどの静的検証ルールで守られているか」「各層はどう連携するか」という設計上の関心に沿って構成している。ElwindUIL DSLの構文・文法そのもの(`component`/`view`/`param`/`prop`定義、制御構文、値制約、enum、i18n等)は`docs/elwindui_dsl_spec.md`が正であり、本ドキュメントの§2はその要点のみを設計文脈の中で引用する。
+本ドキュメントは**GUIフレームワーク本体**(バックエンド抽象化・`elwindui-core`ランタイム・ライフサイクル・Store/ViewModel/MVVM・UI機能拡張)の設計における正(authoritative source)である。「誰が何を実装するのか」「各機能はどの静的検証ルールで守られているか」「各層はどう連携するか」という設計上の関心に沿って構成している。ElwindUIL DSLの構文・文法そのもの(`component`/`view`/`param`/`prop`定義、制御構文、値制約、enum、i18n等)は`docs/specs/dsl_spec.md`が正であり、本ドキュメントの§2はその要点のみを設計文脈の中で引用する。
 
 ## 本ドキュメントのスコープ
 
 **対象(本ドキュメント)**: バックエンド抽象化、`elwindui-core`ランタイム(`UIElement`クラス階層・レイアウト・フォーカス・アクセシビリティ・描画)、標準ビルトイン部品、ライフサイクル、Store/ViewModel/MVVM/非同期/Undo-Redoなどの状態管理層、キーボード・ナビゲーション・テーマ・エラーハンドリング・モバイル対応等のUI機能拡張。
 
-**対象外(他の設計書を参照)**: ElwindUIL DSLの構文・静的検証ルール自体は`docs/elwindui_dsl_spec.md`、`builtin::`要素の個別リファレンス実装は`docs/elwindui_builtins_spec.md`、`.elwind`→Rustのコード生成コンパイラ(`elwindui-codegen`)・LSP(`elwindui-languageserver`)・エディタ内プレビュー・ホットリロード機構は`docs/elwindui_tool_*_design.md`を参照すること。
+**対象外(他の設計書を参照)**: ElwindUIL DSLの構文・静的検証ルール自体は`docs/specs/dsl_spec.md`、`builtin::`要素の個別リファレンス実装は`docs/specs/builtins_spec.md`、DSL→Rustのコード生成コンパイラ(`elwindui-codegen`)・LSP(`elwindui-languageserver`)・エディタ内プレビュー・ホットリロード機構は`docs/design/tools/*.md`を参照すること。
 
 ---
 
@@ -31,7 +31,7 @@
 ElwindUILは特定のGUIフレームワークに依存しない中間表現として設計されている。
 
 ```
-.elwind ファイル(ElwindUIL構文)
+.rs ファイル(#[elwindui::component])
         │  コンパイル(ツール設計書側の責務)
         ▼
 共通AST(フレームワーク非依存の要素ツリー)
@@ -89,7 +89,7 @@ fn main() {
 `Window::show()` 済みのトップレベルウィンドウはバックエンドが閉じるまで保持し、最後の
 ウィンドウが閉じるとネイティブアプリケーションを終了する。
 
-`.elwind`コンパイラが生成するコードは常に`elwindui-core`のトレイト境界に対して書かれ、実行時にどのバックエンドクレートがリンクされるかで実体が決まる。バックエンド指定は`#![backend(...)]`(ビルド設定)と`target::backend()`(式内定数、§3.3)の2つの窓口を持つ設計だが、いずれも現時点では未実装(実際のバックエンド選択は`elwindui`ファサードクレートのCargoフィーチャ`backend-appkit`/`backend-winui3`/`backend-gtk4`のみで行われる。詳細は§3.3、`docs/elwindui_implementation_status.md`)。
+`elwindui-codegen`が生成するコードは常に`elwindui-core`のトレイト境界に対して書かれ、実行時にどのバックエンドクレートがリンクされるかで実体が決まる。バックエンド指定は`#![backend(...)]`(ビルド設定)と`target::backend()`(式内定数、§3.3)の2つの窓口を持つ設計だが、いずれも現時点では未実装(実際のバックエンド選択は`elwindui`ファサードクレートのCargoフィーチャ`backend-appkit`/`backend-winui3`/`backend-gtk4`のみで行われる。詳細は§3.3、`docs/status/implementation_status.md`)。
 
 ---
 
@@ -211,11 +211,11 @@ trait Element {
 
 ---
 
-## 3. バックエンド抽象化
+## 3. バックエンド抽象化 🚧
 
 ### 3.1 全体像
 
-.elwindは論理的な要素ツリーを記述するのみで、各OSネイティブツールキットへの変換は「バックエンド」が担う(§1参照)。制約検証・enum網羅性検査・i18n解決などの言語機能はすべてバックエンド非依存のフロントエンド解析段階(ツール側の責務)で完結し、バックエンド選択に影響されない。
+DSLは論理的な要素ツリーを記述するのみで、各OSネイティブツールキットへの変換は「バックエンド」が担う(§1参照)。制約検証・enum網羅性検査・i18n解決などの言語機能はすべてバックエンド非依存のフロントエンド解析段階(ツール側の責務)で完結し、バックエンド選択に影響されない。
 
 ### 3.2 OSネイティブツールキットへの抽象化
 
@@ -248,7 +248,7 @@ Windows→**WinUI 3**(windows-rs経由)、macOS→**AppKit**(objc2経由)、Linu
 | `Column { ... }` | `Microsoft::UI::Xaml::Controls::StackPanel`(`Orientation: Vertical`) | `NSStackView(orientation: .vertical)` | `gtk::Box(orientation: Vertical)` |
 | `Dropdown { ... }` | `Microsoft::UI::Xaml::Controls::ComboBox` | `NSPopUpButton` | `gtk::DropDown` |
 
-DSL記述者はこれらの違いを一切意識せず、`Button { text: t!("save"), on_click: save_document() }`と書くだけでよい(実際の各ビルトインのリファレンス実装は`docs/elwindui_builtins_spec.md`付録Fを参照)。
+DSL記述者はこれらの違いを一切意識せず、`Button { text: t!("save"), on_click: save_document() }`と書くだけでよい(実際の各ビルトインのリファレンス実装は`docs/specs/builtins_spec.md`付録Fを参照)。
 
 OSごとの見た目差はスタイル層に閉じ込める:
 
@@ -298,14 +298,14 @@ view NotepadWindow {
 
 | 項目 | 担当 |
 |---|---|
-| `.elwind`の記述 | 常に1つ、プラットフォーム分岐は原則書かない |
+| DSLの記述 | 常に1つ、プラットフォーム分岐は原則書かない |
 | どのOSでどのツールキットを使うか | `#![backend(native)]` またはビルドターゲット別の明示指定(`winui3`/`appkit`/`gtk4`) |
 | 論理要素→具体API変換 | 各バックエンドクレート(`elwindui-backend-winui3`, `elwindui-backend-appkit`, `elwindui-backend-gtk4`) |
 | OSごとの見た目差 | `style { select(..., backend == ...) }` |
 | OS固有機能の直接利用 | `#[cfg(backend = "...")]` + `native!` |
 | プロパティ変更の反映方式 | バックエンドが保持モードAPIへの更新呼び出しとして生成、DSL側の`param`/`prop`定義は不変 |
 
-### 3.3 `target::backend()`(コンパイル時静的定数)
+### 3.3 `target::backend()`(コンパイル時静的定数) 📋
 
 ```rust
 enum Backend {
@@ -317,7 +317,7 @@ enum Backend {
 
 **実装状況**: `Backend` enumと`target::backend()`はいずれも現時点で未実装(`crates/`配下のRustソースに実体が存在しない)。実際のバックエンド選択は`elwindui`ファサードクレートのCargoフィーチャ(`backend-appkit`/`backend-winui3`/`backend-gtk4`)による`#[cfg(feature = ...)]`のみで行われており、本節が説明する「コンパイル時定数+`match`網羅性検査」の仕組みはフォワードルッキングな設計である。
 
-`target::backend()`はビルドターゲットからビルド時に一意に確定する定数関数で、`#[param]`の静的評価式に無条件で使用できる(`env::os()`より確定タイミングが早い)。これにより、抽象化されたコンポーネント定義を1つの`.elwind`ファイル内で完結できる:
+`target::backend()`はビルドターゲットからビルド時に一意に確定する定数関数で、`#[param]`の静的評価式に無条件で使用できる(`env::os()`より確定タイミングが早い)。これにより、抽象化されたコンポーネント定義を1つのファイル内で完結できる:
 
 ```rust
 component NotepadWindow {
@@ -364,7 +364,7 @@ const fn resolve_backend() -> Backend {
 | 概念 | 役割 | 確定タイミング |
 |---|---|---|
 | `#![backend(native)]` / `#![backend(winui3)]`(§3.2) | どのコード生成器(crate)を使うかというビルド設定 | ビルド構成時 |
-| `target::backend()`(本節) | その結果を`.elwind`の式中から参照するための静的定数 | コンパイル時(式に畳み込み) |
+| `target::backend()`(本節) | その結果をDSLの式中から参照するための静的定数 | コンパイル時(式に畳み込み) |
 
 前者はプロジェクト全体・ファイル単位のビルド設定、後者はコンポーネント定義内部の条件分岐に使う窓口である。まとめ:
 
@@ -377,15 +377,15 @@ const fn resolve_backend() -> Backend {
 
 ### 3.4 名前空間とビルトインのオーバーライド規則
 
-ビルトインは予約名前空間`builtin::*`に属し(`Row { ... }`は`builtin::Row`への暗黙の`use`が常に効いている扱い)、ユーザー定義コンポーネントが同名の場合は`#[overrides(builtin::X)]`を明示しない限り静的エラーになる(暗黙のシャドーイングは一切許可しない)。この名前解決規則自体はDSLの静的検証ルールの一部であり、`docs/elwindui_dsl_spec.md`付録Aが正とする。§4.1で述べる「バックエンド分岐を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ」という制限は、この節で定義される名前解決の上に成り立つ。
+ビルトインは予約名前空間`builtin::*`に属し(`Row { ... }`は`builtin::Row`への暗黙の`use`が常に効いている扱い)、ユーザー定義コンポーネントが同名の場合は`#[overrides(builtin::X)]`を明示しない限り静的エラーになる(暗黙のシャドーイングは一切許可しない)。この名前解決規則自体はDSLの静的検証ルールの一部であり、`docs/specs/dsl_spec.md`付録Aが正とする。§4.1で述べる「バックエンド分岐を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ」という制限は、この節で定義される名前解決の上に成り立つ。
 
 ---
 
-## 4. 標準ビルトイン部品
+## 4. 標準ビルトイン部品 ✅
 
-`Window`/`Column`/`Row`/`Text`/`TextArea`/`Dropdown`等は`builtin`名前空間に属し、コード生成器が標準実装として提供する。内部実装は他コンポーネントと同じ`component`/`view`構文(2026-07-31時点では、`elwindui-core`/各`elwindui-backend-*`crateの`#[elwindui_macros::class]`宣言というRust形式で書かれる——`docs/elwindui_tool_codegen_design.md`参照)で表現でき、`match target::backend()`(§3.3)による網羅性検査と`native!`エスケープハッチがそのまま適用される設計だが、§3.3の通り`target::backend()`自体は未実装のため、実際のビルトイン宣言はバックエンド分岐を持たず、バックエンドごとの実体はCargoフィーチャで選択される別クレート(`elwindui-backend-appkit`等)側に委ねられている。
+`Window`/`Column`/`Row`/`Text`/`TextArea`/`Dropdown`等は`builtin`名前空間に属し、コード生成器が標準実装として提供する。内部実装は`elwindui-core`/各`elwindui-backend-*`crateの`#[elwindui_macros::class]`宣言というRust形式で書かれ(`docs/design/tools/codegen_design.md`参照)、`match target::backend()`(§3.3)による網羅性検査と`native!`エスケープハッチがそのまま適用される設計だが、§3.3の通り`target::backend()`自体は未実装のため、実際のビルトイン宣言はバックエンド分岐を持たず、バックエンドごとの実体はCargoフィーチャで選択される別クレート(`elwindui-backend-appkit`等)側に委ねられている。
 
-**実装状況**: 実装済みなのは`Window`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`Control`/`ContentControl`/`Grid`/`TextArea`/`Button`/`TextBlock`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/`TabViewItem`(`Row`/`Column`という名称ではなく`HorizontalLayout`/`VerticalLayout`という名称で実装されている点に注意)。`Dropdown`/`Option`、`Canvas`、`NavigationHost`/`Route`、`Dialog`、`Tooltip`、`VirtualList`は仕様のみで未実装。詳細は`docs/elwindui_builtins_spec.md`冒頭の分類ツリーと`docs/elwindui_implementation_status.md`を参照。
+**実装状況**: 実装済みなのは`Window`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`Control`/`ContentControl`/`Grid`/`TextArea`/`Button`/`TextBlock`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/`TabViewItem`(`Row`/`Column`という名称ではなく`HorizontalLayout`/`VerticalLayout`という名称で実装されている点に注意)。`Dropdown`/`Option`、`Canvas`、`NavigationHost`/`Route`、`Dialog`、`Tooltip`、`VirtualList`は仕様のみで未実装。詳細は`docs/specs/builtins_spec.md`冒頭の分類ツリーと`docs/status/implementation_status.md`を参照。
 
 **代表的な実装パターン(`Stack` → `Column`/`Row`)**: 共通の`Stack`部品に`orientation`を渡して処理を委譲し、`Column`/`Row`はその薄いラッパーとして定義する。
 
@@ -411,12 +411,12 @@ view Column { Stack { orientation: Orientation::Vertical, children } }
 
 ---
 
-## 5. コアランタイム(elwindui-core)
+## 5. コアランタイム(elwindui-core) ✅
 
 Button/Textのような個別ウィジェット抽象化(§4)とは別レイヤーとして、WinUI 3の`Composition`/`UIAutomation`/`Measure-Arrange`に相当する共通基盤を`elwindui-core`として定義し、各バックエンドがこれを実装する。
 
 ```
-.elwind (component/view)
+.rs (#[elwindui::component])
         │
         ▼
 UIElement ツリー(§2.11、§5.1)
@@ -443,7 +443,7 @@ UIElement ツリー(§2.11、§5.1)
 
 #### 5.1a Rustコードでのクラス階層表現規約
 
-elwindui本体(コード生成・手書きランタイム双方)でRustに"クラス"階層を実装する際は、以下の規約に従う(Rustには実装継承がないため、trait(振る舞いの契約)と構造体合成(データの委譲)を組み合わせて疑似的に表現する)。**実装を伴う正の仕様は`docs/elwindui_macro_class_spec.md`(`#[elwindui_macros::class]`マクロの完全な仕様)であり、以下は要点の要約。命名の詳細に食い違いがあれば同書と`crates/elwindui-macros/src/class.rs`/`crates/elwindui-core/src/ui.rs`を優先すること。**
+elwindui本体(コード生成・手書きランタイム双方)でRustに"クラス"階層を実装する際は、以下の規約に従う(Rustには実装継承がないため、trait(振る舞いの契約)と構造体合成(データの委譲)を組み合わせて疑似的に表現する)。**実装を伴う正の仕様は`docs/specs/macro_class_spec.md`(`#[elwindui_macros::class]`マクロの完全な仕様)であり、以下は要点の要約。命名の詳細に食い違いがあれば同書と`crates/elwindui-macros/src/class.rs`/`crates/elwindui-core/src/ui.rs`を優先すること。**
 
 - コンポーネント(クラス)名を`Class`とすると:
   - **構造体名**: 常にソースに書いたとおりの素の識別子`Class`(接尾辞なし)。先頭のフィールドとして`base`という名前で親クラスの構造体を保持する:
@@ -456,9 +456,9 @@ elwindui本体(コード生成・手書きランタイム双方)でRustに"ク�
   - **トレイト名**: `{Class}Ext`(Rustは同一モジュール内で構造体とトレイトが同じ裸名を共有できないため、接尾辞はトレイト側に付く)。親クラスが`SuperClass`なら`trait ClassExt: SuperClassExt`と宣言し、Rustのtrait境界で継承関係を表現する。
   - 親を持たない既定(ルート)クラス(例: `UIElement`)は`base`フィールドを持たない。
   - `Class`構造体は`ClassExt`自身のトレイトに加えて、既定クラスまでの祖先トレイトを**すべて**実装する(`UIElementExt => ControlExt => ContentControlExt`の継承チェーンなら、`ContentControl`構造体は`UIElementExt`・`ControlExt`・`ContentControlExt`の3つのトレイトすべてを実装する)。祖先トレイトの各メソッドは`self.base.method(...)`へ委譲するだけの薄い実装になる。
-  - 構造体の生成は構造体リテラルを直接書かず、ファクトリー関数`create_class(...)`を経由する(例: `Button`なら`create_button()`)。`margin`/`horizontal_alignment`/`vertical_alignment`/`grid_cell`(`UIElement`が持つ共通フィールド)に加えて、**このクラス自身が宣言する`#[param]`フィールドも含めて全プロパティ**が`create_class(...)`の引数にはならない——ネイティブ手書きビルトイン(`Window`/`Button`/`TextArea`/`MenuBar`/`Menu`/`MenuItem`/`MenuBarItem`/`TabView`/`TabViewItem`)と`elwindui-core::ui`の仮想ビルトイン(`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/`Control`/`Grid`)は、`Copy`なフィールドを`Cell`、それ以外を`RefCell`で持ち(§7.2)、`create_class()`は常に引数なしで`UIElement::default()`相当の既定値を組み立てるだけ。使用箇所ごとの値は、構築**後**に`binding.set_<field>(..)`(margin等の共通属性なら`binding.base().set_margin(..)`)という呼び出しで反映する(`elwindui-codegen`の`emit_common_ui_element_setters`/`build_component_setters`)——`resync()`による値の再反映(二重バインディング等)も同じ`set_<field>(..)`を呼ぶだけで済む、単一の統一された仕組みになる。(`view`を持つコンポーネント——`ContentControl`/`Rectangle`/`Ellipse`のような組み込みでも、ユーザー定義componentでも——の生成`new(args)`は今のところ対象外で、引数どおりに構築する従来の方式のまま。)
-  - `Button`/`TextArea`/`Window`/`Menu`/`MenuBar`/`MenuItem`/`MenuBarItem`/`TabView`/`TabViewItem`のように、このクレート(`elwindui-core`)自身は対応する構造体を持たず各バックエンドクレートが個別に実装する「純粋インターフェース宣言」(`trait_only`、`docs/elwindui_macro_class_spec.md`§2.2)は、`{Class}Ext`ではなく素の`Class`という裸名のトレイトになる(同名の競合する構造体がこのクレート内に存在しないため)。
-- コード生成器(`elwindui-codegen`)が`component X inherits Y`から生成するコードも同じ形を取る——親の実効フィールド/メソッドを1つのstructへ畳み込む(フラット化する)のではなく、`X { base: Y, /* Xの宣言分のみ */ }`という実体合成にする。これにより`base::method(...)`(§2.1)は名前を変えたシャドーメソッドを介さず、文字通り`self.base.method(...)`に書き換えるだけで済む。`.elwind`のDSL構文や、他コンポーネントが`X { ... }`と書く箇所は一切変更不要——`X::new(args)`という既存の呼び出し規約は変わらず成立する。
+  - 構造体の生成は構造体リテラルを直接書かず、ファクトリー関数`create_class(...)`を経由する(例: `Button`なら`create_button()`)。`margin`/`horizontal_alignment`/`vertical_alignment`/`grid_cell`(`UIElement`が持つ共通フィールド)に加えて、**このクラス自身が宣言する`#[param]`フィールドも含めて全プロパティ**が`create_class(...)`の引数にはならない——ネイティブ手書きビルトイン(`Window`/`Button`/`TextArea`/`MenuBar`/`Menu`/`MenuItem`/`MenuBarItem`/`TabView`/`TabViewItem`)と`elwindui-core::ui`の仮想ビルトイン(`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/`Control`/`Grid`)は、`Copy`なフィールドを`Cell`、それ以外を`RefCell`で持ち(§7.2)、`create_class()`は常に引数なしで`UIElement::default()`相当の既定値を組み立てるだけ。使用箇所ごとの値は、構築**後**に`binding.set_<field>(..)`(margin等の共通属性なら`binding.base().set_margin(..)`)という呼び出しで反映する(`elwindui-codegen`の`emit_common_ui_element_setters`/`build_component_setters`)——`resync()`による値の再反映(二重バインディング等)も同じ`set_<field>(..)`を呼ぶだけで済む、単一の統一された仕組みになる。(`view`を持つコンポーネント——`ContentControl`/`Rectangle`/`Ellipse`のような組み込みでも、ユーザー定義componentでも——の生成`new(args)`は今のところ対象外で、引数どおりに構築する。)
+  - `Button`/`TextArea`/`Window`/`Menu`/`MenuBar`/`MenuItem`/`MenuBarItem`/`TabView`/`TabViewItem`のように、このクレート(`elwindui-core`)自身は対応する構造体を持たず各バックエンドクレートが個別に実装する「純粋インターフェース宣言」(`trait_only`、`docs/specs/macro_class_spec.md`§2.2)は、`{Class}Ext`ではなく素の`Class`という裸名のトレイトになる(同名の競合する構造体がこのクレート内に存在しないため)。
+- コード生成器(`elwindui-codegen`)が`component X inherits Y`から生成するコードも同じ形を取る——親の実効フィールド/メソッドを1つのstructへ畳み込む(フラット化する)のではなく、`X { base: Y, /* Xの宣言分のみ */ }`という実体合成にする。これにより`base::method(...)`(§2.1)は名前を変えたシャドーメソッドを介さず、文字通り`self.base.method(...)`に書き換えるだけで済む。DSL構文や、他コンポーネントが`X { ... }`と書く箇所は一切変更不要——`X::new(args)`という既存の呼び出し規約は変わらず成立する。
 
 ```rust
 pub trait UIElementExt: AsAny {
@@ -486,7 +486,7 @@ pub struct UIElement {
 }
 ```
 
-`Visibility`はWinUI3の`UIElement.Visibility`と同じく`Visible`(既定)/`Collapsed`の2値のみ(WPFの`Hidden`相当は無い)。`Collapsed`な要素はレイアウト上スペースを一切取らず(`measure`が常に`(0, 0)`を返す——自身の`Width`/`Height`指定も無視する)、`arrange`/`hit_test`の対象からもその子孫ごと除外される(描画されず、ヒットテストにも当たらない)。`margin`/`horizontal_alignment`と同じ共通属性だが、`.elwind`側の`margin`のような即値配線(`emit_common_ui_element_setters`)はまだ無く、`set_visibility(..)`をRustから直接呼ぶ形にとどまる。
+`Visibility`はWinUI3の`UIElement.Visibility`と同じく`Visible`(既定)/`Collapsed`の2値のみ(WPFの`Hidden`相当は無い)。`Collapsed`な要素はレイアウト上スペースを一切取らず(`measure`が常に`(0, 0)`を返す——自身の`Width`/`Height`指定も無視する)、`arrange`/`hit_test`の対象からもその子孫ごと除外される(描画されず、ヒットテストにも当たらない)。`margin`/`horizontal_alignment`と同じ共通属性だが、DSL側の`margin`のような即値配線(`emit_common_ui_element_setters`)はまだ無く、`set_visibility(..)`をRustから直接呼ぶ形にとどまる。
 
 `UIElement`はこの階層の既定(ルート)クラスなので`base`フィールドを持たない。`UIElementExt`トレイト自体はハンドル型`H`について非ジェネリックである。実ネイティブハンドルを持つのは各バックエンドの`NativeControl`実装(下記)だけであり、木を歩く汎用関数(`measure`/`arrange`/`layout_root`)の方がハンドル型`H`についてジェネリックになっている。
 
@@ -525,14 +525,14 @@ UIElement (構造体、Margin/Alignment共通実装。baseなしの既定クラ�
 
 `VerticalLayout`/`HorizontalLayout`は交差軸方向の配置を一律設定として持たない——各子要素自身の`horizontal_alignment`/`vertical_alignment`が交差軸配置を決める、WinUI3の`StackPanel`と同じ設計である。主軸方向は常に「Auto」(子の自然サイズ)である。
 
-`Grid`(実装済み、`docs/elwindui_builtins_spec.md`参照)は行/列ベースのレイアウトで、`VerticalLayout`/`HorizontalLayout`にはない「残り領域を`*`比例配分で埋める」手段(`GridLength::Star`)を提供する。各子の行/列位置は`elwindui_dsl_spec.md`§3の添付プロパティ(`Grid::row`/`Grid::column`)で指定し、`UIElement.grid_cell`(既定`(0, 0)`)として子要素自身が保持する——`Grid`自身が子ごとの別テーブルを持つわけではない。
+`Grid`(実装済み、`docs/specs/builtins_spec.md`参照)は行/列ベースのレイアウトで、`VerticalLayout`/`HorizontalLayout`にはない「残り領域を`*`比例配分で埋める」手段(`GridLength::Star`)を提供する。各子の行/列位置は`docs/specs/dsl_spec.md`§3の添付プロパティ(`Grid::row`/`Grid::column`)で指定し、`UIElement.grid_cell`(既定`(0, 0)`)として子要素自身が保持する——`Grid`自身が子ごとの別テーブルを持つわけではない。
 
 #### 5.1b `ScrollView`のネストホスト構造(NativeControl拡充Phase 1)
 
-**実装済み**(AppKit・WinUI3両バックエンドに実配線。WinUI3側はWindows環境が無く未検証、`docs/elwindui_nativecontrol_expansion_status.md`参照)。`Button`/`TextArea`/`TextBox`/`PasswordBox`はいずれも自己完結した単一のネイティブウィジェットを`NativeControl<H>`として保持するだけだが、`ScrollView`(付録F.14)の`content`は独自のlayout/paint/hit-test/focusを持つelwindui部分木そのものであり、単一値としては保持できない。これを解決するため、`ScrollView`は3層構造を取る:
+**実装済み**(AppKit・WinUI3両バックエンドに実配線。WinUI3側はWindows環境が無く未検証、`docs/status/nativecontrol_status.md`参照)。`Button`/`TextArea`/`TextBox`/`PasswordBox`はいずれも自己完結した単一のネイティブウィジェットを`NativeControl<H>`として保持するだけだが、`ScrollView`(付録F.14)の`content`は独自のlayout/paint/hit-test/focusを持つelwindui部分木そのものであり、単一値としては保持できない。これを解決するため、`ScrollView`は3層構造を取る:
 
 ```
-ScrollView            .elwindから見えるNativeControl葉ノード自身
+ScrollView            DSLから見えるNativeControl葉ノード自身
  └─ NativeScrollHost   バックエンドのネイティブスクロールコンテナ本体
      (AppKit: NSScrollView / WinUI3: ScrollViewer)
      └─ ElwinduiContentRoot   ネストしたTreeHostView(AppKit)/TreeHostPanel(WinUI3)
@@ -545,12 +545,12 @@ ScrollView            .elwindから見えるNativeControl葉ノード自身
 
 ### 5.2 Logical/Visualツリーの分離
 
-WinUI3に倣い、「`.elwind`で書かれた見た目上の参照関係」(Logicalツリー)と「実際にlayoutされる`Rc<dyn UIElement>`の木」(Visualツリー)を区別する。既存の`component`+`view`パターン(例:`DocumentView`)は、実質的に既に「1つの論理ノード → 展開された`UIElement`木」というLogical/Visual構造を持っている。
+WinUI3に倣い、「DSLで書かれた見た目上の参照関係」(Logicalツリー)と「実際にlayoutされる`Rc<dyn UIElement>`の木」(Visualツリー)を区別する。既存の`component`+`view`パターン(例:`DocumentView`)は、実質的に既に「1つの論理ノード → 展開された`UIElement`木」というLogical/Visual構造を持っている。
 
-- **Logicalツリー**:`.elwind`上の参照関係(例:`NotepadWindow`から見て`DocumentView`は1個のノード)。将来のテンプレート機能・アクセシビリティツリーはこちらを対象にする。今回は`LogicalNode { type_name, children }`という最小限の型のみ導入し、コード生成側からはまだ生成されない(将来のテンプレート/データバインド機能向けの受け皿として未使用のまま残す)。`ControlTemplate<Self>`(§5.12・設計のみ)は、この`LogicalNode`を「テンプレートを持つコンポーネント自身は1ノード」というLogical表現として使う想定の、最初の具体的な採用候補。`Layout`(`VerticalLayout`/`HorizontalLayout`/`Grid`)/`Control`が`.elwind`上で宣言する`children: UIElementCollection`(下記)は、この`LogicalNode`とは別の、より具体的な仕組み——これらのコンテナはテンプレート機構を持たない(1つの`.elwind`宣言がそのまま1つのVisualノードになる)ため、Logical上の子要素リストが同時にVisual上の子要素そのものでもある。
+- **Logicalツリー**:DSL上の参照関係(例:`NotepadWindow`から見て`DocumentView`は1個のノード)。将来のテンプレート機能・アクセシビリティツリーはこちらを対象にする。今回は`LogicalNode { type_name, children }`という最小限の型のみ導入し、コード生成側からはまだ生成されない(将来のテンプレート/データバインド機能向けの受け皿として未使用のまま残す)。`ControlTemplate<Self>`(§5.12・設計のみ)は、この`LogicalNode`を「テンプレートを持つコンポーネント自身は1ノード」というLogical表現として使う想定の、最初の具体的な採用候補。`Layout`(`VerticalLayout`/`HorizontalLayout`/`Grid`)/`Control`がDSL上で宣言する`children: UIElementCollection`(下記)は、この`LogicalNode`とは別の、より具体的な仕組み——これらのコンテナはテンプレート機構を持たない(1つのビルトイン宣言がそのまま1つのVisualノードになる)ため、Logical上の子要素リストが同時にVisual上の子要素そのものでもある。
 - **Visualツリー**: 実際にlayoutされる`Rc<dyn UIElement>`の木(`Layout`/`Shape`/`TextBlock`/`NativeControl`/`Control`から組み立てられる)。§5.1・付録Fで説明している木はこちら。`UIElement::visual_children(&self) -> &[Rc<dyn UIElement>]`がこの木を歩く汎用関数(`measure`/`arrange`/`hit_test`)から参照される、Visualツリー専用のアクセサ。
 
-`elwindui_core::ui::UIElementCollection`はWinUI3自身の`UIElementCollection`に相当する型で、`Layout`/`Control`が`.elwind`上で`#[content(children)]`(WinUI3の`ContentPropertyAttribute`相当)付きで宣言するLogicalツリーの子要素リストを表す。`Stack`/`Control`/`Grid`構造体はこれを実フィールドとして保持し、`visual_children()`はそこから`as_slice()`で直接導出される(`UIElementCollection::new(Vec<Rc<dyn UIElement>>) -> Self`/`as_slice(&self) -> &[Rc<dyn UIElement>]`のみを持つ薄いラッパー)。`Shape`(`Rectangle`/`Ellipse`)は実WinUI3の`Shape`同様、子要素を一切持たない純粋なリーフである。
+`elwindui_core::ui::UIElementCollection`はWinUI3自身の`UIElementCollection`に相当する型で、`Layout`/`Control`がDSL上で`#[content(children)]`(WinUI3の`ContentPropertyAttribute`相当)付きで宣言するLogicalツリーの子要素リストを表す。`Stack`/`Control`/`Grid`構造体はこれを実フィールドとして保持し、`visual_children()`はそこから`as_slice()`で直接導出される(`UIElementCollection::new(Vec<Rc<dyn UIElement>>) -> Self`/`as_slice(&self) -> &[Rc<dyn UIElement>]`のみを持つ薄いラッパー)。`Shape`(`Rectangle`/`Ellipse`)は実WinUI3の`Shape`同様、子要素を一切持たない純粋なリーフである。
 
 `Control`(§5.1参照)は「Logical上は1ノード、Visual上は複数の小部品」という構造を体現する型として導入された——`Padding: f32`(一律)と`ContentAlignment`(`HorizontalAlignment`/`VerticalAlignment`の組)、および`children: UIElementCollection`を持ち、WinUI3の`Control`基底クラス(独自描画ではなく複数の小部品を持てるカスタム部品)に相当する。
 
@@ -565,7 +565,7 @@ trait LayoutNode {
 }
 ```
 
-各バックエンドのネイティブ葉ウィジェットのハンドル(`elwindui-backend-appkit::AnyView`等)がこのトレイトを実装する(`NativeControl<H>`経由で`UIElement`に接続される)。`Stack`や`Canvas`を含む全ビルトインがこのトレイトを実装する。`.elwind`側の`width`/`height`/`spacing`等の属性がそのままMeasure/Arrangeの入力になり、新しい構文は不要。**レイアウト計算は`elwindui-core`内の共通実装(1つのRustクレート)で一元化され**、バックエンドは計算結果(確定した矩形座標)を受け取ってネイティブAPIに反映するだけ、という役割分担にする。
+各バックエンドのネイティブ葉ウィジェットのハンドル(`elwindui-backend-appkit::AnyView`等)がこのトレイトを実装する(`NativeControl<H>`経由で`UIElement`に接続される)。`Stack`や`Canvas`を含む全ビルトインがこのトレイトを実装する。DSL側の`width`/`height`/`spacing`等の属性がそのままMeasure/Arrangeの入力になり、新しい構文は不要。**レイアウト計算は`elwindui-core`内の共通実装(1つのRustクレート)で一元化され**、バックエンドは計算結果(確定した矩形座標)を受け取ってネイティブAPIに反映するだけ、という役割分担にする。
 
 | バックエンド | レイアウト計算の主体 |
 |---|---|
@@ -604,9 +604,9 @@ trait UIElement {
 
 新しいバックエンドを追加する際・既存バックエンドの`RelayoutHost`実装をレビューする際は、このコアレシング契約を満たしているかを確認すること。
 
-### 5.5 フォーカス管理
+### 5.5 フォーカス管理 ✅
 
-**実装済み**(AppKit・WinUI3両バックエンドに実配線。WinUI3側はWindows環境が無く未検証)。`elwindui_core::focus::FocusTracker`が`elwindui_core::input::PointerDispatcher`と対になる具象型として実装されている——旧`FocusManager`トレイト(`ElementId`文字列ベース)は撤廃した。§5.2で「文字列idによる`find_by_id`は提供しない」と明記した設計と整合しないため(`ElementId`から実際のツリーノードを解決する手段が無かった)、`PointerDispatcher`/`dispatch_routed`と同じく`Rc<dyn UIElementExt>`を直接扱う設計に置き換えた。
+**実装済み**(AppKit・WinUI3両バックエンドに実配線。WinUI3側はWindows環境が無く未検証)。`elwindui_core::focus::FocusTracker`が`elwindui_core::input::PointerDispatcher`と対になる具象型として実装されている。`PointerDispatcher`/`dispatch_routed`と同じく`Rc<dyn UIElementExt>`を直接扱う——`ElementId`のような文字列idを介する設計は採らない。§5.2の「文字列idによる`find_by_id`は提供しない」という方針と整合させるためで、文字列idからは実際のツリーノードを解決できない。
 
 ```rust
 // elwindui-core::focus
@@ -645,7 +645,7 @@ TextArea {
 pub enum FocusState { Unfocused, Pointer, Keyboard, Programmatic }
 ```
 
-`UIElementExt::focus_state(&self) -> FocusState`で命令的に読める。`FocusTracker::set_focus`が更新し、`Keyboard`の場合はTabキー経由(`KeyboardDispatcher`)、`Programmatic`の場合は後述の`focus()`経由。**マウスクリックによる`Pointer`は実装済み**(NativeControl拡充Phase 1、`docs/elwindui_nativecontrol_expansion_status.md`参照)——自前描画要素は`PointerDispatcher::handle`の`Pressed`分岐が`is_tab_stop()`な要素を直接`set_focus(.., FocusState::Pointer)`し、ネイティブリーフ(`Button`/`TextArea`/`TabView`)はOS側の実フォーカスイン通知(下記)を`elwindui_core::focus::native_focus_gained`経由で橋渡しする。両経路とも`FocusState::Pointer`固定(実際にマウスクリックかキーボードのタブ移動かをOSイベントから区別する処理はPhase 1では簡略化のため省略)。
+`UIElementExt::focus_state(&self) -> FocusState`で命令的に読める。`FocusTracker::set_focus`が更新し、`Keyboard`の場合はTabキー経由(`KeyboardDispatcher`)、`Programmatic`の場合は後述の`focus()`経由。**マウスクリックによる`Pointer`は実装済み**(NativeControl拡充Phase 1、`docs/status/nativecontrol_status.md`参照)——自前描画要素は`PointerDispatcher::handle`の`Pressed`分岐が`is_tab_stop()`な要素を直接`set_focus(.., FocusState::Pointer)`し、ネイティブリーフ(`Button`/`TextArea`/`TabView`)はOS側の実フォーカスイン通知(下記)を`elwindui_core::focus::native_focus_gained`経由で橋渡しする。両経路とも`FocusState::Pointer`固定(実際にマウスクリックかキーボードのタブ移動かをOSイベントから区別する処理はPhase 1では簡略化のため省略)。
 
 **強制フォーカス(`UIElementExt::focus()`)**: WinUI3の`Control.Focus()`相当。`RelayoutHost`(§5.4)と対になる`FocusHost`トレイトを新設し、`invalidate_host`と同じ「ホストの`set_tree`がルート要素に1つだけ登録し、任意のノードが`visual_parent`を根まで辿って発見する」パターンで実装した:
 
@@ -660,7 +660,7 @@ DSL側で見た目にフォーカス状態を反映したい場合は、新し�
 
 **ネイティブ系バックエンドのOS標準フォーカス機構(AppKitの`NSResponder`チェーン、WinUI3の`GotFocus`/`LostFocus`)への片方向ミラー(OS→`FocusTracker`)は実装済み**(NativeControl拡充Phase 1)。AppKitは`ElwinduiWindow: NSWindow`サブクラスが`makeFirstResponder:`をオーバーライドし、新しいresponderのsuperview鎖を辿って追跡中の`TreeHostView`祖先(ネストしたホストも含む)を探し、`RenderCommand::NativeControl.owner_id`→`RenderTree::visual_index`経由で要素を解決して`elwindui_core::focus::native_focus_gained`/`native_focus_lost`を呼ぶ(`crates/elwindui-backend-appkit/src/inner.rs`の`resolve_focus_owner`/`ElwinduiWindow`)。WinUI3は`FrameworkElement`が標準で持つ`GotFocus`/`LostFocus`ルーテッドイベントに、ネイティブ子要素の初回アタッチ時に一度だけ配線する(サブクラス化不要、`reconcile_native_children`)——ただしWindows環境が無いため未検証。自前描画系要素のキーボードフォーカスは引き続き完全に仮想(`FocusTracker`のみが真実)。既知の制限として、(1) 方向キー(`Up`/`Down`/`Left`/`Right`)によるフォーカス移動は未実装(前述)、(2) **ネイティブリーフがフォーカスを持っている間のTab/Shift+Tabキーはそのウィジェットのネイティブ既定動作(例: `NSTextView`はタブ文字を挿入する)に委ねられたままで、`FocusTracker::move_focus`には到達しない** — ネイティブコントロールから「抜ける」方向のTab移動はPhase 1では対応しておらず、AppKitのkey-view-loopチェーン等より侵襲的な変更が必要になる(§8.1参照)。
 
-### 5.6 アクセシビリティ
+### 5.6 アクセシビリティ 📋
 
 ```rust
 trait AccessibilityNode {
@@ -673,7 +673,7 @@ trait AccessibilityNode {
 enum AccessibilityRole { Button, TextInput, CheckBox, Slider, StaticText, ... }
 ```
 
-**`.elwind`側の属性:**
+**DSL側の属性:**
 
 ```rust
 Button {
@@ -695,9 +695,9 @@ Button {
 
 **実装状況**: `AccessibilityNode`トレイトと`AccessibilityRole`/`AccessibilityState`の型定義は`elwindui-core::accessibility`に存在するが、いずれの型に対しても実装(`impl AccessibilityNode for ...`)がなく、`UIElement`ツリーにもいずれのバックエンドのネイティブアクセシビリティAPIにも未結線(`#[accessible(...)]`属性・14章ルール10の警告を含め未実装)。
 
-### 5.7 独自描画部品(Canvas / RenderContext)
+### 5.7 独自描画部品(Canvas / RenderContext) 📋
 
-グラフ・ゲージ等「ピクセル単位で自分で描く」部品は宣言的な`view`構文の対象外とし、`Canvas`ビルトイン+命令的な`RenderContext`描画コードの組み合わせとして扱う。レイアウトは引き続き`.elwind`で宣言的に書き、描画内容は`RenderContext`を受け取るRust関数として書く。
+グラフ・ゲージ等「ピクセル単位で自分で描く」部品は宣言的な`view`構文の対象外とし、`Canvas`ビルトイン+命令的な`RenderContext`描画コードの組み合わせとして扱う。レイアウトは引き続き`view!`で宣言的に書き、描画内容は`RenderContext`を受け取るRust関数として書く。
 
 ```rust
 struct RenderContext {
@@ -713,11 +713,11 @@ struct RenderContext {
 
 `builtin::Canvas`自身は他ビルトイン同様`RenderContext`へ命令を記録し、backend は保持された`RenderTree`を再生する(バックエンド分岐が許されるのは`builtin`定義のみという§4.1の原則がここでも維持される)。
 
-描画コードは`.elwind`の外、通常のRustファイル(`src/painters/*.rs`)に分離する。推奨ディレクトリ構成:
+描画コードは`view!`の外、通常のRustファイル(`src/painters/*.rs`)に分離する。推奨ディレクトリ構成:
 
 ```
 src/
-├── ui/       # .elwind本体(レイアウト定義)
+├── ui/       # コンポーネント定義(レイアウト)
 ├── painters/ # 描画ロジック(通常のRust、バックエンド共通実装)
 └── logic/    # on_click等の業務ロジック
 ```
@@ -726,7 +726,7 @@ src/
 
 `Canvas`と`Row`/`Column`等の既存部品は同じ`Element`ツリー・`LayoutNode`として自然に混在できる(§2.11・§5.3が支えている)。
 
-### 5.8 描画機能の拡張(Composition相当のビジュアル効果)
+### 5.8 描画機能の拡張(Composition相当のビジュアル効果) 📋
 
 `Painter`の基本セット(塗り・線・テキスト)を拡張し、WinUI3の`Win2D`/`Composition`相当の機能を提供する。いずれも`elwindui-core`に属し、バックエンド差異は`builtin::Canvas`内部にのみ許可される(§4.1原則の継続)。
 
@@ -752,9 +752,9 @@ elwindui-backend-appkit # 同上、objc2経由(実装済み・動作確認済み
 elwindui-backend-gtk4   # 同上、gtk-rs経由(現状スタブのみ)
 ```
 
-`.elwind`コンパイラが生成するコードは常に`elwindui-core`のトレイト境界に対して書かれ、実行時にどのバックエンドクレートがリンクされるかで実体が決まる(§3.3の`target::backend()`と対応)。`elwindui-core`が`UIElement`/`LayoutEngine`/`FocusManager`/`AccessibilityTree`/`InputRouter`/`Painter`という共通・バックエンド非依存な基盤を持ち、各`elwindui-backend-*`クレートがこれを実装してネイティブAPIへ橋渡しする、という構成が全体を貫く設計原則である。
+`elwindui-codegen`が生成するコードは常に`elwindui-core`のトレイト境界に対して書かれ、実行時にどのバックエンドクレートがリンクされるかで実体が決まる(§3.3の`target::backend()`と対応)。`elwindui-core`が`UIElement`/`LayoutEngine`/`FocusManager`/`AccessibilityTree`/`InputRouter`/`Painter`という共通・バックエンド非依存な基盤を持ち、各`elwindui-backend-*`クレートがこれを実装してネイティブAPIへ橋渡しする、という構成が全体を貫く設計原則である。
 
-### 5.10 ルーティングイベント(WinUI3スタイル)
+### 5.10 ルーティングイベント(WinUI3スタイル) ✅
 
 WinUI3の`RoutedEvent`に倣い、`#[routed]`属性(`#[two_way]`と同じ、コールバック型フィールドに付与するアトリビュート)を付けたイベントは、発生元の要素から祖先へバブルする。対象は`on_click`のような入力系イベントに限られ、`TabView`の`on_select(usize)`のようなウィジェット固有の型付きペイロードを持つコールバックはルーティング対象外(既存の直接配線のまま)。
 
@@ -785,7 +785,7 @@ pub fn hit_test(root: &Rc<dyn UIElement>, available: Size, at: Point) -> Option<
 `elwindui_core::input::PointerEventArgs`/`PointerWheelEventArgs`/`TappedEventArgs`)にも使われている。
 これらは`UIElement`が宣言する実フィールドなので、ビルトイン・ユーザー定義を問わずどのコンポーネントでも書ける——`on_click`と異なり
 `elwindui-codegen`側に属性名のハードコードは一切なく、フィールドの`fn(T)`宣言型(`callback_param_types`)から
-ペイロード型を機械的に導出する(`docs/elwindui_tool_codegen_design.md`の実装原則参照)。
+ペイロード型を機械的に導出する(`docs/design/tools/codegen_design.md`の実装原則参照)。
 
 実配線は`elwindui_core::input::PointerDispatcher`(WinUI3の入力マネージャ+`GestureRecognizer`に相当)が担う。
 `elwindui_core::ui::hit_test`でヒットテストし`dispatch_routed`でバブルさせる点は`on_click`と同じだが、WinUI3に寄せて
@@ -801,7 +801,7 @@ pub fn hit_test(root: &Rc<dyn UIElement>, available: Size, at: Point) -> Option<
 `Control`/`ContentControl`/`Shape`(`Rectangle`/`Ellipse`)/`TextBlock`等の自前描画系`UIElement`全般で上記9イベントが
 実配線済み(`TreeHostView`の`mouseDown:`/`mouseUp:`/`mouseMoved:`/`mouseDragged:`/`mouseEntered:`/`mouseExited:`/
 `scrollWheel:`/`updateTrackingAreas`)。`Button`/`TextArea`/`TabView`などのネイティブリーフは別NSViewとして重ねられた
-ネイティブアイランドのため、OSのマウスイベントはそのNSView自身が受け取り`TreeHostView`側には伝播しない——`.elwind`側の
+ネイティブアイランドのため、OSのマウスイベントはそのNSView自身が受け取り`TreeHostView`側には伝播しない——DSL側の
 記述自体は静的エラーにならないが実際には発火しない。トンネリング(`Preview*`)、`Canvas`固有のポインタイベント、
 WinUI3バックエンドでの実配線は引き続き将来の課題として残る。
 
@@ -811,7 +811,7 @@ WinUI3バックエンドでの実配線は引き続き将来の課題として�
 |---|---|
 | WinUI3方式の要素階層 | `UIElement`トレイト(非ジェネリック)+ `NativeControl<H>`(実ハンドルを保持する唯一の型)+ `AsAny`によるダウンキャスト(§5.1) |
 | Margin/Alignment | `UIElement`(一律`f32`のMargin、`HorizontalAlignment`/`VerticalAlignment`、既定`Stretch`)を全`UIElement`が共通して持つ(§5.1) |
-| Logical/Visualツリーの分離 | `.elwind`上の参照関係(Logical、`UIElementCollection`)と実際にlayoutされる`Rc<dyn UIElement>`の木(Visual、`visual_children()`)を区別、`Control`/`Layout`がその橋渡し(§5.2) |
+| Logical/Visualツリーの分離 | DSL上の参照関係(Logical、`UIElementCollection`)と実際にlayoutされる`Rc<dyn UIElement>`の木(Visual、`visual_children()`)を区別、`Control`/`Layout`がその橋渡し(§5.2) |
 | レイアウト計算の共通化 | `LayoutNode`(Measure/Arrange)を`elwindui-core`で一元計算し、バックエンド間の見た目のズレを防止(§5.3) |
 | 再描画要求の一元化 | `RelayoutHost`のコアレシング契約により、1回の同期実行区間で複数回の変更更新があっても再レイアウトは高々1回(§5.4) |
 | フォーカス管理の共通化 | `FocusTracker`(`PointerDispatcher`と対の`Rc<dyn UIElementExt>`ベース具象型)+ `tab_stop`/`focus_order`共通プロパティ、`FocusHost`による強制フォーカス(§5.5) |
@@ -821,19 +821,19 @@ WinUI3バックエンドでの実配線は引き続き将来の課題として�
 | `ControlTemplate`(WinUI3方式の再テンプレート化) | `Control`の視覚ツリーを実行時に丸ごと差し替え可能にする`prop`。動的子範囲の入れ替えを流用して再構築、`LogicalNode`をLogical表現に使う(§5.12・**設計のみ**) |
 | フォント/テキストスタイルの継承(WinUI3方式) | `TextStyleOwner`トレイト(`Control`/`TextBlock`/各バックエンドの`NativeControl`が実装)+ プロパティ単位の`Option<T>`ローカル値 + `inheritance_parent(kind)`によるVisual Parent経由の解決 + `TextBackend`計測シーム(§5.13・**AppKit実装済み、WinUI3コードのみ未検証**) |
 
-### 5.12 テンプレート機構(`ControlTemplate`)
+### 5.12 テンプレート機構(`ControlTemplate`) 📋
 
-> **実装状況**: 設計のみ。`docs/elwindui_dsl_spec.md`§4「`ControlTemplate<Self>`」の実行時側の設計。`crates/elwindui-core/src/ui.rs`の`Control`構造体(§5.1既出)には現状`template`フィールドは無く、`ui.rs`自身のdocコメントに"template replacement is future work"と明記されている。
+> **実装状況**: 設計のみ。`docs/specs/dsl_spec.md`§4「`ControlTemplate<Self>`」の実行時側の設計。`crates/elwindui-core/src/ui.rs`の`Control`構造体(§5.1既出)には現状`template`フィールドは無く、`ui.rs`自身のdocコメントに"template replacement is future work"と明記されている。
 
-`ControlTemplate<Self>`型フィールド(`docs/elwindui_dsl_spec.md`§4)は、WinUI3の`Control.Template`同様、コンポーネント自身の視覚ツリーを実行時に丸ごと差し替え可能にする。ランタイム側で必要になる要素は以下の3つ:
+`ControlTemplate<Self>`型フィールド(`docs/specs/dsl_spec.md`§4)は、WinUI3の`Control.Template`同様、コンポーネント自身の視覚ツリーを実行時に丸ごと差し替え可能にする。ランタイム側で必要になる要素は以下の3つ:
 
-- **再構築の仕組み**: `template`の値変更(`set_template(..)`)は通常の属性再代入とは異なり、`body: template(Self)`配下の視覚ツリーを丸ごと差し替える必要がある。新しい再構築エンジンは作らず、`if`/`match`の動的子要素領域の入れ替え(`docs/elwindui_dsl_spec.md`§5、本書§7.2の`{Component}Property`通知機構と同型)を、常に1分岐だけを持つ特殊ケースとして流用する——`template`の`PropertyChanged`通知を受けたら、既存の動的子範囲と同じ経路で「今の子を外し、`template(self)`を呼び直した結果を新しい子として挿入する」。
+- **再構築の仕組み**: `template`の値変更(`set_template(..)`)は通常の属性再代入とは異なり、`body: template(Self)`配下の視覚ツリーを丸ごと差し替える必要がある。新しい再構築エンジンは作らず、`if`/`match`の動的子要素領域の入れ替え(`docs/specs/dsl_spec.md`§5、本書§7.2の`{Component}Property`通知機構と同型)を、常に1分岐だけを持つ特殊ケースとして流用する——`template`の`PropertyChanged`通知を受けたら、既存の動的子範囲と同じ経路で「今の子を外し、`template(self)`を呼び直した結果を新しい子として挿入する」。
 - **Logicalツリー表現**: §5.2で「将来のテンプレート機能の受け皿」として予約されている`LogicalNode { type_name, children }`(現状コード生成からは未使用)を、この機能のLogicalツリー表現として使う——Logical上は「テンプレートを持つコンポーネント自身」が1ノード、Visual上は`template`が返した要素以下の展開木、という対応になる。
-- **`TemplateBinding`相当**: WinUI3の`TemplateBinding`(リフレクションベースの動的束縛)に対応するのは、テンプレートを構成するクロージャ内から`control.content`/`control.padding()`のように、既存の「`#[param]`フィールドへの名前付きアクセサ自動生成」(`docs/elwindui_builtins_spec.md`付録F補足)を直接呼び出す形——静的に型付けされ、リフレクションを一切必要としない。
+- **`TemplateBinding`相当**: WinUI3の`TemplateBinding`(リフレクションベースの動的束縛)に対応するのは、テンプレートを構成するクロージャ内から`control.content`/`control.padding()`のように、既存の「`#[param]`フィールドへの名前付きアクセサ自動生成」(`docs/specs/builtins_spec.md`付録F補足)を直接呼び出す形——静的に型付けされ、リフレクションを一切必要としない。
 
-### 5.13 フォント/テキストスタイルの継承ランタイム契約(実装済み・2026-07-26)
+### 5.13 フォント/テキストスタイルの継承ランタイム契約(実装済み)
 
-**単一の真実の源は`docs/elwindui_font_status.md`**——本節はそこへの導線となる、ランタイム契約の要約のみを記す(実装詳細・バックエンド別対応表・未対応事項は重複させない)。
+**単一の真実の源は`docs/status/font_status.md`**——本節はそこへの導線となる、ランタイム契約の要約のみを記す(実装詳細・バックエンド別対応表・未対応事項は重複させない)。
 
 - **`TextStyleOwner`トレイト**(`crates/elwindui-core/src/ui.rs`、手書き・`#[class]`管理外): `Control`/`TextBlock`/各バックエンドの`NativeControl`の3クラスだけが実装する、直交する能力トレイト(§5.5の`FocusHost`/`AsAny`と同じ形)。フォント/foreground7プロパティそれぞれの`get`/`set`/`clear`と、`resolved_text_style() -> ComputedTextStyle`を提供する。
 - **`UIElementExt::as_text_style_owner()`**: `UIElement`が`#[overridable]`宣言し、`Control`/`TextBlock`/`NativeControl`が`#[overrides]`で`Some(self)`を返す(既存の`try_as_native_control`と同型)。`Grid`/`Layout`/`Shape`のような`TextStyleOwner`非実装要素は`None`のままで、継承の通過点として透過的に振る舞う。
@@ -847,7 +847,7 @@ WinUI3バックエンドでの実配線は引き続き将来の課題として�
 
 ---
 
-## 6. ライフサイクル
+## 6. ライフサイクル 🚧
 
 ### 6.1 コンポーネント単位(`on_mount` / `on_unmount` / `on_update`)
 
@@ -885,9 +885,9 @@ component App {
 
 ---
 
-## 7. 状態管理とMVVM
+## 7. 状態管理とMVVM 🚧
 
-### 7.1 グローバル状態(Store)
+### 7.1 グローバル状態(Store) 📋
 
 `bind!(settings.volume, TwoWay)`のように暗黙に扱ってきた`settings`を、`store`という専用構文で明示的に定義する。
 
@@ -928,7 +928,7 @@ component Button inherits Control {
 
 WinUI3の`Style`/`Template`が持つ「値ソースごとの優先順位を持つ動的プロパティバッグ」(DependencyProperty)、あるいはSwiftUIの`Environment`(木の位置に応じた暗黙値伝播)に相当する仕組みは、ElwindUILには存在しない。`#[scoped] store`を使えば区画ごとに異なるテーマを持たせられるが、注入は常に`#[inject]`で明示的――WPF/XAMLの`DynamicResource`やSwiftUIの`Environment`のように、**途中の階層から暗黙に(中間コンポーネントを経由せず)差し替える**ことはできない。この非対称性は既知の制約として残す。将来この種の「祖先を辿って最も近い定義を解決する」仕組みが必要になった場合は、ルーティングイベント(§5.10)が既に使っている`visual_parent`を辿るバブリングと同じインフラ、および`on_mount`ライフサイクルフック(§6.1、Visualツリー接続後に発火)を組み合わせた祖先探索スコープ(`ThemeScope`的なbuiltin)が検討候補になるが、これは本節の設計には含まない。
 
-### 7.2 ViewModel / アクション(MVVM)
+### 7.2 ViewModel / アクション(MVVM) ✅
 
 WinUI3/WPF由来のMVVMパターンを、**新しい実行時機構を作らず**`#[computed]`(§2.2)と`store`(§7.1)の仕組みを再利用して導入する。
 
@@ -970,11 +970,11 @@ mod notepad_view_model {
 
 - `struct`は`#[observable]`/`#[computed]`フィールドのみを宣言する。`impl`ブロック内の`fn`/`async fn`は**すべて自動的にアクションとして公開される**(`viewmodel`の呼び出し可能な操作) — struct側に対応するフィールド宣言は一切不要で、`fn`の存在そのものがアクションの宣言を兼ねる。生成される公開メソッド名はそのfnの名前そのもの(`pub fn save(&self)`)で、`Command`型のような専用のラッパー型・`.execute()`呼び出しは存在しない
 - `fn`本体内の代入(`state = ...`)・読み取り(`content`)は、同じ`struct`のフィールドへの参照として自動的に`self.set_state(...)`/`self.content()`へ書き換えられる(`#[computed]`の初期化式と同じ規約)
-- 非同期化したい場合は単に`async fn`と書く — 専用の属性(旧`#[command(async)]`)は不要で、`fn`自体の`async`キーワードから構造的に判定される。生成コードは`elwindui-core::task::spawn_local`で包まれ、View側からは同期アクションと同じ`vm.save()`という書き方で呼べる(§7.3参照)
+- 非同期化したい場合は単に`async fn`と書く — 専用の属性は不要で、`fn`自体の`async`キーワードから構造的に判定される。生成コードは`elwindui-core::task::spawn_local`で包まれ、View側からは同期アクションと同じ`vm.save()`という書き方で呼べる(§7.3参照)
 - WinUI3/WPFの`Command.CanExecute`に相当する「実行可否」は、専用の仕組みを持たず**普通の`#[computed]`フィールド**として自分で書く(上の`save_can_execute`)。命名規約もなく、View側から好きな名前で`enabled: vm.save_can_execute`のように参照する
 - `viewmodel`は`view`ブロックを持てず、ビルトイン要素への参照が内部に出現すると14章ルール19により静的エラーとなる(V/VM分離が構文レベルで強制される)
 - View側はViewModelを`#[param] #[inject]`(実体は`#[bindable]`、下記)で受け取り(§7.1の`#[scoped]`+`#[inject]`と同じ注入パターン)、双方向編集フィールドは`bind!(vm.field, TwoWay)`でpropに写し取り、読み取り専用表示(`vm.window_title`等)・アクション呼び出し(`vm.save`)は`view`式中で直接参照してよい(14章ルール13の対象外 — ルール13は`#[param]`初期化式への直接参照のみを禁止)。アクション参照に`()`は付けない — `vm.char_count`のような他の0引数ゲッターと同じ規約
-- `.elwind`のDSLネイティブ`viewmodel Name { ... }`構文は`#[observable]`/`#[computed]`のみをサポートし、アクションを宣言する手段を持たない。アクションが必要な`viewmodel`は上記のRustネイティブ構文を使う
+- テキスト構文のDSLネイティブ`viewmodel Name { ... }`は`#[observable]`/`#[computed]`のみをサポートし、アクションを宣言する手段を持たない。アクションが必要な`viewmodel`は上記のRustネイティブ構文を使う
 
 **`on_*`イベント属性へのクロージャ構文**: `TabView`の`on_select: fn(usize)`のように引数を取るイベントハンドラは、`|param, ...| 式`または`|param, ...| { 文; ... }`という明示的なクロージャで書く(パラメータは型注釈なし・宣言側の`fn(T0, T1, ...)`から位置対応で型が決まる):
 
@@ -985,13 +985,13 @@ TabView {
 }
 ```
 
-引数を取らないハンドラ(`fn()`)は`on_new_tab: vm.new_tab`のように従来どおりベアパスの糖衣で書ける — このときクロージャを書く必要はない。
+引数を取らないハンドラ(`fn()`)は`on_new_tab: vm.new_tab`のようにベアパスの糖衣で書ける — このときクロージャを書く必要はない。
 
 **再同期のタイミング**: コード生成器は初期構築時だけ全属性を設定する`resync()`を生成し、以後の更新はブランケットな再同期ではなく各`viewmodel`の型付き`PropertyChanged`購読で行う。`#[observable]`のsetterは代入後に対応する`PropertyId`を通知し、`#[computed]`(アクションの実行可否を表す`#[computed]`フィールドも含む)は依存するsetterの後で再計算されて自身の`PropertyId`も通知する。`Subscription`は表示オブジェクトが保持し、破棄時にDropで解除される。子viewmodelの変更を親viewmodelのコレクション変更として転送しない(文書本文の変更は`TextArea`と文字数表示だけを更新し、親`TabView`のchildrenは更新しない)。
 
-**低オーバーヘッドな内部表現**: 依存関係はコンパイル時に静的抽出し(`#[computed]`と同一の仕組み)、動的な購読リスト(`Vec<Box<dyn Fn()>>`)は持たない。`Copy`可能な型は`Cell<T>`、非`Copy`型のみ`RefCell`で保持し、アクションの本体は具体的なクロージャ型として単相化する(`dyn Trait`を使わない)。複雑な相互依存で静的解析が困難な場合のみ、`elwindui-core`が提供する汎用リアクティブグラフ(スロットマップ+世代インデックスの`SignalId`、Leptos/Xilem系のリアクティブランタイムと同様の設計)にフォールバックする。`ControlTemplate<Self>`(§5.12、`docs/elwindui_dsl_spec.md`§4)は、実行時に差し替え可能でなければ意味を持たないという性質上、この単相化方針への意図的で限定的な例外として`Rc<dyn Fn(&Self) -> Rc<dyn UIElement>>`を許容する。
+**低オーバーヘッドな内部表現**: 依存関係はコンパイル時に静的抽出し(`#[computed]`と同一の仕組み)、動的な購読リスト(`Vec<Box<dyn Fn()>>`)は持たない。`Copy`可能な型は`Cell<T>`、非`Copy`型のみ`RefCell`で保持し、アクションの本体は具体的なクロージャ型として単相化する(`dyn Trait`を使わない)。複雑な相互依存で静的解析が困難な場合のみ、`elwindui-core`が提供する汎用リアクティブグラフ(スロットマップ+世代インデックスの`SignalId`、Leptos/Xilem系のリアクティブランタイムと同様の設計)にフォールバックする。`ControlTemplate<Self>`(§5.12、`docs/specs/dsl_spec.md`§4)は、実行時に差し替え可能でなければ意味を持たないという性質上、この単相化方針への意図的で限定的な例外として`Rc<dyn Fn(&Self) -> Rc<dyn UIElement>>`を許容する。
 
-**`#[bindable]`**: `component`がviewmodelを注入するフィールドには`#[bindable]`を付ける(`#[param] #[inject]`を暗黙に含む)。`#[elwindui::component]` + `body: view! { .. }`(`docs/elwindui_tool_codegen_design.md`の代替方式(proc-macro)参照)のように`component`とそれが注入する`viewmodel`が別々のマクロ呼び出しとして展開される場合、`component`側のコード生成はその`viewmodel`の実体型を型解決できない(各proc-macro展開は自分自身のトークンしか見えない)。`#[bindable]`はこの判定を型解決ではなく構文マーカーに置き換え、`elwindui::core::reactive::ObservableExt`(プロパティ名文字列で`PropertyChanged`購読を公開する共通トレイト)経由で、型名を知らなくても既存の細粒度更新の仕組みを維持する(呼び出しは常に具体的な型に単相化され、`dyn ObservableExt`は使わない)。`#[bindable]`はviewmodel注入の標準形であり、プロジェクト全体でこの形に統一する。
+**`#[bindable]`**: `component`がviewmodelを注入するフィールドには`#[bindable]`を付ける(`#[param] #[inject]`を暗黙に含む)。`#[elwindui::component]` + `body: view! { .. }`(`docs/design/tools/codegen_design.md`の代替方式(proc-macro)参照)のように`component`とそれが注入する`viewmodel`が別々のマクロ呼び出しとして展開される場合、`component`側のコード生成はその`viewmodel`の実体型を型解決できない(各proc-macro展開は自分自身のトークンしか見えない)。`#[bindable]`はこの判定を型解決ではなく構文マーカーに置き換え、`elwindui::core::reactive::ObservableExt`(プロパティ名文字列で`PropertyChanged`購読を公開する共通トレイト)経由で、型名を知らなくても既存の細粒度更新の仕組みを維持する(呼び出しは常に具体的な型に単相化され、`dyn ObservableExt`は使わない)。`#[bindable]`はviewmodel注入の標準形であり、プロジェクト全体でこの形に統一する。
 
 `viewmodel`は`view`を持たず、ビルトイン要素にも依存しないため、バックエンドを一切起動せず通常の`#[test]`で単体テスト可能(§9参照):
 
@@ -1014,7 +1014,7 @@ fn save_disables_while_saving() {
 | インスタンス | 既定でシングルトン(`#[scoped]`で複数化可) | 常にView単位、`#[inject]`で注入 |
 | アクション | 持たない(素のRustロジック関数を直接呼ぶ) | `impl`ブロックの`fn`がそのまま公開メソッドになる。実行可否は普通の`#[computed]`で自分で表現する |
 
-### 7.3 非同期処理
+### 7.3 非同期処理 🚧
 
 ファイル読込・API呼び出し等の非同期処理と、`prop`/アクションの連携を定義する。新しい実行モデルは導入せず、既存の`#[computed]`・アクションを非同期版に拡張する。
 
@@ -1046,10 +1046,10 @@ match vm.content {
 - `AsyncState<T>`は通常のenumとして網羅性検査の対象(`match`でIdle/Loading/Success/Errorの処理漏れを静的検出)
 - `#[async_computed]`は`#[computed]`の非同期版。`#[observable]`依存が変化すると自動再実行され、実行中は`Loading`
 - `#[async_computed]`が`viewmodel`/`store`以外に付与された場合は静的エラー(14章ルール20) — 非同期状態はVM/Model層に閉じ込め、`component`の`#[param]`静的評価式を汚染しない。アクション側の非同期は`async fn`という構造そのものから判定されるため(§7.2)、対応する専用属性は存在しない — `viewmodel`の`impl`ブロック以外に`async fn`アクションを書く場所自体がないので、この種の静的検査を別途必要としない
-- 実行中の多重実行防止・キャンセルは(旧`#[command(async, ...)]`が担っていた領域)専用の仕組みを持たない — 必要なら`#[computed]`の実行可否フィールド(§7.2)を自分で`false`にする、または独自の`Cancelled`状態を`#[observable]`で管理する
+- 実行中の多重実行防止・キャンセルは専用の仕組みを持たない — 必要なら`#[computed]`の実行可否フィールド(§7.2)を自分で`false`にする、または独自の`Cancelled`状態を`#[observable]`で管理する
 - `elwindui-core`はホストの非同期ランタイムを直接指定せず`spawn(fut)`という薄い抽象を提供し、各バックエンドがWinUI3の`DispatcherQueue`/AppKitの`DispatchQueue.main`/GTK4の`glib::MainContext`に橋渡しする
 
-### 7.4 Undo/Redo
+### 7.4 Undo/Redo 📋
 
 編集操作のUndo/Redoを`viewmodel`フィールドへの共通仕組みとして提供する。
 
@@ -1075,9 +1075,9 @@ Button { text: t!("menu-undo"), on_click: vm.undo, enabled: vm.can_undo }
 
 ---
 
-## 8. UI機能拡張ビルトイン
+## 8. UI機能拡張ビルトイン 🚧
 
-### 8.1 キーボード入力・ショートカット
+### 8.1 キーボード入力・ショートカット ✅
 
 ポインタ系イベント(`on_pointer_down`等、§5.7)に加え、キーボード入力・IME・アプリ全体のショートカットを扱うための構文。
 
@@ -1111,9 +1111,9 @@ Button {
 }
 ```
 
-`#[shortcut(...)]`は`on_click`のようなコールバック型フィールドの**宣言**(`Button`の`on_click: fn()`、§5.10参照)ではなく、`Button { ... }`という**要素の使用箇所**に付ける属性である点に注意——`#[routed]`(§5.10)がフィールド宣言そのものに付く(全`Button`インスタンス共通の配線方式を決める)のとは対照的に、ショートカットは本質的にインスタンスごとの決定(「このSaveボタンだけCtrl+S」)なので、`Button`自身の共有宣言には付けられない。構文上は`#[id("...")]`(付録I.1の`let`束縛)と同じく、要素の`{}`本体内で`属性名: 値`という行の直前に書く、通常の属性行に対する注釈という位置づけ。
+`#[shortcut(...)]`は`on_click`のようなコールバック型フィールドの**宣言**(`Button`の`on_click: fn()`、§5.10参照)ではなく、`Button { ... }`という**要素の使用箇所**に付ける属性である点に注意——`#[routed]`(§5.10)がフィールド宣言そのものに付く(全`Button`インスタンス共通の配線方式を決める)のとは対照的に、ショートカットは本質的にインスタンスごとの決定(「このSaveボタンだけCtrl+S」)なので、`Button`自身の共有宣言には付けられない。構文上は`#[id("...")]`(`docs/specs/dsl_spec.md` §13の`let`束縛)と同じく、要素の`{}`本体内で`属性名: 値`という行の直前に書く、通常の属性行に対する注釈という位置づけ。
 
-`#[shortcut("...")]`はプラットフォーム非依存の修飾キー表記(`Ctrl`/`Shift`/`Alt`/`Meta`)を使う。コード生成時に、macOS向けビルド(`backend-appkit` Cargoフィーチャ)では`Ctrl`が自動的に`Cmd`に読み替えられる(WinUI3等の他backendではそのまま`Ctrl`として扱う)、というプラットフォーム変換規則を標準で持つ——`target::backend()`ではなく実在する仕組みである`elwindui`ファサードのCargoフィーチャで振り分ける(`docs/elwindui_implementation_status.md`参照)。明示的にOSごとの割り当てを変えたい場合は複数指定できる:
+`#[shortcut("...")]`はプラットフォーム非依存の修飾キー表記(`Ctrl`/`Shift`/`Alt`/`Meta`)を使う。コード生成時に、macOS向けビルド(`backend-appkit` Cargoフィーチャ)では`Ctrl`が自動的に`Cmd`に読み替えられる(WinUI3等の他backendではそのまま`Ctrl`として扱う)、というプラットフォーム変換規則を標準で持つ——`target::backend()`ではなく実在する仕組みである`elwindui`ファサードのCargoフィーチャで振り分ける(`docs/status/implementation_status.md`参照)。明示的にOSごとの割り当てを変えたい場合は複数指定できる:
 
 ```rust
 #[shortcut(winui3: "Ctrl+S", appkit: "Cmd+S")]
@@ -1129,7 +1129,7 @@ on_key_down: |_| find_in_selection()
 
 実体は`elwindui_core::input::ShortcutRegistry`——`KeyboardDispatcher`(§5.5)が1ホストツリーにつき1インスタンス所有し、キーイベントごとに`on_key_down`のバブリングより先に評価される(WinUI3の`KeyboardAccelerator`が通常の`KeyDown`より先に評価されるのと同じ順序)。`#[shortcut(...)]`が付いた要素の構築時、`UIElement::declared_shortcuts`という自分専用のバッファに登録内容を積むだけに留め(まだどのツリー/ウィンドウに属すか分からないため)、ホストの`set_tree`がツリー全体を1回walkして実際の`ShortcutRegistry`へ吸い上げる、という2段構成になっている。
 
-### 8.2 画面遷移(ナビゲーション)
+### 8.2 画面遷移(ナビゲーション) 📋
 
 `NavigationHost`ビルトインによるルートベースの画面遷移機構。
 
@@ -1150,7 +1150,7 @@ view App {
 
 `match current_route { ... }`は`Route`の全メンバー網羅を要求される(14章ルール14、§2.3と同じ仕組み)。遷移操作は`navigate!(route)`(遷移+履歴push)/`navigate_back!()`(履歴を1つ戻す)。`NavigationHost`はビルトインのため内部で`match target::backend()`を持つ(WinUI3=`Frame`、AppKit=`contentViewController`差し替え、GTK4=`gtk::Stack`)。§4.1の原則通り、通常のcomponentはこの分岐を書けない。
 
-### 8.3 ダイアログ・ポップアップ・メニュー
+### 8.3 ダイアログ・ポップアップ・メニュー 🚧
 
 - `Dialog`: モーダル。`#[focus(trap: true)](§5.5)`が自動適用され、`on_dismiss`はEsc・外側クリック・明示的な閉じるボタンいずれからも発火
 - `Menu`/`MenuItem`: コンテキストメニュー。`context_menu`属性で任意要素に紐付け
@@ -1158,7 +1158,7 @@ view App {
 
 いずれもビルトインで内部に`match target::backend()`を持ち、独自部品からの利用時は§4.1のバックエンド分岐禁止原則がそのまま適用される(14章ルール15)。
 
-### 8.4 リスト仮想化
+### 8.4 リスト仮想化 📋
 
 大量データを`for`でそのまま描画すると全要素が`Element`化され性能が破綻するため、表示範囲のみ描画する`VirtualList`を提供する。
 
@@ -1176,7 +1176,7 @@ VirtualList {
 - 画面外に出た`Element`はプールに戻し再利用する。再利用インスタンスでは`on_mount`(§6.1)は初回プール生成時のみ発火し、以降は`prop`更新のみ行う
 - `key`未指定で順序が変わる更新を行うと挿入位置ベースの再利用にフォールバックし、14章ルール23により静的警告
 
-### 8.5 テーマ/デザイントークン
+### 8.5 テーマ/デザイントークン ✅
 
 `style{}`(§2.4)は個別属性の上書きに留まるため、カラーパレット・スペーシング・タイポグラフィを一元管理する`theme`構文を用意する。
 
@@ -1194,7 +1194,7 @@ theme AppTheme {
 - 参照は`AppTheme.token名`という`.`アクセス(`env::*`やstoreフィールド参照と同じ慣習)。`style{}`からも`Painter`/`Brush`(§5.8)からも同じ記法で参照可能
 - 実行時切り替えはファイル単位アトリビュート`#![theme(AppTheme, variant: bind!(AppSettings.theme_mode, OneWay))]`で宣言し、storeの変化に応じて`AppTheme.*`参照箇所が自動再評価される(既存のprop差分更新の仕組みに乗る)
 
-### 8.6 エラーハンドリング(エラーバウンダリ)
+### 8.6 エラーハンドリング(エラーバウンダリ) 📋
 
 `view`内の予期しないエラーでアプリ全体をクラッシュさせず、該当部分だけフォールバック表示に切り替える。
 
@@ -1212,7 +1212,7 @@ ErrorBoundary {
 - 同期アクションのエラーは`#[catches(ErrorType)]`をアクションのfnに付与すると`viewmodel`の`last_error`相当フィールドに自動格納(§7.3の非同期版と対になる同期パターン)
 - 未捕捉時は`elwindui-core`既定のフォールバック画面(デバッグ=詳細スタック、リリース=簡潔メッセージ)でクラッシュを防止する
 
-### 8.7 クリップボード・ドラッグ&ドロップ・ファイルダイアログ
+### 8.7 クリップボード・ドラッグ&ドロップ・ファイルダイアログ 🚧
 
 OS機能へのアクセスをGUI要素ではなく`platform::`名前空間の関数として提供する(`env::*`/`external::*`と同じ「明示的な入口」の思想)。
 
@@ -1231,7 +1231,7 @@ let text: Option<String> = platform::clipboard::read_text();
 | ファイルダイアログ | `FileOpenPicker`/`FileSavePicker` | `NSOpenPanel`/`NSSavePanel` | `gtk::FileChooserNative` |
 | D&D | `DragDrop`イベント | `NSDraggingDestination` | `Gtk::DropTarget` |
 
-### 8.8 モバイル対応(iOS / Android)
+### 8.8 モバイル対応(iOS / Android) 📋
 
 §3.3の`Backend` enumに`Uikit`(iOS)/`Jetpack`(Android)を追加し、既存バックエンド抽象化をそのまま拡張する。バリアント追加に伴う既存ビルトインの網羅性エラー(§3.3参照)は、各`builtin`定義に対応する`native!`腕を追加することで解消する。
 
@@ -1263,7 +1263,7 @@ Rustバインディングは、iOSは`objc2`(AppKitと同系統のクレート)�
 
 ---
 
-## 9. テスト支援
+## 9. テスト支援 🚧
 
 §7.2の`viewmodel`単体テスト(バックエンド非起動)に加え、`view`が組み立てる要素ツリー・描画結果を検証するスナップショットテストを提供する。
 
@@ -1294,7 +1294,7 @@ fn knob_renders_correctly_at_half_value() {
 
 `render_canvas_snapshot`はツール設計書側のオフスクリーンレンダリング機能(プレビュー用)を再利用する。新しいBackend variant(テスト専用等)は追加せず既存backendのヘッドレスモードを用いることで、`match target::backend()`の網羅性検査(§2.3・§3.3)に影響を与えない設計になっている。
 
-**実装状況**: `elwindui-test`クレートは`render_tree`(`Element`ツリーのインデント付きダンプ)のみ実装済み。`render_canvas_snapshot`/`assert_image_snapshot!`は未実装(依存先のオフスクリーンレンダリング機能自体がプレビューツール未着手のため存在しない、`docs/elwindui_tool_preview_design.md`参照)。`viewmodel`単体テストは通常のRustの`#[test]`をそのまま使えるため追加のテストヘルパーを要さず、この点はドキュメント通り機能する。
+**実装状況**: `elwindui-test`クレートは`render_tree`(`Element`ツリーのインデント付きダンプ)のみ実装済み。`render_canvas_snapshot`/`assert_image_snapshot!`は未実装(依存先のオフスクリーンレンダリング機能自体がプレビューツール未着手のため存在しない、`docs/design/tools/preview_design.md`参照)。`viewmodel`単体テストは通常のRustの`#[test]`をそのまま使えるため追加のテストヘルパーを要さず、この点はドキュメント通り機能する。
 
 ---
 
@@ -1302,7 +1302,7 @@ fn knob_renders_correctly_at_half_value() {
 
 コンパイラ/リンタが実行前に検出すべき項目(ツール側の実装対象だが、各ルールがフレームワークのどの不変条件を守っているかは設計上重要なため一覧化する)。
 
-**実装状況**: `crates/elwindui-codegen/src/validate.rs`(約1600行)が静的検証の実装本体だが、本表の24ルールすべてが1対1でルール番号付きで実装されているわけではない(現状ソース中に明示的なルール番号コメントがあるのはルール18・19のみ)。多くはこの表の各節が説明する言語機能(`#[param]`/`bind!`/enum網羅性検査/`viewmodel`のview参照禁止等)のバリデーションとして実質的に実装されているが、ルール9(`native!`/`target::backend()`制限)・14(`NavigationHost`網羅性)・15(オーバーレイ系の分岐制限)は§3.3・§8.2・§8.3で述べた通り前提となる`target::backend()`自体が未実装のため検証しようがない。ルールごとの詳細な実装状況は`docs/elwindui_implementation_status.md`を参照。
+**実装状況**: `crates/elwindui-codegen/src/validate.rs`(約1600行)が静的検証の実装本体だが、本表の24ルールすべてが1対1でルール番号付きで実装されているわけではない(現状ソース中に明示的なルール番号コメントがあるのはルール18・19のみ)。多くはこの表の各節が説明する言語機能(`#[param]`/`bind!`/enum網羅性検査/`viewmodel`のview参照禁止等)のバリデーションとして実質的に実装されているが、ルール9(`native!`/`target::backend()`制限)・14(`NavigationHost`網羅性)・15(オーバーレイ系の分岐制限)は§3.3・§8.2・§8.3で述べた通り前提となる`target::backend()`自体が未実装のため検証しようがない。ルールごとの詳細な実装状況は`docs/status/implementation_status.md`を参照。
 
 | # | ルール概要 | 関連する本ドキュメントの節 |
 |---|---|---|
@@ -1323,7 +1323,7 @@ fn knob_renders_correctly_at_half_value() {
 | 15 | ダイアログ/メニュー等オーバーレイ系ビルトイン外での`native!`/`target::backend()` → エラー | §8.3 |
 | 16 | `Transition`/`KeyframeAnimation`の不正イージング名・範囲外キーフレーム → エラー | §5.8 |
 | 17 | `Effect`のバックエンド非対応組み合わせ → 警告(フォールバック明示) | §5.8 |
-| 18 | (欠番 — `Command`機構撤廃により削除。アクションはRustの`impl` fnとして自動検出されるため、対応する型検査自体が不要になった) | §7.2 |
+| 18 | (欠番 — アクションはRustの`impl` fnとして自動検出されるため、対応する型検査が存在しない) | §7.2 |
 | 19 | `viewmodel`定義内に`view`ブロック/ビルトイン要素への直接参照 → エラー | §7.2 |
 | 20 | `#[async_computed]`が`viewmodel`/`store`以外に付与 → エラー | §7.3 |
 | 21 | `#[undoable]`が`viewmodel`の`#[observable]`以外に付与 → エラー | §7.4 |
@@ -1337,7 +1337,7 @@ fn knob_renders_correctly_at_half_value() {
 
 | 責務 | 担当 |
 |---|---|
-| `.elwind`のパース・型検査・14章の静的検証ルール適用 | コンパイラ(ツール設計書側、`elwindui-codegen`) |
+| DSLのパース・型検査・14章の静的検証ルール適用 | コンパイラ(ツール設計書側、`elwindui-codegen`) |
 | `component`/`view`/`enum`/`store`/`viewmodel`からのRustコード生成 | コンパイラ |
 | バックエンド判定の定数畳み込み(`target::backend()`)、非該当分岐の除去 | コンパイラ |
 | `.ftl`の静的パースと`t!`キー・引数名の整合性検証 | コンパイラ |
@@ -1346,6 +1346,6 @@ fn knob_renders_correctly_at_half_value() {
 | レイアウト計算(Measure/Arrange)の一元実装 | `elwindui-core`(§5.3) |
 | ViewModelの依存関係静的抽出結果に基づく`Cell`/`RefCell`ベースの実行時更新 | コンパイラが生成するコード + `elwindui-core`の汎用リアクティブグラフ(フォールバック時のみ) |
 | ネイティブAPIへの橋渡し(WinUI3/AppKit/GTK4/Uikit/Jetpack) | 各`elwindui-backend-*`クレート |
-| コード生成・LSP診断・プレビュー・ホットリロード | ツール設計書(`docs/elwindui_tool_*_design.md`)側の対象 |
+| コード生成・LSP診断・プレビュー・ホットリロード | ツール設計書(`docs/design/tools/*.md`)側の対象 |
 
 この分担の要点: **DSLの文法自体は「`Element`ツリーへの到達可能性」「param/propの静的/動的区別」「enum網羅性」といった契約のみを保証し、探索アルゴリズムやレイアウト計算・リアクティブ更新の実装詳細はすべて`elwindui-core`側の関心事として分離されている**。これにより、将来的にレイアウトエンジンの実装を差し替えたり新しいバックエンドを追加したりしても、DSLの構文自体は変更不要という設計になっている。

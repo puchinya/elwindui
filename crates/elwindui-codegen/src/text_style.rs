@@ -1,4 +1,4 @@
-//! The seven fields `#[text_style]` (指示書 §9, `docs/elwindui_dsl_spec.md` 付録A) injects into a
+//! The seven fields `#[text_style]` (指示書 §9, `docs/specs/dsl_spec.md` 付録A) injects into a
 //! component's field set — shared by `parser.rs` (injection) and `validate.rs` (duplicate-name
 //! checking) so the two can never drift out of sync with each other.
 

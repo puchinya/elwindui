@@ -5,7 +5,7 @@ pub struct SignalId {
     generation: u32,
 }
 
-/// Fallback only (付録O.5): ordinary `#[computed]`/`#[async_computed]` fields have their
+/// Fallback only (docs/design/gui_framework_design.md §7.2): ordinary `#[computed]`/`#[async_computed]` fields have their
 /// dependency graph extracted statically by `elwindui-codegen`, which generates direct call
 /// chains instead of going through this graph. This exists only for dependency paths that can't
 /// be resolved at compile time. Modeled loosely on WinUI3's `DependencyProperty` invalidation
@@ -48,9 +48,9 @@ impl Drop for Subscription {
 }
 
 /// Common interface for a type with a generated `PropertyChanged` event (currently only
-/// `viewmodel`, 付録O.2/O.5) — identifies the changed property by name (`&'static str`) rather
+/// `viewmodel`, docs/design/gui_framework_design.md §7.2) — identifies the changed property by name (`&'static str`) rather
 /// than a per-viewmodel-generated enum. This exists specifically for `#[bindable]` fields
-/// (付録O.8): a `component` written via `#[elwindui::component]` + `body: view! { .. }` (or a
+/// (docs/design/gui_framework_design.md §7.2): a `component` written via `#[elwindui::component]` + `body: view! { .. }` (or a
 /// `.elwind` `view` referencing a `viewmodel` declared elsewhere) is parsed by a *separate* macro
 /// invocation / file from whatever declares the concrete viewmodel type, so it never has a name
 /// for that type's own generated `XProperty` enum to write a match arm against. A property *name*
@@ -63,8 +63,8 @@ impl Drop for Subscription {
 /// instead of identity-by-typed-accessor.
 ///
 /// Every call site is against a statically-known concrete type (never `dyn ObservableExt`), so
-/// this does not reintroduce the dynamic dispatch 付録O.5 deliberately avoids — it's a marker/
-/// protocol trait, not a type-erasure mechanism.
+/// this does not reintroduce the dynamic dispatch that `docs/design/gui_framework_design.md` §7.2
+/// deliberately avoids — it's a marker/protocol trait, not a type-erasure mechanism.
 pub trait ObservableExt {
     fn subscribe_property_changed(&self, f: impl Fn(&'static str) + 'static) -> Subscription;
 }

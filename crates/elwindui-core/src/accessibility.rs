@@ -1,4 +1,4 @@
-/// See docs/elwindui_spec.md 付録H.4.
+/// See docs/design/gui_framework_design.md §5.6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessibilityRole {
     ButtonExt,
@@ -41,7 +41,7 @@ impl Default for AccessibilityState {
     }
 }
 
-/// See docs/elwindui_spec.md 付録H.4.
+/// See docs/design/gui_framework_design.md §5.6.
 pub trait AccessibilityNode {
     fn role(&self) -> AccessibilityRole;
     fn label(&self) -> String;

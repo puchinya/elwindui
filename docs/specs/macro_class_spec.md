@@ -1,13 +1,13 @@
 # `#[elwindui_macros::class]` マクロ仕様書
 
 `crates/elwindui-macros/src/class.rs` が実装する属性マクロ `#[elwindui_macros::class]`
-(`elwindui`ファサード経由では `#[elwindui::class]`)の完全な仕様。`docs/elwindui_gui_framework_design.md`
+(`elwindui`ファサード経由では `#[elwindui::class]`)の完全な仕様。`docs/design/gui_framework_design.md`
 §5.1a が定めるRustクラス階層表現規約(trait+構造体合成によるRust上の疑似継承)を、
 手書きコード(`elwindui-core`/各バックエンドクレート)とコード生成(`elwindui-codegen`)の
 両方で実際に自動化する実装がこのマクロである。
 
 > 本書は命名規約(構造体は素の`ClassName`、トレイトは`ClassNameExt`、祖先アクセサは`as_ui_element`/
-> `__dyn_x`)を含め、`docs/elwindui_gui_framework_design.md`§5.1aより詳細かつ実装に忠実な正である。
+> `__dyn_x`)を含め、`docs/design/gui_framework_design.md`§5.1aより詳細かつ実装に忠実な正である。
 > 実装を疑うときは本書よりも常に`crates/elwindui-macros/src/class.rs`自体を優先して確認すること。
 
 ---
@@ -606,7 +606,7 @@ fn __elwindui_run_on_constructed(&self) {  // Button自身
 `struct_only`クラスを他クラスが`inherits`すると、その子孫は「トレイトに存在しない
 アクセサメソッドの実装」を要求され`E0407`になる。
 
-**2026-07-26、フォント機能実装時にユーザー確認済みの方針**: このマクロ自体は修正しない。
+**方針**: このマクロ自体は修正しない。
 `struct_only`クラスで真にオーバーライド可能な仮想メソッドが必要になった場合は、
 マクロにアクセサ自動生成の特別分岐を追加するのではなく、**共有基底となる
 `trait_only`宣言(例:`elwindui_core::ui::NativeControlExt`)側へ手動でメソッドを追加し、
@@ -618,7 +618,7 @@ fn __elwindui_run_on_constructed(&self) {  // Button自身
 このマクロの複雑さ・既存の脆弱さ(rust-analyzerとの既知の食い違い、§15参照)に対して
 リスクに見合わないと判断した。
 
-実例: `docs/elwindui_font_status.md`のフォント機能実装では、この制限に一度当たった
+実例: `docs/status/font_status.md`のフォント機能実装では、この制限に一度当たった
 (`NativeControl`に「解決済みスタイルをネイティブハンドルへpushする」仮想フックが
 最初は必要に見えた)が、**pull方式**(`NativeControl::measure_override`の中から
 `sync_text_style()`という`#[class]`管理外の普通の`impl NativeControl { .. }`メソッドを
@@ -685,7 +685,7 @@ rust-analyzer内部で評価されると、`load_class_args`は`None`を返す�
   `store`の成否に依存しないため必ず成功する。`construct`があり手書きの`new`が無ければ
   (`abstract_class`かどうかはこの分岐では不明なため無視した簡略版のルールで)`new`も
   自動生成する。
-- `#[cfg(not(rust_analyzer))]`限定の、従来通りの`compile_error!`——rustcでの本物のコンパイル
+- `#[cfg(not(rust_analyzer))]`限定の`compile_error!`——rustcでの本物のコンパイル
   では、struct宣言順の誤り(またはstructを書き忘れている)は今まで通り検出される。
 
 **この失敗ケース以外では何も変わらない**——`load_class_args`が成功する通常のケース(圧倒的

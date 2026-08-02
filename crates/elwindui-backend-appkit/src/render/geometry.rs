@@ -9,7 +9,7 @@ use objc2_core_graphics::CGColor;
 use objc2_quartz_core::{CALayer, CAShapeLayer, kCAFillRuleEvenOdd, kCAFillRuleNonZero};
 
 /// Parses a `"#RRGGBB"`/`"#RRGGBBAA"` hex color (the only form `Rectangle`/`Ellipse`'s `fill`/
-/// `stroke` params accept — see docs/elwindui_builtins_spec.md 付録N/G) into a `CGColor`. An
+/// `stroke` params accept — see docs/specs/builtins_spec.md 付録N/G) into a `CGColor`. An
 /// unparseable string falls back to opaque black rather than panicking, since this runs during
 /// layout, not construction.
 pub(crate) fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {

@@ -98,7 +98,7 @@ impl NativeControl {
     /// from `TextStyleOwner::on_text_style_property_changed`, because a base-class method has no
     /// way to reach the most-derived leaf object (`UIElement` keeps no self-`Weak`, and
     /// `#[overridable]` isn't available on a `struct_only` class — see
-    /// `docs/elwindui_macro_class_spec.md`). Every text-style setter already calls
+    /// `docs/specs/macro_class_spec.md`). Every text-style setter already calls
     /// `invalidate_measure()`, so this is guaranteed to run again before anything is drawn.
     ///
     /// `pub(crate)` (not `#[inherent]`/private): `native_ui::text::TextArea` overrides

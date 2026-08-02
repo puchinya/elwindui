@@ -1,2 +1,3 @@
-//! Offscreen Canvas/Painter snapshot rendering, reusing 付録B.3's offscreen rendering path.
-//! See docs/elwindui_spec.md 付録V.2. Needs a concrete `Painter` trait in `elwindui-core` first.
+//! Offscreen Canvas/Painter snapshot rendering, reusing the offscreen rendering path described in
+//! `docs/design/tools/preview_design.md`. See `docs/design/gui_framework_design.md` §9. Needs a
+//! concrete `Painter` trait in `elwindui-core` first.

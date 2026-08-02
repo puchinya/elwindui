@@ -13,7 +13,7 @@ use std::rc::Rc;
 /// `native_ui::ScrollView`. See `elwindui_core::ui::ScrollView`'s own doc comment for the
 /// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content` structure this implements.
 /// Structurally mirrors `elwindui-backend-appkit::inner::InnerScrollView`; unverified on this
-/// machine (no Windows environment — see `docs/elwindui_nativecontrol_expansion_status.md`).
+/// machine (no Windows environment — see `docs/status/nativecontrol_status.md`).
 /// `content_host` is a second, independent `TreeHostPanel` instance — the same nested-hosting
 /// pattern `InnerTabView::insert_tab`'s own per-tab `TreeHostPanel::new()` already establishes, not
 /// a one-off special case. Unlike AppKit (where a plain `NSAutoresizingMaskOptions` bit keeps the

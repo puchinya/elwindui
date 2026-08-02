@@ -3,7 +3,7 @@
 use crate::DocumentViewModel;
 use crate::ui::rounded_panel::{RoundedPanel, RoundedPanelExt};
 
-// `inherits ContentControl` (docs/elwindui_gui_framework_design.md §5, same pattern as
+// `inherits ContentControl` (docs/design/gui_framework_design.md §5, same pattern as
 // `RoundedPanel` above) — own field renamed to `document_text` (not `content`) since
 // `ContentControl` already declares an inherited `content: Rc<dyn UIElement>` field of its own.
 #[elwindui::component(inherits ContentControl)]

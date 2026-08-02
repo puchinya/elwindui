@@ -113,7 +113,7 @@ impl Color {
 /// proc-macro-expansion time; here the same mistake surfaces as a runtime panic the first time the
 /// element is constructed, since `.into()` runs when the generated code executes, not when it's
 /// generated. Accepted as part of moving builtin property validation off `elwindui-codegen`'s own
-/// tables entirely (see `docs/elwindui_implementation_status.md`).
+/// tables entirely (see `docs/status/implementation_status.md`).
 impl From<&str> for Color {
     fn from(s: &str) -> Self {
         Self::parse_hex(s).unwrap_or_else(|e| panic!("invalid hex color {s:?}: {e}"))

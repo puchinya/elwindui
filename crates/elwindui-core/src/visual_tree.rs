@@ -6,7 +6,7 @@
 //!
 //! Deliberately has no name-based lookup (WinUI3's own `VisualTreeHelper` doesn't either — that's
 //! `FrameworkElement.FindName`, a separate mechanism). In ElwindUIL, named access is
-//! `#[id(...)]` (docs/elwindui_spec.md §13), resolved entirely at compile time via a generated
+//! `#[id(...)]` (docs/specs/dsl_spec.md §13), resolved entirely at compile time via a generated
 //! typed accessor — there is no runtime element-id concept to search by.
 
 use crate::ui::UIElementExt;
@@ -30,7 +30,7 @@ pub fn get_parent(element: &dyn UIElementExt) -> Option<Rc<dyn UIElementExt>> {
 
 /// Recursively collects every element in `root`'s subtree (including `root` itself) whose concrete
 /// type downcasts to `T`, depth-first. Not part of real WinUI3's `VisualTreeHelper`, but the type-
-/// based counterpart to its child/parent walk (docs/elwindui_spec.md §13's original `find_all`
+/// based counterpart to its child/parent walk (docs/specs/dsl_spec.md §13's original `find_all`
 /// intent) — useful for e.g. asserting how many `Button`s a generated view produced. Returns each
 /// match still erased as `Rc<dyn UIElement>` (this crate's usual erasure convention, matching
 /// `UIElement::try_as_native_control`'s own downcast pattern) — call `.as_any().downcast_ref::<T>()` on

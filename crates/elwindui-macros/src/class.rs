@@ -1,5 +1,5 @@
 //! `#[elwindui_macros::class]` — automates the H.2.1a class-hierarchy convention
-//! (docs/elwindui_spec.md 付録H.2.1a): `struct ClassName { base: SuperClassName, .. }` implementing
+//! (docs/design/gui_framework_design.md §5.1): `struct ClassName { base: SuperClassName, .. }` implementing
 //! `trait ClassNameExt: SuperClassNameExt` (plus every ancestor trait), delegating ancestor methods
 //! to `self.base`.
 //!
@@ -2056,7 +2056,7 @@ fn build_inherit_macros(
     // overrides method A but not method B needs *other*, non-overriding descendants' default
     // dispatch for A to stop at this hop, while their dispatch for B must still continue past it —
     // a single boolean-shaped accessor (reflexive vs. forwarding) can't satisfy both at once (found
-    // via a real 3-hop test; see `docs/elwindui_macro_class_spec.md` §14's note on this). Any
+    // via a real 3-hop test; see `docs/specs/macro_class_spec.md` §14's note on this). Any
     // method *not* declared `#[overridable]` has only ever had one real implementor (the declaring
     // class), so `#dyn_ident`'s original "reflexive there, forward everywhere else" shape remains
     // correct and unchanged for it.
@@ -2283,7 +2283,7 @@ fn expand_struct(args: &ClassArgs, item: syn::ItemStruct) -> TokenStream2 {
     // ancestor chain as plain inherent methods (each ancestor class emits this same `Deref` for its
     // own `base` field in turn), entirely independent of the `{ClassName}Ext` traits/
     // `__elwindui_inherit_*!` macro chain real builds use for the same purpose — see
-    // `build_rust_analyzer_shadow`'s own doc comment and docs/elwindui_macro_class_spec.md §15 for
+    // `build_rust_analyzer_shadow`'s own doc comment and docs/specs/macro_class_spec.md §15 for
     // why. Unlike `expand_impl`, this function has no cross-invocation (`class_arg_store`)
     // dependency of its own — it always succeeds from its own single invocation's args alone,
     // regardless of rust-analyzer's expansion order, so nothing extra is needed to make this part
@@ -2433,7 +2433,7 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
 /// expanded.
 ///
 /// Only ever called from `expand_impl`'s `class_arg_store` lookup-failure branch — see this
-/// module's own doc comment on that store and docs/elwindui_macro_class_spec.md §15: rust-analyzer's
+/// module's own doc comment on that store and docs/specs/macro_class_spec.md §15: rust-analyzer's
 /// demand-driven macro expansion doesn't guarantee rustc's "same-crate attribute macros expand in
 /// source order," so this lookup can fail spuriously there even when nothing is really wrong. The
 /// ordinary success path needs no shadow of its own — `trait_decl`/`trait_impl`/`ctor_block` (built
@@ -2837,7 +2837,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 // all) fails here for real — but this lookup can *also* fail spuriously under
                 // rust-analyzer, which never guaranteed this impl's paired struct was expanded
                 // first (see `build_rust_analyzer_shadow`'s own doc comment and
-                // docs/elwindui_macro_class_spec.md §15). So: always emit the self-contained shadow
+                // docs/specs/macro_class_spec.md §15). So: always emit the self-contained shadow
                 // (built from `item.items` alone, just classified above, no store dependency) for
                 // rust-analyzer's benefit, and keep the `compile_error!` real but gate it to actual
                 // `cargo build`/`cargo check` only, so a spurious lookup failure under
@@ -3353,7 +3353,7 @@ mod rust_analyzer_shadow_tests {
     // `store_class_args` call reproduces directly, without needing a real multi-invocation macro
     // expansion pass. Only a syntactic smoke test (the workspace's own ~25 real `#[class]`-managed
     // types are the semantic coverage for the shadow's shape, verified with `RUSTFLAGS="--cfg
-    // rust_analyzer" cargo check --workspace` per docs/elwindui_macro_class_spec.md §15) — this
+    // rust_analyzer" cargo check --workspace` per docs/specs/macro_class_spec.md §15) — this
     // module has no proc-macro test harness capable of actually running the resulting tokens
     // through rustc.
     #[test]

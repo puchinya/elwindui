@@ -36,11 +36,9 @@ struct Greeting {
             TextBlock { text: "Hello" }
             Button { text: "OK" }
         }
-    },
+    }
 }
 ```
-
-以降、要素ツリーだけを示す例は、すべてこの`body: view! { .. }`の中身である。
 
 - 属性は `key: value` 形式
 - カンマ・改行はどちらも区切りとして等価
@@ -55,7 +53,7 @@ struct Label {
     body: view! {
         TextBlock { text: label }                  // 単純参照
         TextBlock { text: format!("{label}!") }    // 式はformat!マクロで明示
-    },
+    }
 }
 ```
 
@@ -115,7 +113,7 @@ struct Dashboard {
 
     body: view! {
         Card { title, value }   // title: title, value: value の省略形
-    },
+    }
 }
 ```
 
@@ -325,7 +323,7 @@ struct FormPanel {
             TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
             Button { text: "Click", Grid::row: 1, Grid::column: 1 }
         }
-    },
+    }
 }
 ```
 
@@ -453,7 +451,7 @@ struct DocumentTabs {
             }
             on_new_tab: vm.new_tab                        // 0引数、ベアパスの糖衣
         }
-    },
+    }
 }
 ```
 
@@ -507,7 +505,7 @@ struct Control {
             Some(t) => t(Self),
             None => /* 既定挙動: children をそのまま Visual 子要素にする */,
         }
-    },
+    }
 }
 ```
 
@@ -520,7 +518,7 @@ struct Control {
 struct Toolbar {
     body: view! {
         Button { template: button_template }
-    },
+    }
 }
 ```
 
@@ -563,7 +561,7 @@ struct ItemList {
             Status::Error   => TextBlock { text: "エラー", foreground: "#c0392b" },
             Status::Ok      => TextBlock { text: "OK" },
         }
-    },
+    }
 }
 ```
 
@@ -665,7 +663,7 @@ struct ThemePicker {
                 on_select: selected = m,
             }
         }
-    },
+    }
 }
 ```
 
@@ -706,7 +704,7 @@ struct VolumeSlider {
 
     body: view! {
         Slider { value: volume }
-    },
+    }
 }
 ```
 
@@ -750,7 +748,7 @@ struct OrderSummary {
         TextBlock { text: t!("cart-item-count", count: n) }
         TextBlock { text: t!("order-saved-at", time: order.created_at) }
         TextBlock { text: t!("item-price", price: price) }
-    },
+    }
 }
 ```
 
@@ -874,7 +872,7 @@ struct Toolbar {
             if show_save { ToolbarButton { text: "Save" } }
             for item in extra_buttons { ToolbarButton { text: item.label } }
         }
-    },
+    }
 }
 ```
 
@@ -919,7 +917,7 @@ struct SaveButton {
             #[shortcut("Ctrl+S")]
             on_click: save_document()
         }
-    },
+    }
 }
 ```
 
@@ -943,7 +941,7 @@ struct DocumentView {
         let editor = TextArea { text: content };
 
         VerticalLayout { editor, StatusBar { ... } }
-    },
+    }
 }
 ```
 
@@ -1137,7 +1135,7 @@ use components::button::Button;   // #[overrides]付きButtonをインポート
 struct SavePanel {
     body: view! {
         Button { text: "Save" }   // オーバーライド版が使われる
-    },
+    }
 }
 ```
 
@@ -1147,7 +1145,7 @@ struct SavePanel {
 struct OkPanel {
     body: view! {
         Button { text: "OK" }   // builtin::Button
-    },
+    }
 }
 ```
 
@@ -1162,7 +1160,7 @@ struct OkPanel {
 struct AlwaysBuiltinPanel {
     body: view! {
         builtin::Button { text: "常に組み込み実装を使う" }
-    },
+    }
 }
 ```
 

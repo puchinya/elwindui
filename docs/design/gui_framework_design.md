@@ -21,7 +21,7 @@
 7. [状態管理とMVVM](#7-状態管理とmvvm)
 8. [UI機能拡張ビルトイン](#8-ui機能拡張ビルトイン)
 9. [テスト支援](#9-テスト支援)
-10. [静的検証ルール一覧(14章)と機能対応表](#10-静的検証ルール一覧14章と機能対応表)
+10. [静的検証ルール一覧(13章)と機能対応表](#10-静的検証ルール一覧13章と機能対応表)
 11. [責務分担まとめ:コンパイラ/コード生成器 vs ランタイムライブラリ](#11-責務分担まとめコンパイラコード生成器-vs-ランタイムライブラリ)
 
 ---
@@ -119,7 +119,7 @@ fn main() {
 
 `#[computed]`は依存する他フィールドの変化に応じ自動再評価される読み取り専用の算出値であり、外部からの代入は許されない。
 
-**この区別はフレームワーク全体で一貫して守られる**: ライフサイクルフック内でも(§6.1)、Store/ViewModelからの参照でも(§7.1, §7.2)、モバイルのデバイス情報からも(§8.8)、`#[param]`は「実体化時固定」という性質を失わない。これは14章ルール1・2・11・13・21(§10参照)により静的に強制される。
+**この区別はフレームワーク全体で一貫して守られる**: ライフサイクルフック内でも(§6.1)、Store/ViewModelからの参照でも(§7.1, §7.2)、モバイルのデバイス情報からも(§8.8)、`#[param]`は「実体化時固定」という性質を失わない。これは13章ルール1・2・11・13・21(§10参照)により静的に強制される。
 
 ### 2.3 制御構文
 
@@ -174,7 +174,7 @@ style {
 volume: i32 = bind!(settings.volume, TwoWay),
 ```
 
-`bind!(path, mode)`のmodeは`OneWay`(既定、外部→propの一方向反映)/`TwoWay`(UI操作で外部にも書き戻す)/`OneTime`(実体化時に一度だけ取り込み以後固定)。参照先は`store`(§7.1)・`viewmodel`(§7.2)・ビルトインStore(§8.8)のフィールドパスであり、いずれも`#[param]`から直接参照することはできない(14章ルール12・13)。
+`bind!(path, mode)`のmodeは`OneWay`(既定、外部→propの一方向反映)/`TwoWay`(UI操作で外部にも書き戻す)/`OneTime`(実体化時に一度だけ取り込み以後固定)。参照先は`store`(§7.1)・`viewmodel`(§7.2)・ビルトインStore(§8.8)のフィールドパスであり、いずれも`#[param]`から直接参照することはできない(13章ルール12・13)。
 
 ### 2.9 多言語対応(i18n)
 
@@ -397,7 +397,7 @@ view Column { Stack { orientation: Orientation::Vertical, children } }
 
 ### 4.1 独自部品はバックエンド共通実装に限定する(最重要ルール)
 
-**バックエンド分岐(`native!`/`match target::backend()`)を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ**(14章ルール9)。通常の独自部品は常にビルトイン要素の組み合わせ、または`Canvas`+`Painter`(§5.4)のみで実装する。
+**バックエンド分岐(`native!`/`match target::backend()`)を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ**(13章ルール9)。通常の独自部品は常にビルトイン要素の組み合わせ、または`Canvas`+`Painter`(§5.4)のみで実装する。
 
 | コンポーネント種別 | バックエンド分岐の可否 |
 |---|---|
@@ -407,7 +407,7 @@ view Column { Stack { orientation: Orientation::Vertical, children } }
 
 判断フロー: 「`native!`が必要だと感じたら」→ 既存ビルトインの代替実装なら`#[overrides(builtin::X)]`として定義し直す → それも違うなら`Canvas`+`Painter`で表現できないか再検討する → それでも無理な場合のみ新規ビルトイン追加を提案する。
 
-このルールはダイアログ・メニュー(§8.3)、ナビゲーション(§8.2)等、他の全ビルトイン層にも同じ原則(14章ルール9・14・15)として繰り返し適用される。
+このルールはダイアログ・メニュー(§8.3)、ナビゲーション(§8.2)等、他の全ビルトイン層にも同じ原則(13章ルール9・14・15)として繰り返し適用される。
 
 ---
 
@@ -683,7 +683,7 @@ Button {
 }
 ```
 
-ビルトイン部品は既定roleを自動付与するため通常追記不要だが、`Canvas`ベースの独自部品(§5.7)は意味情報を持たないため`#[accessible(role:, label:, ...)]`の明示を推奨し、付けない場合14章ルール10により静的警告となる。
+ビルトイン部品は既定roleを自動付与するため通常追記不要だが、`Canvas`ベースの独自部品(§5.7)は意味情報を持たないため`#[accessible(role:, label:, ...)]`の明示を推奨し、付けない場合13章ルール10により静的警告となる。
 
 **バックエンド実装義務:**
 
@@ -693,7 +693,7 @@ Button {
 | AppKit | `NSAccessibilityElement`プロトコルを実装 |
 | GTK4 | `Atk`/AT-SPIブリッジに登録 |
 
-**実装状況**: `AccessibilityNode`トレイトと`AccessibilityRole`/`AccessibilityState`の型定義は`elwindui-core::accessibility`に存在するが、いずれの型に対しても実装(`impl AccessibilityNode for ...`)がなく、`UIElement`ツリーにもいずれのバックエンドのネイティブアクセシビリティAPIにも未結線(`#[accessible(...)]`属性・14章ルール10の警告を含め未実装)。
+**実装状況**: `AccessibilityNode`トレイトと`AccessibilityRole`/`AccessibilityState`の型定義は`elwindui-core::accessibility`に存在するが、いずれの型に対しても実装(`impl AccessibilityNode for ...`)がなく、`UIElement`ツリーにもいずれのバックエンドのネイティブアクセシビリティAPIにも未結線(`#[accessible(...)]`属性・13章ルール10の警告を含め未実装)。
 
 ### 5.7 独自描画部品(Canvas / RenderContext) 📋
 
@@ -722,7 +722,7 @@ src/
 └── logic/    # on_click等の業務ロジック
 ```
 
-`Canvas`の`prop`が変わると通常の`prop`更新ルール(§2.2)で再描画がトリガーされる。毎フレーム再描画したい場合は`#[animated]`を付け、その内部でのみ非純粋関数呼び出し(`elapsed_time()`等)が許可される(14章ルール2の例外)。クリック・ドラッグは`on_pointer_down`/`on_pointer_move`で扱い、座標系は論理ピクセルに統一してバックエンド側が実ピクセル変換を担う。
+`Canvas`の`prop`が変わると通常の`prop`更新ルール(§2.2)で再描画がトリガーされる。毎フレーム再描画したい場合は`#[animated]`を付け、その内部でのみ非純粋関数呼び出し(`elapsed_time()`等)が許可される(13章ルール2の例外)。クリック・ドラッグは`on_pointer_down`/`on_pointer_move`で扱い、座標系は論理ピクセルに統一してバックエンド側が実ピクセル変換を担う。
 
 `Canvas`と`Row`/`Column`等の既存部品は同じ`Element`ツリー・`LayoutNode`として自然に混在できる(§2.11・§5.3が支えている)。
 
@@ -732,16 +732,16 @@ src/
 
 | 機能 | 型/メソッド | 備考 |
 |---|---|---|
-| ブラシ(単色/グラデーション/画像/Acrylic) | `Brush` enum + `fill_rect_brush`/`stroke_path_brush` | GTK4はAcrylic/Blur非対応時、単色フォールバック+静的警告(14章ルール17) |
+| ブラシ(単色/グラデーション/画像/Acrylic) | `Brush` enum + `fill_rect_brush`/`stroke_path_brush` | GTK4はAcrylic/Blur非対応時、単色フォールバック+静的警告(13章ルール17) |
 | ジオメトリ(ベジエ・弧) | `Path` + `StrokeStyle`(cap/join/dash) | |
 | エフェクト(シャドウ・ブラー・色調補正) | `Effect` enum + `#[effect(...)]` | オフスクリーンサーフェスへレンダリング後に適用 |
 | 変形(移動・回転・拡縮・スキュー) | `Transform` enum + `push_transform`/`pop_transform` | スタック方式、ネスト可 |
 | レイヤー合成・クリップ・ブレンド | `begin_layer`/`end_layer`/`clip_rect`/`clip_path` + `BlendMode` | エフェクトの基盤機構 |
 | 暗黙アニメーション | `#[transition(duration, easing)]` | propに付与、値変化時に自動補間描画 |
-| キーフレームアニメーション | `KeyframeAnimation::new().add(t, v).easing(...).sample(t)` | `Canvas`内での手続き的制御、位置は`0.0..=1.0`(範囲外は14章ルール16でエラー) |
+| キーフレームアニメーション | `KeyframeAnimation::new().add(t, v).easing(...).sample(t)` | `Canvas`内での手続き的制御、位置は`0.0..=1.0`(範囲外は13章ルール16でエラー) |
 | リッチテキスト | `TextRun` + `draw_rich_text` | 複数書式混在テキストの1回描画 |
 
-存在しないイージング関数名や範囲外キーフレーム位置は14章ルール16で静的エラーとなる。
+存在しないイージング関数名や範囲外キーフレーム位置は13章ルール16で静的エラーとなる。
 
 ### 5.9 Core Runtimeの位置づけ(クレート構成)
 
@@ -863,11 +863,11 @@ view NotepadWindow {
 - `on_mount`はコンポーネントが要素ツリーに初めて組み込まれた直後に一度だけ、`on_unmount`はツリーから除去される直前に一度だけ実行される
 - `on_update(field, ...)`は指定propまたは`#[computed]`の変化毎に発火(複数フィールドを監視する場合は`on_update(a, b): { ... }`のようにカンマ区切りで列挙し、いずれかが変化した時点で発火)。無引数の`on_update: { ... }`は任意prop変化で発火(頻度が高くなるため濫用注意)
 - これらは通常のRustコードブロックであり、`#[param]`静的評価式(§2.2)とは別の実行コンテキストのため非純粋関数呼び出し制限は適用されない
-- **ただし`#[param]`フィールドへの代入はライフサイクルフック内でも禁止**される(14章ルール11)。`#[param]`の「実体化時のみ確定・以後不変」という原則はフックの内側でも一貫する
+- **ただし`#[param]`フィールドへの代入はライフサイクルフック内でも禁止**される(13章ルール11)。`#[param]`の「実体化時のみ確定・以後不変」という原則はフックの内側でも一貫する
 
 コード生成器は各バックエンドのライフサイクル(WinUI3の`Loaded`/`Unloaded`、AppKitの`viewDidAppear`/`viewWillDisappear`、GTK4の`realize`/`unrealize`)にこれらのフックをマッピングする。この変換自体はビルトイン側の責務であり、通常の`component`では意識する必要はない。リスト仮想化(§8.4)でリサイクルされる要素は、プール再利用時に`on_mount`を再発火させず`prop`更新のみで反映する点に注意。
 
-**実装状況**: `on_mount`は実装済み(生成される`new()`の中、`resync()`直後にそのまま展開される)。`on_unmount`はパース・検証・コード生成は実装済みだが、`elwindui_core::ui`に要素の破棄(detach/teardown)通知が現状存在しないため、実行時に呼び出されるトリガーはまだない(`__run_on_unmount`という到達可能なメソッドとしては生成される)。`on_update`、および`#[param]`不変性(14章ルール11)の静的検証は未実装。§2.1で述べた`inherits`の`base::on_mount()`/`base::on_unmount()`呼び出しは実装済み(1階層のみ)。
+**実装状況**: `on_mount`は実装済み(生成される`new()`の中、`resync()`直後にそのまま展開される)。`on_unmount`はパース・検証・コード生成は実装済みだが、`elwindui_core::ui`に要素の破棄(detach/teardown)通知が現状存在しないため、実行時に呼び出されるトリガーはまだない(`__run_on_unmount`という到達可能なメソッドとしては生成される)。`on_update`、および`#[param]`不変性(13章ルール11)の静的検証は未実装。§2.1で述べた`inherits`の`base::on_mount()`/`base::on_unmount()`呼び出しは実装済み(1階層のみ)。
 
 ### 6.2 アプリ全体(OSレベル、モバイル)
 
@@ -881,7 +881,7 @@ component App {
 }
 ```
 
-エントリポイント(ルート)コンポーネント以外での宣言は14章ルール24により静的警告。iOSの`applicationDidEnterBackground`等、Androidの`onPause`等にマッピングされ、デスクトップ系では`on_background`=最小化、`on_terminate`=プロセス終了に対応する。
+エントリポイント(ルート)コンポーネント以外での宣言は13章ルール24により静的警告。iOSの`applicationDidEnterBackground`等、Androidの`onPause`等にマッピングされ、デスクトップ系では`on_background`=最小化、`on_terminate`=プロセス終了に対応する。
 
 ---
 
@@ -908,7 +908,7 @@ store AppSettings {
 - `#[persist]`が付いたフィールドはアプリ終了後もディスクに永続化される(実際の方式はバックエンドの責務)
 - 参照は`bind!(AppSettings.volume, TwoWay)`。`AppSettings`は既定でシングルトン
 - storeの変更はプレーンなRust構造体フィールドとして通常ロジックから直接代入でき(`AppSettings.volume = 0;`)、`bind!`で購読する全propに伝播する
-- **`#[param]`はstoreを直接参照できない**(14章ルール13)。storeのような実行時変化しうる値は必ず`prop`側で`bind!`を介して取り込む
+- **`#[param]`はstoreを直接参照できない**(13章ルール13)。storeのような実行時変化しうる値は必ず`prop`側で`bind!`を介して取り込む
 - シングルトンでなくインスタンスを複数持たせたい場合は`#[scoped]`を付け、`#[param] #[inject]`で注入する(ドキュメント単位・ウィンドウ単位のstoreなど)
 
 **`ControlTemplate<Self>`の広域既定値(WinUI3の`Style`の代替)**: 複数コンポーネントに跨って既定テンプレートを共有・一括変更したい(WinUI3で`Style`を差し替えると画面上の全`Button`が変わる、という用途)場合、新しい仕組みを作らず`store`+`bind!`をそのまま使う:
@@ -972,8 +972,8 @@ mod notepad_view_model {
 - `fn`本体内の代入(`state = ...`)・読み取り(`content`)は、同じ`struct`のフィールドへの参照として自動的に`self.set_state(...)`/`self.content()`へ書き換えられる(`#[computed]`の初期化式と同じ規約)
 - 非同期化したい場合は単に`async fn`と書く — 専用の属性は不要で、`fn`自体の`async`キーワードから構造的に判定される。生成コードは`elwindui-core::task::spawn_local`で包まれ、View側からは同期アクションと同じ`vm.save()`という書き方で呼べる(§7.3参照)
 - WinUI3/WPFの`Command.CanExecute`に相当する「実行可否」は、専用の仕組みを持たず**普通の`#[computed]`フィールド**として自分で書く(上の`save_can_execute`)。命名規約もなく、View側から好きな名前で`enabled: vm.save_can_execute`のように参照する
-- `viewmodel`は`view`ブロックを持てず、ビルトイン要素への参照が内部に出現すると14章ルール19により静的エラーとなる(V/VM分離が構文レベルで強制される)
-- View側はViewModelを`#[param] #[inject]`(実体は`#[bindable]`、下記)で受け取り(§7.1の`#[scoped]`+`#[inject]`と同じ注入パターン)、双方向編集フィールドは`bind!(vm.field, TwoWay)`でpropに写し取り、読み取り専用表示(`vm.window_title`等)・アクション呼び出し(`vm.save`)は`view`式中で直接参照してよい(14章ルール13の対象外 — ルール13は`#[param]`初期化式への直接参照のみを禁止)。アクション参照に`()`は付けない — `vm.char_count`のような他の0引数ゲッターと同じ規約
+- `viewmodel`は`view`ブロックを持てず、ビルトイン要素への参照が内部に出現すると13章ルール19により静的エラーとなる(V/VM分離が構文レベルで強制される)
+- View側はViewModelを`#[param] #[inject]`(実体は`#[bindable]`、下記)で受け取り(§7.1の`#[scoped]`+`#[inject]`と同じ注入パターン)、双方向編集フィールドは`bind!(vm.field, TwoWay)`でpropに写し取り、読み取り専用表示(`vm.window_title`等)・アクション呼び出し(`vm.save`)は`view`式中で直接参照してよい(13章ルール13の対象外 — ルール13は`#[param]`初期化式への直接参照のみを禁止)。アクション参照に`()`は付けない — `vm.char_count`のような他の0引数ゲッターと同じ規約
 - テキスト構文のDSLネイティブ`viewmodel Name { ... }`は`#[observable]`/`#[computed]`のみをサポートし、アクションを宣言する手段を持たない。アクションが必要な`viewmodel`は上記のRustネイティブ構文を使う
 
 **`on_*`イベント属性へのクロージャ構文**: `TabView`の`on_select: fn(usize)`のように引数を取るイベントハンドラは、`|param, ...| 式`または`|param, ...| { 文; ... }`という明示的なクロージャで書く(パラメータは型注釈なし・宣言側の`fn(T0, T1, ...)`から位置対応で型が決まる):
@@ -1045,7 +1045,7 @@ match vm.content {
 
 - `AsyncState<T>`は通常のenumとして網羅性検査の対象(`match`でIdle/Loading/Success/Errorの処理漏れを静的検出)
 - `#[async_computed]`は`#[computed]`の非同期版。`#[observable]`依存が変化すると自動再実行され、実行中は`Loading`
-- `#[async_computed]`が`viewmodel`/`store`以外に付与された場合は静的エラー(14章ルール20) — 非同期状態はVM/Model層に閉じ込め、`component`の`#[param]`静的評価式を汚染しない。アクション側の非同期は`async fn`という構造そのものから判定されるため(§7.2)、対応する専用属性は存在しない — `viewmodel`の`impl`ブロック以外に`async fn`アクションを書く場所自体がないので、この種の静的検査を別途必要としない
+- `#[async_computed]`が`viewmodel`/`store`以外に付与された場合は静的エラー(13章ルール20) — 非同期状態はVM/Model層に閉じ込め、`component`の`#[param]`静的評価式を汚染しない。アクション側の非同期は`async fn`という構造そのものから判定されるため(§7.2)、対応する専用属性は存在しない — `viewmodel`の`impl`ブロック以外に`async fn`アクションを書く場所自体がないので、この種の静的検査を別途必要としない
 - 実行中の多重実行防止・キャンセルは専用の仕組みを持たない — 必要なら`#[computed]`の実行可否フィールド(§7.2)を自分で`false`にする、または独自の`Cancelled`状態を`#[observable]`で管理する
 - `elwindui-core`はホストの非同期ランタイムを直接指定せず`spawn(fut)`という薄い抽象を提供し、各バックエンドがWinUI3の`DispatcherQueue`/AppKitの`DispatchQueue.main`/GTK4の`glib::MainContext`に橋渡しする
 
@@ -1069,7 +1069,7 @@ viewmodel NotepadViewModel {
 Button { text: t!("menu-undo"), on_click: vm.undo, enabled: vm.can_undo }
 ```
 
-- `#[undoable]`は`viewmodel`の`#[observable]`フィールドにのみ付与できる(14章ルール21) — Undo単位は「1つのViewの編集セッション」に紐づくため、アプリ全体共有の`store`や`component`の`prop`には意味を持たない
+- `#[undoable]`は`viewmodel`の`#[observable]`フィールドにのみ付与できる(13章ルール21) — Undo単位は「1つのViewの編集セッション」に紐づくため、アプリ全体共有の`store`や`component`の`prop`には意味を持たない
 - `#[undoable]`フィールドが1つ以上ある`viewmodel`には`undo`/`redo`アクションと`can_undo`/`can_redo`が自動追加される
 - `coalesce: 500ms`で連続入力を1つのUndoエントリにまとめる(`#[transition(duration:...)]`と同じ「時間指定アトリビュート」の慣習)
 
@@ -1111,7 +1111,7 @@ Button {
 }
 ```
 
-`#[shortcut(...)]`は`on_click`のようなコールバック型フィールドの**宣言**(`Button`の`on_click: fn()`、§5.10参照)ではなく、`Button { ... }`という**要素の使用箇所**に付ける属性である点に注意——`#[routed]`(§5.10)がフィールド宣言そのものに付く(全`Button`インスタンス共通の配線方式を決める)のとは対照的に、ショートカットは本質的にインスタンスごとの決定(「このSaveボタンだけCtrl+S」)なので、`Button`自身の共有宣言には付けられない。構文上は`#[id("...")]`(`docs/specs/dsl_spec.md` §13の`let`束縛)と同じく、要素の`{}`本体内で`属性名: 値`という行の直前に書く、通常の属性行に対する注釈という位置づけ。
+`#[shortcut(...)]`は`on_click`のようなコールバック型フィールドの**宣言**(`Button`の`on_click: fn()`、§5.10参照)ではなく、`Button { ... }`という**要素の使用箇所**に付ける属性である点に注意——`#[routed]`(§5.10)がフィールド宣言そのものに付く(全`Button`インスタンス共通の配線方式を決める)のとは対照的に、ショートカットは本質的にインスタンスごとの決定(「このSaveボタンだけCtrl+S」)なので、`Button`自身の共有宣言には付けられない。構文上は`#[id("...")]`(`docs/specs/dsl_spec.md` §12の`let`束縛)と同じく、要素の`{}`本体内で`属性名: 値`という行の直前に書く、通常の属性行に対する注釈という位置づけ。
 
 `#[shortcut("...")]`はプラットフォーム非依存の修飾キー表記(`Ctrl`/`Shift`/`Alt`/`Meta`)を使う。コード生成時に、macOS向けビルド(`backend-appkit` Cargoフィーチャ)では`Ctrl`が自動的に`Cmd`に読み替えられる(WinUI3等の他backendではそのまま`Ctrl`として扱う)、というプラットフォーム変換規則を標準で持つ——`target::backend()`ではなく実在する仕組みである`elwindui`ファサードのCargoフィーチャで振り分ける(`docs/status/implementation_status.md`参照)。明示的にOSごとの割り当てを変えたい場合は複数指定できる:
 
@@ -1148,7 +1148,7 @@ view App {
 }
 ```
 
-`match current_route { ... }`は`Route`の全メンバー網羅を要求される(14章ルール14、§2.3と同じ仕組み)。遷移操作は`navigate!(route)`(遷移+履歴push)/`navigate_back!()`(履歴を1つ戻す)。`NavigationHost`はビルトインのため内部で`match target::backend()`を持つ(WinUI3=`Frame`、AppKit=`contentViewController`差し替え、GTK4=`gtk::Stack`)。§4.1の原則通り、通常のcomponentはこの分岐を書けない。
+`match current_route { ... }`は`Route`の全メンバー網羅を要求される(13章ルール14、§2.3と同じ仕組み)。遷移操作は`navigate!(route)`(遷移+履歴push)/`navigate_back!()`(履歴を1つ戻す)。`NavigationHost`はビルトインのため内部で`match target::backend()`を持つ(WinUI3=`Frame`、AppKit=`contentViewController`差し替え、GTK4=`gtk::Stack`)。§4.1の原則通り、通常のcomponentはこの分岐を書けない。
 
 ### 8.3 ダイアログ・ポップアップ・メニュー 🚧
 
@@ -1156,7 +1156,7 @@ view App {
 - `Menu`/`MenuItem`: コンテキストメニュー。`context_menu`属性で任意要素に紐付け
 - `tooltip`: 任意のビルトイン要素が持てる共通属性
 
-いずれもビルトインで内部に`match target::backend()`を持ち、独自部品からの利用時は§4.1のバックエンド分岐禁止原則がそのまま適用される(14章ルール15)。
+いずれもビルトインで内部に`match target::backend()`を持ち、独自部品からの利用時は§4.1のバックエンド分岐禁止原則がそのまま適用される(13章ルール15)。
 
 ### 8.4 リスト仮想化 📋
 
@@ -1174,7 +1174,7 @@ VirtualList {
 - `key`関数は要素の同一性判定に使い、順序が変わっても同じkeyのデータは`Element`インスタンスを使い回す(Reactのkey付きリコンサイル相当)
 - `item_height`固定なら§5.3のMeasureパスをスキップし定数時間で表示範囲を計算、`estimated_item_height`のみなら初回`measure`で実測しキャッシュ
 - 画面外に出た`Element`はプールに戻し再利用する。再利用インスタンスでは`on_mount`(§6.1)は初回プール生成時のみ発火し、以降は`prop`更新のみ行う
-- `key`未指定で順序が変わる更新を行うと挿入位置ベースの再利用にフォールバックし、14章ルール23により静的警告
+- `key`未指定で順序が変わる更新を行うと挿入位置ベースの再利用にフォールバックし、13章ルール23により静的警告
 
 ### 8.5 テーマ/デザイントークン ✅
 
@@ -1190,7 +1190,7 @@ theme AppTheme {
 }
 ```
 
-- 全`variant`は`tokens{}`宣言のトークンを過不足なく持たねばならない(14章ルール22) — 「ダークモードだけ特定の色が未定義」という事故を静的に防ぐ
+- 全`variant`は`tokens{}`宣言のトークンを過不足なく持たねばならない(13章ルール22) — 「ダークモードだけ特定の色が未定義」という事故を静的に防ぐ
 - 参照は`AppTheme.token名`という`.`アクセス(`env::*`やstoreフィールド参照と同じ慣習)。`style{}`からも`Painter`/`Brush`(§5.8)からも同じ記法で参照可能
 - 実行時切り替えはファイル単位アトリビュート`#![theme(AppTheme, variant: bind!(AppSettings.theme_mode, OneWay))]`で宣言し、storeの変化に応じて`AppTheme.*`参照箇所が自動再評価される(既存のprop差分更新の仕組みに乗る)
 
@@ -1254,7 +1254,7 @@ let text: Option<String> = platform::clipboard::read_text();
 
 Rustバインディングは、iOSは`objc2`(AppKitと同系統のクレート)、Androidは`jni`クレート経由でJava/Kotlin APIを呼ぶ。
 
-- **画面サイズ・向き・セーフエリア**: 実行中に変化しうる値であるため`env::*`を拡張せず、§7.1と同じ`store`の仕組みを使ったビルトインStoreとして提供する(`store platform::Device { orientation, safe_area, window_size }`)。参照は通常のstoreと同じく`bind!`経由必須(14章ルール13)
+- **画面サイズ・向き・セーフエリア**: 実行中に変化しうる値であるため`env::*`を拡張せず、§7.1と同じ`store`の仕組みを使ったビルトインStoreとして提供する(`store platform::Device { orientation, safe_area, window_size }`)。参照は通常のstoreと同じく`bind!`経由必須(13章ルール13)
 - **セーフエリアのレイアウト反映**: `Window`ビルトインは既定で`respects_safe_area: true`を持ち、§5.3のレイアウトエンジンがセーフエリアを差し引いて利用可能領域を計算する
 - **タッチジェスチャー**: `on_swipe`/`on_pinch`/`on_long_press`を任意のビルトイン要素の共通属性として一般化(§5.7の`on_pointer_down`等の拡張)。デスクトップ系backendはマウス操作からの近似にフォールバック
 - **OSレベルライフサイクル**: §6.2参照
@@ -1298,7 +1298,7 @@ fn knob_renders_correctly_at_half_value() {
 
 ---
 
-## 10. 静的検証ルール一覧(14章)と機能対応表
+## 10. 静的検証ルール一覧(13章)と機能対応表
 
 コンパイラ/リンタが実行前に検出すべき項目(ツール側の実装対象だが、各ルールがフレームワークのどの不変条件を守っているかは設計上重要なため一覧化する)。
 
@@ -1337,7 +1337,7 @@ fn knob_renders_correctly_at_half_value() {
 
 | 責務 | 担当 |
 |---|---|
-| DSLのパース・型検査・14章の静的検証ルール適用 | コンパイラ(ツール設計書側、`elwindui-codegen`) |
+| DSLのパース・型検査・13章の静的検証ルール適用 | コンパイラ(ツール設計書側、`elwindui-codegen`) |
 | `component`/`view`/`enum`/`store`/`viewmodel`からのRustコード生成 | コンパイラ |
 | バックエンド判定の定数畳み込み(`target::backend()`)、非該当分岐の除去 | コンパイラ |
 | `.ftl`の静的パースと`t!`キー・引数名の整合性検証 | コンパイラ |

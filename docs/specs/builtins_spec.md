@@ -2,7 +2,7 @@
 
 `builtin::`名前空間のUI要素・`platform::`名前空間のOS機能アクセスに関する仕様書(付録F・G・L・M・N・Q・T・X・Y)。`docs/specs/dsl_spec.md`側に残る「付録G参照」等の記述は本ファイル内の該当節を指す。
 
-DSLの言語構文(`component`/`view`/`param`/`prop`・14章の静的検証ルール等)は`docs/specs/dsl_spec.md`、バックエンド抽象化・`elwindui-core`ランタイム(`UIElement`トレイト等)・状態管理層は`docs/design/gui_framework_design.md`が正とする。
+DSLの言語構文(`component`/`view`/`param`/`prop`・13章の静的検証ルール等)は`docs/specs/dsl_spec.md`、バックエンド抽象化・`elwindui-core`ランタイム(`UIElement`トレイト等)・状態管理層は`docs/design/gui_framework_design.md`が正とする。
 
 ## 全部品共通のクラス階層
 
@@ -508,7 +508,7 @@ ContentControlExt: UIElementExt + ControlExt`を生成する(`docs/design/gui_fr
 (`LabeledPanel → ContentControl → Control`)、何段合成が重なっても正しく動作する。
 唯一この合成の対象外なのは、`Name`が**自分自身の`view`を
 持ち**、それが`Base`とは無関係な別のルート要素を持つ場合(`Derived inherits Base`、両者とも
-独立に`VerticalLayout`をルートに持つ、`#[override] fn`+`base::name(...)`によるメソッド上書き)——
+独立に`VerticalLayout`をルートに持つ、`#[overrides] fn`+`base::name(...)`によるメソッド上書き)——
 この場合は「生きた`Base`インスタンス」ではなく「`Base`のメソッド本体の再利用」でしかないため、
 既存の実効フィールド畳み込み(`resolve_effective_fields`)と`base::name(...)`シャドーメソッド機構
 (付録F補足の下、`elwindui-codegen/src/codegen.rs`の`rewrite_base_calls`)がそのまま使われる
@@ -906,7 +906,7 @@ view Canvas {
 
 ## G.3 独自部品はバックエンド共通実装に限定する(重要ルール)
 
-**バックエンド分岐(`native!`/`match target::backend()`)を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ**とする(14章ルール9)。通常の独自部品は常にビルトイン要素の組み合わせ、または`Canvas`+`Painter`のみで実装する。
+**バックエンド分岐(`native!`/`match target::backend()`)を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ**とする(13章ルール9)。通常の独自部品は常にビルトイン要素の組み合わせ、または`Canvas`+`Painter`のみで実装する。
 
 | コンポーネント種別 | バックエンド分岐の可否 |
 |---|---|
@@ -957,7 +957,7 @@ src/
     └── document.rs
 ```
 
-`Painter`が既にバックエンド差異を吸収しているため、`painters/*.rs`は原則1ファイル1実装で全バックエンドに対応できる。`use painters::volume_meter::draw_meter;` は12章の`use`構文をそのまま使い、参照先はパスからコンパイラが自動判別する。
+`Painter`が既にバックエンド差異を吸収しているため、`painters/*.rs`は原則1ファイル1実装で全バックエンドに対応できる。`use painters::volume_meter::draw_meter;` は11章の`use`構文をそのまま使い、参照先はパスからコンパイラが自動判別する。
 
 `Painter`で表現しきれないネイティブ専用描画がどうしても必要な場合のみ、`painters/<name>/`をディレクトリ化しRust標準の`#[cfg(feature = "backend-...")]`で分岐する。これはDSLの文法ではなく通常のRustコード側の関心事であるため、`target::backend()`ではなくRust標準のcfg機構を使う。
 
@@ -974,7 +974,7 @@ Canvas {
 }
 ```
 
-`#[animated]`が付いた`on_paint`内でのみ、`elapsed_time()`のような非純粋関数の呼び出しが許可される(14章ルール2の例外)。
+`#[animated]`が付いた`on_paint`内でのみ、`elapsed_time()`のような非純粋関数の呼び出しが許可される(13章ルール2の例外)。
 
 ## G.6 インタラクション(クリック・ドラッグ)
 
@@ -1040,7 +1040,7 @@ view VolumeSlider {
 
 | 仕組み | 混載を支えている理由 |
 |---|---|
-| `Element`トレイト(13章) | `Canvas`も`Row`も同じ`Element`として扱われ、ツリー上の位置づけに差がない |
+| `Element`トレイト(12章) | `Canvas`も`Row`も同じ`Element`として扱われ、ツリー上の位置づけに差がない |
 | `LayoutNode`(`docs/design/gui_framework_design.md`§5.3) | `Canvas`は「指定サイズを占有するノード」として他の部品と同じレイアウト計算に参加する |
 | `Painter`抽象(本付録) | `Canvas`内部の描画がバックエンド非依存なので、混載してもバックエンド分岐が漏れ出さない |
 | G.3のバックエンド分岐禁止ルール | 混載した`view`全体を見てもnative!が現れないため、静的検証にそのまま合格する |
@@ -1052,7 +1052,7 @@ view VolumeSlider {
 |---|---|
 | グラフ・ゲージ等の独自描画 | `Canvas` + `on_paint: fn(&mut Painter)` |
 | バックエンド間の描画API差異の吸収 | `Painter`トレイトと各backendのラッパー実装(`builtin::Canvas`内部のみ) |
-| 独自部品はバックエンド共通実装に限定 | `native!`/`target::backend()`の使用を通常のcomponentでは静的エラーとする(14章ルール9) |
+| 独自部品はバックエンド共通実装に限定 | `native!`/`target::backend()`の使用を通常のcomponentでは静的エラーとする(13章ルール9) |
 | propに連動した再描画 | 既存の`prop`更新ルール(4章)をそのまま流用 |
 | 常時アニメーションさせたい | `#[animated]`で毎フレーム再描画対象と明示、非純粋関数呼び出しを許可 |
 | クリック・ドラッグ等の入力 | `on_pointer_down`/`on_pointer_move`等のコールバックをCanvasに追加 |
@@ -1097,7 +1097,7 @@ view App {
 }
 ```
 
-- `match current_route { ... }` は`Route` enumの全メンバーを網羅していなければ静的エラーになる(8章の網羅性検査、14章ルール14)
+- `match current_route { ... }` は`Route` enumの全メンバーを網羅していなければ静的エラーになる(7章の網羅性検査、13章ルール14)
 - `NavigationHost`はビルトインのため、内部で`match target::backend()`によるバックエンド別実装を持つ(付録G.3の原則通り、通常のcomponentではこの分岐は書けない)
 
 | バックエンド | 実装 |
@@ -1120,7 +1120,7 @@ fn go_back() {
 
 - `navigate!(route)` — 指定ルートへ遷移し、遷移履歴に積む
 - `navigate_back!()` — 履歴を1つ戻す(履歴が空の場合は何もしない)
-- これらはマクロ呼び出し形式(10章の`bind!`と同じ慣習)であり、`NavigationHost`の内部履歴スタックを操作する
+- これらはマクロ呼び出し形式(9章の`bind!`と同じ慣習)であり、`NavigationHost`の内部履歴スタックを操作する
 
 ## L.4 まとめ
 
@@ -1128,7 +1128,7 @@ fn go_back() {
 |---|---|
 | 複数画面の定義 | `enum Route { ... }` |
 | ルートに応じた画面切り替え | `NavigationHost { route, match route { ... } }` |
-| 遷移漏れの検出 | `match`の網羅性検査(14章ルール14) |
+| 遷移漏れの検出 | `match`の網羅性検査(13章ルール14) |
 | 遷移操作 | `navigate!(route)` / `navigate_back!()` |
 | バックエンドごとの実装差 | `NavigationHost`内部にのみバックエンド分岐を許可(付録G.3の原則を維持) |
 
@@ -1206,7 +1206,7 @@ Button {
 
 ## M.4 制約の継承
 
-`Menu`(実装済み)、`Dialog`/`Tooltip`/汎用`context_menu`属性(いずれも未実装・仕様のみ)は、実装された暁にはいずれもビルトインとして内部でバックエンド別実装を持つ設計である。通常の`component`側でこれらを利用する際は、他のビルトイン同様バックエンド分岐を意識する必要はなく、独自部品からこれらを組み合わせて使う場合もG.3の「バックエンド分岐禁止」原則がそのまま適用される(14章ルール15)。
+`Menu`(実装済み)、`Dialog`/`Tooltip`/汎用`context_menu`属性(いずれも未実装・仕様のみ)は、実装された暁にはいずれもビルトインとして内部でバックエンド別実装を持つ設計である。通常の`component`側でこれらを利用する際は、他のビルトイン同様バックエンド分岐を意識する必要はなく、独自部品からこれらを組み合わせて使う場合もG.3の「バックエンド分岐禁止」原則がそのまま適用される(13章ルール15)。
 
 ## M.5 まとめ
 
@@ -1215,7 +1215,7 @@ Button {
 | モーダルダイアログ | `Dialog { on_dismiss, ... }`、フォーカストラップを自動適用 | 未実装・仕様のみ |
 | コンテキストメニュー | `Menu` / `MenuItem`、`context_menu`属性での紐付け | `Menu`/`MenuItem`自体は実装済み、`context_menu`属性は未実装 |
 | ツールチップ | 任意要素が持てる共通属性`tooltip` | 未実装・仕様のみ |
-| バックエンドごとの実装差 | ビルトイン内部にのみ分岐を許可し、独自部品からの利用時は分岐禁止原則を維持(14章ルール15) | (原則自体はコード生成器の設計方針) |
+| バックエンドごとの実装差 | ビルトイン内部にのみ分岐を許可し、独自部品からの利用時は分岐禁止原則を維持(13章ルール15) | (原則自体はコード生成器の設計方針) |
 
 ---
 
@@ -1373,7 +1373,7 @@ component ProgressBar {
 ```
 
 - `#[transition(duration, easing)]`が付いた`prop`は、値が変化した際にUIが自動的に指定時間・イージング関数で補間描画される。`Canvas`の`on_paint`やビルトイン部品(`ProgressBar`等)の内部実装が、この補間後の中間値を使って再描画する
-- `easing`には標準イージング関数(`Linear`, `EaseIn/EaseOut/EaseInOutCubic`, `EaseOutBack`, `Spring { stiffness, damping }`等)を指定する。存在しない名前は14章ルール16により静的エラー
+- `easing`には標準イージング関数(`Linear`, `EaseIn/EaseOut/EaseInOutCubic`, `EaseOutBack`, `Spring { stiffness, damping }`等)を指定する。存在しない名前は13章ルール16により静的エラー
 
 **明示的なキーフレームアニメーション(Canvas内での手続き的制御):**
 
@@ -1392,7 +1392,7 @@ Canvas {
 }
 ```
 
-- `KeyframeAnimation`は0.0〜1.0の正規化時刻に対する値を複数指定し、`sample(t)`で任意時刻の補間値を取得する。キーフレーム位置が範囲外の場合は14章ルール16によりエラー
+- `KeyframeAnimation`は0.0〜1.0の正規化時刻に対する値を複数指定し、`sample(t)`で任意時刻の補間値を取得する。キーフレーム位置が範囲外の場合は13章ルール16によりエラー
 
 ## N.7 リッチテキスト描画
 
@@ -1425,7 +1425,7 @@ trait Painter {
 | キーフレームアニメーション | `KeyframeAnimation`(`Canvas`内で手続き的に使用) |
 | リッチテキスト | `TextRun` + `draw_rich_text` |
 
-いずれもG.2で定義した`Painter`トレイトの拡張メソッド・付随データ型として`elwindui-core`(`docs/design/gui_framework_design.md`§5.8)に属し、バックエンドごとの実装差はG.3の原則通り`builtin::Canvas`内部にのみ許可される。GTK4のように一部エフェクト(Acrylic/Blur)が未対応のバックエンドでは、静的警告(14章ルール17)とともに単色/効果無しへのフォールバック描画が行われる。
+いずれもG.2で定義した`Painter`トレイトの拡張メソッド・付随データ型として`elwindui-core`(`docs/design/gui_framework_design.md`§5.8)に属し、バックエンドごとの実装差はG.3の原則通り`builtin::Canvas`内部にのみ許可される。GTK4のように一部エフェクト(Acrylic/Blur)が未対応のバックエンドでは、静的警告(13章ルール17)とともに単色/効果無しへのフォールバック描画が行われる。
 
 
 ---
@@ -1470,7 +1470,7 @@ VirtualList {
 
 ## Q.4 `key`未指定時の挙動
 
-`key`を指定せずに`items`の順序が変わる更新を行うと、挿入位置ベースの再利用にフォールバックし、意図しない要素の使い回し(例:別データなのに同じ`Element`インスタンスが再利用されフォーカス状態が誤って引き継がれる)が起きうる。これを防ぐため、14章ルール23により静的警告を出す。
+`key`を指定せずに`items`の順序が変わる更新を行うと、挿入位置ベースの再利用にフォールバックし、意図しない要素の使い回し(例:別データなのに同じ`Element`インスタンスが再利用されフォーカス状態が誤って引き継がれる)が起きうる。これを防ぐため、13章ルール23により静的警告を出す。
 
 ## Q.5 バックエンド対応
 
@@ -1487,14 +1487,14 @@ VirtualList {
 | 大量データの効率描画 | `VirtualList { items, item_height/estimated_item_height, render_item }` |
 | 順序変更時の安全な再利用 | `key`関数による同一性判定 |
 | リサイクルとライフサイクルの整合 | プール再利用時は`on_mount`を再発火させず、prop更新のみで反映 |
-| `key`未指定時の注意喚起 | 14章ルール23による静的警告 |
+| `key`未指定時の注意喚起 | 13章ルール23による静的警告 |
 
 
 ---
 
 # 付録T. クリップボード・ドラッグ&ドロップ・ファイルダイアログ 🚧
 
-OS機能へのアクセスを、GUI要素ではなく`platform::`名前空間の関数として提供する(9章の`env::*`、5章で触れた`external::*`と同じ「明示的な入口」の考え方)。
+OS機能へのアクセスを、GUI要素ではなく`platform::`名前空間の関数として提供する(8章の`env::*`、5章で触れた`external::*`と同じ「明示的な入口」の考え方)。
 
 ## T.1 クリップボード(未実装・仕様のみ)
 

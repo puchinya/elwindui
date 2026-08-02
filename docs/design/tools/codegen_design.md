@@ -13,7 +13,7 @@ ElwindUILツールチェーン全体(本書・LSP・プレビュー・ホット�
 ### 1.1 責務
 
 - `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`が受け取るRustトークン列(`syn::ItemStruct`/`syn::ItemMod`/`syn::ItemEnum`)からの共通AST構築
-- `docs/specs/dsl_spec.md`1〜15章・付録Aに定義された静的検証(14章の検証ルール一覧)の実行
+- `docs/specs/dsl_spec.md`1〜14章・付録Aに定義された静的検証(13章の検証ルール一覧)の実行
 - `#![backend(...)]` 指定・ビルドターゲットに基づく `target::backend()` の定数畳み込みと、非該当バックエンド分岐の静的除去(設計のみ、**未実装** — 下記実装状況の注を参照)
 - バックエンド(WinUI 3/AppKit/GTK4)向けRustソースの生成
 - 3つのプロシージャルマクロ(`component`/`viewmodel`/`dsl_enum`)への入力フロントエンドの提供
@@ -56,7 +56,7 @@ ElwindUILツールチェーン全体(本書・LSP・プレビュー・ホット�
    │ ① フロントエンド変換(component_frontend.rs/attr_frontend.rs)
    ▼
 共通AST(フレームワーク非依存の要素ツリー)
-   │ ② 静的検証(言語仕様14章のルール一覧)
+   │ ② 静的検証(言語仕様13章のルール一覧)
    ▼
 検証済みAST
    │ ③ (設計上)target::backend() の定数畳み込み・非該当分岐の除去 ※未実装、下記参照
@@ -68,7 +68,7 @@ Rustソース(WinUI3/AppKit/GTK4のいずれのバックエンドクレートに
 ```
 
 - **①フロントエンド変換**: `syn`で解析済みのRustトークン列(`ItemStruct`/`ItemMod`/`ItemEnum`)から共通ASTを構築する(`component_frontend::component_and_view_from_item_struct`/`attr_frontend::viewmodel_def_from_item_mod`/`component_frontend::enum_def_from_item_enum`)。`view! { .. }`型フィールドの中身だけは生のDSLテキストとして`parser::parse_view_body`にかけられる(§4.2参照)。他の同一クレート内`component`/`viewmodel`/`enum`の解決は、宣言順に populate される同一クレート内レジストリ(`component_frontend::same_crate_components`等)経由で行われる — `use`宣言によるモジュール解決自体は生成コードがRustコードである以上、最終的にはRustコンパイラに委譲される(§4.2脚注参照)。
-- **②静的検証**: 言語仕様14章に列挙された検証ルール(`#[param]`初期化式への`bind!`混入禁止、enum網羅性検査、制約違反の検出、`native!`の出現位置制限など)をASTに対して実行する。違反はビルド時エラーとしてコンパイルを停止させる。
+- **②静的検証**: 言語仕様13章に列挙された検証ルール(`#[param]`初期化式への`bind!`混入禁止、enum網羅性検査、制約違反の検出、`native!`の出現位置制限など)をASTに対して実行する。違反はビルド時エラーとしてコンパイルを停止させる。
 - **③定数畳み込み(未実装)**: `docs/design/gui_framework_design.md`§3.3は、`target::backend()`をビルド設定(Cargoのfeature/target triple)から一意に確定し、該当しない `match target::backend() { ... }` の腕や `#[cfg(backend = "...")]` 付き `native!` ブロックを生成対象から静的に除去する設計を定めているが、現在の`elwindui-codegen`にはこの段階が存在しない(`enum Backend`/`target::backend()`はコード中どこにも実装されていない)。実際には生成コードはバックエンドを問わず同一であり、この段階は素通りする。
 - **④コード生成**: 検証済みASTから、バックエンドを問わず同一のRustコードを生成する。ビルトイン要素(`builtin::Window`/`Row`/`Text`等、`docs/specs/builtins_spec.md`付録F)は他コンポーネントと同じ`component`/`view`構文で書かれたリファレンス実装として同一パイプラインで処理される。生成コードが実際にどのバックエンドで動くかは、リンクされる`elwindui-backend-*`クレート(各バックエンドクレートが同名のビルトイン型を実装している)によって決まる——`docs/design/gui_framework_design.md`§1・§3が想定する「バックエンドごとに異なるコードを生成する」段階は現状ここには存在しない。
 
@@ -184,6 +184,6 @@ template]`」参照)が設計されている——**設計のみ・未実装**�
 |---|---|
 | `component`/`viewmodel`/`dsl_enum` → Rust変換 | フロントエンド変換→共通AST→静的検証→定数畳み込み→バックエンド別コード生成の4段パイプライン |
 | 起動方式 | `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`プロシージャルマクロのみ |
-| 静的検証 | 言語仕様14章のルール一覧をASTに対して実行し、違反はビルド時エラー |
+| 静的検証 | 言語仕様13章のルール一覧をASTに対して実行し、違反はビルド時エラー |
 | バックエンド分岐の除去 | `target::backend()`の定数畳み込みにより非該当分岐を静的除去(**未実装**。現状は生成コードがバックエンド非依存で、リンクする`elwindui-backend-*`クレートの選択のみでバックエンドが決まる) |
 | 他ツールとの関係 | LanguageServer/preview/hotreloadは本コンパイラの解析結果・生成コードを利用する側であり、検証ロジックの二重実装を避ける |

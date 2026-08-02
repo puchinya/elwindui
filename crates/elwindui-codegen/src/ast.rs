@@ -1,5 +1,5 @@
 /// A single `.elwind` file (or an equivalent synthetic module built from a plain `.rs` file's
-/// `#[elwindui::viewmodel] mod foo { .. }`, see `attr_frontend.rs`). See docs/specs/dsl_spec.md §12
+/// `#[elwindui::viewmodel] mod foo { .. }`, see `attr_frontend.rs`). See docs/specs/dsl_spec.md §11
 /// (`use`), §1-15 core language, docs/design/tools/codegen_design.md §3 (how `path` maps to a real Rust module path).
 #[derive(Debug, Clone, Default)]
 pub struct Module {
@@ -343,7 +343,7 @@ pub struct ViewBody {
     pub children: Vec<ChildEntry>,
 }
 
-/// `#[id("editor")] let editor = TextArea { text: content };` — see docs/specs/dsl_spec.md §13's
+/// `#[id("editor")] let editor = TextArea { text: content };` — see docs/specs/dsl_spec.md §12's
 /// "特定要素への名前付きアクセス". `id`, when present, becomes a generated named accessor method
 /// (`self.editor()`) returning that binding's concrete Rust type (`codegen.rs`'s
 /// `emit_named_accessors`) — not a runtime string-keyed lookup (`#[id(...)]` names are always

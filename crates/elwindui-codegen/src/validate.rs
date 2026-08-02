@@ -1,4 +1,4 @@
-//! A narrow slice of the ~24 static verification rules in docs/specs/dsl_spec.md §14 — only the
+//! A narrow slice of the ~24 static verification rules in docs/specs/dsl_spec.md §13 — only the
 //! ones reachable by the constructs the notepad example actually uses. See
 //! docs/design/gui_framework_design.md §10 for the full rule list.
 

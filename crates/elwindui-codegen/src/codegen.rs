@@ -21,7 +21,7 @@ use syn::visit_mut::VisitMut;
 /// (see `ast::Module::path`) — rather than a bare item name, so two same-named types defined in
 /// different modules never collide, and a lookup must go through `resolve` (i.e. through a `use`,
 /// or be in the same module) instead of being visible from anywhere in the compilation unit. See
-/// docs/specs/dsl_spec.md §12, docs/design/tools/codegen_design.md §3.
+/// docs/specs/dsl_spec.md §11, docs/design/tools/codegen_design.md §3.
 pub struct SymbolTable {
     types: HashMap<(Vec<String>, String), TypeInfo>,
 }
@@ -3060,7 +3060,7 @@ fn generate_view(
     let mut theme_resync_stmts = TokenStream::new();
     // `#[id("...")]` bindings (§13) — a monomorphized `pub fn <id>(&self) -> Rc<ConcreteType>`
     // per binding, not a runtime string-keyed lookup (every `#[id(...)]` name is fixed at compile
-    // time, so a plain accessor is strictly sufficient — see docs/specs/dsl_spec.md §13 and
+    // time, so a plain accessor is strictly sufficient — see docs/specs/dsl_spec.md §12 and
     // docs/design/gui_framework_design.md §7.2's avoid-type-erasure convention).
     let mut named_accessors = TokenStream::new();
     // Populated instead of `named_accessors` for a composed target's own `#[param]`
@@ -3269,7 +3269,7 @@ fn generate_view(
     }
 
     // Getter for a component's own `#[computed]` field (`own_computed_names`) — read-only (external
-    // assignment to a `#[computed]` field is already a static error, docs/specs/dsl_spec.md §14
+    // assignment to a `#[computed]` field is already a static error, docs/specs/dsl_spec.md §13
     // ルール3), Cell/RefCell-backed under the *same* field name as the accessor (not a `_cache`-
     // suffixed one like `generate_viewmodel`'s own Computed arm uses): this generic own-field
     // bare-path branch (`emit_expr`) reads `self.#ident.get()`/`.borrow().clone()` directly off

@@ -25,14 +25,14 @@
 以下の3つの機能を提供する。
 
 1. **入力中からの即時診断**
-   - 制約違反(`#[range]`/`#[length]`/`#[pattern]`/`#[format]`/`#[check]`等、7章)
-   - enumの網羅漏れ(`match`が全メンバーを網羅していない、8章)
+   - 制約違反(`#[range]`/`#[length]`/`#[pattern]`/`#[format]`/`#[check]`等、6章)
+   - enumの網羅漏れ(`match`が全メンバーを網羅していない、7章)
    - `#[param]`フィールドへの`bind!`混入など、param/propの静的評価式ルール違反(4章)
-   - その他、14章「静的検証ルール一覧」に列挙された全項目(ルール1〜24)。これらはコンパイラ/リンタが実行前に検出すべき項目として定義されており、`elwindui-languageserver`はその実行環境をエディタ内でリアルタイムに提供する役割を担う。ルール個々の詳細(何が違反でどの付録が根拠か)は `docs/design/gui_framework_design.md` を参照。
+   - その他、13章「静的検証ルール一覧」に列挙された全項目(ルール1〜24)。これらはコンパイラ/リンタが実行前に検出すべき項目として定義されており、`elwindui-languageserver`はその実行環境をエディタ内でリアルタイムに提供する役割を担う。ルール個々の詳細(何が違反でどの付録が根拠か)は `docs/design/gui_framework_design.md` を参照。
 2. **生成されるRustコードのプレビュー表示**
    - コード生成器(`elwindui-codegen`)が出力するRustソースに相当する内容をエディタ上でプレビュー表示する。
 3. **ホバー情報**
-   - enumメンバー等にホバーした際、Fluentメッセージ(`t!`)の解決結果を表示する(11章のi18n仕組みと連動)。
+   - enumメンバー等にホバーした際、Fluentメッセージ(`t!`)の解決結果を表示する(10章のi18n仕組みと連動)。
 
 **実装状況**: 上記1(即時診断)は`elwindui_codegen::{component_frontend, validate}`をそのまま再利用する形で実装済み(`src/diagnostics.rs`) — `syn::parse_file`が対象`.rs`ファイルをパースし、`component_frontend::modules_from_file`が`#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`アイテムをそのファイルの範囲内で見つけて`Module`化する(実マクロ展開は行わない)。`syn::parse_file`自体が失敗した場合(構文エラー)は実際の行・列情報付きで報告される。2(コードプレビュー)・3(ホバー)は未実装。
 
@@ -57,7 +57,7 @@
 ```
 
 - **増分パース**: 保存イベントをトリガーに、変更箇所を中心に再パースする。
-- **型検査・制約検証**: `docs/specs/dsl_spec.md`3章の`component`/`view`定義、7章の値制約、8章のenum網羅性検査などを実行し、診断結果(エラー/警告)をエディタに返す。
+- **型検査・制約検証**: `docs/specs/dsl_spec.md`3章の`component`/`view`定義、6章の値制約、7章のenum網羅性検査などを実行し、診断結果(エラー/警告)をエディタに返す。
 - **プレビュー用インスタンス生成**: `component`の既定値でインスタンス化する(①静的プレビュー向け)。②インタラクティブプレビュー向けには、`docs/design/tools/preview_design.md`に定義される通り「`bind!(path, mode)`が使われている`prop`を自動検出し、プレビュー専用のコントロールUI(スライダー・テキスト欄等)に置き換える」モック化処理を行う。
 - 生成されたインスタンスの実際の描画(バックエンドのオフスクリーンレンダリング)およびWebViewへの送信は、プレビューパネル側の責務との境界にあたる(詳細は`docs/design/tools/preview_design.md`)。LanguageServerはレンダリング可能なインスタンス(既定値/モック値で構築された要素ツリー)を生成し引き渡すところまでを担う。
 

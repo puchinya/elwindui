@@ -40,6 +40,11 @@ pub(crate) fn rasterize_vector_image_to_cgimage(
     }
     let scale_x = pixel_width as f32 / src_rect.width;
     let scale_y = pixel_height as f32 / src_rect.height;
+    // `root` is deliberately left at the default `contentsScale` `1.0` — `pixel_width`/
+    // `pixel_height` are already the caller's own scale-multiplied pixel dimensions (see
+    // `draw_vector_image`'s `Auto`/`Fixed` arms), and `src_to_pixel` below bakes that same
+    // scaling into the geometry itself; stamping `root` with a scale on top of that would double
+    // it (same reasoning as `rasterize_nodes_to_pixels`'s own offscreen root).
     let root = CALayer::new();
     root.setBounds(CGRect::new(
         CGPoint::new(0.0, 0.0),
@@ -148,15 +153,26 @@ mod auto_raster_target_size_tests {
 }
 
 /// Renders `children` (already in `local_rect`'s own coordinate space) into a fresh, appropriately
-/// sized `CALayer` tree and rasterizes it to premultiplied top-down RGBA8 pixels. Returns `None`
-/// for a degenerate or pathologically large region rather than allocating unboundedly.
+/// sized `CALayer` tree and rasterizes it to premultiplied top-down RGBA8 pixels, at `scale` pixels
+/// per point — the offscreen counterpart to `render::add_sublayer_scaled`'s live-tree propagation,
+/// needed because this bitmap is generated once and then displayed at a fixed point size
+/// (`place_offscreen_image`'s `local_rect`) rather than re-rendered per frame, so a `scale` baked
+/// into the raster itself (not just the displaying layer's `contentsScale`) is what actually makes
+/// SVG masks/filters/patterns crisp on a Retina display. Returns `None` for a degenerate or
+/// pathologically large region rather than allocating unboundedly (the `MAX_OFFSCREEN_DIMENSION`
+/// check applies to the already-`scale`-multiplied pixel dimensions, not the point-space input).
+///
+/// `root` (and everything rendered into it) is deliberately left at the default `contentsScale`
+/// `1.0`: `local_to_pixel` below already bakes `scale` into the geometry itself, so stamping
+/// `root`'s subtree with `scale` again would double it.
 pub(crate) fn rasterize_nodes_to_pixels(
     children: &[VectorNode],
     local_rect: Rect,
+    scale: f32,
     image_cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) -> Option<(Vec<u8>, usize, usize)> {
-    let width = local_rect.width.ceil().max(1.0) as usize;
-    let height = local_rect.height.ceil().max(1.0) as usize;
+    let width = (local_rect.width * scale).ceil().max(1.0) as usize;
+    let height = (local_rect.height * scale).ceil().max(1.0) as usize;
     if width == 0
         || height == 0
         || width > MAX_OFFSCREEN_DIMENSION
@@ -170,7 +186,8 @@ pub(crate) fn rasterize_nodes_to_pixels(
         CGPoint::new(0.0, 0.0),
         CGSize::new(width as f64, height as f64),
     ));
-    let local_to_pixel = AffineTransform::translation(-local_rect.x, -local_rect.y);
+    let local_to_pixel = AffineTransform::scale(scale, scale)
+        .concat(&AffineTransform::translation(-local_rect.x, -local_rect.y));
     for child in children {
         render_node(&root, child, &local_to_pixel, 1.0, image_cache);
     }

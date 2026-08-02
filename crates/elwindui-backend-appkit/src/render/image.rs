@@ -11,6 +11,8 @@ use objc2_foundation::NSRect;
 use objc2_quartz_core::{CALayer, kCAFilterLinear, kCAFilterNearest};
 use std::collections::HashMap;
 
+use super::layer::add_sublayer_scaled;
+
 /// Crops `cg_image` to `source` (image-pixel coordinates, top-left origin — `CGImage::
 /// with_image_in_rect`'s own convention for a raster image), clamped to the image's own bounds
 /// first (painter design doc §13.2: "source が画像外にはみ出した場合は交差領域にクリップする").
@@ -196,7 +198,12 @@ pub(crate) fn build_image_container_layer(
     unsafe { image_layer.setContents(Some(cg_image.as_ref() as &objc2::runtime::AnyObject)) };
     image_layer.setMagnificationFilter(filter);
     image_layer.setMinificationFilter(filter);
-    container.addSublayer(&image_layer);
+    // `container` isn't attached to a real parent yet (`build_image_container_layer`'s caller
+    // does that) — this stamps whatever scale `container` happens to have right now (the
+    // default `1.0`), which the caller's own `add_sublayer_scaled` corrects once `container`
+    // is actually attached, per `render::layer`'s doc comment on subtrees built before they
+    // have a parent.
+    add_sublayer_scaled(&container, &image_layer);
     container.setOpacity(opacity);
     Some(container)
 }

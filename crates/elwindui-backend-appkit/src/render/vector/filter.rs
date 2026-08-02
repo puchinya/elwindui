@@ -36,8 +36,9 @@ pub(crate) fn render_filtered_content(
         }
         return;
     };
+    let scale = target.contentsScale() as f32;
     let Some((pixels, width, height)) =
-        rasterize_nodes_to_pixels(children, local_rect, image_cache)
+        rasterize_nodes_to_pixels(children, local_rect, scale, image_cache)
     else {
         return;
     };
@@ -62,8 +63,9 @@ pub(crate) fn render_filtered_content(
     for filter in filters {
         let mut results: Vec<Retained<CIImage>> = Vec::with_capacity(filter.primitives.len());
         for primitive in filter.primitives.iter() {
-            let output =
-                apply_filter_primitive(primitive, &current, &source_ci, &results, local_rect);
+            let output = apply_filter_primitive(
+                primitive, &current, &source_ci, &results, local_rect, scale,
+            );
             let output = output
                 .unwrap_or_else(|| results.last().cloned().unwrap_or_else(|| current.clone()));
             results.push(output);
@@ -84,7 +86,7 @@ pub(crate) fn render_filtered_content(
     };
     let result_cgimage = retained_to_cf_cgimage(result_cgimage);
     let result_layer = place_offscreen_image(&result_cgimage, local_rect, world, 1.0);
-    target.addSublayer(&result_layer);
+    crate::render::add_sublayer_scaled(target, &result_layer);
 }
 
 /// Bridges an `objc2`-managed `Retained<CGImage>` (what `CIContext::createCGImage:fromRect:`
@@ -135,6 +137,7 @@ pub(crate) fn apply_filter_primitive(
     source_graphic: &Retained<CIImage>,
     results: &[Retained<CIImage>],
     local_rect: Rect,
+    scale: f32,
 ) -> Option<Retained<CIImage>> {
     let _ = default_input_image;
     match &node.kind {
@@ -275,6 +278,7 @@ pub(crate) fn apply_filter_primitive(
             let Some((pixels, w, h)) = rasterize_nodes_to_pixels(
                 std::slice::from_ref(&VectorNode::Group(fe.root.clone())),
                 local_rect,
+                scale,
                 &mut HashMap::new(),
             ) else {
                 return None;

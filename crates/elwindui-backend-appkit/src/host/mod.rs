@@ -81,7 +81,8 @@ pub struct TreeHostIvars {
     /// unchanged still needs rebuilding if an ancestor's offset moved (the group's own relative
     /// `offset` stays the same, so its `generation` never bumps, even though the *absolute*
     /// geometry baked into its cached sublayers is now stale). Comparing the full
-    /// `(generation, origin, clip, transform, opacity)` tuple each pass catches both cases.
+    /// `(generation, origin, clip, transform, opacity, scale)` tuple each pass catches both that
+    /// and a window moved to a display with a different `backing_scale_factor`.
     pub(crate) group_layer_cache_keys: RefCell<HashMap<u64, GroupCacheKey>>,
     /// Which `native_containers` identities were discovered inside each group's own `commands` the
     /// last time it was actually rebuilt — replayed back into `live_native_controls` on a cache hit
@@ -210,6 +211,26 @@ define_class!(
                 elwindui_core::theme::ThemeAppearance::Light
             };
             self.theme_handle().set_appearance(appearance);
+        }
+
+        /// Fires when this view's backing store resolution changes — most commonly a window
+        /// dragged between displays with different `backingScaleFactor`s, but also the first
+        /// `viewDidMoveToWindow` after construction. `backing_scale_factor` (and therefore every
+        /// hand-built `CALayer` this view paints, via `render::add_sublayer_scaled`) is derived
+        /// from `NSWindow.backingScaleFactor`, so it must be re-applied here rather than assumed
+        /// to update on its own.
+        #[unsafe(method(viewDidChangeBackingProperties))]
+        fn view_did_change_backing_properties(&self) {
+            unsafe {
+                let _: () = msg_send![super(self), viewDidChangeBackingProperties];
+            }
+            // Rasterized bitmaps in this cache are keyed by pixel size, not by scale — a bitmap
+            // rasterized at 1x stays a 1x bitmap after the window moves to a Retina display.
+            // `GroupCacheKey::scale` (see `replay::replay_group`) already forces every group's own
+            // `CALayer` tree to rebuild when the scale changes; this cache needs an explicit drop
+            // since nothing else invalidates it.
+            self.ivars().vector_raster_cache.borrow_mut().clear();
+            self.setNeedsLayout(true);
         }
 
         #[unsafe(method(updateTrackingAreas))]
@@ -489,6 +510,28 @@ impl TreeHostView {
         self.ivars().unconstrained_axes.set((width, height));
     }
 
+    /// The authoritative pixels-per-point scale for everything this host paints — the value every
+    /// hand-built `CALayer` in `replay_group`/`render::*` must be stamped with (see
+    /// `render::add_sublayer_scaled`) since Core Animation does not inherit `contentsScale` from a
+    /// superlayer the way it does for a layer-backed view's own backing layer.
+    ///
+    /// Sourced from `self.window().backingScaleFactor()` rather than `self.layer().
+    /// contentsScale()`: the latter is itself derived by AppKit *from* `backingScaleFactor`, so
+    /// depending on it would make this value sensitive to whether AppKit has already refreshed the
+    /// backing layer before `layout` runs on a given pass. Falls back to `NSScreen::mainScreen`'s
+    /// scale, then `1.0`, for a host laid out before it is attached to a window — e.g.
+    /// `InnerScrollView`'s nested content host and `InnerTabView`'s per-tab hosts, both of which
+    /// call `relayout` during construction.
+    pub(crate) fn backing_scale_factor(&self) -> objc2_core_foundation::CGFloat {
+        if let Some(window) = self.window() {
+            return window.backingScaleFactor();
+        }
+        if let Some(screen) = objc2_app_kit::NSScreen::mainScreen(mtm()) {
+            return screen.backingScaleFactor();
+        }
+        1.0
+    }
+
     fn relayout(&self) {
         use elwindui_core::base::Size;
 
@@ -569,6 +612,7 @@ impl TreeHostView {
             None,
             elwindui_core::base::AffineTransform::identity(),
             1.0,
+            self.backing_scale_factor(),
             &mut live_native_controls,
             &mut live_group_ids,
             &mut live_image_ids,

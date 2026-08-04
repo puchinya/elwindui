@@ -3,14 +3,14 @@
 // paired with a `...Ext` trait, per the `#[class]` naming convention) that actually implements
 // `UIElement` (directly or via delegating to a `base`) corresponds to some `.elwind` component declaring
 // `inherits UIElement` (directly or transitively through `NativeControl`/`Layout`/`Shape`/
-// `Control`/`TextBlock`) — this is the DSL-visible root of that hierarchy (docs/elwindui_spec.md
-// 付録H.2.1a). `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem` do *not* inherit
+// `Control`/`TextBlock`) — this is the DSL-visible root of that hierarchy (docs/design/gui_framework_design.md
+// §5.1). `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem` do *not* inherit
 // it: none of them implement `elwindui_core::ui::UIElement` at all (see their own comments).
 // Common properties every element supports regardless of its own concrete type
 // (`elwindui_core::ui::UIElement`, ui.rs — `margin`/`horizontal_alignment`/`vertical_alignment`/
 // `visibility`/`width`/`height`/`min_width`/`min_height`/`max_width`/`max_height`/
 // `hit_test_visible`), plus a common set of `#[routed]` pointer/tap events
-// (docs/elwindui_gui_framework_design.md §5.10, modeled on WinUI3's `UIElement` pointer events).
+// (docs/design/gui_framework_design.md §5.10, modeled on WinUI3's `UIElement` pointer events).
 // Declared here (rather than left for `elwindui-codegen` to special-case by literal attribute name,
 // as `margin` used to be, and as `on_click` still is — see that field's own doc comment below) so
 // every component — builtin or user-defined — picks them up for free through the same
@@ -40,7 +40,7 @@ component UIElement {
     // `elwindui_core::ui::UIElement::hit_test_visible`'s own doc comment.
     hit_test_visible: Option<bool>,
 
-    // WinUI3's `Control.IsTabStop`/`Control.TabIndex` (docs/elwindui_gui_framework_design.md §5.5).
+    // WinUI3's `Control.IsTabStop`/`Control.TabIndex` (docs/design/gui_framework_design.md §5.5).
     // `tab_stop: true` opts a self-drawn element (`Layout`/`Control`/`Shape`/`TextBlock`) into
     // `FocusTracker`'s Tab-key traversal; native leaves (`Button`/`TextArea`/`TabView`) already
     // default to `true` (set by each backend's own `new()`). `focus_order` breaks ties within that
@@ -51,7 +51,7 @@ component UIElement {
     tab_stop: Option<bool>,
     focus_order: Option<i32>,
 
-    // Keyboard/focus routed events (docs/elwindui_gui_framework_design.md §5.5/§8.1). `on_key_down`/
+    // Keyboard/focus routed events (docs/design/gui_framework_design.md §5.5/§8.1). `on_key_down`/
     // `on_key_up`/`on_text_input` are dispatched to whichever element currently has focus (no
     // hit-testing involved, unlike the pointer events above) and bubble from there —
     // `elwindui_core::input::KeyboardDispatcher`. `on_got_focus`/`on_lost_focus` fire non-bubbling
@@ -74,7 +74,7 @@ component UIElement {
     // `elwindui_core::input::PointerEventArgs`'s own doc comment. Currently only fired for
     // self-drawn elements on the AppKit backend (`Layout`/`Control`/`Shape`/`TextBlock` and their
     // subclasses); native leaves (`Button`/`TextArea`/`TabView`) don't receive them — see
-    // `docs/elwindui_gui_framework_design.md` §5.10.
+    // `docs/design/gui_framework_design.md` §5.10.
     // `elwindui::core::input::..` (the facade path — never the bare `elwindui_core::` crate name):
     // these payload types are spliced by `elwindui-codegen` directly into generated
     // `register_routed_handler::<..>` turbofish output (`emit_routed_registration`), the same
@@ -106,9 +106,9 @@ component UIElement {
 
 // Every layout-container virtual builtin (`VerticalLayout`/`HorizontalLayout`/`Grid`) — mirrors
 // `elwindui_core::ui::Layout`, implemented by the bare `VerticalLayout`/`HorizontalLayout`/`Grid`
-// structs (each paired with its own `...Ext` trait, docs/elwindui_spec.md 付録H.2.1a).
+// structs (each paired with its own `...Ext` trait, docs/design/gui_framework_design.md §5.1).
 // `children` is the Logical-tree child list this container declares (`UIElementCollection`,
-// WinUI3's own type, docs/elwindui_spec.md 付録H.2.2) — inherited unconditionally by
+// WinUI3's own type, docs/design/gui_framework_design.md §5.2) — inherited unconditionally by
 // `VerticalLayout`/`HorizontalLayout`/`Grid` below (none of them have their own `view`, see
 // `resolve_effective_fields`'s doc comment), so it's declared once here rather than on each of
 // them. `#[content(children)]` (WinUI3's `ContentPropertyAttribute`) isn't itself inherited the
@@ -126,17 +126,17 @@ component Layout inherits UIElement {
 // a real `base` (a backend-owned `NativeControl`, composed via `inherits = NativeControl` —
 // `elwindui_core::ui::NativeControl` itself is a pure marker trait with no shared, generic
 // `elwindui-core`-owned struct; see that trait's own doc comment) and implements `NativeControl`/
-// `UIElement` by delegating to it (docs/elwindui_spec.md 付録H.2.1a). `MenuBar`/`MenuBarItem`/
+// `UIElement` by delegating to it (docs/design/gui_framework_design.md §5.1). `MenuBar`/`MenuBarItem`/
 // `Menu`/`MenuItem` never enter the visual tree (they attach to the platform menu bar directly, no
 // `into_any_view`/measure/arrange ever happens for them) — despite sharing a real `Control`-family
 // ancestry in WinUI3, implementing `NativeControl` for them would have no real handle to hold and
 // no caller that ever exercises it, so they declare `#[native]` directly instead, exactly like
 // `Window` below (real WinUI3's `Window` likewise has no meaningful `Control`-family ancestor at
-// all — it derives directly from `Object`). See docs/elwindui_spec.md 付録H.2 and
+// all — it derives directly from `Object`). See docs/design/gui_framework_design.md §5.3 and
 // `elwindui-codegen`'s `is_native` computation (`#[native]` and `inherits NativeControl` are
 // equivalent for `is_native` purposes; they differ only in whether a real Rust `NativeControl`
 // backend-owned base is expected).
-// `#[text_style]` (docs/elwindui_dsl_spec.md 付録A) injects font_family/font_size/font_weight/
+// `#[text_style]` (docs/specs/dsl_spec.md 付録A) injects font_family/font_size/font_weight/
 // font_style/font_stretch/character_spacing/foreground onto every native leaf that inherits this
 // (`Button`/`TextArea`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView`) — matching WinUI3, where
 // these are `Control` dependency properties every derived control inherits. Declared on
@@ -155,7 +155,7 @@ component NativeControl inherits UIElement {
 }
 
 // `Window` has no meaningful `Control`-family ancestor (see `NativeControl` above), so it declares
-// `#[native]` (docs/elwindui_spec.md 付録E) directly: base-less, `view`-less, hand-written per
+// `#[native]` (docs/specs/dsl_spec.md 付録A) directly: base-less, `view`-less, hand-written per
 // backend crate — exactly like an `inherits NativeControl` leaf as far as `is_native`/codegen are
 // concerned (`codegen::resolve_is_native`), just without the (here, inaccurate) shared-ancestor tag.
 // `content` is a single slot (WinUI3's own `Window.Content`, WinUI3's `ContentPropertyAttribute`
@@ -175,7 +175,7 @@ component Window {
     // WinUI3-style position/size — top-left-origin, Y increasing downward. Each backend's own
     // `Window` also exposes these as plain getters (`left()`/`top()`/`width()`/`height()`,
     // querying the live native window state), not just these construction-time setters — see
-    // docs/elwindui_builtins_spec.md 付録F.1. `#[onetime]`: applied once at construction only, never
+    // docs/specs/builtins_spec.md 付録F.1. `#[onetime]`: applied once at construction only, never
     // re-pushed by `resync()` — the OS window manager (not this declaration) owns the live value
     // once the window exists, so blindly re-applying the originally-declared value on every
     // unrelated resync would fight a user's subsequent drag/resize. See `Attr::Onetime`'s own doc
@@ -206,7 +206,7 @@ component HorizontalLayout inherits Layout {
 }
 
 // The composable drawing primitive `Rectangle`/`Ellipse` (below) shape-compose over
-// (docs/elwindui_spec.md 付録H.2.1a), mirroring `Control`'s role for `ContentControl`. `Shape` does
+// (docs/design/gui_framework_design.md §5.1), mirroring `Control`'s role for `ContentControl`. `Shape` does
 // have a real, named backend struct (`elwindui_core::ui::Shape`) — used as `Rectangle`/`Ellipse`'s
 // own `base` field — but no *user-facing* `Shape::new(..)` constructor call is ever generated for
 // it directly (`Shape` is `#[abstract]`): `elwindui-codegen`'s `emit_virtual_construction` assembles
@@ -216,7 +216,7 @@ component HorizontalLayout inherits Layout {
 // `elwindui-codegen`'s literal-coercion handling for `Brush`/`Color`-typed fields), so
 // `Rectangle { fill: "#3a3a3c" }` keeps working unchanged at the `.elwind` call site. No
 // `children` — matching real WinUI3's `Shape`, a pure leaf with no `Children`/content property of
-// its own (docs/elwindui_spec.md 付録H.2.2).
+// its own (docs/design/gui_framework_design.md §5.2).
 #[embedded]
 #[abstract]
 component Shape inherits UIElement {
@@ -260,7 +260,7 @@ view Ellipse {
 }
 
 // `children` is the Logical-tree child list this component declares (`UIElementCollection`,
-// WinUI3's own type, docs/elwindui_spec.md 付録H.2.2). `#[text_style]` (docs/elwindui_dsl_spec.md
+// WinUI3's own type, docs/design/gui_framework_design.md §5.2). `#[text_style]` (docs/specs/dsl_spec.md
 // 付録A) lets a `Control`-derived component set font/foreground properties directly — inherited by
 // any Visual descendant regardless of what non-owning elements (`Grid`/`VerticalLayout`/...) sit
 // in between (指示書 §10/§11).
@@ -273,7 +273,7 @@ component Control inherits UIElement {
 }
 
 // WinUI3's real `ContentControl` (single `Content`, as opposed to `Control`'s N-children form) —
-// composed via `inherits` (docs/elwindui_spec.md §3, 付録H.2.1a): its `view` root literally
+// composed via `inherits` (docs/specs/dsl_spec.md §3, docs/design/gui_framework_design.md §5.1): its `view` root literally
 // constructs a `Control` with exactly one child. The real implementation is the bare
 // `elwindui_core::ui::ContentControl` struct (paired with its own `ContentControlExt` trait, per
 // the `#[class]` naming convention — struct is always the bare class name, never `...Impl`), with a
@@ -301,13 +301,13 @@ view ContentControl {
     content
 }
 
-// WPF/WinUI3-style row/column layout (docs/elwindui_spec.md §3) — a virtual builtin like `Control`/
+// WPF/WinUI3-style row/column layout (docs/specs/dsl_spec.md §3) — a virtual builtin like `Control`/
 // `Rectangle` (no backend Rust struct; `elwindui-codegen`'s `emit_virtual_construction` builds an
 // `elwindui_core::ui::Grid` directly at each use site). `rows`/`columns` are ordinary required
 // fields (an array literal of `elwindui_core::layout::GridLength::Auto`/`Fixed(px)`/`Star(weight)`);
 // `row`/`column` are `#[attached]` properties — declared here, but settable on *any* element
 // anywhere via `Grid::row: <expr>` / `Grid::column: <expr>`, not just this component's own direct
-// children (see docs/elwindui_spec.md §3's attached-property section). Unset on a given element,
+// children (see docs/specs/dsl_spec.md §3's attached-property section). Unset on a given element,
 // they default to `0` (the top-left cell), matching `elwindui_core::layout::GridCell::default()`.
 #[embedded]
 #[content(children)]
@@ -331,7 +331,7 @@ component TextArea inherits NativeControl {
 // Single-line counterpart to `TextArea` above — a distinct native widget per backend (AppKit:
 // `NSTextField`, not `NSTextView`; WinUI3: the same `TextBox` XAML class as `TextArea` itself, just
 // without `AcceptsReturn`/`TextWrapping`), never unified into one control with a `multiline` flag
-// (see docs/elwindui_nativecontrol_expansion_status.md). `submit`-on-Enter rides the ordinary
+// (see docs/status/nativecontrol_status.md). `submit`-on-Enter rides the ordinary
 // inherited `on_key_down` (`UIElement`, above) rather than a dedicated field — see
 // `elwindui_core::ui::TextBox`'s own doc comment.
 #[embedded]
@@ -385,7 +385,7 @@ component Button inherits NativeControl {
 }
 
 // `color` (a bare `Color`) was replaced by `#[text_style]`'s `foreground` (a `Brush`, inherited
-// like every other font property — docs/elwindui_font_status.md) — use `foreground: "#3a3a3c"` (or
+// like every other font property — docs/status/font_status.md) — use `foreground: "#3a3a3c"` (or
 // a `Brush::...` expression) instead of the old `color:`.
 #[embedded]
 #[text_style]
@@ -467,7 +467,7 @@ component TabView inherits NativeControl {
     on_new_tab: fn(),
 }
 
-// See docs/elwindui_builtins_spec.md 付録Y. Written as a `TabView` child, including from a dynamic
+// See docs/specs/builtins_spec.md 付録Y. Written as a `TabView` child, including from a dynamic
 // child range. Never itself embedded as a real
 // `Rc<dyn UIElement>` node (its own `content` is what gets mounted into a per-tab host) — like
 // `MenuBar`/`MenuItem`, declares `#[native]` directly rather than `inherits NativeControl`.

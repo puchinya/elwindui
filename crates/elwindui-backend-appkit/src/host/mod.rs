@@ -102,7 +102,7 @@ pub struct TreeHostIvars {
     pub(crate) weak_self: RefCell<objc2::rc::Weak<TreeHostView>>,
     /// Turns this view's own raw `NSEvent`s into `elwindui_core::ui::hit_test`/`dispatch_routed`
     /// calls against `tree` — see `elwindui_core::input::PointerDispatcher`'s own doc comment.
-    /// `docs/elwindui_gui_framework_design.md` §5.10's currently-implemented range: self-drawn
+    /// `docs/design/gui_framework_design.md` §5.10's currently-implemented range: self-drawn
     /// elements only, since a native subview (`Button`/`TextArea`/`TabView`, laid out as its own
     /// `native_containers` island) receives the OS mouse event directly via ordinary AppKit
     /// hit-testing, never reaching this view's own overrides below at all.
@@ -110,8 +110,9 @@ pub struct TreeHostIvars {
     /// Turns this view's own raw key/text events into `elwindui_core::ui::dispatch_routed` calls
     /// against whichever element currently has focus, and owns the `FocusTracker`/
     /// `ShortcutRegistry` for whatever tree this view hosts — see
-    /// `elwindui_core::input::KeyboardDispatcher`'s own doc comment. `docs/elwindui_gui_framework_
-    /// design.md` §5.5/§8.1's currently-implemented range mirrors `pointer`'s own: self-drawn
+    /// `elwindui_core::input::KeyboardDispatcher`'s own doc comment.
+    /// `docs/design/gui_framework_design.md` §5.5/§8.1's currently-implemented range mirrors
+    /// `pointer`'s own: self-drawn
     /// elements' virtual focus is real (`KeyboardDispatcher::focus` is the single source of truth),
     /// but a native leaf (`Button`/`TextArea`/`TabView`) receives real OS keyboard focus/events
     /// directly and needs its own individual wiring (see `native_ui.rs`'s `Button`/`TextArea`) —

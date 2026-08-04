@@ -1,8 +1,8 @@
-// macos-ui-driver — Phase 1 + Phase 2 of docs/elwindui_macos_gui_test_driver.md (AI-agent-drivable
+// macos-ui-driver — Phase 1 + Phase 2 of docs/status/macos_ui_driver_status.md (AI-agent-drivable
 // macOS GUI test CLI). Phase 1: app launch/terminate, window enumeration, per-window screenshot
 // capture, and permission diagnostics ("doctor"). Phase 2: Accessibility-tree walking
 // (`dump-tree`/`find`) and control interaction (`set-focus`/`click`/`type-text`/`press-key`/
-// `wait-for`) — driver-side only, see docs/elwindui_macos_gui_test_driver_status.md for scope notes.
+// `wait-for`) — driver-side only, see docs/status/macos_ui_driver_status.md for scope notes.
 // elwindui-internal state introspection and image-diff regression testing are later phases, not
 // implemented here.
 //
@@ -214,7 +214,7 @@ func cmdLaunch(_ args: Args) -> Never {
     // Without this, the child inherits this process's own stdout (the fd behind our one-line JSON
     // response) and, being a long-lived GUI app, keeps its write end open indefinitely — so a
     // caller reading our output via a shell pipe or `$(...)` blocks until the *launched app* exits,
-    // not until we do. See docs/elwindui_macos_gui_test_driver_status.md's "呼び出し側の既知の落とし穴"
+    // not until we do. See docs/status/macos_ui_driver_status.md's "呼び出し側の既知の落とし穴"
     // for the hang this caused in practice. `.standardError` gets the same treatment for symmetry.
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
@@ -317,7 +317,7 @@ func axWindows(_ appElement: AXUIElement) -> [AXUIElement] {
 /// the macOS version) — **not** as a driver bug to paper over, but as a real, reportable
 /// environment constraint (e.g. a sandboxed/agent shell that macOS declines to let steal
 /// foreground focus from the user's actual active application — see
-/// `docs/elwindui_macos_gui_test_driver_status.md` for a concrete case this was observed in). A
+/// `docs/status/macos_ui_driver_status.md` for a concrete case this was observed in). A
 /// caller that needs guaranteed-stable foregrounding for CI should prefer XCUITest, which runs
 /// inside the same test-runner process macOS already trusts to drive the UI, rather than fighting
 /// this from an external CLI.
@@ -384,7 +384,7 @@ func cmdFocusWindow(_ args: Args) -> Never {
         emit(success: true, diagnostics)
     } else {
         diagnostics["error"] =
-            "could not confirm the window is actually frontmost/main/focused within \(timeout)s — activate()/AXRaise return values alone are not proof of success on macOS 14+; this may be an environment-level restriction (e.g. this process's own foreground/user-attended status) rather than an application defect — see this command's own design notes in docs/elwindui_macos_gui_test_driver_status.md"
+            "could not confirm the window is actually frontmost/main/focused within \(timeout)s — activate()/AXRaise return values alone are not proof of success on macOS 14+; this may be an environment-level restriction (e.g. this process's own foreground/user-attended status) rather than an application defect — see this command's own design notes in docs/status/macos_ui_driver_status.md"
         emit(success: false, diagnostics)
     }
 }
@@ -787,7 +787,7 @@ func cmdFind(_ args: Args) -> Never {
 /// "click doesn't focus this control" (a mouse/hit-test/first-responder bug) from "nothing can put
 /// focus on this control at all" (a deeper wiring bug) by trying both `click` and `set-focus`
 /// independently against the identical selector — see this driver's real-machine finding against
-/// `examples/controls-demo`'s `TextBox`, recorded in `docs/elwindui_macos_gui_test_driver_status.md`.
+/// `examples/controls-demo`'s `TextBox`, recorded in `docs/status/macos_ui_driver_status.md`.
 /// Same request-then-verify idiom as `focus-window`: the `AXUIElementSetAttributeValue` return code
 /// is recorded but not trusted as proof; only a re-read of `AXFocused` counts.
 func cmdSetFocus(_ args: Args) -> Never {

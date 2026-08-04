@@ -432,7 +432,7 @@ fn inherits_arg_from_component_attrs(attrs: &[syn::Attribute]) -> Result<Option<
 /// non-unit enum variant, ...) make the whole call fail — matching how a real macro invocation
 /// would fail to expand that one item, except surfaced as one error for the whole file rather than
 /// pinpointed to the offending item (no span info flows through these conversions — see
-/// `docs/elwindui_tool_languageserver_design.md` for why this is an accepted precision limit, same
+/// `docs/design/tools/languageserver_design.md` for why this is an accepted precision limit, same
 /// as `validate::validate`'s own error messages).
 pub fn modules_from_file(file: &syn::File) -> Result<Vec<Module>, String> {
     let mut modules = Vec::new();
@@ -709,7 +709,7 @@ view Counter {
 /// codegen support at all before `generate_view`/`generate_component` grew it: `own_fields`, and
 /// everything derived from it, used to filter to `f.initializer.is_none()` only, so a bare
 /// same-component reference like `text: label` failed with "unsupported path shape after bind
-/// resolution". See docs/elwindui_dsl_spec.md's "Rustファイル内での代替記法" subsection, whose
+/// resolution". See docs/specs/dsl_spec.md's "Rustファイル内での代替記法" subsection, whose
 /// `VolumeControl` example this mirrors.
 #[cfg(test)]
 mod doc_example_own_default_and_computed_fields {
@@ -783,7 +783,7 @@ view Greeter {
         );
     }
 
-    /// The exact `docs/elwindui_dsl_spec.md` "Rustファイル内での代替記法" example: `VolumeControl`
+    /// The exact `docs/specs/dsl_spec.md` "Rustファイル内での代替記法" example: `VolumeControl`
     /// inherits `ContentControl` (a real builtin, already shape-composed over `Control`), and
     /// branches over a `#[param] orientation: Orientation` via `match` inside `view!`, referencing
     /// its own `#[prop(default = 50)] volume`/`#[computed] label` fields bare from inside the match

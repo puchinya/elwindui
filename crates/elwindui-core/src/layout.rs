@@ -219,7 +219,7 @@ pub fn stack_natural_size(orientation: Orientation, spacing: f32, child_sizes: &
 /// WPF/WinUI3-style `Grid` sizing unit — `Auto` (a track's size follows its content's natural
 /// size), `Fixed(px)` (a literal size), or `Star(weight)` (a share of whatever space is left after
 /// every `Fixed`/`Auto` track has taken its own size, proportional to `weight` among all `Star`
-/// tracks — WPF's `*`/`2*` etc.). See `builtin::Grid`, docs/elwindui_spec.md §3.
+/// tracks — WPF's `*`/`2*` etc.). See `builtin::Grid`, docs/specs/dsl_spec.md §3.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridLength {
     Auto,
@@ -227,7 +227,7 @@ pub enum GridLength {
     Star(f32),
 }
 
-/// A `Grid`-child's attached `Grid::row`/`Grid::column` position (docs/elwindui_spec.md §3) —
+/// A `Grid`-child's attached `Grid::row`/`Grid::column` position (docs/specs/dsl_spec.md §3) —
 /// 0-indexed, defaulting to the top-left cell (`0, 0`) like WPF's own `Grid.Row`/`Grid.Column`
 /// defaults. Row/column spanning isn't implemented yet (each cell holds exactly one child).
 /// Not stored as this shape anywhere — `elwindui_core::ui::UIElement::attached` holds `row`/

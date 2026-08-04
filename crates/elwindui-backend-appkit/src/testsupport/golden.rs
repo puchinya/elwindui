@@ -7,7 +7,7 @@
 //! headlessly in `cargo test`) and asserts specific sample pixels rather than diffing against a
 //! checked-in reference PNG — a narrower, self-contained foundation for this class of test rather
 //! than the full 24-scene cross-backend suite the design doc describes (WinUI3/GTK4 can't run on
-//! this machine at all — see `docs/elwindui_implementation_status.md` — so a true cross-backend
+//! this machine at all — see `docs/status/implementation_status.md` — so a true cross-backend
 //! image diff isn't achievable here regardless).
 
 use crate::render::fitted_image_rect;
@@ -1081,4 +1081,4 @@ fn nested_push_opacity_multiplies_both_levels() {
 // production bug — but it makes a headless pixel golden for real text rendering unreliable in this
 // environment. `render/text.rs`'s `ns_font`/`measure_text` unit tests (weight/italic/stretch/
 // fallback/growth/wrap/kerning) are the real-machine verification for this feature instead; see
-// `docs/elwindui_font_status.md` §11/§9 for the full record of what was tried and why.
+// `docs/status/font_status.md` §11/§9 for the full record of what was tried and why.

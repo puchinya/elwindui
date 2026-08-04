@@ -1,8 +1,8 @@
 //! Incremental parse/diagnostics/`vm.field` completion for `.rs` files using elwindui's
 //! Rust-macro frontend (`#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`).
-//! See docs/elwindui_tool_languageserver_design.md.
+//! See docs/design/tools/languageserver_design.md.
 //!
-//! Phase 7 (`docs/elwindui_implementation_status.md`) retargeted this crate from the retired
+//! Phase 7 (`docs/status/implementation_status.md`) retargeted this crate from the retired
 //! `.elwind`-directory model to a single-`.rs`-file model, matching elwindui's own unification onto
 //! the Rust-macro frontend — real-time diagnostics (`diagnostics`, reusing
 //! `elwindui_codegen::{component_frontend, validate}`) and `vm.field` member completion
@@ -12,8 +12,8 @@
 //! `view! { .. }` macro bodies (Issue #14's "未解決の論点" — the one part of the file rust-analyzer
 //! can't highlight, since `view!` is never a real macro) rather than the whole file, avoiding any
 //! double-coloring/conflict with rust-analyzer's own semantic tokens. Generated-code preview and
-//! hover (付録B.2 items 2/3) and the offscreen-rendering pipeline (付録B.3) remain later phases, not
-//! attempted here.
+//! hover (docs/design/tools/languageserver_design.md §3) and the offscreen-rendering pipeline
+//! (docs/design/tools/preview_design.md) remain later phases, not attempted here.
 
 pub mod completion;
 pub mod diagnostics;

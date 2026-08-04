@@ -174,7 +174,7 @@ fn main() {
         "Microsoft.UI.Xaml.Media.LoadedImageSourceLoadCompletedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Media.LoadedImageSourceLoadStatus".to_owned(),
         "Microsoft.UI.Xaml.Media.SolidColorBrush".to_owned(),
-        // Font model support (docs/elwindui_font_status.md §6) — `Control.FontFamily`/`FontSize`/
+        // Font model support (docs/status/font_status.md §6) — `Control.FontFamily`/`FontSize`/
         // `FontWeight`/`FontStyle`/`FontStretch`/`CharacterSpacing`/`Foreground` are already
         // reachable through `Microsoft.UI.Xaml.Controls.Control` above; these three add the value
         // types those properties are typed with. **Unverified**: this crate is

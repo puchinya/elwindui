@@ -1,5 +1,5 @@
 //! WinUI 3 backend — the concrete widget surface `elwindui-codegen` targets on Windows.
-//! See docs/elwindui_gui_framework_design.md §3.
+//! See docs/design/gui_framework_design.md §3.
 //!
 //! Layering — dependencies run one way only, `native_ui -> inner -> host -> render -> ffi`:
 //!
@@ -17,13 +17,13 @@
 //!
 //! `elwindui-backend-appkit` mirrors this file-for-file; keep the two in step. NOTE: this crate
 //! is `#![cfg(target_os = "windows")]` and has never been built — see
-//! docs/elwindui_implementation_status.md.
+//! docs/status/implementation_status.md.
 
 #![cfg(target_os = "windows")]
 // `#[elwindui_macros::class]`'s `__elwindui_inherit_*!` chain mechanism needs a same-crate
 // macro-to-macro reference (`$crate::the_macro!`) to also work cross-crate, which currently
 // requires this lint disabled — see `crates/elwindui-macros/src/class.rs`'s own doc comment on
-// `inherit_macro_self_ref_path` for the full explanation, and `docs/elwindui_macro_class_spec.md`.
+// `inherit_macro_self_ref_path` for the full explanation, and `docs/specs/macro_class_spec.md`.
 // Every crate using `#[class]` with a same-crate `inherits` chain needs this same line —
 // `elwindui-backend-appkit` carries the identical `#![allow(...)]` for the identical reason.
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
@@ -71,7 +71,7 @@ pub fn init() -> windows::core::Result<()> {
 
     // Registers this crate's `elwindui_core::graphics::TextBackend` — see
     // `elwindui-backend-appkit::lib.rs::init()`'s identical registration and
-    // `docs/elwindui_font_status.md` §6 for why this needs to happen before any `TextBlock`
+    // `docs/status/font_status.md` §6 for why this needs to happen before any `TextBlock`
     // measurement or `NativeControl::sync_text_style` call.
     elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::WinUi3TextBackend));
 

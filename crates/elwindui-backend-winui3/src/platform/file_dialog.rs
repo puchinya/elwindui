@@ -1,4 +1,4 @@
-//! See docs/elwindui_spec.md 付録T.2 — same async-shaped-but-synchronous-underneath API as
+//! See docs/specs/builtins_spec.md 付録T.2 — same async-shaped-but-synchronous-underneath API as
 //! AppKit's `platform::file_dialog` (`IFileOpenDialog`/`IFileSaveDialog::Show` block the calling
 //! thread until the user closes the dialog; there's no genuine suspend point). Uses the classic
 //! Win32 common file dialog COM interfaces (`Win32_UI_Shell` — present in the mainstream `windows`

@@ -107,7 +107,7 @@ pub(crate) fn invoke_ui_text_event_callback(id: usize, text: String) {
 /// Implemented on the raw XAML element type itself (a foreign type — allowed since `WinUiHandle` is
 /// a local trait) rather than on `TextArea`/`Button`/`NativeTabView`, since those now each
 /// compose this crate's own `NativeControl` (see `native_ui.rs`) as their own `base` field
-/// (docs/elwindui_spec.md 付録H.2.1a) — an `AnyView` wrapping the not-yet-fully-constructed widget
+/// (docs/design/gui_framework_design.md §5.1) — an `AnyView` wrapping the not-yet-fully-constructed widget
 /// itself would be a self-reference. Wrapping just the raw element instead lets `base.handle` be
 /// built (`AnyView::from(xaml.clone())`) before the rest of the widget struct exists.
 pub(crate) trait WinUiHandle: elwindui_core::base::AsAny {

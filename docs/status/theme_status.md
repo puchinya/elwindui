@@ -1,10 +1,8 @@
 # ElwindUIテーマ実装状況
 
-最終更新: 2026-07-26
-
 ## 1. 正規のRust構文
 
-テーマは`.elwind`へ追加せず、Rust属性と式マクロだけで定義・参照する。
+テーマはRust属性と式マクロだけで定義・参照する。
 
 ```rust
 #[elwindui::theme_definition(
@@ -26,10 +24,9 @@ struct AppTheme {
 background: theme!(AppTheme::layout_background)
 ```
 
-当初案の外側属性`#[elwindui::theme]`と参照マクロ`theme!`は、Rustの同一macro
-namespaceで同名のattribute macroとfunction-like macroを同時公開できないため採用しない。
-ユーザー確認に基づき、外側属性を`theme_definition`、field属性を`theme`、参照を
-`theme!`とする構文を正式仕様とした。
+外側属性は`theme_definition`、field属性は`theme`、参照は`theme!`とする。外側属性を
+`#[elwindui::theme]`にはできない——Rustは同一macro namespaceで同名のattribute macroと
+function-like macroを同時公開できないため、参照マクロ`theme!`と衝突する。
 
 ## 2. 実装済み
 
@@ -74,7 +71,7 @@ namespaceで同名のattribute macroとfunction-like macroを同時公開でき�
 
 ## 4. 検証
 
-- `cargo test --workspace`（2026-07-26、Windows、全件成功）。
+- `cargo test --workspace`（Windows、全件成功）。
 - core/codegen/macro単体テスト。
 - WinUI 3単一Applicationホストテスト（text style round-tripとClearValue復帰、15件成功）。
 - `cargo build -p theme-demo`、`cargo check -p font-demo -p theme-demo`。
@@ -84,10 +81,10 @@ namespaceで同名のattribute macroとfunction-like macroを同時公開でき�
   Ocean → Solarized → Default → Dark → Light → Systemを`InvokePattern`で操作し、
   variant/appearanceラベル、revision増加、disabled control、nested TabViewを検証する。
 - `rust-analyzer diagnostics .`は実行済みだが、`#[class]`／`#[viewmodel]`／`#[component]`
-  の既知の解析差異により、既存exampleと新規`theme-demo`のマクロ呼び出し位置で
+  の既知の解析差異により、example群と`theme-demo`のマクロ呼び出し位置で
   `Weak<{unknown}>`／`Rc<{unknown}>`のE0282を報告する。rustcによる同じ生成コードの
-  workspace build/testは成功している。既存のclass macro解析設計は
-  `docs/elwindui_macro_class_spec.md` §15を参照。
+  workspace build/testは成功している。class macroの解析設計は
+  `docs/specs/macro_class_spec.md` §15を参照。
 
 ## 5. 残る制限
 

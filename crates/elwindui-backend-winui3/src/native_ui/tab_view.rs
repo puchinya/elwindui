@@ -8,7 +8,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-/// See docs/elwindui_builtins_spec.md 付録Y and `elwindui_backend_appkit::native_ui::TabView`'s
+/// See docs/specs/builtins_spec.md 付録Y and `elwindui_backend_appkit::native_ui::TabView`'s
 /// doc comment for the shared `children` convention (static and transparent dynamic ranges) and
 /// why `TabViewItem` — not a bespoke per-mode representation — is the thing every child range
 /// normalizes into. `Microsoft.UI.Xaml.Controls.
@@ -128,7 +128,7 @@ impl TabView {
             .expect("TabView::on_constructed: owner must be this TabView");
         *self.weak_self.borrow_mut() = Rc::downgrade(&this);
         // WinUI3's `TabView` is a tab stop by default — see
-        // docs/elwindui_gui_framework_design.md §5.5.
+        // docs/design/gui_framework_design.md §5.5.
         self.set_tab_stop(true);
     }
 

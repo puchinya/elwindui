@@ -2,7 +2,7 @@ use elwindui_core::ui::UIElementExt;
 use std::fmt::Write;
 
 /// Indented text dump of a `UIElement` tree, for use with `assert_snapshot!` (e.g. `insta`).
-/// See docs/elwindui_spec.md 付録V.1.
+/// See docs/design/gui_framework_design.md §9.
 pub fn render_tree(root: &dyn UIElementExt) -> String {
     let mut out = String::new();
     write_node(root, 0, &mut out);

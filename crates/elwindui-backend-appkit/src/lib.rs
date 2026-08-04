@@ -1,5 +1,5 @@
 //! AppKit backend — the concrete widget surface `elwindui-codegen` targets on macOS.
-//! See docs/elwindui_gui_framework_design.md §3.
+//! See docs/design/gui_framework_design.md §3.
 //!
 //! Layering — dependencies run one way only, `native_ui -> inner -> host -> render -> ffi`:
 //!
@@ -20,7 +20,7 @@
 // `#[elwindui_macros::class]`'s `__elwindui_inherit_*!` chain mechanism needs a same-crate
 // macro-to-macro reference (`$crate::the_macro!`) to also work cross-crate, which currently
 // requires this lint disabled — see `crates/elwindui-macros/src/class.rs`'s own doc comment on
-// `inherit_macro_self_ref_path` for the full explanation, and `docs/elwindui_macro_class_spec.md`.
+// `inherit_macro_self_ref_path` for the full explanation, and `docs/specs/macro_class_spec.md`.
 // Every crate using `#[class]` with a same-crate `inherits` chain needs this same line.
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 

@@ -4,7 +4,7 @@ use crate::ui::UIElementExt;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
-/// See docs/elwindui_gui_framework_design.md §5.5. `Up`/`Down`/`Left`/`Right` are declared for API
+/// See docs/design/gui_framework_design.md §5.5. `Up`/`Down`/`Left`/`Right` are declared for API
 /// completeness but not yet implemented by `FocusTracker::move_focus` — 2D spatial navigation needs
 /// each tab stop's own arranged rect, which isn't threaded through here yet. Only `Next`/`Previous`
 /// (`Tab`/`Shift+Tab`) are wired, via `KeyboardDispatcher::handle_key`.
@@ -40,17 +40,17 @@ fn tab_order(scope: &Rc<dyn UIElementExt>) -> Vec<Rc<dyn UIElementExt>> {
 
 /// Tracks which element (if any) currently has keyboard focus within a hosted tree — the
 /// `Rc<dyn UIElementExt>`-based counterpart to `elwindui_core::input::PointerDispatcher`, and the
-/// concrete runtime backing for `docs/elwindui_gui_framework_design.md` §5.5. Owned by
+/// concrete runtime backing for `docs/design/gui_framework_design.md` §5.5. Owned by
 /// `KeyboardDispatcher` (one per hosted tree), the same "host owns exactly one instance" pattern
 /// `PointerDispatcher` already uses. Deliberately not keyed by an `ElementId` string — see
-/// docs/elwindui_gui_framework_design.md §5.2's note that a string-id-based `find_by_id` is
+/// docs/design/gui_framework_design.md §5.2's note that a string-id-based `find_by_id` is
 /// intentionally not provided, so an id-keyed API would have no way to resolve back to a real tree
 /// node in the first place.
 #[derive(Default)]
 pub struct FocusTracker {
     focused: RefCell<Option<Rc<dyn UIElementExt>>>,
     /// Innermost (most recently pushed) scope last — `Dialog`-style focus traps push their own
-    /// root here (`docs/elwindui_builtins_spec.md` 付録M, not yet implemented) so `tab_order`/
+    /// root here (`docs/specs/builtins_spec.md` 付録M, not yet implemented) so `tab_order`/
     /// `move_focus` stay confined to that subtree until popped. Unused until some builtin actually
     /// calls `push_trap`.
     trap_stack: RefCell<Vec<Rc<dyn UIElementExt>>>,

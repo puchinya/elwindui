@@ -111,7 +111,7 @@ impl AppKitHandle for Retained<NSScrollView> {
         // whole-text-storage attribute rewrite (or `typingAttributes`, which only affects text
         // typed *after* this call) rather than a single property setter the way `NSButton`'s
         // attributed-title rebuild works — narrower scope, documented in
-        // `docs/elwindui_font_status.md`, not a silent drop.
+        // `docs/status/font_status.md`, not a silent drop.
     }
     fn supports_text_style(&self) -> bool {
         self.documentView()

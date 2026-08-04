@@ -1,4 +1,4 @@
-/// See docs/elwindui_spec.md 付録S.4. WinUI3 has no equivalent generic error screen; this is a
+/// See docs/design/gui_framework_design.md §8.6. WinUI3 has no equivalent generic error screen; this is a
 /// minimal shape sized to that requirement, not a port of anything.
 pub struct ErrorInfo {
     pub message: String,

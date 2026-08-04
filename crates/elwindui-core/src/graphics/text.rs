@@ -2,7 +2,7 @@
 //! `FontStyle`/`FontStretch`/`CharacterSpacing`/`Foreground` taken as individually-settable,
 //! individually-inherited properties (指示書 §2), aggregated internally into one
 //! [`TextStyleStorage`] per owning element the same way WinUI3 aggregates its own dependency
-//! properties into a `TextFormatting` struct. See `docs/elwindui_font_status.md` for the full
+//! properties into a `TextFormatting` struct. See `docs/status/font_status.md` for the full
 //! design writeup (inheritance model, per-backend mapping tables, and what's deliberately
 //! unimplemented).
 //!
@@ -444,7 +444,7 @@ pub enum TextWrapping {
 
 /// Everything a backend needs to measure one run of text consistently with how it will later be
 /// drawn (指示書 §21's "計測時と描画時で...一致させる" list, minus DPI/text-scale/locale concepts
-/// that don't exist anywhere in `elwindui-core` yet — see `docs/elwindui_font_status.md`).
+/// that don't exist anywhere in `elwindui-core` yet — see `docs/status/font_status.md`).
 #[derive(Debug, Clone)]
 pub struct TextMeasureRequest<'a> {
     pub text: &'a str,
@@ -456,7 +456,7 @@ pub struct TextMeasureRequest<'a> {
     pub alignment: super::command::TextAlignment,
     pub max_lines: Option<u32>,
     /// Device scale factor. Always `1.0` today — no DPI/scale concept exists in `elwindui-core`
-    /// (未対応, `docs/elwindui_font_status.md`). Carried here so a backend that gains one has a
+    /// (未対応, `docs/status/font_status.md`). Carried here so a backend that gains one has a
     /// slot to fill in without another signature change.
     pub scale: f32,
 }

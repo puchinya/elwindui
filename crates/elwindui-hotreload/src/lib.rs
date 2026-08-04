@@ -1,5 +1,5 @@
 /// Whether a hot-reloaded `view` update requires a full remount (state reset) or can be
-/// applied as a differential patch (state preserved). See docs/elwindui_spec.md 付録B.4.
+/// applied as a differential patch (state preserved). See docs/design/tools/hotreload_design.md.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReloadAction {
     Remount,

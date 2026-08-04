@@ -59,7 +59,7 @@ impl TextArea {
 
     fn on_constructed(&self) {
         // WinUI3's `TextBox`/AppKit's `NSTextField` are tab stops by default — see
-        // docs/elwindui_gui_framework_design.md §5.5.
+        // docs/design/gui_framework_design.md §5.5.
         self.set_tab_stop(true);
     }
 }
@@ -114,7 +114,7 @@ impl TextBox {
 
     fn on_constructed(&self) {
         // AppKit's `NSTextField`/WinUI3's `TextBox` are tab stops by default — see
-        // docs/elwindui_gui_framework_design.md §5.5.
+        // docs/design/gui_framework_design.md §5.5.
         self.set_tab_stop(true);
         // Enter-key submit rides the ordinary inherited `on_key_down` (see
         // `elwindui_core::ui::TextBox`'s own doc comment on why this isn't a dedicated field) —
@@ -122,7 +122,7 @@ impl TextBox {
         // `InnerTextBox::set_on_submit` is the one narrowly-scoped AppKit addition that makes a
         // native `NSTextField`'s own Enter key actually reach this dispatch at all (AppKit doesn't
         // otherwise forward its own key handling into `on_key_down` — see
-        // `docs/elwindui_gui_framework_design.md` §5.5/§8.1's "known limitation" note).
+        // `docs/design/gui_framework_design.md` §5.5/§8.1's "known limitation" note).
         let node: Rc<dyn UIElementExt> = self
             .as_ui_element()
             .visual_collection
@@ -186,7 +186,7 @@ impl PasswordBox {
 
     fn on_constructed(&self) {
         // AppKit's `NSSecureTextField`/WinUI3's `PasswordBox` are tab stops by default — see
-        // docs/elwindui_gui_framework_design.md §5.5.
+        // docs/design/gui_framework_design.md §5.5.
         self.set_tab_stop(true);
     }
 }

@@ -8,7 +8,7 @@ mod text_style;
 pub mod validate;
 
 /// Test-only stand-in for the old, workspace-wide `builtins.elwind`/`builtin_modules()` (removed —
-/// see 05d4861/29ced3d/c916322/d255f31/36292fb, `docs/elwindui_implementation_status.md`, Refs #14):
+/// see 05d4861/29ced3d/c916322/d255f31/36292fb, `docs/status/implementation_status.md`, Refs #14):
 /// every real builtin's shape now lives as `#[elwindui_macros::class]` DSL attributes on its actual
 /// `elwindui-core`/`elwindui-backend-*` declaration, propagated to a consumer crate via the
 /// `__elwindui_shape_*!` macro chain (`elwindui-macros::class::build_props_macro`) rather than a
@@ -146,7 +146,7 @@ pub fn generate_component_from_item_struct(
     Ok(generated)
 }
 
-/// Phase 4 (`docs/elwindui_implementation_status.md`): exercises `#[elwindui::dsl_enum]` end to
+/// Phase 4 (`docs/status/implementation_status.md`): exercises `#[elwindui::dsl_enum]` end to
 /// end through the exact same path `generate_component_from_item_struct` uses in production
 /// (register the enum via `generate_dsl_enum_from_item_enum`, then chain it in via
 /// `component_frontend::sibling_enum_modules()` while building a sibling component) — confirming a

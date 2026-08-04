@@ -53,7 +53,7 @@ impl Button {
 
     fn on_constructed(&self) {
         // WinUI3's `Button` is a tab stop by default — see
-        // docs/elwindui_gui_framework_design.md §5.5.
+        // docs/design/gui_framework_design.md §5.5.
         self.set_tab_stop(true);
         // Wires the real `NSButton` click directly to `dispatch_routed`, once, right here, rather
         // than re-detecting/re-wiring it on every relayout. Unconditional — `dispatch_routed`

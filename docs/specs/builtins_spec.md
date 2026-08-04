@@ -101,40 +101,44 @@ UIElement (trait, elwindui-core::ui)
 ## F.1 `builtin::Window` ✅
 
 ```rust
+#[elwindui::dsl_enum]
 enum Direction { Ltr, Rtl }
 
-component Window {
+#[elwindui::component]
+struct Window {
+    #[prop]
     title: String,
-    #[param]
-    width: number = 800,
-    #[param]
-    height: number = 600,
-    #[param]
-    direction: Direction = env::direction(),
-    children: Vec<Element>,
-}
+    #[param(default = 800.0)]
+    width: f32,
+    #[param(default = 600.0)]
+    height: f32,
+    #[param(default = env::direction())]
+    direction: Direction,
+    #[content(children)]
+    children: UIElementCollection,
 
-view Window {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            let win = Microsoft::UI::Xaml::Window::new()?;
-            win.SetTitle(&title)?;
-            win.SetFlowDirection(direction)?;
-            win.SetContent(&build_children(children))?;
-            win
-        }
-        Backend::Appkit => native! {
-            let win = NSWindow::init_with_size(width, height);
-            win.setTitle(&text::from(title));
-            win.setContentView(&build_children(children));
-            win
-        }
-        Backend::Gtk4 => native! {
-            let win = gtk::ApplicationWindow::new(&app);
-            win.set_title(Some(&title));
-            win.set_default_size(width as i32, height as i32);
-            win.set_child(Some(&build_children(children)));
-            win
+    body: view! {
+        match target::backend() {
+            Backend::Winui3 => native! {
+                let win = Microsoft::UI::Xaml::Window::new()?;
+                win.SetTitle(&title)?;
+                win.SetFlowDirection(direction)?;
+                win.SetContent(&build_children(children))?;
+                win
+            }
+            Backend::Appkit => native! {
+                let win = NSWindow::init_with_size(width, height);
+                win.setTitle(&text::from(title));
+                win.setContentView(&build_children(children));
+                win
+            }
+            Backend::Gtk4 => native! {
+                let win = gtk::ApplicationWindow::new(&app);
+                win.set_title(Some(&title));
+                win.set_default_size(width as i32, height as i32);
+                win.set_child(Some(&build_children(children)));
+                win
+            }
         }
     }
 }
@@ -160,15 +164,16 @@ AppKitは`NSWindow.frame`が画面左下原点・Y上向きなため、`top`/`he
 **専用のネイティブ実体を一切持たない**。バックエンドごとの`component`+`view`ペアや`native!`分岐は
 存在せず、DSL側は以下のシェイプ宣言のみで完結する:
 
-```
+```rust
+#[elwindui_macros::class(inherits = crate::ui::Layout)]
 #[content(children)]
-component VerticalLayout inherits Layout {
-    spacing: Option<f32>,
+#[prop(spacing: Option<f32>)]
+pub struct VerticalLayout {
+    spacing: Cell<f32>,
 }
 ```
 
-(`HorizontalLayout`も同じ形。実宣言は`elwindui-core::ui`内の`VerticalLayout`/
-`HorizontalLayout`(`#[elwindui_macros::class]`宣言)。`children: UIElementCollection`(Logicalツリーの子要素リスト、`docs/design/gui_framework_design.md`§5.2)は
+(`HorizontalLayout`も同じ形。実宣言は`elwindui-core::ui`内にある。`children: UIElementCollection`(Logicalツリーの子要素リスト、`docs/design/gui_framework_design.md`§5.2)は
 `VerticalLayout`/`HorizontalLayout`/`Grid`をまとめる共通親`Layout`が持ち、自前の`view`を持たない
 この3つへ無条件に継承される——`#[content(children)]`はフィールドと違い継承されないため、3つとも
 個別に宣言している)
@@ -206,11 +211,15 @@ WinUI3の`UIElement`階層(`UIElement => TextBlock (プリミティブ描画(非
 実体を持たず、DSL側は以下のシェイプ宣言のみで完結する(実宣言は
 `elwindui-core::ui`内の`TextBlock`、`#[elwindui_macros::class]`宣言):
 
-```
+```rust
+#[elwindui_macros::class(inherits = crate::ui::UIElement)]
 #[text_style]
-component TextBlock {
-    text: String,
-    text_alignment: Option<TextAlignment>,
+#[prop(text: String)]
+#[prop(text_alignment: Option<crate::ui::TextAlignment>)]
+pub struct TextBlock {
+    pub text: RefCell<String>,
+    pub text_style: crate::graphics::TextStyleStorage,
+    pub alignment: Cell<TextAlignment>,
 }
 ```
 
@@ -234,12 +243,12 @@ component TextBlock {
 `elwindui-codegen`が使用箇所ごとに直接組み立てる値は次の通り:
 
 ```rust
-elwindui_core::ui::TextBlock::new(/* setters applied after construction */)
-    base: elwindui_core::ui::UIElementBase { margin: /* ... */, ..Default::default() },
-    content: text.to_string(),
-    text_style: /* #[text_style]の7プロパティ、省略時は全てNone(=Visual Parentから継承) */,
-    alignment: /* text_alignment属性、省略時はTextAlignment::Left */,
-})
+let text_block = elwindui_core::ui::TextBlock::new();
+text_block.set_text(text.to_string());
+text_block.set_margin(/* margin属性 */);
+text_block.set_text_alignment(/* text_alignment属性、省略時はTextAlignment::Left */);
+// #[text_style]の7プロパティは、値が指定された場合のみ対応するsetterが呼ばれる。
+// 一度も呼ばなければ未設定のまま(=Visual Parentから継承)。
 ```
 
 `TextBlock::render()`/`measure_override()`は、`TextStyleOwner::resolved_text_style()`
@@ -257,35 +266,37 @@ elwindui_core::ui::TextBlock::new(/* setters applied after construction */)
 ## F.4 `builtin::TextArea` ✅
 
 ```rust
-component TextArea {
-    text: String = bind!(self.text, TwoWay),
-    #[param]
-    padding_start: number = 0,
-    #[param]
-    padding_end: number = 0,
-}
+#[elwindui::component]
+struct TextArea {
+    #[prop(default = bind!(self.text, TwoWay))]
+    text: String,
+    #[param(default = 0)]
+    padding_start: f32,
+    #[param(default = 0)]
+    padding_end: f32,
 
-view TextArea {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            let box_ = microsoft::ui::xaml::controls::TextBox::new()?;
-            box_.SetAcceptsReturn(true)?;
-            box_.SetText(&text)?;
-            box_.TextChanged(&TextChangedHandler::new(move |new_text| { text = new_text; }))?;
-            box_
-        }
-        Backend::Appkit => native! {
-            let view = NSTextView::new();
-            view.setString(&text);
-            view.set_delegate_on_change(move |new_text| { text = new_text; });
-            view
-        }
-        Backend::Gtk4 => native! {
-            let buf = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-            buf.set_text(&text);
-            let tv = gtk::TextView::with_buffer(&buf);
-            buf.connect_changed(move |b| { text = b.text(&b.start_iter(), &b.end_iter(), false).to_string(); });
-            tv
+    body: view! {
+        match target::backend() {
+            Backend::Winui3 => native! {
+                let box_ = microsoft::ui::xaml::controls::TextBox::new()?;
+                box_.SetAcceptsReturn(true)?;
+                box_.SetText(&text)?;
+                box_.TextChanged(&TextChangedHandler::new(move |new_text| { text = new_text; }))?;
+                box_
+            }
+            Backend::Appkit => native! {
+                let view = NSTextView::new();
+                view.setString(&text);
+                view.set_delegate_on_change(move |new_text| { text = new_text; });
+                view
+            }
+            Backend::Gtk4 => native! {
+                let buf = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
+                buf.set_text(&text);
+                let tv = gtk::TextView::with_buffer(&buf);
+                buf.connect_changed(move |b| { text = b.text(&b.start_iter(), &b.end_iter(), false).to_string(); });
+                tv
+            }
         }
     }
 }
@@ -294,35 +305,39 @@ view TextArea {
 ## F.5 `builtin::Dropdown` / `builtin::Option` 📋
 
 ```rust
-component Option {
+#[elwindui::component]
+struct Option {
+    #[prop]
     text: String,
-    #[param]
-    selected: bool = false,
+    #[param(default = false)]
+    selected: bool,
 }
 
-component Dropdown {
+#[elwindui::component]
+struct Dropdown {
+    #[content(options)]
     options: Vec<Option>,
-}
 
-view Dropdown {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            let combo = microsoft::ui::xaml::controls::ComboBox::new()?;
-            for opt in &options { combo.Items().Append(&opt.text)?; }
-            combo.SetSelectedIndex(find_selected_index(&options))?;
-            combo
-        }
-        Backend::Appkit => native! {
-            let popup = NSPopUpButton::new();
-            for opt in &options { popup.addItemWithTitle(&opt.text); }
-            popup.selectItemAtIndex(find_selected_index(&options));
-            popup
-        }
-        Backend::Gtk4 => native! {
-            let model = gtk::StringList::new(&options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>());
-            let dd = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
-            dd.set_selected(find_selected_index(&options) as u32);
-            dd
+    body: view! {
+        match target::backend() {
+            Backend::Winui3 => native! {
+                let combo = microsoft::ui::xaml::controls::ComboBox::new()?;
+                for opt in &options { combo.Items().Append(&opt.text)?; }
+                combo.SetSelectedIndex(find_selected_index(&options))?;
+                combo
+            }
+            Backend::Appkit => native! {
+                let popup = NSPopUpButton::new();
+                for opt in &options { popup.addItemWithTitle(&opt.text); }
+                popup.selectItemAtIndex(find_selected_index(&options));
+                popup
+            }
+            Backend::Gtk4 => native! {
+                let model = gtk::StringList::new(&options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>());
+                let dd = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
+                dd.set_selected(find_selected_index(&options) as u32);
+                dd
+            }
         }
     }
 }
@@ -374,22 +389,22 @@ WinUI3の`Control`(複数パーツからなる汎用コンポジション)に相
 コンテナ。`VerticalLayout`/`Rectangle`と同じ「専用のネイティブ実体を持たない仮想ビルトイン」で、
 `elwindui-codegen`が使用箇所ごとに`elwindui_core::ui::Control`を直接組み立てる:
 
-```
-#[content(children)]
+```rust
+#[elwindui_macros::class(inherits = crate::ui::UIElement)]
 #[text_style]
-component Control inherits UIElement {
-    children: UIElementCollection,
-    padding: Option<f32>,
-
-    #[prop(default = None)]
-    template: Option<ControlTemplate<Self>>,
-}
-
-view Control {
-    match template {
-        Some(t) => t(Self),
-        None => /* 既存挙動: children をそのまま Visual 子要素にする */,
-    }
+#[content(children)]
+#[prop(children: crate::ui::UIElementCollection)]
+#[prop(padding: Option<f32>)]
+// 📋 `template`は設計のみ・未実装(下記F.9.1)。実装時はここに
+// #[prop(template: Option<ControlTemplate<Self>>)] が加わり、
+// 視覚ツリーのルートが `template` の有無で切り替わる:
+//     Some(t) => t(Self)
+//     None    => children をそのまま Visual 子要素にする
+pub struct Control {
+    pub padding: Cell<f32>,
+    pub content_horizontal_alignment: Cell<HorizontalAlignment>,
+    pub content_vertical_alignment: Cell<VerticalAlignment>,
+    pub text_style: crate::graphics::TextStyleStorage,
 }
 ```
 
@@ -417,8 +432,10 @@ view Control {
 
 **その場限りのインライン値クロージャ**(`docs/specs/dsl_spec.md`§4「コールバック型フィールドへのクロージャ値構文」をそのまま流用):
 
-```
-component CustomButton inherits Control {
+```rust
+#[elwindui::component(inherits Control)]
+struct CustomButton {
+    #[prop]
     content: Rc<dyn UIElement>,
 
     #[prop(default = Some(|control| Grid {
@@ -443,8 +460,10 @@ fn custom_button_template(inst: &CustomButton) -> Rc<dyn UIElement> {
 
 `CustomButton`側は、この関数を裸パスで参照するだけでよい:
 
-```
-component CustomButton inherits Control {
+```rust
+#[elwindui::component(inherits Control)]
+struct CustomButton {
+    #[prop]
     content: Rc<dyn UIElement>,
 
     #[prop(default = Some(custom_button_template))]
@@ -464,17 +483,13 @@ WinUI3の実際の`ContentControl`(単一の`Content`プロパティを持つ、
 inherits Rectangle`と同じパターン)で`Control`を実際に継承し、その`view`が単一の子要素だけを
 `Control`へ転送する:
 
-```
-component ContentControl inherits Control {
-    content: std::rc::Rc<dyn UIElement>,
-    // padding は Control から自動的に継承される(§3)——再宣言不要
-}
-
-view ContentControl {
-    Control {
-        padding: padding,
-        content
-    }
+```rust
+#[elwindui_macros::class(inherits = crate::ui::Control)]
+#[content(content)]
+#[prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
+// padding は Control から自動的に継承される(§3)——再宣言不要
+pub struct ContentControl {
+    content: RefCell<Option<Rc<dyn UIElementExt>>>,
 }
 ```
 
@@ -536,16 +551,16 @@ WPF/WinUI3の`Grid`(行/列ベースのレイアウト、`*`比例サイズ対�
 `Rectangle`/`Control`と同じ「専用のネイティブ実体を持たない仮想ビルトイン」で、`elwindui-codegen`が
 使用箇所ごとに`elwindui_core::ui::Grid`を直接組み立てる:
 
-```
+```rust
+#[elwindui_macros::class(inherits = crate::ui::Layout)]
 #[content(children)]
-component Grid inherits Layout {
-    rows: Vec<GridLength>,
-    columns: Vec<GridLength>,
-
-    #[attached]
-    row: i32 = 0,
-    #[attached]
-    column: i32 = 0,
+#[prop(rows: Vec<crate::layout::GridLength>)]
+#[prop(columns: Vec<crate::layout::GridLength>)]
+#[prop(attached, row: i32 = 0)]
+#[prop(attached, column: i32 = 0)]
+pub struct Grid {
+    pub rows: RefCell<Vec<GridLength>>,
+    pub columns: RefCell<Vec<GridLength>>,
 }
 ```
 
@@ -599,45 +614,51 @@ NativeControl派生コントロール拡充Phase 1(`docs/status/nativecontrol_st
 独立したビルトイン部品であり、`TextArea`へ`multiline`のようなフラグを追加して統合してはいない。
 
 ```rust
-component TextBox {
-    text: String = bind!(self.text, TwoWay),
+#[elwindui::component]
+struct TextBox {
+    #[prop(default = bind!(self.text, TwoWay))]
+    text: String,
+    #[prop]
     placeholder: Option<String>,
+    #[prop]
     read_only: Option<bool>,
+    #[prop]
     max_length: Option<u32>,
+    #[prop]
     text_alignment: Option<TextAlignment>,
-}
 
-view TextBox {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            // TextAreaと全く同じXAMLクラス。SetAcceptsReturn/SetTextWrappingを設定しないだけ。
-            let box_ = microsoft::ui::xaml::controls::TextBox::new()?;
-            box_.SetText(&text)?;
-            box_.SetPlaceholderText(&placeholder.unwrap_or_default())?;
-            box_.SetIsReadOnly(read_only.unwrap_or(false))?;
-            box_.SetMaxLength(max_length.unwrap_or(0) as i32)?; // 0 = 無制限、ネイティブ実装
-            box_.TextChanged(&TextChangedHandler::new(move |new_text| { text = new_text; }))?;
-            box_.KeyDown(&KeyEventHandler::new(move |args| {
-                if args.Key() == VirtualKey::Enter { dispatch_on_key_down(Key::Enter); }
-            }))?;
-            box_
-        }
-        Backend::Appkit => native! {
-            let field = NSTextField::new();
-            field.setStringValue(&text);
-            field.setPlaceholderString(&placeholder.unwrap_or_default());
-            field.setEditable(!read_only.unwrap_or(false));
-            // NSTextFieldにmax_lengthのネイティブAPIは無い。デリゲート側でtruncateする。
-            field.set_delegate_on_change_with_max_length(max_length, move |new_text| { text = new_text; });
-            // NSTextFieldにEnterキー専用イベントは無い。control:textView:doCommandBySelector:で
-            // insertNewline:を検知し、on_key_downへ転送する(TextBox専用の狭い追加対応)。
-            field.set_delegate_on_submit(move || { dispatch_on_key_down(Key::Enter); });
-            field
-        }
-        Backend::Gtk4 => native! {
-            // 未実装 — docs/status/nativecontrol_status.md §3のGTK4基盤構築フォロー
-            // アップ完了後に着手する。
-            unimplemented!()
+    body: view! {
+        match target::backend() {
+            Backend::Winui3 => native! {
+                // TextAreaと全く同じXAMLクラス。SetAcceptsReturn/SetTextWrappingを設定しないだけ。
+                let box_ = microsoft::ui::xaml::controls::TextBox::new()?;
+                box_.SetText(&text)?;
+                box_.SetPlaceholderText(&placeholder.unwrap_or_default())?;
+                box_.SetIsReadOnly(read_only.unwrap_or(false))?;
+                box_.SetMaxLength(max_length.unwrap_or(0) as i32)?; // 0 = 無制限、ネイティブ実装
+                box_.TextChanged(&TextChangedHandler::new(move |new_text| { text = new_text; }))?;
+                box_.KeyDown(&KeyEventHandler::new(move |args| {
+                    if args.Key() == VirtualKey::Enter { dispatch_on_key_down(Key::Enter); }
+                }))?;
+                box_
+            }
+            Backend::Appkit => native! {
+                let field = NSTextField::new();
+                field.setStringValue(&text);
+                field.setPlaceholderString(&placeholder.unwrap_or_default());
+                field.setEditable(!read_only.unwrap_or(false));
+                // NSTextFieldにmax_lengthのネイティブAPIは無い。デリゲート側でtruncateする。
+                field.set_delegate_on_change_with_max_length(max_length, move |new_text| { text = new_text; });
+                // NSTextFieldにEnterキー専用イベントは無い。control:textView:doCommandBySelector:で
+                // insertNewline:を検知し、on_key_downへ転送する(TextBox専用の狭い追加対応)。
+                field.set_delegate_on_submit(move || { dispatch_on_key_down(Key::Enter); });
+                field
+            }
+            Backend::Gtk4 => native! {
+                // 未実装 — docs/status/nativecontrol_status.md §3のGTK4基盤構築フォロー
+                // アップ完了後に着手する。
+                unimplemented!()
+            }
         }
     }
 }
@@ -669,39 +690,44 @@ NativeControl派生コントロール拡充Phase 1で追加。`TextBox`(F.12)と
 `docs/status/nativecontrol_status.md`参照)。
 
 ```rust
-component PasswordBox {
-    password: String = bind!(self.password, TwoWay),
+#[elwindui::component]
+struct PasswordBox {
+    #[prop(default = bind!(self.password, TwoWay))]
+    password: String,
+    #[prop]
     placeholder: Option<String>,
+    #[prop]
     max_length: Option<u32>,
+    #[prop]
     reveal_enabled: Option<bool>,
-}
 
-view PasswordBox {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            let box_ = microsoft::ui::xaml::controls::PasswordBox::new()?;
-            box_.SetPassword(&password)?;
-            box_.SetPlaceholderText(&placeholder.unwrap_or_default())?;
-            box_.SetMaxLength(max_length.unwrap_or(0) as i32)?;
-            box_.SetPasswordRevealMode(if reveal_enabled.unwrap_or(false) {
-                PasswordRevealMode::Peek
-            } else {
-                PasswordRevealMode::Hidden
-            })?;
-            box_.PasswordChanged(&RoutedEventHandler::new(move |_, _| { password = box_.Password(); }))?;
-            box_
-        }
-        Backend::Appkit => native! {
-            let field = NSSecureTextField::new();
-            field.setStringValue(&password);
-            field.setPlaceholderString(&placeholder.unwrap_or_default());
-            // NSSecureTextFieldにreveal_enabled相当のネイティブAPIは無い。true側は現状no-op。
-            field.set_delegate_on_change_with_max_length(max_length, move |new_password| { password = new_password; });
-            field
-        }
-        Backend::Gtk4 => native! {
-            // 未実装 — GTK4基盤構築フォローアップ完了後に着手する。
-            unimplemented!()
+    body: view! {
+        match target::backend() {
+            Backend::Winui3 => native! {
+                let box_ = microsoft::ui::xaml::controls::PasswordBox::new()?;
+                box_.SetPassword(&password)?;
+                box_.SetPlaceholderText(&placeholder.unwrap_or_default())?;
+                box_.SetMaxLength(max_length.unwrap_or(0) as i32)?;
+                box_.SetPasswordRevealMode(if reveal_enabled.unwrap_or(false) {
+                    PasswordRevealMode::Peek
+                } else {
+                    PasswordRevealMode::Hidden
+                })?;
+                box_.PasswordChanged(&RoutedEventHandler::new(move |_, _| { password = box_.Password(); }))?;
+                box_
+            }
+            Backend::Appkit => native! {
+                let field = NSSecureTextField::new();
+                field.setStringValue(&password);
+                field.setPlaceholderString(&placeholder.unwrap_or_default());
+                // NSSecureTextFieldにreveal_enabled相当のネイティブAPIは無い。true側は現状no-op。
+                field.set_delegate_on_change_with_max_length(max_length, move |new_password| { password = new_password; });
+                field
+            }
+            Backend::Gtk4 => native! {
+                // 未実装 — GTK4基盤構築フォローアップ完了後に着手する。
+                unimplemented!()
+            }
         }
     }
 }
@@ -749,39 +775,43 @@ ScrollView            DSLから見える NativeControl 葉ノード
 `elwindui_backend_winui3::inner::TreeHostPanel::unconstrained_axes`)。
 
 ```rust
-component ScrollView {
+#[elwindui::component]
+struct ScrollView {
+    #[prop]
     content: Rc<dyn UIElement>,
-    horizontal_scroll_enabled: bool = false,
-    vertical_scroll_enabled: bool = true,
-}
+    #[prop(default = false)]
+    horizontal_scroll_enabled: bool,
+    #[prop(default = true)]
+    vertical_scroll_enabled: bool,
 
-view ScrollView {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            let content_host = TreeHostPanel::new(); // ElwinduiContentRoot
-            content_host.set_tree(content);
-            content_host.set_unconstrained_axes(horizontal_scroll_enabled, vertical_scroll_enabled);
-            let scroll_viewer = ScrollViewer::new()?;
-            scroll_viewer.SetContent(&content_host.as_element())?;
-            scroll_viewer.SetVerticalScrollMode(if vertical_scroll_enabled { Auto } else { Disabled })?;
-            scroll_viewer.SetHorizontalScrollMode(if horizontal_scroll_enabled { Auto } else { Disabled })?;
-            // CanvasはWinUI3のレイアウトシステムに参加しないため、スクロールしない側の軸幅/高さを
-            // ScrollViewer.SizeChangedで明示的に押し込む必要がある(TabViewItem.Contentと同じ問題)。
-            scroll_viewer
-        }
-        Backend::Appkit => native! {
-            let content_host = TreeHostView::new(); // ElwinduiContentRoot
-            content_host.set_tree(content);
-            content_host.set_unconstrained_axes(horizontal_scroll_enabled, vertical_scroll_enabled);
-            let scroll = NSScrollView::new();
-            scroll.setDocumentView(Some(&content_host));
-            // スクロールしない側の軸は NSAutoresizingMaskOptions(ViewWidthSizable/ViewHeightSizable)
-            // でclip viewへ自動追従させる。NSNotificationCenterの購読は不要。
-            scroll
-        }
-        Backend::Gtk4 => native! {
-            // 未実装 — GTK4基盤構築フォローアップ完了後に着手する。
-            unimplemented!()
+    body: view! {
+        match target::backend() {
+            Backend::Winui3 => native! {
+                let content_host = TreeHostPanel::new(); // ElwinduiContentRoot
+                content_host.set_tree(content);
+                content_host.set_unconstrained_axes(horizontal_scroll_enabled, vertical_scroll_enabled);
+                let scroll_viewer = ScrollViewer::new()?;
+                scroll_viewer.SetContent(&content_host.as_element())?;
+                scroll_viewer.SetVerticalScrollMode(if vertical_scroll_enabled { Auto } else { Disabled })?;
+                scroll_viewer.SetHorizontalScrollMode(if horizontal_scroll_enabled { Auto } else { Disabled })?;
+                // CanvasはWinUI3のレイアウトシステムに参加しないため、スクロールしない側の軸幅/高さを
+                // ScrollViewer.SizeChangedで明示的に押し込む必要がある(TabViewItem.Contentと同じ問題)。
+                scroll_viewer
+            }
+            Backend::Appkit => native! {
+                let content_host = TreeHostView::new(); // ElwinduiContentRoot
+                content_host.set_tree(content);
+                content_host.set_unconstrained_axes(horizontal_scroll_enabled, vertical_scroll_enabled);
+                let scroll = NSScrollView::new();
+                scroll.setDocumentView(Some(&content_host));
+                // スクロールしない側の軸は NSAutoresizingMaskOptions(ViewWidthSizable/ViewHeightSizable)
+                // でclip viewへ自動追従させる。NSNotificationCenterの購読は不要。
+                scroll
+            }
+            Backend::Gtk4 => native! {
+                // 未実装 — GTK4基盤構築フォローアップ完了後に着手する。
+                unimplemented!()
+            }
         }
     }
 }
@@ -842,16 +872,17 @@ ScrollView {
 ```rust
 use painters::volume_meter::draw_meter;
 
-component VolumeMeter {
+#[elwindui::component]
+struct VolumeMeter {
     #[range(0..=1)]
     level: f64,
-}
 
-view VolumeMeter {
-    Canvas {
-        width: 200
-        height: 40
-        on_paint: draw_meter(painter, level)
+    body: view! {
+        Canvas {
+            width: 200
+            height: 40
+            on_paint: draw_meter(painter, level)
+        }
     }
 }
 ```
@@ -881,25 +912,27 @@ trait Painter {
 `builtin::Canvas`自身は付録Fの他部品と同様、`match target::backend()`で各バックエンドのネイティブ描画コンテキストを`Painter`実装でラップして`on_paint`に渡す(バックエンド分岐が許されるのは`builtin`定義のみという原則はここでも維持される)。
 
 ```rust
-component Canvas {
+#[elwindui::component]
+struct Canvas {
     #[param]
-    width: number,
+    width: f32,
     #[param]
-    height: number,
+    height: f32,
+    #[prop]
     on_paint: fn(&mut Painter),
-}
 
-view Canvas {
-    match target::backend() {
-        Backend::Winui3 => native! {
-            let ctrl = microsoft::ui::xaml::controls::CanvasControl::new()?;
-            ctrl.Draw(&DrawHandler::new(move |session| {
-                let mut p = Win2DPainter::wrap(session);
-                on_paint(&mut p);
-            }))?;
-            ctrl
+    body: view! {
+        match target::backend() {
+            Backend::Winui3 => native! {
+                let ctrl = microsoft::ui::xaml::controls::CanvasControl::new()?;
+                ctrl.Draw(&DrawHandler::new(move |session| {
+                    let mut p = Win2DPainter::wrap(session);
+                    on_paint(&mut p);
+                }))?;
+                ctrl
+            }
+            _ => native! { /* Appkit / Gtk4 も同様にラップ */ }
         }
-        _ => native! { /* Appkit / Gtk4 も同様にラップ */ }
     }
 }
 ```
@@ -979,18 +1012,19 @@ Canvas {
 ## G.6 インタラクション(クリック・ドラッグ)
 
 ```rust
-component DraggableKnob {
+#[elwindui::component]
+struct DraggableKnob {
     #[range(0..=1)]
     value: f64,
-}
 
-view DraggableKnob {
-    Canvas {
-        width: 60
-        height: 60
-        on_paint: draw_knob(painter, value)
-        on_pointer_down: |pos| start_drag(pos)
-        on_pointer_move: |pos| value = knob_value_from_pos(pos)
+    body: view! {
+        Canvas {
+            width: 60
+            height: 60
+            on_paint: draw_knob(painter, value)
+            on_pointer_down: |pos| start_drag(pos)
+            on_pointer_move: |pos| value = knob_value_from_pos(pos)
+        }
     }
 }
 ```
@@ -1004,33 +1038,34 @@ view DraggableKnob {
 ```rust
 use painters::knob::draw_knob;
 
-component VolumeSlider {
+#[elwindui::component]
+struct VolumeSlider {
     #[range(0..=1)]
     value: f64,
 
-    #[computed]
-    percent_label: String = format!("{}%", (value * 100.0) as i32),
-}
+    #[computed(default = format!("{}%", (value * 100.0) as i32))]
+    percent_label: String,
 
-view VolumeSlider {
-    Row {
-        spacing: 12
+    body: view! {
+        HorizontalLayout {
+            spacing: 12
 
-        TextBlock { text: t!("volume-label") }
+            TextBlock { text: t!("volume-label") }
 
-        Canvas {
-            width: 60
-            height: 60
-            on_paint: draw_knob(painter, value)
-            on_pointer_move: |pos| value = knob_value_from_pos(pos)
-            #[accessible(role: Slider, label: t!("a11y-volume"), value: percent_label)]
-        }
+            Canvas {
+                width: 60
+                height: 60
+                on_paint: draw_knob(painter, value)
+                on_pointer_move: |pos| value = knob_value_from_pos(pos)
+                #[accessible(role: Slider, label: t!("a11y-volume"), value: percent_label)]
+            }
 
-        TextBlock { text: percent_label }
+            TextBlock { text: percent_label }
 
-        Button {
-            text: t!("volume-mute")
-            on_click: value = 0.0
+            Button {
+                text: t!("volume-mute")
+                on_click: value = 0.0
+            }
         }
     }
 }
@@ -1079,19 +1114,20 @@ enum Route {
 ## L.2 `NavigationHost`
 
 ```rust
-component App {
-    #[param]
-    current_route: Route = Route::Main,
-}
+#[elwindui::component]
+struct App {
+    #[param(default = Route::Main)]
+    current_route: Route,
 
-view App {
-    NavigationHost {
-        route: current_route
+    body: view! {
+        NavigationHost {
+            route: current_route
 
-        match current_route {
-            Route::Main     => NotepadWindow { }
-            Route::Settings => SettingsWindow { }
-            Route::Search   => SearchDialog { }
+            match current_route {
+                Route::Main     => NotepadWindow { }
+                Route::Settings => SettingsWindow { }
+                Route::Search   => SearchDialog { }
+            }
         }
     }
 }
@@ -1141,20 +1177,21 @@ fn go_back() {
 ## M.1 `Dialog`(モーダル、未実装・仕様のみ)
 
 ```rust
-component App {
-    #[param]
-    show_settings: bool = false,
-}
+#[elwindui::component]
+struct App {
+    #[param(default = false)]
+    show_settings: bool,
 
-view App {
-    NotepadWindow { }
+    body: view! {
+        NotepadWindow { }
 
-    if show_settings {
-        Dialog {
-            title: t!("settings-title")
-            on_dismiss: show_settings = false
+        if show_settings {
+            Dialog {
+                title: t!("settings-title")
+                on_dismiss: show_settings = false
 
-            SettingsPanel { }
+                SettingsPanel { }
+            }
         }
     }
 }
@@ -1365,7 +1402,8 @@ WinUI3の`Composition`が提供する「暗黙アニメーション(値が変わ
 **暗黙アニメーション(prop変化に自動追従):**
 
 ```rust
-component ProgressBar {
+#[elwindui::component]
+struct ProgressBar {
     #[range(0..=1)]
     #[transition(duration: 200ms, easing: EaseOutCubic)]
     value: f64,
@@ -1441,7 +1479,7 @@ VirtualList {
     items: documents
     key: |doc| doc.id
     item_height: 32
-    render_item: |doc| Row { TextBlock { text: doc.name } }
+    render_item: |doc| HorizontalLayout { TextBlock { text: doc.name } }
 }
 ```
 
@@ -1558,28 +1596,34 @@ TextArea {
 ## X.1 基本構文
 
 ```rust
-view NotepadWindow {
-    Window {
-        title: vm.window_title
-        menu_bar: MenuBar {
-            MenuBarItem {
-                text: t!("menu-file")
-                Menu {
-                    MenuItem { text: t!("menu-new"), #[shortcut(winui3: "Ctrl+N", appkit: "Cmd+N")], on_select: vm.new_tab }
-                    MenuItem { text: t!("menu-open"), #[shortcut(winui3: "Ctrl+O", appkit: "Cmd+O")], on_select: vm.open }
-                    MenuItem { text: t!("menu-save"), #[shortcut(winui3: "Ctrl+S", appkit: "Cmd+S")], on_select: vm.save, enabled: vm.save_can_execute }
-                }
-            }
-            MenuBarItem {
-                text: t!("menu-edit")
-                Menu {
-                    MenuItem { text: t!("menu-undo"), #[shortcut("Ctrl+Z")], on_select: vm.undo }
-                    MenuItem { text: t!("menu-redo"), #[shortcut(winui3: "Ctrl+Y", appkit: "Cmd+Shift+Z")], on_select: vm.redo }
-                }
-            }
-        }
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[bindable]
+    vm: std::rc::Rc<NotepadViewModel>,
 
-        // ... 既存のTabView等
+    body: view! {
+        Window {
+            title: vm.window_title
+            menu_bar: MenuBar {
+                MenuBarItem {
+                    text: t!("menu-file")
+                    Menu {
+                        MenuItem { text: t!("menu-new"), #[shortcut(winui3: "Ctrl+N", appkit: "Cmd+N")], on_select: vm.new_tab }
+                        MenuItem { text: t!("menu-open"), #[shortcut(winui3: "Ctrl+O", appkit: "Cmd+O")], on_select: vm.open }
+                        MenuItem { text: t!("menu-save"), #[shortcut(winui3: "Ctrl+S", appkit: "Cmd+S")], on_select: vm.save, enabled: vm.save_can_execute }
+                    }
+                }
+                MenuBarItem {
+                    text: t!("menu-edit")
+                    Menu {
+                        MenuItem { text: t!("menu-undo"), #[shortcut("Ctrl+Z")], on_select: vm.undo }
+                        MenuItem { text: t!("menu-redo"), #[shortcut(winui3: "Ctrl+Y", appkit: "Cmd+Shift+Z")], on_select: vm.redo }
+                    }
+                }
+            }
+
+            // ... 既存のTabView等
+        }
     }
 }
 ```
@@ -1630,23 +1674,29 @@ TabView {
 **動的なタブ**(実行時に増減する場合。ノートパッド例):
 
 ```rust
-view NotepadWindow {
-    Window {
-        title: vm.window_title
-        menu_bar: MenuBar { /* 付録X */ }
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[bindable]
+    vm: std::rc::Rc<NotepadViewModel>,
 
-        TabView {
-            for doc in vm.documents {
-                TabViewItem {
-                    header: doc.file_name
-                    closable: true
-                    on_close: vm.close_active_tab
-                    DocumentView { doc: doc }
+    body: view! {
+        Window {
+            title: vm.window_title
+            menu_bar: MenuBar { /* 付録X */ }
+
+            TabView {
+                for doc in vm.documents {
+                    TabViewItem {
+                        header: doc.file_name
+                        closable: true
+                        on_close: vm.close_active_tab
+                        DocumentView { doc: doc }
+                    }
                 }
+                selected_index: vm.active_tab
+                on_select: |index| vm.select_tab(index)
+                on_new_tab: vm.new_tab
             }
-            selected_index: vm.active_tab
-            on_select: |index| vm.select_tab(index)
-            on_new_tab: vm.new_tab
         }
     }
 }

@@ -979,12 +979,12 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 > **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25, 30〜31 — `#[param]`の静的性、`bind!`経由のstoreアクセス、`viewmodel`のV/VM分離、`#[shortcut(...)]`の妥当性など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: テーマはDSLブロックではなくRust属性`#[elwindui::theme_definition]`として実装されているため対象外、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装、26〜29: `ControlTemplate<Self>`/`#[elwindui::template]`未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は欠番(アクションはRustの`impl`ブロックの`fn`として自動検出されるため、対応する型検査が存在しない)。
 
 1. `#[param]` フィールドの初期化式に `bind!` / propの参照 / `#[computed]` が出現 → エラー
-2. `#[param]` フィールドの初期化式に非純粋関数(`now()`, `random()` 等)が出現 → エラー(`env::*` / `once` 値は例外)
+2. `#[param]` フィールドの初期化式に非純粋関数(`now()`, `random()` 等)が出現 → エラー(`env::*` は例外)
 3. `#[computed]` フィールドへの外部代入 → エラー
 4. enum値の裸文字列直書き(完全修飾でない参照) → エラー
 5. `match` におけるenumメンバーの網羅漏れ(`_ =>` なし) → エラー
 6. 制約(`#[range]`, `#[length]`, `#[pattern]` 等)付きフィールドへのリテラル値代入が制約違反 → ビルド時エラー、動的値の場合は実行時エラー
-7. `external::*` 呼び出しがトップレベルの `once` 宣言以外の場所に出現 → エラー
+7. (欠番 — `once` 宣言の廃止に伴い、`external::*` を許可する場所自体が無くなったため)
 8. importの循環・未解決パス → エラー
 9. `#[overrides(builtin::X)]` が付いていない通常の`component`の`view`内に `native!` ブロック、または `target::backend()` の参照が出現 → エラー(`docs/design/gui_framework_design.md`§4.1参照。独自部品はバックエンド共通実装に限定する)
 10. `view`内に`Canvas`が含まれているが `#[accessible(...)]` が付与されていない → 警告(`docs/design/gui_framework_design.md`§5.6参照)

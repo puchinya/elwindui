@@ -125,18 +125,7 @@ fn main() {
 
 Rust標準の`if`/`for`/`match`をそのまま採用し、専用ディレクティブは設けない。`match`は対象がenumの場合、全メンバー網羅で`_ =>`を省略できる。**網羅されていない場合はコンパイルエラー**となる(これは`Backend`・`Route`(§8.2)・`AsyncState`(§7.3)など、フレームワーク全体の多くのenumで繰り返し利用される中核機構)。
 
-### 2.4 `style`(横断的属性適用)
-
-```rust
-style {
-    select(Text) { font_family: "Noto Sans" }
-    select(Button, variant == "danger") { color: "#e74c3c" }
-}
-```
-
-`select(要素型, 条件式)`で対象を絞り込み属性をマージ適用する。インライン属性がスタイル定義より優先(後勝ち・詳細優先)。`theme`のトークン参照(§8.5)や`target::backend()`による条件分岐(§3.3)もこのセレクタ条件式内で使える。
-
-### 2.5 値制約(アトリビュートによる数式的表現)
+### 2.4 値制約(アトリビュートによる数式的表現)
 
 | 記法 | 意味 |
 |---|---|
@@ -150,7 +139,7 @@ style {
 
 検証タイミング: リテラル値による制約違反はビルド時静的エラー、`bind!`等の動的値による違反は実行時エラー。
 
-### 2.6 `enum`
+### 2.5 `enum`
 
 値候補があるフィールドは常に名前付き`enum`として定義する(匿名共用体は採用しない)。
 
@@ -159,16 +148,15 @@ style {
 - `#[label(...)]`で多言語表示名を付与、`member.label()`で現在ロケールの文字列取得
 - `match`との組み合わせで網羅性検査が働く(§2.3)
 
-### 2.7 動的定数(`env` / `once`)
+### 2.6 動的定数(`env`)
 
 「実体化時に一度だけ確定し以後不変」な値を`#[param]`の静的評価式の例外として参照可能にする。
 
 - `env::os()` / `env::platform()` / `env::locale()` / `env::direction()` — 組み込み
-- `once NAME: T = external::foo()` — ユーザー拡張。`external::*`呼び出しはトップレベルの`once`宣言でのみ許可され、動的性の入口を一箇所に集約する
 
 `target::backend()`(§3.3)はこれとは確定タイミングが異なる**コンパイル時定数**であり、`env::*`より強い静的性を持つ。
 
-### 2.8 データバインディング
+### 2.7 データバインディング
 
 ```rust
 volume: i32 = bind!(settings.volume, TwoWay),
@@ -176,7 +164,7 @@ volume: i32 = bind!(settings.volume, TwoWay),
 
 `bind!(path, mode)`のmodeは`OneWay`(既定、外部→propの一方向反映)/`TwoWay`(UI操作で外部にも書き戻す)/`OneTime`(実体化時に一度だけ取り込み以後固定)。参照先は`store`(§7.1)・`viewmodel`(§7.2)・ビルトインStore(§8.8)のフィールドパスであり、いずれも`#[param]`から直接参照することはできない(13章ルール12・13)。
 
-### 2.9 多言語対応(i18n)
+### 2.8 多言語対応(i18n)
 
 翻訳は業界標準の**Fluent(.ftl)**をそのまま採用し、DSL側は`t!`マクロでメッセージIDを参照するだけに留める。複数形・性別分岐・日付/数値フォーマットはFluent自身の構文(`select`式、`NUMBER()`/`DATETIME()`)に委譲する。
 
@@ -184,11 +172,11 @@ volume: i32 = bind!(settings.volume, TwoWay),
 - `t!`の引数名は対応する`.ftl`メッセージ内の`{ $引数名 }`と一致しなければ静的エラー
 - RTL対応のため`padding_start`/`padding_end`等の論理方向プロパティを使う
 
-### 2.10 モジュール(import)
+### 2.9 モジュール(import)
 
 Rustの`use`構文と完全に一致させる(`use components::card::Card as ProductCard;`等)。静的にimportを解決し、循環参照・未解決参照を機械的に検出する。
 
-### 2.11 要素ツリーの探索(`Element`トレイト)
+### 2.10 要素ツリーの探索(`Element`トレイト)
 
 「子要素を持つ」性質は既存の`{}`ネスト構文が表現するため、children専用の新DSL構文は追加しない。代わりにコード生成器が全要素型に共通のトレイトを自動実装する。
 
@@ -245,42 +233,52 @@ Windows→**WinUI 3**(windows-rs経由)、macOS→**AppKit**(objc2経由)、Linu
 | `Window { title, ... }` | `Microsoft::UI::Xaml::Window` | `NSWindow` | `gtk::ApplicationWindow` |
 | `Button { text, on_click }` | `Microsoft::UI::Xaml::Controls::Button` | `NSButton` | `gtk::Button` |
 | `TextArea { text }` | `Microsoft::UI::Xaml::Controls::TextBox`(`AcceptsReturn: true`) | `NSTextView` | `gtk::TextView` |
-| `Column { ... }` | `Microsoft::UI::Xaml::Controls::StackPanel`(`Orientation: Vertical`) | `NSStackView(orientation: .vertical)` | `gtk::Box(orientation: Vertical)` |
+| `VerticalLayout { ... }` | `Microsoft::UI::Xaml::Controls::StackPanel`(`Orientation: Vertical`) | `NSStackView(orientation: .vertical)` | `gtk::Box(orientation: Vertical)` |
 | `Dropdown { ... }` | `Microsoft::UI::Xaml::Controls::ComboBox` | `NSPopUpButton` | `gtk::DropDown` |
 
 DSL記述者はこれらの違いを一切意識せず、`Button { text: t!("save"), on_click: save_document() }`と書くだけでよい(実際の各ビルトインのリファレンス実装は`docs/specs/builtins_spec.md`付録Fを参照)。
 
-OSごとの見た目差はスタイル層に閉じ込める:
+OSごとの見た目差は、原則としてネイティブウィジェットの既定にそのまま委ねる。明示的に差を付けたい場合は、
+テーマトークン(§8.5、`docs/status/theme_status.md`)をバックエンドごとに解決させるか、ビルトインの
+リファレンス実装側で`target::backend()`分岐として閉じ込める:
 
 ```rust
-style {
-    select(Button) {
-        // 既定はOS標準の見た目に委ね、何も書かない
-    }
-    select(Button, backend == Backend::Winui3) { corner_radius: 4 }
-    select(Button, backend == Backend::Appkit) { corner_radius: 6 }
+#[elwindui::component(inherits Control)]
+struct Button {
+    #[param(default = match target::backend() {
+        Backend::Winui3 => 4.0,
+        Backend::Appkit => 6.0,
+        _               => 0.0,
+    })]
+    corner_radius: f32,
 }
 ```
 
-`backend == Backend::Winui3`のような条件はビルドターゲットで確定するコンパイル時定数として扱われ、該当しない分岐はコード生成対象から静的に除外される(デッドコード除去と同様)。
+`match target::backend()`の各腕はビルドターゲットで確定するコンパイル時定数として扱われ、該当しない分岐はコード生成対象から静的に除外される(デッドコード除去と同様)。
 
-プラットフォーム固有機能へのエスケープハッチは`native!`ブロック(§2.11外の特殊構文。フレームワーク固有API、例:AppKitの`NSVisualEffectView`を直接埋め込む)を`#[cfg(backend = "...")]`と組み合わせて使う:
+プラットフォーム固有機能へのエスケープハッチは`native!`ブロック(§2.10外の特殊構文。フレームワーク固有API、例:AppKitの`NSVisualEffectView`を直接埋め込む)を`#[cfg(backend = "...")]`と組み合わせて使う:
 
 ```rust
-view NotepadWindow {
-    Column {
-        TextArea { text: content }
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[prop]
+    content: String,
 
-        #[cfg(backend = "winui3")]
-        native! {
-            // WinUI 3固有: Mica素材背景を有効化
-            self.window.SystemBackdrop(MicaBackdrop::new());
-        }
+    body: view! {
+        VerticalLayout {
+            TextArea { text: content }
 
-        #[cfg(backend = "appkit")]
-        native! {
-            // AppKit固有: ウィンドウにVisual Effect Viewを追加
-            self.window.contentView().addSubview(&vibrancy_view);
+            #[cfg(backend = "winui3")]
+            native! {
+                // WinUI 3固有: Mica素材背景を有効化
+                self.window.SystemBackdrop(MicaBackdrop::new());
+            }
+
+            #[cfg(backend = "appkit")]
+            native! {
+                // AppKit固有: ウィンドウにVisual Effect Viewを追加
+                self.window.contentView().addSubview(&vibrancy_view);
+            }
         }
     }
 }
@@ -320,32 +318,35 @@ enum Backend {
 `target::backend()`はビルドターゲットからビルド時に一意に確定する定数関数で、`#[param]`の静的評価式に無条件で使用できる(`env::os()`より確定タイミングが早い)。これにより、抽象化されたコンポーネント定義を1つのファイル内で完結できる:
 
 ```rust
-component NotepadWindow {
-    #[param]
-    chrome_style: ChromeStyle = match target::backend() {
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[param(default = match target::backend() {
         Backend::Winui3 => ChromeStyle::Mica,
         Backend::Appkit => ChromeStyle::Vibrancy,
         _               => ChromeStyle::Flat,
-    },
+    })]
+    chrome_style: ChromeStyle,
 }
 ```
 
 `match target::backend() { ... }`は`Backend`の全メンバー網羅を要求される(§2.3の網羅性検査と同じ仕組み)。**新しいバックエンド(`Uikit`/`Jetpack`等)を追加すると、既存の全ビルトインリファレンス実装が非網羅エラーになる** — これは仕様の欠陥ではなく、「新バックエンド追加時にどのビルトインが未対応かを機械的に洗い出す」安全弁として意図された挙動である。ビルトインのリファレンス実装(§4)はデスクトップ系backendの説明を目的として`Backend::Uikit | Backend::Jetpack`腕を省略するため、モバイル対応時は§8.8の指針に沿って各ビルトインに対応腕を追加する。
 
-`env::os()`(実体化時に一度だけ確定・以後不変、§2.7)と`target::backend()`は確定タイミングが異なる:
+`env::os()`(実体化時に一度だけ確定・以後不変、§2.6)と`target::backend()`は確定タイミングが異なる:
 
 | 定数 | 確定タイミング | `#[param]`初期化式での使用 |
 |---|---|---|
-| `env::os()` 等 | 実体化時に一度だけ | 許可(§2.2・§2.7の例外規定) |
+| `env::os()` 等 | 実体化時に一度だけ | 許可(§2.2・§2.6の例外規定) |
 | `target::backend()` | コンパイル時(ビルド構成から確定) | 常に許可 |
 
-`style`セレクタの条件式でも同様に使える:
+`#[param]`の既定値式でも同様に使える:
 
 ```rust
-style {
-    select(Button, target::backend() == Backend::Winui3) { corner_radius: 4 }
-    select(Button, target::backend() == Backend::Appkit) { corner_radius: 6 }
-}
+#[param(default = match target::backend() {
+    Backend::Winui3 => 4.0,
+    Backend::Appkit => 6.0,
+    _               => 0.0,
+})]
+corner_radius: f32,
 ```
 
 コード生成時、`target::backend()`はコード生成器がビルド設定から得た値へ定数畳み込みし、該当しない分岐(他backend向けの`native!`ブロック等)は生成対象から静的に除去される。実行バイナリには不要な分岐コードが一切残らない:
@@ -377,7 +378,7 @@ const fn resolve_backend() -> Backend {
 
 ### 3.4 名前空間とビルトインのオーバーライド規則
 
-ビルトインは予約名前空間`builtin::*`に属し(`Row { ... }`は`builtin::Row`への暗黙の`use`が常に効いている扱い)、ユーザー定義コンポーネントが同名の場合は`#[overrides(builtin::X)]`を明示しない限り静的エラーになる(暗黙のシャドーイングは一切許可しない)。この名前解決規則自体はDSLの静的検証ルールの一部であり、`docs/specs/dsl_spec.md`付録Aが正とする。§4.1で述べる「バックエンド分岐を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ」という制限は、この節で定義される名前解決の上に成り立つ。
+ビルトインは予約名前空間`builtin::*`に属し(`HorizontalLayout { ... }`は`builtin::HorizontalLayout`への暗黙の`use`が常に効いている扱い)、ユーザー定義コンポーネントが同名の場合は`#[overrides(builtin::X)]`を明示しない限り静的エラーになる(暗黙のシャドーイングは一切許可しない)。この名前解決規則自体はDSLの静的検証ルールの一部であり、`docs/specs/dsl_spec.md`付録Aが正とする。§4.1で述べる「バックエンド分岐を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ」という制限は、この節で定義される名前解決の上に成り立つ。
 
 ---
 
@@ -387,12 +388,22 @@ const fn resolve_backend() -> Backend {
 
 **実装状況**: 実装済みなのは`Window`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`Control`/`ContentControl`/`Grid`/`TextArea`/`Button`/`TextBlock`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/`TabViewItem`(`Row`/`Column`という名称ではなく`HorizontalLayout`/`VerticalLayout`という名称で実装されている点に注意)。`Dropdown`/`Option`、`Canvas`、`NavigationHost`/`Route`、`Dialog`、`Tooltip`、`VirtualList`は仕様のみで未実装。詳細は`docs/specs/builtins_spec.md`冒頭の分類ツリーと`docs/status/implementation_status.md`を参照。
 
-**代表的な実装パターン(`Stack` → `Column`/`Row`)**: 共通の`Stack`部品に`orientation`を渡して処理を委譲し、`Column`/`Row`はその薄いラッパーとして定義する。
+**代表的な実装パターン(`Stack` → `VerticalLayout`/`HorizontalLayout`)**: 共通の内部実装`Stack`にレイアウト計算を集約し、`VerticalLayout`/`HorizontalLayout`はそれを`base`フィールドとして持つ薄い派生として定義する。`Stack`はDSL上に現れない(`docs/specs/builtins_spec.md` F.2)。
 
 ```rust
-component Stack { #[param] orientation: Orientation, #[param] spacing: number = 0, children: Vec<Element> }
-component Column { children: Vec<Element> }
-view Column { Stack { orientation: Orientation::Vertical, children } }
+#[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[content(children)]
+#[prop(spacing: Option<f32>)]
+pub struct VerticalLayout {
+    spacing: Cell<f32>,
+}
+
+#[elwindui_macros::class(inherits = crate::ui::Layout)]
+#[content(children)]
+#[prop(spacing: Option<f32>)]
+pub struct HorizontalLayout {
+    spacing: Cell<f32>,
+}
 ```
 
 ### 4.1 独自部品はバックエンド共通実装に限定する(最重要ルール)
@@ -419,7 +430,7 @@ Button/Textのような個別ウィジェット抽象化(§4)とは別レイヤ�
 .rs (#[elwindui::component])
         │
         ▼
-UIElement ツリー(§2.11、§5.1)
+UIElement ツリー(§2.10、§5.1)
         │
         ▼
 ┌─────────────────────────────────────────┐
@@ -724,7 +735,7 @@ src/
 
 `Canvas`の`prop`が変わると通常の`prop`更新ルール(§2.2)で再描画がトリガーされる。毎フレーム再描画したい場合は`#[animated]`を付け、その内部でのみ非純粋関数呼び出し(`elapsed_time()`等)が許可される(13章ルール2の例外)。クリック・ドラッグは`on_pointer_down`/`on_pointer_move`で扱い、座標系は論理ピクセルに統一してバックエンド側が実ピクセル変換を担う。
 
-`Canvas`と`Row`/`Column`等の既存部品は同じ`Element`ツリー・`LayoutNode`として自然に混在できる(§2.11・§5.3が支えている)。
+`Canvas`と`HorizontalLayout`/`VerticalLayout`等の既存部品は同じ`Element`ツリー・`LayoutNode`として自然に混在できる(§2.10・§5.3が支えている)。
 
 ### 5.8 描画機能の拡張(Composition相当のビジュアル効果) 📋
 
@@ -852,11 +863,17 @@ WinUI3バックエンドでの実配線は引き続き将来の課題として�
 ### 6.1 コンポーネント単位(`on_mount` / `on_unmount` / `on_update`)
 
 ```rust
-view NotepadWindow {
-    on_mount: { load_last_document(); }
-    on_unmount: { save_draft(); }
-    on_update(content): { state = SaveState::Unsaved; }
-    Window { ... }
+#[elwindui::component(inherits Window)]
+struct NotepadWindow {
+    #[prop]
+    content: String,
+
+    body: view! {
+        on_mount: { load_last_document(); }
+        on_unmount: { save_draft(); }
+        on_update(content): { state = SaveState::Unsaved; }
+        Window { ... }
+    }
 }
 ```
 
@@ -874,10 +891,13 @@ view NotepadWindow {
 §6.1がコンポーネント単位のライフサイクルであるのに対し、モバイルではアプリプロセス全体のバックグラウンド/フォアグラウンド遷移がある。これはルートコンポーネントに対するフックとして別軸で提供する。
 
 ```rust
-component App {
-    on_foreground: { resume_sync(); }
-    on_background: { save_state(); }
-    on_terminate: { flush_pending_writes(); }
+#[elwindui::component]
+struct App {
+    body: view! {
+        on_foreground: { resume_sync(); }
+        on_background: { save_state(); }
+        on_terminate: { flush_pending_writes(); }
+    }
 }
 ```
 
@@ -891,7 +911,7 @@ component App {
 
 `bind!(settings.volume, TwoWay)`のように暗黙に扱ってきた`settings`を、`store`という専用構文で明示的に定義する。
 
-**実装状況**: `store`宣言構文は`elwindui-codegen`のパーサーに未実装(現状の`bind!`/`#[observable]`/`#[computed]`は`viewmodel`向けにのみ実装されている)。本節は設計のみ。
+**実装状況**: `store`宣言構文は`elwindui-codegen`のパーサーに未実装(現状の`bind!`/`#[observable]`/`#[computed]`は`viewmodel`向けにのみ実装されている)。本節は設計のみで、対応するRustマクロ形式(`#[elwindui::store]`のようなもの)も未設計であるため、以下はテキスト構文のまま示す。
 
 ```rust
 store AppSettings {
@@ -914,11 +934,15 @@ store AppSettings {
 **`ControlTemplate<Self>`の広域既定値(WinUI3の`Style`の代替)**: 複数コンポーネントに跨って既定テンプレートを共有・一括変更したい(WinUI3で`Style`を差し替えると画面上の全`Button`が変わる、という用途)場合、新しい仕組みを作らず`store`+`bind!`をそのまま使う:
 
 ```rust
+// store はRustマクロ形式が未設計のため、テキスト構文のまま示す(上記の実装状況の注を参照)
 store ButtonTheme {
     template: ControlTemplate<Button> = default_button_template,
 }
+```
 
-component Button inherits Control {
+```rust
+#[elwindui::component(inherits Control)]
+struct Button {
     #[prop(default = bind!(ButtonTheme.template, OneWay))]
     template: ControlTemplate<Self>,
 }
@@ -1023,23 +1047,34 @@ fn save_disables_while_saving() {
 ```rust
 enum AsyncState<T> { Idle, Loading, Success(T), Error(String) }
 
-viewmodel DocumentViewModel {
-    #[observable]
-    file_path: String,
+#[elwindui::viewmodel]
+mod document_view_model {
+    struct DocumentViewModel {
+        #[observable]
+        file_path: String,
 
-    #[async_computed]
-    content: AsyncState<String> = task!(async { fs::read_to_string(&file_path).await }),
+        #[async_computed(expr = task!(async { fs::read_to_string(&file_path).await }))]
+        content: AsyncState<String>,
+    }
 }
 ```
 
 View側は他のenumと同じく`match`で扱い、網羅性検査により状態の処理漏れ(例:`Error`ケースの表示忘れ)が静的に検出される:
 
 ```rust
-match vm.content {
-    AsyncState::Idle    => TextBlock { text: "" }
-    AsyncState::Loading => Spinner {}
-    AsyncState::Success(text) => TextArea { text }
-    AsyncState::Error(msg)    => TextBlock { text: msg, color: "#e74c3c" }
+#[elwindui::component]
+struct DocumentPane {
+    #[bindable]
+    vm: std::rc::Rc<DocumentViewModel>,
+
+    body: view! {
+        match vm.content {
+            AsyncState::Idle    => TextBlock { text: "" }
+            AsyncState::Loading => TextBlock { text: t!("loading") }
+            AsyncState::Success(text) => TextArea { text }
+            AsyncState::Error(msg)    => TextBlock { text: msg, foreground: "#e74c3c" }
+        }
+    }
 }
 ```
 
@@ -1056,10 +1091,13 @@ match vm.content {
 **実装状況**: `#[undoable]`属性は`elwindui-codegen`の`Attr`列挙体に未実装。本節は設計のみ。
 
 ```rust
-viewmodel NotepadViewModel {
-    #[observable]
-    #[undoable(coalesce: 500ms)]
-    content: String = String::new(),
+#[elwindui::viewmodel]
+mod notepad_view_model {
+    struct NotepadViewModel {
+        #[observable]
+        #[undoable(coalesce: 500ms)]
+        content: String,
+    }
 }
 ```
 
@@ -1134,15 +1172,22 @@ on_key_down: |_| find_in_selection()
 `NavigationHost`ビルトインによるルートベースの画面遷移機構。
 
 ```rust
+#[elwindui::dsl_enum]
 enum Route { Main, Settings, Search }
 
-view App {
-    NavigationHost {
-        route: current_route
-        match current_route {
-            Route::Main     => NotepadWindow { }
-            Route::Settings => SettingsWindow { }
-            Route::Search   => SearchDialog { }
+#[elwindui::component]
+struct App {
+    #[param(default = Route::Main)]
+    current_route: Route,
+
+    body: view! {
+        NavigationHost {
+            route: current_route
+            match current_route {
+                Route::Main     => NotepadWindow { }
+                Route::Settings => SettingsWindow { }
+                Route::Search   => SearchDialog { }
+            }
         }
     }
 }
@@ -1167,7 +1212,7 @@ VirtualList {
     items: documents
     key: |doc| doc.id
     item_height: 32
-    render_item: |doc| Row { Text { text: doc.name } }
+    render_item: |doc| HorizontalLayout { TextBlock { text: doc.name } }
 }
 ```
 
@@ -1178,7 +1223,7 @@ VirtualList {
 
 ### 8.5 テーマ/デザイントークン ✅
 
-`style{}`(§2.4)は個別属性の上書きに留まるため、カラーパレット・スペーシング・タイポグラフィを一元管理する`theme`構文を用意する。
+DSLには横断的な属性適用の仕組みが無いため、カラーパレット・スペーシング・タイポグラフィを一元管理する`theme`構文を用意する。
 
 **実装状況**: `theme`構文は`elwindui-codegen`のAST(`ast::Item`)に対応する項目がなく未実装。本節は設計のみ。
 
@@ -1202,7 +1247,7 @@ theme AppTheme {
 
 ```rust
 ErrorBoundary {
-    fallback: |err| Text { text: t!("error-fallback", message: err.to_string()), color: "#e74c3c" }
+    fallback: |err| TextBlock { text: t!("error-fallback", message: err.to_string()), foreground: "#e74c3c" }
     NotepadWindow { }
 }
 ```
@@ -1282,7 +1327,7 @@ fn notepad_initial_view_matches_snapshot() {
 }
 ```
 
-`render_tree`は`UIElement`ツリー(§2.11)を、各ノードの型名(`UIElement::type_name()`)によるテキスト表現(インデント付きの構造ダンプ)に変換する。`assert_snapshot!`は既存のRustスナップショットテストの慣習(`insta`クレート等)に合わせ、差分があれば失敗し、承認コマンドで期待値を更新できるようにする。
+`render_tree`は`UIElement`ツリー(§2.10)を、各ノードの型名(`UIElement::type_name()`)によるテキスト表現(インデント付きの構造ダンプ)に変換する。`assert_snapshot!`は既存のRustスナップショットテストの慣習(`insta`クレート等)に合わせ、差分があれば失敗し、承認コマンドで期待値を更新できるようにする。
 
 ```rust
 #[test]
@@ -1307,13 +1352,13 @@ fn knob_renders_correctly_at_half_value() {
 | # | ルール概要 | 関連する本ドキュメントの節 |
 |---|---|---|
 | 1 | `#[param]`初期化式に`bind!`/propの参照/`#[computed]`が出現 → エラー | §2.2 |
-| 2 | `#[param]`初期化式に非純粋関数(`now()`,`random()`等)が出現 → エラー(`env::*`/`once`は例外) | §2.2, §2.7, §5.7(`#[animated]`が例外) |
+| 2 | `#[param]`初期化式に非純粋関数(`now()`,`random()`等)が出現 → エラー(`env::*`は例外) | §2.2, §2.6, §5.7(`#[animated]`が例外) |
 | 3 | `#[computed]`フィールドへの外部代入 → エラー | §2.2 |
-| 4 | enum値の裸文字列直書き(完全修飾でない参照) → エラー | §2.6 |
+| 4 | enum値の裸文字列直書き(完全修飾でない参照) → エラー | §2.5 |
 | 5 | `match`におけるenumメンバーの網羅漏れ → エラー | §2.3 |
-| 6 | 制約付きフィールドへの制約違反代入 → ビルド時/実行時エラー | §2.5 |
-| 7 | `external::*`呼び出しが`once`宣言以外に出現 → エラー | §2.7 |
-| 8 | importの循環・未解決パス → エラー | §2.10 |
+| 6 | 制約付きフィールドへの制約違反代入 → ビルド時/実行時エラー | §2.4 |
+| 7 | (欠番 — `once`宣言の廃止に伴い、`external::*`を許可する場所自体が無くなった) | — |
+| 8 | importの循環・未解決パス → エラー | §2.9 |
 | 9 | `#[overrides(builtin::X)]`のない通常componentに`native!`/`target::backend()`出現 → エラー | §3.4, §4.1 |
 | 10 | `Canvas`を含む`view`に`#[accessible(...)]`なし → 警告 | §5.6, §5.7 |
 | 11 | ライフサイクルフック外での`#[param]`相当の再代入 → エラー | §6.1 |

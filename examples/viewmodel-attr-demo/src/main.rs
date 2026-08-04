@@ -1,6 +1,6 @@
 //! Minimal end-to-end proof that `#[elwindui::viewmodel]` (a real Rust attribute macro over a
 //! `mod { struct ... impl ... }`, see `elwindui_codegen::attr_frontend`) generates a working
-//! viewmodel, without going through the `.elwind` DSL/`parser.rs` at all. Deliberately kept small
+//! viewmodel, without going through the text frontend (`parser.rs`) at all. Deliberately kept small
 //! and separate from `examples/notepad`: this crate only exercises the new frontend, not the view
 //! layer or any backend.
 

@@ -53,12 +53,12 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                 Item::Component(c) => {
                     // `#[embedded]` (docs/specs/dsl_spec.md 付録A) claims this component is one of
                     // this crate's own builtin shape declarations — reject it on anything parsed
-                    // from a consumer's own `.elwind` directory (`Module::is_builtin`, set only by
+                    // from a consumer's own source directory (`Module::is_builtin`, set only by
                     // `builtin_modules()`).
                     if c.embedded && !module.is_builtin {
                         errors.push(format!(
                             "{}: #[embedded] can only be used on a component from elwindui-codegen's own \
-                             BUILTIN_SHAPE_SOURCE, not a consumer's own `.elwind` file",
+                             BUILTIN_SHAPE_SOURCE, not a consumer's own source",
                             c.name
                         ));
                     }
@@ -74,7 +74,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         if !module.is_builtin {
                             errors.push(format!(
                                 "{}: #[text_style] can only be used on a component from elwindui-codegen's \
-                                 own BUILTIN_SHAPE_SOURCE, not a consumer's own `.elwind` file",
+                                 own BUILTIN_SHAPE_SOURCE, not a consumer's own source",
                                 c.name
                             ));
                         }
@@ -108,7 +108,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         if !module.is_builtin {
                             errors.push(format!(
                                 "{}: #[native] can only be used on a component from elwindui-codegen's own \
-                                 BUILTIN_SHAPE_SOURCE, not a consumer's own `.elwind` file",
+                                 BUILTIN_SHAPE_SOURCE, not a consumer's own source",
                                 c.name
                             ));
                         }
@@ -182,7 +182,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         // `#[bindable]` is meant exclusively for viewmodel injection (§7.2 — "the
                         // standard form for viewmodel injection, unify the whole project around
                         // this shape"). When the field's (Rc-stripped) type happens to be
-                        // resolvable from this module — same-directory `.elwind` files and
+                        // resolvable from this module — same-directory DSL modules and
                         // `compile_dir_with_extra_viewmodels`'s Rust-side viewmodels both commonly
                         // are — check it actually names a `viewmodel`, catching a `#[bindable]`
                         // mistakenly put on a plain `component` field early. When it's *not*
@@ -444,7 +444,7 @@ fn check_match_in_child(
                     .cloned()
             }) {
                 let wildcard = arms.iter().any(|arm| arm.pattern.trim() == "_");
-                // `arm.pattern`'s source text comes either straight from `.elwind` file text (no
+                // `arm.pattern`'s source text comes either straight from DSL text (no
                 // extra whitespace around `::`) or, for a `view!`-macro-sourced `component`
                 // (`component_frontend.rs`), from `proc_macro2::TokenStream::to_string()`, which
                 // always re-serializes a qualified path with spaces around `::` (`"Orientation ::
@@ -606,7 +606,7 @@ fn check_child_vm_references(
 }
 
 /// `#[abstract]` (docs/specs/dsl_spec.md 付録A): a pure category tag (`UIElement`/`NativeControl`/
-/// `Layout`/`Shape` in `builtins.elwind`) cannot be instantiated directly — only named as an
+/// `Layout`/`Shape`) cannot be instantiated directly — only named as an
 /// `inherits` base, or (for a shape-composition base) as a component's own view root (see
 /// `check_vm_references`'s `exempt_root_type`). An unresolvable `node.type_path` is left to
 /// `check_element_value`'s own "unknown component" error, not reported again here.
@@ -960,7 +960,7 @@ fn check_attached_properties(
 /// `on_click`/`on_key_down` themselves being callback-shaped, not arbitrary data) — checked here,
 /// against the concrete usage site, rather than in `parse_field_def`'s per-declaration checks: a
 /// shortcut is inherently a per-instance annotation (see `ast::ElementNode::attribute_shortcuts`'s
-/// own doc comment for why it can't live on the field's shared declaration in `builtins.elwind`).
+/// own doc comment for why it can't live on the field's shared `#[class]` declaration).
 /// Also checks every declared key spec parses (`codegen::parse_shortcut_spec` — the same parser
 /// `codegen::emit_shortcut_chord_expr` uses, so a spec that passes here is guaranteed not to panic
 /// during code generation).
@@ -1121,7 +1121,7 @@ fn check_element_value(
         // required-attribute completeness without a shape table, the same tradeoff
         // `emit_external_construction`/`check_shortcut_attrs` already make — a genuinely wrong
         // reference still fails to compile, just later, via `elwindui::ui::{Name}::new()` itself.
-        // On the `.elwind` text path (`allows_external_builtins == false`), no such escape hatch
+        // On the DSL text path (`allows_external_builtins == false`), no such escape hatch
         // exists — every type there must resolve through `table`, so `None` still means a typo.
         None if from.allows_external_builtins => {}
         None => errors.push(format!(
@@ -1206,7 +1206,7 @@ fn validate_bind_path(
 ///   `codegen::build_virtual_value`'s per-type-name `match`, never through a `view` — it's
 ///   structurally incapable of having one, so none of the `view`-based checks below apply (this is
 ///   what lets `Layout` carry a real `children: UIElementCollection` field — see that component's
-///   own doc comment in `builtins.elwind` — without breaking `VerticalLayout`/`HorizontalLayout`/
+///   own `#[class]` doc comment — without breaking `VerticalLayout`/`HorizontalLayout`/
 ///   `Grid`'s own `inherits Layout`).
 /// - A pure, field-less category tag (`base_info.effective_fields.is_empty() && !has_view` — e.g.
 ///   `UIElement`/`NativeControl`/`TextBlock` themselves): nothing to delegate to structurally, so
@@ -1247,7 +1247,7 @@ fn validate_inherits(
         // guaranteed to pass regardless of `base` — and a genuinely `#[sealed]` base still fails to
         // compile on its own, via `#[class]`'s own inherit-macro mechanism (a sealed class emits no
         // `__elwindui_inherit_*!` trio, so naming it as `inherits = ..` fails with "macro not found"
-        // rather than silently succeeding). The `.elwind` file path (where a component may
+        // rather than silently succeeding). The DSL module path (where a component may
         // legitimately have no `view` of its own, relying on an inherited template) loses real
         // checking here — accepted since that whole path is being phased out (`examples/notepad` is
         // its only remaining user, migrating to `#[component]` — see
@@ -1425,10 +1425,10 @@ mod tests {
     use super::*;
     use crate::parser::parse_module;
 
-    /// Actions can't be declared in `.elwind`-native `viewmodel` text (only `#[observable]`/
+    /// Actions can't be declared in the DSL text form's `viewmodel` (only `#[observable]`/
     /// `#[computed]` can) — a viewmodel with an action is always built via the Rust-native
     /// `attr_frontend` frontend, same as the real `#[elwindui::viewmodel]` macro. `path:
-    /// Vec::new()` matches `.elwind`'s own crate-root placement, so a plain `vm: NotepadViewModel`
+    /// Vec::new()` matches the DSL's own crate-root placement, so a plain `vm: NotepadViewModel`
     /// reference elsewhere resolves against it exactly the same way.
     fn viewmodel_module_from_rust(src: &str) -> Module {
         let item_mod: syn::ItemMod = syn::parse_str(src).expect("mod should parse as valid Rust");
@@ -1541,7 +1541,7 @@ view Window2 { Window { NotAViewModel { label: "x" } } }
     }
 
     /// `vm.documents` / `vm.save` / `vm.save_can_execute` — the shape `examples/notepad`'s
-    /// `notepad_window.elwind` actually uses against a `NotepadViewModel` defined elsewhere (not in
+    /// `notepad_window.rs` actually uses against a `NotepadViewModel` defined elsewhere (not in
     /// this same slice of parsed modules) — must validate cleanly. An action (`save`) resolves
     /// through the exact same 2-segment `[vm_name, field]` check as any other viewmodel field —
     /// there's no separate `Command`-wrapper form to validate.
@@ -1635,11 +1635,11 @@ view Window4 { Window { Button { text: "x", on_click: vm.no_such_command } } }
 
     /// Simulates a Rust-authored viewmodel (`#[elwindui::viewmodel] mod some_vm_mod { struct Vm {..} }`,
     /// real path `["some_vm_mod"]` — see `attr_frontend.rs`/`lib.rs::compile_dir_with_extra_viewmodels`)
-    /// referenced by bare name only from a `.elwind` window file, with no `use` bringing it into scope.
+    /// referenced by bare name only from a window module, with no `use` bringing it into scope.
     /// Even though a type named `Vm` exists somewhere in the compilation unit, it isn't visible from
     /// the window module's own scope, so this must be a validation error — the same "cannot find type"
     /// Rust itself reports for a missing `use` (this is the exact class of bug
-    /// `examples/notepad/src/ui/notepad_window.elwind`'s stale `use elwindui::viewmodel::NotepadViewModel;`
+    /// `examples/notepad/src/ui/notepad_window.rs`'s stale `use elwindui::viewmodel::NotepadViewModel;`
     /// used to hide: that `use` didn't resolve to anything real, yet the old flat, path-blind lookup
     /// let the reference through anyway).
     #[test]
@@ -2135,7 +2135,7 @@ view DocumentViewLike {
     }
 
     /// `Window` declares `#[native]` with **no** `inherits` at all (unlike `Button`/`TextArea`/...,
-    /// which reach `is_native` via `inherits NativeControl` — see `window.elwind`'s own doc comment
+    /// which reach `is_native` via `inherits NativeControl` — see `Window`'s own `#[class]` doc comment
     /// for why `Window` deliberately doesn't share that tag). `resolve_is_native`'s `#[native]`
     /// fallback must still resolve it to native.
     #[test]
@@ -2241,7 +2241,7 @@ view Foo {
     }
 
     /// `#[native]`, like `#[embedded]`, only makes sense on one of this crate's own builtin shape
-    /// components — a consumer's own `.elwind` file has no way to actually provide a hand-written
+    /// components — a consumer's own source has no way to actually provide a hand-written
     /// per-backend implementation for it.
     #[test]
     fn rejects_native_attribute_outside_builtin_module() {

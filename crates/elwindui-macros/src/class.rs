@@ -643,7 +643,7 @@ fn rewrite_crate_segment(tokens: TokenStream2) -> TokenStream2 {
 ///   generic argument names, found by walking the type's own generic arguments for a
 ///   `Type::TraitObject` at any nesting depth (works for either wrapper uniformly, rather than
 ///   text-matching each spelling separately the way `elwindui-codegen`'s own now-`#[cfg(test)]`-
-///   only `dynamic_collection_item_trait` still does for the `.elwind` text path).
+///   only `dynamic_collection_item_trait` still does for the DSL text path).
 ///
 /// `rewrite_crate_segment` on the found trait object's own bounds (not the whole `dyn Trait`
 /// token, which starts with the `dyn` keyword, not `crate`) — same reasoning as

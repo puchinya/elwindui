@@ -1,7 +1,7 @@
 // The root of every `UIElement`-implementing builtin — a field-less category marker, not a real
 // widget. Every concrete struct in `elwindui_core::ui` (bare class name — e.g. `Control`/`Shape` —
 // paired with a `...Ext` trait, per the `#[class]` naming convention) that actually implements
-// `UIElement` (directly or via delegating to a `base`) corresponds to some `.elwind` component declaring
+// `UIElement` (directly or via delegating to a `base`) corresponds to some DSL component declaring
 // `inherits UIElement` (directly or transitively through `NativeControl`/`Layout`/`Shape`/
 // `Control`/`TextBlock`) — this is the DSL-visible root of that hierarchy (docs/design/gui_framework_design.md
 // §5.1). `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabViewItem` do *not* inherit
@@ -214,7 +214,7 @@ component HorizontalLayout inherits Layout {
 // `elwindui::core::graphics::Brush`-typed (not raw hex strings) — a string literal assigned to
 // either field is validated and converted to `Brush::Solid(Color::rgba(..))` at codegen time (see
 // `elwindui-codegen`'s literal-coercion handling for `Brush`/`Color`-typed fields), so
-// `Rectangle { fill: "#3a3a3c" }` keeps working unchanged at the `.elwind` call site. No
+// `Rectangle { fill: "#3a3a3c" }` keeps working unchanged at the DSL call site. No
 // `children` — matching real WinUI3's `Shape`, a pure leaf with no `Children`/content property of
 // its own (docs/design/gui_framework_design.md §5.2).
 #[embedded]
@@ -280,7 +280,7 @@ component Control inherits UIElement {
 // `base: elwindui_core::ui::Control` field and a direct `impl elwindui_core::ui::UIElement`/
 // `Control for ContentControl` delegating to it —
 // `self` *is* the tree node (`into_node()` just returns `self`), not a wrapper holding a
-// separately-`Rc`-erased `Control` value. Every other `.elwind` reference to `ContentControl` still
+// separately-`Rc`-erased `Control` value. Every other DSL reference to `ContentControl` still
 // compiles unchanged — `emit_construction`'s `concrete_type_ident` is the one place that resolves it
 // to the real `ContentControl::new(..)` call. `padding` is inherited from `Control`
 // automatically (no redeclaration needed — `self.padding()`/the bare `padding` reference below both

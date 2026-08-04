@@ -1,6 +1,6 @@
 //! Rust-only frontend for `#[elwindui::theme_definition]`.
 //!
-//! Theme declarations intentionally do not enter the `.elwind` AST/parser. This module consumes a
+//! Theme declarations intentionally do not enter the DSL AST/parser. This module consumes a
 //! `syn::ItemStruct` and emits the typed runtime adapter used by `theme!(Theme::token)`.
 
 use proc_macro2::TokenStream;
@@ -139,7 +139,7 @@ fn impact_for(name: &str) -> proc_macro2::Ident {
     }
 }
 
-/// Kept in the Rust frontend rather than the `.elwind` parser. Names are intentionally based on
+/// Kept in the Rust frontend rather than the DSL text parser. Names are intentionally based on
 /// ElwindUI public/abstract types, never toolkit vocabulary such as Panel or Surface.
 pub const STANDARD_TOKEN_NAMES: &[&str] = &[
     "window_background",

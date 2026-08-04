@@ -4,7 +4,7 @@ use crate::NotepadViewModel;
 use crate::ui::document_view::DocumentView;
 
 // Demonstrates a same-crate sibling `#[elwindui::component]` reference resolved entirely through
-// `component_frontend::same_crate_components` (no matching `.elwind` file counterpart existed —
+// `component_frontend::same_crate_components` (no text-form counterpart existed —
 // carried over from the now-removed `examples/notepad-inline`, which used it to show the mechanism
 // works within a single file; here it instead demonstrates the same registry resolving across two
 // files in the same crate, `notepad_window.rs`'s own declaration and use immediately below).

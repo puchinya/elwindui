@@ -40,7 +40,7 @@ impl InnerScrollView {
         let content_host = TreeHostPanel::new();
         let _ = scroll_viewer.SetContent(&content_host.as_element());
         let handle = AnyView::from(scroll_viewer.clone());
-        // Vertical-only scrolling by default — matches `ScrollView` in `builtins.elwind`'s own
+        // Vertical-only scrolling by default — matches `ScrollView`'s own `#[class]` declaration and its
         // default.
         let axes = Rc::new(Cell::new((false, true)));
         let this = Self {

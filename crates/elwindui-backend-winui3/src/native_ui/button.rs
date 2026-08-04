@@ -13,7 +13,7 @@ pub struct Button {
 
 #[elwindui_macros::class]
 impl Button {
-    /// `#[routed] on_click` (`Button` in `builtins.elwind`) is registered directly onto this
+    /// `#[routed] on_click` (`Button`'s `#[class]` declaration) is registered directly onto this
     /// widget's own `base` — real since construction (see `new`), and already wired (also in `new`)
     /// to fire `dispatch_routed` starting at this same node.
     #[inherent]

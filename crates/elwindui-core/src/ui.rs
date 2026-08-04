@@ -25,7 +25,7 @@
 //! **Ownership: `Rc`, not `Box`.** Every node holds a real parent back-reference
 //! (`UIElement::visual_parent`, WinUI3's `_parent`) so `dispatch_routed` can bubble a routed event
 //! from any element up to the root by simply following `visual_parent()` — no tree search needed,
-//! and critically, no dependence on the tree having been built by a single static `.elwind`
+//! and critically, no dependence on the tree having been built by a single static DSL
 //! traversal. Matches real WinUI3/UWP, where measure/arrange/render/hit-test *and* routed-event
 //! bubbling all walk the Visual tree — the separate Logical `parent` back-reference exists purely
 //! as a receptacle for a future template/accessibility tree (see `UIElementCollection`'s own doc
@@ -198,13 +198,13 @@ pub struct UIElement {
     /// `docs/specs/dsl_spec.md` 4章), keyed by field name. Each value is a
     /// `Box<dyn Fn(&T, &RoutedEventArgs)>` erased to `Box<dyn Any>` (`T` is that field's own
     /// payload type — `()` for `on_click`, `usize` for a hypothetical routed `on_select`, ...);
-    /// generated call sites know `T` statically from the `.elwind` declaration, so the downcast in
+    /// generated call sites know `T` statically from the DSL declaration, so the downcast in
     /// `dispatch_routed` always succeeds (matching generated dynamic child ranges' type-erasure
     /// pattern).
     pub routed_handlers: RoutedHandlers,
     /// Generic, type-erased attached-property bag (docs/specs/dsl_spec.md §3の添付プロパティ), keyed
     /// by `(owner, field)` — e.g. `("Grid", "row")` — and populated right after construction from
-    /// whatever `Owner::field: value` setters the `.elwind` source wrote on this specific element
+    /// whatever `Owner::field: value` setters the DSL source wrote on this specific element
     /// (`elwindui-codegen`'s `plan_element`/`emit_construction`/`emit_attached_setters`). Absent for
     /// any element that didn't set a given `(owner, field)` — the owner's own reader (e.g.
     /// `Grid`'s `grid_cell_of`) supplies the default in that case, since only the owner knows
@@ -477,7 +477,7 @@ impl UIElement {
         self.as_ui_element().clip_to_bounds.set(value);
         self.invalidate_arrange();
     }
-    // `Option<f32>`-typed at the DSL/`builtins.elwind` declaration (an unset value means "let
+    // `Option<f32>`-typed at the `#[class]` declaration (an unset value means "let
     // natural sizing decide"), but taking the plain, unwrapped `f32` here — matching every other
     // deferred `Option<T>`-declared common property's own setter (`set_margin(&self, margin: f32)`
     // above, `set_enabled(&self, enabled: bool)` on `Button`/`MenuItem`, ...): "unset" is expressed
@@ -581,7 +581,7 @@ impl UIElement {
     /// (`hit_test_at`'s own doc comment) — whether *this element's own bounds* (not its children's)
     /// should be considered a hit-test candidate. Defaults to `true` (every leaf-like element —
     /// `NativeControl`/`TextBlock` — represents real content). `Layout`/`Control` (no background
-    /// concept at all in `builtins.elwind`) override this to `false`; `Shape` overrides it to
+    /// concept at all) override this to `false`; `Shape` overrides it to
     /// whether `fill`/`stroke` is actually set. This is independent of `hit_test_visible`, which
     /// excludes the whole subtree unconditionally.
     #[overridable]
@@ -1273,7 +1273,7 @@ impl UIElementVisualCollection {
 }
 
 /// The Logical-tree-shaped child list a container (`Layout`/`Control` family) declares in
-/// `.elwind` — WinUI3's own `UIElementCollection` (docs/design/gui_framework_design.md §5.2), e.g.
+/// the DSL — WinUI3's own `UIElementCollection` (docs/design/gui_framework_design.md §5.2), e.g.
 /// `Panel.Children`. There is no separate, generically-traversable Logical tree: this is simply the
 /// convenience API a *particular* component exposes for its own children, which automatically stays
 /// in sync with the real Visual tree — `add`/`insert`/`remove`/`remove_at`/`clear` all mutate the
@@ -1367,7 +1367,7 @@ impl UIElementCollection {
 /// `Grid`'s `children`) serve as a dynamic-child-range host the exact same way `TabView`/`Menu`/
 /// `MenuBar`'s own dedicated `ListExt` implementors already do (`elwindui-codegen`'s
 /// `DynamicChildSlot::replace_children`/`replace_rc_items`, driving `if`/`for`/`match` inside a
-/// `.elwind` view) — every method here already exists verbatim as one of `UIElementCollection`'s own
+/// DSL view) — every method here already exists verbatim as one of `UIElementCollection`'s own
 /// inherent methods just above; this only adds the trait so a `&UIElementCollection` can also be used
 /// as `&dyn ListExt<dyn UIElementExt>` where the generated code needs one. The inherent methods
 /// remain what ordinary `.add(..)`-style call sites resolve to (inherent methods take priority over
@@ -1480,7 +1480,7 @@ pub trait Button {
 /// active editor right now" concept this codebase doesn't have yet; revisit once a second consumer
 /// needs it). `submit`-on-Enter is likewise not a dedicated trait method — `UIElement`'s existing
 /// `on_key_down` (`#[routed]`) already covers it the same way any other element's own key handling
-/// would (see `TextBox` in `builtins.elwind` and `native_ui::TextBox::on_constructed`'s own doc
+/// would (see `TextBox`'s `#[class]` declaration and `native_ui::TextBox::on_constructed`'s own doc
 /// comment on why AppKit needs one narrow, TextBox-specific addition to make that work in practice).
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
 #[prop(two_way, text: String)]
@@ -1502,7 +1502,7 @@ pub trait TextBox {
 /// way a text field does, and adding dead setters would misrepresent what's actually usable), and
 /// no `selection_start`/`selection_length` (same rationale as `TextBox`, doubly so here — selection
 /// semantics on obscured text are rarely product-relevant). The field/method is named `password`,
-/// not `text`, everywhere (trait, `builtins.elwind`, backend structs) — a deliberate naming
+/// not `text`, everywhere (trait, `#[class]` declaration, backend structs) — a deliberate naming
 /// divergence from `TextBox` so nothing can accidentally get routed through a code path that
 /// assumes plaintext display is fine. See `docs/status/nativecontrol_status.md` for the
 /// `reveal_enabled` AppKit/WinUI3 asymmetry this control has (WinUI3's `PasswordRevealMode` is
@@ -1836,8 +1836,8 @@ pub trait Menu {
     fn add_item(&self, item: &dyn MenuItemExt);
     fn remove_item(&self, item: &dyn MenuItemExt);
     /// A live handle onto the same backing collection `add_item`/`remove_item` mutate — added
-    /// alongside them (not a replacement) so `.elwind`'s `#[content(items)]` mechanism
-    /// (`builtins.elwind`'s `Menu`, `docs/specs/builtins_spec.md` 付録M) can populate `Menu`'s
+    /// alongside them (not a replacement) so the DSL's `#[content(items)]` mechanism
+    /// (`elwindui-core::ui`'s `Menu`, `docs/specs/builtins_spec.md` 付録M) can populate `Menu`'s
     /// nested `MenuItem { .. }` children through the same generic `ListExt`-typed
     /// content-field path every other multi-child builtin (`VerticalLayout`/`Grid`/`TabView`/...)
     /// already uses, instead of `elwindui-codegen` needing a `Menu`-specific construction branch.
@@ -1881,7 +1881,7 @@ pub trait TabView {
 
 /// `TabViewItem`'s own class trait. No `inherits`: like `Window`,
 /// `TabViewItem` is never itself embedded as a real `Rc<dyn UIElement>` node (see its own
-/// `builtins.elwind` doc comment), so it has no meaningful `NativeControl`/`UIElement` ancestor.
+/// `#[class]` doc comment), so it has no meaningful `NativeControl`/`UIElement` ancestor.
 #[elwindui_macros::class(trait_only, sealed)]
 #[prop(header: String)]
 #[content(content)]
@@ -2284,7 +2284,7 @@ impl Rectangle {
     // always mirrors this signature verbatim — see `elwindui_macros::class`'s own doc comment on
     // `auto_new` — so a non-zero-arg `construct()` here means a non-zero-arg `new()`, which
     // `elwindui-codegen`'s `emit_external_construction` can never supply: with no `TypeInfo` to
-    // consult (builtins.elwind removed, Refs #14), it always calls `Type::new()` and configures
+    // consult (the builtin shape source was removed, Refs #14), it always calls `Type::new()` and configures
     // everything through the already-existing `set_fill`/`set_stroke`/`set_stroke_width`/
     // `set_corner_radius` setters instead).
     fn construct() -> Self {
@@ -2594,7 +2594,7 @@ impl TextStyleOwner for TextBlock {
 /// replacement is future work.
 /// `Control`'s own class trait (docs/design/gui_framework_design.md §5.1) — exposes the fields a
 /// DSL-level subclass composed via `base: Control` (e.g. `builtin::ContentControl`,
-/// `crates/elwindui-builtins/src/builtins.elwind`) delegates to.
+/// `elwindui-core::ui`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 #[text_style]
 #[content(children)]
@@ -3254,7 +3254,7 @@ fn invoke_handlers_at<T: 'static>(
 /// registered under `name`, then its parent's, and so on up to the root (`UIElement::visual_parent`
 /// — matching real WinUI3, where routed events bubble along the Visual tree, not the Logical one),
 /// stopping as soon as one sets `args.handled`. Works identically whether `target`'s tree was built
-/// by a single static `.elwind` traversal or assembled at runtime by a `for` child range.
+/// by a single static DSL traversal or assembled at runtime by a `for` child range.
 pub fn dispatch_routed<T: 'static>(
     target: &Rc<dyn UIElementExt>,
     name: &str,

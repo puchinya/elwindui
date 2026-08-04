@@ -1,9 +1,9 @@
 //! Alternative frontend: builds the same `ViewModelDef`/`FieldDef` AST (`ast.rs`, unchanged) that
-//! `parser.rs`'s hand-written recursive-descent parser produces from `.elwind` DSL text — but from
+//! `parser.rs`'s hand-written recursive-descent parser produces from DSL text — but from
 //! real Rust syntax instead (a `syn::ItemMod` containing a `struct` + an `impl` block). This is
 //! what lets `viewmodel`s be written as ordinary Rust (matching how WPF-style MVVM keeps the
 //! ViewModel in the host language, not markup — see docs/design/gui_framework_design.md §7.2) while
-//! `view { ... }` trees still need `.elwind`/`parser.rs` (bare nested child elements aren't valid
+//! `view { ... }` trees still need `parser.rs` (bare nested child elements aren't valid
 //! Rust expression syntax, so that half can't move here).
 //!
 //! Because `generate_viewmodel` (codegen.rs) only ever consumes the `ViewModelDef`/`FieldDef` AST
@@ -22,13 +22,13 @@ use std::path::Path;
 /// any caller that needs a viewmodel's shape *before* the crate's own macro expansion has run (a
 /// `build.rs`, or a language server processing a file in isolation — see
 /// `docs/status/implementation_status.md` for whether such a caller currently exists; the
-/// `.elwind`-era `build.rs` caller this was originally written for, `compile_dir_with_extra_
-/// viewmodels`, was removed once `.elwind` text compilation itself was, so this is currently
+/// text-frontend-era `build.rs` caller this was originally written for, `compile_dir_with_extra_
+/// viewmodels`, was removed once DSL text compilation itself was, so this is currently
 /// exercised only by its own test below).
 ///
 /// The mod name is what lets a caller build this viewmodel's real, crate-relative path (`Module::path`,
-/// e.g. `["notepad_view_model"]` for `main.rs`'s `mod notepad_view_model { .. }`), so a `.elwind`
-/// file's `use crate::notepad_view_model::NotepadViewModel;` can be resolved against it exactly like
+/// e.g. `["notepad_view_model"]` for `main.rs`'s `mod notepad_view_model { .. }`), so a DSL
+/// module's `use crate::notepad_view_model::NotepadViewModel;` can be resolved against it exactly like
 /// Rust's own name resolution (§12, docs/design/tools/codegen_design.md §3) — the struct name alone isn't enough to know where it
 /// actually lives.
 pub fn viewmodel_defs_from_rs_file(
@@ -115,7 +115,7 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
 /// `syn::Expr` (`parse_name_value_expr`) — fine since neither ever needs `bind!` sugar.
 /// `#[prop(default = ...)]`/`#[attached(default = ...)]` instead route their raw token text
 /// through `parser::parse_initializer` (`parse_name_value_tokens`), so `bind!(vm.content,
-/// TwoWay)` written there gets the same recognition hand-written `.elwind` text gets — unlike a
+/// TwoWay)` written there gets the same recognition hand-written DSL text gets — unlike a
 /// `view!`-typed field's tokens (discarded whole), a field default is emitted verbatim into code
 /// that really gets compiled, so it can't be left as an inert `syn::Expr::Macro`.
 pub(crate) fn fields_from_item_struct(
@@ -207,7 +207,7 @@ pub(crate) fn fields_from_item_struct(
             }
         }
 
-        // Unlike hand-written `.elwind` text, a plain Rust struct field has no `= expr` syntax of
+        // Unlike hand-written DSL text, a plain Rust struct field has no `= expr` syntax of
         // its own — `#[observable(default = ...)]`/`#[computed(expr = ...)]` are the only place
         // either kind's value can be written, so (whether `kind` came from an explicit attribute
         // or fell back to `default_kind`) both must end up with an initializer.

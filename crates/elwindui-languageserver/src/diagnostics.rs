@@ -3,7 +3,7 @@
 //! `lsp_server::Connection`. See docs/design/tools/languageserver_design.md §3.1.
 //!
 //! Operates on a single `.rs` file's source text (Phase 7, `docs/status/implementation_status.md`)
-//! — the successor to the old `.elwind`-directory model, retired along with `.elwind` compilation
+//! — the successor to the old directory-based model, retired along with DSL text compilation
 //! itself. Each `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` item in
 //! the file becomes its own `Module` (`component_frontend::modules_from_file`, the same conversion
 //! real macro expansion uses), validated together. There is no cross-file resolution the way the
@@ -31,12 +31,12 @@ pub fn modules_for_source(src: &str) -> Option<Vec<Module>> {
 /// clean, so a caller can always publish the result and have stale diagnostics cleared once fixed.
 ///
 /// Position precision: a `syn::parse_file` failure carries the parser's own real line/column
-/// (`proc_macro2`'s span-locations tracking) — strictly better than the old `.elwind` text
+/// (`proc_macro2`'s span-locations tracking) — strictly better than the DSL text form
 /// parser's own hand-rolled line counting. A `component_frontend::modules_from_file` conversion
 /// failure (a malformed `view!` body, a non-unit `#[elwindui::dsl_enum]` variant, ...) and every
 /// `validate::validate` error stay at line 0, column 0 — neither carries span info through the AST
 /// (`ast.rs`'s `FieldDef`/`ElementNode` have no source-location fields), matching the precision the
-/// `.elwind`-era `validate_error_diagnostic` already had. Precise positions need span-tracking
+/// text-frontend-era `validate_error_diagnostic` already had. Precise positions need span-tracking
 /// threaded through `ast.rs`/`parser.rs`/`component_frontend.rs` — a separate follow-up, not
 /// attempted here.
 pub fn diagnostics_for_source(src: &str) -> Vec<Diagnostic> {

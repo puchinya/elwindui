@@ -1,6 +1,6 @@
 //! Alternative frontend, sibling to `attr_frontend.rs`'s viewmodel path: builds the same
 //! `ComponentDef`/`ViewDef` AST (`ast.rs`, unchanged) that `parser.rs`'s hand-written
-//! recursive-descent parser produces from `.elwind` DSL text — but from a real Rust `struct`
+//! recursive-descent parser produces from DSL text — but from a real Rust `struct`
 //! instead, annotated `#[elwindui::component(inherits Base)]`. Ordinary fields become the
 //! component's `#[param]`/`#[prop]`/etc. fields (via `attr_frontend::fields_from_item_struct`,
 //! shared with the viewmodel frontend); exactly one field, typed as a `view!` macro invocation
@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` (already
 /// parsed as a `syn::ItemStruct` by the `elwindui-macros` proc-macro, `base` from the attribute's
 /// own `inherits Base` argument) — builds the matching `ComponentDef`/`ViewDef` pair. `Name` may
-/// omit the `view! { .. }` field entirely — same as a `.elwind` `component X { .. }` with no
+/// omit the `view! { .. }` field entirely — same as a DSL `component X { .. }` with no
 /// paired `view X { .. }` block — in which case the second return value is `None` (the great
 /// majority of builtins in `elwindui-core`/backend crates are `view`-less; this frontend's own
 /// callers only ever chain a real builtin through `#[elwindui_macros::class]` directly, not this
@@ -110,7 +110,7 @@ pub fn component_and_view_from_item_struct(
 
 /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract_]`/`#[text_style]`/`#[content(field_name)]`,
 /// read off `item_struct.attrs` — the Rust-macro-path counterpart of `parser.rs`'s
-/// `parse_item_attrs`, same vocabulary, minus the `.elwind`-text-only wart of `abstract` colliding
+/// `parse_item_attrs`, same vocabulary, minus the DSL-text-only wart of `abstract` colliding
 /// with the reserved Rust keyword (spelled `abstract_` here instead — decided over introducing a
 /// raw-identifier `r#abstract`, since this whole attribute vocabulary is otherwise plain
 /// identifiers). Any other component-level attribute the user wrote (`#[derive(..)]`, doc
@@ -350,7 +350,7 @@ pub fn sibling_enum_modules() -> Vec<Module> {
 }
 
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` -> `EnumDef { name: "Name", variants: ["A", "B",
-/// "C"] }`. Every variant must be a bare unit variant — same restriction `.elwind`'s own `enum`
+/// "C"] }`. Every variant must be a bare unit variant — same restriction the DSL's own `enum`
 /// syntax has (§7 of the DSL spec: "no anonymous unions", enums are plain value sets), and there's
 /// no way to `match` a tuple/struct variant's payload from `view!`'s own limited match-arm syntax
 /// anyway.
@@ -556,7 +556,7 @@ mod tests {
         assert!(s.contains("impl"));
     }
 
-    // Phase 2: a `view!`-less component is legal (the Rust-macro-path counterpart of a `.elwind`
+    // Phase 2: a `view!`-less component is legal (the Rust-macro-path counterpart of a DSL
     // `component X { .. }` with no paired `view X { .. }` block) — see
     // `component_and_view_from_item_struct`'s own doc comment.
     #[test]
@@ -592,7 +592,7 @@ mod tests {
     }
 
     /// The attribute-macro frontend must produce *the same* generated code as the equivalent
-    /// `.elwind` DSL text through the existing `parser.rs` — proving `codegen.rs` really is
+    /// DSL text through the existing `parser.rs` — proving `codegen.rs` really is
     /// unchanged/shared, not just superficially similar.
     #[test]
     fn matches_dsl_frontend_output_for_an_equivalent_component() {

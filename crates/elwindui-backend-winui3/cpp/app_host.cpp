@@ -47,7 +47,7 @@ void (*g_startup)() = nullptr;
 // `Application::Start` crashes with the same stowed exception (`0xC000027B`) the project's own
 // Rust-side history already hit for a bare, metadata-provider-less composed `Application` — see
 // `Application::Current()`'s doc comment in `lib.rs`. `XamlControlsXamlMetaDataProvider` (the same
-// stock type the DSL's own `.elwind` XAML-flavored markup would resolve custom types through) is
+// stock type a real XAML markup file would resolve custom types through) is
 // delegated to here, mirroring the Rust `IXamlMetadataProvider` implementation this file replaces.
 struct App : ApplicationT<App, IXamlMetadataProvider> {
     App() : m_provider(XamlControlsXamlMetaDataProvider()) {}

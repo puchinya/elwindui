@@ -1,9 +1,9 @@
-/// A single `.elwind` file (or an equivalent synthetic module built from a plain `.rs` file's
+/// A single DSL module (or an equivalent synthetic module built from a plain `.rs` file's
 /// `#[elwindui::viewmodel] mod foo { .. }`, see `attr_frontend.rs`). See docs/specs/dsl_spec.md §11
 /// (`use`), §1-15 core language, docs/design/tools/codegen_design.md §3 (how `path` maps to a real Rust module path).
 #[derive(Debug, Clone, Default)]
 pub struct Module {
-    /// This module's real, crate-relative path segments — `[]` for a `.elwind` file compiled by
+    /// This module's real, crate-relative path segments — `[]` for a DSL module compiled by
     /// `compile_dir` (which lands flat at the crate root via `include!`, docs/design/tools/codegen_design.md §3) or for a
     /// standalone proc-macro invocation; `["notepad_view_model"]` for Rust source's
     /// `mod notepad_view_model { .. }`. `use` declarations (§12) are resolved against these paths
@@ -12,15 +12,15 @@ pub struct Module {
     pub uses: Vec<UseDecl>,
     pub items: Vec<Item>,
     /// Whether this module came from `elwindui-codegen`'s own `BUILTIN_SHAPE_SOURCE`
-    /// (`builtin_modules()`, set there) rather than a consumer's own `.elwind` directory —
+    /// (`builtin_modules()`, set there) rather than a consumer's own source directory —
     /// `validate::validate` uses this to reject a `#[embedded]` component declared outside the
     /// actual builtin sources (docs/specs/dsl_spec.md 付録A).
     pub is_builtin: bool,
     /// Whether this module was built by `component_frontend.rs` from a real `#[elwindui::component]`
     /// Rust struct (`generate_component_from_item_struct`'s own module, or one of
     /// `component_frontend::sibling_component_modules`), as opposed to `parser::parse_module`'s
-    /// text-based `.elwind` frontend. Defaults to `false` (`Module`'s `Default`), matching every
-    /// `parser::parse_module` output — real `.elwind` text has no notion of "a type that exists in
+    /// text-based DSL frontend. Defaults to `false` (`Module`'s `Default`), matching every
+    /// `parser::parse_module` output — real DSL text has no notion of "a type that exists in
     /// real Rust but isn't declared anywhere in this compilation unit's own AST", so an unresolved
     /// name there is always a genuine typo (`check_element_value`'s `None` arm relies on this to
     /// keep catching them). A proc-macro-built module, by contrast, may legitimately reference a
@@ -31,7 +31,7 @@ pub struct Module {
 }
 
 /// `use components::card::Card;` / `use a::b::{C, D};` (§12). Only the flat form is needed for
-/// notepad; the brace-group form can be added when a `.elwind` file actually uses it.
+/// notepad; the brace-group form can be added when a caller actually uses it.
 #[derive(Debug, Clone)]
 pub struct UseDecl {
     pub path: Vec<String>,
@@ -99,7 +99,7 @@ pub struct ComponentDef {
     /// `#[embedded]` (written immediately before `component`, docs/specs/dsl_spec.md 付録A): marks
     /// this component as one of the builtin shape declarations (`BUILTIN_SHAPE_SOURCE`) — `validate::validate`
     /// rejects it on a component whose `Module::is_builtin` is `false` (i.e. a consumer's own
-    /// `.elwind` file falsely claiming to be a builtin).
+    /// DSL module falsely claiming to be a builtin).
     pub embedded: bool,
     /// `#[sealed]` (same position): marks this component as unable to be named as a `base` in
     /// `component X inherits Y` — `validate::validate_inherits` rejects `inherits` naming a sealed
@@ -122,7 +122,7 @@ pub struct ComponentDef {
     /// (for a shape-composition base like `Shape`) as the root of another component's own `view`.
     /// `validate::check_element_value` rejects any `Type { .. }`/bare-child use site naming an
     /// `#[abstract]` component; `codegen::generate_module` skips it entirely (no `create_<snake
-    /// case>(..)`/`new(..)` is ever generated for it). Used on `builtins.elwind`'s pure markers
+    /// case>(..)`/`new(..)` is ever generated for it). Used on the builtins' pure markers
     /// (`UIElement`/`NativeControl`/`Layout`/`Shape`) — a concrete virtual builtin meant to be used
     /// directly (`VerticalLayout`/`HorizontalLayout`/`Control`/`Grid`/`TextBlock`) does not set this.
     pub is_abstract: bool,
@@ -184,8 +184,8 @@ pub enum FieldKind {
     /// `#[computed]`: read-only, recomputed from its dependencies. See §4, docs/design/gui_framework_design.md §7.2.
     Computed,
     /// A `viewmodel` action method, auto-detected from an `impl` block's `fn`/`async fn` (Rust-
-    /// native `#[elwindui::viewmodel] mod { struct .. impl .. }` frontend only — the `.elwind`
-    /// DSL has no syntax to declare one). Not a real struct field: `attr_frontend.rs` synthesizes
+    /// native `#[elwindui::viewmodel] mod { struct .. impl .. }` frontend only — the DSL text
+    /// form has no syntax to declare one). Not a real struct field: `attr_frontend.rs` synthesizes
     /// one `FieldDef` per `impl` `fn` directly, with no corresponding struct-side declaration.
     Action,
     /// `#[attached]`: a WPF/WinUI3-style attached property (§3) — declares a property that any
@@ -206,7 +206,7 @@ pub enum Attr {
     /// `#[two_way]`: marks a builtin shape's `#[param]` field as eligible for automatic two-way
     /// wiring — when an element's value for this attribute is a settable path, codegen wires a
     /// change callback back into it generically (no per-type `codegen.rs` logic needed). See
-    /// this crate's own `builtins.elwind` shape declarations (e.g. `TextArea`'s `text` field).
+    /// the builtin `#[class]` shape declarations (e.g. `TextArea`'s `text` field).
     TwoWay,
     /// `#[length(start..=end)]` / `#[length(start..end)]`. See §7.
     Length {
@@ -230,7 +230,7 @@ pub enum Attr {
     /// `#[onetime]`: marks a builtin shape's `#[param]` field as construction-time-only — applied
     /// once when the element is built, never re-applied by `resync()`. For a field whose real
     /// setter has externally-mutable, backend-owned semantics (e.g. `Window`'s `left`/`top`/
-    /// `width`/`height` — the OS window manager, not the `.elwind` declaration, owns the live
+    /// `width`/`height` — the OS window manager, not the DSL declaration, owns the live
     /// value once the window exists), blindly re-pushing the originally-declared value on every
     /// unrelated `resync()` would fight the user's own subsequent interaction (dragging/resizing)
     /// by snapping it back. Declarative replacement for what used to be a hardcoded
@@ -373,7 +373,7 @@ pub struct ElementNode {
     /// use* of a `#[routed]`-declared attribute (`on_click`, `on_key_down`, ...), not to the
     /// field's own declaration (unlike every other `Attr` variant): a shortcut is inherently a
     /// per-instance decision (this one `Button` gets `Ctrl+S`, not every `Button` in the app), so
-    /// it can't live on `Button.on_click: fn()`'s shared declaration in `builtins.elwind` the way
+    /// it can't live on `Button.on_click: fn()`'s shared `#[class]` declaration the way
     /// `#[routed]` itself does. `(attribute name, chords, scope)`, one entry per annotated
     /// attribute — `chords` is a list of `(backend, key spec)` pairs (a `None` backend applies to
     /// every backend with no more specific entry of its own, e.g. `#[shortcut(winui3: "Ctrl+S",

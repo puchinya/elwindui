@@ -19,9 +19,9 @@ pub use elwindui_svg as svg;
 /// a `component`+`view` pair (docs/specs/dsl_spec.md §3/§13) as a single ordinary Rust `struct`,
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the
 /// viewmodel half (docs/design/gui_framework_design.md §7.2). `view!` is not a real macro (never invoked/expanded — see
-/// `elwindui_macros::component`'s own doc comment); its tokens are read as `.elwind`-DSL text.
+/// `elwindui_macros::component`'s own doc comment); its tokens are read as DSL text.
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` opts a plain user `enum` into the same
-/// `match`/`if let` exhaustiveness checking a `.elwind`-text `enum` always got — see
+/// `match`/`if let` exhaustiveness checking a DSL-text `enum` always got — see
 /// `elwindui_macros::dsl_enum`'s own doc comment.
 pub use elwindui_macros::{class, component, dsl_enum, main, theme_definition, viewmodel};
 

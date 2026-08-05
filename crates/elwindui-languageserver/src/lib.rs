@@ -3,7 +3,7 @@
 //! See docs/design/tools/languageserver_design.md.
 //!
 //! Phase 7 (`docs/status/implementation_status.md`) retargeted this crate from the retired
-//! `.elwind`-directory model to a single-`.rs`-file model, matching elwindui's own unification onto
+//! directory-based model to a single-`.rs`-file model, matching elwindui's own unification onto
 //! the Rust-macro frontend — real-time diagnostics (`diagnostics`, reusing
 //! `elwindui_codegen::{component_frontend, validate}`) and `vm.field` member completion
 //! (`completion`, built on `elwindui_codegen::codegen::SymbolTable::resolve`). Semantic tokens
@@ -165,7 +165,7 @@ fn handle_notification(connection: &Connection, not: ServerNotification) {
 }
 
 /// Re-checks just the one file `uri` names (Phase 7 — the old directory-wide re-check is gone along
-/// with the `.elwind`-directory model it existed for, see `diagnostics.rs`'s own doc comment) and
+/// with the directory-based model it existed for, see `diagnostics.rs`'s own doc comment) and
 /// publishes its diagnostics, including an empty list when it turned out clean (so previously
 /// reported problems get cleared once fixed).
 fn publish_for_document(connection: &Connection, uri: &Uri) {

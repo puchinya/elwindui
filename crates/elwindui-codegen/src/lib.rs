@@ -7,7 +7,7 @@ pub mod theme_frontend;
 mod text_style;
 pub mod validate;
 
-/// Test-only stand-in for the old, workspace-wide `builtins.elwind`/`builtin_modules()` (removed —
+/// Test-only stand-in for the old, workspace-wide builtin shape source and `builtin_modules()` (removed —
 /// see 05d4861/29ced3d/c916322/d255f31/36292fb, `docs/status/implementation_status.md`, Refs #14):
 /// every real builtin's shape now lives as `#[elwindui_macros::class]` DSL attributes on its actual
 /// `elwindui-core`/`elwindui-backend-*` declaration, propagated to a consumer crate via the
@@ -29,10 +29,10 @@ pub mod validate;
 /// `codegen::generate_module` directly (no later rustc pass to fall back on). This file — a private
 /// copy of the old real shape source, now allowed to drift out of sync with the real builtins without
 /// consequence, since nothing production-facing reads it — gives those tests real `TypeInfo` to
-/// check against again, exactly as `builtin_modules()` used to for everyone. Named `.txt`, not
-/// `.elwind` (Refs #14's first acceptance criterion, "0 `.elwind` files in the repo") — its content
-/// is still the same hand-written DSL text `parser::parse_module` (test-only, same Issue) parses;
-/// only the file extension changed.
+/// check against again, exactly as `builtin_modules()` used to for everyone. It carries a `.txt`
+/// extension rather than the DSL text form's old one, so that no source file in the repo claims to
+/// be a compilable DSL module. Its content is still the same hand-written DSL text
+/// `parser::parse_module` (test-only) parses; only the file extension changed.
 #[cfg(test)]
 const TEST_BUILTIN_SHAPE_SOURCE: &str = include_str!("testdata/builtins_dsl_text.txt");
 
@@ -54,7 +54,7 @@ pub(crate) fn test_builtin_modules() -> Vec<ast::Module> {
 /// The attribute-macro counterpart to `generate_component_from_item_struct`: takes a
 /// `#[elwindui::viewmodel] mod foo { struct Foo { ... } impl Foo { ... } }` (already parsed as a `syn::ItemMod` by the
 /// `elwindui-macros` proc-macro), builds the same `ViewModelDef` AST `parser.rs` would from
-/// equivalent `.elwind` text (see `attr_frontend`), and feeds it through `generate_module` (not
+/// equivalent DSL text (see `attr_frontend`), and feeds it through `generate_module` (not
 /// `generate_viewmodel` directly — `generate_module` is also what conditionally emits the
 /// `__elwindui_block_on_ready` helper an async `#[command]` needs, and there's no reason to
 /// duplicate that check here).
@@ -80,7 +80,7 @@ pub fn generate_viewmodel_from_item_mod(
 }
 
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` — the opt-in that makes a plain Rust `enum`
-/// visible to `validate::validate`'s `match`-exhaustiveness checking the same way `.elwind`'s own
+/// visible to `validate::validate`'s `match`-exhaustiveness checking the same way the DSL's own
 /// `enum Name { .. }` syntax always was (§14's user-enum rule; see
 /// `component_frontend::same_crate_enums`'s own doc comment for why an opt-in is needed at all —
 /// unlike a `#[elwindui::component]` struct or `#[elwindui::viewmodel]` mod, nothing about a bare
@@ -223,7 +223,7 @@ mod dsl_enum_tests {
 /// two mistakes its own doc comment claims it fixes — a typo'd `vm.field` reference and a
 /// `#[bindable]` field whose type isn't a `viewmodel` at all — mirroring `validate.rs`'s own
 /// `rejects_reference_to_unknown_vm_field`/`rejects_bindable_field_whose_type_is_not_a_viewmodel`
-/// tests for the `.elwind`-text frontend. Names are unique per test for the same reason
+/// tests for the DSL-text frontend. Names are unique per test for the same reason
 /// `dsl_enum_tests` uses unique names (shared process-global registries).
 #[cfg(test)]
 mod viewmodel_registry_tests {

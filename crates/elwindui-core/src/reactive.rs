@@ -51,7 +51,7 @@ impl Drop for Subscription {
 /// `viewmodel`, docs/design/gui_framework_design.md §7.2) — identifies the changed property by name (`&'static str`) rather
 /// than a per-viewmodel-generated enum. This exists specifically for `#[bindable]` fields
 /// (docs/design/gui_framework_design.md §7.2): a `component` written via `#[elwindui::component]` + `body: view! { .. }` (or a
-/// `.elwind` `view` referencing a `viewmodel` declared elsewhere) is parsed by a *separate* macro
+/// DSL `view` referencing a `viewmodel` declared elsewhere) is parsed by a *separate* macro
 /// invocation / file from whatever declares the concrete viewmodel type, so it never has a name
 /// for that type's own generated `XProperty` enum to write a match arm against. A property *name*
 /// needs no such type knowledge — `#[component]`'s own codegen already knows every `vm.<field>`

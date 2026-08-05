@@ -455,7 +455,7 @@ pub struct KeyEventArgs {
 
 /// Payload for `on_text_input` — the IME-committed string, or a directly-typed character when no
 /// IME is involved. Only ever carries already-committed text; in-progress IME composition previews
-/// are not exposed to `.elwind` (see docs/design/gui_framework_design.md §8.1's own caveat).
+/// are not exposed to the DSL (see docs/design/gui_framework_design.md §8.1's own caveat).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextInputEventArgs {
     pub text: String,

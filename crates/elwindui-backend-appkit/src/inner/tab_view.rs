@@ -14,7 +14,7 @@ use objc2_foundation::NSRect;
 
 /// See docs/specs/builtins_spec.md 付録Y. A single tab's header: a title button (click to
 /// select) plus a small close button, packed into one row so `TabStripImpl` can insert/remove it as
-/// one unit. Purely an internal composition helper (never a real `.elwind`-declared element), so
+/// one unit. Purely an internal composition helper (never a real DSL-declared element), so
 /// its two buttons are plain `InnerButton`s, not `native_ui::Button` — no use-site margin/alignment
 /// ever applies to them.
 pub(crate) struct TabChipImpl {

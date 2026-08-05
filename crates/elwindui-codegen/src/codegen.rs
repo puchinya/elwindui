@@ -14,8 +14,8 @@ use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 
 /// What every `component`/`viewmodel` in the whole compilation unit looks like, so that
-/// cross-file references (e.g. `notepad_window.elwind`'s `vm.window_title` referring to a
-/// `#[computed]` field defined in `notepad_viewmodel.elwind`) can be resolved.
+/// cross-file references (e.g. `notepad_window.rs`'s `vm.window_title` referring to a
+/// `#[computed]` field defined in `notepad_view_model`) can be resolved.
 ///
 /// Keyed by `(module real path, item name)` — the same address Rust's own name resolution uses
 /// (see `ast::Module::path`) — rather than a bare item name, so two same-named types defined in
@@ -67,7 +67,7 @@ pub struct TypeInfo {
     pub declaring_types: HashMap<String, String>,
     /// Names of `#[onetime]` fields (`ast::Attr::Onetime`'s own doc comment) — applied once at
     /// construction, never re-pushed by `emit_resync`'s per-attribute loop. Empty for ordinary user
-    /// components (only `builtins.elwind`'s `Window` declares any today: `left`/`top`/`width`/
+    /// components (only `Window` declares any today: `left`/`top`/`width`/
     /// `height`).
     pub onetime_fields: HashSet<String>,
     /// Whether this type is one of the hand-written-in-`elwindui_core::ui` "virtual" builtins with
@@ -75,7 +75,7 @@ pub struct TypeInfo {
     /// `HorizontalLayout`/`TextBlock`/`Control`/`Grid`/`Shape` today) — computed structurally
     /// (`is_builtin && !has_view && !is_native_control_leaf && !` this component's own `#[native]`
     /// flag, at `TypeInfo` construction time) rather than an enumerated name list, so adding a
-    /// future virtual builtin to `builtins.elwind` needs no matching change here. See
+    /// future virtual builtin needs no matching change here. See
     /// `build_virtual_value`'s own doc comment for the construction convention this drives.
     pub is_virtual_builtin: bool,
     /// Every field with no initializer, `#[param]` or not, mapped to its declared type — used
@@ -196,7 +196,7 @@ pub struct TypeInfo {
     /// `viewmodel` (never a valid `inherits` target at all).
     pub sealed: bool,
     /// Whether this component is `#[abstract]` (docs/specs/dsl_spec.md 付録A) — a pure category tag
-    /// (`UIElement`/`NativeControl`/`Layout`/`Shape` in `builtins.elwind`) that cannot be
+    /// (`UIElement`/`NativeControl`/`Layout`/`Shape`) that cannot be
     /// instantiated directly. `validate::check_element_value` rejects any `Type { .. }`/bare-child
     /// use site naming one; `generate_module` skips generating a `create_<snake case>(..)`/`new(..)`
     /// for it entirely. `false` for a `viewmodel`.
@@ -210,8 +210,8 @@ pub struct TypeInfo {
     /// ("first still-unclaimed non-`Option` field") fallback. `None` for a `viewmodel` and for any
     /// component that doesn't declare `#[content(..)]`.
     pub content_field: Option<String>,
-    /// Whether this type is marked `#[embedded]` in `elwindui-codegen`'s own `builtins.elwind`,
-    /// rather than being a consumer's own `.elwind`/`#[elwindui::component]` declaration. `Module::is_builtin`
+    /// Whether this type is marked `#[embedded]` as a builtin shape,
+    /// rather than being a consumer's own `#[elwindui::component]` declaration. `Module::is_builtin`
     /// only authorizes that attribute inside the embedded shape source; `ComponentDef::embedded`
     /// is the actual per-type builtin boundary.
     /// `concrete_type_ident`/`composed_create_fn_ident`/the `host_composition_base` trait-bound
@@ -323,7 +323,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             _ => None,
                         })
                         .collect();
-                    // Kind-agnostic (not `f.kind == FieldKind::Param`): now that builtins.elwind's
+                    // Kind-agnostic (not `f.kind == FieldKind::Param`): now that the builtin shape source is gone,
                     // own fields are plain (unattributed) `prop`s rather than `#[param]` (their
                     // backing Rust types are all zero-arg-constructed with post-construction
                     // `set_<field>` setters regardless — docs/design/gui_framework_design.md §5.1 — so
@@ -399,7 +399,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             bindable_fields,
                             onetime_fields,
                             // A "virtual builtin" is exactly: an `#[embedded]` shape declaration
-                            // from `builtins.elwind`, with no `view` of its own, that isn't native
+                            // from the builtin shape set, with no `view` of its own, that isn't native
                             // (neither `inherits NativeControl` nor `#[native]` directly). `Module::
                             // is_builtin` only establishes that `#[embedded]` is legal in this source
                             // file; the component-level attribute is the actual builtin/user boundary.
@@ -573,7 +573,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
 /// needed — this is what `build_symbol_table` itself uses to resolve an `inherits` base while
 /// still building the table), mirroring `SymbolTable::resolve_key`'s own name-resolution rule:
 /// defined locally — in *any* module sharing `from`'s real path, not just `from` itself, since
-/// every builtin shape lives in the same same-path (`[]`), `use`-less `builtins.elwind` file
+/// every builtin shape lives in the same same-path (`[]`), `use`-less builtin shape set
 /// (`builtin_modules`'s own doc comment) — or brought into scope by one of `from`'s `use`
 /// declarations.
 fn find_component_and_module<'m>(
@@ -655,7 +655,7 @@ pub(crate) fn resolve_effective_fields<'m>(
     let base_fields: Vec<FieldDef> = match find_view(from, &c.name) {
         // `#[routed]` fields (docs/design/gui_framework_design.md §5.10, e.g. `UIElement`'s own
         // `on_tapped`/`on_pointer_pressed`/...), and every field declared directly on the root
-        // `UIElement` component itself (`margin`/`width`/`height`/... — `builtins.elwind`'s own doc
+        // `UIElement` component itself (`margin`/`width`/`height`/... — the builtin's own `#[class]` doc
         // comment on that declaration: "every component — builtin or user-defined — picks them up
         // for free ... with no per-attribute-name hardcoding in the compiler"), are exempt from the
         // bare-reference requirement below: both apply directly to whatever concrete node this
@@ -1498,7 +1498,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
     //
     // The `ObservableExt` impl below (`#[bindable]`'s target, `elwindui_core::reactive`) is the one
     // deliberate exception: a component injecting this viewmodel across a *separate* macro
-    // invocation (`#[elwindui::component]` + `body: view! { .. }`, or any `.elwind` `view`
+    // invocation (`#[elwindui::component]` + `body: view! { .. }`, or any DSL `view`
     // referencing a viewmodel it can't resolve in its own symbol table) has no name for
     // `#property_enum` to write a match arm against at all, enum-typed or otherwise — the choice
     // there isn't "enum vs. string", it's "string vs. nothing works". It doesn't reopen the typo
@@ -2477,7 +2477,7 @@ fn generate_view(
     // `#[class]` derives an `XExt` trait from the component struct `X`.
     let struct_ident = target.clone();
 
-    // A `component`/`view` pair always shares one `.elwind` file (`generate_module`'s
+    // A `component`/`view` pair always shares one DSL module (`generate_module`'s
     // `view_targets` check), so the target is always defined locally in `from` — no `use` needed.
     let binds = table
         .resolve(from, &target_name)
@@ -2563,7 +2563,7 @@ fn generate_view(
     // references to `self.<field>()`), this initial computation runs before `self` exists, so
     // sibling references here are deliberately left as bare identifiers — already valid Rust once
     // each is its own preceding `let`. Field order in the source is trusted to already put
-    // dependencies before dependents (the same assumption `.elwind` authors already have to satisfy
+    // dependencies before dependents (the same assumption DSL authors already have to satisfy
     // for a `#[computed]` field to read sensibly top-to-bottom); this doesn't topologically sort.
     let mut own_default_construct_stmts = TokenStream::new();
     for f in component.fields.iter().filter(|f| {
@@ -2908,7 +2908,7 @@ fn generate_view(
     // after construction — a `prop` field is runtime-mutable *by definition*, and "referenced at
     // construction time" doesn't change that (e.g. `RoundedPanel`'s `label`, used immediately to
     // build its own internal `TextBlock` but also meant to change on every `resync()` of whichever
-    // *other* component instantiated it — `document_view.elwind`'s `RoundedPanel { label:
+    // *other* component instantiated it — `document_view.rs`'s `RoundedPanel { label:
     // t!("notepad-status-chars", count: doc.char_count) }`). Cell/RefCell-wrapped
     // (`is_copy_type`) like a deferred field's storage, but — unlike a deferred field — stays a
     // `new(..)` positional argument (its value is needed immediately, before `Self` exists) and its
@@ -3859,7 +3859,7 @@ fn generate_view(
             quote! { #ident }
         }
     };
-    // The literal name (`.elwind`-level, e.g. `"ContentControl"`/`"Rectangle"`/`"Window"`) this
+    // The literal name (DSL-level, e.g. `"ContentControl"`/`"Rectangle"`/`"Window"`) this
     // component's own generated trait bound (`inherits_path`) is keyed off — the *immediate* base
     // actually embedded as this component's own `base: <BaseImpl>` field (`resolved_root.type_path` for
     // shape composition,
@@ -4473,8 +4473,8 @@ fn content_field_is_list(info: &TypeInfo) -> bool {
 /// The trait-object element type of a parent's declared content collection, in whichever form
 /// `dynamic_collection_item_trait_ty` (this function's own dispatcher, and every real caller's
 /// entry point) can actually produce for it — a bare `Ident` when a shape table resolves the
-/// parent (`table.resolve`'s `Some`, `.elwind`-text-path-only since production dropped
-/// `builtins.elwind` — Refs #14), or opaque already-`dyn`-wrapped tokens from the `@content_item_dyn`
+/// parent (`table.resolve`'s `Some`, DSL-text-path-only since production dropped
+/// the builtin shape set — Refs #14), or opaque already-`dyn`-wrapped tokens from the `@content_item_dyn`
 /// shape-macro query (`content_item_dyn_type`, `elwindui-macros`) when it isn't. `dynamic_child_binding`
 /// is the only reader that needs to tell the two apart (the `KnownIdent(UIElementExt)` case has its
 /// own `into_node_if_needed`-based shortcut) — every other caller treats both uniformly as "already
@@ -5408,7 +5408,7 @@ fn emit_attached_setters(
                 });
             }
             // `owner` has no local `TypeInfo` (a real builtin — `Grid`, same as every other
-            // builtin since `builtins.elwind` was deleted, §see `emit_external_construction`'s
+            // builtin since the builtin shape source was deleted, §see `emit_external_construction`'s
             // own doc comment): its `#[attached]` field's declared type can't be looked up here
             // any more, only inside `owner`'s own `#[elwindui_macros::class]`-generated
             // `__elwindui_props_{owner}!` macro (`elwindui-macros::class::build_props_macro`'s
@@ -5482,7 +5482,7 @@ fn coerce_color_literal(inner_ty: &str, value: &ViewExpr) -> Option<TokenStream>
     };
     // Unwrap any `Group`/`Paren` nesting a proc-macro token stream (the `#[elwindui::component]` +
     // `view! { .. }` frontend, `component_frontend.rs`) can introduce around a literal that a
-    // freshly `syn::parse_str`-parsed `.elwind` text expression never has — the underlying literal
+    // freshly `syn::parse_str`-parsed DSL text expression never has — the underlying literal
     // is the same either way, so this coercion should recognize both uniformly.
     let mut expr = expr;
     while let syn::Expr::Group(group) = expr {
@@ -5949,7 +5949,7 @@ fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
 ///     child (`MenuBarItem`'s single nested `Menu`, bound to its `#[content(submenu)]` field);
 ///   - anything else is an ordinary `emit_expr` value.
 /// Constructs an *external* element: `table.resolve` found nothing for `node.type_path` in this
-/// compilation's own `.elwind`/`#[component]` AST, so it is treated as a builtin declared entirely
+/// compilation's own `#[component]` AST, so it is treated as a builtin declared entirely
 /// elsewhere (`elwindui-core`'s `#[class]`/`#[prop]` items, or a future crate declaring one the same
 /// way) — the counterpart to `is_hand_written_native`'s branch below, but knowing none of what
 /// `TypeInfo` used to supply. Every DSL-surface decision that used to come from a builtin's
@@ -6351,7 +6351,7 @@ fn is_deferred_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str
 ///   docs/specs/dsl_spec.md §4's param/prop split — `generate_view` keeps it a positional `new(..)`
 ///   argument *and* gives it a resync-triggering setter. Gated on `!info.is_builtin`: this rule
 ///   only holds for a genuinely `generate_view`-generated user component — `elwindui-codegen`'s own
-///   embedded `builtins.elwind` also declares a `view` for `Rectangle`/`Ellipse`/`ContentControl`
+///   the builtin shape set also declares a `view` for `Rectangle`/`Ellipse`/`ContentControl`
 ///   (`has_view: true` too), but purely for symbol-table/validation purposes (docs/
 ///   docs/design/gui_framework_design.md §5.1) — their real implementation is hand-written directly in
 ///   `elwindui_core::ui`, never run through `generate_view`, so a "no `#[param]`" field there
@@ -6378,7 +6378,7 @@ fn is_settable_field(info: &TypeInfo, component_name: &str, name: &str, ty: &str
 /// closes that gap: a use site providing an explicit attribute for one of these now gets a real
 /// post-construction `set_<name>(value)` call, exactly like a deferred `Option<..>` field already
 /// does. Gated on `!info.is_builtin` for the same reason `is_settable_field` is — this crate's own
-/// embedded `builtins.elwind` never declares a defaulted `Prop` field today (only `#[attached]`
+/// the builtin shape set never declares a defaulted `Prop` field today (only `#[attached]`
 /// fields have a `= expr` default, a wholly separate mechanism — `emit_attached_setters`), but
 /// nothing here should assume a hand-written native's own defaulted field (if one existed) works
 /// this same way.
@@ -6481,7 +6481,7 @@ fn build_component_args(
                     let value = emit_expr(other, ctx, &EmitMode::Construction);
                     // A `String`-shaped param takes `&str` in every *hand-written* builtin (matching
                     // the shape declaration's `String`/`Option<String>` — see this crate's own
-                    // `src/builtins.elwind`), so the value is wrapped in `&(..)` here regardless of
+                    // `elwindui-core::ui`), so the value is wrapped in `&(..)` here regardless of
                     // whether the DSL expression itself is a `&str` literal or a computed `String`
                     // (e.g. `t!(...)`) — Rust's deref coercion accepts either as `&str` at the call
                     // site. A `view`-having (`info.has_view`) component's
@@ -6839,7 +6839,7 @@ fn build_component_value(
         // `TypeInfo` references) — the same shape this function already special-cased for
         // `ContentControl` specifically before any builtin lost its `TypeInfo`; that special case
         // was never really about `ContentControl`'s *name*, just the only shape-composition base a
-        // real `.elwind`/`#[component]` file happened to use with args. `build_component_args`
+        // real `#[component]` file happened to use with args. `build_component_args`
         // needs a real field list to decide what's required/positional, which — as with every other
         // external path — no longer exists to consult.
         let construct_path = composed_construct_path(&node.type_path, true);
@@ -7418,7 +7418,7 @@ fn concrete_type_ident(type_path: &str, info: Option<&TypeInfo>) -> TokenStream 
     // flat crate-root convention instead. `info.is_none()` (external, no local `TypeInfo`) is
     // treated the same as a known builtin — every name `table.resolve` doesn't find locally *is*
     // one, by construction (see `emit_construction`'s own dispatch: a name is only ever unresolved
-    // here because it's declared entirely outside this compilation's own `.elwind`/`#[component]`
+    // here because it's declared entirely outside this compilation's own `#[component]`
     // AST).
     if info.is_none() || info.is_some_and(|i| i.is_builtin) {
         quote! { elwindui::ui::#ident }
@@ -8284,7 +8284,7 @@ fn emit_resync(
         // *anything else* triggers resync() (e.g. `TabView`'s `on_select` wiring). The live native
         // frame is available separately via `Window`'s own `left()`/`top()`/`width()`/`height()`
         // getters for whoever wants current state. Declarative (`info.onetime_fields`, from this
-        // field's own `#[onetime]` attribute in `builtins.elwind`) rather than a hardcoded
+        // field's own `#[onetime]` attribute in the builtin's own `#[class]` declaration) rather than a hardcoded
         // type-name + field-name tuple — see `ast::Attr::Onetime`'s own doc comment.
         if info.is_some_and(|i| i.onetime_fields.contains(name)) {
             continue;
@@ -8523,7 +8523,7 @@ fn emit_resync(
 
 /// Converts a resync value into a virtual-builtin setter's by-value parameter shape, derived
 /// purely from the field's own declared type string (`TypeInfo::field_types`, sourced from
-/// `builtins.elwind`) — no per-widget-type or per-field-name table to maintain: any current or
+/// the builtin `#[class]` declarations) — no per-widget-type or per-field-name table to maintain: any current or
 /// future virtual builtin's non-Copy field is covered automatically as long as its declared type
 /// matches one of these two shapes, mirroring `build_virtual_value`'s own construction-time
 /// conversions (a `Vec<T>`-typed field is handled earlier, by the caller's own type-agnostic
@@ -8703,11 +8703,11 @@ mod tests {
         );
     }
 
-    /// Actions can't be declared in `.elwind`-native `viewmodel` text (only `#[observable]`/
+    /// Actions can't be declared in the DSL text form's `viewmodel` (only `#[observable]`/
     /// `#[computed]` can); a viewmodel with actions is always built via the Rust-native
     /// `attr_frontend` frontend (`mod { struct .. impl .. }`) instead, same as the real
     /// `#[elwindui::viewmodel]` macro — see `attr_frontend::viewmodel_def_from_item_mod`. `path:
-    /// Vec::new()` matches `.elwind`'s own crate-root placement (`parse_module`'s modules are also
+    /// Vec::new()` matches the DSL's own crate-root placement (`parse_module`'s modules are also
     /// always `path: []`), so `use crate::NotepadViewModel;` elsewhere resolves against it exactly
     /// the same way.
     fn viewmodel_module_from_rust(src: &str) -> Module {
@@ -8964,7 +8964,7 @@ view NotepadWindow {
     #[test]
     fn content_control_declares_seven_text_style_fields_via_control_base() {
         // Regression guard for the `Attr::TextStyle` exemption in `resolve_effective_fields`/
-        // `resolve_field_declaring_types` — `ContentControl` has its own `view` (`builtins.elwind`)
+        // `resolve_field_declaring_types` — `ContentControl` has its own `view`
         // that never bare-references `font_size`/etc., so without the exemption these seven fields
         // would silently vanish from its effective field set (no compile error — just a missing
         // setter downstream).
@@ -9830,7 +9830,7 @@ view NotepadWindow {
     /// `compile_dir_with_extra_viewmodels` production path) actually does, not the shared test
     /// helper's simplified `path: []`. Needed by `for_loop_identity_survives_when_element_type_isnt_
     /// used_by_the_for_loops_own_file` below to reproduce the real bug: with `path: []` (same as
-    /// every `.elwind`-parsed module), the element type would be trivially visible to *any* module
+    /// every text-parsed module), the element type would be trivially visible to *any* module
     /// with no `use` needed at all, masking the exact cross-module scoping gap this test exists to
     /// catch.
     fn viewmodel_module_from_rust_at_its_own_module_path(src: &str) -> Module {
@@ -9847,7 +9847,7 @@ view NotepadWindow {
     }
 
     /// Regression test for the real `examples/notepad` bug this session root-caused: a `for` loop
-    /// (`notepad_window.elwind`) over a `#[elwindui::viewmodel]`-declared `Vec<DocumentViewModel>`
+    /// (`notepad_window.rs`) over a `#[elwindui::viewmodel]`-declared `Vec<DocumentViewModel>`
     /// (no `Rc<..>` spelled in the field type — the declaration-boundary shape `#[elwindui::
     /// viewmodel]` is documented to use) generated `replace_items` (full rebuild every refresh,
     /// discarding native control state) instead of `replace_rc_items`, because the *element* type
@@ -9894,7 +9894,7 @@ view NotepadWindow {
             }
         "#,
         );
-        // Mirrors `document_view.elwind`: `#[bindable]` (not `#[param] #[inject]`), and `use`s
+        // Mirrors `document_view.rs`: `#[bindable]` (not `#[param] #[inject]`), and `use`s
         // `Document` since it names the type directly in its own field declaration.
         let document_view_src = r#"
 use crate::document_view_model::Document;
@@ -9912,7 +9912,7 @@ view DocumentView {
     }
 }
 "#;
-        // Mirrors `notepad_window.elwind`: `use`s `NotepadViewModel` and `DocumentView`, but never
+        // Mirrors `notepad_window.rs`: `use`s `NotepadViewModel` and `DocumentView`, but never
         // `Document` — `doc` is only ever referenced through the `for` loop's own binding.
         let window_src = r#"
 use crate::notepad_view_model::NotepadViewModel;
@@ -10086,7 +10086,7 @@ view DocumentView {
     }
 
     /// `Rectangle { fill: "#3a3a3c" }` (a real usage — see `examples/notepad/src/ui/
-    /// rounded_panel.elwind`) — `fill`/`stroke` are `Brush`-typed (painter design doc §18's
+    /// rounded_panel.rs`) — `fill`/`stroke` are `Brush`-typed (painter design doc §18's
     /// `Option<String>` → `Option<Brush>` migration), so a hex string literal must be validated
     /// and converted to `Brush::Solid(Color::rgba(..))` at codegen time (`coerce_color_literal`)
     /// rather than spliced through unchanged.
@@ -10170,9 +10170,9 @@ view Foo {
         );
 
         // `ContentControl`'s own generated code (produced when `builtin_modules()` is fed through
-        // `generate_module` directly, mirroring how a real consumer's own `.elwind` component
+        // `generate_module` directly, mirroring how a real consumer's own component
         // would be generated) forwards `content` into `Control`'s children and exposes both
-        // `#[param]` fields as public accessors. `builtins.elwind` bundles every builtin into one
+        // `#[param]` fields as public accessors. The builtin shape source bundled every builtin into one
         // module, so only `ContentControl`'s own `Item::Component`/`Item::View` pair is kept —
         // `generate_module` would otherwise also try (and fail) to generate every shape-only
         // builtin sharing that module (mirroring `compile_dir_impl`'s own filtering in `lib.rs`).

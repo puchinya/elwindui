@@ -7,7 +7,7 @@
 //! it shows as an unexpanded, undecorated token stream to any ordinary Rust-aware tool.
 //!
 //! The scanner (`Scanner`/`tokenize`/`RawToken`, classification logic and the `KEYWORDS`/
-//! `ATTR_NAMES`/`MACRO_NAMES` tables) is the pre-Phase-7 `.elwind`-file tokenizer, otherwise
+//! `ATTR_NAMES`/`MACRO_NAMES` tables) is the pre-Phase-7 text-form tokenizer, otherwise
 //! unchanged (see git history at `b648618^` for the original whole-file version) — deliberately not
 //! built on `elwindui_codegen::parser` (span-free by design, see that module's own doc comment), so
 //! a dedicated lexical scanner is the only way to recover per-character positions at all. What's new

@@ -23,7 +23,7 @@ pub(crate) struct InnerScrollView {
     handle: AnyView,
     scroll: Retained<NSScrollView>,
     content_host: Retained<TreeHostView>,
-    /// `(horizontal_scroll_enabled, vertical_scroll_enabled)` — mirrors the `.elwind`-visible
+    /// `(horizontal_scroll_enabled, vertical_scroll_enabled)` — mirrors the DSL-visible
     /// property names directly (unlike `TreeHostIvars::unconstrained_axes`, which is phrased as
     /// "width/height unconstrained" — the same booleans, just named from the opposite perspective:
     /// scrolling enabled on an axis is exactly what makes that axis unconstrained).
@@ -44,7 +44,7 @@ impl InnerScrollView {
             content_host,
             // Vertical-only scrolling by default — matches both platforms' own scroll-widget
             // defaults and the overwhelmingly common product case (`ScrollView` in
-            // `builtins.elwind`'s own default).
+            // the builtin's own `#[class]` default).
             axes: Cell::new((false, true)),
         };
         this.apply_axes();

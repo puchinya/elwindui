@@ -6,13 +6,13 @@ mod class;
 /// `#[elwindui::viewmodel] mod foo { struct Foo { #[observable(default = ...)] field: Ty, ... }
 /// impl Foo { fn some_action(&self) { ... } } }` — lets a `viewmodel` be written as ordinary Rust
 /// (a real `struct` + a real `impl` with real attributes and real `fn` bodies) instead of the
-/// `.elwind` DSL's `viewmodel Name { ... }` block, matching how WPF-style MVVM frameworks keep the
-/// ViewModel in the host language and reserve markup (here, `.elwind`'s `view { ... }`) for the
+/// the DSL text form's `viewmodel Name { ... }` block, matching how WPF-style MVVM frameworks keep the
+/// ViewModel in the host language and reserve markup (here, the DSL's `view { ... }`) for the
 /// View. Every `fn`/`async fn` in the `impl` block is itself an action, auto-detected with no
 /// separate struct-side declaration — see `elwindui_codegen::attr_frontend` for why the
 /// `struct`+`impl` still have to be wrapped in one `mod` (a single attribute-macro invocation only
 /// ever sees one annotated item, so both need to arrive together for action bodies to be picked
-/// up at all). `.elwind`-native `viewmodel` text has no equivalent — it only supports
+/// up at all). The DSL text form's `viewmodel` has no equivalent — it only supports
 /// `#[observable]`/`#[computed]`; a viewmodel needing actions must use this Rust-native form.
 ///
 /// The `mod` wrapper itself doesn't survive expansion — the generated `struct`/`impl` appear
@@ -38,9 +38,9 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — lets a
-/// `component`+`view` pair be written as a single ordinary Rust `struct` instead of the `.elwind`
-/// DSL's `component Name inherits Base { .. } view Name { .. }` block pair. Ordinary fields become
-/// the component's own `#[param]`/`#[prop]`/etc. fields, exactly as in `.elwind` text; exactly one
+/// `component`+`view` pair be written as a single ordinary Rust `struct` instead of the DSL text
+/// form's `component Name inherits Base { .. } view Name { .. }` block pair. Ordinary fields become
+/// the component's own `#[param]`/`#[prop]`/etc. fields, exactly as in DSL text; exactly one
 /// field, typed as a `view! { .. }` macro invocation, supplies the view tree.
 ///
 /// `view` is never a real macro — it's never invoked, since this attribute macro (which runs
@@ -81,7 +81,7 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` — opts a plain Rust `enum` into `view!`'s
-/// `match`/`if let` exhaustiveness checking, the same way `.elwind` text's own `enum Name { .. }`
+/// `match`/`if let` exhaustiveness checking, the same way the DSL text form's own `enum Name { .. }`
 /// syntax always got it. Nothing about a bare `enum` item is otherwise visible to any proc-macro
 /// (unlike a `#[elwindui::component]`/`#[elwindui::viewmodel]` item), so an opt-in attribute is the
 /// only way to register it into the same-crate symbol table a sibling `#[elwindui::component]`'s

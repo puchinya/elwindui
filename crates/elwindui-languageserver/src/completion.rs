@@ -1,7 +1,7 @@
 //! `textDocument/completion` for `vm.field` — the same shape `elwindui_codegen::validate::check_vm_expr`
 //! already understands. An action (e.g. `vm.save`) completes the same way as any other field —
 //! there's no separate `.execute()`/`.can_execute` member form to drill into (actions can't even
-//! be declared from `.elwind`-native `viewmodel` text at all; only the Rust-native
+//! be declared from the DSL text form's `viewmodel` at all; only the Rust-native
 //! `#[elwindui::viewmodel]` frontend supports them, see `elwindui_codegen::attr_frontend`).
 //!
 //! `ast.rs` has no span info (see `diagnostics.rs`'s doc comment), so this doesn't know which
@@ -41,8 +41,8 @@ pub fn completions_at(src: &str, position: Position) -> Vec<CompletionItem> {
     // field declarations, its sibling items — everything completion actually needs) still comes
     // through; only the dotted-path info already extracted above (`owner_path`/`filter`) is used
     // for resolution. Operates on the raw file text (not just the `view!` macro body), so no
-    // span-mapping through `syn::Macro::tokens` is needed — the same trick the old `.elwind`-text
-    // version of this function used, just at whole-file granularity instead of whole-`.elwind`-file
+    // span-mapping through `syn::Macro::tokens` is needed — the same trick the old DSL-text
+    // version of this function used, just at whole-file granularity instead of whole-file
     // granularity.
     let mut patched = String::with_capacity(src.len());
     patched.push_str(&src[..chain_start]);

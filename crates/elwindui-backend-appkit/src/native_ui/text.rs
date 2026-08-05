@@ -29,7 +29,7 @@ impl TextArea {
         self.inner.measure(available)
     }
 
-    /// `#[two_way] text` (`TextArea` in `builtins.elwind`) — the change-back half of the binding;
+    /// `#[two_way] text` (`TextArea`'s `#[class]` declaration) — the change-back half of the binding;
     /// `elwindui_core::ui::TextArea::set_text` is the model→widget half.
     #[inherent]
     pub fn set_on_text_change(&self, callback: Box<dyn Fn(String)>) {
@@ -71,7 +71,7 @@ pub struct TextBox {
 
 #[elwindui_macros::class]
 impl TextBox {
-    /// `#[two_way] text` (`TextBox` in `builtins.elwind`) — the change-back half of the binding;
+    /// `#[two_way] text` (`TextBox`'s `#[class]` declaration) — the change-back half of the binding;
     /// `elwindui_core::ui::TextBox::set_text` is the model→widget half. Mirrors
     /// `TextArea::set_on_text_change` above.
     #[inherent]
@@ -147,7 +147,7 @@ pub struct PasswordBox {
 
 #[elwindui_macros::class]
 impl PasswordBox {
-    /// `#[two_way] password` (`PasswordBox` in `builtins.elwind`) — the change-back half of the
+    /// `#[two_way] password` (`PasswordBox`'s `#[class]` declaration) — the change-back half of the
     /// binding; `elwindui_core::ui::PasswordBox::set_password` is the model→widget half.
     #[inherent]
     pub fn set_on_password_change(&self, callback: Box<dyn Fn(String)>) {

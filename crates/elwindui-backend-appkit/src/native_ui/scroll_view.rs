@@ -6,7 +6,7 @@ use crate::inner::InnerScrollView;
 use elwindui_core::ui::UIElementExt;
 use std::rc::Rc;
 
-/// `content: std::rc::Rc<dyn UIElement>` (`ScrollView` in `builtins.elwind`, `#[content(content)]`)
+/// `content: std::rc::Rc<dyn UIElement>` (`ScrollView`'s `#[class]` declaration, `#[content(content)]`)
 /// resolves to `Rc<dyn UIElementExt>` here — the same type every other `visual_children()`/
 /// `#[content(..)]` slot in this crate already uses.
 #[elwindui_macros::class(struct_only = elwindui_core::ui::ScrollViewExt, inherits = crate::NativeControl)]

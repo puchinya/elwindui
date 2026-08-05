@@ -6,7 +6,7 @@
 use crate::ast::{Attr, FieldDef, FieldKind};
 
 /// `(field name, declared DSL type)`. The `foreground` type string must stay byte-identical to
-/// `Shape.fill`'s own declared type (`builtins.elwind`) — `codegen::coerce_color_literal` matches
+/// `Shape.fill`'s own declared type — `codegen::coerce_color_literal` matches
 /// on the literal path `"elwindui::core::graphics::Brush"`, so `foreground: "#3a3a3c"` only keeps
 /// working through that existing mechanism if the spelling agrees exactly.
 pub(crate) const TEXT_STYLE_FIELDS: [(&str, &str); 7] = [

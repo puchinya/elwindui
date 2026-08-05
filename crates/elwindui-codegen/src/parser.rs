@@ -5,7 +5,7 @@
 
 use crate::ast::*;
 
-/// Test-only (Refs #14's "未解決の論点"): production code no longer parses whole `.elwind`-style
+/// Test-only (Refs #14's "未解決の論点"): production code no longer parses whole text-form
 /// modules — the top-level `component`/`view`/`viewmodel`/`enum`/`use` structure `Parser::
 /// parse_module` (below) recognizes only ever existed to feed the removed `build.rs`/`compile_dir`
 /// path (see `lib.rs`'s own `TEST_BUILTIN_SHAPE_SOURCE` doc comment). `parse_view_body`/
@@ -46,10 +46,10 @@ pub fn parse_view_body(
 /// `command!(|| { .. })`, or a plain expression — from standalone text, exactly like the `= ...`
 /// right-hand side of a DSL field declaration (`parse_field_def`). Used by `attr_frontend.rs` so a
 /// Rust-attribute-sourced default value (e.g. `#[prop(default = bind!(vm.content, TwoWay))]`) gets
-/// the same `bind!`/`command!` recognition as hand-written `.elwind` text, instead of being parsed
+/// the same `bind!`/`command!` recognition as hand-written DSL text, instead of being parsed
 /// as an inert `syn::Expr::Macro` that `codegen.rs` wouldn't know how to treat specially.
 pub fn parse_initializer(src: &str) -> Result<Initializer, String> {
-    // Unlike the `= ...` right-hand side of a hand-written `.elwind` field declaration (parsed by
+    // Unlike the `= ...` right-hand side of a hand-written DSL field declaration (parsed by
     // `self.parse_initializer()` below while more source always follows, guaranteeing a trailing
     // `,`/`}` for the plain-expression fallback's `take_balanced_until` to find), `src` here is a
     // whole, self-contained attribute-token string (`parse_name_value_tokens`'s `tokens.to_string()`)
@@ -951,7 +951,7 @@ impl<'a> Parser<'a> {
         // `take_bracketed_src` stops exactly there regardless of trailing separators or
         // whitespace/newlines. This matters beyond style: relying on an unnested newline to end
         // the capture (as this used to) silently breaks whenever this DSL text didn't come from a
-        // real `.elwind` file with real line breaks but from a macro's `TokenStream::to_string()`
+        // real DSL module with real line breaks but from a macro's `TokenStream::to_string()`
         // (`elwindui::component!`'s removed bang-macro form, or `view!`'s tokens today) —
         // `to_string()` never preserves original source line breaks, so the "stop at newline"
         // fallback would keep consuming every subsequent attribute/child until the next stray
@@ -1437,7 +1437,7 @@ impl<'a> Parser<'a> {
     /// text as part of the expression.
     ///
     /// The newline check alone isn't enough when this text came from `view!`-macro token recovery
-    /// (`TokenStream::to_string()`, `component_frontend.rs`) rather than a real `.elwind` file —
+    /// (`TokenStream::to_string()`, `component_frontend.rs`) rather than a real DSL module —
     /// `to_string()` never preserves original source line breaks, and doesn't reliably insert space
     /// between every adjacent token pair either (`take_bracketed_src`'s own doc comment notes the
     /// same line-break gap for array literals, fixed there by that value being self-delimiting; a

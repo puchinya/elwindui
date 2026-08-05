@@ -1,6 +1,6 @@
 //! Visual verification harness for `elwindui_core::graphics` (gradients, dashed/capped/joined
 //! strokes, `Path`/`PathBuilder`, boolean path combine, `Clip`/`AffineTransform`/opacity stacks,
-//! `Image`) — none of these are reachable from `.elwind`/`view!` DSL syntax yet (`Rectangle`/
+//! `Image`) — none of these are reachable from `view!` DSL syntax yet (`Rectangle`/
 //! `Ellipse`'s `fill`/`stroke` only accept a solid-color hex literal), so this demo bypasses the
 //! DSL for its actual drawing: `GraphicsDemoCanvas` is a hand-written self-drawing leaf element
 //! (the same `#[elwindui::class]` pattern `elwindui_core::ui::Shape`/`TextBlock` themselves use),
@@ -761,7 +761,7 @@ struct GraphicsDemoWindow {
     // uniformly (the same conversion any literal DSL child element goes through), so `content:
     // fills_canvas` etc. below still resolve correctly. Two independent reasons to prefer the
     // concrete type over a trait object here regardless: (1) `component_frontend.rs` re-serializes
-    // this struct's fields as `.elwind`-DSL text — a bare `dyn UIElementExt` round-trips through
+    // this struct's fields as DSL text — a bare `dyn UIElementExt` round-trips through
     // that as the single malformed identifier `dynUIElementExt` (the space between `dyn` and the
     // path is lost); (2) `codegen.rs`'s `is_copy_type` heuristic (no real type resolution, just the
     // field's type text) treats any bare, uppercase, generic-free identifier as one of this file's

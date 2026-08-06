@@ -120,6 +120,10 @@ impl<'a> Parser<'a> {
                         ComponentDef {
                             name,
                             base,
+                            // The DSL text frontend's `inherits Base` has no qualified-path spelling
+                            // (that's Rust-macro-only syntax, see `ComponentDef::base_path`'s own doc
+                            // comment) — always `None` here.
+                            base_path: None,
                             fields,
                             methods,
                             embedded,

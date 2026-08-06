@@ -94,6 +94,15 @@ pub enum Item {
 pub struct ComponentDef {
     pub name: String,
     pub base: Option<String>,
+    /// The full crate-root-qualified path the DSL author wrote for `base` (`crate::ui::LabeledPanel`),
+    /// when they wrote one — `None` for a bare-name base (always a builtin; see
+    /// `validate::validate_inherits`, which rejects a bare name naming a user-defined base). `base`
+    /// itself always stays the bare symbol-table name (`LabeledPanel`) regardless — this field only
+    /// ever affects *emission* (`codegen::generate_view`'s qualified-base-path helpers), never symbol
+    /// resolution (`SymbolTable::resolve` keys purely on bare names). Only ever set from the Rust-macro
+    /// frontend (`component_frontend::component_and_view_from_item_struct`, Refs #25) — the DSL text
+    /// frontend (`parser.rs`) has no equivalent syntax and always leaves this `None`.
+    pub base_path: Option<String>,
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
     /// `#[embedded]` (written immediately before `component`, docs/specs/dsl_spec.md 付録A): marks

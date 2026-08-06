@@ -4,10 +4,12 @@
 //! and separate from `examples/notepad`: this crate only exercises the new frontend, not the view
 //! layer or any backend.
 //!
-//! Also covers `#[elwindui::component] impl Name { .. }` — §3's `#[overridable]`/`#[overrides]`
-//! method inheritance — for the same reason: it is the only place the generated `__base_<name>`
-//! shadow and the `base::<name>(..)` rewrite are actually compiled and run, rather than just
-//! asserted on as token text in `elwindui-codegen`'s own unit tests.
+//! Also covers `#[elwindui::component] impl Name { .. }` — §3's `#[overridable]` declaration and
+//! generation — for the same reason: `LabeledPanel` below has no subclass in this crate, so it
+//! only exercises `#[overridable]` itself, not the `#[overrides]`/`base::<name>(..)` half. See
+//! `examples/inheritance-demo` for that half compiled and run end to end (through a user-defined
+//! `inherits` base, Refs #25), rather than just asserted on as token text in `elwindui-codegen`'s
+//! own unit tests.
 
 // Required in the crate root of anything using `#[elwindui_macros::class]` (which every
 // `inherits`-carrying component becomes) — see docs/specs/macro_class_spec.md §10.

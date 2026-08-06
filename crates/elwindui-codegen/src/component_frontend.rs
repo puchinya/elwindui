@@ -38,6 +38,13 @@ pub fn component_and_view_from_item_struct(
     item_struct: &syn::ItemStruct,
 ) -> Result<(ComponentDef, Option<ViewDef>), String> {
     let name = item_struct.ident.to_string();
+    // `base` arrives as whatever `elwindui_macros::path_to_string` produced from the attribute's own
+    // `inherits <path>` argument: a bare name (`ContentControl`) or a full crate-root-qualified path
+    // (`crate::ui::LabeledPanel`, Refs #25). Split it here rather than upstream — this is the one
+    // place both halves (`ComponentDef::base`, the bare symbol-table name every resolution site
+    // already expects, and `ComponentDef::base_path`, the qualified spelling `codegen::generate_view`
+    // needs to emit) come together.
+    let (base, base_path) = split_base_path(base);
     let (embedded, sealed, native, is_abstract, text_style, content_field) =
         component_item_attrs(&item_struct.attrs)?;
 
@@ -95,6 +102,7 @@ pub fn component_and_view_from_item_struct(
     let component_def = ComponentDef {
         name,
         base,
+        base_path,
         fields,
         methods: Vec::new(),
         embedded,
@@ -106,6 +114,21 @@ pub fn component_and_view_from_item_struct(
     };
 
     Ok((component_def, view_def))
+}
+
+/// Splits a raw `inherits` argument string (as `elwindui_macros::path_to_string` produced it) into
+/// its bare symbol-table name and, only when the DSL author wrote a qualified path, that full path
+/// text — see `ComponentDef::base_path`'s own doc comment. `"ContentControl"` splits to
+/// `(Some("ContentControl"), None)`; `"crate::ui::LabeledPanel"` splits to
+/// `(Some("LabeledPanel"), Some("crate::ui::LabeledPanel"))`.
+fn split_base_path(base: Option<String>) -> (Option<String>, Option<String>) {
+    let Some(raw) = base else {
+        return (None, None);
+    };
+    match raw.rsplit_once("::") {
+        Some((_, bare)) => (Some(bare.to_string()), Some(raw)),
+        None => (Some(raw), None),
+    }
 }
 
 /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract_]`/`#[text_style]`/`#[content(field_name)]`,

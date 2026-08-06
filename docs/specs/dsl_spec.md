@@ -126,6 +126,8 @@ struct Dashboard {
 3. **`Base`が自前の`view`を持つ、それ自体は合成されていない論理コンポーネント**(builtinでもユーザー定義でも) — フィールドに加えて`view`(テンプレート)も継承する。`Name`が独自の`view`を書かなければ`Base`のテンプレートをそのまま(WinUI3の既定`ControlTemplate`のように)引き継ぎ、書けば**完全なテンプレート上書き**になる(ルート要素の型に制約はない)。
 4. **`Base`がネイティブ実装のみの末端要素**(例:`Button`) — 継承不可。生成されるRustコードを持たないため、委譲先が存在しない。
 
+`Base`の書き方は、それが組み込み(builtin)かユーザー定義かで異なる:組み込みは裸の名前(`inherits Control`/`inherits ContentControl`のように)、ユーザー定義コンポーネントはクレートルート起点の完全修飾パス(`inherits crate::ui::LabeledPanel`)で書く。これは`#[elwindui_macros::class]`の`inherits = ..`引数が同一クレート内でも常に完全修飾パスを要求するのと同じ理由による(`docs/specs/macro_class_spec.md`§7)——生成される`__elwindui_inherit_*!`マクロ連鎖が別モジュールから展開される可能性があるため、裸名は解決できない。ユーザー定義の`Base`を裸名で書くと静的エラーになる。あわせて、`Base`を公開するモジュールは名前を列挙した再エクスポートではなく、必ずグロブ再エクスポート(`pub use some_module::*;`)にすること——`#[class]`は`Base`と同じ位置に伴走する`__elwindui_macros_of_{Base}`エイリアスを生成するため、名前を列挙した再エクスポートではそれが取り残される。
+
 ```rust
 #[elwindui::component(inherits Control)]
 struct ContentControl {
@@ -186,12 +188,6 @@ impl ContentControl {
 - `impl`側の`#[elwindui::component]`は**引数なし**で書く。`#[class]`と同じく、対応する`struct`が同一ソース上で先に宣言されている必要がある
 - **`impl`ブロックはメソッドが無くても必須**。型を生成するのは`impl`側であり、`struct`側は宣言を登録するだけである(`#[class]`が`struct`側で引数を保存し`impl`側で生成するのと同じ分担)。メソッドを持たないコンポーネントも`#[elwindui::component] impl Name {}`を書く
 - `fn`には`#[overridable]`か`#[overrides]`のいずれかが必須。`&self`レシーバ・プレーンな識別子引数のみで、ジェネリクス・`where`句・`async`/`unsafe`・トレイト`impl`は受け付けない(通常の`impl`ブロックに書く)
-
-> **実装状況**: `#[overridable]`(基底側の宣言とその生成)は実装・動作確認済み。`#[overrides]`と
-> `base::name(..)`の書き換えはコード生成レベルで実装・テスト済みだが、**実際に動かすには
-> `inherits <ユーザー定義コンポーネント>`が必要で、そちらが別の未解決問題で動作しない**ため、
-> エンドツーエンドの動作確認ができていない(`inherits <組み込み>`は正常)。詳細は
-> `docs/status/implementation_status.md`参照。
 
 `#[computed]`フィールドも同様に、基底の同名フィールドを`#[overrides]`なしで再宣言するとエラーになり、`#[overrides]`を付けると上書きとして扱われる(型は基底と一致していなければならない)。
 
@@ -259,7 +255,8 @@ struct VolumeControl {
   `match`を使う
 - `#[elwindui::component]`の引数は`inherits Base`のみ(`=`は付けない——DSL側の
   `component Name inherits Base`と同じ綴り。`#[elwindui_macros::class]`の`inherits = ..`とは
-  流儀が異なるので混同しないこと)
+  流儀が異なるので混同しないこと)。`Base`は組み込みなら裸の名前、ユーザー定義コンポーネントなら
+  クレートルート起点の完全修飾パス(`inherits crate::ui::LabeledPanel`)——上記「`inherits`」節参照
 - `view!`は実在するマクロとして展開されるわけではない——`#[elwindui::component]`が`struct`全体を
   丸ごと別のコードへ置き換えるため、`view!`呼び出しのトークンはRustの型位置(`syn::Type::Macro`として
   構文的に妥当)を借りた記法にすぎず、生のDSLテキストとして読み出されて既存のパーサへそのままかけられる

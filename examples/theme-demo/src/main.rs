@@ -362,6 +362,9 @@ struct ThemeDemoWindow {
     },
 }
 
+#[elwindui::component]
+impl ThemeDemoWindow {}
+
 #[elwindui::main]
 fn main() {
     install_theme();

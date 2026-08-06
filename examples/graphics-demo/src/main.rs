@@ -829,6 +829,9 @@ struct GraphicsDemoWindow {
     },
 }
 
+#[elwindui::component]
+impl GraphicsDemoWindow {}
+
 #[elwindui::main]
 fn main() {
     let vm = GraphicsDemoViewModel::new();

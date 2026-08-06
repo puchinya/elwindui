@@ -50,17 +50,37 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `elwindui::component!` bang macro treated its whole input as DSL text via `input.to_string()`.
 /// See docs/design/tools/codegen_design.md §3.
 ///
-/// `#[virtual]`/`#[override]` methods aren't supported yet — there's no natural place for a method
-/// *body* on a bare `struct` (unlike `#[elwindui::viewmodel]`'s paired `impl` block for action
-/// bodies). The natural extension point, if/when needed, is a companion `#[elwindui::component] impl
-/// Name { .. }` matched up by struct name.
+/// Also accepts a companion `#[elwindui::component] impl Name { .. }` (no arguments), holding
+/// `#[overridable]`/`#[overrides]` methods — a bare `struct` has nowhere to put a method *body*, so
+/// method inheritance uses the same paired-item shape `#[elwindui_macros::class]` does. The `struct`
+/// must be declared first; the `impl` expansion emits a second inherent `impl` block with those
+/// methods plus the `__base_<name>` shadows a `base::<name>(..)` call rewrites into. See
+/// docs/specs/dsl_spec.md §3 and `elwindui_codegen::generate_component_methods_from_item_impl`.
 #[proc_macro_attribute]
 pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
+    // The companion form: `#[elwindui::component] impl Name { .. }`, carrying the
+    // `#[overridable]`/`#[overrides]` methods for an already-declared `struct Name`. Tried first
+    // because an `impl` never parses as an `ItemStruct`, so there's no ambiguity to resolve.
+    if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone()) {
+        if !attr.is_empty() {
+            let msg = "#[elwindui::component]: the `impl` form takes no arguments — `inherits Base` \
+                       belongs on the `struct`";
+            return quote::quote! { compile_error!(#msg); }.into();
+        }
+        return match elwindui_codegen::generate_component_from_item_impl(&item_impl) {
+            Ok(tokens) => tokens.into(),
+            Err(e) => {
+                let msg = format!("#[elwindui::component]: {e}");
+                quote::quote! { compile_error!(#msg); }.into()
+            }
+        };
+    }
     let item_struct = match syn::parse::<syn::ItemStruct>(item) {
         Ok(item_struct) => item_struct,
         Err(e) => {
-            let msg =
-                format!("#[elwindui::component]: expected a plain `struct Name {{ .. }}`: {e}");
+            let msg = format!(
+                "#[elwindui::component]: expected `struct Name {{ .. }}` or `impl Name {{ .. }}`: {e}"
+            );
             return quote::quote! { compile_error!(#msg); }.into();
         }
     };

@@ -249,6 +249,9 @@ struct ControlsDemoWindow {
     },
 }
 
+#[elwindui::component]
+impl ControlsDemoWindow {}
+
 #[elwindui::main]
 fn main() {
     let vm = ControlsDemoViewModel::new();

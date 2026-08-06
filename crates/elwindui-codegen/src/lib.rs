@@ -181,6 +181,8 @@ pub fn generate_component_from_item_impl(
         ));
     };
     component_def.methods = methods;
+    let base = component_def.base.clone();
+    let base_path = component_def.base_path.clone();
     let module = ast::Module {
         path: Vec::new(),
         uses: Vec::new(),
@@ -195,6 +197,27 @@ pub fn generate_component_from_item_impl(
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(&all_modules);
+    // A bare, non-builtin `inherits <Base>` compiles here (unlike `validate::validate_inherits`,
+    // shared with the DSL text frontend, which has no qualified-path escape hatch to require at
+    // all — see `ComponentDef::base_path`'s own doc comment) but is *guaranteed* to fail later,
+    // confusingly, once the `#[elwindui::class(inherits = ..)]` this emits is itself expanded
+    // (`elwindui_macros::class::validate_fully_qualified_path`). Catching it here, with the base's
+    // own DSL name in hand, gives a much more actionable diagnostic (Refs #25).
+    if let Some(base) = &base {
+        let base_is_builtin = table
+            .resolve(&module, base)
+            .is_none_or(|info| info.is_builtin);
+        if !base_is_builtin && base_path.is_none() {
+            return Err(format!(
+                "{name}: inherits `{base}`, but `{base}` is a user-defined component — write a \
+                 full crate-root-qualified path instead of a bare name (e.g. `inherits \
+                 crate::ui::{base}`). Also make sure the module exposing `{base}` re-exports it \
+                 with a glob (`pub use some_module::*;`), not a named list — #[class] generates a \
+                 companion `__elwindui_macros_of_{base}` alongside `{base}` itself that a named \
+                 re-export would strand (docs/specs/dsl_spec.md §3)."
+            ));
+        }
+    }
     let generated = codegen::generate_module(&module, &table);
     component_frontend::register_same_crate_component_methods(&name, item_impl);
     Ok(generated)
@@ -425,7 +448,7 @@ mod component_impl_tests {
         )
         .expect("base impl should generate");
         declare(
-            Some("MiSuper"),
+            Some("crate::MiSuper"),
             r#"struct MiDerived { body: view! { MiSuper { } }, }"#,
         );
         let out = methods(
@@ -451,7 +474,7 @@ mod component_impl_tests {
     fn overrides_without_a_matching_overridable_is_rejected() {
         declare(None, r#"struct MiNoHook { body: view! { VerticalLayout { } }, }"#);
         declare(
-            Some("MiNoHook"),
+            Some("crate::MiNoHook"),
             r#"struct MiNoHookChild { body: view! { MiNoHook { } }, }"#,
         );
         let err = methods(
@@ -479,7 +502,7 @@ mod component_impl_tests {
         )
         .expect("base impl should generate");
         declare(
-            Some("MiSigBase"),
+            Some("crate::MiSigBase"),
             r#"struct MiSigChild { body: view! { MiSigBase { } }, }"#,
         );
         let err = methods(
@@ -528,7 +551,12 @@ mod component_impl_tests {
     }
 }
 
-/// Reproduction scaffolding for `Derived inherits <user component>` (Refs #23's investigation).
+/// Reproduction scaffolding for `Derived inherits <user component>` (Refs #23's investigation,
+/// Refs #25's fix). Unlike `component_impl_tests` above (which only asserts `Ok(())`/error
+/// *strings*, discarding the generated token text), these tests inspect the actual generated
+/// `#[elwindui::class(inherits = ..)]` argument — that blind spot is exactly what let #25's bug
+/// (a bare, unqualified name for a user-defined base, silently rejected only once real code tried
+/// to compile it) slip past this same test module for a full release cycle.
 #[cfg(test)]
 mod user_base_inherits_tests {
     use super::*;
@@ -543,17 +571,71 @@ mod user_base_inherits_tests {
         generate_component_from_item_impl(&item_impl).map(|t| t.to_string())
     }
 
+    /// `inherits crate::UbBase` (a fully crate-root-qualified path, as `#25`'s fix now requires
+    /// for a user-defined base): `UbDerived` must build, and — the actual regression check — its
+    /// generated `#[elwindui::class(inherits = ..)]` argument must carry that same qualified path
+    /// verbatim, not the bare `UbBase` `codegen::base_trait_path` used to emit before the fix
+    /// (which `elwindui_macros::class::validate_fully_qualified_path` would reject the moment this
+    /// token stream was ever fed through the real `#[class]` proc macro).
     #[test]
-    fn derived_from_a_user_component_builds() {
+    fn derived_from_a_user_component_builds_with_a_qualified_path() {
         declare(
             Some("ContentControl"),
             r#"struct UbBase { body: view! { TextBlock { text: "x" } }, }"#,
         )
         .expect("base struct");
         build(r#"impl UbBase { }"#).expect("base impl");
-        declare(Some("UbBase"), r#"struct UbDerived { body: view! { UbBase { } }, }"#)
-            .expect("derived struct");
-        let out = build(r#"impl UbDerived { }"#);
-        assert!(out.is_ok(), "derived impl failed: {:?}", out.err());
+        declare(
+            Some("crate::UbBase"),
+            r#"struct UbDerived { body: view! { UbBase { } }, }"#,
+        )
+        .expect("derived struct");
+        let out = build(r#"impl UbDerived { }"#).expect("derived impl should generate");
+        assert!(
+            out.contains("inherits = crate :: UbBase"),
+            "expected the qualified path to survive into `#[elwindui::class(inherits = ..)]` \
+             verbatim: {out}"
+        );
+    }
+
+    /// The exact failure Issue #25 reported: a *bare* name for a user-defined base. Must now be
+    /// rejected up front, with a diagnostic that names the actual problem (a missing qualified
+    /// path) — not left to surface later as `elwindui_macros::class`'s own internal-sounding
+    /// `__elwindui_inherit_*!` error once the generated (broken) code is actually compiled.
+    #[test]
+    fn derived_from_a_user_component_with_a_bare_base_name_is_rejected() {
+        declare(
+            Some("ContentControl"),
+            r#"struct UbBareBase { body: view! { TextBlock { text: "x" } }, }"#,
+        )
+        .expect("base struct");
+        build(r#"impl UbBareBase { }"#).expect("base impl");
+        declare(
+            Some("UbBareBase"),
+            r#"struct UbBareDerived { body: view! { UbBareBase { } }, }"#,
+        )
+        .expect("derived struct");
+        let err = build(r#"impl UbBareDerived { }"#)
+            .expect_err("a bare name naming a user-defined base should be rejected");
+        assert!(
+            err.contains("crate::ui::UbBareBase") || err.contains("crate::UbBareBase"),
+            "error should suggest a qualified path: {err}"
+        );
+    }
+
+    /// Regression guard: a *builtin* base must keep emitting its old, bare-but-fully-resolvable
+    /// `elwindui::ui::X` form — #25's fix only changes user-defined bases, never builtin ones.
+    #[test]
+    fn derived_from_a_builtin_base_still_emits_the_builtin_path() {
+        declare(
+            Some("ContentControl"),
+            r#"struct UbBuiltinDerived { body: view! { TextBlock { text: "x" } }, }"#,
+        )
+        .expect("derived struct");
+        let out = build(r#"impl UbBuiltinDerived { }"#).expect("derived impl should generate");
+        assert!(
+            out.contains("inherits = elwindui :: ui :: ContentControl"),
+            "builtin base should stay fully-qualified via the existing `elwindui::ui::` rule: {out}"
+        );
     }
 }

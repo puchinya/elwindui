@@ -43,6 +43,16 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// the component's own `#[param]`/`#[prop]`/etc. fields, exactly as in DSL text; exactly one
 /// field, typed as a `view! { .. }` macro invocation, supplies the view tree.
 ///
+/// `Base` is a bare name (`inherits ContentControl`) when inheriting a builtin, or a full
+/// crate-root-qualified path (`inherits crate::ui::LabeledPanel`) when inheriting another
+/// `#[elwindui::component]` — mirroring `#[elwindui_macros::class]`'s own `inherits = ..`
+/// requirement (`docs/specs/macro_class_spec.md` §7) and for the same reason: this base's own name
+/// ends up embedded in generated code that's textually placed wherever the `use`-less qualified
+/// form makes it resolvable, and in the `#[class(inherits = ..)]` argument this type ultimately
+/// becomes, whose own `__elwindui_inherit_*!` macro chain may expand from a different module
+/// entirely. A bare name naming a user-defined base is rejected (`validate::validate_inherits`,
+/// Refs #25).
+///
 /// `view` is never a real macro — it's never invoked, since this attribute macro (which runs
 /// before any inner item macro would) replaces the whole annotated `struct` with different code,
 /// so `view!`'s tokens never survive into anything Rust itself expands. They're recovered here as
@@ -167,7 +177,12 @@ pub fn theme_definition(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Parses `#[component]`'s own argument list: empty (no base), or exactly `inherits Base` (no
 /// `=`, matching the DSL's own `component Name inherits Base` spelling — unlike `#[class]`'s
-/// `inherits = ..` convention).
+/// `inherits = ..` convention). `Base` may be a bare name (`ContentControl`) — only ever valid for
+/// a builtin, since a bare name has no anchor `#[class]`'s own generated `__elwindui_inherit_*!`
+/// chain could resolve from elsewhere (see `docs/specs/macro_class_spec.md` §7) — or a full
+/// crate-root-qualified path (`crate::ui::LabeledPanel`), required for a user-defined base for the
+/// exact same reason. Either form is accepted here; `elwindui_codegen::component_frontend` is what
+/// splits the result back into a bare symbol-table name plus an optional qualifying path (Refs #25).
 fn parse_inherits_arg(attr: proc_macro2::TokenStream) -> syn::Result<Option<String>> {
     use syn::parse::Parser;
     if attr.is_empty() {
@@ -176,12 +191,34 @@ fn parse_inherits_arg(attr: proc_macro2::TokenStream) -> syn::Result<Option<Stri
     (|input: syn::parse::ParseStream| {
         let kw: syn::Ident = input.parse()?;
         if kw != "inherits" {
-            return Err(syn::Error::new(kw.span(), "expected `inherits <Base>`"));
+            return Err(syn::Error::new(
+                kw.span(),
+                "expected `inherits <Base>` or `inherits <crate::path::To::Base>`",
+            ));
         }
-        let base: syn::Ident = input.parse()?;
-        Ok(Some(base.to_string()))
+        let path: syn::Path = input.parse()?;
+        Ok(Some(path_to_string(&path)))
     })
     .parse2(attr)
+}
+
+/// Joins `path`'s segments with `::`, ignoring any generic arguments (`inherits` targets are
+/// always plain type paths, never generic) — a compact, whitespace-free string
+/// (`crate::ui::LabeledPanel`) rather than `quote!`'s spaced-out token rendering
+/// (`crate :: ui :: LabeledPanel`), which is both easier to re-split (`component_frontend`'s
+/// `rsplit_once("::")`) and friendlier to read back in diagnostics.
+fn path_to_string(path: &syn::Path) -> String {
+    let mut s = String::new();
+    if path.leading_colon.is_some() {
+        s.push_str("::");
+    }
+    for (i, seg) in path.segments.iter().enumerate() {
+        if i > 0 {
+            s.push_str("::");
+        }
+        s.push_str(&seg.ident.to_string());
+    }
+    s
 }
 
 /// `#[elwindui_macros::class(inherits = SuperClass, struct_only = existing::TraitPath, trait_only, abstract_class, sealed)]`

@@ -1485,6 +1485,9 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                 let synthetic = ComponentDef {
                     name: c.name.clone(),
                     base: c.base.clone(),
+                    // Carried through unchanged: `generate_view`'s qualified-base-path helpers read
+                    // this off the *synthetic* def they're actually passed, not the original `c`.
+                    base_path: c.base_path.clone(),
                     fields: info.effective_fields.clone(),
                     methods: info.effective_methods.clone(),
                     // Irrelevant downstream: `generate_component`/`generate_view` never consult
@@ -3487,11 +3490,18 @@ fn generate_view(
                     let base_impl_ty = shape_composition_base_type(&resolved_root.type_path);
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
                 } else {
-                    let value = build_component_value(node, &ctx, from, table, &plan);
-                    let base_impl_ty = concrete_type_ident(
+                    let value =
+                        build_component_value(node, &ctx, from, table, &plan, component);
+                    let base_impl_ty = immediate_base_qualified_path(
+                        component,
                         &resolved_root.type_path,
-                        table.resolve(from, &resolved_root.type_path),
-                    );
+                    )
+                    .unwrap_or_else(|| {
+                        concrete_type_ident(
+                            &resolved_root.type_path,
+                            table.resolve(from, &resolved_root.type_path),
+                        )
+                    });
                     construct_stmts.extend(quote! { let #binding: #base_impl_ty = #value; });
                 }
                 continue;
@@ -3617,8 +3627,9 @@ fn generate_view(
         // struct (see `struct_ident`'s doc comment) — the field's concrete type must be its `Impl`
         // struct, exactly like `concrete_type_ident` resolves for any other reference to it.
         let base_info = table.resolve(from, base_name);
-        let base_construct =
-            composed_construct_path(base_name, base_info.is_some_and(|i| i.is_builtin));
+        let base_construct = qualified_construct_path(component, base_name).unwrap_or_else(|| {
+            composed_construct_path(base_name, base_info.is_some_and(|i| i.is_builtin))
+        });
         if base_name == "ContentControl" && base_info.is_some_and(|info| info.is_builtin) {
             field_inits.extend(quote! { base: #base_construct(), });
         } else {
@@ -3940,6 +3951,9 @@ fn generate_view(
     // chain, exactly like `elwindui_core::ui::TextArea: NativeControl` does — no need to skip ahead
     // to every ancestor through the supertrait chain.
     let base_trait_path = |name: &str| -> TokenStream {
+        if let Some(qualified) = immediate_base_qualified_path(component, name) {
+            return qualified;
+        }
         let ident = format_ident!("{}", name);
         // `info.is_none()` (external, no local `TypeInfo`) treated the same as a known builtin —
         // same rule `concrete_type_ident` already applies, for the same reason (see its own doc
@@ -4113,36 +4127,52 @@ fn generate_view(
                 // comment in `elwindui-core` for the same shape). `new()` itself is never hand-written
                 // here — `#[class]` derives it from `construct` above.
                 //
-                // `wiring_stmts`/`component_self_subscription`/`subscribe_stmts`/`on_mount_stmt` were
-                // all originally generated against a local `this: Rc<Self>` bound right after
-                // `Rc::new` — several of them `move` a cloned `this`/`Rc::downgrade(&this)` into a
-                // callback that outlives this function call, which a bare `&self` can't provide.
-                // `on_constructed` reconstructs the same `this: Rc<Self>` binding here from the
-                // `__self_weak` field `construct` populated above (guaranteed to upgrade successfully
-                // — `on_constructed` only ever runs once the enclosing `Rc` exists) so none of that
-                // generation logic needs to change.
+                // `content_attach_stmt`/`__refresh_dynamic_regions`/`resync` only ever need `&self` —
+                // safe to call unconditionally, on `self` directly, regardless of how this object was
+                // constructed.
+                //
+                // `wiring_stmts`/`component_self_subscription`/`subscribe_stmts`/`theme_subscribe_stmt`/
+                // `on_mount_stmt`, in contrast, `move` a cloned `this`/`Rc::downgrade(&this)` into a
+                // callback that outlives this call, which needs a genuine `Rc<#target>` — reconstructed
+                // from the `__self_weak` field `construct` populated. `__self_weak` always upgrades
+                // successfully (`on_constructed` only ever runs once the enclosing `Rc` exists) but is
+                // contractually a weak reference to the *most-derived* object under construction
+                // (`docs/specs/macro_class_spec.md` §13.3), not necessarily `#target` itself — when this
+                // component is instead embedded as *another* generated component's own composed `base:`
+                // field (Refs #25 — a user-defined `inherits` base), the most-derived object is that
+                // outer component, and `downcast::<#target>()` correctly fails. Skip these `Rc`-needing
+                // steps rather than panic in that case.
+                //
+                // KNOWN LIMITATION (docs/status/implementation_status.md §10): a composed base that
+                // itself declares `on_*` wiring, bindable fields, or `on_mount` loses that wiring when
+                // embedded this way — reaching it needs a typed weak reference alongside `__self_weak`
+                // (or deferring these closures' downcast to call time), out of scope here.
                 fn on_constructed(&self) {
-                    let this: std::rc::Rc<#target> = self
+                    #content_attach_stmt
+                    let __most_derived: Option<std::rc::Rc<#target>> = self
                         .__self_weak
                         .borrow()
                         .upgrade()
                         .expect("on_constructed: object must already be Rc-constructed")
                         .downcast::<#target>()
-                        .expect("on_constructed: owner must be this component");
-                    #content_attach_stmt
-                    #wiring_stmts
-                    this.__refresh_dynamic_regions();
+                        .ok();
+                    if let Some(this) = __most_derived.clone() {
+                        #wiring_stmts
+                    }
+                    self.__refresh_dynamic_regions();
                     // Most widgets already read live model state at construction time, so this is a
                     // no-op for them. A widget whose own state only ever appears in `resync()` (e.g.
                     // a dynamic list, like `TabView`'s tabs) needs this call so state populated
                     // before construction (as `main.rs` does, calling `new_tab_execute()` first)
                     // appears immediately rather than waiting for the first unrelated user
                     // interaction.
-                    this.resync();
-                    #component_self_subscription
-                    #subscribe_stmts
-                    #theme_subscribe_stmt
-                    #on_mount_stmt
+                    self.resync();
+                    if let Some(this) = __most_derived {
+                        #component_self_subscription
+                        #subscribe_stmts
+                        #theme_subscribe_stmt
+                        #on_mount_stmt
+                    }
                 }
 
                 #own_class_methods
@@ -6941,12 +6971,19 @@ fn build_component_optional_setters(
 /// `generate_view`'s `is_shape_composition` branch).
 ///
 /// Deferred fields of a composed base are not supported at this expression-only call site.
+///
+/// `component` is the *caller's own* component being generated — its only use here is
+/// `immediate_base_qualified_path`/`qualified_construct_path`, which only ever fire when `node`
+/// (always the shape-composition root, this function's one call site) is literally `component`'s
+/// own `inherits` base written as a qualified path (Refs #25); every other case falls through to
+/// the existing bare/builtin `composed_construct_path` resolution, unchanged.
 fn build_component_value(
     node: &PlannedNode,
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
     plan: &[PlannedNode],
+    component: &ComponentDef,
 ) -> TokenStream {
     let Some(info) = table.resolve(from, &node.type_path) else {
         // External (no local `TypeInfo`) — same rule every other construction path applies
@@ -6960,10 +6997,12 @@ fn build_component_value(
         // real `#[component]` file happened to use with args. `build_component_args`
         // needs a real field list to decide what's required/positional, which — as with every other
         // external path — no longer exists to consult.
-        let construct_path = composed_construct_path(&node.type_path, true);
+        let construct_path = qualified_construct_path(component, &node.type_path)
+            .unwrap_or_else(|| composed_construct_path(&node.type_path, true));
         return quote! { #construct_path() };
     };
-    let construct_path = composed_construct_path(&node.type_path, info.is_builtin);
+    let construct_path = qualified_construct_path(component, &node.type_path)
+        .unwrap_or_else(|| composed_construct_path(&node.type_path, info.is_builtin));
     if info.is_builtin && node.type_path == "ContentControl" {
         return quote! { #construct_path() };
     }
@@ -7565,6 +7604,48 @@ fn composed_construct_path(name: &str, is_builtin: bool) -> TokenStream {
 fn shape_composition_base_type(base: &str) -> TokenStream {
     let ident = format_ident!("{base}");
     quote! { elwindui::core::ui::#ident }
+}
+
+/// `name`'s own fully-qualified path, but only when `name` is literally `component`'s *immediate*
+/// `inherits` base (`component.base`) *and* the DSL author wrote that base as a qualified path
+/// (`ComponentDef::base_path`) — i.e. exactly the case `component_frontend::split_base_path`
+/// produces for a user-defined base (Refs #25). `None` for every other name (a builtin base,
+/// written bare; a base two or more `inherits` hops up; an ordinary same-crate sibling referenced
+/// as a plain view element) — every call site below falls back to its own existing builtin/bare
+/// resolution (`concrete_type_ident`/`composed_construct_path`/`base_trait_path`'s own "is_builtin"
+/// rule) in that case, unchanged from before this function existed.
+///
+/// A free function, not a `generate_view`-local closure: needed both inside `generate_view` itself
+/// (before `component`'s own composition kind is even known, for the shape-composition root's type
+/// annotation) and from `build_component_value` — a separate top-level function with no closure
+/// access of its own.
+///
+/// Every use site embeds `name` into code emitted at (or, for the `#[class(inherits = ..)]`
+/// argument this ultimately feeds, expanded from) an arbitrary module — never necessarily the same
+/// module the DSL author's own `use`s are visible from — so a bare consumer-defined name can't be
+/// trusted to resolve on its own; see `elwindui_macros::class::validate_fully_qualified_path`'s own
+/// doc comment for the fully general version of this same requirement.
+fn immediate_base_qualified_path(component: &ComponentDef, name: &str) -> Option<TokenStream> {
+    if component.base.as_deref() != Some(name) {
+        return None;
+    }
+    let raw = component.base_path.as_ref()?;
+    let parsed: syn::Path = syn::parse_str(raw).unwrap_or_else(|e| {
+        panic!(
+            "`{name}`'s own `inherits` path `{raw}` should already be valid Rust syntax — it was \
+             parsed as a `syn::Path` once already, by `elwindui_macros::parse_inherits_arg`, before \
+             being stringified: {e}"
+        )
+    });
+    Some(quote! { #parsed })
+}
+
+/// `immediate_base_qualified_path`, with the base's own `::construct` factory function appended —
+/// the qualified counterpart to `composed_construct_path`'s bare-name fallback. `None` under the
+/// same conditions `immediate_base_qualified_path` returns `None` under.
+fn qualified_construct_path(component: &ComponentDef, name: &str) -> Option<TokenStream> {
+    let path = immediate_base_qualified_path(component, name)?;
+    Some(quote! { #path::construct })
 }
 
 /// Attaches callbacks (`on_*`) and two-way change-back wiring to widgets that were stored on

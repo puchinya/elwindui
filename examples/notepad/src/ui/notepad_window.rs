@@ -42,6 +42,9 @@ struct CustomCheckBox {
     },
 }
 
+#[elwindui::component]
+impl CustomCheckBox {}
+
 #[elwindui::component(inherits Window)]
 struct NotepadWindow {
     #[bindable]
@@ -89,3 +92,6 @@ struct NotepadWindow {
         }
     },
 }
+
+#[elwindui::component]
+impl NotepadWindow {}

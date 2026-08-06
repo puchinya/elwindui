@@ -431,7 +431,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             host_composition_base: None,
                             sealed: c.sealed,
                             is_abstract: c.is_abstract,
-                            content_field: c.content_field.clone(),
+                            content_field: resolve_content_field(module, c, modules),
                             is_builtin: c.embedded,
                             declaring_types: resolve_field_declaring_types(module, c, modules),
                         },
@@ -995,6 +995,29 @@ fn block_references_ident(block: &syn::Block, name: &str) -> bool {
 /// methods (an override's body rewritten the same way). See `ComponentDef`'s doc comment. Only one
 /// `inherits` hop's worth of `base::` chaining is guaranteed correct — see `generate_view`'s doc
 /// comment on `own_on_mount`/`own_on_unmount` for the same limitation applied to lifecycle hooks.
+/// Resolves the `#[content(field_name)]` slot a component's bare nested children go into: its own
+/// declaration if it has one, otherwise its base's (recursively).
+///
+/// `#[content(..)]` is not *inherited as an attribute* — each builtin declares its own, on purpose
+/// (see `docs/specs/builtins_spec.md` F.2). But a user component that composes over a base which has
+/// one still needs the slot resolvable, because the composition itself puts the base's own view root
+/// there: `Derived inherits Base` whose view root literally constructs `Base` plans `Base`'s view
+/// root as a bare child of the `Base` node. Without walking the chain, `build_component_args`
+/// rejects that child as having nowhere to go, even though the base does declare a destination —
+/// which made `inherits <user component>` unusable whenever the base composed over something with a
+/// content slot (e.g. `ContentControl`).
+fn resolve_content_field(module: &Module, c: &ComponentDef, modules: &[Module]) -> Option<String> {
+    if let Some(own) = &c.content_field {
+        return Some(own.clone());
+    }
+    let base = c.base.as_deref()?;
+    if base == "NativeControl" {
+        return None;
+    }
+    let (base_module, base_c) = find_component_and_module(module, base, modules)?;
+    resolve_content_field(base_module, base_c, modules)
+}
+
 pub(crate) fn resolve_effective_methods<'m>(
     from: &'m Module,
     c: &ComponentDef,
@@ -1013,11 +1036,16 @@ pub(crate) fn resolve_effective_methods<'m>(
                     .collect();
                 for bm in base_methods {
                     if overridden.contains(bm.name.as_str()) {
+                        // Keep the base body reachable as a private `__base_<name>` shadow (what a
+                        // `base::<name>(..)` call is rewritten onto), but do *not* also keep the
+                        // original under its own name: `c`'s own override is appended below under
+                        // that exact name, and two inherent methods with one name don't compile.
                         let mut shadow = bm.clone();
                         shadow.name = format!("__base_{}", bm.name);
                         shadow.is_virtual = false;
                         shadow.is_override = false;
                         result.push(shadow);
+                        continue;
                     }
                     result.push(bm);
                 }
@@ -1201,10 +1229,73 @@ fn rewrite_base_calls(mut block: syn::Block, receiver: &syn::Ident) -> syn::Bloc
             }
             syn::visit_mut::visit_expr_mut(self, node);
         }
+
+        /// A macro's arguments are an opaque `TokenStream` to `syn` — `visit_expr_mut` never
+        /// reaches inside one, so `format!("{}!", base::label())` (the very shape
+        /// `docs/specs/dsl_spec.md` §3 uses) would otherwise keep an unresolvable `base::label()`.
+        /// Rewrite at the token level instead: `base :: name ( args )` -> `receiver . __base_name (
+        /// args )`, recursing into every nested group so it works at any depth.
+        fn visit_macro_mut(&mut self, node: &mut syn::Macro) {
+            node.tokens = rewrite_base_calls_in_tokens(node.tokens.clone(), self.receiver);
+            syn::visit_mut::visit_macro_mut(self, node);
+        }
     }
     let mut rewriter = Rewriter { receiver };
     rewriter.visit_block_mut(&mut block);
     block
+}
+
+/// Token-level counterpart of `rewrite_base_calls`' `syn` visitor, for macro argument streams —
+/// see `Rewriter::visit_macro_mut`. Matches the four-token prefix `base`, `::`, `<name>`,
+/// `(<args>)` and rewrites it to `<receiver> . __base_<name> (<args>)`, recursing into the
+/// argument group and into any other group it passes over.
+fn rewrite_base_calls_in_tokens(
+    tokens: proc_macro2::TokenStream,
+    receiver: &syn::Ident,
+) -> proc_macro2::TokenStream {
+    use proc_macro2::{Delimiter, Group, TokenTree};
+    let flat: Vec<TokenTree> = tokens.into_iter().collect();
+    let mut out = TokenStream::new();
+    let mut i = 0;
+    while i < flat.len() {
+        // `base` `::` `name` `( .. )`
+        if let (
+            Some(TokenTree::Ident(base_ident)),
+            Some(TokenTree::Punct(colon1)),
+            Some(TokenTree::Punct(colon2)),
+            Some(TokenTree::Ident(name)),
+            Some(TokenTree::Group(args)),
+        ) = (
+            flat.get(i),
+            flat.get(i + 1),
+            flat.get(i + 2),
+            flat.get(i + 3),
+            flat.get(i + 4),
+        ) {
+            if base_ident == "base"
+                && colon1.as_char() == ':'
+                && colon2.as_char() == ':'
+                && args.delimiter() == Delimiter::Parenthesis
+            {
+                let method = format_ident!("__base_{}", name.to_string());
+                let inner = rewrite_base_calls_in_tokens(args.stream(), receiver);
+                out.extend(quote! { #receiver.#method(#inner) });
+                i += 5;
+                continue;
+            }
+        }
+        match &flat[i] {
+            TokenTree::Group(g) => {
+                let inner = rewrite_base_calls_in_tokens(g.stream(), receiver);
+                let mut replaced = Group::new(g.delimiter(), inner);
+                replaced.set_span(g.span());
+                out.extend(std::iter::once(TokenTree::Group(replaced)));
+            }
+            other => out.extend(std::iter::once(other.clone())),
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Recursively resolves whether the component at `key` is native (see `TypeInfo::is_native`'s doc
@@ -2392,6 +2483,7 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
 /// shadow copies — see `resolve_effective_methods`) as an ordinary inherent method. A shadow copy
 /// (its mangled name starting with `__base_`) is kept private — it exists only to be called via a
 /// `base::name(...)`-rewritten `self.__base_name(...)`, never part of the type's public surface.
+
 fn emit_methods(methods: &[MethodDef]) -> TokenStream {
     let mut out = TokenStream::new();
     for m in methods {
@@ -6414,7 +6506,20 @@ fn build_component_args(
     // declared destination at all, is a codegen-time authoring mistake, not a silently-guessed
     // field declaration order.
     let has_children_field = info.param_fields.iter().any(|(name, _)| name == "children");
-    if !has_children_field && info.content_field.is_none() && !node.child_bindings.is_empty() {
+    // A composed component routes bare children into whatever content slot the shape it composes
+    // over declares (`ContentControl`'s `content`, ...), reached at runtime through that shape's own
+    // `__elwindui_shape_*!` protocol rather than through a local `TypeInfo` — so there is nothing to
+    // check here, and `content_field` being `None` says nothing about whether a destination exists.
+    // Without this, `Derived inherits <user component>` was rejected outright whenever the base
+    // composed over something with a content slot, since the composition plans the base's own view
+    // root as a bare child of the base node.
+    let routes_children_through_composition =
+        info.composed_shape.is_some() || info.host_composition_base.is_some();
+    if !has_children_field
+        && info.content_field.is_none()
+        && !routes_children_through_composition
+        && !node.child_bindings.is_empty()
+    {
         panic!(
             "`{}` has no `children` field or `#[content(field_name)]` to receive its {} bare nested child element(s) — \
              add an explicit `name: value` attribute for each, or declare `#[content(field_name)]` on the component",
@@ -6574,7 +6679,20 @@ fn build_component_setters(
     plan: &[PlannedNode],
 ) -> Vec<TokenStream> {
     let has_children_field = info.param_fields.iter().any(|(name, _)| name == "children");
-    if !has_children_field && info.content_field.is_none() && !node.child_bindings.is_empty() {
+    // A composed component routes bare children into whatever content slot the shape it composes
+    // over declares (`ContentControl`'s `content`, ...), reached at runtime through that shape's own
+    // `__elwindui_shape_*!` protocol rather than through a local `TypeInfo` — so there is nothing to
+    // check here, and `content_field` being `None` says nothing about whether a destination exists.
+    // Without this, `Derived inherits <user component>` was rejected outright whenever the base
+    // composed over something with a content slot, since the composition plans the base's own view
+    // root as a bare child of the base node.
+    let routes_children_through_composition =
+        info.composed_shape.is_some() || info.host_composition_base.is_some();
+    if !has_children_field
+        && info.content_field.is_none()
+        && !routes_children_through_composition
+        && !node.child_bindings.is_empty()
+    {
         panic!(
             "`{}` has no `children` field or `#[content(field_name)]` to receive its {} bare nested child element(s) — \
              add an explicit `name: value` attribute for each, or declare `#[content(field_name)]` on the component",

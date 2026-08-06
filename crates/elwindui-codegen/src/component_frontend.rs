@@ -192,6 +192,11 @@ fn compiling_crate_key() -> String {
 struct StoredComponent {
     base: Option<String>,
     struct_src: String,
+    /// The companion `#[elwindui::component] impl Name { .. }` block's source, if one was expanded
+    /// after this struct. Kept as text for the same reason `struct_src` is. Empty until
+    /// `register_same_crate_component_methods` runs, which is what lets a *later* component
+    /// resolve this one's `#[overridable]` methods when it writes `#[overrides]` against them.
+    impl_src: Option<String>,
 }
 
 /// Keyed by `(compiling_crate_key(), component name)` — every `#[elwindui::component]` struct
@@ -222,11 +227,34 @@ pub fn register_same_crate_component(
     let stored = StoredComponent {
         base: base.map(str::to_string),
         struct_src: quote::quote! { #item_struct }.to_string(),
+        impl_src: None,
     };
     same_crate_components()
         .lock()
         .unwrap()
         .insert((compiling_crate_key(), name.to_string()), stored);
+}
+
+/// Rebuilds `name`'s `ComponentDef`/`ViewDef` from its registered struct text — the same
+/// reconstruction `sibling_component_modules` does, but for one named component rather than every
+/// sibling. Returns `None` if no `#[elwindui::component] struct name { .. }` has been expanded in
+/// this crate yet, which is exactly the "impl written before its struct" mistake.
+pub fn registered_component_parts(name: &str) -> Option<(ComponentDef, Option<ViewDef>)> {
+    let store = same_crate_components().lock().unwrap();
+    let stored = store.get(&(compiling_crate_key(), name.to_string()))?;
+    let item_struct: syn::ItemStruct = syn::parse_str(&stored.struct_src).ok()?;
+    component_and_view_from_item_struct(stored.base.clone(), &item_struct).ok()
+}
+
+/// Attaches `name`'s companion `#[elwindui::component] impl Name { .. }` to its already-registered
+/// struct, so a *later* same-crate component writing `#[overrides]` against one of these methods can
+/// see it (`sibling_component_modules` replays both halves). Must run after the `impl` block's own
+/// validation succeeds, for the same reason `register_same_crate_component` runs after codegen does.
+pub fn register_same_crate_component_methods(name: &str, item_impl: &syn::ItemImpl) {
+    let mut store = same_crate_components().lock().unwrap();
+    if let Some(stored) = store.get_mut(&(compiling_crate_key(), name.to_string())) {
+        stored.impl_src = Some(quote::quote! { #item_impl }.to_string());
+    }
 }
 
 /// A registered `#[elwindui::viewmodel] mod foo { .. }` — kept as reparseable source text for the
@@ -414,6 +442,102 @@ fn inherits_arg_from_component_attrs(attrs: &[syn::Attribute]) -> Result<Option<
     .map_err(|e| e.to_string())
 }
 
+/// Builds the `MethodDef` list for a companion `#[elwindui::component] impl Name { .. }` block —
+/// the Rust-macro-path counterpart of `parser.rs`'s `parse_method_def`, which reads the same two
+/// tags off the DSL text form's `component` body.
+///
+/// The two tags are spelled `#[overridable]` (declares a method derived components may override)
+/// and `#[overrides]` (overrides the base's same-named `#[overridable]`), matching
+/// `#[elwindui_macros::class]`'s vocabulary — see `docs/specs/dsl_spec.md` §3. Every `fn` in the
+/// block must carry exactly one of them: an untagged `fn` would silently not participate in the
+/// override chain, which is worse than rejecting it.
+///
+/// Deliberately narrow, exactly as `MethodDef` is: `&self` receiver, plain typed parameters, no
+/// generics, no `where` clause, no `async`/`unsafe`. Anything beyond that belongs in an ordinary
+/// (non-`#[elwindui::component]`) `impl` block, which this macro never touches.
+pub fn methods_from_item_impl(item_impl: &syn::ItemImpl) -> Result<(String, Vec<ast::MethodDef>), String> {
+    if let Some((_, path, _)) = &item_impl.trait_ {
+        let name = quote::quote!(#path).to_string();
+        return Err(format!(
+            "expected an inherent `impl Name {{ .. }}`, found a trait impl for `{name}`"
+        ));
+    }
+    if !item_impl.generics.params.is_empty() || item_impl.generics.where_clause.is_some() {
+        return Err("an `impl` block for a component cannot be generic".to_string());
+    }
+    let syn::Type::Path(type_path) = &*item_impl.self_ty else {
+        return Err("expected `impl <ComponentName> { .. }`".to_string());
+    };
+    let Some(name) = type_path.path.get_ident().map(|i| i.to_string()) else {
+        return Err("expected a bare component name, not a qualified path".to_string());
+    };
+
+    let mut methods = Vec::new();
+    for item in &item_impl.items {
+        let syn::ImplItem::Fn(f) = item else {
+            return Err(format!(
+                "{name}: only `fn` items are allowed in a component `impl` block"
+            ));
+        };
+        let is_overridable = attr_path_ends_with(&f.attrs, "overridable");
+        let is_overrides = attr_path_ends_with(&f.attrs, "overrides");
+        let fn_name = f.sig.ident.to_string();
+        match (is_overridable, is_overrides) {
+            (false, false) => {
+                return Err(format!(
+                    "{name}::{fn_name}: a `fn` in a component `impl` block must be tagged \
+                     `#[overridable]` or `#[overrides]`"
+                ));
+            }
+            (true, true) => {
+                return Err(format!(
+                    "{name}::{fn_name}: `#[overridable]` and `#[overrides]` are mutually exclusive"
+                ));
+            }
+            _ => {}
+        }
+        if f.sig.asyncness.is_some() || f.sig.unsafety.is_some() {
+            return Err(format!("{name}::{fn_name}: `async`/`unsafe` are not supported"));
+        }
+        if !f.sig.generics.params.is_empty() || f.sig.generics.where_clause.is_some() {
+            return Err(format!("{name}::{fn_name}: generic methods are not supported"));
+        }
+
+        let mut inputs = f.sig.inputs.iter();
+        match inputs.next() {
+            Some(syn::FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none() => {}
+            _ => {
+                return Err(format!("{name}::{fn_name}: must take `&self` as its first parameter"));
+            }
+        }
+        let mut params = Vec::new();
+        for arg in inputs {
+            let syn::FnArg::Typed(pat_type) = arg else {
+                return Err(format!("{name}::{fn_name}: unexpected receiver after `&self`"));
+            };
+            let syn::Pat::Ident(pat_ident) = &*pat_type.pat else {
+                return Err(format!(
+                    "{name}::{fn_name}: parameters must be plain identifiers, not patterns"
+                ));
+            };
+            params.push((pat_ident.ident.to_string(), (*pat_type.ty).clone()));
+        }
+        let return_ty = match &f.sig.output {
+            syn::ReturnType::Default => None,
+            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+        };
+        methods.push(ast::MethodDef {
+            name: fn_name,
+            is_virtual: is_overridable,
+            is_override: is_overrides,
+            params,
+            return_ty,
+            body: f.block.clone(),
+        });
+    }
+    Ok((name, methods))
+}
+
 /// Builds one `Module` per `#[elwindui::component]` struct / `#[elwindui::viewmodel]` mod /
 /// `#[elwindui::dsl_enum]` enum found among `file`'s top-level items, in source order — the
 /// `elwindui-languageserver` counterpart to the real macro-expansion path
@@ -492,9 +616,19 @@ pub fn sibling_component_modules(skip_name: &str) -> Vec<Module> {
         .map(|(_, stored)| {
             let item_struct: syn::ItemStruct = syn::parse_str(&stored.struct_src)
                 .expect("internal: failed to reparse a registered sibling component's struct text");
-            let (component_def, view_def) =
+            let (mut component_def, view_def) =
                 component_and_view_from_item_struct(stored.base.clone(), &item_struct)
                     .expect("internal: failed to rebuild a registered sibling component");
+            // Replay the companion `impl` block too, so this sibling's `#[overridable]` methods are
+            // visible to whoever is currently writing `#[overrides]` against them.
+            if let Some(impl_src) = &stored.impl_src {
+                let item_impl: syn::ItemImpl = syn::parse_str(impl_src).expect(
+                    "internal: failed to reparse a registered sibling component's impl text",
+                );
+                let (_, methods) = methods_from_item_impl(&item_impl)
+                    .expect("internal: failed to rebuild a registered sibling component's methods");
+                component_def.methods = methods;
+            }
             Module {
                 path: Vec::new(),
                 uses: Vec::new(),

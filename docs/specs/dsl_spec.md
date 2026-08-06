@@ -59,7 +59,7 @@ struct Label {
 
 ---
 
-## 3. component と view ✅
+## 3. component と view 🚧
 
 コンポーネントは **`component`(データ定義)** と **`view`(描画ロジック)** の2ブロックに分離する。Rustの `struct` と `impl` の関係に対応する。
 
@@ -145,9 +145,7 @@ struct ContentControl {
 
 継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
 
-**メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当)。📋 **未実装** ——
-`component_frontend.rs`は`ComponentDef::methods`を常に空で構築するため、現状この機能はどこからも
-到達できない。
+**メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当)。🚧 **部分実装**。
 
 メソッド本体は`struct`定義には置けないので、`#[elwindui_macros::class]`と同じ**`struct`/`impl`
 ペア**(`docs/specs/macro_class_spec.md`§2.1)の形を取る。属性名も`#[class]`と揃え、
@@ -186,6 +184,14 @@ impl ContentControl {
 - `base::name(...)` — オーバーライドした本体から基底実装を呼び出す(C#の`base.Method()`相当)。同じ書き方で`on_mount`/`on_unmount`(`docs/design/gui_framework_design.md`§6.1)内から基底のライフサイクルフックを呼ぶこともできる
 - 継承・オーバーライドは1階層(直接の`inherits`先)のみ保証される。2階層以上に渡る`base::`連鎖は対象外
 - `impl`側の`#[elwindui::component]`は**引数なし**で書く。`#[class]`と同じく、対応する`struct`が同一ソース上で先に宣言されている必要がある
+- **`impl`ブロックはメソッドが無くても必須**。型を生成するのは`impl`側であり、`struct`側は宣言を登録するだけである(`#[class]`が`struct`側で引数を保存し`impl`側で生成するのと同じ分担)。メソッドを持たないコンポーネントも`#[elwindui::component] impl Name {}`を書く
+- `fn`には`#[overridable]`か`#[overrides]`のいずれかが必須。`&self`レシーバ・プレーンな識別子引数のみで、ジェネリクス・`where`句・`async`/`unsafe`・トレイト`impl`は受け付けない(通常の`impl`ブロックに書く)
+
+> **実装状況**: `#[overridable]`(基底側の宣言とその生成)は実装・動作確認済み。`#[overrides]`と
+> `base::name(..)`の書き換えはコード生成レベルで実装・テスト済みだが、**実際に動かすには
+> `inherits <ユーザー定義コンポーネント>`が必要で、そちらが別の未解決問題で動作しない**ため、
+> エンドツーエンドの動作確認ができていない(`inherits <組み込み>`は正常)。詳細は
+> `docs/status/implementation_status.md`参照。
 
 `#[computed]`フィールドも同様に、基底の同名フィールドを`#[overrides]`なしで再宣言するとエラーになり、`#[overrides]`を付けると上書きとして扱われる(型は基底と一致していなければならない)。
 

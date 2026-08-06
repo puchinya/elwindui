@@ -132,6 +132,7 @@
 | `on_*`イベント属性のクロージャ構文(`\|param, ...\| 式`/`{ .. }`) | ✅ 対象フィールドの`fn(T0, T1, ...)`宣言から位置対応でパラメータ型を決める汎用機構(`codegen::emit_wiring`)。0引数ハンドラはベアパスの糖衣(`on_click: vm.save`)も書ける |
 | 値計算コールバックがネストした要素を構築する構文(`\|param\| Type { .. }`) | 📋 **未実装**。これに依存する`VirtualList`の`render_item`・`ControlTemplate<Self>`も未実装 |
 | `ControlTemplate<Self>`型フィールド・`body: <field>(Self)`・`#[elwindui::template]` | 📋 **未実装** |
+| メソッド継承(`#[overridable]`/`#[overrides]`/`base::name(..)`) | 🚧 `#[elwindui::component] struct X { .. }` + `#[elwindui::component] impl X { .. }`の2枚組で提供する(`impl`はメソッドが無くても必須——型を生成するのは`impl`側)。`#[overridable]`は動作確認済み。`#[overrides]`と`base::`の書き換えはコード生成・テスト済みだが、実際に効くのは`inherits <ユーザー定義コンポーネント>`のときだけで、そちらが未解決(下記§10参照)のためエンドツーエンドでは未確認 |
 | i18n(Fluent、`t!`) | 🚧 ランタイム(`elwindui-i18n`)は実装済み。ビルド時の`.ftl`静的検証は未実装 |
 | モジュール(`use`) | ✅ 生成先が実際のRustコードのため`use`解決自体はRustコンパイラに委譲される。循環参照・未解決パスの独自の機械的検出は未確認 |
 | `visual_tree`モジュール(`get_children_count`/`get_child`/`get_parent`/`find_all`) | ✅ `UIElement::visual_children()`/`parent()`が走査を担う。ランタイム文字列idによる検索(`find_by_id`相当)は`#[id(...)]`(静的アクセサ)と役割が重複するため未提供・提供予定なし |
@@ -216,4 +217,5 @@
 - **`Backend` enum / `target::backend()`が存在しない**ため、これに依存する多くの静的検証ルール・ビルトイン(`NavigationHost`、ダイアログ/メニューのバックエンド分岐等)が未実装の根本原因になっている。将来この仕組みを実装する際は、影響範囲がドキュメント全体に及ぶことに留意する
 - **`Control.template`(`ControlTemplate`)は設計のみ・未実装。** 前提となる「値計算コールバックがネストした要素を構築する」構文(`VirtualList`の`render_item`と共通)も未実装のため、実装時はまずそちらから着手が必要。広域既定値は`store`(同じく未実装)への依存として設計されている
 - **フォント機能はGTK4未対応・DPI非対応。** `ScrollView`/`TabView`がホストする入れ子`TreeHostView`配下のコンテンツにはフォント継承が届かない(visualチェーンがそこで途切れるため)
+- **`inherits <ユーザー定義コンポーネント>`が動作しない。** `codegen::generate_view`の`base_trait_path`はユーザー定義の基底に対して裸の名前(`LabeledPanel`)を出すが、`#[elwindui_macros::class]`はクレートルート起点の完全修飾パス(`crate::ui::LabeledPanel`)を要求する(`docs/specs/macro_class_spec.md` §7)ため、`#[class]`が拒否する。正しいパスを出すにはそのコンポーネントが属するモジュールパスが必要だが、マクロ経路の`Module::path`は常に空であり、その情報を持っていない。`inherits <組み込み>`(`ContentControl`等)は正常に動作する
 - **`builtin::Image`は実装済みだが仕様書に節が無い。** `docs/specs/builtins_spec.md` 付録Fに`Image`の項目が存在しないため、プロパティ(`source`/`stretch`/`rasterize`)の規範的な定義は`crates/elwindui-core/src/ui.rs`の宣言のみが正になっている

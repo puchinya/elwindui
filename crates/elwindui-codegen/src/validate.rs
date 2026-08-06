@@ -1340,8 +1340,8 @@ fn validate_inherits(
 /// exactly and be `#[computed]` with `#[override]` (an intentional override — codegen's
 /// `resolve_effective_fields`/`resolve_effective_methods` shadow-copies `base`'s original body
 /// under `__base_name`, reachable via `base::name(...)`), or not be redeclared at all (it's already
-/// inherited — remove the redeclaration). Also checks `#[override] fn` methods the same way against
-/// `base`'s effective `#[virtual]` methods.
+/// inherited — remove the redeclaration). Also checks `#[overrides] fn` methods the same way
+/// against `base`'s effective `#[overridable]` methods.
 fn validate_field_overrides(
     from: &Module,
     c: &ComponentDef,
@@ -1392,7 +1392,7 @@ fn validate_field_overrides(
         }
         let Some(base_method) = base_virtual_methods.get(m.name.as_str()) else {
             errors.push(format!(
-                "{}: #[override] fn {} has no matching #[virtual] method named `{}` on `{base}`",
+                "{}: #[overrides] fn {} has no matching #[overridable] method named `{}` on `{base}`",
                 c.name, m.name, m.name
             ));
             continue;
@@ -1413,7 +1413,7 @@ fn validate_field_overrides(
         };
         if !same_params || !same_return {
             errors.push(format!(
-                "{}: #[override] fn {} has a different signature than `{base}`'s #[virtual] fn {}",
+                "{}: #[overrides] fn {} has a different signature than `{base}`'s #[overridable] fn {}",
                 c.name, m.name, m.name
             ));
         }
@@ -2467,7 +2467,7 @@ component Derived inherits Base {
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter()
-                .any(|e| e.contains("no matching #[virtual] method")),
+                .any(|e| e.contains("no matching #[overridable] method")),
             "errors: {errs:?}"
         );
     }

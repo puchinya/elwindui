@@ -33,3 +33,6 @@ struct RoundedPanel {
         }
     },
 }
+
+#[elwindui::component]
+impl RoundedPanel {}

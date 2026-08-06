@@ -121,9 +121,15 @@ pub fn generate_component_from_item_struct(
     base: Option<String>,
     item_struct: &syn::ItemStruct,
 ) -> Result<proc_macro2::TokenStream, String> {
+    // Shape errors (a malformed `view!`, a bad field attribute, ...) are reported here, against the
+    // struct that actually contains them, rather than being deferred to the `impl` half.
     let (component_def, view_def) =
         component_frontend::component_and_view_from_item_struct(base.clone(), item_struct)?;
     let name = component_def.name.clone();
+    // Validate here as well as in the `impl` half. Everything except `#[overrides]`-vs-base method
+    // checking is already decidable from the struct alone (a non-exhaustive `match`, a typo'd
+    // `vm.field`, a `#[bindable]` field whose type isn't a viewmodel, ...), and a diagnostic is far
+    // more useful pointing at the struct that contains the mistake than at the `impl` below it.
     let module = ast::Module {
         path: Vec::new(),
         uses: Vec::new(),
@@ -131,18 +137,66 @@ pub fn generate_component_from_item_struct(
         allows_external_builtins: true,
         ..Default::default()
     };
-    let sibling_modules = component_frontend::sibling_component_modules(&name);
-    let sibling_viewmodels = component_frontend::sibling_viewmodel_modules();
-    let sibling_enums = component_frontend::sibling_enum_modules();
+    let all_modules: Vec<_> = std::iter::once(module)
+        .chain(component_frontend::sibling_component_modules(&name))
+        .chain(component_frontend::sibling_viewmodel_modules())
+        .chain(component_frontend::sibling_enum_modules())
+        .collect();
+    validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
+    component_frontend::register_same_crate_component(&name, base.as_deref(), item_struct);
+    // Emits nothing on purpose: the paired `#[elwindui::component] impl Name { .. }` generates the
+    // whole type. This mirrors `#[elwindui_macros::class]` exactly — there too the `struct` half
+    // only stashes what the `impl` half needs (`store_class_args`/`load_class_args`), and the
+    // `impl` half is what emits the trait, the trait impl and `new()`. Components need the same
+    // split because a `#[overridable]`/`#[overrides]` method body has nowhere to live on a bare
+    // `struct`, and the generated type can only be emitted once — so it has to be emitted by
+    // whichever half comes last, which is the `impl`.
+    Ok(proc_macro2::TokenStream::new())
+}
+
+/// The generating half of the pair: `#[elwindui::component] impl Name { .. }`, whose `struct`
+/// counterpart has already registered itself (see `generate_component_from_item_struct`). This is
+/// what actually emits the component — the struct, its `#[elwindui_macros::class]` declaration and
+/// paired class `impl`, `new()`, the accessors, the resync machinery, and §3's
+/// `#[overridable]`/`#[overrides]` methods (see `component_frontend::methods_from_item_impl` for
+/// the accepted method shape, and `docs/specs/dsl_spec.md` §3).
+///
+/// The `impl` block is required even when it declares no methods: it is the only place the type can
+/// be emitted from, because a `#[overrides]` body can only be known once the `impl` is in hand and
+/// the generated type must be emitted exactly once. Mirrors `#[elwindui_macros::class]`'s own
+/// `struct`-stores/`impl`-emits split.
+///
+/// An `#[overrides]` method also gets its base's original body kept as a private `__base_<name>`
+/// shadow (`codegen::resolve_effective_methods`), since `base::<name>(..)` in the override body is
+/// rewritten to `self.__base_<name>(..)`.
+pub fn generate_component_from_item_impl(
+    item_impl: &syn::ItemImpl,
+) -> Result<proc_macro2::TokenStream, String> {
+    let (name, methods) = component_frontend::methods_from_item_impl(item_impl)?;
+    let Some((mut component_def, view_def)) = component_frontend::registered_component_parts(&name)
+    else {
+        return Err(format!(
+            "{name}: no `#[elwindui::component] struct {name} {{ .. }}` was expanded before this \
+             `impl` block — declare the struct first"
+        ));
+    };
+    component_def.methods = methods;
+    let module = ast::Module {
+        path: Vec::new(),
+        uses: Vec::new(),
+        items: component_frontend::component_module_items(component_def, view_def),
+        allows_external_builtins: true,
+        ..Default::default()
+    };
     let all_modules: Vec<_> = std::iter::once(module.clone())
-        .chain(sibling_modules)
-        .chain(sibling_viewmodels)
-        .chain(sibling_enums)
+        .chain(component_frontend::sibling_component_modules(&name))
+        .chain(component_frontend::sibling_viewmodel_modules())
+        .chain(component_frontend::sibling_enum_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
     let table = codegen::build_symbol_table(&all_modules);
     let generated = codegen::generate_module(&module, &table);
-    component_frontend::register_same_crate_component(&name, base.as_deref(), item_struct);
+    component_frontend::register_same_crate_component_methods(&name, item_impl);
     Ok(generated)
 }
 
@@ -298,5 +352,208 @@ mod viewmodel_registry_tests {
         let err = generate_component_from_item_struct(None, &item_struct)
             .expect_err("#[bindable] on a non-viewmodel type should be rejected");
         assert!(err.contains("isn't a `viewmodel`"), "error: {err}");
+    }
+}
+
+/// `#[elwindui::component] impl Name { .. }` — §3's `#[overridable]`/`#[overrides]` method
+/// inheritance on the Rust-macro path (`generate_component_methods_from_item_impl`). The
+/// downstream half (`codegen::resolve_effective_methods`'s `__base_<name>` shadows,
+/// `rewrite_base_calls`, `validate`'s signature check) is already covered by `parser.rs`/
+/// `validate.rs`'s own tests against the DSL text form; these cover the macro front door and the
+/// struct-before-impl pairing it depends on.
+///
+/// Component names are unique per test for the same reason `dsl_enum_tests` does it — the
+/// same-crate registries are process-global statics shared by every test in this binary.
+#[cfg(test)]
+mod component_impl_tests {
+    use super::*;
+
+    fn declare(base: Option<&str>, src: &str) {
+        let item_struct: syn::ItemStruct = syn::parse_str(src).expect("struct should parse");
+        generate_component_from_item_struct(base.map(str::to_string), &item_struct)
+            .expect("struct half should generate");
+    }
+
+    fn methods(src: &str) -> Result<String, String> {
+        let item_impl: syn::ItemImpl = syn::parse_str(src).expect("impl should parse");
+        generate_component_from_item_impl(&item_impl).map(|t| t.to_string())
+    }
+
+    /// The `struct` half emits nothing at all now — every token comes from the `impl` half.
+    #[test]
+    fn the_struct_half_emits_nothing() {
+        let item_struct: syn::ItemStruct =
+            syn::parse_str(r#"struct MiSilent { body: view! { VerticalLayout { } }, }"#)
+                .expect("struct should parse");
+        let out = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should succeed");
+        assert!(out.is_empty(), "struct half should emit nothing, got: {out}");
+    }
+
+    #[test]
+    fn overridable_method_is_emitted_as_a_public_inherent_method() {
+        declare(
+            None,
+            r#"struct MiBase { body: view! { VerticalLayout { } }, }"#,
+        );
+        let out = methods(
+            r#"
+            impl MiBase {
+                #[overridable]
+                fn label(&self) -> String { "base".to_string() }
+            }
+            "#,
+        )
+        .expect("impl half should generate");
+        assert!(
+            out.contains("struct MiBase"),
+            "the impl half emits the whole type: {out}"
+        );
+        assert!(out.contains("pub fn label"), "should emit `label`: {out}");
+    }
+
+    #[test]
+    fn overrides_gets_a_base_shadow_and_a_rewritten_base_call() {
+        declare(None, r#"struct MiSuper { body: view! { VerticalLayout { } }, }"#);
+        methods(
+            r#"
+            impl MiSuper {
+                #[overridable]
+                fn label(&self) -> String { "super".to_string() }
+            }
+            "#,
+        )
+        .expect("base impl should generate");
+        declare(
+            Some("MiSuper"),
+            r#"struct MiDerived { body: view! { MiSuper { } }, }"#,
+        );
+        let out = methods(
+            r#"
+            impl MiDerived {
+                #[overrides]
+                fn label(&self) -> String { format!("{}!", base::label()) }
+            }
+            "#,
+        )
+        .expect("derived impl should generate");
+        assert!(
+            out.contains("fn __base_label"),
+            "base body should be kept as a private shadow: {out}"
+        );
+        assert!(
+            out.contains("self . __base_label ()") || out.contains("self.__base_label()"),
+            "`base::label()` should be rewritten onto the shadow: {out}"
+        );
+    }
+
+    #[test]
+    fn overrides_without_a_matching_overridable_is_rejected() {
+        declare(None, r#"struct MiNoHook { body: view! { VerticalLayout { } }, }"#);
+        declare(
+            Some("MiNoHook"),
+            r#"struct MiNoHookChild { body: view! { MiNoHook { } }, }"#,
+        );
+        let err = methods(
+            r#"
+            impl MiNoHookChild {
+                #[overrides]
+                fn missing(&self) -> String { String::new() }
+            }
+            "#,
+        )
+        .expect_err("overriding a method the base never declared should be rejected");
+        assert!(err.contains("no matching"), "error: {err}");
+    }
+
+    #[test]
+    fn signature_mismatch_against_the_base_is_rejected() {
+        declare(None, r#"struct MiSigBase { body: view! { VerticalLayout { } }, }"#);
+        methods(
+            r#"
+            impl MiSigBase {
+                #[overridable]
+                fn label(&self) -> String { String::new() }
+            }
+            "#,
+        )
+        .expect("base impl should generate");
+        declare(
+            Some("MiSigBase"),
+            r#"struct MiSigChild { body: view! { MiSigBase { } }, }"#,
+        );
+        let err = methods(
+            r#"
+            impl MiSigChild {
+                #[overrides]
+                fn label(&self, extra: i32) -> String { let _ = extra; String::new() }
+            }
+            "#,
+        )
+        .expect_err("a different signature should be rejected");
+        assert!(err.contains("different signature"), "error: {err}");
+    }
+
+    #[test]
+    fn an_untagged_fn_is_rejected() {
+        declare(None, r#"struct MiUntagged { body: view! { VerticalLayout { } }, }"#);
+        let err = methods(r#"impl MiUntagged { fn helper(&self) -> String { String::new() } }"#)
+            .expect_err("an untagged fn should be rejected");
+        assert!(
+            err.contains("#[overridable]") && err.contains("#[overrides]"),
+            "error should name both tags: {err}"
+        );
+    }
+
+    #[test]
+    fn an_impl_before_its_struct_is_rejected() {
+        let err = methods(
+            r#"
+            impl MiNeverDeclared {
+                #[overridable]
+                fn label(&self) -> String { String::new() }
+            }
+            "#,
+        )
+        .expect_err("an impl with no registered struct should be rejected");
+        assert!(err.contains("declare the struct first"), "error: {err}");
+    }
+
+    #[test]
+    fn a_trait_impl_is_rejected() {
+        declare(None, r#"struct MiTraitImpl { body: view! { VerticalLayout { } }, }"#);
+        let err = methods(r#"impl Clone for MiTraitImpl { fn clone(&self) -> Self { todo!() } }"#)
+            .expect_err("a trait impl should be rejected");
+        assert!(err.contains("trait impl"), "error: {err}");
+    }
+}
+
+/// Reproduction scaffolding for `Derived inherits <user component>` (Refs #23's investigation).
+#[cfg(test)]
+mod user_base_inherits_tests {
+    use super::*;
+
+    fn declare(base: Option<&str>, src: &str) -> Result<(), String> {
+        let item_struct: syn::ItemStruct = syn::parse_str(src).expect("struct should parse");
+        generate_component_from_item_struct(base.map(str::to_string), &item_struct).map(|_| ())
+    }
+
+    fn build(src: &str) -> Result<String, String> {
+        let item_impl: syn::ItemImpl = syn::parse_str(src).expect("impl should parse");
+        generate_component_from_item_impl(&item_impl).map(|t| t.to_string())
+    }
+
+    #[test]
+    fn derived_from_a_user_component_builds() {
+        declare(
+            Some("ContentControl"),
+            r#"struct UbBase { body: view! { TextBlock { text: "x" } }, }"#,
+        )
+        .expect("base struct");
+        build(r#"impl UbBase { }"#).expect("base impl");
+        declare(Some("UbBase"), r#"struct UbDerived { body: view! { UbBase { } }, }"#)
+            .expect("derived struct");
+        let out = build(r#"impl UbDerived { }"#);
+        assert!(out.is_ok(), "derived impl failed: {:?}", out.err());
     }
 }

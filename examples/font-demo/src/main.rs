@@ -190,6 +190,9 @@ struct FontDemoWindow {
     },
 }
 
+#[elwindui::component]
+impl FontDemoWindow {}
+
 #[elwindui::main]
 fn main() {
     let vm = FontDemoViewModel::new();

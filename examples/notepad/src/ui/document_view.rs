@@ -35,3 +35,6 @@ struct DocumentView {
         }
     },
 }
+
+#[elwindui::component]
+impl DocumentView {}

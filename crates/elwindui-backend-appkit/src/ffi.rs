@@ -15,7 +15,7 @@ use objc2_app_kit::{
     NSButton, NSScrollView, NSSecureTextField, NSStackView, NSTextField, NSTextView,
     NSUserInterfaceLayoutOrientation, NSView,
 };
-use objc2_foundation::NSRect;
+use objc2_foundation::{NSRect, NSString};
 use std::rc::Rc;
 
 pub(crate) fn mtm() -> MainThreadMarker {
@@ -241,6 +241,15 @@ impl AnyView {
     /// Applies an explicit background or restores the native toolkit default.
     pub(crate) fn apply_background(&self, background: Option<&Brush>) {
         self.0.apply_background(background);
+    }
+
+    /// Sets (or, with `None`, removes) this control's hover tooltip.
+    ///
+    /// Not an `AppKitHandle` method: `toolTip` lives on `NSView` itself, so one implementation on
+    /// the base view covers every wrapped widget and no per-handle `impl` needs to know about it.
+    pub(crate) fn set_tooltip(&self, tooltip: Option<&str>) {
+        let value = tooltip.map(NSString::from_str);
+        self.as_nsview().setToolTip(value.as_deref());
     }
 
     /// Lets every native leaf's `measure_override` (in `native_ui.rs::NativeControl`) measure any

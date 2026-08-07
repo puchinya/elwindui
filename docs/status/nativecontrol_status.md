@@ -76,7 +76,36 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | スクロール位置取得・設定、`scroll_changed`イベント | ⬜ 意図的に見送り | ⬜ 同左 |
 | `docs/specs/builtins_spec.md` F.14、`docs/design/gui_framework_design.md` §5.1b | ✅ | ✅(同一ドキュメント) |
 
-### 2.4 `examples/controls-demo`
+### 2.4 Button(`role` / `is_default` / `tooltip`)
+
+**`NativeButton`を新規コントロールとして分離するか要検討**としていた§3のバックログ項目は、**既存`Button`の拡張**として決着した。`role`/`is_default`が必要とするものはすべて同じ`NSButton`/`Button`ウィジェットのプロパティであり、別型を立てる理由が無いため。
+
+| 項目 | AppKit | WinUI3 |
+|---|---|---|
+| `ButtonRole`(`Normal`/`Primary`/`Destructive`)の定義 | ✅ | ✅(バックエンド非依存) |
+| `role` | ✅ どちらの強調roleも`bezelColor`(塗りボタン)で、塗る色だけが違う——`Primary`=`controlAccentColor`、`Destructive`=`systemRedColor`。`hasDestructiveAction`はmacOS 11+のセマンティックsignalとして併設。**`examples/controls-demo`のButtonタブで3つのroleが視覚的に区別できることをスクリーンショットで確認済み** | 🟡 `Primary`=`AccentButtonStyle`。`Destructive`は**ネイティブ相当が無く**`SystemFillColorCriticalBrush`を前景色に設定するのみ |
+| `role`の実機検証で却下した2案 | ✅ `contentTintColor`は標準のbordered push buttonのタイトルに効かず`Normal`と区別できなかった。`setAttributedTitle`の赤文字は`apply_text_style`が毎レイアウトパスで`setTitle`を呼んで破棄するため成立しない | N/A |
+| `is_default` | ✅ `keyEquivalent = "\r"`。**AXの`AXDefaultButton`属性が該当ボタンを返すことで検証済み** | 🟡 `Button.IsDefault`が存在しない(`ContentDialog`のボタン専用)ため`KeyboardAccelerator`(`VirtualKey::Enter`)で代替 |
+| `role`と`is_default`の直交性 | ✅ `Primary`が`keyEquivalent`を触らないのはこのため | 🟡 同左 |
+| `hasDestructiveAction`(macOS 11+)のバージョンガード | ✅ `respondsToSelector:`で存在確認。**本クレート初のバージョン分岐**であり以後の前例とする | N/A |
+| role別テーマトークン | ⬜ 意図的に追加しない — `button_background`等が既に全role共通の上書き口で、role専用トークンはシステムアクセントカラーと競合する | ⬜ 同左 |
+| `icon`/`image` | ⬜ 未対応(`NSButton.image`とWinUI3の`Content`合成で作業の質が異なるため別スコープ) | ⬜ 同左 |
+| `docs/specs/builtins_spec.md` F.15 | ✅ 新設(`:41`が付録F.6を指していた誤参照も修正) | ✅(同一ドキュメント) |
+
+#### `tooltip`(`NativeControl`に宣言)
+
+`docs/specs/builtins_spec.md` 付録M.3 が「任意のビルトイン要素が持てる共通属性」と規定しているため、`Button`固有ではなく`NativeControl`に1回だけ宣言した。
+
+| 項目 | AppKit | WinUI3 |
+|---|---|---|
+| `NativeControl`への`#[prop(tooltip: Option<String>)]`宣言 | ✅ | ✅(バックエンド非依存) |
+| 実装箇所 | ✅ `native_ui/control.rs`に1箇所。`AnyView::set_tooltip`→`NSView.toolTip` | 🟡 同構造。`ToolTipService.SetToolTip` |
+| 派生する全ネイティブ葉での利用 | ✅ `Button`/`TextArea`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView`。**`Button`と`TextBox`の両方でAXの`AXHelp`属性に設定値が現れることを確認済み**(Button固有ではなく`NativeControl`から継承していることの実証) | 🟡 同左 |
+| `background`/`text_style`と違い`measure_override`でのpull-syncをしない | ✅ テーマトークンも遅延解決も無く、レイアウトにも影響しないためsetterでの直接pushが正しい | 🟡 同左 |
+| `clear_tooltip` | ⬜ 不要 — codegenが`clear_<name>()`を生成するのは`theme!(..)`値を取り`PlatformDefault`に解決されうるプロパティのみ(`placeholder`に`clear_placeholder`が無いのと同じ) | ⬜ 同左 |
+| 自前描画要素(`TextBlock`/`Shape`/レイアウト)の`tooltip` | ⬜ 未実装。ネイティブビューを持たないためホバー判定・表示遅延・ポップアップをelwindui側で実装する必要があり、ネイティブ葉への転送とは作業の質が異なる | ⬜ 同左 |
+
+### 2.5 `examples/controls-demo`
 
 `examples/graphics-demo`と同じ構造(単一`main.rs`、`#[elwindui::viewmodel]`、`TabView`+タブごとの機能領域)。
 
@@ -95,7 +124,8 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 ## 3. 未実装コントロールのバックログ(詳細設計は未着手)
 
-- **NativeButton** — 既存`Button`(既にNativeControl派生として実装済み)の拡張として扱うか、role(`normal`/`primary`/`destructive`)等を持つ新規コントロールとして分離するか要検討。AppKit: `NSButton` / WinUI3: `Button`
+(**NativeButton**は§2.4で既存`Button`の拡張として決着済み。バックログから除去した。)
+
 - **ComboBox** — 編集不可の選択コントロール。AppKit: `NSPopUpButton` / WinUI3: `ComboBox`。仕様書の`Dropdown`(付録F.5、未実装)との名称・スコープ重複を実装時に整理する必要がある
 - **CheckBox** — AppKit: `NSButton`(`NSButtonType.Switch`) / WinUI3: `CheckBox`。三状態(`CheckState::Indeterminate`)はユーザー操作からは遷移不可にする
 - **RadioButton** — AppKit: `NSButton`(`NSButtonType.Radio`) / WinUI3: `RadioButton`。グループ管理はネイティブのグループ機能に依存せず、elwindui側で論理管理する
@@ -121,4 +151,5 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 - **WinUI3**: Windows環境が無いため`cargo build`/`cargo test`/実行のいずれも不可能。すべての変更は構造レビューのみ
 - **GTK4**: 未着手
+- **`Option<String>`プロパティは`&str`しか受け付けない**: `wrap_prop_value`(`crates/elwindui-macros/src/class.rs`)が`&(..)`を挿入するのは**裸の`String`**プロパティ(`Button::text`)だけで、`Option<String>`は`is_string_type`の判定を外れて値が素通しになる。そのためsetterが`&str`を取る`Option<String>`プロパティ——`NativeControl::tooltip`、`TextBox::placeholder`、`PasswordBox::placeholder`——にはDSLの文字列リテラルしか渡せず、`bind!`した`String`のビューモデルフィールドは型エラーになる。`crates/elwindui-core/tests/props_macro.rs`の`props_macro_forwards_tooltip_up_to_native_control`がこの挙動を固定している
 - **`view!`の`Option<T>`自動ラップ**: `Option<T>`型のプロパティ(`max_length: Option<u32>`等)に裸のリテラル値(`40`や`40u32`)を書いても`Some(..)`への自動ラップが効かず型エラーになる。`vm.some_field`のような変数参照(`bind!`経由)は`Option<bool>`等で自動ラップされる(`Button.enabled: vm.save_can_execute`、`examples/notepad`)ため、自動ラップの対象は変数参照のみでリテラル値には適用されない。`Some(40u32)`のような関数呼び出し形の式もDSLパーサーが受け付けない(識別子を期待するパースエラー)。`examples/controls-demo`では`TextBox`/`PasswordBox`の`max_length`指定を省略して回避している

@@ -51,6 +51,9 @@ mod controls_demo_view_model {
         nested_text_box_value: String,
 
         #[observable(default = String::new())]
+        button_log: String,
+
+        #[observable(default = String::new())]
         regression_text: String,
         #[observable(default = String::new())]
         regression_log: String,
@@ -85,6 +88,10 @@ mod controls_demo_view_model {
         fn password_box_lost_focus(&self) {
             let len = self.password_box_value.borrow().chars().count();
             password_box_log = format!("{}lost_focus (len={len})\n", self.password_box_log.borrow());
+        }
+
+        fn button_clicked(&self, which: String) {
+            button_log = format!("{}{which} clicked\n", self.button_log.borrow());
         }
 
         fn regression_button_clicked(&self) {
@@ -213,6 +220,74 @@ struct ControlsDemoWindow {
                             TextBlock { text: "Row 14" }
                             TextBlock { text: "Row 15 — bottom" }
                         }
+                    }
+                }
+            }
+            TabViewItem {
+                header: "Button"
+                closable: false
+                on_close: || {}
+                content: Grid {
+                    rows: [elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Star(1.0)]
+                    columns: [elwindui::core::layout::GridLength::Star(1.0)]
+
+                    VerticalLayout {
+                        Grid::row: 0
+                        margin: 12.0
+                        spacing: 6.0
+                        TextBlock { text: "role — mapped to each platform's own emphasis affordance, not to elwindui styling:" }
+                        HorizontalLayout {
+                            spacing: 8.0
+                            Button {
+                                text: "Normal"
+                                tooltip: "An ordinary action — the plain platform push button"
+                                on_click: || { vm.button_clicked("Normal".to_string()) }
+                            }
+                            Button {
+                                text: "Primary"
+                                role: elwindui::core::ui::ButtonRole::Primary
+                                tooltip: "Accent-filled: the action this view is primarily for"
+                                on_click: || { vm.button_clicked("Primary".to_string()) }
+                            }
+                            Button {
+                                text: "Destructive"
+                                role: elwindui::core::ui::ButtonRole::Destructive
+                                tooltip: "Red-filled bezel; also flagged hasDestructiveAction on macOS 11+"
+                                on_click: || { vm.button_clicked("Destructive".to_string()) }
+                            }
+                        }
+                        TextBlock { text: "is_default — Return activates it. Orthogonal to role, so both can be set:" }
+                        HorizontalLayout {
+                            spacing: 8.0
+                            Button {
+                                text: "Default (press Return)"
+                                is_default: true
+                                tooltip: "keyEquivalent = \\r on AppKit"
+                                on_click: || { vm.button_clicked("Default".to_string()) }
+                            }
+                            Button {
+                                text: "Disabled"
+                                enabled: false
+                                tooltip: "Tooltips still show on a disabled control"
+                                on_click: || { vm.button_clicked("Disabled".to_string()) }
+                            }
+                        }
+                        TextBlock { text: "tooltip is declared on NativeControl, so every native leaf has it — hover the TextBox below:" }
+                        TextBox {
+                            text: vm.nested_text_box_value
+                            placeholder: "hover me"
+                            tooltip: "A TextBox tooltip, inherited from NativeControl"
+                        }
+                    }
+                    TextBlock {
+                        Grid::row: 1
+                        margin: 12.0
+                        text: "event log:"
+                    }
+                    ScrollView {
+                        Grid::row: 2
+                        margin: 12.0
+                        content: TextBlock { text: vm.button_log }
                     }
                 }
             }

@@ -62,6 +62,17 @@ impl NativeControl {
         self.sync_background();
         self.invalidate();
     }
+    /// Pushed straight to the element rather than pull-synced from `measure_override` the way
+    /// `background`/`text_style` are: those two have theme tokens and so must be re-resolved
+    /// whenever the theme revision changes, while a tooltip is plain text with no token and no
+    /// lazy resolution. It also has no effect on layout, so there is nothing to invalidate.
+    fn set_tooltip(&self, tooltip: &str) {
+        let _ = self.handle.set_tooltip(if tooltip.is_empty() {
+            None
+        } else {
+            Some(tooltip)
+        });
+    }
     fn construct(handle: AnyView) -> Self {
         Self {
             base: elwindui_core::ui::UIElement::construct(),

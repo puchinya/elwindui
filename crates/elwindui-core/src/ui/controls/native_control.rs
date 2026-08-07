@@ -18,6 +18,7 @@ use super::*;
 #[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement, abstract_class)]
 #[text_style]
 #[prop(background: Option<crate::graphics::Brush>)]
+#[prop(tooltip: Option<String>)]
 pub trait NativeControl {
     /// Sets an explicit native-control background, or removes it (`None`) so the backend control
     /// theme can supply it again — matching `#[prop(background: Option<Brush>)]`'s own declared
@@ -31,4 +32,18 @@ pub trait NativeControl {
 
     /// Removes an explicit background so the backend control theme can supply it again.
     fn clear_background(&self);
+
+    /// Sets the hover-delayed explanatory text shown for this control.
+    ///
+    /// Declared here rather than on any individual leaf because `docs/specs/builtins_spec.md`
+    /// 付録M.3 specifies `tooltip` as an attribute *any* builtin may carry, and both toolkits
+    /// expose it on their universal view type (AppKit `NSView.toolTip`, WinUI3
+    /// `ToolTipService.ToolTip`) — so every native leaf inherits one working implementation from
+    /// its backend's own `NativeControl` struct, exactly as `background` above already does.
+    ///
+    /// Passing an empty string removes the tooltip. There is no `clear_tooltip` counterpart:
+    /// `elwindui-codegen` only emits `clear_<name>()` for properties that can carry a
+    /// `theme!(..)` value and resolve to `PlatformDefault`, and a tooltip is plain text with no
+    /// theme token — the same reason `TextBox::set_placeholder` has no `clear_placeholder`.
+    fn set_tooltip(&self, tooltip: &str);
 }

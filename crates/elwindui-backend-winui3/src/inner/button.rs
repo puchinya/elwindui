@@ -1,12 +1,16 @@
 //! The XAML `Button` and its click handler.
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::Button as XamlButton;
-use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
+use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
+use crate::bindings::Microsoft::UI::Xaml::Media::Brush;
+use crate::bindings::Microsoft::UI::Xaml::{Application, RoutedEventHandler, Style};
 use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use elwindui_core::ui::ButtonRole;
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows::Foundation::PropertyValue;
-use windows::core::HSTRING;
+use windows::System::VirtualKey;
+use windows::core::{HSTRING, Interface};
 
 /// Raw `XamlButton` + click wiring — composed by `native_ui::Button`.
 pub(crate) struct InnerButton {
@@ -56,6 +60,64 @@ impl InnerButton {
             let _ = self.xaml.SetContent(&value);
         }
     }
+
+    /// Applies a `ButtonRole`'s native emphasis, always resetting the previous role's treatment
+    /// first so switching roles at runtime can't leave a stale style behind.
+    ///
+    /// Asymmetric with AppKit, and honestly so:
+    ///
+    /// - `Primary` maps to the real Fluent `AccentButtonStyle`, looked up from the application
+    ///   resources — the direct counterpart of AppKit's accent `bezelColor`.
+    /// - `Destructive` has **no** WinUI 3 built-in equivalent of AppKit's `hasDestructiveAction`.
+    ///   Fluent expects destructive intent to be carried by wording and confirmation, not by a
+    ///   stock red button style. Rather than invent one, this clears the style and sets the
+    ///   foreground to the system critical brush, which is the closest honest approximation.
+    ///   Recorded as a known gap in `docs/status/nativecontrol_status.md`, the same way
+    ///   `PasswordBox::reveal_enabled`'s reverse asymmetry already is.
+    pub(crate) fn set_role(&self, role: ButtonRole) {
+        let style = match role {
+            ButtonRole::Primary => lookup_resource::<Style>("AccentButtonStyle"),
+            ButtonRole::Normal | ButtonRole::Destructive => None,
+        };
+        let _ = self.xaml.SetStyle(style.as_ref());
+
+        let foreground = match role {
+            ButtonRole::Destructive => lookup_resource::<Brush>("SystemFillColorCriticalBrush"),
+            ButtonRole::Normal | ButtonRole::Primary => None,
+        };
+        let _ = self.xaml.SetForeground(foreground.as_ref());
+    }
+
+    /// Makes this the window's default button, so Enter activates it.
+    ///
+    /// WinUI 3's `Button` has no `IsDefault` (that lives on `ContentDialog`'s buttons only), so
+    /// this uses the general mechanism: an `Enter` `KeyboardAccelerator`. The accelerator is added
+    /// once and removed when unset, rather than accumulating one per call.
+    pub(crate) fn set_is_default(&self, is_default: bool) {
+        let Ok(accelerators) = self.xaml.KeyboardAccelerators() else {
+            return;
+        };
+        let _ = accelerators.Clear();
+        if !is_default {
+            return;
+        }
+        if let Ok(accelerator) = KeyboardAccelerator::new() {
+            let _ = accelerator.SetKey(VirtualKey::Enter);
+            let _ = accelerators.Append(&accelerator);
+        }
+    }
+}
+
+/// Resolves a Fluent theme resource by key from `Application.Current.Resources`.
+///
+/// Returns `None` rather than panicking when the key is missing or has another type: the Fluent
+/// resource dictionary is only fully populated once `XamlControlsResources` is merged in, and a
+/// button that renders unstyled is a far better failure than one that aborts the app.
+fn lookup_resource<T: Interface>(key: &str) -> Option<T> {
+    let resources = Application::Current().ok()?.Resources().ok()?;
+    let key = PropertyValue::CreateString(&HSTRING::from(key)).ok()?;
+    let value = resources.Lookup(&key).ok()?;
+    value.cast::<T>().ok()
 }
 
 /// Windows-only hosted-XAML regression tests. The `AnyView::measure`/`arrange` `Width`/`Height`

@@ -73,7 +73,7 @@
 | `TextBox` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.12 |
 | `PasswordBox` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.13 |
 | `ScrollView` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.14 |
-| `Button` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.9 |
+| `Button` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.15 |
 | `Image`(ラスター/ベクター) | ✅ | ✖ | ✖ | **仕様書に節が無い**(§5・§7参照) |
 | `MenuBar` / `MenuBarItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録X |
 | `Menu` / `MenuItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録M.2 |
@@ -82,7 +82,8 @@
 | 描画拡張(Brush/Geometry/Effect/Transform) | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録N |
 | `NavigationHost` / `Route` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録L |
 | `Dialog` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録M.1 |
-| `Tooltip` / 汎用`context_menu`属性 | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録M.3 |
+| `tooltip`属性(`NativeControl`派生の全ネイティブ葉) | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録M.3 |
+| `tooltip`属性(自前描画要素) / 汎用`context_menu`属性 | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録M.2/M.3 |
 | `VirtualList` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録Q |
 | `platform::file_dialog` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録T.2 |
 | `platform::clipboard` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録T.1 |
@@ -110,7 +111,7 @@
 
 - `Image`は`Rectangle`/`Ellipse`と同じくバックエンド非依存の自己描画builtin(ネイティブウィジェットを持たない)。`source: Option<ImageSource>`(`Raster(Image)`/`Vector(VectorImage)`)、`stretch: Option<Stretch>`、`rasterize: Option<VectorRasterizeMode>`(`Vector`ソースのみ有効、§7参照)。ヒットテストは`Shape`同様bounding-box精度のみ(`UIElement::hit_test_content`が点を受け取らないシグネチャのため、path形状ベースの精密ヒットテストは別タスク)
 - `Menu`/`MenuItem`は`MenuBarItem.submenu`経由での利用のみ実装済み。任意要素に`context_menu`属性で付ける汎用コンテキストメニュー機構は未実装
-- `tooltip`共通属性は未実装
+- `tooltip`共通属性は`NativeControl`に宣言され、そこから派生する全ネイティブ葉で実装済み。自前描画要素(`TextBlock`/`Shape`/レイアウト)では未実装
 - `Control`の`template: Option<ControlTemplate<Self>>`(WinUI3の`Control.Template`相当の視覚ツリー実行時差し替え、`docs/specs/builtins_spec.md` 付録F.9.1・`docs/specs/dsl_spec.md` §4・`docs/design/gui_framework_design.md` §5.12)は📋設計のみ。`crates/elwindui-core/src/ui.rs`の`Control`構造体に対応フィールドは無く、`children`をそのままVisual子要素にする挙動のみ実装されている
 - `Control`/`TextBlock`/各バックエンドの`NativeControl`は`font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/`foreground`の7プロパティを持ち(`#[text_style]` DSLコンポーネント属性、`docs/specs/dsl_spec.md` 付録A)、プロパティ単位で独立にVisual Parent経由で継承される。`TextBlock::measure_override`は登録済み`TextBackend`(AppKit・WinUI3実装済み)による実測を行う。詳細は`docs/status/font_status.md`参照
 
@@ -148,7 +149,7 @@
 | `store`(グローバル状態) | `docs/design/gui_framework_design.md` §7.1 | 📋 **未実装**。ASTに`Store`ノードが無い。`ControlTemplate<Self>`の広域既定値もこれに依存する |
 | キーボード入力・フォーカス管理 | `docs/design/gui_framework_design.md` §5.5 / §8.1 | 🚧 AppKit・WinUI3両バックエンドで実装(WinUI3は`#![cfg(target_os = "windows")]`ゲートのため本機ではコンパイル確認自体不可)。`#[focus(order/trap)]`という専用DSL属性ではなく`tab_stop`/`focus_order`という共通プロパティとして提供する。自前描画系要素の自動フォーカス移譲(クリックでフォーカス)、方向キーでのフォーカス移動、ネイティブリーフ(`Button`/`TextArea`)自身の`on_key_down`/`on_got_focus`個別配線、IME変換中プレビュー表示は未実装 |
 | ナビゲーション(`NavigationHost`/`Route`) | `docs/specs/builtins_spec.md` 付録L | 📋 **未実装** |
-| ダイアログ/メニュー/ツールチップ | `docs/specs/builtins_spec.md` 付録M | 🚧 `Menu`/`MenuItem`本体は実装済み。`Dialog`/`Tooltip`および汎用`context_menu`/`tooltip`属性は未実装 |
+| ダイアログ/メニュー/ツールチップ | `docs/specs/builtins_spec.md` 付録M | 🚧 `Menu`/`MenuItem`本体と`tooltip`属性(ネイティブ葉のみ)は実装済み。`Dialog`、自前描画要素の`tooltip`、汎用`context_menu`属性は未実装 |
 | 描画拡張(Brush/Geometry/Effect/Transform/レイヤー合成/アニメーション) | `docs/specs/builtins_spec.md` 付録N | 📋 未実装。`Painter`基本セット(塗り・線・テキスト)のみ`elwindui-core`に存在し、`Canvas`自体が未実装のため利用できない |
 | MVVM(`viewmodel`/アクション) | `docs/design/gui_framework_design.md` §7.2 | ✅ `#[observable]`/`#[computed]`と、`impl`ブロックの`fn`/`async fn`から自動検出されるアクションが動作し、`examples/notepad`のMVVM構成で使われている |
 | 非同期処理 | `docs/design/gui_framework_design.md` §7.3 | 🚧 `spawn`相当(`spawn_local`)は実装済みで`examples/notepad`が使用。`AsyncState<T>`/`#[async_computed]`/`task!`マクロは未実装 |

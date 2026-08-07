@@ -105,7 +105,25 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | `clear_tooltip` | ⬜ 不要 — codegenが`clear_<name>()`を生成するのは`theme!(..)`値を取り`PlatformDefault`に解決されうるプロパティのみ(`placeholder`に`clear_placeholder`が無いのと同じ) | ⬜ 同左 |
 | 自前描画要素(`TextBlock`/`Shape`/レイアウト)の`tooltip` | ⬜ 未実装。ネイティブビューを持たないためホバー判定・表示遅延・ポップアップをelwindui側で実装する必要があり、ネイティブ葉への転送とは作業の質が異なる | ⬜ 同左 |
 
-### 2.5 `examples/controls-demo`
+### 2.5 選択系(`CheckBox` / `RadioButton` / `ToggleSwitch`)
+
+3つとも`docs/specs/builtins_spec.md` F.16/F.17/F.18に対応。AppKitでは`CheckBox`/`RadioButton`が`Button`と同じ`NSButton`をボタン種別違いで使うため、`inner/button.rs`の`ButtonTarget`クリックトランポリンを`pub(crate)`化して直接共有している(`ButtonTarget::attach`ヘルパ)。
+
+| 項目 | AppKit | WinUI3 |
+|---|---|---|
+| `CheckState`(`Unchecked`/`Checked`/`Indeterminate`)の定義 | ✅ | ✅(バックエンド非依存) |
+| `CheckBox`: `Indeterminate`はプログラムから表示可能、ユーザークリックからは到達不可 | ✅ **実機で挙動修正済み**——当初`setAllowsMixedState(false)`で三状態サイクル自体を無効化する設計だったが、それだと`setState(.mixed)`というプログラムからの設定まで`.on`表示に潰れてしまい(`tools/macos-ui-driver`のスクリーンショット比較で発覚)、受け入れ条件「プログラムからは表示される」を満たせなかった。`allowsMixedState(true)`のままにし、`set_on_change`のクリックコールバック側でネイティブが`Mixed`に着地した場合だけ即座に`Checked`へ引き戻す方式へ修正(`inner/check_box.rs`) | 🟡 同じ推論に基づき`SetIsThreeState(true)`+`Indeterminate`イベントでの引き戻しへ構造ミラー(Windows環境が無く未検証) |
+| `CheckBox`/`RadioButton`の`ButtonTarget`共有 | ✅ `inner/check_box.rs`・`inner/radio_button.rs`とも`crate::inner::button::ButtonTarget`を直接使用 | 🟡 同型対応 |
+| `RadioButton`のグループ管理(elwindui側で論理管理、ネイティブグループ機能に非依存) | ✅ `native_ui/radio_button.rs`のスレッドローカル`GROUPS`(`Weak<dyn UIElementExt>`のレジストリ)。同一グループの他メンバーを明示的に`unchecked`にする | 🟡 同型対応 |
+| AppKit自身の「同一superview+同一action」による暗黙のradio自動排他との衝突有無 | ✅ **`examples/controls-demo`のSelectionタブで実機確認済み** — 異なる`group`のRadioButtonが同一コンテナに同居しても互いに干渉しないことを確認 | N/A(未検証) |
+| `ToggleSwitch`: `NSSwitch`(`objc2-app-kit` feature `"NSSwitch"`追加) | ✅ | N/A |
+| `ToggleSwitch`に`text`プロパティが無いこと | ✅ 仕様どおり(F.18) | 🟡 同左 |
+| role別/コントロール別のテーマトークン追加 | ⬜ 意図的に追加しない——`background_token`のdefault armが`native_control_background`にフォールバックし、かつ`NSButton`ファミリー全体で`apply_background`がno-opのため実害が無い(`ffi.rs`の`impl AppKitHandle for Retained<NSButton>`のdocコメント参照) | ⬜ 同左 |
+| `objc2-app-kit` feature追加(`NSButtonCell`/`NSCell`/`NSSwitch`) | ✅ `NSButtonType`(`NSButtonCell`)と`NSControlStateValueOn/Off/Mixed`(`NSCell`)は`"NSButton"` featureだけでは届かず、個別追加が必要だった | N/A |
+| `crates/elwindui-core/tests/props_macro.rs` | ✅ 3コントロール分のクロスクレート形状テスト追加 | — |
+| `docs/specs/builtins_spec.md` F.16/F.17/F.18 | ✅ 新設 | ✅(同一ドキュメント) |
+
+### 2.6 `examples/controls-demo`
 
 `examples/graphics-demo`と同じ構造(単一`main.rs`、`#[elwindui::viewmodel]`、`TabView`+タブごとの機能領域)。
 
@@ -114,9 +132,13 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | TextBox | 値・placeholder・focus状態表示・event log・submit-on-Enter |
 | PasswordBox | 値の長さのみ表示、実際の値は一切表示しない(漏洩防止方針をデモ自身が実演) |
 | ScrollView | ビューポートより高いコンテンツ。ネストした`TextBox`でネスト内フォーカスを確認できる |
+| Button | 3つのrole・is_default・tooltip |
+| Selection | CheckBox(三状態のプログラム設定含む)・同一グループのRadioButton3つ・ToggleSwitch |
 | 回帰確認 | 既存`TextArea`/`Button` |
 
 対話的な動作確認(クリック・入力・フォーカス切り替え・スクロール)は`tools/macos-ui-driver`で行う(`docs/status/macos_ui_driver_status.md`)。
+
+**`#[computed]`初期化式の書き方に関する注意**: Selectionタブの`check_box_checked_label`等は当初`self.check_box_checked.get()`のように内部ストレージへ直接アクセスする書き方だったが、これは`elwindui-codegen`の依存関係抽出(`codegen.rs`の`referenced_fields`)が裸の1セグメントパス(`check_box_checked`のような素のフィールド名)しか検出しない設計のため、依存先の観測プロパティが変化しても`recompute_<name>`が呼ばれず、ラベルが初期値のまま固まって更新されないというバグを引き起こした(`tools/macos-ui-driver`での実クリック検証で発覚)。同じ理由で`format!(...)`のようなマクロ呼び出しの引数に埋め込んだフィールド参照も(`t!`マクロ以外は)不可視——`rewrite_field_refs`/`referenced_fields`はマクロの生トークン列の中までは踏み込まない。正しい書き方は`examples/notepad`と同じ「裸のフィールド名」糖衣構文(例: `check_box_checked`単体、または`.get()`無しでメソッドを呼ぶ`toggle_is_on.to_string()`)を使い、`format!`でラップしたい場合は`match`/`if`式で先に`String`へ変換してから渡す。**同型の既存バグが`password_box_length`(`#[computed(expr = format!("{}", self.password_box_value.borrow().chars().count()))]`)にも残っている**——本Issueのスコープ外(Selectionタブ新設より前から存在)のため未修正のまま残置。
 
 **AppKit実機能ライフサイクルテストが未着手である理由**: `MainThreadMarker::new()`は`cargo test`のデフォルトテストハーネス(ワーカースレッド)で`None`を返す。`harness = false`のカスタムテストバイナリが必要だが、`inner`/`native_ui`モジュールの型が`pub(crate)`のため外部`tests/`統合テストからアクセスできず、設計に追加検討が必要。現状は`examples/controls-demo`+`macos-ui-driver`による確認で代替している。
 
@@ -124,13 +146,10 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 ## 3. 未実装コントロールのバックログ(詳細設計は未着手)
 
-(**NativeButton**は§2.4で既存`Button`の拡張として決着済み。バックログから除去した。)
+(**NativeButton**は§2.4で既存`Button`の拡張として決着済み。**CheckBox/RadioButton/ToggleSwitch**は§2.5で実装済み。いずれもバックログから除去した。)
 
 - **ComboBox** — 編集不可の選択コントロール。AppKit: `NSPopUpButton` / WinUI3: `ComboBox`。仕様書の`Dropdown`(付録F.5、未実装)との名称・スコープ重複を実装時に整理する必要がある
-- **CheckBox** — AppKit: `NSButton`(`NSButtonType.Switch`) / WinUI3: `CheckBox`。三状態(`CheckState::Indeterminate`)はユーザー操作からは遷移不可にする
-- **RadioButton** — AppKit: `NSButton`(`NSButtonType.Radio`) / WinUI3: `RadioButton`。グループ管理はネイティブのグループ機能に依存せず、elwindui側で論理管理する
 - **Slider** — AppKit: `NSSlider` / WinUI3: `Slider`
-- **ToggleSwitch** — AppKit: `NSSwitch`(10.15+)またはカスタム合成 / WinUI3: `ToggleSwitch`
 - **ProgressBar** — AppKit: `NSProgressIndicator` / WinUI3: `ProgressBar`。indeterminate状態はネイティブアニメーションを使い、elwindui側でフレーム生成しない
 - **NumberBox** — AppKit: `NSTextField`+`NSStepper`合成 / WinUI3: `NumberBox`(ネイティブ一体型)。入力中文字列と確定値を区別する設計が必要
 - **その他** — ContextMenu / Popup / ToolTip / SearchBox / DatePicker / TimePicker / ColorPicker / ListView / TreeView / WebView / DataGrid

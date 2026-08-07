@@ -12,7 +12,7 @@ use elwindui_core::graphics::{
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSButton, NSScrollView, NSSecureTextField, NSStackView, NSTextField, NSTextView,
+    NSButton, NSScrollView, NSSecureTextField, NSStackView, NSSwitch, NSTextField, NSTextView,
     NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{NSRect, NSString};
@@ -118,6 +118,13 @@ impl AppKitHandle for Retained<NSScrollView> {
             .is_some_and(|d| d.downcast::<NSTextView>().is_ok())
     }
 }
+/// Covers every widget built on a raw `NSButton`, not just `Button`: `CheckBox`
+/// (`NSButtonType::Switch`) and `RadioButton` (`NSButtonType::Radio`) are the same Rust type with
+/// a different button type, so they share this one impl too — there is no distinct `Retained<T>`
+/// to hang a separate `impl` off, the way `PasswordBox`'s `NSSecureTextField` gets its own.
+/// `theme_prefix() == "button"` for all three is therefore imprecise, but harmless: this impl
+/// never overrides `apply_background` (the trait's own no-op default applies), so no background
+/// token is ever actually resolved through it for any of them.
 impl AppKitHandle for Retained<NSButton> {
     fn as_nsview(&self) -> Retained<NSView> {
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
@@ -157,6 +164,18 @@ impl AppKitHandle for Retained<NSStackView> {
     fn as_nsview(&self) -> Retained<NSView> {
         Retained::into_super(self.clone())
     }
+}
+impl AppKitHandle for Retained<NSSwitch> {
+    fn as_nsview(&self) -> Retained<NSView> {
+        let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
+        Retained::into_super(control)
+    }
+    fn theme_prefix(&self) -> &'static str {
+        "toggle_switch"
+    }
+    // `NSSwitch` has no title/text of its own (see `ToggleSwitch`'s own doc comment), so it never
+    // overrides `apply_text_style`/`supports_text_style` — the trait's defaults (no-op, `false`)
+    // are exactly right.
 }
 impl AppKitHandle for Retained<NSTextField> {
     fn as_nsview(&self) -> Retained<NSView> {

@@ -34,6 +34,7 @@ mod shape;
 
 // Then everything that inherits one of the above (or inherits nothing at all).
 mod button;
+mod check_box;
 mod content_control;
 mod ellipse;
 mod grid;
@@ -44,6 +45,7 @@ mod menu_bar;
 mod menu_bar_item;
 mod menu_item;
 mod password_box;
+mod radio_button;
 mod rectangle;
 mod scroll_view;
 mod tab_view;
@@ -51,12 +53,14 @@ mod tab_view_item;
 mod text_area;
 mod text_block;
 mod text_box;
+mod toggle_switch;
 mod vertical_layout;
 mod window;
 
 // Globs, never named lists — each class's companion `__elwindui_macros_of_*` alias has to travel
 // up to `elwindui::ui::` for downstream `#[component(inherits ..)]` to resolve it.
 pub use button::*;
+pub use check_box::*;
 pub use content_control::*;
 pub use control::*;
 pub use ellipse::*;
@@ -70,6 +74,7 @@ pub use menu_bar_item::*;
 pub use menu_item::*;
 pub use native_control::*;
 pub use password_box::*;
+pub use radio_button::*;
 pub use rectangle::*;
 pub use scroll_view::*;
 pub use shape::*;
@@ -78,5 +83,6 @@ pub use tab_view_item::*;
 pub use text_area::*;
 pub use text_block::*;
 pub use text_box::*;
+pub use toggle_switch::*;
 pub use vertical_layout::*;
 pub use window::*;

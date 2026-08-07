@@ -966,6 +966,137 @@ struct Button {
 
 ---
 
+## F.16 `builtin::CheckBox` ✅
+
+三状態のネイティブチェックボックス(AppKit: `NSButton`を`NSButtonType::Switch`に設定したもの——`Button`と同じウィジェットをボタン種別違いで使う。WinUI3: `CheckBox`)。
+
+```rust
+#[elwindui::component]
+struct CheckBox {
+    #[prop]
+    text: String,
+    #[prop(default = bind!(self.checked, TwoWay))]
+    checked: CheckState,
+    #[prop]
+    enabled: Option<bool>,
+
+    body: view! {
+        match target::backend() {
+            Backend::Appkit => native! {
+                let button = NSButton::buttonWithTitle_target_action(&text, None, None)?;
+                button.setButtonType(NSButtonType::Switch);
+                // `allowsMixedState(false)` (デフォルト)は、ユーザークリックのサイクルを抑止するだけでなく
+                // `setState(.mixed)`自体を無効化し `.on` として描画してしまう(実機で確認済み)。ダッシュ表示を
+                // 生かすため true のままにし、クリックからの到達阻止は target/action 側の後段で行う。
+                button.setAllowsMixedState(true);
+                button.setState(check_state_to_ns_state(checked));
+                button.setEnabled(enabled.unwrap_or(true));
+                button.set_target_action(move || {
+                    let mut new_state = read_check_state(&button);
+                    if new_state == CheckState::Indeterminate {
+                        // ネイティブの3値サイクルがクリックで Mixed に到達した場合、ここで即座に
+                        // Checked へ引き戻す——ユーザークリックからは Indeterminate へ絶対に遷移しない。
+                        new_state = CheckState::Checked;
+                        button.setState(check_state_to_ns_state(new_state));
+                    }
+                    checked = new_state;
+                    dispatch_on_change(checked);
+                });
+                button
+            }
+            Backend::Winui3 => native! {
+                let box_ = microsoft::ui::xaml::controls::CheckBox::new()?;
+                box_.SetContent(&PropertyValue::CreateString(&text)?)?;
+                // 同じ理由で true のまま(未検証・AppKit側の実機確認結果からの類推)。
+                box_.SetIsThreeState(true)?;
+                box_.SetIsChecked(check_state_to_nullable_bool(checked))?;
+                box_.SetIsEnabled(enabled.unwrap_or(true))?;
+                box_.Checked(&RoutedEventHandler::new(move |_, _| { checked = CheckState::Checked; dispatch_on_change(checked); Ok(()) }))?;
+                box_.Unchecked(&RoutedEventHandler::new(move |_, _| { checked = CheckState::Unchecked; dispatch_on_change(checked); Ok(()) }))?;
+                box_.Indeterminate(&RoutedEventHandler::new(move |_, _| {
+                    // クリックからの3値サイクルが Indeterminate に到達した場合の引き戻し。
+                    checked = CheckState::Checked;
+                    box_.SetIsChecked(check_state_to_nullable_bool(checked))?;
+                    dispatch_on_change(checked);
+                    Ok(())
+                }))?;
+                box_
+            }
+            Backend::Gtk4 => native! {
+                // 未実装 — docs/status/nativecontrol_status.md §4のGTK4基盤構築後に着手する。
+                unimplemented!()
+            }
+        }
+    }
+}
+```
+
+**`CheckState`は`Unchecked`/`Checked`/`Indeterminate`の3値だが、ユーザークリックが到達できるのは前2つだけ**。当初は`setAllowsMixedState(false)`/`SetIsThreeState(false)`でネイティブの三状態サイクル自体を無効化する設計だったが、AppKit実機検証で「`setAllowsMixedState(false)`は`setState(.mixed)`というプログラムからの設定も`.on`として描画してしまい、ダッシュ表示が一切出ない」ことが判明した(`tools/macos-ui-driver`のスクリーンショット比較で確認——ラベルは`Indeterminate`を示すのにチェックボックス自体は`Checked`と同じ見た目のまま)。そのため両バックエンドとも三状態サイクル自体は有効(`allowsMixedState(true)`/`IsThreeState(true)`)にし、代わりにクリックハンドラ側でネイティブの3値サイクルが`Indeterminate`/`Mixed`に到達した場合だけその場で`Checked`へ引き戻す(ネイティブ状態・`checked`値の両方を即座に上書きしてから`dispatch_on_change`する)。これにより`Indeterminate`は`component`が`checked: CheckState::Indeterminate`をプログラムから設定したときにだけ表示され(例: 部分的に選択されたリストを表すヘッダーチェックボックス)、ユーザークリックからは(直前の状態が何であれ)常に`Checked`へ遷移する、という要求どおりの挙動になる。WinUI3側の対応は同じ推論に基づく構造ミラーで、Windows環境が無いため未検証。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`examples/controls-demo`のSelectionタブで目視検証済み |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし) |
+| GTK4 | 未実装 |
+
+## F.17 `builtin::RadioButton` ✅
+
+ネイティブの排他選択ボタン(AppKit: `NSButton`を`NSButtonType::Radio`に設定したもの。WinUI3: `RadioButton`)。
+
+```rust
+#[elwindui::component]
+struct RadioButton {
+    #[prop]
+    text: String,
+    #[prop(default = bind!(self.checked, TwoWay))]
+    checked: bool,
+    #[prop]
+    group: Option<String>,
+    #[prop]
+    enabled: Option<bool>,
+    // on_click相当は無い——checkedのTwoWayバインドとgroupによる排他だけで完結する。
+}
+```
+
+**グループ管理はどちらのバックエンドもelwindui自身が行い、ネイティブの自動グルーピングには依存しない。** `RadioButton`はAppKitでもWinUI3でも`Button`と同じクリック用トランポリンを1インスタンスにつき1つ持つため(`ButtonTarget`、F.15参照)、複数のラジオボタンが同じ`action`セレクタを共有しうる——AppKitには「同一superviewかつ同一actionのradio-typeボタンは自動的に排他になる」という長年の挙動があり、これはelwindui側の`group`プロパティ(文字列で論理的にグループを表す、ビューの親子構造とは無関係)とは独立した基準で発火しうる。そのため各バックエンドの`native_ui`層(AppKitの場合`native_ui/radio_button.rs`)が同じ`group`文字列を持つ`RadioButton`インスタンス群を弱参照(`Weak`)で管理する独自のレジストリを持ち、1つをチェックすると同じグループの他の全員を明示的に`unchecked`にする。`group`が未指定(既定の空文字列)の`RadioButton`は排他に一切参加せず、単なる2値トグルとして振る舞う。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`examples/controls-demo`のSelectionタブで同一グループ内の排他を目視検証済み |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし) |
+| GTK4 | 未実装 |
+
+## F.18 `builtin::ToggleSwitch` ✅
+
+ネイティブのオン/オフスイッチ(AppKit: `NSSwitch`、macOS 10.15+。WinUI3: `ToggleSwitch`)。
+
+```rust
+#[elwindui::component]
+struct ToggleSwitch {
+    #[prop(default = bind!(self.is_on, TwoWay))]
+    is_on: bool,
+    #[prop]
+    enabled: Option<bool>,
+    // text プロパティは無い——次の段落を参照。
+}
+```
+
+**`text`プロパティを持たない**。`NSSwitch`にも素のFluent `ToggleSwitch`にも`Button`/`CheckBox`/`RadioButton`のようなラベルは無いため、隣に`TextBlock`を並べて使う(`Slider`など他のラベル無しコントロールと同じ扱い)。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`examples/controls-demo`のSelectionタブで目視検証済み |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし) |
+| GTK4 | 未実装 |
+
+---
+
 ## G.1 基本方針
 
 - レイアウト(どこに何を置くか)は引き続き宣言的な`view!`で書く

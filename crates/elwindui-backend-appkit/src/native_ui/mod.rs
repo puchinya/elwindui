@@ -21,11 +21,14 @@
 pub use elwindui_core::ui::NativeControlExt;
 
 mod button;
+mod check_box;
 mod control;
 mod menu;
+mod radio_button;
 mod scroll_view;
 mod tab_view;
 mod text;
+mod toggle_switch;
 mod window;
 
 // Glob re-exports, not a named list: `#[class]` generates a companion `__elwindui_macros_of_*`
@@ -33,9 +36,12 @@ mod window;
 // `elwindui::ui::__elwindui_macros_of_Window`. Naming only the types here would leave those
 // aliases behind in the submodule and break every inheriting user component.
 pub use button::*;
+pub use check_box::*;
 pub use control::*;
 pub use menu::*;
+pub use radio_button::*;
 pub use scroll_view::*;
 pub use tab_view::*;
 pub use text::*;
+pub use toggle_switch::*;
 pub use window::*;

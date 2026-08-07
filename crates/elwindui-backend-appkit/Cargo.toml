@@ -19,6 +19,13 @@ objc2-app-kit = { version = "0.3", features = [
     "NSGraphics",
     "NSControl",
     "NSButton",
+    # `NSButtonType` (`ButtonType::Switch`/`Radio` — `CheckBox`/`RadioButton`) lives in
+    # `NSButtonCell`, and `NSControlStateValueOn`/`Off`/`Mixed` (`CheckState`) live in `NSCell`;
+    # neither is reachable through the plain `NSButton` feature.
+    "NSButtonCell",
+    "NSCell",
+    # `ToggleSwitch`.
+    "NSSwitch",
     "NSTextField",
     "NSSecureTextField",
     "NSText",

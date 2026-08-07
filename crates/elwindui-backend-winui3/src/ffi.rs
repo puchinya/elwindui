@@ -7,7 +7,7 @@
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
     Button as XamlButton, Canvas, PasswordBox as XamlPasswordBox, ScrollViewer,
-    TabView as XamlTabView, TextBox as XamlTextBox,
+    TabView as XamlTabView, TextBox as XamlTextBox, ToolTipService,
 };
 use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
 use elwindui_core::input::RawKeyEvent;
@@ -15,8 +15,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use windows::Foundation::PropertyValue;
 use windows::Foundation::Size;
-use windows::core::Interface;
+use windows::core::{HSTRING, Interface};
 
 pub(crate) static NEXT_UI_EVENT_CALLBACK: AtomicUsize = AtomicUsize::new(1);
 
@@ -286,6 +287,23 @@ impl AnyView {
         background: Option<&elwindui_core::graphics::Brush>,
     ) -> windows::core::Result<()> {
         self.0.apply_background(background)
+    }
+
+    /// Sets (or, with `None`, removes) this control's hover tooltip.
+    ///
+    /// Not an `WinUi3Handle` method: `ToolTipService` is an attached property on
+    /// `DependencyObject`, so one implementation on the base element covers every wrapped widget
+    /// and no per-handle `impl` needs to know about it — the AppKit backend's own
+    /// `AnyView::set_tooltip` (`NSView.toolTip`) mirrors this exactly.
+    pub(crate) fn set_tooltip(&self, tooltip: Option<&str>) -> windows::core::Result<()> {
+        let element = self.as_element();
+        match tooltip {
+            Some(text) => {
+                let value = PropertyValue::CreateString(&HSTRING::from(text))?;
+                ToolTipService::SetToolTip(&element, &value)
+            }
+            None => ToolTipService::SetToolTip(&element, None),
+        }
     }
 }
 

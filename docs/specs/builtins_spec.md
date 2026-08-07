@@ -38,7 +38,7 @@ UIElement (trait, elwindui-core::ui)
  │                      れる葉ノードのみ(常にleaf、children()は空)。DSL側で
  │                      `inherits NativeControl`を宣言するのはこの6つ(TextBox/PasswordBox/ScrollView
  │                      はNativeControl拡充Phase 1で追加、`docs/status/nativecontrol_status.md`参照):
- │   ├─ Button                    (付録F.6, #[routed] on_click)
+ │   ├─ Button                    (付録F.15, #[routed] on_click)
  │   ├─ TextArea                  (付録F.4, #[two_way] text)
  │   ├─ TextBox                   (付録F.12, #[two_way] text)
  │   ├─ PasswordBox               (付録F.13, #[two_way] password)
@@ -863,6 +863,109 @@ ScrollView {
 
 グラフ・ゲージ・独自アニメーションのような「ピクセル単位で自分で描く」部品は、既存部品の組み合わせでは表現できない。これは`view`の宣言的な要素ツリー構文の対象外とし、**`Canvas`という専用ビルトインとRustの命令的な描画コードの組み合わせ**として扱う。
 
+## F.15 `builtin::Button` ✅
+
+ネイティブのプッシュボタン。**これがネイティブボタンそのもの**であり、別途`NativeButton`という型は存在しない——`docs/status/nativecontrol_status.md`が保留していた「既存`Button`を拡張するか新規コントロールに分離するか」は、`role`/`is_default`が必要とするものがすべて同じ`NSButton`/`Button`ウィジェットのプロパティであることから、拡張として決着した。
+
+```rust
+#[elwindui::component]
+struct Button {
+    #[prop]
+    text: String,
+    #[prop]
+    enabled: Option<bool>,
+    #[prop]
+    role: Option<ButtonRole>,      // Normal(既定) / Primary / Destructive
+    #[prop]
+    is_default: Option<bool>,
+    #[routed]
+    on_click: fn(),
+
+    body: view! {
+        match target::backend() {
+            Backend::Appkit => native! {
+                let button = NSButton::buttonWithTitle_target_action(&text, None, None);
+                button.setEnabled(enabled.unwrap_or(true));
+                // 強調する2つのroleはどちらも「塗りボタン」(bezelColor)で表現し、
+                // 塗る色だけが違う。hasDestructiveActionはmacOS 11+のセマンティックな
+                // signalとして併せて設定する(respondsToSelector:で存在確認してから呼ぶ)。
+                match role {
+                    ButtonRole::Normal => {
+                        button.setBezelColor(None);
+                        button.set_has_destructive_action(false);
+                    }
+                    ButtonRole::Primary => {
+                        button.setBezelColor(Some(NSColor::controlAccentColor()));
+                        button.set_has_destructive_action(false);
+                    }
+                    ButtonRole::Destructive => {
+                        button.setBezelColor(Some(NSColor::systemRedColor()));
+                        button.set_has_destructive_action(true);
+                    }
+                }
+                button.setKeyEquivalent(if is_default.unwrap_or(false) { "\r" } else { "" });
+                button.set_target_action(move || { dispatch_routed("on_click"); });
+                button
+            }
+            Backend::Winui3 => native! {
+                let button = microsoft::ui::xaml::controls::Button::new()?;
+                button.SetContent(&PropertyValue::CreateString(&text)?)?;
+                button.SetIsEnabled(enabled.unwrap_or(true))?;
+                match role {
+                    // Fluentのアクセントボタンスタイルをアプリのリソース辞書から引く。
+                    ButtonRole::Primary => button.SetStyle(lookup_resource("AccentButtonStyle"))?,
+                    // WinUI3にhasDestructiveAction相当は無い。M.5の既知ギャップを参照。
+                    ButtonRole::Destructive => {
+                        button.SetForeground(lookup_resource("SystemFillColorCriticalBrush"))?
+                    }
+                    ButtonRole::Normal => { button.SetStyle(None)?; button.SetForeground(None)?; }
+                }
+                // Button.IsDefaultはWinUI3には無い(ContentDialogのボタン専用)ため
+                // KeyboardAcceleratorで代替する。
+                button.KeyboardAccelerators()?.Clear()?;
+                if is_default.unwrap_or(false) {
+                    let accelerator = KeyboardAccelerator::new()?;
+                    accelerator.SetKey(VirtualKey::Enter)?;
+                    button.KeyboardAccelerators()?.Append(&accelerator)?;
+                }
+                button.Click(&RoutedEventHandler::new(move |_, _| { dispatch_routed("on_click"); Ok(()) }))?;
+                button
+            }
+            Backend::Gtk4 => native! {
+                // 未実装 — docs/status/nativecontrol_status.md §4のGTK4基盤構築後に着手する。
+                unimplemented!()
+            }
+        }
+    }
+}
+```
+
+**`role`は見た目のためだけの属性ではなく、各プラットフォーム固有の「強調の作法」への写像である。** elwindui側で色を決め打ちせず、`Primary`はOSのアクセントカラー(ユーザーがシステム設定で変えるもの)に従う。role別のテーマトークンは**意図的に追加していない**——`button_background`等が既に全role共通の上書き口として存在しており、role専用トークンを足すとユーザーが自分で制御することを期待しているシステムアクセントカラーと競合するため。明示的な`background:`は引き続き勝つ(`NativeControl`の背景適用はroleのベゼルとは独立に、かつ後に走る)。
+
+**`role`と`is_default`は直交する。** roleは「これはどういう種類の操作か」、`is_default`は「Returnで起動するか」を表す。破壊的操作が既定ボタンになることもできる(そしてたいていはすべきでない)。AppKitで既定ボタンもアクセント塗りになるのは`keyEquivalent`の副作用であり、`Primary`が`bezelColor`を使って`keyEquivalent`を触らないのはこの直交性を保つため。
+
+**DSLでは完全修飾で書く**(`role: elwindui::core::ui::ButtonRole::Primary`)。プロパティの宣言型からenumバリアント名を解決する仕組みはコード生成器に無く、裸の`Primary`は解決されない。
+
+`tooltip`は`Button`固有ではなく`NativeControl`から継承する(付録M.3)。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`examples/controls-demo`のButtonタブで目視検証済み |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし) |
+| GTK4 | 未実装(GTK4バックエンド自体が基盤未構築) |
+
+**既知のギャップ(意図的な縮小スコープ、隠していない)**:
+- **`Destructive`のWinUI3対応が非対称**。AppKitには`NSButton.hasDestructiveAction`(macOS 11+)というネイティブの破壊的操作表現があるが、WinUI3/Fluentには対応する組み込みスタイルが無い(Fluentは破壊的意図を文言と確認ダイアログで表すという設計思想)。独自に赤いスタイルを発明せず、`SystemFillColorCriticalBrush`を前景色に設定するに留めている。
+- **`is_default`のWinUI3対応が非対称**。`Button.IsDefault`はWinUI3には存在せず(`ContentDialog`のボタンにのみある)、`KeyboardAccelerator`での代替になっている。
+- **`hasDestructiveAction`はmacOS 11+**。objc2はバインディングを無条件に生成するため、10.x で呼ぶと`unrecognized selector`になる。`respondsToSelector:`で存在確認してから呼ぶ。本クレート初のバージョン分岐であり、以後の前例とする。**なお`Destructive`の赤は`bezelColor`が作っており、`hasDestructiveAction`はセマンティックな signal として併設しているだけなので、macOS 10.x でも見た目は変わらない。**
+- **AppKitで`Destructive`に採れなかった2つの方法**(実機で試して却下した記録):`contentTintColor`は標準のbordered push buttonのタイトルには効かない(テンプレート画像等が対象)ため、赤いティントだけでは`Normal`と見分けがつかなかった。`setAttributedTitle`による赤文字も採れない——`AppKitHandle::apply_text_style`(`ffi.rs`)が毎レイアウトパスで`setTitle`を呼び、設定した属性付きタイトルを直後に破棄するため。
+- `icon`/`image`は未対応。`NSButton.image`とWinUI3の`Content`合成では必要な作業の質が異なり、別スコープとした。
+- 同一ウィンドウ内で`is_default`を複数のボタンに設定した場合の解決は行わない。どちらのツールキットも解決しないため、呼び出し側の誤りとして扱う。
+
+---
+
 ## G.1 基本方針
 
 - レイアウト(どこに何を置くか)は引き続き宣言的な`view!`で書く
@@ -1229,7 +1332,7 @@ TextArea {
 
 `Menu`/`MenuItem`自体は実装済み(現状は`MenuBarItem`の`submenu`経由でアプリメインメニューに使われている、付録X参照)。一方、上記の`context_menu`のように**任意のビルトイン要素に汎用属性として付けられる**仕組みはまだ実装されていない(`TextArea`をはじめ、どのビルトイン宣言にも`context_menu`フィールドは存在しない)。
 
-## M.3 `Tooltip`(未実装・仕様のみ)
+## M.3 `Tooltip` ✅(ネイティブコントロールのみ)
 
 ```rust
 Button {
@@ -1239,7 +1342,9 @@ Button {
 }
 ```
 
-- `tooltip`は任意のビルトイン要素が持てる共通属性として提供し、ホバー時に各OS標準のツールチップ表示を行う、という設計。現状どのビルトイン宣言にも`tooltip`フィールドは存在せず、対応するバックエンド実装もない。
+- `tooltip`は`builtin::NativeControl`(付録F.9系のネイティブ基底)に`Option<String>`として1回だけ宣言されており、そこから派生する全ネイティブ葉——`Button`/`TextArea`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView`——が継承する。ホバー時の表示は各OS標準の機構をそのまま使う(AppKit: `NSView.toolTip`、WinUI3: `ToolTipService.ToolTip`)。どちらもツールチップを普遍的なビュー型の属性として持つため、葉ごとの実装は不要で、各バックエンドの`native_ui/control.rs`に1箇所だけ存在する。
+- **自前描画要素(`TextBlock`/`Rectangle`/`Ellipse`/`Image`/レイアウト各種)にはまだ無い。** これらはネイティブビューを持たないため、ホバー判定・表示遅延・ポップアップウィンドウをelwindui側で実装する必要があり、ネイティブ葉への転送だけで済む上記とは作業の性質が異なる。仕様上「任意のビルトイン要素が持てる」という目標は変えていないが、現状の実装範囲はネイティブ葉に限る。
+- 空文字列を設定するとツールチップを解除する。`clear_tooltip`は存在しない——`elwindui-codegen`が`clear_<name>()`を生成するのは`theme!(..)`値を取り得て`PlatformDefault`に解決されうるプロパティだけで、ツールチップはテーマトークンを持たない素のテキストであるため(`TextBox::set_placeholder`に`clear_placeholder`が無いのと同じ理由)。
 
 ## M.4 制約の継承
 
@@ -1251,7 +1356,7 @@ Button {
 |---|---|---|
 | モーダルダイアログ | `Dialog { on_dismiss, ... }`、フォーカストラップを自動適用 | 未実装・仕様のみ |
 | コンテキストメニュー | `Menu` / `MenuItem`、`context_menu`属性での紐付け | `Menu`/`MenuItem`自体は実装済み、`context_menu`属性は未実装 |
-| ツールチップ | 任意要素が持てる共通属性`tooltip` | 未実装・仕様のみ |
+| ツールチップ | 任意要素が持てる共通属性`tooltip` | `NativeControl`派生の全ネイティブ葉で実装済み。自前描画要素は未実装(M.3参照) |
 | バックエンドごとの実装差 | ビルトイン内部にのみ分岐を許可し、独自部品からの利用時は分岐禁止原則を維持(13章ルール15) | (原則自体はコード生成器の設計方針) |
 
 ---

@@ -5,6 +5,7 @@
 //! crate from `elwindui-core`, so it exercises exactly that boundary.
 
 use elwindui_core::graphics::{Brush, Color};
+use elwindui_core::ui::ButtonRole;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -21,6 +22,14 @@ struct FakeButton {
     background: RefCell<Option<Brush>>,
     /// Declared by `UIElement`, at the very top of the chain.
     margin: RefCell<Option<f32>>,
+    /// An enum-typed prop. `wrap_prop_value` passes an `Option<Enum>` value through unwrapped and
+    /// unconverted (no `.into()`, no `Some(..)`), unlike the Brush/Color and `String` cases above —
+    /// this pins that difference down across the crate boundary.
+    role: RefCell<Option<ButtonRole>>,
+    is_default: RefCell<Option<bool>>,
+    /// Declared by `NativeControl`, like `background` — the check that a *newly* added ancestor
+    /// prop forwards the same way the long-established one does.
+    tooltip: RefCell<Option<String>>,
 }
 
 impl FakeButton {
@@ -38,6 +47,15 @@ impl FakeButton {
     }
     fn set_margin(&self, margin: f32) {
         *self.margin.borrow_mut() = Some(margin);
+    }
+    fn set_role(&self, role: ButtonRole) {
+        *self.role.borrow_mut() = Some(role);
+    }
+    fn set_is_default(&self, is_default: bool) {
+        *self.is_default.borrow_mut() = Some(is_default);
+    }
+    fn set_tooltip(&self, tooltip: &str) {
+        *self.tooltip.borrow_mut() = Some(tooltip.to_string());
     }
 }
 
@@ -89,6 +107,40 @@ fn props_macro_forwards_through_the_whole_ancestor_chain() {
     let button = FakeButton::default();
     elwindui_core::__elwindui_props_Button!(@set button, margin, 4.0f32);
     assert_eq!(*button.margin.borrow(), Some(4.0));
+}
+
+/// An enum-typed prop reaches its setter as the bare enum value. `Option<ButtonRole>` is declared,
+/// but the DSL writes the inner value and `wrap_prop_value` leaves enums alone — no `Some(..)`, no
+/// `.into()`, unlike the `Brush` and `String` cases above.
+#[test]
+fn props_macro_passes_an_enum_prop_through_unwrapped() {
+    let button = FakeButton::default();
+    elwindui_core::__elwindui_props_Button!(@set button, role, ButtonRole::Destructive);
+    assert_eq!(*button.role.borrow(), Some(ButtonRole::Destructive));
+}
+
+#[test]
+fn props_macro_sets_is_default() {
+    let button = FakeButton::default();
+    elwindui_core::__elwindui_props_Button!(@set button, is_default, true);
+    assert_eq!(*button.is_default.borrow(), Some(true));
+}
+
+/// `tooltip` is declared on `NativeControl`, so setting it on a `Button` has to forward one hop up
+/// exactly like `background` does — the check that a newly added ancestor prop joins the existing
+/// chain rather than needing anything Button-specific.
+///
+/// The value is a `&str`, not a `String`, and that is load-bearing: `wrap_prop_value` inserts the
+/// `&` only for a *bare* `String` prop (`Button::text`, above). `Option<String>` misses that check
+/// and passes the value through untouched, so an `Option<String>` prop whose setter takes `&str` —
+/// `tooltip` here, and `TextBox::placeholder` before it — can only be given something that already
+/// *is* a `&str`. A DSL string literal is; a `bind!`-ed `String` viewmodel field is not. See
+/// `docs/status/nativecontrol_status.md` §5 for this and the other `Option<T>` wrapping gaps.
+#[test]
+fn props_macro_forwards_tooltip_up_to_native_control() {
+    let button = FakeButton::default();
+    elwindui_core::__elwindui_props_Button!(@set button, tooltip, "Save the file");
+    assert_eq!(button.tooltip.borrow().as_deref(), Some("Save the file"));
 }
 
 // --- `@clear`: resetting a themed property to its platform default ------------------------------

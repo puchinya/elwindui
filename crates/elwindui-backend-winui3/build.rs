@@ -148,6 +148,18 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.PasswordRevealMode".to_owned(),
         "Microsoft.UI.Xaml.Controls.ScrollViewer".to_owned(),
         "Microsoft.UI.Xaml.Controls.ScrollMode".to_owned(),
+        // `Button.role`/`is_default`/`tooltip` (`elwindui_core::ui::ButtonRole`,
+        // `NativeControl::set_tooltip`). `Style` is looked up by key from `Application.Resources`
+        // for `AccentButtonStyle`; `Brush` for the destructive foreground; `KeyboardAccelerator` +
+        // `VirtualKey` stand in for the `IsDefault` that WinUI 3's `Button` (unlike
+        // `ContentDialog`'s) does not have. `ToolTipService` is the attached property both the
+        // tooltip setter and every other native leaf go through.
+        "Microsoft.UI.Xaml.Application".to_owned(),
+        "Microsoft.UI.Xaml.Style".to_owned(),
+        "Microsoft.UI.Xaml.Media.Brush".to_owned(),
+        "Microsoft.UI.Xaml.Input.KeyboardAccelerator".to_owned(),
+        "Microsoft.UI.Xaml.Controls.ToolTipService".to_owned(),
+        "Windows.System.VirtualKey".to_owned(),
         "Microsoft.UI.Xaml.Controls.ListViewItem".to_owned(),
         "Microsoft.UI.Xaml.Controls.Panel".to_owned(),
         "Microsoft.UI.Xaml.Controls.UIElementCollection".to_owned(),

@@ -143,6 +143,140 @@ fn props_macro_forwards_tooltip_up_to_native_control() {
     assert_eq!(button.tooltip.borrow().as_deref(), Some("Save the file"));
 }
 
+// --- Selection controls (Phase 2: CheckBox / RadioButton / ToggleSwitch) ------------------------
+
+use elwindui_core::ui::CheckState;
+
+#[derive(Default)]
+struct FakeCheckBox {
+    text: RefCell<String>,
+    checked: RefCell<Option<CheckState>>,
+    enabled: RefCell<Option<bool>>,
+    background: RefCell<Option<Brush>>,
+}
+
+impl FakeCheckBox {
+    fn set_text(&self, text: &str) {
+        *self.text.borrow_mut() = text.to_string();
+    }
+    fn set_checked(&self, checked: CheckState) {
+        *self.checked.borrow_mut() = Some(checked);
+    }
+    fn set_enabled(&self, enabled: bool) {
+        *self.enabled.borrow_mut() = Some(enabled);
+    }
+    fn set_background(&self, background: Option<Brush>) {
+        *self.background.borrow_mut() = background;
+    }
+}
+
+#[test]
+fn props_macro_sets_check_box_checked_to_a_three_state_enum() {
+    let check_box = FakeCheckBox::default();
+    elwindui_core::__elwindui_props_CheckBox!(@set check_box, checked, CheckState::Indeterminate);
+    assert_eq!(*check_box.checked.borrow(), Some(CheckState::Indeterminate));
+}
+
+#[test]
+fn props_macro_sets_check_box_text_and_enabled() {
+    let check_box = FakeCheckBox::default();
+    elwindui_core::__elwindui_props_CheckBox!(@set check_box, text, String::from("Subscribe"));
+    elwindui_core::__elwindui_props_CheckBox!(@set check_box, enabled, false);
+    assert_eq!(*check_box.text.borrow(), "Subscribe");
+    assert_eq!(*check_box.enabled.borrow(), Some(false));
+}
+
+/// `background` belongs to `NativeControl`, not `CheckBox` — the same one-hop forwarding
+/// `props_macro_forwards_an_undeclared_prop_one_hop_up` already pins for `Button`, now checked
+/// for a second, independently declared descendant of `NativeControl`.
+#[test]
+fn props_macro_forwards_check_box_background_up_to_native_control() {
+    let check_box = FakeCheckBox::default();
+    elwindui_core::__elwindui_props_CheckBox!(@set check_box, background, "#336699");
+    assert_eq!(
+        *check_box.background.borrow(),
+        Some(Brush::Solid(Color::parse_hex("#336699").unwrap()))
+    );
+}
+
+#[derive(Default)]
+struct FakeRadioButton {
+    text: RefCell<String>,
+    checked: RefCell<Option<bool>>,
+    group: RefCell<String>,
+    enabled: RefCell<Option<bool>>,
+}
+
+impl FakeRadioButton {
+    fn set_text(&self, text: &str) {
+        *self.text.borrow_mut() = text.to_string();
+    }
+    fn set_checked(&self, checked: bool) {
+        *self.checked.borrow_mut() = Some(checked);
+    }
+    fn set_group(&self, group: &str) {
+        *self.group.borrow_mut() = group.to_string();
+    }
+    fn set_enabled(&self, enabled: bool) {
+        *self.enabled.borrow_mut() = Some(enabled);
+    }
+}
+
+#[test]
+fn props_macro_sets_radio_button_group_as_a_plain_string() {
+    let radio = FakeRadioButton::default();
+    elwindui_core::__elwindui_props_RadioButton!(@set radio, group, "shipping-speed");
+    assert_eq!(*radio.group.borrow(), "shipping-speed");
+}
+
+#[test]
+fn props_macro_sets_radio_button_checked() {
+    let radio = FakeRadioButton::default();
+    elwindui_core::__elwindui_props_RadioButton!(@set radio, checked, true);
+    assert_eq!(*radio.checked.borrow(), Some(true));
+}
+
+#[test]
+fn props_macro_sets_radio_button_text_and_enabled() {
+    let radio = FakeRadioButton::default();
+    elwindui_core::__elwindui_props_RadioButton!(@set radio, text, String::from("Large"));
+    elwindui_core::__elwindui_props_RadioButton!(@set radio, enabled, false);
+    assert_eq!(*radio.text.borrow(), "Large");
+    assert_eq!(*radio.enabled.borrow(), Some(false));
+}
+
+/// `ToggleSwitch` has no `text` property (see its own doc comment in elwindui-core) — this fake
+/// deliberately has no `text` field either, so the macro invocation below would fail to compile
+/// if `#[prop(text: ..)]` were ever accidentally declared on it.
+#[derive(Default)]
+struct FakeToggleSwitch {
+    is_on: RefCell<Option<bool>>,
+    enabled: RefCell<Option<bool>>,
+}
+
+impl FakeToggleSwitch {
+    fn set_is_on(&self, is_on: bool) {
+        *self.is_on.borrow_mut() = Some(is_on);
+    }
+    fn set_enabled(&self, enabled: bool) {
+        *self.enabled.borrow_mut() = Some(enabled);
+    }
+}
+
+#[test]
+fn props_macro_sets_toggle_switch_is_on() {
+    let toggle = FakeToggleSwitch::default();
+    elwindui_core::__elwindui_props_ToggleSwitch!(@set toggle, is_on, true);
+    assert_eq!(*toggle.is_on.borrow(), Some(true));
+}
+
+#[test]
+fn props_macro_sets_toggle_switch_enabled() {
+    let toggle = FakeToggleSwitch::default();
+    elwindui_core::__elwindui_props_ToggleSwitch!(@set toggle, enabled, false);
+    assert_eq!(*toggle.enabled.borrow(), Some(false));
+}
+
 // --- `@clear`: resetting a themed property to its platform default ------------------------------
 
 #[test]

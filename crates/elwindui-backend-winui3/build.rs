@@ -160,6 +160,13 @@ fn main() {
         "Microsoft.UI.Xaml.Input.KeyboardAccelerator".to_owned(),
         "Microsoft.UI.Xaml.Controls.ToolTipService".to_owned(),
         "Windows.System.VirtualKey".to_owned(),
+        // `CheckBox`/`RadioButton`/`ToggleSwitch` (selection controls). `CheckBox.IsChecked`/
+        // `RadioButton.IsChecked` are `Windows.Foundation.IReference<bool>` (nullable — `null`
+        // means indeterminate for `CheckBox`), set via `PropertyValue::CreateBoolean(..)?.cast()?`
+        // the same way `win2d.rs`'s existing `IReference<Rect>` usage already does.
+        "Microsoft.UI.Xaml.Controls.CheckBox".to_owned(),
+        "Microsoft.UI.Xaml.Controls.RadioButton".to_owned(),
+        "Microsoft.UI.Xaml.Controls.ToggleSwitch".to_owned(),
         "Microsoft.UI.Xaml.Controls.ListViewItem".to_owned(),
         "Microsoft.UI.Xaml.Controls.Panel".to_owned(),
         "Microsoft.UI.Xaml.Controls.UIElementCollection".to_owned(),

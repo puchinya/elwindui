@@ -44,11 +44,7 @@ impl InnerButton {
     }
 
     pub(crate) fn set_on_click(&self, callback: Box<dyn Fn()>) {
-        let target = ButtonTarget::new(ButtonTargetIvars { callback });
-        unsafe {
-            self.ns.setTarget(Some(&target));
-            self.ns.setAction(Some(sel!(perform:)));
-        }
+        let target = ButtonTarget::attach(&self.ns, callback);
         *self.target_storage.borrow_mut() = Some(target);
     }
 
@@ -118,14 +114,14 @@ fn set_has_destructive_action(button: &NSButton, value: bool) {
     }
 }
 
-struct ButtonTargetIvars {
+pub(crate) struct ButtonTargetIvars {
     callback: Box<dyn Fn()>,
 }
 
 define_class!(
     #[unsafe(super(objc2_foundation::NSObject))]
     #[ivars = ButtonTargetIvars]
-    struct ButtonTarget;
+    pub(crate) struct ButtonTarget;
 
     unsafe impl NSObjectProtocol for ButtonTarget {}
 
@@ -138,8 +134,23 @@ define_class!(
 );
 
 impl ButtonTarget {
-    fn new(ivars: ButtonTargetIvars) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(ivars);
+    /// Shared by `InnerButton` and — since `CheckBox`/`RadioButton` are the same `NSButton`
+    /// widget in a different `NSButtonType`, not a different class — `InnerCheckBox`/
+    /// `InnerRadioButton`, which wire it directly rather than duplicating this trampoline.
+    pub(crate) fn new(callback: Box<dyn Fn()>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(ButtonTargetIvars { callback });
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Wires `target`/`action` on any `NSButton`-family control and returns the target, which the
+    /// caller must retain for as long as the click should keep firing (an `NSButton` does not
+    /// retain its own `target`).
+    pub(crate) fn attach(button: &NSButton, callback: Box<dyn Fn()>) -> Retained<Self> {
+        let target = Self::new(callback);
+        unsafe {
+            button.setTarget(Some(&target));
+            button.setAction(Some(sel!(perform:)));
+        }
+        target
     }
 }

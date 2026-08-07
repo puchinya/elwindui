@@ -19,11 +19,12 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::input::Key;
+use elwindui::core::ui::CheckState;
 use elwindui::ui::WindowExt;
 
 #[elwindui::viewmodel]
 mod controls_demo_view_model {
-    use super::Key;
+    use super::{CheckState, Key};
 
     struct ControlsDemoViewModel {
         // `TabView`'s chip click only ever fires `on_select` — it never updates `selected_index`
@@ -52,6 +53,43 @@ mod controls_demo_view_model {
 
         #[observable(default = String::new())]
         button_log: String,
+
+        #[observable(default = CheckState::Unchecked)]
+        check_box_checked: CheckState,
+        #[computed(expr = match check_box_checked {
+            CheckState::Unchecked => "Unchecked".to_string(),
+            CheckState::Checked => "Checked".to_string(),
+            CheckState::Indeterminate => "Indeterminate".to_string(),
+        })]
+        check_box_checked_label: String,
+        #[observable(default = String::new())]
+        selection_log: String,
+
+        // Two-way bound directly (`checked: vm.radio_small_checked` in the view below), the same
+        // way `TextBox { text: vm.text_box_value }` round-trips without an explicit `on_change:` —
+        // `CheckBox`/`RadioButton`/`ToggleSwitch` have no user-visible `on_change` property either
+        // (see `elwindui_core::ui::TextBox`'s own `set_on_change`: a plain, non-`#[prop]` trait
+        // method the `#[two_way]` binding machinery calls internally). The native backend's own
+        // group-exclusivity bookkeeping (`group: "size"` below) keeps only one of these three ever
+        // `true`, and that change flows back up through the same two-way path.
+        #[observable(default = true)]
+        radio_small_checked: bool,
+        #[observable(default = false)]
+        radio_medium_checked: bool,
+        #[observable(default = false)]
+        radio_large_checked: bool,
+        #[computed(expr = {
+            if radio_small_checked { "Small".to_string() }
+            else if radio_medium_checked { "Medium".to_string() }
+            else if radio_large_checked { "Large".to_string() }
+            else { "(none)".to_string() }
+        })]
+        radio_selected_label: String,
+
+        #[observable(default = false)]
+        toggle_is_on: bool,
+        #[computed(expr = toggle_is_on.to_string())]
+        toggle_is_on_label: String,
 
         #[observable(default = String::new())]
         regression_text: String,
@@ -92,6 +130,17 @@ mod controls_demo_view_model {
 
         fn button_clicked(&self, which: String) {
             button_log = format!("{}{which} clicked\n", self.button_log.borrow());
+        }
+
+        // The only real event in this tab: `on_click` is a genuine `#[routed]` event, unlike
+        // `checked`/`is_on` above, which round-trip through two-way binding with no user-visible
+        // `on_change` — see those fields' own comments.
+        fn force_indeterminate(&self) {
+            check_box_checked = CheckState::Indeterminate;
+            selection_log = format!(
+                "{}Force Indeterminate clicked (programmatic — not reachable by a user click)\n",
+                self.selection_log.borrow()
+            );
         }
 
         fn regression_button_clicked(&self) {
@@ -288,6 +337,73 @@ struct ControlsDemoWindow {
                         Grid::row: 2
                         margin: 12.0
                         content: TextBlock { text: vm.button_log }
+                    }
+                }
+            }
+            TabViewItem {
+                header: "Selection"
+                closable: false
+                on_close: || {}
+                content: Grid {
+                    rows: [elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Star(1.0)]
+                    columns: [elwindui::core::layout::GridLength::Star(1.0)]
+
+                    VerticalLayout {
+                        Grid::row: 0
+                        margin: 12.0
+                        spacing: 6.0
+                        TextBlock { text: "CheckBox — user clicks only ever reach Unchecked/Checked:" }
+                        HorizontalLayout {
+                            spacing: 8.0
+                            CheckBox {
+                                text: "Subscribe to updates"
+                                checked: vm.check_box_checked
+                            }
+                            TextBlock { text: vm.check_box_checked_label }
+                        }
+                        Button {
+                            text: "Force Indeterminate (programmatic only)"
+                            on_click: vm.force_indeterminate
+                        }
+                        TextBlock { text: "RadioButton — same group, elwindui's own exclusivity bookkeeping:" }
+                        HorizontalLayout {
+                            spacing: 8.0
+                            RadioButton {
+                                text: "Small"
+                                group: "size"
+                                checked: vm.radio_small_checked
+                            }
+                            RadioButton {
+                                text: "Medium"
+                                group: "size"
+                                checked: vm.radio_medium_checked
+                            }
+                            RadioButton {
+                                text: "Large"
+                                group: "size"
+                                checked: vm.radio_large_checked
+                            }
+                            TextBlock { text: vm.radio_selected_label }
+                        }
+                        TextBlock { text: "ToggleSwitch — no text property of its own, paired with a TextBlock:" }
+                        HorizontalLayout {
+                            spacing: 8.0
+                            ToggleSwitch {
+                                is_on: vm.toggle_is_on
+                            }
+                            TextBlock { text: "Airplane mode" }
+                            TextBlock { text: vm.toggle_is_on_label }
+                        }
+                    }
+                    TextBlock {
+                        Grid::row: 1
+                        margin: 12.0
+                        text: "event log:"
+                    }
+                    ScrollView {
+                        Grid::row: 2
+                        margin: 12.0
+                        content: TextBlock { text: vm.selection_log }
                     }
                 }
             }

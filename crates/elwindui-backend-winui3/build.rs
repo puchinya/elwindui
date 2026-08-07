@@ -167,6 +167,10 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.CheckBox".to_owned(),
         "Microsoft.UI.Xaml.Controls.RadioButton".to_owned(),
         "Microsoft.UI.Xaml.Controls.ToggleSwitch".to_owned(),
+        // `Dropdown`. `ComboBox.Items` is an `IObservableVector<IInspectable>` populated with
+        // plain `HSTRING`s (via `PropertyValue::CreateString`), the same way `win2d.rs`'s existing
+        // `IReference<..>` usage already boxes primitives for a WinRT collection.
+        "Microsoft.UI.Xaml.Controls.ComboBox".to_owned(),
         "Microsoft.UI.Xaml.Controls.ListViewItem".to_owned(),
         "Microsoft.UI.Xaml.Controls.Panel".to_owned(),
         "Microsoft.UI.Xaml.Controls.UIElementCollection".to_owned(),

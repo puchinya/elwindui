@@ -3766,7 +3766,23 @@ fn generate_view(
             // creation site's own doc comment (a few dozen lines up) for why.
             let is_list = parent_info.map_or(true, content_field_is_list);
             let body = if is_list {
-                let host = quote! { self.#parent_binding.children() };
+                // The getter `#[content(..)]` names, not always literally `children` (`Dropdown`'s
+                // is `items`, `Menu`'s is `items`) — a local `TypeInfo` names it directly; an
+                // external (cross-crate) builtin has none, so the call is deferred to its own
+                // `@content_field_get` shape-macro query (`elwindui-macros::class`'s own doc
+                // comment on that arm), resolved once the generated code actually compiles against
+                // that builtin's real crate.
+                let host = match parent_info.and_then(|info| info.content_field.as_deref()) {
+                    Some(field) => {
+                        let field_ident = format_ident!("{field}");
+                        quote! { self.#parent_binding.#field_ident() }
+                    }
+                    None => {
+                        let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
+                        let recv = quote! { self.#parent_binding };
+                        quote! { elwindui::core::#props_macro!(@content_field_get #recv) }
+                    }
+                };
                 emit_dynamic_node_refresh(&plan, node, &host, &item_ext, &ctx, from, table)
             } else {
                 // Phase 2: a scalar `#[content(...)]` field needs no `DynamicChildSlot` at all —

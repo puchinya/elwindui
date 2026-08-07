@@ -1448,6 +1448,25 @@ fn build_props_macro(
             };
         }
     });
+
+    // `@content_field_get $recv:expr` calls whichever getter `#[content(..)]` names directly on
+    // `$recv` (`Dropdown`'s `items()`, `TabView`'s `children()`, ...) — the shape-macro counterpart
+    // `elwindui-codegen`'s `dynamic_region_refresh_method` needs for a *cross-crate* builtin's list-
+    // content field, where it has no local `TypeInfo.content_field` to read directly (the same-crate
+    // case just reads that field; this query exists only for the case it can't). One hop only, not
+    // `@content_item_dyn`'s two: the *name* is all that's needed here (no property type to resolve),
+    // and Rust's own trait method resolution already finds the getter on `$recv` however far up the
+    // ancestor chain it's actually declared, once `dynamic_region_refresh_method`'s own `use
+    // elwindui::core::ui::#parent_ext as _;` brings the right trait into scope — so unlike
+    // `@children`/`@content_item_dyn`, this class's own `#[content(..)]` designation is the entire
+    // answer.
+    let content_field_get_entry = shape.content_field().map(|content| {
+        quote! {
+            (@content_field_get $recv:expr) => {
+                $recv.#content()
+            };
+        }
+    });
     let content_item_dyn_into_arms: Vec<TokenStream2> = shape
         .props
         .iter()
@@ -1628,6 +1647,34 @@ fn build_props_macro(
         },
     };
 
+    // `@content_field_get`'s own fallback — same two-way split as `@content_item_dyn` above: an
+    // ancestor forwards the query further up; the terminal class turns an unresolved query into a
+    // `compile_error!`.
+    let content_field_get_fallback = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro = inherit_macro_self_ref_path(
+                parent_bare,
+                parent_ty,
+                props_macro_ident(parent_bare),
+            );
+            quote! {
+                (@content_field_get $recv:expr) => {
+                    #parent_macro!(@content_field_get $recv)
+                };
+            }
+        }
+        None => quote! {
+            (@content_field_get $recv:expr) => {
+                compile_error!(concat!(
+                    "`",
+                    #bare_name,
+                    "` (or any of its ancestors) declares no content-collection property to hold \
+                     a dynamic `for`/`if`/`match` region's children"
+                ))
+            };
+        },
+    };
+
     // The probes themselves, emitted in item position next to the class.
     let mut probes: Vec<TokenStream2> = Vec::new();
     // Collision probe: only a class that *has* an ancestor emits any — a root class has nothing to
@@ -1680,6 +1727,8 @@ fn build_props_macro(
             #content_item_dyn_entry
             #(#content_item_dyn_into_arms)*
             #content_item_dyn_fallback
+            #content_field_get_entry
+            #content_field_get_fallback
         }
         #(#probes)*
     }

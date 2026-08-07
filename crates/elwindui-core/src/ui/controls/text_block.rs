@@ -104,3 +104,64 @@ impl TextStyleOwner for TextBlock {
         style
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_block_defaults_to_left_alignment_and_set_text_alignment_updates_paint() {
+        let text_block = TextBlock::new();
+        assert_eq!(text_block.alignment.get(), TextAlignment::Left);
+        let mut commands = Vec::new();
+        text_block.render(&mut RenderContext::begin_group(
+            &mut commands,
+            Point { x: 0.0, y: 0.0 },
+            None,
+        ));
+        assert!(matches!(
+            commands[0],
+            RenderCommand::Text {
+                alignment: TextAlignment::Left,
+                ..
+            }
+        ));
+        assert!(matches!(
+            commands[0],
+            RenderCommand::Text {
+                foreground: None,
+                ..
+            }
+        ));
+
+        text_block.set_text_alignment(TextAlignment::Center);
+        commands.clear();
+        text_block.render(&mut RenderContext::begin_group(
+            &mut commands,
+            Point { x: 0.0, y: 0.0 },
+            None,
+        ));
+        assert!(matches!(
+            commands[0],
+            RenderCommand::Text {
+                alignment: TextAlignment::Center,
+                ..
+            }
+        ));
+
+        text_block.set_foreground(Some(Brush::Solid(Color::rgb(1, 2, 3))));
+        commands.clear();
+        text_block.render(&mut RenderContext::begin_group(
+            &mut commands,
+            Point { x: 0.0, y: 0.0 },
+            None,
+        ));
+        assert!(matches!(
+            commands[0],
+            RenderCommand::Text {
+                foreground: Some(Brush::Solid(Color { r: 1, g: 2, b: 3, .. })),
+                ..
+            }
+        ));
+    }
+}

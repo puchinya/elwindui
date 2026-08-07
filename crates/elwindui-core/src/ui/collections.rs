@@ -481,3 +481,190 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         *self.items.borrow_mut() = items;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::testsupport::*;
+
+    #[test]
+    fn logical_and_visual_parents_are_set_by_collections() {
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        assert!(Rc::ptr_eq(
+            &leaf.parent().expect("leaf should have a logical parent"),
+            &root
+        ));
+        assert!(Rc::ptr_eq(
+            &leaf
+                .visual_parent()
+                .expect("leaf should have a visual parent"),
+            &root
+        ));
+        assert!(root.parent().is_none());
+    }
+
+    #[test]
+    fn runtime_add_and_remove_after_construction_wire_parent_and_visual_children() {
+        // `UIElementCollection::add`/`remove` must work *after* the owner is already `Rc`-wrapped
+        // after the owner is already constructed.
+        let root = VerticalLayout::new();
+        let root_erased: Rc<dyn UIElementExt> = root.clone();
+        let children = root.children().clone();
+        assert!(root.visual_children().is_empty());
+
+        let child = native("a", size(10.0, 20.0));
+        children.add(Rc::clone(&child));
+
+        assert_eq!(root.visual_children().len(), 1);
+        assert!(Rc::ptr_eq(
+            &child
+                .parent()
+                .expect("add should wire the child's logical parent"),
+            &root_erased
+        ));
+        assert!(Rc::ptr_eq(
+            &child
+                .visual_parent()
+                .expect("add should wire the child's visual parent"),
+            &root_erased
+        ));
+
+        assert!(children.remove(&child));
+        assert!(root.visual_children().is_empty());
+        assert!(
+            child.parent().is_none(),
+            "remove should clear the child's parent"
+        );
+        assert!(
+            child.visual_parent().is_none(),
+            "remove should clear the child's visual parent"
+        );
+    }
+
+    #[test]
+    fn logical_and_visual_collections_keep_their_parent_relationships_separate() {
+        let root = VerticalLayout::new();
+        let root_erased: Rc<dyn UIElementExt> = root.clone();
+
+        let visual_only = TextBlock::new();
+        root.as_ui_element()
+            .visual_collection
+            .add(visual_only.clone());
+        assert!(visual_only.parent().is_none());
+        assert!(Rc::ptr_eq(
+            &visual_only.visual_parent().expect("visual parent"),
+            &root_erased
+        ));
+
+        let logical_child = TextBlock::new();
+        root.children().add(logical_child.clone());
+        assert!(Rc::ptr_eq(
+            &logical_child.parent().expect("logical parent"),
+            &root_erased
+        ));
+        assert!(Rc::ptr_eq(
+            &logical_child.visual_parent().expect("visual parent"),
+            &root_erased
+        ));
+    }
+
+    #[test]
+    fn dynamic_child_slot_reuses_rc_item_children_and_applies_source_order() {
+        struct TestList(RefCell<Vec<Rc<String>>>);
+
+        impl ListExt<String> for TestList {
+            fn add(&self, item: Rc<String>) {
+                self.0.borrow_mut().push(item);
+            }
+            fn insert(&self, index: usize, item: Rc<String>) {
+                self.0.borrow_mut().insert(index, item);
+            }
+            fn remove(&self, item: &Rc<String>) -> bool {
+                let mut items = self.0.borrow_mut();
+                let Some(index) = items.iter().position(|current| Rc::ptr_eq(current, item)) else {
+                    return false;
+                };
+                items.remove(index);
+                true
+            }
+            fn remove_at(&self, index: usize) -> Rc<String> {
+                self.0.borrow_mut().remove(index)
+            }
+            fn clear(&self) {
+                self.0.borrow_mut().clear();
+            }
+            fn len(&self) -> usize {
+                self.0.borrow().len()
+            }
+            fn is_empty(&self) -> bool {
+                self.0.borrow().is_empty()
+            }
+            fn to_vec(&self) -> Vec<Rc<String>> {
+                self.0.borrow().clone()
+            }
+        }
+
+        let slot = DynamicChildSlot::<String>::default();
+        let host = TestList(RefCell::new(Vec::new()));
+        let leading = Rc::new("leading".to_owned());
+        let trailing = Rc::new("trailing".to_owned());
+        let first = Rc::new("first".to_owned());
+        let second = Rc::new("second".to_owned());
+        let renders = Cell::new(0);
+        let first_subscription_dropped = Rc::new(Cell::new(false));
+        let second_subscription_dropped = Rc::new(Cell::new(false));
+        host.add(Rc::clone(&leading));
+        host.add(Rc::clone(&trailing));
+
+        slot.replace_rc_items(&host, 1, &[Rc::clone(&first), Rc::clone(&second)], |item| {
+            renders.set(renders.get() + 1);
+            let dropped = if Rc::ptr_eq(item, &first) {
+                Rc::clone(&first_subscription_dropped)
+            } else {
+                Rc::clone(&second_subscription_dropped)
+            };
+            DynamicChild::with_subscriptions(
+                Rc::new(format!("child:{item}")),
+                vec![crate::reactive::Subscription::new(move || {
+                    dropped.set(true)
+                })],
+            )
+        });
+        let original = host.to_vec();
+        assert_eq!(renders.get(), 2);
+        assert!(Rc::ptr_eq(&original[0], &leading));
+        assert!(Rc::ptr_eq(&original[3], &trailing));
+
+        slot.replace_rc_items(&host, 1, &[Rc::clone(&second), Rc::clone(&first)], |_| {
+            panic!("an unchanged Rc item must reuse its child")
+        });
+        let reordered = host.to_vec();
+        assert_eq!(renders.get(), 2);
+        assert!(Rc::ptr_eq(&reordered[0], &leading));
+        assert!(Rc::ptr_eq(&reordered[1], &original[2]));
+        assert!(Rc::ptr_eq(&reordered[2], &original[1]));
+        assert!(Rc::ptr_eq(&reordered[3], &trailing));
+
+        slot.replace_rc_items(&host, 1, &[Rc::clone(&second)], |_| {
+            panic!("a retained Rc item must not be rendered again")
+        });
+        assert!(first_subscription_dropped.get());
+        assert!(!second_subscription_dropped.get());
+
+        slot.replace_children(
+            &host,
+            1,
+            vec![
+                Rc::new("first-child".to_owned()),
+                Rc::new("second-child".to_owned()),
+            ],
+        );
+        assert_eq!(slot.len(), 2);
+        assert_eq!(
+            host.to_vec().len(),
+            4,
+            "the range occupies both grouped children"
+        );
+    }
+}

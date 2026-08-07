@@ -116,3 +116,73 @@ impl Grid {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::testsupport::*;
+
+    #[test]
+    fn grid_measures_children_in_two_passes_per_track_kind() {
+        // Single Auto row; Fixed(50)/Auto/Star(1.0) columns, one child per column.
+        let root = Grid::new();
+        root.set_rows(vec![GridLength::Auto]);
+        root.set_columns(vec![
+            GridLength::Fixed(50.0),
+            GridLength::Auto,
+            GridLength::Star(1.0),
+        ]);
+
+        let fixed_child = MeasureProbe::new(size(10.0, 10.0));
+        fixed_child.set_attached("Grid", "column", 0i32);
+        let auto_child = MeasureProbe::new(size(30.0, 10.0));
+        auto_child.set_attached("Grid", "column", 1i32);
+        let star_child = MeasureProbe::new(size(20.0, 10.0));
+        star_child.set_attached("Grid", "column", 2i32);
+
+        root.children().add(fixed_child.clone());
+        root.children().add(auto_child.clone());
+        root.children().add(star_child.clone());
+
+        root.measure(size(300.0, 100.0));
+
+        // Pass 1: `Fixed` measures at its own literal size; `Auto`/`Star` measure unconstrained
+        // (on both axes -- the row is `Auto` too) so each child's own natural size is exactly what
+        // comes back to resolve its track.
+        assert_eq!(
+            fixed_child.calls.borrow()[0],
+            Size {
+                width: 50.0,
+                height: f32::INFINITY
+            }
+        );
+        assert!(auto_child.calls.borrow()[0].width.is_infinite());
+        assert!(star_child.calls.borrow()[0].width.is_infinite());
+
+        // Pass 2: every child is re-measured at its now-fully-resolved cell size — `Fixed` column
+        // stays 50, `Auto` column becomes its own natural width (30), `Star` column gets whatever's
+        // left (300 - 50 - 30 = 220). The `Auto` row resolves to 10 (every child's own natural
+        // height) and every child is re-measured at that height too.
+        assert_eq!(
+            fixed_child.last_available(),
+            Size {
+                width: 50.0,
+                height: 10.0
+            }
+        );
+        assert_eq!(
+            auto_child.last_available(),
+            Size {
+                width: 30.0,
+                height: 10.0
+            }
+        );
+        assert_eq!(
+            star_child.last_available(),
+            Size {
+                width: 220.0,
+                height: 10.0
+            }
+        );
+    }
+}

@@ -69,3 +69,32 @@ impl VerticalLayout {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::testsupport::*;
+
+    #[test]
+    fn vertical_layout_measures_children_with_unconstrained_main_axis() {
+        // A content-sized `VerticalLayout` must size itself from each child's own natural height,
+        // not from whatever finite `available` its own parent happened to hand it — passing
+        // `available.height` straight through to children would let a large parent silently
+        // inflate every child's measured height.
+        let probe = MeasureProbe::new(size(10.0, 20.0));
+        let child: Rc<dyn UIElementExt> = probe.clone();
+        let root = VerticalLayout::new();
+        root.children().add(child);
+        root.measure(size(200.0, 50.0));
+        let last = probe.last_available();
+        assert_eq!(
+            last.width, 200.0,
+            "cross axis (width) must stay constrained to the container's own available width"
+        );
+        assert!(
+            last.height.is_infinite() && last.height > 0.0,
+            "main axis (height) must be unconstrained, got {:?}",
+            last.height
+        );
+    }
+}

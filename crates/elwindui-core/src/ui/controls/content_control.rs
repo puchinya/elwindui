@@ -50,3 +50,29 @@ impl ContentControl {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_control_replaces_its_visual_child() {
+        let first = TextBlock::new();
+        let content_control = ContentControl::new();
+        content_control.set_content(first.clone());
+        let control: Rc<dyn UIElementExt> = content_control.clone();
+        assert!(Rc::ptr_eq(
+            &first.visual_parent().expect("initial visual parent"),
+            &control
+        ));
+
+        let second = TextBlock::new();
+        content_control.set_content(second.clone());
+        assert!(first.visual_parent().is_none());
+        assert!(Rc::ptr_eq(
+            &second.visual_parent().expect("replacement visual parent"),
+            &control
+        ));
+        assert_eq!(content_control.visual_children().len(), 1);
+    }
+}

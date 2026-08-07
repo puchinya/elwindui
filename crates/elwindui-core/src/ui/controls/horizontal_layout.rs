@@ -64,3 +64,28 @@ impl HorizontalLayout {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::testsupport::*;
+
+    #[test]
+    fn horizontal_layout_measures_children_with_unconstrained_main_axis() {
+        let probe = MeasureProbe::new(size(20.0, 10.0));
+        let child: Rc<dyn UIElementExt> = probe.clone();
+        let root = HorizontalLayout::new();
+        root.children().add(child);
+        root.measure(size(50.0, 200.0));
+        let last = probe.last_available();
+        assert_eq!(
+            last.height, 200.0,
+            "cross axis (height) must stay constrained to the container's own available height"
+        );
+        assert!(
+            last.width.is_infinite() && last.width > 0.0,
+            "main axis (width) must be unconstrained, got {:?}",
+            last.width
+        );
+    }
+}

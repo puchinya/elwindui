@@ -277,3 +277,198 @@ pub fn inherited_text_style(base: &UIElement) -> crate::graphics::ComputedTextSt
     inherited_cascaded_text_style(base)
         .materialize(&crate::graphics::text_backend().default_text_style())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::testsupport::*;
+
+    #[test]
+    fn as_text_style_owner_is_none_for_non_owning_elements() {
+        // Grid/Layout/Shape must stay transparent to inheritance (指示書 §11) — verified directly
+        // via the downcast hook rather than only indirectly through an inheritance chain.
+        let grid = Grid::new();
+        assert!(grid.as_text_style_owner().is_none());
+        let stack = VerticalLayout::new();
+        assert!(stack.as_text_style_owner().is_none());
+        let rect = Rectangle::new();
+        assert!(rect.as_text_style_owner().is_none());
+    }
+
+    #[test]
+    fn as_text_style_owner_is_some_for_control_and_text_block() {
+        let control = Control::new();
+        assert!(control.as_text_style_owner().is_some());
+        let text_block = TextBlock::new();
+        assert!(text_block.as_text_style_owner().is_some());
+    }
+
+    #[test]
+    fn orphan_text_block_resolves_to_backend_default() {
+        let text_block = TextBlock::new();
+        let style = text_block.resolved_text_style();
+        assert_eq!(style, crate::graphics::text_backend().default_text_style());
+    }
+
+    #[test]
+    fn control_font_size_inherits_through_grid_to_nested_text_block() {
+        // Control -(Visual)-> Grid -(Visual)-> TextBlock: Grid is not a TextStyleOwner, so it must
+        // not block inheritance (指示書 §11's own worked example).
+        let control = Control::new();
+        control.set_font_size(24.0);
+        let grid = Grid::new();
+        let text_block = TextBlock::new();
+        grid.children().add(text_block.clone());
+        control.as_ui_element().visual_collection.add(grid.clone());
+
+        let style = text_block.resolved_text_style();
+        assert_eq!(style.font_size, 24.0);
+    }
+
+    #[test]
+    fn child_local_value_wins_over_inherited() {
+        let control = Control::new();
+        control.set_font_size(24.0);
+        let text_block = TextBlock::new();
+        text_block.set_font_size(12.0);
+        control.as_ui_element().visual_collection.add(text_block.clone());
+
+        assert_eq!(text_block.resolved_text_style().font_size, 12.0);
+    }
+
+    #[test]
+    fn child_partial_override_leaves_other_properties_inherited() {
+        // Setting only `font_size` locally must not disturb `font_family`/`font_weight`/etc. —
+        // each of the seven properties resolves independently (指示書 §7/§19, never a wholesale
+        // "inherit the whole struct" replacement).
+        let control = Control::new();
+        control.set_font_size(24.0);
+        control.set_font_family(crate::graphics::FontFamily::new("Helvetica"));
+        control.set_font_weight(crate::graphics::FontWeight::BOLD);
+        let text_block = TextBlock::new();
+        text_block.set_font_size(12.0);
+        control.as_ui_element().visual_collection.add(text_block.clone());
+
+        let style = text_block.resolved_text_style();
+        assert_eq!(style.font_size, 12.0); // local wins
+        assert_eq!(style.font_family, crate::graphics::FontFamily::new("Helvetica")); // inherited
+        assert_eq!(style.font_weight, crate::graphics::FontWeight::BOLD); // inherited
+    }
+
+    #[test]
+    fn clear_font_size_reverts_to_inherited_value() {
+        let control = Control::new();
+        control.set_font_size(24.0);
+        let text_block = TextBlock::new();
+        text_block.set_font_size(12.0);
+        control.as_ui_element().visual_collection.add(text_block.clone());
+        assert_eq!(text_block.resolved_text_style().font_size, 12.0);
+
+        text_block.clear_font_size();
+        assert_eq!(text_block.resolved_text_style().font_size, 24.0);
+    }
+
+    #[test]
+    fn setting_font_size_invalidates_measure_but_foreground_only_invalidates_arrange() {
+        let text_block = TextBlock::new();
+        let host = Rc::new(RecordingRelayoutHost::default());
+        text_block.set_invalidate_host(Some(host.clone() as Rc<dyn RelayoutHost>));
+        layout_root(&(text_block.clone() as Rc<dyn UIElementExt>), size(100.0, 100.0));
+        assert!(text_block.measured_size().is_some());
+        assert!(text_block.arranged_width().is_some());
+
+        text_block.set_font_size(20.0);
+        assert!(
+            text_block.measured_size().is_none(),
+            "a font-size change must invalidate measure"
+        );
+
+        layout_root(&(text_block.clone() as Rc<dyn UIElementExt>), size(100.0, 100.0));
+        assert!(text_block.measured_size().is_some());
+        text_block.set_foreground(Some(crate::graphics::Brush::Solid(crate::graphics::Color::white())));
+        assert!(
+            text_block.measured_size().is_some(),
+            "a foreground-only change must not invalidate measure"
+        );
+        assert!(text_block.arranged_width().is_none());
+    }
+
+    #[test]
+    fn reparenting_text_block_re_resolves_from_the_new_parent() {
+        let old_parent = Control::new();
+        old_parent.set_font_size(10.0);
+        let new_parent = Control::new();
+        new_parent.set_font_size(30.0);
+        let text_block = TextBlock::new();
+        old_parent.as_ui_element().visual_collection.add(text_block.clone());
+        assert_eq!(text_block.resolved_text_style().font_size, 10.0);
+
+        old_parent.as_ui_element().visual_collection.remove(&(text_block.clone() as Rc<dyn UIElementExt>));
+        new_parent.as_ui_element().visual_collection.add(text_block.clone());
+        assert_eq!(text_block.resolved_text_style().font_size, 30.0);
+    }
+
+    #[test]
+    fn removed_from_parent_falls_back_to_backend_default() {
+        let parent = Control::new();
+        parent.set_font_size(30.0);
+        let text_block = TextBlock::new();
+        parent.as_ui_element().visual_collection.add(text_block.clone());
+        assert_eq!(text_block.resolved_text_style().font_size, 30.0);
+
+        parent.as_ui_element().visual_collection.remove(&(text_block.clone() as Rc<dyn UIElementExt>));
+        assert_eq!(
+            text_block.resolved_text_style().font_size,
+            crate::graphics::text_backend().default_text_style().font_size
+        );
+    }
+
+    #[test]
+    fn inheritance_parent_logical_falls_back_to_visual_when_no_logical_parent() {
+        let root = VerticalLayout::new();
+        let child = native("a", size(10.0, 10.0));
+        root.as_ui_element().visual_collection.add(child.clone());
+        // `child` has a Visual parent (`root`, via the raw visual collection) but no Logical
+        // parent (never added through `UIElementCollection`) — `Logical` must still find `root`
+        // by falling back to Visual (指示書 §14).
+        assert!(child.parent().is_none());
+        let via_logical = child
+            .inheritance_parent(InheritanceParentKind::Logical)
+            .expect("Logical must fall back to Visual when there is no logical parent");
+        assert!(Rc::ptr_eq(&via_logical, &(root.clone() as Rc<dyn UIElementExt>)));
+        let via_visual = child
+            .inheritance_parent(InheritanceParentKind::Visual)
+            .expect("Visual parent must be reachable directly");
+        assert!(Rc::ptr_eq(&via_visual, &(root as Rc<dyn UIElementExt>)));
+    }
+
+    #[test]
+    fn content_control_inherits_text_style_from_its_base_control() {
+        // Regression guard for the `Attr::TextStyle` exemption in `resolve_effective_fields`/
+        // `resolve_field_declaring_types` (`elwindui-codegen`'s `codegen.rs`) — without it, a
+        // `has_view` component like `ContentControl` would silently lose all seven text-style
+        // setters (they'd never even compile-error; the DSL setter would just not exist). This
+        // exercises the *runtime* half: `ContentControl::as_text_style_owner()` must resolve
+        // through the `#[class]` ancestor-forwarding chain to its embedded `base: Control`, which
+        // really implements `TextStyleOwner` — not `ContentControl` itself (see
+        // `emit_field_setter_call`'s own doc comment on why `elwindui-codegen` always goes through
+        // `as_text_style_owner()` rather than assuming `TextStyleOwner` is implemented directly).
+        let content_control = ContentControl::new();
+        let owner = content_control
+            .as_text_style_owner()
+            .expect("ContentControl must resolve a TextStyleOwner through its Control base");
+        owner.set_font_size(18.0);
+        assert_eq!(
+            content_control
+                .as_text_style_owner()
+                .unwrap()
+                .resolved_text_style()
+                .font_size,
+            18.0
+        );
+
+        let inner = TextBlock::new();
+        content_control.set_content(inner.clone());
+        assert_eq!(inner.resolved_text_style().font_size, 18.0);
+    }
+}

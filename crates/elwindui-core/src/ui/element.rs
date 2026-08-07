@@ -868,3 +868,53 @@ pub(crate) fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
         None => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::testsupport::*;
+
+    #[test]
+    fn invalidate_family_reaches_a_relayout_host_registered_on_the_root() {
+        struct CountingHost {
+            calls: Rc<RefCell<usize>>,
+        }
+        impl RelayoutHost for CountingHost {
+            fn request_relayout(&self, _dirty_group_id: u64) {
+                *self.calls.borrow_mut() += 1;
+            }
+        }
+
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+
+        let calls = Rc::new(RefCell::new(0));
+        root.as_ui_element()
+            .set_invalidate_host(Some(Rc::new(CountingHost {
+                calls: Rc::clone(&calls),
+            })));
+
+        // Called from the *leaf*, not the root — must walk `parent()` up to find the registered host.
+        leaf.invalidate();
+        leaf.invalidate_arrange();
+        leaf.invalidate_measure();
+        assert_eq!(*calls.borrow(), 3);
+
+        root.as_ui_element().set_invalidate_host(None);
+        leaf.invalidate();
+        assert_eq!(
+            *calls.borrow(),
+            3,
+            "un-registering the host should make invalidate a no-op again"
+        );
+    }
+
+    #[test]
+    fn invalidate_on_an_unhosted_tree_is_a_no_op() {
+        // No `RelayoutHost` registered anywhere on this tree — must not panic.
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        leaf.invalidate();
+        root.invalidate_arrange();
+    }
+}

@@ -117,3 +117,27 @@ impl TextStyleOwner for Control {
         style
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::testsupport::*;
+
+    #[test]
+    fn control_padding_shrinks_the_slot_its_children_are_arranged_into() {
+        let control = ContentControl::new();
+        control.set_padding(10.0);
+        control.set_content(native("a", size(10.0, 20.0)));
+        let tree: Rc<dyn UIElementExt> = control;
+        let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(100.0, 100.0)));
+        assert_eq!(
+            natives[0].1,
+            Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 80.0,
+                height: 80.0
+            }
+        );
+    }
+}

@@ -277,6 +277,60 @@ fn props_macro_sets_toggle_switch_enabled() {
     assert_eq!(*toggle.enabled.borrow(), Some(false));
 }
 
+// --- Dropdown / DropdownItem (Phase 3) -----------------------------------------------------------
+
+/// `DropdownItem` has no `enabled`/`selected` field of its own (see this Issue's own design
+/// notes) — this fake deliberately only has `text`.
+#[derive(Default)]
+struct FakeDropdownItem {
+    text: RefCell<String>,
+}
+
+impl FakeDropdownItem {
+    fn set_text(&self, text: &str) {
+        *self.text.borrow_mut() = text.to_string();
+    }
+}
+
+#[test]
+fn props_macro_sets_dropdown_item_text() {
+    let item = FakeDropdownItem::default();
+    elwindui_core::__elwindui_props_DropdownItem!(@set item, text, String::from("Large"));
+    assert_eq!(*item.text.borrow(), "Large");
+}
+
+/// `Dropdown` has no `text` property of its own — selection is driven entirely by
+/// `selected_index` (see this Issue's own design notes: a per-item `selected` flag was rejected in
+/// favor of a single source of truth).
+#[derive(Default)]
+struct FakeDropdown {
+    selected_index: RefCell<Option<usize>>,
+    enabled: RefCell<Option<bool>>,
+}
+
+impl FakeDropdown {
+    fn set_selected_index(&self, selected_index: usize) {
+        *self.selected_index.borrow_mut() = Some(selected_index);
+    }
+    fn set_enabled(&self, enabled: bool) {
+        *self.enabled.borrow_mut() = Some(enabled);
+    }
+}
+
+#[test]
+fn props_macro_sets_dropdown_selected_index_as_a_two_way_usize() {
+    let dropdown = FakeDropdown::default();
+    elwindui_core::__elwindui_props_Dropdown!(@set dropdown, selected_index, 2usize);
+    assert_eq!(*dropdown.selected_index.borrow(), Some(2));
+}
+
+#[test]
+fn props_macro_sets_dropdown_enabled() {
+    let dropdown = FakeDropdown::default();
+    elwindui_core::__elwindui_props_Dropdown!(@set dropdown, enabled, false);
+    assert_eq!(*dropdown.enabled.borrow(), Some(false));
+}
+
 // --- `@clear`: resetting a themed property to its platform default ------------------------------
 
 #[test]

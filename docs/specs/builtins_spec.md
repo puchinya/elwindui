@@ -43,14 +43,16 @@ UIElement (trait, elwindui-core::ui)
  │   ├─ TextBox                   (付録F.12, #[two_way] text)
  │   ├─ PasswordBox               (付録F.13, #[two_way] password)
  │   ├─ ScrollView                (付録F.14, #[content(content)] content)
- │   └─ TabView                   (付録Y)
+ │   ├─ TabView                   (付録Y)
+ │   └─ Dropdown                  (付録F.5, #[content(items)] items, #[two_way] selected_index)
  │
  │   ビジュアルツリーに参加しない(measure/arrangeが呼ばれない)ため`inherits NativeControl`ではなく
  │   `#[native]`直接指定にとどまる部品(`is_native`はtrueだが`NativeControl`実装は合成しない):
  │   `MenuBar`/`MenuBarItem`(付録X)、`Menu`/`MenuItem`(付録M.2)、`TabViewItem`(付録Y)、
+ │   `DropdownItem`(付録F.5、`MenuItem`と同様ネイティブ実体を持たない)、
  │   `Window`(付録F.1、`UIElement`非実装)。
  │
- │   未実装(仕様のみ)で分類未定: `Dropdown`/`Option`(付録F.5)、`Dialog`(付録M.1)、
+ │   未実装(仕様のみ)で分類未定: `Dialog`(付録M.1)、
  │   `Tooltip`(付録M.3)、`NavigationHost`(付録L.2)、`VirtualList`(付録Q) ——
  │   ビジュアルツリーに直接埋め込まれるか(`NativeControl<H>`)、`Window`のような独立ホストかは
  │   実装時に決める。
@@ -96,7 +98,7 @@ UIElement (trait, elwindui-core::ui)
 
 # 付録F. 標準ビルトイン部品のリファレンス実装
 
-`Window`, `VerticalLayout`/`HorizontalLayout`, `TextBlock`, `TextArea`, `Dropdown`/`Option` など、これまで暗黙に使ってきたビルトインプリミティブは、実際には `builtin` 名前空間(`docs/specs/dsl_spec.md`付録A参照)に属し、コード生成器が標準で提供する。ネイティブな葉ウィジェット(`Window`/`Button`/`TextArea`/`MenuBar`/`TabView`等)は他のコンポーネントと同じ`component`/`view`構文で表現でき、`match target::backend()`による網羅性検査(`docs/design/gui_framework_design.md`§3.3)や`native!`エスケープハッチ(同§3.2)がそのまま適用される。一方`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`のような仮想ビルトインは専用のネイティブ実体を持たず、`elwindui_core::ui::UIElement`の実装として`elwindui-codegen`が直接組み立てる(F.2参照)。全ての`UIElement`実装は`Margin`(一律`f32`)と`HorizontalAlignment`/`VerticalAlignment`を共通して持つ(`docs/design/gui_framework_design.md`§5.1参照)。
+`Window`, `VerticalLayout`/`HorizontalLayout`, `TextBlock`, `TextArea`, `Dropdown`/`DropdownItem` など、これまで暗黙に使ってきたビルトインプリミティブは、実際には `builtin` 名前空間(`docs/specs/dsl_spec.md`付録A参照)に属し、コード生成器が標準で提供する。ネイティブな葉ウィジェット(`Window`/`Button`/`TextArea`/`MenuBar`/`TabView`等)は他のコンポーネントと同じ`component`/`view`構文で表現でき、`match target::backend()`による網羅性検査(`docs/design/gui_framework_design.md`§3.3)や`native!`エスケープハッチ(同§3.2)がそのまま適用される。一方`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`のような仮想ビルトインは専用のネイティブ実体を持たず、`elwindui_core::ui::UIElement`の実装として`elwindui-codegen`が直接組み立てる(F.2参照)。全ての`UIElement`実装は`Margin`(一律`f32`)と`HorizontalAlignment`/`VerticalAlignment`を共通して持つ(`docs/design/gui_framework_design.md`§5.1参照)。
 
 ## F.1 `builtin::Window` ✅
 
@@ -302,46 +304,69 @@ struct TextArea {
 }
 ```
 
-## F.5 `builtin::Dropdown` / `builtin::Option` 📋
+## F.5 `builtin::Dropdown` / `builtin::DropdownItem` ✅
+
+編集不可の native 選択コントロール(AppKit: `NSPopUpButton`。WinUI3: `ComboBox`)。実装時に元案から2点変更した(詳細は Issue #35): (1) 子コンポーネント名を`Option`から`DropdownItem`へ改名した(`std::option::Option`との衝突を避けるため)。(2) 選択状態は`DropdownItem`側の`selected`パラメータではなく、`Dropdown`側の`#[prop(two_way, selected_index: usize)]`に一本化した——`CheckBox`/`RadioButton`/`ToggleSwitch`(F.16–F.18)で確立した「主要な状態に`#[two_way]`」慣習と整合させ、単一の真実の源を`Dropdown.selected_index`に置くため。`DropdownItem`自身は`text: String`のみを持ち、`MenuItem`/`TabViewItem`と同様ネイティブ実体を持たない(`inherits`なしの`trait_only`)。
 
 ```rust
 #[elwindui::component]
-struct Option {
+struct DropdownItem {
     #[prop]
     text: String,
-    #[param(default = false)]
-    selected: bool,
 }
 
 #[elwindui::component]
 struct Dropdown {
-    #[content(options)]
-    options: Vec<Option>,
+    #[content(items)]
+    items: Vec<DropdownItem>,
+    #[prop(default = bind!(self.selected_index, TwoWay))]
+    selected_index: usize,
+    #[prop]
+    enabled: Option<bool>,
 
     body: view! {
         match target::backend() {
-            Backend::Winui3 => native! {
-                let combo = microsoft::ui::xaml::controls::ComboBox::new()?;
-                for opt in &options { combo.Items().Append(&opt.text)?; }
-                combo.SetSelectedIndex(find_selected_index(&options))?;
-                combo
-            }
             Backend::Appkit => native! {
                 let popup = NSPopUpButton::new();
-                for opt in &options { popup.addItemWithTitle(&opt.text); }
-                popup.selectItemAtIndex(find_selected_index(&options));
+                for item in &items { popup.addItemWithTitle(&item.text); }
+                popup.selectItemAtIndex(selected_index as isize);
+                popup.setEnabled(enabled.unwrap_or(true));
+                popup.set_target_action(move || {
+                    let index = popup.indexOfSelectedItem();
+                    if index >= 0 { selected_index = index as usize; dispatch_on_change(selected_index); }
+                });
                 popup
             }
+            Backend::Winui3 => native! {
+                let combo = microsoft::ui::xaml::controls::ComboBox::new()?;
+                for item in &items { combo.Items()?.Append(&PropertyValue::CreateString(&item.text)?)?; }
+                combo.SetSelectedIndex(selected_index as i32)?;
+                combo.SetIsEnabled(enabled.unwrap_or(true))?;
+                combo.SelectionChanged(&SelectionChangedEventHandler::new(move |sender, _| {
+                    let index = sender.SelectedIndex()?;
+                    if index >= 0 { selected_index = index as usize; dispatch_on_change(selected_index); }
+                    Ok(())
+                }))?;
+                combo
+            }
             Backend::Gtk4 => native! {
-                let model = gtk::StringList::new(&options.iter().map(|o| o.text.as_str()).collect::<Vec<_>>());
-                let dd = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
-                dd.set_selected(find_selected_index(&options) as u32);
-                dd
+                // 未実装 — docs/status/nativecontrol_status.md §4のGTK4基盤構築後に着手する。
+                unimplemented!()
             }
         }
     }
 }
 ```
+
+**`items`の増減・並び替えはネイティブ側の全再構築で反映する**(`TabView`/`MenuBar`のような`Rc`同一性差分ではない)。`DropdownItem`は自前の描画やフォーカス状態を持たない軽量な値なので、`items`が変化するたびに`removeAllItems`(AppKit)/`Items().Clear()`(WinUI3)してから現在の`items`順に再構築するだけで十分——ただしこの再構築はネイティブ側の選択状態もリセットしてしまうため、直後に`selected_index`を再適用する。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`examples/controls-demo`のDropdownタブで実クリックによる選択変更・`items`の動的な追加削除を実機検証済み(`tools/macos-ui-driver`) |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし) |
+| GTK4 | 未実装 |
 
 ## F.6 図形プリミティブ(`builtin::Rectangle` / `builtin::Ellipse`)について ✅
 
@@ -365,7 +390,7 @@ NotepadWindow
  │   └─ VerticalLayout
  │       ├─ HorizontalLayout
  │       │   ├─ ToolbarButton → Button(#[overrides])
- │       │   └─ Dropdown → Option
+ │       │   └─ Dropdown → DropdownItem
  │       ├─ TextArea
  │       └─ StatusBar
  │           └─ HorizontalLayout → TextBlock
@@ -379,7 +404,7 @@ NotepadWindow
 | `VerticalLayout`/`HorizontalLayout` | 専用のネイティブ実体を持たない仮想ツリー(`elwindui_core::ui::UIElement`実装の`Stack`)、交差軸配置は子ごとの`HorizontalAlignment`/`VerticalAlignment` |
 | `TextBlock` | 自前描画のプリミティブ(非native)、`#[text_style]`によるフォント/`foreground`(`Option<Brush>`)、backendごとの描画実装(`CATextLayer`/XAML`TextBlock`を描画専用に利用) |
 | `TextArea` | `bind!(self.text, TwoWay)`による双方向バインディング |
-| `Dropdown` / `Option` | `Vec<Option>`という複合型プロパティ、backendごとの選択状態同期 |
+| `Dropdown` / `DropdownItem` | `Vec<DropdownItem>`という複合型プロパティ、`selected_index`の双方向バインディング |
 
 これらの標準ビルトイン実装は、通常はコード生成器(`elwindui-codegen`)が内部に持ち利用者が直接編集する必要はないが、`#[overrides(builtin::X)]`(`docs/specs/dsl_spec.md` 付録A)を使うことで、プロジェクト固有の要件に応じて安全に差し替えられる。
 

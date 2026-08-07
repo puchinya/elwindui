@@ -12,8 +12,8 @@ use elwindui_core::graphics::{
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSButton, NSScrollView, NSSecureTextField, NSStackView, NSSwitch, NSTextField, NSTextView,
-    NSUserInterfaceLayoutOrientation, NSView,
+    NSButton, NSPopUpButton, NSScrollView, NSSecureTextField, NSStackView, NSSwitch, NSTextField,
+    NSTextView, NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{NSRect, NSString};
 use std::rc::Rc;
@@ -159,6 +159,19 @@ impl AppKitHandle for Retained<NSButton> {
     fn supports_text_style(&self) -> bool {
         true
     }
+}
+impl AppKitHandle for Retained<NSPopUpButton> {
+    fn as_nsview(&self) -> Retained<NSView> {
+        let button: Retained<NSButton> = Retained::into_super(self.clone());
+        let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(button);
+        Retained::into_super(control)
+    }
+    fn theme_prefix(&self) -> &'static str {
+        "dropdown"
+    }
+    // No `apply_text_style` override — `Dropdown` has no `#[text_style]` prop of its own (F.5);
+    // its displayed title is driven entirely by whichever `DropdownItem` is selected, not by an
+    // app-set text/font the way `Button`'s title is.
 }
 impl AppKitHandle for Retained<NSStackView> {
     fn as_nsview(&self) -> Retained<NSView> {

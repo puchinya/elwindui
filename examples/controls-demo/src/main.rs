@@ -91,6 +91,23 @@ mod controls_demo_view_model {
         #[computed(expr = toggle_is_on.to_string())]
         toggle_is_on_label: String,
 
+        // `Dropdown` has no user-visible `on_change` either — same two-way-only shape as
+        // `checked`/`is_on` above (see `Dropdown`'s own doc comment, elwindui-core).
+        #[observable(default = 0usize)]
+        dropdown_selected_index: usize,
+        #[computed(expr = match dropdown_selected_index {
+            0 => "Small".to_string(),
+            1 => "Medium".to_string(),
+            2 => "Large".to_string(),
+            3 => "Extra Large".to_string(),
+            _ => "(none)".to_string(),
+        })]
+        dropdown_selected_label: String,
+        // Toggled by a button below to demonstrate `items` changing at runtime (a 4th
+        // `DropdownItem` appearing/disappearing) — the native item list must follow along.
+        #[observable(default = false)]
+        dropdown_extra_item: bool,
+
         #[observable(default = String::new())]
         regression_text: String,
         #[observable(default = String::new())]
@@ -141,6 +158,10 @@ mod controls_demo_view_model {
                 "{}Force Indeterminate clicked (programmatic — not reachable by a user click)\n",
                 self.selection_log.borrow()
             );
+        }
+
+        fn toggle_dropdown_extra_item(&self) {
+            dropdown_extra_item = !self.dropdown_extra_item.get();
         }
 
         fn regression_button_clicked(&self) {
@@ -404,6 +425,33 @@ struct ControlsDemoWindow {
                         Grid::row: 2
                         margin: 12.0
                         content: TextBlock { text: vm.selection_log }
+                    }
+                }
+            }
+            TabViewItem {
+                header: "Dropdown"
+                closable: false
+                on_close: || {}
+                content: VerticalLayout {
+                    margin: 12.0
+                    spacing: 6.0
+                    TextBlock { text: "Dropdown — non-editable native selection, selected_index is the single source of truth:" }
+                    HorizontalLayout {
+                        spacing: 8.0
+                        Dropdown {
+                            selected_index: vm.dropdown_selected_index
+                            DropdownItem { text: "Small" }
+                            DropdownItem { text: "Medium" }
+                            DropdownItem { text: "Large" }
+                            if vm.dropdown_extra_item {
+                                DropdownItem { text: "Extra Large" }
+                            }
+                        }
+                        TextBlock { text: vm.dropdown_selected_label }
+                    }
+                    Button {
+                        text: "Toggle 4th item (Extra Large)"
+                        on_click: vm.toggle_dropdown_extra_item
                     }
                 }
             }

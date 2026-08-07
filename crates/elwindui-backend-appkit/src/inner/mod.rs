@@ -6,6 +6,8 @@
 
 pub(crate) mod button;
 mod check_box;
+mod dropdown;
+mod dropdown_item;
 mod menu;
 mod radio_button;
 mod scroll_view;
@@ -16,6 +18,8 @@ mod window;
 
 pub(crate) use button::InnerButton;
 pub(crate) use check_box::InnerCheckBox;
+pub(crate) use dropdown::InnerDropdown;
+pub(crate) use dropdown_item::InnerDropdownItem;
 pub(crate) use menu::{InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem};
 pub(crate) use radio_button::InnerRadioButton;
 pub(crate) use scroll_view::InnerScrollView;

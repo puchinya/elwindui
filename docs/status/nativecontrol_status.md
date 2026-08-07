@@ -123,7 +123,26 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | `crates/elwindui-core/tests/props_macro.rs` | ✅ 3コントロール分のクロスクレート形状テスト追加 | — |
 | `docs/specs/builtins_spec.md` F.16/F.17/F.18 | ✅ 新設 | ✅(同一ドキュメント) |
 
-### 2.6 `examples/controls-demo`
+### 2.6 `Dropdown` / `DropdownItem`
+
+`docs/specs/builtins_spec.md` F.5に対応(Phase 3、Issue #35)。バックログの「ComboBox」と実質同一スコープだった仕様書F.5の未実装項目を統合し、`Option`という子コンポーネント名を`DropdownItem`へ改名、選択状態を`Dropdown.selected_index`の`#[two_way]`へ一本化した(詳細はF.5本文参照)。
+
+| 項目 | AppKit | WinUI3 |
+|---|---|---|
+| `NSPopUpButton`は`NSButton`のサブクラスであるため`ButtonTarget`を再利用 | ✅ `inner/dropdown.rs`が`crate::inner::button::ButtonTarget`を直接使用 | N/A(WinUI3側は`SelectionChangedEventHandler`を使用) |
+| `items`変更時のネイティブ側同期 | ✅ 全再構築方式(`removeAllItems`→再`addItemWithTitle`→`selected_index`再適用)。`TabView`/`MenuBar`のような`Rc`同一性差分ではない——`DropdownItem`が自前の編集状態を持たない軽量な値であるため | 🟡 同型対応(`Items().Clear()`→再`Append`) |
+| `items`の動的な追加・削除でネイティブ選択状態が保持されること | ✅ **`examples/controls-demo`のDropdownタブで実機確認済み**(`tools/macos-ui-driver`)——4番目の項目をトグルで追加/削除しても、既存の選択(例: "Medium")が再構築後も維持されることを確認 | N/A(未検証) |
+| クリックによる`selected_index`変更 | ✅ **実機確認済み**——`NSPopUpButton`のポップアップメニューから項目をAX経由でクリックし、ネイティブ側の値とアプリ側ラベルの両方が追従することを確認 | N/A(未検証) |
+| `DropdownItem`はネイティブ実体を持たない(`MenuItem`同様) | ✅ `text: RefCell<String>`のみ保持。`Dropdown`側が各アイテムを`as_any().downcast_ref`して`text()`を読み出し、ネイティブ項目リストを再構築する | 🟡 同型対応 |
+| `objc2-app-kit` feature追加(`NSPopUpButton`) | ✅ | N/A |
+| `crates/elwindui-core/tests/props_macro.rs` | ✅ `DropdownItem.text`・`Dropdown.selected_index`(two-way)・`Dropdown.enabled`のクロスクレート形状テスト追加 | — |
+| `docs/specs/builtins_spec.md` F.5 | ✅ `Dropdown`/`DropdownItem`実装内容へ更新(旧`Dropdown`/`Option`案から改訂) | ✅(同一ドキュメント) |
+
+**`elwindui-codegen`の一般バグを発見・修正**: `#[content(field_name)]`で宣言したリスト型content field(`Vec<..>`/`ListExt<..>`)の中身を`if`/`for`で動的に変える(`Dropdown`の`items`に`if vm.dropdown_extra_item { DropdownItem { .. } }`のような分岐を書く)と、コード生成側の動的子要素リフレッシュ処理(`codegen.rs`の`dynamic_region_refresh_method`)が実際の`#[content(..)]`名を見ず常に`.children()`という決め打ちのメソッド呼び出しを生成していた。`TabView`/`VerticalLayout`/`HorizontalLayout`/`Grid`はいずれも実際のcontent fieldが`children`という名前なので偶然動いていたが、フィールド名が`items`の`Dropdown`(および同じく`items`の`Menu`)で初めて顕在化した——`Menu`はこれまで静的な子要素しか使われておらず、この動的リフレッシュ経路自体が未通過だった。
+
+修正は2箇所: (1) 同一クレート内のユーザーコンポーネント向けには、`codegen.rs`側がすでに持っている`TypeInfo.content_field`をこの箇所でも読むようにした(スカラー分岐は元々読んでいたのに、リスト分岐だけ読んでいなかった)。(2) クロスクレートのビルトイン(`Dropdown`/`Menu`など、ローカルな`TypeInfo`を持たない)向けには、`elwindui-macros`の`build_props_macro`(`class.rs`)に新しい shape-macro クエリ `@content_field_get $recv:expr` を追加した——`@content_item_dyn`と同じ1ホップ方式(このクラス自身の`#[content(..)]`宣言がそのまま答えになる。型解決が要らないぶん`@content_item_dyn`より単純)。`codegen.rs`はローカル情報が無い場合、この新クエリ経由で`elwindui::core::#props_macro!(@content_field_get self.#parent_binding)`を生成し、実際にコンパイルされる時点で正しいゲッター呼び出しへ展開されるようにした。ワークスペース全体のテスト(457件)に回帰なし。
+
+### 2.7 `examples/controls-demo`
 
 `examples/graphics-demo`と同じ構造(単一`main.rs`、`#[elwindui::viewmodel]`、`TabView`+タブごとの機能領域)。
 
@@ -134,6 +153,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | ScrollView | ビューポートより高いコンテンツ。ネストした`TextBox`でネスト内フォーカスを確認できる |
 | Button | 3つのrole・is_default・tooltip |
 | Selection | CheckBox(三状態のプログラム設定含む)・同一グループのRadioButton3つ・ToggleSwitch |
+| Dropdown | 3項目の`Dropdown`・`selected_index`の双方向バインディング・ボタンによる4番目の項目の動的追加削除 |
 | 回帰確認 | 既存`TextArea`/`Button` |
 
 対話的な動作確認(クリック・入力・フォーカス切り替え・スクロール)は`tools/macos-ui-driver`で行う(`docs/status/macos_ui_driver_status.md`)。
@@ -146,9 +166,8 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 ## 3. 未実装コントロールのバックログ(詳細設計は未着手)
 
-(**NativeButton**は§2.4で既存`Button`の拡張として決着済み。**CheckBox/RadioButton/ToggleSwitch**は§2.5で実装済み。いずれもバックログから除去した。)
+(**NativeButton**は§2.4で既存`Button`の拡張として決着済み。**CheckBox/RadioButton/ToggleSwitch**は§2.5で実装済み。**ComboBox**は§2.6で仕様書の`Dropdown`(付録F.5)と統合の上実装済み。いずれもバックログから除去した。)
 
-- **ComboBox** — 編集不可の選択コントロール。AppKit: `NSPopUpButton` / WinUI3: `ComboBox`。仕様書の`Dropdown`(付録F.5、未実装)との名称・スコープ重複を実装時に整理する必要がある
 - **Slider** — AppKit: `NSSlider` / WinUI3: `Slider`
 - **ProgressBar** — AppKit: `NSProgressIndicator` / WinUI3: `ProgressBar`。indeterminate状態はネイティブアニメーションを使い、elwindui側でフレーム生成しない
 - **NumberBox** — AppKit: `NSTextField`+`NSStepper`合成 / WinUI3: `NumberBox`(ネイティブ一体型)。入力中文字列と確定値を区別する設計が必要

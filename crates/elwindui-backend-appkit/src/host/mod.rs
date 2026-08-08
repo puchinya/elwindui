@@ -726,7 +726,39 @@ impl TreeHostView {
         // this branch, so the `task_info` syscall and cache walk `record_memory_stats` does never
         // run there. See that method's own doc comment for why it isn't unconditional.
         #[cfg(any(test, debug_assertions, feature = "render-stats"))]
-        self.record_memory_stats();
+        {
+            self.record_memory_stats();
+            // Manual, opt-in observation point for the numbers `record_memory_stats` populates —
+            // there is otherwise no way to read `render::stats::snapshot()` from outside the
+            // process. `ELWINDUI_RENDER_STATS=1 cargo run -p <example>` prints one JSON-ish line
+            // per relayout pass; see `docs/status/implementation_status.md` §9 for how this feeds
+            // the AppKit render-optimization work's per-step measurement table.
+            if std::env::var_os("ELWINDUI_RENDER_STATS").is_some() {
+                let s = crate::render::stats::snapshot();
+                eprintln!(
+                    "elwindui-render-stats groups_visited={} groups_rebuilt={} groups_cache_hit={} \
+                     layers_created={} layers_removed={} add_sublayer_calls={} subview_added={} \
+                     cgpaths_created={} text_layers_created={} attributed_strings_created={} \
+                     setter_calls={} setter_calls_skipped={} image_cache_bytes={} \
+                     vector_raster_cache_bytes={} process_footprint_bytes={}",
+                    s.groups_visited,
+                    s.groups_rebuilt,
+                    s.groups_cache_hit,
+                    s.layers_created,
+                    s.layers_removed,
+                    s.add_sublayer_calls,
+                    s.subview_added,
+                    s.cgpaths_created,
+                    s.text_layers_created,
+                    s.attributed_strings_created,
+                    s.setter_calls,
+                    s.setter_calls_skipped,
+                    s.image_cache_bytes,
+                    s.vector_raster_cache_bytes,
+                    s.process_footprint_bytes,
+                );
+            }
+        }
     }
 
     /// Looks up which live native leaf `container` (one of `native_containers`' own values — the

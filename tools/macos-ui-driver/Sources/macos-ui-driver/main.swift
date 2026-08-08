@@ -531,11 +531,24 @@ func axSize(_ element: AXUIElement, _ attribute: String) -> CGSize? {
 /// Best-effort JSON coercion of a raw `kAXValueAttribute` read: String/Bool/NSNumber map directly;
 /// anything else falls back to `String(describing:)` (distinguishable by callers, since it won't
 /// parse as the expected type).
+///
+/// Bool and NSNumber are distinguished by `CFGetTypeID`, not Swift's `as? Bool`/`as? NSNumber`
+/// casts — `NSNumber`'s Bool bridging is permissive enough that `(0 as NSNumber) as? Bool`
+/// succeeds and yields `false` (likewise `1` -> `true`), which previously misreported a genuinely
+/// numeric `AXValue` (e.g. an `AXSlider` sitting at exactly its minimum or maximum) as a boolean
+/// whenever `as? Bool` was tried before `as? NSNumber` — confirmed empirically via `Slider`'s own
+/// `value` hitting `0.0`. `CFBooleanGetTypeID()`/`CFNumberGetTypeID()` are the real, unambiguous
+/// CoreFoundation type tags underneath, so checking those first removes the ambiguity entirely.
 func axJSONValue(_ raw: CFTypeRef?) -> Any? {
     guard let raw else { return nil }
     if let s = raw as? String { return s }
-    if let b = raw as? Bool { return b }
-    if let n = raw as? NSNumber { return n }
+    let typeID = CFGetTypeID(raw)
+    if typeID == CFBooleanGetTypeID() {
+        return CFBooleanGetValue((raw as! CFBoolean))
+    }
+    if typeID == CFNumberGetTypeID() {
+        return raw as! NSNumber
+    }
     return String(describing: raw)
 }
 
@@ -726,15 +739,23 @@ func resolveContext(_ args: Args) -> (pid: pid_t, appElement: AXUIElement, windo
 
 /// Shared mouse-click synthesis used by `click --via mouse`, `type-text --focus-via click`, and
 /// `press-key --focus-via click` — a real `CGEventPost` down/up pair at `.cghidEventTap`, computed
-/// from the element's own `AXPosition`/`AXSize` center. Deliberately not `postToPid`-targeted: the
-/// whole point is to exercise real hit-testing/focus routing, which targeted delivery would bypass.
+/// from the element's own `AXPosition`/`AXSize`. Deliberately not `postToPid`-targeted: the whole
+/// point is to exercise real hit-testing/focus routing, which targeted delivery would bypass.
+///
+/// `xFraction` (0.0 = left edge, 1.0 = right edge, default 0.5 = center) picks where along the
+/// element's own width the click lands — a plain click still can't drag, but for a control whose
+/// value follows click position directly (`AXSlider` and similar single-click-to-position widgets)
+/// this is enough to land on an arbitrary value without needing a real drag gesture. Vertical
+/// position is always the element's own vertical center; there is no `yFraction` counterpart, since
+/// every control this targets today is horizontal (`click`'s own doc comment).
+///
 /// Returns the click point if the element had position/size to click, else `nil`.
 @discardableResult
-func synthesizeClick(on element: AXUIElement) -> CGPoint? {
+func synthesizeClick(on element: AXUIElement, xFraction: Double = 0.5) -> CGPoint? {
     guard let pos = axPoint(element, kAXPositionAttribute as String),
         let size = axSize(element, kAXSizeAttribute as String)
     else { return nil }
-    let point = CGPoint(x: pos.x + size.width / 2, y: pos.y + size.height / 2)
+    let point = CGPoint(x: pos.x + size.width * xFraction, y: pos.y + size.height / 2)
     let down = CGEvent(
         mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
     let up = CGEvent(
@@ -821,8 +842,16 @@ func cmdSetFocus(_ args: Args) -> Never {
 /// Real user-facing click, faithfully synthesized via `synthesizeClick` (real `CGEventPost` at
 /// `.cghidEventTap` — the same tap Accessibility trust, reported by `doctor`, already gates, so no
 /// new permission story). `--via ax-press` performs `AXUIElementPerformAction(kAXPressAction)`
-/// instead, for elements where a synthetic mouse event is unnecessary (plain buttons) — both modes
-/// exist specifically so a caller can trial either independently against the same selector.
+/// instead, for elements where a synthetic mouse event is unnecessary (plain buttons); `--via
+/// ax-increment`/`ax-decrement` likewise perform `kAXIncrementAction`/`kAXDecrementAction`, the
+/// step-based counterpart `AXSlider`/`AXStepper`-family elements expose in place of `kAXPressAction`
+/// (which they don't support at all — confirmed empirically, `ax_press_status_ok: false`). All four
+/// modes exist specifically so a caller can trial whichever independently against the same selector.
+///
+/// `--fraction <0.0-1.0>` (mouse only) picks where along the element's own width the synthesized
+/// click lands, instead of always its center — see `synthesizeClick`'s own `xFraction` doc comment
+/// for why this alone (no real drag) is enough to exercise a single-click-to-position control like
+/// `AXSlider`.
 ///
 /// There is no universal AX signal for "did the click semantically succeed" — clicking a button vs.
 /// a text field means different things. So `click` reports a before/after diff (`changed.focused`,
@@ -842,17 +871,28 @@ func cmdClick(_ args: Args) -> Never {
 
     switch via {
     case "mouse":
-        guard let point = synthesizeClick(on: element) else {
+        let fraction = args.double("fraction") ?? 0.5
+        guard fraction >= 0.0, fraction <= 1.0 else {
+            fail("--fraction must be within 0.0..=1.0, got \(fraction)")
+        }
+        guard let point = synthesizeClick(on: element, xFraction: fraction) else {
             fail(
                 "element has no position/size — cannot compute click point",
                 ["element": before.jsonObject()])
         }
         fields["click_point"] = ["x": point.x, "y": point.y]
+        fields["fraction"] = fraction
     case "ax-press":
         let status = AXUIElementPerformAction(element, kAXPressAction as CFString)
         fields["ax_press_status_ok"] = (status == .success)
+    case "ax-increment":
+        let status = AXUIElementPerformAction(element, kAXIncrementAction as CFString)
+        fields["ax_increment_status_ok"] = (status == .success)
+    case "ax-decrement":
+        let status = AXUIElementPerformAction(element, kAXDecrementAction as CFString)
+        fields["ax_decrement_status_ok"] = (status == .success)
     default:
-        fail("unknown --via \(via) (expected mouse or ax-press)")
+        fail("unknown --via \(via) (expected mouse, ax-press, ax-increment, or ax-decrement)")
     }
 
     // No universal "click landed" signal exists — poll briefly for *any* observable change, then

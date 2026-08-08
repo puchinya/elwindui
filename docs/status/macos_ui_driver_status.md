@@ -48,12 +48,14 @@ AIエージェントがelwindui製macOSアプリを自動で起動・操作・�
 | `dump-tree --pid <pid> [--window-id ..] [--window-title ..] [--max-depth 40]` | AXツリーをJSONで取得する。`position`/`size`は`list-windows`が返すウィンドウ境界と同一のtop-left原点グローバル座標系(AXの`kAXPositionAttribute`と`CGWindowBounds`は同じ座標系) |
 | `find --pid <pid> [...] --role/--title/--title-contains/--identifier` | セレクタに一致する要素を返す。0件でも`success:true`(存在確認として正常) |
 | `set-focus --pid <pid> [...] <selector>` | `AXUIElementSetAttributeValue(kAXFocusedAttribute)`による直接フォーカス設定 |
-| `click --pid <pid> [...] <selector> [--via mouse\|ax-press]` | `--via mouse`は実座標への本物の`CGEventPost`、`--via ax-press`は`AXPress`アクション |
+| `click --pid <pid> [...] <selector> [--via mouse\|ax-press\|ax-increment\|ax-decrement] [--fraction 0.0..1.0]` | `--via mouse`は実座標への本物の`CGEventPost`(既定で要素中央。`--fraction`(既定`0.5`)で要素の左端からの相対位置を指定でき、`AXSlider`のような「クリック位置がそのまま値になる」コントロールをドラッグ無しで任意値へ動かせる)。`--via ax-press`は`AXPress`アクション。`--via ax-increment`/`ax-decrement`は`kAXIncrementAction`/`kAXDecrementAction`——`AXSlider`は`AXPress`に対応しない(`ax_press_status_ok: false`)ため、キーボード相当の刻み幅操作にはこちらを使う |
 | `type-text --pid <pid> [...] <selector> --text <s> [--focus-via ..]` | 文字列入力。`after_value`/`value_matches_expected`を返す |
 | `press-key --pid <pid> [...] --key <k> [--modifiers ..]` | 単一キー送信。修飾キーは`cmd`/`ctrl`/`alt`/`shift` |
 | `wait-for --pid <pid> [...] --condition <c> [--value ..] [--timeout ..]` | 条件は`exists`/`not-exists`/`enabled`/`focused`/`value-equals`/`ax-attribute` |
 
 `click`はセレクタが0件のとき、また複数件のとき(`--index`を促す)にいずれも`fail()`(exit 1)する——推測での実行は行わない。
+
+**`AXValue`の数値/真偽値誤判定バグを修正済み**: `axJSONValue`が`raw as? Bool`を`raw as? NSNumber`より先に試していたため、`NSNumber`のBoolへの寛容なブリッジング(`(0 as NSNumber) as? Bool`は`false`として成功する)により、値がちょうど`0`または`1`になった数値系`AXValue`(`AXSlider`の`value`、`AXCheckBox`の`value`等)が誤って真偽値として報告されていた(`Slider`(#37)の実機検証中に発覚)。`CFGetTypeID`で`CFBooleanGetTypeID()`/`CFNumberGetTypeID()`を明示的に判定するよう修正——`AXCheckBox.value`が(たまたま`false`/`true`と一致していたのではなく)実際には`0`/`1`/`2`(`NSControlStateValueOff/On/Mixed`)という数値であったことも、この修正で正しく可視化されるようになった。
 
 ### 3.1 呼び出し側の必須の注意点
 

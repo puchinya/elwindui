@@ -21,21 +21,26 @@ impl HorizontalLayout {
             width: f32::INFINITY,
             height: available.height,
         };
+        // See `VerticalLayout::measure_override`'s own doc comment: every child is still measured,
+        // but only participating children's sizes feed `stack_natural_size` — otherwise a zero-
+        // sized non-participating child would still strand one `spacing` gap.
         let child_sizes: Vec<Size> = self
             .visual_children()
             .iter()
-            .map(|c| {
+            .filter_map(|c| {
                 c.measure(child_available);
-                c.measured_size().unwrap_or_default()
+                c.participates_in_layout()
+                    .then(|| c.measured_size().unwrap_or_default())
             })
             .collect();
         stack_natural_size(Orientation::Horizontal, self.spacing.get(), &child_sizes)
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
-        let child_sizes: Vec<Size> = self
-            .visual_children()
+        let children = self.visual_children();
+        let child_sizes: Vec<Size> = children
             .iter()
+            .filter(|c| c.participates_in_layout())
             .map(|c| c.measured_size().unwrap_or_default())
             .collect();
         let child_rects = stack_arrange(
@@ -44,8 +49,22 @@ impl HorizontalLayout {
             self.spacing.get(),
             &child_sizes,
         );
-        for (child, rect) in self.visual_children().iter().zip(child_rects) {
-            child.arrange(rect);
+        // See `VerticalLayout::arrange_override`'s own doc comment: a non-participating child
+        // still gets `arrange` called on it, with a placeholder rect it never reads.
+        let mut rects = child_rects.into_iter();
+        for child in children.iter() {
+            if child.participates_in_layout() {
+                child.arrange(rects.next().expect(
+                    "stack_arrange returns exactly one rect per participating child size",
+                ));
+            } else {
+                child.arrange(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                });
+            }
         }
         final_size
     }

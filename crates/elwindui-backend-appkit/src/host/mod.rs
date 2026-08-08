@@ -12,17 +12,14 @@ use elwindui_core::input::{
     FocusState, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
     RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
-use elwindui_core::ui::{FocusHost, RelayoutHost, UIElementExt, layout_root};
+use elwindui_core::ui::{FocusHost, InvalidationKind, RelayoutHost, UIElementExt, layout_root};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
-use objc2_core_foundation::CFRetained;
-use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSObjectProtocol, NSRect};
-use objc2_quartz_core::CALayer;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -49,53 +46,11 @@ pub struct TreeHostIvars {
     /// element does this native container belong to" without a second registry of its own; see
     /// `resolve_native_owner_id`.
     pub(crate) native_owner_ids: RefCell<HashMap<usize, u64>>,
-    /// Decoded-image cache (`RenderCommand::DrawImage`'s `elwindui_core::graphics::Image` -> real
-    /// `CGImage`), keyed by the image's stable `ImageId`. Entries are pruned after each relayout
-    /// to the image resources referenced by the currently retained render tree.
-    pub(crate) image_cache: RefCell<HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>>,
-    /// `RenderCommand::DrawVectorImage`'s `VectorRasterizeMode::Auto`/`Fixed` cache — the
-    /// rasterized-bitmap counterpart to `image_cache` above, keyed by `VectorImageId` rather than
-    /// pointer identity since the *same* `VectorImage` may legitimately need re-rasterizing at a
-    /// different pixel size (unlike a decoded raster `Image`, which has one fixed native size).
-    /// At most one entry per id — `Auto` mode simply overwrites the entry when the requested size
-    /// changes (see `VectorRasterizeMode::Auto`'s own doc comment); `Fixed` mode never changes
-    /// size so its entry never gets overwritten after the first rasterization. Entries are pruned
-    /// after each relayout to vectors still referenced by the retained render tree.
-    pub(crate) vector_raster_cache: RefCell<
-        HashMap<elwindui_core::graphics::VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
-    >,
-    /// Per-`RenderGroup` id, the persistent container `CALayer` holding that group's own painted
-    /// sublayers — a flat sibling of the root paint layer (`frame` always exactly matches the
-    /// root's own `bounds()`, a zero-offset "namespace" rather than a real nested coordinate
-    /// space) so every existing absolute-canvas-coordinate drawing helper
-    /// (`replay_paint_command`/`try_add_gradient_fill_layer`/`clip_mask_layer`/`DrawImage`'s own
-    /// container) keeps working completely unchanged. Reused across `relayout` passes — see
-    /// `group_layer_cache_keys`'s own doc comment for when its contents get rebuilt vs left alone
-    /// (painter design doc §15's renderer cache, acceptance criterion 14).
-    pub(crate) group_layers: RefCell<HashMap<u64, Retained<CALayer>>>,
-    /// What `group_layers[id]`'s sublayers were last rebuilt from. A `RenderGroup`'s own
-    /// `generation` alone can't tell `replay_group` whether a rebuild is needed: this backend
-    /// bakes the *full accumulated* origin/clip/transform/opacity directly into each leaf's
-    /// `CGPath`/frame (not a live nested `CALayer` transform, by deliberate design — see
-    /// `replay_group`'s own doc comment), so a group whose own `commands` are byte-for-byte
-    /// unchanged still needs rebuilding if an ancestor's offset moved (the group's own relative
-    /// `offset` stays the same, so its `generation` never bumps, even though the *absolute*
-    /// geometry baked into its cached sublayers is now stale). Comparing the full
-    /// `(generation, origin, clip, transform, opacity, scale)` tuple each pass catches both that
-    /// and a window moved to a display with a different `backing_scale_factor`.
-    pub(crate) group_layer_cache_keys: RefCell<HashMap<u64, GroupCacheKey>>,
-    /// Which `native_containers` identities were discovered inside each group's own `commands` the
-    /// last time it was actually rebuilt — replayed back into `live_native_controls` on a cache hit
-    /// (where `replay_commands` doesn't run and so can't rediscover them itself), so
-    /// `native_containers`' own liveness-based pruning at the end of `relayout` doesn't tear down a
-    /// native control just because its owning group happened to be skipped this pass.
-    pub(crate) group_native_controls: RefCell<HashMap<u64, Vec<usize>>>,
-    /// Raster image resources used by each cached group. Replayed on cache hits so decoded images
-    /// remain live without rewalking commands.
-    pub(crate) group_image_ids: RefCell<HashMap<u64, Vec<elwindui_core::graphics::ImageId>>>,
-    /// Vector resources used by each cached group, for vector-raster cache liveness tracking.
-    pub(crate) group_vector_image_ids:
-        RefCell<HashMap<u64, Vec<elwindui_core::graphics::VectorImageId>>>,
+    /// Everything a replay pass reads or writes besides the live `CALayer`/`NSView` tree itself
+    /// (per-group container cache, image/vector-raster caches) — see `replay::ReplayState`'s own
+    /// doc comment. Held as a single `RefCell` so a pass takes one borrow across its whole
+    /// recursion instead of several small ones.
+    pub(crate) replay_state: RefCell<ReplayState>,
     /// Set once, right after construction — lets `set_tree` hand out an `AppKitRelayoutHost`
     /// wrapping a weak reference back to this same view, without needing a `Retained<Self>` in
     /// hand at that point.
@@ -130,6 +85,32 @@ pub struct TreeHostIvars {
     /// `NSScrollView`'s native scroll physics do the rest, rather than being clamped to whatever
     /// viewport size happens to be available. See `set_unconstrained_axes`.
     pub(crate) unconstrained_axes: Cell<(bool, bool)>,
+    /// `true` for the duration of a `relayout()` call — lets `AppKitRelayoutHost::request_relayout`
+    /// detect a reentrant call (e.g. a `NativeControl`'s focus change synchronously running user
+    /// code that calls `invalidate()`) and defer touching `render_tree` instead of trying to
+    /// `borrow_mut()` it while `relayout()`'s own replay pass still holds it borrowed — see
+    /// `pending_dirty_ids`/`needs_another_pass` and `relayout`'s own doc comment.
+    pub(crate) relaying_out: Cell<bool>,
+    /// Group ids `request_relayout` couldn't `mark_dirty` immediately because `relaying_out` was
+    /// set — drained and applied right after the in-progress `relayout()` call finishes.
+    pub(crate) pending_dirty_ids: RefCell<Vec<u64>>,
+    /// Set by a reentrant `request_relayout` (alongside `pending_dirty_ids`) to tell `relayout()`
+    /// it must schedule another pass once the current one finishes, since `setNeedsLayout(true)`
+    /// called mid-pass is not guaranteed to still be honored once AppKit's own layout pass (which
+    /// is what got this `relayout()` running in the first place) completes.
+    pub(crate) needs_another_pass: Cell<bool>,
+    /// The strongest `InvalidationKind` any `request_relayout` call has asked for since the last
+    /// `relayout_inner` pass consumed it — `None` means no explicit request arrived (a `layout`
+    /// callback can still fire for other reasons, e.g. a window resize; see `relayout_inner`'s own
+    /// handling of `frame_changed`). Coalesced by `max` rather than overwritten, mirroring the
+    /// WinUI3 backend's own `pending: Cell<bool>` coalescing (`WinUI3RelayoutHost`) — several
+    /// `request_relayout` calls within one runloop turn collapse into a single pass at the
+    /// strongest kind any of them needed.
+    pub(crate) pending_invalidation: Cell<Option<InvalidationKind>>,
+    /// `self.frame().size` as of the last `relayout_inner` pass — compared against the current
+    /// frame at the top of the next pass so a resize (which `layout` can trigger with no
+    /// `request_relayout` call at all) is never treated as a `Render`-only pass.
+    pub(crate) last_layout_size: Cell<objc2_foundation::NSSize>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
@@ -138,13 +119,27 @@ pub struct TreeHostIvars {
 pub(crate) struct AppKitRelayoutHost(objc2::rc::Weak<TreeHostView>);
 
 impl RelayoutHost for AppKitRelayoutHost {
-    fn request_relayout(&self, dirty_group_id: u64) {
-        if let Some(view) = self.0.load() {
-            if let Some(render_tree) = view.ivars().render_tree.borrow_mut().as_mut() {
-                render_tree.mark_dirty(dirty_group_id);
-            }
-            view.setNeedsLayout(true);
+    fn request_relayout(&self, dirty_group_id: u64, kind: InvalidationKind) {
+        let Some(view) = self.0.load() else { return };
+        let previous = view.ivars().pending_invalidation.get();
+        view.ivars()
+            .pending_invalidation
+            .set(Some(previous.map_or(kind, |p| p.max(kind))));
+        if view.ivars().relaying_out.get() {
+            // Reentrant call from inside `relayout()`'s own replay pass (see `relaying_out`'s own
+            // doc comment) — `render_tree` is already borrowed by that pass, so defer the mark
+            // instead of panicking on a double `borrow_mut()`.
+            view.ivars()
+                .pending_dirty_ids
+                .borrow_mut()
+                .push(dirty_group_id);
+            view.ivars().needs_another_pass.set(true);
+        } else if let Some(render_tree) = view.ivars().render_tree.borrow_mut().as_mut() {
+            // Every kind still marks the group dirty — `Render` especially, since re-recording
+            // this group's commands is the entire point of a paint-only invalidation.
+            render_tree.mark_dirty(dirty_group_id);
         }
+        view.setNeedsLayout(true);
     }
 }
 
@@ -230,7 +225,11 @@ define_class!(
             // `GroupCacheKey::scale` (see `replay::replay_group`) already forces every group's own
             // `CALayer` tree to rebuild when the scale changes; this cache needs an explicit drop
             // since nothing else invalidates it.
-            self.ivars().vector_raster_cache.borrow_mut().clear();
+            self.ivars()
+                .replay_state
+                .borrow_mut()
+                .vector_raster_cache
+                .clear();
             self.setNeedsLayout(true);
         }
 
@@ -356,18 +355,17 @@ impl TreeHostView {
             render_tree: RefCell::new(None),
             native_containers: RefCell::new(HashMap::new()),
             native_owner_ids: RefCell::new(HashMap::new()),
-            image_cache: RefCell::new(HashMap::new()),
-            vector_raster_cache: RefCell::new(HashMap::new()),
-            group_layers: RefCell::new(HashMap::new()),
-            group_layer_cache_keys: RefCell::new(HashMap::new()),
-            group_native_controls: RefCell::new(HashMap::new()),
-            group_image_ids: RefCell::new(HashMap::new()),
-            group_vector_image_ids: RefCell::new(HashMap::new()),
+            replay_state: RefCell::new(ReplayState::default()),
             weak_self: RefCell::new(objc2::rc::Weak::default()),
             pointer: PointerDispatcher::new(),
             keyboard: KeyboardDispatcher::new(),
             tracking_area: RefCell::new(None),
             unconstrained_axes: Cell::new((false, false)),
+            relaying_out: Cell::new(false),
+            pending_dirty_ids: RefCell::new(Vec::new()),
+            needs_another_pass: Cell::new(false),
+            pending_invalidation: Cell::new(None),
+            last_layout_size: Cell::new(objc2_foundation::NSSize::new(-1.0, -1.0)),
         };
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =
@@ -482,13 +480,7 @@ impl TreeHostView {
         }
         self.ivars().native_containers.borrow_mut().clear();
         self.ivars().native_owner_ids.borrow_mut().clear();
-        self.ivars().group_layers.borrow_mut().clear();
-        self.ivars().group_layer_cache_keys.borrow_mut().clear();
-        self.ivars().group_native_controls.borrow_mut().clear();
-        self.ivars().group_image_ids.borrow_mut().clear();
-        self.ivars().group_vector_image_ids.borrow_mut().clear();
-        self.ivars().image_cache.borrow_mut().clear();
-        self.ivars().vector_raster_cache.borrow_mut().clear();
+        *self.ivars().replay_state.borrow_mut() = ReplayState::default();
         let weak_self = self.ivars().weak_self.borrow().clone();
         tree.as_ui_element()
             .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self.clone()))));
@@ -533,8 +525,45 @@ impl TreeHostView {
         1.0
     }
 
+    /// Reflects the current `tree`'s layout and paint state into real `NSView`/`CALayer` state.
+    /// Wraps `relayout_inner` with the reentrancy guard `AppKitRelayoutHost::request_relayout`
+    /// relies on (`relaying_out`/`pending_dirty_ids`/`needs_another_pass` — see those fields' own
+    /// doc comments): a reentrant `request_relayout` during `relayout_inner` (e.g. a
+    /// `NativeControl` focus change synchronously running user code that calls `invalidate()`)
+    /// cannot safely `render_tree.borrow_mut()` while `relayout_inner`'s own replay pass still
+    /// holds `render_tree` borrowed, so it defers its `mark_dirty` instead — this is what applies
+    /// that deferred work once `relayout_inner` returns.
     fn relayout(&self) {
+        self.ivars().relaying_out.set(true);
+        self.relayout_inner();
+        self.ivars().relaying_out.set(false);
+
+        let pending: Vec<u64> = self
+            .ivars()
+            .pending_dirty_ids
+            .borrow_mut()
+            .drain(..)
+            .collect();
+        if !pending.is_empty() {
+            if let Some(render_tree) = self.ivars().render_tree.borrow_mut().as_mut() {
+                for id in pending {
+                    render_tree.mark_dirty(id);
+                }
+            }
+        }
+        if self.ivars().needs_another_pass.take() {
+            self.setNeedsLayout(true);
+        }
+    }
+
+    fn relayout_inner(&self) {
         use elwindui_core::base::Size;
+
+        // Suppresses Core Animation's implicit ~0.25s property animations for this whole pass —
+        // see `ImplicitAnimationGuard`'s own doc comment. `_animation_guard` is never read; its
+        // `Drop` (running whichever of this function's several early `return`s is taken) is the
+        // entire point.
+        let _animation_guard = crate::render::ImplicitAnimationGuard::begin();
 
         let frame = self.frame();
         let (unconstrained_width, unconstrained_height) = self.ivars().unconstrained_axes.get();
@@ -552,31 +581,55 @@ impl TreeHostView {
         };
         let tree = self.ivars().tree.borrow();
         let Some(tree) = tree.as_ref() else { return };
-        layout_root(tree, available);
-        // `InnerScrollView`'s content host (`unconstrained_axes` set via
-        // `set_unconstrained_axes`) grows to its own content's natural size on whichever axis is
-        // unconstrained, rather than staying clamped to `frame`'s (possibly stale, possibly
-        // zero-on-first-layout) size — every other host has both axes `false` and this is a no-op.
-        if unconstrained_width || unconstrained_height {
-            let natural_width = tree.arranged_width().unwrap_or(0.0) as f64;
-            let natural_height = tree.arranged_height().unwrap_or(0.0) as f64;
-            let new_width = if unconstrained_width {
-                natural_width
-            } else {
-                frame.size.width
-            };
-            let new_height = if unconstrained_height {
-                natural_height
-            } else {
-                frame.size.height
-            };
-            if new_width != frame.size.width || new_height != frame.size.height {
-                self.setFrame(NSRect::new(
-                    frame.origin,
-                    objc2_foundation::NSSize::new(new_width, new_height),
-                ));
+
+        // `layout` (the NSView override that calls `relayout`) fires for reasons other than our
+        // own `request_relayout` — a window resize chief among them — so a frame change always
+        // forces `Measure` regardless of what (if anything) was actually requested. Several
+        // `request_relayout` calls since the last pass already coalesced to their strongest kind
+        // (`AppKitRelayoutHost::request_relayout`'s own `max`); `None` (nothing was explicitly
+        // requested — e.g. the very first pass from `set_tree`) also defaults to `Measure`, the
+        // only kind safe to assume with no other information.
+        let requested = self.ivars().pending_invalidation.take();
+        let frame_changed = self.ivars().last_layout_size.get() != frame.size;
+        let kind = if frame_changed {
+            InvalidationKind::Measure
+        } else {
+            requested.unwrap_or(InvalidationKind::Measure)
+        };
+        self.ivars().last_layout_size.set(frame.size);
+
+        if kind != InvalidationKind::Render {
+            layout_root(tree, available);
+            // `InnerScrollView`'s content host (`unconstrained_axes` set via
+            // `set_unconstrained_axes`) grows to its own content's natural size on whichever axis is
+            // unconstrained, rather than staying clamped to `frame`'s (possibly stale, possibly
+            // zero-on-first-layout) size — every other host has both axes `false` and this is a no-op.
+            if unconstrained_width || unconstrained_height {
+                let natural_width = tree.arranged_width().unwrap_or(0.0) as f64;
+                let natural_height = tree.arranged_height().unwrap_or(0.0) as f64;
+                let new_width = if unconstrained_width {
+                    natural_width
+                } else {
+                    frame.size.width
+                };
+                let new_height = if unconstrained_height {
+                    natural_height
+                } else {
+                    frame.size.height
+                };
+                if new_width != frame.size.width || new_height != frame.size.height {
+                    self.setFrame(NSRect::new(
+                        frame.origin,
+                        objc2_foundation::NSSize::new(new_width, new_height),
+                    ));
+                }
             }
         }
+        // `Render` skips `layout_root` above, but `reconcile` below still runs — since Render
+        // invalidation never clears `arranged_*`, `reconcile_render_group` recomputes the exact
+        // same `offset`/`size`/`clip` it always would, so this reconcile is provably equivalent to
+        // what today's always-runs-`layout_root` path already produced; only the (redundant)
+        // measure/arrange work itself is skipped.
         {
             let mut retained_tree = self.ivars().render_tree.borrow_mut();
             if retained_tree
@@ -596,15 +649,20 @@ impl TreeHostView {
             return;
         };
 
-        self.setWantsLayer(true);
+        // `setWantsLayer` is idempotent in AppKit itself, but calling it every pass is still an
+        // avoidable message send — only the very first pass needs it.
+        if self.layer().is_none() {
+            self.setWantsLayer(true);
+        }
         let layer = self.layer().expect("wantsLayer(true) implies a layer");
 
         let mut live_native_controls = HashSet::new();
         let mut live_group_ids = HashSet::new();
         let mut live_image_ids = HashSet::new();
         let mut live_vector_image_ids = HashSet::new();
-        let mut image_cache = self.ivars().image_cache.borrow_mut();
-        let mut vector_raster_cache = self.ivars().vector_raster_cache.borrow_mut();
+        let mut new_group_order = Vec::new();
+        let mut new_native_order = Vec::new();
+        let mut state = self.ivars().replay_state.borrow_mut();
         replay_group(
             self,
             &layer,
@@ -618,13 +676,56 @@ impl TreeHostView {
             &mut live_group_ids,
             &mut live_image_ids,
             &mut live_vector_image_ids,
-            &mut image_cache,
-            &mut vector_raster_cache,
+            &mut new_group_order,
+            &mut new_native_order,
+            &mut state,
         );
-        image_cache.retain(|id, _| live_image_ids.contains(id));
-        vector_raster_cache.retain(|id, _| live_vector_image_ids.contains(id));
-        drop(image_cache);
-        drop(vector_raster_cache);
+        state.image_cache.retain(|id, _| live_image_ids.contains(id));
+        state
+            .vector_raster_cache
+            .retain(|id, _| live_vector_image_ids.contains(id));
+        state.group_layers.retain(|id, container| {
+            if live_group_ids.contains(id) {
+                true
+            } else {
+                container.removeFromSuperlayer();
+                false
+            }
+        });
+        state.group_cache.retain(|id, _| live_group_ids.contains(id));
+
+        // Z-order repair: `replay_group` only `addSublayer`s a container the first time it's ever
+        // created (see that function's own doc comment) — a group whose position in the traversal
+        // order moved (a list reorder, a tab switch, an item insert/delete elsewhere in the tree)
+        // needs its container moved too. Comparing traversal orders makes "nothing moved" (by far
+        // the common case — a static UI's steady-state relayout) provably free: this whole block,
+        // and therefore any `addSublayer` call, is skipped entirely.
+        //
+        // Re-`addSublayer`ing every entry in `new_group_order`, in order, rather than computing a
+        // minimal set of moves: `root_layer.setSublayers(...)` can't be used here since AppKit
+        // interleaves each native control's own backing layer into this same array (see the
+        // native-control z-order comment below) — replacing the array wholesale would detach every
+        // one of them. `insertSublayer:atIndex:` has the same problem from the other direction: an
+        // index computed from `new_group_order` alone is an index into a *paint-only* sequence, not
+        // into the real (paint + native) array. Re-adding in order sidesteps both — AppKit moves an
+        // already-attached sublayer to the top of the array rather than duplicating it, so a plain
+        // ordered pass reproduces `new_group_order`'s relative order at the top of whatever native
+        // layers are already interleaved below.
+        let group_order_changed = state.group_order != new_group_order;
+        if group_order_changed {
+            for id in &new_group_order {
+                if let Some(container) = state.group_layers.get(id) {
+                    crate::render::stats::bump(|s| s.add_sublayer_calls += 1);
+                    layer.addSublayer(container);
+                }
+            }
+            state.group_order = new_group_order;
+        }
+        let native_order_changed = state.native_order != new_native_order;
+        if native_order_changed {
+            state.native_order = new_native_order;
+        }
+        drop(state);
         self.ivars()
             .native_containers
             .borrow_mut()
@@ -640,47 +741,70 @@ impl TreeHostView {
             .native_owner_ids
             .borrow_mut()
             .retain(|identity, _| live_native_controls.contains(identity));
-        self.ivars()
-            .group_layers
-            .borrow_mut()
-            .retain(|id, container| {
-                if live_group_ids.contains(id) {
-                    true
-                } else {
-                    container.removeFromSuperlayer();
-                    false
+        // A repainted `RenderGroup` container whose *order* moved above (`group_order_changed`)
+        // just moved back to the front of `root_layer`'s sublayers (see the Z-order repair comment
+        // above). A native leaf's own island, though, is only ever `host.addSubview`ed once, the
+        // first time it appears (`NativeIslandHost::attach_island`'s `is_new` guard in
+        // `replay_commands`) — so a paint reorder would otherwise stack a paint layer right back on
+        // top of a native control that didn't move, hiding it, even though the control itself is
+        // still correctly laid out and attached. Run this restore loop only when paint topology
+        // could plausibly have shifted (`group_order_changed`) or the native controls themselves
+        // did (`native_order_changed`, e.g. one was added/removed/reordered this pass) — a static
+        // UI's steady-state relayout takes neither branch, so `addSubview` is called zero times.
+        // Iterating `new_native_order` (rather than the old `native_containers.values()`, a
+        // `HashMap` whose iteration order was never actually deterministic) also fixes a latent
+        // bug: the relative Z-order among multiple native controls used to be randomized every
+        // pass instead of following paint traversal order like every other leaf here does.
+        if group_order_changed || native_order_changed {
+            let containers = self.ivars().native_containers.borrow();
+            for identity in &self.ivars().replay_state.borrow().native_order {
+                if let Some(container) = containers.get(identity) {
+                    crate::render::stats::bump(|s| s.subview_added += 1);
+                    self.addSubview(container);
                 }
-            });
-        self.ivars()
-            .group_layer_cache_keys
-            .borrow_mut()
-            .retain(|id, _| live_group_ids.contains(id));
-        self.ivars()
-            .group_native_controls
-            .borrow_mut()
-            .retain(|id, _| live_group_ids.contains(id));
-        self.ivars()
-            .group_image_ids
-            .borrow_mut()
-            .retain(|id, _| live_group_ids.contains(id));
-        self.ivars()
-            .group_vector_image_ids
-            .borrow_mut()
-            .retain(|id, _| live_group_ids.contains(id));
-        // Every repainted `RenderGroup` container above just moved back to the front of
-        // `root_layer`'s sublayers (`replay_group`'s own doc comment on why: re-`addSublayer`ing
-        // an already-attached container is what keeps *paint* z-order correct across a mix of
-        // rebuilt and cache-hit groups). A native leaf's own island, though, is only ever
-        // `host.addSubview`ed once, the first time it appears (`replay_commands`' `is_new` guard)
-        // — so after any later pass repaints a sibling paint layer (e.g. a themed, now-opaque
-        // `window_background`/`layout_background`), that paint layer ends up stacked back on top
-        // of every native control, hiding it, even though the control itself is still correctly
-        // laid out and attached. Re-adding every still-live native container here brings it back
-        // to the front of `self`'s subviews (AppKit moves an already-attached subview to the top
-        // of the z-order rather than duplicating it), keeping native controls visually above all
-        // painted content on every pass, not just the first.
-        for container in self.ivars().native_containers.borrow().values() {
-            self.addSubview(container);
+            }
+        }
+
+        // Cheap only relative to a `debug_assertions`/`render-stats` build that already pays for
+        // `render::stats` bumps throughout this pass — a release build with neither never takes
+        // this branch, so the `task_info` syscall and cache walk `record_memory_stats` does never
+        // run there. See that method's own doc comment for why it isn't unconditional.
+        #[cfg(any(test, debug_assertions, feature = "render-stats"))]
+        {
+            self.record_memory_stats();
+            // Manual, opt-in observation point for the numbers `record_memory_stats` populates —
+            // there is otherwise no way to read `render::stats::snapshot()` from outside the
+            // process. `ELWINDUI_RENDER_STATS=1 cargo run -p <example>` prints one JSON-ish line
+            // per relayout pass; see `docs/status/implementation_status.md` §9 for how this feeds
+            // the AppKit render-optimization work's per-step measurement table.
+            if std::env::var_os("ELWINDUI_RENDER_STATS").is_some() {
+                let s = crate::render::stats::snapshot();
+                eprintln!(
+                    "elwindui-render-stats groups_visited={} groups_rebuilt={} groups_cache_hit={} \
+                     groups_updated_in_place={} layers_created={} layers_removed={} \
+                     add_sublayer_calls={} subview_added={} cgpaths_created={} cgcolors_created={} \
+                     text_layers_created={} attributed_strings_created={} setter_calls={} \
+                     setter_calls_skipped={} image_cache_bytes={} vector_raster_cache_bytes={} \
+                     process_footprint_bytes={}",
+                    s.groups_visited,
+                    s.groups_rebuilt,
+                    s.groups_cache_hit,
+                    s.groups_updated_in_place,
+                    s.layers_created,
+                    s.layers_removed,
+                    s.add_sublayer_calls,
+                    s.subview_added,
+                    s.cgpaths_created,
+                    s.cgcolors_created,
+                    s.text_layers_created,
+                    s.attributed_strings_created,
+                    s.setter_calls,
+                    s.setter_calls_skipped,
+                    s.image_cache_bytes,
+                    s.vector_raster_cache_bytes,
+                    s.process_footprint_bytes,
+                );
+            }
         }
     }
 
@@ -703,5 +827,58 @@ impl TreeHostView {
             .borrow()
             .get(&identity)
             .copied()
+    }
+}
+
+/// The real, production `NativeIslandHost` — see that trait's own doc comment for why the replay
+/// pass needs nothing else from a live view.
+impl NativeIslandHost for TreeHostView {
+    fn island(&self, identity: usize, owner_id: u64) -> (Retained<NSView>, bool) {
+        let mut containers = self.ivars().native_containers.borrow_mut();
+        if let Some(container) = containers.get(&identity) {
+            (container.clone(), false)
+        } else {
+            let container = NSView::new(mtm());
+            containers.insert(identity, container.clone());
+            self.ivars()
+                .native_owner_ids
+                .borrow_mut()
+                .insert(identity, owner_id);
+            (container, true)
+        }
+    }
+
+    fn attach_island(&self, container: &NSView, nsview: &NSView) {
+        self.addSubview(container);
+        container.addSubview(nsview);
+    }
+}
+
+impl TreeHostView {
+    /// Populates `render::stats::RenderStats`'s memory fields (`image_cache_bytes`/
+    /// `vector_raster_cache_bytes`/`process_footprint_bytes`) from this host's current caches and
+    /// the process's own `phys_footprint`. Called from `relayout_inner` under the same
+    /// `cfg(any(test, debug_assertions, feature = "render-stats"))` gate as every other
+    /// `render::stats` counter, so a plain release build (no feature) never pays for the
+    /// `task_info` syscall or the `O(cache size)` walk this does — see that call site.
+    pub(crate) fn record_memory_stats(&self) {
+        let state = self.ivars().replay_state.borrow();
+        let image_cache_bytes: u64 = state
+            .image_cache
+            .values()
+            .map(|image| crate::render::cgimage_bytes(image))
+            .sum();
+        let vector_raster_cache_bytes: u64 = state
+            .vector_raster_cache
+            .values()
+            .map(|(_, _, _, image)| crate::render::cgimage_bytes(image))
+            .sum();
+        drop(state);
+        let process_footprint_bytes = crate::render::stats::phys_footprint_bytes();
+        crate::render::stats::bump(|s| {
+            s.image_cache_bytes = image_cache_bytes;
+            s.vector_raster_cache_bytes = vector_raster_cache_bytes;
+            s.process_footprint_bytes = process_footprint_bytes;
+        });
     }
 }

@@ -19,8 +19,44 @@
 //! miss those inner layers. See `host::TreeHostView::backing_scale_factor` for where the
 //! authoritative scale value comes from.
 
+use objc2::rc::Retained;
 use objc2_core_foundation::CGFloat;
-use objc2_quartz_core::CALayer;
+use objc2_foundation::NSString;
+use objc2_quartz_core::{CALayer, CATransaction};
+
+thread_local! {
+    static PAINT_LAYER_NAME: Retained<NSString> = NSString::from_str("elwindui-paint");
+}
+
+/// The `NSString` every hand-built layer in this backend names itself with, memoized per thread
+/// instead of allocated fresh (`NSString::from_str`) at each of its ~15 creation sites, all of
+/// which pass the same literal.
+pub(crate) fn paint_layer_name() -> Retained<NSString> {
+    PAINT_LAYER_NAME.with(|name| name.clone())
+}
+
+/// Suppresses Core Animation's implicit (default ~0.25s) property animations for the duration of
+/// one render synchronization pass. Every `setFrame`/`addSublayer`/`setPath`/`setString`/etc. this
+/// backend issues outside this guard runs inside AppKit's own ambient transaction and therefore
+/// animates implicitly — harmless for a genuinely new value, but a visible "smear" on every
+/// no-op-content, layout-only relayout (a window resize, a theme repaint) where nothing the user
+/// asked to animate actually changed. Always `Drop`-based, never a bare `begin()`/`commit()` pair,
+/// because the caller (`TreeHostView::relayout_inner`) has several early `return`s.
+pub(crate) struct ImplicitAnimationGuard;
+
+impl ImplicitAnimationGuard {
+    pub(crate) fn begin() -> Self {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        Self
+    }
+}
+
+impl Drop for ImplicitAnimationGuard {
+    fn drop(&mut self) {
+        CATransaction::commit();
+    }
+}
 
 /// Sets `layer`'s `contentsScale` to `scale`, and recursively does the same for its mask and
 /// every sublayer (and their own masks and sublayers, transitively).
@@ -52,6 +88,7 @@ pub(crate) fn set_contents_scale_recursive(layer: &CALayer, scale: CGFloat) {
 /// harness, which never attaches to a real window) stamps `1.0` onto `child` — a no-op there by
 /// construction, which is what keeps every existing golden byte-identical.
 pub(crate) fn add_sublayer_scaled(parent: &CALayer, child: &CALayer) {
+    super::stats::bump(|s| s.add_sublayer_calls += 1);
     parent.addSublayer(child);
     set_contents_scale_recursive(child, parent.contentsScale());
 }
@@ -61,6 +98,58 @@ pub(crate) fn add_sublayer_scaled(parent: &CALayer, child: &CALayer) {
 pub(crate) fn set_mask_scaled(layer: &CALayer, mask: &CALayer) {
     unsafe { layer.setMask(Some(mask)) };
     set_contents_scale_recursive(mask, layer.contentsScale());
+}
+
+/// Every Core Animation property setter is a mutation Core Animation itself has to track (and,
+/// absent `ImplicitAnimationGuard`, animate) even when the new value is byte-identical to the old
+/// one — these four helpers skip the underlying setter whenever that's the case. Called every
+/// pass on every group's persistent container (`host::replay::replay_group`), so a static UI's
+/// steady-state relayout should hit the skip branch every time and touch nothing.
+pub(crate) fn set_contents_scale_if_changed(layer: &CALayer, scale: CGFloat) {
+    if layer.contentsScale() != scale {
+        crate::render::stats::bump(|s| s.setter_calls += 1);
+        layer.setContentsScale(scale);
+    } else {
+        crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
+    }
+}
+
+/// See `set_contents_scale_if_changed`'s own doc comment. Used for a group container's own
+/// `bounds` (always `(0, 0, root_layer.bounds().size)` — see `replay_group`'s own doc comment on
+/// why a group container carries its absolute origin via `position` rather than `frame`), which
+/// only actually changes on a window resize.
+pub(crate) fn set_bounds_if_changed(layer: &CALayer, bounds: objc2_core_foundation::CGRect) {
+    if layer.bounds() != bounds {
+        crate::render::stats::bump(|s| s.setter_calls += 1);
+        layer.setBounds(bounds);
+    } else {
+        crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
+    }
+}
+
+/// See `set_contents_scale_if_changed`'s own doc comment. Used for a group container's own
+/// `position` (its absolute origin) — the one property among the four here that changes often in
+/// practice (any layout change moves it), which is exactly the case Step 6 of the AppKit render
+/// optimization work introduced this for: a `setPosition` alone, with no `CGPath` rebuild, is now
+/// enough to reflect a scrolled/moved group.
+pub(crate) fn set_position_if_changed(layer: &CALayer, position: objc2_core_foundation::CGPoint) {
+    if layer.position() != position {
+        crate::render::stats::bump(|s| s.setter_calls += 1);
+        layer.setPosition(position);
+    } else {
+        crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
+    }
+}
+
+/// See `set_contents_scale_if_changed`'s own doc comment. Used for a group container's own
+/// `hidden` state (`ClipRelation::Outside` — see that enum's own doc comment).
+pub(crate) fn set_hidden_if_changed(layer: &CALayer, hidden: bool) {
+    if layer.isHidden() != hidden {
+        crate::render::stats::bump(|s| s.setter_calls += 1);
+        layer.setHidden(hidden);
+    } else {
+        crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
+    }
 }
 
 #[cfg(test)]

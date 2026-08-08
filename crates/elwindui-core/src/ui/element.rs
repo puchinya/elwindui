@@ -21,8 +21,27 @@ static NEXT_RENDER_GROUP_ID: AtomicU64 = AtomicU64::new(1);
 /// host (see e.g. `elwindui-backend-appkit`'s `AppKitRelayoutHost`) — a strong one would create a
 /// reference cycle, since the host itself holds the tree that (via `UIElement::invalidate_host`
 /// on that tree's root) holds this `Rc<dyn RelayoutHost>` right back.
+/// How much of the layout pipeline a change invalidates. Ordered weakest -> strongest
+/// (`#[derive(PartialOrd, Ord)]` follows declaration order) so a host coalescing several
+/// `request_relayout` calls within one runloop turn can just keep the `max` of what it's seen —
+/// see e.g. `elwindui-backend-appkit`'s `AppKitRelayoutHost`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum InvalidationKind {
+    /// Paint only: this element's `RenderGroup` commands must be re-recorded, but its measured
+    /// and arranged geometry are still valid, so a host may skip re-running layout entirely
+    /// (`layout_root`) and go straight to reconcile + replay. Nothing today produces this kind
+    /// except `UIElement::invalidate_render` — see that method's own doc comment on why
+    /// `invalidate()`'s many existing call sites are not simply retargeted to it.
+    #[default]
+    Render,
+    /// Where this element sits changed, but not how big it wants to be.
+    Arrange,
+    /// This element's desired size may have changed.
+    Measure,
+}
+
 pub trait RelayoutHost {
-    fn request_relayout(&self, dirty_group_id: u64);
+    fn request_relayout(&self, dirty_group_id: u64, kind: InvalidationKind);
 }
 
 /// The `FocusHost` counterpart to `RelayoutHost` — registered the same way (`UIElement::focus_host`
@@ -550,8 +569,22 @@ impl UIElement {
     }
     /// WPF's `UIElement.InvalidateVisual`: invalidates arrange state and asks the host for an
     /// asynchronous layout/render pass. The pass records this Visual's RenderGroup again.
+    ///
+    /// Deliberately still an alias for `invalidate_arrange` rather than `invalidate_render` —
+    /// `invalidate()` has many existing call sites across this crate and both backends that have
+    /// never been individually audited for whether the change they guard could affect
+    /// `measure_override`/`arrange_override` (font/text/size/margin/visibility changes must stay
+    /// `Arrange` or `Measure`; only a provably paint-only change is safe to migrate to
+    /// `invalidate_render`). See `InvalidationKind::Render`'s own doc comment.
     fn invalidate(&self) {
         self.invalidate_arrange();
+    }
+    /// Paint-only invalidation: this element's `RenderGroup` commands must be re-recorded, but
+    /// nothing about its measured or arranged geometry is in question, so a host may skip
+    /// `layout_root` entirely for this pass. See `InvalidationKind::Render`'s own doc comment on
+    /// why callers must self-audit before using this instead of `invalidate()`.
+    fn invalidate_render(&self) {
+        request_relayout(self.as_ui_element(), InvalidationKind::Render);
     }
     /// WinUI3's `UIElement.InvalidateArrange` — marks this element's `arranged_width`/
     /// `arranged_height`/`arranged_offset` `None` (to be recomputed by the next `arrange` pass) and
@@ -561,7 +594,7 @@ impl UIElement {
         self.as_ui_element().arranged_width.set(None);
         self.as_ui_element().arranged_height.set(None);
         self.as_ui_element().arranged_offset.set(None);
-        request_relayout(self.as_ui_element());
+        request_relayout(self.as_ui_element(), InvalidationKind::Arrange);
     }
     /// WinUI3's `UIElement.InvalidateMeasure` — marks this element's `measured_size` *and*
     /// `arranged_width`/`arranged_height`/`arranged_offset` all `None` (a changed desired size
@@ -573,7 +606,7 @@ impl UIElement {
         self.as_ui_element().arranged_width.set(None);
         self.as_ui_element().arranged_height.set(None);
         self.as_ui_element().arranged_offset.set(None);
-        request_relayout(self.as_ui_element());
+        request_relayout(self.as_ui_element(), InvalidationKind::Measure);
     }
     /// Registers a handler for a `#[routed]`-tagged field named `name` on this element — see this
     /// struct's own `routed_handlers` doc comment for the erasure convention.
@@ -672,7 +705,12 @@ impl UIElement {
             });
         *self.as_ui_element().theme_context.borrow_mut() = context;
         match impact {
-            ThemeChangeImpact::Paint => self.invalidate(),
+            // `ThemeChangeImpact::Paint` is `set_theme_context`'s own guarantee that a themed
+            // brush/paint value changed and nothing that could affect `measure_override`/
+            // `arrange_override` did — the sibling `Measure` branch below is what themes route
+            // through instead when that's not true. Safe to use `invalidate_render` here without
+            // the wider per-call-site audit `InvalidationKind::Render`'s own doc comment asks for.
+            ThemeChangeImpact::Paint => self.invalidate_render(),
             ThemeChangeImpact::Measure | ThemeChangeImpact::NativeStyle => {
                 self.invalidate_measure()
             }
@@ -830,7 +868,7 @@ impl UIElement {
 /// (see `UIElement::invalidate_host`), asks it for a fresh layout pass. Takes `&UIElement`
 /// (not `&dyn UIElement`) so the caller — a default trait method, where `Self` isn't known to be
 /// `Sized`. A no-op if the Visual root has no registered host (e.g. a standalone test tree).
-pub(crate) fn request_relayout(base: &UIElement) {
+pub(crate) fn request_relayout(base: &UIElement, kind: InvalidationKind) {
     let mut current = base
         .visual_parent
         .borrow()
@@ -847,7 +885,7 @@ pub(crate) fn request_relayout(base: &UIElement) {
         current = element.visual_parent();
     }
     if let Some(host) = host {
-        host.request_relayout(base.render_group_id);
+        host.request_relayout(base.render_group_id, kind);
     }
 }
 
@@ -880,7 +918,7 @@ mod tests {
             calls: Rc<RefCell<usize>>,
         }
         impl RelayoutHost for CountingHost {
-            fn request_relayout(&self, _dirty_group_id: u64) {
+            fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
                 *self.calls.borrow_mut() += 1;
             }
         }
@@ -916,5 +954,76 @@ mod tests {
         let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
         leaf.invalidate();
         root.invalidate_arrange();
+    }
+
+    #[test]
+    fn invalidate_arrange_and_measure_send_their_own_kind() {
+        struct KindRecordingHost {
+            kinds: Rc<RefCell<Vec<InvalidationKind>>>,
+        }
+        impl RelayoutHost for KindRecordingHost {
+            fn request_relayout(&self, _dirty_group_id: u64, kind: InvalidationKind) {
+                self.kinds.borrow_mut().push(kind);
+            }
+        }
+
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        let kinds = Rc::new(RefCell::new(Vec::new()));
+        root.as_ui_element()
+            .set_invalidate_host(Some(Rc::new(KindRecordingHost {
+                kinds: Rc::clone(&kinds),
+            })));
+
+        leaf.invalidate_render();
+        leaf.invalidate_arrange();
+        leaf.invalidate_measure();
+        leaf.invalidate(); // still an `invalidate_arrange` alias, not `Render` — see its own doc comment
+
+        assert_eq!(
+            *kinds.borrow(),
+            vec![
+                InvalidationKind::Render,
+                InvalidationKind::Arrange,
+                InvalidationKind::Measure,
+                InvalidationKind::Arrange,
+            ]
+        );
+    }
+
+    #[test]
+    fn invalidate_render_leaves_measured_and_arranged_state_untouched() {
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        // No host needed — `invalidate_render` clearing nothing is a property of the element
+        // itself, independent of whether a host is registered to receive the request.
+        let _ = root;
+
+        leaf.as_ui_element().measured_size.set(Some(Size {
+            width: 10.0,
+            height: 20.0,
+        }));
+        leaf.as_ui_element().arranged_width.set(Some(10.0));
+        leaf.as_ui_element().arranged_height.set(Some(20.0));
+        leaf.as_ui_element()
+            .arranged_offset
+            .set(Some(Point { x: 0.0, y: 0.0 }));
+
+        leaf.invalidate_render();
+
+        assert!(leaf.as_ui_element().measured_size.get().is_some());
+        assert!(leaf.as_ui_element().arranged_width.get().is_some());
+        assert!(leaf.as_ui_element().arranged_height.get().is_some());
+        assert!(leaf.as_ui_element().arranged_offset.get().is_some());
+    }
+
+    #[test]
+    fn invalidation_kind_orders_render_weakest_and_measure_strongest() {
+        assert!(InvalidationKind::Render < InvalidationKind::Arrange);
+        assert!(InvalidationKind::Arrange < InvalidationKind::Measure);
+        assert_eq!(
+            InvalidationKind::Render.max(InvalidationKind::Measure),
+            InvalidationKind::Measure
+        );
     }
 }

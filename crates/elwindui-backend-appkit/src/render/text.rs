@@ -166,6 +166,7 @@ fn try_named_font(
 /// `"Yu Gothic UI"`, and this keeps that promise on the AppKit side too: whatever `NSFont` AppKit's
 /// own Dynamic Type / language resolution picks is used verbatim.
 pub(crate) fn ns_font(style: &ComputedTextStyle) -> Retained<NSFont> {
+    super::stats::bump(|s| s.ns_fonts_created += 1);
     let size: CGFloat = if style.font_size.is_finite() && style.font_size > 0.0 {
         style.font_size as CGFloat
     } else {
@@ -275,6 +276,7 @@ pub(crate) fn attributed_string(
     foreground: Option<&Brush>,
     alignment: TextAlignment,
 ) -> Retained<NSAttributedString> {
+    super::stats::bump(|s| s.attributed_strings_created += 1);
     let attrs = text_attributes(style, foreground, alignment);
     unsafe {
         NSAttributedString::initWithString_attributes(

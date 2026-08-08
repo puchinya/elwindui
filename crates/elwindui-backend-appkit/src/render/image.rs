@@ -139,6 +139,7 @@ pub(crate) fn build_image_container_layer(
     let has_identity_linear_transform =
         world.m11 == 1.0 && world.m12 == 0.0 && world.m21 == 0.0 && world.m22 == 1.0;
     if !needs_clip && has_identity_linear_transform {
+        super::stats::bump(|s| s.layers_created += 1);
         let image_layer = CALayer::new();
         image_layer.setBounds(objc2_core_foundation::CGRect::new(
             objc2_core_foundation::CGPoint::new(0.0, 0.0),
@@ -167,6 +168,7 @@ pub(crate) fn build_image_container_layer(
         return Some(image_layer);
     }
 
+    super::stats::bump(|s| s.layers_created += 2); // container + its image_layer child below
     let container = CALayer::new();
     container.setMasksToBounds(true);
     container.setBounds(objc2_core_foundation::CGRect::new(
@@ -221,6 +223,13 @@ pub(crate) fn resolve_cgimage(
     let decoded = decode_cgimage(image)?;
     cache.insert(key, decoded.clone());
     Some(decoded)
+}
+
+/// Approximate resident size of `image`'s backing store — `height * bytesPerRow`, the same figure
+/// Core Graphics itself allocates for an uncompressed bitmap. Used to total up `image_cache`'s own
+/// memory footprint for `render::stats::RenderStats::image_cache_bytes`.
+pub(crate) fn cgimage_bytes(image: &CGImage) -> u64 {
+    CGImage::height(Some(image)) as u64 * CGImage::bytes_per_row(Some(image)) as u64
 }
 
 /// Releases the boxed pixel buffer `with_data` was given ownership of — `CGDataProvider::with_data`

@@ -3,7 +3,8 @@
 
 use crate::render::{
     add_shape_layer, add_sublayer_scaled, apply_stroke, build_image_container_layer,
-    color_to_cgcolor, gradient_unit_point, path_to_cgpath, resolve_cgimage, set_mask_scaled,
+    color_to_cgcolor, gradient_unit_point, paint_layer_name, path_to_cgpath, resolve_cgimage,
+    set_mask_scaled,
 };
 use elwindui_core::base::{AffineTransform, Point, Rect};
 use elwindui_core::graphics::{
@@ -15,7 +16,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::{CFRetained, CGAffineTransform, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{NSNumber, NSString};
+use objc2_foundation::NSNumber;
 use objc2_quartz_core::{
     CAGradientLayer, CALayer, CAShapeLayer, kCAFillRuleEvenOdd, kCAFillRuleNonZero,
     kCAGradientLayerAxial, kCAGradientLayerRadial,
@@ -287,7 +288,7 @@ pub(crate) fn render_stroke(
     };
     let cg_path = path_to_cgpath(world, path);
     let shape_layer = CAShapeLayer::new();
-    shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+    shape_layer.setName(Some(&paint_layer_name()));
     shape_layer.setPath(Some(&cg_path));
     shape_layer.setFillColor(None);
     apply_stroke(&shape_layer, &brush, &stroke.style, local_bounds);
@@ -314,7 +315,7 @@ pub(crate) fn add_gradient_shape_layer(
     opacity: f32,
 ) {
     let gradient_layer = CAGradientLayer::new();
-    gradient_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+    gradient_layer.setName(Some(&paint_layer_name()));
     let ca_layer: &CALayer = &gradient_layer;
     ca_layer.setBounds(CGRect::new(
         CGPoint::new(0.0, 0.0),
@@ -472,7 +473,7 @@ pub(crate) fn add_pattern_shape_layer(
 
     let tile_world = world.concat(&pattern.transform);
     let wrapper = CALayer::new();
-    wrapper.setName(Some(&NSString::from_str("elwindui-paint")));
+    wrapper.setName(Some(&paint_layer_name()));
     wrapper.setBounds(CGRect::new(
         CGPoint::new(0.0, 0.0),
         CGSize::new(grid_local.width as f64, grid_local.height as f64),

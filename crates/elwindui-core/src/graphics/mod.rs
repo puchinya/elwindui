@@ -7,6 +7,7 @@
 mod brush;
 mod color;
 mod command;
+mod command_fingerprint;
 mod context;
 mod image;
 mod path;
@@ -24,6 +25,7 @@ pub use brush::{
 };
 pub use color::{Color, ParseColorError};
 pub use command::{Clip, RenderCommand, TextAlignment};
+pub use command_fingerprint::{CommandFingerprint, CommandKind};
 pub use context::{Fill, RenderContext, SaveGuard, Stroke};
 pub use image::{
     AlphaMode, BackendImageHandle, Image, ImageData, ImageDrawOptions, ImageError, ImageFit,

@@ -3,13 +3,13 @@
 //! mask/filter region cannot blow up memory.
 
 use crate::render::image::release_boxed_pixels;
+use crate::render::paint_layer_name;
 use elwindui_core::base::{AffineTransform, Point, Rect};
 use elwindui_core::graphics::{VectorImage, VectorNode};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::{CFRetained, CGAffineTransform, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo};
-use objc2_foundation::NSString;
 use objc2_quartz_core::CALayer;
 use std::collections::HashMap;
 
@@ -275,7 +275,7 @@ pub(crate) fn place_offscreen_image(
     opacity: f32,
 ) -> Retained<CALayer> {
     let layer = CALayer::new();
-    layer.setName(Some(&NSString::from_str("elwindui-paint")));
+    layer.setName(Some(&paint_layer_name()));
     layer.setBounds(CGRect::new(
         CGPoint::new(0.0, 0.0),
         CGSize::new(local_rect.width as f64, local_rect.height as f64),

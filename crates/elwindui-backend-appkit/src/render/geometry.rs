@@ -196,13 +196,34 @@ pub(crate) fn is_pure_translation(t: &elwindui_core::base::AffineTransform) -> b
         && (t.m22 - 1.0).abs() < 1e-4
 }
 
+thread_local! {
+    /// Memoizes `color_to_cgcolor`'s own result, keyed by the raw RGBA bytes rather than
+    /// `elwindui_core::graphics::Color` itself (which derives `Eq` but not `Hash`) — this is a
+    /// small, backend-local cache, so avoiding a core-crate change for it is worth the one extra
+    /// tuple destructure. Fill/stroke brushes are drawn from a small, repeated palette in
+    /// practice (a handful of theme colors), so this collapses what would otherwise be a fresh
+    /// `CGColor` allocation on every single shape command into one allocation per distinct color.
+    static CGCOLOR_CACHE: std::cell::RefCell<
+        std::collections::HashMap<(u8, u8, u8, u8), objc2_core_foundation::CFRetained<CGColor>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 pub(crate) fn color_to_cgcolor(
     color: elwindui_core::graphics::Color,
 ) -> objc2_core_foundation::CFRetained<CGColor> {
-    CGColor::new_generic_rgb(
-        color.r as f64 / 255.0,
-        color.g as f64 / 255.0,
-        color.b as f64 / 255.0,
-        color.a as f64 / 255.0,
-    )
+    let key = (color.r, color.g, color.b, color.a);
+    CGCOLOR_CACHE.with(|cache| {
+        if let Some(existing) = cache.borrow().get(&key) {
+            return existing.clone();
+        }
+        super::stats::bump(|s| s.cgcolors_created += 1);
+        let created = CGColor::new_generic_rgb(
+            color.r as f64 / 255.0,
+            color.g as f64 / 255.0,
+            color.b as f64 / 255.0,
+            color.a as f64 / 255.0,
+        );
+        cache.borrow_mut().insert(key, created.clone());
+        created
+    })
 }

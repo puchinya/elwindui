@@ -10,19 +10,30 @@
 //! Submodules are private and re-exported explicitly below, following
 //! `elwindui_core::graphics`'s own `mod.rs` convention.
 
+mod batch;
+mod fastpath;
 mod geometry;
 mod image;
 mod layer;
 mod paint;
 mod path;
+pub(crate) mod stats;
 mod text;
 mod vector;
 
+pub(crate) use batch::try_batch_fills;
+pub(crate) use fastpath::{try_fast_path, try_update_fast_path};
 pub(crate) use geometry::{
     clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, parse_color, transform_point,
 };
-pub(crate) use image::{build_image_container_layer, fitted_image_rect, resolve_cgimage};
-pub(crate) use layer::{add_sublayer_scaled, set_mask_scaled};
+pub(crate) use image::{
+    build_image_container_layer, cgimage_bytes, fitted_image_rect, resolve_cgimage,
+};
+pub(crate) use layer::{
+    ImplicitAnimationGuard, add_sublayer_scaled, paint_layer_name, set_bounds_if_changed,
+    set_contents_scale_if_changed, set_hidden_if_changed, set_mask_scaled,
+    set_position_if_changed,
+};
 pub(crate) use paint::{
     GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, first_gradient_stop_color,
     gradient_unit_point, try_add_gradient_fill_layer, try_add_image_fill_layer,

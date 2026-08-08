@@ -202,7 +202,7 @@
 
 バックエンド固有の追加モジュール:
 
-- appkit: `render/`は`geometry.rs` `image.rs` `layer.rs` `paint.rs` `path.rs` `text.rs` `vector/`。`testsupport/`にgolden-imageテスト基盤
+- appkit: `render/`は`batch.rs` `fastpath.rs` `geometry.rs` `image.rs` `layer.rs` `paint.rs` `path.rs` `stats.rs` `text.rs` `vector/`(`fastpath.rs`/`batch.rs`/`stats.rs`はAppKit render optimization work #46で追加——`fastpath.rs`は単純な塗り/線をCGPathなしの`CALayer`プロパティへ、`batch.rs`は同色矩形の連続を1枚の`CAShapeLayer`へ、`stats.rs`は`cfg(test)`/`debug_assertions`/`render-stats`featureでのみ有効なCA tree変更・メモリ計測カウンタ)。`testsupport/`にgolden-imageテスト基盤
 - winui3: `render/`は`composition/` `text.rs` `vector.rs` `win2d.rs`。`bindings.rs`が`build.rs`生成のWinRT projection
 
 **プラットフォーム非依存ロジックの`elwindui-core`への集約**: `base::Rect::union`/`intersect`、`graphics::fitted_image_rect` + `impl From<Stretch> for ImageFit`、`input::ShortcutRegistry::collect_from_tree`、`ui::ChildList<T>`(`ListExt`実装の裏側の記憶域)。

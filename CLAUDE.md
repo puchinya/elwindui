@@ -19,6 +19,19 @@ Use this workflow only for requests expected to modify this repository. Do not c
 - Search for an existing relevant Issue before creating a new one.
 - Every repository-changing task must be associated with one GitHub Issue.
 - Create or locate the Issue before modifying source code or documentation.
+- When a feature has backend-specific implementation or verification work that can progress
+  independently, keep shared API/specification decisions in the parent Issue and create one
+  sub-issue per in-scope backend before changing that backend. Do not create empty sub-issues for
+  explicitly out-of-scope backends; record the exclusion and reason in the parent instead.
+- Treat each backend sub-issue as its own lifecycle unit: give it acceptance criteria and one
+  `phase:*` label, name its branch from the sub-issue number, close it from its associated Pull
+  Request, and keep the parent Issue's sub-issue roll-up current. Close the parent only after every
+  required backend sub-issue is merged and the shared acceptance criteria are satisfied.
+- Prefer one Pull Request per backend sub-issue. A single atomic Pull Request may close multiple
+  backend sub-issues only when the user approves the combined scope and the Pull Request explains
+  why the shared change cannot be reviewed or landed independently. If backend-specific work is
+  discovered while implementing an older broad Issue, create and link the sub-issue before
+  continuing and leave only the roll-up summary in the parent.
 - For Rust work, assign the Issue to the GitHub Milestone whose title exactly matches the root `Cargo.toml` version. Prefer `[workspace.package].version`, otherwise `[package].version`. Do not add a `v` prefix. Create the Milestone if it does not exist. Use `scripts/agent/ensure-version-milestone.sh <issue-number>` on macOS/Linux or `scripts/agent/ensure-version-milestone.ps1 <issue-number>` in PowerShell.
 - If an exact-title Milestone exists but is closed, do not create a duplicate or reopen it silently; report the inconsistency for a release-version decision.
 - For source-code changes, create a dedicated branch named `feature/<issue-number>-<short-slug>` from the current remote default branch before editing. Never edit source code directly on the default branch. Use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` on macOS/Linux or `scripts/agent/start-feature-branch.ps1 <issue-number> <short-description>` in PowerShell.
@@ -88,7 +101,7 @@ After approval, update the Issue with the approved requirements, non-goals, desi
 
 ## Project state
 
-This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to native OS toolkit backends (WinUI 3 / AppKit / GTK4). This is a Cargo workspace (`crates/*` + `examples/*`, no root `src/`) with a real, substantial implementation — not just a spec: `elwindui-codegen` (the compiler backing three Rust proc-macros — `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` — the only supported input form), `elwindui-core` (the `UIElement` runtime), `elwindui-macros`, `elwindui-i18n`, `elwindui-languageserver` (operates on a single `.rs` file at a time), and `elwindui-backend-appkit` (built, run, and screenshot-verified on this machine) are all real. `elwindui-backend-winui3` has code but is unverified (no Windows environment); `elwindui-backend-gtk4` and hot reload (`elwindui-hotreload`) are stubs; there is no preview-tool crate at all yet. See `docs/status/implementation_status.md` for the full, regularly-stale-prone breakdown of what's implemented vs. still just spec — check it, and re-verify against `crates/` directly, before assuming a feature described in the spec docs actually exists.
+This repo is **elwindui**, the implementation project for **ElwindUIL**: a declarative, Rust-flavored layout DSL for building GUIs that compile to native OS toolkit backends (WinUI 3 / AppKit / GTK4). This is a Cargo workspace (`crates/*` + `examples/*`, no root `src/`) with a real, substantial implementation — not just a spec: `elwindui-codegen` (the compiler backing three Rust proc-macros — `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` — the only supported input form), `elwindui-core` (the `UIElement` runtime), `elwindui-macros`, `elwindui-i18n`, `elwindui-languageserver` (operates on a single `.rs` file at a time), and `elwindui-backend-appkit` (built, run, and screenshot-verified on this machine) are all real. `elwindui-backend-winui3` has code and selected NativeControls have been built and interaction-tested on Windows, but backend-wide verification remains incomplete; `elwindui-backend-gtk4` and hot reload (`elwindui-hotreload`) are stubs; there is no preview-tool crate at all yet. See `docs/status/implementation_status.md` for the full, regularly-stale-prone breakdown of what's implemented vs. still just spec — check it, and re-verify against `crates/` directly, before assuming a feature described in the spec docs actually exists.
 
 `docs/README.md` is the entry point: it indexes every doc, defines the `docs/specs` (normative spec) /
 `docs/design` (how it is built) / `docs/status` (what actually works today) split, and explains the

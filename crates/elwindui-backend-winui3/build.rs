@@ -13,21 +13,42 @@ fn main() {
         .expect(
             "Microsoft.UI.Xaml.winmd was not found. Restore Microsoft.WindowsAppSDK with NuGet, or set WINDOWS_APP_SDK_WINMD.",
         );
-    assert!(app_sdk.is_file(), "WINDOWS_APP_SDK_WINMD is not a file: {}", app_sdk.display());
+    assert!(
+        app_sdk.is_file(),
+        "WINDOWS_APP_SDK_WINMD is not a file: {}",
+        app_sdk.display()
+    );
 
-    let contract_dir = app_sdk.parent().and_then(std::path::Path::parent).and_then(|lib| {
-        let mut candidates: Vec<_> = std::fs::read_dir(lib).ok()?.flatten().map(|entry| entry.path())
-            .filter(|path| path.is_dir() && path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("uap10.0.")))
-            .collect();
-        candidates.sort();
-        candidates.pop()
-    });
+    let contract_dir = app_sdk
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(|lib| {
+            let mut candidates: Vec<_> = std::fs::read_dir(lib)
+                .ok()?
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_dir()
+                        && path
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with("uap10.0."))
+                })
+                .collect();
+            candidates.sort();
+            candidates.pop()
+        });
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let interop_path = format!("{out_dir}/xaml_interop.rs");
     let out_path = format!("{out_dir}/bindings.rs");
     let interop_warnings = windows_bindgen::bindgen([
-        "--in", "default", "--out", &interop_path, "--no-deps", "--filter",
-        "Windows.UI.Xaml.Interop.TypeKind", "Windows.UI.Xaml.Interop.TypeName",
+        "--in",
+        "default",
+        "--out",
+        &interop_path,
+        "--no-deps",
+        "--filter",
+        "Windows.UI.Xaml.Interop.TypeKind",
+        "Windows.UI.Xaml.Interop.TypeName",
     ]);
     let mut args = vec![
         "--in".to_owned(),
@@ -35,11 +56,14 @@ fn main() {
         "--in".to_owned(),
         app_sdk.to_string_lossy().into_owned(),
     ];
-    for metadata in ["Microsoft.Foundation.winmd", "Microsoft.Graphics.winmd", "Microsoft.UI.winmd"] {
-        if let Some(path) = find_package_contract_winmd(
-            "microsoft.windowsappsdk.interactiveexperiences",
-            metadata,
-        ) {
+    for metadata in [
+        "Microsoft.Foundation.winmd",
+        "Microsoft.Graphics.winmd",
+        "Microsoft.UI.winmd",
+    ] {
+        if let Some(path) =
+            find_package_contract_winmd("microsoft.windowsappsdk.interactiveexperiences", metadata)
+        {
             args.push("--in".to_owned());
             args.push(path.to_string_lossy().into_owned());
         }
@@ -67,15 +91,26 @@ fn main() {
     }
     if let Some(win2d) = std::env::var_os("WIN2D_WINMD")
         .map(PathBuf::from)
-        .or_else(|| find_package_winmd("microsoft.graphics.win2d", "Microsoft.Graphics.Canvas.winmd"))
+        .or_else(|| {
+            find_package_winmd(
+                "microsoft.graphics.win2d",
+                "Microsoft.Graphics.Canvas.winmd",
+            )
+        })
     {
         args.push("--in".to_owned());
         args.push(win2d.to_string_lossy().into_owned());
     }
     if let Some(dir) = contract_dir.clone() {
-        for entry in std::fs::read_dir(dir).expect("read Windows App SDK contracts").flatten() {
+        for entry in std::fs::read_dir(dir)
+            .expect("read Windows App SDK contracts")
+            .flatten()
+        {
             let path = entry.path();
-            if path.extension().is_some_and(|extension| extension == "winmd") {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "winmd")
+            {
                 args.push("--in".to_owned());
                 args.push(path.to_string_lossy().into_owned());
             }
@@ -93,11 +128,38 @@ fn main() {
         .collect();
 
     args.extend([
+        // `windows-bindgen`'s automatic dependency references route every
+        // `Windows.Foundation.Collections` type through `windows-collections`. That companion
+        // crate owns the stock IIterable/IVector types, but observable collections remain in the
+        // `windows` crate; treating the whole namespace as `windows-collections` makes WinUI's
+        // `ItemsControl.Items` unprojectable. Disable the automatic references and reproduce them
+        // with the two split namespaces (plus the equivalent Quaternion/numerics split) explicitly.
+        "--no-deps".to_owned(),
         "--reference".to_owned(),
         "crate,full,Windows.UI.Xaml.Interop".to_owned(),
         "--reference".to_owned(),
+        "windows_future,flat,Windows.Foundation.Async*".to_owned(),
+        "--reference".to_owned(),
+        "windows_future,flat,Windows.Foundation.IAsync*".to_owned(),
+        "--reference".to_owned(),
+        "windows,skip-root,Windows.Foundation.Collections.IObservableVector".to_owned(),
+        "--reference".to_owned(),
+        "windows,skip-root,Windows.Foundation.Collections.IVectorChangedEventArgs".to_owned(),
+        "--reference".to_owned(),
+        "windows,skip-root,Windows.Foundation.Collections.VectorChangedEventHandler".to_owned(),
+        "--reference".to_owned(),
+        "windows,skip-root,Windows.Foundation.Collections.CollectionChange".to_owned(),
+        "--reference".to_owned(),
+        "windows_collections,flat,Windows.Foundation.Collections".to_owned(),
+        "--reference".to_owned(),
+        "windows,skip-root,Windows.Foundation.Numerics.Quaternion".to_owned(),
+        "--reference".to_owned(),
+        "windows_numerics,flat,Windows.Foundation.Numerics".to_owned(),
+        "--reference".to_owned(),
         "windows,skip-root,Windows".to_owned(),
-        "--out".to_owned(), out_path.clone(), "--filter".to_owned(),
+        "--out".to_owned(),
+        out_path.clone(),
+        "--filter".to_owned(),
         "Microsoft.UI.Xaml.IApplicationOverrides".to_owned(),
         "Microsoft.UI.Xaml.LaunchActivatedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Markup.IXamlMetadataProvider".to_owned(),
@@ -127,8 +189,6 @@ fn main() {
         "Microsoft.UI.Xaml.UIElement".to_owned(),
         "Microsoft.UI.Xaml.Window".to_owned(),
         "Microsoft.UI.Xaml.WindowEventArgs".to_owned(),
-        "Windows.Foundation.Collections.IVectorChangedEventArgs".to_owned(),
-        "Windows.Foundation.Collections.CollectionChange".to_owned(),
         "Microsoft.UI.Xaml.Controls.UserControl".to_owned(),
         "Microsoft.UI.Xaml.Controls.Button".to_owned(),
         "Microsoft.UI.Xaml.Controls.Canvas".to_owned(),
@@ -158,8 +218,9 @@ fn main() {
         "Microsoft.UI.Xaml.Style".to_owned(),
         "Microsoft.UI.Xaml.Media.Brush".to_owned(),
         "Microsoft.UI.Xaml.Input.KeyboardAccelerator".to_owned(),
+        "Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Controls.ToolTipService".to_owned(),
-        "Windows.System.VirtualKey".to_owned(),
+        "Microsoft.UI.Xaml.Controls.ToolTip".to_owned(),
         // `CheckBox`/`RadioButton`/`ToggleSwitch` (selection controls). `CheckBox.IsChecked`/
         // `RadioButton.IsChecked` are `Windows.Foundation.IReference<bool>` (nullable — `null`
         // means indeterminate for `CheckBox`), set via `PropertyValue::CreateBoolean(..)?.cast()?`
@@ -167,13 +228,18 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.CheckBox".to_owned(),
         "Microsoft.UI.Xaml.Controls.RadioButton".to_owned(),
         "Microsoft.UI.Xaml.Controls.ToggleSwitch".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.ToggleButton".to_owned(),
         // `Dropdown`. `ComboBox.Items` is an `IObservableVector<IInspectable>` populated with
         // plain `HSTRING`s (via `PropertyValue::CreateString`), the same way `win2d.rs`'s existing
         // `IReference<..>` usage already boxes primitives for a WinRT collection.
         "Microsoft.UI.Xaml.Controls.ComboBox".to_owned(),
+        "Microsoft.UI.Xaml.Controls.ItemsControl".to_owned(),
+        "Microsoft.UI.Xaml.Controls.ItemCollection".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.Selector".to_owned(),
         // `Slider`. `Minimum`/`Maximum`/`Value` are plain `f64`; `ValueChanged` carries the new
         // value directly in its args (no need to read `Value` back off the sender).
         "Microsoft.UI.Xaml.Controls.Slider".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.RangeBase".to_owned(),
         "Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventHandler".to_owned(),
         "Microsoft.UI.Xaml.Controls.ListViewItem".to_owned(),
@@ -303,15 +369,19 @@ fn main() {
                 "windows::Foundation::Numerics::Quaternion",
             ),
     )
-        .expect("write generated WinUI bindings");
-    let interop = std::fs::read_to_string(&interop_path).expect("read generated XAML interop bindings");
+    .expect("write generated WinUI bindings");
+    let interop =
+        std::fs::read_to_string(&interop_path).expect("read generated XAML interop bindings");
     std::fs::write(&interop_path, interop.replacen("#![allow(", "#[allow(", 1))
         .expect("write generated XAML interop bindings");
     copy_win2d_runtime(&out_dir);
     generate_resources_pri(&out_dir);
     build_cpp_app_host(&out_dir, &winmd_inputs);
     if !warnings.is_empty() || !interop_warnings.is_empty() {
-        println!("cargo:warning=WinUI binding generation omitted {} unsupported metadata member(s)", warnings.len());
+        println!(
+            "cargo:warning=WinUI binding generation omitted {} unsupported metadata member(s)",
+            warnings.len()
+        );
     }
     println!("cargo:rustc-env=ELWINDUI_WINUI3_BINDINGS={out_path}");
 }
@@ -326,7 +396,10 @@ fn find_app_sdk_winmd() -> Option<std::path::PathBuf> {
 fn find_package_metadata_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
     let root = std::env::var_os("NUGET_PACKAGES")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages")))?
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
+        })?
         .join(package);
     let mut candidates = Vec::new();
     for version in std::fs::read_dir(root).ok()?.flatten() {
@@ -343,12 +416,20 @@ fn find_package_metadata_winmd(package: &str, filename: &str) -> Option<std::pat
 fn find_package_contract_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
     let root = std::env::var_os("NUGET_PACKAGES")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages")))?
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
+        })?
         .join(package);
     let mut candidates = Vec::new();
     for version in std::fs::read_dir(root).ok()?.flatten() {
         let metadata = version.path().join("metadata");
-        for contract in std::fs::read_dir(metadata).ok().into_iter().flatten().flatten() {
+        for contract in std::fs::read_dir(metadata)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let winmd = contract.path().join(filename);
             if winmd.is_file() {
                 candidates.push(winmd);
@@ -368,27 +449,52 @@ fn copy_win2d_runtime(out_dir: &str) {
     };
     let root = std::env::var_os("NUGET_PACKAGES")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages")))
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
+        })
         .expect("NUGET_PACKAGES or USERPROFILE is required to locate Win2D runtime");
     let mut candidates = Vec::new();
     let package = root.join("microsoft.graphics.win2d");
-    for version in std::fs::read_dir(package).expect("read Win2D NuGet package").flatten() {
-        let dll = version.path().join("runtimes").join(arch).join("native").join("Microsoft.Graphics.Canvas.dll");
+    for version in std::fs::read_dir(package)
+        .expect("read Win2D NuGet package")
+        .flatten()
+    {
+        let dll = version
+            .path()
+            .join("runtimes")
+            .join(arch)
+            .join("native")
+            .join("Microsoft.Graphics.Canvas.dll");
         if dll.is_file() {
             candidates.push(dll);
         }
     }
     candidates.sort();
-    let Some(source) = candidates.pop() else { panic!("Microsoft.Graphics.Canvas.dll was not found for {arch}"); };
-    let profile_dir = std::path::Path::new(out_dir).ancestors().nth(3).expect("target profile directory");
+    let Some(source) = candidates.pop() else {
+        panic!("Microsoft.Graphics.Canvas.dll was not found for {arch}");
+    };
+    let profile_dir = std::path::Path::new(out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("target profile directory");
     let target = profile_dir.join("Microsoft.Graphics.Canvas.dll");
-    std::fs::copy(&source, &target).expect("copy Microsoft.Graphics.Canvas.dll beside application binary");
+    std::fs::copy(&source, &target)
+        .expect("copy Microsoft.Graphics.Canvas.dll beside application binary");
     println!("cargo:rerun-if-changed={}", source.display());
 
     let mut bootstrap_candidates = Vec::new();
     let package = root.join("microsoft.windowsappsdk");
-    for version in std::fs::read_dir(package).expect("read Windows App SDK NuGet package").flatten() {
-        let dll = version.path().join("runtimes").join(arch).join("native").join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
+    for version in std::fs::read_dir(package)
+        .expect("read Windows App SDK NuGet package")
+        .flatten()
+    {
+        let dll = version
+            .path()
+            .join("runtimes")
+            .join(arch)
+            .join("native")
+            .join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
         if dll.is_file() {
             bootstrap_candidates.push(dll);
         }
@@ -414,18 +520,24 @@ fn copy_win2d_runtime(out_dir: &str) {
 /// `tools/setup-vs-env.ps1` sourced first — same precondition the whole crate already has for MSVC.
 #[cfg(target_os = "windows")]
 fn generate_resources_pri(out_dir: &str) {
-    let makepri = find_makepri()
-        .expect("makepri.exe was not found; source tools/setup-vs-env.ps1 first");
-    let profile_dir = std::path::Path::new(out_dir).ancestors().nth(3).expect("target profile directory");
+    let makepri =
+        find_makepri().expect("makepri.exe was not found; source tools/setup-vs-env.ps1 first");
+    let profile_dir = std::path::Path::new(out_dir)
+        .ancestors()
+        .nth(3)
+        .expect("target profile directory");
     let pri_root = std::path::Path::new(out_dir).join("resources_pri");
     std::fs::create_dir_all(&pri_root).expect("create resources.pri project root");
 
     let config = pri_root.join("priconfig.xml");
     let status = std::process::Command::new(&makepri)
         .arg("createconfig")
-        .arg("/cf").arg(&config)
-        .arg("/dq").arg("en-US")
-        .arg("/pv").arg("10.0.0")
+        .arg("/cf")
+        .arg(&config)
+        .arg("/dq")
+        .arg("en-US")
+        .arg("/pv")
+        .arg("10.0.0")
         .arg("/o")
         .status()
         .expect("run makepri.exe createconfig");
@@ -434,9 +546,12 @@ fn generate_resources_pri(out_dir: &str) {
     let generated = pri_root.join("resources.pri");
     let status = std::process::Command::new(&makepri)
         .arg("new")
-        .arg("/pr").arg(&pri_root)
-        .arg("/cf").arg(&config)
-        .arg("/of").arg(&generated)
+        .arg("/pr")
+        .arg(&pri_root)
+        .arg("/cf")
+        .arg(&config)
+        .arg("/of")
+        .arg(&generated)
         .arg("/o")
         .status()
         .expect("run makepri.exe new");
@@ -473,7 +588,10 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
     // `Microsoft.UI.Xaml.winmd`'s own `IWebView2` interface references WebView2's winmd even
     // though this shim never touches WebView2 — cppwinrt validates the whole input database
     // up front, so the reference has to resolve even when `-exclude` drops the type from output.
-    if let Some(webview2) = find_package_lib_winmd("microsoft.web.webview2", "Microsoft.Web.WebView2.Core.winmd") {
+    if let Some(webview2) = find_package_lib_winmd(
+        "microsoft.web.webview2",
+        "Microsoft.Web.WebView2.Core.winmd",
+    ) {
         args.push("-input".to_owned());
         args.push(webview2.to_string_lossy().into_owned());
     }
@@ -489,7 +607,10 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
     }
     // Excludes types this shim never touches whose own metadata references external winmd files
     // this build doesn't provide (e.g. WebView2's own winmd, only needed by real WebView2 users).
-    for excluded in ["Microsoft.UI.Xaml.Controls.WebView2", "Microsoft.UI.Xaml.Controls.IWebView2"] {
+    for excluded in [
+        "Microsoft.UI.Xaml.Controls.WebView2",
+        "Microsoft.UI.Xaml.Controls.IWebView2",
+    ] {
         args.push("-exclude".to_owned());
         args.push(excluded.to_owned());
     }
@@ -497,8 +618,14 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
     args.push(projection_dir.to_string_lossy().into_owned());
     args.push("-overwrite".to_owned());
 
-    let status = std::process::Command::new(&cppwinrt).args(&args).status().expect("run cppwinrt.exe");
-    assert!(status.success(), "cppwinrt.exe failed generating the C++/WinRT projection");
+    let status = std::process::Command::new(&cppwinrt)
+        .args(&args)
+        .status()
+        .expect("run cppwinrt.exe");
+    assert!(
+        status.success(),
+        "cppwinrt.exe failed generating the C++/WinRT projection"
+    );
 
     cc::Build::new()
         .cpp(true)
@@ -520,7 +647,10 @@ fn build_cpp_app_host(out_dir: &str, winmd_inputs: &[String]) {
 fn find_package_lib_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
     let root = std::env::var_os("NUGET_PACKAGES")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages")))?
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
+        })?
         .join(package);
     let mut candidates = Vec::new();
     for version in std::fs::read_dir(root).ok()?.flatten() {
@@ -540,9 +670,10 @@ fn find_sdk_tool(name: &str) -> Option<std::path::PathBuf> {
         Ok("aarch64") => "arm64",
         _ => "x64",
     };
-    if let (Ok(sdk_dir), Ok(sdk_version)) =
-        (std::env::var("WindowsSdkDir"), std::env::var("WindowsSDKVersion"))
-    {
+    if let (Ok(sdk_dir), Ok(sdk_version)) = (
+        std::env::var("WindowsSdkDir"),
+        std::env::var("WindowsSDKVersion"),
+    ) {
         let candidate = std::path::Path::new(&sdk_dir)
             .join("bin")
             .join(sdk_version.trim_end_matches('\\'))
@@ -570,9 +701,10 @@ fn find_makepri() -> Option<std::path::PathBuf> {
         Ok("aarch64") => "arm64",
         _ => "x64",
     };
-    if let (Ok(sdk_dir), Ok(sdk_version)) =
-        (std::env::var("WindowsSdkDir"), std::env::var("WindowsSDKVersion"))
-    {
+    if let (Ok(sdk_dir), Ok(sdk_version)) = (
+        std::env::var("WindowsSdkDir"),
+        std::env::var("WindowsSDKVersion"),
+    ) {
         let candidate = std::path::Path::new(&sdk_dir)
             .join("bin")
             .join(sdk_version.trim_end_matches('\\'))
@@ -597,7 +729,10 @@ fn find_makepri() -> Option<std::path::PathBuf> {
 fn find_package_winmd(package: &str, filename: &str) -> Option<std::path::PathBuf> {
     let root = std::env::var_os("NUGET_PACKAGES")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages")))?
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|profile| std::path::PathBuf::from(profile).join(".nuget\\packages"))
+        })?
         .join(package);
     let mut candidates = Vec::new();
     for version in std::fs::read_dir(root).ok()?.flatten() {

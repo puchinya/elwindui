@@ -10,9 +10,7 @@
 //! already uses, but none of it has been checked against the real generated `bindings.rs`.
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::{Control, TextBlock};
-use crate::bindings::Microsoft::UI::Xaml::Media::{
-    FontFamily as XamlFontFamily, SolidColorBrush,
-};
+use crate::bindings::Microsoft::UI::Xaml::Media::{FontFamily as XamlFontFamily, SolidColorBrush};
 use crate::bindings::winui_text::{
     FontStretch as XamlFontStretch, FontStyle as XamlFontStyle, FontWeight as XamlFontWeight,
 };
@@ -135,9 +133,7 @@ unsafe extern "C" {
         inspectable: *mut core::ffi::c_void,
         mask: u32,
     ) -> i32;
-    fn elwindui_winui3_clear_text_block_foreground(
-        inspectable: *mut core::ffi::c_void,
-    ) -> i32;
+    fn elwindui_winui3_clear_text_block_foreground(inspectable: *mut core::ffi::c_void) -> i32;
 }
 
 /// Applies or clears a native `Control.Background` value.
@@ -148,11 +144,15 @@ pub(crate) fn apply_control_background(
     if let Some(background) = background {
         control.SetBackground(&solid_color_brush(flat_foreground_color(background))?)
     } else {
-        let code = unsafe {
-            elwindui_winui3_clear_control_text_style(control.as_raw(), 1 << 7)
-        };
+        let code = unsafe { elwindui_winui3_clear_control_text_style(control.as_raw(), 1 << 7) };
         windows::core::HRESULT(code).ok()
     }
+}
+
+/// Removes a local `Control.Foreground` value so the active WinUI style/theme can supply it.
+pub(crate) fn clear_control_foreground(control: &Control) -> Result<()> {
+    let code = unsafe { elwindui_winui3_clear_control_text_style(control.as_raw(), 1 << 6) };
+    windows::core::HRESULT(code).ok()
 }
 
 /// Applies inherited/explicit values and clears properties that remain absent after the ElwindUI
@@ -203,15 +203,12 @@ pub(crate) fn apply_cascaded_text_style_to_control(
 
     if clear_mask != 0 {
         let result = unsafe {
-            elwindui_winui3_clear_control_text_style(
-                Interface::as_raw(control),
-                clear_mask,
-            )
+            elwindui_winui3_clear_control_text_style(Interface::as_raw(control), clear_mask)
         };
         if result < 0 {
-            return Err(windows::core::Error::from_hresult(
-                windows::core::HRESULT(result),
-            ));
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                result,
+            )));
         }
     }
     Ok(())
@@ -247,9 +244,7 @@ pub(crate) fn apply_text_style_to_text_block_with_foreground(
             text_block.SetForeground(&brush)?;
         }
     } else {
-        let code = unsafe {
-            elwindui_winui3_clear_text_block_foreground(text_block.as_raw())
-        };
+        let code = unsafe { elwindui_winui3_clear_text_block_foreground(text_block.as_raw()) };
         windows::core::HRESULT(code).ok()?;
     }
     Ok(())

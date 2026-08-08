@@ -1,24 +1,53 @@
 //! The XAML `Slider` and its `ValueChanged` event.
 
-use crate::bindings::Microsoft::UI::Xaml::Controls::Slider as XamlSlider;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::RangeBaseValueChangedEventHandler;
-use crate::ffi::AnyView;
+use crate::bindings::Microsoft::UI::Xaml::Controls::Slider as XamlSlider;
+use crate::ffi::{
+    AnyView, UiEventGate, invoke_ui_f32_event_callback, register_ui_f32_event_callback,
+};
+use std::cell::RefCell;
+use std::rc::Rc;
 
-/// Raw `XamlSlider` — composed by `native_ui::Slider`. `ValueChanged`'s own args carry the new
-/// value directly (`args.NewValue()`), so there is no separate `on_change` storage/registration
-/// dance the way `InnerToggleSwitch`/`InnerDropdown` need (no re-entrant callback-id indirection
-/// required — the handler closure can call straight into whatever `set_on_change` was given, once
-/// stored).
+/// Raw `XamlSlider` + change wiring — composed by `native_ui::Slider`.
 pub(crate) struct InnerSlider {
     handle: AnyView,
     xaml: XamlSlider,
+    on_change: Rc<RefCell<Option<Box<dyn Fn(f32)>>>>,
+    events: UiEventGate,
 }
 
 impl InnerSlider {
     pub(crate) fn new() -> Self {
         let xaml = XamlSlider::new().expect("Slider::new");
         let handle = AnyView::from(xaml.clone());
-        Self { handle, xaml }
+        let on_change: Rc<RefCell<Option<Box<dyn Fn(f32)>>>> = Rc::new(RefCell::new(None));
+        let events = UiEventGate::default();
+        let callback = on_change.clone();
+        let callback_events = events.clone();
+        let callback_id = register_ui_f32_event_callback(Rc::new(move |value| {
+            if callback_events.is_suppressed() {
+                return;
+            }
+            if let Some(callback) = callback.borrow().as_ref() {
+                callback(value);
+            }
+        }));
+        let _ = xaml.ValueChanged(&RangeBaseValueChangedEventHandler::new(
+            move |_sender, args| {
+                if let Some(args) = args.cloned() {
+                    if let Ok(new_value) = args.NewValue() {
+                        invoke_ui_f32_event_callback(callback_id, new_value as f32);
+                    }
+                }
+                Ok(())
+            },
+        ));
+        Self {
+            handle,
+            xaml,
+            on_change,
+            events,
+        }
     }
 
     pub(crate) fn handle(&self) -> AnyView {
@@ -30,32 +59,27 @@ impl InnerSlider {
     }
 
     pub(crate) fn set_value(&self, value: f32) {
-        let _ = self.xaml.SetValue(value as f64);
+        self.events.suppress(|| {
+            let _ = self.xaml.SetValue(value as f64);
+        });
     }
 
     pub(crate) fn set_min(&self, min: f32) {
-        let _ = self.xaml.SetMinimum(min as f64);
+        self.events.suppress(|| {
+            let _ = self.xaml.SetMinimum(min as f64);
+        });
     }
 
     pub(crate) fn set_max(&self, max: f32) {
-        let _ = self.xaml.SetMaximum(max as f64);
+        self.events.suppress(|| {
+            let _ = self.xaml.SetMaximum(max as f64);
+        });
     }
 
     /// `NSSlider`'s AppKit counterpart fires continuously while dragging by default
     /// (`isContinuous`); `Slider.ValueChanged` already behaves the same way, so no extra setup is
     /// needed here to match.
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(f32)>) {
-        // `args` arrives as `&Option<RangeBaseValueChangedEventArgs>` — same shape
-        // `inner/tab_view.rs`'s own `TabCloseRequested` handler already unwraps via `.cloned()`.
-        let _ = self.xaml.ValueChanged(&RangeBaseValueChangedEventHandler::new(
-            move |_sender, args| {
-                if let Some(args) = args.cloned() {
-                    if let Ok(new_value) = args.NewValue() {
-                        callback(new_value as f32);
-                    }
-                }
-                Ok(())
-            },
-        ));
+        *self.on_change.borrow_mut() = Some(callback);
     }
 }

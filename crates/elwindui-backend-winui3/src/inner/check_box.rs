@@ -2,45 +2,47 @@
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::CheckBox as XamlCheckBox;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{AnyView, UiEventGate, invoke_ui_event_callback, register_ui_event_callback};
 use elwindui_core::ui::CheckState;
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows::Foundation::{IReference, PropertyValue};
-use windows::core::HSTRING;
+use windows::core::{HSTRING, Interface};
 
 /// Raw `XamlCheckBox` + change wiring — composed by `native_ui::CheckBox`.
 pub(crate) struct InnerCheckBox {
     handle: AnyView,
     xaml: XamlCheckBox,
     on_change: Rc<RefCell<Option<Box<dyn Fn(CheckState)>>>>,
+    events: UiEventGate,
 }
 
 impl InnerCheckBox {
     pub(crate) fn new() -> Self {
         let xaml = XamlCheckBox::new().expect("CheckBox::new");
-        // `IsThreeState(false)` (the default) is documented to make XAML ignore a programmatic
-        // `IsChecked = null` and render Unchecked instead — the same silent-coercion behavior
-        // confirmed empirically on the AppKit backend's `NSButton.allowsMixedState` (see
-        // `elwindui-backend-appkit`'s `inner/check_box.rs::new`'s own doc comment; unverified here,
-        // no Windows environment, but mirrored on the same reasoning). So three-state stays
-        // *enabled* at the XAML level for a `component`'s programmatic `Indeterminate` to ever
-        // actually render the dash glyph; the `Indeterminate` event handler below is what keeps a
-        // real user click from ever landing on it instead (`CheckBox`'s own doc comment,
-        // elwindui-core).
-        let _ = xaml.SetIsThreeState(true);
+        // `IsThreeState` is enabled only while a programmatic `Indeterminate` is displayed (see
+        // `set_checked`). Leaving it enabled permanently makes XAML's user cycle advance from
+        // Checked to Indeterminate on every subsequent click; coercing that event back to Checked
+        // would then leave the control stuck. Ordinary Checked/Unchecked model updates restore
+        // XAML's native two-state user cycle.
         let handle = AnyView::from(xaml.clone());
+        let events = UiEventGate::default();
         let this = Self {
             handle,
             xaml,
             on_change: Rc::new(RefCell::new(None)),
+            events,
         };
         for (event, state) in [
             ("Checked", CheckState::Checked),
             ("Unchecked", CheckState::Unchecked),
         ] {
             let callback = this.on_change.clone();
+            let events = this.events.clone();
             let callback_id = register_ui_event_callback(Rc::new(move || {
+                if events.is_suppressed() {
+                    return;
+                }
                 if let Some(callback) = callback.borrow().as_ref() {
                     callback(state);
                 }
@@ -62,11 +64,17 @@ impl InnerCheckBox {
         {
             let xaml_for_coerce = this.xaml.clone();
             let callback = this.on_change.clone();
+            let events = this.events.clone();
             let callback_id = register_ui_event_callback(Rc::new(move || {
-                let value = PropertyValue::CreateBoolean(true)
-                    .ok()
-                    .and_then(|v| v.cast::<IReference<bool>>().ok());
-                let _ = xaml_for_coerce.SetIsChecked(value.as_ref());
+                if events.is_suppressed() {
+                    return;
+                }
+                events.suppress(|| {
+                    let value = PropertyValue::CreateBoolean(true)
+                        .ok()
+                        .and_then(|v| v.cast::<IReference<bool>>().ok());
+                    let _ = xaml_for_coerce.SetIsChecked(value.as_ref());
+                });
                 if let Some(callback) = callback.borrow().as_ref() {
                     callback(CheckState::Checked);
                 }
@@ -95,10 +103,10 @@ impl InnerCheckBox {
     }
 
     /// `CheckBox.IsChecked` is `Windows.Foundation.IReference<bool>` — nullable, with `null`
-    /// meaning indeterminate. `IsThreeState` is `true` (see `new`) so XAML actually renders this,
-    /// but the `Indeterminate` event handler registered there coerces any real user click away from
-    /// it — so this remains the only path that ever leaves `Indeterminate` in effect, matching
-    /// `CheckState`'s own doc comment.
+    /// meaning indeterminate. Three-state mode is enabled for that programmatic value and disabled
+    /// again for either Boolean value, preserving both the dash glyph and a native two-state user
+    /// click cycle. The `Indeterminate` event handler remains a defensive guard for a user action
+    /// that reaches the third state before a model refresh restores two-state mode.
     pub(crate) fn set_checked(&self, checked: CheckState) {
         let value = match checked {
             CheckState::Unchecked => PropertyValue::CreateBoolean(false)
@@ -109,7 +117,12 @@ impl InnerCheckBox {
                 .and_then(|v| v.cast::<IReference<bool>>().ok()),
             CheckState::Indeterminate => None,
         };
-        let _ = self.xaml.SetIsChecked(value.as_ref());
+        self.events.suppress(|| {
+            let _ = self
+                .xaml
+                .SetIsThreeState(matches!(checked, CheckState::Indeterminate));
+            let _ = self.xaml.SetIsChecked(value.as_ref());
+        });
     }
 
     pub(crate) fn set_on_change(&self, callback: Box<dyn Fn(CheckState)>) {

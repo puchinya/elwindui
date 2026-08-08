@@ -4,33 +4,48 @@
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::RadioButton as XamlRadioButton;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use crate::ffi::{AnyView, UiEventGate, invoke_ui_event_callback, register_ui_event_callback};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use windows::Foundation::{IReference, PropertyValue};
-use windows::core::HSTRING;
+use windows::core::{HSTRING, Interface};
+
+static NEXT_NATIVE_GROUP: AtomicUsize = AtomicUsize::new(1);
 
 /// Raw `XamlRadioButton` + click wiring — composed by `native_ui::RadioButton`.
 pub(crate) struct InnerRadioButton {
     handle: AnyView,
     xaml: XamlRadioButton,
     on_click: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    events: UiEventGate,
 }
 
 impl InnerRadioButton {
     pub(crate) fn new() -> Self {
         let xaml = XamlRadioButton::new().expect("RadioButton::new");
-        // Deliberately empty: an empty `GroupName` still participates in WinUI 3's own
-        // visual-parent-based automatic grouping, the exact ambiguity `RadioButton`'s own doc
-        // comment explains elwindui avoids by managing groups itself. Nothing to set here.
+        // An unset `GroupName` makes WinUI implicitly group every RadioButton with the same visual
+        // parent. Give each raw widget a unique native group so only elwindui's logical `group`
+        // registry decides exclusivity, including when two logical groups share one TreeHostPanel.
+        let native_group = format!(
+            "elwindui-radio-{}",
+            NEXT_NATIVE_GROUP.fetch_add(1, Ordering::Relaxed)
+        );
+        let _ = xaml.SetGroupName(&HSTRING::from(native_group));
         let handle = AnyView::from(xaml.clone());
+        let events = UiEventGate::default();
         let this = Self {
             handle,
             xaml,
             on_click: Rc::new(RefCell::new(None)),
+            events,
         };
         let callback = this.on_click.clone();
+        let events = this.events.clone();
         let callback_id = register_ui_event_callback(Rc::new(move || {
+            if events.is_suppressed() {
+                return;
+            }
             if let Some(callback) = callback.borrow().as_ref() {
                 callback();
             }
@@ -60,7 +75,9 @@ impl InnerRadioButton {
         let value = PropertyValue::CreateBoolean(checked)
             .ok()
             .and_then(|v| v.cast::<IReference<bool>>().ok());
-        let _ = self.xaml.SetIsChecked(value.as_ref());
+        self.events.suppress(|| {
+            let _ = self.xaml.SetIsChecked(value.as_ref());
+        });
     }
 
     /// The raw click signal — see `InnerRadioButton`'s AppKit counterpart's own doc comment for

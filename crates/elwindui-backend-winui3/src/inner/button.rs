@@ -1,7 +1,9 @@
 //! The XAML `Button` and its click handler.
 
-use crate::bindings::Microsoft::UI::Xaml::Controls::Button as XamlButton;
-use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
+use crate::bindings::Microsoft::UI::Xaml::Controls::{Button as XamlButton, Control};
+use crate::bindings::Microsoft::UI::Xaml::Input::{
+    KeyboardAccelerator, KeyboardAcceleratorInvokedEventArgs,
+};
 use crate::bindings::Microsoft::UI::Xaml::Media::Brush;
 use crate::bindings::Microsoft::UI::Xaml::{Application, RoutedEventHandler, Style};
 use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
@@ -9,6 +11,7 @@ use elwindui_core::ui::ButtonRole;
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows::Foundation::PropertyValue;
+use windows::Foundation::TypedEventHandler;
 use windows::System::VirtualKey;
 use windows::core::{HSTRING, Interface};
 
@@ -81,11 +84,15 @@ impl InnerButton {
         };
         let _ = self.xaml.SetStyle(style.as_ref());
 
-        let foreground = match role {
-            ButtonRole::Destructive => lookup_resource::<Brush>("SystemFillColorCriticalBrush"),
-            ButtonRole::Normal | ButtonRole::Primary => None,
-        };
-        let _ = self.xaml.SetForeground(foreground.as_ref());
+        if role == ButtonRole::Destructive {
+            let foreground = lookup_resource::<Brush>("SystemFillColorCriticalBrush");
+            let _ = self.xaml.SetForeground(foreground.as_ref());
+        } else if let Ok(control) = self.xaml.clone().cast::<Control>() {
+            // `SetForeground(None)` creates a local null DependencyProperty value and therefore
+            // hides AccentButtonStyle's own foreground. Clear the local value so the active
+            // Fluent style supplies a readable theme-aware label color.
+            let _ = crate::render::clear_control_foreground(&control);
+        }
     }
 
     /// Makes this the window's default button, so Enter activates it.
@@ -103,6 +110,22 @@ impl InnerButton {
         }
         if let Ok(accelerator) = KeyboardAccelerator::new() {
             let _ = accelerator.SetKey(VirtualKey::Enter);
+            let callback = self.on_click.clone();
+            let callback_id = register_ui_event_callback(Rc::new(move || {
+                if let Some(callback) = callback.borrow().as_ref() {
+                    callback();
+                }
+            }));
+            let _ = accelerator.Invoked(&TypedEventHandler::<
+                KeyboardAccelerator,
+                KeyboardAcceleratorInvokedEventArgs,
+            >::new(move |_, args| {
+                invoke_ui_event_callback(callback_id);
+                if let Some(args) = args.cloned() {
+                    let _ = args.SetHandled(true);
+                }
+                Ok(())
+            }));
             let _ = accelerators.Append(&accelerator);
         }
     }
@@ -134,7 +157,7 @@ mod hosted_xaml_regression_tests {
     use super::*;
     use crate::bindings;
     use crate::bindings::Microsoft::UI::Xaml::Controls::{
-        Canvas, Control, TextBlock, TextBox as XamlTextBox,
+        Canvas, Control, TextBlock, TextBox as XamlTextBox, ToolTip as XamlToolTip, ToolTipService,
     };
     use crate::bindings::Microsoft::UI::Xaml::Media::{
         FontFamily as XamlFontFamily, SolidColorBrush,
@@ -150,6 +173,7 @@ mod hosted_xaml_regression_tests {
         Brush, CascadedTextStyle, Color, ComputedTextStyle, FontFamily, FontStretch, FontStyle,
         FontWeight, TextBackend, TextMeasureRequest, TextWrapping,
     };
+    use windows::Foundation::IPropertyValue;
     use windows::core::{HSTRING, Interface};
 
     fn assert_text_style_round_trip(canvas: &Canvas) {
@@ -340,6 +364,38 @@ mod hosted_xaml_regression_tests {
             // docs/status/winui3_backend_status.md).
             button.set_text("a very long button label");
             let view = button.handle();
+            view.set_tooltip(Some("hosted tooltip"))
+                .expect("set hosted tooltip");
+            let tooltip: XamlToolTip = ToolTipService::GetToolTip(&view.as_element())
+                .expect("get hosted tooltip")
+                .cast()
+                .expect("tooltip is a native ToolTip");
+            let tooltip: IPropertyValue = tooltip
+                .Content()
+                .expect("get hosted tooltip content")
+                .cast()
+                .expect("tooltip content is a boxed string");
+            assert_eq!(
+                tooltip
+                    .GetString()
+                    .expect("read hosted tooltip")
+                    .to_string_lossy(),
+                "hosted tooltip"
+            );
+            button.set_is_default(true);
+            let accelerators = button
+                .xaml
+                .KeyboardAccelerators()
+                .expect("Button.KeyboardAccelerators");
+            assert_eq!(accelerators.Size().expect("accelerator count"), 1);
+            assert_eq!(
+                accelerators
+                    .GetAt(0)
+                    .expect("default accelerator")
+                    .Key()
+                    .expect("default accelerator key"),
+                VirtualKey::Enter
+            );
             let element = view.as_element();
             let _ = canvas.Children().expect("Canvas.Children").Append(&element);
             VIEW.with(|slot| *slot.borrow_mut() = Some(view));

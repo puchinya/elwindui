@@ -6,12 +6,14 @@
 //! `elwindui::backend::AnyView` directly — that path must stay stable.
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    Button as XamlButton, Canvas, PasswordBox as XamlPasswordBox, ScrollViewer,
-    TabView as XamlTabView, TextBox as XamlTextBox, ToolTipService,
+    Button as XamlButton, Canvas, CheckBox as XamlCheckBox, ComboBox as XamlComboBox,
+    PasswordBox as XamlPasswordBox, RadioButton as XamlRadioButton, ScrollViewer,
+    Slider as XamlSlider, TabView as XamlTabView, TextBox as XamlTextBox,
+    ToggleSwitch as XamlToggleSwitch, ToolTip as XamlToolTip, ToolTipService,
 };
 use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
 use elwindui_core::input::RawKeyEvent;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,6 +29,7 @@ thread_local! {
     /// thread, so the delegate captures only a numeric key and resolves the actual callback here.
     static UI_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn()>>> = RefCell::new(HashMap::new());
     static UI_INDEX_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(usize)>>> = RefCell::new(HashMap::new());
+    static UI_F32_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(f32)>>> = RefCell::new(HashMap::new());
     static UI_KEY_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(RawKeyEvent)>>> = RefCell::new(HashMap::new());
     static UI_TEXT_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(String)>>> = RefCell::new(HashMap::new());
 }
@@ -64,6 +67,57 @@ pub(crate) fn invoke_ui_index_event_callback(id: usize, index: usize) {
     let callback = UI_INDEX_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
     if let Some(callback) = callback {
         callback(index);
+    }
+}
+
+pub(crate) fn register_ui_f32_event_callback(callback: Rc<dyn Fn(f32)>) -> usize {
+    let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
+    UI_F32_EVENT_CALLBACKS.with(|callbacks| {
+        callbacks.borrow_mut().insert(id, callback);
+    });
+    id
+}
+
+pub(crate) fn invoke_ui_f32_event_callback(id: usize, value: f32) {
+    // See `invoke_ui_event_callback`'s doc comment — same re-entrancy hazard, same fix.
+    let callback = UI_F32_EVENT_CALLBACKS.with(|callbacks| callbacks.borrow().get(&id).cloned());
+    if let Some(callback) = callback {
+        callback(value);
+    }
+}
+
+/// Distinguishes a model-to-native property push from a real user-originated XAML event.
+///
+/// WinUI dependency-property setters synchronously raise the same change events used for input.
+/// Each native control wraps its setter calls in `suppress`, and its TLS callback checks
+/// `is_suppressed`, so a two-way binding does not immediately echo its own value back to the
+/// model. The previous state is restored by `Drop`, including during unwinding and nested pushes.
+#[derive(Clone, Default)]
+pub(crate) struct UiEventGate(Rc<Cell<bool>>);
+
+impl UiEventGate {
+    pub(crate) fn is_suppressed(&self) -> bool {
+        self.0.get()
+    }
+
+    pub(crate) fn suppress<T>(&self, callback: impl FnOnce() -> T) -> T {
+        struct Restore<'a> {
+            cell: &'a Cell<bool>,
+            previous: bool,
+        }
+
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.cell.set(self.previous);
+            }
+        }
+
+        let previous = self.0.replace(true);
+        let _restore = Restore {
+            cell: &self.0,
+            previous,
+        };
+        callback()
     }
 }
 
@@ -239,6 +293,52 @@ impl WinUiHandle for XamlButton {
     }
 }
 
+macro_rules! impl_button_like_handle {
+    ($ty:ty, $name:literal) => {
+        impl WinUiHandle for $ty {
+            fn as_element(&self) -> FrameworkElement {
+                self.cast()
+                    .expect(concat!($name, " implements FrameworkElement"))
+            }
+            fn theme_prefix(&self) -> &'static str {
+                "button"
+            }
+            fn apply_text_style(
+                &self,
+                style: &elwindui_core::graphics::CascadedTextStyle,
+            ) -> windows::core::Result<()> {
+                let control: crate::bindings::Microsoft::UI::Xaml::Controls::Control =
+                    self.cast().expect(concat!($name, " implements Control"));
+                crate::render::apply_cascaded_text_style_to_control(&control, style)
+            }
+            fn supports_text_style(&self) -> bool {
+                true
+            }
+        }
+    };
+}
+
+impl_button_like_handle!(XamlCheckBox, "CheckBox");
+impl_button_like_handle!(XamlRadioButton, "RadioButton");
+
+macro_rules! impl_textless_control_handle {
+    ($ty:ty, $name:literal, $prefix:literal) => {
+        impl WinUiHandle for $ty {
+            fn as_element(&self) -> FrameworkElement {
+                self.cast()
+                    .expect(concat!($name, " implements FrameworkElement"))
+            }
+            fn theme_prefix(&self) -> &'static str {
+                $prefix
+            }
+        }
+    };
+}
+
+impl_textless_control_handle!(XamlToggleSwitch, "ToggleSwitch", "toggle_switch");
+impl_textless_control_handle!(XamlComboBox, "ComboBox", "dropdown");
+impl_textless_control_handle!(XamlSlider, "Slider", "slider");
+
 impl WinUiHandle for XamlTabView {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TabView implements FrameworkElement")
@@ -300,7 +400,9 @@ impl AnyView {
         match tooltip {
             Some(text) => {
                 let value = PropertyValue::CreateString(&HSTRING::from(text))?;
-                ToolTipService::SetToolTip(&element, &value)
+                let tooltip = XamlToolTip::new()?;
+                tooltip.SetContent(&value)?;
+                ToolTipService::SetToolTip(&element, &tooltip)
             }
             None => ToolTipService::SetToolTip(&element, None),
         }

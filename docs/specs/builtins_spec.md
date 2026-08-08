@@ -1149,7 +1149,7 @@ struct Slider {
 
 | バックエンド | 状況 |
 |---|---|
-| AppKit | 実装済み・`examples/controls-demo`のSliderタブで目視検証済み(初期値・レンジ変更後の表示)。ドラッグ操作による`value`変更自体は`tools/macos-ui-driver`が中央固定クリックしか行えずスライダーの任意位置クリック/ドラッグに対応していないため実機の対話的検証はできていない——`CheckBox`/`RadioButton`/`ToggleSwitch`で実証済みの同型target/actionトランポリンであることが根拠 |
+| AppKit | 実装済み・`examples/controls-demo`のSliderタブで実機検証済み。`tools/macos-ui-driver`の`click --via mouse --fraction <0.0-1.0>`(要素内の任意水平位置をクリック)で`value`が対応する位置へ変化し、ラベルにも即座に反映されることを確認(#39、PR #40で追加)。`click --via ax-increment`/`ax-decrement`(`kAXIncrementAction`/`kAXDecrementAction`)による刻み幅操作も確認済み |
 | WinUI3 | 実装コードあり・未検証(Windows環境なし) |
 | GTK4 | 未実装 |
 

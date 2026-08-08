@@ -153,7 +153,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | **ネイティブ実体に「自然な幅」が無い問題を発見・文書化** | ✅ `NSSlider.fittingSize()`の幅が常に0になり、`width:`を明示しないと画面上で不可視になることを実機で発見(`tools/macos-ui-driver`のスクリーンショット比較)。`docs/specs/builtins_spec.md` F.19に注記、`examples/controls-demo`のSliderタブでも`width: 200.0`を明示 | 🟡 未検証だが同種の注意が必要な可能性を記録 |
 | `objc2-app-kit` feature追加(`NSSlider`) | ✅ | N/A |
 | `crates/elwindui-core/tests/props_macro.rs` | ✅ `value`(two-way)・`min`・`max`・`enabled`のクロスクレート形状テスト追加 | — |
-| ドラッグ操作による`value`変更の実機対話検証 | 🟡 **未実施**——`tools/macos-ui-driver`の`click --via mouse`は要素中央への固定クリックのみで、スライダーへの任意位置クリック/ドラッグ/`AXIncrement`アクションに未対応(`click --via ax-press`も`ax_press_status_ok: false`でスライダーには効かない)。初期値・レンジ変更後の表示は実機確認済みだが、クリック起点の`on_change`発火自体は`CheckBox`/`RadioButton`/`ToggleSwitch`で実証済みの同型トランポリンであることを根拠に、構造的に妥当と判断した | N/A(未検証) |
+| クリック起点の`value`変更の実機対話検証 | ✅ **実施済み**——`tools/macos-ui-driver`に`click --via mouse --fraction <0.0-1.0>`(要素内の任意水平位置をクリック)と`click --via ax-increment`/`ax-decrement`(`kAXIncrementAction`/`kAXDecrementAction`。`AXSlider`は`kAXPressAction`非対応のため必要)を追加(#39、PR #40)。`--fraction 0.05`/`0.9`でクリック位置に応じた`value`変化とラベル追従、`ax-increment`/`ax-decrement`での0.05刻みの段階変化をいずれも確認 | N/A(未検証) |
 | `docs/specs/builtins_spec.md` F.19 | ✅ 新設 | ✅(同一ドキュメント) |
 
 ### 2.8 `examples/controls-demo`

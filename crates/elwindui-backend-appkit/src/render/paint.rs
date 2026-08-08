@@ -26,6 +26,7 @@ pub(crate) fn add_shape_layer(
     opacity: f32,
     bounds: elwindui_core::base::Rect,
 ) {
+    super::stats::bump(|s| s.layers_created += 1);
     let shape_layer = CAShapeLayer::new();
     shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
     shape_layer.setPath(Some(path));
@@ -86,6 +87,7 @@ pub(crate) fn try_add_gradient_fill_layer(
         x: bounds.x,
         y: bounds.y,
     });
+    super::stats::bump(|s| s.layers_created += 1);
     let gradient_layer = CAGradientLayer::new();
     gradient_layer.setName(Some(&NSString::from_str("elwindui-paint")));
     let ca_layer: &CALayer = &gradient_layer;
@@ -158,6 +160,7 @@ pub(crate) fn try_add_gradient_fill_layer(
     // shifts the mask a second time; for a `bounds` far from the canvas origin (any cell but the
     // very first) that moves the mask entirely outside `gradient_layer`'s own local bounds,
     // leaving nothing visible at all (an *empty* intersection, not just a misaligned one).
+    super::stats::bump(|s| s.layers_created += 1);
     let mask_layer = CAShapeLayer::new();
     let identity = elwindui_core::base::AffineTransform::identity();
     let local_bounds = elwindui_core::base::Rect {
@@ -233,6 +236,7 @@ pub(crate) fn try_add_image_fill_layer(
         x: bounds.x,
         y: bounds.y,
     });
+    super::stats::bump(|s| s.layers_created += 1);
     let container = CALayer::new();
     container.setName(Some(&NSString::from_str("elwindui-paint")));
     container.setMasksToBounds(true);
@@ -256,6 +260,7 @@ pub(crate) fn try_add_image_fill_layer(
                 image_brush.alignment_x,
                 image_brush.alignment_y,
             );
+            super::stats::bump(|s| s.layers_created += 1);
             let image_layer = CALayer::new();
             image_layer.setFrame(NSRect::new(
                 objc2_foundation::NSPoint::new(placed.x as f64, placed.y as f64),
@@ -284,6 +289,7 @@ pub(crate) fn try_add_image_fill_layer(
             {
                 // Keep the retained tree bounded: the per-cell layers exist only while Core
                 // Animation rasterizes this brush, then one CGImage-backed layer replaces them.
+                super::stats::bump(|s| s.layers_created += 1);
                 let tile_root = CALayer::new();
                 tile_root.setBounds(objc2_core_foundation::CGRect::new(
                     objc2_core_foundation::CGPoint::new(0.0, 0.0),
@@ -316,6 +322,7 @@ pub(crate) fn try_add_image_fill_layer(
                     if let Some(tiled_image) =
                         crate::render::pixels_to_cgimage(pixels, pixel_width, pixel_height)
                     {
+                        super::stats::bump(|s| s.layers_created += 1);
                         let image_layer = CALayer::new();
                         image_layer.setFrame(NSRect::new(
                             objc2_foundation::NSPoint::new(
@@ -384,6 +391,7 @@ pub(crate) fn try_add_image_fill_layer(
     // Same re-anchored-at-(0,0) mask path `try_add_gradient_fill_layer` builds — see that
     // function's own doc comment for why `local_bounds` (not another `translation(-bounds.x,
     // -bounds.y)`) is what belongs alongside the identity transform here.
+    super::stats::bump(|s| s.layers_created += 1);
     let mask_layer = CAShapeLayer::new();
     let identity = elwindui_core::base::AffineTransform::identity();
     let mask_path = match mask_shape {
@@ -446,6 +454,7 @@ pub(crate) fn add_tiled_image_layers(
         for col in 0..cols {
             let flip_x = matches!(tile_mode, TileMode::FlipX | TileMode::FlipXY) && col % 2 == 1;
             let flip_y = matches!(tile_mode, TileMode::FlipY | TileMode::FlipXY) && row % 2 == 1;
+            super::stats::bump(|s| s.layers_created += 1);
             let image_layer = CALayer::new();
             image_layer.setBounds(objc2_core_foundation::CGRect::new(
                 objc2_core_foundation::CGPoint::new(0.0, 0.0),

@@ -15,13 +15,16 @@ mod image;
 mod layer;
 mod paint;
 mod path;
+pub(crate) mod stats;
 mod text;
 mod vector;
 
 pub(crate) use geometry::{
     clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, parse_color, transform_point,
 };
-pub(crate) use image::{build_image_container_layer, fitted_image_rect, resolve_cgimage};
+pub(crate) use image::{
+    build_image_container_layer, cgimage_bytes, fitted_image_rect, resolve_cgimage,
+};
 pub(crate) use layer::{add_sublayer_scaled, set_mask_scaled};
 pub(crate) use paint::{
     GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, first_gradient_stop_color,

@@ -52,6 +52,7 @@ pub(crate) fn set_contents_scale_recursive(layer: &CALayer, scale: CGFloat) {
 /// harness, which never attaches to a real window) stamps `1.0` onto `child` — a no-op there by
 /// construction, which is what keeps every existing golden byte-identical.
 pub(crate) fn add_sublayer_scaled(parent: &CALayer, child: &CALayer) {
+    super::stats::bump(|s| s.add_sublayer_calls += 1);
     parent.addSublayer(child);
     set_contents_scale_recursive(child, parent.contentsScale());
 }

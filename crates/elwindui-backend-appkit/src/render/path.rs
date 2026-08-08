@@ -68,6 +68,7 @@ pub(crate) fn path_to_cgpath(
     world: &elwindui_core::base::AffineTransform,
     path: &elwindui_core::graphics::Path,
 ) -> CFRetained<CGMutablePath> {
+    super::stats::bump(|s| s.cgpaths_created += 1);
     let cg_path = CGMutablePath::new();
     for command in path.commands() {
         match *command {

@@ -293,6 +293,19 @@ fn replay_flat_commands(
     let mut idx = 0;
     while idx < commands.len() {
         let command = &commands[idx];
+        // Batching (Step 8) is tried first, same as in `replay_commands`'s own general loop —
+        // this is the *common* case a flat, `Unclipped`/`Inside` group actually hits, so batching
+        // must be reachable here too, not just from the general path (see `try_batch_fills`'s own
+        // doc comment). A batched run's positions get no per-position `CALayer` here (`None`
+        // stays in `fast_path_layers` for each of them, its already-initialized default), so a
+        // group containing one simply never becomes eligible for Step 7b's in-place update later
+        // — the same fate as any other group whose leaf list isn't uniformly single-command
+        // fast-path-eligible.
+        let batched = crate::render::try_batch_fills(layer, commands, idx, &transform, None, opacity);
+        if batched > 0 {
+            idx += batched;
+            continue;
+        }
         let next = commands.get(idx + 1);
         let (consumed, created) =
             crate::render::try_fast_path(layer, command, next, &transform, opacity);
@@ -804,27 +817,40 @@ pub(crate) fn replay_commands(
                 if geometry_bounds(command, &world)
                     .is_none_or(|bounds| clip.is_none_or(|clip| bounds.intersect(clip).is_some()))
                 {
-                    // `try_fast_path` may also consume `commands[idx + 1]` (the FillRect+
-                    // StrokeRect fusion case) — the shared rect makes this command's own cull
-                    // decision above a reasonable stand-in for the pair's, the same bounding-box
-                    // approximation `Shape::hit_test_content` already documents elsewhere in this
-                    // codebase.
-                    let next = commands.get(idx + 1);
-                    let (consumed, _) =
-                        crate::render::try_fast_path(layer, command, next, &world, opacity);
-                    if consumed == 0 {
-                        replay_paint_command(
-                            layer,
-                            command,
-                            origin,
-                            transform,
-                            opacity,
-                            image_cache,
-                            vector_raster_cache,
-                        );
-                        idx += 1;
+                    // A run of >=2 consecutive same-solid-color fills batches into one
+                    // `CAShapeLayer` before anything else is tried — see `try_batch_fills`'s own
+                    // doc comment on why this is safe (a run can never cross a `Push*`/`Pop*`/
+                    // `NativeControl` boundary) and why it's deliberately only reachable from
+                    // here, never from `replay_flat_commands`. A `0` result (no run of 2+ found)
+                    // falls through to the existing single-command handling completely unchanged.
+                    let batched = crate::render::try_batch_fills(
+                        layer, commands, idx, &world, clip, opacity,
+                    );
+                    if batched > 0 {
+                        idx += batched;
                     } else {
-                        idx += consumed;
+                        // `try_fast_path` may also consume `commands[idx + 1]` (the FillRect+
+                        // StrokeRect fusion case) — the shared rect makes this command's own cull
+                        // decision above a reasonable stand-in for the pair's, the same bounding-box
+                        // approximation `Shape::hit_test_content` already documents elsewhere in this
+                        // codebase.
+                        let next = commands.get(idx + 1);
+                        let (consumed, _) =
+                            crate::render::try_fast_path(layer, command, next, &world, opacity);
+                        if consumed == 0 {
+                            replay_paint_command(
+                                layer,
+                                command,
+                                origin,
+                                transform,
+                                opacity,
+                                image_cache,
+                                vector_raster_cache,
+                            );
+                            idx += 1;
+                        } else {
+                            idx += consumed;
+                        }
                     }
                 } else {
                     idx += 1;
@@ -1792,5 +1818,136 @@ mod tests {
             "a non-fast-path-eligible leaf must never be updated in place"
         );
         assert_eq!(stats.groups_rebuilt, 1);
+    }
+
+    /// Step 8's batching happy path: several adjacent solid fills sharing one color must collapse
+    /// into a single `CAShapeLayer` instead of one layer per fill.
+    #[test]
+    fn a_run_of_same_color_fills_batches_into_one_shape_layer() {
+        let root_layer = CALayer::new();
+        let mut group = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
+        let color = Color {
+            r: 10,
+            g: 20,
+            b: 30,
+            a: 255,
+        };
+        group.commands = (0..5)
+            .map(|i| RenderCommand::FillRect {
+                rect: Rect {
+                    x: i as f32 * 12.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                brush: Brush::Solid(color),
+            })
+            .collect();
+        let mut state = ReplayState::default();
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &group, &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        // 2, not 6: the group's own persistent container CALayer plus ONE batched CAShapeLayer
+        // for all 5 same-color fills, instead of one fast-path CALayer per fill.
+        assert_eq!(
+            stats.layers_created, 2,
+            "5 adjacent same-color fills must batch into a single CAShapeLayer"
+        );
+    }
+
+    /// Adjacent fills with *different* colors must never batch — each stays its own fast-path
+    /// layer, since a shared `CAShapeLayer` can only carry one `fillColor`.
+    #[test]
+    fn differently_colored_adjacent_fills_do_not_batch() {
+        let root_layer = CALayer::new();
+        let mut group = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
+        group.commands = (0..3)
+            .map(|i| RenderCommand::FillRect {
+                rect: Rect {
+                    x: i as f32 * 12.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                brush: Brush::Solid(Color {
+                    r: (i as u8) * 50,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+            })
+            .collect();
+        let mut state = ReplayState::default();
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &group, &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        // 4: container + 3 individual fast-path layers, one per distinct color.
+        assert_eq!(stats.layers_created, 4);
+    }
+
+    /// The guide's own explicit Z-order concern: a same-color fill run must never batch *across*
+    /// an intervening command of a different kind — here, real text sandwiched between two
+    /// identically-colored fills. Batching the two fills together would either have to skip the
+    /// text command (silently dropping it from paint order) or splice the merged shape layer in
+    /// front of/behind the text incorrectly; verifying the exact `RenderCommand` kind sequence
+    /// present in `command_kinds` after a rebuild is a much stronger check than counting layers,
+    /// since a layer-count assertion alone could not distinguish "correctly kept separate" from
+    /// "wrongly merged in a way that still happens to produce 3 layers".
+    #[test]
+    fn a_batchable_run_never_crosses_an_intervening_text_command() {
+        let root_layer = CALayer::new();
+        let mut group = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        group.commands = vec![
+            RenderCommand::FillRect {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                brush: Brush::Solid(red),
+            },
+            RenderCommand::Text {
+                content: "hi".to_string(),
+                rect: Rect {
+                    x: 20.0,
+                    y: 0.0,
+                    width: 50.0,
+                    height: 20.0,
+                },
+                style: elwindui_core::graphics::ComputedTextStyle::default(),
+                foreground: None,
+                alignment: elwindui_core::ui::TextAlignment::Left,
+            },
+            RenderCommand::FillRect {
+                rect: Rect {
+                    x: 80.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                brush: Brush::Solid(red),
+            },
+        ];
+        let mut state = ReplayState::default();
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &group, &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        // container + fill + text + fill: the text command must still be its own CATextLayer,
+        // never skipped over or merged into a batch with either fill.
+        assert_eq!(stats.layers_created, 4);
+        assert_eq!(stats.text_layers_created, 1);
     }
 }

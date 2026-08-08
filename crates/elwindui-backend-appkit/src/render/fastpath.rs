@@ -18,8 +18,10 @@ use objc2_quartz_core::CALayer;
 use super::geometry::{color_to_cgcolor, is_pure_translation};
 
 /// Extracts `(rect, radii, brush)` from a fill command this module can fast-path, unifying
-/// `FillRect`'s implicit zero radius with `FillRoundedRect`'s explicit one.
-fn fill_shape(command: &RenderCommand) -> Option<(Rect, CornerRadius, &Brush)> {
+/// `FillRect`'s implicit zero radius with `FillRoundedRect`'s explicit one. `pub(crate)` (not
+/// private) so `render::batch` can classify the same two command kinds for its own, unrelated,
+/// purpose — see that module's own doc comment.
+pub(crate) fn fill_shape(command: &RenderCommand) -> Option<(Rect, CornerRadius, &Brush)> {
     match command {
         RenderCommand::FillRect { rect, brush } => Some((*rect, CornerRadius::default(), brush)),
         RenderCommand::FillRoundedRect { rect, radii, brush } => Some((*rect, *radii, brush)),
@@ -67,7 +69,9 @@ fn is_simple_border(stroke: &StrokeStyle) -> bool {
         && stroke.line_join == LineJoin::Miter
 }
 
-fn solid_color(brush: &Brush) -> Option<Color> {
+/// `pub(crate)` (not private) so `render::batch` can reuse the same solid-brush classification —
+/// see that module's own doc comment.
+pub(crate) fn solid_color(brush: &Brush) -> Option<Color> {
     match brush {
         Brush::Solid(color) => Some(*color),
         _ => None,

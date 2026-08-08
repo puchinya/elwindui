@@ -248,7 +248,7 @@ mod tests {
             render_tree: Rc<RefCell<Option<RenderTree>>>,
         }
         impl crate::ui::RelayoutHost for ReentrantRelayoutHost {
-            fn request_relayout(&self, dirty_group_id: u64) {
+            fn request_relayout(&self, dirty_group_id: u64, _kind: crate::ui::InvalidationKind) {
                 if let Some(rt) = self.render_tree.borrow_mut().as_mut() {
                     rt.mark_dirty(dirty_group_id);
                 }

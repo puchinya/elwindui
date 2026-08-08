@@ -116,7 +116,12 @@ pub(crate) struct WinUI3RelayoutHost {
 }
 
 impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
-    fn request_relayout(&self, dirty_group_id: u64) {
+    // `_kind` is unused: this backend has no `InvalidationKind::Render` fast path yet (every
+    // relayout is a full `relayout_static` rebuild regardless of what was invalidated) — see this
+    // crate's own top-level doc comment on why it can't be built or type-checked on this machine,
+    // so this mechanical signature update is deliberately kept behavior-identical rather than
+    // guessed at.
+    fn request_relayout(&self, dirty_group_id: u64, _kind: elwindui_core::ui::InvalidationKind) {
         if let Some(render_tree) = self.render_tree.upgrade() {
             if let Some(render_tree) = render_tree.borrow_mut().as_mut() {
                 render_tree.mark_dirty(dirty_group_id);

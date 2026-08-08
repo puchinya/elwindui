@@ -492,7 +492,7 @@ pub(crate) struct RecordingRelayoutHost {
     requests: RefCell<Vec<u64>>,
 }
 impl RelayoutHost for RecordingRelayoutHost {
-    fn request_relayout(&self, dirty_group_id: u64) {
+    fn request_relayout(&self, dirty_group_id: u64, _kind: InvalidationKind) {
         self.requests.borrow_mut().push(dirty_group_id);
     }
 }

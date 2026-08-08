@@ -12,7 +12,7 @@ use elwindui_core::input::{
     FocusState, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
     RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
-use elwindui_core::ui::{FocusHost, RelayoutHost, UIElementExt, layout_root};
+use elwindui_core::ui::{FocusHost, InvalidationKind, RelayoutHost, UIElementExt, layout_root};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
@@ -99,6 +99,18 @@ pub struct TreeHostIvars {
     /// called mid-pass is not guaranteed to still be honored once AppKit's own layout pass (which
     /// is what got this `relayout()` running in the first place) completes.
     pub(crate) needs_another_pass: Cell<bool>,
+    /// The strongest `InvalidationKind` any `request_relayout` call has asked for since the last
+    /// `relayout_inner` pass consumed it — `None` means no explicit request arrived (a `layout`
+    /// callback can still fire for other reasons, e.g. a window resize; see `relayout_inner`'s own
+    /// handling of `frame_changed`). Coalesced by `max` rather than overwritten, mirroring the
+    /// WinUI3 backend's own `pending: Cell<bool>` coalescing (`WinUI3RelayoutHost`) — several
+    /// `request_relayout` calls within one runloop turn collapse into a single pass at the
+    /// strongest kind any of them needed.
+    pub(crate) pending_invalidation: Cell<Option<InvalidationKind>>,
+    /// `self.frame().size` as of the last `relayout_inner` pass — compared against the current
+    /// frame at the top of the next pass so a resize (which `layout` can trigger with no
+    /// `request_relayout` call at all) is never treated as a `Render`-only pass.
+    pub(crate) last_layout_size: Cell<objc2_foundation::NSSize>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
@@ -107,8 +119,12 @@ pub struct TreeHostIvars {
 pub(crate) struct AppKitRelayoutHost(objc2::rc::Weak<TreeHostView>);
 
 impl RelayoutHost for AppKitRelayoutHost {
-    fn request_relayout(&self, dirty_group_id: u64) {
+    fn request_relayout(&self, dirty_group_id: u64, kind: InvalidationKind) {
         let Some(view) = self.0.load() else { return };
+        let previous = view.ivars().pending_invalidation.get();
+        view.ivars()
+            .pending_invalidation
+            .set(Some(previous.map_or(kind, |p| p.max(kind))));
         if view.ivars().relaying_out.get() {
             // Reentrant call from inside `relayout()`'s own replay pass (see `relaying_out`'s own
             // doc comment) — `render_tree` is already borrowed by that pass, so defer the mark
@@ -119,6 +135,8 @@ impl RelayoutHost for AppKitRelayoutHost {
                 .push(dirty_group_id);
             view.ivars().needs_another_pass.set(true);
         } else if let Some(render_tree) = view.ivars().render_tree.borrow_mut().as_mut() {
+            // Every kind still marks the group dirty — `Render` especially, since re-recording
+            // this group's commands is the entire point of a paint-only invalidation.
             render_tree.mark_dirty(dirty_group_id);
         }
         view.setNeedsLayout(true);
@@ -346,6 +364,8 @@ impl TreeHostView {
             relaying_out: Cell::new(false),
             pending_dirty_ids: RefCell::new(Vec::new()),
             needs_another_pass: Cell::new(false),
+            pending_invalidation: Cell::new(None),
+            last_layout_size: Cell::new(objc2_foundation::NSSize::new(-1.0, -1.0)),
         };
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =
@@ -561,31 +581,55 @@ impl TreeHostView {
         };
         let tree = self.ivars().tree.borrow();
         let Some(tree) = tree.as_ref() else { return };
-        layout_root(tree, available);
-        // `InnerScrollView`'s content host (`unconstrained_axes` set via
-        // `set_unconstrained_axes`) grows to its own content's natural size on whichever axis is
-        // unconstrained, rather than staying clamped to `frame`'s (possibly stale, possibly
-        // zero-on-first-layout) size — every other host has both axes `false` and this is a no-op.
-        if unconstrained_width || unconstrained_height {
-            let natural_width = tree.arranged_width().unwrap_or(0.0) as f64;
-            let natural_height = tree.arranged_height().unwrap_or(0.0) as f64;
-            let new_width = if unconstrained_width {
-                natural_width
-            } else {
-                frame.size.width
-            };
-            let new_height = if unconstrained_height {
-                natural_height
-            } else {
-                frame.size.height
-            };
-            if new_width != frame.size.width || new_height != frame.size.height {
-                self.setFrame(NSRect::new(
-                    frame.origin,
-                    objc2_foundation::NSSize::new(new_width, new_height),
-                ));
+
+        // `layout` (the NSView override that calls `relayout`) fires for reasons other than our
+        // own `request_relayout` — a window resize chief among them — so a frame change always
+        // forces `Measure` regardless of what (if anything) was actually requested. Several
+        // `request_relayout` calls since the last pass already coalesced to their strongest kind
+        // (`AppKitRelayoutHost::request_relayout`'s own `max`); `None` (nothing was explicitly
+        // requested — e.g. the very first pass from `set_tree`) also defaults to `Measure`, the
+        // only kind safe to assume with no other information.
+        let requested = self.ivars().pending_invalidation.take();
+        let frame_changed = self.ivars().last_layout_size.get() != frame.size;
+        let kind = if frame_changed {
+            InvalidationKind::Measure
+        } else {
+            requested.unwrap_or(InvalidationKind::Measure)
+        };
+        self.ivars().last_layout_size.set(frame.size);
+
+        if kind != InvalidationKind::Render {
+            layout_root(tree, available);
+            // `InnerScrollView`'s content host (`unconstrained_axes` set via
+            // `set_unconstrained_axes`) grows to its own content's natural size on whichever axis is
+            // unconstrained, rather than staying clamped to `frame`'s (possibly stale, possibly
+            // zero-on-first-layout) size — every other host has both axes `false` and this is a no-op.
+            if unconstrained_width || unconstrained_height {
+                let natural_width = tree.arranged_width().unwrap_or(0.0) as f64;
+                let natural_height = tree.arranged_height().unwrap_or(0.0) as f64;
+                let new_width = if unconstrained_width {
+                    natural_width
+                } else {
+                    frame.size.width
+                };
+                let new_height = if unconstrained_height {
+                    natural_height
+                } else {
+                    frame.size.height
+                };
+                if new_width != frame.size.width || new_height != frame.size.height {
+                    self.setFrame(NSRect::new(
+                        frame.origin,
+                        objc2_foundation::NSSize::new(new_width, new_height),
+                    ));
+                }
             }
         }
+        // `Render` skips `layout_root` above, but `reconcile` below still runs — since Render
+        // invalidation never clears `arranged_*`, `reconcile_render_group` recomputes the exact
+        // same `offset`/`size`/`clip` it always would, so this reconcile is provably equivalent to
+        // what today's always-runs-`layout_root` path already produced; only the (redundant)
+        // measure/arrange work itself is skipped.
         {
             let mut retained_tree = self.ivars().render_tree.borrow_mut();
             if retained_tree

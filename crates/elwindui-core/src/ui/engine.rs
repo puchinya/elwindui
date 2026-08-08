@@ -74,12 +74,18 @@ pub(crate) fn record_group_commands<H: Clone + 'static>(
     context.end_group();
 }
 
-/// Builds one retained RenderGroup for every arranged, visible Visual.
+/// Builds one retained RenderGroup for every arranged, visible Visual — threading `path`/
+/// `group_paths`/`visual_index` bookkeeping through this same recursive walk (formerly a
+/// separate `index_render_groups` pass run afterward over the already-built tree) so
+/// `RenderTree::new`/`reconcile` each visit every node exactly once, not twice.
 pub(crate) fn build_render_group<H: Clone + 'static>(
     elem: &Rc<dyn UIElementExt>,
     offset: Point,
+    path: &mut Vec<usize>,
+    group_paths: &mut HashMap<u64, Vec<usize>>,
+    visual_index: &mut HashMap<u64, Weak<dyn UIElementExt>>,
 ) -> Option<RenderGroup> {
-    if elem.visibility() == Visibility::Collapsed {
+    if !elem.participates_in_layout() {
         return None;
     }
     let size = Size {
@@ -97,11 +103,22 @@ pub(crate) fn build_render_group<H: Clone + 'static>(
     group.size = size;
     record_group_commands::<H>(elem, &mut group);
     group.generation += 1;
+    group_paths.insert(id, path.clone());
+    visual_index.insert(id, Rc::downgrade(elem));
     for child in elem.visual_children() {
         let child_offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-        if let Some(child_group) = build_render_group::<H>(&child, child_offset) {
+        // The dense index this child would occupy in `group.children` if it participates —
+        // pushed before recursing so the child's own `group_paths` entry (inserted inside that
+        // call, only if it participates) ends with that index. Popped unconditionally afterward;
+        // a non-participating child returns `None` before ever reading `path`, so pushing an
+        // index for it that ends up unused is harmless.
+        path.push(group.children.len());
+        if let Some(child_group) =
+            build_render_group::<H>(&child, child_offset, path, group_paths, visual_index)
+        {
             group.children.push(child_group);
         }
+        path.pop();
     }
     group.is_dirty = false;
     Some(group)
@@ -135,33 +152,16 @@ pub fn layout_root(root: &Rc<dyn UIElementExt>, available: Size) {
     root.arrange(allotted);
 }
 
-pub(crate) fn index_render_groups(
-    elem: &Rc<dyn UIElementExt>,
-    group: &RenderGroup,
-    path: Vec<usize>,
-    group_paths: &mut HashMap<u64, Vec<usize>>,
-    visual_index: &mut HashMap<u64, Weak<dyn UIElementExt>>,
-) {
-    group_paths.insert(group.id, path.clone());
-    visual_index.insert(group.id, Rc::downgrade(elem));
-    let mut group_children = group.children.iter().enumerate();
-    for child in elem.visual_children() {
-        if child.visibility() == Visibility::Collapsed {
-            continue;
-        }
-        let Some((child_index, child_group)) = group_children.next() else {
-            break;
-        };
-        let mut child_path = path.clone();
-        child_path.push(child_index);
-        index_render_groups(&child, child_group, child_path, group_paths, visual_index);
-    }
-}
-
+/// Reconciles an already-built `RenderGroup` against `elem`'s current layout/children, threading
+/// the same `path`/`group_paths`/`visual_index` bookkeeping `build_render_group` does — see that
+/// function's own doc comment for why this replaces a separate post-pass over the tree.
 pub(crate) fn reconcile_render_group<H: Clone + 'static>(
     elem: &Rc<dyn UIElementExt>,
     group: &mut RenderGroup,
     offset: Point,
+    path: &mut Vec<usize>,
+    group_paths: &mut HashMap<u64, Vec<usize>>,
+    visual_index: &mut HashMap<u64, Weak<dyn UIElementExt>>,
 ) {
     let size = Size {
         width: elem.arranged_width().unwrap_or(0.0),
@@ -179,6 +179,8 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
         group.clip = clip;
         group.is_dirty = true;
     }
+    group_paths.insert(group.id, path.clone());
+    visual_index.insert(group.id, Rc::downgrade(elem));
 
     let old_children = std::mem::take(&mut group.children);
     let mut old_by_id: HashMap<u64, RenderGroup> = old_children
@@ -187,19 +189,31 @@ pub(crate) fn reconcile_render_group<H: Clone + 'static>(
         .collect();
     let mut children = Vec::new();
     for child in elem.visual_children() {
-        if child.visibility() == Visibility::Collapsed {
+        if !child.participates_in_layout() {
             continue;
         }
         let child_offset = child.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
         let id = child.render_group_id();
+        // See `build_render_group`'s own comment on `path.push`/`path.pop` — `children.len()`
+        // here is this child's dense index in `group.children`-to-be, the same role
+        // `group.children.len()` plays there.
+        path.push(children.len());
         let child_group = if let Some(mut existing) = old_by_id.remove(&id) {
-            reconcile_render_group::<H>(&child, &mut existing, child_offset);
+            reconcile_render_group::<H>(
+                &child,
+                &mut existing,
+                child_offset,
+                path,
+                group_paths,
+                visual_index,
+            );
             existing
         } else {
             group.is_dirty = true;
-            build_render_group::<H>(&child, child_offset)
+            build_render_group::<H>(&child, child_offset, path, group_paths, visual_index)
                 .expect("visible Visual must have a RenderGroup")
         };
+        path.pop();
         children.push(child_group);
     }
     if !old_by_id.is_empty() {
@@ -217,17 +231,29 @@ impl RenderTree {
     /// Creates the initial retained tree from a layout-complete content root.
     pub fn new<H: Clone + 'static>(root: &Rc<dyn UIElementExt>) -> Self {
         let offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-        let root_group = build_render_group::<H>(root, offset)
-            .unwrap_or_else(|| RenderGroup::new(root.render_group_id(), offset, None));
-        let mut tree = Self::with_root(root_group);
-        index_render_groups(
+        let mut group_paths = HashMap::new();
+        let mut visual_index = HashMap::new();
+        let root_group = build_render_group::<H>(
             root,
-            &tree.root,
-            Vec::new(),
-            &mut tree.group_paths,
-            &mut tree.visual_index,
-        );
-        tree
+            offset,
+            &mut Vec::new(),
+            &mut group_paths,
+            &mut visual_index,
+        )
+        .unwrap_or_else(|| {
+            // A non-participating root still gets its own `group_paths`/`visual_index` entry (at
+            // the empty path — it *is* the root) even though `build_render_group` returned `None`
+            // before recording one; it just has no descendants to index, since `build_render_group`
+            // never got as far as visiting any of them.
+            group_paths.insert(root.render_group_id(), Vec::new());
+            visual_index.insert(root.render_group_id(), Rc::downgrade(root));
+            RenderGroup::new(root.render_group_id(), offset, None)
+        });
+        Self {
+            root: root_group,
+            group_paths,
+            visual_index,
+        }
     }
 
     /// Reconciles an already retained tree after `layout_root`. Group identities and clean command
@@ -237,16 +263,27 @@ impl RenderTree {
             return false;
         }
         let offset = root.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-        reconcile_render_group::<H>(root, &mut self.root, offset);
         self.group_paths.clear();
         self.visual_index.clear();
-        index_render_groups(
-            root,
-            &self.root,
-            Vec::new(),
-            &mut self.group_paths,
-            &mut self.visual_index,
-        );
+        if root.participates_in_layout() {
+            reconcile_render_group::<H>(
+                root,
+                &mut self.root,
+                offset,
+                &mut Vec::new(),
+                &mut self.group_paths,
+                &mut self.visual_index,
+            );
+        } else {
+            // Mirrors `new`'s own non-participating fallback above: the root's `RenderGroup`
+            // collapses to the same empty shape a freshly built one would have (no commands, no
+            // children) rather than having `reconcile_render_group` — which assumes `elem`
+            // participates — re-record an empty-content group's commands and recurse into what
+            // would otherwise be stale, now-orphaned former children.
+            self.root = RenderGroup::new(self.root.id, offset, None);
+            self.group_paths.insert(self.root.id, Vec::new());
+            self.visual_index.insert(self.root.id, Rc::downgrade(root));
+        }
         true
     }
 
@@ -308,11 +345,11 @@ pub(crate) fn hit_test_at(
     at: Point,
     inherited_clip: Option<Rect>,
 ) -> Option<Rc<dyn UIElementExt>> {
-    // A `Collapsed` element (and its whole subtree) is excluded from hit-testing, matching
-    // `collect_render_items`'s own treatment — see `Visibility`'s own doc comment. `hit_test_visible
-    // == false` (WinUI3's `IsHitTestVisible`) excludes the subtree the same way, with no layout/
-    // render effect at all — see that field's own doc comment.
-    if elem.visibility() == Visibility::Collapsed || !elem.hit_test_visible() {
+    // A non-participating element (and its whole subtree) is excluded from hit-testing, matching
+    // `build_render_group`'s own treatment — see `UIElementExt::participates_in_layout`'s own doc
+    // comment. `hit_test_visible == false` (WinUI3's `IsHitTestVisible`) excludes the subtree the
+    // same way, with no layout/render effect at all — see that field's own doc comment.
+    if !elem.participates_in_layout() || !elem.hit_test_visible() {
         return None;
     }
     let width = elem.arranged_width().unwrap_or(0.0);
@@ -861,6 +898,89 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_removes_a_render_group_when_its_element_becomes_collapsed() {
+        let child = native("child", size(10.0, 10.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&child)]);
+        layout_root(&root, size(40.0, 40.0));
+        let mut render_tree = RenderTree::new::<FakeHandle>(&root);
+        let child_id = child.render_group_id();
+        assert!(render_tree.group_paths.contains_key(&child_id));
+        assert_eq!(render_tree.root.children.len(), 1);
+
+        child.as_ui_element().set_visibility(Visibility::Collapsed);
+        layout_root(&root, size(40.0, 40.0));
+        assert!(render_tree.reconcile::<FakeHandle>(&root));
+
+        assert!(
+            render_tree.root.children.is_empty(),
+            "the Collapsed child's RenderGroup must be removed from its parent's children"
+        );
+        assert!(
+            !render_tree.group_paths.contains_key(&child_id),
+            "a removed RenderGroup's id must not remain in group_paths"
+        );
+        assert!(
+            !render_tree.mark_dirty(child_id),
+            "mark_dirty on a removed group's id must return false, not panic or find a stale entry"
+        );
+    }
+
+    #[test]
+    fn reconcile_recreates_a_render_group_when_its_element_becomes_visible_again() {
+        let child = native("child", size(10.0, 10.0));
+        child.as_ui_element().set_visibility(Visibility::Collapsed);
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&child)]);
+        layout_root(&root, size(40.0, 40.0));
+        let mut render_tree = RenderTree::new::<FakeHandle>(&root);
+        let child_id = child.render_group_id();
+        assert!(render_tree.root.children.is_empty());
+        assert!(!render_tree.group_paths.contains_key(&child_id));
+
+        child.as_ui_element().set_visibility(Visibility::Visible);
+        layout_root(&root, size(40.0, 40.0));
+        assert!(render_tree.reconcile::<FakeHandle>(&root));
+
+        assert_eq!(
+            render_tree.root.children.len(),
+            1,
+            "the now-Visible child's RenderGroup must be (re)created"
+        );
+        assert_eq!(render_tree.root.children[0].id, child_id);
+        assert!(render_tree.group_paths.contains_key(&child_id));
+        assert!(render_tree.mark_dirty(child_id));
+    }
+
+    #[test]
+    fn reconcile_collapses_the_root_group_itself_when_the_root_becomes_collapsed() {
+        // Mirrors `RenderTree::new`'s own non-participating-root fallback (see its doc comment):
+        // a Collapsed *root* can't simply vanish (a `RenderTree` always has a root group), so
+        // `reconcile` must fold it down to the same empty shape `new` would produce instead of
+        // asking `reconcile_render_group` (which assumes its `elem` participates) to reconcile a
+        // group that shouldn't exist at all.
+        let child = native("child", size(10.0, 10.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&child)]);
+        layout_root(&root, size(40.0, 40.0));
+        let mut render_tree = RenderTree::new::<FakeHandle>(&root);
+        let root_id = root.render_group_id();
+        let child_id = child.render_group_id();
+        assert_eq!(render_tree.root.children.len(), 1);
+
+        root.as_ui_element().set_visibility(Visibility::Collapsed);
+        layout_root(&root, size(40.0, 40.0));
+        assert!(render_tree.reconcile::<FakeHandle>(&root));
+
+        assert_eq!(render_tree.root_id(), root_id, "the root's own group id never changes");
+        assert!(render_tree.root.children.is_empty());
+        assert!(render_tree.root.commands.is_empty());
+        assert!(render_tree.group_paths.contains_key(&root_id));
+        assert_eq!(render_tree.group_paths[&root_id], Vec::<usize>::new());
+        assert!(
+            !render_tree.group_paths.contains_key(&child_id),
+            "the collapsed root's former child must not remain indexed"
+        );
+    }
+
+    #[test]
     fn reconcile_rejects_a_different_content_root() {
         let first = native("first", size(10.0, 10.0));
         let second = native("second", size(10.0, 10.0));
@@ -992,21 +1112,27 @@ mod tests {
         );
 
         let (natives, _) = split(layout_tree::<FakeHandle>(&tree, size(200.0, 200.0)));
-        // Known limitation (see `Visibility`'s own doc comment / the layout engine's own comment
-        // above `measure`): `stack_arrange` still reserves the 5.0 `spacing` gap around the
-        // zero-sized collapsed child, so `visible` starts at y = 5.0, not y = 0.0.
+        // `VerticalLayout::measure_override`/`arrange_override` exclude non-participating children
+        // from `stack_natural_size`/`stack_arrange`'s own inputs, so the collapsed child doesn't
+        // strand a `spacing` gap around itself — `visible` starts at y = 0.0, as if `collapsed`
+        // weren't in the stack at all.
         assert_eq!(
             natives,
             vec![(
                 FakeHandle("visible", size(30.0, 10.0)),
                 Rect {
                     x: 0.0,
-                    y: 5.0,
+                    y: 0.0,
                     width: 30.0,
                     height: 10.0
                 }
             )]
         );
+        // The collapsed child is still `arrange`d (its own `arranged_*` reset to zero), just
+        // excluded from the participating-children rect list above.
+        assert_eq!(collapsed.arranged_width(), Some(0.0));
+        assert_eq!(collapsed.arranged_height(), Some(0.0));
+        assert_eq!(collapsed.arranged_offset(), Some(Point { x: 0.0, y: 0.0 }));
     }
 
     #[test]

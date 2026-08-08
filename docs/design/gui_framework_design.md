@@ -615,6 +615,27 @@ trait UIElement {
 
 新しいバックエンドを追加する際・既存バックエンドの`RelayoutHost`実装をレビューする際は、このコアレシング契約を満たしているかを確認すること。
 
+### 5.4a 非表示subtreeの除外とホストアクティベーション 🚧
+
+「存在するUIElement」と「現在Layout/Renderに参加しているUIElement」を分離する。3層で考える:
+
+- **local visibility**: ユーザーが設定した`Visibility`(付録F参照)。コンテナ(`TabView`等)はこれを書き換えない。
+- **container participation**: `TabView`/将来の`NavigationHost`等のコンテナが、自身が管理する子孫subtreeを現在Layout/Renderに参加させるかどうか決める状態。このコードベースでは非アクティブなsubtreeは必ず独立したホスト境界(`TreeHostView`/`TreeHostPanel`、下記)を持つため——`TabViewItem`の内容は外側ツリーの子ではなく、タブごとに独立してホストされた別ルートツリーである(付録Y参照)——per-element型の participation フラグではなく、**ホスト単位の`set_active(bool)`**として表現する。
+- **effective**: 上記2つとancestorの`Visibility`の積。`UIElementExt::participates_in_layout()`(`elwindui-core::ui::element`)が単一の判定箇所であり、`measure`/`arrange`/`build_render_group`/`reconcile_render_group`/`hit_test_at`/`FocusTracker`のtab order/`ShortcutRegistry::try_dispatch`が共通してこれを参照する。祖先が非参加ならsubtree全体を一括で打ち切り、子孫を個別に走査して判定し直すことはしない。
+
+現状`participates_in_layout()`は`Visibility::Visible`のみをチェックする(`Visibility`は`Visible`/`Collapsed`の2値、付録F参照)。将来ホストの`set_active(false)`相当の状態が要素単位のシグナルとして必要になった場合、この1箇所に第2の条件を足せるよう設計されている。
+
+**ホストアクティベーションの状態モデル**(未参加のホストがLayout/RenderTree/backendリソースをどう扱うか):
+
+| 状態 | UI state(要素ツリー) | Layout | RenderTree | backendリソース |
+|---|---|---|---|---|
+| アクティブ | 保持 | 実行 | 保持 | 保持 |
+| 非アクティブ | 保持(ネイティブcontrolハンドルも含む) | 実行しない | 破棄 | 解放 |
+
+非アクティブ化はRenderTree・レンダリングキャッシュ(付録F・AppKitの`ReplayState`/WinUI3のcomposition island・native children)を解放するが、要素ツリー自体とネイティブcontrolハンドルは保持する——`Visibility::Collapsed`と同じ「高コストなnative controlを毎回destroy/recreateしない」方針(頻繁な表示切替のコストとメモリ削減のトレードオフ)を踏襲する。再アクティブ化時は、その時点の最新viewportサイズでlayoutからやり直す。
+
+**実装状況**: `participates_in_layout()`とそれを参照する上記の一元化された判定箇所、および`RenderTree::reconcile`のVisible⇄Collapsed遷移(RenderGroup生成/除去、ルート自身がCollapsedになる場合を含む)は`elwindui-core`に実装・テスト済み。`TreeHostView`(AppKit)/`TreeHostPanel`(WinUI3)自体の`set_active(bool)`とTabViewからの配線は未実装(バックエンド別Issueで対応予定)。GTK4バックエンドはスタブのため対象外(§9参照)。
+
 ### 5.5 フォーカス管理 ✅
 
 **実装済み**(AppKit・WinUI3両バックエンドに実配線。WinUI3側はWindows環境が無く未検証)。`elwindui_core::focus::FocusTracker`が`elwindui_core::input::PointerDispatcher`と対になる具象型として実装されている。`PointerDispatcher`/`dispatch_routed`と同じく`Rc<dyn UIElementExt>`を直接扱う——`ElementId`のような文字列idを介する設計は採らない。§5.2の「文字列idによる`find_by_id`は提供しない」という方針と整合させるためで、文字列idからは実際のツリーノードを解決できない。

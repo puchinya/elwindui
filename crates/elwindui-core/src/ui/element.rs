@@ -360,6 +360,25 @@ impl UIElement {
     fn visibility(&self) -> Visibility {
         self.as_ui_element().visibility.get()
     }
+    /// The single source of truth for whether this element takes part in measure/arrange/
+    /// rendering/hit-testing at all. Every one of `measure`/`arrange`/`build_render_group`/
+    /// `reconcile_render_group`/`hit_test_at` must call this rather than re-checking
+    /// `visibility()` directly — a child skipped here is a child `build_render_group`/
+    /// `reconcile_render_group` never push into `RenderGroup.children` at all, so a second,
+    /// independently-written condition anywhere else in that walk would silently desync
+    /// `RenderTree::group_paths`' child indices from `RenderGroup`'s own dense `children`.
+    ///
+    /// Currently equivalent to `visibility() == Visibility::Visible`, but kept as its own method
+    /// (rather than inlining that comparison at each call site) so a future container-level
+    /// participation signal — e.g. a hosted tree being temporarily deactivated by its own
+    /// `TreeHostView`/`TreeHostPanel` (docs/design/gui_framework_design.md §5) — has exactly one
+    /// place to fold in, without hunting down every call site again. As of this writing no such
+    /// second signal exists in this crate: TabView/ScrollView content lives in its own separately
+    /// hosted tree rather than as `visual_children()` of the tab strip, so a hosted tree simply
+    /// isn't laid out at all while its host is inactive, and nothing here needs to model that.
+    fn participates_in_layout(&self) -> bool {
+        self.visibility() == Visibility::Visible
+    }
     /// WinUI3's `UIElement.IsHitTestVisible` — see `UIElement::hit_test_visible`'s own doc comment.
     fn hit_test_visible(&self) -> bool {
         self.as_ui_element().hit_test_visible.get()
@@ -761,7 +780,7 @@ impl UIElement {
     /// recomputes when called, regardless of whether `measured_size()` was already `Some` — see
     /// `UIElement::measured_size`'s own doc comment for why this isn't a memoizing cache.
     fn measure(&self, available: Size) {
-        let result = if self.visibility() == Visibility::Collapsed {
+        let result = if !self.participates_in_layout() {
             Size {
                 width: 0.0,
                 height: 0.0,
@@ -783,9 +802,15 @@ impl UIElement {
     /// entirely to `arrange_override` (still freely overridable), which calls `child.arrange(..)`
     /// itself for each one it has.
     fn arrange(&self, final_rect: Rect) {
-        if self.visibility() == Visibility::Collapsed {
+        if !self.participates_in_layout() {
             self.as_ui_element().arranged_width.set(Some(0.0));
             self.as_ui_element().arranged_height.set(Some(0.0));
+            // `arranged_offset` is set too (unlike width/height, which the non-participating
+            // case above always resets, this used to leave a stale offset from the last time
+            // this element *did* arrange) — a reader that only checks `arranged_offset().is_some()`
+            // to decide "has this element ever been positioned" would otherwise see a leftover
+            // real position for an element that currently contributes nothing to the tree.
+            self.as_ui_element().arranged_offset.set(Some(Point { x: 0.0, y: 0.0 }));
             return;
         }
         // WinUI3: `Arrange` implicitly re-`Measure`s if `Measure` hasn't run since the last

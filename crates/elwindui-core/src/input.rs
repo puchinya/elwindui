@@ -579,10 +579,22 @@ impl ShortcutRegistry {
     /// would already reach it. Fires the first matching binding's own `event_name` via
     /// `dispatch_direct` (not bubbling — the binding's own `target` already *is* the intended
     /// recipient, e.g. a `Button`'s `on_click`) and returns whether anything matched.
+    ///
+    /// A `target` that isn't currently reachable — itself or any visual ancestor failing
+    /// `UIElementExt::participates_in_layout` (e.g. `Visibility::Collapsed`) — never fires,
+    /// `Global` scope included. `collect_from_tree` only runs once (when a backend host calls it
+    /// after `set_tree`, see that method's own doc comment), so a binding stays registered across
+    /// later visibility changes; this check is what keeps a hidden element's shortcut from firing
+    /// instead of also pruning at collection time and permanently losing bindings under
+    /// currently-Collapsed elements that might become visible later.
     pub fn try_dispatch(&self, chord: KeyChord, focused: Option<&Rc<dyn UIElementExt>>) -> bool {
         let bindings = self.bindings.borrow();
         for (bound_chord, scope, target, event_name) in bindings.iter() {
             if *bound_chord != chord {
+                continue;
+            }
+            let target_chain = ancestor_chain(Some(Rc::clone(target)));
+            if !target_chain.iter().all(|e| e.participates_in_layout()) {
                 continue;
             }
             let eligible = match scope {
@@ -795,5 +807,34 @@ mod keyboard_tests {
         assert!(!fired.get());
         assert!(registry.try_dispatch(chord, Some(&target)));
         assert!(fired.get());
+    }
+
+    #[test]
+    fn global_shortcut_does_not_fire_for_a_collapsed_target() {
+        use crate::layout::Visibility;
+
+        let target = tab_stop();
+        target.as_ui_element().set_visibility(Visibility::Collapsed);
+        let fired = Rc::new(std::cell::Cell::new(false));
+        {
+            let fired = fired.clone();
+            target.register_routed_handler::<()>("on_click", Box::new(move |_, _| fired.set(true)));
+        }
+        let target: Rc<dyn UIElementExt> = target;
+
+        let registry = ShortcutRegistry::new();
+        let chord = KeyChord {
+            key: Key::Character('s'),
+            modifiers: KeyModifiers {
+                control: true,
+                ..Default::default()
+            },
+        };
+        // `Global` scope would normally fire regardless of focus (see
+        // `global_shortcut_fires_without_focus` above) — a Collapsed target must still suppress
+        // it, matching every other non-participating exclusion (render, hit-test, tab order).
+        registry.register(chord, ShortcutScope::Global, target, "on_click");
+        assert!(!registry.try_dispatch(chord, None));
+        assert!(!fired.get());
     }
 }

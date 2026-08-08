@@ -76,9 +76,12 @@ fn solid_color(brush: &Brush) -> Option<Color> {
 
 /// Attempts to render `command` (and, for the fill+stroke fusion case, the following command
 /// `next`) as plain `CALayer` properties on a freshly created layer, appending it to `layer` if
-/// successful. Returns how many commands were consumed: `0` means no fast path applied and the
-/// caller must fall back to the general path for `command` alone; `1`/`2` mean `command` (and,
-/// for `2`, `next` too) were fully handled.
+/// successful. Returns how many commands were consumed (`0` means no fast path applied and the
+/// caller must fall back to the general path for `command` alone; `1`/`2` mean `command` — and,
+/// for `2`, `next` too — were fully handled), plus, for the *single*-command (`1`) success case
+/// only, the layer that was created — `None` for a `0` or a fused `2` result. This is what
+/// [`try_update_fast_path`] needs a position's own leaf-diffing cache entry for: fusion
+/// deliberately never gets one (see that function's own doc comment on why).
 ///
 /// `world` must already be known pure-translation (`FillRect`/`FillRoundedRect`/`StrokeRect`/
 /// `StrokeRoundedRect` under a rotated or sheared group fall back to the general path, same as
@@ -90,19 +93,19 @@ pub(crate) fn try_fast_path(
     next: Option<&RenderCommand>,
     world: &AffineTransform,
     opacity: f32,
-) -> usize {
+) -> (usize, Option<Retained<CALayer>>) {
     if !is_pure_translation(world) {
-        return 0;
+        return (0, None);
     }
     let Some((rect, radii, fill_brush)) = fill_shape(command) else {
         // Not a fill — still try the standalone-stroke fast path below.
         return try_stroke_only(layer, command, world, opacity);
     };
     let Some(fill_color) = solid_color(fill_brush) else {
-        return 0;
+        return (0, None);
     };
     let Some(radius) = uniform_radius(radii) else {
-        return 0;
+        return (0, None);
     };
 
     // Fusion: a StrokeRect/StrokeRoundedRect immediately following, on the same rect and radii,
@@ -128,7 +131,7 @@ pub(crate) fn try_fast_path(
                 ca_layer.setBorderColor(Some(&color_to_cgcolor(stroke_color)));
                 ca_layer.setBorderWidth(stroke_style.width as f64);
                 super::add_sublayer_scaled(layer, &ca_layer);
-                return 2;
+                return (2, None);
             }
         }
     }
@@ -142,7 +145,7 @@ pub(crate) fn try_fast_path(
         ca_layer.setCornerRadius(radius as f64);
     }
     super::add_sublayer_scaled(layer, &ca_layer);
-    1
+    (1, Some(ca_layer))
 }
 
 /// The standalone-stroke half of `try_fast_path` — a `StrokeRect`/`StrokeRoundedRect` not
@@ -152,18 +155,18 @@ fn try_stroke_only(
     command: &RenderCommand,
     world: &AffineTransform,
     opacity: f32,
-) -> usize {
+) -> (usize, Option<Retained<CALayer>>) {
     let Some((rect, radii, brush, stroke)) = stroke_shape(command) else {
-        return 0;
+        return (0, None);
     };
     let Some(color) = solid_color(brush) else {
-        return 0;
+        return (0, None);
     };
     let Some(radius) = uniform_radius(radii) else {
-        return 0;
+        return (0, None);
     };
     if !is_simple_border(stroke) {
-        return 0;
+        return (0, None);
     }
     let origin = world.transform_point(elwindui_core::base::Point { x: rect.x, y: rect.y });
     let ca_layer = CALayer::new();
@@ -175,7 +178,63 @@ fn try_stroke_only(
         ca_layer.setCornerRadius(radius as f64);
     }
     super::add_sublayer_scaled(layer, &ca_layer);
-    1
+    (1, Some(ca_layer))
+}
+
+/// Re-applies `command`'s fast-path classification directly onto `layer` — an existing layer a
+/// *previous* pass already built via [`try_fast_path`]'s single-command (non-fused) success case,
+/// for this exact same position in a group whose own command-kind sequence is unchanged since
+/// then (see `host::replay::replay_group`'s own doc comment on the eligibility check this is used
+/// under). Returns `false` when `command` is no longer simply updatable this way — not fast-path-
+/// eligible any more (a rotated group, a gradient/image brush now, a non-uniform radius), or a
+/// fusion candidate (deliberately excluded: whether `command` fuses with a *sibling* depends on
+/// that sibling too, information this single-command function doesn't have, and which sibling a
+/// given position fuses with can itself change between passes — safer to just decline and let the
+/// caller fall back to a full rebuild than to risk updating a layer that should have been split
+/// into two, or vice versa). `layer` is left untouched when this returns `false`.
+pub(crate) fn try_update_fast_path(
+    layer: &CALayer,
+    command: &RenderCommand,
+    world: &AffineTransform,
+    opacity: f32,
+) -> bool {
+    if !is_pure_translation(world) {
+        return false;
+    }
+    if let Some((rect, radii, brush)) = fill_shape(command) {
+        let Some(fill_color) = solid_color(brush) else {
+            return false;
+        };
+        let Some(radius) = uniform_radius(radii) else {
+            return false;
+        };
+        let origin = world.transform_point(elwindui_core::base::Point { x: rect.x, y: rect.y });
+        place(layer, origin, rect, opacity);
+        layer.setBackgroundColor(Some(&color_to_cgcolor(fill_color)));
+        layer.setBorderColor(None);
+        layer.setBorderWidth(0.0);
+        layer.setCornerRadius(radius as f64);
+        true
+    } else if let Some((rect, radii, brush, stroke)) = stroke_shape(command) {
+        let Some(color) = solid_color(brush) else {
+            return false;
+        };
+        let Some(radius) = uniform_radius(radii) else {
+            return false;
+        };
+        if !is_simple_border(stroke) {
+            return false;
+        }
+        let origin = world.transform_point(elwindui_core::base::Point { x: rect.x, y: rect.y });
+        place(layer, origin, rect, opacity);
+        layer.setBackgroundColor(None);
+        layer.setBorderColor(Some(&color_to_cgcolor(color)));
+        layer.setBorderWidth(stroke.width as f64);
+        layer.setCornerRadius(radius as f64);
+        true
+    } else {
+        false
+    }
 }
 
 /// Positions `ca_layer` at `origin` (already `world`-transformed) with `rect`'s own untransformed

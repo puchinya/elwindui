@@ -17,6 +17,10 @@ pub(crate) struct RenderStats {
     pub(crate) groups_visited: u32,
     pub(crate) groups_rebuilt: u32,
     pub(crate) groups_cache_hit: u32,
+    /// Rebuilds that skipped `CALayer::new`/`removeFromSuperlayer` entirely and instead re-applied
+    /// each leaf's fast-path properties onto its existing `CALayer` in place — see
+    /// `host::replay::try_update_group_in_place`.
+    pub(crate) groups_updated_in_place: u32,
     pub(crate) layers_created: u32,
     pub(crate) layers_removed: u32,
     pub(crate) add_sublayer_calls: u32,

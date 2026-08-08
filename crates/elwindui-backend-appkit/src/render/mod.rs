@@ -20,7 +20,7 @@ pub(crate) mod stats;
 mod text;
 mod vector;
 
-pub(crate) use fastpath::try_fast_path;
+pub(crate) use fastpath::{try_fast_path, try_update_fast_path};
 pub(crate) use geometry::{
     clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, parse_color, transform_point,
 };

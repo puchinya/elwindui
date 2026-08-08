@@ -18,7 +18,9 @@ use crate::render::{
     path_to_cgpath, resolve_cgimage, rounded_rect_cgpath, set_mask_scaled, transform_point,
     try_add_gradient_fill_layer, try_add_image_fill_layer,
 };
-use elwindui_core::graphics::{Brush, ImageId, RenderCommand, RenderGroup, VectorImageId};
+use elwindui_core::graphics::{
+    Brush, CommandKind, ImageId, RenderCommand, RenderGroup, VectorImageId,
+};
 use elwindui_core::ui::TextAlignment;
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
@@ -119,6 +121,18 @@ pub(crate) struct GroupCacheEntry {
     native_controls: Vec<usize>,
     image_ids: Vec<ImageId>,
     vector_image_ids: Vec<VectorImageId>,
+    /// Per-command `CommandKind`, in the same order as `RenderGroup::commands`, captured only
+    /// when this group's rebuild took the flat-leaf fast path (`replay_flat_commands` — see
+    /// `is_flat_leaf_only`) — left empty otherwise. An empty vec here (or one whose length doesn't
+    /// match a later `RenderGroup::commands`) is exactly what makes `try_update_group_in_place`
+    /// decline: there is nothing to compare kinds against.
+    command_kinds: Vec<CommandKind>,
+    /// Parallel to `command_kinds` — each position's own fast-path `CALayer`, or `None` for a
+    /// position the general paint path had to handle (not fast-path-eligible) or that was
+    /// consumed as the second half of a fill+stroke fusion (see `try_fast_path`'s own doc
+    /// comment). Any `None` here also makes `try_update_group_in_place` decline for this group:
+    /// there is no single `CALayer` at that position to update in place.
+    fast_path_layers: Vec<Option<Retained<CALayer>>>,
 }
 
 /// Everything a replay pass reads or writes that is not the live `CALayer`/`NSView` tree itself —
@@ -236,6 +250,109 @@ fn resource_ids(commands: &[RenderCommand]) -> (Vec<ImageId>, Vec<VectorImageId>
         }
     }
     (images, vectors)
+}
+
+/// Whether every command in `commands` is an ordinary paint leaf — no `Push*`/`Pop*` (a nested
+/// scope) and no `NativeControl` (a real `NSView` island, not a `CALayer`). Gates both
+/// `replay_flat_commands` (able to skip `replay_commands`'s general recursion entirely, since
+/// there is no scope to recurse into) and, transitively through `GroupCacheEntry::command_kinds`/
+/// `fast_path_layers` only ever being populated from that flat path, the in-place update
+/// `try_update_group_in_place` performs later.
+fn is_flat_leaf_only(commands: &[RenderCommand]) -> bool {
+    commands.iter().all(|c| {
+        !matches!(
+            c.kind(),
+            CommandKind::PushClip
+                | CommandKind::PopClip
+                | CommandKind::PushTransform
+                | CommandKind::PopTransform
+                | CommandKind::PushOpacity
+                | CommandKind::PopOpacity
+                | CommandKind::NativeControl
+        )
+    })
+}
+
+/// Replays a flat, non-nested command list (`is_flat_leaf_only(commands)` already known true —
+/// no `Push*`/`Pop*`/`NativeControl`, so `origin` is always zero and `transform` is the group's
+/// own `world`) directly, without going through `replay_commands`'s general recursion, so each
+/// position's own fast-path `CALayer` (if any) can be captured for a future in-place update — see
+/// `try_update_fast_path`. Only called when this group's inherited clip classified as
+/// `Unclipped`/`Inside` (see `replay_group`'s own call site), so there is no per-leaf
+/// bounding-box culling to do here — every command in `commands` is drawn.
+fn replay_flat_commands(
+    layer: &Retained<CALayer>,
+    commands: &[RenderCommand],
+    transform: elwindui_core::base::AffineTransform,
+    opacity: f32,
+    image_cache: &mut HashMap<ImageId, CFRetained<CGImage>>,
+    vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
+) -> Vec<Option<Retained<CALayer>>> {
+    let origin = elwindui_core::base::Point { x: 0.0, y: 0.0 };
+    let mut fast_path_layers = vec![None; commands.len()];
+    let mut idx = 0;
+    while idx < commands.len() {
+        let command = &commands[idx];
+        let next = commands.get(idx + 1);
+        let (consumed, created) =
+            crate::render::try_fast_path(layer, command, next, &transform, opacity);
+        if consumed == 0 {
+            replay_paint_command(
+                layer,
+                command,
+                origin,
+                transform,
+                opacity,
+                image_cache,
+                vector_raster_cache,
+            );
+            idx += 1;
+        } else {
+            fast_path_layers[idx] = created;
+            idx += consumed;
+        }
+    }
+    fast_path_layers
+}
+
+/// Attempts the in-place fast-path update described in `replay_group`'s own doc comment on its
+/// `in_place` local. Returns `true` only when `entry` came from a *previous* rebuild of this exact
+/// group id that took the flat-leaf fast path (`entry.command_kinds`/`fast_path_layers` both
+/// non-empty and every layer `Some`), the command *kinds* are unchanged in both length and order,
+/// and every single position's `try_update_fast_path` call succeeds. On a `false` return, some
+/// positions may have already been mutated regardless — harmless, since the caller's own full
+/// rebuild discards them anyway when this returns `false`.
+fn try_update_group_in_place(
+    entry: Option<&GroupCacheEntry>,
+    commands: &[RenderCommand],
+    transform: elwindui_core::base::AffineTransform,
+    opacity: f32,
+) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    if entry.fast_path_layers.len() != commands.len() || entry.command_kinds.len() != commands.len()
+    {
+        return false;
+    }
+    let kinds_match = entry
+        .command_kinds
+        .iter()
+        .zip(commands)
+        .all(|(kind, command)| *kind == command.kind());
+    if !kinds_match {
+        return false;
+    }
+    entry
+        .fast_path_layers
+        .iter()
+        .zip(commands)
+        .all(|(layer, command)| match layer {
+            Some(layer) => {
+                crate::render::try_update_fast_path(layer, command, &transform, opacity)
+            }
+            None => false,
+        })
 }
 
 /// One retained-render replay pass over a `RenderGroup` tree, appending real `CALayer`s to
@@ -380,18 +497,6 @@ pub(crate) fn replay_group(
     let stale =
         visible && (is_new || state.group_cache.get(&group.id).map(|entry| entry.key) != Some(key));
     if stale {
-        crate::render::stats::bump(|s| s.groups_rebuilt += 1);
-        if let Some(existing) = unsafe { container.sublayers() } {
-            // `removeFromSuperlayer` while iterating `existing` (a live view onto `container`'s
-            // own sublayer array, not a snapshot) trips Foundation's mutation-during-enumeration
-            // guard — collect into a plain `Vec` first, then iterate that instead.
-            let old: Vec<_> = existing.iter().collect();
-            crate::render::stats::bump(|s| s.layers_removed += old.len() as u32);
-            for sub in old {
-                sub.removeFromSuperlayer();
-            }
-        }
-        let native_controls_before: HashSet<usize> = live_native_controls.clone();
         // `leaf_clip` is `None` for `Unclipped`/`Inside` (no per-leaf culling needed — see
         // `ClipRelation`'s own doc comment) and the intersection rect, already local, for
         // `Partial`. `Outside` can never reach here: `stale` is `false` whenever `!visible`.
@@ -400,37 +505,97 @@ pub(crate) fn replay_group(
             ClipRelation::Unclipped | ClipRelation::Inside => None,
             ClipRelation::Outside => unreachable!("stale is false whenever !visible"),
         };
-        replay_commands(
-            native,
-            &container,
-            &group.commands,
-            0,
-            elwindui_core::base::Point { x: 0.0, y: 0.0 },
-            leaf_clip,
-            transform,
-            opacity,
-            origin,
-            live_native_controls,
-            new_native_order,
-            &mut state.image_cache,
-            &mut state.vector_raster_cache,
-        );
-        let discovered_native_controls: Vec<usize> = live_native_controls
-            .difference(&native_controls_before)
-            .copied()
-            .collect();
-        let (image_ids, vector_image_ids) = resource_ids(&group.commands);
-        live_image_ids.extend(image_ids.iter().copied());
-        live_vector_image_ids.extend(vector_image_ids.iter().copied());
-        state.group_cache.insert(
-            group.id,
-            GroupCacheEntry {
-                key,
-                native_controls: discovered_native_controls,
-                image_ids,
-                vector_image_ids,
-            },
-        );
+
+        // In-place fast path (AppKit render optimization work, narrowed Step 7b): a rebuild whose
+        // *content* didn't actually change shape, only leaf properties (color, geometry, opacity),
+        // never needs `removeFromSuperlayer`/`CALayer::new` at all — see
+        // `try_update_group_in_place`'s own doc comment for the exact eligibility rule.
+        let in_place = !is_new
+            && leaf_clip.is_none()
+            && try_update_group_in_place(
+                state.group_cache.get(&group.id),
+                &group.commands,
+                transform,
+                opacity,
+            );
+        if in_place {
+            crate::render::stats::bump(|s| s.groups_updated_in_place += 1);
+            if let Some(entry) = state.group_cache.get_mut(&group.id) {
+                entry.key = key;
+            }
+            if let Some(entry) = state.group_cache.get(&group.id) {
+                live_native_controls.extend(&entry.native_controls);
+                live_image_ids.extend(&entry.image_ids);
+                live_vector_image_ids.extend(&entry.vector_image_ids);
+            }
+        } else {
+            crate::render::stats::bump(|s| s.groups_rebuilt += 1);
+            if let Some(existing) = unsafe { container.sublayers() } {
+                // `removeFromSuperlayer` while iterating `existing` (a live view onto `container`'s
+                // own sublayer array, not a snapshot) trips Foundation's mutation-during-enumeration
+                // guard — collect into a plain `Vec` first, then iterate that instead.
+                let old: Vec<_> = existing.iter().collect();
+                crate::render::stats::bump(|s| s.layers_removed += old.len() as u32);
+                for sub in old {
+                    sub.removeFromSuperlayer();
+                }
+            }
+            let native_controls_before: HashSet<usize> = live_native_controls.clone();
+            // A flat, non-nested leaf list under a clip that needs no per-leaf culling can be
+            // replayed directly (skipping `replay_commands`'s general recursion) so each
+            // position's own fast-path `CALayer` can be captured for a future in-place update —
+            // see `replay_flat_commands`'s own doc comment. Anything else (nested `Push*` scopes,
+            // `NativeControl`, or a `Partial` clip needing bbox culling) still goes through the
+            // general path, and simply never becomes eligible for in-place updates later.
+            let (command_kinds, fast_path_layers) =
+                if leaf_clip.is_none() && is_flat_leaf_only(&group.commands) {
+                    let layers = replay_flat_commands(
+                        &container,
+                        &group.commands,
+                        transform,
+                        opacity,
+                        &mut state.image_cache,
+                        &mut state.vector_raster_cache,
+                    );
+                    let kinds = group.commands.iter().map(|c| c.kind()).collect();
+                    (kinds, layers)
+                } else {
+                    replay_commands(
+                        native,
+                        &container,
+                        &group.commands,
+                        0,
+                        elwindui_core::base::Point { x: 0.0, y: 0.0 },
+                        leaf_clip,
+                        transform,
+                        opacity,
+                        origin,
+                        live_native_controls,
+                        new_native_order,
+                        &mut state.image_cache,
+                        &mut state.vector_raster_cache,
+                    );
+                    (Vec::new(), Vec::new())
+                };
+            let discovered_native_controls: Vec<usize> = live_native_controls
+                .difference(&native_controls_before)
+                .copied()
+                .collect();
+            let (image_ids, vector_image_ids) = resource_ids(&group.commands);
+            live_image_ids.extend(image_ids.iter().copied());
+            live_vector_image_ids.extend(vector_image_ids.iter().copied());
+            state.group_cache.insert(
+                group.id,
+                GroupCacheEntry {
+                    key,
+                    native_controls: discovered_native_controls,
+                    image_ids,
+                    vector_image_ids,
+                    command_kinds,
+                    fast_path_layers,
+                },
+            );
+        }
     } else {
         crate::render::stats::bump(|s| s.groups_cache_hit += 1);
         if let Some(entry) = state.group_cache.get(&group.id) {
@@ -645,7 +810,8 @@ pub(crate) fn replay_commands(
                     // approximation `Shape::hit_test_content` already documents elsewhere in this
                     // codebase.
                     let next = commands.get(idx + 1);
-                    let consumed = crate::render::try_fast_path(layer, command, next, &world, opacity);
+                    let (consumed, _) =
+                        crate::render::try_fast_path(layer, command, next, &world, opacity);
                     if consumed == 0 {
                         replay_paint_command(
                             layer,
@@ -1457,5 +1623,174 @@ mod tests {
             "a changed Partial intersection must still force a rebuild — only Inside/Outside/\
              Unclipped are stable across small viewport shifts"
         );
+    }
+
+    /// The Step 7b happy path: a flat, single-leaf, fast-path-eligible group whose leaf property
+    /// (not shape) changes must update its existing `CALayer` in place — no
+    /// `removeFromSuperlayer`/`CALayer::new` at all.
+    #[test]
+    fn changing_a_flat_fast_path_groups_color_updates_in_place() {
+        let root_layer = CALayer::new();
+        let mut group = solid_fill_rect_group(1);
+        let mut state = ReplayState::default();
+        replay_once(&root_layer, &group, &mut state);
+
+        group.commands = vec![RenderCommand::FillRect {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            brush: Brush::Solid(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            }),
+        }];
+        group.generation += 1;
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &group, &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        assert_eq!(
+            stats.groups_updated_in_place, 1,
+            "an unchanged flat leaf-kind list must update in place"
+        );
+        assert_eq!(stats.groups_rebuilt, 0);
+        assert_eq!(stats.layers_created, 0, "in-place update must create no new CALayer");
+        assert_eq!(stats.layers_removed, 0, "in-place update must not remove any CALayer");
+    }
+
+    /// A fused fill+stroke pair never gets a tracked per-position `CALayer` (see
+    /// `try_fast_path`'s own doc comment on why) — so a subsequent content change on that same
+    /// group must always fall back to a full rebuild, never attempt (and potentially corrupt) an
+    /// in-place update.
+    #[test]
+    fn a_fused_fill_and_stroke_group_never_updates_in_place() {
+        let root_layer = CALayer::new();
+        let mut group = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let stroke = elwindui_core::graphics::StrokeStyle::default();
+        group.commands = vec![
+            RenderCommand::FillRect {
+                rect,
+                brush: Brush::Solid(Color {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+            },
+            RenderCommand::StrokeRect {
+                rect,
+                brush: Brush::Solid(Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+                stroke: stroke.clone(),
+            },
+        ];
+        let mut state = ReplayState::default();
+        replay_once(&root_layer, &group, &mut state);
+
+        group.commands = vec![
+            RenderCommand::FillRect {
+                rect,
+                brush: Brush::Solid(Color {
+                    r: 0,
+                    g: 255,
+                    b: 0,
+                    a: 255,
+                }),
+            },
+            RenderCommand::StrokeRect {
+                rect,
+                brush: Brush::Solid(Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+                stroke,
+            },
+        ];
+        group.generation += 1;
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &group, &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        assert_eq!(
+            stats.groups_updated_in_place, 0,
+            "a fused pair has no single tracked CALayer per position and must never update in place"
+        );
+        assert_eq!(stats.groups_rebuilt, 1);
+    }
+
+    /// A leaf `try_fast_path` declines (here: `FillRoundedRect` with non-uniform per-corner radii)
+    /// leaves a `None` in that position's `fast_path_layers` forever, so a group containing one
+    /// must always take the full-rebuild path, never in-place — same disqualification rule as the
+    /// fusion case above, via a different mechanism (a single non-eligible leaf rather than a
+    /// two-command fusion).
+    #[test]
+    fn a_group_with_a_non_fast_path_eligible_leaf_never_updates_in_place() {
+        let root_layer = CALayer::new();
+        let mut group = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let non_uniform_radii = CornerRadius {
+            top_left: 1.0,
+            top_right: 2.0,
+            bottom_right: 3.0,
+            bottom_left: 4.0,
+        };
+        group.commands = vec![RenderCommand::FillRoundedRect {
+            rect,
+            radii: non_uniform_radii,
+            brush: Brush::Solid(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
+        }];
+        let mut state = ReplayState::default();
+        replay_once(&root_layer, &group, &mut state);
+
+        group.commands = vec![RenderCommand::FillRoundedRect {
+            rect,
+            radii: non_uniform_radii,
+            brush: Brush::Solid(Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            }),
+        }];
+        group.generation += 1;
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &group, &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        assert_eq!(
+            stats.groups_updated_in_place, 0,
+            "a non-fast-path-eligible leaf must never be updated in place"
+        );
+        assert_eq!(stats.groups_rebuilt, 1);
     }
 }

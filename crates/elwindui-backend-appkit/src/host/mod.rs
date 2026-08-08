@@ -781,13 +781,15 @@ impl TreeHostView {
                 let s = crate::render::stats::snapshot();
                 eprintln!(
                     "elwindui-render-stats groups_visited={} groups_rebuilt={} groups_cache_hit={} \
-                     layers_created={} layers_removed={} add_sublayer_calls={} subview_added={} \
-                     cgpaths_created={} cgcolors_created={} text_layers_created={} \
-                     attributed_strings_created={} setter_calls={} setter_calls_skipped={} \
-                     image_cache_bytes={} vector_raster_cache_bytes={} process_footprint_bytes={}",
+                     groups_updated_in_place={} layers_created={} layers_removed={} \
+                     add_sublayer_calls={} subview_added={} cgpaths_created={} cgcolors_created={} \
+                     text_layers_created={} attributed_strings_created={} setter_calls={} \
+                     setter_calls_skipped={} image_cache_bytes={} vector_raster_cache_bytes={} \
+                     process_footprint_bytes={}",
                     s.groups_visited,
                     s.groups_rebuilt,
                     s.groups_cache_hit,
+                    s.groups_updated_in_place,
                     s.layers_created,
                     s.layers_removed,
                     s.add_sublayer_calls,

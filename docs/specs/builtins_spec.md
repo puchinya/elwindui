@@ -1120,6 +1120,39 @@ struct ToggleSwitch {
 | WinUI3 | 実装コードあり・未検証(Windows環境なし) |
 | GTK4 | 未実装 |
 
+## F.19 `builtin::Slider` ✅
+
+ネイティブの連続値スライダー(AppKit: `NSSlider`。WinUI3: `Slider`)。
+
+```rust
+#[elwindui::component]
+struct Slider {
+    #[prop(default = bind!(self.value, TwoWay))]
+    value: f32,
+    #[prop]
+    min: f32,
+    #[prop]
+    max: f32,
+    #[prop]
+    enabled: Option<bool>,
+    // text プロパティは無い——ToggleSwitchと同様、隣にTextBlockを並べて使う。
+}
+```
+
+**`value`/`min`/`max`はすべて`f32`**(AppKit `NSSlider`本体は`Double`だが、DSL/コア側は`f32`に統一しバックエンド境界でキャストする)。**`min`/`max`は`#[prop]`(実行時変更可能)であって`#[param]`(インスタンス化時固定)ではない**——`vm`の値に応じてレンジを動的に変えられる。`value`だけが`#[two_way]`——ドラッグでネイティブ側から変化するのは`value`のみで、`min`/`max`はアプリ側からネイティブへの一方向。
+
+**ネイティブ実体には「自然な幅」が無い**。`NSSlider`の`fittingSize()`は高さこそ意味のある値を返すが、幅は0(スライダーはコンテナに合わせて伸縮する前提のコントロールで、`Button`のタイトルのように内容から幅を導出できない)。そのため`Slider`を使う側は`width:`(`UIElement`共通の明示サイズ上書き、`docs/design/gui_framework_design.md`§5.1)を必ず指定する必要がある——省略すると幅0で見えなくなる(`examples/controls-demo`のSliderタブ実装時に実機で発覚)。
+
+**AppKitの`isContinuous`はデフォルト(`YES`)のまま**——ドラッグ中連続的に`on_change`が発火する一般的なスライダーのUXに一致するため、明示的な設定は不要。`NSSlider`は`NSButton`ではなく`NSControl`直下のサブクラスであるため、`CheckBox`/`RadioButton`/`Dropdown`のように`ButtonTarget`は再利用できず、`ToggleSwitch`の`ToggleSwitchTarget`と同じ形の専用target/actionトランポリンを実装する。
+
+**バックエンド対応状況**
+
+| バックエンド | 状況 |
+|---|---|
+| AppKit | 実装済み・`examples/controls-demo`のSliderタブで実機検証済み。`tools/macos-ui-driver`の`click --via mouse --fraction <0.0-1.0>`(要素内の任意水平位置をクリック)で`value`が対応する位置へ変化し、ラベルにも即座に反映されることを確認(#39、PR #40で追加)。`click --via ax-increment`/`ax-decrement`(`kAXIncrementAction`/`kAXDecrementAction`)による刻み幅操作も確認済み |
+| WinUI3 | 実装コードあり・未検証(Windows環境なし) |
+| GTK4 | 未実装 |
+
 ---
 
 ## G.1 基本方針

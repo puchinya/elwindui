@@ -12,8 +12,8 @@ use elwindui_core::graphics::{
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSButton, NSPopUpButton, NSScrollView, NSSecureTextField, NSStackView, NSSwitch, NSTextField,
-    NSTextView, NSUserInterfaceLayoutOrientation, NSView,
+    NSButton, NSPopUpButton, NSScrollView, NSSecureTextField, NSSlider, NSStackView, NSSwitch,
+    NSTextField, NSTextView, NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{NSRect, NSString};
 use std::rc::Rc;
@@ -187,6 +187,18 @@ impl AppKitHandle for Retained<NSSwitch> {
         "toggle_switch"
     }
     // `NSSwitch` has no title/text of its own (see `ToggleSwitch`'s own doc comment), so it never
+    // overrides `apply_text_style`/`supports_text_style` — the trait's defaults (no-op, `false`)
+    // are exactly right.
+}
+impl AppKitHandle for Retained<NSSlider> {
+    fn as_nsview(&self) -> Retained<NSView> {
+        let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
+        Retained::into_super(control)
+    }
+    fn theme_prefix(&self) -> &'static str {
+        "slider"
+    }
+    // `NSSlider` has no title/text of its own (see `Slider`'s own doc comment), so it never
     // overrides `apply_text_style`/`supports_text_style` — the trait's defaults (no-op, `false`)
     // are exactly right.
 }

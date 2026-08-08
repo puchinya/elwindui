@@ -171,6 +171,11 @@ fn main() {
         // plain `HSTRING`s (via `PropertyValue::CreateString`), the same way `win2d.rs`'s existing
         // `IReference<..>` usage already boxes primitives for a WinRT collection.
         "Microsoft.UI.Xaml.Controls.ComboBox".to_owned(),
+        // `Slider`. `Minimum`/`Maximum`/`Value` are plain `f64`; `ValueChanged` carries the new
+        // value directly in its args (no need to read `Value` back off the sender).
+        "Microsoft.UI.Xaml.Controls.Slider".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventHandler".to_owned(),
         "Microsoft.UI.Xaml.Controls.ListViewItem".to_owned(),
         "Microsoft.UI.Xaml.Controls.Panel".to_owned(),
         "Microsoft.UI.Xaml.Controls.UIElementCollection".to_owned(),

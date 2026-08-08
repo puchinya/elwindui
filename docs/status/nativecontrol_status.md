@@ -142,7 +142,21 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 修正は2箇所: (1) 同一クレート内のユーザーコンポーネント向けには、`codegen.rs`側がすでに持っている`TypeInfo.content_field`をこの箇所でも読むようにした(スカラー分岐は元々読んでいたのに、リスト分岐だけ読んでいなかった)。(2) クロスクレートのビルトイン(`Dropdown`/`Menu`など、ローカルな`TypeInfo`を持たない)向けには、`elwindui-macros`の`build_props_macro`(`class.rs`)に新しい shape-macro クエリ `@content_field_get $recv:expr` を追加した——`@content_item_dyn`と同じ1ホップ方式(このクラス自身の`#[content(..)]`宣言がそのまま答えになる。型解決が要らないぶん`@content_item_dyn`より単純)。`codegen.rs`はローカル情報が無い場合、この新クエリ経由で`elwindui::core::#props_macro!(@content_field_get self.#parent_binding)`を生成し、実際にコンパイルされる時点で正しいゲッター呼び出しへ展開されるようにした。ワークスペース全体のテスト(457件)に回帰なし。
 
-### 2.7 `examples/controls-demo`
+### 2.7 `Slider`
+
+`docs/specs/builtins_spec.md` F.19に対応(Phase 4、Issue #37)。
+
+| 項目 | AppKit | WinUI3 |
+|---|---|---|
+| `NSSlider`は`NSControl`直下のサブクラス(`NSButton`ではない)であるため専用のtarget/actionトランポリンが必要 | ✅ `inner/slider.rs`が`ToggleSwitch`の`ToggleSwitchTarget`と同じ形の`SliderTarget`を実装 | 🟡 `RangeBaseValueChangedEventHandler`を使用(構造ミラー) |
+| `min`/`max`を`#[prop]`(実行時変更可)として実装 | ✅ | 🟡 同型対応 |
+| **ネイティブ実体に「自然な幅」が無い問題を発見・文書化** | ✅ `NSSlider.fittingSize()`の幅が常に0になり、`width:`を明示しないと画面上で不可視になることを実機で発見(`tools/macos-ui-driver`のスクリーンショット比較)。`docs/specs/builtins_spec.md` F.19に注記、`examples/controls-demo`のSliderタブでも`width: 200.0`を明示 | 🟡 未検証だが同種の注意が必要な可能性を記録 |
+| `objc2-app-kit` feature追加(`NSSlider`) | ✅ | N/A |
+| `crates/elwindui-core/tests/props_macro.rs` | ✅ `value`(two-way)・`min`・`max`・`enabled`のクロスクレート形状テスト追加 | — |
+| クリック起点の`value`変更の実機対話検証 | ✅ **実施済み**——`tools/macos-ui-driver`に`click --via mouse --fraction <0.0-1.0>`(要素内の任意水平位置をクリック)と`click --via ax-increment`/`ax-decrement`(`kAXIncrementAction`/`kAXDecrementAction`。`AXSlider`は`kAXPressAction`非対応のため必要)を追加(#39、PR #40)。`--fraction 0.05`/`0.9`でクリック位置に応じた`value`変化とラベル追従、`ax-increment`/`ax-decrement`での0.05刻みの段階変化をいずれも確認 | N/A(未検証) |
+| `docs/specs/builtins_spec.md` F.19 | ✅ 新設 | ✅(同一ドキュメント) |
+
+### 2.8 `examples/controls-demo`
 
 `examples/graphics-demo`と同じ構造(単一`main.rs`、`#[elwindui::viewmodel]`、`TabView`+タブごとの機能領域)。
 
@@ -154,6 +168,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | Button | 3つのrole・is_default・tooltip |
 | Selection | CheckBox(三状態のプログラム設定含む)・同一グループのRadioButton3つ・ToggleSwitch |
 | Dropdown | 3項目の`Dropdown`・`selected_index`の双方向バインディング・ボタンによる4番目の項目の動的追加削除 |
+| Slider | `value`の双方向バインディング・ボタンによる`min`/`max`レンジの動的変更 |
 | 回帰確認 | 既存`TextArea`/`Button` |
 
 対話的な動作確認(クリック・入力・フォーカス切り替え・スクロール)は`tools/macos-ui-driver`で行う(`docs/status/macos_ui_driver_status.md`)。
@@ -166,9 +181,8 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 ## 3. 未実装コントロールのバックログ(詳細設計は未着手)
 
-(**NativeButton**は§2.4で既存`Button`の拡張として決着済み。**CheckBox/RadioButton/ToggleSwitch**は§2.5で実装済み。**ComboBox**は§2.6で仕様書の`Dropdown`(付録F.5)と統合の上実装済み。いずれもバックログから除去した。)
+(**NativeButton**は§2.4で既存`Button`の拡張として決着済み。**CheckBox/RadioButton/ToggleSwitch**は§2.5で実装済み。**ComboBox**は§2.6で仕様書の`Dropdown`(付録F.5)と統合の上実装済み。**Slider**は§2.7で実装済み。いずれもバックログから除去した。)
 
-- **Slider** — AppKit: `NSSlider` / WinUI3: `Slider`
 - **ProgressBar** — AppKit: `NSProgressIndicator` / WinUI3: `ProgressBar`。indeterminate状態はネイティブアニメーションを使い、elwindui側でフレーム生成しない
 - **NumberBox** — AppKit: `NSTextField`+`NSStepper`合成 / WinUI3: `NumberBox`(ネイティブ一体型)。入力中文字列と確定値を区別する設計が必要
 - **その他** — ContextMenu / Popup / ToolTip / SearchBox / DatePicker / TimePicker / ColorPicker / ListView / TreeView / WebView / DataGrid

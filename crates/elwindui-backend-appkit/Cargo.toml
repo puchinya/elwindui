@@ -64,7 +64,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSFontDescriptor",
     "NSColor", "NSAppearance",
 ] }
-objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAShapeLayer", "CATextLayer", "CAGradientLayer"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer", "CAShapeLayer", "CATextLayer", "CAGradientLayer", "CATransaction"] }
 objc2-core-graphics = { version = "0.3.2", features = ["CGPath", "CGColor", "CGColorSpace", "CGGeometry", "CGAffineTransform", "CGGradient", "CGImage", "CGDataProvider", "CGBitmapContext", "CGContext"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-image = { version = "0.3.2", features = ["CIFilter", "CIImage", "CIContext", "CIVector", "CIColor"] }

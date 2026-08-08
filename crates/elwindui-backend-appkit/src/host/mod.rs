@@ -539,6 +539,12 @@ impl TreeHostView {
     fn relayout_inner(&self) {
         use elwindui_core::base::Size;
 
+        // Suppresses Core Animation's implicit ~0.25s property animations for this whole pass —
+        // see `ImplicitAnimationGuard`'s own doc comment. `_animation_guard` is never read; its
+        // `Drop` (running whichever of this function's several early `return`s is taken) is the
+        // entire point.
+        let _animation_guard = crate::render::ImplicitAnimationGuard::begin();
+
         let frame = self.frame();
         let (unconstrained_width, unconstrained_height) = self.ivars().unconstrained_axes.get();
         let available = Size {

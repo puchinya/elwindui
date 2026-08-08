@@ -20,7 +20,30 @@
 //! authoritative scale value comes from.
 
 use objc2_core_foundation::CGFloat;
-use objc2_quartz_core::CALayer;
+use objc2_quartz_core::{CALayer, CATransaction};
+
+/// Suppresses Core Animation's implicit (default ~0.25s) property animations for the duration of
+/// one render synchronization pass. Every `setFrame`/`addSublayer`/`setPath`/`setString`/etc. this
+/// backend issues outside this guard runs inside AppKit's own ambient transaction and therefore
+/// animates implicitly — harmless for a genuinely new value, but a visible "smear" on every
+/// no-op-content, layout-only relayout (a window resize, a theme repaint) where nothing the user
+/// asked to animate actually changed. Always `Drop`-based, never a bare `begin()`/`commit()` pair,
+/// because the caller (`TreeHostView::relayout_inner`) has several early `return`s.
+pub(crate) struct ImplicitAnimationGuard;
+
+impl ImplicitAnimationGuard {
+    pub(crate) fn begin() -> Self {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        Self
+    }
+}
+
+impl Drop for ImplicitAnimationGuard {
+    fn drop(&mut self) {
+        CATransaction::commit();
+    }
+}
 
 /// Sets `layer`'s `contentsScale` to `scale`, and recursively does the same for its mask and
 /// every sublayer (and their own masks and sublayers, transitively).

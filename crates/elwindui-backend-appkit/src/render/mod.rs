@@ -25,7 +25,7 @@ pub(crate) use geometry::{
 pub(crate) use image::{
     build_image_container_layer, cgimage_bytes, fitted_image_rect, resolve_cgimage,
 };
-pub(crate) use layer::{add_sublayer_scaled, set_mask_scaled};
+pub(crate) use layer::{ImplicitAnimationGuard, add_sublayer_scaled, set_mask_scaled};
 pub(crate) use paint::{
     GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, first_gradient_stop_color,
     gradient_unit_point, try_add_gradient_fill_layer, try_add_image_fill_layer,

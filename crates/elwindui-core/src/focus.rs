@@ -22,9 +22,16 @@ pub enum FocusDirection {
 /// `is_tab_stop()` elements only, ordered by `(focus_order().unwrap_or(i32::MAX), encounter order)`
 /// — WinUI3's tab order, without needing any element to declare `#[focus(order: ..)]` at all (tree
 /// order alone is a legitimate default, matching WinUI3's own "unset TabIndex falls back to
-/// visual/declaration order" behavior).
+/// visual/declaration order" behavior). A non-participating element (`UIElementExt::
+/// participates_in_layout` — currently `Visibility::Collapsed`) prunes its whole subtree from tab
+/// order, the same way it's pruned from `build_render_group`/hit-testing: `tab_order` is
+/// recomputed fresh on every `Tab` press (there's no cached order to go stale), so this stays
+/// correct across visibility changes without any extra invalidation plumbing.
 fn tab_order(scope: &Rc<dyn UIElementExt>) -> Vec<Rc<dyn UIElementExt>> {
     fn walk(elem: &Rc<dyn UIElementExt>, out: &mut Vec<Rc<dyn UIElementExt>>) {
+        if !elem.participates_in_layout() {
+            return;
+        }
         if elem.is_tab_stop() {
             out.push(Rc::clone(elem));
         }
@@ -258,11 +265,11 @@ mod tests {
         let leaf = tab_stop();
         let owner_id = leaf.as_ui_element().render_group_id;
 
-        let render_tree = Rc::new(RefCell::new(Some(RenderTree::with_root(RenderGroup::new(
-            owner_id,
-            crate::base::Point { x: 0.0, y: 0.0 },
-            None,
-        )))));
+        let render_tree = Rc::new(RefCell::new(Some(RenderTree {
+            root: RenderGroup::new(owner_id, crate::base::Point { x: 0.0, y: 0.0 }, None),
+            group_paths: std::collections::HashMap::new(),
+            visual_index: std::collections::HashMap::new(),
+        })));
         let leaf_dyn: Rc<dyn UIElementExt> = Rc::clone(&leaf) as Rc<dyn UIElementExt>;
         render_tree
             .borrow_mut()
@@ -317,5 +324,30 @@ mod tests {
 
         assert!(tracker.move_focus(&root, FocusDirection::Next));
         assert!(Rc::ptr_eq(&tracker.focused().unwrap(), &a_dyn));
+    }
+
+    #[test]
+    fn move_focus_skips_a_collapsed_tab_stop() {
+        use crate::layout::Visibility;
+
+        let root = VerticalLayout::new();
+        let a = tab_stop();
+        a.as_ui_element().set_visibility(Visibility::Collapsed);
+        let b = tab_stop();
+        root.children().add(a.clone());
+        root.children().add(b.clone());
+        let root: Rc<dyn UIElementExt> = root;
+
+        let tracker = FocusTracker::new();
+        let b_dyn: Rc<dyn UIElementExt> = b.clone();
+        assert!(tracker.move_focus(&root, FocusDirection::Next));
+        assert!(
+            Rc::ptr_eq(&tracker.focused().unwrap(), &b_dyn),
+            "the Collapsed tab stop must be pruned from tab order entirely, landing on `b` first"
+        );
+
+        // Wraps straight back to `b` — `a` never re-enters tab order just because focus cycled.
+        assert!(tracker.move_focus(&root, FocusDirection::Next));
+        assert!(Rc::ptr_eq(&tracker.focused().unwrap(), &b_dyn));
     }
 }

@@ -26,21 +26,29 @@ impl VerticalLayout {
             width: available.width,
             height: f32::INFINITY,
         };
+        // Every child is still measured (a non-participating child's own `measure` short-circuits
+        // to zero-size internally — see `UIElementExt::participates_in_layout`'s own doc comment —
+        // but it must still run so `measured_size()` isn't left stale). Only *participating*
+        // children's sizes feed `stack_natural_size`, though: including a zero-sized non-
+        // participating child there would still add one `spacing` gap for it, stranding a visible
+        // gap where a Collapsed/suppressed child used to be.
         let child_sizes: Vec<Size> = self
             .visual_children()
             .iter()
-            .map(|c| {
+            .filter_map(|c| {
                 c.measure(child_available);
-                c.measured_size().unwrap_or_default()
+                c.participates_in_layout()
+                    .then(|| c.measured_size().unwrap_or_default())
             })
             .collect();
         stack_natural_size(Orientation::Vertical, self.spacing.get(), &child_sizes)
     }
     #[overrides]
     fn arrange_override(&self, final_size: Size) -> Size {
-        let child_sizes: Vec<Size> = self
-            .visual_children()
+        let children = self.visual_children();
+        let child_sizes: Vec<Size> = children
             .iter()
+            .filter(|c| c.participates_in_layout())
             .map(|c| c.measured_size().unwrap_or_default())
             .collect();
         let child_rects = stack_arrange(
@@ -49,8 +57,25 @@ impl VerticalLayout {
             self.spacing.get(),
             &child_sizes,
         );
-        for (child, rect) in self.visual_children().iter().zip(child_rects) {
-            child.arrange(rect);
+        // Zipped back up against only the participating children, in the same order `child_sizes`
+        // collected them in — a non-participating child still gets `arrange` called on it (so its
+        // own `arranged_*` reset to zero rather than staying stale), just with a placeholder rect
+        // it ignores (`UIElement::arrange`'s non-participating branch returns before ever reading
+        // `final_rect`).
+        let mut rects = child_rects.into_iter();
+        for child in children.iter() {
+            if child.participates_in_layout() {
+                child.arrange(rects.next().expect(
+                    "stack_arrange returns exactly one rect per participating child size",
+                ));
+            } else {
+                child.arrange(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                });
+            }
         }
         final_size
     }

@@ -51,14 +51,6 @@ pub struct RenderTree {
 }
 
 impl RenderTree {
-    pub(crate) fn with_root(root: RenderGroup) -> Self {
-        Self {
-            root,
-            group_paths: HashMap::new(),
-            visual_index: HashMap::new(),
-        }
-    }
-
     pub fn mark_dirty(&mut self, id: u64) -> bool {
         let Some(path) = self.group_paths.get(&id).cloned() else {
             return false;

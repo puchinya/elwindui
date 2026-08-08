@@ -31,9 +31,68 @@ use objc2_quartz_core::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// A group's own on-screen extent (`(0, 0, group.size.width, group.size.height)`, in this
+/// group's *local* space) classified against the clip it inherited from its ancestors — the
+/// piece that lets [`GroupCacheKey`] drop absolute `origin`/absolute-`clip` entirely (see that
+/// struct's own doc comment) without losing correctness or, just as importantly, without losing
+/// the whole point of dropping `origin`: a scrolled `ScrollView`'s inherited clip is *fixed* in
+/// absolute space, so expressed as a plain local rect it would shift by the scroll delta on
+/// every single tick, changing this key just as often as raw `origin` used to. `Inside`/`Outside`
+/// are what stay stable across a scroll — only a group whose own extent straddles the viewport
+/// edge is ever `Partial`, and only that group's `GroupCacheKey` actually changes tick to tick.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum ClipRelation {
+    /// No clip inherited from any ancestor.
+    Unclipped,
+    /// This group's own extent is fully contained in the inherited clip — safe to replay with no
+    /// per-leaf bounding-box culling at all (equivalent to `Unclipped` for that purpose).
+    Inside,
+    /// This group's own extent does not intersect the inherited clip at all. `replay_group`
+    /// hides the container and skips replaying `commands` entirely — the free subtree culling
+    /// this classification exists to provide — while still restoring cached resource liveness
+    /// exactly as an ordinary cache hit would, so a native control or decoded image scrolled
+    /// offscreen isn't torn down just because its owning group went unrendered this pass.
+    Outside,
+    /// Straddles the inherited clip's own edge — `Rect` is the intersection, already expressed
+    /// in this group's local space, and is what `replay_commands` bbox-culls individual leaves
+    /// against.
+    Partial(elwindui_core::base::Rect),
+}
+
+impl ClipRelation {
+    /// `local_clip` is the inherited clip already converted to this group's own local space
+    /// (`inherited_clip - origin`); `None` means no ancestor clip at all.
+    fn classify(
+        local_clip: Option<elwindui_core::base::Rect>,
+        size: elwindui_core::base::Size,
+    ) -> Self {
+        let Some(local_clip) = local_clip else {
+            return ClipRelation::Unclipped;
+        };
+        let extent = elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: size.width,
+            height: size.height,
+        };
+        match extent.intersect(local_clip) {
+            None => ClipRelation::Outside,
+            Some(intersection) if intersection == extent => ClipRelation::Inside,
+            Some(intersection) => ClipRelation::Partial(intersection),
+        }
+    }
+}
+
 /// What `ReplayState::group_layers[id]`'s sublayers were last rebuilt from — see
 /// `GroupCacheEntry`'s own doc comment for why `RenderGroup::generation` alone isn't a sufficient
 /// cache key.
+///
+/// Deliberately holds no absolute `origin` — see `ClipRelation`'s own doc comment for why `clip`
+/// is expressed that way instead of as a raw absolute rect, which is the other half of the same
+/// problem. `transform`/`opacity` stay as accumulators exactly as before (in practice always
+/// identity/`1.0` at this level today — nothing currently makes a `RenderGroup` boundary inherit
+/// a non-identity `transform` from an ancestor's own commands — but kept for correctness should
+/// that change).
 ///
 /// `scale` (the host's `backing_scale_factor()` at the time of the last rebuild) is part of this
 /// key so a group whose geometry is byte-for-byte unchanged still rebuilds when the window moves
@@ -41,8 +100,7 @@ use std::collections::{HashMap, HashSet};
 /// `render::add_sublayer_scaled`.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct GroupCacheKey {
-    origin: elwindui_core::base::Point,
-    clip: Option<elwindui_core::base::Rect>,
+    clip: ClipRelation,
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
     generation: u64,
@@ -197,17 +255,28 @@ fn resource_ids(commands: &[RenderCommand]) -> (Vec<ImageId>, Vec<VectorImageId>
 ///
 /// Each `RenderGroup` gets one persistent, cached container `CALayer` (`ReplayState::
 /// group_layers`) rather than a fresh throwaway one every pass — a *flat* sibling of every other
-/// group's own container (`frame` always exactly `root_layer.bounds()`, deliberately not nested
-/// to match the `RenderGroup` tree shape, so the absolute-canvas-coordinate geometry every leaf
-/// drawing helper already bakes in stays valid unchanged; nesting would need re-deriving all of
-/// that in per-container-local coordinates for no benefit). A container is `addSublayer`ed to
-/// `root_layer` only the first time it's ever created — see `new_group_order`'s own doc comment
-/// (and `relayout_inner`'s) for how Z-order among a mix of rebuilt and cache-hit groups stays
-/// correct without re-`addSublayer`ing every one of them, every pass, forever. The actually
-/// expensive part (`CGPath`/`CAShapeLayer`/`CAGradientLayer` construction) only happens when
-/// `GroupCacheKey` shows this group's replay inputs actually changed since last time (painter
-/// design doc §15's renderer cache, acceptance criterion 14: "画像・pathリソースを毎フレーム再生成
-/// しない").
+/// group's own container. Since Step 6 of the AppKit render optimization work, a container's
+/// `frame` no longer equals `root_layer.bounds()` — instead `anchorPoint = (0, 0)`,
+/// `bounds.size == root_layer.bounds().size`, and `position` is this group's own *absolute*
+/// origin (the accumulated `offset` chain from every ancestor `RenderGroup`, exactly what used to
+/// get baked into every leaf's own `CGPath`/frame instead). This is why `origin` passed to
+/// `replay_commands` below is always `Point::ZERO`: inside this container, `(0, 0)` *is* this
+/// group's own absolute origin, so every existing leaf drawing helper (building geometry in
+/// whatever coordinate space `origin`+`transform` describe) keeps working completely unchanged —
+/// only *where that space starts* moved, from `root_layer` up to this container. The payoff: a
+/// scrolled ancestor now costs this group one `setPosition`, not a `CGPath` rebuild —
+/// `GroupCacheKey` has no `origin` field at all any more, see that struct's own doc comment.
+/// `anchorPoint = (0, 0)` matches the convention every other multi-layer subtree in this backend
+/// already uses (`build_image_container_layer`, `place_offscreen_image`,
+/// `add_gradient_shape_layer`, every fill/stroke mask).
+///
+/// A container is `addSublayer`ed to `root_layer` only the first time it's ever created — see
+/// `new_group_order`'s own doc comment (and `relayout_inner`'s) for how Z-order among a mix of
+/// rebuilt and cache-hit groups stays correct without re-`addSublayer`ing every one of them,
+/// every pass, forever. The actually expensive part (`CGPath`/`CAShapeLayer`/`CAGradientLayer`
+/// construction) only happens when `GroupCacheKey` shows this group's replay inputs actually
+/// changed since last time (painter design doc §15's renderer cache, acceptance criterion 14:
+/// "画像・pathリソースを毎フレーム再生成しない").
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn replay_group(
     native: &dyn NativeIslandHost,
@@ -239,11 +308,24 @@ pub(crate) fn replay_group(
         width: clip.width,
         height: clip.height,
     });
+    // Absolute space — this is what descendant groups need as their own `inherited_clip`, so it
+    // is computed and threaded down exactly as before Step 6.
     let effective_clip = match (inherited_clip, group_clip) {
         (Some(a), Some(b)) => a.intersect(b),
         (Some(clip), None) | (None, Some(clip)) => Some(clip),
         (None, None) => None,
     };
+    // This group's own local space (relative to `origin`) — see `ClipRelation`'s own doc comment
+    // for why this, not the absolute `effective_clip` above, belongs in the cache key and in the
+    // bounding-box culling test this group's own leaves are checked against.
+    let local_clip = effective_clip.map(|clip| elwindui_core::base::Rect {
+        x: clip.x - origin.x,
+        y: clip.y - origin.y,
+        width: clip.width,
+        height: clip.height,
+    });
+    let clip_relation = ClipRelation::classify(local_clip, group.size);
+
     live_group_ids.insert(group.id);
     new_group_order.push(group.id);
     crate::render::stats::bump(|s| s.groups_visited += 1);
@@ -254,11 +336,23 @@ pub(crate) fn replay_group(
             crate::render::stats::bump(|s| s.layers_created += 1);
             let c = CALayer::new();
             c.setName(Some(&crate::render::paint_layer_name()));
+            // Set once at creation, never again — see this function's own doc comment.
+            c.setAnchorPoint(objc2_core_foundation::CGPoint::new(0.0, 0.0));
             entry.insert(c.clone());
             (c, true)
         }
     };
-    crate::render::set_frame_if_changed(&container, root_layer.bounds());
+    crate::render::set_bounds_if_changed(
+        &container,
+        objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            root_layer.bounds().size,
+        ),
+    );
+    crate::render::set_position_if_changed(
+        &container,
+        objc2_core_foundation::CGPoint::new(origin.x as f64, origin.y as f64),
+    );
     // Set directly from `scale` (not via `add_sublayer_scaled`, which would also recursively
     // re-stamp every one of this container's *existing* sublayers on every single pass, including
     // cache hits) — `GroupCacheKey::scale` below already forces a full rebuild, which re-attaches
@@ -273,15 +367,18 @@ pub(crate) fn replay_group(
         root_layer.addSublayer(&container);
     }
 
+    let visible = clip_relation != ClipRelation::Outside;
+    crate::render::set_hidden_if_changed(&container, !visible);
+
     let key = GroupCacheKey {
-        origin,
-        clip: effective_clip,
+        clip: clip_relation,
         transform,
         opacity,
         generation: group.generation,
         scale,
     };
-    let stale = is_new || state.group_cache.get(&group.id).map(|entry| entry.key) != Some(key);
+    let stale =
+        visible && (is_new || state.group_cache.get(&group.id).map(|entry| entry.key) != Some(key));
     if stale {
         crate::render::stats::bump(|s| s.groups_rebuilt += 1);
         if let Some(existing) = unsafe { container.sublayers() } {
@@ -295,15 +392,24 @@ pub(crate) fn replay_group(
             }
         }
         let native_controls_before: HashSet<usize> = live_native_controls.clone();
+        // `leaf_clip` is `None` for `Unclipped`/`Inside` (no per-leaf culling needed — see
+        // `ClipRelation`'s own doc comment) and the intersection rect, already local, for
+        // `Partial`. `Outside` can never reach here: `stale` is `false` whenever `!visible`.
+        let leaf_clip = match clip_relation {
+            ClipRelation::Partial(rect) => Some(rect),
+            ClipRelation::Unclipped | ClipRelation::Inside => None,
+            ClipRelation::Outside => unreachable!("stale is false whenever !visible"),
+        };
         replay_commands(
             native,
             &container,
             &group.commands,
             0,
-            origin,
-            effective_clip,
+            elwindui_core::base::Point { x: 0.0, y: 0.0 },
+            leaf_clip,
             transform,
             opacity,
+            origin,
             live_native_controls,
             new_native_order,
             &mut state.image_cache,
@@ -372,6 +478,13 @@ pub(crate) fn replay_commands(
     clip: Option<elwindui_core::base::Rect>,
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
+    // The owning group's own absolute origin (its `container`'s `position` — see `replay_group`'s
+    // own doc comment) — `origin` above is local to this replay (always `Point::ZERO` when this
+    // is the group's own top-level call, per `replay_group`). Used *only* by the `NativeControl`
+    // arm: a native island is a real `NSView` subview of the host, not a sublayer of any group
+    // container, so its frame must be in real absolute screen coordinates — the one place these
+    // two coordinate spaces meet.
+    group_origin: elwindui_core::base::Point,
     live_native_controls: &mut HashSet<usize>,
     new_native_order: &mut Vec<usize>,
     image_cache: &mut HashMap<ImageId, CFRetained<CGImage>>,
@@ -418,6 +531,7 @@ pub(crate) fn replay_commands(
                     new_clip,
                     transform,
                     opacity,
+                    group_origin,
                     live_native_controls,
                     new_native_order,
                     image_cache,
@@ -434,6 +548,7 @@ pub(crate) fn replay_commands(
                     clip,
                     transform.concat(pushed),
                     opacity,
+                    group_origin,
                     live_native_controls,
                     new_native_order,
                     image_cache,
@@ -450,6 +565,7 @@ pub(crate) fn replay_commands(
                     clip,
                     transform,
                     opacity * *pushed,
+                    group_origin,
                     live_native_controls,
                     new_native_order,
                     image_cache,
@@ -468,17 +584,30 @@ pub(crate) fn replay_commands(
                 let identity = view.identity();
                 live_native_controls.insert(identity);
                 new_native_order.push(identity);
-                let rect = elwindui_core::base::Rect {
+                // `rect`/`clip` are in this call's own local space (see `group_origin`'s own doc
+                // comment) — the culled/visible portion is computed there, exactly as before, and
+                // only the final `NSView` frame is translated into real absolute screen
+                // coordinates via `group_origin` (a native island is a real subview, not a
+                // sublayer of any group container, so it needs actual absolute placement).
+                let local_rect = elwindui_core::base::Rect {
                     x: origin.x + rect.x,
                     y: origin.y + rect.y,
                     width: rect.width,
                     height: rect.height,
                 };
-                let visible_rect = clip.and_then(|clip| rect.intersect(clip)).unwrap_or(rect);
-                if visible_rect.width <= 0.0 || visible_rect.height <= 0.0 {
+                let visible_local = clip
+                    .and_then(|clip| local_rect.intersect(clip))
+                    .unwrap_or(local_rect);
+                if visible_local.width <= 0.0 || visible_local.height <= 0.0 {
                     idx += 1;
                     continue;
                 }
+                let visible_rect = elwindui_core::base::Rect {
+                    x: group_origin.x + visible_local.x,
+                    y: group_origin.y + visible_local.y,
+                    width: visible_local.width,
+                    height: visible_local.height,
+                };
                 // This is deliberately a native island only around an actual native command;
                 // ordinary painted content continues to replay to `layer` above.
                 let (container, is_new) = native.island(identity, *owner_id);
@@ -497,10 +626,10 @@ pub(crate) fn replay_commands(
                 }
                 nsview.setTranslatesAutoresizingMaskIntoConstraints(true);
                 view.arrange(elwindui_core::base::Rect {
-                    x: rect.x - visible_rect.x,
-                    y: rect.y - visible_rect.y,
-                    width: rect.width,
-                    height: rect.height,
+                    x: local_rect.x - visible_local.x,
+                    y: local_rect.y - visible_local.y,
+                    width: local_rect.width,
+                    height: local_rect.height,
                 });
                 idx += 1;
             }
@@ -813,7 +942,7 @@ pub(crate) fn replay_paint_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elwindui_core::base::{AffineTransform, CornerRadius, Point, Rect};
+    use elwindui_core::base::{AffineTransform, CornerRadius, Point, Rect, Size};
     use elwindui_core::graphics::{Brush, Color};
 
     /// A `NativeIslandHost` for trees that contain no `RenderCommand::NativeControl` — every real
@@ -949,14 +1078,18 @@ mod tests {
     }
 
     #[test]
-    fn replaying_at_a_different_origin_forces_a_rebuild() {
-        // `GroupCacheKey::origin` is what makes a scrolled ancestor's offset change invalidate an
-        // unchanged descendant group — see `ReplayState::group_cache`'s own doc comment. This
-        // guards that the `ReplayState` refactor preserved that behavior byte-for-byte.
+    fn replaying_at_a_different_unclipped_origin_moves_the_container_without_rebuilding() {
+        // The whole point of Step 6 (AppKit render optimization work #46): a scrolled ancestor's
+        // offset change must cost exactly one `setPosition` on the group's own persistent
+        // container, never a rebuild — see `GroupCacheKey`'s and `ClipRelation`'s own doc
+        // comments for why dropping `origin` from the cache key (in favor of a stable
+        // `Unclipped`/`Inside`/`Outside` classification) is what makes that true.
         let root_layer = CALayer::new();
         let group = solid_fill_rect_group(1);
         let mut state = ReplayState::default();
         replay_once(&root_layer, &group, &mut state);
+        let container = state.group_layers.get(&1).unwrap().clone();
+        assert_eq!(container.position(), objc2_core_foundation::CGPoint::new(0.0, 0.0));
 
         crate::render::stats::reset();
         let mut live_native_controls = HashSet::new();
@@ -984,11 +1117,15 @@ mod tests {
         );
 
         let stats = crate::render::stats::snapshot();
-        assert_eq!(stats.groups_rebuilt, 1, "a moved ancestor must force a rebuild");
-        // A solid-color `FillRect` under a pure-translation `world` takes the `fastpath` route
-        // (a plain `CALayer` + `backgroundColor`, no `CGPath`/`CAShapeLayer`) — see
-        // `render::fastpath`. `layers_created` is what actually proves the rebuild happened.
-        assert!(stats.layers_created > 0);
+        assert_eq!(stats.groups_rebuilt, 0, "an unclipped group's origin must not force a rebuild");
+        assert_eq!(stats.groups_cache_hit, 1);
+        assert_eq!(stats.layers_created, 0);
+        assert_eq!(stats.cgpaths_created, 0);
+        assert_eq!(
+            container.position(),
+            objc2_core_foundation::CGPoint::new(5.0, 0.0),
+            "the container itself must carry the new absolute origin"
+        );
     }
 
     #[test]
@@ -1143,6 +1280,182 @@ mod tests {
             stats.cgpaths_created > 0,
             "a rotated group must fall back to the general CGPath path, \
              since CALayer.cornerRadius/backgroundColor have no rotation-aware equivalent"
+        );
+    }
+
+    #[test]
+    fn clip_relation_classify_matches_its_own_contract() {
+        let size = Size {
+            width: 10.0,
+            height: 10.0,
+        };
+        assert_eq!(ClipRelation::classify(None, size), ClipRelation::Unclipped);
+        assert_eq!(
+            ClipRelation::classify(
+                Some(Rect {
+                    x: -5.0,
+                    y: -5.0,
+                    width: 100.0,
+                    height: 100.0
+                }),
+                size
+            ),
+            ClipRelation::Inside,
+            "a clip that fully contains the group's own extent must classify as Inside"
+        );
+        assert_eq!(
+            ClipRelation::classify(
+                Some(Rect {
+                    x: 50.0,
+                    y: 50.0,
+                    width: 10.0,
+                    height: 10.0
+                }),
+                size
+            ),
+            ClipRelation::Outside,
+            "a clip disjoint from the group's own extent must classify as Outside"
+        );
+        assert_eq!(
+            ClipRelation::classify(
+                Some(Rect {
+                    x: 5.0,
+                    y: 5.0,
+                    width: 100.0,
+                    height: 100.0
+                }),
+                size
+            ),
+            ClipRelation::Partial(Rect {
+                x: 5.0,
+                y: 5.0,
+                width: 5.0,
+                height: 5.0
+            }),
+            "a clip straddling the group's own edge must classify as Partial with the intersection"
+        );
+    }
+
+    #[test]
+    fn a_group_outside_the_inherited_clip_hides_its_container_and_skips_rebuilding() {
+        let root_layer = CALayer::new();
+        let mut group = solid_fill_rect_group(1);
+        group.size = Size {
+            width: 10.0,
+            height: 10.0,
+        };
+        let mut state = ReplayState::default();
+
+        let mut live_native_controls = HashSet::new();
+        let mut live_group_ids = HashSet::new();
+        let mut live_image_ids = HashSet::new();
+        let mut live_vector_image_ids = HashSet::new();
+        let mut new_group_order = Vec::new();
+        let mut new_native_order = Vec::new();
+        // A clip entirely disjoint from the group's own (0,0,10,10) extent.
+        let disjoint_clip = Some(Rect {
+            x: 1000.0,
+            y: 1000.0,
+            width: 10.0,
+            height: 10.0,
+        });
+        replay_group(
+            &NoNativeIslands,
+            &root_layer,
+            &group,
+            Point { x: 0.0, y: 0.0 },
+            disjoint_clip,
+            AffineTransform::identity(),
+            1.0,
+            1.0,
+            &mut live_native_controls,
+            &mut live_group_ids,
+            &mut live_image_ids,
+            &mut live_vector_image_ids,
+            &mut new_group_order,
+            &mut new_native_order,
+            &mut state,
+        );
+
+        let stats = crate::render::stats::snapshot();
+        assert_eq!(stats.groups_rebuilt, 0, "an Outside group must never be rebuilt");
+        assert_eq!(stats.cgpaths_created, 0);
+        let container = state.group_layers.get(&1).unwrap();
+        assert!(container.isHidden(), "an Outside group's container must be hidden");
+    }
+
+    #[test]
+    fn a_partial_clip_group_rebuilds_when_the_local_intersection_changes() {
+        let root_layer = CALayer::new();
+        let mut group = solid_fill_rect_group(1);
+        group.size = Size {
+            width: 10.0,
+            height: 10.0,
+        };
+        let mut state = ReplayState::default();
+
+        let replay_with_clip = |root_layer: &Retained<CALayer>,
+                                 group: &RenderGroup,
+                                 state: &mut ReplayState,
+                                 inherited_clip: Option<Rect>| {
+            let mut live_native_controls = HashSet::new();
+            let mut live_group_ids = HashSet::new();
+            let mut live_image_ids = HashSet::new();
+            let mut live_vector_image_ids = HashSet::new();
+            let mut new_group_order = Vec::new();
+            let mut new_native_order = Vec::new();
+            replay_group(
+                &NoNativeIslands,
+                root_layer,
+                group,
+                Point { x: 0.0, y: 0.0 },
+                inherited_clip,
+                AffineTransform::identity(),
+                1.0,
+                1.0,
+                &mut live_native_controls,
+                &mut live_group_ids,
+                &mut live_image_ids,
+                &mut live_vector_image_ids,
+                &mut new_group_order,
+                &mut new_native_order,
+                state,
+            );
+        };
+
+        // Straddles the group's right edge (Partial).
+        replay_with_clip(
+            &root_layer,
+            &group,
+            &mut state,
+            Some(Rect {
+                x: -100.0,
+                y: -100.0,
+                width: 105.0,
+                height: 200.0,
+            }),
+        );
+
+        crate::render::stats::reset();
+        // Same origin, but the viewport edge moved — the local intersection rect differs even
+        // though nothing about the group's own content changed.
+        replay_with_clip(
+            &root_layer,
+            &group,
+            &mut state,
+            Some(Rect {
+                x: -100.0,
+                y: -100.0,
+                width: 103.0,
+                height: 200.0,
+            }),
+        );
+
+        let stats = crate::render::stats::snapshot();
+        assert_eq!(
+            stats.groups_rebuilt, 1,
+            "a changed Partial intersection must still force a rebuild — only Inside/Outside/\
+             Unclipped are stable across small viewport shifts"
         );
     }
 }

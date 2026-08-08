@@ -100,26 +100,53 @@ pub(crate) fn set_mask_scaled(layer: &CALayer, mask: &CALayer) {
     set_contents_scale_recursive(mask, layer.contentsScale());
 }
 
-/// `layer.setFrame(frame)`, skipped if `frame` already equals `layer.frame()` — every Core
-/// Animation property setter is a mutation Core Animation itself has to track (and, absent
-/// `ImplicitAnimationGuard`, animate) even when the new value is byte-identical to the old one.
-/// Called every pass on every group's persistent container (`host::replay::replay_group`), so a
-/// static UI's steady-state relayout should hit this branch and touch nothing.
-pub(crate) fn set_frame_if_changed(layer: &CALayer, frame: objc2_core_foundation::CGRect) {
-    if layer.frame() != frame {
+/// Every Core Animation property setter is a mutation Core Animation itself has to track (and,
+/// absent `ImplicitAnimationGuard`, animate) even when the new value is byte-identical to the old
+/// one — these four helpers skip the underlying setter whenever that's the case. Called every
+/// pass on every group's persistent container (`host::replay::replay_group`), so a static UI's
+/// steady-state relayout should hit the skip branch every time and touch nothing.
+pub(crate) fn set_contents_scale_if_changed(layer: &CALayer, scale: CGFloat) {
+    if layer.contentsScale() != scale {
         crate::render::stats::bump(|s| s.setter_calls += 1);
-        layer.setFrame(frame);
+        layer.setContentsScale(scale);
     } else {
         crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
     }
 }
 
-/// `layer.setContentsScale(scale)`, skipped if `scale` already equals `layer.contentsScale()` —
-/// see `set_frame_if_changed`'s own doc comment.
-pub(crate) fn set_contents_scale_if_changed(layer: &CALayer, scale: CGFloat) {
-    if layer.contentsScale() != scale {
+/// See `set_contents_scale_if_changed`'s own doc comment. Used for a group container's own
+/// `bounds` (always `(0, 0, root_layer.bounds().size)` — see `replay_group`'s own doc comment on
+/// why a group container carries its absolute origin via `position` rather than `frame`), which
+/// only actually changes on a window resize.
+pub(crate) fn set_bounds_if_changed(layer: &CALayer, bounds: objc2_core_foundation::CGRect) {
+    if layer.bounds() != bounds {
         crate::render::stats::bump(|s| s.setter_calls += 1);
-        layer.setContentsScale(scale);
+        layer.setBounds(bounds);
+    } else {
+        crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
+    }
+}
+
+/// See `set_contents_scale_if_changed`'s own doc comment. Used for a group container's own
+/// `position` (its absolute origin) — the one property among the four here that changes often in
+/// practice (any layout change moves it), which is exactly the case Step 6 of the AppKit render
+/// optimization work introduced this for: a `setPosition` alone, with no `CGPath` rebuild, is now
+/// enough to reflect a scrolled/moved group.
+pub(crate) fn set_position_if_changed(layer: &CALayer, position: objc2_core_foundation::CGPoint) {
+    if layer.position() != position {
+        crate::render::stats::bump(|s| s.setter_calls += 1);
+        layer.setPosition(position);
+    } else {
+        crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
+    }
+}
+
+/// See `set_contents_scale_if_changed`'s own doc comment. Used for a group container's own
+/// `hidden` state (`ClipRelation::Outside` — see that enum's own doc comment).
+pub(crate) fn set_hidden_if_changed(layer: &CALayer, hidden: bool) {
+    if layer.isHidden() != hidden {
+        crate::render::stats::bump(|s| s.setter_calls += 1);
+        layer.setHidden(hidden);
     } else {
         crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
     }

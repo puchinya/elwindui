@@ -18,8 +18,11 @@ pub struct RenderGroup {
     pub generation: u64,
     pub offset: Point,
     /// The arranged local extent. It is retained separately from `clip`: an unclipped Visual can
-    /// still need to re-record its local commands when only its size changes.
-    pub(crate) size: Size,
+    /// still need to re-record its local commands when only its size changes. `pub` (not
+    /// `pub(crate)`) so a backend can classify this group's own on-screen extent against an
+    /// inherited clip without recomputing it from `commands` — see e.g.
+    /// `elwindui-backend-appkit`'s `ClipRelation`.
+    pub size: Size,
     pub clip: Option<Rect>,
     pub commands: Vec<RenderCommand>,
     pub children: Vec<RenderGroup>,

@@ -28,6 +28,7 @@ pub(crate) struct RenderStats {
     pub(crate) setter_calls_skipped: u32,
     // resource creation
     pub(crate) cgpaths_created: u32,
+    pub(crate) cgcolors_created: u32,
     pub(crate) text_layers_created: u32,
     pub(crate) attributed_strings_created: u32,
     pub(crate) ns_fonts_created: u32,

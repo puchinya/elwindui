@@ -782,9 +782,9 @@ impl TreeHostView {
                 eprintln!(
                     "elwindui-render-stats groups_visited={} groups_rebuilt={} groups_cache_hit={} \
                      layers_created={} layers_removed={} add_sublayer_calls={} subview_added={} \
-                     cgpaths_created={} text_layers_created={} attributed_strings_created={} \
-                     setter_calls={} setter_calls_skipped={} image_cache_bytes={} \
-                     vector_raster_cache_bytes={} process_footprint_bytes={}",
+                     cgpaths_created={} cgcolors_created={} text_layers_created={} \
+                     attributed_strings_created={} setter_calls={} setter_calls_skipped={} \
+                     image_cache_bytes={} vector_raster_cache_bytes={} process_footprint_bytes={}",
                     s.groups_visited,
                     s.groups_rebuilt,
                     s.groups_cache_hit,
@@ -793,6 +793,7 @@ impl TreeHostView {
                     s.add_sublayer_calls,
                     s.subview_added,
                     s.cgpaths_created,
+                    s.cgcolors_created,
                     s.text_layers_created,
                     s.attributed_strings_created,
                     s.setter_calls,

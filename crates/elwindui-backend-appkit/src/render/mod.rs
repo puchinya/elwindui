@@ -10,6 +10,7 @@
 //! Submodules are private and re-exported explicitly below, following
 //! `elwindui_core::graphics`'s own `mod.rs` convention.
 
+mod fastpath;
 mod geometry;
 mod image;
 mod layer;
@@ -19,6 +20,7 @@ pub(crate) mod stats;
 mod text;
 mod vector;
 
+pub(crate) use fastpath::try_fast_path;
 pub(crate) use geometry::{
     clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, parse_color, transform_point,
 };

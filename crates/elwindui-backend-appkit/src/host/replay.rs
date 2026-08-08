@@ -510,17 +510,30 @@ pub(crate) fn replay_commands(
                 if geometry_bounds(command, &world)
                     .is_none_or(|bounds| clip.is_none_or(|clip| bounds.intersect(clip).is_some()))
                 {
-                    replay_paint_command(
-                        layer,
-                        command,
-                        origin,
-                        transform,
-                        opacity,
-                        image_cache,
-                        vector_raster_cache,
-                    );
+                    // `try_fast_path` may also consume `commands[idx + 1]` (the FillRect+
+                    // StrokeRect fusion case) — the shared rect makes this command's own cull
+                    // decision above a reasonable stand-in for the pair's, the same bounding-box
+                    // approximation `Shape::hit_test_content` already documents elsewhere in this
+                    // codebase.
+                    let next = commands.get(idx + 1);
+                    let consumed = crate::render::try_fast_path(layer, command, next, &world, opacity);
+                    if consumed == 0 {
+                        replay_paint_command(
+                            layer,
+                            command,
+                            origin,
+                            transform,
+                            opacity,
+                            image_cache,
+                            vector_raster_cache,
+                        );
+                        idx += 1;
+                    } else {
+                        idx += consumed;
+                    }
+                } else {
+                    idx += 1;
                 }
-                idx += 1;
             }
         }
     }
@@ -972,7 +985,10 @@ mod tests {
 
         let stats = crate::render::stats::snapshot();
         assert_eq!(stats.groups_rebuilt, 1, "a moved ancestor must force a rebuild");
-        assert!(stats.cgpaths_created > 0);
+        // A solid-color `FillRect` under a pure-translation `world` takes the `fastpath` route
+        // (a plain `CALayer` + `backgroundColor`, no `CGPath`/`CAShapeLayer`) — see
+        // `render::fastpath`. `layers_created` is what actually proves the rebuild happened.
+        assert!(stats.layers_created > 0);
     }
 
     #[test]
@@ -1007,5 +1023,126 @@ mod tests {
         let stats = crate::render::stats::snapshot();
         assert_eq!(stats.groups_rebuilt, 1);
         assert_eq!(stats.groups_cache_hit, 0);
+    }
+
+    #[test]
+    fn solid_fill_rect_takes_the_fast_path_and_builds_no_cgpath() {
+        let root_layer = CALayer::new();
+        let group = solid_fill_rect_group(1);
+        let mut state = ReplayState::default();
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &group, &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        assert_eq!(
+            stats.cgpaths_created, 0,
+            "a solid FillRect must not build a CGPath — see render::fastpath"
+        );
+        // 2, not 1: the group's own persistent container CALayer (replay_group) plus the one
+        // fast-path CALayer for the FillRect itself.
+        assert_eq!(stats.layers_created, 2);
+    }
+
+    #[test]
+    fn fill_and_stroke_rect_on_the_same_rect_fuse_into_one_layer() {
+        fn fill_and_stroke(same_rect: bool) -> RenderGroup {
+            let mut group = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
+            let fill_rect = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            };
+            let stroke_rect = if same_rect {
+                fill_rect
+            } else {
+                Rect {
+                    x: 20.0,
+                    ..fill_rect
+                }
+            };
+            group.commands = vec![
+                RenderCommand::FillRect {
+                    rect: fill_rect,
+                    brush: Brush::Solid(Color {
+                        r: 255,
+                        g: 0,
+                        b: 0,
+                        a: 255,
+                    }),
+                },
+                RenderCommand::StrokeRect {
+                    rect: stroke_rect,
+                    brush: Brush::Solid(Color {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 255,
+                    }),
+                    stroke: elwindui_core::graphics::StrokeStyle::default(),
+                },
+            ];
+            group
+        }
+
+        let fused_layers = {
+            let root_layer = CALayer::new();
+            let mut state = ReplayState::default();
+            crate::render::stats::reset();
+            replay_once(&root_layer, &fill_and_stroke(true), &mut state);
+            crate::render::stats::snapshot().layers_created
+        };
+        let unfused_layers = {
+            let root_layer = CALayer::new();
+            let mut state = ReplayState::default();
+            crate::render::stats::reset();
+            replay_once(&root_layer, &fill_and_stroke(false), &mut state);
+            crate::render::stats::snapshot().layers_created
+        };
+
+        assert_eq!(
+            unfused_layers - fused_layers,
+            1,
+            "a FillRect immediately followed by a StrokeRect on the *same* rect must produce \
+             exactly one fewer CALayer than the same pair on different rects"
+        );
+    }
+
+    #[test]
+    fn a_rotated_group_falls_back_to_the_general_cgpath_path() {
+        let root_layer = CALayer::new();
+        let mut group = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
+        group.commands = vec![
+            RenderCommand::PushTransform {
+                transform: AffineTransform::rotation(0.3),
+            },
+            RenderCommand::FillRect {
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                brush: Brush::Solid(Color {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+            },
+            RenderCommand::PopTransform,
+        ];
+        let mut state = ReplayState::default();
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &group, &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        assert!(
+            stats.cgpaths_created > 0,
+            "a rotated group must fall back to the general CGPath path, \
+             since CALayer.cornerRadius/backgroundColor have no rotation-aware equivalent"
+        );
     }
 }

@@ -183,6 +183,15 @@ impl InnerTabView {
         );
         host.setFrame(self.content_container.bounds());
         host.setHidden(true);
+        // Every new host starts suppressed (docs/design/gui_framework_design.md §5.4a) — only
+        // `set_tab_content_visible(host, true)` below ever reactivates one, including the very
+        // first time a tab becomes selected (see that method's own doc comment). Suppressing here
+        // rather than leaving the default `active: true` matters even for a tab that never gets
+        // selected at all: without it, the `host.set_tree(content)` call `native_ui::TabView::
+        // rebuild` makes right after `insert_tab` returns would run a full, wasted `relayout()`
+        // (measure/arrange/RenderTree/CALayer build) before this tab's actual visibility is even
+        // decided.
+        host.set_active(false);
         self.content_container.addSubview(&host);
         (chip, host)
     }
@@ -190,12 +199,25 @@ impl InnerTabView {
     /// Removes a tab's chip and its persistent content host together.
     pub(crate) fn remove_tab(&self, chip: &TabChipImpl, host: &TreeHostView) {
         self.strip.remove_tab(chip);
+        // Explicit rather than relying on the last `Retained<TreeHostView>` being dropped by the
+        // caller (which happens to be immediate today, but isn't guaranteed by anything at this
+        // call site) — releases `render_tree`/every retained CALayer/native island deterministically
+        // right here, matching `set_active`'s own doc comment.
+        host.set_active(false);
         host.removeFromSuperview();
     }
 
     /// Shows or hides a tab's content host — selecting a tab means showing its host and hiding the
-    /// previously-selected one, never touching either one's actual content.
+    /// previously-selected one, never touching either one's actual content. Activating before
+    /// unhiding (and hiding before deactivating) avoids ever presenting a suppressed host's empty
+    /// frame for even one paint.
     pub(crate) fn set_tab_content_visible(&self, host: &TreeHostView, visible: bool) {
-        host.setHidden(!visible);
+        if visible {
+            host.set_active(true);
+            host.setHidden(false);
+        } else {
+            host.setHidden(true);
+            host.set_active(false);
+        }
     }
 }

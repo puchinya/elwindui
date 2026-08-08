@@ -4,12 +4,12 @@
 
 use super::geometry::*;
 use super::image::*;
-use super::layer::{add_sublayer_scaled, set_mask_scaled};
+use super::layer::{add_sublayer_scaled, paint_layer_name, set_mask_scaled};
 use super::path::*;
 use objc2::rc::Retained;
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{CGColor, CGImage, CGMutablePath};
-use objc2_foundation::{NSArray, NSNumber, NSRect, NSString};
+use objc2_foundation::{NSArray, NSNumber, NSRect};
 use objc2_quartz_core::{
     CAGradientLayer, CALayer, CAShapeLayer, kCAGradientLayerAxial, kCAGradientLayerRadial,
 };
@@ -28,7 +28,7 @@ pub(crate) fn add_shape_layer(
 ) {
     super::stats::bump(|s| s.layers_created += 1);
     let shape_layer = CAShapeLayer::new();
-    shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+    shape_layer.setName(Some(&paint_layer_name()));
     shape_layer.setPath(Some(path));
     // `CAShapeLayer.fillColor` defaults to opaque black, not nil — `apply_fill`'s own `None` arm
     // (`setFillColor(None)`) must always run for a stroke-only shape, or the shape silently paints
@@ -89,7 +89,7 @@ pub(crate) fn try_add_gradient_fill_layer(
     });
     super::stats::bump(|s| s.layers_created += 1);
     let gradient_layer = CAGradientLayer::new();
-    gradient_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+    gradient_layer.setName(Some(&paint_layer_name()));
     let ca_layer: &CALayer = &gradient_layer;
     ca_layer.setFrame(NSRect::new(
         objc2_foundation::NSPoint::new(absolute_origin.x as f64, absolute_origin.y as f64),
@@ -238,7 +238,7 @@ pub(crate) fn try_add_image_fill_layer(
     });
     super::stats::bump(|s| s.layers_created += 1);
     let container = CALayer::new();
-    container.setName(Some(&NSString::from_str("elwindui-paint")));
+    container.setName(Some(&paint_layer_name()));
     container.setMasksToBounds(true);
     container.setFrame(NSRect::new(
         objc2_foundation::NSPoint::new(absolute_origin.x as f64, absolute_origin.y as f64),

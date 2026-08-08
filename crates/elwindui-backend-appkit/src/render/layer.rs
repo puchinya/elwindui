@@ -19,8 +19,21 @@
 //! miss those inner layers. See `host::TreeHostView::backing_scale_factor` for where the
 //! authoritative scale value comes from.
 
+use objc2::rc::Retained;
 use objc2_core_foundation::CGFloat;
+use objc2_foundation::NSString;
 use objc2_quartz_core::{CALayer, CATransaction};
+
+thread_local! {
+    static PAINT_LAYER_NAME: Retained<NSString> = NSString::from_str("elwindui-paint");
+}
+
+/// The `NSString` every hand-built layer in this backend names itself with, memoized per thread
+/// instead of allocated fresh (`NSString::from_str`) at each of its ~15 creation sites, all of
+/// which pass the same literal.
+pub(crate) fn paint_layer_name() -> Retained<NSString> {
+    PAINT_LAYER_NAME.with(|name| name.clone())
+}
 
 /// Suppresses Core Animation's implicit (default ~0.25s) property animations for the duration of
 /// one render synchronization pass. Every `setFrame`/`addSublayer`/`setPath`/`setString`/etc. this
@@ -85,6 +98,31 @@ pub(crate) fn add_sublayer_scaled(parent: &CALayer, child: &CALayer) {
 pub(crate) fn set_mask_scaled(layer: &CALayer, mask: &CALayer) {
     unsafe { layer.setMask(Some(mask)) };
     set_contents_scale_recursive(mask, layer.contentsScale());
+}
+
+/// `layer.setFrame(frame)`, skipped if `frame` already equals `layer.frame()` — every Core
+/// Animation property setter is a mutation Core Animation itself has to track (and, absent
+/// `ImplicitAnimationGuard`, animate) even when the new value is byte-identical to the old one.
+/// Called every pass on every group's persistent container (`host::replay::replay_group`), so a
+/// static UI's steady-state relayout should hit this branch and touch nothing.
+pub(crate) fn set_frame_if_changed(layer: &CALayer, frame: objc2_core_foundation::CGRect) {
+    if layer.frame() != frame {
+        crate::render::stats::bump(|s| s.setter_calls += 1);
+        layer.setFrame(frame);
+    } else {
+        crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
+    }
+}
+
+/// `layer.setContentsScale(scale)`, skipped if `scale` already equals `layer.contentsScale()` —
+/// see `set_frame_if_changed`'s own doc comment.
+pub(crate) fn set_contents_scale_if_changed(layer: &CALayer, scale: CGFloat) {
+    if layer.contentsScale() != scale {
+        crate::render::stats::bump(|s| s.setter_calls += 1);
+        layer.setContentsScale(scale);
+    } else {
+        crate::render::stats::bump(|s| s.setter_calls_skipped += 1);
+    }
 }
 
 #[cfg(test)]

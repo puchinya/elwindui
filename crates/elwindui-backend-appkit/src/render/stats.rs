@@ -22,6 +22,10 @@ pub(crate) struct RenderStats {
     pub(crate) add_sublayer_calls: u32,
     pub(crate) subview_added: u32,
     pub(crate) subview_removed: u32,
+    /// Property setters actually issued (`set_frame_if_changed`/`set_contents_scale_if_changed`)
+    /// vs. skipped because the new value equaled the old one.
+    pub(crate) setter_calls: u32,
+    pub(crate) setter_calls_skipped: u32,
     // resource creation
     pub(crate) cgpaths_created: u32,
     pub(crate) text_layers_created: u32,

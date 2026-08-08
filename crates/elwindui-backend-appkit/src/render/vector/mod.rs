@@ -11,7 +11,7 @@
 
 use crate::render::{
     add_sublayer_scaled, build_image_container_layer, clip_mask_layer, fitted_image_rect,
-    set_mask_scaled,
+    paint_layer_name, set_mask_scaled,
 };
 use elwindui_core::base::{AffineTransform, Rect};
 use elwindui_core::graphics::{
@@ -84,7 +84,7 @@ pub(crate) fn draw_vector_image(
 
     let container = if options.clip_to_dest {
         let clip_container = CALayer::new();
-        clip_container.setName(Some(&NSString::from_str("elwindui-paint")));
+        clip_container.setName(Some(&paint_layer_name()));
         clip_container.setFrame(layer.bounds());
         // Attach before masking — `add_sublayer_scaled` stamps `clip_container`'s scale from
         // `layer` at attach time, which `set_mask_scaled` below needs already set to propagate
@@ -302,14 +302,14 @@ pub(crate) fn render_group(
     }
 
     let wrapper = CALayer::new();
-    wrapper.setName(Some(&NSString::from_str("elwindui-paint")));
+    wrapper.setName(Some(&paint_layer_name()));
     wrapper.setFrame(layer.bounds());
 
     // clip-path gets its own inner layer so its mask slot doesn't collide with the SVG `mask`'s
     // own mask slot on `wrapper` below — `CALayer` only has one `.mask` property each.
     let content_target = if group.clip_path.is_some() {
         let content = CALayer::new();
-        content.setName(Some(&NSString::from_str("elwindui-paint")));
+        content.setName(Some(&paint_layer_name()));
         content.setFrame(layer.bounds());
         add_sublayer_scaled(&wrapper, &content);
         content

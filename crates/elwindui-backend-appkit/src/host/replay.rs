@@ -24,7 +24,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSView;
 use objc2_core_foundation::{CFRetained, CGFloat};
 use objc2_core_graphics::{CGImage, CGMutablePath};
-use objc2_foundation::{NSRect, NSString};
+use objc2_foundation::NSRect;
 use objc2_quartz_core::{
     CALayer, CAShapeLayer, CATextLayer, kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight,
     kCAFillRuleEvenOdd, kCAFillRuleNonZero,
@@ -88,6 +88,18 @@ pub(crate) struct ReplayState {
     /// sublayers is now stale). Comparing the full `GroupCacheKey` tuple each pass catches both
     /// that and a window moved to a display with a different `backing_scale_factor`.
     pub(crate) group_cache: HashMap<u64, GroupCacheEntry>,
+    /// The `RenderGroup` traversal order of the previous pass, in final Z order (every group
+    /// container is a flat sibling of `root_layer`, so this one flat list covers the whole tree,
+    /// not just root-level groups) — compared against the current pass's own traversal order so
+    /// `relayout_inner` can tell whether `root_layer`'s sublayer array needs any reordering *at
+    /// all* before touching it. See `relayout_inner`'s own doc comment on why re-`addSublayer`ing
+    /// in this order, when it *is* needed, is enough to fix the order (no `insertSublayer:atIndex:`
+    /// bookkeeping) without disturbing native-control layers interleaved in the same array.
+    pub(crate) group_order: Vec<u64>,
+    /// The `RenderCommand::NativeControl` traversal order of the previous pass — the `NSView`
+    /// counterpart of `group_order`, compared the same way to decide whether the native z-order
+    /// restore loop (`relayout_inner`) needs to run at all.
+    pub(crate) native_order: Vec<usize>,
     /// Decoded-image cache (`RenderCommand::DrawImage`'s `elwindui_core::graphics::Image` -> real
     /// `CGImage`), keyed by the image's stable `ImageId`. Pruned after each pass to the resources
     /// referenced by the currently retained render tree.
@@ -188,13 +200,14 @@ fn resource_ids(commands: &[RenderCommand]) -> (Vec<ImageId>, Vec<VectorImageId>
 /// group's own container (`frame` always exactly `root_layer.bounds()`, deliberately not nested
 /// to match the `RenderGroup` tree shape, so the absolute-canvas-coordinate geometry every leaf
 /// drawing helper already bakes in stays valid unchanged; nesting would need re-deriving all of
-/// that in per-container-local coordinates for no benefit). Re-adding an already-attached
-/// container to `root_layer` every pass (regardless of whether its *content* is rebuilt) moves it
-/// to the top of the sublayer list, which is enough on its own to keep Z-order correct across a
-/// mix of rebuilt and cache-hit groups each frame — the actually expensive part
-/// (`CGPath`/`CAShapeLayer`/`CAGradientLayer` construction) only happens when `GroupCacheKey`
-/// shows this group's replay inputs actually changed since last time (painter design doc §15's
-/// renderer cache, acceptance criterion 14: "画像・pathリソースを毎フレーム再生成しない").
+/// that in per-container-local coordinates for no benefit). A container is `addSublayer`ed to
+/// `root_layer` only the first time it's ever created — see `new_group_order`'s own doc comment
+/// (and `relayout_inner`'s) for how Z-order among a mix of rebuilt and cache-hit groups stays
+/// correct without re-`addSublayer`ing every one of them, every pass, forever. The actually
+/// expensive part (`CGPath`/`CAShapeLayer`/`CAGradientLayer` construction) only happens when
+/// `GroupCacheKey` shows this group's replay inputs actually changed since last time (painter
+/// design doc §15's renderer cache, acceptance criterion 14: "画像・pathリソースを毎フレーム再生成
+/// しない").
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn replay_group(
     native: &dyn NativeIslandHost,
@@ -209,6 +222,11 @@ pub(crate) fn replay_group(
     live_group_ids: &mut HashSet<u64>,
     live_image_ids: &mut HashSet<ImageId>,
     live_vector_image_ids: &mut HashSet<VectorImageId>,
+    // `new_group_order`/`new_native_order`: this pass's traversal order, accumulated alongside the
+    // liveness sets above and compared by `relayout_inner` (after the whole tree has been walked)
+    // against `ReplayState::group_order`/`native_order` — see those fields' own doc comments.
+    new_group_order: &mut Vec<u64>,
+    new_native_order: &mut Vec<usize>,
     state: &mut ReplayState,
 ) {
     let origin = elwindui_core::base::Point {
@@ -227,28 +245,33 @@ pub(crate) fn replay_group(
         (None, None) => None,
     };
     live_group_ids.insert(group.id);
+    new_group_order.push(group.id);
     crate::render::stats::bump(|s| s.groups_visited += 1);
 
-    let is_new = !state.group_layers.contains_key(&group.id);
-    let container = state
-        .group_layers
-        .entry(group.id)
-        .or_insert_with(|| {
+    let (container, is_new) = match state.group_layers.entry(group.id) {
+        std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+        std::collections::hash_map::Entry::Vacant(entry) => {
             crate::render::stats::bump(|s| s.layers_created += 1);
             let c = CALayer::new();
-            c.setName(Some(&NSString::from_str("elwindui-paint")));
-            c
-        })
-        .clone();
-    container.setFrame(root_layer.bounds());
+            c.setName(Some(&crate::render::paint_layer_name()));
+            entry.insert(c.clone());
+            (c, true)
+        }
+    };
+    crate::render::set_frame_if_changed(&container, root_layer.bounds());
     // Set directly from `scale` (not via `add_sublayer_scaled`, which would also recursively
     // re-stamp every one of this container's *existing* sublayers on every single pass, including
     // cache hits) — `GroupCacheKey::scale` below already forces a full rebuild, which re-attaches
     // every descendant through `add_sublayer_scaled` and picks up this value, whenever the scale
     // genuinely changes. This keeps a cache-hit pass exactly as cheap as it was before this fix.
-    container.setContentsScale(scale);
-    crate::render::stats::bump(|s| s.add_sublayer_calls += 1);
-    root_layer.addSublayer(&container);
+    crate::render::set_contents_scale_if_changed(&container, scale);
+    if container.superlayer().is_none() {
+        // First time this container has ever been attached. Z-order among the rest is fixed up
+        // in bulk by `relayout_inner` once the whole tree has been walked, not here — see
+        // `ReplayState::group_order`'s own doc comment.
+        crate::render::stats::bump(|s| s.add_sublayer_calls += 1);
+        root_layer.addSublayer(&container);
+    }
 
     let key = GroupCacheKey {
         origin,
@@ -282,6 +305,7 @@ pub(crate) fn replay_group(
             transform,
             opacity,
             live_native_controls,
+            new_native_order,
             &mut state.image_cache,
             &mut state.vector_raster_cache,
         );
@@ -324,6 +348,8 @@ pub(crate) fn replay_group(
             live_group_ids,
             live_image_ids,
             live_vector_image_ids,
+            new_group_order,
+            new_native_order,
             state,
         );
     }
@@ -347,6 +373,7 @@ pub(crate) fn replay_commands(
     transform: elwindui_core::base::AffineTransform,
     opacity: f32,
     live_native_controls: &mut HashSet<usize>,
+    new_native_order: &mut Vec<usize>,
     image_cache: &mut HashMap<ImageId, CFRetained<CGImage>>,
     vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
 ) -> usize {
@@ -374,7 +401,7 @@ pub(crate) fn replay_commands(
                     .concat(&transform);
                 crate::render::stats::bump(|s| s.layers_created += 1);
                 let container = CALayer::new();
-                container.setName(Some(&NSString::from_str("elwindui-paint")));
+                container.setName(Some(&crate::render::paint_layer_name()));
                 container.setFrame(layer.bounds());
                 // Attach before masking, not after: `add_sublayer_scaled` stamps `container`'s
                 // scale from `layer` at attach time, and `set_mask_scaled` needs that already-set
@@ -392,6 +419,7 @@ pub(crate) fn replay_commands(
                     transform,
                     opacity,
                     live_native_controls,
+                    new_native_order,
                     image_cache,
                     vector_raster_cache,
                 );
@@ -407,6 +435,7 @@ pub(crate) fn replay_commands(
                     transform.concat(pushed),
                     opacity,
                     live_native_controls,
+                    new_native_order,
                     image_cache,
                     vector_raster_cache,
                 );
@@ -422,6 +451,7 @@ pub(crate) fn replay_commands(
                     transform,
                     opacity * *pushed,
                     live_native_controls,
+                    new_native_order,
                     image_cache,
                     vector_raster_cache,
                 );
@@ -437,6 +467,7 @@ pub(crate) fn replay_commands(
                 };
                 let identity = view.identity();
                 live_native_controls.insert(identity);
+                new_native_order.push(identity);
                 let rect = elwindui_core::base::Rect {
                     x: origin.x + rect.x,
                     y: origin.y + rect.y,
@@ -642,7 +673,7 @@ pub(crate) fn replay_paint_command(
             let cg_path = path_to_cgpath(&world, path);
             crate::render::stats::bump(|s| s.layers_created += 1);
             let shape_layer = CAShapeLayer::new();
-            shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+            shape_layer.setName(Some(&crate::render::paint_layer_name()));
             shape_layer.setPath(Some(&cg_path));
             shape_layer.setFillRule(match rule {
                 elwindui_core::graphics::FillRule::NonZero => unsafe { kCAFillRuleNonZero },
@@ -661,7 +692,7 @@ pub(crate) fn replay_paint_command(
             let cg_path = path_to_cgpath(&world, path);
             crate::render::stats::bump(|s| s.layers_created += 1);
             let shape_layer = CAShapeLayer::new();
-            shape_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+            shape_layer.setName(Some(&crate::render::paint_layer_name()));
             shape_layer.setPath(Some(&cg_path));
             // `CAShapeLayer.fillColor` defaults to opaque black — must be explicitly nilled for a
             // stroke-only shape, same reasoning as `add_shape_layer`'s own doc comment.
@@ -721,7 +752,7 @@ pub(crate) fn replay_paint_command(
                 s.text_layers_created += 1;
             });
             let text_layer = CATextLayer::new();
-            text_layer.setName(Some(&NSString::from_str("elwindui-paint")));
+            text_layer.setName(Some(&crate::render::paint_layer_name()));
             text_layer.setFrame(NSRect::new(
                 transform_point(
                     &world,
@@ -808,6 +839,12 @@ mod tests {
         group
     }
 
+    fn parent_with_children(child_ids: &[u64]) -> RenderGroup {
+        let mut parent = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
+        parent.children = child_ids.iter().map(|&id| solid_fill_rect_group(id)).collect();
+        parent
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn replay_once(
         root_layer: &Retained<CALayer>,
@@ -818,6 +855,8 @@ mod tests {
         let mut live_group_ids = HashSet::new();
         let mut live_image_ids = HashSet::new();
         let mut live_vector_image_ids = HashSet::new();
+        let mut new_group_order = Vec::new();
+        let mut new_native_order = Vec::new();
         replay_group(
             &NoNativeIslands,
             root_layer,
@@ -831,12 +870,28 @@ mod tests {
             &mut live_group_ids,
             &mut live_image_ids,
             &mut live_vector_image_ids,
+            &mut new_group_order,
+            &mut new_native_order,
             state,
         );
+        // Mirrors what `relayout_inner` does after the top-level `replay_group` call: apply the
+        // Z-order repair only when this pass's traversal order actually differs from last time.
+        if state.group_order != new_group_order {
+            for id in &new_group_order {
+                if let Some(container) = state.group_layers.get(id) {
+                    crate::render::stats::bump(|s| s.add_sublayer_calls += 1);
+                    root_layer.addSublayer(container);
+                }
+            }
+            state.group_order = new_group_order;
+        }
     }
 
+    /// The §22 no-op assertion: replaying an unchanged tree a second time must mutate the Core
+    /// Animation tree not at all — no new/removed layers, no re-`addSublayer`, no `CGPath`
+    /// rebuild. This is the regression harness every later optimization step is checked against.
     #[test]
-    fn second_replay_of_an_unchanged_group_hits_the_cache_and_creates_nothing_new() {
+    fn second_replay_of_an_unchanged_group_mutates_nothing() {
         let root_layer = CALayer::new();
         let group = solid_fill_rect_group(1);
         let mut state = ReplayState::default();
@@ -846,15 +901,38 @@ mod tests {
         replay_once(&root_layer, &group, &mut state);
 
         let stats = crate::render::stats::snapshot();
-        // `add_sublayer_calls` is deliberately not asserted here — `replay_group` still
-        // unconditionally re-`addSublayer`s the group container every pass (that's Step 2's own
-        // fix, tracked by the full §22 no-op assertion added once it lands). What Step 0 already
-        // guarantees is that a cache hit builds nothing new.
         assert_eq!(stats.groups_rebuilt, 0, "unchanged group must not rebuild");
         assert_eq!(stats.groups_cache_hit, 1);
         assert_eq!(stats.layers_created, 0, "cache hit must create no new CALayer");
         assert_eq!(stats.layers_removed, 0);
         assert_eq!(stats.cgpaths_created, 0, "cache hit must not rebuild any CGPath");
+        assert_eq!(
+            stats.add_sublayer_calls, 0,
+            "an already-attached, unreordered container must not be re-addSublayer'd"
+        );
+    }
+
+    #[test]
+    fn a_reordered_child_list_repairs_z_order_without_rebuilding_content() {
+        let root_layer = CALayer::new();
+        let mut state = ReplayState::default();
+
+        replay_once(&root_layer, &parent_with_children(&[2, 3]), &mut state);
+        assert_eq!(state.group_order, vec![1, 2, 3]);
+
+        crate::render::stats::reset();
+        replay_once(&root_layer, &parent_with_children(&[3, 2]), &mut state);
+
+        let stats = crate::render::stats::snapshot();
+        assert_eq!(
+            stats.groups_rebuilt, 0,
+            "reordering alone must not rebuild any group's own content"
+        );
+        assert!(
+            stats.add_sublayer_calls > 0,
+            "a changed traversal order must trigger the Z-order repair pass"
+        );
+        assert_eq!(state.group_order, vec![1, 3, 2]);
     }
 
     #[test]
@@ -872,6 +950,8 @@ mod tests {
         let mut live_group_ids = HashSet::new();
         let mut live_image_ids = HashSet::new();
         let mut live_vector_image_ids = HashSet::new();
+        let mut new_group_order = Vec::new();
+        let mut new_native_order = Vec::new();
         replay_group(
             &NoNativeIslands,
             &root_layer,
@@ -885,6 +965,8 @@ mod tests {
             &mut live_group_ids,
             &mut live_image_ids,
             &mut live_vector_image_ids,
+            &mut new_group_order,
+            &mut new_native_order,
             &mut state,
         );
 

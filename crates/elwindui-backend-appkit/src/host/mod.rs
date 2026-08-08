@@ -605,13 +605,19 @@ impl TreeHostView {
             return;
         };
 
-        self.setWantsLayer(true);
+        // `setWantsLayer` is idempotent in AppKit itself, but calling it every pass is still an
+        // avoidable message send — only the very first pass needs it.
+        if self.layer().is_none() {
+            self.setWantsLayer(true);
+        }
         let layer = self.layer().expect("wantsLayer(true) implies a layer");
 
         let mut live_native_controls = HashSet::new();
         let mut live_group_ids = HashSet::new();
         let mut live_image_ids = HashSet::new();
         let mut live_vector_image_ids = HashSet::new();
+        let mut new_group_order = Vec::new();
+        let mut new_native_order = Vec::new();
         let mut state = self.ivars().replay_state.borrow_mut();
         replay_group(
             self,
@@ -626,6 +632,8 @@ impl TreeHostView {
             &mut live_group_ids,
             &mut live_image_ids,
             &mut live_vector_image_ids,
+            &mut new_group_order,
+            &mut new_native_order,
             &mut state,
         );
         state.image_cache.retain(|id, _| live_image_ids.contains(id));
@@ -641,6 +649,38 @@ impl TreeHostView {
             }
         });
         state.group_cache.retain(|id, _| live_group_ids.contains(id));
+
+        // Z-order repair: `replay_group` only `addSublayer`s a container the first time it's ever
+        // created (see that function's own doc comment) — a group whose position in the traversal
+        // order moved (a list reorder, a tab switch, an item insert/delete elsewhere in the tree)
+        // needs its container moved too. Comparing traversal orders makes "nothing moved" (by far
+        // the common case — a static UI's steady-state relayout) provably free: this whole block,
+        // and therefore any `addSublayer` call, is skipped entirely.
+        //
+        // Re-`addSublayer`ing every entry in `new_group_order`, in order, rather than computing a
+        // minimal set of moves: `root_layer.setSublayers(...)` can't be used here since AppKit
+        // interleaves each native control's own backing layer into this same array (see the
+        // native-control z-order comment below) — replacing the array wholesale would detach every
+        // one of them. `insertSublayer:atIndex:` has the same problem from the other direction: an
+        // index computed from `new_group_order` alone is an index into a *paint-only* sequence, not
+        // into the real (paint + native) array. Re-adding in order sidesteps both — AppKit moves an
+        // already-attached sublayer to the top of the array rather than duplicating it, so a plain
+        // ordered pass reproduces `new_group_order`'s relative order at the top of whatever native
+        // layers are already interleaved below.
+        let group_order_changed = state.group_order != new_group_order;
+        if group_order_changed {
+            for id in &new_group_order {
+                if let Some(container) = state.group_layers.get(id) {
+                    crate::render::stats::bump(|s| s.add_sublayer_calls += 1);
+                    layer.addSublayer(container);
+                }
+            }
+            state.group_order = new_group_order;
+        }
+        let native_order_changed = state.native_order != new_native_order;
+        if native_order_changed {
+            state.native_order = new_native_order;
+        }
         drop(state);
         self.ivars()
             .native_containers
@@ -657,20 +697,28 @@ impl TreeHostView {
             .native_owner_ids
             .borrow_mut()
             .retain(|identity, _| live_native_controls.contains(identity));
-        // Every repainted `RenderGroup` container above just moved back to the front of
-        // `root_layer`'s sublayers (`replay_group`'s own doc comment on why: re-`addSublayer`ing
-        // an already-attached container is what keeps *paint* z-order correct across a mix of
-        // rebuilt and cache-hit groups). A native leaf's own island, though, is only ever
-        // `host.addSubview`ed once, the first time it appears (`replay_commands`' `is_new` guard)
-        // — so after any later pass repaints a sibling paint layer (e.g. a themed, now-opaque
-        // `window_background`/`layout_background`), that paint layer ends up stacked back on top
-        // of every native control, hiding it, even though the control itself is still correctly
-        // laid out and attached. Re-adding every still-live native container here brings it back
-        // to the front of `self`'s subviews (AppKit moves an already-attached subview to the top
-        // of the z-order rather than duplicating it), keeping native controls visually above all
-        // painted content on every pass, not just the first.
-        for container in self.ivars().native_containers.borrow().values() {
-            self.addSubview(container);
+        // A repainted `RenderGroup` container whose *order* moved above (`group_order_changed`)
+        // just moved back to the front of `root_layer`'s sublayers (see the Z-order repair comment
+        // above). A native leaf's own island, though, is only ever `host.addSubview`ed once, the
+        // first time it appears (`NativeIslandHost::attach_island`'s `is_new` guard in
+        // `replay_commands`) — so a paint reorder would otherwise stack a paint layer right back on
+        // top of a native control that didn't move, hiding it, even though the control itself is
+        // still correctly laid out and attached. Run this restore loop only when paint topology
+        // could plausibly have shifted (`group_order_changed`) or the native controls themselves
+        // did (`native_order_changed`, e.g. one was added/removed/reordered this pass) — a static
+        // UI's steady-state relayout takes neither branch, so `addSubview` is called zero times.
+        // Iterating `new_native_order` (rather than the old `native_containers.values()`, a
+        // `HashMap` whose iteration order was never actually deterministic) also fixes a latent
+        // bug: the relative Z-order among multiple native controls used to be randomized every
+        // pass instead of following paint traversal order like every other leaf here does.
+        if group_order_changed || native_order_changed {
+            let containers = self.ivars().native_containers.borrow();
+            for identity in &self.ivars().replay_state.borrow().native_order {
+                if let Some(container) = containers.get(identity) {
+                    crate::render::stats::bump(|s| s.subview_added += 1);
+                    self.addSubview(container);
+                }
+            }
         }
 
         // Cheap only relative to a `debug_assertions`/`render-stats` build that already pays for

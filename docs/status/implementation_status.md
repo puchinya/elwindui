@@ -47,7 +47,7 @@
 | バックエンド | 状況 |
 |---|---|
 | AppKit(macOS) | ✅ 実装・実機検証済み |
-| WinUI3(Windows) | ⚠️ 実装コードあり。フォント/テキストスタイルはWindowsでビルド・実行テスト済み、他機能の実機検証は未完了 |
+| WinUI3(Windows) | ⚠️ 実装コードあり。フォント/テキストスタイルに加え、Button・CheckBox・RadioButton・ToggleSwitch・Dropdown・SliderはWindowsでビルド・実操作検証済み。他機能の実機検証は未完了 |
 | GTK4(Linux) | ✖ 未着手(19行のスタブのみ) |
 | UIKit(iOS)/Jetpack(Android) | 📋 設計のみ、コード無し(`docs/design/gui_framework_design.md` §8.8) |
 
@@ -65,7 +65,7 @@
 | `VerticalLayout` / `HorizontalLayout` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.2 |
 | `TextBlock` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.3 |
 | `TextArea` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.4 |
-| `Dropdown` / `DropdownItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.5 |
+| `Dropdown` / `DropdownItem` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.5 |
 | `Rectangle` / `Ellipse` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.6 |
 | `Control` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.9 |
 | `ContentControl` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.10 |
@@ -73,11 +73,11 @@
 | `TextBox` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.12 |
 | `PasswordBox` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.13 |
 | `ScrollView` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.14 |
-| `Button` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.15 |
-| `CheckBox` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.16 |
-| `RadioButton` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.17 |
-| `ToggleSwitch` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.18 |
-| `Slider` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.19 |
+| `Button` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.15 |
+| `CheckBox` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.16 |
+| `RadioButton` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.17 |
+| `ToggleSwitch` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.18 |
+| `Slider` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.19 |
 | `Image`(ラスター/ベクター) | ✅ | ✖ | ✖ | **仕様書に節が無い**(§5・§7参照) |
 | `MenuBar` / `MenuBarItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録X |
 | `Menu` / `MenuItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録M.2 |
@@ -151,7 +151,7 @@
 |---|---|---|
 | ライフサイクルフック | `docs/design/gui_framework_design.md` §6.1 | 🚧 `on_mount`は実装・結線済み。`on_unmount`はパース・コード生成されるが、`elwindui-core::ui`にツリー離脱(デタッチ)フックが無いため**呼び出されない** |
 | `store`(グローバル状態) | `docs/design/gui_framework_design.md` §7.1 | 📋 **未実装**。ASTに`Store`ノードが無い。`ControlTemplate<Self>`の広域既定値もこれに依存する |
-| キーボード入力・フォーカス管理 | `docs/design/gui_framework_design.md` §5.5 / §8.1 | 🚧 AppKit・WinUI3両バックエンドで実装(WinUI3は`#![cfg(target_os = "windows")]`ゲートのため本機ではコンパイル確認自体不可)。`#[focus(order/trap)]`という専用DSL属性ではなく`tab_stop`/`focus_order`という共通プロパティとして提供する。自前描画系要素の自動フォーカス移譲(クリックでフォーカス)、方向キーでのフォーカス移動、ネイティブリーフ(`Button`/`TextArea`)自身の`on_key_down`/`on_got_focus`個別配線、IME変換中プレビュー表示は未実装 |
+| キーボード入力・フォーカス管理 | `docs/design/gui_framework_design.md` §5.5 / §8.1 | 🚧 AppKit・WinUI3両バックエンドで実装し、WinUI3のButton default acceleratorは実キーボードEnterで検証済み。`#[focus(order/trap)]`という専用DSL属性ではなく`tab_stop`/`focus_order`という共通プロパティとして提供する。自前描画系要素の自動フォーカス移譲(クリックでフォーカス)、方向キーでのフォーカス移動、ネイティブリーフ(`Button`/`TextArea`)自身の`on_key_down`/`on_got_focus`個別配線、IME変換中プレビュー表示は未実装 |
 | ナビゲーション(`NavigationHost`/`Route`) | `docs/specs/builtins_spec.md` 付録L | 📋 **未実装** |
 | ダイアログ/メニュー/ツールチップ | `docs/specs/builtins_spec.md` 付録M | 🚧 `Menu`/`MenuItem`本体と`tooltip`属性(ネイティブ葉のみ)は実装済み。`Dialog`、自前描画要素の`tooltip`、汎用`context_menu`属性は未実装 |
 | 描画拡張(Brush/Geometry/Effect/Transform/レイヤー合成/アニメーション) | `docs/specs/builtins_spec.md` 付録N | 📋 未実装。`Painter`基本セット(塗り・線・テキスト)のみ`elwindui-core`に存在し、`Canvas`自体が未実装のため利用できない |
@@ -209,7 +209,7 @@
 
 **未統合として残るもの**: `fitted_image_rect`は3つの変種(原点がdest相対か絶対か、入力が`ImageFit`か`ImageDrawOptions`か`ImageBrush`か、退化サイズのガード有無)があり、統合は「移動」ではなく挙動変更になるため、winui3側の2つは`elwindui-core`へ寄せていない。
 
-**検証状況**: appkitは`cargo test`・`rust-analyzer diagnostics`(0エラー)・notepad/graphics-demoのスクリーンショットまで確認済み。winui3は`#![cfg(target_os = "windows")]`のため本機では空crateにコンパイルされ、**型検査すらされない**——全ファイルが構文解析を通ること、層の依存方向、モジュール間参照の静的監査のみ実施している。Windows上でのビルド確認が済むまで未検証扱いとすること。
+**検証状況**: appkitは`cargo test`・`rust-analyzer diagnostics`(0エラー)・notepad/graphics-demoのスクリーンショットまで確認済み。winui3もWindows 11/MSVCで型検査・テスト・`controls-demo`実操作が可能になり、追加NativeControl 6種はUI Automation、実キーボード/マウス入力、ウィンドウキャプチャまで確認済み。未検証のWinUI3機能は各表の⚠️を参照すること。
 
 ---
 
@@ -217,7 +217,7 @@
 
 - **GTK4バックエンドは事実上何も実装されていない**(19行のスタブ)。本ドキュメントの他の章で「WinUI3/AppKit/GTK4」と横並びで書かれている箇所の多くは、GTK4に関しては未着手である
 - **アクセシビリティは型定義のみ**で、`UIElement`ツリーにもバックエンドのネイティブAPI(`AutomationPeer`/`NSAccessibilityElement`/AT-SPI)にも未結線
-- **ルーティングイベント(`#[routed]`)の実配線はAppKit・WinUI3両バックエンドで対応**(WinUI3はこのマシンでコンパイル確認不可のため未検証)。`Button`の実クリック(`on_click`)、共通`component UIElement`が宣言する9個のポインタ/タップイベント(`input::PointerDispatcher`)、5個のキーボード/フォーカスイベント(`input::KeyboardDispatcher`/`focus::FocusTracker`)が自前描画系`UIElement`(`Layout`/`Control`/`Shape`/`TextBlock`系)で実配線済み——`Button`/`TextArea`/`TabView`等のネイティブリーフは別ウィジェットとして重なっているため、ポインタ/キーボードいずれも実際には発火しない(`on_click`のみ個別配線済み)。`hit_test`は`ClipToBounds`/透明背景パススルー/`IsHitTestVisible`に対応済み。トンネリングイベント・`Canvas`固有のポインタイベント・明示的ポインタキャプチャAPIは未着手
+- **ルーティングイベント(`#[routed]`)の実配線はAppKit・WinUI3両バックエンドで対応**(WinUI3はコンパイル済み。今回の実操作対象はButtonのクリック/Enter経路であり、汎用ルーティング入力の網羅検証は未実施)。`Button`の実クリック(`on_click`)、共通`component UIElement`が宣言する9個のポインタ/タップイベント(`input::PointerDispatcher`)、5個のキーボード/フォーカスイベント(`input::KeyboardDispatcher`/`focus::FocusTracker`)が自前描画系`UIElement`(`Layout`/`Control`/`Shape`/`TextBlock`系)で実配線済み——`Button`/`TextArea`/`TabView`等のネイティブリーフは別ウィジェットとして重なっているため、ポインタ/キーボードいずれも実際には発火しない(`on_click`のみ個別配線済み)。`hit_test`は`ClipToBounds`/透明背景パススルー/`IsHitTestVisible`に対応済み。トンネリングイベント・`Canvas`固有のポインタイベント・明示的ポインタキャプチャAPIは未着手
 - **`store`(グローバル状態)が未実装**——`viewmodel`(MVVM)は実装済みで、`examples/notepad`のMVVMは`viewmodel`のみで構成されている
 - **`Backend` enum / `target::backend()`が存在しない**ため、これに依存する多くの静的検証ルール・ビルトイン(`NavigationHost`、ダイアログ/メニューのバックエンド分岐等)が未実装の根本原因になっている。将来この仕組みを実装する際は、影響範囲がドキュメント全体に及ぶことに留意する
 - **`Control.template`(`ControlTemplate`)は設計のみ・未実装。** 前提となる「値計算コールバックがネストした要素を構築する」構文(`VirtualList`の`render_item`と共通)も未実装のため、実装時はまずそちらから着手が必要。広域既定値は`store`(同じく未実装)への依存として設計されている

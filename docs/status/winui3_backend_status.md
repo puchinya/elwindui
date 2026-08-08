@@ -312,6 +312,21 @@ lasting change:
 
 ## Verified evidence
 
+### Additional NativeControl verification (2026-08-08)
+
+- `windows-bindgen`入力を依存クレート別に明示し、`ToggleButton`/`Selector`/`ItemsControl`/
+  `ItemCollection`/`RangeBase`を生成対象へ追加した。`Windows.System.VirtualKey`はローカル生成せず
+  `windows`クレート型へ統一した。
+- CheckBox/RadioButton/ToggleSwitch/ComboBox/Sliderへ共通`WinUiHandle`とイベント抑制ガードを
+  追加した。Sliderの`f32`通知も既存TLS callback registryを通すため、WinRT delegateが非`Send`
+  UI状態を保持しない。
+- 実操作で見つかった3件を追加修正した: CheckBoxの常時三状態によるChecked張り付き、
+  AccentButtonStyle上のローカルnull前景色によるPrimaryラベル消失、Enter acceleratorからClickへの
+  明示的橋渡し不足。
+- `controls-demo`でButton role/default/tooltip、選択系2グループ、Dropdownの動的項目再構築、
+  Sliderの値・レンジ・200px幅をWindows UI Automationと実入力で確認した。スクリーンショットと
+  操作ログは`.agent-state/issues/41`〜`44`に保存している。
+
 - `cargo build -p elwindui-backend-winui3` / `-p notepad-inline -p notepad -p graphics-demo`: all
   succeed cleanly with the C++/WinRT shim in place (`cc`-compiled `app_host.cpp` links into every
   example binary with no unresolved symbols).

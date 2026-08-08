@@ -9,7 +9,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 ## 0. スコープに関する方針
 
 - **GTK4は対象外**(見落としではない)。GTK4バックエンド(`crates/elwindui-backend-gtk4`)は19行のスタブのみで、gtk4-rs依存すら無く、AppKit/WinUI3が持つ`native_ui`/`inner`相当の基盤(`AnyView`/`TreeHostView`/`NativeControl`構造)が一切存在しない。この基盤構築は個別コントロールの作業とは独立した大作業であり、§4として別建てで扱う
-- **WinUI3側の実装はすべて「AppKitと構造的に一致するようミラーしたが、Windows環境が無いためビルド・実行検証を行っていない」**。既存のTextArea/Button/TabViewのWinUI3実装と同じ扱い
+- **WinUI3側はWindows 11上でビルド・UI Automation・実キーボード/マウス入力・ウィンドウキャプチャまで実施済み**。本ページで🟡のままの項目だけが未検証であり、Button/CheckBox/RadioButton/ToggleSwitch/Dropdown/Sliderは§2.4〜2.7の実測結果を正とする
 - AppKit側は`cargo build`/`cargo test`/アプリ起動/`tools/macos-ui-driver`による対話操作で検証する
 
 ---
@@ -83,9 +83,9 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
 | `ButtonRole`(`Normal`/`Primary`/`Destructive`)の定義 | ✅ | ✅(バックエンド非依存) |
-| `role` | ✅ どちらの強調roleも`bezelColor`(塗りボタン)で、塗る色だけが違う——`Primary`=`controlAccentColor`、`Destructive`=`systemRedColor`。`hasDestructiveAction`はmacOS 11+のセマンティックsignalとして併設。**`examples/controls-demo`のButtonタブで3つのroleが視覚的に区別できることをスクリーンショットで確認済み** | 🟡 `Primary`=`AccentButtonStyle`。`Destructive`は**ネイティブ相当が無く**`SystemFillColorCriticalBrush`を前景色に設定するのみ |
+| `role` | ✅ どちらの強調roleも`bezelColor`(塗りボタン)で、塗る色だけが違う——`Primary`=`controlAccentColor`、`Destructive`=`systemRedColor`。`hasDestructiveAction`はmacOS 11+のセマンティックsignalとして併設。**`examples/controls-demo`のButtonタブで3つのroleが視覚的に区別できることをスクリーンショットで確認済み** | ✅ `Primary`=`AccentButtonStyle`、`Destructive`=`SystemFillColorCriticalBrush`前景色。`SetForeground(None)`がAccentのラベル色を隠す不具合を`ClearValue`へ修正し、3 roleの表示を実画面確認済み |
 | `role`の実機検証で却下した2案 | ✅ `contentTintColor`は標準のbordered push buttonのタイトルに効かず`Normal`と区別できなかった。`setAttributedTitle`の赤文字は`apply_text_style`が毎レイアウトパスで`setTitle`を呼んで破棄するため成立しない | N/A |
-| `is_default` | ✅ `keyEquivalent = "\r"`。**AXの`AXDefaultButton`属性が該当ボタンを返すことで検証済み** | 🟡 `Button.IsDefault`が存在しない(`ContentDialog`のボタン専用)ため`KeyboardAccelerator`(`VirtualKey::Enter`)で代替 |
+| `is_default` | ✅ `keyEquivalent = "\r"`。**AXの`AXDefaultButton`属性が該当ボタンを返すことで検証済み** | ✅ `Button.IsDefault`が存在しないため`KeyboardAccelerator`(`VirtualKey::Enter`)で代替。`Invoked`をTLS callbackへ橋渡しし、TextBoxフォーカスを外した実キーボードEnterで`Default clicked`が1回記録されることを確認 |
 | `role`と`is_default`の直交性 | ✅ `Primary`が`keyEquivalent`を触らないのはこのため | 🟡 同左 |
 | `hasDestructiveAction`(macOS 11+)のバージョンガード | ✅ `respondsToSelector:`で存在確認。**本クレート初のバージョン分岐**であり以後の前例とする | N/A |
 | role別テーマトークン | ⬜ 意図的に追加しない — `button_background`等が既に全role共通の上書き口で、role専用トークンはシステムアクセントカラーと競合する | ⬜ 同左 |
@@ -100,7 +100,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 |---|---|---|
 | `NativeControl`への`#[prop(tooltip: Option<String>)]`宣言 | ✅ | ✅(バックエンド非依存) |
 | 実装箇所 | ✅ `native_ui/control.rs`に1箇所。`AnyView::set_tooltip`→`NSView.toolTip` | 🟡 同構造。`ToolTipService.SetToolTip` |
-| 派生する全ネイティブ葉での利用 | ✅ `Button`/`TextArea`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView`。**`Button`と`TextBox`の両方でAXの`AXHelp`属性に設定値が現れることを確認済み**(Button固有ではなく`NativeControl`から継承していることの実証) | 🟡 同左 |
+| 派生する全ネイティブ葉での利用 | ✅ `Button`/`TextArea`/`TextBox`/`PasswordBox`/`ScrollView`/`TabView`。**`Button`と`TextBox`の両方でAXの`AXHelp`属性に設定値が現れることを確認済み**(Button固有ではなく`NativeControl`から継承していることの実証) | ✅ ネイティブ`ToolTip`をattached propertyへ設定し、Button/TextBox双方でUIA `ControlType.ToolTip`と内容を実表示確認。ホスト回帰テストでも内容を往復確認 |
 | `background`/`text_style`と違い`measure_override`でのpull-syncをしない | ✅ テーマトークンも遅延解決も無く、レイアウトにも影響しないためsetterでの直接pushが正しい | 🟡 同左 |
 | `clear_tooltip` | ⬜ 不要 — codegenが`clear_<name>()`を生成するのは`theme!(..)`値を取り`PlatformDefault`に解決されうるプロパティのみ(`placeholder`に`clear_placeholder`が無いのと同じ) | ⬜ 同左 |
 | 自前描画要素(`TextBlock`/`Shape`/レイアウト)の`tooltip` | ⬜ 未実装。ネイティブビューを持たないためホバー判定・表示遅延・ポップアップをelwindui側で実装する必要があり、ネイティブ葉への転送とは作業の質が異なる | ⬜ 同左 |
@@ -112,12 +112,12 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
 | `CheckState`(`Unchecked`/`Checked`/`Indeterminate`)の定義 | ✅ | ✅(バックエンド非依存) |
-| `CheckBox`: `Indeterminate`はプログラムから表示可能、ユーザークリックからは到達不可 | ✅ **実機で挙動修正済み**——当初`setAllowsMixedState(false)`で三状態サイクル自体を無効化する設計だったが、それだと`setState(.mixed)`というプログラムからの設定まで`.on`表示に潰れてしまい(`tools/macos-ui-driver`のスクリーンショット比較で発覚)、受け入れ条件「プログラムからは表示される」を満たせなかった。`allowsMixedState(true)`のままにし、`set_on_change`のクリックコールバック側でネイティブが`Mixed`に着地した場合だけ即座に`Checked`へ引き戻す方式へ修正(`inner/check_box.rs`) | 🟡 同じ推論に基づき`SetIsThreeState(true)`+`Indeterminate`イベントでの引き戻しへ構造ミラー(Windows環境が無く未検証) |
+| `CheckBox`: `Indeterminate`はプログラムから表示可能、ユーザークリックからは到達不可 | ✅ **実機で挙動修正済み**——当初`setAllowsMixedState(false)`で三状態サイクル自体を無効化する設計だったが、それだと`setState(.mixed)`というプログラムからの設定まで`.on`表示に潰れてしまい(`tools/macos-ui-driver`のスクリーンショット比較で発覚)、受け入れ条件「プログラムからは表示される」を満たせなかった。`allowsMixedState(true)`のままにし、`set_on_change`のクリックコールバック側でネイティブが`Mixed`に着地した場合だけ即座に`Checked`へ引き戻す方式へ修正(`inner/check_box.rs`) | ✅ プログラム設定時だけ`IsThreeState(true)`、Boolean値では二状態へ復帰。常時三状態によるChecked張り付きを実操作で発見・修正し、4クリックのOff/On交互切替とプログラム`Indeterminate`保持を確認 |
 | `CheckBox`/`RadioButton`の`ButtonTarget`共有 | ✅ `inner/check_box.rs`・`inner/radio_button.rs`とも`crate::inner::button::ButtonTarget`を直接使用 | 🟡 同型対応 |
-| `RadioButton`のグループ管理(elwindui側で論理管理、ネイティブグループ機能に非依存) | ✅ `native_ui/radio_button.rs`のスレッドローカル`GROUPS`(`Weak<dyn UIElementExt>`のレジストリ)。同一グループの他メンバーを明示的に`unchecked`にする | 🟡 同型対応 |
-| AppKit自身の「同一superview+同一action」による暗黙のradio自動排他との衝突有無 | ✅ **`examples/controls-demo`のSelectionタブで実機確認済み** — 異なる`group`のRadioButtonが同一コンテナに同居しても互いに干渉しないことを確認 | N/A(未検証) |
+| `RadioButton`のグループ管理(elwindui側で論理管理、ネイティブグループ機能に非依存) | ✅ `native_ui/radio_button.rs`のスレッドローカル`GROUPS`(`Weak<dyn UIElementExt>`のレジストリ)。同一グループの他メンバーを明示的に`unchecked`にする | ✅ 各ネイティブ要素へ一意な`GroupName`を設定して親ベースの暗黙グループを無効化。同一グループ排他と異なる2グループの非干渉を実操作確認 |
+| ツールキット自身の親ベース暗黙グループ化との衝突有無 | ✅ **`examples/controls-demo`のSelectionタブで実機確認済み** — 異なる`group`のRadioButtonが同一コンテナに同居しても互いに干渉しないことを確認 | ✅ 各要素の一意な`GroupName`でWinUIの同一親グループ化を無効化し、同じSelectionタブで異なる2グループの非干渉を確認 |
 | `ToggleSwitch`: `NSSwitch`(`objc2-app-kit` feature `"NSSwitch"`追加) | ✅ | N/A |
-| `ToggleSwitch`に`text`プロパティが無いこと | ✅ 仕様どおり(F.18) | 🟡 同左 |
+| `ToggleSwitch`に`text`プロパティが無いこと | ✅ 仕様どおり(F.18) | ✅ `TextBlock`ラベルとのtwo-way同期を実操作確認 |
 | role別/コントロール別のテーマトークン追加 | ⬜ 意図的に追加しない——`background_token`のdefault armが`native_control_background`にフォールバックし、かつ`NSButton`ファミリー全体で`apply_background`がno-opのため実害が無い(`ffi.rs`の`impl AppKitHandle for Retained<NSButton>`のdocコメント参照) | ⬜ 同左 |
 | `objc2-app-kit` feature追加(`NSButtonCell`/`NSCell`/`NSSwitch`) | ✅ `NSButtonType`(`NSButtonCell`)と`NSControlStateValueOn/Off/Mixed`(`NSCell`)は`"NSButton"` featureだけでは届かず、個別追加が必要だった | N/A |
 | `crates/elwindui-core/tests/props_macro.rs` | ✅ 3コントロール分のクロスクレート形状テスト追加 | — |
@@ -130,9 +130,9 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
 | `NSPopUpButton`は`NSButton`のサブクラスであるため`ButtonTarget`を再利用 | ✅ `inner/dropdown.rs`が`crate::inner::button::ButtonTarget`を直接使用 | N/A(WinUI3側は`SelectionChangedEventHandler`を使用) |
-| `items`変更時のネイティブ側同期 | ✅ 全再構築方式(`removeAllItems`→再`addItemWithTitle`→`selected_index`再適用)。`TabView`/`MenuBar`のような`Rc`同一性差分ではない——`DropdownItem`が自前の編集状態を持たない軽量な値であるため | 🟡 同型対応(`Items().Clear()`→再`Append`) |
-| `items`の動的な追加・削除でネイティブ選択状態が保持されること | ✅ **`examples/controls-demo`のDropdownタブで実機確認済み**(`tools/macos-ui-driver`)——4番目の項目をトグルで追加/削除しても、既存の選択(例: "Medium")が再構築後も維持されることを確認 | N/A(未検証) |
-| クリックによる`selected_index`変更 | ✅ **実機確認済み**——`NSPopUpButton`のポップアップメニューから項目をAX経由でクリックし、ネイティブ側の値とアプリ側ラベルの両方が追従することを確認 | N/A(未検証) |
+| `items`変更時のネイティブ側同期 | ✅ 全再構築方式(`removeAllItems`→再`addItemWithTitle`→`selected_index`再適用)。`TabView`/`MenuBar`のような`Rc`同一性差分ではない——`DropdownItem`が自前の編集状態を持たない軽量な値であるため | ✅ `ItemCollection`をbinding生成対象へ追加し、`Items().Clear()`→再`Append`をWindowsでビルド・実行確認 |
+| `items`の動的な追加・削除でネイティブ選択状態が保持されること | ✅ **`examples/controls-demo`のDropdownタブで実機確認済み**(`tools/macos-ui-driver`)——4番目の項目をトグルで追加/削除しても、既存の選択(例: "Medium")が再構築後も維持されることを確認 | ✅ 4番目の追加・削除後もMedium/Large選択が維持されることをUIAで確認 |
+| クリックによる`selected_index`変更 | ✅ **実機確認済み**——`NSPopUpButton`のポップアップメニューから項目をAX経由でクリックし、ネイティブ側の値とアプリ側ラベルの両方が追従することを確認 | ✅ Small/Medium/Large/Extra Largeの選択とラベル同期をUIAで確認 |
 | `DropdownItem`はネイティブ実体を持たない(`MenuItem`同様) | ✅ `text: RefCell<String>`のみ保持。`Dropdown`側が各アイテムを`as_any().downcast_ref`して`text()`を読み出し、ネイティブ項目リストを再構築する | 🟡 同型対応 |
 | `objc2-app-kit` feature追加(`NSPopUpButton`) | ✅ | N/A |
 | `crates/elwindui-core/tests/props_macro.rs` | ✅ `DropdownItem.text`・`Dropdown.selected_index`(two-way)・`Dropdown.enabled`のクロスクレート形状テスト追加 | — |
@@ -148,12 +148,12 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
-| `NSSlider`は`NSControl`直下のサブクラス(`NSButton`ではない)であるため専用のtarget/actionトランポリンが必要 | ✅ `inner/slider.rs`が`ToggleSwitch`の`ToggleSwitchTarget`と同じ形の`SliderTarget`を実装 | 🟡 `RangeBaseValueChangedEventHandler`を使用(構造ミラー) |
-| `min`/`max`を`#[prop]`(実行時変更可)として実装 | ✅ | 🟡 同型対応 |
-| **ネイティブ実体に「自然な幅」が無い問題を発見・文書化** | ✅ `NSSlider.fittingSize()`の幅が常に0になり、`width:`を明示しないと画面上で不可視になることを実機で発見(`tools/macos-ui-driver`のスクリーンショット比較)。`docs/specs/builtins_spec.md` F.19に注記、`examples/controls-demo`のSliderタブでも`width: 200.0`を明示 | 🟡 未検証だが同種の注意が必要な可能性を記録 |
+| `NSSlider`は`NSControl`直下のサブクラス(`NSButton`ではない)であるため専用のtarget/actionトランポリンが必要 | ✅ `inner/slider.rs`が`ToggleSwitch`の`ToggleSwitchTarget`と同じ形の`SliderTarget`を実装 | ✅ `RangeBaseValueChangedEventHandler`を1回だけ登録し、非`Send` callbackはTLSの`f32`経路へ橋渡し |
+| `min`/`max`を`#[prop]`(実行時変更可)として実装 | ✅ | ✅ `0..1`と`-100..100`の往復切替を実操作確認 |
+| **ネイティブ実体に「自然な幅」が無い問題を発見・文書化** | ✅ `NSSlider.fittingSize()`の幅が常に0になり、`width:`を明示しないと画面上で不可視になることを実機で発見(`tools/macos-ui-driver`のスクリーンショット比較)。`docs/specs/builtins_spec.md` F.19に注記、`examples/controls-demo`のSliderタブでも`width: 200.0`を明示 | ✅ `width: 200.0`がUIA上でも200×32で操作可能なことを確認 |
 | `objc2-app-kit` feature追加(`NSSlider`) | ✅ | N/A |
 | `crates/elwindui-core/tests/props_macro.rs` | ✅ `value`(two-way)・`min`・`max`・`enabled`のクロスクレート形状テスト追加 | — |
-| クリック起点の`value`変更の実機対話検証 | ✅ **実施済み**——`tools/macos-ui-driver`に`click --via mouse --fraction <0.0-1.0>`(要素内の任意水平位置をクリック)と`click --via ax-increment`/`ax-decrement`(`kAXIncrementAction`/`kAXDecrementAction`。`AXSlider`は`kAXPressAction`非対応のため必要)を追加(#39、PR #40)。`--fraction 0.05`/`0.9`でクリック位置に応じた`value`変化とラベル追従、`ax-increment`/`ax-decrement`での0.05刻みの段階変化をいずれも確認 | N/A(未検証) |
+| クリック起点の`value`変更の実機対話検証 | ✅ **実施済み**——`tools/macos-ui-driver`に`click --via mouse --fraction <0.0-1.0>`(要素内の任意水平位置をクリック)と`click --via ax-increment`/`ax-decrement`(`kAXIncrementAction`/`kAXDecrementAction`。`AXSlider`は`kAXPressAction`非対応のため必要)を追加(#39、PR #40)。`--fraction 0.05`/`0.9`でクリック位置に応じた`value`変化とラベル追従、`ax-increment`/`ax-decrement`での0.05刻みの段階変化をいずれも確認 | ✅ UIA RangeValue操作で0.75/-50/0.25とラベル同期、`0..1`↔`-100..100`の動的レンジ変更を確認 |
 | `docs/specs/builtins_spec.md` F.19 | ✅ 新設 | ✅(同一ドキュメント) |
 
 ### 2.8 `examples/controls-demo`
@@ -201,7 +201,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 ## 5. 既知の制約
 
-- **WinUI3**: Windows環境が無いため`cargo build`/`cargo test`/実行のいずれも不可能。すべての変更は構造レビューのみ
+- **WinUI3**: Windows 11/MSVC環境で`cargo check`/`cargo test`/`controls-demo`ビルドと実操作を実施済み。ローカル証跡は`.agent-state/issues/41`〜`44`に保存
 - **GTK4**: 未着手
 - **`Option<String>`プロパティは`&str`しか受け付けない**: `wrap_prop_value`(`crates/elwindui-macros/src/class.rs`)が`&(..)`を挿入するのは**裸の`String`**プロパティ(`Button::text`)だけで、`Option<String>`は`is_string_type`の判定を外れて値が素通しになる。そのためsetterが`&str`を取る`Option<String>`プロパティ——`NativeControl::tooltip`、`TextBox::placeholder`、`PasswordBox::placeholder`——にはDSLの文字列リテラルしか渡せず、`bind!`した`String`のビューモデルフィールドは型エラーになる。`crates/elwindui-core/tests/props_macro.rs`の`props_macro_forwards_tooltip_up_to_native_control`がこの挙動を固定している
 - **`view!`の`Option<T>`自動ラップ**: `Option<T>`型のプロパティ(`max_length: Option<u32>`等)に裸のリテラル値(`40`や`40u32`)を書いても`Some(..)`への自動ラップが効かず型エラーになる。`vm.some_field`のような変数参照(`bind!`経由)は`Option<bool>`等で自動ラップされる(`Button.enabled: vm.save_can_execute`、`examples/notepad`)ため、自動ラップの対象は変数参照のみでリテラル値には適用されない。`Some(40u32)`のような関数呼び出し形の式もDSLパーサーが受け付けない(識別子を期待するパースエラー)。`examples/controls-demo`では`TextBox`/`PasswordBox`の`max_length`指定を省略して回避している

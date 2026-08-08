@@ -1,6 +1,6 @@
 //! `builtin::Dropdown` — the `DropdownExt` implementation. Mirrors
-//! `elwindui_backend_appkit::native_ui::dropdown`'s own doc comment and structure exactly
-//! (unverified — no Windows environment).
+//! `elwindui_backend_appkit::native_ui::dropdown`'s own doc comment and structure; dynamic item
+//! rebuild and two-way selection are verified on Windows.
 
 use super::NativeControl;
 use super::dropdown_item::DropdownItem;

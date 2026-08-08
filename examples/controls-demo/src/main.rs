@@ -86,6 +86,19 @@ mod controls_demo_view_model {
         })]
         radio_selected_label: String,
 
+        // A second logical group under the same native parent catches WinUI's implicit
+        // parent-based grouping: changing this pair must never clear the `size` group above.
+        #[observable(default = true)]
+        radio_light_checked: bool,
+        #[observable(default = false)]
+        radio_dark_checked: bool,
+        #[computed(expr = {
+            if radio_light_checked { "Light".to_string() }
+            else if radio_dark_checked { "Dark".to_string() }
+            else { "(none)".to_string() }
+        })]
+        radio_theme_label: String,
+
         #[observable(default = false)]
         toggle_is_on: bool,
         #[computed(expr = toggle_is_on.to_string())]
@@ -156,7 +169,8 @@ mod controls_demo_view_model {
         }
         fn password_box_lost_focus(&self) {
             let len = self.password_box_value.borrow().chars().count();
-            password_box_log = format!("{}lost_focus (len={len})\n", self.password_box_log.borrow());
+            password_box_log =
+                format!("{}lost_focus (len={len})\n", self.password_box_log.borrow());
         }
 
         fn button_clicked(&self, which: String) {
@@ -426,6 +440,21 @@ struct ControlsDemoWindow {
                                 checked: vm.radio_large_checked
                             }
                             TextBlock { text: vm.radio_selected_label }
+                        }
+                        TextBlock { text: "RadioButton — separate group under the same native parent:" }
+                        HorizontalLayout {
+                            spacing: 8.0
+                            RadioButton {
+                                text: "Light"
+                                group: "theme"
+                                checked: vm.radio_light_checked
+                            }
+                            RadioButton {
+                                text: "Dark"
+                                group: "theme"
+                                checked: vm.radio_dark_checked
+                            }
+                            TextBlock { text: vm.radio_theme_label }
                         }
                         TextBlock { text: "ToggleSwitch — no text property of its own, paired with a TextBlock:" }
                         HorizontalLayout {

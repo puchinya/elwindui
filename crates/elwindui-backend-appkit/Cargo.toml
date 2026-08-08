@@ -28,6 +28,8 @@ objc2-app-kit = { version = "0.3", features = [
     "NSSwitch",
     # `Dropdown`.
     "NSPopUpButton",
+    # `Slider`.
+    "NSSlider",
     "NSTextField",
     "NSSecureTextField",
     "NSText",

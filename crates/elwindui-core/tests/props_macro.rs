@@ -331,6 +331,56 @@ fn props_macro_sets_dropdown_enabled() {
     assert_eq!(*dropdown.enabled.borrow(), Some(false));
 }
 
+// --- Slider (Phase 4) -----------------------------------------------------------------------------
+
+/// `Slider` has no `text` property (see its own doc comment in elwindui-core) — this fake
+/// deliberately has no `text` field either, mirroring `FakeToggleSwitch`'s own note.
+#[derive(Default)]
+struct FakeSlider {
+    value: RefCell<Option<f32>>,
+    min: RefCell<Option<f32>>,
+    max: RefCell<Option<f32>>,
+    enabled: RefCell<Option<bool>>,
+}
+
+impl FakeSlider {
+    fn set_value(&self, value: f32) {
+        *self.value.borrow_mut() = Some(value);
+    }
+    fn set_min(&self, min: f32) {
+        *self.min.borrow_mut() = Some(min);
+    }
+    fn set_max(&self, max: f32) {
+        *self.max.borrow_mut() = Some(max);
+    }
+    fn set_enabled(&self, enabled: bool) {
+        *self.enabled.borrow_mut() = Some(enabled);
+    }
+}
+
+#[test]
+fn props_macro_sets_slider_value_as_a_two_way_f32() {
+    let slider = FakeSlider::default();
+    elwindui_core::__elwindui_props_Slider!(@set slider, value, 0.25f32);
+    assert_eq!(*slider.value.borrow(), Some(0.25));
+}
+
+#[test]
+fn props_macro_sets_slider_min_and_max() {
+    let slider = FakeSlider::default();
+    elwindui_core::__elwindui_props_Slider!(@set slider, min, -10.0f32);
+    elwindui_core::__elwindui_props_Slider!(@set slider, max, 10.0f32);
+    assert_eq!(*slider.min.borrow(), Some(-10.0));
+    assert_eq!(*slider.max.borrow(), Some(10.0));
+}
+
+#[test]
+fn props_macro_sets_slider_enabled() {
+    let slider = FakeSlider::default();
+    elwindui_core::__elwindui_props_Slider!(@set slider, enabled, false);
+    assert_eq!(*slider.enabled.borrow(), Some(false));
+}
+
 // --- `@clear`: resetting a themed property to its platform default ------------------------------
 
 #[test]

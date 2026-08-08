@@ -108,6 +108,20 @@ mod controls_demo_view_model {
         #[observable(default = false)]
         dropdown_extra_item: bool,
 
+        // `min`/`max` are plain (one-way) `#[prop]`s, not `#[two_way]` — only `value` round-trips.
+        // Bound to `vm` fields anyway to demonstrate the range can still change reactively at
+        // runtime (toggled by a button below), just without a change-back path of its own.
+        #[observable(default = 0.5f32)]
+        slider_value: f32,
+        #[computed(expr = slider_value.to_string())]
+        slider_value_label: String,
+        #[observable(default = 0.0f32)]
+        slider_min: f32,
+        #[observable(default = 1.0f32)]
+        slider_max: f32,
+        #[observable(default = false)]
+        slider_wide_range: bool,
+
         #[observable(default = String::new())]
         regression_text: String,
         #[observable(default = String::new())]
@@ -162,6 +176,13 @@ mod controls_demo_view_model {
 
         fn toggle_dropdown_extra_item(&self) {
             dropdown_extra_item = !self.dropdown_extra_item.get();
+        }
+
+        fn toggle_slider_range(&self) {
+            let wide = !self.slider_wide_range.get();
+            slider_wide_range = wide;
+            slider_min = if wide { -100.0 } else { 0.0 };
+            slider_max = if wide { 100.0 } else { 1.0 };
         }
 
         fn regression_button_clicked(&self) {
@@ -452,6 +473,34 @@ struct ControlsDemoWindow {
                     Button {
                         text: "Toggle 4th item (Extra Large)"
                         on_click: vm.toggle_dropdown_extra_item
+                    }
+                }
+            }
+            TabViewItem {
+                header: "Slider"
+                closable: false
+                on_close: || {}
+                content: VerticalLayout {
+                    margin: 12.0
+                    spacing: 6.0
+                    TextBlock { text: "Slider — value is #[two_way], min/max are one-way #[prop]s:" }
+                    HorizontalLayout {
+                        spacing: 8.0
+                        Slider {
+                            // `NSSlider`'s own `fittingSize()` has no natural width (a slider's
+                            // length isn't content-derived the way a button's title is) — an
+                            // explicit `width` is required, the same way any `UIElement` overrides
+                            // its own measured size (docs/design/gui_framework_design.md §5.1).
+                            width: 200.0
+                            value: vm.slider_value
+                            min: vm.slider_min
+                            max: vm.slider_max
+                        }
+                        TextBlock { text: vm.slider_value_label }
+                    }
+                    Button {
+                        text: "Toggle range (0..1 / -100..100)"
+                        on_click: vm.toggle_slider_range
                     }
                 }
             }

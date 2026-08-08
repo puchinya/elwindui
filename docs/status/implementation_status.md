@@ -77,6 +77,7 @@
 | `CheckBox` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.16 |
 | `RadioButton` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.17 |
 | `ToggleSwitch` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.18 |
+| `Slider` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.19 |
 | `Image`(ラスター/ベクター) | ✅ | ✖ | ✖ | **仕様書に節が無い**(§5・§7参照) |
 | `MenuBar` / `MenuBarItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録X |
 | `Menu` / `MenuItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録M.2 |
@@ -108,7 +109,7 @@
 
 **`elwindui-core`が持つバックエンド非依存ビルトイン(12)**: `UIElement` / `Layout`(抽象) / `VerticalLayout` / `HorizontalLayout` / `Shape`(抽象) / `Rectangle` / `Ellipse` / `Image` / `TextBlock` / `Control` / `ContentControl` / `Grid`
 
-**各バックエンドが持つネイティブビルトイン(17)**: `NativeControl`(抽象) / `Window` / `Button` / `CheckBox` / `RadioButton` / `ToggleSwitch` / `Dropdown` / `TextArea` / `TextBox` / `PasswordBox` / `ScrollView` / `MenuBar` / `MenuBarItem` / `Menu` / `MenuItem` / `TabView` / `TabViewItem`
+**各バックエンドが持つネイティブビルトイン(18)**: `NativeControl`(抽象) / `Window` / `Button` / `CheckBox` / `RadioButton` / `ToggleSwitch` / `Dropdown` / `Slider` / `TextArea` / `TextBox` / `PasswordBox` / `ScrollView` / `MenuBar` / `MenuBarItem` / `Menu` / `MenuItem` / `TabView` / `TabViewItem`
 
 補足:
 

@@ -39,6 +39,8 @@ pub fn init() -> Result<(), std::convert::Infallible> {
 }
 
 mod app;
+#[cfg(feature = "render-stats")]
+pub mod diagnostics;
 mod ffi;
 mod host;
 mod inner;

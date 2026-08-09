@@ -9,6 +9,11 @@ edition.workspace = true
 # — see that module's own doc comment — so this is only needed to profile a release build.
 render-stats = []
 
+[[example]]
+name = "appkit-memory-baseline"
+path = "examples/appkit_memory_baseline.rs"
+required-features = ["render-stats"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 elwindui-core = { path = "../elwindui-core" }
 elwindui-macros = { path = "../elwindui-macros" }

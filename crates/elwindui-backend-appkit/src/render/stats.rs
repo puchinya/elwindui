@@ -40,6 +40,16 @@ pub(crate) struct RenderStats {
     pub(crate) image_cache_bytes: u64,
     pub(crate) vector_raster_cache_bytes: u64,
     pub(crate) process_footprint_bytes: u64,
+    pub(crate) process_resident_bytes: u64,
+}
+
+/// Process memory values read from macOS's `TASK_VM_INFO` task-info record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProcessMemory {
+    /// The physical footprint used as Activity Monitor's Memory value.
+    pub(crate) physical_footprint_bytes: u64,
+    /// The process's current resident memory size, used only as a supplementary metric.
+    pub(crate) resident_bytes: u64,
 }
 
 #[cfg(any(test, debug_assertions, feature = "render-stats"))]
@@ -51,6 +61,7 @@ mod enabled {
         static STATS: Cell<RenderStats> = Cell::new(RenderStats::default());
     }
 
+    #[allow(dead_code)]
     pub(crate) fn reset() {
         STATS.with(|s| s.set(RenderStats::default()));
     }
@@ -72,6 +83,7 @@ mod enabled {
 mod disabled {
     use super::RenderStats;
 
+    #[allow(dead_code)]
     pub(crate) fn reset() {}
 
     pub(crate) fn snapshot() -> RenderStats {
@@ -82,10 +94,12 @@ mod disabled {
     pub(crate) fn bump(_f: impl FnOnce(&mut RenderStats)) {}
 }
 
-#[cfg(any(test, debug_assertions, feature = "render-stats"))]
-pub(crate) use enabled::{bump, reset, snapshot};
 #[cfg(not(any(test, debug_assertions, feature = "render-stats")))]
-pub(crate) use disabled::{bump, reset, snapshot};
+pub(crate) use disabled::{bump, snapshot};
+#[cfg(test)]
+pub(crate) use enabled::reset;
+#[cfg(any(test, debug_assertions, feature = "render-stats"))]
+pub(crate) use enabled::{bump, snapshot};
 
 /// Reads this process's `phys_footprint` (the same figure Activity Monitor's "Memory" column
 /// reports) via `task_info(TASK_VM_INFO)`. Only the fields up to and including `phys_footprint`
@@ -93,7 +107,7 @@ pub(crate) use disabled::{bump, reset, snapshot};
 /// only ever writes that many words into it; the real kernel struct has further trailing fields
 /// (peak/lifetime counters) that this deliberately never asks for. See `<mach/task_info.h>`'s
 /// `task_vm_info` for the authoritative layout this mirrors.
-pub(crate) fn phys_footprint_bytes() -> u64 {
+pub(crate) fn process_memory() -> ProcessMemory {
     #[repr(C)]
     struct TaskVmInfo {
         virtual_size: u64,
@@ -140,7 +154,14 @@ pub(crate) fn phys_footprint_bytes() -> u64 {
             &mut count,
         )
     };
-    if result == 0 { info.phys_footprint } else { 0 }
+    if result == 0 {
+        ProcessMemory {
+            physical_footprint_bytes: info.phys_footprint,
+            resident_bytes: info.resident_size,
+        }
+    } else {
+        ProcessMemory::default()
+    }
 }
 
 #[cfg(test)]
@@ -158,9 +179,9 @@ mod tests {
     }
 
     #[test]
-    fn phys_footprint_bytes_returns_a_plausible_nonzero_value() {
-        // A real process always has *some* physical footprint — this is mostly a smoke test that
-        // the `task_info` call succeeds and the struct layout above lines up with the kernel's.
-        assert!(phys_footprint_bytes() > 0);
+    fn process_memory_returns_a_plausible_nonzero_footprint_and_rss() {
+        let memory = process_memory();
+        assert!(memory.physical_footprint_bytes > 0);
+        assert!(memory.resident_bytes > 0);
     }
 }

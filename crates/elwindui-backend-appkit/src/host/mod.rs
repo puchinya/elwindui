@@ -843,7 +843,7 @@ impl TreeHostView {
                      add_sublayer_calls={} subview_added={} cgpaths_created={} cgcolors_created={} \
                      text_layers_created={} attributed_strings_created={} setter_calls={} \
                      setter_calls_skipped={} image_cache_bytes={} vector_raster_cache_bytes={} \
-                     process_footprint_bytes={}",
+                     process_footprint_bytes={} process_resident_bytes={}",
                     s.groups_visited,
                     s.groups_rebuilt,
                     s.groups_cache_hit,
@@ -861,6 +861,7 @@ impl TreeHostView {
                     s.image_cache_bytes,
                     s.vector_raster_cache_bytes,
                     s.process_footprint_bytes,
+                    s.process_resident_bytes,
                 );
             }
         }
@@ -914,9 +915,9 @@ impl NativeIslandHost for TreeHostView {
 
 impl TreeHostView {
     /// Populates `render::stats::RenderStats`'s memory fields (`image_cache_bytes`/
-    /// `vector_raster_cache_bytes`/`process_footprint_bytes`) from this host's current caches and
-    /// the process's own `phys_footprint`. Called from `relayout_inner` under the same
-    /// `cfg(any(test, debug_assertions, feature = "render-stats"))` gate as every other
+    /// `vector_raster_cache_bytes`/`process_footprint_bytes`/`process_resident_bytes`) from this
+    /// host's current caches and the process's own task VM counters. Called from `relayout_inner`
+    /// under the same `cfg(any(test, debug_assertions, feature = "render-stats"))` gate as every other
     /// `render::stats` counter, so a plain release build (no feature) never pays for the
     /// `task_info` syscall or the `O(cache size)` walk this does — see that call site.
     pub(crate) fn record_memory_stats(&self) {
@@ -932,11 +933,12 @@ impl TreeHostView {
             .map(|(_, _, _, image)| crate::render::cgimage_bytes(image))
             .sum();
         drop(state);
-        let process_footprint_bytes = crate::render::stats::phys_footprint_bytes();
+        let process_memory = crate::render::stats::process_memory();
         crate::render::stats::bump(|s| {
             s.image_cache_bytes = image_cache_bytes;
             s.vector_raster_cache_bytes = vector_raster_cache_bytes;
-            s.process_footprint_bytes = process_footprint_bytes;
+            s.process_footprint_bytes = process_memory.physical_footprint_bytes;
+            s.process_resident_bytes = process_memory.resident_bytes;
         });
     }
 }

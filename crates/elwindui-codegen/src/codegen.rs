@@ -2683,6 +2683,7 @@ fn generate_view(
         closure_param: None,
         own_fields,
         mutable_own_fields: HashSet::new(),
+        target: target.clone(),
     };
 
     // `on_*`-named fields are excluded here for the same reason `TypeInfo::param_fields` (built
@@ -4289,6 +4290,14 @@ struct ViewCtx {
     /// own field uses). Empty at `Construction` time's own use (`emit_expr`'s `EmitMode::
     /// Construction` reads the raw constructor-argument local instead, always bare regardless).
     mutable_own_fields: HashSet<String>,
+    /// The concrete type being generated (`generate_view`'s own `target`) — needed by
+    /// `emit_for_item_wiring` to downcast `__self_weak` the same way `on_constructed`'s own
+    /// `#wiring_stmts` does (see that field's own doc comment), since a `for`-loop item's renderer
+    /// closure has no already-upgraded `this: Rc<Self>` handed to it the way `on_constructed`'s
+    /// body does — it only ever runs with `self: &Self` in scope (inside `__refresh_dynamic_
+    /// regions`), so wiring an `on_*` attribute on an item template element has to perform that
+    /// upgrade itself.
+    target: syn::Ident,
 }
 
 impl ViewCtx {
@@ -4298,6 +4307,7 @@ impl ViewCtx {
             closure_param: Some(param.to_string()),
             own_fields: self.own_fields.clone(),
             mutable_own_fields: self.mutable_own_fields.clone(),
+            target: self.target.clone(),
         }
     }
 }
@@ -4471,6 +4481,7 @@ fn emit_for_renderer(
     for planned in &plan {
         emit_construction(planned, &closure_ctx, from, table, &mut construct, &plan);
     }
+    let wiring = emit_for_item_wiring(&plan, &closure_ctx, from, table);
     let subscriptions = subscribe_to_item_changes
         .then(|| emit_for_item_subscriptions(&plan, binding, &closure_ctx, from, table))
         .unwrap_or_default();
@@ -4480,6 +4491,7 @@ fn emit_for_renderer(
     quote! {
         |#param_ident: &_| {
             #construct
+            #wiring
             let mut __dynamic_item_subscriptions = Vec::new();
             #subscriptions
             elwindui::core::ui::DynamicChild::with_children(
@@ -4488,6 +4500,214 @@ fn emit_for_renderer(
             )
         }
     }
+}
+
+/// Wires every `on_*` event attribute declared on an element inside a `for` loop's own item
+/// template — the item-template counterpart to `emit_wiring`, which only ever walks the *shared*
+/// top-level `plan` (`generate_view`'s own loop, driving `on_constructed`'s `#wiring_stmts`) and
+/// therefore never reaches an element declared inside a `for` body at all. Before this existed,
+/// an `on_*` attribute written on a `for`-loop item element (e.g. `TabViewItem { on_close: vm.
+/// close_active_tab }` inside `for doc in vm.documents { .. }`) silently compiled to nothing —
+/// `emit_construction`'s own `build_component_setters` skips `on_*`-named fields outright (they're
+/// excluded from `param_fields` for exactly this reason: normally `emit_wiring` is the one thing
+/// that handles them), and nothing else ever picked up the slack for a `for`-loop item.
+///
+/// Unlike `emit_wiring`, there is no persistent `self`/`this` field for the wired widget to live
+/// on — it's a `DynamicChild`-owned temporary, (re)built fresh whenever its own `for`-loop source
+/// item's `Rc` identity changes (see `DynamicChildSlot::replace_rc_items`) — so the widget is read
+/// as a local binding (`#binding.clone()`) rather than `this.#binding.clone()`. There is also no
+/// already-upgraded `this: Rc<Self>` sitting in scope the way `on_constructed`'s own body has one
+/// (`emit_for_renderer`'s returned closure only ever runs with `self: &Self` in scope, from inside
+/// `__refresh_dynamic_regions`) — so any node here that actually needs wiring performs the same
+/// `__self_weak` upgrade `on_constructed` does, once, up front, shared by every wired attribute in
+/// this template. Unlike `emit_for_item_subscriptions` (which deliberately never reaches back into
+/// the enclosing view's dynamic-range refresh cycle — it only updates the already-created child's
+/// own properties in response to *that item's own* observable changes), firing an item's `on_*`
+/// callback *does* call `this.__refresh_dynamic_regions()` afterward, exactly like `emit_wiring`'s
+/// own top-level callbacks do: the callback body is arbitrary user code (e.g. `vm.close_active_tab`
+/// removing this very item from the `Vec` the enclosing `for` loop iterates), and nothing else
+/// would otherwise re-run that loop's own diff — the mutated collection's own `#[observable]`
+/// setter publishes a property-changed notification, but nothing subscribes to it on this specific
+/// `for` region the way `emit_for_item_subscriptions`' per-item subscriptions do for item-local
+/// properties.
+///
+/// `#[two_way]` fields are deliberately not handled here: a `for` item's own widget-to-model
+/// write-back path doesn't exist yet anywhere in this codebase (there is no working behavior to
+/// preserve), and adding one is a separate design question from "an `on_*` attribute silently does
+/// nothing", which is what this function closes.
+fn emit_for_item_wiring(
+    plan: &[PlannedNode],
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let has_any_wiring = plan.iter().any(|node| {
+        node.stored
+            && node
+                .attributes
+                .iter()
+                .any(|(name, _)| name.starts_with("on_"))
+    });
+    if !has_any_wiring {
+        return TokenStream::new();
+    }
+    let target = &ctx.target;
+    let self_mode = EmitMode::WithSelf(quote! { __elwindui_for_item_this });
+    let mut out = quote! {
+        let __elwindui_for_item_this: std::rc::Rc<#target> = self
+            .__self_weak
+            .borrow()
+            .upgrade()
+            .expect("for-loop item wiring: object must already be Rc-constructed")
+            .downcast::<#target>()
+            .expect("for-loop item wiring: most-derived object must be this component");
+    };
+    for node in plan {
+        if !node.stored {
+            continue;
+        }
+        let binding = &node.binding;
+        let info = table.resolve(from, &node.type_path);
+        let widget_binding = quote! { #binding.clone() };
+        for (name, expr) in &node.attributes {
+            if name.strip_prefix("on_").is_none() {
+                continue;
+            }
+            if info.is_none() {
+                let name_ident = format_ident!("{name}");
+                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+                let call = match expr {
+                    ViewExpr::Closure { params, body } => {
+                        emit_on_event_closure_body(body, params, ctx, &self_mode)
+                    }
+                    other => emit_expr(other, ctx, &self_mode),
+                };
+                let closure_params = match expr {
+                    ViewExpr::Closure { params, .. } => {
+                        params.iter().map(|p| format_ident!("{p}")).collect::<Vec<_>>()
+                    }
+                    _ => Vec::new(),
+                };
+                let annotated_params: Vec<TokenStream> = closure_params
+                    .iter()
+                    .map(|p| match common_routed_payload_type(name) {
+                        Some(ty) if closure_params.len() == 1 => quote! { #p: #ty },
+                        _ => quote! { #p },
+                    })
+                    .collect();
+                out.extend(quote! {
+                    {
+                        #[allow(unused_imports)]
+                        use elwindui::ui::*;
+                        let widget = #widget_binding;
+                        let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
+                        elwindui::core::#props_macro!(@set widget, #name_ident, move |#(#annotated_params),*| {
+                            #call;
+                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                        });
+                    }
+                });
+                continue;
+            }
+            let info = info.expect("checked above");
+            out.extend(builtin_trait_use(&node.type_path, Some(info)));
+            let setter = format_ident!("set_{name}");
+            let is_routed = info.routed_fields.contains(name);
+            if is_routed {
+                let param_types = info
+                    .field_types
+                    .get(name)
+                    .map(|ty| callback_param_types(ty))
+                    .unwrap_or_default();
+                let registration = emit_routed_registration(
+                    name,
+                    expr,
+                    &param_types,
+                    ctx,
+                    &self_mode,
+                    &quote! { widget.as_ui_element() },
+                );
+                let shortcut_registration = node
+                    .attribute_shortcuts
+                    .get(name)
+                    .map(|(chords, scope)| {
+                        emit_shortcut_registration(
+                            name,
+                            chords,
+                            *scope,
+                            &quote! { widget.as_ui_element() },
+                        )
+                    })
+                    .unwrap_or_default();
+                out.extend(quote! {
+                    {
+                        use elwindui::core::ui::UIElementExt as _;
+                        let widget = #widget_binding;
+                        #registration
+                        #shortcut_registration
+                    }
+                });
+                continue;
+            }
+            let param_types = info
+                .field_types
+                .get(name)
+                .map(|ty| callback_param_types(ty))
+                .unwrap_or_default();
+            if param_types.is_empty() {
+                let call = match expr {
+                    ViewExpr::Closure { params, body } if params.is_empty() => {
+                        emit_on_event_closure_body(body, params, ctx, &self_mode)
+                    }
+                    ViewExpr::Closure { params, .. } => panic!(
+                        "`{name}` takes no parameters, but a closure with {} parameter(s) was given",
+                        params.len()
+                    ),
+                    other => emit_expr(other, ctx, &self_mode),
+                };
+                out.extend(quote! {
+                    {
+                        let widget = #widget_binding;
+                        let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
+                        widget.#setter(Box::new(move || {
+                            #call;
+                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                        }));
+                    }
+                });
+            } else {
+                let ViewExpr::Closure { params, body } = expr else {
+                    panic!(
+                        "`{name}` needs {} parameter(s); write an explicit closure, e.g. `{name}: |x| ...`",
+                        param_types.len()
+                    );
+                };
+                if params.len() != param_types.len() {
+                    panic!(
+                        "`{name}`'s closure takes {} parameter(s) but the callback field declares {}",
+                        params.len(),
+                        param_types.len()
+                    );
+                }
+                let param_decls = params.iter().zip(&param_types).map(|(name, ty)| {
+                    let ident = format_ident!("{}", name);
+                    quote! { #ident: #ty }
+                });
+                let call = emit_on_event_closure_body(body, params, ctx, &self_mode);
+                out.extend(quote! {
+                    {
+                        let widget = #widget_binding;
+                        let __elwindui_for_item_this = std::rc::Rc::clone(&__elwindui_for_item_this);
+                        widget.#setter(Box::new(move |#(#param_decls),*| {
+                            #call;
+                            __elwindui_for_item_this.__refresh_dynamic_regions();
+                        }));
+                    }
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Emits observers owned by one `for` item. They update the already-created child directly;
@@ -10038,6 +10258,107 @@ view NotepadWindow {
         assert!(window_str.contains("source . subscribe_property_changed"));
         assert!(window_str.contains("item . set_header"));
         assert!(!window_str.contains("set_items_source"));
+    }
+
+    /// Regression test for a `for`-loop item template element's `on_*` attribute being silently
+    /// dropped — `elwindui-backend-appkit`'s `native_ui::TabView`'s per-item `on_close` closure
+    /// found `TabViewItem::on_close` always `None` at runtime because nothing ever called
+    /// `set_on_close` on it: `emit_construction`/`build_component_setters` skip `on_*`-named
+    /// fields outright (`emit_wiring` is supposed to handle them), but `emit_for_renderer` never
+    /// called `emit_wiring` for elements inside a `for` body at all. Mirrors real
+    /// `examples/notepad`'s own shape as closely as possible: a zero-arg `close_active_tab`
+    /// bare-method-reference (not an explicit closure), set on a `for`-loop item element,
+    /// referencing the enclosing component's own injected `vm`.
+    #[test]
+    fn generates_on_close_wiring_for_a_for_loop_item_template_element() {
+        let viewmodel_src = r#"
+viewmodel Document {
+    #[observable]
+    file_name: String = "untitled.txt",
+}
+"#;
+        let notepad_viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod notepad_view_model {
+                struct NotepadViewModel {
+                    #[observable(default = Vec::new())]
+                    documents: Vec<std::rc::Rc<Document>>,
+
+                    #[observable(default = 0usize)]
+                    active_tab: usize,
+                }
+
+                impl NotepadViewModel {
+                    fn close_tab(&self, index: usize) {
+                        documents.remove(index);
+                    }
+
+                    fn close_active_tab(&self) {
+                        self.close_tab(active_tab);
+                    }
+                }
+            }
+        "#,
+        );
+        let window_src = r#"
+use crate::NotepadViewModel;
+
+component NotepadWindow {
+    #[param]
+    #[inject]
+    vm: NotepadViewModel,
+}
+
+view NotepadWindow {
+    Window {
+        title: t!("notepad-window-title")
+
+        TabView {
+            for doc in vm.documents {
+                TabViewItem {
+                    header: doc.file_name
+                    closable: true
+                    on_close: vm.close_active_tab
+                    TextBlock { text: doc.file_name }
+                }
+            }
+            selected_index: vm.active_tab
+        }
+    }
+}
+"#;
+        let document_module = parse_module(viewmodel_src).expect("viewmodel should parse");
+        let window_module = parse_module(window_src).expect("window should parse");
+        let modules = [
+            document_module.clone(),
+            notepad_viewmodel_module.clone(),
+            window_module.clone(),
+        ];
+        let all_modules: Vec<_> = modules
+            .iter()
+            .cloned()
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let table = build_symbol_table(&all_modules);
+
+        assert_eq!(crate::validate::validate(&all_modules), Ok(()));
+
+        let window_code = generate_module(&window_module, &table);
+        assert_valid_rust("for_loop_on_close_window", &window_code);
+        let window_str = window_code.to_string();
+        assert!(
+            window_str.contains("set_on_close"),
+            "window_str: {window_str}"
+        );
+        assert!(
+            window_str.contains("close_active_tab"),
+            "window_str: {window_str}"
+        );
+        // The upgrade-and-downcast prelude `emit_for_item_wiring` adds — proves the item's own
+        // wiring closure captures an owned `Rc<NotepadWindow>` rather than trying to move a
+        // borrowed `&self` into a `'static` closure.
+        assert!(window_str.contains("__self_weak"));
+        assert!(window_str.contains("downcast :: < NotepadWindow >"));
     }
 
     /// Unlike `viewmodel_module_from_rust` (used by other tests), registers the viewmodel module at

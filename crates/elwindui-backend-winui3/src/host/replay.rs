@@ -6,7 +6,7 @@
 
 
 use crate::render::xaml_text_alignment;
-use crate::ffi::AnyView;
+use crate::ffi::{AnyView, UiCallbackRegistryOwner};
 use super::*;
 
 use crate::render::composition::IslandId;
@@ -27,17 +27,44 @@ use windows::core::{HSTRING, Interface};
 /// A `RenderCommand::Text`/`NativeControl` command's reflection as a real XAML child, kept across
 /// relayout passes so it can be updated in place instead of torn down and recreated — see
 /// `reconcile_native_children`'s own doc comment for why.
-#[derive(Clone)]
 pub(crate) enum NativeChildElement {
     Text(TextBlock),
-    Native(AnyView),
+    Native(NativeChildState),
+}
+
+/// One host-created focus subscription attached to a retained native control.
+///
+/// The control itself belongs to the core UI tree and survives host suppression, but these
+/// host-specific routed handlers must follow the reflected native-child entry: dropping the entry
+/// removes the WinRT event tokens and then releases its callback-registry ids. Reactivation can
+/// therefore wire one fresh pair without accumulating duplicate focus dispatches.
+pub(crate) struct NativeChildState {
+    view: AnyView,
+    got_focus_token: Option<i64>,
+    lost_focus_token: Option<i64>,
+    callback_owner: UiCallbackRegistryOwner,
+}
+
+impl Drop for NativeChildState {
+    fn drop(&mut self) {
+        let element = self.view.as_element();
+        if let Some(token) = self.got_focus_token.take() {
+            let _ = element.RemoveGotFocus(token);
+        }
+        if let Some(token) = self.lost_focus_token.take() {
+            let _ = element.RemoveLostFocus(token);
+        }
+        // `callback_owner` drops immediately after this method returns, once the native delegates
+        // that could still contain their numeric ids have been detached above.
+        let _ = &self.callback_owner;
+    }
 }
 
 impl NativeChildElement {
     pub(crate) fn framework_element(&self) -> FrameworkElement {
         match self {
             NativeChildElement::Text(t) => t.clone().cast().expect("TextBlock is a FrameworkElement"),
-            NativeChildElement::Native(v) => v.as_element(),
+            NativeChildElement::Native(state) => state.view.as_element(),
         }
     }
 }
@@ -99,9 +126,9 @@ pub(crate) fn reconcile_native_children(
                 let _ = Canvas::SetLeft(&fe, rect.x as f64);
                 let _ = Canvas::SetTop(&fe, rect.y as f64);
             }
-            (Some(NativeChildElement::Native(view)), RenderedNativeChild::Native { view: new_view, rect }) => {
+            (Some(NativeChildElement::Native(state)), RenderedNativeChild::Native { view: new_view, rect }) => {
                 let _ = new_view; // same underlying handle identity as `view` — see the key match above
-                let mut view = view.clone();
+                let mut view = state.view.clone();
                 view.arrange(rect);
             }
             (_, wanted_child) => {
@@ -153,7 +180,8 @@ pub(crate) fn reconcile_native_children(
                         // crash this avoids (`native_focus_gained` dispatches `on_got_focus`, which
                         // can run user code that synchronously re-enters this same `render_tree` via
                         // `RelayoutHost::request_relayout`).
-                        let got_focus_id = register_ui_event_callback(Rc::new(move || {
+                        let callback_owner = UiCallbackRegistryOwner::default();
+                        let got_focus_id = callback_owner.register_event(Rc::new(move || {
                             if let (Some(render_tree), Some(keyboard)) =
                                 (render_tree_for_gained.upgrade(), keyboard_for_gained.upgrade())
                             {
@@ -169,21 +197,26 @@ pub(crate) fn reconcile_native_children(
                                 }
                             }
                         }));
-                        let _ = element.GotFocus(&RoutedEventHandler::new(move |_, _| {
+                        let got_focus_token = element.GotFocus(&RoutedEventHandler::new(move |_, _| {
                             invoke_ui_event_callback(got_focus_id);
                             Ok(())
-                        }));
+                        })).ok();
                         let keyboard_for_lost = Rc::downgrade(keyboard);
-                        let lost_focus_id = register_ui_event_callback(Rc::new(move || {
+                        let lost_focus_id = callback_owner.register_event(Rc::new(move || {
                             if let Some(keyboard) = keyboard_for_lost.upgrade() {
                                 elwindui_core::focus::native_focus_lost(&keyboard.focus, owner_id);
                             }
                         }));
-                        let _ = element.LostFocus(&RoutedEventHandler::new(move |_, _| {
+                        let lost_focus_token = element.LostFocus(&RoutedEventHandler::new(move |_, _| {
                             invoke_ui_event_callback(lost_focus_id);
                             Ok(())
-                        }));
-                        NativeChildElement::Native(view)
+                        })).ok();
+                        NativeChildElement::Native(NativeChildState {
+                            view,
+                            got_focus_token,
+                            lost_focus_token,
+                            callback_owner,
+                        })
                     }
                 };
                 // Only reached with a stale `existing` entry if the command's *kind* changed at

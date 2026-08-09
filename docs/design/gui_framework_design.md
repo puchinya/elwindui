@@ -615,7 +615,7 @@ trait UIElement {
 
 新しいバックエンドを追加する際・既存バックエンドの`RelayoutHost`実装をレビューする際は、このコアレシング契約を満たしているかを確認すること。
 
-### 5.4a 非表示subtreeの除外とホストアクティベーション 🚧
+### 5.4a 非表示subtreeの除外とホストアクティベーション ✅
 
 「存在するUIElement」と「現在Layout/Renderに参加しているUIElement」を分離する。3層で考える:
 
@@ -634,7 +634,7 @@ trait UIElement {
 
 非アクティブ化はRenderTree・レンダリングキャッシュ(付録F・AppKitの`ReplayState`/WinUI3のcomposition island・native children)を解放するが、要素ツリー自体とネイティブcontrolハンドルは保持する——`Visibility::Collapsed`と同じ「高コストなnative controlを毎回destroy/recreateしない」方針(頻繁な表示切替のコストとメモリ削減のトレードオフ)を踏襲する。再アクティブ化時は、その時点の最新viewportサイズでlayoutからやり直す。
 
-**実装状況**: `participates_in_layout()`とそれを参照する上記の一元化された判定箇所、および`RenderTree::reconcile`のVisible⇄Collapsed遷移(RenderGroup生成/除去、ルート自身がCollapsedになる場合を含む)は`elwindui-core`に実装・テスト済み。`TreeHostView`(AppKit)/`TreeHostPanel`(WinUI3)自体の`set_active(bool)`とTabViewからの配線は未実装(バックエンド別Issueで対応予定)。GTK4バックエンドはスタブのため対象外(§9参照)。
+**実装状況**: `participates_in_layout()`とそれを参照する上記の一元化された判定箇所、および`RenderTree::reconcile`のVisible⇄Collapsed遷移(RenderGroup生成/除去、ルート自身がCollapsedになる場合を含む)は`elwindui-core`に実装・テスト済み。`TreeHostView`(AppKit)/`TreeHostPanel`(WinUI3)の`set_active(bool)`とTabView配線も実装済みで、非選択hostはtree/native control stateを保持したままRenderTreeとbackend描画資源を解放し、再選択時に最新viewportで再構築する。GTK4バックエンドはスタブのため対象外(§9参照)。
 
 ### 5.5 フォーカス管理 ✅
 

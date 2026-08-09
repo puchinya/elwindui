@@ -2,6 +2,7 @@
 
 use super::NativeControl;
 use crate::AnyView;
+use crate::host::TreeHostPanel;
 use crate::inner::InnerTabView;
 use elwindui_core::ui::UIElementExt;
 use std::any::Any;
@@ -32,6 +33,17 @@ pub struct TabView {
     /// real `TabViewItem`s, in display order — the "before" side of `rebuild`'s diff against the
     /// current `children` pointers (the "after" side).
     displayed: RefCell<Vec<usize>>,
+    /// Parallel to `displayed`: each real XAML tab's persistent content host, in display order.
+    /// Ownership lives here rather than in `InnerTabView` so keyed removal can suppress and drop
+    /// exactly the host belonging to a closed declarative item.
+    content_hosts: RefCell<Vec<TreeHostPanel>>,
+    /// Pointer identity of the entry whose host currently participates in layout/render. `None`
+    /// means either no selected child exists or the selected index is out of range.
+    active: Cell<Option<usize>>,
+    /// Guards XAML collection edits that can synchronously raise selection/size events. Transient
+    /// selection callbacks are suppressed, and host synchronization waits until `rebuild` has
+    /// released its `children`/`displayed` borrows.
+    rebuilding: Cell<bool>,
     /// Not read by this type itself (`set_on_select` passes callbacks straight through to
     /// `crate::inner::InnerTabView`, which has no getter of its own) — tracked here purely so
     /// `selected_item`/`selected_container` can read it back.
@@ -106,6 +118,9 @@ impl TabView {
             inner,
             children: RefCell::new(Vec::new()),
             displayed: RefCell::new(Vec::new()),
+            content_hosts: RefCell::new(Vec::new()),
+            active: Cell::new(None),
+            rebuilding: Cell::new(false),
             selected_index: Cell::new(0),
             on_close: RefCell::new(None),
             weak_self: RefCell::new(Weak::new()),
@@ -127,6 +142,39 @@ impl TabView {
             .downcast::<TabView>()
             .expect("TabView::on_constructed: owner must be this TabView");
         *self.weak_self.borrow_mut() = Rc::downgrade(&this);
+        let weak = Rc::downgrade(&this);
+        self.inner
+            .set_on_content_size_changed(Box::new(move |width, height| {
+                if let Some(this) = weak.upgrade() {
+                    this.resize_active_content_host(width, height);
+                }
+            }));
+        // Always wire the native close event. Static tabs may provide only per-item `on_close`
+        // handlers, so waiting for a TabView-level fallback to be assigned would leave their
+        // close buttons disconnected entirely.
+        let weak = Rc::downgrade(&this);
+        self.inner.set_on_close(Box::new(move |index| {
+            let Some(this) = weak.upgrade() else { return };
+            // Drop the collection borrow before invoking user code: a close callback can
+            // synchronously mutate the backing list and re-enter `ListExt::remove_at`.
+            let entry = {
+                let children = this.children.borrow();
+                children.get(index).cloned()
+            };
+            let handled = entry.is_some_and(|entry| {
+                if let Some(callback) = downcast_tab_view_item(&*entry).on_close.borrow().as_ref() {
+                    callback();
+                    true
+                } else {
+                    false
+                }
+            });
+            if !handled {
+                if let Some(callback) = this.on_close.borrow().as_ref() {
+                    callback(index);
+                }
+            }
+        }));
         // WinUI3's `TabView` is a tab stop by default — see
         // docs/design/gui_framework_design.md §5.5.
         self.set_tab_stop(true);
@@ -148,7 +196,17 @@ impl TabView {
 
     #[inherent]
     pub fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
-        self.inner.set_on_select(callback);
+        let weak = self.weak_self.borrow().clone();
+        self.inner.set_on_select(Box::new(move |index| {
+            let Some(this) = weak.upgrade() else { return };
+            // XAML raises transient selection changes synchronously while `rebuild` edits
+            // `TabItems`. Publishing those intermediate indices can re-enter the declarative list
+            // diff while it still holds collection borrows; the final model-selected index is
+            // applied after rebuilding instead.
+            if !this.rebuilding.get() {
+                callback(index);
+            }
+        }));
     }
 
     /// A static `TabViewItem`'s own `on_close` (if set) takes precedence — it's the per-item
@@ -157,24 +215,6 @@ impl TabView {
     #[inherent]
     pub fn set_on_close(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_close.borrow_mut() = Some(callback);
-        let this = self.weak_self.borrow().clone();
-        self.inner.set_on_close(Box::new(move |index| {
-            let Some(this) = this.upgrade() else { return };
-            let entry = this.children.borrow().get(index).cloned();
-            let handled = entry.is_some_and(|e| {
-                if let Some(cb) = downcast_tab_view_item(&*e).on_close.borrow().as_ref() {
-                    cb();
-                    true
-                } else {
-                    false
-                }
-            });
-            if !handled {
-                if let Some(cb) = this.on_close.borrow().as_ref() {
-                    cb(index);
-                }
-            }
-        }));
     }
 
     #[inherent]
@@ -186,10 +226,10 @@ impl TabView {
         self
     }
 
-    /// Unlike `elwindui_backend_appkit::native_ui::TabView` (where selecting a tab means manually
-    /// swapping the single visible content pane, done inside `rebuild`), `Controls::TabView`
-    /// already shows/hides each `TabViewItem`'s own persistent `Content` based on `SelectedIndex`
-    /// natively — so this is just a straight passthrough, no rebuild needed.
+    /// Selects the matching XAML item and transfers layout/render participation to its persistent
+    /// host. XAML still owns visual visibility, while this layer independently suppresses the old
+    /// host's expensive RenderTree/backend resources and rebuilds the new host at the latest
+    /// content viewport size.
     #[inherent]
     pub fn set_selected_index(&self, selected_index: usize) {
         if self.selected_index.get() == selected_index {
@@ -197,6 +237,9 @@ impl TabView {
         }
         self.selected_index.set(selected_index);
         self.inner.set_selected_index(selected_index);
+        if !self.rebuilding.get() {
+            self.sync_active_content_host();
+        }
     }
 
     #[inherent]
@@ -240,6 +283,67 @@ impl TabView {
             .set_tab_title(index, &downcast_tab_view_item(&*item).header.borrow());
     }
 
+    /// Resizes only the host currently participating in layout/render. The native `SizeChanged`
+    /// callback delegates here instead of retaining and walking every tab host.
+    #[inherent]
+    fn resize_active_content_host(&self, width: f64, height: f64) {
+        if self.rebuilding.get() {
+            return;
+        }
+        let Some(active_key) = self.active.get() else {
+            return;
+        };
+        let host = {
+            let displayed = self.displayed.borrow();
+            let Some(index) = displayed.iter().position(|key| *key == active_key) else {
+                return;
+            };
+            self.content_hosts.borrow().get(index).cloned()
+        };
+        if let Some(host) = host {
+            self.inner.resize_content_host(&host, width, height);
+        }
+    }
+
+    /// Deactivates the previously selected host, then sizes and activates the current one. Host
+    /// clones are resolved before each state transition and no collection borrow is held across a
+    /// relayout, avoiding `RefCell` re-entry if native focus events synchronously run user code.
+    #[inherent]
+    fn sync_active_content_host(&self) {
+        let selected_key = self
+            .children
+            .borrow()
+            .get(self.selected_index.get())
+            .map(tab_view_item_key);
+        if self.active.get() == selected_key {
+            return;
+        }
+
+        let old_host = self.active.get().and_then(|active_key| {
+            let displayed = self.displayed.borrow();
+            let index = displayed.iter().position(|key| *key == active_key)?;
+            self.content_hosts.borrow().get(index).cloned()
+        });
+        if let Some(host) = old_host {
+            host.set_active(false);
+        }
+
+        let new_host = selected_key.and_then(|selected_key| {
+            let displayed = self.displayed.borrow();
+            let index = displayed.iter().position(|key| *key == selected_key)?;
+            self.content_hosts.borrow().get(index).cloned()
+        });
+        let active_key = if let (Some(selected_key), Some(host)) = (selected_key, new_host) {
+            let (width, height) = self.inner.content_size();
+            self.inner.resize_content_host(&host, width, height);
+            host.set_active(true);
+            Some(selected_key)
+        } else {
+            None
+        };
+        self.active.set(active_key);
+    }
+
     /// Keyed diff (pointer identity — see `displayed`'s doc comment): removes displayed tabs whose
     /// `TabViewItem` no longer appears in `children`, inserts a real `TabViewItem` (+ that entry's
     /// one-time `content`) for each not-yet-displayed one, and refreshes every displayed tab's
@@ -249,12 +353,17 @@ impl TabView {
     /// in its current slot rather than physically moved to match `children`' exact order.
     #[inherent]
     fn rebuild(&self) {
+        if self.rebuilding.replace(true) {
+            return;
+        }
         let children = self.children.borrow();
         let new_keys: Vec<usize> = children.iter().map(tab_view_item_key).collect();
         let mut displayed = self.displayed.borrow_mut();
 
         for i in (0..displayed.len()).rev() {
             if !new_keys.contains(&displayed[i]) {
+                let host = self.content_hosts.borrow_mut().remove(i);
+                host.set_active(false);
                 self.inner.remove_tab_at(i);
                 displayed.remove(i);
             }
@@ -272,6 +381,9 @@ impl TabView {
                     content_host.set_tree(content);
                 }
                 let insertion_index = target_index.min(displayed.len());
+                self.content_hosts
+                    .borrow_mut()
+                    .insert(insertion_index, content_host);
                 displayed.insert(insertion_index, *key);
             }
         }
@@ -281,6 +393,9 @@ impl TabView {
             self.inner
                 .set_tab_title(index, &downcast_tab_view_item(&**entry).header.borrow());
         }
+        drop(children);
+        self.rebuilding.set(false);
+        self.sync_active_content_host();
     }
 }
 

@@ -1,6 +1,6 @@
 //! `TabView` and its per-tab content hosting.
 
-use crate::ffi::{AnyView, register_ui_event_callback, invoke_ui_event_callback, register_ui_index_event_callback, invoke_ui_index_event_callback};
+use crate::ffi::{AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_index_event_callback};
 use crate::host::TreeHostPanel;
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
@@ -27,14 +27,14 @@ pub(crate) struct InnerTabView {
     on_select: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
     on_close: Rc<RefCell<Option<Box<dyn Fn(usize)>>>>,
     on_new_tab: Rc<RefCell<Option<Box<dyn Fn()>>>>,
-    /// Every tab's own content `TreeHostPanel` (`insert_tab`'s `content_host`), so `TabView`'s own
-    /// `SizeChanged` (below) can keep every one of them sized *and freshly relaid-out* to match —
-    /// not just the currently selected tab's — since an unselected tab may never itself receive a
-    /// `SizeChanged` (its `ActualWidth`/`ActualHeight` may simply never be assigned at all while
-    /// not the visible content), unlike `TabView` itself, which reliably resizes with the window.
-    /// See `insert_tab`'s own doc comment for why this is needed at all, and
-    /// `TreeHostPanel::force_relayout`'s for why setting the size alone isn't enough either.
-    content_hosts: Rc<RefCell<Vec<TreeHostPanel>>>,
+    /// Delivers the current content viewport to `native_ui::TabView`, which owns the ordered host
+    /// collection and can therefore resize only its active host. Keeping that ownership above this
+    /// raw-toolkit layer is what lets close remove the matching host deterministically.
+    on_content_size_changed: Rc<RefCell<Option<Box<dyn Fn(f64, f64)>>>>,
+    /// Owns every TLS callback id installed by this native TabView. Several callbacks capture the
+    /// XAML control strongly; releasing the final `InnerTabView` now removes those entries instead
+    /// of leaving the whole control reachable from the registry.
+    callback_owner: UiCallbackRegistryOwner,
 }
 
 // `TabView` lays out each item content below its tab strip, but the manually
@@ -59,26 +59,17 @@ impl InnerTabView {
             on_select: Rc::new(RefCell::new(None)),
             on_close: Rc::new(RefCell::new(None)),
             on_new_tab: Rc::new(RefCell::new(None)),
-            content_hosts: Rc::new(RefCell::new(Vec::new())),
+            on_content_size_changed: Rc::new(RefCell::new(None)),
+            callback_owner: UiCallbackRegistryOwner::default(),
         };
 
         {
-        let content_hosts = this.content_hosts.clone();
+        let on_content_size_changed = this.on_content_size_changed.clone();
         let xaml_for_resize = this.xaml.clone();
-        let callback_id = register_ui_event_callback(Rc::new(move || {
-            let width = xaml_for_resize.ActualWidth().unwrap_or(0.0);
-            let height = (xaml_for_resize.ActualHeight().unwrap_or(0.0)
-                - TAB_VIEW_CONTENT_TOP_INSET)
-                .max(0.0);
-            for content_host in content_hosts.borrow().iter() {
-                let element = content_host.as_element();
-                let _ = element.SetWidth(width);
-                let _ = element.SetHeight(height);
-                // Setting `Width`/`Height` alone (even with `InvalidateMeasure`/`InvalidateArrange`)
-                // does not make this `Canvas`'s own `SizeChanged` fire on any later frame either —
-                // confirmed by logging `ActualWidth`/`ActualHeight` immediately after, which stayed
-                // `0` — so relayout can't be left to arrive on its own; force it directly instead.
-                content_host.force_relayout();
+        let callback_id = this.callback_owner.register_event(Rc::new(move || {
+            let (width, height) = content_size(&xaml_for_resize);
+            if let Some(callback) = on_content_size_changed.borrow().as_ref() {
+                callback(width, height);
             }
         }));
         let _ = this.xaml.SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
@@ -89,7 +80,7 @@ impl InnerTabView {
 
         {
         let on_select = this.on_select.clone();
-        let callback_id = register_ui_index_event_callback(Rc::new(move |index| {
+        let callback_id = this.callback_owner.register_index(Rc::new(move |index| {
             if let Some(callback) = on_select.borrow().as_ref() { callback(index); }
         }));
         let _ = this.xaml.SelectionChanged(&SelectionChangedEventHandler::new(move |sender, _| {
@@ -105,7 +96,7 @@ impl InnerTabView {
 
         {
         let on_close = this.on_close.clone();
-        let callback_id = register_ui_index_event_callback(Rc::new(move |index| {
+        let callback_id = this.callback_owner.register_index(Rc::new(move |index| {
             if let Some(callback) = on_close.borrow().as_ref() { callback(index); }
         }));
         let _ = this.xaml.TabCloseRequested(&TypedEventHandler::<
@@ -132,7 +123,7 @@ impl InnerTabView {
 
         {
         let on_new_tab = this.on_new_tab.clone();
-        let callback_id = register_ui_event_callback(Rc::new(move || {
+        let callback_id = this.callback_owner.register_event(Rc::new(move || {
             if let Some(callback) = on_new_tab.borrow().as_ref() { callback(); }
         }));
         let _ = this
@@ -162,8 +153,33 @@ impl InnerTabView {
         *self.on_new_tab.borrow_mut() = Some(callback);
     }
 
+    /// Installs the native-ui owner callback that receives each new content viewport size. Only
+    /// that layer knows which persistent host is selected, so this replaces the old append-only
+    /// `content_hosts` list and its resize-all behavior.
+    pub(crate) fn set_on_content_size_changed(&self, callback: Box<dyn Fn(f64, f64)>) {
+        *self.on_content_size_changed.borrow_mut() = Some(callback);
+    }
+
+    /// Returns the content viewport derived from the live XAML TabView bounds.
+    pub(crate) fn content_size(&self) -> (f64, f64) {
+        content_size(&self.xaml)
+    }
+
+    /// Applies a viewport to one host and requests its synchronous layout. Suppressed hosts still
+    /// retain the explicit size but make `force_relayout` a no-op, so selection can size first and
+    /// activate second without doing a wasted pass.
+    pub(crate) fn resize_content_host(&self, content_host: &TreeHostPanel, width: f64, height: f64) {
+        let element = content_host.as_element();
+        let _ = element.SetWidth(width);
+        let _ = element.SetHeight(height);
+        content_host.force_relayout();
+    }
+
     pub(crate) fn insert_tab(&self, index: usize, title: &str, closable: bool) -> TreeHostPanel {
         let content_host = TreeHostPanel::new();
+        // A tab host must be suppressed before `native_ui::TabView::rebuild` attaches its tree;
+        // otherwise `set_tree` would build a full RenderTree for every never-selected tab once.
+        content_host.set_active(false);
         let item = TabViewItem::new().expect("TabViewItem::new");
         if let Ok(value) = PropertyValue::CreateString(&HSTRING::from(title)) {
             let _ = item.SetHeader(&value);
@@ -183,17 +199,10 @@ impl InnerTabView {
         // it isn't the visible one, so its `SizeChanged` may simply never fire — including for the
         // very first tab, before any selection change has ever happened. `TabView` itself, though,
         // reliably resizes with the window (confirmed — its own tab strip renders correctly), so
-        // `content_hosts` tracks every tab's own `TreeHostPanel` and `new`'s `TabView.SizeChanged`
-        // handler resizes *and force-relays-out* all of them together (see
-        // `TreeHostPanel::force_relayout`'s doc comment), whether or not each one is currently
-        // selected.
-        self.content_hosts.borrow_mut().push(content_host.clone());
-        let width = self.xaml.ActualWidth().unwrap_or(0.0);
-        let height = (self.xaml.ActualHeight().unwrap_or(0.0) - TAB_VIEW_CONTENT_TOP_INSET)
-            .max(0.0);
-        let _ = content_host.as_element().SetWidth(width);
-        let _ = content_host.as_element().SetHeight(height);
-        content_host.force_relayout();
+        // `native_ui::TabView` owns this host after return. Set its initial viewport here while it
+        // is still suppressed; the selected entry's later activation performs the first layout.
+        let (width, height) = self.content_size();
+        self.resize_content_host(&content_host, width, height);
         if let Ok(items) = self.xaml.TabItems() {
             let item: windows::core::IInspectable = item.into();
             let _ = items.InsertAt(index as u32, &item);
@@ -205,10 +214,6 @@ impl InnerTabView {
         if let Ok(items) = self.xaml.TabItems() {
             let _ = items.RemoveAt(index as u32);
         }
-        // Not removed from `content_hosts` — a closed tab's now-detached `Canvas` just keeps
-        // getting harmlessly resized in the background along with the rest; not worth the
-        // bookkeeping to prune it given `insert_tab`'s `index` and this list's (unordered, append-
-        // only) positions don't otherwise need to correspond.
     }
 
     pub(crate) fn set_tab_title(&self, index: usize, title: &str) {
@@ -226,4 +231,10 @@ impl InnerTabView {
     pub(crate) fn set_selected_index(&self, index: usize) {
         let _ = self.xaml.SetSelectedIndex(index as i32);
     }
+}
+
+fn content_size(xaml: &XamlTabView) -> (f64, f64) {
+    let width = xaml.ActualWidth().unwrap_or(0.0);
+    let height = (xaml.ActualHeight().unwrap_or(0.0) - TAB_VIEW_CONTENT_TOP_INSET).max(0.0);
+    (width, height)
 }

@@ -4812,37 +4812,49 @@ fn emit_for_renderer(
 /// `for` region the way `emit_for_item_subscriptions`' per-item subscriptions do for item-local
 /// properties.
 ///
-/// `#[two_way]` fields are deliberately not handled here: a `for` item's own widget-to-model
-/// write-back path doesn't exist yet anywhere in this codebase (there is no working behavior to
-/// preserve), and adding one is a separate design question from "an `on_*` attribute silently does
-/// nothing", which is what this function closes.
+/// `#[two_way]` fields use the same item-local lifetime: their typed callback clones the current
+/// item `Rc` and calls its generated setter, while `emit_for_item_subscriptions` below owns the
+/// reverse item-to-widget observer. A pure TwoWay template never upgrades or captures the
+/// enclosing component, so replacing the item cannot create a component/widget/item cycle.
 fn emit_for_item_wiring(
     plan: &[PlannedNode],
     ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
 ) -> TokenStream {
-    let has_any_wiring = plan.iter().any(|node| {
+    let has_event_wiring = plan.iter().any(|node| {
         node.stored
             && node
                 .attributes
                 .iter()
                 .any(|attribute| attribute.name.starts_with("on_"))
     });
-    if !has_any_wiring {
+    let has_two_way_wiring = plan.iter().any(|node| {
+        node.stored
+            && node.attributes.iter().any(|attribute| {
+                attribute.kind == AssignmentKind::TwoWay
+                    && table
+                        .resolve(from, &node.type_path)
+                        .is_some_and(|info| info.two_way_fields.contains(&attribute.name))
+            })
+    });
+    if !has_event_wiring && !has_two_way_wiring {
         return TokenStream::new();
     }
-    let target = &ctx.target;
     let self_mode = EmitMode::WithSelf(quote! { __elwindui_for_item_this });
-    let mut out = quote! {
-        let __elwindui_for_item_this: std::rc::Rc<#target> = self
-            .__self_weak
-            .borrow()
-            .upgrade()
-            .expect("for-loop item wiring: object must already be Rc-constructed")
-            .downcast::<#target>()
-            .expect("for-loop item wiring: most-derived object must be this component");
-    };
+    let mut out = TokenStream::new();
+    if has_event_wiring {
+        let target = &ctx.target;
+        out.extend(quote! {
+            let __elwindui_for_item_this: std::rc::Rc<#target> = self
+                .__self_weak
+                .borrow()
+                .upgrade()
+                .expect("for-loop item wiring: object must already be Rc-constructed")
+                .downcast::<#target>()
+                .expect("for-loop item wiring: most-derived object must be this component");
+        });
+    }
     for node in plan {
         if !node.stored {
             continue;
@@ -4853,6 +4865,40 @@ fn emit_for_item_wiring(
         for attribute in &node.attributes {
             let name = &attribute.name;
             let expr = &attribute.value;
+            if attribute.kind == AssignmentKind::TwoWay {
+                let Some(path) = (match expr {
+                    ViewExpr::Path(path) => Some(path),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let [owner, field] = path.as_slice() else {
+                    continue;
+                };
+                if ctx.closure_param.as_deref() != Some(owner.as_str()) {
+                    continue;
+                }
+                let Some(target_info) = info else {
+                    continue;
+                };
+                if !target_info.two_way_fields.contains(name) {
+                    continue;
+                }
+                let source = format_ident!("{owner}");
+                let source_setter = format_ident!("set_{field}");
+                let change_setter = format_ident!("set_on_{name}_change");
+                out.extend(builtin_trait_use(&node.type_path, Some(target_info)));
+                out.extend(quote! {
+                    {
+                        let widget = #widget_binding;
+                        let source = std::rc::Rc::clone(#source);
+                        widget.#change_setter(Box::new(move |new_value| {
+                            source.#source_setter(new_value);
+                        }));
+                    }
+                });
+                continue;
+            }
             if name.strip_prefix("on_").is_none() {
                 continue;
             }
@@ -5203,11 +5249,12 @@ fn dynamic_collection_item_trait(
 /// Keeping this conservative is intentional: an unresolved expression must never be treated as
 /// identity-stable merely because it happens to yield `Rc` values at runtime.
 ///
-/// Two independent ways to prove that: the collection's own declared type textually says
-/// `Vec<Rc<T>>` (checked here directly), or the loop body hands the item to some child element's
-/// `#[bindable]` field (`for_body_binds_item_to_a_bindable_field`, below) — the latter deliberately
-/// never resolves the *item*'s own type (e.g. `DocumentViewModel`) at all, only the *receiving
-/// component*'s (e.g. `DocumentView`), for the same reason `#[bindable]` itself exists: a
+/// Three independent ways to prove that: the collection's own declared type textually says
+/// `Vec<Rc<T>>` (checked here directly), a known viewmodel's `#[observable] Vec<T>` field (which
+/// `generate_viewmodel` stores as `Vec<Rc<T>>`), or the loop body hands the item to some child
+/// element's `#[bindable]` field (`for_body_binds_item_to_a_bindable_field`, below) — the latter
+/// deliberately never resolves the *item*'s own type (e.g. `DocumentViewModel`) at all, only the
+/// *receiving component*'s (e.g. `DocumentView`), for the same reason `#[bindable]` itself exists: a
 /// `#[elwindui::viewmodel]` type is commonly declared in a plain `.rs` file (or a sibling
 /// `#[elwindui::component]` proc-macro invocation) that the `for` loop's own file/module never has
 /// a `use` for and was never going to need one, since it only ever references the item through the
@@ -5238,23 +5285,36 @@ fn collection_type_is_vec_rc(
     let ViewExpr::Path(path) = collection else {
         return false;
     };
-    let [owner, field] = path.as_slice() else {
-        return false;
-    };
-    let Some(owner_type) = ctx.own_fields.get(owner) else {
-        return false;
-    };
-    let Some(owner_info) = table.resolve(from, strip_rc_wrapper(owner_type)) else {
-        return false;
-    };
-    let Some(collection_type) = owner_info.value_field_types.get(field) else {
-        return false;
+    let (collection_type, is_viewmodel_observable) = match path.as_slice() {
+        [field] => match ctx.own_fields.get(field) {
+            Some(collection_type) => (collection_type.as_str(), false),
+            None => return false,
+        },
+        [owner, field] => {
+            let Some(owner_type) = ctx.own_fields.get(owner) else {
+                return false;
+            };
+            let Some(owner_info) = table.resolve(from, strip_rc_wrapper(owner_type)) else {
+                return false;
+            };
+            let Some(collection_type) = owner_info.value_field_types.get(field) else {
+                return false;
+            };
+            (
+                collection_type.as_str(),
+                owner_info.is_viewmodel
+                    && matches!(owner_info.fields.get(field), Some(FieldKind::Observable))
+                    && nested_vec_item_type(collection_type, from, table).is_some(),
+            )
+        }
+        _ => return false,
     };
     let compact = collection_type
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>();
-    compact.starts_with("Vec<Rc<")
+    is_viewmodel_observable
+        || compact.starts_with("Vec<Rc<")
         || compact.starts_with("Vec<std::rc::Rc<")
         || compact.starts_with("Vec<rc::Rc<")
 }
@@ -10410,6 +10470,52 @@ view NotepadWindow {
         let rendered = generated.to_string();
         assert!(rendered.contains("replace_rc_items"));
         assert!(rendered.contains("item . clone"));
+    }
+
+    #[test]
+    fn generates_two_way_wiring_for_an_rc_for_item() {
+        let module = parse_module(
+            r#"
+viewmodel Row {
+    #[observable]
+    content: String = String::new(),
+}
+viewmodel Rows {
+    #[observable]
+    rows: Vec<Row> = Vec::new(),
+}
+component Search {
+    #[bindable]
+    vm: Rc<Rows>,
+}
+view Search {
+    VerticalLayout {
+        for row in vm.rows { TextArea { text <=> row.content } }
+    }
+}
+"#,
+        )
+        .expect("for-item two-way source should parse");
+        let all_modules: Vec<_> = std::iter::once(module.clone())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        crate::validate::validate(&all_modules)
+            .expect("direct observable for-item field must validate");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("for_item_two_way", &generated);
+        let rendered = generated.to_string();
+        assert!(rendered.contains("replace_rc_items"), "{rendered}");
+        assert!(rendered.contains("set_on_text_change"), "{rendered}");
+        assert!(rendered.contains("source . set_content"), "{rendered}");
+        assert!(
+            rendered.contains("__dynamic_item_subscriptions"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("__elwindui_for_item_this"),
+            "pure TwoWay wiring must not retain the enclosing component: {rendered}"
+        );
     }
 
     #[test]

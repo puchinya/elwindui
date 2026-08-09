@@ -715,7 +715,9 @@ struct VolumeSlider {
   `#[param]`だけなら初期化時の一度だけ評価する
 - `property: once!(expression)`は依存収集を抑止し、初期化時のスナップショットとして一度だけ評価する
 - `property <=> writable_target`は明示的なTwoWay。RHSは同一componentの可変`#[prop]`/
-  `#[state]`、または直接の`#[bindable] owner.property`に限る
+  `#[state]`、直接の`#[bindable] owner.property`、または安定した`for` itemの直接の
+  `item.property`に限る。後者は明示的な`Vec<Rc<T>>`または`#[observable] Vec<T>`として
+  生成されるviewmodel collectionだけで使え、propertyは`#[prop]`または`#[observable]`でなければならない
 - `#[state(default = expr)]`はcomponent専用の非公開リアクティブ状態。defaultは必須で、
   コンストラクタ引数・公開getter/setter・props API・継承フィールドには現れない
 
@@ -727,7 +729,9 @@ struct VolumeSlider {
 更新し、親の `TabView` の children コレクションを再同期しない。二方向バインディングのwidget→model側は
 setterを呼ぶだけで、別途コンポーネント全体の再同期を呼んではならない。
 
-購読は `Subscription` で表され、表示領域が破棄されるとDropにより解除される。`for`/`if`/`match`
+購読は `Subscription` で表され、表示領域が破棄されるとDropにより解除される。`for` itemの
+TwoWayコールバックも同じ`DynamicChild`の寿命に属し、itemが置換・削除されると購読とともに解放される。
+`for`/`if`/`match`
 の構造変更は親view全体ではなく対応する動的領域だけを差し替える。依存プロパティを静的に
 特定できない任意Rust式はビルド時エラーとし、必要な計算は `#[computed]` または解析可能な
 prop参照へ分解する。

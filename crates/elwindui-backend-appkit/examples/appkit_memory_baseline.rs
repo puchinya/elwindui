@@ -9,10 +9,10 @@ use elwindui_backend_appkit::diagnostics::{MemoryBaselineCase, show_memory_basel
 fn main() {
     let case = match std::env::args().nth(1).as_deref() {
         Some("a") | Some("A") => MemoryBaselineCase::EmptyNsView,
-        Some("b") | Some("B") => MemoryBaselineCase::EmptyTreeHost,
+        Some("b") | Some("B") | Some("e") | Some("E") => MemoryBaselineCase::EmptyTreeHost,
         Some("c") | Some("C") => MemoryBaselineCase::LayerBackedTreeHost,
         _ => {
-            eprintln!("usage: appkit-memory-baseline <A|B|C>");
+            eprintln!("usage: appkit-memory-baseline <A|B|C|E>");
             std::process::exit(2);
         }
     };

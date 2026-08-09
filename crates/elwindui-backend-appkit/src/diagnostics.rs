@@ -12,8 +12,8 @@ use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadOnly, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSStackView,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CAGradientLayer, CALayer, CAShapeLayer, CATextLayer};
@@ -44,6 +44,10 @@ pub struct AppKitMemorySnapshot {
     pub native_nsview_count: u32,
     /// Number of reachable views for which AppKit reports a backing layer.
     pub layer_backed_nsview_count: u32,
+    /// Number of reachable native `NSStackView` objects.
+    pub native_nsstackview_count: u32,
+    /// Number of reachable native `NSButton` objects.
+    pub native_nsbutton_count: u32,
     /// Number of unique reachable Core Animation layers, including mask-only layers.
     pub live_calayer_count: u32,
     /// Number of reachable layers that are `CAShapeLayer` instances.
@@ -72,6 +76,7 @@ impl AppKitMemorySnapshot {
                 "{{\"physical_footprint_bytes\":{},\"resident_bytes\":{},",
                 "\"attached_tree_host_count\":{},\"hidden_tree_host_count\":{},",
                 "\"native_nsview_count\":{},\"layer_backed_nsview_count\":{},",
+                "\"native_nsstackview_count\":{},\"native_nsbutton_count\":{},",
                 "\"live_calayer_count\":{},\"live_shape_layer_count\":{},",
                 "\"live_text_layer_count\":{},\"live_gradient_layer_count\":{},",
                 "\"live_mask_layer_count\":{},\"image_cache_bytes\":{},",
@@ -84,6 +89,8 @@ impl AppKitMemorySnapshot {
             self.hidden_tree_host_count,
             self.native_nsview_count,
             self.layer_backed_nsview_count,
+            self.native_nsstackview_count,
+            self.native_nsbutton_count,
             self.live_calayer_count,
             self.live_shape_layer_count,
             self.live_text_layer_count,
@@ -201,6 +208,8 @@ fn collect_view(
         host.as_ref().is_some(),
         host.as_ref().is_some_and(|host| host.isHidden()),
         layer.is_some(),
+        view.downcast_ref::<NSStackView>().is_some(),
+        view.downcast_ref::<NSButton>().is_some(),
     );
     if let Some(layer) = layer {
         collect_layer(&layer, snapshot, seen_layers, seen_masks);
@@ -231,10 +240,18 @@ fn record_view_metadata(
     is_tree_host: bool,
     is_hidden: bool,
     is_layer_backed: bool,
+    is_stack_view: bool,
+    is_button: bool,
 ) {
     snapshot.native_nsview_count += 1;
     if is_layer_backed {
         snapshot.layer_backed_nsview_count += 1;
+    }
+    if is_stack_view {
+        snapshot.native_nsstackview_count += 1;
+    }
+    if is_button {
+        snapshot.native_nsbutton_count += 1;
     }
     if is_tree_host {
         snapshot.attached_tree_host_count += 1;
@@ -292,6 +309,8 @@ mod tests {
             "hidden_tree_host_count",
             "native_nsview_count",
             "layer_backed_nsview_count",
+            "native_nsstackview_count",
+            "native_nsbutton_count",
             "live_calayer_count",
             "live_shape_layer_count",
             "live_text_layer_count",
@@ -337,13 +356,15 @@ mod tests {
     #[test]
     fn view_metadata_counts_backing_layers_and_hidden_tree_hosts() {
         let mut snapshot = AppKitMemorySnapshot::default();
-        record_view_metadata(&mut snapshot, false, false, true);
-        record_view_metadata(&mut snapshot, true, false, true);
-        record_view_metadata(&mut snapshot, true, true, true);
+        record_view_metadata(&mut snapshot, false, false, true, true, false);
+        record_view_metadata(&mut snapshot, true, false, true, true, true);
+        record_view_metadata(&mut snapshot, true, true, true, false, true);
 
         assert_eq!(snapshot.native_nsview_count, 3);
         assert_eq!(snapshot.attached_tree_host_count, 2);
         assert_eq!(snapshot.hidden_tree_host_count, 1);
         assert_eq!(snapshot.layer_backed_nsview_count, 3);
+        assert_eq!(snapshot.native_nsstackview_count, 2);
+        assert_eq!(snapshot.native_nsbutton_count, 2);
     }
 }

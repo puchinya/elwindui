@@ -11,4 +11,3 @@ pub trait MenuItem {
     fn set_shortcut(&self, key_equivalent: &str);
     fn set_on_select(&self, callback: Box<dyn Fn()>);
 }
-

@@ -606,4 +606,3 @@ fn attached_set_stores_a_value_readable_back_through_get_attached() {
         2
     );
 }
-

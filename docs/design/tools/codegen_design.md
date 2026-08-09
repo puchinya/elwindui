@@ -72,6 +72,8 @@ Rustソース(WinUI3/AppKit/GTK4のいずれのバックエンドクレートに
 - **③定数畳み込み(未実装)**: `docs/design/gui_framework_design.md`§3.3は、`target::backend()`をビルド設定(Cargoのfeature/target triple)から一意に確定し、該当しない `match target::backend() { ... }` の腕や `#[cfg(backend = "...")]` 付き `native!` ブロックを生成対象から静的に除去する設計を定めているが、現在の`elwindui-codegen`にはこの段階が存在しない(`enum Backend`/`target::backend()`はコード中どこにも実装されていない)。実際には生成コードはバックエンドを問わず同一であり、この段階は素通りする。
 - **④コード生成**: 検証済みASTから、バックエンドを問わず同一のRustコードを生成する。ビルトイン要素(`builtin::Window`/`Row`/`Text`等、`docs/specs/builtins_spec.md`付録F)は他コンポーネントと同じ`component`/`view`構文で書かれたリファレンス実装として同一パイプラインで処理される。生成コードが実際にどのバックエンドで動くかは、リンクされる`elwindui-backend-*`クレート(各バックエンドクレートが同名のビルトイン型を実装している)によって決まる——`docs/design/gui_framework_design.md`§1・§3が想定する「バックエンドごとに異なるコードを生成する」段階は現状ここには存在しない。
 
+動的`for`内の`property <=> item.field`は、安定したRc identityと解決可能な可変fieldを検証した後、通常の属性初期setter・item→widgetの`Subscription`・widget→itemの型付き`set_on_<property>_change`を生成する。どちらの購読もitemごとの`DynamicChild`が所有するため、`DynamicChildSlot::replace_rc_items`でitemが削除・置換されると一緒にDropされる。汎用Bindingオブジェクトやバックエンド別の経路は増やさない。
+
 ---
 
 ## 4. 起動方式

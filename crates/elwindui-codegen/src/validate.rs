@@ -280,7 +280,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 module,
                                 c,
                                 &table,
-                                false,
+                                None,
                                 &mut errors,
                             );
                         }
@@ -333,7 +333,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                     module,
                                     c,
                                     &table,
-                                    false,
+                                    None,
                                     &mut errors,
                                 );
                                 check_match_exhaustiveness(
@@ -378,12 +378,18 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ForBinding<'a> {
+    name: &'a str,
+    collection: &'a ViewExpr,
+}
+
 fn check_binding_assignments(
     node: &ElementNode,
     from: &Module,
     component: &ComponentDef,
     table: &SymbolTable,
-    inside_for: bool,
+    for_binding: Option<ForBinding<'_>>,
     errors: &mut Vec<String>,
 ) {
     let target_info = table.resolve(from, &node.type_path);
@@ -398,12 +404,6 @@ fn check_binding_assignments(
         }
         if attribute.kind == AssignmentKind::TwoWay {
             let location = format!("{}:{}", attribute.span.line, attribute.span.column);
-            if inside_for {
-                errors.push(format!(
-                    "{}: {location}: two-way binding in a `for` item template is not implemented",
-                    component.name
-                ));
-            }
             match target_info {
                 Some(info) if info.two_way_fields.contains(&attribute.name) => {}
                 Some(_) => errors.push(format!(
@@ -413,7 +413,18 @@ fn check_binding_assignments(
                 None => {}
             }
 
-            match &attribute.value {
+            if let Some(for_binding) = for_binding {
+                check_for_item_two_way_target(
+                    &attribute.value,
+                    for_binding,
+                    from,
+                    component,
+                    table,
+                    &location,
+                    errors,
+                );
+            } else {
+                match &attribute.value {
                 ViewExpr::Path(path) if path.len() == 1 => {
                     let source = &path[0];
                     match component.fields.iter().find(|field| &field.name == source) {
@@ -467,6 +478,7 @@ fn check_binding_assignments(
                     "{}: {location}: two-way RHS must be a writable component field or direct bindable owner.field",
                     component.name
                 )),
+                }
             }
         }
         check_binding_assignments_in_expr(
@@ -474,14 +486,14 @@ fn check_binding_assignments(
             from,
             component,
             table,
-            inside_for,
+            for_binding,
             errors,
         );
     }
     for child in &node.children {
         match child {
             ChildEntry::Literal(element) => {
-                check_binding_assignments(element, from, component, table, inside_for, errors)
+                check_binding_assignments(element, from, component, table, for_binding, errors)
             }
             ChildEntry::Ref(_) => {}
             ChildEntry::If {
@@ -491,24 +503,190 @@ fn check_binding_assignments(
             } => {
                 for child in then_branch.iter().chain(else_branch) {
                     check_binding_assignment_child(
-                        child, from, component, table, inside_for, errors,
+                        child,
+                        from,
+                        component,
+                        table,
+                        for_binding,
+                        errors,
                     );
                 }
             }
             ChildEntry::Match { arms, .. } => {
                 for child in arms.iter().flat_map(|arm| &arm.body) {
                     check_binding_assignment_child(
-                        child, from, component, table, inside_for, errors,
+                        child,
+                        from,
+                        component,
+                        table,
+                        for_binding,
+                        errors,
                     );
                 }
             }
-            ChildEntry::For { body, .. } => {
+            ChildEntry::For {
+                binding,
+                collection,
+                body,
+            } => {
                 for child in body {
-                    check_binding_assignment_child(child, from, component, table, true, errors);
+                    check_binding_assignment_child(
+                        child,
+                        from,
+                        component,
+                        table,
+                        Some(ForBinding {
+                            name: binding,
+                            collection,
+                        }),
+                        errors,
+                    );
                 }
             }
         }
     }
+}
+
+fn check_for_item_two_way_target(
+    expr: &ViewExpr,
+    for_binding: ForBinding<'_>,
+    from: &Module,
+    component: &ComponentDef,
+    table: &SymbolTable,
+    location: &str,
+    errors: &mut Vec<String>,
+) {
+    let ViewExpr::Path(path) = expr else {
+        errors.push(format!(
+            "{}: {location}: two-way binding in a `for` item template must target a direct `{}` field path",
+            component.name, for_binding.name
+        ));
+        return;
+    };
+    let [owner, property] = path.as_slice() else {
+        errors.push(format!(
+            "{}: {location}: unsupported two-way `for` item path `{}`; use `{}.field`",
+            component.name,
+            path.join("."),
+            for_binding.name
+        ));
+        return;
+    };
+    if owner != for_binding.name {
+        errors.push(format!(
+            "{}: {location}: two-way binding in a `for` item template must target `{}.field`",
+            component.name, for_binding.name
+        ));
+        return;
+    }
+
+    let item_info = match resolve_for_item_info(for_binding.collection, from, component, table) {
+        Ok(info) => info,
+        Err(reason) => {
+            errors.push(format!(
+                "{}: {location}: cannot use `{}` as a two-way `for` item target: {reason}",
+                component.name,
+                path.join(".")
+            ));
+            return;
+        }
+    };
+    match item_info.fields.get(property) {
+        Some(FieldKind::Prop | FieldKind::Observable) => {}
+        Some(kind) => errors.push(format!(
+            "{}: {location}: `{}.{property}` is {kind:?}; a two-way `for` item target must be a mutable #[prop] or #[observable] field",
+            component.name, for_binding.name
+        )),
+        None => errors.push(format!(
+            "{}: {location}: `for` item type has no property `{property}`",
+            component.name
+        )),
+    }
+}
+
+fn resolve_for_item_info<'a>(
+    collection: &ViewExpr,
+    from: &Module,
+    component: &ComponentDef,
+    table: &'a SymbolTable,
+) -> Result<&'a crate::codegen::TypeInfo, String> {
+    let (collection_ty, is_viewmodel_observable) = match collection {
+        ViewExpr::Path(path) if path.len() == 1 => {
+            let name = &path[0];
+            let field = component
+                .fields
+                .iter()
+                .find(|field| &field.name == name)
+                .ok_or_else(|| format!("collection `{name}` is not a component field"))?;
+            (field.ty.as_str(), false)
+        }
+        ViewExpr::Path(path) if path.len() == 2 => {
+            let owner = &path[0];
+            let name = &path[1];
+            let owner_field = component
+                .fields
+                .iter()
+                .find(|field| &field.name == owner)
+                .ok_or_else(|| format!("collection owner `{owner}` is not a component field"))?;
+            if !owner_field
+                .attrs
+                .iter()
+                .any(|attr| matches!(attr, Attr::Bindable))
+            {
+                return Err(format!("collection owner `{owner}` is not #[bindable]"));
+            }
+            let owner_ty = strip_rc_wrapper(&owner_field.ty);
+            let owner_info = table
+                .resolve(from, owner_ty)
+                .ok_or_else(|| format!("cannot resolve collection owner type `{owner_ty}`"))?;
+            let collection_ty = owner_info
+                .value_field_types
+                .get(name)
+                .ok_or_else(|| format!("bindable owner `{owner}` has no collection `{name}`"))?;
+            (
+                collection_ty.as_str(),
+                owner_info.is_viewmodel
+                    && matches!(owner_info.fields.get(name), Some(FieldKind::Observable)),
+            )
+        }
+        ViewExpr::Path(path) => {
+            return Err(format!(
+                "collection path `{}` is not a direct component or bindable-owner field",
+                path.join(".")
+            ));
+        }
+        _ => return Err("collection is not a statically resolvable path".to_string()),
+    };
+
+    let item_ty = explicit_rc_vec_item_type(collection_ty).or_else(|| {
+        if is_viewmodel_observable {
+            collection_ty
+                .strip_prefix("Vec<")
+                .and_then(|inner| inner.strip_suffix(">"))
+                .map(str::trim)
+        } else {
+            None
+        }
+    });
+    let item_ty = item_ty.ok_or_else(|| {
+        format!(
+            "collection type `{collection_ty}` does not provide stable Vec<Rc<T>> item identity"
+        )
+    })?;
+    table
+        .resolve(from, item_ty)
+        .ok_or_else(|| format!("cannot resolve `for` item type `{item_ty}`"))
+}
+
+fn explicit_rc_vec_item_type(ty: &str) -> Option<&str> {
+    let ty = ty.trim();
+    let inner = ty
+        .strip_prefix("Vec<")
+        .or_else(|| ty.strip_prefix("std::vec::Vec<"))?
+        .strip_suffix(">")?
+        .trim();
+    let item = strip_rc_wrapper(inner);
+    (item != inner).then_some(item)
 }
 
 fn unsupported_dependency_macro(expr: &ViewExpr) -> Option<String> {
@@ -570,11 +748,11 @@ fn check_binding_assignment_child(
     from: &Module,
     component: &ComponentDef,
     table: &SymbolTable,
-    inside_for: bool,
+    for_binding: Option<ForBinding<'_>>,
     errors: &mut Vec<String>,
 ) {
     if let ChildEntry::Literal(element) = child {
-        check_binding_assignments(element, from, component, table, inside_for, errors);
+        check_binding_assignments(element, from, component, table, for_binding, errors);
     } else {
         let wrapper = ElementNode {
             type_path: String::new(),
@@ -583,7 +761,7 @@ fn check_binding_assignment_child(
             attribute_shortcuts: Vec::new(),
             children: vec![child.clone()],
         };
-        check_binding_assignments(&wrapper, from, component, table, inside_for, errors);
+        check_binding_assignments(&wrapper, from, component, table, for_binding, errors);
     }
 }
 
@@ -592,17 +770,17 @@ fn check_binding_assignments_in_expr(
     from: &Module,
     component: &ComponentDef,
     table: &SymbolTable,
-    inside_for: bool,
+    for_binding: Option<ForBinding<'_>>,
     errors: &mut Vec<String>,
 ) {
     match expr {
         ViewExpr::Element(element) => {
-            check_binding_assignments(element, from, component, table, inside_for, errors)
+            check_binding_assignments(element, from, component, table, for_binding, errors)
         }
         ViewExpr::Closure {
             body: ClosureBody::Element(element),
             ..
-        } => check_binding_assignments(element, from, component, table, inside_for, errors),
+        } => check_binding_assignments(element, from, component, table, for_binding, errors),
         _ => {}
     }
 }
@@ -2955,7 +3133,7 @@ view Search { TextBlock { text <=> query } }
     }
 
     #[test]
-    fn rejects_non_writable_two_way_rhs_and_for_item_two_way() {
+    fn validates_for_item_two_way_targets() {
         let expression_src = r#"
 component Search { }
 view Search { TextArea { text <=> format!("fixed") } }
@@ -2989,7 +3167,99 @@ view Search {
         assert!(
             errors
                 .iter()
-                .any(|error| error.contains("for` item template")),
+                .any(|error| error.contains("does not provide stable Vec<Rc<T>> item identity")),
+            "errors: {errors:?}"
+        );
+
+        let valid_src = r#"
+viewmodel Row {
+    #[observable]
+    content: String = String::new(),
+    #[computed]
+    label: String = content,
+}
+viewmodel Rows {
+    #[observable]
+    rows: Vec<Row> = Vec::new(),
+}
+component Search {
+    #[bindable]
+    vm: Rc<Rows>,
+}
+view Search {
+    VerticalLayout {
+        for row in vm.rows { TextArea { text <=> row.content } }
+    }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(valid_src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        validate(&modules).expect("direct observable for-item field must be writable");
+
+        let explicit_rc_src = r#"
+viewmodel Row {
+    #[observable]
+    content: String = String::new(),
+}
+component Search {
+    #[param]
+    items: Vec<Rc<Row>>,
+}
+view Search {
+    VerticalLayout {
+        for row in items { TextArea { text <=> row.content } }
+    }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(explicit_rc_src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        validate(&modules).expect("explicit Vec<Rc<T>> item field must be writable");
+
+        let computed_src = valid_src.replace("row.content", "row.label");
+        let modules: Vec<_> = std::iter::once(parse_module(&computed_src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors.iter().any(|error| error.contains("is Computed")),
+            "errors: {errors:?}"
+        );
+
+        let nested_src = valid_src.replace("row.content", "row.content.value");
+        let modules: Vec<_> = std::iter::once(parse_module(&nested_src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("unsupported two-way `for` item path")),
+            "errors: {errors:?}"
+        );
+
+        let transient_src = valid_src.replace("row.content", "format!(\"{}\", row.content)");
+        let modules: Vec<_> = std::iter::once(parse_module(&transient_src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("must target a direct `row` field path")),
+            "errors: {errors:?}"
+        );
+
+        let unresolved_src = valid_src.replace("Vec<Row>", "Vec<Missing>");
+        let modules: Vec<_> = std::iter::once(parse_module(&unresolved_src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("cannot resolve `for` item type `Missing`")),
             "errors: {errors:?}"
         );
     }

@@ -85,8 +85,7 @@ struct NotepadWindow {
                         DocumentView { doc: doc }
                     }
                 }
-                selected_index: vm.active_tab
-                on_select: |index| vm.select_tab(index)
+                selected_index <=> vm.active_tab
                 on_new_tab: vm.new_tab
             }
         }

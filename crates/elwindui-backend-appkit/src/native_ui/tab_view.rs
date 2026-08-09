@@ -2,9 +2,7 @@
 
 use super::NativeControl;
 use crate::AnyView;
-use crate::inner::{
-    InnerTabView, TabChipImpl,
-};
+use crate::inner::{InnerTabView, TabChipImpl};
 use elwindui_core::ui::UIElementExt;
 use objc2::rc::Retained;
 use std::any::Any;
@@ -157,6 +155,12 @@ impl TabView {
     #[inherent]
     pub fn set_on_select(&self, callback: Box<dyn Fn(usize)>) {
         *self.on_select.borrow_mut() = Some(callback);
+    }
+
+    /// Registers the write-back callback used by a two-way `selected_index` binding.
+    #[inherent]
+    pub fn set_on_selected_index_change(&self, callback: Box<dyn Fn(usize)>) {
+        self.set_on_select(callback);
     }
 
     #[inherent]

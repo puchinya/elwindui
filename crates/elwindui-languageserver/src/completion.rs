@@ -105,7 +105,9 @@ fn field_completion_item(name: &str, kind: FieldKind) -> CompletionItem {
     let item_kind = match kind {
         FieldKind::Action => CompletionItemKind::METHOD,
         FieldKind::Computed | FieldKind::Attached => CompletionItemKind::PROPERTY,
-        FieldKind::Observable | FieldKind::Prop | FieldKind::Param => CompletionItemKind::FIELD,
+        FieldKind::Observable | FieldKind::Prop | FieldKind::Param | FieldKind::State => {
+            CompletionItemKind::FIELD
+        }
     };
     CompletionItem {
         label: name.to_string(),

@@ -114,7 +114,7 @@ fn main() {
 | | `#[param]` | 既定(`prop`) |
 |---|---|---|
 | 変更可能性 | 実体化時のみ、以後イミュータブル | 実行時いつでも変更可 |
-| 使える式 | リテラル・他paramの参照・純粋関数・`env::*`・`once`値のみ | 上記に加え`bind!`・propの参照・`#[computed]` |
+| 使える式 | リテラル・他paramの参照・純粋関数・`env::*`・`once!`値のみ | 上記に加えprop/state/computed/bindable ownerを参照するリアクティブ式 |
 | 主な用途 | 構造分岐(`if`/`for`の条件)、レイアウト決定 | 表示内容・状態の動的更新 |
 
 `#[computed]`は依存する他フィールドの変化に応じ自動再評価される読み取り専用の算出値であり、外部からの代入は許されない。
@@ -137,7 +137,7 @@ Rust標準の`if`/`for`/`match`をそのまま採用し、専用ディレクテ�
 | `#[format(email)]` | 組込み検証型(email, url, color_hex等) |
 | `#[check(expr, message = "...")]` | 相関検証(数式化できない場合) |
 
-検証タイミング: リテラル値による制約違反はビルド時静的エラー、`bind!`等の動的値による違反は実行時エラー。
+検証タイミング: リテラル値による制約違反はビルド時静的エラー、リアクティブ属性式等の動的値による違反は実行時エラー。
 
 ### 2.5 `enum`
 
@@ -159,10 +159,10 @@ Rust標準の`if`/`for`/`match`をそのまま採用し、専用ディレクテ�
 ### 2.7 データバインディング
 
 ```rust
-volume: i32 = bind!(settings.volume, TwoWay),
+Slider { value <=> settings.volume }
 ```
 
-`bind!(path, mode)`のmodeは`OneWay`(既定、外部→propの一方向反映)/`TwoWay`(UI操作で外部にも書き戻す)/`OneTime`(実体化時に一度だけ取り込み以後固定)。参照先は`store`(§7.1)・`viewmodel`(§7.2)・ビルトインStore(§8.8)のフィールドパスであり、いずれも`#[param]`から直接参照することはできない(13章ルール12・13)。
+通常の`property: expression`は依存解析でOnceまたはOneWayへ分類する。`once!(expression)`は明示的な初期スナップショット、`property <=> writable_target`は明示的なTwoWayである。TwoWayのRHSは同一componentの可変`#[prop]`/`#[state]`、または直接の`#[bindable] owner.property`に限定し、`#[param]`や`#[computed]`には書き戻さない。
 
 ### 2.8 多言語対応(i18n)
 
@@ -930,9 +930,9 @@ struct App {
 
 ### 7.1 グローバル状態(Store) 📋
 
-`bind!(settings.volume, TwoWay)`のように暗黙に扱ってきた`settings`を、`store`という専用構文で明示的に定義する。
+`settings.volume`のように属性式から参照する共有状態のownerを、`store`という専用構文で明示的に定義する。
 
-**実装状況**: `store`宣言構文は`elwindui-codegen`のパーサーに未実装(現状の`bind!`/`#[observable]`/`#[computed]`は`viewmodel`向けにのみ実装されている)。本節は設計のみで、対応するRustマクロ形式(`#[elwindui::store]`のようなもの)も未設計であるため、以下はテキスト構文のまま示す。
+**実装状況**: `store`宣言構文は`elwindui-codegen`のパーサーに未実装(現状の`#[observable]`/`#[computed]`は`viewmodel`向けにのみ実装されている)。本節は設計のみで、対応するRustマクロ形式(`#[elwindui::store]`のようなもの)も未設計であるため、以下はテキスト構文のまま示す。
 
 ```rust
 store AppSettings {
@@ -947,12 +947,12 @@ store AppSettings {
 - `store`は`component`と似た構文だが`view`を持たない。状態のみを保持する共有可能なデータ定義
 - フィールドの型・制約構文は`component`のprop定義と共通
 - `#[persist]`が付いたフィールドはアプリ終了後もディスクに永続化される(実際の方式はバックエンドの責務)
-- 参照は`bind!(AppSettings.volume, TwoWay)`。`AppSettings`は既定でシングルトン
-- storeの変更はプレーンなRust構造体フィールドとして通常ロジックから直接代入でき(`AppSettings.volume = 0;`)、`bind!`で購読する全propに伝播する
-- **`#[param]`はstoreを直接参照できない**(13章ルール13)。storeのような実行時変化しうる値は必ず`prop`側で`bind!`を介して取り込む
+- storeをViewへ公開する場合は`#[bindable]` ownerとして注入し、`Slider { value <=> settings.volume }`のように使用箇所で代入方向を宣言する
+- storeの変更はPropertyChanged通知を通じ、`property: settings.volume`で参照する表示へ伝播する
+- **`#[param]`はstoreを直接参照できない**(13章ルール13)
 - シングルトンでなくインスタンスを複数持たせたい場合は`#[scoped]`を付け、`#[param] #[inject]`で注入する(ドキュメント単位・ウィンドウ単位のstoreなど)
 
-**`ControlTemplate<Self>`の広域既定値(WinUI3の`Style`の代替)**: 複数コンポーネントに跨って既定テンプレートを共有・一括変更したい(WinUI3で`Style`を差し替えると画面上の全`Button`が変わる、という用途)場合、新しい仕組みを作らず`store`+`bind!`をそのまま使う:
+**`ControlTemplate<Self>`の広域既定値(WinUI3の`Style`の代替)**: 複数コンポーネントに跨って既定テンプレートを共有・一括変更したい場合、storeを`#[bindable]` ownerとして注入し、通常のOneWay属性式を使う:
 
 ```rust
 // store はRustマクロ形式が未設計のため、テキスト構文のまま示す(上記の実装状況の注を参照)
@@ -964,12 +964,14 @@ store ButtonTheme {
 ```rust
 #[elwindui::component(inherits Control)]
 struct Button {
-    #[prop(default = bind!(ButtonTheme.template, OneWay))]
+    #[prop]
     template: ControlTemplate<Self>,
+
+    body: view! { Control { template: button_theme.template } }
 }
 ```
 
-`ButtonTheme.template = other_template_fn;`という普通の代入だけで、`bind!(.., OneWay)`購読中の全`Button`(自分で`template`を明示上書きしていないもの)が既存の`PropertyChanged`通知経由で自動再構築される――新しい伝播機構は不要。個別インスタンスでの上書きも、構築時に`template:`を明示指定すれば既存の「呼び出し側指定がデフォルト初期化式より優先される」という一般規則がそのまま「ローカル値がStyleより優先」を実現する。
+`ButtonTheme.template = other_template_fn;`という普通の代入だけで、`template: button_theme.template`を参照する全`Button`が既存のPropertyChanged通知経由で自動再構築される。
 
 WinUI3の`Style`/`Template`が持つ「値ソースごとの優先順位を持つ動的プロパティバッグ」(DependencyProperty)、あるいはSwiftUIの`Environment`(木の位置に応じた暗黙値伝播)に相当する仕組みは、ElwindUILには存在しない。`#[scoped] store`を使えば区画ごとに異なるテーマを持たせられるが、注入は常に`#[inject]`で明示的――WPF/XAMLの`DynamicResource`やSwiftUIの`Environment`のように、**途中の階層から暗黙に(中間コンポーネントを経由せず)差し替える**ことはできない。この非対称性は既知の制約として残す。将来この種の「祖先を辿って最も近い定義を解決する」仕組みが必要になった場合は、ルーティングイベント(§5.10)が既に使っている`visual_parent`を辿るバブリングと同じインフラ、および`on_mount`ライフサイクルフック(§6.1、Visualツリー接続後に発火)を組み合わせた祖先探索スコープ(`ThemeScope`的なbuiltin)が検討候補になるが、これは本節の設計には含まない。
 
@@ -1018,7 +1020,7 @@ mod notepad_view_model {
 - 非同期化したい場合は単に`async fn`と書く — 専用の属性は不要で、`fn`自体の`async`キーワードから構造的に判定される。生成コードは`elwindui-core::task::spawn_local`で包まれ、View側からは同期アクションと同じ`vm.save()`という書き方で呼べる(§7.3参照)
 - WinUI3/WPFの`Command.CanExecute`に相当する「実行可否」は、専用の仕組みを持たず**普通の`#[computed]`フィールド**として自分で書く(上の`save_can_execute`)。命名規約もなく、View側から好きな名前で`enabled: vm.save_can_execute`のように参照する
 - `viewmodel`は`view`ブロックを持てず、ビルトイン要素への参照が内部に出現すると13章ルール19により静的エラーとなる(V/VM分離が構文レベルで強制される)
-- View側はViewModelを`#[param] #[inject]`(実体は`#[bindable]`、下記)で受け取り(§7.1の`#[scoped]`+`#[inject]`と同じ注入パターン)、双方向編集フィールドは`bind!(vm.field, TwoWay)`でpropに写し取り、読み取り専用表示(`vm.window_title`等)・アクション呼び出し(`vm.save`)は`view`式中で直接参照してよい(13章ルール13の対象外 — ルール13は`#[param]`初期化式への直接参照のみを禁止)。アクション参照に`()`は付けない — `vm.char_count`のような他の0引数ゲッターと同じ規約
+- View側はViewModelを`#[bindable]`で受け取り、双方向編集は`TextArea { text <=> vm.field }`、読み取り専用表示は`TextBlock { text: vm.window_title }`のように使用箇所で方向を宣言する。アクション参照に`()`は付けない
 - テキスト構文のDSLネイティブ`viewmodel Name { ... }`は`#[observable]`/`#[computed]`のみをサポートし、アクションを宣言する手段を持たない。アクションが必要な`viewmodel`は上記のRustネイティブ構文を使う
 
 **`on_*`イベント属性へのクロージャ構文**: `TabView`の`on_select: fn(usize)`のように引数を取るイベントハンドラは、`|param, ...| 式`または`|param, ...| { 文; ... }`という明示的なクロージャで書く(パラメータは型注釈なし・宣言側の`fn(T0, T1, ...)`から位置対応で型が決まる):
@@ -1258,7 +1260,7 @@ theme AppTheme {
 
 - 全`variant`は`tokens{}`宣言のトークンを過不足なく持たねばならない(13章ルール22) — 「ダークモードだけ特定の色が未定義」という事故を静的に防ぐ
 - 参照は`AppTheme.token名`という`.`アクセス(`env::*`やstoreフィールド参照と同じ慣習)。`style{}`からも`Painter`/`Brush`(§5.8)からも同じ記法で参照可能
-- 実行時切り替えはファイル単位アトリビュート`#![theme(AppTheme, variant: bind!(AppSettings.theme_mode, OneWay))]`で宣言し、storeの変化に応じて`AppTheme.*`参照箇所が自動再評価される(既存のprop差分更新の仕組みに乗る)
+- 実行時切り替えはファイル単位アトリビュート`#![theme(AppTheme, variant: AppSettings.theme_mode)]`で宣言し、storeの変化に応じて`AppTheme.*`参照箇所が自動再評価される
 
 ### 8.6 エラーハンドリング(エラーバウンダリ) 📋
 
@@ -1320,7 +1322,7 @@ let text: Option<String> = platform::clipboard::read_text();
 
 Rustバインディングは、iOSは`objc2`(AppKitと同系統のクレート)、Androidは`jni`クレート経由でJava/Kotlin APIを呼ぶ。
 
-- **画面サイズ・向き・セーフエリア**: 実行中に変化しうる値であるため`env::*`を拡張せず、§7.1と同じ`store`の仕組みを使ったビルトインStoreとして提供する(`store platform::Device { orientation, safe_area, window_size }`)。参照は通常のstoreと同じく`bind!`経由必須(13章ルール13)
+- **画面サイズ・向き・セーフエリア**: 実行中に変化しうる値であるため`env::*`を拡張せず、§7.1と同じ`store`の仕組みを使ったビルトインStoreとして提供する(`store platform::Device { orientation, safe_area, window_size }`)。通常のstoreと同じくViewのリアクティブ属性式から参照する(13章ルール13)
 - **セーフエリアのレイアウト反映**: `Window`ビルトインは既定で`respects_safe_area: true`を持ち、§5.3のレイアウトエンジンがセーフエリアを差し引いて利用可能領域を計算する
 - **タッチジェスチャー**: `on_swipe`/`on_pinch`/`on_long_press`を任意のビルトイン要素の共通属性として一般化(§5.7の`on_pointer_down`等の拡張)。デスクトップ系backendはマウス操作からの近似にフォールバック
 - **OSレベルライフサイクル**: §6.2参照
@@ -1368,11 +1370,11 @@ fn knob_renders_correctly_at_half_value() {
 
 コンパイラ/リンタが実行前に検出すべき項目(ツール側の実装対象だが、各ルールがフレームワークのどの不変条件を守っているかは設計上重要なため一覧化する)。
 
-**実装状況**: `crates/elwindui-codegen/src/validate.rs`(約1600行)が静的検証の実装本体だが、本表の24ルールすべてが1対1でルール番号付きで実装されているわけではない(現状ソース中に明示的なルール番号コメントがあるのはルール18・19のみ)。多くはこの表の各節が説明する言語機能(`#[param]`/`bind!`/enum網羅性検査/`viewmodel`のview参照禁止等)のバリデーションとして実質的に実装されているが、ルール9(`native!`/`target::backend()`制限)・14(`NavigationHost`網羅性)・15(オーバーレイ系の分岐制限)は§3.3・§8.2・§8.3で述べた通り前提となる`target::backend()`自体が未実装のため検証しようがない。ルールごとの詳細な実装状況は`docs/status/implementation_status.md`を参照。
+**実装状況**: `crates/elwindui-codegen/src/validate.rs`が静的検証の実装本体だが、本表の24ルールすべてが1対1でルール番号付きで実装されているわけではない。多くはこの表の各節が説明する言語機能(`#[param]`/リアクティブ属性式/`<=>`/enum網羅性検査/`viewmodel`のview参照禁止等)のバリデーションとして実質的に実装されているが、ルール9(`native!`/`target::backend()`制限)・14(`NavigationHost`網羅性)・15(オーバーレイ系の分岐制限)は§3.3・§8.2・§8.3で述べた通り前提となる`target::backend()`自体が未実装のため検証しようがない。ルールごとの詳細な実装状況は`docs/status/implementation_status.md`を参照。
 
 | # | ルール概要 | 関連する本ドキュメントの節 |
 |---|---|---|
-| 1 | `#[param]`初期化式に`bind!`/propの参照/`#[computed]`が出現 → エラー | §2.2 |
+| 1 | `#[param]`初期化式にリアクティブなprop/state/computed/bindable owner参照が出現 → エラー | §2.2 |
 | 2 | `#[param]`初期化式に非純粋関数(`now()`,`random()`等)が出現 → エラー(`env::*`は例外) | §2.2, §2.6, §5.7(`#[animated]`が例外) |
 | 3 | `#[computed]`フィールドへの外部代入 → エラー | §2.2 |
 | 4 | enum値の裸文字列直書き(完全修飾でない参照) → エラー | §2.5 |
@@ -1383,7 +1385,7 @@ fn knob_renders_correctly_at_half_value() {
 | 9 | `#[overrides(builtin::X)]`のない通常componentに`native!`/`target::backend()`出現 → エラー | §3.4, §4.1 |
 | 10 | `Canvas`を含む`view`に`#[accessible(...)]`なし → 警告 | §5.6, §5.7 |
 | 11 | ライフサイクルフック外での`#[param]`相当の再代入 → エラー | §6.1 |
-| 12 | `bind!`参照先が`store`宣言に存在しない → エラー | §7.1 |
+| 12 | リアクティブ属性式または`<=>`の参照先が`store`宣言に存在しない → エラー | §7.1 |
 | 13 | `store`/ViewModel/ビルトインStoreフィールドへの`#[param]`側からの直接参照 → エラー | §7.1, §7.2, §8.8 |
 | 14 | `NavigationHost`内`match route`の非網羅 → エラー | §8.2 |
 | 15 | ダイアログ/メニュー等オーバーレイ系ビルトイン外での`native!`/`target::backend()` → エラー | §8.3 |

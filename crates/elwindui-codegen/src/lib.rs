@@ -3,8 +3,8 @@ pub mod attr_frontend;
 pub mod codegen;
 pub mod component_frontend;
 pub mod parser;
-pub mod theme_frontend;
 mod text_style;
+pub mod theme_frontend;
 pub mod validate;
 
 /// Test-only stand-in for the old, workspace-wide builtin shape source and `builtin_modules()` (removed —
@@ -110,7 +110,7 @@ pub fn generate_dsl_enum_from_item_enum(
 /// `component_frontend::sibling_component_modules()`/`sibling_viewmodel_modules()`/
 /// `sibling_enum_modules()`, so a `view!` can reference an *earlier* same-crate
 /// `#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]` as a plain element
-/// type, `bind!`/field target, or `match`/`if let` subject (each attribute-macro invocation
+/// type, reactive field target, or `match`/`if let` subject (each attribute-macro invocation
 /// otherwise only ever sees its own single annotated item — see
 /// `component_frontend::same_crate_components`'s own doc comment for the full mechanism and its
 /// declaration-order requirement). A `view!` body routinely references
@@ -410,7 +410,10 @@ mod component_impl_tests {
                 .expect("struct should parse");
         let out = generate_component_from_item_struct(None, &item_struct)
             .expect("struct half should succeed");
-        assert!(out.is_empty(), "struct half should emit nothing, got: {out}");
+        assert!(
+            out.is_empty(),
+            "struct half should emit nothing, got: {out}"
+        );
     }
 
     #[test]
@@ -437,7 +440,10 @@ mod component_impl_tests {
 
     #[test]
     fn overrides_gets_a_base_shadow_and_a_rewritten_base_call() {
-        declare(None, r#"struct MiSuper { body: view! { VerticalLayout { } }, }"#);
+        declare(
+            None,
+            r#"struct MiSuper { body: view! { VerticalLayout { } }, }"#,
+        );
         methods(
             r#"
             impl MiSuper {
@@ -472,7 +478,10 @@ mod component_impl_tests {
 
     #[test]
     fn overrides_without_a_matching_overridable_is_rejected() {
-        declare(None, r#"struct MiNoHook { body: view! { VerticalLayout { } }, }"#);
+        declare(
+            None,
+            r#"struct MiNoHook { body: view! { VerticalLayout { } }, }"#,
+        );
         declare(
             Some("crate::MiNoHook"),
             r#"struct MiNoHookChild { body: view! { MiNoHook { } }, }"#,
@@ -491,7 +500,10 @@ mod component_impl_tests {
 
     #[test]
     fn signature_mismatch_against_the_base_is_rejected() {
-        declare(None, r#"struct MiSigBase { body: view! { VerticalLayout { } }, }"#);
+        declare(
+            None,
+            r#"struct MiSigBase { body: view! { VerticalLayout { } }, }"#,
+        );
         methods(
             r#"
             impl MiSigBase {
@@ -519,7 +531,10 @@ mod component_impl_tests {
 
     #[test]
     fn an_untagged_fn_is_rejected() {
-        declare(None, r#"struct MiUntagged { body: view! { VerticalLayout { } }, }"#);
+        declare(
+            None,
+            r#"struct MiUntagged { body: view! { VerticalLayout { } }, }"#,
+        );
         let err = methods(r#"impl MiUntagged { fn helper(&self) -> String { String::new() } }"#)
             .expect_err("an untagged fn should be rejected");
         assert!(
@@ -544,7 +559,10 @@ mod component_impl_tests {
 
     #[test]
     fn a_trait_impl_is_rejected() {
-        declare(None, r#"struct MiTraitImpl { body: view! { VerticalLayout { } }, }"#);
+        declare(
+            None,
+            r#"struct MiTraitImpl { body: view! { VerticalLayout { } }, }"#,
+        );
         let err = methods(r#"impl Clone for MiTraitImpl { fn clone(&self) -> Self { todo!() } }"#)
             .expect_err("a trait impl should be rejected");
         assert!(err.contains("trait impl"), "error: {err}");

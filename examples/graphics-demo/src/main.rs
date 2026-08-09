@@ -881,12 +881,9 @@ fn draw_svg_opacity(context: &mut RenderContext<'_>, rect: Rect) {
     });
 }
 
-// `TabView`'s chip click handler (`elwindui-backend-appkit`'s `native_ui::TabView::rebuild`) only
-// ever fires the DSL `on_select` callback — it never updates `selected_index` on its own (that
-// `usize` observable is one-directional, view -> `on_select` -> model -> back down through
-// `bind!`). A static `selected_index: 0` plus a no-op `on_select` therefore never actually
-// switches tabs; this tiny viewmodel exists solely to round-trip that click back into
-// `selected_index`, the same way `examples/notepad`'s real `active_tab`/`select_tab` does.
+// `TabView`'s chip click handler (`elwindui-backend-appkit`'s `native_ui::TabView::rebuild`) invokes
+// the typed callback installed by `<=>`. This observable is the writable source that receives the
+// selected index and drives the subsequent model-to-widget resynchronization.
 #[elwindui::viewmodel]
 mod graphics_demo_view_model {
     struct GraphicsDemoViewModel {
@@ -894,11 +891,7 @@ mod graphics_demo_view_model {
         selected_tab: usize,
     }
 
-    impl GraphicsDemoViewModel {
-        fn select_tab(&self, index: usize) {
-            selected_tab = index;
-        }
-    }
+    impl GraphicsDemoViewModel {}
 }
 
 #[elwindui::component(inherits Window)]
@@ -972,8 +965,7 @@ struct GraphicsDemoWindow {
                 closable: false
                 on_close: || {}
             }
-            selected_index: vm.selected_tab
-            on_select: |index| { vm.select_tab(index) }
+            selected_index <=> vm.selected_tab
             on_new_tab: || {}
         }
     },

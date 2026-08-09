@@ -131,8 +131,8 @@
 | `style{}`(横断的属性適用) | 📋 **未実装**。`elwindui-codegen`のASTに`Style`ノードが存在しない |
 | 値制約(`#[range]`/`#[step]`/`#[length]`/`#[pattern]`/`#[format]`/`#[check]`) | 🚧 `#[length]`のみ実装 |
 | `enum`(`EnumName::values()`、`#[label(...)]`) | 🚧 `EnumDef`はASTに存在。`values()`/`#[label]`によるi18nラベル付与の実装範囲は個別確認が必要 |
-| `env::*` / `once` | 📋 **未実装**。`elwindui-codegen`にDSLキーワードとしての扱いが無い |
-| `bind!` | ✅ (`Initializer::Bind`) |
+| `env::*` / `once!` | 🚧 `once!(expression)`は属性RHS全体の初期スナップショットとして実装済み。`env::*`は未実装 |
+| 属性代入(`:` / `<=>`)とcomponent state | ✅ `ViewAttribute`の型付き`AssignmentKind`、依存解析による暗黙Once/OneWay、明示TwoWay、`#[state(default = ...)]`を実装 |
 | `viewmodel`アクション | ✅ `#[elwindui::viewmodel]`のRustネイティブ`impl`ブロックの`fn`/`async fn`がそのまま自動検出されアクションになる(`Initializer::Action`、struct側の宣言は不要)。テキスト構文の`viewmodel Name { ... }`にはアクションを宣言する手段が無い(`#[observable]`/`#[computed]`のみ)——アクションが必要な`viewmodel`はRustネイティブ構文を使う |
 | `on_*`イベント属性のクロージャ構文(`\|param, ...\| 式`/`{ .. }`) | ✅ 対象フィールドの`fn(T0, T1, ...)`宣言から位置対応でパラメータ型を決める汎用機構(`codegen::emit_wiring`)。0引数ハンドラはベアパスの糖衣(`on_click: vm.save`)も書ける |
 | 値計算コールバックがネストした要素を構築する構文(`\|param\| Type { .. }`) | 📋 **未実装**。これに依存する`VirtualList`の`render_item`・`ControlTemplate<Self>`も未実装 |

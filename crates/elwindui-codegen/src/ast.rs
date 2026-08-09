@@ -186,6 +186,12 @@ pub struct EnumDef {
 pub enum FieldKind {
     /// Default: runtime-mutable. See §4.
     Prop,
+    /// `#[state]`: component-owned private reactive state.
+    ///
+    /// State is initialized once with its declared default, retained by the component, and can be
+    /// read or mutated by that component's generated view and event handlers. Unlike [`Self::Prop`],
+    /// it is not part of the component's external construction/property surface.
+    State,
     /// `#[param]`: fixed at instantiation. See §4.
     Param,
     /// `#[observable]`: `viewmodel`/`store` runtime-mutable field. See docs/design/gui_framework_design.md §7.2.
@@ -292,13 +298,9 @@ pub struct FieldDef {
     pub initializer: Option<Initializer>,
 }
 
-/// How a field's initializer expression was recognized. Only `bind!` is given its own DSL-level
-/// macro syntax (§10); everything else is an arbitrary Rust expression and is parsed for real via
-/// `syn` rather than kept as opaque text.
+/// How a field's initializer expression was recognized.
 #[derive(Debug, Clone)]
 pub enum Initializer {
-    /// `bind!(vm.content, TwoWay)`. See §10.
-    Bind { path: Vec<String>, mode: String },
     /// A `FieldKind::Action` field's body, taken directly from the matching `impl` `fn`'s
     /// signature (`params`, `is_async`) and block (`body`) — see
     /// `attr_frontend::synthesize_action_fields`. `params` is empty for the common zero-arg case;
@@ -344,7 +346,7 @@ pub struct ViewDef {
 /// composability is known, not here — see docs/design/gui_framework_design.md §5.1's "inherits" section.
 #[derive(Debug, Clone)]
 pub struct ViewBody {
-    pub attributes: Vec<(String, ViewExpr)>,
+    pub attributes: Vec<ViewAttribute>,
     pub attached: Vec<(String, String, ViewExpr)>,
     /// See `ElementNode::attribute_shortcuts`'s own doc comment — this is the same thing for the
     /// view's own (implicit) root element.
@@ -371,7 +373,7 @@ pub struct LetBinding {
 #[derive(Debug, Clone)]
 pub struct ElementNode {
     pub type_path: String,
-    pub attributes: Vec<(String, ViewExpr)>,
+    pub attributes: Vec<ViewAttribute>,
     /// `Grid::row: 1` etc. — `(owner type name, attached field name, value)`. `owner` need not be
     /// (and isn't checked to be) an actual ancestor of this element anywhere in the tree — like
     /// WPF's own attached properties, an unconsumed one is simply inert, not a static error. See
@@ -393,6 +395,47 @@ pub struct ElementNode {
     /// `codegen::emit_shortcut_registration`.
     pub attribute_shortcuts: Vec<(String, Vec<(Option<String>, String)>, ShortcutScope)>,
     pub children: Vec<ChildEntry>,
+}
+
+/// A byte range in the parser input for one DSL construct.
+///
+/// The component frontend reparses the contents of `view!` as DSL text, so this range is relative
+/// to that macro body rather than the surrounding Rust source file. Line and column are stored as
+/// one-based values so validation errors can still identify the relevant DSL location after parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpan {
+    /// Inclusive UTF-8 byte offset in the parser input.
+    pub start: usize,
+    /// Exclusive UTF-8 byte offset in the parser input.
+    pub end: usize,
+    /// One-based line containing [`Self::start`].
+    pub line: usize,
+    /// One-based UTF-8 character column containing [`Self::start`].
+    pub column: usize,
+}
+
+/// Compile-time semantics selected by an element property assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignmentKind {
+    /// `property: expression`; dependency analysis selects Once or OneWay behavior.
+    Normal,
+    /// `property: once!(expression)`; dependencies inside the expression are intentionally ignored.
+    Once,
+    /// `property <=> writable.path`; forward updates plus typed target-to-source write-back.
+    TwoWay,
+}
+
+/// One named element property assignment together with its compile-time binding semantics.
+#[derive(Debug, Clone)]
+pub struct ViewAttribute {
+    /// Target property name on the element.
+    pub name: String,
+    /// Value expression, or the writable endpoint path for [`AssignmentKind::TwoWay`].
+    pub value: ViewExpr,
+    /// Assignment semantics selected by the source syntax.
+    pub kind: AssignmentKind,
+    /// Location of the complete assignment in the parsed DSL input.
+    pub span: SourceSpan,
 }
 
 /// A bare (non-`key:`-prefixed) entry inside an element's `{}` body — either a literal nested

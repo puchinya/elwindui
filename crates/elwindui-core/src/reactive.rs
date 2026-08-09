@@ -90,7 +90,7 @@ impl ReactiveGraph {
 #[cfg(test)]
 mod tests {
     use super::Subscription;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     #[test]
@@ -111,5 +111,30 @@ mod tests {
         let calls_for_cancel = calls.clone();
         Subscription::new(move || calls_for_cancel.set(calls_for_cancel.get() + 1)).cancel();
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn repeated_generated_style_subscriptions_remove_registry_entries() {
+        type HandlerEntry = (Rc<Cell<bool>>, Rc<dyn Fn()>);
+
+        let handlers = Rc::new(RefCell::new(Vec::<HandlerEntry>::new()));
+        for _ in 0..64 {
+            let active = Rc::new(Cell::new(true));
+            handlers.borrow_mut().push((active.clone(), Rc::new(|| {})));
+            let weak_handlers = Rc::downgrade(&handlers);
+            let subscription = Subscription::new(move || {
+                active.set(false);
+                if let Some(handlers) = weak_handlers.upgrade() {
+                    handlers
+                        .borrow_mut()
+                        .retain(|(registered, _)| !Rc::ptr_eq(registered, &active));
+                }
+            });
+
+            assert_eq!(handlers.borrow().len(), 1);
+            drop(subscription);
+            assert!(handlers.borrow().is_empty());
+        }
+        assert_eq!(Rc::strong_count(&handlers), 1);
     }
 }

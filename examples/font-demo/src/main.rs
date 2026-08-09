@@ -154,7 +154,7 @@ struct FontDemoWindow {
                         foreground: vm.foreground
                     }
                     TextBox {
-                        text: vm.text_box_value
+                        text <=> vm.text_box_value
                         font_family: vm.font_family
                         font_size: vm.font_size
                         font_weight: vm.font_weight
@@ -164,7 +164,7 @@ struct FontDemoWindow {
                         foreground: vm.foreground
                     }
                     PasswordBox {
-                        password: vm.password_value
+                        password <=> vm.password_value
                         font_family: vm.font_family
                         font_size: vm.font_size
                         font_weight: vm.font_weight
@@ -175,7 +175,7 @@ struct FontDemoWindow {
                     }
                     TextArea {
                         height: 155.0
-                        text: vm.text_area_value
+                        text <=> vm.text_area_value
                         font_family: vm.font_family
                         font_size: vm.font_size
                         font_weight: vm.font_weight

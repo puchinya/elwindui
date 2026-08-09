@@ -459,6 +459,7 @@ component TabView inherits NativeControl {
     // `UIElement`, so the backend owns the corresponding native tab hosts.
     children: Vec<TabViewItem>,
 
+    #[two_way]
     selected_index: usize,
 
     // The selected tab position in `children`.

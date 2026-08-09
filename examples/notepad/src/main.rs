@@ -75,10 +75,6 @@ mod notepad_view_model {
             self.close_tab(active_tab);
         }
 
-        fn select_tab(&self, index: usize) {
-            active_tab = index;
-        }
-
         async fn save(&self) {
             let doc = documents[active_tab].clone();
             doc.set_state(SaveState::Saving);

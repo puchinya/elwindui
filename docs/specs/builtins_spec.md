@@ -270,7 +270,8 @@ text_block.set_text_alignment(/* text_alignment属性、省略時はTextAlignmen
 ```rust
 #[elwindui::component]
 struct TextArea {
-    #[prop(default = bind!(self.text, TwoWay))]
+    #[prop]
+    #[two_way]
     text: String,
     #[param(default = 0)]
     padding_start: f32,
@@ -319,7 +320,8 @@ struct DropdownItem {
 struct Dropdown {
     #[content(items)]
     items: Vec<DropdownItem>,
-    #[prop(default = bind!(self.selected_index, TwoWay))]
+    #[prop]
+    #[two_way]
     selected_index: usize,
     #[prop]
     enabled: Option<bool>,
@@ -403,7 +405,7 @@ NotepadWindow
 | `Window` | `#[param] direction = env::direction()`、`match target::backend()`の網羅性検査 |
 | `VerticalLayout`/`HorizontalLayout` | 専用のネイティブ実体を持たない仮想ツリー(`elwindui_core::ui::UIElement`実装の`Stack`)、交差軸配置は子ごとの`HorizontalAlignment`/`VerticalAlignment` |
 | `TextBlock` | 自前描画のプリミティブ(非native)、`#[text_style]`によるフォント/`foreground`(`Option<Brush>`)、backendごとの描画実装(`CATextLayer`/XAML`TextBlock`を描画専用に利用) |
-| `TextArea` | `bind!(self.text, TwoWay)`による双方向バインディング |
+| `TextArea` | `text <=> writable_target`による明示的な双方向バインディング |
 | `Dropdown` / `DropdownItem` | `Vec<DropdownItem>`という複合型プロパティ、`selected_index`の双方向バインディング |
 
 これらの標準ビルトイン実装は、通常はコード生成器(`elwindui-codegen`)が内部に持ち利用者が直接編集する必要はないが、`#[overrides(builtin::X)]`(`docs/specs/dsl_spec.md` 付録A)を使うことで、プロジェクト固有の要件に応じて安全に差し替えられる。
@@ -496,7 +498,7 @@ struct CustomButton {
 }
 ```
 
-いずれの形でも、テンプレート本体からは`control.content`/`inst.content`のように自分自身の他フィールドへ直接アクセスできる(WinUI3の`TemplateBinding`の静的型付け版、`docs/specs/builtins_spec.md`付録F補足参照)。複数コンポーネントに跨る既定テンプレートの一括差し替え(WinUI3の`Style`相当)は`store`+`bind!`を使う——`docs/design/gui_framework_design.md`§7.1参照。
+いずれの形でも、テンプレート本体からは`control.content`/`inst.content`のように自分自身の他フィールドへ直接アクセスできる(WinUI3の`TemplateBinding`の静的型付け版、`docs/specs/builtins_spec.md`付録F補足参照)。複数コンポーネントに跨る既定テンプレートの一括差し替え(WinUI3の`Style`相当)は`store`を`#[bindable]` ownerとして公開し、通常のリアクティブ属性式を使う——`docs/design/gui_framework_design.md`§7.1参照。
 
 ## F.10 `builtin::ContentControl` ✅
 
@@ -641,7 +643,8 @@ NativeControl派生コントロール拡充Phase 1(`docs/status/nativecontrol_st
 ```rust
 #[elwindui::component]
 struct TextBox {
-    #[prop(default = bind!(self.text, TwoWay))]
+    #[prop]
+    #[two_way]
     text: String,
     #[prop]
     placeholder: Option<String>,
@@ -717,7 +720,8 @@ NativeControl派生コントロール拡充Phase 1で追加。`TextBox`(F.12)と
 ```rust
 #[elwindui::component]
 struct PasswordBox {
-    #[prop(default = bind!(self.password, TwoWay))]
+    #[prop]
+    #[two_way]
     password: String,
     #[prop]
     placeholder: Option<String>,
@@ -1000,7 +1004,8 @@ struct Button {
 struct CheckBox {
     #[prop]
     text: String,
-    #[prop(default = bind!(self.checked, TwoWay))]
+    #[prop]
+    #[two_way]
     checked: CheckState,
     #[prop]
     enabled: Option<bool>,
@@ -1075,7 +1080,8 @@ struct CheckBox {
 struct RadioButton {
     #[prop]
     text: String,
-    #[prop(default = bind!(self.checked, TwoWay))]
+    #[prop]
+    #[two_way]
     checked: bool,
     #[prop]
     group: Option<String>,
@@ -1102,7 +1108,8 @@ struct RadioButton {
 ```rust
 #[elwindui::component]
 struct ToggleSwitch {
-    #[prop(default = bind!(self.is_on, TwoWay))]
+    #[prop]
+    #[two_way]
     is_on: bool,
     #[prop]
     enabled: Option<bool>,
@@ -1127,7 +1134,8 @@ struct ToggleSwitch {
 ```rust
 #[elwindui::component]
 struct Slider {
-    #[prop(default = bind!(self.value, TwoWay))]
+    #[prop]
+    #[two_way]
     value: f32,
     #[prop]
     min: f32,
@@ -1448,7 +1456,7 @@ fn go_back() {
 
 - `navigate!(route)` — 指定ルートへ遷移し、遷移履歴に積む
 - `navigate_back!()` — 履歴を1つ戻す(履歴が空の場合は何もしない)
-- これらはマクロ呼び出し形式(9章の`bind!`と同じ慣習)であり、`NavigationHost`の内部履歴スタックを操作する
+- これらはマクロ呼び出し形式であり、`NavigationHost`の内部履歴スタックを操作する
 
 ## L.4 まとめ
 
@@ -1987,8 +1995,7 @@ struct NotepadWindow {
                         DocumentView { doc: doc }
                     }
                 }
-                selected_index: vm.active_tab
-                on_select: |index| vm.select_tab(index)
+                selected_index <=> vm.active_tab
                 on_new_tab: vm.new_tab
             }
         }

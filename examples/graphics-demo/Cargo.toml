@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[features]
+render-stats = ["elwindui/render-stats"]
+
 [dependencies]
 elwindui = { path = "../../crates/elwindui", features = ["backend-appkit", "backend-winui3", "svg"] }
 

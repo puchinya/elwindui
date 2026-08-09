@@ -281,4 +281,3 @@ impl InnerPasswordBox {
         let _ = self.password_box.SetPasswordRevealMode(mode);
     }
 }
-

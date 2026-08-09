@@ -55,49 +55,124 @@ struct DemoEntry {
 }
 
 const FILLS: &[DemoEntry] = &[
-    DemoEntry { label: "Linear Gradient", draw: draw_linear_gradient },
-    DemoEntry { label: "Radial Gradient", draw: draw_radial_gradient },
+    DemoEntry {
+        label: "Linear Gradient",
+        draw: draw_linear_gradient,
+    },
+    DemoEntry {
+        label: "Radial Gradient",
+        draw: draw_radial_gradient,
+    },
 ];
 
 const STROKES: &[DemoEntry] = &[
-    DemoEntry { label: "Dashed Stroke", draw: draw_dashed_stroke },
-    DemoEntry { label: "Line Caps", draw: draw_line_caps },
-    DemoEntry { label: "Line Joins", draw: draw_line_joins },
+    DemoEntry {
+        label: "Dashed Stroke",
+        draw: draw_dashed_stroke,
+    },
+    DemoEntry {
+        label: "Line Caps",
+        draw: draw_line_caps,
+    },
+    DemoEntry {
+        label: "Line Joins",
+        draw: draw_line_joins,
+    },
 ];
 
 const PATHS: &[DemoEntry] = &[
-    DemoEntry { label: "Star Path", draw: draw_star_path },
-    DemoEntry { label: "Fill Rule (Even-Odd)", draw: draw_fill_rule },
-    DemoEntry { label: "Bezier Curve", draw: draw_bezier_curve },
+    DemoEntry {
+        label: "Star Path",
+        draw: draw_star_path,
+    },
+    DemoEntry {
+        label: "Fill Rule (Even-Odd)",
+        draw: draw_fill_rule,
+    },
+    DemoEntry {
+        label: "Bezier Curve",
+        draw: draw_bezier_curve,
+    },
 ];
 
 const PATH_COMBINE: &[DemoEntry] = &[
-    DemoEntry { label: "Union", draw: draw_combine_union },
-    DemoEntry { label: "Intersect", draw: draw_combine_intersect },
-    DemoEntry { label: "Xor", draw: draw_combine_xor },
-    DemoEntry { label: "Exclude", draw: draw_combine_exclude },
+    DemoEntry {
+        label: "Union",
+        draw: draw_combine_union,
+    },
+    DemoEntry {
+        label: "Intersect",
+        draw: draw_combine_intersect,
+    },
+    DemoEntry {
+        label: "Xor",
+        draw: draw_combine_xor,
+    },
+    DemoEntry {
+        label: "Exclude",
+        draw: draw_combine_exclude,
+    },
 ];
 
 const COMPOSITING: &[DemoEntry] = &[
-    DemoEntry { label: "Clip", draw: draw_clip_demo },
-    DemoEntry { label: "Transform", draw: draw_transform_demo },
-    DemoEntry { label: "Opacity", draw: draw_opacity_demo },
+    DemoEntry {
+        label: "Clip",
+        draw: draw_clip_demo,
+    },
+    DemoEntry {
+        label: "Transform",
+        draw: draw_transform_demo,
+    },
+    DemoEntry {
+        label: "Opacity",
+        draw: draw_opacity_demo,
+    },
 ];
 
 const IMAGES: &[DemoEntry] = &[
-    DemoEntry { label: "Normal", draw: draw_image_normal },
-    DemoEntry { label: "Partial (Crop)", draw: draw_image_partial },
-    DemoEntry { label: "Affine Transform", draw: draw_image_affine },
-    DemoEntry { label: "Transparency", draw: draw_image_transparency },
-    DemoEntry { label: "Texture Brush Fill", draw: draw_image_texture_fill },
-    DemoEntry { label: "Texture Tile", draw: draw_image_texture_tile },
+    DemoEntry {
+        label: "Normal",
+        draw: draw_image_normal,
+    },
+    DemoEntry {
+        label: "Partial (Crop)",
+        draw: draw_image_partial,
+    },
+    DemoEntry {
+        label: "Affine Transform",
+        draw: draw_image_affine,
+    },
+    DemoEntry {
+        label: "Transparency",
+        draw: draw_image_transparency,
+    },
+    DemoEntry {
+        label: "Texture Brush Fill",
+        draw: draw_image_texture_fill,
+    },
+    DemoEntry {
+        label: "Texture Tile",
+        draw: draw_image_texture_tile,
+    },
 ];
 
 const SVG: &[DemoEntry] = &[
-    DemoEntry { label: "Contain", draw: draw_svg_contain },
-    DemoEntry { label: "Cover", draw: draw_svg_cover },
-    DemoEntry { label: "Affine Transform", draw: draw_svg_affine },
-    DemoEntry { label: "Opacity", draw: draw_svg_opacity },
+    DemoEntry {
+        label: "Contain",
+        draw: draw_svg_contain,
+    },
+    DemoEntry {
+        label: "Cover",
+        draw: draw_svg_cover,
+    },
+    DemoEntry {
+        label: "Affine Transform",
+        draw: draw_svg_affine,
+    },
+    DemoEntry {
+        label: "Opacity",
+        draw: draw_svg_opacity,
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,12 +209,16 @@ impl GraphicsDemoCategory {
 #[elwindui::class(inherits = elwindui::core::ui::UIElement)]
 pub struct GraphicsDemoCanvas {
     category: GraphicsDemoCategory,
+    paint_enabled: bool,
 }
 
 #[elwindui::class]
 impl GraphicsDemoCanvas {
     #[overrides]
     fn render(&self, context: &mut RenderContext<'_>) {
+        if !self.paint_enabled {
+            return;
+        }
         let entries = self.category.entries();
         let n = entries.len().max(1) as f32;
         let width = self.arranged_width().unwrap_or(0.0);
@@ -153,7 +232,11 @@ impl GraphicsDemoCanvas {
                 width: cell_w,
                 height: cell_h,
             };
-            context.fill_rounded_rect(card, CornerRadius::uniform(10.0), &Brush::Solid(CARD_BACKGROUND));
+            context.fill_rounded_rect(
+                card,
+                CornerRadius::uniform(10.0),
+                &Brush::Solid(CARD_BACKGROUND),
+            );
             let label_rect = Rect {
                 x: card.x,
                 y: card.y + 6.0,
@@ -188,10 +271,27 @@ impl GraphicsDemoCanvas {
     pub fn into_node(self: Rc<Self>) -> Rc<dyn UIElementExt> {
         self
     }
-    fn construct(category: GraphicsDemoCategory) -> Self {
+    fn construct(category: GraphicsDemoCategory, paint_enabled: bool) -> Self {
         Self {
             base: elwindui::core::ui::UIElement::construct(),
             category,
+            paint_enabled,
+        }
+    }
+}
+
+/// Empty leaf used only by the graphics-demo memory measurement profiles.
+///
+/// It gives a tab a real `UIElement` tree without registering any paint commands, so the staged
+/// profiles can separate the native tab host cost from `GraphicsDemoCanvas` state.
+#[elwindui::class(inherits = elwindui::core::ui::UIElement)]
+struct EmptyTabContent {}
+
+#[elwindui::class]
+impl EmptyTabContent {
+    fn construct() -> Self {
+        Self {
+            base: elwindui::core::ui::UIElement::construct(),
         }
     }
 }
@@ -261,8 +361,14 @@ fn draw_line_caps(context: &mut RenderContext<'_>, rect: Rect) {
             ..Default::default()
         };
         context.draw_line(
-            Point { x: rect.x + 14.0, y },
-            Point { x: rect.x + rect.width - 14.0, y },
+            Point {
+                x: rect.x + 14.0,
+                y,
+            },
+            Point {
+                x: rect.x + rect.width - 14.0,
+                y,
+            },
             &brush,
             &stroke,
         );
@@ -279,9 +385,15 @@ fn draw_line_joins(context: &mut RenderContext<'_>, rect: Rect) {
         let bottom = rect.y + rect.height * 0.85;
         let half_w = col_w * 0.3;
         let mut builder = PathBuilder::new();
-        builder.move_to(Point { x: cx - half_w, y: bottom });
+        builder.move_to(Point {
+            x: cx - half_w,
+            y: bottom,
+        });
         builder.line_to(Point { x: cx, y: top });
-        builder.line_to(Point { x: cx + half_w, y: bottom });
+        builder.line_to(Point {
+            x: cx + half_w,
+            y: bottom,
+        });
         let path = builder.build().expect("polyline path is never empty");
         let stroke = StrokeStyle {
             width: 10.0,
@@ -314,7 +426,11 @@ fn draw_star_path(context: &mut RenderContext<'_>, rect: Rect) {
     }
     builder.close();
     let star = builder.build().expect("star path is never empty");
-    context.fill_path(&star, &Brush::Solid(Color::rgb(251, 146, 60)), FillRule::NonZero);
+    context.fill_path(
+        &star,
+        &Brush::Solid(Color::rgb(251, 146, 60)),
+        FillRule::NonZero,
+    );
     let stroke = StrokeStyle {
         width: 3.0,
         line_join: LineJoin::Round,
@@ -343,7 +459,11 @@ fn draw_fill_rule(context: &mut RenderContext<'_>, rect: Rect) {
         height: h,
     });
     let path = builder.build().expect("rects path is never empty");
-    context.fill_path(&path, &Brush::Solid(Color::rgb(234, 88, 12)), FillRule::EvenOdd);
+    context.fill_path(
+        &path,
+        &Brush::Solid(Color::rgb(234, 88, 12)),
+        FillRule::EvenOdd,
+    );
 }
 
 fn draw_bezier_curve(context: &mut RenderContext<'_>, rect: Rect) {
@@ -405,15 +525,31 @@ fn draw_path_combine(context: &mut RenderContext<'_>, rect: Rect, mode: Geometry
     let cy = rect.y + rect.height / 2.0;
     let offset = r * 0.55;
     let mut a_builder = PathBuilder::new();
-    a_builder.add_circle(Point { x: cx - offset, y: cy }, r);
+    a_builder.add_circle(
+        Point {
+            x: cx - offset,
+            y: cy,
+        },
+        r,
+    );
     let a = a_builder.build().expect("circle path is never empty");
     let mut b_builder = PathBuilder::new();
-    b_builder.add_circle(Point { x: cx + offset, y: cy }, r);
+    b_builder.add_circle(
+        Point {
+            x: cx + offset,
+            y: cy,
+        },
+        r,
+    );
     let b = b_builder.build().expect("circle path is never empty");
     let Ok(combined) = Path::combine(&a, &b, mode, 0.5) else {
         return;
     };
-    context.fill_path(&combined, &Brush::Solid(Color::rgb(56, 189, 248)), FillRule::NonZero);
+    context.fill_path(
+        &combined,
+        &Brush::Solid(Color::rgb(56, 189, 248)),
+        FillRule::NonZero,
+    );
     let stroke = StrokeStyle {
         width: 2.0,
         line_join: LineJoin::Round,
@@ -495,10 +631,14 @@ fn draw_transform_demo(context: &mut RenderContext<'_>, rect: Rect) {
         width: 80.0,
         height: 50.0,
     };
-    let rotate =
-        AffineTransform::translation(center.x, center.y).concat(&AffineTransform::rotation(30f32.to_radians()));
+    let rotate = AffineTransform::translation(center.x, center.y)
+        .concat(&AffineTransform::rotation(30f32.to_radians()));
     context.with_transform(rotate, |ctx| {
-        ctx.fill_rounded_rect(local_rect, CornerRadius::uniform(8.0), &Brush::Solid(Color::rgb(236, 72, 153)));
+        ctx.fill_rounded_rect(
+            local_rect,
+            CornerRadius::uniform(8.0),
+            &Brush::Solid(Color::rgb(236, 72, 153)),
+        );
     });
 }
 
@@ -531,7 +671,9 @@ const ELWIND_CHAN_PNG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/
 /// repaint (painter design doc §13.1's "never re-decoded/re-uploaded on repaint" invariant).
 fn elwind_chan_image() -> &'static Image {
     static IMAGE: OnceLock<Image> = OnceLock::new();
-    IMAGE.get_or_init(|| Image::from_file(ELWIND_CHAN_PNG_PATH).expect("assets/elwind_chan.png must be readable"))
+    IMAGE.get_or_init(|| {
+        Image::from_file(ELWIND_CHAN_PNG_PATH).expect("assets/elwind_chan.png must be readable")
+    })
 }
 
 fn draw_image_normal(context: &mut RenderContext<'_>, rect: Rect) {
@@ -604,7 +746,11 @@ fn draw_image_affine(context: &mut RenderContext<'_>, rect: Rect) {
 /// (inert, on this backend) options field. A solid backdrop behind it is what actually makes the
 /// resulting translucency visible.
 fn draw_image_transparency(context: &mut RenderContext<'_>, rect: Rect) {
-    context.fill_rounded_rect(rect, CornerRadius::uniform(10.0), &Brush::Solid(Color::rgb(37, 99, 235)));
+    context.fill_rounded_rect(
+        rect,
+        CornerRadius::uniform(10.0),
+        &Brush::Solid(Color::rgb(37, 99, 235)),
+    );
     context.with_opacity(0.45, |ctx| {
         ctx.draw_image(
             elwind_chan_image(),
@@ -717,7 +863,11 @@ fn draw_svg_affine(context: &mut RenderContext<'_>, rect: Rect) {
 }
 
 fn draw_svg_opacity(context: &mut RenderContext<'_>, rect: Rect) {
-    context.fill_rounded_rect(rect, CornerRadius::uniform(10.0), &Brush::Solid(Color::rgb(37, 99, 235)));
+    context.fill_rounded_rect(
+        rect,
+        CornerRadius::uniform(10.0),
+        &Brush::Solid(Color::rgb(37, 99, 235)),
+    );
     context.with_opacity(0.5, |ctx| {
         ctx.draw_vector_image(
             elwind_chan_vector(),
@@ -832,18 +982,149 @@ struct GraphicsDemoWindow {
 #[elwindui::component]
 impl GraphicsDemoWindow {}
 
-#[elwindui::main]
-fn main() {
+/// Measurement-only window with a native `TabView` but no tabs.
+#[elwindui::component(inherits Window)]
+struct ZeroTabMemoryWindow {
+    body: view! {
+        title: "Graphics Demo Memory: 0 tabs"
+        width: 860.0
+        height: 460.0
+        content: TabView {
+            on_new_tab: || {}
+        }
+    },
+}
+
+#[elwindui::component]
+impl ZeroTabMemoryWindow {}
+
+/// Measurement-only window with one tab whose content has no paint callback.
+#[elwindui::component(inherits Window)]
+struct OneEmptyTabMemoryWindow {
+    content: Rc<EmptyTabContent>,
+
+    body: view! {
+        title: "Graphics Demo Memory: 1 empty tab"
+        width: 860.0
+        height: 460.0
+        content: TabView {
+            TabViewItem {
+                header: "Empty 1"
+                content: content
+                closable: false
+                on_close: || {}
+            }
+            on_new_tab: || {}
+        }
+    },
+}
+
+#[elwindui::component]
+impl OneEmptyTabMemoryWindow {}
+
+/// Measurement-only window with seven tabs whose content has no paint callback.
+#[elwindui::component(inherits Window)]
+struct SevenEmptyTabsMemoryWindow {
+    first: Rc<EmptyTabContent>,
+    second: Rc<EmptyTabContent>,
+    third: Rc<EmptyTabContent>,
+    fourth: Rc<EmptyTabContent>,
+    fifth: Rc<EmptyTabContent>,
+    sixth: Rc<EmptyTabContent>,
+    seventh: Rc<EmptyTabContent>,
+
+    body: view! {
+        title: "Graphics Demo Memory: 7 empty tabs"
+        width: 860.0
+        height: 460.0
+        content: TabView {
+            TabViewItem {
+                header: "Empty 1"
+                content: first
+                closable: false
+                on_close: || {}
+            }
+            TabViewItem {
+                header: "Empty 2"
+                content: second
+                closable: false
+                on_close: || {}
+            }
+            TabViewItem {
+                header: "Empty 3"
+                content: third
+                closable: false
+                on_close: || {}
+            }
+            TabViewItem {
+                header: "Empty 4"
+                content: fourth
+                closable: false
+                on_close: || {}
+            }
+            TabViewItem {
+                header: "Empty 5"
+                content: fifth
+                closable: false
+                on_close: || {}
+            }
+            TabViewItem {
+                header: "Empty 6"
+                content: sixth
+                closable: false
+                on_close: || {}
+            }
+            TabViewItem {
+                header: "Empty 7"
+                content: seventh
+                closable: false
+                on_close: || {}
+            }
+            on_new_tab: || {}
+        }
+    },
+}
+
+#[elwindui::component]
+impl SevenEmptyTabsMemoryWindow {}
+
+fn show_graphics_demo(paint_enabled: bool) {
     let vm = GraphicsDemoViewModel::new();
     let window = GraphicsDemoWindow::new(
         vm,
-        GraphicsDemoCanvas::new(GraphicsDemoCategory::Fills),
-        GraphicsDemoCanvas::new(GraphicsDemoCategory::Strokes),
-        GraphicsDemoCanvas::new(GraphicsDemoCategory::Paths),
-        GraphicsDemoCanvas::new(GraphicsDemoCategory::PathCombine),
-        GraphicsDemoCanvas::new(GraphicsDemoCategory::Compositing),
-        GraphicsDemoCanvas::new(GraphicsDemoCategory::Images),
-        GraphicsDemoCanvas::new(GraphicsDemoCategory::Svg),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Fills, paint_enabled),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Strokes, paint_enabled),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Paths, paint_enabled),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::PathCombine, paint_enabled),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Compositing, paint_enabled),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Images, paint_enabled),
+        GraphicsDemoCanvas::new(GraphicsDemoCategory::Svg, paint_enabled),
     );
     window.show();
+}
+
+#[elwindui::main]
+fn main() {
+    match std::env::var("ELWINDUI_GRAPHICS_DEMO_MEMORY_CASE").as_deref() {
+        Ok("F") => ZeroTabMemoryWindow::new().show(),
+        Ok("G") => OneEmptyTabMemoryWindow::new(EmptyTabContent::new()).show(),
+        Ok("H") => SevenEmptyTabsMemoryWindow::new(
+            EmptyTabContent::new(),
+            EmptyTabContent::new(),
+            EmptyTabContent::new(),
+            EmptyTabContent::new(),
+            EmptyTabContent::new(),
+            EmptyTabContent::new(),
+            EmptyTabContent::new(),
+        )
+        .show(),
+        Ok("I") => show_graphics_demo(false),
+        Ok("J") | Err(_) => show_graphics_demo(true),
+        Ok(other) => {
+            eprintln!(
+                "unknown ELWINDUI_GRAPHICS_DEMO_MEMORY_CASE: {other} (expected F, G, H, I, or J)"
+            );
+            std::process::exit(2);
+        }
+    }
 }

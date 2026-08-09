@@ -75,5 +75,7 @@ where
     APP_DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
 
     startup();
+    #[cfg(feature = "render-stats")]
+    crate::diagnostics::schedule_env_report();
     app.run();
 }

@@ -3465,6 +3465,20 @@ fn generate_view(
             #slot: elwindui::core::ui::DynamicChildSlot::default(),
         });
     }
+    // `RefCell<Option<Rc<..>>>` per lazily-materialized `if`/`match` branch leaf
+    // (`lazy_branch_plan`'s own eligibility rule; see `emit_lazy_leaf_value`/
+    // `emit_lazy_branch_resync`, the field's only other readers) — declared unconditionally here
+    // (not gated by `is_list`/`is_template_composition` above, since a lazy leaf's own field is
+    // never part of `plan` itself and so isn't touched by anything else in this function).
+    for (cache_field, leaf) in collect_lazy_leaves(&plan) {
+        let type_ident = concrete_type_ident(&leaf.type_path, table.resolve(from, &leaf.type_path));
+        struct_fields.extend(quote! {
+            #cache_field: std::cell::RefCell<Option<std::rc::Rc<#type_ident>>>,
+        });
+        field_inits.extend(quote! {
+            #cache_field: std::cell::RefCell::new(None),
+        });
+    }
     if !is_template_composition {
         for (i, node) in plan.iter().enumerate() {
             if node.dynamic.is_some() {
@@ -3595,6 +3609,25 @@ fn generate_view(
                 ResyncFilter::Theme,
                 &mut theme_resync_stmts,
                 self_is_node,
+            );
+        }
+        // `resync_stmts` (`ResyncFilter::All`) is deliberately NOT threaded through lazy leaves
+        // here: it only ever runs once, from `on_constructed`, and by that point
+        // `__refresh_dynamic_regions()` has already materialized whichever branch is initially
+        // active (`on_constructed` calls it before `self.resync()`) — `emit_lazy_leaf_value`'s own
+        // `emit_construction` call already reads every attribute at its current, live value, so a
+        // freshly-materialized leaf is never stale. A theme change, in contrast, can happen at any
+        // later point against an already-materialized (and now possibly reactivated) leaf, so
+        // `__resync_theme` does need to reach it.
+        for (cache_field, leaf) in collect_lazy_leaves(&plan) {
+            emit_lazy_branch_resync(
+                &cache_field,
+                leaf,
+                &ctx,
+                from,
+                table,
+                ResyncFilter::Theme,
+                &mut theme_resync_stmts,
             );
         }
     }
@@ -4024,6 +4057,7 @@ fn generate_view(
         true,
         is_shape_composition || is_host_composition,
     ));
+    let lazy_leaves_for_own_resync = collect_lazy_leaves(&plan);
     let component_property_resync_methods: TokenStream = component_property_variants
         .iter()
         .map(|property| {
@@ -4041,6 +4075,17 @@ fn generate_view(
                     ResyncFilter::Property("", &property_name),
                     &mut statements,
                     self_is_node,
+                );
+            }
+            for (cache_field, leaf) in &lazy_leaves_for_own_resync {
+                emit_lazy_branch_resync(
+                    cache_field,
+                    leaf,
+                    &ctx,
+                    from,
+                    table,
+                    ResyncFilter::Property("", &property_name),
+                    &mut statements,
                 );
             }
             quote! {
@@ -4363,10 +4408,22 @@ enum DynamicPlan {
         condition: ViewExpr,
         then_bindings: Vec<(syn::Ident, String)>,
         else_bindings: Vec<(syn::Ident, String)>,
+        /// `Some(leaves)` when this branch qualifies for lazy-once materialization (see
+        /// `lazy_branch_plan`'s own doc comment for the eligibility rule) — `leaves` are the
+        /// branch's own top-level root `PlannedNode`s, planned into a plan of their own rather
+        /// than the shared `plan` `generate_view` iterates for eager construction/wiring/resync
+        /// (so they get no `Type::new()` call, no struct field, no resync statement — matching
+        /// this issue's "not constructed until first reached" requirement by simply never being
+        /// in the list those passes walk). `None` means this branch is still eager, exactly as
+        /// before this field existed — `then_bindings` are real `plan` entries either way, so
+        /// every position/span computation (`slot_span`/`preceding_span`/`dynamic_region_start`)
+        /// stays correct without caring which case applies.
+        then_lazy: Option<Vec<PlannedNode>>,
+        else_lazy: Option<Vec<PlannedNode>>,
     },
     Match {
         value: ViewExpr,
-        arms: Vec<(syn::Pat, Vec<(syn::Ident, String)>)>,
+        arms: Vec<(syn::Pat, Vec<(syn::Ident, String)>, Option<Vec<PlannedNode>>)>,
     },
     For {
         collection: ViewExpr,
@@ -4374,6 +4431,208 @@ enum DynamicPlan {
         item_type: String,
         rc_identity: bool,
     },
+}
+
+/// Eligibility + planning for one `if`/`match` branch's lazy-once materialization. A branch
+/// qualifies only when *every* one of its top-level entries is a childless literal element
+/// (`ChildEntry::Literal` whose own `children` is empty) — deliberately excludes:
+/// - a nested `if`/`match`/`for` region (needs its own persistent `self.#slot` field, reachable
+///   from `emit_dynamic_node_refresh`'s existing recursion — moving it into this branch's own
+///   lazily-constructed, non-`plan`-resident leaves would leave it with no field to be declared
+///   on at all);
+/// - an element with its own nested children (so this function never has to decide whether a
+///   *descendant*, several `child_bindings` hops down, also needs lazy treatment — resync only
+///   ever walks a lazy leaf's own direct attributes, see `emit_lazy_branch_resync`);
+/// - a `ChildEntry::Ref` (an `#[id(...)]`-bound `let`, always constructed once at the top level
+///   regardless of which branch currently uses it — nothing of this branch's own to defer).
+/// Any of these falls back to eager construction, unchanged from before lazy-once existed.
+///
+/// `unique_prefix` disambiguates this branch's own leaf bindings from every other branch's: each
+/// call plans into its own fresh, branch-local `Vec` (starting its own binding-name counter back
+/// at 0 — unlike the shared `plan` every *other* planning path threads through), so a `then`
+/// branch's first leaf and an `else` branch's first leaf would otherwise both be named
+/// `__rectangle_0` — a real collision once both become distinct struct fields (`lazy_branch_
+/// cache_ident` derives each field's name from its own leaf's binding). The caller passes
+/// something derived from the enclosing marker's own about-to-be-assigned `plan` position (already
+/// unique per `if`/`match` region) plus which branch this is.
+fn lazy_branch_plan(
+    branch: &[ChildEntry],
+    parent_type_path: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    lets: &HashMap<String, (syn::Ident, String)>,
+    unique_prefix: &str,
+) -> Option<(Vec<(syn::Ident, String)>, Vec<PlannedNode>)> {
+    if branch.is_empty() {
+        return None;
+    }
+    let eligible = branch
+        .iter()
+        .all(|entry| matches!(entry, ChildEntry::Literal(element) if element.children.is_empty()));
+    if !eligible {
+        return None;
+    }
+    let mut leaves = Vec::new();
+    for entry in branch {
+        plan_child_entry(entry, parent_type_path, ctx, from, table, &mut leaves, lets);
+    }
+    // Rename every leaf's binding to be unique across every branch of every `if`/`match` region in
+    // this view — see this function's own doc comment on why the fresh, branch-local `leaves`
+    // above can't be trusted to already be unique. Leaves have no `child_bindings`/`element_attr_
+    // bindings` of their own to keep in sync with the rename (the eligibility check above already
+    // guarantees each is childless), so renaming just the node's own `binding` field is sufficient.
+    for (index, leaf) in leaves.iter_mut().enumerate() {
+        leaf.binding = format_ident!("{unique_prefix}_{index}");
+    }
+    let bindings = leaves
+        .iter()
+        .map(|leaf| (leaf.binding.clone(), leaf.type_path.clone()))
+        .collect();
+    Some((bindings, leaves))
+}
+
+/// The `RefCell<Option<Rc<..>>>` struct field name backing one lazily-materialized branch leaf —
+/// shared by struct-field emission, `emit_lazy_leaf_value`, and `emit_lazy_branch_resync` so the
+/// naming convention only lives in one place (mirrors `dynamic_slot_ident`'s own role for
+/// `DynamicChildSlot` fields).
+fn lazy_branch_cache_ident(binding: &syn::Ident) -> syn::Ident {
+    format_ident!(
+        "__lazy_branch_{}",
+        binding.to_string().trim_start_matches('_')
+    )
+}
+
+/// The "construct once, then reuse" value expression for one lazily-materialized `if`/`match`
+/// branch leaf. `lazy_branch_plan`'s own eligibility rule guarantees `leaf` has no children of its
+/// own, so `emit_construction` needs nothing from a wider `plan` beyond `leaf` itself — passed a
+/// single-element slice of just `leaf` accordingly. Read together with `emit_lazy_branch_resync`
+/// (keeps a *materialized* leaf's cached instance in sync with whatever bindable/observable
+/// properties it depends on) and the struct field `generate_view`'s own struct-field loop declares
+/// for it via `lazy_branch_cache_ident`.
+fn emit_lazy_leaf_value(leaf: &PlannedNode, ctx: &ViewCtx, from: &Module, table: &SymbolTable) -> TokenStream {
+    let cache_field = lazy_branch_cache_ident(&leaf.binding);
+    let binding = &leaf.binding;
+    let mut construct = TokenStream::new();
+    emit_construction(
+        leaf,
+        ctx,
+        from,
+        table,
+        &mut construct,
+        std::slice::from_ref(leaf),
+    );
+    quote! {
+        {
+            let mut __elwindui_lazy_cache = self.#cache_field.borrow_mut();
+            if __elwindui_lazy_cache.is_none() {
+                #construct
+                *__elwindui_lazy_cache = Some(#binding);
+            }
+            __elwindui_lazy_cache
+                .as_ref()
+                .expect("just constructed above if it was None")
+                .clone()
+        }
+    }
+}
+
+/// Keeps a lazily-materialized branch leaf's cached instance in sync with whatever bindable/
+/// observable property it depends on — the lazy-branch counterpart of a direct `emit_resync` call.
+/// A leaf never has its own `self.#binding` field (that's the entire point of laziness: the plan
+/// slot it would have occupied doesn't exist), so this always resyncs through `cache_field`'s own
+/// `RefCell<Option<Rc<..>>>` instead — and, since that cache is only ever populated, never cleared,
+/// once the branch first materializes (`emit_lazy_leaf_value`), a `None` here just means "this
+/// branch/arm has never been active yet, nothing to resync" and is silently skipped rather than
+/// treated as an error. Emits nothing at all (not even an empty `if let`) when the leaf has no
+/// attribute depending on `filter`, matching `emit_resync`'s own no-op-when-nothing-matches shape.
+fn emit_lazy_branch_resync(
+    cache_field: &syn::Ident,
+    leaf: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    filter: ResyncFilter<'_>,
+    out: &mut TokenStream,
+) {
+    let mut inner = TokenStream::new();
+    emit_resync_with_receiver(
+        leaf,
+        ctx,
+        from,
+        table,
+        filter,
+        &mut inner,
+        false,
+        Some(quote! { __elwindui_lazy_receiver }),
+    );
+    if inner.is_empty() {
+        return;
+    }
+    out.extend(quote! {
+        if let Some(__elwindui_lazy_receiver) = self.#cache_field.borrow().as_ref() {
+            let __elwindui_lazy_receiver = std::rc::Rc::clone(__elwindui_lazy_receiver);
+            #inner
+        }
+    });
+}
+
+/// Every lazily-materialized branch leaf reachable anywhere in `plan` (walking every `If`/`Match`
+/// dynamic node's own `then_lazy`/`else_lazy`/per-arm lazy leaves — a nested dynamic region, Phase
+/// 1, is always still eager per `lazy_branch_plan`'s own eligibility rule, so it never contributes
+/// here, and `For` has no lazy leaves of its own kind at all), paired with the cache field backing
+/// each one. Struct-field emission and resync-method generation both need "every lazy leaf in this
+/// component, regardless of which region/branch/arm it belongs to" — walking `plan` once here
+/// keeps that one flat list the single source of truth for both, rather than each re-deriving it.
+fn collect_lazy_leaves(plan: &[PlannedNode]) -> Vec<(syn::Ident, &PlannedNode)> {
+    let mut out = Vec::new();
+    for node in plan {
+        let Some(dynamic) = &node.dynamic else {
+            continue;
+        };
+        match dynamic {
+            DynamicPlan::If {
+                then_lazy,
+                else_lazy,
+                ..
+            } => {
+                for leaves in [then_lazy, else_lazy].into_iter().flatten() {
+                    for leaf in leaves {
+                        out.push((lazy_branch_cache_ident(&leaf.binding), leaf));
+                    }
+                }
+            }
+            DynamicPlan::Match { arms, .. } => {
+                for (_, _, lazy) in arms {
+                    for leaves in lazy.iter() {
+                        for leaf in leaves {
+                            out.push((lazy_branch_cache_ident(&leaf.binding), leaf));
+                        }
+                    }
+                }
+            }
+            DynamicPlan::For { .. } => {}
+        }
+    }
+    out
+}
+
+/// Looks up `child` in `lazy` (a branch's own `then_lazy`/`else_lazy`/per-arm lazy leaves, if this
+/// branch qualified) and emits either `emit_lazy_leaf_value`'s cache-or-construct expression (found
+/// — this leaf is lazily materialized) or the unchanged `self.#child.clone()` field read (not
+/// found — either this whole branch stayed eager, or `child` is a `ChildEntry::Ref` naming some
+/// other, always-eager `#[id(...)]`-bound `let` that this branch merely borrows).
+fn lazy_leaf_or_field_value(
+    lazy: Option<&[PlannedNode]>,
+    child: &syn::Ident,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    match lazy.and_then(|leaves| leaves.iter().find(|n| &n.binding == child)) {
+        Some(leaf) => emit_lazy_leaf_value(leaf, ctx, from, table),
+        None => quote! { self.#child.clone() },
+    }
 }
 
 fn plan_element(
@@ -5029,20 +5288,24 @@ fn dynamic_child_binding(
 
 /// Phase 2: the construction-time value for a scalar `#[content(...)]` field whose sole bare child
 /// is a dynamic (`if`/`match`) region — `marker_binding` names that region's own
-/// `DYNAMIC_CHILD_SLOT_MARKER` `PlannedNode`, found in `plan`. Deliberately picks the *first*
-/// branch (`If`'s `then`, `Match`'s first arm) completely unconditionally, without evaluating the
-/// region's own condition/value at all: `new()` already calls `__refresh_dynamic_regions()`
-/// immediately after construction, before `resync()` and before returning `Rc<Self>` to the caller
-/// (mirroring how a scalar-unrelated, list-based dynamic region starts genuinely empty at
-/// construction and is only ever populated for the first time by that same initial refresh call) —
-/// so whichever branch is picked here is corrected to the real one synchronously, before anything
-/// outside this function ever observes it. `for` can't reach here (Phase 2's validation rejects it
-/// under a scalar field — see `validate.rs`'s `check_dynamic_child_hosts`), so only `If`/`Match`
-/// are handled.
+/// `DYNAMIC_CHILD_SLOT_MARKER` `PlannedNode`, found in `plan`. Evaluates the region's own
+/// condition/value exactly once, as a genuine Rust `if`/`match` *expression* (mirroring
+/// `emit_scalar_dynamic_node_refresh`'s structure, which does the same evaluation for every later
+/// resync), and constructs only the branch actually selected. This isn't just a nicety since Issue
+/// #52's lazy-once branches: a lazy leaf's own binding is never a real local variable at
+/// construction time the way an eager leaf's always is (`emit_construction` only ever runs its
+/// unconditional `let #binding = ..;` for nodes that stayed in the shared `plan`), so
+/// unconditionally reaching for *some* branch's binding — as this used to do, picking `then`/the
+/// first arm regardless of which branch construction-time state actually selects — would reference
+/// an undefined identifier whenever that guessed branch happened to be the lazy one. Evaluating for
+/// real up front avoids ever touching a branch that didn't just get selected, lazy or not. `for`
+/// can't reach here (Phase 2's validation rejects it under a scalar field — see `validate.rs`'s
+/// `check_dynamic_child_hosts`), so only `If`/`Match` are handled.
 fn initial_dynamic_content_value(
     plan: &[PlannedNode],
     marker_binding: &syn::Ident,
     inner_ty: &str,
+    ctx: &ViewCtx,
     from: &Module,
     table: &SymbolTable,
 ) -> TokenStream {
@@ -5050,21 +5313,83 @@ fn initial_dynamic_content_value(
         .iter()
         .find(|n| &n.binding == marker_binding)
         .expect("dynamic marker must be in plan");
-    let (child, child_ty) = match node
+    match node
         .dynamic
         .as_ref()
         .expect("marker binding must be a dynamic node")
     {
-        DynamicPlan::If { then_bindings, .. } => &then_bindings[0],
-        DynamicPlan::Match { arms, .. } => &arms[0].1[0],
+        DynamicPlan::If {
+            condition,
+            then_bindings,
+            else_bindings,
+            then_lazy,
+            else_lazy,
+        } => {
+            let condition = emit_expr(condition, ctx, &EmitMode::Construction);
+            let then_value = initial_dynamic_branch_value(
+                plan,
+                &then_bindings[0],
+                then_lazy.as_deref(),
+                inner_ty,
+                ctx,
+                from,
+                table,
+            );
+            let else_value = initial_dynamic_branch_value(
+                plan,
+                &else_bindings[0],
+                else_lazy.as_deref(),
+                inner_ty,
+                ctx,
+                from,
+                table,
+            );
+            quote! { if #condition { #then_value } else { #else_value } }
+        }
+        DynamicPlan::Match { value, arms } => {
+            let value = emit_expr(value, ctx, &EmitMode::Construction);
+            let arm_stmts = arms.iter().map(|(pattern, children, lazy)| {
+                let arm_value = initial_dynamic_branch_value(
+                    plan,
+                    &children[0],
+                    lazy.as_deref(),
+                    inner_ty,
+                    ctx,
+                    from,
+                    table,
+                );
+                quote! { #pattern => #arm_value }
+            });
+            quote! { match #value { #(#arm_stmts)* } }
+        }
         DynamicPlan::For { .. } => {
             panic!("a `for` region cannot be the sole content of a scalar content field")
         }
-    };
+    }
+}
+
+/// A single branch's contribution to `initial_dynamic_content_value` — the value-expression analog
+/// of `emit_scalar_branch_value` (which emits a *statement*, a setter call against `self`; this
+/// emits a bare *value*, since it runs before `self` exists). Recurses through a nested dynamic
+/// marker (Phase 1 — always still eager) the same way.
+fn initial_dynamic_branch_value(
+    plan: &[PlannedNode],
+    entry: &(syn::Ident, String),
+    lazy: Option<&[PlannedNode]>,
+    inner_ty: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+) -> TokenStream {
+    let (binding, ty) = entry;
+    if ty == DYNAMIC_CHILD_SLOT_MARKER {
+        return initial_dynamic_content_value(plan, binding, inner_ty, ctx, from, table);
+    }
+    let value = lazy_leaf_or_field_value(lazy, binding, ctx, from, table);
     if inner_ty.contains("dyn UIElement") {
-        into_node_if_needed(quote! { #child }, child_ty, from, table)
+        into_node_if_needed(value, ty, from, table)
     } else {
-        into_any_view_if_needed(quote! { #child }, inner_ty)
+        into_any_view_if_needed(value, inner_ty)
     }
 }
 
@@ -5097,7 +5422,7 @@ fn direct_nested_marker_bindings(plan: &DynamicPlan) -> Vec<&syn::Ident> {
             .collect(),
         DynamicPlan::Match { arms, .. } => arms
             .iter()
-            .flat_map(|(_, children)| children.iter())
+            .flat_map(|(_, children, _)| children.iter())
             .filter(|(_, ty)| ty == DYNAMIC_CHILD_SLOT_MARKER)
             .map(|(b, _)| b)
             .collect(),
@@ -5135,7 +5460,7 @@ fn dynamic_plan_branch_containing<'a>(
         }
         DynamicPlan::Match { arms, .. } => arms
             .iter()
-            .map(|(_, children)| children.as_slice())
+            .map(|(_, children, _)| children.as_slice())
             .find(|children| children.iter().any(|(b, _)| b == target))
             .expect("target must be in one of this Match's arms"),
         DynamicPlan::For { .. } => panic!("`For` has no branches to search"),
@@ -5339,15 +5664,19 @@ fn emit_dynamic_node_refresh(
             condition,
             then_bindings,
             else_bindings,
+            then_lazy,
+            else_lazy,
         } => {
             let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(quote! { self }));
             let (then_leaves, then_nested) = partition_branch_bindings(then_bindings);
             let (else_leaves, else_nested) = partition_branch_bindings(else_bindings);
             let then_children = then_leaves.iter().map(|(child, ty)| {
-                dynamic_child_binding(quote! { self.#child.clone() }, ty, item_ext, from, table)
+                let value = lazy_leaf_or_field_value(then_lazy.as_deref(), child, ctx, from, table);
+                dynamic_child_binding(value, ty, item_ext, from, table)
             });
             let else_children = else_leaves.iter().map(|(child, ty)| {
-                dynamic_child_binding(quote! { self.#child.clone() }, ty, item_ext, from, table)
+                let value = lazy_leaf_or_field_value(else_lazy.as_deref(), child, ctx, from, table);
+                dynamic_child_binding(value, ty, item_ext, from, table)
             });
             let refresh_nested = |bindings: &[&syn::Ident]| -> TokenStream {
                 bindings
@@ -5392,16 +5721,17 @@ fn emit_dynamic_node_refresh(
             // the one actually selected) is what lets a nested `for` inside the currently-active
             // arm keep reusing its previously-constructed items by `Rc` identity across refreshes —
             // clearing it too would reset that identity cache for no reason every single time.
-            let arm_stmts = arms.iter().enumerate().map(|(i, (pattern, children))| {
+            let arm_stmts = arms.iter().enumerate().map(|(i, (pattern, children, lazy))| {
                 let (leaves, nested) = partition_branch_bindings(children);
                 let leaf_children = leaves.iter().map(|(child, ty)| {
-                    dynamic_child_binding(quote! { self.#child.clone() }, ty, item_ext, from, table)
+                    let value = lazy_leaf_or_field_value(lazy.as_deref(), child, ctx, from, table);
+                    dynamic_child_binding(value, ty, item_ext, from, table)
                 });
                 let clear_other_arms: TokenStream = arms
                     .iter()
                     .enumerate()
                     .filter(|(j, _)| *j != i)
-                    .flat_map(|(_, (_, other_children))| {
+                    .flat_map(|(_, (_, other_children, _))| {
                         partition_branch_bindings(other_children).1
                     })
                     .map(|b| {
@@ -5460,11 +5790,14 @@ fn emit_scalar_dynamic_node_refresh(
             condition,
             then_bindings,
             else_bindings,
+            then_lazy,
+            else_lazy,
         } => {
             let condition = emit_expr(condition, ctx, &EmitMode::WithSelf(quote! { self }));
             let then_value = emit_scalar_branch_value(
                 plan,
                 &then_bindings[0],
+                then_lazy.as_deref(),
                 owner_binding,
                 setter,
                 item_ext,
@@ -5475,6 +5808,7 @@ fn emit_scalar_dynamic_node_refresh(
             let else_value = emit_scalar_branch_value(
                 plan,
                 &else_bindings[0],
+                else_lazy.as_deref(),
                 owner_binding,
                 setter,
                 item_ext,
@@ -5488,10 +5822,11 @@ fn emit_scalar_dynamic_node_refresh(
         }
         DynamicPlan::Match { value, arms } => {
             let value = emit_expr(value, ctx, &EmitMode::WithSelf(quote! { self }));
-            let arm_stmts = arms.iter().map(|(pattern, children)| {
+            let arm_stmts = arms.iter().map(|(pattern, children, lazy)| {
                 let arm_value = emit_scalar_branch_value(
                     plan,
                     &children[0],
+                    lazy.as_deref(),
                     owner_binding,
                     setter,
                     item_ext,
@@ -5509,12 +5844,15 @@ fn emit_scalar_dynamic_node_refresh(
 }
 
 /// A single branch's contribution to `emit_scalar_dynamic_node_refresh` — either the branch's own
-/// leaf child (emits the actual `self.#owner_binding.#setter(..)` call) or, when the branch is
-/// itself a nested dynamic marker (Phase 1), a further recursive dispatch that bottoms out at
-/// exactly one such call regardless of nesting depth.
+/// leaf child (emits the actual `self.#owner_binding.#setter(..)` call, lazily-materialized via
+/// `lazy_leaf_or_field_value` when `lazy` says this branch qualifies) or, when the branch is
+/// itself a nested dynamic marker (Phase 1 — always still eager, `lazy_branch_plan`'s own
+/// eligibility rule excludes it), a further recursive dispatch that bottoms out at exactly one such
+/// call regardless of nesting depth.
 fn emit_scalar_branch_value(
     plan: &[PlannedNode],
     entry: &(syn::Ident, String),
+    lazy: Option<&[PlannedNode]>,
     owner_binding: &syn::Ident,
     setter: &syn::Ident,
     item_ext: &ItemTraitTokens,
@@ -5539,7 +5877,8 @@ fn emit_scalar_branch_value(
             table,
         );
     }
-    let value = dynamic_child_binding(quote! { self.#binding.clone() }, ty, item_ext, from, table);
+    let value = lazy_leaf_or_field_value(lazy, binding, ctx, from, table);
+    let value = dynamic_child_binding(value, ty, item_ext, from, table);
     quote! { self.#owner_binding.#setter(#value); }
 }
 
@@ -5598,14 +5937,49 @@ fn plan_dynamic_entry(
             then_branch,
             else_branch,
         } => {
-            let then_bindings = then_branch
-                .iter()
-                .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
-                .collect();
-            let else_bindings = else_branch
-                .iter()
-                .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
-                .collect();
+            // Fixed before either branch is planned: lazy planning never grows `out` (a lazy
+            // branch's own leaves live in its own local plan instead), so this stays a stable,
+            // collision-free seed for both branches' `lazy_branch_plan` calls regardless of which
+            // one (if either) ends up falling back to eager and pushing into `out` itself.
+            let marker_index = out.len();
+            let then_lazy_prefix = format!("__lazyif{marker_index}_then");
+            let (then_bindings, then_lazy) = match lazy_branch_plan(
+                then_branch,
+                parent_type_path,
+                ctx,
+                from,
+                table,
+                lets,
+                &then_lazy_prefix,
+            ) {
+                Some((bindings, leaves)) => (bindings, Some(leaves)),
+                None => (
+                    then_branch
+                        .iter()
+                        .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
+                        .collect(),
+                    None,
+                ),
+            };
+            let else_lazy_prefix = format!("__lazyif{marker_index}_else");
+            let (else_bindings, else_lazy) = match lazy_branch_plan(
+                else_branch,
+                parent_type_path,
+                ctx,
+                from,
+                table,
+                lets,
+                &else_lazy_prefix,
+            ) {
+                Some((bindings, leaves)) => (bindings, Some(leaves)),
+                None => (
+                    else_branch
+                        .iter()
+                        .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
+                        .collect(),
+                    None,
+                ),
+            };
             let binding = format_ident!("__node_{}", out.len());
             out.push(PlannedNode {
                 binding: binding.clone(),
@@ -5621,25 +5995,47 @@ fn plan_dynamic_entry(
                     condition: condition.clone(),
                     then_bindings,
                     else_bindings,
+                    then_lazy,
+                    else_lazy,
                 }),
             });
             (binding, DYNAMIC_CHILD_SLOT_MARKER.to_string())
         }
         ChildEntry::Match { value, arms } => {
+            // See the `If` arm's matching comment: fixed before any arm is planned, stable across
+            // however many of them do or don't end up lazy.
+            let marker_index = out.len();
             let arms = arms
                 .iter()
-                .map(|arm| {
+                .enumerate()
+                .map(|(arm_index, arm)| {
                     let pattern =
                         syn::parse::Parser::parse_str(syn::Pat::parse_single, &arm.pattern)
                             .unwrap_or_else(|error| {
                                 panic!("invalid match pattern `{}`: {error}", arm.pattern)
                             });
-                    let children = arm
-                        .body
-                        .iter()
-                        .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
-                        .collect();
-                    (pattern, children)
+                    let lazy_prefix = format!("__lazymatch{marker_index}_arm{arm_index}");
+                    let (children, lazy) = match lazy_branch_plan(
+                        &arm.body,
+                        parent_type_path,
+                        ctx,
+                        from,
+                        table,
+                        lets,
+                        &lazy_prefix,
+                    ) {
+                        Some((bindings, leaves)) => (bindings, Some(leaves)),
+                        None => (
+                            arm.body
+                                .iter()
+                                .map(|e| {
+                                    plan_child_entry(e, parent_type_path, ctx, from, table, out, lets)
+                                })
+                                .collect(),
+                            None,
+                        ),
+                    };
+                    (pattern, children, lazy)
                 })
                 .collect();
             let binding = format_ident!("__node_{}", out.len());
@@ -6904,7 +7300,7 @@ fn build_component_args(
                 }
                 let (child, child_ty) = &node.child_bindings[0];
                 if child_ty == DYNAMIC_CHILD_SLOT_MARKER {
-                    initial_dynamic_content_value(plan, child, inner_ty, from, table)
+                    initial_dynamic_content_value(plan, child, inner_ty, ctx, from, table)
                 } else if inner_ty.contains("dyn UIElement") {
                     into_node_if_needed(quote! { #child }, child_ty, from, table)
                 } else {
@@ -7093,7 +7489,7 @@ fn build_component_setters(
                 }
                 let (child, child_ty) = &node.child_bindings[0];
                 if child_ty == DYNAMIC_CHILD_SLOT_MARKER {
-                    initial_dynamic_content_value(plan, child, inner_ty, from, table)
+                    initial_dynamic_content_value(plan, child, inner_ty, ctx, from, table)
                 } else if inner_ty.contains("dyn UIElement") {
                     into_node_if_needed(quote! { #child }, child_ty, from, table)
                 } else {
@@ -8519,6 +8915,7 @@ fn property_resync_methods_for(
     root_is_self: bool,
 ) -> TokenStream {
     let root_binding = plan.last().map(|r| r.binding.clone());
+    let lazy_leaves = collect_lazy_leaves(plan);
     bind_owners
         .iter()
         .map(|owner_ident| {
@@ -8526,6 +8923,11 @@ fn property_resync_methods_for(
             let mut properties: std::collections::BTreeSet<String> = Default::default();
             for node in plan {
                 for (_, expr) in &node.attributes {
+                    collect_view_expr_owner_properties(expr, ctx, &owner_name, &mut properties);
+                }
+            }
+            for (_, leaf) in &lazy_leaves {
+                for (_, expr) in &leaf.attributes {
                     collect_view_expr_owner_properties(expr, ctx, &owner_name, &mut properties);
                 }
             }
@@ -8545,6 +8947,17 @@ fn property_resync_methods_for(
                             ResyncFilter::Property(&owner_name, property_name),
                             &mut statements,
                             self_is_node,
+                        );
+                    }
+                    for (cache_field, leaf) in &lazy_leaves {
+                        emit_lazy_branch_resync(
+                            cache_field,
+                            leaf,
+                            ctx,
+                            from,
+                            table,
+                            ResyncFilter::Property(&owner_name, property_name),
+                            &mut statements,
                         );
                     }
                     let refresh =
@@ -8638,6 +9051,25 @@ fn emit_resync(
     out: &mut TokenStream,
     self_is_node: bool,
 ) {
+    emit_resync_with_receiver(node, ctx, from, table, filter, out, self_is_node, None);
+}
+
+// Same as `emit_resync`, but for a node that isn't reachable as `self`/`self.#binding` at all —
+// a lazy-once `if`/`match` branch leaf, whose only live handle is the `Rc<T>` sitting in its own
+// `RefCell<Option<Rc<T>>>` cache field once materialized (see `lazy_branch_cache_ident`). The
+// caller is expected to have already unwrapped that cache and bound the clone to `receiver_override`
+// under an `if let Some(..)` guard — this function itself has no opinion on cache presence, it just
+// emits setter calls against whatever receiver expression it's given.
+fn emit_resync_with_receiver(
+    node: &PlannedNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    filter: ResyncFilter<'_>,
+    out: &mut TokenStream,
+    self_is_node: bool,
+    receiver_override: Option<TokenStream>,
+) {
     if !node.stored {
         return;
     }
@@ -8647,10 +9079,10 @@ fn emit_resync(
     // See `emit_wiring`'s matching `widget_binding`/`self_is_node` doc comment — a shape/host-
     // composition root has no separately-stored `self.#binding` field; `self` itself already *is*
     // the tree node.
-    let receiver = if self_is_node {
-        quote! { self }
-    } else {
-        quote! { self.#binding }
+    let receiver = match receiver_override {
+        Some(receiver) => receiver,
+        None if self_is_node => quote! { self },
+        None => quote! { self.#binding },
     };
     // `resync()` is its own function, a separate lexical scope from `new()` — the `use` already
     // injected alongside construction (`emit_construction`'s `builtin_trait_use`, or
@@ -9503,6 +9935,118 @@ view NotepadWindow {
         let rendered = generated.to_string();
         assert!(rendered.contains("fn __refresh_dynamic_regions"));
     }
+
+    /// Issue #52's lazy-once materialization (`lazy_branch_plan`): a childless-literal-only branch
+    /// gets its own `RefCell<Option<Rc<..>>>` cache field and is constructed only once actually
+    /// selected, instead of unconditionally at `new()` time like every branch used to be.
+    #[test]
+    fn generates_lazy_branch_cache_for_a_childless_literal_branch() {
+        let module = parse_module(
+            r#"
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    show: bool = true,
+                }
+
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+
+                view DynamicHost {
+                    VerticalLayout {
+                        if vm.show {
+                            TextBlock { text: "shown" }
+                        } else {
+                            TextBlock { text: "hidden" }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("dynamic if source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("lazy_branch_cache", &generated);
+
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("__lazy_branch_"),
+            "both branches are childless literals, so both should be lazily cached: {rendered}"
+        );
+        assert!(rendered.contains("RefCell < Option < std :: rc :: Rc"));
+    }
+
+    /// Task #14 (Issue #52): `initial_dynamic_content_value`'s construction-time value for a
+    /// scalar `#[content(...)]` field must evaluate the region's condition once and construct only
+    /// the selected branch — not the old unconditional "always the `then`/first-arm branch"
+    /// shortcut, which used to compile only because every branch happened to be an already-
+    /// unconditionally-constructed eager local. Here `ContentControl` is used as an ordinary
+    /// *nested* literal child (not `inherits`, unlike the sibling
+    /// `generates_scalar_content_dynamic_region_via_content_control` test, whose root-level
+    /// implicit-composition sugar takes a different, unrelated emission path and never calls
+    /// `initial_dynamic_content_value` at all) — its bare `if` child is exactly the shape that
+    /// reaches `build_component_args`'s `#[content(field_name)]` branch. Both branches are
+    /// childless literals, so both are lazily cached; if `initial_dynamic_content_value` still blindly
+    /// picked the `then` branch's binding regardless of the condition, this would only accidentally
+    /// still work while the condition happens to be `true` by construction-time default — flipping
+    /// the DSL's own default below to `false` makes a wrong, unconditional guess fail loudly instead
+    /// (a real compile error, referencing an unpopulated lazy cache's binding) rather than silently
+    /// mis-selecting the branch.
+    #[test]
+    fn scalar_content_field_on_a_nested_literal_evaluates_condition_once_at_construction() {
+        let module = parse_module(
+            r#"
+                viewmodel DynamicViewModel {
+                    #[observable]
+                    show_a: bool = false,
+                }
+
+                component DynamicHost {
+                    #[param]
+                    #[inject]
+                    vm: DynamicViewModel,
+                }
+
+                view DynamicHost {
+                    ContentControl {
+                        if vm.show_a {
+                            TextBlock { text: "a" }
+                        } else {
+                            TextBlock { text: "b" }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("nested scalar dynamic content source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_scalar_dynamic_content_construction", &generated);
+
+        let rendered = generated.to_string();
+        assert!(rendered.contains("fn __refresh_dynamic_regions"));
+        assert!(
+            rendered.contains("__lazy_branch_"),
+            "both branches are childless literals: {rendered}"
+        );
+    }
+
+    // Issue #52 §4's documented asymmetry (`lazy_branch_plan`'s own doc comment) turns out to be
+    // unreachable through either DSL frontend today, confirmed by direct inspection rather than
+    // assumed: `parser.rs`'s `parse_child_block` (the only parser used for `if`/`match`/`for`
+    // branch bodies) unconditionally calls `parse_element_node()` for every non-control-flow
+    // entry, never routing through the `ChildEntry::Ref` arm that ordinary (non-branch) element
+    // bodies support (`parser.rs` around the `Column { editor, StatusBar {} }` doc example) — so
+    // an `#[id("...")]`-bound `let` reference inside a branch is a parse error, not a valid
+    // construct, in the text frontend. `attr_frontend.rs` (the real `#[elwindui::component]`
+    // macro path every example app uses) never constructs `ChildEntry::Ref` at all, in any
+    // position. `lazy_branch_plan`'s own `ChildEntry::Ref` exclusion in its eligibility check is
+    // therefore a correct, harmless defensive guard for a case no current DSL input can trigger —
+    // worth keeping (forward-compatible if either frontend ever gains branch-local `Ref` support)
+    // but nothing here to regression-test against today without hand-constructing a `ChildEntry`
+    // tree directly, which isn't warranted for logic no real input reaches.
 
     /// A `for` nested inside an `if`'s then-branch: the outer `if` toggles between the `for` region
     /// and a static fallback, so the nested `for`'s own `DynamicChildSlot` must be forced empty

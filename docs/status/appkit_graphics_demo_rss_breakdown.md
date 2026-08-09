@@ -74,3 +74,54 @@ clean mapped fileの+3 MiBは、主にAppleKeyboardLayouts-L.dat（+1472 KiB）�
 3. **B — `VM_ALLOCATE` +416 KiBを追跡する。** ownershipが分かるまで削減実装はしない。
 
 mapped file、`__TEXT`、`__LINKEDIT`、dyld shared cache、IOSurface/CGの不変部分をRSSだけを理由に削減対象にしない。今回の結果はRSS 75 MiBを50 MiBにすることではなく、Case Aとの差分で約4–5 MiBのprivate dirtyを下げることが有意義であることを示す。
+
+## MallocStackLoggingによるDefaultMallocZoneの所有者特定
+
+### 方法と解釈上の制約
+
+release buildのCase Aとgraphics-demo（Fills初期タブ）を別プロセスで起動し、`MallocStackLogging=full` と `MallocStackLoggingDirectory` を有効にして、表示後のlive allocationを`malloc_history -allBySize`で集計した。`xctrace`のAllocations templateはこの環境で対象プロセスへのattachに失敗したため、同じ目的に使えるMallocStackLoggingのdisk recorderを用いた。
+
+これは通常起動時の絶対値を再測定するものではない。MallocStackLogging自身が常駐メモリを増やし、両プロセスとも起動後にstack loggingが有効になった旨を`malloc_history`が報告した。そのため、起動直後の一部はstackを持たない。Physical FootprintもCase A 27.8 MiB、graphics-demo 31.9 MiBとなり、通常測定の13.81 MiB / 17.85 MiBより大きい。以下は**同一計測条件内のCase A差分で、live allocationの直接発行者を比較した結果だけ**である。
+
+ここでいうPersistent Bytesは、採取時点まで解放されていないmalloc blockの合計である。allocation stackの最初の非allocator frameで分類した。ElwindUIの呼出し元からAppKitが確保したblockを「ElwindUI直接確保」とは数えず、実際に確保処理を行ったframework/runtime側としている。この区別により、最適化対象を過大に帰属しない。
+
+### Persistent Bytesの分類
+
+| 直接のallocation site分類 | Case A | graphics-demo | graphics-demo - A | 判定 |
+|---|---:|---:|---:|---|
+| ElwindUI core / AppKit backend | 0 KiB | 12.7 KiB | **+12.7 KiB** | 直接所有はごく小さい |
+| graphics-demo | 0 KiB | 4.3 KiB | **+4.3 KiB** | 直接所有はごく小さい |
+| AppKit / Foundation / CoreFoundation / CoreAutoLayout等 | 1,940.9 KiB | 2,967.7 KiB | **+1,026.8 KiB** | framework起因 |
+| Objective-C / Swift / ICU / libc++ runtime | 2,570.8 KiB | 4,298.5 KiB | **+1,727.7 KiB** | framework起動・UI構築に伴うruntime状態 |
+| stack未取得のlive malloc block | 36 KiB | 344 KiB | **+308 KiB** | 起動後にlogging開始したため未帰属 |
+| **live malloc block合計** | **4,547.7 KiB** | **7,627.2 KiB** | **+3,079.5 KiB** | DefaultMallocZone増分と整合 |
+
+同じMallocStackLogging条件の`vmmap -summary`では、MALLOC zoneの`ALLOCATED`はCase A 4,801 KiB、graphics-demo 7,925 KiB、差分**+3,124 KiB**だった。stack集計との差約45 KiBは、`malloc_history`の記録開始時点・集計単位・丸めの差であり、約+3 MiBのDefaultMallocZone増分をほぼ説明する。
+
+allocator overheadはPersistent Bytesとは分けて扱う。同じzoneの`FRAG SIZE`はCase A 4,591 KiB、graphics-demo 5,467 KiB、差分**+876 KiB**だった。これはzoneが保持する未割当capacity/fragmentationで、live objectの所有者を示さない。実際のmemory pressureには寄与し得るが、個別のallocation siteへ二重計上せず、A/Bの条件付き削減対象とする。
+
+### 増分の大きい直接allocation site
+
+`graphics-demo - A` のPersistent Bytes差分を、allocatorの直後のframeで正規化して大きい順に示す。これらはdirect siteであり、呼出し経路にはElwindUIのwindow/tree構築が含まれる場合があっても、block自体を確保した実体は右欄のframework/runtimeである。
+
+| allocation site | 増分Persistent Bytes | 分類 |
+|---|---:|---|
+| `swift::swift_slowAllocTyped` | +452.4 KiB | Swift runtime |
+| `_objc_rootAllocWithZone` | +401.4 KiB | Objective-C runtime |
+| `swift::MetadataAllocator::Allocate` | +288.0 KiB | Swift runtime |
+| `_CFRuntimeCreateInstance` | +171.8 KiB | CoreFoundation |
+| `cache_t::insert` | +115.7 KiB | Objective-C runtime |
+| `AutoreleasePoolPage::autoreleaseFullPage` | +108.0 KiB | Objective-C runtime |
+| `CoreAutoLayout::_table_addStorageBlock` | +104.7 KiB | AppKit/CoreAutoLayout |
+| `class_createInstance` | +93.8 KiB | Objective-C runtime |
+| `operator_new_impl` | +90.2 KiB | libc++ runtime |
+| `AttributeGraph::data::zone::alloc_persistent` | +76.0 KiB | AppKit/SwiftUI support framework |
+
+ElwindUIがcaller chainに現れるlive blockの多くは、`NSApplication`初期化、`InnerWindow::new`、`TreeHostView::set_tree`、`TabView::measure`の過程でframework/runtimeが確保した状態だった。直接siteがElwindUI core/backendである合計は12.7 KiB、graphics-demo固有は4.3 KiBに留まる。したがって、この計測では「約+3 MiBのprivate dirtyをElwindUIのRenderTreeやgraphics-demoデータが直接保持している」と結論付ける根拠はない。
+
+### 所有者の結論と次の判断
+
+- 約+3.0 MiBのlive malloc増分のうち、stackを取得できた約+2.75 MiBはAppKit系frameworkまたはObjective-C/Swift等のsystem runtimeが直接確保したものだった。
+- ElwindUI core/backendとgraphics-demoの直接allocation siteは合計約+17 KiBであり、この観測では積極的な削減対象（A）にはならない。
+- +308 KiBはstack未取得なので所有者未確定、+876 KiBのallocator fragmentationは個別objectの所有者を持たない。両者は条件付き対象（B）として、将来の実装変更で再計測する。
+- AppKit/Foundation/runtime由来のclean/shared mappingではなく、このprivate dirty増分だけを最適化候補の評価対象とする。ただし現時点では所有者特定までとし、最適化実装は行わない。

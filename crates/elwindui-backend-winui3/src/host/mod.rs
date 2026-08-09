@@ -8,7 +8,7 @@
 mod event;
 mod replay;
 
-use crate::ffi::{AnyView, register_ui_event_callback, invoke_ui_event_callback, register_ui_key_event_callback, invoke_ui_key_event_callback, register_ui_text_event_callback, invoke_ui_text_event_callback};
+use crate::ffi::{AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_key_event_callback, invoke_ui_text_event_callback};
 use event::*;
 use replay::*;
 
@@ -76,6 +76,10 @@ pub struct TreeHostPanel {
     /// their own weak-captured handle to read it at fire time, the same pattern `render_tree`/
     /// `native_children` already use.
     unconstrained_axes: Rc<Cell<(bool, bool)>>,
+    /// Gates all layout and rendering work while this host belongs to a non-selected tab.
+    active: Rc<Cell<bool>>,
+    /// Keeps every FFI callback registered by this host alive for exactly this host's lifetime.
+    callback_owner: UiCallbackRegistryOwner,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostPanel` — wraps a *weak* reference back to the
@@ -104,6 +108,8 @@ pub(crate) struct WinUI3RelayoutHost {
     keyboard: Weak<KeyboardDispatcher>,
     /// See `TreeHostPanel::unconstrained_axes`'s own doc comment.
     unconstrained_axes: Weak<Cell<(bool, bool)>>,
+    /// See `TreeHostPanel::active`.
+    active: Weak<Cell<bool>>,
     /// `true` while a relayout pass is already enqueued on the `DispatcherQueue` and hasn't run
     /// yet — makes `request_relayout` a no-op for any further call until that pass actually runs
     /// (and clears it right before doing so).
@@ -122,6 +128,12 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
     // so this mechanical signature update is deliberately kept behavior-identical rather than
     // guessed at.
     fn request_relayout(&self, dirty_group_id: u64, _kind: elwindui_core::ui::InvalidationKind) {
+        let Some(active) = self.active.upgrade() else {
+            return;
+        };
+        if !active.get() {
+            return;
+        }
         if let Some(render_tree) = self.render_tree.upgrade() {
             if let Some(render_tree) = render_tree.borrow_mut().as_mut() {
                 render_tree.mark_dirty(dirty_group_id);
@@ -142,6 +154,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             Some(composition),
             Some(keyboard),
             Some(unconstrained_axes),
+            Some(active),
         ) = (
             this.tree.upgrade(),
             this.render_tree.upgrade(),
@@ -149,6 +162,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
             this.composition.upgrade(),
             this.keyboard.upgrade(),
             this.unconstrained_axes.upgrade(),
+            this.active.upgrade(),
         ) {
             TreeHostPanel::relayout_static(
                 &this.canvas,
@@ -158,6 +172,7 @@ impl elwindui_core::ui::RelayoutHost for WinUI3RelayoutHost {
                 &native_children,
                 &keyboard,
                 unconstrained_axes.get(),
+                &active,
             );
         }
     }
@@ -193,6 +208,8 @@ impl TreeHostPanel {
             native_children: Rc::new(RefCell::new(NativeChildMap::new())),
             keyboard: Rc::new(KeyboardDispatcher::new()),
             unconstrained_axes: Rc::new(Cell::new((false, false))),
+            active: Rc::new(Cell::new(true)),
+            callback_owner: UiCallbackRegistryOwner::default(),
         };
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
         // allows the host to receive OS keyboard focus, mirroring AppKit's TreeHostView.
@@ -200,7 +217,7 @@ impl TreeHostPanel {
         {
             let tree_for_key = Rc::downgrade(&this.tree);
             let keyboard_for_key = Rc::downgrade(&this.keyboard);
-            let callback_id = register_ui_key_event_callback(Rc::new(move |event| {
+            let callback_id = this.callback_owner.register_key(Rc::new(move |event| {
                 if let (Some(tree), Some(keyboard)) = (tree_for_key.upgrade(), keyboard_for_key.upgrade()) {
                     if let Some(tree) = tree.borrow().clone() { keyboard.handle_key(&tree, event); }
                 }
@@ -229,7 +246,7 @@ impl TreeHostPanel {
         {
             let tree_for_key = Rc::downgrade(&this.tree);
             let keyboard_for_key = Rc::downgrade(&this.keyboard);
-            let callback_id = register_ui_key_event_callback(Rc::new(move |event| {
+            let callback_id = this.callback_owner.register_key(Rc::new(move |event| {
                 if let (Some(tree), Some(keyboard)) = (tree_for_key.upgrade(), keyboard_for_key.upgrade()) {
                     if let Some(tree) = tree.borrow().clone() { keyboard.handle_key(&tree, event); }
                 }
@@ -254,7 +271,7 @@ impl TreeHostPanel {
         {
             let tree_for_text = Rc::downgrade(&this.tree);
             let keyboard_for_text = Rc::downgrade(&this.keyboard);
-            let callback_id = register_ui_text_event_callback(Rc::new(move |text| {
+            let callback_id = this.callback_owner.register_text(Rc::new(move |text| {
                 if let (Some(tree), Some(keyboard)) = (tree_for_text.upgrade(), keyboard_for_text.upgrade()) {
                     if let Some(tree) = tree.borrow().clone() {
                         keyboard.handle_text_input(&tree, RawTextInputEvent { text });
@@ -283,8 +300,9 @@ impl TreeHostPanel {
         let weak_composition = Rc::downgrade(&this.composition);
         let weak_keyboard = Rc::downgrade(&this.keyboard);
         let weak_unconstrained_axes = Rc::downgrade(&this.unconstrained_axes);
+        let weak_active = Rc::downgrade(&this.active);
         let canvas_for_handler = this.canvas.clone();
-        let callback_id = register_ui_event_callback(Rc::new(move || {
+        let callback_id = this.callback_owner.register_event(Rc::new(move || {
             if let (
                 Some(tree),
                 Some(render_tree),
@@ -292,6 +310,7 @@ impl TreeHostPanel {
                 Some(composition),
                 Some(keyboard),
                 Some(unconstrained_axes),
+                Some(active),
             ) = (
                 weak.upgrade(),
                 weak_render_tree.upgrade(),
@@ -299,6 +318,7 @@ impl TreeHostPanel {
                 weak_composition.upgrade(),
                 weak_keyboard.upgrade(),
                 weak_unconstrained_axes.upgrade(),
+                weak_active.upgrade(),
             ) {
                 Self::relayout_static(
                     &canvas_for_handler,
@@ -308,6 +328,7 @@ impl TreeHostPanel {
                     &native_children,
                     &keyboard,
                     unconstrained_axes.get(),
+                    &active,
                 );
             }
         }));
@@ -347,6 +368,12 @@ impl TreeHostPanel {
     /// `InvalidateMeasure`/`InvalidateArrange`) on such a `Canvas` does not, in practice, make its
     /// `SizeChanged` fire on any later frame either — logged and observed directly, not assumed.
     pub(crate) fn force_relayout(&self) {
+        if !self.active.get() {
+            if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+                eprintln!("[elwindui-winui3] skipped relayout for inactive TreeHostPanel");
+            }
+            return;
+        }
         Self::relayout_static(
             &self.canvas,
             &self.composition,
@@ -355,7 +382,39 @@ impl TreeHostPanel {
             &self.native_children,
             &self.keyboard,
             self.unconstrained_axes.get(),
+            &self.active,
         );
+    }
+
+    /// Activates or suspends this host's layout and rendering lifecycle.
+    ///
+    /// Suspending removes retained Composition and native children, clears focus, and turns later
+    /// invalidations and forced layouts into no-ops. Reactivating performs one full relayout from
+    /// the retained logical tree, so callers do not need to replay changes made while inactive.
+    pub(crate) fn set_active(&self, active: bool) {
+        if self.active.replace(active) == active {
+            return;
+        }
+        if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
+            eprintln!("[elwindui-winui3] TreeHostPanel active={active}");
+        }
+        if active {
+            self.force_relayout();
+            return;
+        }
+
+        self.keyboard.focus.clear_focus();
+        let _ = self.composition
+            .borrow_mut()
+            .reconcile(&self.canvas, Vec::new());
+        reconcile_native_children(
+            &self.canvas,
+            &self.native_children,
+            Vec::new(),
+            &self.render_tree,
+            &self.keyboard,
+        );
+        *self.render_tree.borrow_mut() = None;
     }
 
     /// See `TreeHostPanel::unconstrained_axes`'s own doc comment. `InnerScrollView` calls this once,
@@ -379,6 +438,7 @@ impl TreeHostPanel {
             native_children: Rc::downgrade(&self.native_children),
             keyboard: Rc::downgrade(&self.keyboard),
             unconstrained_axes: Rc::downgrade(&self.unconstrained_axes),
+            active: Rc::downgrade(&self.active),
             pending: Cell::new(false),
             weak_self: RefCell::new(Weak::new()),
         });
@@ -393,15 +453,7 @@ impl TreeHostPanel {
         self.keyboard.shortcuts().collect_from_tree(&tree);
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
-        Self::relayout_static(
-            &self.canvas,
-            &self.composition,
-            &self.tree,
-            &self.render_tree,
-            &self.native_children,
-            &self.keyboard,
-            self.unconstrained_axes.get(),
-        );
+        self.force_relayout();
     }
 
     fn relayout_static(
@@ -412,7 +464,11 @@ impl TreeHostPanel {
         native_children: &Rc<RefCell<NativeChildMap>>,
         keyboard: &Rc<KeyboardDispatcher>,
         unconstrained_axes: (bool, bool),
+        active: &Cell<bool>,
     ) {
+        if !active.get() {
+            return;
+        }
         use elwindui_core::base::Size as LSize;
 
         // `ActualWidth`/`ActualHeight` only update after a real native layout pass runs on this
@@ -941,4 +997,3 @@ impl TreeHostPanel {
         }
     }
 }
-

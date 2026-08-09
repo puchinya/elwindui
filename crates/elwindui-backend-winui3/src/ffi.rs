@@ -34,6 +34,93 @@ thread_local! {
     static UI_TEXT_EVENT_CALLBACKS: RefCell<HashMap<usize, Rc<dyn Fn(String)>>> = RefCell::new(HashMap::new());
 }
 
+#[derive(Clone, Copy)]
+enum UiCallbackKind {
+    Event,
+    Index,
+    Key,
+    Text,
+}
+
+#[derive(Default)]
+struct UiCallbackRegistryOwnerInner {
+    registrations: RefCell<Vec<(UiCallbackKind, usize)>>,
+}
+
+impl Drop for UiCallbackRegistryOwnerInner {
+    fn drop(&mut self) {
+        for (kind, id) in self.registrations.get_mut().drain(..) {
+            let _ = match kind {
+                UiCallbackKind::Event => UI_EVENT_CALLBACKS.try_with(|callbacks| {
+                    callbacks.borrow_mut().remove(&id);
+                }),
+                UiCallbackKind::Index => UI_INDEX_EVENT_CALLBACKS.try_with(|callbacks| {
+                    callbacks.borrow_mut().remove(&id);
+                }),
+                UiCallbackKind::Key => UI_KEY_EVENT_CALLBACKS.try_with(|callbacks| {
+                    callbacks.borrow_mut().remove(&id);
+                }),
+                UiCallbackKind::Text => UI_TEXT_EVENT_CALLBACKS.try_with(|callbacks| {
+                    callbacks.borrow_mut().remove(&id);
+                }),
+            };
+        }
+    }
+}
+
+/// Owns callback-registry entries whose native event source has the same lifetime.
+///
+/// WinRT delegates capture only the numeric callback id because their generated ABI requires a
+/// `Send` closure, while the callback itself deliberately remains UI-thread-local and may contain
+/// `Rc` state. Clones share one registration set; dropping the final owner removes every entry so
+/// a detached tree host or native child cannot keep callback closures (and anything they capture)
+/// alive indefinitely. A delegate that races with teardown safely resolves the missing id as a
+/// no-op through the existing `invoke_ui_*` functions.
+#[derive(Clone, Default)]
+pub(crate) struct UiCallbackRegistryOwner(Rc<UiCallbackRegistryOwnerInner>);
+
+impl UiCallbackRegistryOwner {
+    /// Registers a no-argument callback owned by this lifetime group.
+    pub(crate) fn register_event(&self, callback: Rc<dyn Fn()>) -> usize {
+        let id = register_ui_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::Event, id));
+        id
+    }
+
+    /// Registers an index callback owned by this lifetime group.
+    pub(crate) fn register_index(&self, callback: Rc<dyn Fn(usize)>) -> usize {
+        let id = register_ui_index_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::Index, id));
+        id
+    }
+
+    /// Registers a raw-key callback owned by this lifetime group.
+    pub(crate) fn register_key(&self, callback: Rc<dyn Fn(RawKeyEvent)>) -> usize {
+        let id = register_ui_key_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::Key, id));
+        id
+    }
+
+    /// Registers a text-input callback owned by this lifetime group.
+    pub(crate) fn register_text(&self, callback: Rc<dyn Fn(String)>) -> usize {
+        let id = register_ui_text_event_callback(callback);
+        self.0
+            .registrations
+            .borrow_mut()
+            .push((UiCallbackKind::Text, id));
+        id
+    }
+}
+
 pub(crate) fn register_ui_event_callback(callback: Rc<dyn Fn()>) -> usize {
     let id = NEXT_UI_EVENT_CALLBACK.fetch_add(1, Ordering::Relaxed);
     UI_EVENT_CALLBACKS.with(|callbacks| {
@@ -478,5 +565,55 @@ impl AnyView {
 impl<T: WinUiHandle + 'static> From<T> for AnyView {
     fn from(v: T) -> Self {
         AnyView(Rc::new(v))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callback_registry_owner_unregisters_on_final_drop() {
+        let calls = Rc::new(Cell::new(0));
+        let owner = UiCallbackRegistryOwner::default();
+        let owner_clone = owner.clone();
+        let calls_for_callback = calls.clone();
+        let id = owner.register_event(Rc::new(move || {
+            calls_for_callback.set(calls_for_callback.get() + 1);
+        }));
+
+        invoke_ui_event_callback(id);
+        assert_eq!(calls.get(), 1);
+        drop(owner);
+        invoke_ui_event_callback(id);
+        assert_eq!(calls.get(), 2, "a clone must keep the registration alive");
+        drop(owner_clone);
+        invoke_ui_event_callback(id);
+        assert_eq!(calls.get(), 2, "a removed id must be a safe no-op");
+    }
+
+    #[test]
+    fn callback_registry_owner_unregisters_each_callback_kind() {
+        let owner = UiCallbackRegistryOwner::default();
+        let index_calls = Rc::new(Cell::new(0));
+        let text_calls = Rc::new(Cell::new(0));
+        let index_calls_for_callback = index_calls.clone();
+        let text_calls_for_callback = text_calls.clone();
+        let index_id = owner.register_index(Rc::new(move |value| {
+            index_calls_for_callback.set(value);
+        }));
+        let text_id = owner.register_text(Rc::new(move |value| {
+            text_calls_for_callback.set(value.len());
+        }));
+
+        invoke_ui_index_event_callback(index_id, 7);
+        invoke_ui_text_event_callback(text_id, "abc".to_string());
+        assert_eq!(index_calls.get(), 7);
+        assert_eq!(text_calls.get(), 3);
+        drop(owner);
+        invoke_ui_index_event_callback(index_id, 9);
+        invoke_ui_text_event_callback(text_id, "ignored".to_string());
+        assert_eq!(index_calls.get(), 7);
+        assert_eq!(text_calls.get(), 3);
     }
 }

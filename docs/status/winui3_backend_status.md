@@ -203,10 +203,12 @@ see):
   `SetWidth`/`SetHeight`/`InvalidateMeasure`/`InvalidateArrange` do not make `ActualWidth`/
   `ActualHeight` update either, even after several seconds. Fixed two ways, both needed together:
   - Added `TreeHostPanel::force_relayout(&self)`, which calls `relayout_static` directly rather than
-    waiting on the (unreliable, for this specific host) native `SizeChanged` cascade.
-    `InnerTabView` now tracks every tab's `TreeHostPanel` (not just its `FrameworkElement`) in
-    `content_hosts: Rc<RefCell<Vec<TreeHostPanel>>>`, and the `TabView`-level (not per-item)
-    `SizeChanged` handler calls `SetWidth`/`SetHeight` + `force_relayout()` on all of them.
+    waiting on the (unreliable, for this specific host) native `SizeChanged` cascade. The initial
+    workaround retained every host in `InnerTabView` and force-relayouted all of them; this is now
+    replaced by `native_ui::TabView`'s ordered host ownership and `TreeHostPanel::set_active(bool)`.
+    The `TabView`-level `SizeChanged` callback forwards the current content viewport only to the
+    selected host. Non-selected hosts retain their core tree/native-control state but discard their
+    RenderTree, Composition islands/image cache and reflected XAML children until reselected.
   - `TreeHostPanel::relayout_static` itself (`inner.rs`) computed its layout `available` size from
     `canvas.ActualWidth()/ActualHeight()` — which, per the point above, does not reflect a
     `SetWidth`/`SetHeight` call made moments earlier on a `TabViewItem`-hosted Canvas. Fixed by
@@ -215,6 +217,11 @@ see):
     `ActualWidth`/`ActualHeight` when they're `NaN` — this is the *same* explicit-vs-native-actual
     distinction as the `AnyView::measure` fix above, just applied to the container driving `available`
     instead of to an individual native control's own measure pass.
+- **Closed and non-selected tab resource lifetime is deterministic**: removing a declarative item
+  suppresses and removes its matching host before removing the XAML `TabViewItem`; host-created
+  callback registry entries and native focus event tokens are owned and released with their native
+  source. Repeated tab activation therefore neither resizes inactive trees nor accumulates duplicate
+  focus handlers.
 
 ### `elwindui-codegen`'s `for`-loop identity detection and module scope
 

@@ -111,6 +111,13 @@ pub struct TreeHostIvars {
     /// frame at the top of the next pass so a resize (which `layout` can trigger with no
     /// `request_relayout` call at all) is never treated as a `Render`-only pass.
     pub(crate) last_layout_size: Cell<objc2_foundation::NSSize>,
+    /// Whether this host currently participates in layout/render at all — the AppKit-side half of
+    /// `docs/design/gui_framework_design.md` §5.4a's "container participation" (a `Visible`-vs-
+    /// `Collapsed` element's own `UIElementExt::participates_in_layout()` is the *other* half, and
+    /// is orthogonal to this one: neither overwrites the other). `true` for every host by default
+    /// (matches every existing host's behavior — only `InnerTabView`'s non-selected-tab hosts ever
+    /// set this `false`, immediately after construction). See `set_active`'s own doc comment.
+    pub(crate) active: Cell<bool>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
@@ -366,6 +373,7 @@ impl TreeHostView {
             needs_another_pass: Cell::new(false),
             pending_invalidation: Cell::new(None),
             last_layout_size: Cell::new(objc2_foundation::NSSize::new(-1.0, -1.0)),
+            active: Cell::new(true),
         };
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =
@@ -525,6 +533,46 @@ impl TreeHostView {
         1.0
     }
 
+    /// Activates or suppresses this host's own layout/render participation — the mechanism behind
+    /// `InnerTabView`'s non-selected tabs (docs/design/gui_framework_design.md §5.4a): a
+    /// suppressed host keeps its `tree` (so a previously-shown-then-hidden tab doesn't lose any
+    /// state) but discards `render_tree` and every retained backend resource that tree produced
+    /// (`CALayer`s, native control islands, image/vector-raster caches), and `relayout_inner`
+    /// (called below) refuses to do any measure/arrange/render work while suppressed — including
+    /// the `layout()` calls AppKit's own autoresizing mask machinery keeps firing on every
+    /// `content_container` resize for every tab host, not just the selected one.
+    ///
+    /// Reactivating forces a full `Measure` pass at this host's *current* frame size (not
+    /// whatever size it had when last active) — a suppressed host still gets resized by its
+    /// superview's autoresizing mask, so its `frame` may well have changed while suppressed, and
+    /// no `relayout_inner` pass ran to notice.
+    pub(crate) fn set_active(&self, active: bool) {
+        if self.ivars().active.get() == active {
+            return;
+        }
+        self.ivars().active.set(active);
+        if active {
+            self.ivars()
+                .last_layout_size
+                .set(objc2_foundation::NSSize::new(-1.0, -1.0));
+            self.relayout();
+        } else {
+            // `relayout_inner`'s own GC (the `retain` calls below) only runs during a relayout
+            // pass, which a suppressed host by definition no longer gets — so every currently-
+            // attached CALayer/NSView must be detached here, explicitly, before the caches that
+            // own them are dropped.
+            for container in self.ivars().replay_state.borrow().group_layers.values() {
+                container.removeFromSuperlayer();
+            }
+            for (_, container) in self.ivars().native_containers.borrow_mut().drain() {
+                container.removeFromSuperview();
+            }
+            self.ivars().native_owner_ids.borrow_mut().clear();
+            *self.ivars().render_tree.borrow_mut() = None;
+            *self.ivars().replay_state.borrow_mut() = ReplayState::default();
+        }
+    }
+
     /// Reflects the current `tree`'s layout and paint state into real `NSView`/`CALayer` state.
     /// Wraps `relayout_inner` with the reentrancy guard `AppKitRelayoutHost::request_relayout`
     /// relies on (`relaying_out`/`pending_dirty_ids`/`needs_another_pass` — see those fields' own
@@ -558,6 +606,16 @@ impl TreeHostView {
 
     fn relayout_inner(&self) {
         use elwindui_core::base::Size;
+
+        // A suppressed host (`set_active(false)` — e.g. a `TabView`'s non-selected tab) does no
+        // measure/arrange/render work at all, including for a pass `layout()` triggered for
+        // reasons that have nothing to do with this specific host (a window resize propagating
+        // through AppKit's own autoresizing mask machinery hits every tab's content host, not just
+        // the selected one). `render_tree`/`replay_state` were already torn down by `set_active`
+        // itself, so there is nothing here to reconcile against even if this didn't return early.
+        if !self.ivars().active.get() {
+            return;
+        }
 
         // Suppresses Core Animation's implicit ~0.25s property animations for this whole pass —
         // see `ImplicitAnimationGuard`'s own doc comment. `_animation_guard` is never read; its

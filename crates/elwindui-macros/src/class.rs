@@ -1324,32 +1324,28 @@ fn build_props_macro(
     // `@set_on_change` wires a two-way property's own native "value changed" callback back into a
     // DSL use site's bound path (`elwindui-codegen`'s `emit_wiring`, the counterpart to `@set`'s
     // forward direction) — one arm per `#[prop(two_way, ..)]` field, calling that field's own
-    // `set_on_change` setter. Every current `#[prop(two_way, ..)]` declaration (`TextBox`/
-    // `TextArea`'s `text`, `PasswordBox`'s `password`) is a hand-written `NativeControl` leaf with
-    // exactly one two-way field, and its real backend method is uniformly the generic
-    // `set_on_change(&self, callback: Box<dyn Fn(String)>)` — never a per-field
-    // `set_on_<name>_change` — so this splices the fixed name, not one derived from `#name`. Unlike
-    // `@attached_set`'s fallback (a real property-name typo — every DSL use of `Owner::field` spells
-    // the owner explicitly, so there's no other class it could mean), this one's fallback is silent:
-    // `emit_wiring` cannot tell two-way-ness apart from any other bare-path attribute once a
-    // builtin's shape lives only here (no local `TypeInfo` to check `two_way_fields` against, see
-    // that function's own doc comment), so it calls this for *every* bare-path attribute an external
-    // node has — an ordinary (non-two-way) one is expected to land here and do nothing.
+    // typed `set_on_<property>_change` setter. Since codegen only invokes this arm for explicit
+    // `<=>`, reaching the fallback is a real capability error rather than an ignorable candidate.
     let two_way_arms: Vec<TokenStream2> = shape
         .props
         .iter()
         .filter(|p| p.two_way)
         .map(|p| {
             let name = &p.name;
+            let change_setter = format_ident!("set_on_{}_change", name);
             quote! {
                 (@set_on_change #name, $widget:expr, $on_change:expr) => {
-                    $widget.set_on_change($on_change);
+                    $widget.#change_setter($on_change);
                 };
             }
         })
         .collect();
     let two_way_fallback = quote! {
-        (@set_on_change $name:ident, $widget:expr, $on_change:expr) => {};
+        (@set_on_change $name:ident, $widget:expr, $on_change:expr) => {
+            compile_error!(concat!(
+                "property `", stringify!($name), "` does not support two-way binding"
+            ));
+        };
     };
 
     // One arm per declared property — *every* property, not just the `@set`-able ones: a name
@@ -1492,119 +1488,122 @@ fn build_props_macro(
         })
         .collect();
 
-    let (fallback, clear_fallback, routed_fallback, assert_fallback, declared_fallback, children_fallback) =
-        match parent {
-            Some((parent_bare, parent_ty)) => {
-                let parent_macro = inherit_macro_self_ref_path(
-                    parent_bare,
-                    parent_ty,
-                    props_macro_ident(parent_bare),
-                );
-                (
-                    quote! {
-                        (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
-                            #parent_macro!(@set_from $origin, $recv, $name, $value);
-                        };
-                    },
-                    quote! {
-                        (@clear_from $origin:ident, $recv:expr, $name:ident) => {
-                            #parent_macro!(@clear_from $origin, $recv, $name);
-                        };
-                    },
-                    quote! {
-                        (@routed_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
-                            #parent_macro!(@routed_from $origin, $recv, $name, $value);
-                        };
-                    },
-                    quote! {
-                        (@assert_undeclared $origin:ident, $name:ident) => {
-                            #parent_macro!(@assert_undeclared $origin, $name);
-                        };
-                    },
-                    quote! {
-                        (@assert_declared $origin:ident, $name:ident) => {
-                            #parent_macro!(@assert_declared $origin, $name);
-                        };
-                    },
-                    quote! {
-                        (@children $recv:expr, [$($child:expr),* $(,)?]) => {
-                            #parent_macro!(@children $recv, [$($child),*]);
-                        };
-                        (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
-                            #parent_macro!(@children_into $origin, $name, $recv, [$($child),*]);
-                        };
-                    },
-                )
-            }
-            None => (
+    let (
+        fallback,
+        clear_fallback,
+        routed_fallback,
+        assert_fallback,
+        declared_fallback,
+        children_fallback,
+    ) = match parent {
+        Some((parent_bare, parent_ty)) => {
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
+            (
                 quote! {
                     (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
-                        compile_error!(concat!(
-                            "`",
-                            stringify!($origin),
-                            "` (or any of its ancestors) has no such property: ",
-                            stringify!($name)
-                        ));
+                        #parent_macro!(@set_from $origin, $recv, $name, $value);
                     };
                 },
                 quote! {
                     (@clear_from $origin:ident, $recv:expr, $name:ident) => {
-                        compile_error!(concat!(
-                            "`",
-                            stringify!($origin),
-                            "` (or any of its ancestors) has no such property: ",
-                            stringify!($name)
-                        ));
+                        #parent_macro!(@clear_from $origin, $recv, $name);
                     };
                 },
                 quote! {
                     (@routed_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
-                        compile_error!(concat!(
-                            "`",
-                            stringify!($origin),
-                            "` (or any of its ancestors) has no such #[routed] event: ",
-                            stringify!($name)
-                        ));
+                        #parent_macro!(@routed_from $origin, $recv, $name, $value);
                     };
                 },
-                // Reached the top of the chain without a collision: the name is free.
                 quote! {
-                    (@assert_undeclared $origin:ident, $name:ident) => {};
+                    (@assert_undeclared $origin:ident, $name:ident) => {
+                        #parent_macro!(@assert_undeclared $origin, $name);
+                    };
                 },
                 quote! {
                     (@assert_declared $origin:ident, $name:ident) => {
-                        compile_error!(concat!(
-                            "#[prop(content, ",
-                            stringify!($name),
-                            ")] on `",
-                            stringify!($origin),
-                            "`: neither it nor any ancestor declares a `",
-                            stringify!($name),
-                            "` property"
-                        ));
+                        #parent_macro!(@assert_declared $origin, $name);
                     };
                 },
                 quote! {
                     (@children $recv:expr, [$($child:expr),* $(,)?]) => {
-                        compile_error!(
-                            "this element takes no nested child elements — no `#[content(..)]` is \
-                             declared on it or any ancestor"
-                        );
+                        #parent_macro!(@children $recv, [$($child),*]);
                     };
                     (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
-                        compile_error!(concat!(
-                            "#[content(",
-                            stringify!($name),
-                            ")] on `",
-                            stringify!($origin),
-                            "`: neither it nor any ancestor declares a `",
-                            stringify!($name),
-                            "` property"
-                        ));
+                        #parent_macro!(@children_into $origin, $name, $recv, [$($child),*]);
                     };
                 },
-            ),
-        };
+            )
+        }
+        None => (
+            quote! {
+                (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` (or any of its ancestors) has no such property: ",
+                        stringify!($name)
+                    ));
+                };
+            },
+            quote! {
+                (@clear_from $origin:ident, $recv:expr, $name:ident) => {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` (or any of its ancestors) has no such property: ",
+                        stringify!($name)
+                    ));
+                };
+            },
+            quote! {
+                (@routed_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` (or any of its ancestors) has no such #[routed] event: ",
+                        stringify!($name)
+                    ));
+                };
+            },
+            // Reached the top of the chain without a collision: the name is free.
+            quote! {
+                (@assert_undeclared $origin:ident, $name:ident) => {};
+            },
+            quote! {
+                (@assert_declared $origin:ident, $name:ident) => {
+                    compile_error!(concat!(
+                        "#[prop(content, ",
+                        stringify!($name),
+                        ")] on `",
+                        stringify!($origin),
+                        "`: neither it nor any ancestor declares a `",
+                        stringify!($name),
+                        "` property"
+                    ));
+                };
+            },
+            quote! {
+                (@children $recv:expr, [$($child:expr),* $(,)?]) => {
+                    compile_error!(
+                        "this element takes no nested child elements — no `#[content(..)]` is \
+                         declared on it or any ancestor"
+                    );
+                };
+                (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
+                    compile_error!(concat!(
+                        "#[content(",
+                        stringify!($name),
+                        ")] on `",
+                        stringify!($origin),
+                        "`: neither it nor any ancestor declares a `",
+                        stringify!($name),
+                        "` property"
+                    ));
+                };
+            },
+        ),
+    };
 
     // `@content_item_dyn`'s own fallback — same two-way split as `@set_from`/`@children` above: an
     // ancestor forwards the query further up (`content_item_dyn_entry`'s own doc comment on why an
@@ -1612,11 +1611,8 @@ fn build_props_macro(
     // `compile_error!` naming the type that actually asked (`$origin`), same spirit as the others.
     let content_item_dyn_fallback = match parent {
         Some((parent_bare, parent_ty)) => {
-            let parent_macro = inherit_macro_self_ref_path(
-                parent_bare,
-                parent_ty,
-                props_macro_ident(parent_bare),
-            );
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
             quote! {
                 (@content_item_dyn) => {
                     #parent_macro!(@content_item_dyn)
@@ -1652,11 +1648,8 @@ fn build_props_macro(
     // `compile_error!`.
     let content_field_get_fallback = match parent {
         Some((parent_bare, parent_ty)) => {
-            let parent_macro = inherit_macro_self_ref_path(
-                parent_bare,
-                parent_ty,
-                props_macro_ident(parent_bare),
-            );
+            let parent_macro =
+                inherit_macro_self_ref_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
             quote! {
                 (@content_field_get $recv:expr) => {
                     #parent_macro!(@content_field_get $recv)
@@ -1680,7 +1673,8 @@ fn build_props_macro(
     // Collision probe: only a class that *has* an ancestor emits any — a root class has nothing to
     // collide with.
     if let Some((parent_bare, parent_ty)) = parent {
-        let parent_macro = inherit_macro_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
+        let parent_macro =
+            inherit_macro_path(parent_bare, parent_ty, props_macro_ident(parent_bare));
         probes.extend(shape.props.iter().map(|p| {
             let name = &p.name;
             quote! { #parent_macro!(@assert_undeclared #bare_ident, #name); }
@@ -3654,7 +3648,9 @@ mod self_weak_on_constructed_tests {
             "construct should be renamed to __class_construct: {s}"
         );
         assert!(
-            s.contains("__class_self_weak") && s.contains("Weak") && s.contains("SelfWeakTestRenamedExt"),
+            s.contains("__class_self_weak")
+                && s.contains("Weak")
+                && s.contains("SelfWeakTestRenamedExt"),
             "hidden param should be typed against this class's own Ext trait: {s}"
         );
         assert!(
@@ -3696,7 +3692,10 @@ mod self_weak_on_constructed_tests {
             },
         );
         let s = child_impl_out.to_string();
-        assert!(!is_real_compile_error(&child_impl_out), "unexpected error: {s}");
+        assert!(
+            !is_real_compile_error(&child_impl_out),
+            "unexpected error: {s}"
+        );
         assert!(
             s.contains("SelfWeakTestParent :: __class_construct")
                 || s.contains("SelfWeakTestParent::__class_construct"),
@@ -3740,7 +3739,9 @@ mod self_weak_on_constructed_tests {
             .find("pub trait SelfWeakTestHookParentExt")
             .expect("trait declaration must exist");
         let trait_decl_slice = &parent_s[trait_decl_start..];
-        let trait_decl_end = trait_decl_slice.find("impl ").unwrap_or(trait_decl_slice.len());
+        let trait_decl_end = trait_decl_slice
+            .find("impl ")
+            .unwrap_or(trait_decl_slice.len());
         assert!(
             !trait_decl_slice[..trait_decl_end].contains("on_constructed"),
             "on_constructed must not become a trait method: {}",
@@ -3815,7 +3816,10 @@ mod self_weak_on_constructed_tests {
             },
         );
         let s = child_impl_out.to_string();
-        assert!(!is_real_compile_error(&child_impl_out), "unexpected error: {s}");
+        assert!(
+            !is_real_compile_error(&child_impl_out),
+            "unexpected error: {s}"
+        );
         let trait_start = s
             .find("pub trait IntoNodeTestChildExt")
             .expect("trait declaration must exist");

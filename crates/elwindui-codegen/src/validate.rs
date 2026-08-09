@@ -3,11 +3,12 @@
 //! docs/design/gui_framework_design.md §10 for the full rule list.
 
 use crate::ast::{
-    Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind, Initializer,
+    AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind,
     Item, Module, ViewExpr,
 };
 use crate::codegen::{self, SymbolTable, strip_rc_wrapper};
 use std::collections::{HashMap, HashSet};
+use syn::visit::Visit;
 
 pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
@@ -24,7 +25,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
         .collect();
 
     // The same real-path-aware resolver `codegen.rs` uses for code generation, reused here so
-    // `vm.field` / `bind!(vm.content, ..)` / etc. are checked against exactly what's actually in
+    // `vm.field` and other qualified paths are checked against exactly what's actually in
     // scope for the referencing module (locally defined, or brought in via `use` — §12) rather
     // than against every `component`/`viewmodel` in the whole compilation unit regardless of
     // whether it was ever imported.
@@ -154,6 +155,18 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     }
 
                     for f in &c.fields {
+                        if f.kind == FieldKind::State && f.initializer.is_none() {
+                            errors.push(format!(
+                                "{}.{}: #[state] field needs `default = expr`",
+                                c.name, f.name
+                            ));
+                        }
+                        if f.kind == FieldKind::State && !f.attrs.is_empty() {
+                            errors.push(format!(
+                                "{}.{}: #[state] cannot be combined with other field attributes",
+                                c.name, f.name
+                            ));
+                        }
                         // `#[attached]` (§3) declares a property other elements set on
                         // *themselves* via `Owner::field: value` — it needs a default value for
                         // whichever of them never set it explicitly (see `check_attached_properties`).
@@ -201,17 +214,6 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                     ));
                                 }
                             }
-                        }
-                        if let Some(Initializer::Bind { path, .. }) = &f.initializer {
-                            validate_bind_path(
-                                module,
-                                &c.name,
-                                &f.name,
-                                path,
-                                &c.fields,
-                                &table,
-                                &mut errors,
-                            );
                         }
                     }
 
@@ -273,6 +275,14 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 &table,
                                 &mut errors,
                             );
+                            check_binding_assignments(
+                                &let_binding.element,
+                                module,
+                                c,
+                                &table,
+                                false,
+                                &mut errors,
+                            );
                         }
                         // Phase 0 (docs/design/gui_framework_design.md §5.1): `view.root` is now a bare
                         // `ast::ViewBody` — resolve it to the concrete `ElementNode` every other
@@ -318,6 +328,14 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                     &table,
                                     &mut errors,
                                 );
+                                check_binding_assignments(
+                                    &resolved_root,
+                                    module,
+                                    c,
+                                    &table,
+                                    false,
+                                    &mut errors,
+                                );
                                 check_match_exhaustiveness(
                                     &resolved_root,
                                     c,
@@ -336,9 +354,17 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         }
                     }
                 }
-                Item::ViewModel(_) => {
+                Item::ViewModel(viewmodel) => {
                     // Rule 19 (viewmodel must not reference view/builtin elements) holds by
                     // construction: `ViewModelDef` has no `view` body in this AST.
+                    for field in &viewmodel.fields {
+                        if field.kind == FieldKind::State {
+                            errors.push(format!(
+                                "{}.{}: #[state] is only allowed on a component",
+                                viewmodel.name, field.name
+                            ));
+                        }
+                    }
                 }
                 Item::Enum(_) | Item::View(_) => {}
             }
@@ -349,6 +375,235 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn check_binding_assignments(
+    node: &ElementNode,
+    from: &Module,
+    component: &ComponentDef,
+    table: &SymbolTable,
+    inside_for: bool,
+    errors: &mut Vec<String>,
+) {
+    let target_info = table.resolve(from, &node.type_path);
+    for attribute in &node.attributes {
+        if attribute.kind != AssignmentKind::Once
+            && let Some(macro_name) = unsupported_dependency_macro(&attribute.value)
+        {
+            errors.push(format!(
+                "{}: {}:{}: cannot safely analyze dependencies inside `{macro_name}!`; wrap the whole RHS in once!(...) to evaluate it only during initialization",
+                component.name, attribute.span.line, attribute.span.column
+            ));
+        }
+        if attribute.kind == AssignmentKind::TwoWay {
+            let location = format!("{}:{}", attribute.span.line, attribute.span.column);
+            if inside_for {
+                errors.push(format!(
+                    "{}: {location}: two-way binding in a `for` item template is not implemented",
+                    component.name
+                ));
+            }
+            match target_info {
+                Some(info) if info.two_way_fields.contains(&attribute.name) => {}
+                Some(_) => errors.push(format!(
+                    "{}: {location}: `{}.{}` does not support #[two_way]",
+                    component.name, node.type_path, attribute.name
+                )),
+                None => {}
+            }
+
+            match &attribute.value {
+                ViewExpr::Path(path) if path.len() == 1 => {
+                    let source = &path[0];
+                    match component.fields.iter().find(|field| &field.name == source) {
+                        Some(field) if matches!(field.kind, FieldKind::Prop | FieldKind::State) => {}
+                        Some(field) => errors.push(format!(
+                            "{}: {location}: `{source}` is {:?}; a two-way source must be a mutable #[prop] or #[state] field",
+                            component.name, field.kind
+                        )),
+                        None => errors.push(format!(
+                            "{}: {location}: unknown two-way source `{source}`",
+                            component.name
+                        )),
+                    }
+                }
+                ViewExpr::Path(path) if path.len() == 2 => {
+                    let owner = &path[0];
+                    let property = &path[1];
+                    match component.fields.iter().find(|field| &field.name == owner) {
+                        Some(field)
+                            if field.attrs.iter().any(|attr| matches!(attr, Attr::Bindable)) =>
+                        {
+                            let owner_ty = strip_rc_wrapper(&field.ty);
+                            match table.resolve(from, owner_ty) {
+                                Some(info) if info.fields.contains_key(property) => {}
+                                Some(_) => errors.push(format!(
+                                    "{}: {location}: bindable owner `{owner}` has no property `{property}`",
+                                    component.name
+                                )),
+                                None => errors.push(format!(
+                                    "{}: {location}: cannot resolve bindable owner type `{owner_ty}`",
+                                    component.name
+                                )),
+                            }
+                        }
+                        Some(_) => errors.push(format!(
+                            "{}: {location}: `{owner}` is not a direct #[bindable] owner",
+                            component.name
+                        )),
+                        None => errors.push(format!(
+                            "{}: {location}: unknown bindable owner `{owner}`",
+                            component.name
+                        )),
+                    }
+                }
+                ViewExpr::Path(path) => errors.push(format!(
+                    "{}: {location}: unsupported two-way path `{}`; use a component field or direct bindable owner.field",
+                    component.name,
+                    path.join(".")
+                )),
+                _ => errors.push(format!(
+                    "{}: {location}: two-way RHS must be a writable component field or direct bindable owner.field",
+                    component.name
+                )),
+            }
+        }
+        check_binding_assignments_in_expr(
+            &attribute.value,
+            from,
+            component,
+            table,
+            inside_for,
+            errors,
+        );
+    }
+    for child in &node.children {
+        match child {
+            ChildEntry::Literal(element) => {
+                check_binding_assignments(element, from, component, table, inside_for, errors)
+            }
+            ChildEntry::Ref(_) => {}
+            ChildEntry::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                for child in then_branch.iter().chain(else_branch) {
+                    check_binding_assignment_child(
+                        child, from, component, table, inside_for, errors,
+                    );
+                }
+            }
+            ChildEntry::Match { arms, .. } => {
+                for child in arms.iter().flat_map(|arm| &arm.body) {
+                    check_binding_assignment_child(
+                        child, from, component, table, inside_for, errors,
+                    );
+                }
+            }
+            ChildEntry::For { body, .. } => {
+                for child in body {
+                    check_binding_assignment_child(child, from, component, table, true, errors);
+                }
+            }
+        }
+    }
+}
+
+fn unsupported_dependency_macro(expr: &ViewExpr) -> Option<String> {
+    match expr {
+        ViewExpr::TFluent(_, args) => args
+            .iter()
+            .find_map(|(_, value)| unsupported_dependency_macro(value)),
+        ViewExpr::Expr(expr) => {
+            struct Collector {
+                unsupported: Option<String>,
+            }
+            impl<'ast> Visit<'ast> for Collector {
+                fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+                    let name = node
+                        .mac
+                        .path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string())
+                        .unwrap_or_default();
+                    if matches!(name.as_str(), "format" | "format_args" | "vec" | "theme") {
+                        use syn::parse::Parser as _;
+                        if let Ok(arguments) = syn::punctuated::Punctuated::<
+                            syn::Expr,
+                            syn::Token![,],
+                        >::parse_terminated
+                            .parse2(node.mac.tokens.clone())
+                        {
+                            for argument in &arguments {
+                                self.visit_expr(argument);
+                            }
+                            return;
+                        }
+                    }
+                    self.unsupported.get_or_insert(name);
+                }
+            }
+            let mut collector = Collector { unsupported: None };
+            collector.visit_expr(expr);
+            collector.unsupported
+        }
+        ViewExpr::Element(element) => element
+            .attributes
+            .iter()
+            .find_map(|attribute| unsupported_dependency_macro(&attribute.value)),
+        ViewExpr::Closure {
+            body: ClosureBody::Element(element),
+            ..
+        } => element
+            .attributes
+            .iter()
+            .find_map(|attribute| unsupported_dependency_macro(&attribute.value)),
+        ViewExpr::Path(_) | ViewExpr::Closure { .. } => None,
+    }
+}
+
+fn check_binding_assignment_child(
+    child: &ChildEntry,
+    from: &Module,
+    component: &ComponentDef,
+    table: &SymbolTable,
+    inside_for: bool,
+    errors: &mut Vec<String>,
+) {
+    if let ChildEntry::Literal(element) = child {
+        check_binding_assignments(element, from, component, table, inside_for, errors);
+    } else {
+        let wrapper = ElementNode {
+            type_path: String::new(),
+            attributes: Vec::new(),
+            attached: Vec::new(),
+            attribute_shortcuts: Vec::new(),
+            children: vec![child.clone()],
+        };
+        check_binding_assignments(&wrapper, from, component, table, inside_for, errors);
+    }
+}
+
+fn check_binding_assignments_in_expr(
+    expr: &ViewExpr,
+    from: &Module,
+    component: &ComponentDef,
+    table: &SymbolTable,
+    inside_for: bool,
+    errors: &mut Vec<String>,
+) {
+    match expr {
+        ViewExpr::Element(element) => {
+            check_binding_assignments(element, from, component, table, inside_for, errors)
+        }
+        ViewExpr::Closure {
+            body: ClosureBody::Element(element),
+            ..
+        } => check_binding_assignments(element, from, component, table, inside_for, errors),
+        _ => {}
     }
 }
 
@@ -542,8 +797,15 @@ fn check_vm_references(
     if exempt_root_type != Some(node.type_path.as_str()) {
         check_not_abstract(node, from, component_name, table, errors);
     }
-    for (_, expr) in &node.attributes {
-        check_vm_expr(expr, from, component_name, vm_fields, table, errors);
+    for attribute in &node.attributes {
+        check_vm_expr(
+            &attribute.value,
+            from,
+            component_name,
+            vm_fields,
+            table,
+            errors,
+        );
     }
     for child in &node.children {
         check_child_vm_references(child, from, component_name, vm_fields, table, errors);
@@ -712,6 +974,19 @@ fn check_static_view_expr(expr: &syn::Expr, component_name: &str, errors: &mut V
                     .is_some_and(|segment| segment.ident == "theme") =>
             {
                 syn::parse2::<syn::Path>(expression.mac.tokens.clone()).is_ok()
+            }
+            syn::Expr::Macro(expression)
+                if expression.mac.path.segments.last().is_some_and(|segment| {
+                    matches!(
+                        segment.ident.to_string().as_str(),
+                        "format" | "format_args" | "vec"
+                    )
+                }) =>
+            {
+                use syn::parse::Parser as _;
+                syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+                    .parse2(expression.mac.tokens.clone())
+                    .is_ok_and(|arguments| arguments.iter().all(allowed))
             }
             // Optional shape fields in the builtin declarations use this pure normalization
             // before constructing their enum value.
@@ -950,8 +1225,8 @@ fn check_attached_properties(
             check_attached_properties(elem, from, component_name, table, errors);
         }
     }
-    for (_, expr) in &node.attributes {
-        check_attached_properties_in_expr(expr, from, component_name, table, errors);
+    for attribute in &node.attributes {
+        check_attached_properties_in_expr(&attribute.value, from, component_name, table, errors);
     }
 }
 
@@ -1007,8 +1282,8 @@ fn check_shortcut_attrs(
             check_shortcut_attrs(elem, from, component_name, table, errors);
         }
     }
-    for (_, expr) in &node.attributes {
-        check_shortcut_attrs_in_expr(expr, from, component_name, table, errors);
+    for attribute in &node.attributes {
+        check_shortcut_attrs_in_expr(&attribute.value, from, component_name, table, errors);
     }
 }
 
@@ -1101,7 +1376,10 @@ fn check_element_value(
                     continue;
                 }
                 let (_, is_option) = codegen::strip_option(ty);
-                let has_attr = elem.attributes.iter().any(|(k, _)| k == name);
+                let has_attr = elem
+                    .attributes
+                    .iter()
+                    .any(|attribute| &attribute.name == name);
                 if has_attr || is_option {
                     continue;
                 }
@@ -1129,7 +1407,8 @@ fn check_element_value(
             elem.type_path
         )),
     }
-    for (_, value) in &elem.attributes {
+    for attribute in &elem.attributes {
+        let value = &attribute.value;
         match param {
             Some(param) => check_closure_expr_body(
                 value,
@@ -1155,46 +1434,6 @@ fn check_element_value(
                 errors,
             );
         }
-    }
-}
-
-/// Checks `bind!(vm.content, ...)`: `vm` must be a field of the enclosing `component` whose type
-/// names a `component`/`viewmodel` in scope from `from`, and `content` must be one of that type's
-/// fields. Generalizes rules 12/13 (written against `store` in the spec) to any bindable owner.
-fn validate_bind_path(
-    from: &Module,
-    owner_name: &str,
-    field_name: &str,
-    path: &[String],
-    own_fields: &[FieldDef],
-    table: &SymbolTable,
-    errors: &mut Vec<String>,
-) {
-    let [root, target_field] = path else {
-        errors.push(format!(
-            "{owner_name}.{field_name}: bind! path must be `owner.field`, found `{}`",
-            path.join(".")
-        ));
-        return;
-    };
-
-    let Some(root_field) = own_fields.iter().find(|f| &f.name == root) else {
-        errors.push(format!(
-            "{owner_name}.{field_name}: bind! refers to unknown field `{root}`"
-        ));
-        return;
-    };
-
-    match table.resolve(from, strip_rc_wrapper(&root_field.ty)) {
-        Some(info) if info.fields.contains_key(target_field.as_str()) => {}
-        Some(_) => errors.push(format!(
-            "{owner_name}.{field_name}: `{}` has no field `{target_field}`",
-            root_field.ty
-        )),
-        None => errors.push(format!(
-            "{owner_name}.{field_name}: unknown type `{}` for bind! target `{root}`",
-            root_field.ty
-        )),
     }
 }
 
@@ -1460,18 +1699,18 @@ mod tests {
         );
         let window_src = r#"
 component NotepadWindow {
-    #[param]
-    #[inject]
-    vm: NotepadViewModel,
-
-    content: String = bind!(vm.content, TwoWay),
+    #[bindable]
+    vm: std::rc::Rc<NotepadViewModel>,
 }
 
 view NotepadWindow {
-    Window { TextArea { text: content } }
+    Window { TextArea { text <=> vm.content } }
 }
 "#;
-        let modules = vec![viewmodel_module, parse_module(window_src).unwrap()];
+        let modules: Vec<_> = [viewmodel_module, parse_module(window_src).unwrap()]
+            .into_iter()
+            .chain(crate::test_builtin_modules())
+            .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1480,18 +1719,18 @@ view NotepadWindow {
         let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
         let window_src = r#"
 component Window2 {
-    #[param]
-    #[inject]
-    vm: Vm,
-
-    missing: String = bind!(vm.does_not_exist, TwoWay),
+    #[bindable]
+    vm: std::rc::Rc<Vm>,
 }
-view Window2 { Window { TextArea { text: missing } } }
+view Window2 { Window { TextArea { text <=> vm.does_not_exist } } }
 "#;
-        let modules = vec![
+        let modules: Vec<_> = [
             parse_module(viewmodel_src).unwrap(),
             parse_module(window_src).unwrap(),
-        ];
+        ]
+        .into_iter()
+        .chain(crate::test_builtin_modules())
+        .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("does_not_exist")));
     }
@@ -2692,5 +2931,66 @@ view SaveField {
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
+    }
+
+    #[test]
+    fn rejects_two_way_target_without_capability() {
+        let src = r#"
+component Search {
+    #[state]
+    query: String = String::new(),
+}
+view Search { TextBlock { text <=> query } }
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("does not support #[two_way]")),
+            "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_writable_two_way_rhs_and_for_item_two_way() {
+        let expression_src = r#"
+component Search { }
+view Search { TextArea { text <=> format!("fixed") } }
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(expression_src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("two-way RHS must be")),
+            "errors: {errors:?}"
+        );
+
+        let for_src = r#"
+component Search {
+    #[param]
+    items: Vec<String>,
+}
+view Search {
+    VerticalLayout {
+        for item in items { TextArea { text <=> item.content } }
+    }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(for_src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errors = validate(&modules).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("for` item template")),
+            "errors: {errors:?}"
+        );
     }
 }

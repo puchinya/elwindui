@@ -27,10 +27,8 @@ mod controls_demo_view_model {
     use super::{CheckState, Key};
 
     struct ControlsDemoViewModel {
-        // `TabView`'s chip click only ever fires `on_select` — it never updates `selected_index`
-        // on its own, so this round-trips the click back down through `bind!` the same way
-        // `examples/graphics-demo`'s own `GraphicsDemoViewModel` does (see that file's own doc
-        // comment on `selected_tab`).
+        // `<=>` installs `TabView`'s typed selected-index write-back callback; a chip click updates
+        // this observable and the resulting PropertyChanged notification resynchronizes the view.
         #[observable(default = 0usize)]
         selected_tab: usize,
 
@@ -65,8 +63,8 @@ mod controls_demo_view_model {
         #[observable(default = String::new())]
         selection_log: String,
 
-        // Two-way bound directly (`checked: vm.radio_small_checked` in the view below), the same
-        // way `TextBox { text: vm.text_box_value }` round-trips without an explicit `on_change:` —
+        // Two-way bound directly (`checked <=> vm.radio_small_checked` in the view below), the same
+        // way `TextBox { text <=> vm.text_box_value }` round-trips without an explicit `on_change:` —
         // `CheckBox`/`RadioButton`/`ToggleSwitch` have no user-visible `on_change` property either
         // (see `elwindui_core::ui::TextBox`'s own `set_on_change`: a plain, non-`#[prop]` trait
         // method the `#[two_way]` binding machinery calls internally). The native backend's own
@@ -142,11 +140,7 @@ mod controls_demo_view_model {
     }
 
     impl ControlsDemoViewModel {
-        fn select_tab(&self, index: usize) {
-            selected_tab = index;
-        }
-
-        // `text`/`password` themselves are already two-way bound directly (`text:
+        // `text`/`password` themselves are already two-way bound directly (`text <=>
         // vm.text_box_value` in the view below) — model sync doesn't need a manual hook. Only the
         // events that *aren't* otherwise observable (focus, submit) get logged here.
         fn text_box_got_focus(&self) {
@@ -210,6 +204,9 @@ struct ControlsDemoWindow {
     #[bindable]
     vm: std::rc::Rc<ControlsDemoViewModel>,
 
+    #[state(default = "")]
+    search_query: String,
+
     body: view! {
         title: "elwindui NativeControl Demo"
         width: 640.0
@@ -228,8 +225,15 @@ struct ControlsDemoWindow {
                         margin: 12.0
                         spacing: 6.0
                         TextBlock { text: "TextBox (single-line, submit on Enter)" }
+                        TextBlock { text: "Component-owned search state" }
                         TextBox {
-                            text: vm.text_box_value
+                            text <=> search_query
+                            placeholder: "search locally"
+                        }
+                        TextBlock { text: format!("Live query: {}", search_query) }
+                        TextBlock { text: once!(format!("Initial snapshot: {}", search_query)) }
+                        TextBox {
+                            text <=> vm.text_box_value
                             placeholder: "type here, then press Enter"
                             on_key_down: |e| { vm.text_box_key_down(e.key) }
                             on_got_focus: vm.text_box_got_focus
@@ -272,7 +276,7 @@ struct ControlsDemoWindow {
                         spacing: 6.0
                         TextBlock { text: "PasswordBox (masked entry, no reveal on AppKit — see log)" }
                         PasswordBox {
-                            password: vm.password_box_value
+                            password <=> vm.password_box_value
                             placeholder: "type a password"
                             reveal_enabled: true
                             on_got_focus: vm.password_box_got_focus
@@ -319,7 +323,7 @@ struct ControlsDemoWindow {
                             TextBlock { text: "Row 9" }
                             TextBlock { text: "Row 10" }
                             TextBlock { text: "Row 11 — a nested TextBox, to confirm native focus still works inside a ScrollView:" }
-                            TextBox { text: vm.nested_text_box_value, placeholder: "focus me while scrolled" }
+                            TextBox { text <=> vm.nested_text_box_value, placeholder: "focus me while scrolled" }
                             TextBlock { text: "Row 12" }
                             TextBlock { text: "Row 13" }
                             TextBlock { text: "Row 14" }
@@ -379,7 +383,7 @@ struct ControlsDemoWindow {
                         }
                         TextBlock { text: "tooltip is declared on NativeControl, so every native leaf has it — hover the TextBox below:" }
                         TextBox {
-                            text: vm.nested_text_box_value
+                            text <=> vm.nested_text_box_value
                             placeholder: "hover me"
                             tooltip: "A TextBox tooltip, inherited from NativeControl"
                         }
@@ -413,7 +417,7 @@ struct ControlsDemoWindow {
                             spacing: 8.0
                             CheckBox {
                                 text: "Subscribe to updates"
-                                checked: vm.check_box_checked
+                                checked <=> vm.check_box_checked
                             }
                             TextBlock { text: vm.check_box_checked_label }
                         }
@@ -427,17 +431,17 @@ struct ControlsDemoWindow {
                             RadioButton {
                                 text: "Small"
                                 group: "size"
-                                checked: vm.radio_small_checked
+                                checked <=> vm.radio_small_checked
                             }
                             RadioButton {
                                 text: "Medium"
                                 group: "size"
-                                checked: vm.radio_medium_checked
+                                checked <=> vm.radio_medium_checked
                             }
                             RadioButton {
                                 text: "Large"
                                 group: "size"
-                                checked: vm.radio_large_checked
+                                checked <=> vm.radio_large_checked
                             }
                             TextBlock { text: vm.radio_selected_label }
                         }
@@ -447,12 +451,12 @@ struct ControlsDemoWindow {
                             RadioButton {
                                 text: "Light"
                                 group: "theme"
-                                checked: vm.radio_light_checked
+                                checked <=> vm.radio_light_checked
                             }
                             RadioButton {
                                 text: "Dark"
                                 group: "theme"
-                                checked: vm.radio_dark_checked
+                                checked <=> vm.radio_dark_checked
                             }
                             TextBlock { text: vm.radio_theme_label }
                         }
@@ -460,7 +464,7 @@ struct ControlsDemoWindow {
                         HorizontalLayout {
                             spacing: 8.0
                             ToggleSwitch {
-                                is_on: vm.toggle_is_on
+                                is_on <=> vm.toggle_is_on
                             }
                             TextBlock { text: "Airplane mode" }
                             TextBlock { text: vm.toggle_is_on_label }
@@ -489,7 +493,7 @@ struct ControlsDemoWindow {
                     HorizontalLayout {
                         spacing: 8.0
                         Dropdown {
-                            selected_index: vm.dropdown_selected_index
+                            selected_index <=> vm.dropdown_selected_index
                             DropdownItem { text: "Small" }
                             DropdownItem { text: "Medium" }
                             DropdownItem { text: "Large" }
@@ -521,7 +525,7 @@ struct ControlsDemoWindow {
                             // explicit `width` is required, the same way any `UIElement` overrides
                             // its own measured size (docs/design/gui_framework_design.md §5.1).
                             width: 200.0
-                            value: vm.slider_value
+                            value <=> vm.slider_value
                             min: vm.slider_min
                             max: vm.slider_max
                         }
@@ -550,7 +554,7 @@ struct ControlsDemoWindow {
                             text: "Click me"
                             on_click: vm.regression_button_clicked
                         }
-                        TextArea { text: vm.regression_text }
+                        TextArea { text <=> vm.regression_text }
                     }
                     ScrollView {
                         Grid::row: 1
@@ -559,8 +563,7 @@ struct ControlsDemoWindow {
                     }
                 }
             }
-            selected_index: vm.selected_tab
-            on_select: |index| { vm.select_tab(index) }
+            selected_index <=> vm.selected_tab
             on_new_tab: || {}
         }
     },

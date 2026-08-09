@@ -49,13 +49,16 @@ const KEYWORDS: &[&str] = &["use", "enum", "component", "viewmodel", "view", "as
 const ATTR_NAMES: &[&str] = &[
     "param",
     "prop",
+    "state",
     "observable",
     "computed",
     "inject",
+    "bindable",
+    "two_way",
     "length",
 ];
-// DSL macro forms recognized by `peek_keyword_bang`/direct match: `bind!`, `t!`.
-const MACRO_NAMES: &[&str] = &["bind", "t"];
+// DSL and dependency-analyzable expression macros accepted inside `view!` values.
+const MACRO_NAMES: &[&str] = &["once", "t", "format", "format_args", "vec", "theme"];
 
 /// Finds every `view! { .. }` field's exact byte range in `src` and returns semantic tokens for
 /// their contents only — see this module's own doc comment. Returns an empty `Vec` (rather than
@@ -380,16 +383,16 @@ struct NotepadWindow {
     }
 
     #[test]
-    fn recognizes_bind_and_t_macro_calls_inside_view() {
+    fn recognizes_once_macro_calls_inside_view() {
         let src = r#"
 struct Foo {
-    body: view! { TextBlock { text: bind!(vm.content, TwoWay) } },
+    body: view! { TextBlock { text: once!(format!("{}", vm.content)) } },
 }
 "#;
         let toks = decode(src);
         assert!(
             toks.iter()
-                .any(|t| t.3 == MACRO && t.2 == "bind!".len() as u32),
+                .any(|t| t.3 == MACRO && t.2 == "once!".len() as u32),
             "{toks:?}"
         );
     }

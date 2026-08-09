@@ -91,7 +91,7 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
     });
 
     let name = item_struct.ident.to_string();
-    let mut fields = fields_from_item_struct(item_struct, FieldKind::Observable)?;
+    let mut fields = fields_from_item_struct(item_struct, FieldKind::Observable, false)?;
 
     if let Some(item_impl) = item_impl {
         fields.extend(synthesize_action_fields(item_impl));
@@ -102,7 +102,7 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
 
 /// Builds `FieldDef`s from a `syn::ItemStruct`'s named fields, recognizing the same attribute
 /// vocabulary `parser.rs`'s DSL field parser (`parse_field_def`) does — `param`/`prop`/
-/// `observable`/`computed`/`attached`/`inject`/`two_way`/`routed`/`override`/`onetime`/
+/// `state`/`observable`/`computed`/`attached`/`inject`/`two_way`/`routed`/`override`/`onetime`/
 /// `length` — uniformly whether the caller is a `viewmodel` (`default_kind: FieldKind::Observable`,
 /// via `viewmodel_def_from_item_mod`) or a `component` (`default_kind: FieldKind::Prop`, via
 /// `component_frontend.rs`), exactly mirroring `parse_module`'s two `parse_fields_block` call
@@ -111,16 +111,15 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
 /// text — no duplicate validation here. `FieldKind::Action` never appears here — actions are
 /// synthesized separately from the `impl` block, see `synthesize_action_fields`.
 ///
-/// `#[observable(default = expr)]`/`#[computed(expr = expr)]` parse their value as a plain
-/// `syn::Expr` (`parse_name_value_expr`) — fine since neither ever needs `bind!` sugar.
+/// `#[state(default = expr)]`/`#[observable(default = expr)]`/`#[computed(expr = expr)]` parse their value as a plain
+/// `syn::Expr` (`parse_name_value_expr`) — fine since neither needs view-attribute syntax.
 /// `#[prop(default = ...)]`/`#[attached(default = ...)]` instead route their raw token text
-/// through `parser::parse_initializer` (`parse_name_value_tokens`), so `bind!(vm.content,
-/// TwoWay)` written there gets the same recognition hand-written DSL text gets — unlike a
-/// `view!`-typed field's tokens (discarded whole), a field default is emitted verbatim into code
-/// that really gets compiled, so it can't be left as an inert `syn::Expr::Macro`.
+/// through `parser::parse_initializer` (`parse_name_value_tokens`) so every frontend shares the
+/// same initializer syntax and diagnostics.
 pub(crate) fn fields_from_item_struct(
     item_struct: &syn::ItemStruct,
     default_kind: FieldKind,
+    allow_state: bool,
 ) -> Result<Vec<FieldDef>, String> {
     let syn::Fields::Named(named) = &item_struct.fields else {
         return Err(format!("`{}` must have named fields", item_struct.ident));
@@ -138,6 +137,7 @@ pub(crate) fn fields_from_item_struct(
         let mut kind = default_kind;
         let mut attrs = Vec::new();
         let mut initializer = None;
+        let mut explicit_kind: Option<String> = None;
 
         for attr in &field.attrs {
             let Some(attr_name) = attr.path().get_ident().map(|i| i.to_string()) else {
@@ -145,6 +145,7 @@ pub(crate) fn fields_from_item_struct(
             };
             match attr_name.as_str() {
                 "param" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "param")?;
                     kind = FieldKind::Param;
                     if let Some(tokens) = parse_name_value_tokens(attr, "default")? {
                         initializer =
@@ -154,6 +155,7 @@ pub(crate) fn fields_from_item_struct(
                     }
                 }
                 "prop" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "prop")?;
                     kind = FieldKind::Prop;
                     if let Some(tokens) = parse_name_value_tokens(attr, "default")? {
                         initializer =
@@ -162,7 +164,21 @@ pub(crate) fn fields_from_item_struct(
                             })?);
                     }
                 }
+                "state" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "state")?;
+                    if !allow_state {
+                        return Err(format!(
+                            "field `{name}`: #[state] is only allowed on a component"
+                        ));
+                    }
+                    kind = FieldKind::State;
+                    let default = parse_name_value_expr(attr, "default")?.ok_or_else(|| {
+                        format!("field `{name}`: #[state(...)] needs `default = expr`")
+                    })?;
+                    initializer = Some(Initializer::Expr(default));
+                }
                 "observable" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "observable")?;
                     kind = FieldKind::Observable;
                     let default = parse_name_value_expr(attr, "default")?.ok_or_else(|| {
                         format!("field `{name}`: #[observable(...)] needs `default = expr`")
@@ -170,6 +186,7 @@ pub(crate) fn fields_from_item_struct(
                     initializer = Some(Initializer::Expr(default));
                 }
                 "computed" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "computed")?;
                     kind = FieldKind::Computed;
                     let expr = parse_name_value_expr(attr, "expr")?.ok_or_else(|| {
                         format!("field `{name}`: #[computed(...)] needs `expr = expr`")
@@ -177,6 +194,7 @@ pub(crate) fn fields_from_item_struct(
                     initializer = Some(Initializer::Expr(expr));
                 }
                 "attached" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "attached")?;
                     kind = FieldKind::Attached;
                     if let Some(tokens) = parse_name_value_tokens(attr, "default")? {
                         initializer =
@@ -187,6 +205,7 @@ pub(crate) fn fields_from_item_struct(
                 }
                 "inject" => attrs.push(Attr::Inject),
                 "bindable" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "bindable")?;
                     kind = FieldKind::Param;
                     attrs.push(Attr::Inject);
                     attrs.push(Attr::Bindable);
@@ -207,11 +226,21 @@ pub(crate) fn fields_from_item_struct(
             }
         }
 
+        if kind == FieldKind::State && !attrs.is_empty() {
+            return Err(format!(
+                "field `{name}`: #[state] cannot be combined with inject, bindable, two_way, routed, override, onetime, or length"
+            ));
+        }
+
         // Unlike hand-written DSL text, a plain Rust struct field has no `= expr` syntax of
         // its own — `#[observable(default = ...)]`/`#[computed(expr = ...)]` are the only place
         // either kind's value can be written, so (whether `kind` came from an explicit attribute
         // or fell back to `default_kind`) both must end up with an initializer.
-        if matches!(kind, FieldKind::Observable | FieldKind::Computed) && initializer.is_none() {
+        if matches!(
+            kind,
+            FieldKind::State | FieldKind::Observable | FieldKind::Computed
+        ) && initializer.is_none()
+        {
             return Err(format!(
                 "field `{name}`: an Observable/Computed field needs #[observable(default = ...)] \
                  or #[computed(expr = ...)] (plain Rust struct fields have no other way to supply one)"
@@ -227,6 +256,20 @@ pub(crate) fn fields_from_item_struct(
         });
     }
     Ok(out)
+}
+
+fn record_explicit_kind(
+    current: &mut Option<String>,
+    field_name: &str,
+    new_kind: &str,
+) -> Result<(), String> {
+    if let Some(previous) = current {
+        return Err(format!(
+            "field `{field_name}`: #[{previous}] cannot be combined with #[{new_kind}]"
+        ));
+    }
+    *current = Some(new_kind.to_string());
+    Ok(())
 }
 
 /// Builds one `FieldDef { kind: Action, .. }` per `fn`/`async fn` in the mod's `impl` block — no
@@ -314,7 +357,7 @@ fn parse_name_value_expr(attr: &syn::Attribute, name: &str) -> Result<Option<syn
 
 /// Like `parse_name_value_expr`, but returns `name = <tokens>`'s raw, unparsed token text instead
 /// of eagerly parsing it as a `syn::Expr` — used for `#[prop(default = ...)]`/`#[attached(default
-/// = ...)]`, which (unlike `observable`/`computed`) need `bind!` sugar recognized via
+/// = ...)]`, which (unlike `observable`/`computed`) need owned-string coercion recognized via
 /// `parser::parse_initializer` rather than left as an inert `syn::Expr::Macro` (see
 /// `fields_from_item_struct`'s doc comment).
 fn parse_name_value_tokens(
@@ -510,5 +553,36 @@ mod tests {
         assert_eq!(def.name, "Counter");
         assert!(def.fields.iter().any(|f| f.name == "count"));
         assert!(def.fields.iter().any(|f| f.name == "increment"));
+    }
+
+    #[test]
+    fn component_state_requires_a_default_and_rejects_kind_conflicts() {
+        let missing: syn::ItemStruct = syn::parse_quote! {
+            struct Search { #[state] query: String }
+        };
+        let error = fields_from_item_struct(&missing, FieldKind::Prop, true)
+            .expect_err("state default is mandatory");
+        assert!(error.contains("default = expr"), "{error}");
+
+        let conflicting: syn::ItemStruct = syn::parse_quote! {
+            struct Search {
+                #[state(default = "")]
+                #[prop(default = String::new())]
+                query: String,
+            }
+        };
+        let error = fields_from_item_struct(&conflicting, FieldKind::Prop, true)
+            .expect_err("state and prop must conflict");
+        assert!(error.contains("cannot be combined"), "{error}");
+    }
+
+    #[test]
+    fn viewmodel_rejects_component_state() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct Search { #[state(default = "")] query: String }
+        };
+        let error = fields_from_item_struct(&item, FieldKind::Observable, false)
+            .expect_err("state is component-only");
+        assert!(error.contains("only allowed on a component"), "{error}");
     }
 }

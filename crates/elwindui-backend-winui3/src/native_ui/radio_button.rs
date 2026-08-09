@@ -43,7 +43,9 @@ impl RadioButton {
             self.uncheck_siblings();
         }
     }
-    fn set_on_change(&self, callback: Box<dyn Fn(bool)>) {
+    /// Registers the write-back callback used by a two-way `checked` binding.
+    #[inherent]
+    pub fn set_on_checked_change(&self, callback: Box<dyn Fn(bool)>) {
         *self.on_change.borrow_mut() = Some(callback);
     }
     fn set_group(&self, group: &str) {

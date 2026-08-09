@@ -209,6 +209,12 @@ impl TabView {
         }));
     }
 
+    /// Registers the write-back callback used by a two-way `selected_index` binding.
+    #[inherent]
+    pub fn set_on_selected_index_change(&self, callback: Box<dyn Fn(usize)>) {
+        self.set_on_select(callback);
+    }
+
     /// A static `TabViewItem`'s own `on_close` (if set) takes precedence — it's the per-item
     /// declaration in that mode; dynamic mode has none, so its `TabView`-level `on_close(index)`
     /// is used instead (same precedence as `elwindui_backend_appkit::native_ui::TabView`).

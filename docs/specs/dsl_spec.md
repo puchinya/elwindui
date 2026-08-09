@@ -78,7 +78,7 @@ struct VolumeControl {
 
     #[range(0..=100)]
     #[step(5)]
-    #[prop(default = bind!(settings.volume, TwoWay))]
+    #[prop(default = 50)]
     volume: i32,
 
     #[computed(expr = volume.to_string() + "%")]
@@ -86,7 +86,7 @@ struct VolumeControl {
 
     body: view! {
         if orientation == Orientation::Horizontal {
-            HorizontalLayout { Slider { value: volume }, TextBlock { text: label } }
+            HorizontalLayout { Slider { value <=> volume }, TextBlock { text: label } }
         } else {
             VerticalLayout { Slider { value: volume }, TextBlock { text: label } }
         }
@@ -232,14 +232,11 @@ struct VolumeControl {
   `#[computed(expr = expr)]`(`docs/design/gui_framework_design.md`§7.2)と同じ仕組み
   (`crates/elwindui-codegen/src/attr_frontend.rs`が両方の`struct`フロントエンドで共有)
 - `#[param]`フィールドも`#[prop]`と同様に`#[param(default = expr)]`でデフォルト値を持てる
-  (`#[prop(default = expr)]`と同じ`parser::parse_initializer`を経由するため`bind!(..)`も構文上は
-  書ける——ただし`#[param]`が本来求める「静的評価式のみ」制限を`validate::validate`が実際に検証する
-  仕組みはこの2フロントエンド共通でまだ存在しない、既知のギャップとして残る)。この例の`orientation`は
+  (`#[prop(default = expr)]`と同じ`parser::parse_initializer`を経由する。ただし`#[param]`は
+  静的評価式だけを許可し、リアクティブなフィールド参照は拒否する)。この例の`orientation`は
   デフォルトを持たない設計のため必須のコンストラクタ引数のまま
-- `volume`は`#[prop(default = 50)]`という通常の(実行時可変な)`prop`——ここでは自己完結した例にする
-  ため固定値をデフォルトにしているが、外部の`store`/`viewmodel`へ結びつけたい場合は呼び出し側で
-  `bind!`を使う(`#[prop(default = bind!(..))]`のようにフィールド宣言自体に埋め込むのではなく、
-  §9のバインディング機構は使用箇所で書く)
+- `volume`は`#[prop(default = 50)]`という通常の(実行時可変な)`prop`。入力側の
+  `Slider { value <=> volume }`が明示的な双方向代入を構成する
 - `component`自身の`#[prop(default=...)]`/`#[computed(...)]`フィールドを、その同じcomponentの
   `view`から裸の識別子で参照できる(`text: label`)——コード生成側は、`volume`が変わるたびに
   `label`を再計算して該当するビューノードだけを再同期する専用の`{Component}Property`通知機構を
@@ -363,7 +360,7 @@ struct FormPanel {
 | | `#[param]` を付けたフィールド | 既定(prop)のフィールド |
 |---|---|---|
 | 変更可能性 | 実体化時のみ、以後イミュータブル | 実行時いつでも変更可 |
-| 使える式 | 静的評価式のみ(リテラル・他paramの参照・純粋関数・`env::*`) | 静的評価式に加え `bind!`・他propの参照・`#[computed]` |
+| 使える式 | 静的評価式のみ(リテラル・他paramの参照・純粋関数・`env::*`) | 静的評価式に加え、他prop/state/computed/bindable ownerを参照するリアクティブ式 |
 | 主な用途 | 構造分岐(`if`/`for`の条件)、レイアウト決定 | 表示内容・状態の動的更新 |
 | 実行時アクセス | 不可(代入するとコンパイルエラー) | `instance.field` で読み書き可 |
 
@@ -389,7 +386,7 @@ struct Cart {
 
 **禁止される要素:**
 
-- `bind!(...)` の使用
+- リアクティブな`#[prop]`/`#[state]`/`#[bindable]`プロパティの参照
 - prop(`#[param]`が付いていないフィールド)の参照
 - 非純粋関数(`now()`, `random()` など)の直接呼び出し
 
@@ -527,7 +524,7 @@ struct Toolbar {
 
 `ControlTemplate<Self>`型フィールドへの裸パス代入は、既存の裸パス糖衣(直前、`fn()`型=0引数フィールド専用、`on_new_tab: vm.new_tab`が`|| vm.new_tab()`の糖衣になるもの)とは**意味が異なる**——「0引数で呼び出した結果」ではなく、`#[elwindui::template]`で定義された関数アイテムそのものを値として直接束縛する(13章ルール29)。`ControlTemplate<Self>`型フィールドはそもそも`fn(...)`糖衣とは別の専用型なので、既存の裸パス規則と文法上バッティングはしない。
 
-**広く共有される既定値**(WinUI3の`Style`相当、複数コンポーネントに跨って既定テンプレートを一括変更する用途)は、新しい仕組みを作らず既存の`store`+`bind!`(`docs/design/gui_framework_design.md`§7.1)をそのまま使う。詳細は同節を参照。
+**広く共有される既定値**(WinUI3の`Style`相当、複数コンポーネントに跨って既定テンプレートを一括変更する用途)は、新しい仕組みを作らず既存の`store`を`#[bindable]` ownerとして公開し、通常のリアクティブ属性式(`docs/design/gui_framework_design.md`§7.1)を使う。詳細は同節を参照。
 
 ---
 
@@ -612,7 +609,7 @@ struct LoginForm {
 **検証タイミング:**
 
 - リテラル値による制約違反 → ビルド時静的エラー
-- `bind!` 等の動的値による制約違反 → 実行時エラー
+- リアクティブ属性式等の動的値による制約違反 → 実行時エラー
 
 ---
 
@@ -702,26 +699,31 @@ struct TitleBar {
 ```rust
 #[elwindui::component]
 struct VolumeSlider {
-    #[prop(default = bind!(settings.volume, TwoWay))]
+    #[state(default = 50)]
     volume: i32,
 
     body: view! {
-        Slider { value: volume }
+        Slider { value <=> volume }
+        TextBlock { text: format!("{}%", volume) }
+        TextBlock { text: once!(format!("initial: {}%", volume)) }
     }
 }
 ```
 
-- `bind!(path, mode)` — マクロ呼び出し形式(Rustの `vec!` 等の慣習に合わせる)
-- `mode`:
-    - `OneWay`(既定):外部→propの一方向反映
-    - `TwoWay`:UI操作で外部側にも書き戻す
-    - `OneTime`:実体化時に一度だけ取り込み、以後固定
+- `property: expression`は依存解析により自動分類される。`#[state]`、可変`#[prop]`、
+  `#[computed]`、直接の`#[bindable] owner.property`を含めばOneWay、定数・リテラル・
+  `#[param]`だけなら初期化時の一度だけ評価する
+- `property: once!(expression)`は依存収集を抑止し、初期化時のスナップショットとして一度だけ評価する
+- `property <=> writable_target`は明示的なTwoWay。RHSは同一componentの可変`#[prop]`/
+  `#[state]`、または直接の`#[bindable] owner.property`に限る
+- `#[state(default = expr)]`はcomponent専用の非公開リアクティブ状態。defaultは必須で、
+  コンストラクタ引数・公開getter/setter・props API・継承フィールドには現れない
 
 ### PropertyChanged と部分更新
 
 `#[observable]` のsetterは代入後に型付き `PropertyChanged` を発火する。`view` は式から
 静的に取得した依存プロパティだけを購読し、その属性または動的領域だけを更新する。従って
-`TextArea { text: doc.content }` の入力はその `TextArea` と `doc.content` に依存する表示だけを
+`TextArea { text <=> doc.content }` の入力はその `TextArea` と `doc.content` に依存する表示だけを
 更新し、親の `TabView` の children コレクションを再同期しない。二方向バインディングのwidget→model側は
 setterを呼ぶだけで、別途コンポーネント全体の再同期を呼んではならない。
 
@@ -979,9 +981,9 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 
 コンパイラ/リンタが実行前に検出すべき項目:
 
-> **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25, 30〜31 — `#[param]`の静的性、`bind!`経由のstoreアクセス、`viewmodel`のV/VM分離、`#[shortcut(...)]`の妥当性など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: テーマはDSLブロックではなくRust属性`#[elwindui::theme_definition]`として実装されているため対象外、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装、26〜29: `ControlTemplate<Self>`/`#[elwindui::template]`未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は欠番(アクションはRustの`impl`ブロックの`fn`として自動検出されるため、対応する型検査が存在しない)。
+> **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25, 30〜31 — `#[param]`の静的性、リアクティブ属性式と`<=>`の参照先、`viewmodel`のV/VM分離、`#[shortcut(...)]`の妥当性など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: テーマはDSLブロックではなくRust属性`#[elwindui::theme_definition]`として実装されているため対象外、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装、26〜29: `ControlTemplate<Self>`/`#[elwindui::template]`未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は欠番(アクションはRustの`impl`ブロックの`fn`として自動検出されるため、対応する型検査が存在しない)。
 
-1. `#[param]` フィールドの初期化式に `bind!` / propの参照 / `#[computed]` が出現 → エラー
+1. `#[param]` フィールドの初期化式にリアクティブなprop/state/computed/bindable owner参照が出現 → エラー
 2. `#[param]` フィールドの初期化式に非純粋関数(`now()`, `random()` 等)が出現 → エラー(`env::*` は例外)
 3. `#[computed]` フィールドへの外部代入 → エラー
 4. enum値の裸文字列直書き(完全修飾でない参照) → エラー
@@ -992,8 +994,8 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 9. `#[overrides(builtin::X)]` が付いていない通常の`component`の`view`内に `native!` ブロック、または `target::backend()` の参照が出現 → エラー(`docs/design/gui_framework_design.md`§4.1参照。独自部品はバックエンド共通実装に限定する)
 10. `view`内に`Canvas`が含まれているが `#[accessible(...)]` が付与されていない → 警告(`docs/design/gui_framework_design.md`§5.6参照)
 11. `on_mount`/`on_unmount`ブロックの外で`#[param]`フィールドの再代入相当の操作が行われている → エラー(`docs/design/gui_framework_design.md`§6.1参照。paramの不変性は生涯を通じて保証される)
-12. `bind!`の参照先が`store`宣言(`docs/design/gui_framework_design.md`§7.1)の型・フィールドとして存在しない → エラー
-13. `store`フィールドへの`#[param]`側からの直接参照(`bind!`を介さない読み取り)→ エラー(`docs/design/gui_framework_design.md`§7.1参照。storeへのアクセスは常に`bind!`を経由する)
+12. リアクティブ属性式または`<=>`の参照先が`store`宣言(`docs/design/gui_framework_design.md`§7.1)の型・フィールドとして存在しない → エラー
+13. `store`フィールドへの`#[param]`側からの直接参照 → エラー(`docs/design/gui_framework_design.md`§7.1参照。storeはViewのリアクティブ属性式から参照する)
 14. `NavigationHost`内の`match route { ... }` がRoute enumの全メンバーを網羅していない(`_ =>`なし) → エラー(7章の網羅性検査と同じ仕組み、`docs/specs/builtins_spec.md`付録L.2参照)
 15. `Dialog`/`Menu`等のオーバーレイ系ビルトインの外側(通常のcomponent)で`native!`/`target::backend()`が出現 → エラー(ルール9と同じ原則、`docs/specs/builtins_spec.md`付録M参照)
 16. `Transition`/`KeyframeAnimation`(`docs/specs/builtins_spec.md`付録N.6)で存在しないイージング関数名、または範囲外のキーフレーム位置(`0.0..=1.0`外)が指定されている → エラー
@@ -1034,14 +1036,14 @@ struct VolumeControl {
 
     #[range(0..=100)]
     #[step(5)]
-    #[prop(default = bind!(settings.volume, TwoWay))]
+    #[state(default = 50)]
     volume: i32,
 
     #[computed(expr = volume.to_string() + "%")]
     label: String,
 
     body: view! {
-        let slider = Slider { value: volume };
+        let slider = Slider { value <=> volume };
 
         if orientation == Orientation::Horizontal {
             HorizontalLayout { slider, TextBlock { text: label } }

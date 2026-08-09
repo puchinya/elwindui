@@ -97,7 +97,7 @@ pub fn component_and_view_from_item_struct(
             .cloned()
             .collect();
     }
-    let fields = attr_frontend::fields_from_item_struct(&non_view_struct, FieldKind::Prop)?;
+    let fields = attr_frontend::fields_from_item_struct(&non_view_struct, FieldKind::Prop, true)?;
 
     let component_def = ComponentDef {
         name,
@@ -159,15 +159,22 @@ fn component_item_attrs(
             "abstract_" => is_abstract = true,
             "text_style" => text_style = true,
             "content" => {
-                let field: syn::Ident = attr.parse_args().map_err(|e| {
-                    format!("invalid #[content(field_name)] arguments: {e}")
-                })?;
+                let field: syn::Ident = attr
+                    .parse_args()
+                    .map_err(|e| format!("invalid #[content(field_name)] arguments: {e}"))?;
                 content_field = Some(field.to_string());
             }
             _ => continue,
         }
     }
-    Ok((embedded, sealed, native, is_abstract, text_style, content_field))
+    Ok((
+        embedded,
+        sealed,
+        native,
+        is_abstract,
+        text_style,
+        content_field,
+    ))
 }
 
 fn is_view_macro_field(field: &syn::Field) -> bool {
@@ -290,10 +297,10 @@ struct StoredViewModel {
 /// Keyed by `(compiling_crate_key(), viewmodel type name)` — mirrors `same_crate_components`, but
 /// for `#[elwindui::viewmodel] mod foo { struct Foo { .. } }` (`elwindui-macros`'s `viewmodel`
 /// attribute macro doesn't keep the `mod` wrapper past expansion, so `Foo` itself is what a sibling
-/// `#[elwindui::component]`'s field type or `bind!` target actually names — see
+/// `#[elwindui::component]`'s field type or reactive owner path actually names — see
 /// `register_same_crate_viewmodel`'s own doc comment). Populated by
 /// `lib.rs::generate_viewmodel_from_item_mod`; read by `sibling_viewmodel_modules` so a
-/// `#[bindable]`/`bind!`-using component elsewhere in the same crate can be checked against the
+/// `#[bindable]`-using component elsewhere in the same crate can be checked against the
 /// viewmodel's real fields instead of silently going unchecked (the gap 05d4861-era `validate.rs`
 /// comments call out: without this, `vm.typo_field` never gets caught on the proc-macro path). Same
 /// declaration-order requirement as `same_crate_components` — a viewmodel must be declared before
@@ -307,7 +314,7 @@ fn same_crate_viewmodels() -> &'static Mutex<HashMap<(String, String), StoredVie
 /// a later same-crate `#[elwindui::component]`/`#[elwindui::viewmodel]` invocation can resolve it —
 /// see `same_crate_viewmodels`'s own doc comment. `name` is the viewmodel *struct's* name (e.g.
 /// `DocumentViewModel`), not the enclosing `mod`'s name (e.g. `document_view_model`) — the two
-/// usually differ, and it's the struct name real Rust code (field types, `bind!` targets) actually
+/// usually differ, and it's the struct name real Rust code (field types, reactive owner paths) actually
 /// references. Only call this after this viewmodel's own codegen has actually succeeded.
 pub fn register_same_crate_viewmodel(name: &str, item_mod: &syn::ItemMod) {
     let stored = StoredViewModel {
@@ -440,10 +447,12 @@ fn attr_path_ends_with(attrs: &[syn::Attribute], name: &str) -> bool {
 /// instead receives the attribute's own argument tokens directly from the proc-macro system rather
 /// than having to find the attribute itself first.
 fn inherits_arg_from_component_attrs(attrs: &[syn::Attribute]) -> Result<Option<String>, String> {
-    let Some(attr) = attrs
-        .iter()
-        .find(|attr| attr.path().segments.last().is_some_and(|s| s.ident == "component"))
-    else {
+    let Some(attr) = attrs.iter().find(|attr| {
+        attr.path()
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "component")
+    }) else {
         return Ok(None);
     };
     let syn::Meta::List(list) = &attr.meta else {
@@ -478,7 +487,9 @@ fn inherits_arg_from_component_attrs(attrs: &[syn::Attribute]) -> Result<Option<
 /// Deliberately narrow, exactly as `MethodDef` is: `&self` receiver, plain typed parameters, no
 /// generics, no `where` clause, no `async`/`unsafe`. Anything beyond that belongs in an ordinary
 /// (non-`#[elwindui::component]`) `impl` block, which this macro never touches.
-pub fn methods_from_item_impl(item_impl: &syn::ItemImpl) -> Result<(String, Vec<ast::MethodDef>), String> {
+pub fn methods_from_item_impl(
+    item_impl: &syn::ItemImpl,
+) -> Result<(String, Vec<ast::MethodDef>), String> {
     if let Some((_, path, _)) = &item_impl.trait_ {
         let name = quote::quote!(#path).to_string();
         return Err(format!(
@@ -520,23 +531,31 @@ pub fn methods_from_item_impl(item_impl: &syn::ItemImpl) -> Result<(String, Vec<
             _ => {}
         }
         if f.sig.asyncness.is_some() || f.sig.unsafety.is_some() {
-            return Err(format!("{name}::{fn_name}: `async`/`unsafe` are not supported"));
+            return Err(format!(
+                "{name}::{fn_name}: `async`/`unsafe` are not supported"
+            ));
         }
         if !f.sig.generics.params.is_empty() || f.sig.generics.where_clause.is_some() {
-            return Err(format!("{name}::{fn_name}: generic methods are not supported"));
+            return Err(format!(
+                "{name}::{fn_name}: generic methods are not supported"
+            ));
         }
 
         let mut inputs = f.sig.inputs.iter();
         match inputs.next() {
             Some(syn::FnArg::Receiver(r)) if r.reference.is_some() && r.mutability.is_none() => {}
             _ => {
-                return Err(format!("{name}::{fn_name}: must take `&self` as its first parameter"));
+                return Err(format!(
+                    "{name}::{fn_name}: must take `&self` as its first parameter"
+                ));
             }
         }
         let mut params = Vec::new();
         for arg in inputs {
             let syn::FnArg::Typed(pat_type) = arg else {
-                return Err(format!("{name}::{fn_name}: unexpected receiver after `&self`"));
+                return Err(format!(
+                    "{name}::{fn_name}: unexpected receiver after `&self`"
+                ));
             };
             let syn::Pat::Ident(pat_ident) = &*pat_type.pat else {
                 return Err(format!(
@@ -585,7 +604,9 @@ pub fn modules_from_file(file: &syn::File) -> Result<Vec<Module>, String> {
     let mut modules = Vec::new();
     for item in &file.items {
         match item {
-            syn::Item::Struct(item_struct) if attr_path_ends_with(&item_struct.attrs, "component") => {
+            syn::Item::Struct(item_struct)
+                if attr_path_ends_with(&item_struct.attrs, "component") =>
+            {
                 let base = inherits_arg_from_component_attrs(&item_struct.attrs)?;
                 let (component_def, view_def) =
                     component_and_view_from_item_struct(base, item_struct)?;
@@ -745,7 +766,10 @@ mod tests {
         let item_struct: syn::ItemStruct = syn::parse_str(src).unwrap();
         let err = component_and_view_from_item_struct(Some("Window".to_string()), &item_struct)
             .unwrap_err();
-        assert!(err.contains("at most one"), "error should mention the cardinality: {err}");
+        assert!(
+            err.contains("at most one"),
+            "error should mention the cardinality: {err}"
+        );
     }
 
     /// The attribute-macro frontend must produce *the same* generated code as the equivalent
@@ -816,21 +840,39 @@ view Counter {
             syn::parse_str(src).expect("struct should parse as valid Rust");
         let (component_def, view_def) = component_and_view_from_item_struct(None, &item_struct)
             .expect("should build a ComponentDef");
-        assert!(component_def.sealed, "#[sealed] should set ComponentDef::sealed");
-        assert!(component_def.native, "#[native] should set ComponentDef::native");
-        assert!(component_def.is_abstract, "#[abstract_] should set ComponentDef::is_abstract");
-        assert!(!component_def.embedded, "#[embedded] was not written, should stay false");
-        assert!(!component_def.text_style, "#[text_style] was not written, should stay false");
+        assert!(
+            component_def.sealed,
+            "#[sealed] should set ComponentDef::sealed"
+        );
+        assert!(
+            component_def.native,
+            "#[native] should set ComponentDef::native"
+        );
+        assert!(
+            component_def.is_abstract,
+            "#[abstract_] should set ComponentDef::is_abstract"
+        );
+        assert!(
+            !component_def.embedded,
+            "#[embedded] was not written, should stay false"
+        );
+        assert!(
+            !component_def.text_style,
+            "#[text_style] was not written, should stay false"
+        );
         assert_eq!(
             component_def.content_field.as_deref(),
             Some("children"),
             "#[content(children)] should set ComponentDef::content_field"
         );
-        assert!(view_def.is_none(), "no `view! {{ .. }}` field, so the view should be None");
+        assert!(
+            view_def.is_none(),
+            "no `view! {{ .. }}` field, so the view should be None"
+        );
     }
 
     // Phase 2: `#[param(default = ...)]`, mirroring `#[prop(default = ...)]`'s existing
-    // token-based routing through `parser::parse_initializer` (so `bind!(..)` sugar parses the
+    // token-based routing through `parser::parse_initializer` (so initializer expressions parse the
     // same way, even though `validate`'s param-staticness checks are a separate, pre-existing
     // concern this frontend doesn't duplicate — see `attr_frontend::fields_from_item_struct`'s own
     // doc comment).
@@ -1112,9 +1154,11 @@ mod modules_from_file_tests {
         let modules = modules_from_file(&file).expect("should build Modules");
         assert_eq!(modules.len(), 3);
 
-        let has_enum = modules
-            .iter()
-            .any(|m| m.items.iter().any(|i| matches!(i, ast::Item::Enum(e) if e.name == "StatusC")));
+        let has_enum = modules.iter().any(|m| {
+            m.items
+                .iter()
+                .any(|i| matches!(i, ast::Item::Enum(e) if e.name == "StatusC"))
+        });
         let has_vm = modules.iter().any(|m| {
             m.items
                 .iter()

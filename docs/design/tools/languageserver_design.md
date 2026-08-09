@@ -6,7 +6,7 @@
 
 `elwindui-languageserver` は ElwindUILの`#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`マクロを使う`.rs`ファイルを対象とする専用言語サーバー(LSP)であり、エディタ(VSCode等)に対して以下を提供する裏方プロセスである。
 
-- 入力中からの即時診断(制約違反、enum網羅漏れ、`#[param]`への`bind!`混入など)
+- 入力中からの即時診断(制約違反、enum網羅漏れ、無効な`<=>` RHSなど)
 - 生成されるRustコードのプレビュー表示
 - enumメンバー等にホバーした際の、Fluentメッセージ(`t!`)の解決結果表示
 
@@ -27,7 +27,7 @@
 1. **入力中からの即時診断**
    - 制約違反(`#[range]`/`#[length]`/`#[pattern]`/`#[format]`/`#[check]`等、6章)
    - enumの網羅漏れ(`match`が全メンバーを網羅していない、7章)
-   - `#[param]`フィールドへの`bind!`混入など、param/propの静的評価式ルール違反(4章)
+   - `#[param]`の静的評価式違反、`#[state]`競合、無効な`<=>` RHSなど(4章・9章)
    - その他、13章「静的検証ルール一覧」に列挙された全項目(ルール1〜24)。これらはコンパイラ/リンタが実行前に検出すべき項目として定義されており、`elwindui-languageserver`はその実行環境をエディタ内でリアルタイムに提供する役割を担う。ルール個々の詳細(何が違反でどの付録が根拠か)は `docs/design/gui_framework_design.md` を参照。
 2. **生成されるRustコードのプレビュー表示**
    - コード生成器(`elwindui-codegen`)が出力するRustソースに相当する内容をエディタ上でプレビュー表示する。
@@ -41,9 +41,17 @@
 - `textDocument/completion`による`vm.field`のメンバー補完(`src/completion.rs`、`elwindui_codegen::codegen::SymbolTable::resolve`を利用)。アクションも他のフィールドと同じ1階層の補完で扱われる。
 - `textDocument/semanticTokens/full`による独自シンタックスハイライト(`src/semantic_tokens.rs`)。対象は**`view! { .. }`マクロ本体に限定する** — `view!`はrust-analyzerが構文を理解できない唯一の部分(実在しないマクロで、単なる未展開トークン列にしか見えない)であり、そこだけを対象にすればrust-analyzer自身のRustハイライトと二重提供にならない。実装は軽量トークナイザ(文字単位スキャナ、AST/spanを経由しない設計は`elwindui_codegen::parser`の仕様どおり)を使いつつ、`syn::parse_file`のASTから各`view!`フィールドの実ソース上のバイト範囲を特定し(`proc-macro2`の`span-locations`機能——実プロシージャルマクロの外でも正確な`byte_range()`が取れる)、その範囲内の文字だけをトークナイズする。範囲外の文字は行・列カウントのためスキャンだけして分類はスキップする。
 
+| semantic token | 対象例 |
+|---|---|
+| `keyword` | `component`、`view`、`state` |
+| `type` | `TextArea`、`String` |
+| `macro` | `once!`、`t!`、`format!`、`theme!` |
+| `variable` | 属性名、`#[bindable]` owner、State名 |
+| `string` / `number` / `comment` | 各リテラルとコメント |
+
 まとめると、実装済みなのは「即時診断・メンバー補完・`view!`本体限定のシンタックスハイライト」の3つであり、§4に述べる「プレビュー用インスタンス生成」パイプライン(オフスクリーンレンダリングを含む)およびホバー情報・生成コードプレビューは未実装。
 
-**クロスファイル解決は提供しない**: 別ファイルのviewmodelを参照する`bind!`/`vm.field`は検証対象外である。実際のマクロ展開自体、宣言順に populate される同一クレート内レジストリ(`component_frontend::same_crate_components`等)にしか依存しておらず、実コンパイルを行わないLSPには再現不能なため。
+**クロスファイル解決は提供しない**: 別ファイルのviewmodelを参照する`vm.field`は検証対象外である。実際のマクロ展開自体、宣言順に populate される同一クレート内レジストリ(`component_frontend::same_crate_components`等)にしか依存しておらず、実コンパイルを行わないLSPには再現不能なため。
 
 ## 4. 増分パース〜プレビュー用インスタンス生成のパイプライン
 
@@ -58,13 +66,13 @@
 
 - **増分パース**: 保存イベントをトリガーに、変更箇所を中心に再パースする。
 - **型検査・制約検証**: `docs/specs/dsl_spec.md`3章の`component`/`view`定義、6章の値制約、7章のenum網羅性検査などを実行し、診断結果(エラー/警告)をエディタに返す。
-- **プレビュー用インスタンス生成**: `component`の既定値でインスタンス化する(①静的プレビュー向け)。②インタラクティブプレビュー向けには、`docs/design/tools/preview_design.md`に定義される通り「`bind!(path, mode)`が使われている`prop`を自動検出し、プレビュー専用のコントロールUI(スライダー・テキスト欄等)に置き換える」モック化処理を行う。
+- **プレビュー用インスタンス生成**: `component`の既定値でインスタンス化する(①静的プレビュー向け)。②インタラクティブプレビュー向けには、`docs/design/tools/preview_design.md`に定義される通り、`<=>`の書き込み可能RHSと`#[state]`を検出し、プレビュー専用のコントロールUI(スライダー・テキスト欄等)に置き換える。
 - 生成されたインスタンスの実際の描画(バックエンドのオフスクリーンレンダリング)およびWebViewへの送信は、プレビューパネル側の責務との境界にあたる(詳細は`docs/design/tools/preview_design.md`)。LanguageServerはレンダリング可能なインスタンス(既定値/モック値で構築された要素ツリー)を生成し引き渡すところまでを担う。
 
 ## 5. 他ツールとの連携インターフェース
 
 - **コード生成器(`elwindui-codegen`)との関係**: LanguageServerはフロントエンド変換・ASTをコード生成器と共有する(実マクロ展開と同一の解析基盤、`component_frontend::modules_from_file`)。「生成されるRustコードのプレビュー表示」は、コード生成器が最終的に出力するのと同じASTから導出される。共有フロントエンド/ASTの具体的な実装分割は `docs/design/tools/codegen_design.md` 側の設計に従う。
-- **プレビューパネル(WebView)への送信内容**: ①静的プレビューでは既定値インスタンスのオフスクリーンレンダリング結果(画像)、②インタラクティブプレビューでは`bind!`参照先をモック化したインスタンスと、それを操作するためのコントロールUI情報を送信する。WebView側の受信・表示・操作UIの詳細は `docs/design/tools/preview_design.md` を参照。
+- **プレビューパネル(WebView)への送信内容**: ①静的プレビューでは既定値インスタンスのオフスクリーンレンダリング結果(画像)、②インタラクティブプレビューでは`<=>` RHSと`#[state]`をモック化したインスタンスと、それを操作するためのコントロールUI情報を送信する。WebView側の受信・表示・操作UIの詳細は `docs/design/tools/preview_design.md` を参照。
 - **ホットリロードとの関係**: ③実行中アプリへの反映は、LanguageServerが直接担うものではなく任意経路として存在する(`docs/design/tools/codegen_design.md`§6の図参照)。ホットリロードは`#[param]`変更時の再マウント、prop変更のみの場合の差分更新という、既存の`param`/`prop`区分をそのまま利用する仕組みであり、LanguageServerが行う型検査・制約検証の結果(検証済みであること)を前提として実行される。詳細設計は `docs/design/tools/hotreload_design.md` を参照。
 
 ## 6. 非スコープ

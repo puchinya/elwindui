@@ -8,7 +8,7 @@ use super::*;
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
 #[content(children)]
 #[prop(children: Vec<std::rc::Rc<dyn crate::ui::TabViewItemExt>>)]
-#[prop(selected_index: usize)]
+#[prop(two_way, selected_index: usize)]
 #[prop(on_select: fn(usize))]
 #[prop(on_new_tab: fn())]
 pub trait TabView {

@@ -320,20 +320,20 @@ struct ThemeDemoWindow {
                         foreground: theme!(AppTheme::button_foreground)
                     }
                     TextBox {
-                        text: vm.text_box_value
+                        text <=> vm.text_box_value
                         placeholder: "Placeholder uses native resources"
                         background: theme!(AppTheme::text_box_background)
                         foreground: theme!(AppTheme::text_box_foreground)
                     }
                     PasswordBox {
-                        password: vm.password_value
+                        password <=> vm.password_value
                         placeholder: "Password"
                         background: theme!(AppTheme::password_box_background)
                         foreground: theme!(AppTheme::password_box_foreground)
                     }
                     TextArea {
                         height: 115.0
-                        text: vm.text_area_value
+                        text <=> vm.text_area_value
                         background: theme!(AppTheme::text_area_background)
                         foreground: theme!(AppTheme::text_area_foreground)
                     }

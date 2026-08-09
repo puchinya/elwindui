@@ -11,9 +11,6 @@ struct DocumentView {
     #[bindable]
     doc: std::rc::Rc<DocumentViewModel>,
 
-    #[prop(default = bind!(doc.content, TwoWay))]
-    document_text: String,
-
     // `Grid` (not `VerticalLayout`) for the outer split: `VerticalLayout`'s main axis is always
     // "Auto" (each child's own natural size) — a `TextArea` inside a `VerticalLayout` would only
     // ever get its own small natural height, never the remaining window space. `Grid`'s
@@ -23,7 +20,7 @@ struct DocumentView {
         Grid {
             rows: [elwindui::core::layout::GridLength::Star(1.0), elwindui::core::layout::GridLength::Auto]
             columns: [elwindui::core::layout::GridLength::Star(1.0)]
-            TextArea { text: document_text, Grid::row: 0 }
+            TextArea { text <=> doc.content, Grid::row: 0 }
             HorizontalLayout {
                 Grid::row: 1
                 TextBlock {

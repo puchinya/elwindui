@@ -1,6 +1,6 @@
 //! Hand-written lexer-free recursive-descent parser for the DSL's own structural syntax
 //! (`use`/`enum`/`component`/`viewmodel`/`view`). Field/attribute-value expressions that aren't
-//! one of the DSL's own macro forms (`bind!`, `command!`, `t!`) are handed off to `syn` for real
+//! one of the DSL's own macro forms (`once!`, `command!`, `t!`) are handed off to `syn` for real
 //! parsing. See docs/specs/dsl_spec.md §1-15.
 
 use crate::ast::*;
@@ -42,12 +42,8 @@ pub fn parse_view_body(
     Parser::new(&format!("{src}\n}}")).parse_view_body_tail()
 }
 
-/// Parses a single field/attribute initializer expression — `bind!(a.b, TwoWay)`,
-/// `command!(|| { .. })`, or a plain expression — from standalone text, exactly like the `= ...`
-/// right-hand side of a DSL field declaration (`parse_field_def`). Used by `attr_frontend.rs` so a
-/// Rust-attribute-sourced default value (e.g. `#[prop(default = bind!(vm.content, TwoWay))]`) gets
-/// the same `bind!`/`command!` recognition as hand-written DSL text, instead of being parsed
-/// as an inert `syn::Expr::Macro` that `codegen.rs` wouldn't know how to treat specially.
+/// Parses a single field/attribute initializer expression from standalone text, exactly like the
+/// `= ...` right-hand side of a DSL field declaration (`parse_field_def`).
 pub fn parse_initializer(src: &str) -> Result<Initializer, String> {
     // Unlike the `= ...` right-hand side of a hand-written DSL field declaration (parsed by
     // `self.parse_initializer()` below while more source always follows, guaranteeing a trailing
@@ -55,8 +51,7 @@ pub fn parse_initializer(src: &str) -> Result<Initializer, String> {
     // whole, self-contained attribute-token string (`parse_name_value_tokens`'s `tokens.to_string()`)
     // with nothing after it — so a bare literal/expr default (`#[prop(default = 50)]`) would hit
     // EOF before any terminator and fail. Appending a synthetic terminator gives that fallback the
-    // same trailing character a hand-written field declaration always has; `bind!`/`command!` parse
-    // their own `(...)` explicitly and never reach that fallback, so they're unaffected.
+    // same trailing character a hand-written field declaration always has.
     Parser::new(&format!("{src}}}")).parse_initializer()
 }
 
@@ -219,7 +214,14 @@ impl<'a> Parser<'a> {
             self.expect_char(']')?;
             self.skip_trivia();
         }
-        Ok((embedded, sealed, native, is_abstract, text_style, content_field))
+        Ok((
+            embedded,
+            sealed,
+            native,
+            is_abstract,
+            text_style,
+            content_field,
+        ))
     }
 
     /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(..)]` only
@@ -427,6 +429,7 @@ impl<'a> Parser<'a> {
     #[cfg(test)]
     fn parse_field_def(&mut self, default_kind: FieldKind) -> Result<FieldDef, String> {
         let mut kind = default_kind;
+        let mut explicit_kind: Option<String> = None;
         let mut attrs = Vec::new();
 
         loop {
@@ -437,13 +440,31 @@ impl<'a> Parser<'a> {
             self.expect_char('[')?;
             let attr_name = self.parse_ident()?;
             match attr_name.as_str() {
-                "param" => kind = FieldKind::Param,
-                "prop" => kind = FieldKind::Prop,
-                "observable" => kind = FieldKind::Observable,
-                "computed" => kind = FieldKind::Computed,
-                "attached" => kind = FieldKind::Attached,
+                "param" | "prop" | "state" | "observable" | "computed" | "attached" => {
+                    if let Some(previous) = &explicit_kind {
+                        return Err(self.err(&format!(
+                            "conflicting field attributes #[{previous}] and #[{attr_name}]"
+                        )));
+                    }
+                    explicit_kind = Some(attr_name.clone());
+                    kind = match attr_name.as_str() {
+                        "param" => FieldKind::Param,
+                        "prop" => FieldKind::Prop,
+                        "state" => FieldKind::State,
+                        "observable" => FieldKind::Observable,
+                        "computed" => FieldKind::Computed,
+                        "attached" => FieldKind::Attached,
+                        _ => unreachable!(),
+                    };
+                }
                 "inject" => attrs.push(Attr::Inject),
                 "bindable" => {
+                    if let Some(previous) = &explicit_kind {
+                        return Err(self.err(&format!(
+                            "conflicting field attributes #[{previous}] and #[bindable]"
+                        )));
+                    }
+                    explicit_kind = Some("bindable".to_string());
                     kind = FieldKind::Param;
                     attrs.push(Attr::Inject);
                     attrs.push(Attr::Bindable);
@@ -552,19 +573,9 @@ impl<'a> Parser<'a> {
 
     fn parse_initializer(&mut self) -> Result<Initializer, String> {
         if self.eat_keyword_bang("bind") {
-            self.expect_char('(')?;
-            self.skip_trivia();
-            let mut path = vec![self.parse_ident()?];
-            while self.eat_str(".") {
-                path.push(self.parse_ident()?);
-            }
-            self.skip_trivia();
-            self.expect_char(',')?;
-            self.skip_trivia();
-            let mode = self.parse_ident()?;
-            self.skip_trivia();
-            self.expect_char(')')?;
-            return Ok(Initializer::Bind { path, mode });
+            return Err(self.err(
+                "bind!(...) was removed; use normal `property: expression`, `once!(...)`, or `property <=> writable_target` in a view",
+            ));
         }
 
         let expr_src = self.take_balanced_until(&[',', '}'])?;
@@ -714,7 +725,7 @@ impl<'a> Parser<'a> {
         &mut self,
     ) -> Result<
         (
-            Vec<(String, ViewExpr)>,
+            Vec<ViewAttribute>,
             Vec<(String, String, ViewExpr)>,
             Vec<(String, Vec<(Option<String>, String)>, ShortcutScope)>,
             Vec<ChildEntry>,
@@ -778,13 +789,45 @@ impl<'a> Parser<'a> {
                 self.skip_trivia();
                 let value = self.parse_view_expr()?;
                 attached.push((ident, field, value));
-            } else if self.eat_char(':') {
+            } else if self.eat_str("<=>") {
+                if pending_shortcut.is_some() {
+                    return Err(self.err(
+                        "#[shortcut(...)] can annotate only an `attribute: event` assignment, not `<=>`",
+                    ));
+                }
                 self.skip_trivia();
                 let value = self.parse_view_expr()?;
+                attributes.push(ViewAttribute {
+                    name: ident,
+                    value,
+                    kind: AssignmentKind::TwoWay,
+                    span: self.source_span(ident_start, self.pos),
+                });
+            } else if self.eat_char(':') {
+                self.skip_trivia();
+                let (kind, value) = if self.eat_keyword_bang("once") {
+                    self.expect_char('(')?;
+                    let source = self.take_balanced_until(&[')'])?;
+                    self.expect_char(')')?;
+                    let mut parser = Parser::new(source.trim());
+                    let value = parser.parse_view_expr()?;
+                    parser.skip_trivia();
+                    if !parser.at_eof() {
+                        return Err(self.err("invalid once!(...) expression"));
+                    }
+                    (AssignmentKind::Once, value)
+                } else {
+                    (AssignmentKind::Normal, self.parse_view_expr()?)
+                };
                 if let Some((chords, scope)) = pending_shortcut {
                     attribute_shortcuts.push((ident.clone(), chords, scope));
                 }
-                attributes.push((ident, value));
+                attributes.push(ViewAttribute {
+                    name: ident,
+                    value,
+                    kind,
+                    span: self.source_span(ident_start, self.pos),
+                });
             } else if self.peek_char() == Some('{') {
                 if pending_shortcut.is_some() {
                     return Err(self.err(
@@ -810,6 +853,22 @@ impl<'a> Parser<'a> {
         }
 
         Ok((attributes, attached, attribute_shortcuts, children))
+    }
+
+    fn source_span(&self, start: usize, end: usize) -> SourceSpan {
+        let prefix = &self.src[..start.min(self.src.len())];
+        let line = prefix.matches('\n').count() + 1;
+        let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+        let column = self.src[line_start..start]
+            .chars()
+            .count()
+            .saturating_add(1);
+        SourceSpan {
+            start,
+            end,
+            line,
+            column,
+        }
     }
 
     fn parse_control_child(&mut self) -> Result<ChildEntry, String> {
@@ -959,7 +1018,7 @@ impl<'a> Parser<'a> {
         // (`elwindui::component!`'s removed bang-macro form, or `view!`'s tokens today) —
         // `to_string()` never preserves original source line breaks, so the "stop at newline"
         // fallback would keep consuming every subsequent attribute/child until the next stray
-        // `,`/`}`, exactly the class of bug `eat_keyword_bang` fixed for `t!`/`bind!`/`command!`.
+        // `,`/`}`, exactly the class of bug `eat_keyword_bang` fixed for `t!`/`once!`/`command!`.
         if self.peek_char() == Some('[') {
             let expr_src = self.take_bracketed_src()?;
             let expr = syn::parse_str::<syn::Expr>(expr_src.trim())
@@ -1025,6 +1084,39 @@ impl<'a> Parser<'a> {
                 args.push((arg_name, arg_value));
             }
             return Ok(ViewExpr::TFluent(key, args));
+        }
+
+        if self.eat_keyword_bang("bind") {
+            return Err(self.err(
+                "bind!(...) was removed; use normal `property: expression`, `once!(...)`, or `property <=> writable_target`",
+            ));
+        }
+
+        // Other Rust-style expression macros are self-delimiting by their token group. Preserve
+        // the complete invocation as `syn::Expr::Macro`; validation decides whether its arguments
+        // can be analyzed reactively or require an outer `once!(...)`.
+        if self.looks_like_macro_call() {
+            let start = self.pos;
+            self.parse_ident()?;
+            self.skip_trivia();
+            self.expect_char('!')?;
+            self.skip_trivia();
+            let open = self
+                .peek_char()
+                .ok_or_else(|| self.err("expected macro delimiter"))?;
+            let close = match open {
+                '(' => ')',
+                '[' => ']',
+                '{' => '}',
+                _ => return Err(self.err("expected `(`, `[`, or `{` after macro name")),
+            };
+            self.expect_char(open)?;
+            self.take_balanced_until(&[close])?;
+            self.expect_char(close)?;
+            let source = &self.src[start..self.pos];
+            let expr = syn::parse_str::<syn::Expr>(source)
+                .map_err(|error| format!("invalid macro expression `{source}`: {error}"))?;
+            return Ok(ViewExpr::Expr(expr));
         }
 
         // Dotted field path. `()` is no longer special-cased here — a trailing call like
@@ -1101,6 +1193,16 @@ impl<'a> Parser<'a> {
         let followed_by_brace = self.peek_char() == Some('{');
         self.pos = save;
         is_type_name && followed_by_brace
+    }
+
+    fn looks_like_macro_call(&mut self) -> bool {
+        let checkpoint = self.pos;
+        let result = self.parse_ident().is_ok() && {
+            self.skip_trivia();
+            self.peek_char() == Some('!')
+        };
+        self.pos = checkpoint;
+        result
     }
 
     /// Lookahead-and-rewind (same idiom as `looks_like_element`) for a `::`-qualified path value —
@@ -1235,7 +1337,7 @@ impl<'a> Parser<'a> {
         matched
     }
 
-    /// Like `eat_keyword`, but for the DSL's own `bind!(..)`/`command!(..)`/`t!(..)` macro-call
+    /// Like `eat_keyword`, but for the DSL's own `once!(..)`/`command!(..)`/`t!(..)` macro-call
     /// sugar forms: consumes `kw` followed by `!`, tolerating whitespace in between. Real rustc's
     /// `proc_macro::TokenStream::to_string()` never puts a space between an identifier and an
     /// immediately-following `!`, but rust-analyzer's own proc-macro-srv token-stream-to-text
@@ -1549,17 +1651,21 @@ mod tests {
             c.fields[1].ty, // font_size
             "Option<f32>"
         );
-        assert!(c.fields[1].attrs.iter().any(|a| matches!(a, Attr::TextStyle)));
+        assert!(
+            c.fields[1]
+                .attrs
+                .iter()
+                .any(|a| matches!(a, Attr::TextStyle))
+        );
     }
 
     #[test]
     fn parses_theme_macro_as_a_rust_macro_expression() {
         let mut parser = Parser::new("theme!(AppTheme::layout_background)");
-        let expression = parser.parse_view_expr().expect("theme reference should parse");
-        assert!(matches!(
-            expression,
-            ViewExpr::Expr(syn::Expr::Macro(_))
-        ));
+        let expression = parser
+            .parse_view_expr()
+            .expect("theme reference should parse");
+        assert!(matches!(expression, ViewExpr::Expr(syn::Expr::Macro(_))));
         assert!(parser.at_eof());
     }
 
@@ -1703,7 +1809,6 @@ component NotepadWindow {
     #[inject]
     vm: NotepadViewModel,
 
-    content: String = bind!(vm.content, TwoWay),
 }
 
 view NotepadWindow {
@@ -1723,7 +1828,7 @@ view NotepadWindow {
                 }
             }
 
-            TextArea { text: content }
+            TextArea { text <=> vm.content }
 
             Row {
                 Text { text: t!("notepad-status-chars", count: vm.char_count) }
@@ -1744,14 +1849,10 @@ view NotepadWindow {
             panic!("expected component");
         };
         assert_eq!(component.name, "NotepadWindow");
-        assert_eq!(component.fields.len(), 2);
+        assert_eq!(component.fields.len(), 1);
         assert_eq!(component.fields[0].name, "vm");
         assert_eq!(component.fields[0].kind, FieldKind::Param);
         assert!(component.fields[0].initializer.is_none());
-        assert!(matches!(
-            component.fields[1].initializer,
-            Some(Initializer::Bind { .. })
-        ));
 
         let Item::View(view) = &module.items[1] else {
             panic!("expected view");
@@ -1774,8 +1875,8 @@ view NotepadWindow {
         let on_click = save_button
             .attributes
             .iter()
-            .find(|(k, _)| k == "on_click")
-            .map(|(_, v)| v)
+            .find(|attribute| attribute.name == "on_click")
+            .map(|attribute| &attribute.value)
             .unwrap();
         assert!(matches!(on_click, ViewExpr::Path(path)
             if path == &vec!["vm".to_string(), "save".to_string()]));
@@ -1802,11 +1903,12 @@ view NotepadWindow {
             panic!("expected view")
         };
         let root = literal(&view.root.children[0]);
-        let (_, expr) = root
+        let expr = root
             .attributes
             .iter()
-            .find(|(k, _)| k == "x")
+            .find(|attribute| attribute.name == "x")
             .expect("attribute `x`")
+            .value
             .clone();
         expr
     }
@@ -1854,9 +1956,9 @@ view NotepadWindow {
         };
         assert_eq!(elem.type_path, "DocumentView");
         assert_eq!(elem.attributes.len(), 1);
-        assert_eq!(elem.attributes[0].0, "doc");
+        assert_eq!(elem.attributes[0].name, "doc");
         assert!(
-            matches!(&elem.attributes[0].1, ViewExpr::Path(p) if p == &vec!["doc".to_string()])
+            matches!(&elem.attributes[0].value, ViewExpr::Path(p) if p == &vec!["doc".to_string()])
         );
     }
 
@@ -1873,6 +1975,39 @@ view NotepadWindow {
         assert!(
             matches!(*inner, ViewExpr::Path(p) if p == vec!["vm".to_string(), "save".to_string()])
         );
+    }
+
+    #[test]
+    fn parses_typed_attribute_assignments_and_source_spans() {
+        let module = parse_module(
+            r#"
+view Demo {
+    TextBox {
+        text: "initial"
+        placeholder: once!(format!("snapshot"))
+        text <=> query
+    }
+}
+"#,
+        )
+        .expect("assignment forms should parse");
+        let Item::View(view) = &module.items[0] else {
+            panic!("expected view")
+        };
+        let root = literal(&view.root.children[0]);
+        assert_eq!(root.attributes[0].kind, AssignmentKind::Normal);
+        assert_eq!(root.attributes[1].kind, AssignmentKind::Once);
+        assert_eq!(root.attributes[2].kind, AssignmentKind::TwoWay);
+        assert_eq!(root.attributes[0].span.line, 4);
+        assert_eq!(root.attributes[0].span.column, 9);
+        assert!(root.attributes[0].span.end > root.attributes[0].span.start);
+    }
+
+    #[test]
+    fn rejects_removed_bind_macro_in_view_attributes() {
+        let error = parse_module("view Demo { TextArea { text: bind!(vm.content, TwoWay) } }")
+            .expect_err("removed bind syntax must be rejected");
+        assert!(error.contains("bind!(...) was removed"), "{error}");
     }
 
     #[test]
@@ -1914,8 +2049,8 @@ view V {
         let attr = |name: &str| {
             root.attributes
                 .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.clone())
+                .find(|attribute| attribute.name == name)
+                .map(|attribute| attribute.value.clone())
         };
 
         assert!(matches!(attr("key"), Some(ViewExpr::Closure { .. })));
@@ -2047,11 +2182,11 @@ view MainGrid {
         let root = literal(&view.root.children[0]);
         assert_eq!(root.type_path, "Grid");
         assert!(matches!(
-            &root.attributes[0].1,
+            &root.attributes[0].value,
             ViewExpr::Expr(syn::Expr::Array(_))
         ));
         assert!(matches!(
-            &root.attributes[1].1,
+            &root.attributes[1].value,
             ViewExpr::Expr(syn::Expr::Array(_))
         ));
 

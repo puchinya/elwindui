@@ -56,6 +56,7 @@
 | [`status/winui3_backend_status.md`](status/winui3_backend_status.md) | WinUI 3バックエンドの状況。ビルド環境、C++/WinRTシム、既知の落とし穴、退行させてはいけない項目 |
 | [`status/macos_ui_driver_status.md`](status/macos_ui_driver_status.md) | `tools/macos-ui-driver`(macOS GUI自動テストCLI)のコマンド一覧と制約 |
 | [`status/appkit_memory_baseline.md`](status/appkit_memory_baseline.md) | AppKit backend の A-D 基礎メモリ baseline、測定環境、再現スクリプト |
+| [`status/appkit_graphics_demo_rss_breakdown.md`](status/appkit_graphics_demo_rss_breakdown.md) | AppKit graphics-demo のRSS、footprint、vmmap実プロセス調査 |
 
 ### エージェント向け
 

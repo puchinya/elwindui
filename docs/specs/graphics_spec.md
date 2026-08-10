@@ -8,7 +8,7 @@
 
 本書は `elwindui::core::graphics` モジュールが公開するグラフィックス表現型（Color, Brush, Path, Image, VectorImage 等）の型定義および公開意味論を規定する。
 
-描画コマンドの保持構造（RenderTree, RenderGroup）、フィンガープリント、各バックエンド（CoreGraphics / Win2D / Cairo）への再生・再描画キャッシュ戦略は実装設計であり、[GUI Framework Design](../design/gui_framework_design.md) §5.7 の対象である。
+描画コマンドの保持構造（`RenderTree`, `RenderGroup`, `RenderCommand`）の基本モデルは本書 §10 で規定する。各プラットフォームバックエンド（CoreGraphics / Win2D / Cairo）への具体的な描画命令再生（Replay）およびレイヤーキャッシュ戦略の詳細は [GUI Framework Design](../design/gui_framework_design.md) §5.7 を参照すること。
 
 ---
 
@@ -196,7 +196,62 @@ SVG等のベクター文書の保持・レンダリング構造。
 
 ---
 
-## 10. Related specifications
+## 10. Retained render tree (`RenderTree`, `RenderGroup`, `RenderCommand`)
+
+`RenderTree` は、UI 視覚ツリー（`UIElement` 階層）のレイアウト計算結果および描画コマンドを保持（Retained）し、ネイティブプラットフォームのレンダリング出力パス（CoreGraphics, Win2D, Cairo 等）へ引き渡す保持型グラフィックス描画データ構造である。
+
+### 10.1 `RenderTree` and `RenderGroup` Architecture
+
+- **`RenderTree`**:
+  - 全体の保持型描画木のルートノード（`root: RenderGroup`）を保持する。
+  - 要素 ID（`u64`）から木構造上のパス（`group_paths`）および対応する UI 要素（`visual_index: HashMap<u64, Weak<dyn UIElementExt>>`）への高速参照テーブルを管理する。
+- **`RenderGroup`**:
+  - 視覚ツリー上の 1 つの描画単位（Visual Node）。
+  - **`id` (`u64`)**: 対応する UI 要素の一意識別子。
+  - **`offset` (`Point`)**: 親 `RenderGroup` からのローカル相対位置オフセット。
+  - **`size` (`Size`)**: 要素のローカル確定サイズ。
+  - **`clip` (`Option<Rect>`)**: 要素に適用される局所クリッピング矩形。
+  - **`commands` (`Vec<RenderCommand>`)**: 該当要素自身が出力する描画コマンド列。
+  - **`children` (`Vec<RenderGroup>`)**: 子視覚要素の `RenderGroup` リスト。
+
+### 10.2 Dirty Tracking & Generation Caching
+
+- **`is_dirty` (`bool`)**:
+  - 要素プロパティやサイズの変更に伴い、該当ノードが再描画・再作成を要することを示す一時フラグ（`mark_dirty`）。
+- **`generation` (`u64`)**:
+  - 描画コマンド列（`commands`）が更新・再記録されるたびにインクリメントされる世代番号。
+  - バックエンドの描画キャッシュレイヤー（例: AppKit の `CALayer` キャッシュ構造）は、前回の描画再生（Replay）時の `generation` と比較することで、コマンドに変更がない場合にプラットフォームネイティブの描画リソース構築をスキップ・再利用する。
+
+### 10.3 `RenderCommand` Primitive Set
+
+`RenderGroup::commands` に保持されるバックエンド非依存の描画命令プリミティブ。
+
+| Command Variant | Fields / Parameters | Description |
+|---|---|---|
+| `FillRect` | `rect`, `brush` | 矩形の塗りつぶし描画 |
+| `StrokeRect` | `rect`, `brush`, `stroke` | 矩形の輪郭線描画 |
+| `FillRoundedRect` | `rect`, `radii`, `brush` | 角丸矩形の塗りつぶし描画 |
+| `StrokeRoundedRect` | `rect`, `radii`, `brush`, `stroke` | 角丸矩形の輪郭線描画 |
+| `FillEllipse` | `rect`, `brush` | 楕円の塗りつぶし描画 |
+| `StrokeEllipse` | `rect`, `brush`, `stroke` | 楕円の輪郭線描画 |
+| `FillPath` | `path`, `brush`, `rule` | パス（ベクター図形）の塗りつぶし |
+| `StrokePath` | `path`, `brush`, `stroke` | パス（ベクター図形）の輪郭線描画 |
+| `DrawText` | `rect`, `text`, `style`, `alignment` | テキストグリフ列の指定領域内描画 |
+| `DrawImage` | `rect`, `image`, `options` | ラスタ画像（`Image`）の描画 |
+| `DrawVectorImage` | `rect`, `image`, `options` | ベクター画像（`VectorImage`）の描画 |
+| `PushClip` / `PopClip` | `clip` (`Rect` / `RoundedRect` / `Path`) | クリッピング領域のスタック操作 |
+| `NativeControl` | `bounds`, `owner_id` | ネイティブウィジェット（`NSView`, `FrameworkElement`）の埋め込み座標および所有要素 ID の定義 |
+
+### 10.4 Reconcile & Resource Lifetime
+
+- **ツリー同期（Reconcile）**:
+  - UI 階層の変更やプロパティ更新後、`RenderTree::reconcile` により、最小の変更差分で `RenderGroup` の生成・削除・再記録・座標同期を行う。
+- **リソースライフサイクル**:
+  - `Visibility::Collapsed` や非選択タブなどの非アクティブノードでは、`UIElement` モデルは保持されたまま `RenderGroup` およびバックエンド描画リソースが解放され、アクティブ化時に最新のビューポートサイズで再作成される。
+
+---
+
+## 11. Related specifications
 
 - [UI Specification](ui_spec.md) - 本グラフィックス型を利用するUI要素仕様
 - [DSL Specification](dsl_spec.md) - DSLにおける属性指定ルール

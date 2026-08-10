@@ -1,4 +1,3 @@
-//! `platform::*` — OS services that are not UI elements (file dialogs today; clipboard and
-//! drag & drop per docs/specs/builtins_spec.md 付録T when they land).
+//! `platform::*` — OS services that are not UI elements (file dialogs today per docs/specs/platform_spec.md).
 
 pub mod file_dialog;

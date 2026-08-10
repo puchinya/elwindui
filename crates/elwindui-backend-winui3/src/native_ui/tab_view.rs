@@ -9,7 +9,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-/// See docs/specs/builtins_spec.md 付録Y and `elwindui_backend_appkit::native_ui::TabView`'s
+/// See docs/specs/ui_spec.md#tabs and `elwindui_backend_appkit::native_ui::TabView`'s
 /// doc comment for the shared `children` convention (static and transparent dynamic ranges) and
 /// why `TabViewItem` — not a bespoke per-mode representation — is the thing every child range
 /// normalizes into. `Microsoft.UI.Xaml.Controls.

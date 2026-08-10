@@ -1,8 +1,8 @@
-//! `builtin::Rectangle` — self-drawn rectangle primitive.
+//! `elwindui::ui::Rectangle` — self-drawn rectangle primitive.
 
 use super::*;
 
-/// `builtin::Rectangle`(docs/specs/builtins_spec.md 付録G/N)。バックエンド非依存な合成 builtin
+/// `elwindui::ui::Rectangle` (see `docs/specs/ui_spec.md#rectangle` and `docs/specs/graphics_spec.md`). バックエンド非依存な合成要素
 /// としてここに手書きする。`#[ancestor]`(`elwindui_macros::class`の doc comment 参照)で`Shape`
 /// 自身の共通描画メソッドを`base`委譲として登録している。
 #[elwindui_macros::class(inherits = crate::ui::Shape, sealed)]

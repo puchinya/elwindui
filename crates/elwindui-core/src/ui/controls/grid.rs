@@ -16,7 +16,7 @@ use super::*;
 /// `.set_{param name}(..)` generically, so the Rust field/setter name must agree with the DSL's.
 /// `Grid`'s own class trait (docs/design/gui_framework_design.md §5.1) — inherits `Layout` (like
 /// `VerticalLayout`/`HorizontalLayout`), so `children` comes from that shared base rather than
-/// being declared on `Grid` itself (docs/specs/builtins_spec.md 付録F.11).
+/// being declared on `Grid` itself (`docs/specs/ui_spec.md#grid`).
 /// Reads a child's `Grid::row`/`Grid::column` attached-property values back out of its
 /// `UIElement::attached` bag — `Grid` is the only thing that knows those two fields are `i32`
 /// and default to `0`, so it (not `UIElement`) owns this downcast, mirroring how

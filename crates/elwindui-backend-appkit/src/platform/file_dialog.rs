@@ -1,4 +1,4 @@
-//! See docs/specs/builtins_spec.md 付録T.2. Modal file panels (`runModal`) are themselves synchronous
+//! See docs/specs/platform_spec.md#3-file-dialogs. Modal file panels (`runModal`) are themselves synchronous
 //! (they block until the user closes the panel), so these `async fn`s never actually suspend —
 //! they resolve on the first poll. That's enough for `#[command(async)]` bodies that just need to
 //! `.await` a dialog result; it is not a general-purpose async executor (nothing here can yield

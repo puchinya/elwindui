@@ -1,8 +1,8 @@
-//! `builtin::Ellipse` — self-drawn ellipse primitive.
+//! `elwindui::ui::Ellipse` — self-drawn ellipse primitive.
 
 use super::*;
 
-/// `builtin::Ellipse`(docs/specs/builtins_spec.md 付録G/N)。`Rectangle`の doc comment 参照。
+/// `elwindui::ui::Ellipse` (see `docs/specs/ui_spec.md#ellipse` and `docs/specs/graphics_spec.md`). `Rectangle`の doc comment 参照。
 #[elwindui_macros::class(inherits = crate::ui::Shape, sealed)]
 pub struct Ellipse {
     stroke_width: Option<f32>,

@@ -57,7 +57,7 @@ fn tab_order(scope: &Rc<dyn UIElementExt>) -> Vec<Rc<dyn UIElementExt>> {
 pub struct FocusTracker {
     focused: RefCell<Option<Rc<dyn UIElementExt>>>,
     /// Innermost (most recently pushed) scope last — `Dialog`-style focus traps push their own
-    /// root here (`docs/specs/builtins_spec.md` 付録M, not yet implemented) so `tab_order`/
+    /// root here (`docs/specs/ui_spec.md`, not yet implemented) so `tab_order`/
     /// `move_focus` stay confined to that subtree until popped. Unused until some builtin actually
     /// calls `push_trap`.
     trap_stack: RefCell<Vec<Rc<dyn UIElementExt>>>,

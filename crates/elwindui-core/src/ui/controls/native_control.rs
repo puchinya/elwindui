@@ -35,8 +35,8 @@ pub trait NativeControl {
 
     /// Sets the hover-delayed explanatory text shown for this control.
     ///
-    /// Declared here rather than on any individual leaf because `docs/specs/builtins_spec.md`
-    /// 付録M.3 specifies `tooltip` as an attribute *any* builtin may carry, and both toolkits
+    /// Declared here rather than on any individual leaf because `docs/specs/ui_spec.md#23-common-properties`
+    /// specifies `tooltip` as an attribute any control may carry, and both toolkits
     /// expose it on their universal view type (AppKit `NSView.toolTip`, WinUI3
     /// `ToolTipService.ToolTip`) — so every native leaf inherits one working implementation from
     /// its backend's own `NativeControl` struct, exactly as `background` above already does.

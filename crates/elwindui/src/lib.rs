@@ -106,7 +106,7 @@ pub mod ui {
     pub use elwindui_core::ui::*;
 }
 
-/// `platform::clipboard`/`platform::file_dialog` etc. See docs/specs/builtins_spec.md 付録T.
+/// `platform::file_dialog` etc. See docs/specs/platform_spec.md.
 #[cfg(all(target_os = "macos", feature = "backend-appkit"))]
 pub mod platform {
     pub use elwindui_backend_appkit::platform::file_dialog;

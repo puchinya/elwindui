@@ -15,7 +15,7 @@ use objc2_foundation::{NSObjectProtocol, NSString};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// See docs/specs/builtins_spec.md 付録X. A single application-wide `NSMenu` (top menu bar
+/// See docs/specs/ui_spec.md#menu. A single application-wide `NSMenu` (top menu bar
 /// item / `File`, `Edit`, ...) entry — composed by `native_ui::MenuItem`.
 #[derive(Clone)]
 pub(crate) struct InnerMenuItem {

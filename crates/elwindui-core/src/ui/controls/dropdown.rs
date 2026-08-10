@@ -6,7 +6,7 @@ use super::*;
 /// `Dropdown`'s class trait (docs/design/gui_framework_design.md §5.1). Its content is a live,
 /// ordered collection of `DropdownItem`s — mirrors `TabView`'s own `children` shape exactly.
 /// `selected_index` is the single source of truth for which item is selected (no per-item
-/// `selected` flag — see this Issue's own design notes, `docs/specs/builtins_spec.md` 付録F.5).
+/// `selected` flag — see `docs/specs/ui_spec.md#dropdown`).
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
 #[content(items)]
 #[prop(items: Vec<std::rc::Rc<dyn crate::ui::DropdownItemExt>>)]

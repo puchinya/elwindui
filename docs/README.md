@@ -6,13 +6,13 @@
 
 | ディレクトリ | 役割 | 問いに答える |
 |---|---|---|
-| [`specs/`](specs/) | **仕様書**(規範) | 「これは何であるべきか」 |
-| [`design/`](design/) | **設計書** | 「どう作るか」 |
-| [`status/`](status/) | **実装状況** | 「今どこまで出来ているか」 |
+| [`specs/`](specs/) | **仕様書**(規範) | 採用済みの規範仕様。「何であるべきか」 |
+| [`design/`](design/) | **設計書** | `specs`で定義された仕様を実現する内部設計。「どう作るか」 |
+| [`status/`](status/) | **実装状況** | 現在の実装状態。「今どこまで出来ているか」 |
 | [`agents/`](agents/) | **AI技術ルール** | 「実装時に何を守るべきか」 |
 | [`agent-workflow/`](agent-workflow/) | **作業フロー** | 「Issueをどう進めるか」 |
 
-**`specs/`と`design/`はフォワードルッキングな内容を含む。** 設計として定めてあるが未実装という記述が各所にある。「実際に動くもの」を知りたい場合は必ず `status/` を参照すること。
+**`specs/`は未実装の仕様を含む場合があるが規範であり、`design/`はその実現方法を記述する内部設計書である。** 現在の「実際に動くもの」やバックエンド別の対応状況を知りたい場合は、必ず `status/` を参照すること。
 
 ---
 
@@ -23,6 +23,9 @@
 | タスク | 一次参照ドキュメント | 補足 |
 |---|---|---|
 | **DSL構文・仕様確認** | [`specs/dsl_spec.md`](specs/dsl_spec.md) | 該当 section のみ部分読みする |
+| **標準UI型・仕様確認** | [`specs/ui_spec.md`](specs/ui_spec.md) | `elwindui::ui` の公開UI型 |
+| **グラフィックス仕様確認** | [`specs/graphics_spec.md`](specs/graphics_spec.md) | Color, Brush, Path, Image 等 |
+| **OSサービス仕様確認** | [`specs/platform_spec.md`](specs/platform_spec.md) | `elwindui::platform` (file_dialog 等) |
 | **DSL/codegen実装・修正** | [`agents/codegen.md`](agents/codegen.md) | 必要に応じ `specs/dsl_spec.md` §2/§13 を参照 |
 | **`#[class]`マクロ・クラス階層** | [`agents/class-model.md`](agents/class-model.md) | 正本は `specs/macro_class_spec.md` |
 | **ランタイム / UIツリー / レイアウト** | [`design/gui_framework_design.md`](design/gui_framework_design.md) | §5 コアランタイム |
@@ -41,7 +44,9 @@
 | ファイル | 内容 |
 |---|---|
 | [`specs/dsl_spec.md`](specs/dsl_spec.md) | ElwindUIL **DSL構文のみ**。`component`/`view`分離、`param`/`prop`/`state`、静的検証ルール一覧(§13)等 |
-| [`specs/builtins_spec.md`](specs/builtins_spec.md) | `builtin::` / `platform::` 標準部品リファレンス |
+| [`specs/ui_spec.md`](specs/ui_spec.md) | `elwindui::ui` の標準UI型と公開意味論 |
+| [`specs/graphics_spec.md`](specs/graphics_spec.md) | Graphics型・描画意味論 (`Color`, `Brush`, `Path`, `Image` 等) |
+| [`specs/platform_spec.md`](specs/platform_spec.md) | `elwindui::platform` のOSサービス (`file_dialog` 等) |
 | [`specs/macro_class_spec.md`](specs/macro_class_spec.md) | `#[elwindui_macros::class]` マクロ仕様の正本 |
 
 ### `design/` — 設計書

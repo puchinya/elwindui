@@ -6,7 +6,7 @@
 
 **対象(本ドキュメント)**: バックエンド抽象化、`elwindui-core`ランタイム(`UIElement`クラス階層・レイアウト・フォーカス・アクセシビリティ・描画)、標準ビルトイン部品、ライフサイクル、Store/ViewModel/MVVM/非同期/Undo-Redoなどの状態管理層、キーボード・ナビゲーション・テーマ・エラーハンドリング・モバイル対応等のUI機能拡張。
 
-**対象外(他の設計書を参照)**: ElwindUIL DSLの構文・静的検証ルール自体は`docs/specs/dsl_spec.md`、`builtin::`要素の個別リファレンス実装は`docs/specs/builtins_spec.md`、DSL→Rustのコード生成コンパイラ(`elwindui-codegen`)・LSP(`elwindui-languageserver`)・エディタ内プレビュー・ホットリロード機構は`docs/design/tools/*.md`を参照すること。
+**対象外(他の設計書を参照)**: ElwindUIL DSLの構文・静的検証ルール自体は`docs/specs/dsl_spec.md`、標準UI要素の規範仕様は`docs/specs/ui_spec.md`（グラフィックスは`docs/specs/graphics_spec.md`、OSサービスは`docs/specs/platform_spec.md`）、DSL→Rustのコード生成コンパイラ(`elwindui-codegen`)・LSP(`elwindui-languageserver`)・エディタ内プレビュー・ホットリロード機構は`docs/design/tools/*.md`を参照すること。
 
 ---
 
@@ -236,7 +236,7 @@ Windows→**WinUI 3**(windows-rs経由)、macOS→**AppKit**(objc2経由)、Linu
 | `VerticalLayout { ... }` | `Microsoft::UI::Xaml::Controls::StackPanel`(`Orientation: Vertical`) | `NSStackView(orientation: .vertical)` | `gtk::Box(orientation: Vertical)` |
 | `Dropdown { ... }` | `Microsoft::UI::Xaml::Controls::ComboBox` | `NSPopUpButton` | `gtk::DropDown` |
 
-DSL記述者はこれらの違いを一切意識せず、`Button { text: t!("save"), on_click: save_document() }`と書くだけでよい(実際の各ビルトインのリファレンス実装は`docs/specs/builtins_spec.md`付録Fを参照)。
+DSL記述者はこれらの違いを一切意識せず、`Button { text: t!("save"), on_click: save_document() }`と書くだけでよい(実際の各ビルトインの規範仕様は[`docs/specs/ui_spec.md`](../specs/ui_spec.md)を参照)。
 
 OSごとの見た目差は、原則としてネイティブウィジェットの既定にそのまま委ねる。明示的に差を付けたい場合は、
 テーマトークン(§8.5、`docs/status/theme_status.md`)をバックエンドごとに解決させるか、ビルトインの
@@ -386,9 +386,9 @@ const fn resolve_backend() -> Backend {
 
 `Window`/`Column`/`Row`/`Text`/`TextArea`/`Dropdown`等は`builtin`名前空間に属し、コード生成器が標準実装として提供する。内部実装は`elwindui-core`/各`elwindui-backend-*`crateの`#[elwindui_macros::class]`宣言というRust形式で書かれ(`docs/design/tools/codegen_design.md`参照)、`match target::backend()`(§3.3)による網羅性検査と`native!`エスケープハッチがそのまま適用される設計だが、§3.3の通り`target::backend()`自体は未実装のため、実際のビルトイン宣言はバックエンド分岐を持たず、バックエンドごとの実体はCargoフィーチャで選択される別クレート(`elwindui-backend-appkit`等)側に委ねられている。
 
-**実装状況**: 実装済みなのは`Window`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`Control`/`ContentControl`/`Grid`/`TextArea`/`Button`/`TextBlock`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/`TabViewItem`(`Row`/`Column`という名称ではなく`HorizontalLayout`/`VerticalLayout`という名称で実装されている点に注意)。`Dropdown`/`Option`、`Canvas`、`NavigationHost`/`Route`、`Dialog`、`Tooltip`、`VirtualList`は仕様のみで未実装。詳細は`docs/specs/builtins_spec.md`冒頭の分類ツリーと`docs/status/implementation_status.md`を参照。
+**実装状況**: 実装済みなのは`Window`/`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`Control`/`ContentControl`/`Grid`/`TextArea`/`Button`/`TextBlock`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem`/`TabView`/`TabViewItem`(`Row`/`Column`という名称ではなく`HorizontalLayout`/`VerticalLayout`という名称で実装されている点に注意)。`Dropdown`/`Option`、`Canvas`、`NavigationHost`/`Route`、`Dialog`、`Tooltip`、`VirtualList`は仕様のみで未実装。詳細は[`docs/specs/ui_spec.md`](../specs/ui_spec.md)と`docs/status/implementation_status.md`を参照。
 
-**代表的な実装パターン(`Stack` → `VerticalLayout`/`HorizontalLayout`)**: 共通の内部実装`Stack`にレイアウト計算を集約し、`VerticalLayout`/`HorizontalLayout`はそれを`base`フィールドとして持つ薄い派生として定義する。`Stack`はDSL上に現れない(`docs/specs/builtins_spec.md` F.2)。
+**代表的な実装パターン(`Stack` → `VerticalLayout`/`HorizontalLayout`)**: 共通の内部実装`Stack`にレイアウト計算を集約し、`VerticalLayout`/`HorizontalLayout`はそれを`base`フィールドとして持つ薄い派生として定義する。`Stack`はDSL上に現れない([`docs/specs/ui_spec.md`](../specs/ui_spec.md))。
 
 ```rust
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
@@ -536,11 +536,11 @@ UIElement (構造体、Margin/Alignment共通実装。baseなしの既定クラ�
 
 `VerticalLayout`/`HorizontalLayout`は交差軸方向の配置を一律設定として持たない——各子要素自身の`horizontal_alignment`/`vertical_alignment`が交差軸配置を決める、WinUI3の`StackPanel`と同じ設計である。主軸方向は常に「Auto」(子の自然サイズ)である。
 
-`Grid`(実装済み、`docs/specs/builtins_spec.md`参照)は行/列ベースのレイアウトで、`VerticalLayout`/`HorizontalLayout`にはない「残り領域を`*`比例配分で埋める」手段(`GridLength::Star`)を提供する。各子の行/列位置は`docs/specs/dsl_spec.md`§3の添付プロパティ(`Grid::row`/`Grid::column`)で指定し、`UIElement.grid_cell`(既定`(0, 0)`)として子要素自身が保持する——`Grid`自身が子ごとの別テーブルを持つわけではない。
+`Grid`(実装済み、[`docs/specs/ui_spec.md`](../specs/ui_spec.md#grid)参照)は行/列ベースのレイアウトで、`VerticalLayout`/`HorizontalLayout`にはない「残り領域を`*`比例配分で埋める」手段(`GridLength::Star`)を提供する。各子の行/列位置は`docs/specs/dsl_spec.md`§3の添付プロパティ(`Grid::row`/`Grid::column`)で指定し、`UIElement.grid_cell`(既定`(0, 0)`)として子要素自身が保持する——`Grid`自身が子ごとの別テーブルを持つわけではない。
 
 #### 5.1b `ScrollView`のネストホスト構造(NativeControl拡充Phase 1)
 
-**実装済み**(AppKit・WinUI3両バックエンドに実配線。WinUI3側はWindows環境が無く未検証、`docs/status/nativecontrol_status.md`参照)。`Button`/`TextArea`/`TextBox`/`PasswordBox`はいずれも自己完結した単一のネイティブウィジェットを`NativeControl<H>`として保持するだけだが、`ScrollView`(付録F.14)の`content`は独自のlayout/paint/hit-test/focusを持つelwindui部分木そのものであり、単一値としては保持できない。これを解決するため、`ScrollView`は3層構造を取る:
+**実装済み**(AppKit・WinUI3両バックエンドに実配線。WinUI3側はWindows環境が無く未検証、`docs/status/nativecontrol_status.md`参照)。`Button`/`TextArea`/`TextBox`/`PasswordBox`はいずれも自己完結した単一のネイティブウィジェットを`NativeControl<H>`として保持するだけだが、`ScrollView`([`ui_spec.md#scrollview`](../specs/ui_spec.md#scrollview))の`content`は独自のlayout/paint/hit-test/focusを持つelwindui部分木そのものであり、単一値としては保持できない。これを解決するため、`ScrollView`は3層構造を取る:
 
 ```
 ScrollView            DSLから見えるNativeControl葉ノード自身
@@ -861,7 +861,7 @@ WinUI3バックエンドでの実配線は引き続き将来の課題として�
 
 - **再構築の仕組み**: `template`の値変更(`set_template(..)`)は通常の属性再代入とは異なり、`body: template(Self)`配下の視覚ツリーを丸ごと差し替える必要がある。新しい再構築エンジンは作らず、`if`/`match`の動的子要素領域の入れ替え(`docs/specs/dsl_spec.md`§5、本書§7.2の`{Component}Property`通知機構と同型)を、常に1分岐だけを持つ特殊ケースとして流用する——`template`の`PropertyChanged`通知を受けたら、既存の動的子範囲と同じ経路で「今の子を外し、`template(self)`を呼び直した結果を新しい子として挿入する」。
 - **Logicalツリー表現**: §5.2で「将来のテンプレート機能の受け皿」として予約されている`LogicalNode { type_name, children }`(現状コード生成からは未使用)を、この機能のLogicalツリー表現として使う——Logical上は「テンプレートを持つコンポーネント自身」が1ノード、Visual上は`template`が返した要素以下の展開木、という対応になる。
-- **`TemplateBinding`相当**: WinUI3の`TemplateBinding`(リフレクションベースの動的束縛)に対応するのは、テンプレートを構成するクロージャ内から`control.content`/`control.padding()`のように、既存の「`#[param]`フィールドへの名前付きアクセサ自動生成」(`docs/specs/builtins_spec.md`付録F補足)を直接呼び出す形——静的に型付けされ、リフレクションを一切必要としない。
+- **`TemplateBinding`相当**: WinUI3の`TemplateBinding`(リフレクションベースの動的束縛)に対応するのは、テンプレートを構成するクロージャ内から`control.content`/`control.padding()`のように、既存の「`#[param]`フィールドへの名前付きアクセサ自動生成」([`docs/specs/ui_spec.md`](../specs/ui_spec.md))を直接呼び出す形——静的に型付けされ、リフレクションを一切必要としない。
 
 ### 5.13 フォント/テキストスタイルの継承ランタイム契約(実装済み)
 

@@ -61,37 +61,37 @@
 
 | 機能 | AppKit | WinUI3 | GTK4 | 仕様/設計 |
 |---|:---:|:---:|:---:|---|
-| `Window` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.1 |
-| `VerticalLayout` / `HorizontalLayout` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.2 |
-| `TextBlock` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.3 |
-| `TextArea` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.4 |
-| `Dropdown` / `DropdownItem` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.5 |
-| `Rectangle` / `Ellipse` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.6 |
-| `Control` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.9 |
-| `ContentControl` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.10 |
-| `Grid` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.11 |
-| `TextBox` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.12 |
-| `PasswordBox` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.13 |
-| `ScrollView` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` F.14 |
-| `Button` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.15 |
-| `CheckBox` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.16 |
-| `RadioButton` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.17 |
-| `ToggleSwitch` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.18 |
-| `Slider` | ✅ | ✅ | ✖ | `docs/specs/builtins_spec.md` F.19 |
-| `Image`(ラスター/ベクター) | ✅ | ✖ | ✖ | **仕様書に節が無い**(§5・§7参照) |
-| `MenuBar` / `MenuBarItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録X |
-| `Menu` / `MenuItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録M.2 |
-| `TabView` / `TabViewItem` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録Y |
-| `Canvas` / `Painter` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録G |
-| 描画拡張(Brush/Geometry/Effect/Transform) | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録N |
-| `NavigationHost` / `Route` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録L |
-| `Dialog` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録M.1 |
-| `tooltip`属性(`NativeControl`派生の全ネイティブ葉) | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録M.3 |
-| `tooltip`属性(自前描画要素) / 汎用`context_menu`属性 | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録M.2/M.3 |
-| `VirtualList` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録Q |
-| `platform::file_dialog` | ✅ | ⚠️ | ✖ | `docs/specs/builtins_spec.md` 付録T.2 |
-| `platform::clipboard` | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録T.1 |
-| ドラッグ&ドロップ | ✖ | ✖ | ✖ | `docs/specs/builtins_spec.md` 付録T.3 |
+| `Window` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#window` |
+| `VerticalLayout` / `HorizontalLayout` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#layout` |
+| `TextBlock` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#textblock` |
+| `TextArea` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#textarea` |
+| `Dropdown` / `DropdownItem` | ✅ | ✅ | ✖ | `docs/specs/ui_spec.md#dropdown` |
+| `Rectangle` / `Ellipse` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#shapes` |
+| `Control` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#control` |
+| `ContentControl` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#contentcontrol` |
+| `Grid` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#grid` |
+| `TextBox` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#textbox` |
+| `PasswordBox` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#passwordbox` |
+| `ScrollView` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#scrollview` |
+| `Button` | ✅ | ✅ | ✖ | `docs/specs/ui_spec.md#button` |
+| `CheckBox` | ✅ | ✅ | ✖ | `docs/specs/ui_spec.md#checkbox` |
+| `RadioButton` | ✅ | ✅ | ✖ | `docs/specs/ui_spec.md#radiobutton` |
+| `ToggleSwitch` | ✅ | ✅ | ✖ | `docs/specs/ui_spec.md#toggleswitch` |
+| `Slider` | ✅ | ✅ | ✖ | `docs/specs/ui_spec.md#slider` |
+| `Image`(ラスター/ベクター) | ✅ | ✖ | ✖ | `docs/specs/ui_spec.md#image` |
+| `MenuBar` / `MenuBarItem` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#menu` |
+| `Menu` / `MenuItem` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#menu` |
+| `TabView` / `TabViewItem` | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#tabs` |
+| `Canvas` / `Painter` | ✖ | ✖ | ✖ | `docs/specs/graphics_spec.md` |
+| 描画拡張(Brush/Geometry/Effect/Transform) | ✖ | ✖ | ✖ | `docs/specs/graphics_spec.md` |
+| `NavigationHost` / `Route` | ✖ | ✖ | ✖ | 未実装 |
+| `Dialog` | ✖ | ✖ | ✖ | 未実装 |
+| `tooltip`属性(`NativeControl`派生の全ネイティブ葉) | ✅ | ⚠️ | ✖ | `docs/specs/ui_spec.md#23-common-properties` |
+| `tooltip`属性(自前描画要素) / 汎用`context_menu`属性 | ✖ | ✖ | ✖ | 未実装 |
+| `VirtualList` | ✖ | ✖ | ✖ | 未実装 |
+| `platform::file_dialog` | ✅ | ⚠️ | ✖ | `docs/specs/platform_spec.md` |
+| `platform::clipboard` | ✖ | ✖ | ✖ | `docs/specs/platform_spec.md` |
+| ドラッグ&ドロップ | ✖ | ✖ | ✖ | `docs/specs/platform_spec.md` |
 | SVGベクター描画 | ✅ | ✖ | ✖ | 本ドキュメント §7 |
 | フォント/テキストスタイル | ✅ | ⚠️ | ✖ | `docs/status/font_status.md` |
 | テーマ/デザイントークン | ✅ | ✅ | ✖ | `docs/status/theme_status.md` |
@@ -105,7 +105,7 @@
 
 ## 5. ビルトイン実装状況
 
-`crates/elwindui-core/src/ui.rs`と各`elwindui-backend-*`crateの`#[elwindui_macros::class]`宣言を正とする。詳細な分類ツリーは`docs/specs/builtins_spec.md`冒頭を参照。
+`crates/elwindui-core/src/ui/mod.rs`と各`elwindui-backend-*`crateの`#[elwindui_macros::class]`宣言を正とする。仕様の全容は`docs/specs/ui_spec.md`を参照。
 
 **`elwindui-core`が持つバックエンド非依存ビルトイン(12)**: `UIElement` / `Layout`(抽象) / `VerticalLayout` / `HorizontalLayout` / `Shape`(抽象) / `Rectangle` / `Ellipse` / `Image` / `TextBlock` / `Control` / `ContentControl` / `Grid`
 
@@ -116,7 +116,7 @@
 - `Image`は`Rectangle`/`Ellipse`と同じくバックエンド非依存の自己描画builtin(ネイティブウィジェットを持たない)。`source: Option<ImageSource>`(`Raster(Image)`/`Vector(VectorImage)`)、`stretch: Option<Stretch>`、`rasterize: Option<VectorRasterizeMode>`(`Vector`ソースのみ有効、§7参照)。ヒットテストは`Shape`同様bounding-box精度のみ(`UIElement::hit_test_content`が点を受け取らないシグネチャのため、path形状ベースの精密ヒットテストは別タスク)
 - `Menu`/`MenuItem`は`MenuBarItem.submenu`経由での利用のみ実装済み。任意要素に`context_menu`属性で付ける汎用コンテキストメニュー機構は未実装
 - `tooltip`共通属性は`NativeControl`に宣言され、そこから派生する全ネイティブ葉で実装済み。自前描画要素(`TextBlock`/`Shape`/レイアウト)では未実装
-- `Control`の`template: Option<ControlTemplate<Self>>`(WinUI3の`Control.Template`相当の視覚ツリー実行時差し替え、`docs/specs/builtins_spec.md` 付録F.9.1・`docs/specs/dsl_spec.md` §4・`docs/design/gui_framework_design.md` §5.12)は📋設計のみ。`crates/elwindui-core/src/ui.rs`の`Control`構造体に対応フィールドは無く、`children`をそのままVisual子要素にする挙動のみ実装されている
+- `Control`の`template: Option<ControlTemplate<Self>>`(WinUI3の`Control.Template`相当の視覚ツリー実行時差し替え、`docs/specs/ui_spec.md#control`・`docs/specs/dsl_spec.md` §4・`docs/design/gui_framework_design.md` §5.12)は📋設計のみ。`crates/elwindui-core/src/ui.rs`の`Control`構造体に対応フィールドは無く、`children`をそのままVisual子要素にする挙動のみ実装されている
 - `Control`/`TextBlock`/各バックエンドの`NativeControl`は`font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/`foreground`の7プロパティを持ち(`#[text_style]` DSLコンポーネント属性、`docs/specs/dsl_spec.md` 付録A)、プロパティ単位で独立にVisual Parent経由で継承される。`TextBlock::measure_override`は登録済み`TextBackend`(AppKit・WinUI3実装済み)による実測を行う。詳細は`docs/status/font_status.md`参照
 
 ---
@@ -152,15 +152,15 @@
 | ライフサイクルフック | `docs/design/gui_framework_design.md` §6.1 | 🚧 `on_mount`は実装・結線済み。`on_unmount`はパース・コード生成されるが、`elwindui-core::ui`にツリー離脱(デタッチ)フックが無いため**呼び出されない** |
 | `store`(グローバル状態) | `docs/design/gui_framework_design.md` §7.1 | 📋 **未実装**。ASTに`Store`ノードが無い。`ControlTemplate<Self>`の広域既定値もこれに依存する |
 | キーボード入力・フォーカス管理 | `docs/design/gui_framework_design.md` §5.5 / §8.1 | 🚧 AppKit・WinUI3両バックエンドで実装し、WinUI3のButton default acceleratorは実キーボードEnterで検証済み。`#[focus(order/trap)]`という専用DSL属性ではなく`tab_stop`/`focus_order`という共通プロパティとして提供する。自前描画系要素の自動フォーカス移譲(クリックでフォーカス)、方向キーでのフォーカス移動、ネイティブリーフ(`Button`/`TextArea`)自身の`on_key_down`/`on_got_focus`個別配線、IME変換中プレビュー表示は未実装 |
-| ナビゲーション(`NavigationHost`/`Route`) | `docs/specs/builtins_spec.md` 付録L | 📋 **未実装** |
-| ダイアログ/メニュー/ツールチップ | `docs/specs/builtins_spec.md` 付録M | 🚧 `Menu`/`MenuItem`本体と`tooltip`属性(ネイティブ葉のみ)は実装済み。`Dialog`、自前描画要素の`tooltip`、汎用`context_menu`属性は未実装 |
-| 描画拡張(Brush/Geometry/Effect/Transform/レイヤー合成/アニメーション) | `docs/specs/builtins_spec.md` 付録N | 📋 未実装。`Painter`基本セット(塗り・線・テキスト)のみ`elwindui-core`に存在し、`Canvas`自体が未実装のため利用できない |
+| ナビゲーション(`NavigationHost`/`Route`) | 未実装 | 📋 **未実装** |
+| ダイアログ/メニュー/ツールチップ | `docs/specs/ui_spec.md#menu` | 🚧 `Menu`/`MenuItem`本体と`tooltip`属性(ネイティブ葉のみ)は実装済み。`Dialog`、自前描画要素の`tooltip`、汎用`context_menu`属性は未実装 |
+| 描画拡張(Brush/Geometry/Effect/Transform/レイヤー合成/アニメーション) | `docs/specs/graphics_spec.md` | 📋 未実装。`Painter`基本セット(塗り・線・テキスト)のみ`elwindui-core`に存在し、`Canvas`自体が未実装のため利用できない |
 | MVVM(`viewmodel`/アクション) | `docs/design/gui_framework_design.md` §7.2 | ✅ `#[observable]`/`#[computed]`と、`impl`ブロックの`fn`/`async fn`から自動検出されるアクションが動作し、`examples/notepad`のMVVM構成で使われている |
 | 非同期処理 | `docs/design/gui_framework_design.md` §7.3 | 🚧 `spawn`相当(`spawn_local`)は実装済みで`examples/notepad`が使用。`AsyncState<T>`/`#[async_computed]`/`task!`マクロは未実装 |
-| リスト仮想化(`VirtualList`) | `docs/specs/builtins_spec.md` 付録Q | 📋 未実装 |
+| リスト仮想化(`VirtualList`) | 未実装 | 📋 未実装 |
 | テーマ/デザイントークン | `docs/status/theme_status.md` | ✅ Rust属性ベースの型付きtheme runtime、application/Window context、標準・独自token、variant/appearance、backend既定値へのclear、Layout背景、WinUI 3/AppKit adapterとappearance監視、`examples/theme-demo`、Windows UI Automation操作テストまで実装済み。GTK4、WinUI High Contrast通知、公開setterが未実装のnative state token適用は未対応 |
 | エラーバウンダリ(`ErrorBoundary`) | `docs/design/gui_framework_design.md` §8.6 | 📋 未実装 |
-| クリップボード/D&D/ファイルダイアログ | `docs/specs/builtins_spec.md` 付録T | 🚧 `file_dialog`のみ実装(§4参照) |
+| クリップボード/D&D/ファイルダイアログ | `docs/specs/platform_spec.md` | 🚧 `file_dialog`のみ実装(§4参照) |
 | Undo/Redo(`#[undoable]`) | `docs/design/gui_framework_design.md` §7.4 | 📋 未実装 |
 | スナップショットテスト | `docs/design/gui_framework_design.md` §9 | 🚧 `render_tree`のみ実装。`render_canvas_snapshot`は未実装 |
 | モバイル対応(iOS/Android) | `docs/design/gui_framework_design.md` §8.8 | 📋 未実装(設計のみ) |
@@ -223,4 +223,4 @@
 - **`Control.template`(`ControlTemplate`)は設計のみ・未実装。** 前提となる「値計算コールバックがネストした要素を構築する」構文(`VirtualList`の`render_item`と共通)も未実装のため、実装時はまずそちらから着手が必要。広域既定値は`store`(同じく未実装)への依存として設計されている
 - **フォント機能はGTK4未対応・DPI非対応。** `ScrollView`/`TabView`がホストする入れ子`TreeHostView`配下のコンテンツにはフォント継承が届かない(visualチェーンがそこで途切れるため)
 - **合成された(`inherits`の)ユーザー定義基底が、自身に`on_*`配線・bindableフィールド・`on_mount`を持つ場合、それらが埋め込み先で失われる。** `codegen::generate_view`が生成する`on_constructed`はこれらの配線を`Rc::downgrade(&this)`でクロージャへcaptureするため、`this: Rc<Self>`の実体が要る——通常は`__self_weak`(仕様上「構築中の最派生オブジェクトへの弱参照」、`docs/specs/macro_class_spec.md` §13.3)を`Self`へdowncastして得るが、この基底が*別の*生成コンポーネントの合成`base:`フィールドとして埋め込まれている場合(`inherits <ユーザー定義コンポーネント>`)、最派生オブジェクトは埋め込み先(外側)のコンポーネントであり、downcastは意図どおり失敗する。`&self`だけで足りる`resync()`/`__refresh_dynamic_regions()`/content配線は埋め込み時も正しく動く。修正には`__self_weak`と並ぶ型付きweak参照の追加か、これらのクロージャのdowncastを呼び出し時まで遅延させる設計変更が要る。単純な基底(配線・bindable・on_mountを持たない、`examples/inheritance-demo`の`LabeledPanel`など)は問題なく動作する
-- **`builtin::Image`は実装済みだが仕様書に節が無い。** `docs/specs/builtins_spec.md` 付録Fに`Image`の項目が存在しないため、プロパティ(`source`/`stretch`/`rasterize`)の規範的な定義は`crates/elwindui-core/src/ui.rs`の宣言のみが正になっている
+- **`Image`は規範仕様書 `docs/specs/ui_spec.md#image` へ統合済み。** プロパティ(`source`/`fit`/`sampling`)および画像描画仕様は `ui_spec.md` および `graphics_spec.md` を正とする。

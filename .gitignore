@@ -2,3 +2,7 @@
 /.idea/
 .nuget/
 .build/
+.DS_Store
+*.DS_Store
+.claude/
+.agent-state/

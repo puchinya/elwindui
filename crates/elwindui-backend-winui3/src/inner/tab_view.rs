@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use windows::core::{HSTRING, Interface};
 
-/// See docs/specs/builtins_spec.md 付録Y. `Microsoft.UI.Xaml.Controls.TabView` is a real native
+/// See docs/specs/ui_spec.md#tabs. `Microsoft.UI.Xaml.Controls.TabView` is a real native
 /// tabbed-document control (unlike AppKit, which has none — `elwindui_backend_appkit::inner`'s
 /// `TabStripImpl`/`TabChipImpl` hand-roll one from `Button`s), so this wraps it directly instead of
 /// assembling a strip from scratch. Each tab's `TabViewItem.Content` is a `TreeHostPanel` holding

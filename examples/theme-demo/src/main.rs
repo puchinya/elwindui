@@ -263,7 +263,7 @@ struct ThemeDemoWindow {
                     // transparent." (below) at the Ocean/Solarized variants' own larger
                     // `AppTheme::text_block_font_size` (18.0/17.0 vs the platform default this
                     // unstyled TextBlock otherwise gets) — TextBlock has no word-wrap of its own
-                    // (docs/specs/builtins_spec.md 付録F.3), so a too-narrow column here just
+                    // (docs/specs/ui_spec.md#textblock), so a too-narrow column here just
                     // silently clips the sentence instead of wrapping it. Solarized's own
                     // `text_block_font_family` is an explicit monospace stack (`Consolas, Menlo,
                     // monospace`), which needs noticeably more width per character than Ocean's

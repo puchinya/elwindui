@@ -17,7 +17,7 @@ enum SaveState {
 }
 
 // One open document. Held as `Rc<DocumentViewModel>` inside `NotepadViewModel.documents` (see
-// docs/specs/builtins_spec.md 付録Y.2) so each tab's edits reach the same shared instance
+// docs/specs/ui_spec.md#tabs) so each tab's edits reach the same shared instance
 // rather than a throwaway clone.
 #[elwindui::viewmodel]
 mod document_view_model {

@@ -10,7 +10,7 @@ pub trait Menu {
     fn remove_item(&self, item: &dyn MenuItemExt);
     /// A live handle onto the same backing collection `add_item`/`remove_item` mutate — added
     /// alongside them (not a replacement) so the DSL's `#[content(items)]` mechanism
-    /// (`elwindui-core::ui`'s `Menu`, `docs/specs/builtins_spec.md` 付録M) can populate `Menu`'s
+    /// (`elwindui-core::ui`'s `Menu`, `docs/specs/ui_spec.md#menu`) can populate `Menu`'s
     /// nested `MenuItem { .. }` children through the same generic `ListExt`-typed
     /// content-field path every other multi-child builtin (`VerticalLayout`/`Grid`/`TabView`/...)
     /// already uses, instead of `elwindui-codegen` needing a `Menu`-specific construction branch.

@@ -176,7 +176,7 @@ component Window {
     // WinUI3-style position/size — top-left-origin, Y increasing downward. Each backend's own
     // `Window` also exposes these as plain getters (`left()`/`top()`/`width()`/`height()`,
     // querying the live native window state), not just these construction-time setters — see
-    // docs/specs/builtins_spec.md 付録F.1. `#[onetime]`: applied once at construction only, never
+    // docs/specs/ui_spec.md#window. `#[onetime]`: applied once at construction only, never
     // re-pushed by `resync()` — the OS window manager (not this declaration) owns the live value
     // once the window exists, so blindly re-applying the originally-declared value on every
     // unrelated resync would fight a user's subsequent drag/resize. See `Attr::Onetime`'s own doc
@@ -469,7 +469,7 @@ component TabView inherits NativeControl {
     on_new_tab: fn(),
 }
 
-// See docs/specs/builtins_spec.md 付録Y. Written as a `TabView` child, including from a dynamic
+// See docs/specs/ui_spec.md#tabs. Written as a `TabView` child, including from a dynamic
 // child range. Never itself embedded as a real
 // `Rc<dyn UIElement>` node (its own `content` is what gets mounted into a per-tab host) — like
 // `MenuBar`/`MenuItem`, declares `#[native]` directly rather than `inherits NativeControl`.

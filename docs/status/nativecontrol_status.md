@@ -39,7 +39,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | `native_ui::TextBox` | ✅ | 🟡 |
 | submit-on-Enter(`on_key_down`経由、専用イベントなし) | ✅ `control:textView:doCommandBySelector:`でTextBox専用に対応 | 🟡 `TextBox.KeyDown`がネイティブに発火するため特別な配線不要 |
 | コアレベルテスト(`FakeTextBoxWidget`、`FakeNativeControl`継承) | ✅ measure/`try_as_native_control`/`on_change` dispatchを検証 | - |
-| `docs/specs/builtins_spec.md` F.12 | ✅ | ✅(同一ドキュメント) |
+| `docs/specs/ui_spec.md#textbox` | ✅ | ✅(同一ドキュメント) |
 | `selection_start`/`selection_length` | ⬜ 意図的に見送り | ⬜ 同左 |
 | `max_length` | 🟡 デリゲート側で事後的に切り詰め(ネイティブAPI無し) | 🟡 `TextBox.MaxLength`ネイティブ対応 |
 
@@ -56,11 +56,11 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | `reveal_enabled` | 🟡 setterは配線するが`true`は意図的にno-op(`NSSecureTextField`にネイティブ相当機能無し) | 🟡 `PasswordRevealMode::Peek`/`Hidden`にネイティブ対応 |
 | コアレベルテスト(`FakePasswordBoxWidget`) | ✅ **漏洩防止方針を明示**——テストのアサーションは固定メッセージのみ使用し、パスワード文字列や実際の値を`assert_eq!`のデフォルトpanicメッセージ等で出力しない | - |
 | パスワード内容の非露出(`Debug`/`Display`実装なし、ログ出力経路なし) | ✅ | ✅(構造ミラー) |
-| `docs/specs/builtins_spec.md` F.13 | ✅ | ✅(同一ドキュメント) |
+| `docs/specs/ui_spec.md#passwordbox` | ✅ | ✅(同一ドキュメント) |
 
 ### 2.3 ScrollView
 
-`ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content`という3層構造(`docs/design/gui_framework_design.md` §5.1b、`docs/specs/builtins_spec.md` 付録F.14)。TextBox/PasswordBoxと異なり、新規アーキテクチャ機構(`unconstrained_axes`)を必要とする唯一のコントロール。
+`ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content`という3層構造(`docs/design/gui_framework_design.md` §5.1b、`docs/specs/ui_spec.md#scrollview`)。TextBox/PasswordBoxと異なり、新規アーキテクチャ機構(`unconstrained_axes`)を必要とする唯一のコントロール。
 
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
@@ -74,7 +74,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | `build.rs`の`ScrollViewer`/`ScrollMode` allow-list | N/A | 🟡 |
 | コアレベルテスト(`FakeScrollViewWidget`、`visual_children()`オーバーライドでcontentの到達可能性を検証) | ✅ | - |
 | スクロール位置取得・設定、`scroll_changed`イベント | ⬜ 意図的に見送り | ⬜ 同左 |
-| `docs/specs/builtins_spec.md` F.14、`docs/design/gui_framework_design.md` §5.1b | ✅ | ✅(同一ドキュメント) |
+| `docs/specs/ui_spec.md#scrollview`、`docs/design/gui_framework_design.md` §5.1b | ✅ | ✅(同一ドキュメント) |
 
 ### 2.4 Button(`role` / `is_default` / `tooltip`)
 
@@ -90,11 +90,11 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | `hasDestructiveAction`(macOS 11+)のバージョンガード | ✅ `respondsToSelector:`で存在確認。**本クレート初のバージョン分岐**であり以後の前例とする | N/A |
 | role別テーマトークン | ⬜ 意図的に追加しない — `button_background`等が既に全role共通の上書き口で、role専用トークンはシステムアクセントカラーと競合する | ⬜ 同左 |
 | `icon`/`image` | ⬜ 未対応(`NSButton.image`とWinUI3の`Content`合成で作業の質が異なるため別スコープ) | ⬜ 同左 |
-| `docs/specs/builtins_spec.md` F.15 | ✅ 新設(`:41`が付録F.6を指していた誤参照も修正) | ✅(同一ドキュメント) |
+| `docs/specs/ui_spec.md#button` | ✅ 新設(`:41`が付録F.6を指していた誤参照も修正) | ✅(同一ドキュメント) |
 
 #### `tooltip`(`NativeControl`に宣言)
 
-`docs/specs/builtins_spec.md` 付録M.3 が「任意のビルトイン要素が持てる共通属性」と規定しているため、`Button`固有ではなく`NativeControl`に1回だけ宣言した。
+`docs/specs/ui_spec.md#23-common-properties` が「任意のビルトイン要素が持てる共通属性」と規定しているため、`Button`固有ではなく`NativeControl`に1回だけ宣言した。
 
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
@@ -107,7 +107,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 ### 2.5 選択系(`CheckBox` / `RadioButton` / `ToggleSwitch`)
 
-3つとも`docs/specs/builtins_spec.md` F.16/F.17/F.18に対応。AppKitでは`CheckBox`/`RadioButton`が`Button`と同じ`NSButton`をボタン種別違いで使うため、`inner/button.rs`の`ButtonTarget`クリックトランポリンを`pub(crate)`化して直接共有している(`ButtonTarget::attach`ヘルパ)。
+3つとも`docs/specs/ui_spec.md#input`の`CheckBox`/`RadioButton`/`ToggleSwitch`に対応。AppKitでは`CheckBox`/`RadioButton`が`Button`と同じ`NSButton`をボタン種別違いで使うため、`inner/button.rs`の`ButtonTarget`クリックトランポリンを`pub(crate)`化して直接共有している(`ButtonTarget::attach`ヘルパ)。
 
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
@@ -117,15 +117,15 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | `RadioButton`のグループ管理(elwindui側で論理管理、ネイティブグループ機能に非依存) | ✅ `native_ui/radio_button.rs`のスレッドローカル`GROUPS`(`Weak<dyn UIElementExt>`のレジストリ)。同一グループの他メンバーを明示的に`unchecked`にする | ✅ 各ネイティブ要素へ一意な`GroupName`を設定して親ベースの暗黙グループを無効化。同一グループ排他と異なる2グループの非干渉を実操作確認 |
 | ツールキット自身の親ベース暗黙グループ化との衝突有無 | ✅ **`examples/controls-demo`のSelectionタブで実機確認済み** — 異なる`group`のRadioButtonが同一コンテナに同居しても互いに干渉しないことを確認 | ✅ 各要素の一意な`GroupName`でWinUIの同一親グループ化を無効化し、同じSelectionタブで異なる2グループの非干渉を確認 |
 | `ToggleSwitch`: `NSSwitch`(`objc2-app-kit` feature `"NSSwitch"`追加) | ✅ | N/A |
-| `ToggleSwitch`に`text`プロパティが無いこと | ✅ 仕様どおり(F.18) | ✅ `TextBlock`ラベルとのtwo-way同期を実操作確認 |
+| `ToggleSwitch`に`text`プロパティが無いこと | ✅ 仕様どおり | ✅ `TextBlock`ラベルとのtwo-way同期を実操作確認 |
 | role別/コントロール別のテーマトークン追加 | ⬜ 意図的に追加しない——`background_token`のdefault armが`native_control_background`にフォールバックし、かつ`NSButton`ファミリー全体で`apply_background`がno-opのため実害が無い(`ffi.rs`の`impl AppKitHandle for Retained<NSButton>`のdocコメント参照) | ⬜ 同左 |
 | `objc2-app-kit` feature追加(`NSButtonCell`/`NSCell`/`NSSwitch`) | ✅ `NSButtonType`(`NSButtonCell`)と`NSControlStateValueOn/Off/Mixed`(`NSCell`)は`"NSButton"` featureだけでは届かず、個別追加が必要だった | N/A |
 | `crates/elwindui-core/tests/props_macro.rs` | ✅ 3コントロール分のクロスクレート形状テスト追加 | — |
-| `docs/specs/builtins_spec.md` F.16/F.17/F.18 | ✅ 新設 | ✅(同一ドキュメント) |
+| `docs/specs/ui_spec.md#input` | ✅ 新設 | ✅(同一ドキュメント) |
 
 ### 2.6 `Dropdown` / `DropdownItem`
 
-`docs/specs/builtins_spec.md` F.5に対応(Phase 3、Issue #35)。バックログの「ComboBox」と実質同一スコープだった仕様書F.5の未実装項目を統合し、`Option`という子コンポーネント名を`DropdownItem`へ改名、選択状態を`Dropdown.selected_index`の`#[two_way]`へ一本化した(詳細はF.5本文参照)。
+`docs/specs/ui_spec.md#dropdown`に対応(Phase 3、Issue #35)。バックログの「ComboBox」と実質同一スコープだった未実装項目を統合し、`Option`という子コンポーネント名を`DropdownItem`へ改名、選択状態を`Dropdown.selected_index`の`#[two_way]`へ一本化した(詳細は`ui_spec.md`本文参照)。
 
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
@@ -136,7 +136,7 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 | `DropdownItem`はネイティブ実体を持たない(`MenuItem`同様) | ✅ `text: RefCell<String>`のみ保持。`Dropdown`側が各アイテムを`as_any().downcast_ref`して`text()`を読み出し、ネイティブ項目リストを再構築する | 🟡 同型対応 |
 | `objc2-app-kit` feature追加(`NSPopUpButton`) | ✅ | N/A |
 | `crates/elwindui-core/tests/props_macro.rs` | ✅ `DropdownItem.text`・`Dropdown.selected_index`(two-way)・`Dropdown.enabled`のクロスクレート形状テスト追加 | — |
-| `docs/specs/builtins_spec.md` F.5 | ✅ `Dropdown`/`DropdownItem`実装内容へ更新(旧`Dropdown`/`Option`案から改訂) | ✅(同一ドキュメント) |
+| `docs/specs/ui_spec.md#dropdown` | ✅ `Dropdown`/`DropdownItem`実装内容へ更新(旧`Dropdown`/`Option`案から改訂) | ✅(同一ドキュメント) |
 
 **`elwindui-codegen`の一般バグを発見・修正**: `#[content(field_name)]`で宣言したリスト型content field(`Vec<..>`/`ListExt<..>`)の中身を`if`/`for`で動的に変える(`Dropdown`の`items`に`if vm.dropdown_extra_item { DropdownItem { .. } }`のような分岐を書く)と、コード生成側の動的子要素リフレッシュ処理(`codegen.rs`の`dynamic_region_refresh_method`)が実際の`#[content(..)]`名を見ず常に`.children()`という決め打ちのメソッド呼び出しを生成していた。`TabView`/`VerticalLayout`/`HorizontalLayout`/`Grid`はいずれも実際のcontent fieldが`children`という名前なので偶然動いていたが、フィールド名が`items`の`Dropdown`(および同じく`items`の`Menu`)で初めて顕在化した——`Menu`はこれまで静的な子要素しか使われておらず、この動的リフレッシュ経路自体が未通過だった。
 
@@ -144,17 +144,17 @@ AppKit/WinUI3/GTK4のネイティブコントロールを利用した標準UIコ
 
 ### 2.7 `Slider`
 
-`docs/specs/builtins_spec.md` F.19に対応(Phase 4、Issue #37)。
+`docs/specs/ui_spec.md#slider`に対応(Phase 4、Issue #37)。
 
 | 項目 | AppKit | WinUI3 |
 |---|---|---|
 | `NSSlider`は`NSControl`直下のサブクラス(`NSButton`ではない)であるため専用のtarget/actionトランポリンが必要 | ✅ `inner/slider.rs`が`ToggleSwitch`の`ToggleSwitchTarget`と同じ形の`SliderTarget`を実装 | ✅ `RangeBaseValueChangedEventHandler`を1回だけ登録し、非`Send` callbackはTLSの`f32`経路へ橋渡し |
 | `min`/`max`を`#[prop]`(実行時変更可)として実装 | ✅ | ✅ `0..1`と`-100..100`の往復切替を実操作確認 |
-| **ネイティブ実体に「自然な幅」が無い問題を発見・文書化** | ✅ `NSSlider.fittingSize()`の幅が常に0になり、`width:`を明示しないと画面上で不可視になることを実機で発見(`tools/macos-ui-driver`のスクリーンショット比較)。`docs/specs/builtins_spec.md` F.19に注記、`examples/controls-demo`のSliderタブでも`width: 200.0`を明示 | ✅ `width: 200.0`がUIA上でも200×32で操作可能なことを確認 |
+| **ネイティブ実体に「自然な幅」が無い問題を発見・文書化** | ✅ `NSSlider.fittingSize()`の幅が常に0になり、`width:`を明示しないと画面上で不可視になることを実機で発見(`tools/macos-ui-driver`のスクリーンショット比較)。`docs/specs/ui_spec.md#slider`に注記、`examples/controls-demo`のSliderタブでも`width: 200.0`を明示 | ✅ `width: 200.0`がUIA上でも200×32で操作可能なことを確認 |
 | `objc2-app-kit` feature追加(`NSSlider`) | ✅ | N/A |
 | `crates/elwindui-core/tests/props_macro.rs` | ✅ `value`(two-way)・`min`・`max`・`enabled`のクロスクレート形状テスト追加 | — |
 | クリック起点の`value`変更の実機対話検証 | ✅ **実施済み**——`tools/macos-ui-driver`に`click --via mouse --fraction <0.0-1.0>`(要素内の任意水平位置をクリック)と`click --via ax-increment`/`ax-decrement`(`kAXIncrementAction`/`kAXDecrementAction`。`AXSlider`は`kAXPressAction`非対応のため必要)を追加(#39、PR #40)。`--fraction 0.05`/`0.9`でクリック位置に応じた`value`変化とラベル追従、`ax-increment`/`ax-decrement`での0.05刻みの段階変化をいずれも確認 | ✅ UIA RangeValue操作で0.75/-50/0.25とラベル同期、`0..1`↔`-100..100`の動的レンジ変更を確認 |
-| `docs/specs/builtins_spec.md` F.19 | ✅ 新設 | ✅(同一ドキュメント) |
+| `docs/specs/ui_spec.md#slider` | ✅ 新設 | ✅(同一ドキュメント) |
 
 ### 2.8 `examples/controls-demo`
 

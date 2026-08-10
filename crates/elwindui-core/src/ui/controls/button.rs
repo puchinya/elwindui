@@ -1,4 +1,4 @@
-//! `builtin::Button` — the native push button.
+//! `elwindui::ui::Button` — the native push button.
 
 /// How much emphasis a [`Button`] carries, and what it implies about the action behind it.
 ///

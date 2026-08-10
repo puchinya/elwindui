@@ -976,7 +976,7 @@ fn block_references_ident(block: &syn::Block, name: &str) -> bool {
 /// declaration if it has one, otherwise its base's (recursively).
 ///
 /// `#[content(..)]` is not *inherited as an attribute* — each builtin declares its own, on purpose
-/// (see `docs/specs/builtins_spec.md` F.2). But a user component that composes over a base which has
+/// (see `docs/specs/ui_spec.md`). But a user component that composes over a base which has
 /// one still needs the slot resolvable, because the composition itself puts the base's own view root
 /// there: `Derived inherits Base` whose view root literally constructs `Base` plans `Base`'s view
 /// root as a bare child of the `Base` node. Without walking the chain, `build_component_args`
@@ -1546,7 +1546,7 @@ fn is_copy_type(ty: &str) -> bool {
 /// shared `Document`, so e.g. a `TabView`'s per-tab `TextArea` edits reach the real stored
 /// document. This is what lets a `viewmodel` hold a dynamic list of independently-reactive
 /// sub-viewmodels (needed for notepad's real multi-document tabs) without a general nested-list
-/// compiler feature; see docs/specs/builtins_spec.md 付録Y.2.
+/// compiler feature; see docs/specs/ui_spec.md#tabs.
 fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<String> {
     let inner = ty.strip_prefix("Vec<")?.strip_suffix(">")?.trim();
     // `resolve` only finds `inner` if it's locally defined in `from` or reachable through one of
@@ -7476,8 +7476,8 @@ fn build_component_setters(
         // `.{field}().add(child)` loop against a live accessor) is derived purely from the
         // destination field's own declared type, not from which of the two mechanisms named it —
         // `Vec<T>` (e.g. `TabView`'s `children`) uses the former; `ListExt<T>` (e.g. `Menu`/
-        // `MenuBar`'s `#[content(items)]` `items: ListExt<MenuItem>`, docs/specs/builtins_spec.md
-        // 付録M) uses the latter, mirroring `Layout`/`Control`'s own `.children().add(..)`
+        // `MenuBar`'s `#[content(items)]` `items: ListExt<MenuItem>`, docs/specs/ui_spec.md#menu)
+        // uses the latter, mirroring `Layout`/`Control`'s own `.children().add(..)`
         // convention for virtual builtins (`build_virtual_value`) one level up.
         if (name == "children" || is_this_field_content) && ty.trim_start().starts_with("Vec<") {
             let wants_node = ty.contains("dyn UIElement");
@@ -9345,7 +9345,7 @@ fn emit_resync_with_receiver(
             ResyncFilter::Property(_, _) | ResyncFilter::Theme => {}
         }
         // `#[onetime]` fields (`Window`'s own `left`/`top`/`width`/`height`,
-        // docs/specs/builtins_spec.md 付録F.1) are one-time initial-placement/size setters,
+        // docs/specs/ui_spec.md#window) are one-time initial-placement/size setters,
         // applied once at construction (`build_component_setters`) — never re-pushed here.
         // Re-applying them on every resync() would fight the OS window manager, snapping a
         // user-dragged/resized window back to its originally-declared value the next time
@@ -11476,7 +11476,7 @@ view Foo {
         let _ = generate_module(&module, &table);
     }
 
-    /// `ContentControl inherits Control` (docs/specs/builtins_spec.md 付録F.10) — the
+    /// `ContentControl inherits Control` (docs/specs/ui_spec.md#contentcontrol) — the
     /// `#[param] content` field is forwarded as a bare child into `Control`'s own children via the
     /// `PASSTHROUGH_NODE`-tagged `lets_map` seeding in `generate_view`, and every `#[param]` field
     /// (not just `#[id(...)]` lets) gets a generated named accessor.

@@ -1,4 +1,4 @@
-//! `builtin::TabView`/`TabViewItem`, their identity helpers, and the `ListExt` collection.
+//! `elwindui::ui::TabView`/`TabViewItem`, their identity helpers, and the `ListExt` collection.
 
 use super::NativeControl;
 use crate::AnyView;
@@ -9,7 +9,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-/// See docs/specs/builtins_spec.md 付録Y. `TabView` owns an ordered collection of literal
+/// See docs/specs/ui_spec.md#tabs. `TabView` owns an ordered collection of literal
 /// `TabViewItem` children. Generated dynamic child slots reconcile that collection by `Rc`
 /// identity; this backend reconciles the corresponding native chips and content hosts.
 /// `struct_only = elwindui_core::ui::TabViewExt` (the shared trait exposes `children()`) —

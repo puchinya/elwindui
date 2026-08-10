@@ -12,7 +12,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::NSRect;
 
-/// See docs/specs/builtins_spec.md 付録Y. A single tab's header: a title button (click to
+/// See docs/specs/ui_spec.md#tabs. A single tab's header: a title button (click to
 /// select) plus a small close button, packed into one row so `TabStripImpl` can insert/remove it as
 /// one unit. Purely an internal composition helper (never a real DSL-declared element), so
 /// its two buttons are plain `InnerButton`s, not `native_ui::Button` — no use-site margin/alignment
@@ -100,7 +100,7 @@ impl TabStripImpl {
     }
 }
 
-/// See docs/specs/builtins_spec.md 付録Y. Vertical stack of `[TabStripImpl, content_container]`
+/// See docs/specs/ui_spec.md#tabs. Vertical stack of `[TabStripImpl, content_container]`
 /// — composed by `native_ui::TabView`, which owns the mapping from its `children` collection's
 /// `TabViewItem`s to `TabChipImpl`s + content hosts. This type only holds the widget areas — it has
 /// no notion of "the list of tabs" on its own.

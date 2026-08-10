@@ -9,7 +9,7 @@ use super::*;
 /// Holds `children` plus an optional, explicitly assigned background shared by every layout
 /// container. An unset background remains transparent; `SystemTheme::layout_background` is never
 /// applied implicitly.
-/// (docs/specs/dsl_spec.md 1426行目). `spacing` is *not* here: it only means anything to
+/// `spacing` is *not* here: it only means anything to
 /// `VerticalLayout`/`HorizontalLayout` (`Grid` has no use for it), so each of those two declares
 /// its own `spacing` field instead of it living on this shared base. `VerticalLayout`/
 /// `HorizontalLayout` do their own layout math directly against `elwindui_core::layout`'s

@@ -155,7 +155,8 @@ component NativeControl inherits UIElement {
 }
 
 // `Window` has no meaningful `Control`-family ancestor (see `NativeControl` above), so it declares
-// `#[native]` (docs/specs/dsl_spec.md 付録A) directly: base-less, `view`-less, hand-written per
+// `#[native]` (a test-only fixture attribute — not part of `docs/specs/dsl_spec.md`'s user-facing
+// surface, see `ComponentDef::native`'s own doc comment) directly: base-less, `view`-less, hand-written per
 // backend crate — exactly like an `inherits NativeControl` leaf as far as `is_native`/codegen are
 // concerned (`codegen::resolve_is_native`), just without the (here, inaccurate) shared-ancestor tag.
 // `content` is a single slot (WinUI3's own `Window.Content`, WinUI3's `ContentPropertyAttribute`

@@ -1,4 +1,4 @@
-//! §11(docs/specs/dsl_spec.md)のFluent(.ftl)ベースi18nの実行時ランタイム。単一ロケール
+//! §10(docs/specs/dsl_spec.md)のFluent(.ftl)ベースi18nの実行時ランタイム。単一ロケール
 //! ("en"固定、`strings/en.ftl`)決め打ちの最小実装 — `i18n { default/fallback/available }`の
 //! ようなマルチロケール切り替えは対象外。`elwindui-codegen`が生成する`t!(...)`呼び出しは
 //! `elwindui::i18n::t`/`elwindui::i18n::FluentValue`を直接参照する(`crates/elwindui/src/lib.rs`の

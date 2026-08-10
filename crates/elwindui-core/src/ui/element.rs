@@ -161,7 +161,7 @@ pub struct UIElement {
     pub arranged_height: Cell<Option<f32>>,
     pub arranged_offset: Cell<Option<Point>>,
     /// `#[routed]`-tagged callback fields (`on_click`, and any future one — see
-    /// `docs/specs/dsl_spec.md` 4章), keyed by field name. Each value is a
+    /// `docs/specs/dsl_spec.md` §12), keyed by field name. Each value is a
     /// `Box<dyn Fn(&T, &RoutedEventArgs)>` erased to `Box<dyn Any>` (`T` is that field's own
     /// payload type — `()` for `on_click`, `usize` for a hypothetical routed `on_select`, ...);
     /// generated call sites know `T` statically from the DSL declaration, so the downcast in

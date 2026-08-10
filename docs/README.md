@@ -31,7 +31,7 @@
 
 | ファイル | 内容 |
 |---|---|
-| [`specs/dsl_spec.md`](specs/dsl_spec.md) | ElwindUIL **DSL構文のみ**。`component`/`view`の分離、`param`/`prop`/`state`、制御構文、`style`、値制約、`enum`、`env::*`/`once!`、リアクティブ属性式と`<=>`、i18n(Fluent)、`use`、`UIElement`ツリー探索、静的検証ルール一覧(§14)。付録Aは`builtin::`名前空間と`#[overrides(builtin::X)]`のシャドーイング規則、および`#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(field_name)]`のcomponent単位属性 |
+| [`specs/dsl_spec.md`](specs/dsl_spec.md) | ElwindUIL **DSL構文のみ**。`component`/`view`の分離と名前空間(§2 — ビルトインの正準パスは`elwindui::ui::*`、Rustのクレート名前空間規則にそのまま従う)、`param`/`prop`/`state`、制御構文、`style`、値制約、`enum`、`env::*`/`once!`、リアクティブ属性式と`<=>`、i18n(Fluent)、`use`、`UIElement`ツリー探索、静的検証ルール一覧(§13)。付録Aは`#[sealed]`/`#[abstract]`/`#[text_style]`/`#[content(field_name)]`のcomponent単位属性 |
 | [`specs/builtins_spec.md`](specs/builtins_spec.md) | 個々の`builtin::`要素と`platform::`名前空間のリファレンス。付録Fが標準部品(`Window`/`VerticalLayout`/`HorizontalLayout`/`TextBlock`/`TextArea`/`Control`/`ContentControl`/`Grid`/`TextBox`/`PasswordBox`/`ScrollView`ほか)、付録G/Nが`Canvas`/`Painter`と描画拡張、付録Lがナビゲーション、付録Mがダイアログ/メニュー/ツールチップ、付録Qが`VirtualList`、付録Tがクリップボード/ファイルダイアログ/D&D、付録X/Yが`MenuBar`と`TabView` |
 | [`specs/macro_class_spec.md`](specs/macro_class_spec.md) | `#[elwindui_macros::class]`属性マクロの仕様。クラス階層生成、`__elwindui_inherit_*!`マクロトリオ、`__dyn_x`アクセサ方式による祖先メソッド継承、コンストラクタ自動生成、rust-analyzer対応。`design/gui_framework_design.md` §5.1aの要約と食い違う場合は**こちらが正** |
 

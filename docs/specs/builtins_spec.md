@@ -225,7 +225,7 @@ pub struct TextBlock {
 }
 ```
 
-文字色は`#[text_style]`(`docs/specs/dsl_spec.md`付録A.9)が注入する
+文字色は`#[text_style]`(`docs/specs/dsl_spec.md`付録A)が注入する
 `font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/
 `foreground`の7プロパティのうち、`foreground`
 (`Option<elwindui::core::graphics::Brush>`——`Color`ではなく`Brush`)で指定する
@@ -435,7 +435,7 @@ pub struct Control {
 }
 ```
 
-`#[text_style]`(`docs/specs/dsl_spec.md`付録A.9)により
+`#[text_style]`(`docs/specs/dsl_spec.md`付録A)により
 `font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/
 `foreground`の7プロパティが利用可能——`Control`に設定したフォントは、`children`配下の
 `Grid`/`VerticalLayout`等(いずれも`TextStyleOwner`を実装しない透過的な要素)を何段挟んでも、
@@ -607,7 +607,7 @@ Grid {
 }
 ```
 
-`row`/`column`は`#[attached]`フィールド(§3)——`Grid`自身のインスタンスデータにはならず、任意の
+`row`/`column`は`#[attached]`フィールド(§4)——`Grid`自身のインスタンスデータにはならず、任意の
 子要素が`Grid::row: <expr>`/`Grid::column: <expr>`で自分自身に設定するスキーマ宣言である。設定
 された値は各子要素自身の`UIElementBase.grid_cell`(`elwindui_core::layout::GridCell`)に格納され、
 `Grid::measure_override`/`arrange_override`(`elwindui_core::layout`の`grid_measure_pass1_available`/

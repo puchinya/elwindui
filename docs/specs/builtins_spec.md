@@ -98,7 +98,7 @@ UIElement (trait, elwindui-core::ui)
 
 # 付録F. 標準ビルトイン部品のリファレンス実装
 
-`Window`, `VerticalLayout`/`HorizontalLayout`, `TextBlock`, `TextArea`, `Dropdown`/`DropdownItem` など、これまで暗黙に使ってきたビルトインプリミティブは、実際には `builtin` 名前空間(`docs/specs/dsl_spec.md`付録A参照)に属し、コード生成器が標準で提供する。ネイティブな葉ウィジェット(`Window`/`Button`/`TextArea`/`MenuBar`/`TabView`等)は他のコンポーネントと同じ`component`/`view`構文で表現でき、`match target::backend()`による網羅性検査(`docs/design/gui_framework_design.md`§3.3)や`native!`エスケープハッチ(同§3.2)がそのまま適用される。一方`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`のような仮想ビルトインは専用のネイティブ実体を持たず、`elwindui_core::ui::UIElement`の実装として`elwindui-codegen`が直接組み立てる(F.2参照)。全ての`UIElement`実装は`Margin`(一律`f32`)と`HorizontalAlignment`/`VerticalAlignment`を共通して持つ(`docs/design/gui_framework_design.md`§5.1参照)。
+`Window`, `VerticalLayout`/`HorizontalLayout`, `TextBlock`, `TextArea`, `Dropdown`/`DropdownItem` など、これまで暗黙に使ってきたビルトインプリミティブは、実際には `builtin` 名前空間に属し、コード生成器が標準で提供する。ネイティブな葉ウィジェット(`Window`/`Button`/`TextArea`/`MenuBar`/`TabView`等)は他のコンポーネントと同じ`component`/`view`構文で表現できる。一方`VerticalLayout`/`HorizontalLayout`/`Rectangle`/`Ellipse`/`TextBlock`のような仮想ビルトインは専用のネイティブ実体を持たず、`elwindui_core::ui::UIElement`の実装として`elwindui-codegen`が直接組み立てる(F.2参照)。全ての`UIElement`実装は`Margin`(一律`f32`)と`HorizontalAlignment`/`VerticalAlignment`を共通して持つ(`docs/design/gui_framework_design.md`§5.1参照)。
 
 ## F.1 `builtin::Window` ✅
 
@@ -120,34 +120,12 @@ struct Window {
     children: UIElementCollection,
 
     body: view! {
-        match target::backend() {
-            Backend::Winui3 => native! {
-                let win = Microsoft::UI::Xaml::Window::new()?;
-                win.SetTitle(&title)?;
-                win.SetFlowDirection(direction)?;
-                win.SetContent(&build_children(children))?;
-                win
-            }
-            Backend::Appkit => native! {
-                let win = NSWindow::init_with_size(width, height);
-                win.setTitle(&text::from(title));
-                win.setContentView(&build_children(children));
-                win
-            }
-            Backend::Gtk4 => native! {
-                let win = gtk::ApplicationWindow::new(&app);
-                win.set_title(Some(&title));
-                win.set_default_size(width as i32, height as i32);
-                win.set_child(Some(&build_children(children)));
-                win
-            }
-        }
+        // 各バックエンドのネイティブ Window 実装にバインドされる
     }
 }
 ```
 
-上記は`native!`分岐を使う説明用のサンプルで、実装(`elwindui-core::ui`の`#[native]`宣言、
-各バックエンドクレートの手書き`Window`構造体)とは既に構文が異なる。実際の`Window`は
+上記は概念説明用のサンプルで、実際の`Window`は`title`/`menu_bar`/`content`に加え、
 `title`/`menu_bar`/`content`に加え、WinUI3の`AppWindow.Position`/`Size`と同じ意味を持つ
 `left`/`top`/`width`/`height`(いずれも`Option<f32>`、省略時はOS/バックエンドの既定位置・既定
 サイズのまま)も持つ。他の`#[native]`フィールドと同様、値が指定された場合のみ構築後に
@@ -163,7 +141,7 @@ AppKitは`NSWindow.frame`が画面左下原点・Y上向きなため、`top`/`he
 ## F.2 `builtin::VerticalLayout` / `builtin::HorizontalLayout` ✅
 
 `VerticalLayout`/`HorizontalLayout`は、
-**専用のネイティブ実体を一切持たない**。バックエンドごとの`component`+`view`ペアや`native!`分岐は
+**専用のネイティブ実体を一切持たない**。バックエンドごとの`component`+`view`ペアは
 存在せず、DSL側は以下のシェイプ宣言のみで完結する:
 
 ```rust
@@ -202,8 +180,7 @@ layout.children().add(/* 子要素をRc<dyn UIElement>化したもの */);
 `Rc<dyn UIElement>`を受け付ける単一の再利用可能なホスト(AppKitの`TreeHostView`、
 WinUI3の`TreeHostPanel`)であり、`VerticalLayout`/`HorizontalLayout`自体はバックエンドコードを
 一切持たない。新しいレイアウト種別(将来の`Grid`等)を追加する際も、
-`elwindui_core::ui::UIElement`トレイトの実装を1つ足すだけでよく、バックエンドごとの
-`native!`分岐を増やす必要はない(詳細は`elwindui-core/src/ui.rs`のモジュールコメントを参照)。
+`elwindui_core::ui::UIElement`トレイトの実装を1つ足すだけでよい(詳細は`elwindui-core/src/ui.rs`のモジュールコメントを参照)。
 
 ## F.3 `builtin::TextBlock` ✅
 
@@ -279,28 +256,7 @@ struct TextArea {
     padding_end: f32,
 
     body: view! {
-        match target::backend() {
-            Backend::Winui3 => native! {
-                let box_ = microsoft::ui::xaml::controls::TextBox::new()?;
-                box_.SetAcceptsReturn(true)?;
-                box_.SetText(&text)?;
-                box_.TextChanged(&TextChangedHandler::new(move |new_text| { text = new_text; }))?;
-                box_
-            }
-            Backend::Appkit => native! {
-                let view = NSTextView::new();
-                view.setString(&text);
-                view.set_delegate_on_change(move |new_text| { text = new_text; });
-                view
-            }
-            Backend::Gtk4 => native! {
-                let buf = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
-                buf.set_text(&text);
-                let tv = gtk::TextView::with_buffer(&buf);
-                buf.connect_changed(move |b| { text = b.text(&b.start_iter(), &b.end_iter(), false).to_string(); });
-                tv
-            }
-        }
+        // 各バックエンドのネイティブ TextArea 実装にバインドされる
     }
 }
 ```
@@ -327,35 +283,7 @@ struct Dropdown {
     enabled: Option<bool>,
 
     body: view! {
-        match target::backend() {
-            Backend::Appkit => native! {
-                let popup = NSPopUpButton::new();
-                for item in &items { popup.addItemWithTitle(&item.text); }
-                popup.selectItemAtIndex(selected_index as isize);
-                popup.setEnabled(enabled.unwrap_or(true));
-                popup.set_target_action(move || {
-                    let index = popup.indexOfSelectedItem();
-                    if index >= 0 { selected_index = index as usize; dispatch_on_change(selected_index); }
-                });
-                popup
-            }
-            Backend::Winui3 => native! {
-                let combo = microsoft::ui::xaml::controls::ComboBox::new()?;
-                for item in &items { combo.Items()?.Append(&PropertyValue::CreateString(&item.text)?)?; }
-                combo.SetSelectedIndex(selected_index as i32)?;
-                combo.SetIsEnabled(enabled.unwrap_or(true))?;
-                combo.SelectionChanged(&SelectionChangedEventHandler::new(move |sender, _| {
-                    let index = sender.SelectedIndex()?;
-                    if index >= 0 { selected_index = index as usize; dispatch_on_change(selected_index); }
-                    Ok(())
-                }))?;
-                combo
-            }
-            Backend::Gtk4 => native! {
-                // 未実装 — docs/status/nativecontrol_status.md §4のGTK4基盤構築後に着手する。
-                unimplemented!()
-            }
-        }
+        // 各バックエンドのネイティブ Dropdown 実装にバインドされる
     }
 }
 ```
@@ -391,7 +319,7 @@ NotepadWindow
  ├─ Window
  │   └─ VerticalLayout
  │       ├─ HorizontalLayout
- │       │   ├─ ToolbarButton → Button(#[overrides])
+ │       │   ├─ ToolbarButton → Button
  │       │   └─ Dropdown → DropdownItem
  │       ├─ TextArea
  │       └─ StatusBar
@@ -402,13 +330,13 @@ NotepadWindow
 
 | 部品 | 使用している仕様 |
 |---|---|
-| `Window` | `#[param] direction = env::direction()`、`match target::backend()`の網羅性検査 |
+| `Window` | `#[param] direction = env::direction()` |
 | `VerticalLayout`/`HorizontalLayout` | 専用のネイティブ実体を持たない仮想ツリー(`elwindui_core::ui::UIElement`実装の`Stack`)、交差軸配置は子ごとの`HorizontalAlignment`/`VerticalAlignment` |
 | `TextBlock` | 自前描画のプリミティブ(非native)、`#[text_style]`によるフォント/`foreground`(`Option<Brush>`)、backendごとの描画実装(`CATextLayer`/XAML`TextBlock`を描画専用に利用) |
 | `TextArea` | `text <=> writable_target`による明示的な双方向バインディング |
 | `Dropdown` / `DropdownItem` | `Vec<DropdownItem>`という複合型プロパティ、`selected_index`の双方向バインディング |
 
-これらの標準ビルトイン実装は、通常はコード生成器(`elwindui-codegen`)が内部に持ち利用者が直接編集する必要はないが、`#[overrides(builtin::X)]`(`docs/specs/dsl_spec.md` 付録A)を使うことで、プロジェクト固有の要件に応じて安全に差し替えられる。
+これらの標準ビルトイン実装は、通常はコード生成器(`elwindui-codegen`)および `elwindui-core` / 各バックエンドクレートが内部で提供し、利用者が直接編集する必要はない。
 
 ## F.9 `builtin::Control` ✅
 
@@ -550,7 +478,7 @@ ContentControlExt: UIElementExt + ControlExt`を生成する(`docs/design/gui_fr
 (`LabeledPanel → ContentControl → Control`)、何段合成が重なっても正しく動作する。
 唯一この合成の対象外なのは、`Name`が**自分自身の`view`を
 持ち**、それが`Base`とは無関係な別のルート要素を持つ場合(`Derived inherits Base`、両者とも
-独立に`VerticalLayout`をルートに持つ、`#[overrides] fn`+`base::name(...)`によるメソッド上書き)——
+独立に`VerticalLayout`をルートに持つ、`base::name(...)`によるメソッド上書き)——
 この場合は「生きた`Base`インスタンス」ではなく「`Base`のメソッド本体の再利用」でしかないため、
 既存の実効フィールド畳み込み(`resolve_effective_fields`)と`base::name(...)`シャドーメソッド機構
 (付録F補足の下、`elwindui-codegen/src/codegen.rs`の`rewrite_base_calls`)がそのまま使われる
@@ -656,38 +584,7 @@ struct TextBox {
     text_alignment: Option<TextAlignment>,
 
     body: view! {
-        match target::backend() {
-            Backend::Winui3 => native! {
-                // TextAreaと全く同じXAMLクラス。SetAcceptsReturn/SetTextWrappingを設定しないだけ。
-                let box_ = microsoft::ui::xaml::controls::TextBox::new()?;
-                box_.SetText(&text)?;
-                box_.SetPlaceholderText(&placeholder.unwrap_or_default())?;
-                box_.SetIsReadOnly(read_only.unwrap_or(false))?;
-                box_.SetMaxLength(max_length.unwrap_or(0) as i32)?; // 0 = 無制限、ネイティブ実装
-                box_.TextChanged(&TextChangedHandler::new(move |new_text| { text = new_text; }))?;
-                box_.KeyDown(&KeyEventHandler::new(move |args| {
-                    if args.Key() == VirtualKey::Enter { dispatch_on_key_down(Key::Enter); }
-                }))?;
-                box_
-            }
-            Backend::Appkit => native! {
-                let field = NSTextField::new();
-                field.setStringValue(&text);
-                field.setPlaceholderString(&placeholder.unwrap_or_default());
-                field.setEditable(!read_only.unwrap_or(false));
-                // NSTextFieldにmax_lengthのネイティブAPIは無い。デリゲート側でtruncateする。
-                field.set_delegate_on_change_with_max_length(max_length, move |new_text| { text = new_text; });
-                // NSTextFieldにEnterキー専用イベントは無い。control:textView:doCommandBySelector:で
-                // insertNewline:を検知し、on_key_downへ転送する(TextBox専用の狭い追加対応)。
-                field.set_delegate_on_submit(move || { dispatch_on_key_down(Key::Enter); });
-                field
-            }
-            Backend::Gtk4 => native! {
-                // 未実装 — docs/status/nativecontrol_status.md §3のGTK4基盤構築フォロー
-                // アップ完了後に着手する。
-                unimplemented!()
-            }
-        }
+        // 各バックエンドのネイティブ TextBox 実装にバインドされる
     }
 }
 ```
@@ -731,33 +628,7 @@ struct PasswordBox {
     reveal_enabled: Option<bool>,
 
     body: view! {
-        match target::backend() {
-            Backend::Winui3 => native! {
-                let box_ = microsoft::ui::xaml::controls::PasswordBox::new()?;
-                box_.SetPassword(&password)?;
-                box_.SetPlaceholderText(&placeholder.unwrap_or_default())?;
-                box_.SetMaxLength(max_length.unwrap_or(0) as i32)?;
-                box_.SetPasswordRevealMode(if reveal_enabled.unwrap_or(false) {
-                    PasswordRevealMode::Peek
-                } else {
-                    PasswordRevealMode::Hidden
-                })?;
-                box_.PasswordChanged(&RoutedEventHandler::new(move |_, _| { password = box_.Password(); }))?;
-                box_
-            }
-            Backend::Appkit => native! {
-                let field = NSSecureTextField::new();
-                field.setStringValue(&password);
-                field.setPlaceholderString(&placeholder.unwrap_or_default());
-                // NSSecureTextFieldにreveal_enabled相当のネイティブAPIは無い。true側は現状no-op。
-                field.set_delegate_on_change_with_max_length(max_length, move |new_password| { password = new_password; });
-                field
-            }
-            Backend::Gtk4 => native! {
-                // 未実装 — GTK4基盤構築フォローアップ完了後に着手する。
-                unimplemented!()
-            }
-        }
+        // 各バックエンドのネイティブ PasswordBox 実装にバインドされる
     }
 }
 ```
@@ -814,34 +685,7 @@ struct ScrollView {
     vertical_scroll_enabled: bool,
 
     body: view! {
-        match target::backend() {
-            Backend::Winui3 => native! {
-                let content_host = TreeHostPanel::new(); // ElwinduiContentRoot
-                content_host.set_tree(content);
-                content_host.set_unconstrained_axes(horizontal_scroll_enabled, vertical_scroll_enabled);
-                let scroll_viewer = ScrollViewer::new()?;
-                scroll_viewer.SetContent(&content_host.as_element())?;
-                scroll_viewer.SetVerticalScrollMode(if vertical_scroll_enabled { Auto } else { Disabled })?;
-                scroll_viewer.SetHorizontalScrollMode(if horizontal_scroll_enabled { Auto } else { Disabled })?;
-                // CanvasはWinUI3のレイアウトシステムに参加しないため、スクロールしない側の軸幅/高さを
-                // ScrollViewer.SizeChangedで明示的に押し込む必要がある(TabViewItem.Contentと同じ問題)。
-                scroll_viewer
-            }
-            Backend::Appkit => native! {
-                let content_host = TreeHostView::new(); // ElwinduiContentRoot
-                content_host.set_tree(content);
-                content_host.set_unconstrained_axes(horizontal_scroll_enabled, vertical_scroll_enabled);
-                let scroll = NSScrollView::new();
-                scroll.setDocumentView(Some(&content_host));
-                // スクロールしない側の軸は NSAutoresizingMaskOptions(ViewWidthSizable/ViewHeightSizable)
-                // でclip viewへ自動追従させる。NSNotificationCenterの購読は不要。
-                scroll
-            }
-            Backend::Gtk4 => native! {
-                // 未実装 — GTK4基盤構築フォローアップ完了後に着手する。
-                unimplemented!()
-            }
-        }
+        // 各バックエンドのネイティブ ScrollView 実装にバインドされる
     }
 }
 ```
@@ -911,60 +755,7 @@ struct Button {
     on_click: fn(),
 
     body: view! {
-        match target::backend() {
-            Backend::Appkit => native! {
-                let button = NSButton::buttonWithTitle_target_action(&text, None, None);
-                button.setEnabled(enabled.unwrap_or(true));
-                // 強調する2つのroleはどちらも「塗りボタン」(bezelColor)で表現し、
-                // 塗る色だけが違う。hasDestructiveActionはmacOS 11+のセマンティックな
-                // signalとして併せて設定する(respondsToSelector:で存在確認してから呼ぶ)。
-                match role {
-                    ButtonRole::Normal => {
-                        button.setBezelColor(None);
-                        button.set_has_destructive_action(false);
-                    }
-                    ButtonRole::Primary => {
-                        button.setBezelColor(Some(NSColor::controlAccentColor()));
-                        button.set_has_destructive_action(false);
-                    }
-                    ButtonRole::Destructive => {
-                        button.setBezelColor(Some(NSColor::systemRedColor()));
-                        button.set_has_destructive_action(true);
-                    }
-                }
-                button.setKeyEquivalent(if is_default.unwrap_or(false) { "\r" } else { "" });
-                button.set_target_action(move || { dispatch_routed("on_click"); });
-                button
-            }
-            Backend::Winui3 => native! {
-                let button = microsoft::ui::xaml::controls::Button::new()?;
-                button.SetContent(&PropertyValue::CreateString(&text)?)?;
-                button.SetIsEnabled(enabled.unwrap_or(true))?;
-                match role {
-                    // Fluentのアクセントボタンスタイルをアプリのリソース辞書から引く。
-                    ButtonRole::Primary => button.SetStyle(lookup_resource("AccentButtonStyle"))?,
-                    // WinUI3にhasDestructiveAction相当は無い。M.5の既知ギャップを参照。
-                    ButtonRole::Destructive => {
-                        button.SetForeground(lookup_resource("SystemFillColorCriticalBrush"))?
-                    }
-                    ButtonRole::Normal => { button.SetStyle(None)?; button.SetForeground(None)?; }
-                }
-                // Button.IsDefaultはWinUI3には無い(ContentDialogのボタン専用)ため
-                // KeyboardAcceleratorで代替する。
-                button.KeyboardAccelerators()?.Clear()?;
-                if is_default.unwrap_or(false) {
-                    let accelerator = KeyboardAccelerator::new()?;
-                    accelerator.SetKey(VirtualKey::Enter)?;
-                    button.KeyboardAccelerators()?.Append(&accelerator)?;
-                }
-                button.Click(&RoutedEventHandler::new(move |_, _| { dispatch_routed("on_click"); Ok(()) }))?;
-                button
-            }
-            Backend::Gtk4 => native! {
-                // 未実装 — docs/status/nativecontrol_status.md §4のGTK4基盤構築後に着手する。
-                unimplemented!()
-            }
-        }
+        // 各バックエンドのネイティブ Button 実装にバインドされる
     }
 }
 ```
@@ -1011,52 +802,7 @@ struct CheckBox {
     enabled: Option<bool>,
 
     body: view! {
-        match target::backend() {
-            Backend::Appkit => native! {
-                let button = NSButton::buttonWithTitle_target_action(&text, None, None)?;
-                button.setButtonType(NSButtonType::Switch);
-                // `allowsMixedState(false)` (デフォルト)は、ユーザークリックのサイクルを抑止するだけでなく
-                // `setState(.mixed)`自体を無効化し `.on` として描画してしまう(実機で確認済み)。ダッシュ表示を
-                // 生かすため true のままにし、クリックからの到達阻止は target/action 側の後段で行う。
-                button.setAllowsMixedState(true);
-                button.setState(check_state_to_ns_state(checked));
-                button.setEnabled(enabled.unwrap_or(true));
-                button.set_target_action(move || {
-                    let mut new_state = read_check_state(&button);
-                    if new_state == CheckState::Indeterminate {
-                        // ネイティブの3値サイクルがクリックで Mixed に到達した場合、ここで即座に
-                        // Checked へ引き戻す——ユーザークリックからは Indeterminate へ絶対に遷移しない。
-                        new_state = CheckState::Checked;
-                        button.setState(check_state_to_ns_state(new_state));
-                    }
-                    checked = new_state;
-                    dispatch_on_change(checked);
-                });
-                button
-            }
-            Backend::Winui3 => native! {
-                let box_ = microsoft::ui::xaml::controls::CheckBox::new()?;
-                box_.SetContent(&PropertyValue::CreateString(&text)?)?;
-                // 同じ理由で true のまま(未検証・AppKit側の実機確認結果からの類推)。
-                box_.SetIsThreeState(true)?;
-                box_.SetIsChecked(check_state_to_nullable_bool(checked))?;
-                box_.SetIsEnabled(enabled.unwrap_or(true))?;
-                box_.Checked(&RoutedEventHandler::new(move |_, _| { checked = CheckState::Checked; dispatch_on_change(checked); Ok(()) }))?;
-                box_.Unchecked(&RoutedEventHandler::new(move |_, _| { checked = CheckState::Unchecked; dispatch_on_change(checked); Ok(()) }))?;
-                box_.Indeterminate(&RoutedEventHandler::new(move |_, _| {
-                    // クリックからの3値サイクルが Indeterminate に到達した場合の引き戻し。
-                    checked = CheckState::Checked;
-                    box_.SetIsChecked(check_state_to_nullable_bool(checked))?;
-                    dispatch_on_change(checked);
-                    Ok(())
-                }))?;
-                box_
-            }
-            Backend::Gtk4 => native! {
-                // 未実装 — docs/status/nativecontrol_status.md §4のGTK4基盤構築後に着手する。
-                unimplemented!()
-            }
-        }
+        // 各バックエンドのネイティブ CheckBox 実装にバインドされる
     }
 }
 ```
@@ -1209,7 +955,7 @@ trait Painter {
 | `draw_line` | Win2D `DrawLine` | `CGContextStrokeLineSegments` | `cairo_move_to`/`line_to` |
 | `draw_text` | `CanvasTextLayout` | `NSAttributedString::draw` | Pango経由 |
 
-`builtin::Canvas`自身は付録Fの他部品と同様、`match target::backend()`で各バックエンドのネイティブ描画コンテキストを`Painter`実装でラップして`on_paint`に渡す(バックエンド分岐が許されるのは`builtin`定義のみという原則はここでも維持される)。
+`builtin::Canvas`自身は付録Fの他部品と同様、各バックエンドのネイティブ描画コンテキストを`Painter`実装でラップして`on_paint`に渡す。
 
 ```rust
 #[elwindui::component]
@@ -1222,40 +968,27 @@ struct Canvas {
     on_paint: fn(&mut Painter),
 
     body: view! {
-        match target::backend() {
-            Backend::Winui3 => native! {
-                let ctrl = microsoft::ui::xaml::controls::CanvasControl::new()?;
-                ctrl.Draw(&DrawHandler::new(move |session| {
-                    let mut p = Win2DPainter::wrap(session);
-                    on_paint(&mut p);
-                }))?;
-                ctrl
-            }
-            _ => native! { /* Appkit / Gtk4 も同様にラップ */ }
-        }
+        // 各バックエンドのネイティブ描画セッションを Painter でラップして on_paint へ渡す
     }
 }
 ```
 
-## G.3 独自部品はバックエンド共通実装に限定する(重要ルール)
+## G.3 独自部品はバックエンド共通実装に限定する
 
-**バックエンド分岐(`native!`/`match target::backend()`)を書けるのは`builtin`定義と`#[overrides(builtin::X)]`が付いたコンポーネントだけ**とする(13章ルール9)。通常の独自部品は常にビルトイン要素の組み合わせ、または`Canvas`+`Painter`のみで実装する。
+通常の独自部品は常にビルトイン要素の組み合わせ、または `Canvas` + `Painter` のみで実装する。
 
-| コンポーネント種別 | バックエンド分岐の可否 |
+| コンポーネント種別 | 表現方法 |
 |---|---|
-| `builtin::*`(付録F) | 可(各OSネイティブAPIを直接呼ぶ) |
-| `#[overrides(builtin::X)]`(`docs/specs/dsl_spec.md` 付録A) | 可(ビルトインの置き換えという性質上必要) |
-| 通常の独自部品 | 不可。常にバックエンド共通実装のみ |
+| `builtin::*`(付録F) | フレームワーク組み込み (各OSネイティブAPI) |
+| 通常の独自部品 | ビルトイン要素の組み合わせ、または `Canvas` + `Painter` |
 
-**どうしてもネイティブAPIが必要だと感じた場合の判断フロー:**
+**独自描画が必要だと感じた場合の判断フロー:**
 
 ```
-独自部品を書いていて native! が必要だと感じたら:
+独自部品を書いていてカスタム描画が必要だと感じたら:
 
-  Q. これは既存ビルトインの代替実装か?
-     YES → #[overrides(builtin::X)] として定義し直す(`docs/specs/dsl_spec.md` 付録A)
-     NO  → Canvas + Painter で表現できないか再検討する
-           それでも無理な場合のみ、新しいビルトインをフレームワーク側に追加提案する
+  Canvas + Painter で表現できるか検討する。
+  それでも無理な場合のみ、新しいビルトイン要素をフレームワーク側へ追加提案する。
 ```
 
 これにより、バックエンド分岐が必要な箇所は`builtin`一箇所に集約され、ユーザーが書く独自部品のコードベースにはバックエンド分岐が一切現れない状態を維持できる。
@@ -1292,7 +1025,7 @@ src/
 
 `Painter`が既にバックエンド差異を吸収しているため、`painters/*.rs`は原則1ファイル1実装で全バックエンドに対応できる。`use painters::volume_meter::draw_meter;` は11章の`use`構文をそのまま使い、参照先はパスからコンパイラが自動判別する。
 
-`Painter`で表現しきれないネイティブ専用描画がどうしても必要な場合のみ、`painters/<name>/`をディレクトリ化しRust標準の`#[cfg(feature = "backend-...")]`で分岐する。これはDSLの文法ではなく通常のRustコード側の関心事であるため、`target::backend()`ではなくRust標準のcfg機構を使う。
+`Painter`で表現しきれないネイティブ専用描画がどうしても必要な場合のみ、`painters/<name>/`をディレクトリ化しRust標準の`#[cfg(feature = "backend-...")]`で分岐する。これはDSLの文法ではなく通常のRustコード側の関心事であるため、Rust標準のcfg機構を使う。
 
 ## G.5 再描画のトリガーとアニメーション
 
@@ -1378,7 +1111,6 @@ struct VolumeSlider {
 | `Element`トレイト(12章) | `Canvas`も`Row`も同じ`Element`として扱われ、ツリー上の位置づけに差がない |
 | `LayoutNode`(`docs/design/gui_framework_design.md`§5.3) | `Canvas`は「指定サイズを占有するノード」として他の部品と同じレイアウト計算に参加する |
 | `Painter`抽象(本付録) | `Canvas`内部の描画がバックエンド非依存なので、混載してもバックエンド分岐が漏れ出さない |
-| G.3のバックエンド分岐禁止ルール | 混載した`view`全体を見てもnative!が現れないため、静的検証にそのまま合格する |
 | `#[accessible(...)]`推奨(`docs/design/gui_framework_design.md`§5.6) | `Canvas`部分だけ明示的なアクセシビリティ情報が必要という区別が保たれ、混載時も漏れなく検証できる |
 
 ## G.8 まとめ
@@ -1387,7 +1119,7 @@ struct VolumeSlider {
 |---|---|
 | グラフ・ゲージ等の独自描画 | `Canvas` + `on_paint: fn(&mut Painter)` |
 | バックエンド間の描画API差異の吸収 | `Painter`トレイトと各backendのラッパー実装(`builtin::Canvas`内部のみ) |
-| 独自部品はバックエンド共通実装に限定 | `native!`/`target::backend()`の使用を通常のcomponentでは静的エラーとする(13章ルール9) |
+| 独自部品はバックエンド共通実装に限定 | ビルトイン要素の組み合わせ、または Canvas + Painter に限定する |
 | propに連動した再描画 | 既存の`prop`更新ルール(4章)をそのまま流用 |
 | 常時アニメーションさせたい | `#[animated]`で毎フレーム再描画対象と明示、非純粋関数呼び出しを許可 |
 | クリック・ドラッグ等の入力 | `on_pointer_down`/`on_pointer_move`等のコールバックをCanvasに追加 |
@@ -1434,7 +1166,7 @@ struct App {
 ```
 
 - `match current_route { ... }` は`Route` enumの全メンバーを網羅していなければ静的エラーになる(7章の網羅性検査、13章ルール14)
-- `NavigationHost`はビルトインのため、内部で`match target::backend()`によるバックエンド別実装を持つ(付録G.3の原則通り、通常のcomponentではこの分岐は書けない)
+- `NavigationHost`はビルトインのため、内部でバックエンド別実装を持つ(通常のcomponentはビルトインの組み合わせで記述する)
 
 | バックエンド | 実装 |
 |---|---|

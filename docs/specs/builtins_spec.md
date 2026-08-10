@@ -607,7 +607,7 @@ Grid {
 }
 ```
 
-`row`/`column`は`#[attached]`フィールド(§3)——`Grid`自身のインスタンスデータにはならず、任意の
+`row`/`column`は`#[attached]`フィールド(§4)——`Grid`自身のインスタンスデータにはならず、任意の
 子要素が`Grid::row: <expr>`/`Grid::column: <expr>`で自分自身に設定するスキーマ宣言である。設定
 された値は各子要素自身の`UIElementBase.grid_cell`(`elwindui_core::layout::GridCell`)に格納され、
 `Grid::measure_override`/`arrange_override`(`elwindui_core::layout`の`grid_measure_pass1_available`/

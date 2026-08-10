@@ -211,7 +211,7 @@ pub enum FieldKind {
     /// form has no syntax to declare one). Not a real struct field: `attr_frontend.rs` synthesizes
     /// one `FieldDef` per `impl` `fn` directly, with no corresponding struct-side declaration.
     Action,
-    /// `#[attached]`: a WPF/WinUI3-style attached property (§3) — declares a property that any
+    /// `#[attached]`: a WPF/WinUI3-style attached property (§4) — declares a property that any
     /// *other* element in the tree may set on itself via `Owner::field: value` (e.g. `Grid`'s
     /// `row`/`column`, settable on any child anywhere, not just `Grid`'s own direct children).
     /// Unlike every other kind, a field of this kind is *not* instance data of the component that

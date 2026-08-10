@@ -283,6 +283,71 @@ impl ContentControl {
 
 `#[computed]`フィールドも同様に、基底の同名フィールドを`#[overrides]`なしで再宣言するとエラーになり、`#[overrides]`を付けると上書きとして扱われる(型は基底と一致していなければならない)。
 
+---
+
+## 4. componentフィールドの種類(param/prop/state/computed) ✅
+
+component の各フィールドには、実体化時に固定されるか実行時に変更できるか・値がどこから来るかを表すアトリビュートを付けられる。**アトリビュートを何も付けなければ既定で`#[prop]`(実行時に読み書き可能)になる**——`#[prop]`は明示的に書いてもよいが、省略時のデフォルトでもある。
+
+| | `#[param]` | `#[prop]`(既定) | `#[state]` | `#[computed]` |
+|---|---|---|---|---|
+| 変更可能性 | 実体化時のみ、以後イミュータブル | 実行時いつでも変更可 | 実行時いつでも変更可(component自身のロジックから) | 不可——依存フィールドの変化に応じて自動再計算される読み取り専用値 |
+| 使える式 | 静的評価式のみ(リテラル・他paramの参照・純粋関数・`env::*`) | 静的評価式に加え、他prop/state/computed/bindable ownerを参照するリアクティブ式 | `default`は静的評価式のみ(初期値)。以後の値は`view`/イベントハンドラからの代入で決まる | `#[computed(expr = ...)]`の式(依存する他フィールドへの参照を含む) |
+| 主な用途 | 構造分岐(`if`/`for`の条件)、レイアウト決定 | 表示内容・状態の動的更新 | componentが内部だけで使う非公開の状態(外部の構築引数・公開APIには現れない、§9参照) | 他フィールドから導出される算出値(例:合計金額、書式化した文字列) |
+| 実行時アクセス | `instance.field()`(getterのみ。代入相当の操作はコンパイルエラー) | `instance.field()`/`instance.set_field(value)`(後述) | component内部の`self.field()`/`self.set_field(value)` | `instance.field()`(getterのみ) |
+
+### `#[param]`:実体化時に固定
+
+`#[param]`フィールドの初期化式には**静的評価式**のみを書ける。
+
+**許可される要素:**
+
+- リテラル(数値・文字列・真偽値・配列)
+- 四則演算・比較・三項演算子相当の `if` 式
+- 組み込み純粋関数(`min`, `max`, `round` など)
+- 同一コンポーネント内の他の `#[param]` フィールドへの参照
+- `env::*`(動的定数、§8)
+
+**禁止される要素:**
+
+- リアクティブな`#[prop]`/`#[state]`/`#[bindable]`プロパティの参照
+- prop(`#[param]`が付いていないフィールド)の参照
+- 非純粋関数(`now()`, `random()` など)の直接呼び出し
+
+### `#[prop]`(既定):実行時に読み書き可能
+
+**`#[prop]`フィールドへのアクセスは、コード生成器が自動生成する`pub fn <field>(&self) -> T`(getter)/`pub fn set_<field>(&self, value: T)`(setter)を通じて行う**——フィールド自体は`struct`上に公開されず、この2メソッドが外部・内部を問わず唯一のアクセス経路になる。setterは値を書き換えるだけでなく、そのcomponent専用の型付き通知(`{Component}Property`、viewmodelの`PropertyChanged`と同じ設計、§9参照)を発火し、依存する`view`の該当箇所・依存する`#[computed]`フィールドだけを再同期する。
+
+setterが生成されるかどうかは、**そのcomponentが`view`を持つかどうか**で分かれる:
+
+- **`view`を持つcomponent**(`body: view! { .. }`フィールドがある)では、`#[prop]`フィールドはdefault値の有無に関わらず**常に**getter+setterの両方を持つ——default値の無い必須フィールド(`new(..)`のコンストラクタ引数)であっても、実体化後にsetterで書き換えられる
+- **`view`を持たないcomponent**(データ定義のみ)では、再同期すべき`view`が無いぶん簡略化されており、default値を持つフィールド(`#[prop(default = expr)]`)または`Option<T>`型のフィールドだけがsetterを持つ。default値の無い必須の非`Option`フィールドはgetterのみになる(`#[param]`と同じ形)
+
+### `#[state]`:component専用の非公開状態
+
+`#[state(default = expr)]`はcomponent専用の非公開リアクティブ状態。`default`は必須で、コンストラクタ引数・公開getter/setter・props APIには現れない——外部から与えることも読み取ることもできない、component自身の`view`/イベントハンドラの中だけで完結する状態を表す(§9のTwoWayバインディングの例`VolumeSlider`を参照)。runtime上のアクセス経路・再同期の仕組みは`#[prop]`と同じ(component専用の型付き通知経由)で、公開されるかどうかだけが異なる。
+
+### `#[computed]`:算出値
+
+`#[computed]` を付けたフィールドは依存する他フィールドの変化に応じて自動再評価される読み取り専用の算出値。外部からの代入は静的エラーとなる。
+
+```rust
+#[elwindui::component]
+struct Cart {
+    items: Vec<Item>,
+
+    #[computed(expr = items.iter().map(|i| i.price * i.qty).sum())]
+    total: f64,
+}
+
+#[elwindui::component]
+impl Cart {}
+```
+
+### `#[bindable]`:viewmodelの保持
+
+`#[bindable]`はcomponentがviewmodelを保持するための専用アトリビュートで、**指定できる型はviewmodel(`#[elwindui::viewmodel]`で定義された型)に限られる**——viewmodel以外の型を指定すると、生成されるコードがviewmodel専用のPropertyChanged購読の仕組みを満たせずコンパイルエラーになる。実体化時に一度だけ固定される(以後差し替え不可)という点は`#[param]`と同様だが、`#[bindable]`自身が値を書き換えるわけではなく、保持しているviewmodelの中のフィールドが変化した際に依存する`view`部分を自動再同期させるための購読を張る(`docs/design/gui_framework_design.md`§7.2参照)。
+
 ### 添付プロパティ(`#[attached]`):WPF/WinUI3方式
 
 あるcomponentが宣言し、**任意の別要素が自分自身に設定できる**プロパティ(WPFの`Grid.Row`/`Grid.Column`相当)。
@@ -349,57 +414,6 @@ impl FormPanel {}
   ネイティブに解決するユーザー定義component(`inherits NativeControl`を宣言せず`Button`等を
   ラップするようなケース)への設定は、`.base()`へ到達する手段自体がまだ無く、引き続き未対応
   ——将来の拡張課題
-
----
-
-## 4. componentフィールドの種類(param/prop/state/computed) ✅
-
-**フィールドに`#[param]`/`#[state]`/`#[computed]`のいずれのアトリビュートも付けなければ、既定で`#[prop]`(実行時に読み書き可能)になる。** `#[prop]`は明示的に書いてもよいが、省略時のデフォルトでもある。
-
-| | `#[param]` | `#[prop]`(既定) | `#[state]` | `#[computed]` |
-|---|---|---|---|---|
-| 変更可能性 | 実体化時のみ、以後イミュータブル | 実行時いつでも変更可 | 実行時いつでも変更可(component自身のロジックから) | 不可——依存フィールドの変化に応じて自動再計算される読み取り専用値 |
-| 使える式 | 静的評価式のみ(リテラル・他paramの参照・純粋関数・`env::*`) | 静的評価式に加え、他prop/state/computed/bindable ownerを参照するリアクティブ式 | `default`は静的評価式のみ(初期値)。以後の値は`view`/イベントハンドラからの代入で決まる | `#[computed(expr = ...)]`の式(依存する他フィールドへの参照を含む) |
-| 主な用途 | 構造分岐(`if`/`for`の条件)、レイアウト決定 | 表示内容・状態の動的更新 | componentが内部だけで使う非公開の状態(外部の構築引数・公開APIには現れない、§9参照) | 他フィールドから導出される算出値(例:合計金額、書式化した文字列) |
-| 実行時アクセス | `instance.field()`(getterのみ。代入相当の操作はコンパイルエラー) | `instance.field()`/`instance.set_field(value)`(後述) | component内部の`self.field()`/`self.set_field(value)` | `instance.field()`(getterのみ) |
-
-`#[computed]` を付けたフィールドは依存する他フィールドの変化に応じて自動再評価される読み取り専用の算出値。外部からの代入は静的エラーとなる。
-
-**`#[prop]`フィールドへのアクセスは、コード生成器が自動生成する`pub fn <field>(&self) -> T`(getter)/`pub fn set_<field>(&self, value: T)`(setter)を通じて行う**——フィールド自体は`struct`上に公開されず、この2メソッドが外部・内部を問わず唯一のアクセス経路になる。setterは値を書き換えるだけでなく、そのcomponent専用の型付き通知(`{Component}Property`、viewmodelの`PropertyChanged`と同じ設計、§9参照)を発火し、依存する`view`の該当箇所・依存する`#[computed]`フィールドだけを再同期する。
-
-setterが生成されるかどうかは、**そのcomponentが`view`を持つかどうか**で分かれる:
-
-- **`view`を持つcomponent**(`body: view! { .. }`フィールドがある)では、`#[prop]`フィールドはdefault値の有無に関わらず**常に**getter+setterの両方を持つ——default値の無い必須フィールド(`new(..)`のコンストラクタ引数)であっても、実体化後にsetterで書き換えられる
-- **`view`を持たないcomponent**(データ定義のみ)では、再同期すべき`view`が無いぶん簡略化されており、default値を持つフィールド(`#[prop(default = expr)]`)または`Option<T>`型のフィールドだけがsetterを持つ。default値の無い必須の非`Option`フィールドはgetterのみになる(`#[param]`と同じ形)
-
-`#[bindable]`はcomponentがviewmodelを保持するための専用アトリビュートで、**指定できる型はviewmodel(`#[elwindui::viewmodel]`で定義された型)に限られる**——viewmodel以外の型を指定すると、生成されるコードがviewmodel専用のPropertyChanged購読の仕組みを満たせずコンパイルエラーになる。実体化時に一度だけ固定される(以後差し替え不可)という点は`#[param]`と同様だが、`#[bindable]`自身が値を書き換えるわけではなく、保持しているviewmodelの中のフィールドが変化した際に依存する`view`部分を自動再同期させるための購読を張る(`docs/design/gui_framework_design.md`§7.2参照)。
-
-```rust
-#[elwindui::component]
-struct Cart {
-    items: Vec<Item>,
-
-    #[computed(expr = items.iter().map(|i| i.price * i.qty).sum())]
-    total: f64,
-}
-
-#[elwindui::component]
-impl Cart {}
-```
-
-**静的評価式に許可される要素(`#[param]`用):**
-
-- リテラル(数値・文字列・真偽値・配列)
-- 四則演算・比較・三項演算子相当の `if` 式
-- 組み込み純粋関数(`min`, `max`, `round` など)
-- 同一コンポーネント内の他の `#[param]` フィールドへの参照
-- `env::*`(動的定数、§8)
-
-**禁止される要素:**
-
-- リアクティブな`#[prop]`/`#[state]`/`#[bindable]`プロパティの参照
-- prop(`#[param]`が付いていないフィールド)の参照
-- 非純粋関数(`now()`, `random()` など)の直接呼び出し
 
 ### コールバック型フィールド: `fn(...)` 糖衣構文
 

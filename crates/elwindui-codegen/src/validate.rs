@@ -171,7 +171,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 c.name, f.name
                             ));
                         }
-                        // `#[attached]` (§3) declares a property other elements set on
+                        // `#[attached]` (§4) declares a property other elements set on
                         // *themselves* via `Owner::field: value` — it needs a default value for
                         // whichever of them never set it explicitly (see `check_attached_properties`).
                         if f.kind == FieldKind::Attached && f.initializer.is_none() {

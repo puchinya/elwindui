@@ -37,7 +37,7 @@ elwindui::ui::<Type>
 
 ### 2.3 Common properties
 
-`UIElement` を継承する全てのビジュアル要素は、共通して以下のレイアウト・外観プロパティを持つ。
+`UIElement` を継承する全てのビジュアル要素は、共通して以下のレイアウト・外観・フォーカスプロパティを持つ。
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
@@ -52,6 +52,10 @@ elwindui::ui::<Type>
 | `max_width` | `Option<f32>` | OneWay | 最大幅 |
 | `min_height` | `Option<f32>` | OneWay | 最小高さ |
 | `max_height` | `Option<f32>` | OneWay | 最大高さ |
+| `is_focusable` | `Option<bool>` | OneWay | キーボードフォーカスを受け取り可能か |
+| `is_tab_stop` | `Option<bool>` | OneWay | Tab キーフォーカス移動の対象に含まれるか |
+| `tab_index` | `Option<i32>` | OneWay | Tab キー移動時の明示的な優先度順序 |
+| `is_focused` | `Option<bool>` | TwoWay | 現在キーボードフォーカスを保持しているかを示す状態 |
 
 `NativeControl` を継承する全ての具象コントロールは、さらに以下のプロパティを持つ。
 
@@ -68,6 +72,103 @@ elwindui::ui::<Type>
 - **Single Content**: 単一のコンテンツスロット（`#[content(content)]`）を持つ要素（例: `ContentControl`, `ScrollView`, `Window`）。
 - **Collection Content**: 複数の子要素コレクション（`#[content(children)]` または `#[content(items)]`）を持つ要素（例: `VerticalLayout`, `Grid`, `Menu`, `TabView`）。
 
+### 2.5 Layout and rendering semantics
+
+ElwindUI のすべてのビジュアル要素（`UIElement`）は、**Measure（計測）**、**Arrange（配置）**、**Render（描画）** の3段階のライフサイクルに従ってレイアウト計算および描画更新を行う。
+
+#### 1. Measure パス（サイズ計測）
+
+- **インターフェース**: `measure(available_size: Size) -> Size`
+- **目的**: 親コンテナから提示された利用可能領域（`available_size`）の制約下で、要素が希望する自然サイズ（Desired Size）を計算する。
+- **制約評価と並び順**:
+  1. `margin` を `available_size` から減算する。
+  2. 明示的なプロパティ（`width`, `height`, `min_width`, `max_width`, `min_height`, `max_height`）によるサイズクランプを適用する。
+  3. コレクション・コンテンツを持つ要素は、各子要素の `measure` を呼び出し、レイアウト規則（縦並び、横並び、グリッド等）に従って自身の Desired Size を決定する。
+- **`visibility` の影響**:
+  - `Visible`: 通常通りサイズ計測を行い、レイアウト領域を占有する。
+  - `Hidden`: サイズ計測を行いレイアウト領域を占有するが、描画パスでは不可視（透明）となる。
+  - `Collapsed`: 計測結果を常に Desired Size `(0, 0)` とみなし、レイアウト計算から完全に除外される。
+- **無制約計測（Unconstrained Measure）**:
+  - `ScrollView` などのスクロール可能軸では、利用可能サイズとして `f32::INFINITY`（無制約）を子要素へ渡し、コンテンツ本来の自然サイズへ成長させる。
+
+#### 2. Arrange パス（絶対配置）
+
+- **インターフェース**: `arrange(final_rect: Rect)`
+- **目的**: 親コンテナが決定した最終的な確定領域（`final_rect`）を基に、要素自身の配置位置（Offset）と最終サイズ（Render Size）を確定し、必要に応じて子要素へサブ領域を割り当てる。
+- **整列（Alignment）の適用**:
+  - `horizontal_alignment` (`Left`, `Center`, `Right`, `Stretch`) および `vertical_alignment` (`Top`, `Center`, `Bottom`, `Stretch`) を評価し、`final_rect` 内での配置座標を確定する。
+  - `margin` によるオフセットを最終位置へ加算する。
+
+#### 3. Render パス（描画出力）
+
+- **目的**: Arrange パスで確定した領域情報に従い、画面へビジュアル要素を出力する。
+- **自前描画ノード（`Shape`, `TextBlock` 等）**:
+  - `RenderContext` に対し、塗りつぶし・輪郭線描画・テキストグリフ出力などの描画コマンド（Render Command）を記録する。
+- **ネイティブコントロールノード（`NativeControl`）**:
+  - 各プラットフォームのネイティブウィジェットハンドル（AppKit: `NSView`, WinUI 3: `FrameworkElement` 等）の座標・サイズ・表示状態プロパティを確定領域に同期させる。
+
+#### 4. レイアウトの無効化（Layout Invalidation）
+
+見た目やサイズに影響を与えるプロパティ（`width`, `height`, `margin`, `text`, `visibility` 等）が更新された場合、該当要素はツリーのルート（`RelayoutHost`）へ向けて再レイアウト要求（`invalidate_measure` / `invalidate_arrange` / `invalidate`）を発火し、次フレームで Measure/Arrange パスが再実行される。
+
+### 2.6 Event routing model
+
+ElwindUI のイベント伝播は、WPF / WinUI 3 に倣うルーティングイベントモデルを採用している。`#[routed]` が指定されたイベントは、単一要素内にとどまらず視覚ツリー（Visual Tree）に沿って伝播する。
+
+#### 1. Routing Strategies（ルーティング戦略）
+
+イベントの種類に応じて以下の3つのルーティング戦略が用いられる。
+
+1. **Bubbling（バブリング / 下から上へ）**:
+   - イベント発生源（Target）のノードから開始し、`visual_parent` チェーンを辿ってルート要素（Window/Root）に向けて親方向へ順次伝播する。
+   - 主な対象: マウス/ポインタイベント（`on_pointer_down`, `on_pointer_up`, `on_click`）、キーボード入力（`on_key_down`, `on_key_up`, `on_text_input`）。
+2. **Tunneling（トンネリング / 上から下へ）**:
+   - ルート要素から開始し、ターゲット要素に向けてツリーを下降伝播する（Previewイベント）。
+   - 主な対象: キー押下の事前検証やグローバルショートカットの横取り（`preview_key_down` 等）。
+3. **Direct（ダイレクト / ルーティングなし）**:
+   - ツリー伝播を行わず、イベントが発生した特定の要素のハンドラのみを直接呼び出す。
+   - 主な対象: コントロール固有の状態変化通知（例: `TabView::on_select(usize)`）。
+
+#### 2. Event Handling & Handled Flag
+
+ルーティングイベントは引数として `RoutedEventArgs` を受け取る。
+- **`handled` フラグ**: いずれかのハンドラが `args.set_handled(true)` を呼び出すと、その時点で上位/下位ノードへのイベント伝播が打ち切られる。
+- コントロールが固有の標準動作（例: `Button` が Enter キーでクリックを発火する処理）を完了した場合、通常 `handled = true` を設定して親要素への重複伝播を防止する。
+
+#### 3. Input Dispatch & Hit Testing
+
+- **ポインタイベント**:
+  - 画面座標を基に視覚ツリーを検索（`hit_test`）し、クリッピング、表示状態（`visibility`）、ヒットテスト有効性（`is_hit_test_visible`）を考慮して最前面のターゲット要素を決定した後、Bubbling ルーティングを開始する。
+- **キーボードイベント**:
+  - フォーカス管理機構（Focus Tracker）が保持する現在のフォーカス要素（`focused`）をターゲットとして決定した後、Bubbling ルーティングを開始する。
+
+### 2.7 Focus management and keyboard navigation
+
+ElwindUI は、キーボード入力およびアクセシビリティ操作のためのフォーカス管理モデルを提供する。
+
+#### 1. Focus Model & Scope
+
+- **フォーカスモデル**: 各ウィンドウ/ルートコンテナは、ツリー内で現在アクティブな単一のキーボードフォーカス保持要素（`focused`）を追跡・管理する。
+- **フォーカス移動**: マウスクリック、Tabキー操作、またはプログラムによる `focus()` 呼び出しによってフォーカスが切り替わる。
+
+#### 2. Focus Events
+
+フォーカス状態の変化に伴い、以下のルーティングイベントが発火する。
+
+| Event Name | Signature | Strategy | Description |
+|---|---|---|---|
+| `on_got_focus` | `fn(RoutedEventArgs)` | Bubbling | 要素がフォーカスを獲得した際に発火 |
+| `on_lost_focus` | `fn(RoutedEventArgs)` | Bubbling | 要素からフォーカスが離脱した際に発火 |
+
+#### 3. Keyboard Navigation Semantics
+
+- **Tab / Shift+Tab 遷移**:
+  - `tab_index` の昇順に従ってフォーカスを移動する。`tab_index` が同値の場合は視覚ツリーの先順位（Pre-order traversal）に従う。
+- **デフォルトボタン（Default Accelerator）**:
+  - 単一ラインテキストボックス（`TextBox`）等の入力中に Enter キーが押下された場合、現在のウィンドウ内で `is_default: true` が指定された `Button` のクリックイベントを自動発火する。
+- **フォーカストラップ（Focus Trap / Modal Scope）**:
+  - モーダルダイアログやポップアップが表示されている間、フォーカストラップスコープがスタックに積まれ、Tabキーによるフォーカス遷移がそのサブツリー内に限定される。
+
 ---
 
 ## 3. Base types
@@ -75,6 +176,21 @@ elwindui::ui::<Type>
 ### `UIElement`
 
 全てのビジュアル要素の抽象基底カテゴリ。
+
+#### Common UIElement Events
+
+| Event Name | Signature | Strategy | Description |
+|---|---|---|---|
+| `on_pointer_down` | `fn(PointerEventArgs)` | Bubbling | ポインタ（マウス/タッチ）が要素上で押下された際に発火 |
+| `on_pointer_up` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で離された際に発火 |
+| `on_pointer_move` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で移動した際に発火 |
+| `on_pointer_enter` | `fn(PointerEventArgs)` | Direct | ポインタが要素領域内に進入した際に発火 |
+| `on_pointer_leave` | `fn(PointerEventArgs)` | Direct | ポインタが要素領域外へ退出した際に発火 |
+| `on_key_down` | `fn(KeyEventArgs)` | Bubbling | フォーカス保持中に物理キーが押下された際に発火 |
+| `on_key_up` | `fn(KeyEventArgs)` | Bubbling | フォーカス保持中に物理キーが離された際に発火 |
+| `on_text_input` | `fn(TextInputEventArgs)` | Bubbling | 文字列テキスト入力が行われた際に発火 |
+| `on_got_focus` | `fn(RoutedEventArgs)` | Bubbling | 要素がフォーカスを獲得した際に発火 |
+| `on_lost_focus` | `fn(RoutedEventArgs)` | Bubbling | 要素からフォーカスが脱落した際に発火 |
 
 ### `NativeControl`
 

@@ -365,7 +365,12 @@ impl FormPanel {}
 
 `#[computed]` を付けたフィールドは依存する他フィールドの変化に応じて自動再評価される読み取り専用の算出値。外部からの代入は静的エラーとなる。
 
-**`#[prop]`フィールドへのアクセスは、コード生成器が自動生成する`pub fn <field>(&self) -> T`(getter)/`pub fn set_<field>(&self, value: T)`(setter)を通じて行う**——フィールド自体は`struct`上に公開されず、この2メソッドが外部・内部を問わず唯一のアクセス経路になる。ただし**setterが生成されるのはそのフィールドがdefault値を持つ場合のみ**(`#[prop(default = expr)]`、または`Option<T>`型で暗黙にdefaultが`None`になる場合)——default値を持たない`#[prop]`(型のみを書いた必須フィールド)は`#[param]`と同じく`new(..)`のコンストラクタ引数になり、getterしか生成されない。したがって「`#[prop]`なら常に実行時に書き換えられる」わけではなく、**default値の有無**が実際にsetterを持つかどうかを決める。
+**`#[prop]`フィールドへのアクセスは、コード生成器が自動生成する`pub fn <field>(&self) -> T`(getter)/`pub fn set_<field>(&self, value: T)`(setter)を通じて行う**——フィールド自体は`struct`上に公開されず、この2メソッドが外部・内部を問わず唯一のアクセス経路になる。setterは値を書き換えるだけでなく、そのcomponent専用の型付き通知(`{Component}Property`、viewmodelの`PropertyChanged`と同じ設計、§9参照)を発火し、依存する`view`の該当箇所・依存する`#[computed]`フィールドだけを再同期する。
+
+setterが生成されるかどうかは、**そのcomponentが`view`を持つかどうか**で分かれる:
+
+- **`view`を持つcomponent**(`body: view! { .. }`フィールドがある)では、`#[prop]`フィールドはdefault値の有無に関わらず**常に**getter+setterの両方を持つ——default値の無い必須フィールド(`new(..)`のコンストラクタ引数)であっても、実体化後にsetterで書き換えられる
+- **`view`を持たないcomponent**(データ定義のみ)では、再同期すべき`view`が無いぶん簡略化されており、default値を持つフィールド(`#[prop(default = expr)]`)または`Option<T>`型のフィールドだけがsetterを持つ。default値の無い必須の非`Option`フィールドはgetterのみになる(`#[param]`と同じ形)
 
 `#[bindable]`はcomponentがviewmodelを保持するための専用アトリビュートで、**指定できる型はviewmodel(`#[elwindui::viewmodel]`で定義された型)に限られる**——viewmodel以外の型を指定すると、生成されるコードがviewmodel専用のPropertyChanged購読の仕組みを満たせずコンパイルエラーになる。実体化時に一度だけ固定される(以後差し替え不可)という点は`#[param]`と同様だが、`#[bindable]`自身が値を書き換えるわけではなく、保持しているviewmodelの中のフィールドが変化した際に依存する`view`部分を自動再同期させるための購読を張る(`docs/design/gui_framework_design.md`§7.2参照)。
 
@@ -739,6 +744,14 @@ struct TitleBar {
 
 ## 9. データバインディング ✅
 
+component の属性値(`property: value`の`value`部分)には3つの書き方があり、それぞれ異なる**更新タイミング**を表す:
+
+| 書き方 | 更新タイミング |
+|---|---|
+| `property: expr` | 依存解析による自動分類(下記)——OneWay(依存先が変わるたびに再評価)またはOnce(初期化時に一度だけ) |
+| `property: once!(expr)` | 常にOnce(初期化時に一度だけ評価。依存解析自体を行わない) |
+| `property <=> target` | TwoWay(値の変更が双方向に伝わる。書き方は明示的) |
+
 ```rust
 #[elwindui::component(inherits VerticalLayout)]
 struct VolumeSlider {
@@ -756,31 +769,39 @@ struct VolumeSlider {
 impl VolumeSlider {}
 ```
 
-- `property: expression`は依存解析により自動分類される。`#[state]`、可変`#[prop]`、
-  `#[computed]`、直接の`#[bindable] owner.property`を含めばOneWay、定数・リテラル・
-  `#[param]`だけなら初期化時の一度だけ評価する
-- `property: once!(expression)`は依存収集を抑止し、初期化時のスナップショットとして一度だけ評価する
-- `property <=> writable_target`は明示的なTwoWay。RHSは同一componentの可変`#[prop]`/
-  `#[state]`、直接の`#[bindable] owner.property`、または安定した`for` itemの直接の
-  `item.property`に限る。後者は明示的な`Vec<Rc<T>>`または`#[observable] Vec<T>`として
-  生成されるviewmodel collectionだけで使え、propertyは`#[prop]`または`#[observable]`でなければならない
-- `#[state(default = expr)]`はcomponent専用の非公開リアクティブ状態。defaultは必須で、
-  コンストラクタ引数・公開getter/setter・props API・継承フィールドには現れない
+上の例では、`Slider`の`value`はTwoWay(`volume`の変化がスライダーの表示位置に伝わり、スライダー操作も`volume`に書き戻る)、1つ目の`TextBlock`はOneWay(`volume`が変わるたびに再評価)、2つ目の`TextBlock`はOnce(構築時の`volume`の値でメッセージを1回だけ組み立て、以後`volume`が変わっても更新されない)になる。
 
-### PropertyChanged と部分更新
+### `property: expr` の自動分類
 
-`#[observable]` のsetterは代入後に型付き `PropertyChanged` を発火する。`view` は式から
-静的に取得した依存プロパティだけを購読し、その属性または動的領域だけを更新する。従って
-`TextArea { text <=> doc.content }` の入力はその `TextArea` と `doc.content` に依存する表示だけを
-更新し、親の `TabView` の children コレクションを再同期しない。二方向バインディングのwidget→model側は
-setterを呼ぶだけで、別途コンポーネント全体の再同期を呼んではならない。
+依存解析によって、`expr`の中に**リアクティブな参照**が見つかるかどうかで自動的に分類する:
 
-購読は `Subscription` で表され、表示領域が破棄されるとDropにより解除される。`for` itemの
-TwoWayコールバックも同じ`DynamicChild`の寿命に属し、itemが置換・削除されると購読とともに解放される。
-`for`/`if`/`match`
-の構造変更は親view全体ではなく対応する動的領域だけを差し替える。依存プロパティを静的に
-特定できない任意Rust式はビルド時エラーとし、必要な計算は `#[computed]` または解析可能な
-prop参照へ分解する。
+- **見つかれば OneWay**(依存先が変わるたびに再評価): 自componentの`#[prop]`/`#[state]`/`#[computed]`フィールドへの裸参照、または`#[bindable]`ownerに対する`owner.property`という形の参照
+- **見つからなければ Once**(初期化時に一度だけ評価): リテラル・`#[param]`フィールドの参照のみで構成される式
+
+この判定は式を実際に構文木として走査して行う——`format!(..)`/`format_args!(..)`/`vec!(..)`/`theme!(..)`の引数の中は再帰的に見るが、それ以外のマクロ呼び出しは中身を検査できないため、依存の有無に関わらず**安全側に倒してOneWay扱い**にする(§3の`#[computed(expr = ...)]`の依存検出にも同じ不透明マクロの制約がある)。
+
+### `once!(expr)`:明示的なOnce
+
+`property: once!(expr)`は上記の自動分類そのものを行わず、依存収集を抑止して初期化時のスナップショットとして一度だけ評価する。`expr`の中にリアクティブな参照があっても無視される——「初期表示時の値を固定表示したいが、式の中身自体はリアクティブなフィールドを使って書きたい」場合に使う。
+
+### `property <=> target`:明示的なTwoWay
+
+`<=>`の右辺(`target`)に書けるのは次のいずれかに限る:
+
+- 同一componentの`#[prop]`/`#[state]`フィールド(`<=>`は`view`を持つcomponentの中でしか書けないため、§4のとおりこれらは常に書き込み可能)
+- `#[bindable]` ownerに対する`owner.property`(直接参照。式は不可)
+- 安定した`for` itemの`item.property`——ただしitemの列が明示的な`Vec<Rc<T>>`または`#[observable] Vec<T>`として生成されるviewmodel collectionである場合に限る(§5の`for`要素再利用の仕組みが安定したidを提供できることが前提)。この場合`property`は対象の`#[prop]`または`#[observable]`でなければならない
+
+`<=>`の widget→model 方向(ユーザー操作で値が変わったときの書き戻し)は、対応するsetterを呼ぶだけでよい——別途component全体の再同期を呼んではならない(setter自体が必要な範囲の再同期を担うため、二重に呼ぶと無駄な更新が発生する)。
+
+### 変更の伝搬:2つの仕組み
+
+OneWayの再評価・TwoWayの model→widget 方向の反映は、参照先がどこにあるかによって2つの異なる仕組みで実現される。いずれも**componentの`view`全体を再構築せず、依存する属性・動的領域だけを更新する**という結果は同じだが、実現方法が違う:
+
+1. **同一component自身の`#[prop]`/`#[state]`/`#[computed]`フィールドの変更**: これらのフィールドを変更するsetterは、コンパイル時に静的決定された、そのcomponent専用の型付き通知(`{Component}Property`——viewmodelの`PropertyChanged`と同型の設計)を直接発火し、依存する`view`の該当箇所・依存する`#[computed]`だけを再計算する。ランタイムの購読オブジェクトを経由しない——`elwindui-codegen`が`view`の式を静的解析して依存関係を洗い出し済みだからこそ、setterから直接呼び出せる
+2. **`#[bindable]`で保持しているviewmodelの変更**: viewmodel側は別の`#[elwindui::viewmodel]`マクロ展開で生成されるため、component側はコンパイル時にその内部構造を知らない。そのため`#[observable]`のsetterは代入後に型付き`PropertyChanged`を発火し、component側は`Subscription`によるランタイム購読でそれを受け取り、該当する属性・動的領域だけを更新する。表示領域が破棄されると`Subscription`はDropにより解除される。例えば`TextArea { text <=> doc.content }`の入力は、その`TextArea`と`doc.content`に依存する表示だけを更新し、親の`TabView`の`children`コレクションを再同期しない
+
+`for` itemのTwoWayコールバックも(2)と同じ`DynamicChild`の寿命に属し、itemが置換・削除されると購読とともに解放される。`for`/`if`/`match`の構造変更(§5参照)は親view全体ではなく対応する動的領域だけを差し替える。依存プロパティを静的に特定できない任意のRust式はビルド時エラーとなり、必要な計算は`#[computed]`または解析可能なprop参照へ分解する。
 
 ---
 

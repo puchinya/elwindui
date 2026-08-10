@@ -1,7 +1,7 @@
 //! Hand-written lexer-free recursive-descent parser for the DSL's own structural syntax
 //! (`use`/`enum`/`component`/`viewmodel`/`view`). Field/attribute-value expressions that aren't
 //! one of the DSL's own macro forms (`once!`, `command!`, `t!`) are handed off to `syn` for real
-//! parsing. See docs/specs/dsl_spec.md §1-15.
+//! parsing. See docs/specs/dsl_spec.md §1-14.
 
 use crate::ast::*;
 
@@ -171,11 +171,15 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(field_name)]`
-    /// (docs/specs/dsl_spec.md 付録A/E), written immediately before a top-level item — only
+    /// `#[sealed]`/`#[abstract]`/`#[text_style]`/`#[content(field_name)]` (docs/specs/dsl_spec.md
+    /// 付録A) plus `#[embedded]`/`#[native]`, written immediately before a top-level item — only
     /// meaningful on `component` (see `reject_item_attrs`). Zero or more, any order; unknown
     /// attribute names are a parse error just like the field-level `#[...]` loop
-    /// (`parse_field_def`) this mirrors.
+    /// (`parse_field_def`) this mirrors. `#[embedded]`/`#[native]` are no longer part of
+    /// `docs/specs/dsl_spec.md`'s user-facing surface — this test-only parser still recognizes them
+    /// solely to feed `lib.rs::test_builtin_modules`'s `TEST_BUILTIN_SHAPE_SOURCE` fixture (see
+    /// `component_frontend.rs::component_item_attrs`'s own doc comment, the real production
+    /// frontend, for why they're dead there).
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     fn parse_item_attrs(

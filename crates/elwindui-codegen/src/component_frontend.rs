@@ -45,7 +45,7 @@ pub fn component_and_view_from_item_struct(
     // already expects, and `ComponentDef::base_path`, the qualified spelling `codegen::generate_view`
     // needs to emit) come together.
     let (base, base_path) = split_base_path(base);
-    let (embedded, sealed, native, is_abstract, text_style, content_field) =
+    let (sealed, is_abstract, text_style, content_field) =
         component_item_attrs(&item_struct.attrs)?;
 
     let syn::Fields::Named(named) = &item_struct.fields else {
@@ -105,9 +105,13 @@ pub fn component_and_view_from_item_struct(
         base_path,
         fields,
         methods: Vec::new(),
-        embedded,
+        // `#[embedded]`/`#[native]` are no longer recognized attribute names for this (real,
+        // production) frontend — see `component_item_attrs`'s own doc comment. Only `parser.rs`'s
+        // test-only textual-DSL frontend (feeding `TEST_BUILTIN_SHAPE_SOURCE`) can still produce a
+        // `ComponentDef` with either field `true`.
+        embedded: false,
         sealed,
-        native,
+        native: false,
         is_abstract,
         text_style,
         content_field,
@@ -131,20 +135,26 @@ fn split_base_path(base: Option<String>) -> (Option<String>, Option<String>) {
     }
 }
 
-/// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract_]`/`#[text_style]`/`#[content(field_name)]`,
-/// read off `item_struct.attrs` — the Rust-macro-path counterpart of `parser.rs`'s
-/// `parse_item_attrs`, same vocabulary, minus the DSL-text-only wart of `abstract` colliding
-/// with the reserved Rust keyword (spelled `abstract_` here instead — decided over introducing a
-/// raw-identifier `r#abstract`, since this whole attribute vocabulary is otherwise plain
-/// identifiers). Any other component-level attribute the user wrote (`#[derive(..)]`, doc
-/// comments, ...) is left alone/ignored — `#[elwindui::component]` replaces the whole struct with
-/// generated code, so nothing downstream ever re-emits `item_struct.attrs` verbatim.
+/// `#[sealed]`/`#[abstract_]`/`#[text_style]`/`#[content(field_name)]`, read off
+/// `item_struct.attrs` — the Rust-macro-path counterpart of `parser.rs`'s `parse_item_attrs`,
+/// same vocabulary, minus the DSL-text-only wart of `abstract` colliding with the reserved Rust
+/// keyword (spelled `abstract_` here instead — decided over introducing a raw-identifier
+/// `r#abstract`, since this whole attribute vocabulary is otherwise plain identifiers). Any other
+/// component-level attribute the user wrote (`#[derive(..)]`, doc comments, ...) is left
+/// alone/ignored — `#[elwindui::component]` replaces the whole struct with generated code, so
+/// nothing downstream ever re-emits `item_struct.attrs` verbatim.
+///
+/// Deliberately does **not** recognize `#[embedded]`/`#[native]` — those are for
+/// `elwindui-codegen`'s own test-only builtin-shape fixture only (`parser.rs`'s sibling
+/// `parse_item_attrs`, feeding `TEST_BUILTIN_SHAPE_SOURCE`); `validate::validate` rejects both on
+/// any component whose `Module::is_builtin` isn't set, which no real (non-test) invocation of this
+/// frontend ever produces. A consumer writing `#[embedded]`/`#[native]` on their own component now
+/// just gets it silently ignored, the same as any other unrecognized attribute name, rather than
+/// that internal-sounding rejection message.
 fn component_item_attrs(
     attrs: &[syn::Attribute],
-) -> Result<(bool, bool, bool, bool, bool, Option<String>), String> {
-    let mut embedded = false;
+) -> Result<(bool, bool, bool, Option<String>), String> {
     let mut sealed = false;
-    let mut native = false;
     let mut is_abstract = false;
     let mut text_style = false;
     let mut content_field = None;
@@ -153,9 +163,7 @@ fn component_item_attrs(
             continue;
         };
         match attr_name.as_str() {
-            "embedded" => embedded = true,
             "sealed" => sealed = true,
-            "native" => native = true,
             "abstract_" => is_abstract = true,
             "text_style" => text_style = true,
             "content" => {
@@ -167,14 +175,7 @@ fn component_item_attrs(
             _ => continue,
         }
     }
-    Ok((
-        embedded,
-        sealed,
-        native,
-        is_abstract,
-        text_style,
-        content_field,
-    ))
+    Ok((sealed, is_abstract, text_style, content_field))
 }
 
 fn is_view_macro_field(field: &syn::Field) -> bool {
@@ -828,7 +829,6 @@ view Counter {
     fn component_level_attrs_are_read_from_struct_attrs() {
         let src = r#"
             #[sealed]
-            #[native]
             #[abstract_]
             #[content(children)]
             struct Toolbar {
@@ -845,16 +845,16 @@ view Counter {
             "#[sealed] should set ComponentDef::sealed"
         );
         assert!(
-            component_def.native,
-            "#[native] should set ComponentDef::native"
-        );
-        assert!(
             component_def.is_abstract,
             "#[abstract_] should set ComponentDef::is_abstract"
         );
         assert!(
             !component_def.embedded,
-            "#[embedded] was not written, should stay false"
+            "this frontend never sets ComponentDef::embedded (test-only fixture concept)"
+        );
+        assert!(
+            !component_def.native,
+            "this frontend never sets ComponentDef::native (test-only fixture concept)"
         );
         assert!(
             !component_def.text_style,
@@ -908,8 +908,7 @@ view Counter {
 /// codegen support at all before `generate_view`/`generate_component` grew it: `own_fields`, and
 /// everything derived from it, used to filter to `f.initializer.is_none()` only, so a bare
 /// same-component reference like `text: label` failed with "unsupported path shape after bind
-/// resolution". See docs/specs/dsl_spec.md's "Rustファイル内での代替記法" subsection, whose
-/// `VolumeControl` example this mirrors.
+/// resolution". See docs/specs/dsl_spec.md §3's `VolumeControl` example, which this mirrors.
 #[cfg(test)]
 mod doc_example_own_default_and_computed_fields {
     use crate::codegen::{build_symbol_table, generate_module};
@@ -982,7 +981,7 @@ view Greeter {
         );
     }
 
-    /// The exact `docs/specs/dsl_spec.md` "Rustファイル内での代替記法" example: `VolumeControl`
+    /// The exact `docs/specs/dsl_spec.md` §3 example: `VolumeControl`
     /// inherits `ContentControl` (a real builtin, already shape-composed over `Control`), and
     /// branches over a `#[param] orientation: Orientation` via `match` inside `view!`, referencing
     /// its own `#[prop(default = 50)] volume`/`#[computed] label` fields bare from inside the match

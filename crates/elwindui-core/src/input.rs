@@ -8,7 +8,7 @@ use std::rc::Rc;
 /// pure propagation control, deliberately without a payload (`dispatch_routed`'s own `payload: &T`
 /// argument carries that, so this stays the same shape for every `#[routed]` field regardless of
 /// its own callback signature). A handler sets `handled` to stop further bubbling — WinUI3's
-/// `RoutedEventArgs.Handled`. See docs/specs/dsl_spec.md §4 (`#[routed]`).
+/// `RoutedEventArgs.Handled`. See docs/specs/dsl_spec.md §12 (`#[routed]`).
 #[derive(Debug, Default)]
 pub struct RoutedEventArgs {
     pub handled: Cell<bool>,

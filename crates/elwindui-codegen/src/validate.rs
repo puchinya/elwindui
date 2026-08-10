@@ -52,10 +52,13 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
         for item in &module.items {
             match item {
                 Item::Component(c) => {
-                    // `#[embedded]` (docs/specs/dsl_spec.md 付録A) claims this component is one of
-                    // this crate's own builtin shape declarations — reject it on anything parsed
-                    // from a consumer's own source directory (`Module::is_builtin`, set only by
-                    // `builtin_modules()`).
+                    // `#[embedded]` claims this component is one of this crate's own test-only
+                    // builtin shape declarations — reject it on anything parsed from a consumer's
+                    // own source directory (`Module::is_builtin`, set only by
+                    // `lib.rs::test_builtin_modules`, `#[cfg(test)]`). Not part of
+                    // `docs/specs/dsl_spec.md`'s user-facing surface (`component_frontend.rs`, the
+                    // real production frontend, doesn't even parse this attribute name) — this gate
+                    // only ever fires for `parser.rs`'s test-only textual-DSL frontend.
                     if c.embedded && !module.is_builtin {
                         errors.push(format!(
                             "{}: #[embedded] can only be used on a component from elwindui-codegen's own \
@@ -98,8 +101,9 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         }
                     }
 
-                    // `#[native]` (docs/specs/dsl_spec.md 付録A, `ComponentDef::native`'s doc
-                    // comment) marks a base-less, `view`-less leaf whose real implementation is
+                    // `#[native]` (`ComponentDef::native`'s doc comment — not part of
+                    // `docs/specs/dsl_spec.md`'s user-facing surface, same as `#[embedded]` above)
+                    // marks a base-less, `view`-less leaf whose real implementation is
                     // hand-written per backend crate — `Window` is the motivating case (WinUI3's
                     // `Window` has no meaningful `Control`-family ancestor, unlike `Button`/
                     // `TextArea`/... which share `inherits NativeControl`). All three misuses below

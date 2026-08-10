@@ -39,7 +39,7 @@ pub struct TypeInfo {
     /// Names of `#[param] #[two_way]` fields — a builtin shape's opt-in to automatic two-way
     /// wiring (see `emit_wiring`'s generic two-way rule). Empty for ordinary user components.
     pub two_way_fields: HashSet<String>,
-    /// Names of `#[routed]` fields (docs/specs/dsl_spec.md §4) — a callback's opt-in to WinUI3-
+    /// Names of `#[routed]` fields (docs/specs/dsl_spec.md §12) — a callback's opt-in to WinUI3-
     /// style bubbling via `elwindui::core::ui::dispatch_routed` instead of being called directly.
     /// Non-empty exactly when this type needs `into_node_if_needed` to share its own
     /// `routed_handlers()` into the `NativeControl`/virtual-builtin `UIElementBase` wrapping it,
@@ -2008,7 +2008,7 @@ fn rewrite_field_refs(
 
 /// Recognizes `t!("key", name: expr, ...)` (parsed as an opaque `syn::Expr::Macro` by the DSL
 /// parser, since `name: expr` argument lists aren't valid standalone Rust) and rewrites it into a
-/// call to the generated `t()` i18n helper (see `i18n_prelude`). See docs/specs/dsl_spec.md §11.
+/// call to the generated `t()` i18n helper (see `i18n_prelude`). See docs/specs/dsl_spec.md §10.
 ///
 /// `syn::visit_mut` never descends into a macro's token stream (it has no structure to visit), so
 /// [`rewrite_field_refs`] alone can't see field references nested inside `t!(...)`'s arguments —
@@ -7777,7 +7777,7 @@ fn emit_common_ui_element_setters(
 }
 
 /// Emits `binding.as_ui_element().register_routed_handler::<()>("on_click", ..)` for the generic "any
-/// element can catch a routed `on_click`" common attribute (docs/specs/dsl_spec.md §4) — used by
+/// element can catch a routed `on_click`" common attribute (docs/specs/dsl_spec.md §12) — used by
 /// `emit_virtual_construction` unconditionally, and by `emit_construction`'s native-control-leaf
 /// branch only when the type doesn't *already* declare `on_click` as a real `#[routed]` field of
 /// its own (`Button` — wired instead by `emit_wiring`'s dedicated `is_routed` branch; applying this
@@ -8501,7 +8501,7 @@ fn emit_wiring(
                 continue;
             }
             let setter = format_ident!("set_{name}");
-            // `#[routed]` (docs/specs/dsl_spec.md §4): registered on the widget's own storage
+            // `#[routed]` (docs/specs/dsl_spec.md §12): registered on the widget's own storage
             // (`Button::register_routed_handler`, delegating to its own `routed_handlers`) instead
             // of calling `set_<attr>` directly — `dispatch_routed` invokes it later, bubbling
             // through ancestors too, rather than this being the only thing that ever runs. The

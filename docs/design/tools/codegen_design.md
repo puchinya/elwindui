@@ -136,6 +136,45 @@ dsl_enum`(`crates/elwindui-macros/src/lib.rs`、`elwindui::component`/`elwindui:
 (再利用可能な名前付き`ControlTemplate<Self>`定義、`docs/specs/dsl_spec.md`§4「`#[elwindui::
 template]`」参照)が設計されている——**設計のみ・未実装**。
 
+### 4.2 enum の名前解決と `match` 網羅性の二層設計
+
+enumの値参照(`EnumName::Member`)は、`component`/`viewmodel`/`dsl_enum`いずれの入力形式でも共通して
+`ViewExpr::Expr(syn::Expr)`(`ast.rs`)として構文解析され、生成先のRustコードへ**逐語的に**埋め込まれる。
+DSL側は`EnumName::Member`という(裸の文字列リテラルではなく)パス形式で書かなければならないという
+制約(§7・13章ルール4)以外に、enum専用の名前解決の仕組みは一切持たない——`use`で導入した短い名前を
+そのまま書けるのは、生成コードがそのままそのファイルの通常のRustスコープに置かれ、最終的にRust
+コンパイラ自身が名前解決するため(§4.1脚注・`docs/specs/dsl_spec.md`§11「モジュール(use)」と同じ理由)。
+
+`match`の網羅性検査(`docs/specs/dsl_spec.md`§7・13章ルール5)は二層構造になっている:
+
+- **第1層(マクロ展開時、`elwindui-codegen`自身による早期検査)**: `validate::check_match_in_child`が、
+  `#[elwindui::dsl_enum]`で**同一クレート内に**登録済みのenum(`component_frontend::same_crate_enums`/
+  `sibling_enum_modules`、本章冒頭参照)についてのみ、コンパイルエラーとして早期に分かりやすい
+  メッセージを出す。`same_crate_enums`は`(compiling_crate_key(), enum名)`をキーとするプロセス内静的
+  レジストリで、実際の`cargo build`はクレートごとに別のrustcプロセスになる(`compiling_crate_key`
+  自身のdocコメント参照)ため、**別クレートで定義されたenumの情報をこの層で参照する手段は原理的に
+  存在しない**。したがって別クレートから`use`で取り込んだenumに対しては、この層の検査は単に素通り
+  する(エラーにはならず、検査が働かないだけ)。
+- **第2層(実際のコンパイル、rustc自身による保証)**: `codegen.rs`の`match`生成箇所
+  (`initial_dynamic_content_value`/`emit_dynamic_node_refresh`/`emit_scalar_dynamic_node_refresh`、
+  いずれも`quote! { match #value { #(#arm_stmts)* } }`)は、DSLで書かれたarmをそのまま転写するだけで、
+  **合成的な`_ =>`ワイルドカードや`unreachable!()`を一切追加しない**。したがって生成された実際の
+  Rust `match`が非網羅的であれば、rustc自身が`E0004`(non-exhaustive patterns)を必ず検出する——
+  この保証はenumがどのクレートで定義されていても、`#[elwindui::dsl_enum]`で登録されていても、
+  いなくても、常に働く。
+
+この設計により、**第1層は「早期に分かりやすいエラーを出すための最適化」に過ぎず、正しさの根拠
+(soundness)は常に第2層(rustc)が担う**。「別クレートのenumに対して第1層の検査を拡張してほしい」
+という要望は、`same_crate_enums`のようなプロセス内レジストリを多クレートに拡張する形では実現できない
+(実現するには`build.rs`でのメタデータ出力等、クレートをまたいでenum定義情報を永続化する別方式が
+必要で、大掛かりな設計変更になる)。第2層が既に十分な保証を提供しているため、`elwindui-codegen`は
+**この目的のための追加実装を持たない**。
+
+**実装上の制約**: 上記の「合成`_ =>`を追加しない」という性質は、第2層の保証が成立するための必要条件
+である。将来`match`生成コードにフォールバック的な`_ => unreachable!()`のような分岐を追加する変更を
+行う場合、この二層設計の第2層が失われ、非網羅的な`match`がコンパイルエラーではなく実行時パニックと
+して初めて発覚するようになってしまうため、追加すべきではない。
+
 ---
 
 ## 5. 他ツールとの連携点

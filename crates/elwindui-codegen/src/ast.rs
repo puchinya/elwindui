@@ -11,10 +11,12 @@ pub struct Module {
     pub path: Vec<String>,
     pub uses: Vec<UseDecl>,
     pub items: Vec<Item>,
-    /// Whether this module came from `elwindui-codegen`'s own `BUILTIN_SHAPE_SOURCE`
-    /// (`builtin_modules()`, set there) rather than a consumer's own source directory —
-    /// `validate::validate` uses this to reject a `#[embedded]` component declared outside the
-    /// actual builtin sources (docs/specs/dsl_spec.md 付録A).
+    /// Whether this module came from `elwindui-codegen`'s own test-only `TEST_BUILTIN_SHAPE_SOURCE`
+    /// (`lib.rs::test_builtin_modules`, `#[cfg(test)]` only, set there) rather than a consumer's own
+    /// source directory. `validate::validate` uses this to gate `#[text_style]`, and (test-only
+    /// `parser.rs` frontend only — see `ComponentDef::embedded`/`.native`'s own doc comments)
+    /// `#[embedded]`/`#[native]`, to that fixture — never `true` for any real (non-test) module, since
+    /// nothing in production ever constructs one this way.
     pub is_builtin: bool,
     /// Whether this module was built by `component_frontend.rs` from a real `#[elwindui::component]`
     /// Rust struct (`generate_component_from_item_struct`'s own module, or one of
@@ -105,10 +107,14 @@ pub struct ComponentDef {
     pub base_path: Option<String>,
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
-    /// `#[embedded]` (written immediately before `component`, docs/specs/dsl_spec.md 付録A): marks
-    /// this component as one of the builtin shape declarations (`BUILTIN_SHAPE_SOURCE`) — `validate::validate`
-    /// rejects it on a component whose `Module::is_builtin` is `false` (i.e. a consumer's own
-    /// DSL module falsely claiming to be a builtin).
+    /// `#[embedded]`: marks this component as one of `elwindui-codegen`'s own test-only builtin
+    /// shape declarations (`TEST_BUILTIN_SHAPE_SOURCE`) — `validate::validate` rejects it on a
+    /// component whose `Module::is_builtin` is `false`. **Not a real DSL attribute** —
+    /// `component_frontend.rs` (the real, production frontend for `#[elwindui::component]`) doesn't
+    /// even recognize the name; only `parser.rs`'s test-only textual-DSL frontend does, so this field
+    /// is always `false` for any real (non-test) `ComponentDef`. Real builtins are declared via
+    /// `#[elwindui_macros::class]` in `elwindui-core`/backend crates, entirely outside
+    /// `elwindui-codegen`'s own AST.
     pub embedded: bool,
     /// `#[sealed]` (same position): marks this component as unable to be named as a `base` in
     /// `component X inherits Y` — `validate::validate_inherits` rejects `inherits` naming a sealed
@@ -116,15 +122,17 @@ pub struct ComponentDef {
     /// — extend the composable `Shape` instead; `Button`/`TextArea`/`TabView`/`TabViewItem` — already
     /// implied by their native-leaf-with-no-view shape, but stated explicitly here for clarity).
     pub sealed: bool,
-    /// `#[native]` (same position): marks a **base-less, `view`-less** component whose real Rust
-    /// implementation is hand-written per backend crate (`elwindui-backend-appkit`/`-winui3`/...),
-    /// exactly like an `inherits NativeControl` leaf (`codegen::resolve_is_native` treats either as
-    /// native) — but for a leaf with no meaningful `inherits` base at all. `Window` is the
-    /// motivating case: real WinUI3's `Window` derives directly from `Object`, not through the
+    /// `#[native]`: marks a **base-less, `view`-less** component whose real Rust implementation is
+    /// hand-written per backend crate (`elwindui-backend-appkit`/`-winui3`/...), exactly like an
+    /// `inherits NativeControl` leaf (`codegen::resolve_is_native` treats either as native) — but for
+    /// a leaf with no meaningful `inherits` base at all. `Window` is the motivating case in the
+    /// test-only fixture: real WinUI3's `Window` derives directly from `Object`, not through the
     /// `Control` family every other native leaf (`Button`/`TextArea`/...) shares via `NativeControl`
     /// — declaring `inherits NativeControl` for it would suggest a shared ancestry that doesn't
     /// exist. `validate::validate` rejects `#[native]` combined with an explicit `base` or an own
-    /// `view`, and (like `#[embedded]`) outside this crate's own `BUILTIN_SHAPE_SOURCE`.
+    /// `view`, and (like `#[embedded]`) outside `Module::is_builtin`. **Not a real DSL attribute** —
+    /// see `ComponentDef::embedded`'s own doc comment; always `false` for any real (non-test)
+    /// `ComponentDef`.
     pub native: bool,
     /// `#[abstract]` (same position): marks this component as a pure category tag that cannot be
     /// instantiated directly in a `view` — only named as a `base` in `component X inherits Y` or
@@ -175,7 +183,7 @@ pub struct ViewModelDef {
     pub fields: Vec<FieldDef>,
 }
 
-/// See docs/specs/dsl_spec.md §8.
+/// See docs/specs/dsl_spec.md §7.
 #[derive(Debug, Clone)]
 pub struct EnumDef {
     pub name: String,
@@ -234,7 +242,7 @@ pub enum Attr {
     /// element it's declared on up through ancestors' own handlers for the same field name,
     /// stopping at the first one that sets `RoutedEventArgs::handled`) instead of being called
     /// directly. Not tied to any specific field name (`on_click` is just the first user of it) —
-    /// see docs/specs/dsl_spec.md §4.
+    /// see docs/specs/dsl_spec.md §12.
     Routed,
     /// `#[override]`: on a `#[computed]` field, marks an intentional override of a same-named
     /// inherited `#[computed]` field (vs. an accidental name collision, which is a validation

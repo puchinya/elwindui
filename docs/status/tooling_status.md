@@ -7,7 +7,7 @@ Snapshot: 2026-08-11. Tool architecture is indexed in [`../design/README.md`](..
 | `elwindui-codegen` | ✅ | component/ViewModel/enum frontend, parser, diagnostics, binding and dynamic-region code generation |
 | `elwindui-languageserver` | 🚧 | single-file diagnostics, member completion, and DSL semantic tokens; no cross-file resolution, hover, or generated-code preview |
 | Preview | ⬜ | design exists; no workspace preview application |
-| `elwindui-hotreload` | ⬜ | reload-decision stub only; no dylib replacement pipeline |
+| `elwindui-hotreload` | 🚧 | tested Patch/Remount decision helper exists; artifact loading and live replacement pipeline are absent |
 | `elwindui-test` | 🚧 | render-tree dump exists; canvas/image snapshots absent |
 | `macos-ui-driver` | 🚧 | process/window control, focus, Accessibility tree queries/actions, and screenshots are implemented; full keyboard/mouse synthesis and every AX action are not complete |
 

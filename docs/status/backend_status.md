@@ -17,6 +17,8 @@ Snapshot: 2026-08-11. Architecture is indexed in [`../design/README.md`](../desi
 - Gradient/Image foreground brushes are reduced when a native text widget cannot represent the full brush.
 - Editable TextArea character spacing does not cover every native text-storage path.
 - Secure PasswordBox intentionally retains the system secure font cascade instead of applying ordinary font synthesis.
+- SVG filter replay passes through turbulence, diffuse/specular lighting, displacement maps, unsupported convolve kernels, and Table/Discrete/Gamma component-transfer functions. Group blend modes fall back when no Core Image filter is available.
+- SVG nested masks with mismatched bounds use the outer mask only; image-brush path fills, pattern strokes, and degenerate/offscreen patterns use documented simpler fallbacks.
 - Memory investigations for Issue #60 found no durable evidence that retained ElwindUI render data directly owns the previously observed multi-megabyte process delta. Raw measurements remain Issue evidence rather than status documents.
 
 ## WinUI 3 current gaps

@@ -4,9 +4,9 @@ Related specification: [`../../specs/text_style_spec.md`](../../specs/text_style
 
 ## Storage and resolution
 
-Each `#[text_style]` class owns `TextStyleStorage`, whose optional local fields distinguish unset from explicit values. Resolution walks the public inheritance relationship and overlays properties independently into `ComputedTextStyle`; measurement and painting consume only the fully resolved value.
+Each `#[text_style]` class owns `TextStyleStorage`, whose optional local fields distinguish unset from explicit values. Resolution walks the visual-parent chain and overlays properties independently into `ComputedTextStyle`; measurement and painting consume only the fully resolved value.
 
-`TextStyleOwner` and `as_text_style_owner()` provide the internal lookup seam. `inheritance_parent(kind)` distinguishes logical content inheritance from visual fallback so backend helper nodes do not alter observable cascade behavior.
+`TextStyleOwner` and `as_text_style_owner()` provide the internal lookup seam. Text-style resolution always requests `InheritanceKind::Visual`; logical inheritance remains available to other inheritable relations, but does not alter the text cascade.
 
 ## Change propagation
 

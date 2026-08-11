@@ -1,60 +1,49 @@
-# ElwindUIL プレビューツール 設計書
+# ElwindUIL Preview設計
 
-本書は、エディタ内プレビュー機能の設計を定める。ツールチェーン全体のアーキテクチャ概観は `docs/design/tools/codegen_design.md` §6を参照。
+本書はcomponent previewの実行境界と状態modelを定める。compiler連携は [`codegen_design.md`](codegen_design.md)、editor連携は [`languageserver_design.md`](languageserver_design.md)、実装状況は [`../../status/tooling_status.md`](../../status/tooling_status.md)を参照する。
 
-## 1. スコープ
+## 1. Preview level
 
-対象は「エディタ(VSCode等)のWebViewパネルに コンポーネントの見た目を表示・操作可能にする」プレビュー機能そのものであり、以下は対象外とする。
+| Level | 目的 | State source |
+|---|---|---|
+| Static | default値でlayoutとrenderingを確認する | generated default / explicit preview fixture |
+| Interactive | bindingとeventをpreview process内で操作する | isolated mock ViewModel |
+| Live application | 実際のapplication stateで確認する | running application and hot reload boundary |
 
-- DSLのパース・型検査・制約検証、プレビュー用インスタンスの生成処理そのもの → `elwindui-languageserver`(LSP)側の責務。本書はLSPが生成した結果を受け取って表示する側の設計のみを扱う。
-- DSL → Rustソースへのコード生成(`build.rs`/proc-macro方式) → コード生成ツール側の設計を参照。
-- レベル③で使われるホットリロード機構(dylib差し替え・再マウント/差分更新の判定ロジック)そのものの内部実装 → ホットリロードツール側の設計を参照。本書ではレベル③が「プレビュー体験の延長線上にある」という接続点の説明のみ行う。
+最初の2 levelはpreview subsystemが所有し、live applicationへの反映は [`hotreload_design.md`](hotreload_design.md)へ委譲する。
 
-DSLの言語仕様(`component`/`view`/`param`/`prop`/`Element`トレイト等)自体は変更しない、ツールチェーン層としての位置づけである。
+## 2. Processing flow
 
-**実装状況の注**: 本書に対応する実装(プレビューパネル/WebView連携クレート)はワークスペースに一切存在しない(`crates/`配下に`elwindui-preview`等の該当クレートなし)。本書の内容は100%フォワードルッキングな設計であり、着手前の状態である。なお前提とする`elwindui-languageserver`側も、レベル①の「component既定値でインスタンス化→オフスクリーンレンダリング」の部分はまだ実装されていない(`docs/design/tools/languageserver_design.md`§4参照)。
-
-## 2. プレビュー3段階の比較
-
-| レベル | 内容 | 状態保持 | 主な処理経路 |
-|---|---|---|---|
-| ① 静的プレビュー | 保存のたびに `view` をダミー値/デフォルト値でインスタンス化し、画像としてエディタのWebViewに表示 | なし | `.rs`保存 → LSP増分パース → 既定値インスタンス化 → バックエンドのオフスクリーンレンダリング → WebViewへ画像送信 |
-| ② インタラクティブプレビュー | プレビュー内で操作可能。`<=>`のRHSと`#[state]`を自動的にモックへ差し替え、スライダー等で仮想的に値を操作できる | あり(プレビュー専用の軽量ランタイム) | ①の経路に加え、プレビュー専用ランタイムが操作イベントを受けて再描画をトリガー |
-| ③ 実行中アプリへの反映 | 実際に動作しているアプリ自体を保存と同時に更新する(ホットリロード) | あり(実行中プロセスの状態を維持) | 保存イベントがホットリロード機構経由で実プロセスに伝播(本書の対象外、§5参照) |
-
-## 3. レベル①: 静的プレビューの処理フロー
-
-```
-.rs保存
-  → LSPが増分パース
-  → componentを既定値でインスタンス化
-  → バックエンドのオフスクリーンレンダリング
-  → WebViewへ画像送信
+```text
+validated component + preview fixture
+                  ↓
+isolated preview process
+                  ↓
+component construction and layout
+                  ↓
+offscreen render / interaction channel
+                  ↓
+editor preview panel
 ```
 
-- 「既定値でインスタンス化」する対象のインスタンス自体は `elwindui-languageserver` が生成する。プレビューツール側はその結果(オフスクリーンレンダリング結果の画像)を受け取り、WebViewパネルに描画するだけの役割を担う。
-- 状態を一切保持しないため、保存イベントごとに独立して再生成・再送信される。
+previewはmain application processと分離し、invalid input、panic、native backend failureがeditor本体を終了させない。requestにはdocument versionとpreview instance IDを付け、古いframeやeventを破棄する。
 
-## 4. レベル②: TwoWay／State自動モック化の仕組み
+## 3. Fixtureとmock state
 
-- `<=>`の書き込み可能RHSと`#[state]`を自動検出し、プレビュー専用のコントロールUI(スライダー・テキスト欄等)に置き換える。
-- これにより、実際の外部ストア(`store` 等)を用意しなくても、プレビューパネル単体で動作確認ができる。
-- 状態保持は「プレビュー専用の軽量ランタイム」が担う。このランタイムは実行中アプリのランタイムとは別物であり、プレビューパネルのライフサイクル内でのみ有効な仮想的な状態を持つ。
-- コントロールUIでの操作イベントはこのプレビュー専用ランタイム内で完結し、実際の外部ストアやアプリ本体には一切書き戻さない。
+`#[param]` などconstruct時に必要な値はexplicit preview fixtureを優先し、値がない場合だけ型のdefault policyを利用する。meaningfulな値をtoolが推測してcontract化しない。
 
-## 5. レベル③との接続点(ホットリロードツールへの委譲)
+Interactive previewのmock ViewModelはproperty、subscription、event surfaceを保つ。production data source、network、filesystemなどの外部副作用は自動実行せず、明示されたpreview adapterへ置き換える。
 
-レベル③は「実際に動作しているアプリ自体を保存と同時に更新する」体験であり、プレビューパネル(①②)の自然な延長線上にあるという位置づけである。ただし以下の実装はホットリロードツール側の責務とし、本書では扱わない。
+## 4. Rendering boundary
 
-- `view` 関数を動的ライブラリとして差し替える機構(`hot-lib-reloader` 等の利用)
-- `#[param]`/`prop` の区分に基づく更新粒度の判定(`#[param]`変更→再マウント、prop変更のみ→差分更新)
+preview processは通常のruntime tree、layout、rendering pipelineを使用する。preview専用のlayout semanticsやcontrol behaviorを作らない。backend固有native controlがoffscreen表示を必要とする場合も、通常backend adapterを介して構築する。
 
-プレビューツールから見た接続点は、「保存イベントを検知し、実行中アプリへの反映が可能な場合はホットリロードツールへ処理を委ねる」という一点のみである。
+frameはimageまたはplatform-neutral drawing resultとしてeditorへ渡す。hit testing用geometryとaccessibility metadataはinteractive event routingに必要な範囲で同じframe versionへ関連付ける。
 
-## 6. 他ツールとの連携インターフェース
+## 5. Invariants
 
-全体アーキテクチャ図(`docs/design/tools/codegen_design.md`§6)における、プレビューツールの位置づけは「LSPからの出力を受け取り、WebViewへ描画結果を送信する(①②)」経路であり、実行中アプリへの反映(③、ホットリロードツールによるdylib差し替え)へは任意で接続する。
-
-- 入力: `elwindui-languageserver` から渡される、既定値/モックでインスタンス化済みの描画結果。
-- 出力: WebViewパネルへの画像描画(①)、および操作可能なコントロールUIとその状態(②)。
-- レベル③への遷移判断・実プロセスへの反映処理は本書の対象外であり、ホットリロードツールの設計に従う。
+- preview behaviorでpublic contractを上書きしない。
+- editor processとpreview executionを分離する。
+- production external side effectを暗黙に実行しない。
+- document version、instance ID、frame versionを混同しない。
+- 実装状況はtooling statusに記録する。

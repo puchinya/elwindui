@@ -1,10 +1,10 @@
 /// A single DSL module (or an equivalent synthetic module built from a plain `.rs` file's
 /// `#[elwindui::viewmodel] mod foo { .. }`, see `attr_frontend.rs`). See docs/specs/dsl_spec.md §11
-/// (`use`), §1-15 core language, docs/design/tools/codegen_design.md §3 (how `path` maps to a real Rust module path).
+/// (`use`), §1-15 core language, docs/design/tools/codegen_design.md (how `path` maps to a real Rust module path).
 #[derive(Debug, Clone, Default)]
 pub struct Module {
     /// This module's real, crate-relative path segments — `[]` for a DSL module compiled by
-    /// `compile_dir` (which lands flat at the crate root via `include!`, docs/design/tools/codegen_design.md §3) or for a
+    /// `compile_dir` (which lands flat at the crate root via `include!`, docs/design/tools/codegen_design.md) or for a
     /// standalone proc-macro invocation; `["notepad_view_model"]` for Rust source's
     /// `mod notepad_view_model { .. }`. `use` declarations (§12) are resolved against these paths
     /// exactly like Rust's own name resolution — see `codegen::build_symbol_table`/`validate::validate`.
@@ -47,7 +47,7 @@ pub enum Item {
     View(ViewDef),
 }
 
-/// `component Name inherits Base { fields }`. See docs/specs/dsl_spec.md §3, docs/design/gui_framework_design.md §5.3.
+/// `component Name inherits Base { fields }`. See docs/specs/dsl_spec.md §3, docs/design/runtime/layout_design.md.
 ///
 /// `base` resolves to one of four cases (see `validate.rs`'s `validate_inherits` and
 /// `codegen.rs`'s `resolve_effective_fields`/`resolve_view_for`):
@@ -60,7 +60,7 @@ pub enum Item {
 ///   `Base`'s fields the usual bare-reference way (`resolve_effective_fields`), and — because the
 ///   root construction matches `Base` exactly — `codegen.rs`'s `generate_view` additionally
 ///   generates `Name`'s struct with a real `base: <Base>` field (`elwindui_core::ui`'s own
-///   struct/`Ext`-trait/`base` convention, docs/design/gui_framework_design.md §5.1) and a direct
+///   struct/`Ext`-trait/`base` convention, docs/design/runtime/ui_tree_design.md) and a direct
 ///   `impl UIElementExt`/`impl <Base's own Ext trait>` delegating to it, instead of the generic "wrapper
 ///   owning a separately-`Rc`-erased root" every other `view`-having component uses. See
 ///   `codegen.rs`'s `generate_view` `is_shape_composition` doc comment for why this is deliberately
@@ -176,7 +176,7 @@ pub struct MethodDef {
 }
 
 /// `viewmodel Name { fields }`, reusing the same field syntax as `component`/`store`.
-/// See docs/design/gui_framework_design.md §7.2.
+/// See docs/design/runtime/state_management_design.md.
 #[derive(Debug, Clone)]
 pub struct ViewModelDef {
     pub name: String,
@@ -202,9 +202,9 @@ pub enum FieldKind {
     State,
     /// `#[param]`: fixed at instantiation. See §4.
     Param,
-    /// `#[observable]`: `viewmodel`/`store` runtime-mutable field. See docs/design/gui_framework_design.md §7.2.
+    /// `#[observable]`: `viewmodel`/`store` runtime-mutable field. See docs/design/runtime/state_management_design.md.
     Observable,
-    /// `#[computed]`: read-only, recomputed from its dependencies. See §4, docs/design/gui_framework_design.md §7.2.
+    /// `#[computed]`: read-only, recomputed from its dependencies. See §4, docs/design/runtime/state_management_design.md.
     Computed,
     /// A `viewmodel` action method, auto-detected from an `impl` block's `fn`/`async fn` (Rust-
     /// native `#[elwindui::viewmodel] mod { struct .. impl .. }` frontend only — the DSL text
@@ -224,7 +224,7 @@ pub enum FieldKind {
 
 #[derive(Debug, Clone)]
 pub enum Attr {
-    /// `#[inject]`: caller supplies the value at construction (used with `#[param]`). See docs/design/gui_framework_design.md §7.1.
+    /// `#[inject]`: caller supplies the value at construction (used with `#[param]`). See docs/design/runtime/state_management_design.md.
     Inject,
     /// `#[two_way]`: marks a builtin shape's `#[param]` field as eligible for automatic two-way
     /// wiring — when an element's value for this attribute is a settable path, codegen wires a
@@ -262,12 +262,12 @@ pub enum Attr {
     Onetime,
     /// `#[bindable]`: shorthand for `#[param] #[inject]` on a field whose type is expected to
     /// implement `elwindui::core::reactive::ObservableExt` (currently: a `viewmodel`) — the
-    /// canonical, project-wide way to inject a viewmodel into a `component` (docs/design/gui_framework_design.md §7.2). Parsing
+    /// canonical, project-wide way to inject a viewmodel into a `component` (docs/design/runtime/state_management_design.md). Parsing
     /// this attribute (`parser::parse_field_def`/`attr_frontend::fields_from_item_struct`) sets
     /// `FieldKind::Param` and pushes `Attr::Inject` alongside it, exactly as if both had been
     /// written by hand — so `#[bindable]` never appears without `Inject` also present.
     ///
-    /// Unlike plain `#[inject]` (also used for non-reactive dependencies, e.g. docs/design/gui_framework_design.md §7.1 `store`),
+    /// Unlike plain `#[inject]` (also used for non-reactive dependencies, e.g. docs/design/runtime/state_management_design.md `store`),
     /// `#[bindable]` is what `codegen.rs`'s `generate_view` looks for when deciding which fields
     /// to wire an auto-refreshing `PropertyChanged` subscription for (`bind_owners` in
     /// `generate_view`) — deliberately a syntactic marker rather than inferred from whether the
@@ -296,7 +296,7 @@ pub enum ShortcutScope {
     Local,
 }
 
-/// A `component`/`viewmodel` field. See docs/specs/dsl_spec.md §3, docs/design/gui_framework_design.md §7.2.
+/// A `component`/`viewmodel` field. See docs/specs/dsl_spec.md §3, docs/design/runtime/state_management_design.md.
 #[derive(Debug, Clone)]
 pub struct FieldDef {
     pub name: String,
@@ -325,7 +325,7 @@ pub enum Initializer {
 }
 
 /// `view Name { on_mount { .. } on_unmount { .. } let-bindings... ElementTree }`. See
-/// docs/specs/dsl_spec.md §2, §13, docs/design/gui_framework_design.md §6.1.
+/// docs/specs/dsl_spec.md §2, §13, docs/design/runtime/ui_tree_design.md.
 #[derive(Debug, Clone)]
 pub struct ViewDef {
     pub target: String,
@@ -333,11 +333,11 @@ pub struct ViewDef {
     /// `resync()`). When `Name` inherits a base with its own `view` and `Name` provides its own
     /// `view`, an `on_mount` here may call `base::on_mount()` to chain into the base's block
     /// (rewritten by `codegen.rs`'s `rewrite_base_calls`, same as `#[override]` methods). See
-    /// docs/design/gui_framework_design.md §6.1 (param-immutability during `on_mount` is still enforced).
+    /// docs/design/runtime/ui_tree_design.md (param-immutability during `on_mount` is still enforced).
     pub on_mount: Option<syn::Block>,
     /// `on_unmount { .. }`, parsed/validated/codegen'd (as an inert `__run_on_unmount` method) but
     /// not yet wired to any runtime teardown trigger — `elwindui_core::ui` has no detach/removal
-    /// hook today. See docs/design/gui_framework_design.md §6.1.
+    /// hook today. See docs/design/runtime/ui_tree_design.md.
     pub on_unmount: Option<syn::Block>,
     /// Zero or more `#[id("...")]? let name = Element { .. };` statements, in source order,
     /// preceding `root`. Each introduces a name referenceable later (as a bare `ChildEntry::Ref`)
@@ -351,7 +351,7 @@ pub struct ViewDef {
 /// "the one literal root element of an ordinary component" (`children == [ChildEntry::Literal(_)]`,
 /// `attributes`/`attached` empty) or "the implicit composition body of a component whose `inherits`
 /// base is composable" (`codegen.rs`'s `resolve_view_root`) is resolved once the base's
-/// composability is known, not here — see docs/design/gui_framework_design.md §5.1's "inherits" section.
+/// composability is known, not here — see docs/design/runtime/ui_tree_design.md's "inherits" section.
 #[derive(Debug, Clone)]
 pub struct ViewBody {
     pub attributes: Vec<ViewAttribute>,
@@ -367,7 +367,7 @@ pub struct ViewBody {
 /// (`self.editor()`) returning that binding's concrete Rust type (`codegen.rs`'s
 /// `emit_named_accessors`) — not a runtime string-keyed lookup (`#[id(...)]` names are always
 /// known at compile time, so a monomorphized accessor is strictly sufficient and matches this
-/// project's avoid-type-erasure/avoid-dyn-dispatch convention, docs/design/gui_framework_design.md §7.2).
+/// project's avoid-type-erasure/avoid-dyn-dispatch convention, docs/design/runtime/state_management_design.md).
 #[derive(Debug, Clone)]
 pub struct LetBinding {
     pub id: Option<String>,
@@ -399,7 +399,7 @@ pub struct ElementNode {
     /// appkit: "Cmd+S")]` has no `None` entry at all: both backends are covered explicitly).
     /// `validate::validate` checks the named attribute actually is `#[routed]` on this element's
     /// resolved type, and that every chord's key spec parses (`codegen::parse_shortcut_spec`).
-    /// See docs/design/gui_framework_design.md §8.1, `parser::parse_shortcut_attr`,
+    /// See docs/design/runtime/input_focus_design.md, `parser::parse_shortcut_attr`,
     /// `codegen::emit_shortcut_registration`.
     pub attribute_shortcuts: Vec<(String, Vec<(Option<String>, String)>, ShortcutScope)>,
     pub children: Vec<ChildEntry>,

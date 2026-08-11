@@ -1,0 +1,29 @@
+# WinUI 3 backend design
+
+Related specifications: [`../../specs/ui_spec.md`](../../specs/ui_spec.md), [`../../specs/graphics_spec.md`](../../specs/graphics_spec.md), and [`../../specs/theme_environment_spec.md`](../../specs/theme_environment_spec.md).
+
+## Projection and startup
+
+`build.rs` generates WinUI 3 / Win2D bindings and a separate `Windows.UI.Xaml.Interop` projection. Windows App SDK bootstrap and STA COM initialization occur on the UI thread before application startup.
+
+Application hosting intentionally uses the small C++/WinRT `ApplicationT<App, IXamlMetadataProvider>` shim in `cpp/app_host.cpp`. The shim installs `XamlControlsResources` and calls one exported Rust startup callback. Window creation, controls, layout, rendering, events, and task execution remain in Rust.
+
+This boundary is load-bearing: replacing the shim requires a separately approved design demonstrating correct WinRT composable-class behavior and `Application.Resources` initialization.
+
+## Native hosting and layout
+
+Tree hosts own XAML roots, ElwindUI owner mappings, viewport layout, activation, and native child reconciliation. WinUI widgets remain leaves selected by the common NativeControl design.
+
+Arrange writes explicit `Width` / `Height` for Canvas positioning. Before every natural `Measure`, the adapter resets both values to `NaN` (`Auto`), invalidates native measure, and then measures with the current constraint. This prevents arrange-time sizes from becoming a self-reinforcing natural-size cache.
+
+## Rendering
+
+Win2D handles retained primitive replay for paths, images, gradients, brushes, clipping, opacity, strokes, and supported blend operations. Composition resources and image caches are owned by the render group or host that created them and are released on removal/deactivation.
+
+Native XAML children and Win2D/Composition islands are reconciled from the same active visual tree. A non-selected hosted subtree keeps UI/native control state but releases render resources.
+
+## Theme and text
+
+Theme adapters set or clear dependency properties, apply `RequestedTheme`, and observe `ActualThemeChanged`. Text measurement uses a scratch XAML `TextBlock` with the same conversions used by rendered text. `PlatformDefault` uses ClearValue-equivalent behavior.
+
+Windows environment setup and troubleshooting commands belong in [`../../agents/winui3.md`](../../agents/winui3.md); support and verification belong in [`../../status/backend_status.md`](../../status/backend_status.md).

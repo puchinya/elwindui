@@ -91,7 +91,7 @@ impl InnerTextArea {
 /// just without `SetAcceptsReturn(true)`/`SetTextWrapping(Wrap)` (see that struct's own doc
 /// comment) — composed by `native_ui::TextBox`. Structurally mirrors
 /// `elwindui-backend-appkit::inner::InnerTextBox`; unverified on this machine (no Windows
-/// environment — see `docs/status/nativecontrol_status.md`).
+/// environment — see `docs/status/control_status.md`).
 pub(crate) struct InnerTextBox {
     handle: AnyView,
     text_box: XamlTextBox,
@@ -161,7 +161,7 @@ impl InnerTextBox {
     /// `TextBox.MaxLength` is a native WinUI3 property (`0` = unlimited) — a direct improvement
     /// over AppKit's manual delegate-based truncation
     /// (`elwindui-backend-appkit::inner::NativeTextFieldDelegate`'s own doc comment) — this
-    /// AppKit/WinUI3 asymmetry is recorded in `docs/status/nativecontrol_status.md`.
+    /// AppKit/WinUI3 asymmetry is recorded in `docs/status/control_status.md`.
     pub(crate) fn set_max_length(&self, max_length: Option<u32>) {
         let _ = self.text_box.SetMaxLength(max_length.unwrap_or(0) as i32);
     }
@@ -194,7 +194,7 @@ impl InnerTextBox {
 
 /// Raw `PasswordBox` + change-notification wiring — composed by `native_ui::PasswordBox`.
 /// Structurally mirrors `elwindui-backend-appkit::inner::InnerPasswordBox`; unverified on this
-/// machine (no Windows environment — see `docs/status/nativecontrol_status.md`). Unlike
+/// machine (no Windows environment — see `docs/status/control_status.md`). Unlike
 /// `InnerTextBox`/`InnerTextArea`, `PasswordBox` is a genuinely distinct XAML class (not the same
 /// class configured differently), so there's no bare-name import collision to rename here — the
 /// `PasswordBox as XamlPasswordBox` alias at the top of this file was chosen from the start.

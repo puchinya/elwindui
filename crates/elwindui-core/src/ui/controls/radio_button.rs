@@ -7,7 +7,7 @@
 /// radio grouping only applies to buttons that share both a superview *and* an action selector —
 /// a condition this framework's per-instance click trampoline never satisfies, so nothing needs
 /// suppressing there. Instead, every `RadioButton` sharing the same non-empty `group` string is
-/// tracked together (backend-side; see `docs/status/nativecontrol_status.md` §2 for where), and
+/// tracked together (backend-side; see `docs/status/control_status.md` for where), and
 /// checking one un-checks every other member of its group. A `RadioButton` with no `group` (the
 /// default) participates in no exclusivity at all — it behaves like a plain two-state toggle.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]

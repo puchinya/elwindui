@@ -3,9 +3,9 @@
 use super::*;
 
 /// `Rectangle`/`Ellipse`. A pure leaf, like `TextBlock` — no children of its own (matching real
-/// WinUI3's `Shape`, which likewise has no `Children`/content property; see docs/design/gui_framework_design.md
+/// WinUI3's `Shape`, which likewise has no `Children`/content property; see docs/design/README.md
 /// §5.2), so its natural size is just its own drawn bounds.
-/// `Shape`'s own class trait (docs/design/gui_framework_design.md §5.1); `Shape` has no further
+/// `Shape`'s own class trait (docs/design/runtime/ui_tree_design.md); `Shape` has no further
 /// DSL-level subclass today.
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
 #[prop(fill: Option<crate::graphics::Brush>)]

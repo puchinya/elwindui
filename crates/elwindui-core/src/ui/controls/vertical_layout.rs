@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// `VerticalLayout`'s own class trait (docs/design/gui_framework_design.md §5.1). `spacing` lives here
+/// `VerticalLayout`'s own class trait (docs/design/runtime/ui_tree_design.md). `spacing` lives here
 /// (not on `Layout`) since it's meaningless to `Grid`, `Layout`'s other concrete subclass — see
 /// `Layout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]

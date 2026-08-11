@@ -4,6 +4,8 @@ Read only when resuming or pausing incomplete Issue work.
 
 ## Commands
 
+Before pausing, record any incomplete spec/design/code/status synchronization and the next required document in the checkpoint. A resumed agent must not infer completion from code alone.
+
 macOS/Linux:
 
 ```bash

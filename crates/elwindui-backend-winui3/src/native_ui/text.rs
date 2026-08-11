@@ -45,7 +45,7 @@ impl TextArea {
 
     fn on_constructed(&self) {
         // WinUI3's `TextBox` is a tab stop by default — see
-        // docs/design/gui_framework_design.md §5.5.
+        // docs/design/runtime/input_focus_design.md.
         self.set_tab_stop(true);
     }
 }
@@ -100,7 +100,7 @@ impl TextBox {
 
     fn on_constructed(&self) {
         // WinUI3's `TextBox` is a tab stop by default — see
-        // docs/design/gui_framework_design.md §5.5.
+        // docs/design/runtime/input_focus_design.md.
         self.set_tab_stop(true);
         // Enter-key submit rides the ordinary inherited `on_key_down` — see
         // `elwindui_core::ui::TextBox`'s own doc comment on why this isn't a dedicated field, and
@@ -170,7 +170,7 @@ impl PasswordBox {
 
     fn on_constructed(&self) {
         // WinUI3's `PasswordBox` is a tab stop by default — see
-        // docs/design/gui_framework_design.md §5.5.
+        // docs/design/runtime/input_focus_design.md.
         self.set_tab_stop(true);
     }
 }

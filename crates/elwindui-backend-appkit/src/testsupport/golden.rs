@@ -1081,4 +1081,4 @@ fn nested_push_opacity_multiplies_both_levels() {
 // production bug — but it makes a headless pixel golden for real text rendering unreliable in this
 // environment. `render/text.rs`'s `ns_font`/`measure_text` unit tests (weight/italic/stretch/
 // fallback/growth/wrap/kerning) are the real-machine verification for this feature instead; see
-// `docs/status/font_status.md` §11/§9 for the full record of what was tried and why.
+// `docs/design/runtime/text_design.md` for the full record of what was tried and why.

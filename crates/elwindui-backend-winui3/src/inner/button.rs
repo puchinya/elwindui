@@ -75,7 +75,7 @@ impl InnerButton {
     ///   Fluent expects destructive intent to be carried by wording and confirmation, not by a
     ///   stock red button style. Rather than invent one, this clears the style and sets the
     ///   foreground to the system critical brush, which is the closest honest approximation.
-    ///   Recorded as a known gap in `docs/status/nativecontrol_status.md`, the same way
+    ///   Recorded as a known gap in `docs/status/control_status.md`, the same way
     ///   `PasswordBox::reveal_enabled`'s reverse asymmetry already is.
     pub(crate) fn set_role(&self, role: ButtonRole) {
         let style = match role {
@@ -146,7 +146,7 @@ fn lookup_resource<T: Interface>(key: &str) -> Option<T> {
 /// Windows-only hosted-XAML regression tests. The `AnyView::measure`/`arrange` `Width`/`Height`
 /// stickiness case below needs a real `Application`, and the text-style checks intentionally share
 /// that one application instance because WinUI 3 cannot be started twice in one test process.
-/// bug — see that method's own doc comment and `docs/status/winui3_backend_status.md`'s "`AnyView::
+/// bug — see that method's own doc comment and `docs/design/backends/winui3_backend_design.md`'s "`AnyView::
 /// measure` resets `Width`/`Height` to `NaN`..." section for the full root cause. Needs a real,
 /// fully-hosted `Application` (via `crate::application::run`/the C++/WinRT shim) — not just COM/
 /// Bootstrap `init()` — because `Button`'s default style/template only resolves once `Application.
@@ -361,7 +361,7 @@ mod hosted_xaml_regression_tests {
             // A genuinely distinguishing label, not "Save"/"Open" — both already happen to exceed
             // the Fluent `Button`'s minimum width, which wouldn't by itself prove content is
             // contributing to the measured size (see this test's own history in
-            // docs/status/winui3_backend_status.md).
+            // docs/design/backends/winui3_backend_design.md).
             button.set_text("a very long button label");
             let view = button.handle();
             view.set_tooltip(Some("hosted tooltip"))

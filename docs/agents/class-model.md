@@ -5,7 +5,8 @@ Guidelines for AI agents working with `elwindui-macros` (`#[elwindui_macros::cla
 ## Specification Source of Truth
 
 - **Authoritative spec**: [`docs/specs/macro_class_spec.md`](../specs/macro_class_spec.md).
-- If `docs/design/gui_framework_design.md` §5.1a and `macro_class_spec.md` ever conflict, `macro_class_spec.md` is authoritative.
+- **Internal design**: [`docs/design/tools/class_macro_design.md`](../design/tools/class_macro_design.md).
+- If source or design conflicts with `macro_class_spec.md`, do not change the spec without an approved contract change.
 
 ## Class Hierarchy Convention
 

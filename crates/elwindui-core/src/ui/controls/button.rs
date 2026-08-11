@@ -47,7 +47,7 @@ pub enum ButtonRole {
 ///
 /// This *is* the native button — there is no separate `NativeButton` type. `role`/`is_default`
 /// were added here rather than to a parallel control (the open question
-/// `docs/status/nativecontrol_status.md` used to record) because everything they need is a
+/// `docs/status/control_status.md` used to record) because everything they need is a
 /// property of the same `NSButton`/`Button` widget this already wraps.
 ///
 /// `tooltip` is not declared here: it comes from `NativeControl`, so every native leaf has it.

@@ -8,7 +8,7 @@
 
 本書は `elwindui::ui` モジュールが公開するUI型（コントロール、レイアウト、シェイプ、ウィンドウ、メニュー、タブ等）の抽象モデルと各種プロパティ・イベントの契約を定義する。
 
-特定プラットフォームのバックエンド実装（AppKit / WinUI 3 / GTK4 等）や内部データ構造・コード生成機構の詳細は本書の対象外であり、[GUI Framework Design](../design/gui_framework_design.md) を参照すること。
+特定platformのbackend実装や内部データ構造・codegenの詳細は本書の対象外であり、[`../design/README.md`](../design/README.md) から対象designを選ぶ。共通text propertyは [`text_style_spec.md`](text_style_spec.md) を正本とする。
 
 ---
 
@@ -106,14 +106,11 @@ ElwindUI のすべてのビジュアル要素（`UIElement`）は、**Measure（
 #### 3. Render パス（描画出力）
 
 - **目的**: Arrange パスで確定した領域情報に従い、画面へビジュアル要素を出力する。
-- **自前描画ノード（`Shape`, `TextBlock` 等）**:
-  - `RenderContext` に対し、塗りつぶし・輪郭線描画・テキストグリフ出力などの描画コマンド（Render Command）を記録する。
-- **ネイティブコントロールノード（`NativeControl`）**:
-  - 各プラットフォームのネイティブウィジェットハンドル（AppKit: `NSView`, WinUI 3: `FrameworkElement` 等）の座標・サイズ・表示状態プロパティを確定領域に同期させる。
+- `Shape`や`TextBlock`等の自前描画要素と`NativeControl`は、同じarranged bounds、visibility、clip、opacity semanticsに従って出力される。
 
 #### 4. レイアウトの無効化（Layout Invalidation）
 
-見た目やサイズに影響を与えるプロパティ（`width`, `height`, `margin`, `text`, `visibility` 等）が更新された場合、該当要素はツリーのルート（`RelayoutHost`）へ向けて再レイアウト要求（`invalidate_measure` / `invalidate_arrange` / `invalidate`）を発火し、次フレームで Measure/Arrange パスが再実行される。
+見た目やサイズに影響を与えるproperty（`width`, `height`, `margin`, `text`, `visibility` 等）が更新された場合、必要なMeasure/Arrange/Renderが次のUI更新で再実行される。同じ更新中の複数変更はobservableな中間layoutを公開せずcoalesceしてよい。
 
 ### 2.6 Event routing model
 

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Single-line text input — see `docs/status/nativecontrol_status.md` for the wider
+/// Single-line text input — see `docs/status/control_status.md` for the wider
 /// NativeControl expansion this is part of. Deliberately narrower than the original spec's
 /// `TextBox` sketch: `selection_start`/`selection_length` are not included (AppKit's `NSTextField`
 /// selection lives on its *field editor*, which only exists while actively being edited — a shared

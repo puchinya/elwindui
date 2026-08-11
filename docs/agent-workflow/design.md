@@ -12,6 +12,8 @@ Issue-level design may propose changes to public behavior, but once approved:
 - durable implementation architecture belongs in [`docs/design/`](../design/);
 - current implementation progress belongs in [`docs/status/`](../status/).
 
+Follow the synchronization order in the root [`AGENTS.md`](../../AGENTS.md): establish an approved public contract before architecture, and establish durable architecture before code. Do not derive either from status.
+
 ## Required design topics
 
 Cover only the topics relevant to the change:
@@ -60,6 +62,8 @@ When approval is obtained:
 2. Remove stale planning text that conflicts with the approved specification.
 3. Replace `phase:design` with `phase:ready`.
 4. Remove `needs-user-decision` if no decision remains.
+
+Perform Issue and label updates with `gh`.
 
 If approval changes the requirements materially, remain in `phase:design` until the revised design is consistent.
 

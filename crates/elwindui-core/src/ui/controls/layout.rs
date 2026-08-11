@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// `Layout`'s own class trait (docs/design/gui_framework_design.md §5.1) — empty marker over `UIElement`,
+/// `Layout`'s own class trait (docs/design/runtime/ui_tree_design.md) — empty marker over `UIElement`,
 /// implemented by every layout-container virtual builtin (`VerticalLayout`/
 /// `HorizontalLayout`/`Grid`), the same way `NativeControl` groups every native leaf.
 ///

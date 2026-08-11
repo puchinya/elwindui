@@ -15,6 +15,7 @@ Before editing:
    - use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` on macOS/Linux or `scripts/agent/start-feature-branch.ps1 <issue-number> <short-description>` in PowerShell.
 4. Documentation-only or workflow-only changes may use a `docs/` or `agent/` branch instead.
 5. Replace `phase:ready` with `phase:implementation`.
+6. Classify the change using the synchronization table in the root [`AGENTS.md`](../../AGENTS.md) and confirm that every required upstream spec/design update has been approved before code is edited.
 
 The approved Issue is the implementation contract for the task scope.
 
@@ -32,6 +33,7 @@ It does not silently override normative specifications. If an approved change in
   - public contracts or normative behavior -> [`docs/specs/`](../specs/);
   - durable implementation architecture -> [`docs/design/`](../design/);
   - implementation progress, backend support, known gaps, or verification state -> [`docs/status/`](../status/).
+- Use `gh` for Issue, label, comment, Pull Request, review, and Actions operations. Use `git` for local branch, staging, commit, and push operations.
 
 ## Handling specification disagreement during implementation
 
@@ -78,6 +80,9 @@ Before creating the Pull Request, inspect the complete diff and verify:
 - no unrelated changes are present;
 - tests cover important normal, boundary, and failure behavior;
 - public API and documentation are consistent;
+- architecture and design documentation are consistent;
+- implementation/verification changes are reflected in status without using status to redefine upstream behavior;
+- Agent instructions, commands, and document paths affected by the change are synchronized;
 - error handling and unsafe assumptions are justified;
 - generated files or lockfile changes are intentional.
 
@@ -90,3 +95,5 @@ After implementation and verification:
 3. Create the Pull Request with `Closes #<issue-number>`.
 4. Replace `phase:implementation` with `phase:review`.
 5. Read `docs/agent-workflow/review.md`.
+
+Perform the Issue update, Pull Request creation, and phase-label transition with `gh`.

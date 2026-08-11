@@ -15,11 +15,14 @@ The Pull Request description must contain:
 - focused reviewer guidance;
 - `Closes #<issue-number>`.
 
+Create and inspect the Pull Request, comments, reviews, labels, and Actions checks with `gh`.
+
 The Issue remains the approved specification. The Pull Request describes the actual implementation and evidence.
 
 ## Review handling
 
 1. Inspect all review submissions, inline threads, and required CI checks.
+   Also verify the root `AGENTS.md` synchronization order: public changes have an approved spec, architecture changes have an updated design, current-state changes have an updated status, and no removed document path remains.
 2. For each actionable comment:
    - implement the change;
    - explain why no change is appropriate;

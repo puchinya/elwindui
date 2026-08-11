@@ -57,7 +57,7 @@ pub struct TreeHostIvars {
     pub(crate) weak_self: RefCell<objc2::rc::Weak<TreeHostView>>,
     /// Turns this view's own raw `NSEvent`s into `elwindui_core::ui::hit_test`/`dispatch_routed`
     /// calls against `tree` — see `elwindui_core::input::PointerDispatcher`'s own doc comment.
-    /// `docs/design/gui_framework_design.md` §5.10's currently-implemented range: self-drawn
+    /// The current backend range recorded in `docs/status/backend_status.md`: self-drawn
     /// elements only, since a native subview (`Button`/`TextArea`/`TabView`, laid out as its own
     /// `native_containers` island) receives the OS mouse event directly via ordinary AppKit
     /// hit-testing, never reaching this view's own overrides below at all.
@@ -66,7 +66,7 @@ pub struct TreeHostIvars {
     /// against whichever element currently has focus, and owns the `FocusTracker`/
     /// `ShortcutRegistry` for whatever tree this view hosts — see
     /// `elwindui_core::input::KeyboardDispatcher`'s own doc comment.
-    /// `docs/design/gui_framework_design.md` §5.5/§8.1's currently-implemented range mirrors
+    /// The current backend range recorded in `docs/status/backend_status.md` mirrors
     /// `pointer`'s own: self-drawn
     /// elements' virtual focus is real (`KeyboardDispatcher::focus` is the single source of truth),
     /// but a native leaf (`Button`/`TextArea`/`TabView`) receives real OS keyboard focus/events
@@ -112,7 +112,7 @@ pub struct TreeHostIvars {
     /// `request_relayout` call at all) is never treated as a `Render`-only pass.
     pub(crate) last_layout_size: Cell<objc2_foundation::NSSize>,
     /// Whether this host currently participates in layout/render at all — the AppKit-side half of
-    /// `docs/design/gui_framework_design.md` §5.4a's "container participation" (a `Visible`-vs-
+    /// `docs/design/runtime/layout_design.md`'s "container participation" (a `Visible`-vs-
     /// `Collapsed` element's own `UIElementExt::participates_in_layout()` is the *other* half, and
     /// is orthogonal to this one: neither overwrites the other). `true` for every host by default
     /// (matches every existing host's behavior — only `InnerTabView`'s non-selected-tab hosts ever
@@ -534,7 +534,7 @@ impl TreeHostView {
     }
 
     /// Activates or suppresses this host's own layout/render participation — the mechanism behind
-    /// `InnerTabView`'s non-selected tabs (docs/design/gui_framework_design.md §5.4a): a
+    /// `InnerTabView`'s non-selected tabs (docs/design/runtime/layout_design.md): a
     /// suppressed host keeps its `tree` (so a previously-shown-then-hidden tab doesn't lose any
     /// state) but discards `render_tree` and every retained backend resource that tree produced
     /// (`CALayer`s, native control islands, image/vector-raster caches), and `relayout_inner`
@@ -833,7 +833,7 @@ impl TreeHostView {
             // Manual, opt-in observation point for the numbers `record_memory_stats` populates —
             // there is otherwise no way to read `render::stats::snapshot()` from outside the
             // process. `ELWINDUI_RENDER_STATS=1 cargo run -p <example>` prints one JSON-ish line
-            // per relayout pass; see `docs/status/implementation_status.md` §9 for how this feeds
+            // per relayout pass; see `docs/status/implementation_status.md` for how this feeds
             // the AppKit render-optimization work's per-step measurement table.
             if std::env::var_os("ELWINDUI_RENDER_STATS").is_some() {
                 let s = crate::render::stats::snapshot();

@@ -1,5 +1,5 @@
 //! `#[elwindui_macros::class]` — automates the H.2.1a class-hierarchy convention
-//! (docs/design/gui_framework_design.md §5.1): `struct ClassName { base: SuperClassName, .. }` implementing
+//! (docs/design/runtime/ui_tree_design.md): `struct ClassName { base: SuperClassName, .. }` implementing
 //! `trait ClassNameExt: SuperClassNameExt` (plus every ancestor trait), delegating ancestor methods
 //! to `self.base`.
 //!

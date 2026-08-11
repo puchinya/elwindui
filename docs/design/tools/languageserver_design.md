@@ -1,83 +1,59 @@
-# ElwindUIL LanguageServer(`elwindui-languageserver`)設計書
+# ElwindUIL Language Server設計
 
-本書は、ElwindUILの言語サーバー `elwindui-languageserver` の設計を定める。ツールチェーン全体のアーキテクチャ概観は `docs/design/tools/codegen_design.md` §6を参照。
+本書は `elwindui-languageserver` のdocument lifecycle、incremental analysis、editor protocol境界を定める。DSL contractは [`dsl_spec.md`](../../specs/dsl_spec.md)、compiler pipelineは [`codegen_design.md`](codegen_design.md)、実装状況は [`../../status/tooling_status.md`](../../status/tooling_status.md)を参照する。
 
-## 1. スコープ
+## 1. 責務
 
-`elwindui-languageserver` は ElwindUILの`#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`マクロを使う`.rs`ファイルを対象とする専用言語サーバー(LSP)であり、エディタ(VSCode等)に対して以下を提供する裏方プロセスである。
+Language Serverは次を担当する。
 
-- 入力中からの即時診断(制約違反、enum網羅漏れ、無効な`<=>` RHSなど)
-- 生成されるRustコードのプレビュー表示
-- enumメンバー等にホバーした際の、Fluentメッセージ(`t!`)の解決結果表示
+- workspace内Rust documentのopen/change/save/close状態を管理する
+- ElwindUIL attributeと `view!` 範囲を抽出する
+- codegenのparserとvalidatorを再利用してdiagnosticをpublishする
+- DSL contextに応じたcompletion、hover、semantic tokenを返す
+- preview要求をpreview subsystemへroutingする
 
-プレビューパネル(WebView)自体の表示方式(静的/インタラクティブ/ホットリロード反映の3段階のUI)の詳細設計は `docs/design/tools/preview_design.md` に譲る。本書はLanguageServerが「診断・型検査・制約検証・プレビュー用インスタンスの生成」までを担う範囲に限定する。コード生成(プロシージャルマクロのコンパイラ本体)は `docs/design/tools/codegen_design.md`、ホットリロード機構は `docs/design/tools/hotreload_design.md`、DSL構文自体は `docs/specs/dsl_spec.md`、フレームワーク設計(`Element`トレイト等)は `docs/design/gui_framework_design.md` を参照。
+Rust全体のtype check、build、backend実行はrustc、Cargo、各toolへ委譲する。
 
-対象は単一の`.rs`ファイルである。ディレクトリを1つの検証単位として扱うモデルは採らない。
+## 2. Analysis pipeline
 
-## 2. 全体アーキテクチャにおける位置づけ
-
-ツールチェーン全体のアーキテクチャ図は `docs/design/tools/codegen_design.md` §6を参照。`elwindui-languageserver` は、エディタからの保存イベントを起点に「増分パース・型検査・制約検証」(実装済み)と「プレビュー用インスタンス生成(既定値/モック)」(未実装、§4参照)を行う中核プロセスであり、その結果を①②のプレビューとしてWebViewへ送信する。実機での動作確認(③)が必要な場合のみ、下流の実行中アプリ(dylibホットリロード)へと連携が伸びる形になる。すなわちLanguageServerは、エディタ・プレビューパネル・ホットリロード対象アプリという3者をつなぐハブとして位置づけられる。
-
-ツールチェーン層はいずれもDSLの言語仕様(`component`/`view`/`param`/`prop`/`Element`トレイト等)を変更せずに構築できるものと位置づけられており、LanguageServerも言語仕様に新たな構文を追加することはない。
-
-## 3. 提供する診断・補完機能
-
-以下の3つの機能を提供する。
-
-1. **入力中からの即時診断**
-   - 制約違反(`#[range]`/`#[length]`/`#[pattern]`/`#[format]`/`#[check]`等、6章)
-   - enumの網羅漏れ(`match`が全メンバーを網羅していない、7章)
-   - `#[param]`の静的評価式違反、`#[state]`競合、無効な`<=>` RHSなど(4章・9章)
-   - その他、13章「静的検証ルール一覧」に列挙された全項目(ルール1〜24)。これらはコンパイラ/リンタが実行前に検出すべき項目として定義されており、`elwindui-languageserver`はその実行環境をエディタ内でリアルタイムに提供する役割を担う。ルール個々の詳細(何が違反でどの付録が根拠か)は `docs/design/gui_framework_design.md` を参照。
-2. **生成されるRustコードのプレビュー表示**
-   - コード生成器(`elwindui-codegen`)が出力するRustソースに相当する内容をエディタ上でプレビュー表示する。
-3. **ホバー情報**
-   - enumメンバー等にホバーした際、Fluentメッセージ(`t!`)の解決結果を表示する(10章のi18n仕組みと連動)。
-
-**実装状況**: 上記1(即時診断)は`elwindui_codegen::{component_frontend, validate}`をそのまま再利用する形で実装済み(`src/diagnostics.rs`) — `syn::parse_file`が対象`.rs`ファイルをパースし、`component_frontend::modules_from_file`が`#[elwindui::component]`/`#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`アイテムをそのファイルの範囲内で見つけて`Module`化する(実マクロ展開は行わない)。`syn::parse_file`自体が失敗した場合(構文エラー)は実際の行・列情報付きで報告される。2(コードプレビュー)・3(ホバー)は未実装。
-
-上記3機能には含まれないが、以下も実装済み:
-
-- `textDocument/completion`による`vm.field`のメンバー補完(`src/completion.rs`、`elwindui_codegen::codegen::SymbolTable::resolve`を利用)。アクションも他のフィールドと同じ1階層の補完で扱われる。
-- `textDocument/semanticTokens/full`による独自シンタックスハイライト(`src/semantic_tokens.rs`)。対象は**`view! { .. }`マクロ本体に限定する** — `view!`はrust-analyzerが構文を理解できない唯一の部分(実在しないマクロで、単なる未展開トークン列にしか見えない)であり、そこだけを対象にすればrust-analyzer自身のRustハイライトと二重提供にならない。実装は軽量トークナイザ(文字単位スキャナ、AST/spanを経由しない設計は`elwindui_codegen::parser`の仕様どおり)を使いつつ、`syn::parse_file`のASTから各`view!`フィールドの実ソース上のバイト範囲を特定し(`proc-macro2`の`span-locations`機能——実プロシージャルマクロの外でも正確な`byte_range()`が取れる)、その範囲内の文字だけをトークナイズする。範囲外の文字は行・列カウントのためスキャンだけして分類はスキップする。
-
-| semantic token | 対象例 |
-|---|---|
-| `keyword` | `component`、`view`、`state` |
-| `type` | `TextArea`、`String` |
-| `macro` | `once!`、`t!`、`format!`、`theme!` |
-| `variable` | 属性名、`#[bindable]` owner、State名 |
-| `string` / `number` / `comment` | 各リテラルとコメント |
-
-まとめると、実装済みなのは「即時診断・メンバー補完・`view!`本体限定のシンタックスハイライト」の3つであり、§4に述べる「プレビュー用インスタンス生成」パイプライン(オフスクリーンレンダリングを含む)およびホバー情報・生成コードプレビューは未実装。
-
-**クロスファイル解決は提供しない**: 別ファイルのviewmodelを参照する`vm.field`は検証対象外である。実際のマクロ展開自体、宣言順に populate される同一クレート内レジストリ(`component_frontend::same_crate_components`等)にしか依存しておらず、実コンパイルを行わないLSPには再現不能なため。
-
-## 4. 増分パース〜プレビュー用インスタンス生成のパイプライン
-
-**実装状況の注**: 本章が述べる「component既定値でのインスタンス化」以降(オフスクリーンレンダリング・WebViewへの画像送信を含む)は未実装。現在実装済みなのは「増分パース(保存/変更イベントで再パース)→ 型検査・制約検証 → 診断のpublish」までであり、これは§3の1(即時診断)と同じ範囲にとどまる。以下は`docs/design/tools/preview_design.md`のレベル①として定義されているフローであり、将来実装の対象。
-
-`docs/design/tools/preview_design.md`のレベル①(静的プレビュー)の処理フローとして定義されている通り、LanguageServer内部のパイプラインは以下の順で進行する。
-
-```
-.rs保存 → LSPが対象ファイルを再パース → component既定値でインスタンス化
-    → バックエンドのオフスクリーンレンダリング → WebViewへ画像送信
+```text
+LSP document event
+       ↓
+document snapshot and affected-range selection
+       ↓
+Rust syntax parse and ElwindUIL item extraction
+       ↓
+codegen frontend / validation reuse
+       ↓
+diagnostics and editor features
 ```
 
-- **増分パース**: 保存イベントをトリガーに、変更箇所を中心に再パースする。
-- **型検査・制約検証**: `docs/specs/dsl_spec.md`3章の`component`/`view`定義、6章の値制約、7章のenum網羅性検査などを実行し、診断結果(エラー/警告)をエディタに返す。
-- **プレビュー用インスタンス生成**: `component`の既定値でインスタンス化する(①静的プレビュー向け)。②インタラクティブプレビュー向けには、`docs/design/tools/preview_design.md`に定義される通り、`<=>`の書き込み可能RHSと`#[state]`を検出し、プレビュー専用のコントロールUI(スライダー・テキスト欄等)に置き換える。
-- 生成されたインスタンスの実際の描画(バックエンドのオフスクリーンレンダリング)およびWebViewへの送信は、プレビューパネル側の責務との境界にあたる(詳細は`docs/design/tools/preview_design.md`)。LanguageServerはレンダリング可能なインスタンス(既定値/モック値で構築された要素ツリー)を生成し引き渡すところまでを担う。
+document snapshotにはversionを付け、古いanalysis結果を新しいversionへpublishしない。syntax errorでfull ASTを構築できない場合も、取得可能なrangeとtokenから限定的なeditor responseを返せる構造にする。
 
-## 5. 他ツールとの連携インターフェース
+## 3. Compilerとの共有境界
 
-- **コード生成器(`elwindui-codegen`)との関係**: LanguageServerはフロントエンド変換・ASTをコード生成器と共有する(実マクロ展開と同一の解析基盤、`component_frontend::modules_from_file`)。「生成されるRustコードのプレビュー表示」は、コード生成器が最終的に出力するのと同じASTから導出される。共有フロントエンド/ASTの具体的な実装分割は `docs/design/tools/codegen_design.md` 側の設計に従う。
-- **プレビューパネル(WebView)への送信内容**: ①静的プレビューでは既定値インスタンスのオフスクリーンレンダリング結果(画像)、②インタラクティブプレビューでは`<=>` RHSと`#[state]`をモック化したインスタンスと、それを操作するためのコントロールUI情報を送信する。WebView側の受信・表示・操作UIの詳細は `docs/design/tools/preview_design.md` を参照。
-- **ホットリロードとの関係**: ③実行中アプリへの反映は、LanguageServerが直接担うものではなく任意経路として存在する(`docs/design/tools/codegen_design.md`§6の図参照)。ホットリロードは`#[param]`変更時の再マウント、prop変更のみの場合の差分更新という、既存の`param`/`prop`区分をそのまま利用する仕組みであり、LanguageServerが行う型検査・制約検証の結果(検証済みであること)を前提として実行される。詳細設計は `docs/design/tools/hotreload_design.md` を参照。
+parser、AST、validation ruleをLSP用に再実装しない。compilerと共有する層はfile I/O、LSP type、backend handleを含まず、token、AST、diagnostic spanで入出力する。
 
-## 6. 非スコープ
+macro expansion時にしか取得できないcross-item情報は、workspace indexが同等のmetadataを供給する。確定できない型やpathを推測で有効扱いせず、rustc diagnosticと競合しない補助情報として扱う。
 
-- プレビューパネルのUI・3段階のプレビューレベルそのものの設計 → `docs/design/tools/preview_design.md`
-- プロシージャルマクロによるコード生成の詳細 → `docs/design/tools/codegen_design.md`
-- `hot-lib-reloader`等を用いた動的ライブラリ差し替えの詳細 → `docs/design/tools/hotreload_design.md`
-- DSLの言語仕様そのもの(`component`/`view`/`param`/`prop`等) → `docs/specs/dsl_spec.md`、フレームワーク設計(`Element`トレイト等) → `docs/design/gui_framework_design.md`
+## 4. Editor feature
+
+- Diagnostic: DSL syntax、name、binding direction、compile-time constraintを元rangeへ対応付ける
+- Completion: component property、event、ViewModel member、enum memberをcontextで絞る
+- Hover: public typeとcontractへの短い説明を返し、内部implementation detailを公開APIとして表示しない
+- Semantic token: `view!` 内のelement、property、event、binding、control-flowを分類する
+- Generated-code view: debug用途のvirtual documentとして生成物を提示し、source documentとして編集させない
+
+featureは同じanalysis snapshotを共有し、相互に異なるname resolution結果を作らない。
+
+## 5. Preview連携
+
+preview要求は対象component、document version、検証済みmetadataを [`preview_design.md`](preview_design.md) の境界へ渡す。render processやWebView stateをLanguage Serverのanalysis stateへ混在させない。preview側のfailureはcompiler diagnosticと区別したtool diagnosticとして返す。
+
+## 6. Invariants
+
+- DSL semanticsの正本はspecとcodegen validatorであり、LSP独自ruleを追加しない。
+- stale document versionの結果をpublishしない。
+- editor request処理でnative backend objectを生成しない。
+- workspace indexはsource metadataから再構築可能にする。
+- featureの対応状態とgapはdesignではなくtooling statusに記録する。

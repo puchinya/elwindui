@@ -1,5 +1,5 @@
 //! AppKit backend — the concrete widget surface `elwindui-codegen` targets on macOS.
-//! See docs/design/gui_framework_design.md §3.
+//! See docs/design/backends/appkit_backend_design.md.
 //!
 //! Layering — dependencies run one way only, `native_ui -> inner -> host -> render -> ffi`:
 //!

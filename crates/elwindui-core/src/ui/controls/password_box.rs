@@ -7,7 +7,7 @@
 /// semantics on obscured text are rarely product-relevant). The field/method is named `password`,
 /// not `text`, everywhere (trait, `#[class]` declaration, backend structs) — a deliberate naming
 /// divergence from `TextBox` so nothing can accidentally get routed through a code path that
-/// assumes plaintext display is fine. See `docs/status/nativecontrol_status.md` for the
+/// assumes plaintext display is fine. See `docs/status/control_status.md` for the
 /// `reveal_enabled` AppKit/WinUI3 asymmetry this control has (WinUI3's `PasswordRevealMode` is
 /// native; AppKit's `NSSecureTextField` has no equivalent, so `true` is a documented no-op there).
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]

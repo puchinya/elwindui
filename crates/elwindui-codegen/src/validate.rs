@@ -1,6 +1,6 @@
 //! A narrow slice of the ~24 static verification rules in docs/specs/dsl_spec.md §13 — only the
 //! ones reachable by the constructs the notepad example actually uses. See
-//! docs/design/gui_framework_design.md §10 for the full rule list.
+//! docs/specs/dsl_spec.md for the normative validation rules.
 
 use crate::ast::{
     AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind,
@@ -288,7 +288,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 &mut errors,
                             );
                         }
-                        // Phase 0 (docs/design/gui_framework_design.md §5.1): `view.root` is now a bare
+                        // Phase 0 (docs/design/runtime/ui_tree_design.md): `view.root` is now a bare
                         // `ast::ViewBody` — resolve it to the concrete `ElementNode` every other
                         // check below still expects, exactly the way `codegen::generate_view` does
                         // (a composable `base` implicitly wraps the whole body; otherwise the body
@@ -1282,7 +1282,7 @@ fn check_dynamic_child_hosts(
                     || ty.trim_start().starts_with("Vec<")
                     || ty.contains("ListExt<")
             });
-            // Phase 2 (docs/design/gui_framework_design.md §5.1): a *scalar* `#[content(...)]` field (e.g.
+            // Phase 2 (docs/design/runtime/ui_tree_design.md): a *scalar* `#[content(...)]` field (e.g.
             // `ContentControl`/`Window`'s `content: Rc<dyn UIElement>`) can also host `if`/`match`
             // dynamic children now — not `for` (a variable-length list can never fit one slot), and
             // only if every branch, recursively, resolves to exactly one element (no `for`
@@ -1412,7 +1412,7 @@ fn check_attached_properties(
     }
 }
 
-/// `#[shortcut(...)]` (docs/design/gui_framework_design.md §8.1) only means anything on an
+/// `#[shortcut(...)]` (docs/design/runtime/input_focus_design.md) only means anything on an
 /// attribute that's actually `#[routed]` on this element's resolved type (same reasoning as
 /// `on_click`/`on_key_down` themselves being callback-shaped, not arbitrary data) — checked here,
 /// against the concrete usage site, rather than in `parse_field_def`'s per-declaration checks: a
@@ -1639,7 +1639,7 @@ fn check_element_value(
 ///   e.g. `Button`/`Window`) — falls through to the same "`X`'s own `view` root must literally
 ///   construct `Base`" check as the shape-composition case below (this is how a hand-written
 ///   native host like `Window` gets inherited — `codegen`'s `host_composition_base` resolution;
-///   docs/design/gui_framework_design.md §5.1).
+///   docs/design/runtime/ui_tree_design.md).
 /// - A primitive shape family with no `view` of its own (`has_view == false`, has real fields,
 ///   e.g. `Control`/`Rectangle`) — unchanged from before real field inheritance: `X` must have its
 ///   own `view` whose root element is literally `Base` (the shape-composition use case,
@@ -1699,7 +1699,7 @@ fn validate_inherits(
     }
 
     // The three root category tags of the whole class hierarchy
-    // (docs/design/gui_framework_design.md §5.1) — `UIElement` (the root), and its two immediate
+    // (docs/design/runtime/ui_tree_design.md) — `UIElement` (the root), and its two immediate
     // abstract branches `Layout`/`NativeControl` — are never themselves a `view`'s root anywhere
     // (structurally: nothing
     // meaningfully "is" a bare `UIElement`/`Layout`/`NativeControl`, as opposed to some concrete
@@ -1739,7 +1739,7 @@ fn validate_inherits(
     }
 
     // A primitive shape family (`has_view == false`, not native): `X` must have its own `view` —
-    // Phase 0's implicit-composition sugar (docs/design/gui_framework_design.md §5.1) means that `view`'s
+    // Phase 0's implicit-composition sugar (docs/design/runtime/ui_tree_design.md) means that `view`'s
     // body is always implicitly `base`'s own attributes/children directly (no wrapper element to
     // check the shape of anymore); a virtual-builtin base has no `view` of its own to fall back to
     // as a template, so `X` must still declare one.
@@ -2264,7 +2264,7 @@ view Window11 {
         assert_eq!(validate(&modules), Ok(()));
     }
 
-    /// `inherits`'s shape-composition use case (docs/specs/dsl_spec.md §3, docs/design/gui_framework_design.md §5.1): a component
+    /// `inherits`'s shape-composition use case (docs/specs/dsl_spec.md §3, docs/design/runtime/ui_tree_design.md): a component
     /// inheriting a primitive shape family with no `view` of its own must have its own `view`, whose
     /// body is always implicitly `Shape`'s own attributes/children (Phase 0's implicit-composition
     /// sugar — no `Shape { .. }` wrapper written) — `fill` is inherited from `Rectangle`
@@ -2340,7 +2340,7 @@ view Foo {
         );
     }
 
-    /// Phase 0 (docs/design/gui_framework_design.md §5.1) removed the old "own `view`'s root element must
+    /// Phase 0 (docs/design/runtime/ui_tree_design.md) removed the old "own `view`'s root element must
     /// literally construct `base`" requirement entirely — a composable base's `view` body is always
     /// implicitly its own attributes/children now, so there's no longer a *root shape* for
     /// `validate::validate` to reject here. `Shape` has no `#[content(...)]` field to bind a bare
@@ -2366,7 +2366,7 @@ view RoundedPanel {
         assert_eq!(validate(&modules), Ok(()));
     }
 
-    /// Phase 2 (docs/design/gui_framework_design.md §5.1): a scalar `#[content(...)]` field (`ContentControl`'s
+    /// Phase 2 (docs/design/runtime/ui_tree_design.md): a scalar `#[content(...)]` field (`ContentControl`'s
     /// `content: Rc<dyn UIElement>`) can host `if`/`match` dynamic children now, but never `for` — a
     /// variable-length list can never fit a single-value slot.
     #[test]

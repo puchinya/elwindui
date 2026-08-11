@@ -14,7 +14,7 @@ impl<T: Any> AsAny for T {
     }
 }
 
-/// See docs/design/gui_framework_design.md §5.3. Common geometry primitives shared across layout
+/// See docs/design/runtime/layout_design.md. Common geometry primitives shared across layout
 /// (`elwindui_core::layout`), painting (`elwindui_core::graphics`), input
 /// (`elwindui_core::input`), and every backend crate — kept in their own module rather than
 /// under `layout`/`graphics` since neither of those is the "owner" of a concept this widely used.

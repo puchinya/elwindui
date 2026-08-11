@@ -6,7 +6,7 @@ use elwindui_core::theme::{ThemeContext, ThemeHandle};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// `component X inherits Window` ("host composition", docs/design/gui_framework_design.md §5.1) is what
+/// `component X inherits Window` ("host composition", docs/design/runtime/ui_tree_design.md) is what
 /// actually inherits this — hence `struct_only`'s target being `elwindui_core::ui::WindowExt`
 /// itself. `Window` is deliberately *not* a `UIElement` (no `inherits` here at all) — like AppKit's
 /// `Window`, it's a separate top-level concept, not embeddable as a child.

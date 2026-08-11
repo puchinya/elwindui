@@ -1,6 +1,6 @@
 # Common Agent Guidelines
 
-These rules apply to all AI agent work modifying Rust code and documentation in this repository.
+These rules apply to all AI agent work modifying Rust code and documentation in this repository. Repository-wide document authority, synchronization order, Issue workflow, and `gh` CLI rules are defined only in the root [`AGENTS.md`](../../AGENTS.md).
 
 ## Rules
 

@@ -131,7 +131,7 @@ impl TabView {
             .expect("TabView::on_constructed: owner must be this TabView");
         *self.weak_self.borrow_mut() = Rc::downgrade(&this);
         // WinUI3's `TabView` is a tab stop by default — see
-        // docs/design/gui_framework_design.md §5.5.
+        // docs/design/runtime/input_focus_design.md.
         self.set_tab_stop(true);
     }
 

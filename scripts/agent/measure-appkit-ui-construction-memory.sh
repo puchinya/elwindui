@@ -7,10 +7,10 @@ cd "$repo_root"
 
 readonly sample_count=5
 readonly settle_ms=5000
-readonly report_path="docs/status/appkit_ui_construction_memory.md"
 readonly baseline_binary="target/release/examples/appkit-memory-baseline"
 readonly graphics_demo_binary="target/release/graphics-demo"
 readonly raw_root=".agent-state/issues/60/ui-construction-$(date -u '+%Y%m%dT%H%M%SZ')"
+readonly report_path="$raw_root/report.md"
 
 declare -a sample_cases=()
 declare -a sample_runs=()

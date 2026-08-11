@@ -3,7 +3,7 @@
 //! Mirrors `elwindui-backend-appkit::native_ui::control` file-for-file (`lib.rs`'s own doc
 //! comment) — see that file's identical doc comments for the full rationale behind the
 //! `text_style`/`applied`/`sync_text_style` shape below. **Unverifiable on this machine**
-//! (`#![cfg(target_os = "windows")]`, `docs/status/font_status.md` §6/§9): written to the same
+//! (`#![cfg(target_os = "windows")]`, `docs/design/runtime/text_design.md`): written to the same
 //! shape as the AppKit side, but never compiled or type-checked here.
 
 use crate::AnyView;

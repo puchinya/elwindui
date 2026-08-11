@@ -1,20 +1,16 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Claude Code must follow the repository-wide rules in [`AGENTS.md`](AGENTS.md). This file is only the Claude Code entry point and does not redefine shared workflow, document authority, or product behavior.
 
 ## Communication
 
-When asking the user a question (clarifying questions, `AskUserQuestion`, plan checkpoints, etc.), always ask in Japanese.
+Ask all user questions in Japanese.
 
-## Repository Policy & Single Source of Truth
+## Claude Code routing
 
-- Repository-wide workflow policies are defined in [`AGENTS.md`](AGENTS.md).
-- Follow the Issue-driven workflow and phase routing outlined in `AGENTS.md`.
+1. Read the active Issue phase label and only the corresponding workflow document listed in [`AGENTS.md`](AGENTS.md).
+2. Start document lookup at [`docs/README.md`](docs/README.md), then use the category README to choose the smallest relevant spec/design/status set.
+3. Read only the relevant technical guide under [`docs/agents/`](docs/agents/).
+4. Use `gh` for GitHub operations and `git` for local branch/commit/push operations, as required by [`AGENTS.md`](AGENTS.md).
 
-## Document Routing & Context Minimization
-
-- **Primary document router**: Use [`docs/README.md`](docs/README.md) to locate relevant specifications, designs, status reports, and technical rules.
-- **Code-first investigation**: Start task research from target source code and symbols to locate the affected implementation and understand its current state. This is an investigation strategy (see [`AGENTS.md`](AGENTS.md)), not a source-of-truth rule.
-- **Do not read large documents in full**: Search [`docs/specs/`](docs/specs/), [`docs/design/`](docs/design/), and [`docs/status/`](docs/status/) using `rg` first and read only the relevant ranges.
-- **Technical agent rules**: Read only the relevant domain rules under [`docs/agents/`](docs/agents/) (`common.md`, `codegen.md`, `class-model.md`, `backend-common.md`, `appkit.md`, `winui3.md`, `testing.md`).
-- **Sibling backends**: Do not inspect sibling backend code unless cross-backend parity or shared behavior changes are explicitly requested.
+Do not scan all specifications or designs, do not treat source code as the normative contract, and do not read `docs_only_human/` during ordinary implementation work.

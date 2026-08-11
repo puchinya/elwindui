@@ -4,7 +4,7 @@ use crate::ui::UIElementExt;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
-/// See docs/design/gui_framework_design.md §5.5. `Up`/`Down`/`Left`/`Right` are declared for API
+/// See docs/design/runtime/input_focus_design.md. `Up`/`Down`/`Left`/`Right` are declared for API
 /// completeness but not yet implemented by `FocusTracker::move_focus` — 2D spatial navigation needs
 /// each tab stop's own arranged rect, which isn't threaded through here yet. Only `Next`/`Previous`
 /// (`Tab`/`Shift+Tab`) are wired, via `KeyboardDispatcher::handle_key`.
@@ -47,10 +47,10 @@ fn tab_order(scope: &Rc<dyn UIElementExt>) -> Vec<Rc<dyn UIElementExt>> {
 
 /// Tracks which element (if any) currently has keyboard focus within a hosted tree — the
 /// `Rc<dyn UIElementExt>`-based counterpart to `elwindui_core::input::PointerDispatcher`, and the
-/// concrete runtime backing for `docs/design/gui_framework_design.md` §5.5. Owned by
+/// concrete runtime backing for `docs/design/runtime/input_focus_design.md`. Owned by
 /// `KeyboardDispatcher` (one per hosted tree), the same "host owns exactly one instance" pattern
 /// `PointerDispatcher` already uses. Deliberately not keyed by an `ElementId` string — see
-/// docs/design/gui_framework_design.md §5.2's note that a string-id-based `find_by_id` is
+/// docs/design/runtime/ui_tree_design.md's note that a string-id-based `find_by_id` is
 /// intentionally not provided, so an id-keyed API would have no way to resolve back to a real tree
 /// node in the first place.
 #[derive(Default)]

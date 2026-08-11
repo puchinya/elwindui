@@ -8,6 +8,8 @@ Turn the initial request into a bounded, testable problem statement without star
 
 ## Required actions
 
+Use `gh` for every GitHub Issue, label, milestone, comment, and Pull Request operation in this workflow. The root [`AGENTS.md`](../../AGENTS.md) is authoritative for GitHub tooling and document synchronization.
+
 1. Search for an existing Issue, Pull Request, implementation, and relevant specification before creating anything new.
 2. If this is a repository-changing task and no Issue exists, create one before editing source or documentation.
 3. For a Rust repository, derive the target milestone from the root `Cargo.toml`:
@@ -33,6 +35,7 @@ Turn the initial request into a bounded, testable problem statement without star
    - constraints;
    - verifiable acceptance criteria;
    - unresolved questions.
+   Classify any proposed code change as public contract, internal architecture, implementation-only, bug fix, or verification-only so the required upstream documents are known before design begins.
 7. Do not silently resolve an ambiguity that would materially change public API, compatibility, architecture, supported platforms, or scope.
 8. Use `needs-user-decision` when a user decision blocks progress. Use `blocked` only for an external or technical blocker.
 9. Do not rewrite the Issue body after every exchange. Keep draft reasoning in the active conversation.

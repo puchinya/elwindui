@@ -1,20 +1,20 @@
 //! Manual verification harness for the NativeControl expansion Phase 1 controls (TextBox/
-//! PasswordBox/ScrollView) added in `docs/status/nativecontrol_status.md`, following
+//! PasswordBox/ScrollView) added in `docs/status/control_status.md`, following
 //! `examples/graphics-demo`'s own structure (single `main.rs`, `#[elwindui::viewmodel]`, one
 //! `TabView` with one tab per area — see that file's own doc comment for why this shape was
 //! chosen). Unlike `graphics-demo` (which exercises custom-drawn `Canvas` content), every tab here
 //! is real DSL usage of the new native controls, each showing: the current property value
 //! (round-tripped through two-way binding), an event log (`on_change`/`on_got_focus`/
 //! `on_lost_focus`/submit), and — for TextBox — live focus state, the most direct manual check for
-//! the native-focus-in wiring (§1a) this Phase's common infrastructure work added.
+//! the native-focus-in wiring this Phase's common infrastructure work added.
 //!
 //! `PasswordBox`'s own event log deliberately never shows the password value itself, only its
 //! length (`"changed (len=N)"`) — this demo's own source doubles as documentation of the no-leak
-//! policy `docs/status/nativecontrol_status.md` requires (§1.6).
+//! policy recorded by `docs/status/control_status.md`.
 //!
 //! The "Regression" tab re-exercises the *existing* `TextArea`/`Button` controls (unchanged by this
 //! Phase, but affected by its common-infrastructure focus-wiring changes) as the demo counterpart
-//! to the `docs/status/nativecontrol_status.md` §2 regression-check procedure.
+//! to the `docs/status/control_status.md` regression-check procedure.
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
@@ -523,7 +523,7 @@ struct ControlsDemoWindow {
                             // `NSSlider`'s own `fittingSize()` has no natural width (a slider's
                             // length isn't content-derived the way a button's title is) — an
                             // explicit `width` is required, the same way any `UIElement` overrides
-                            // its own measured size (docs/design/gui_framework_design.md §5.1).
+                            // its own measured size (docs/design/runtime/ui_tree_design.md).
                             width: 200.0
                             value <=> vm.slider_value
                             min: vm.slider_min

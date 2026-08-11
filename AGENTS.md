@@ -52,7 +52,7 @@ Different document classes answer different questions. Do not use one class as a
 - **Implementation architecture**:
   [`docs/design/`](docs/design/) defines how the normative specifications are intended to be implemented. Design documents must conform to `docs/specs/` and do not override them.
 - **Current implementation status**:
-  Source code and tests show the actual current implementation. [`docs/status/`](docs/status/) summarizes implementation progress, backend support, known gaps, and verification state. A difference between source/status and a specification does not by itself mean the specification should be changed.
+  Source code is the actual current implementation. Tests provide executable evidence of implemented behavior. [`docs/status/`](docs/status/) summarizes implementation progress, backend support, known gaps, and verification state. A difference between source/status and a specification does not by itself mean the specification should be changed.
 - **Agent rules and workflow**:
   [`docs/agents/`](docs/agents/) and [`docs/agent-workflow/`](docs/agent-workflow/) define how agents should perform work. They do not redefine product specifications.
 

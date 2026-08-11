@@ -27,8 +27,10 @@ It does not silently override normative specifications. If an approved change in
 - Preserve the architectural rules in the root `AGENTS.md`.
 - Do not expose backend-specific types through common APIs unless explicitly approved.
 - Do not introduce a new dependency without recording and justifying the decision.
-- Add or update tests that verify behavior and acceptance criteria, not only implementation details.
-- Update durable documentation (`docs/specs/`, `docs/design/`, `docs/status/`) when public contracts, implementation architecture, or status change.
+- Update the corresponding durable documentation when it changes:
+  - public contracts or normative behavior -> [`docs/specs/`](../specs/);
+  - durable implementation architecture -> [`docs/design/`](../design/);
+  - implementation progress, backend support, known gaps, or verification state -> [`docs/status/`](../status/).
 
 ## Handling specification disagreement during implementation
 

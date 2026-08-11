@@ -129,18 +129,79 @@ fn props_macro_sets_is_default() {
 /// `tooltip` is declared on `NativeControl`, so setting it on a `Button` has to forward one hop up
 /// exactly like `background` does — the check that a newly added ancestor prop joins the existing
 /// chain rather than needing anything Button-specific.
-///
-/// The value is a `&str`, not a `String`, and that is load-bearing: `wrap_prop_value` inserts the
-/// `&` only for a *bare* `String` prop (`Button::text`, above). `Option<String>` misses that check
-/// and passes the value through untouched, so an `Option<String>` prop whose setter takes `&str` —
-/// `tooltip` here, and `TextBox::placeholder` before it — can only be given something that already
-/// *is* a `&str`. A DSL string literal is; a `String`-valued viewmodel expression is not. See
-/// `docs/status/control_status.md` for this and the other `Option<T>` wrapping gaps.
 #[test]
 fn props_macro_forwards_tooltip_up_to_native_control() {
     let button = FakeButton::default();
     elwindui_core::__elwindui_props_Button!(@set button, tooltip, "Save the file");
     assert_eq!(button.tooltip.borrow().as_deref(), Some("Save the file"));
+}
+
+/// `tooltip: Option<String>`'s real setter takes `&str` (see `FakeButton::set_tooltip`, matching
+/// `NativeControl::set_tooltip`'s own convention), same as bare `String` props like `text` above —
+/// `wrap_prop_value` must insert the same `&(..)` reborrow so a `bind!`-shaped `String` expression
+/// (not just a DSL string literal) can be assigned to it.
+#[test]
+fn props_macro_forwards_tooltip_from_a_string_variable() {
+    let button = FakeButton::default();
+    elwindui_core::__elwindui_props_Button!(@set button, tooltip, String::from("Save the file"));
+    assert_eq!(button.tooltip.borrow().as_deref(), Some("Save the file"));
+}
+
+// --- `placeholder: Option<String>` on TextBox / PasswordBox --------------------------------------
+//
+// Same `Option<String>` / `&str`-setter shape as `tooltip` above, pinned down on the two controls
+// the Issue that fixed `wrap_prop_value` (Option<String> asymmetry) named explicitly.
+
+#[derive(Default)]
+struct FakeTextBox {
+    placeholder: RefCell<Option<String>>,
+}
+
+impl FakeTextBox {
+    fn set_placeholder(&self, text: &str) {
+        *self.placeholder.borrow_mut() = Some(text.to_string());
+    }
+}
+
+#[test]
+fn props_macro_sets_text_box_placeholder_as_a_literal() {
+    let text_box = FakeTextBox::default();
+    elwindui_core::__elwindui_props_TextBox!(@set text_box, placeholder, "Enter your name");
+    assert_eq!(text_box.placeholder.borrow().as_deref(), Some("Enter your name"));
+}
+
+#[test]
+fn props_macro_sets_text_box_placeholder_from_a_string_variable() {
+    let text_box = FakeTextBox::default();
+    elwindui_core::__elwindui_props_TextBox!(@set text_box, placeholder, String::from("Enter your name"));
+    assert_eq!(text_box.placeholder.borrow().as_deref(), Some("Enter your name"));
+}
+
+#[derive(Default)]
+struct FakePasswordBox {
+    placeholder: RefCell<Option<String>>,
+}
+
+impl FakePasswordBox {
+    fn set_placeholder(&self, text: &str) {
+        *self.placeholder.borrow_mut() = Some(text.to_string());
+    }
+}
+
+#[test]
+fn props_macro_sets_password_box_placeholder_as_a_literal() {
+    let password_box = FakePasswordBox::default();
+    elwindui_core::__elwindui_props_PasswordBox!(@set password_box, placeholder, "Enter your password");
+    assert_eq!(password_box.placeholder.borrow().as_deref(), Some("Enter your password"));
+}
+
+#[test]
+fn props_macro_sets_password_box_placeholder_from_a_string_variable() {
+    let password_box = FakePasswordBox::default();
+    elwindui_core::__elwindui_props_PasswordBox!(
+        @set password_box, placeholder, String::from("Enter your password")
+    );
+    assert_eq!(password_box.placeholder.borrow().as_deref(), Some("Enter your password"));
 }
 
 // --- Selection controls (Phase 2: CheckBox / RadioButton / ToggleSwitch) ------------------------

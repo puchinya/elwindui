@@ -9,6 +9,11 @@ When asking the user a question (clarifying questions, `AskUserQuestion`, plan c
 ## Issue-driven development workflow
 
 - Every repository-changing task must be associated with one GitHub Issue.
+- **Pre-editing requirement**: BEFORE editing any source code or documentation files for a repository-changing task:
+  1. Verify or create the GitHub Issue first.
+  2. Assign the target version milestone using `scripts/agent/ensure-version-milestone.sh <issue-number>`.
+  3. Create and switch to a dedicated feature branch (`feature/<issue-number>-<slug>`).
+  Never edit repository files prior to Issue & branch creation or directly on default branches.
 - Do not create an Issue for explanation, research, or exploratory discussion unless explicitly requested.
 - Determine the active phase from Issue labels / PR state and read **only** the required workflow document:
   - `phase:requirements`: read [`docs/agent-workflow/requirements.md`](docs/agent-workflow/requirements.md)

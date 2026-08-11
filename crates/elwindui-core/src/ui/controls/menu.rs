@@ -1,4 +1,4 @@
-//! `builtin::Menu` — a menu holding `MenuItem`s.
+//! `elwindui::ui::Menu` — a menu holding `MenuItem`s.
 
 use super::*;
 

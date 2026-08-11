@@ -1,4 +1,4 @@
-//! `builtin::ScrollView` — the `ScrollViewExt` implementation.
+//! `elwindui::ui::ScrollView` — the `ScrollViewExt` implementation.
 
 use super::NativeControl;
 use crate::AnyView;

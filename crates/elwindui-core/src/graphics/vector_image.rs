@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// What a `builtin::Image`-style element draws — a raster bitmap or a loaded vector document, kept
+/// What an `elwindui::ui::Image`-style element draws — a raster bitmap or a loaded vector document, kept
 /// as an enum rather than two separate optional fields (指示書§14: enumが唯一の値集合機構) (SVG読
 /// み込み・ベクター描画対応 実装指示書§24). Never `Arc<VectorImage>` — `VectorImage` is already
 /// cheap to clone on its own (指示書§1.2).

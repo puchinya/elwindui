@@ -3,7 +3,7 @@
 Rust向けGUIフレームワーク(Elwind)のための宣言的レイアウト記述言語(ElwindUIL)の構文・意味論の仕様書。
 Rustの構文・慣習に寄せることで学習コストを下げつつ、機械可読性・事前検証性を重視した設計。
 
-本書はDSLの構文・静的検証ルールのみを対象とする。バックエンド抽象化・`elwindui-core`ランタイム・ライフサイクル・Store/ViewModel/MVVM等のGUIフレームワーク本体の設計は `docs/design/gui_framework_design.md`、標準UI要素(`Window`/`Button`等)の個別リファレンスとOS機能(ファイルダイアログ等)は `docs/specs/builtins_spec.md`、コード生成・LSP・プレビュー・ホットリロード等のツールチェーンは `docs/design/tools/*.md` を参照。
+本書はDSLの構文・静的検証ルールのみを対象とする。バックエンド抽象化・`elwindui-core`ランタイム・ライフサイクル・Store/ViewModel/MVVM等のGUIフレームワーク本体の設計は `docs/design/gui_framework_design.md`、標準UI要素(`Window`/`Button`等)は `docs/specs/ui_spec.md`、グラフィックス型・描画モデルは `docs/specs/graphics_spec.md`、OS機能(ファイルダイアログ等)は `docs/specs/platform_spec.md`、コード生成・LSP・プレビュー・ホットリロード等のツールチェーンは `docs/design/tools/*.md` を参照。
 
 ---
 
@@ -24,7 +24,7 @@ Rustの構文・慣習に寄せることで学習コストを下げつつ、機�
 
 ---
 
-## 2. 基本構造 ✅
+## 2. 基本構造
 
 ElwindUILは通常のRustファイル中で属性マクロ`#[elwindui::component]`を使って書く。**これが唯一サポートされる記法であり、Rustのソースファイル以外の独自テキスト形式は存在しない。** 要素はRustの構造体リテラルに似た記法で記述し、ネストがそのまま親子関係になる。
 
@@ -69,7 +69,7 @@ impl Label {}
 
 実装は`elwindui_macros::component`(`elwindui::component`として再エクスポート)。マクロの入出力と内部パイプラインは`docs/design/tools/codegen_design.md`を参照。
 
-### 名前空間:Rustのクレート名前空間規則にそのまま従う ✅
+### 名前空間:Rustのクレート名前空間規則にそのまま従う
 
 上記の`HorizontalLayout`/`TextBlock`/`Button`のような標準UI要素(ビルトイン)は、DSL専用の疑似名前空間を持たない。実体は通常のRustアイテムであり、名前解決はRustのクレート名前空間規則にそのまま従う。正準パスは常に **`elwindui::ui::<Name>`** である:
 
@@ -112,7 +112,7 @@ if let Some(path) = platform::file_dialog::open().await {
 
 ---
 
-## 3. component と view 🚧
+## 3. component と view
 
 コンポーネントは **`component`(データ定義)** と **`view`(描画ロジック)** の2つの役割に分離する。Rustの `struct` と `impl` の関係に対応する概念的な区分であり、構文上は1つの`struct`定義の中に共存する(§2参照)。
 
@@ -202,14 +202,12 @@ struct Dashboard {
 impl Dashboard {}
 ```
 
-**実装状況の注**: 「属性名と変数名が一致する場合のショートハンド」(`Card { title, value }`のように`title: title`を省略する記法)は設計されているが、現状の`elwindui-codegen`では動作しない(`` `title` does not refer to an earlier `let` binding in this view ``という内部エラーで失敗する)。動作するまでは`title: title`のように毎回フルスペルで書くこと。
-
 ### `inherits`:WinUI3方式のクラス継承
 
 `#[elwindui::component(inherits Base)] struct Name { ... }` は `Base` を4通りに解決する(単なる構造的契約ではなく、WinUI3/C#の`Control → ContentControl → Button`と同じ実継承):
 
 1. **`Base`が`NativeControl`マーカー** — 純粋なカテゴリタグ(フィールド継承なし)。ネイティブ実装を持つ末端要素(`Button`等)であることを示すのみ。
-2. **`Base`が`view`を持たないプリミティブ形状ファミリー**(例:`Control`/`Rectangle`)、または**`Base`自身が既にシェイプ合成されているDSLコンポーネント**、または**`Base`が`view`を持たないネイティブ実装のホスト**(例:`Window`) — `Base`の`#[param]`/propフィールドを**再宣言なしに自動継承**し、さらに`Name`自身の`view`の中身は**常に暗黙に`Base`自身の属性・子要素**になる(ラッパー要素は書かない——`Base { ... }`という入れ子は書かず、`Base`の属性・子要素を`view`の`{}`直下にそのまま書く)。シェイプ合成/ホスト合成(`docs/specs/builtins_spec.md`付録F.10参照)。
+2. **`Base`が`view`を持たないプリミティブ形状ファミリー**(例:`Control`/`Rectangle`)、または**`Base`自身が既にシェイプ合成されているDSLコンポーネント**、または**`Base`が`view`を持たないネイティブ実装のホスト**(例:`Window`) — `Base`の`#[param]`/propフィールドを**再宣言なしに自動継承**し、さらに`Name`自身の`view`の中身は**常に暗黙に`Base`自身の属性・子要素**になる(ラッパー要素は書かない——`Base { ... }`という入れ子は書かず、`Base`の属性・子要素を`view`の`{}`直下にそのまま書く)。シェイプ合成/ホスト合成(`docs/specs/ui_spec.md`参照)。
 3. **`Base`が自前の`view`を持つ、それ自体は合成されていない論理コンポーネント**(builtinでもユーザー定義でも) — フィールドに加えて`view`(テンプレート)も継承する。`Name`が独自の`view`を書かなければ`Base`のテンプレートをそのまま(WinUI3の既定`ControlTemplate`のように)引き継ぎ、書けば**完全なテンプレート上書き**になる(ルート要素の型に制約はない)。
 4. **`Base`がネイティブ実装のみの末端要素**(例:`Button`) — 継承不可。生成されるRustコードを持たないため、委譲先が存在しない。
 
@@ -233,14 +231,13 @@ struct ContentControl {
 impl ContentControl {}
 ```
 
-**実装状況の注**: `content`のような、`view!`の`{}`直下で自分自身の既存フィールドを**裸のまま**子要素として挿入する記法(`key:`を付けない、`#[id(...)]`束縛でもない単なる識別子1つの行)は、現状の`elwindui-codegen`では動作しない(`` `content` does not refer to an earlier `let` binding in this view ``という内部エラーになる)。`padding: padding`のような`key: value`形式の裸参照(属性値としての参照)は正常に動作する——影響があるのはbody直下に子要素として裸で置く場合のみ。
-ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)で、`ContentControl`は上記の例で定義しているユーザー自身のcomponent名——ビルトインの同名`ContentControl`(`docs/specs/builtins_spec.md`付録F.10)と衝突しない。ローカルに定義された`ContentControl`は、`elwindui::ui::*`の自動`use`(§2)より常に優先して解決される(Rustの通常の名前解決が、同一スコープのグロブ`use`よりローカル定義を優先するのと同じ)。
+ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)で、`ContentControl`は上記の例で定義しているユーザー自身のcomponent名——ビルトインの同名`ContentControl`(`docs/specs/ui_spec.md`参照)と衝突しない。ローカルに定義された`ContentControl`は、`elwindui::ui::*`の自動`use`(§2)より常に優先して解決される(Rustの通常の名前解決が、同一スコープのグロブ`use`よりローカル定義を優先するのと同じ)。
 
 `view`の中身が暗黙に`Base`自身になるかどうかは、`Base`が実際に合成可能(2番目のケースに当てはまるか)によって決まり、`Name`自身がラッパーを書くかどうかでは選べない――合成可能な`Base`を持つ`component`の`view`は常にこの形で書く。3番目のケース(合成されていない論理コンポーネントの継承)だけが、今まで通り「独自のルート要素を持つ完全なテンプレート上書き」になる。
 
 継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
 
-**メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当)。🚧 **部分実装**。
+**メソッド継承とオーバーライド**(C#の`virtual`/`override`/`base.Method()`相当)。
 
 メソッド本体は`struct`定義には置けないので、`#[elwindui_macros::class]`と同じ**`struct`/`impl`ペア**(`docs/specs/macro_class_spec.md`§2.1)の形を取る。属性名も`#[class]`と揃え、`#[overridable]`(オーバーライド可能な宣言)と`#[overrides]`(上書き)を使う:
 
@@ -285,7 +282,7 @@ impl ContentControl {
 
 ---
 
-## 4. componentフィールドの種類(param/prop/state/computed) ✅
+## 4. componentフィールドの種類(param/prop/state/computed)
 
 component の各フィールドには、実体化時に固定されるか実行時に変更できるか・値がどこから来るかを表すアトリビュートを付けられる。**アトリビュートを何も付けなければ既定で`#[prop]`(実行時に読み書き可能)になる**——`#[prop]`は明示的に書いてもよいが、省略時のデフォルトでもある。
 
@@ -492,8 +489,6 @@ impl DocumentTabs {}
 
 ### `ControlTemplate<Self>`:テンプレート型フィールド(WinUI3方式`ControlTemplate`)
 
-> **実装状況**: 設計のみ。本節が前提とする「値計算コールバックがネストした要素を構築する」機構自体(直前の`|param| Type { .. }`)がまだコード生成に実装されていないため、本節はそれに依存する形でさらに未実装。
-
 `ControlTemplate<Self>`は、コンポーネント自身の視覚ツリーを実行時に丸ごと差し替え可能にする専用のフィールド型糖衣。WinUI3の`Control.Template`(`ContentPresenter`等を介した視覚ツリーの丸ごと差し替え、`Style`経由でインスタンス単位に再テンプレート化できる)に相当する。
 
 ```rust
@@ -521,9 +516,9 @@ template: |control| Grid {
 }
 ```
 
-パラメータ名は普通の識別子(型キーワードの`Self`はここでは使えない——値束縛名としては`control`のような通常の識別子を使う)。クロージャ内から`control.content`/`control.padding()`のように自分自身の他フィールドへ直接アクセスできる。これはWinUI3の`TemplateBinding`(リフレクションベース)の静的型付け版に相当し、既存の「`#[param]`フィールドへの名前付きアクセサ自動生成」(`docs/specs/builtins_spec.md`付録F補足)をそのまま使う。
+パラメータ名は普通の識別子(型キーワードの`Self`はここでは使えない——値束縛名としては`control`のような通常の識別子を使う)。クロージャ内から`control.content`/`control.padding()`のように自分自身の他フィールドへ直接アクセスできる。これはWinUI3の`TemplateBinding`(リフレクションベース)の静的型付け版に相当し、既存の「`#[param]`フィールドへの名前付きアクセサ自動生成」(`docs/specs/ui_spec.md`参照)をそのまま使う。
 
-**`body: <field>(Self)`**——`ControlTemplate<Self>`型のフィールドを、自分自身を渡して呼び出した結果を視覚ツリーのルートにする、という新しい`body`/`view`ルートの書き方。`field`名は`template`に限定せず、`ControlTemplate<Self>`型のフィールドなら任意の名前で使える一般規則(13章ルール28: `field`が同一component内の`ControlTemplate<Self>`型フィールドでない場合はエラー)。`Control`(`docs/specs/builtins_spec.md`付録F.9)の例:
+**`body: <field>(Self)`**——`ControlTemplate<Self>`型のフィールドを、自分自身を渡して呼び出した結果を視覚ツリーのルートにする、という新しい`body`/`view`ルートの書き方。`field`名は`template`に限定せず、`ControlTemplate<Self>`型のフィールドなら任意の名前で使える一般規則(13章ルール28: `field`が同一component内の`ControlTemplate<Self>`型フィールドでない場合はエラー)。`Control`(`docs/specs/ui_spec.md`参照)の例:
 
 ```rust
 #[elwindui::component(inherits UIElement)]
@@ -543,8 +538,6 @@ struct Control {
 `ControlTemplate<Self>`が返すのは常に単一ルート要素(WinUI3実物の`ControlTemplate`、および本DSLの「単一値フィールドの`if`/`match`は1要素に還元」ルール(§5)と同じ)。`Control.template`が`None`(既定)のときは現行どおり`children`を直接Visual子要素にする——挙動変更なし。
 
 ### `#[elwindui::template]`:再利用可能な名前付きテンプレート
-
-> **実装状況**: 設計のみ・未実装。`#[elwindui::component]`/`#[elwindui::viewmodel]`と同系統だが、専用の`fn`向け属性マクロとしてはまだ存在しない。
 
 `template: |control| Grid { .. }`のようなインライン値クロージャ(前節参照)はその場限り(1箇所)の書き方しかできない。複数のコンポーネントで同じテンプレートを使い回したい(WinUI3で`ControlTemplate`を`Style`リソースとして共有するのと同じ用途)場合のために、`#[elwindui::component]`(`struct`に付与)・`#[elwindui::viewmodel]`(`mod`に付与)と同系統の、**単一の`fn`に付与する新しい属性マクロ**を用意する:
 
@@ -576,7 +569,7 @@ struct Toolbar {
 
 ---
 
-## 5. 制御構文 ✅
+## 5. 制御構文
 
 Rust標準の制御構文(`for`/`if`/`match`)をそのまま採用し、専用のテンプレートディレクティブは設けない。`view!`の中でこれらを書いた位置は「動的領域」として扱われ、参照しているプロパティの値に応じて実際に生成されるUI要素が変わる——値が変化するたびに、その領域だけが差し替えられ、componentの`view`全体が再構築されることはない(§9「変更の伝搬」参照)。
 
@@ -648,11 +641,9 @@ impl ItemList {}
 
 ---
 
-## 6. 値制約(アトリビュートによる数式的表現) 🚧
+## 6. 値制約(アトリビュートによる数式的表現)
 
 制約はRustのアトリビュート構文(`#[derive(...)]` と同じ見た目)で表現し、数式的な区間・パターンで記述する。
-
-> **実装状況**: `elwindui-codegen`の`Attr`列挙体には`#[length(start..=end)]`のみ実装されている(`Attr::Length`)。`#[range]`/`#[step]`/`#[pattern]`/`#[format]`/`#[check]`は未実装で、本章の該当部分は設計のみ。
 
 | 記法 | 意味 |
 |---|---|
@@ -691,7 +682,7 @@ impl LoginForm {}
 
 ---
 
-## 7. 列挙体(enum) 🚧
+## 7. 列挙体(enum)
 
 値候補があるフィールドは共用体を書き捨てず、名前付き `enum` として定義する。Rustのenum構文をそのまま採用する。
 
@@ -725,8 +716,6 @@ enum LogLevel {
 - `#[label(...)]` アトリビュートで多言語表示名を付与でき、`member.label()` で現在ロケールの文字列を取得する
 - `match` と組み合わせることで、全メンバーを処理しているかどうかの網羅性検査が働く。この検査は二層構造になっている:同一クレート内で`#[elwindui::dsl_enum]`登録済みのenumについては`elwindui-codegen`自身がマクロ展開時に早期エラーを出す(同一クレート内限定——プロセスごとに別のrustc起動になる実際の`cargo build`では、この早期検査を別クレートのenumへ拡張する手段が原理的に存在しない、`docs/design/tools/codegen_design.md`§4.2参照)。それとは独立に、生成される`match`は常に合成的な`_ =>`を持たない素のRust `match`として出力されるため、**別クレートから`use`したenumも含め、非網羅的な`match`は最終的に必ずrustc自身が`E0004`として検出する**——早期検査が効かない場合でも、コンパイルが通ってしまうことはない
 
-**実装状況の注**: `#[elwindui::dsl_enum]`(`component_frontend::enum_def_from_item_enum`)は現状、`syn::Fields::Unit`(ペイロード無しの単純variant)であることの検証のみを行い、本体はそのまま無変更で透過する——`ThemeMode`例の`#[label(...)]`のようなvariant単位の属性は取り除かれずそのまま残るため、`#[label(...)]`自体が実Rustの認識済み属性として何らかの形で処理されない限り、この属性を使う`enum`は実際にはコンパイルが通らない。`#[label]`/`EnumName::values()`によるi18nラベル付与の実装自体が「実装範囲は個別確認が必要」という不確実な状態(`docs/status/implementation_status.md`参照)であり、`ThemeMode`の例は設計意図の説明であって動作確認済みのコード例ではない。また`#[elwindui::dsl_enum]`は本体を完全に無変更で透過するだけなので、`Orientation`/`ThemeMode`同士のような値比較(`==`)が必要な場合は`#[derive(PartialEq)]`等をDSL側の属性とは別に自分で付与する必要がある(match のパターンマッチ自体は`PartialEq`を要求しない)。
-
 ```rust
 #[elwindui::component(inherits VerticalLayout)]
 struct ThemeModeList {
@@ -745,7 +734,7 @@ impl ThemeModeList {}
 
 ---
 
-## 8. 動的定数(env) 📋
+## 8. 動的定数(env)
 
 「実体化時に一度だけ確定し、以後は変化しない」値を扱うための仕組み。`#[param]` の静的評価式の例外として参照を許可する。
 
@@ -764,11 +753,9 @@ struct TitleBar {
 - `env::locale()` — 実行環境の既定ロケール
 - `env::direction()` — `"ltr" | "rtl"`
 
-**実装状況の注**: `env::*`はコード生成器側に実装が全く無く、純粋に設計のみの機能(`docs/status/implementation_status.md`参照)。
-
 ---
 
-## 9. データバインディング ✅
+## 9. データバインディング
 
 **データバインディング**とは、UI要素の属性値をcomponentの状態(フィールド)に結び付け、状態が変化したときにUIの表示を自動的に追従させる仕組みである。手続き的に「値が変わったら該当するUI要素を書き換える」というコードを書く必要はなく、`view!`の中で属性値をフィールド参照として書くだけでよい——コード生成器が依存関係を静的に解析し、状態変化を検知して該当箇所だけを再同期するコードを生成する(§5の制御構文がどうUI要素を生成するか、後述の「変更の伝搬」も参照)。
 
@@ -833,7 +820,7 @@ OneWayの再評価・TwoWayの model→widget 方向の反映は、参照先が�
 
 ---
 
-## 10. 多言語対応(i18n) 🚧
+## 10. 多言語対応(i18n)
 
 翻訳文言は独自フォーマットを持たず、業界標準の **Fluent(.ftl)** をそのまま採用する。DSL側は `t!` マクロでFluentのメッセージIDを参照するだけで、複数形・性別分岐・日付/数値フォーマットはFluent自身の構文(`select`式、`NUMBER()`/`DATETIME()`関数)に委譲する。
 
@@ -903,15 +890,12 @@ fn main() {
 }
 ```
 
-**実装状況の注**: 現在の`declare!()`は引数を取らず、`strings/en.ftl`・ロケール`"en"`に固定されている。
-上記の`default`/`fallback`/`available`/`resources`に相当する設定機構は未実装。
-
 - ビルド時に `.ftl` を静的パースし、DSL内で参照している `t!("key", ...)` のメッセージIDが**全`available`言語で定義されているか**を機械的に検証する(未翻訳キーの検出)
 - `t!` に渡す引数名は、対応する `.ftl` メッセージ内の `{ $引数名 }` と一致していなければ静的エラーとする
 
 ---
 
-## 11. モジュール(import) ✅
+## 11. モジュール(import)
 
 ```rust
 use components::card::Card;
@@ -936,7 +920,7 @@ use components::card::Card as ProductCard;
 
 ---
 
-## 12. 要素ツリーの探索と要素への注釈 ✅
+## 12. 要素ツリーの探索と要素への注釈
 
 ### 役割分担の方針
 
@@ -1082,8 +1066,6 @@ struct SaveButton {
 impl SaveButton {}
 ```
 
-**実装状況の注**: 上記の`#[shortcut("Ctrl+S")]`を`view!`内の属性行の直前に置く記法は設計されているが、現状の`elwindui-codegen`のパーサはこの位置での`#[shortcut(...)]`を正しく処理できず、`view! { .. }`本体のパースエラーになる(内部エラーメッセージが`on_click`の直前で解析に失敗する)。動作するまでは`#[shortcut(...)]`を使わずに`on_click`だけを書くこと。
-
 `#[shortcut(...)]`が付けられるのは`#[routed]`なフィールド(`on_click`/`on_key_down`等)のみ。詳細な構文
 (`winui3: "..."`/`appkit: "..."`によるバックエンド別指定、`scope: local`)・プラットフォーム変換規則
 (macOSでの`Ctrl`→`Cmd`自動読み替え)・実行時の仕組み(`ShortcutRegistry`)は
@@ -1091,11 +1073,9 @@ impl SaveButton {}
 
 ---
 
-## 13. 静的検証ルール一覧 🚧
+## 13. 静的検証ルール一覧
 
 コンパイラ/リンタが実行前に検出すべき項目:
-
-> **実装状況**: `crates/elwindui-codegen/src/validate.rs`は、既に実装済みの言語機能・ビルトインに対応するルール(概ね1〜8, 10〜13, 19, 25, 30〜31 — `#[param]`の静的性、リアクティブ属性式と`<=>`の参照先、`viewmodel`のV/VM分離、`#[shortcut(...)]`の妥当性など)を実際に検査する。一方、対応するビルトイン/機能自体が未実装なルール(9: `target::backend()`自体が存在しないため検査不能、14: `NavigationHost`未実装、15: `Dialog`未実装、16・17: `Transition`/`Effect`未実装、20: `#[async_computed]`未実装、21: `#[undoable]`未実装、22: テーマはDSLブロックではなくRust属性`#[elwindui::theme_definition]`として実装されているため対象外、23: `VirtualList`未実装、24: `on_foreground`等のモバイルライフサイクル未実装、26〜29: `ControlTemplate<Self>`/`#[elwindui::template]`未実装)は`validate.rs`にも対応する検査が存在しない。ルール18は欠番(アクションはRustの`impl`ブロックの`fn`として自動検出されるため、対応する型検査が存在しない)。
 
 1. `#[param]` フィールドの初期化式にリアクティブなprop/state/computed/bindable owner参照が出現 → エラー
 2. `#[param]` フィールドの初期化式に非純粋関数(`now()`, `random()` 等)が出現 → エラー(`env::*` は例外)
@@ -1105,21 +1085,21 @@ impl SaveButton {}
 6. 制約(`#[range]`, `#[length]`, `#[pattern]` 等)付きフィールドへのリテラル値代入が制約違反 → ビルド時エラー、動的値の場合は実行時エラー
 7. (欠番 — `once` 宣言の廃止に伴い、`external::*` を許可する場所自体が無くなったため)
 8. importの循環・未解決パス → エラー
-9. 通常の`component`の`view`内に `native!` ブロック、または `target::backend()` の参照が出現 → エラー(`docs/design/gui_framework_design.md`§4.1参照。独自部品はバックエンド共通実装(ビルトイン)に限定する)
+9. (欠番 — `native!` / `target::backend()` 構文の廃止に伴い不要)
 10. `view`内に`Canvas`が含まれているが `#[accessible(...)]` が付与されていない → 警告(`docs/design/gui_framework_design.md`§5.6参照)
 11. `on_mount`/`on_unmount`ブロックの外で`#[param]`フィールドの再代入相当の操作が行われている → エラー(`docs/design/gui_framework_design.md`§6.1参照。paramの不変性は生涯を通じて保証される)
 12. リアクティブ属性式または`<=>`の参照先が`store`宣言(`docs/design/gui_framework_design.md`§7.1)の型・フィールドとして存在しない → エラー
 13. `store`フィールドへの`#[param]`側からの直接参照 → エラー(`docs/design/gui_framework_design.md`§7.1参照。storeはViewのリアクティブ属性式から参照する)
-14. `NavigationHost`内の`match route { ... }` がRoute enumの全メンバーを網羅していない(`_ =>`なし) → エラー(7章の網羅性検査と同じ仕組み、`docs/specs/builtins_spec.md`付録L.2参照)
-15. `Dialog`/`Menu`等のオーバーレイ系ビルトインの外側(通常のcomponent)で`native!`/`target::backend()`が出現 → エラー(ルール9と同じ原則、`docs/specs/builtins_spec.md`付録M参照)
-16. `Transition`/`KeyframeAnimation`(`docs/specs/builtins_spec.md`付録N.6)で存在しないイージング関数名、または範囲外のキーフレーム位置(`0.0..=1.0`外)が指定されている → エラー
-17. `Effect`(`docs/specs/builtins_spec.md`付録N.3)のパラメータが対応バックエンドでサポートされない組み合わせ(例:GTK4未対応のエフェクト種別)である場合 → 警告(該当バックエンドではフォールバック描画に切り替わる旨を明示)
+14. `NavigationHost`内の`match route { ... }` がRoute enumの全メンバーを網羅していない(`_ =>`なし) → エラー(7章の網羅性検査と同じ仕組み、`docs/specs/ui_spec.md`参照)
+15. (欠番 — `native!` / `target::backend()` 構文の廃止に伴い不要)
+16. `Transition`/`KeyframeAnimation`(`docs/specs/ui_spec.md`参照)で存在しないイージング関数名、または範囲外のキーフレーム位置(`0.0..=1.0`外)が指定されている → エラー
+17. `Effect`(`docs/specs/ui_spec.md`参照)のパラメータが対応バックエンドでサポートされない組み合わせ(例:GTK4未対応のエフェクト種別)である場合 → 警告(該当バックエンドではフォールバック描画に切り替わる旨を明示)
 18. (欠番 — アクションはRustの`impl`ブロックの`fn`として自動検出されるため、対応する型検査が存在しない)
 19. `viewmodel`定義内に`view`ブロック、またはビルトイン要素(`Row`/`Text`等)への直接参照が存在する → エラー(`docs/design/gui_framework_design.md`§7.2参照。ViewModelは表示ロジックを持たず、MVVMのV/VM分離を静的に強制する)
 20. `#[async_computed]` が `viewmodel`/`store` 以外(通常の`component`のprop等)に付与されている → エラー(`docs/design/gui_framework_design.md`§7.3参照。非同期状態はVM/Model層に閉じ込める)
 21. `#[undoable]` が `viewmodel` の `#[observable]` フィールド以外(`store`や`component`のprop等)に付与されている → エラー(`docs/design/gui_framework_design.md`§7.4参照)
 22. `theme`の`variant`ブロックが`tokens{}`で宣言されていないトークン名を定義している、または`tokens{}`で宣言された一部のトークンを欠いている → エラー(`docs/design/gui_framework_design.md`§8.5参照。全variant間でトークン集合の一致を保証する)
-23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(`docs/specs/builtins_spec.md`付録Q参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(`docs/specs/builtins_spec.md`付録Y参照)。`TabView` は `TabViewItem` を子として指定する。
+23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(`docs/specs/ui_spec.md`参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(`docs/specs/ui_spec.md`参照)。`TabView` は `TabViewItem` を子として指定する。
 24. `on_foreground`/`on_background`/`on_terminate`(`docs/design/gui_framework_design.md`§6.2)が、アプリのエントリポイント(ルート)コンポーネント以外で宣言されている → 警告(OSレベルのライフサイクルは単一箇所への集約を推奨)
 25. コールバック型のフィールドで `Rc<dyn Fn(...)>` / `Box<dyn Fn(...)>` のような型消去表現を直接使用している(`fn(...)` 糖衣構文を使っていない) → エラー(4章「コールバック型フィールド」参照)
 26. `ControlTemplate<T>` の `T` が `Self` 以外 → エラー(4章「`ControlTemplate<Self>`」参照)
@@ -1174,20 +1154,17 @@ impl VolumeControl {}
 
 ---
 
-# 付録A. component宣言レベルの属性 ✅
+# 付録A. component宣言レベルの属性
 
 `component`宣言の直前に、`inherits`の有無に関わらず0個以上任意の順序で書ける4つの属性(`enum`/`viewmodel`/`view`には付けられない)。ビルトイン25個の宣言は`elwindui-core::ui`/各`elwindui-backend-*`crateの`#[elwindui_macros::class]`宣言そのものであり、これらの属性はそちらのRust宣言に直接付いている。
 
 - **`#[sealed]`** — このコンポーネントを`component X inherits Y`の`Y`(継承元)として指定できないようにする。具象的な末端形状(`Rectangle`/`Ellipse` — 継承したければ合成可能な`Shape`を使う)や、そもそも継承先を持たないネイティブ末端要素(`Button`/`TextArea`/`TabView`/`TabViewItem`)に付与する。
-- **`#[abstract]`(Rust形式:`#[abstract_]`)** — このコンポーネントを`view`内で直接インスタンス化できないようにする(`Type { .. }`という形で、属性値・クロージャ本体・裸のネスト子要素・単体の`view`ルートのどこに書いても静的エラー)。`component X inherits Y`の`Y`として指定するのは引き続き可能——むしろそれが本来の使い道で、`#[sealed]`のちょうど逆に位置する。唯一の例外は、`X`自身が`inherits`で名指ししている`#[abstract]`な`base`を、`X`自身の`view`の**ルート要素として**構築する場合(シェイプ合成、`docs/specs/builtins_spec.md`付録F.10の`Shape`の例。`validate::validate_inherits`が「ルート要素は`base`と一致しなければならない」を既に強制しているので、この一箇所だけ安全に許可される)。ビルトインの`UIElement`/`NativeControl`/`Layout`/`Shape`(いずれも「フィールドを持たない純粋なカテゴリタグ」、もしくは`Rectangle`/`Ellipse`が合成する土台)に付いており、直接使うことを意図した具象virtual builtin(`VerticalLayout`/`HorizontalLayout`/`Control`/`Grid`/`TextBlock`)には付かない。`codegen::generate_module`も`#[abstract]`なコンポーネントには`create_<snake case>(..)`/`new(..)`を一切生成しない。
-- **`#[text_style]`**(`docs/status/font_status.md`参照) — フォント/テキストスタイルの7プロパティ(`font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/`foreground`)を、このコンポーネント自身の宣言済みフィールドより前に注入する。実体は`elwindui_core::ui::TextStyleOwner`(手書きトレイト)が持つ`TextStyleStorage`——対応する実Rust実装が存在するビルトイン自身の宣言(`Control`/`TextBlock`/`NativeControl`)にのみ付けられる。個別のネイティブ末端要素(`Button`等)には付けない——コード生成側のディスパッチ規約(`docs/specs/builtins_spec.md`付録F参照)上、共有基底の`NativeControl`に付ける必要があるため。同名フィールドを自前で宣言しているコンポーネントに付けるのは静的エラー。
+- **`#[abstract]`(Rust形式:`#[abstract_]`)** — このコンポーネントを`view`内で直接インスタンス化できないようにする(`Type { .. }`という形で、属性値・クロージャ本体・裸のネスト子要素・単体の`view`ルートのどこに書いても静的エラー)。`component X inherits Y`の`Y`として指定するのは引き続き可能——むしろそれが本来の使い道で、`#[sealed]`のちょうど逆に位置する。唯一の例外は、`X`自身が`inherits`で名指ししている`#[abstract]`な`base`を、`X`自身の`view`の**ルート要素として**構築する場合(シェイプ合成、`docs/specs/ui_spec.md`参照。`validate::validate_inherits`が「ルート要素は`base`と一致しなければならない」を既に強制しているので、この一箇所だけ安全に許可される)。ビルトインの`UIElement`/`NativeControl`/`Layout`/`Shape`(いずれも「フィールドを持たない純粋なカテゴリタグ」、もしくは`Rectangle`/`Ellipse`が合成する土台)に付いており、直接使うことを意図した具象virtual builtin(`VerticalLayout`/`HorizontalLayout`/`Control`/`Grid`/`TextBlock`)には付かない。`codegen::generate_module`も`#[abstract]`なコンポーネントには`create_<snake case>(..)`/`new(..)`を一切生成しない。
+- **`#[text_style]`**(`docs/status/font_status.md`参照) — フォント/テキストスタイルの7プロパティ(`font_family`/`font_size`/`font_weight`/`font_style`/`font_stretch`/`character_spacing`/`foreground`)を、このコンポーネント自身の宣言済みフィールドより前に注入する。実体は`elwindui_core::ui::TextStyleOwner`(手書きトレイト)が持つ`TextStyleStorage`——対応する実Rust実装が存在するビルトイン自身の宣言(`Control`/`TextBlock`/`NativeControl`)にのみ付けられる。個別のネイティブ末端要素(`Button`等)には付けない——コード生成側のディスパッチ規約(`docs/specs/ui_spec.md`参照)上、共有基底の`NativeControl`に付ける必要があるため。同名フィールドを自前で宣言しているコンポーネントに付けるのは静的エラー。
 - **`#[content(field_name)]`** — WinUI3の`ContentPropertyAttribute`相当。ある要素の`view`本体に「属性名を書かない裸のネスト子要素」(`Type { .. }`を`name: value`形式でなく直接`{}`内に書く)を渡した際、それがどのフィールドに束縛されるかを明示する。例:`MenuBarItem`は`#[content(submenu)]`を宣言しており、`MenuBarItem { text: "File", Menu { .. } }`の`Menu { .. }`は`submenu`フィールドに束縛される(`Window`/`ContentControl`/`TabViewItem`の`content`フィールドも同様に`#[content(content)]`を宣言している)。`field_name`は実在するフィールド名でなければならず(静的検証)、componentにつき最大1個。裸のネスト子要素があるのに`#[content(..)]`(または`children: Vec<..>`のようなリストフィールド)が無いcomponentにそれを渡すのはコード生成時エラーになる。この属性はビルトイン限定ではなく、ユーザー定義コンポーネントでも使える。
 
 `#[sealed]`/`#[abstract_]`は上記のとおりユーザー定義コンポーネントでも一般的に使える属性である。一方`#[text_style]`は対応する実Rust実装(`TextStyleStorage`)を持つビルトイン自身の宣言でのみ意味を持つ。
 
 ---
 
-> 標準UI要素の個別リファレンス(`Window`/`Button`等)とOS機能アクセス(ファイルダイアログ等)の仕様は
-> `docs/specs/builtins_spec.md`にまとめてある。バックエンド抽象化・
-> `elwindui-core`ランタイム・ライフサイクル・Store/ViewModel/MVVM等のフレームワーク設計は
-> `docs/design/gui_framework_design.md`を参照。
+> 標準UI要素の個別リファレンス(`Window`/`Button`等)は `docs/specs/ui_spec.md`、グラフィックス型・描画モデルは `docs/specs/graphics_spec.md`、OS機能(ファイルダイアログ等)は `docs/specs/platform_spec.md` を参照。バックエンド抽象化・`elwindui-core`ランタイム・ライフサイクル・Store/ViewModel/MVVM等のフレームワーク設計は `docs/design/gui_framework_design.md` を参照。

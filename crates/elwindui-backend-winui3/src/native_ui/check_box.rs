@@ -1,4 +1,4 @@
-//! `builtin::CheckBox` — the `CheckBoxExt` implementation.
+//! `elwindui::ui::CheckBox` — the `CheckBoxExt` implementation.
 
 use super::NativeControl;
 use crate::AnyView;

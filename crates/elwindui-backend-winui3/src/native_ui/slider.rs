@@ -1,4 +1,4 @@
-//! `builtin::Slider` — the Windows-tested `SliderExt` implementation. Mirrors
+//! `elwindui::ui::Slider` — the Windows-tested `SliderExt` implementation. Mirrors
 //! `elwindui_backend_appkit::native_ui::slider`'s own structure exactly.
 
 use super::NativeControl;

@@ -50,9 +50,11 @@ pub struct Color {
 }
 ```
 
-#### Parsing
+#### Constructors and Parsing
 
-16進数カラーコード文字列（例: `"#FF0000"`, `"#8000FF00"`）および色名からのパース（`Color::parse` / `FromStr`）をサポートする。
+- `Color::rgb(r, g, b)` / `Color::rgba(r, g, b, a)`
+- `Color::from_rgba_f32(r, g, b, a)` / `to_rgba_f32(&self) -> (f32, f32, f32, f32)`
+- 16進数カラーコード文字列パース: `Color::parse_hex("#rrggbb")` / `Color::parse_hex("#rrggbbaa")`（`#` 接頭辞省略可、不完全表記は `ParseColorError` を返す）
 
 ---
 
@@ -60,9 +62,18 @@ pub struct Color {
 
 描画領域の塗りつぶし表現の抽象化。単色、グラデーション、パターン画像塗りをサポートする。
 
+```rust
+pub enum Brush {
+    Solid(Color),
+    LinearGradient(LinearGradientBrush),
+    RadialGradient(RadialGradientBrush),
+    Image(ImageBrush),
+}
+```
+
 ### 5.1 Solid Color Brush
 
-単色塗り表現。`Color` 値から暗黙変換または直接指定される。
+単色塗り表現。`Color` 値または 16進数カラーコード文字列から `Brush::Solid` へ変換される。
 
 ### 5.2 Linear Gradient Brush (`LinearGradientBrush`)
 
@@ -72,11 +83,13 @@ pub struct Color {
 
 | Name | Type | Description |
 |---|---|---|
-| `start_point` | `Point` | グラデーション始点 |
-| `end_point` | `Point` | グラデーション終点 |
-| `stops` | `Vec<GradientStop>` | 色と位置（0.0 ..= 1.0）のリスト |
-| `mapping_mode` | `BrushMappingMode` | 座標系（`Absolute`, `RelativeToBoundingBox`） |
-| `spread_method` | `GradientSpreadMethod` | 領域外の拡張方式（`Pad`, `Reflect`, `Repeat`） |
+| `start` | `Point` | グラデーション始点 |
+| `end` | `Point` | グラデーション終点 |
+| `stops` | `Arc<[GradientStop]>` | 色と位置（0.0 ..= 1.0）のリスト |
+| `spread` | `GradientSpreadMethod` | 領域外の拡張方式（`Pad`, `Reflect`, `Repeat`） |
+| `mapping` | `BrushMappingMode` | 座標系（`Absolute`, `RelativeToBounds`） |
+| `transform` | `AffineTransform` | アフィン変換行列 |
+| `opacity` | `f32` | 不透明度 |
 
 ### 5.3 Radial Gradient Brush (`RadialGradientBrush`)
 
@@ -90,8 +103,11 @@ pub struct Color {
 | `gradient_origin` | `Point` | グラデーションの起点 |
 | `radius_x` | `f32` | X軸方向の半径 |
 | `radius_y` | `f32` | Y軸方向の半径 |
-| `stops` | `Vec<GradientStop>` | 色と位置のリスト |
-| `spread_method` | `GradientSpreadMethod` | 領域外の拡張方式 |
+| `stops` | `Arc<[GradientStop]>` | 色と位置のリスト |
+| `spread` | `GradientSpreadMethod` | 領域外の拡張方式 |
+| `mapping` | `BrushMappingMode` | 座標系（`Absolute`, `RelativeToBounds`） |
+| `transform` | `AffineTransform` | アフィン変換行列 |
+| `opacity` | `f32` | 不透明度 |
 
 ### 5.4 Image Brush (`ImageBrush`)
 
@@ -118,10 +134,12 @@ pub struct Color {
 | Property | Type | Description |
 |---|---|---|
 | `width` | `f32` | 線幅 |
-| `line_cap` | `LineCap` | 線の端点形状（`Flat`, `Square`, `Round`） |
-| `line_join` | `LineJoin` | 線の結合形状（`Miter`, `Bevel`, `Round`） |
+| `start_cap` | `LineCap` | 始点の端点形状（`Butt`, `Round`, `Square`） |
+| `end_cap` | `LineCap` | 終点の端点形状（`Butt`, `Round`, `Square`） |
+| `dash_cap` | `LineCap` | 破線節の端点形状（`Butt`, `Round`, `Square`） |
+| `line_join` | `LineJoin` | 線の結合形状（`Miter`, `Round`, `Bevel`） |
 | `miter_limit` | `f32` | マイター結合の限界値 |
-| `dash_array` | `Vec<f32>` | 破線のパターン配列 |
+| `dash_pattern` | `Arc<[f32]>` | 破線のパターン配列（論理座標単位） |
 | `dash_offset` | `f32` | 破線パターンの開始オフセット |
 
 ---
@@ -167,16 +185,26 @@ pub struct Color {
 
 ### `elwindui::core::graphics::Image` & `ImageData`
 
-| Property | Type | Description |
-|---|---|---|
-| `width` | `u32` | ピクセル幅 |
-| `height` | `u32` | ピクセル高さ |
-| `format` | `ImageFormat` | ピクセルフォーマット（`Rgba8`, `Bgra8` 等） |
-| `alpha_mode` | `AlphaMode` | アルファ乗算モード（`Straight`, `Premultiplied`） |
+```rust
+pub enum ImageData {
+    Encoded {
+        bytes: Arc<[u8]>,
+        format_hint: Option<ImageFormat>,
+    },
+    Rgba8 {
+        width: u32,
+        height: u32,
+        stride: u32,
+        pixels: Arc<[u8]>,
+        alpha: AlphaMode,
+    },
+    Backend(BackendImageHandle),
+}
+```
 
-#### ImageFit
-
-描画領域に対する整列・拡大縮小方式（`None`, `Fill`, `Contain`, `Cover`）。
+- **`ImageFormat`**: `Png`, `Jpeg`, `WebP`, `Gif`, `Bmp`, `Tiff`, `Unknown`
+- **`AlphaMode`**: `Straight`, `Premultiplied`, `Opaque`
+- **`ImageSampling`**: `Linear`, `Nearest`
 
 ---
 
@@ -191,38 +219,27 @@ SVG等のベクター文書の保持・レンダリング構造。
 #### Concepts
 - **`VectorNode`**: パスノード、グループノード、テキストノードなどの階層要素
 - **`VectorPaint`**: ベクター用の塗り・ストローク定義
-- **`VectorFilter`**: ドロップシドウ、ガウシアンブラー等のベクターフィルター効果
+- **`VectorFilter`**: ドロップシャドウ、ガウシアンブラー等のベクターフィルター効果
 - **`PreserveAspectRatio`**: アスペクト比維持の揃えとスライスルール
 
 ---
 
 ## 10. Retained render tree (`RenderTree`, `RenderGroup`, `RenderCommand`)
 
-`RenderTree` は、UI 視覚ツリー（`UIElement` 階層）のレイアウト計算結果および描画コマンドを保持（Retained）し、ネイティブプラットフォームのレンダリング出力パス（CoreGraphics, Win2D, Cairo 等）へ引き渡す保持型グラフィックス描画データ構造である。
+`RenderTree` は、UI 視覚ツリー（`UIElement` 階層）のレイアウト計算結果および描画コマンドを保持（Retained）し、ネイティブプラットフォームのレンダリング出力パス（CoreGraphics, Win2D, Cairo 等）へ引き渡す保持型グラフィックス描画データ構造である。内部設計の詳細（dirty トラッキング、世代管理、リコンサイルアルゴリズム、バックエンドレイヤーキャッシュ）は [GUI Framework Design](../design/gui_framework_design.md) §5.7 を参照すること。
 
-### 10.1 `RenderTree` and `RenderGroup` Architecture
+### 10.1 `RenderGroup` Node Architecture
 
-- **`RenderTree`**:
-  - 全体の保持型描画木のルートノード（`root: RenderGroup`）を保持する。
-  - 要素 ID（`u64`）から木構造上のパス（`group_paths`）および対応する UI 要素（`visual_index: HashMap<u64, Weak<dyn UIElementExt>>`）への高速参照テーブルを管理する。
 - **`RenderGroup`**:
   - 視覚ツリー上の 1 つの描画単位（Visual Node）。
   - **`id` (`u64`)**: 対応する UI 要素の一意識別子。
   - **`offset` (`Point`)**: 親 `RenderGroup` からのローカル相対位置オフセット。
   - **`size` (`Size`)**: 要素のローカル確定サイズ。
-  - **`clip` (`Option<Rect>`)**: 要素に適用される局所クリッピング矩形。
+  - **`clip` (`Option<Clip>`)**: 要素に適用される局所クリッピング矩形/パス。
   - **`commands` (`Vec<RenderCommand>`)**: 該当要素自身が出力する描画コマンド列。
   - **`children` (`Vec<RenderGroup>`)**: 子視覚要素の `RenderGroup` リスト。
 
-### 10.2 Dirty Tracking & Generation Caching
-
-- **`is_dirty` (`bool`)**:
-  - 要素プロパティやサイズの変更に伴い、該当ノードが再描画・再作成を要することを示す一時フラグ（`mark_dirty`）。
-- **`generation` (`u64`)**:
-  - 描画コマンド列（`commands`）が更新・再記録されるたびにインクリメントされる世代番号。
-  - バックエンドの描画キャッシュレイヤー（例: AppKit の `CALayer` キャッシュ構造）は、前回の描画再生（Replay）時の `generation` と比較することで、コマンドに変更がない場合にプラットフォームネイティブの描画リソース構築をスキップ・再利用する。
-
-### 10.3 `RenderCommand` Primitive Set
+### 10.2 `RenderCommand` Primitive Set
 
 `RenderGroup::commands` に保持されるバックエンド非依存の描画命令プリミティブ。
 
@@ -234,20 +251,14 @@ SVG等のベクター文書の保持・レンダリング構造。
 | `StrokeRoundedRect` | `rect`, `radii`, `brush`, `stroke` | 角丸矩形の輪郭線描画 |
 | `FillEllipse` | `rect`, `brush` | 楕円の塗りつぶし描画 |
 | `StrokeEllipse` | `rect`, `brush`, `stroke` | 楕円の輪郭線描画 |
+| `DrawLine` | `from`, `to`, `brush`, `stroke` | 直線の描画 |
 | `FillPath` | `path`, `brush`, `rule` | パス（ベクター図形）の塗りつぶし |
 | `StrokePath` | `path`, `brush`, `stroke` | パス（ベクター図形）の輪郭線描画 |
-| `DrawText` | `rect`, `text`, `style`, `alignment` | テキストグリフ列の指定領域内描画 |
-| `DrawImage` | `rect`, `image`, `options` | ラスタ画像（`Image`）の描画 |
-| `DrawVectorImage` | `rect`, `image`, `options` | ベクター画像（`VectorImage`）の描画 |
-| `PushClip` / `PopClip` | `clip` (`Rect` / `RoundedRect` / `Path`) | クリッピング領域のスタック操作 |
-| `NativeControl` | `bounds`, `owner_id` | ネイティブウィジェット（`NSView`, `FrameworkElement`）の埋め込み座標および所有要素 ID の定義 |
-
-### 10.4 Reconcile & Resource Lifetime
-
-- **ツリー同期（Reconcile）**:
-  - UI 階層の変更やプロパティ更新後、`RenderTree::reconcile` により、最小の変更差分で `RenderGroup` の生成・削除・再記録・座標同期を行う。
-- **リソースライフサイクル**:
-  - `Visibility::Collapsed` や非選択タブなどの非アクティブノードでは、`UIElement` モデルは保持されたまま `RenderGroup` およびバックエンド描画リソースが解放され、アクティブ化時に最新のビューポートサイズで再作成される。
+| `DrawText` | `rect`, `text`, `style`, `alignment`, `foreground` | テキスト描画 |
+| `DrawImage` | `dest`, `image`, `source`, `options` | ラスタ画像（`Image`）の描画 |
+| `DrawVectorImage` | `dest`, `image`, `source`, `options` | ベクター画像（`VectorImage`）の描画 |
+| `PushClip` / `PopClip` | `clip` (`Clip`) | クリッピング領域のスタック操作 |
+| `NativeControl` | `bounds`, `owner_id` | ネイティブウィジェットの埋め込み座標および所有要素 ID |
 
 ---
 

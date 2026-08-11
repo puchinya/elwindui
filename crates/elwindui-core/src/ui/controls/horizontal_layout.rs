@@ -1,4 +1,4 @@
-//! `builtin::HorizontalLayout` — stacks children left to right.
+//! `elwindui::ui::HorizontalLayout` — stacks children left to right.
 
 use super::*;
 

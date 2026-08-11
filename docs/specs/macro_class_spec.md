@@ -6,9 +6,7 @@
 手書きコード(`elwindui-core`/各バックエンドクレート)とコード生成(`elwindui-codegen`)の
 両方で実際に自動化する実装がこのマクロである。
 
-> 本書は命名規約(構造体は素の`ClassName`、トレイトは`ClassNameExt`、祖先アクセサは`as_ui_element`/
-> `__dyn_x`)を含め、`docs/design/gui_framework_design.md`§5.1aより詳細かつ実装に忠実な正である。
-> 実装を疑うときは本書よりも常に`crates/elwindui-macros/src/class.rs`自体を優先して確認すること。
+> 本書は `#[elwindui_macros::class]` マクロが提供する公開契約、命名規則、および型継承生成モデルを規定する規範仕様（Normative Specification）である。
 
 ---
 
@@ -42,10 +40,7 @@ impl ClassName {
 }
 ```
 
-`struct`側の属性が展開時に`#[class(..)]`引数を(クレート内プロセスグローバルな)ストアへ
-保存し(`store_class_args`)、続く`impl`側の**引数なし** `#[elwindui_macros::class]` がそれを
-読み出す(`load_class_args`)。したがって**`struct`が`impl`より前にソース上で宣言されている
-ことが必須**。`impl`側に明示的に引数を書いた場合はそちらが常に優先される(ストアは無視される)。
+`struct`側の属性展開時に指定された`inherits`/`struct_only`等のクラスメタデータが記録され、続く`impl`側の**引数なし** `#[elwindui_macros::class]` がそのメタデータを参照してトレイトおよび継承コードを展開する。したがって**`struct`が`impl`より前にソース上で宣言されていることが必須**である。`impl`側に明示的に引数を書いた場合はそちらが優先される。マクロ展開における内部メタデータ保持（`store_class_args` / `load_class_args`）の実装詳細は `docs/design/tools/codegen_design.md` を参照すること。
 
 `inherits = ..` を省略すると**ルートクラスモード**になる(このクラス階層で唯一祖先を持たない
 クラス、実装では`UIElement`のみ)。詳細は§9。

@@ -1,4 +1,4 @@
-//! `builtin::Dropdown` — the `DropdownExt` implementation. Rebuilds its native `NSPopUpButton`
+//! `elwindui::ui::Dropdown` — the `DropdownExt` implementation. Rebuilds its native `NSPopUpButton`
 //! item list from scratch on every `items` change (see `inner/dropdown.rs`'s own doc comment for
 //! why a full rebuild, not incremental diffing like `TabView`/`MenuBar`, is the right call here).
 

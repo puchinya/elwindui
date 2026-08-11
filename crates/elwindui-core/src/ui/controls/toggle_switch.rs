@@ -1,6 +1,6 @@
-//! `builtin::ToggleSwitch` — a native on/off switch.
+//! `elwindui::ui::ToggleSwitch` — a native on/off switch.
 
-/// `builtin::ToggleSwitch` — a native on/off switch (AppKit: `NSSwitch`, macOS 10.15+; WinUI3:
+/// `elwindui::ui::ToggleSwitch` — a native on/off switch (AppKit: `NSSwitch`, macOS 10.15+; WinUI3:
 /// `ToggleSwitch`).
 ///
 /// **Has no `text` property.** Neither `NSSwitch` nor a bare Fluent `ToggleSwitch` carries a

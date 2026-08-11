@@ -1,4 +1,4 @@
-//! `builtin::TabView`/`TabViewItem`, their identity helpers, and the `ListExt` collection.
+//! `elwindui::ui::TabView`/`TabViewItem`, their identity helpers, and the `ListExt` collection.
 
 use super::NativeControl;
 use crate::AnyView;

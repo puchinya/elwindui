@@ -1,4 +1,4 @@
-//! `builtin::Button` — the `ButtonExt` implementation.
+//! `elwindui::ui::Button` — the `ButtonExt` implementation.
 
 use super::NativeControl;
 use crate::AnyView;

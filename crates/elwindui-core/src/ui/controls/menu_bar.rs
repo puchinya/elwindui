@@ -1,4 +1,4 @@
-//! `builtin::MenuBar` — the native application menu bar.
+//! `elwindui::ui::MenuBar` — the native application menu bar.
 
 use super::*;
 

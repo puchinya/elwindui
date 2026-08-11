@@ -1,8 +1,8 @@
-//! `builtin::ContentControl` — a `Control` holding a single content slot.
+//! `elwindui::ui::ContentControl` — a `Control` holding a single content slot.
 
 use super::*;
 
-/// `builtin::ContentControl`(docs/design/gui_framework_design.md §5.1)— 単一の子(`content`)を持つ
+/// `elwindui::ui::ContentControl`(docs/design/gui_framework_design.md §5.1)— 単一の子(`content`)を持つ
 /// `Control`の薄いラッパー。二重管理を避けるため、バックエンド非依存な合成 builtin としてここに直接手書きする。
 /// Content is a single Visual child managed directly by this type.
 #[elwindui_macros::class(inherits = crate::ui::Control)]

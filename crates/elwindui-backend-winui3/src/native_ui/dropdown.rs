@@ -1,4 +1,4 @@
-//! `builtin::Dropdown` — the `DropdownExt` implementation. Mirrors
+//! `elwindui::ui::Dropdown` — the `DropdownExt` implementation. Mirrors
 //! `elwindui_backend_appkit::native_ui::dropdown`'s own doc comment and structure; dynamic item
 //! rebuild and two-way selection are verified on Windows.
 

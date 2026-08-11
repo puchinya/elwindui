@@ -1,4 +1,4 @@
-//! `builtin::ToggleSwitch` — the `ToggleSwitchExt` implementation.
+//! `elwindui::ui::ToggleSwitch` — the `ToggleSwitchExt` implementation.
 
 use super::NativeControl;
 use crate::AnyView;

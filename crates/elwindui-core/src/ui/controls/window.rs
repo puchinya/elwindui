@@ -1,4 +1,4 @@
-//! `builtin::Window` — the top-level native window.
+//! `elwindui::ui::Window` — the top-level native window.
 
 use super::*;
 

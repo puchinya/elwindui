@@ -1,4 +1,4 @@
-//! `builtin::MenuItem` — one entry in a `Menu`.
+//! `elwindui::ui::MenuItem` — one entry in a `Menu`.
 
 #[elwindui_macros::class(trait_only)]
 #[prop(text: String)]

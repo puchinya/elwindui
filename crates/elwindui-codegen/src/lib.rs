@@ -252,18 +252,16 @@ mod dsl_enum_tests {
                 #[prop]
                 status: DslEnumTestStatusA,
                 body: view! {
-                    VerticalLayout {
-                        match status {
-                            DslEnumTestStatusA::Loading => TextBlock { text: "loading" },
-                            DslEnumTestStatusA::Ready => TextBlock { text: "ready" },
-                        }
+                    match status {
+                        DslEnumTestStatusA::Loading => TextBlock { text: "loading" },
+                        DslEnumTestStatusA::Ready => TextBlock { text: "ready" },
                     }
                 },
             }
             "#,
         )
         .expect("struct should parse");
-        let result = generate_component_from_item_struct(None, &item_struct);
+        let result = generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct);
         assert!(result.is_ok(), "expected success, got: {:?}", result.err());
     }
 
@@ -357,7 +355,7 @@ mod viewmodel_registry_tests {
             "#,
         )
         .unwrap();
-        generate_component_from_item_struct(None, &not_vm_struct)
+        generate_component_from_item_struct(Some("VerticalLayout".to_string()), &not_vm_struct)
             .expect("sibling component should build");
 
         let item_struct: syn::ItemStruct = syn::parse_str(
@@ -406,8 +404,7 @@ mod component_impl_tests {
     #[test]
     fn the_struct_half_emits_nothing() {
         let item_struct: syn::ItemStruct =
-            syn::parse_str(r#"struct MiSilent { body: view! { VerticalLayout { } }, }"#)
-                .expect("struct should parse");
+            syn::parse_str(r#"struct MiSilent {}"#).expect("struct should parse");
         let out = generate_component_from_item_struct(None, &item_struct)
             .expect("struct half should succeed");
         assert!(
@@ -418,10 +415,7 @@ mod component_impl_tests {
 
     #[test]
     fn overridable_method_is_emitted_as_a_public_inherent_method() {
-        declare(
-            None,
-            r#"struct MiBase { body: view! { VerticalLayout { } }, }"#,
-        );
+        declare(None, r#"struct MiBase {}"#);
         let out = methods(
             r#"
             impl MiBase {
@@ -440,10 +434,7 @@ mod component_impl_tests {
 
     #[test]
     fn overrides_gets_a_base_shadow_and_a_rewritten_base_call() {
-        declare(
-            None,
-            r#"struct MiSuper { body: view! { VerticalLayout { } }, }"#,
-        );
+        declare(None, r#"struct MiSuper {}"#);
         methods(
             r#"
             impl MiSuper {
@@ -478,10 +469,7 @@ mod component_impl_tests {
 
     #[test]
     fn overrides_without_a_matching_overridable_is_rejected() {
-        declare(
-            None,
-            r#"struct MiNoHook { body: view! { VerticalLayout { } }, }"#,
-        );
+        declare(None, r#"struct MiNoHook {}"#);
         declare(
             Some("crate::MiNoHook"),
             r#"struct MiNoHookChild { body: view! { MiNoHook { } }, }"#,
@@ -500,10 +488,7 @@ mod component_impl_tests {
 
     #[test]
     fn signature_mismatch_against_the_base_is_rejected() {
-        declare(
-            None,
-            r#"struct MiSigBase { body: view! { VerticalLayout { } }, }"#,
-        );
+        declare(None, r#"struct MiSigBase {}"#);
         methods(
             r#"
             impl MiSigBase {
@@ -531,10 +516,7 @@ mod component_impl_tests {
 
     #[test]
     fn an_untagged_fn_is_rejected() {
-        declare(
-            None,
-            r#"struct MiUntagged { body: view! { VerticalLayout { } }, }"#,
-        );
+        declare(None, r#"struct MiUntagged {}"#);
         let err = methods(r#"impl MiUntagged { fn helper(&self) -> String { String::new() } }"#)
             .expect_err("an untagged fn should be rejected");
         assert!(
@@ -559,10 +541,7 @@ mod component_impl_tests {
 
     #[test]
     fn a_trait_impl_is_rejected() {
-        declare(
-            None,
-            r#"struct MiTraitImpl { body: view! { VerticalLayout { } }, }"#,
-        );
+        declare(None, r#"struct MiTraitImpl {}"#);
         let err = methods(r#"impl Clone for MiTraitImpl { fn clone(&self) -> Self { todo!() } }"#)
             .expect_err("a trait impl should be rejected");
         assert!(err.contains("trait impl"), "error: {err}");

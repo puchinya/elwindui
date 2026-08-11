@@ -318,13 +318,32 @@ fn synthesize_action_fields(item_impl: &syn::ItemImpl) -> Vec<FieldDef> {
         .collect()
 }
 
-/// `syn::Type` -> the tight, no-whitespace string form the rest of `codegen.rs` expects (it round-
-/// trips field types through plain string matching — `is_copy_type`, `nested_vec_item_type` — since
-/// that's the form `parser.rs` produces by slicing raw source text). `quote!`'s `Display` inserts a
-/// space around every token (`Vec < Document >`), so it has to be stripped back out here rather
-/// than touching codegen.rs's matching logic.
+/// `syn::Type` -> the tight string form the rest of `codegen.rs` expects (it round-trips field
+/// types through plain string matching — `is_copy_type`, `nested_vec_item_type`, the many
+/// `ty.contains("dyn UIElement")` checks — since that's the form `parser.rs` produces by slicing
+/// raw source text). `quote!`'s `Display` inserts a space around every token (`Vec < Document >`,
+/// `dyn UIElement`), so most of it has to be stripped back out here — but *not* a space that sits
+/// between two word characters (e.g. the one in `dyn UIElement`), since that one is a mandatory
+/// token separator in valid Rust (`parser.rs`'s raw-slice form always keeps it too, for the same
+/// reason) and blindly dropping it collapsed `dyn UIElement` into the never-matching `dynUIElement`
+/// (Issue #68 bug 4).
 fn type_to_compact_string(ty: &syn::Type) -> String {
-    quote::quote! { #ty }.to_string().replace(' ', "")
+    let rendered = quote::quote! { #ty }.to_string();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut compact = String::with_capacity(rendered.len());
+    let mut chars = rendered.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ' ' {
+            let prev_is_word = compact.chars().next_back().is_some_and(is_word);
+            let next_is_word = chars.peek().is_some_and(|&next| is_word(next));
+            if prev_is_word && next_is_word {
+                compact.push(' ');
+            }
+        } else {
+            compact.push(c);
+        }
+    }
+    compact
 }
 
 /// Parses `#[attr_name(name = expr)]`'s inner `name = expr` and returns `expr` if present —
@@ -584,5 +603,28 @@ mod tests {
         let error = fields_from_item_struct(&item, FieldKind::Observable, false)
             .expect_err("state is component-only");
         assert!(error.contains("only allowed on a component"), "{error}");
+    }
+
+    /// Issue #68 bug 4: `quote!`'s `Display` renders `dyn UIElement` with a space (mandatory
+    /// Rust token separator), and `type_to_compact_string` used to strip *every* space
+    /// unconditionally, collapsing it into the never-matching `dynUIElement` — so a `dyn
+    /// UIElement`-typed field never got recognized as UIElement-typed by any of `codegen.rs`'s
+    /// `ty.contains("dyn UIElement")` checks (e.g. `generate_view`'s `lets_map` seeding, which
+    /// makes a bare self-field reference valid in child-element position).
+    #[test]
+    fn compact_type_string_keeps_the_space_in_dyn_trait_bounds() {
+        let item: syn::ItemStruct = syn::parse_quote! {
+            struct ContentControl {
+                content: std::rc::Rc<dyn UIElement>,
+            }
+        };
+        let fields = fields_from_item_struct(&item, FieldKind::Prop, true)
+            .expect("plain struct field should parse");
+        let content = fields
+            .iter()
+            .find(|f| f.name == "content")
+            .expect("`content` field");
+        assert_eq!(content.ty, "std::rc::Rc<dyn UIElement>");
+        assert!(content.ty.contains("dyn UIElement"));
     }
 }

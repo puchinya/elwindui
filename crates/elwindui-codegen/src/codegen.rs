@@ -8909,6 +8909,43 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                     self.visit_expr_mut(argument);
                 }
             }
+            // `format!("{field}!")`'s inline capture (RFC 2795) only ever sees whatever raw local
+            // happens to be in scope at the exact point this call gets embedded — for a
+            // component's own field that's never a real local (it's `self`-backed storage, or a
+            // constructor parameter that's already been moved elsewhere by the time a second
+            // element also needs it), so this used to compile only by accident (Issue #68 bug 5).
+            // Naming the same resolved value as an *explicit* named argument
+            // (`field = self.field()`) satisfies the placeholder directly — an explicit named
+            // argument is checked before format_args! ever falls back to scope capture (verified:
+            // `format!("{field}!", field = get())` needs no local named `field` at all) — without
+            // touching the format string's own text.
+            if is_format_macro(node) {
+                if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                    let already_named: std::collections::HashSet<String> = arguments
+                        .iter()
+                        .filter_map(|argument| match argument {
+                            syn::Expr::Assign(assign) => match assign.left.as_ref() {
+                                syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                        .collect();
+                    for name in format_str_inline_idents(&fmt.value()) {
+                        if already_named.contains(&name) {
+                            continue;
+                        }
+                        let Some(value) = self
+                            .resolved_mutable_field_read(&name)
+                            .or_else(|| self.resolved_owner(&name))
+                        else {
+                            continue;
+                        };
+                        let ident = format_ident!("{}", name);
+                        arguments.push(syn::parse_quote! { #ident = #value });
+                    }
+                }
+            }
             node.mac.tokens = quote! { #(#arguments),* };
         }
     }
@@ -9021,6 +9058,71 @@ fn supported_macro_expr_arguments(node: &syn::ExprMacro) -> Option<Vec<syn::Expr
         .map(|arguments| arguments.into_iter().collect())
 }
 
+/// Every `{ident}` / `{ident:spec}` inline-capture name (RFC 2795) in a `format!`/`format_args!`
+/// literal format string, deduplicated in first-seen order — skips `{{`/`}}` escapes and
+/// positional/empty (`{}`, `{0}`) placeholders, none of which name anything. `format!` captures
+/// only ever bind a bare single-segment identifier (`format!("{a.b}")` isn't valid Rust), so this
+/// never needs to return anything but plain names. Issue #68 bug 5: without this, a field
+/// reference hidden inside a format string's own text was invisible to every dependency scanner
+/// below and to `ViewClosureRewriter`, which left the *generated* code relying on an ambient local
+/// variable happening to still be in scope at that exact point — broke as soon as a second
+/// element's own construction also needed (and consumed) a same-named local.
+fn format_str_inline_idents(value: &str) -> Vec<String> {
+    let mut idents = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' {
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                continue;
+            }
+            let mut name = String::new();
+            while matches!(chars.peek(), Some(next) if *next != '}' && *next != ':') {
+                name.push(chars.next().unwrap());
+            }
+            for next in chars.by_ref() {
+                if next == '}' {
+                    break;
+                }
+            }
+            let is_ident = !name.is_empty()
+                && name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+            if is_ident && seen.insert(name.clone()) {
+                idents.push(name);
+            }
+        } else if c == '}' && chars.peek() == Some(&'}') {
+            chars.next();
+        }
+    }
+    idents
+}
+
+/// The `syn::LitStr` inside a bare string-literal `syn::Expr`, if that's what `expr` is — used to
+/// pull a `format!`/`format_args!` call's own format-string argument out for
+/// `format_str_inline_idents` to scan, never anything else.
+fn expr_as_lit_str(expr: &syn::Expr) -> Option<&syn::LitStr> {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) => Some(s),
+        _ => None,
+    }
+}
+
+/// Whether `node` is specifically a `format!`/`format_args!` call — narrower than
+/// `supported_macro_expr_arguments`'s gate (which also allows `vec!`/`theme!`), since only these
+/// two ever have inline-capture format-string semantics worth scanning for.
+fn is_format_macro(node: &syn::ExprMacro) -> bool {
+    node.mac
+        .path
+        .segments
+        .last()
+        .is_some_and(|s| matches!(s.ident.to_string().as_str(), "format" | "format_args"))
+}
+
 fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
     match expr {
         ViewExpr::Path(path) => match path.as_slice() {
@@ -9057,6 +9159,16 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
 
                 fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
                     if let Some(arguments) = supported_macro_expr_arguments(node) {
+                        if is_format_macro(node) {
+                            if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                                if format_str_inline_idents(&fmt.value())
+                                    .iter()
+                                    .any(|name| self.ctx.mutable_own_fields.contains(name))
+                                {
+                                    self.found = true;
+                                }
+                            }
+                        }
                         for argument in &arguments {
                             self.visit_expr(argument);
                         }
@@ -9243,6 +9355,16 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
 
                 fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
                     if let Some(arguments) = supported_macro_expr_arguments(node) {
+                        if self.owner.is_empty() && is_format_macro(node) {
+                            if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                                if format_str_inline_idents(&fmt.value())
+                                    .iter()
+                                    .any(|name| name == self.property)
+                                {
+                                    self.found = true;
+                                }
+                            }
+                        }
                         for argument in &arguments {
                             self.visit_expr(argument);
                         }
@@ -9760,6 +9882,32 @@ mod tests {
             .chain(crate::test_builtin_modules())
             .collect();
         build_symbol_table(&all)
+    }
+
+    /// Issue #68 bug 5's underlying scanner: `{{`/`}}` escapes, positional/empty (`{}`/`{0}`)
+    /// placeholders, and `{ident:spec}` format specs must not be reported as captured names — only
+    /// bare `{ident}` (or `{ident:spec}`) ones — and a name repeated across the string must be
+    /// reported once, not once per occurrence (an `arguments.push` per occurrence would otherwise
+    /// emit a "duplicate named argument" `rustc` error in `ViewClosureRewriter`).
+    #[test]
+    fn format_str_inline_idents_finds_only_real_named_captures() {
+        assert_eq!(
+            format_str_inline_idents("{volume}%"),
+            vec!["volume".to_string()]
+        );
+        assert_eq!(
+            format_str_inline_idents("{{literal braces}} and {field:>5}"),
+            vec!["field".to_string()]
+        );
+        assert_eq!(
+            format_str_inline_idents("{} and {0} but not {field}"),
+            vec!["field".to_string()]
+        );
+        assert_eq!(
+            format_str_inline_idents("{field} appears twice: {field}"),
+            vec!["field".to_string()]
+        );
+        assert!(format_str_inline_idents("no placeholders here").is_empty());
     }
 
     #[test]
@@ -10699,14 +10847,12 @@ viewmodel Rows {
     #[observable]
     rows: Vec<Row> = Vec::new(),
 }
-component Search {
+component Search inherits VerticalLayout {
     #[bindable]
     vm: Rc<Rows>,
 }
 view Search {
-    VerticalLayout {
-        for row in vm.rows { TextArea { text <=> row.content } }
-    }
+    for row in vm.rows { TextArea { text <=> row.content } }
 }
 "#,
         )
@@ -10741,20 +10887,18 @@ view Search {
                     #[observable]
                     items: Vec<String> = Vec::new(),
                 }
-                component ItemView {
+                component ItemView inherits VerticalLayout {
                     #[param]
                     item: String,
                 }
                 view ItemView { TextBlock { text: item } }
-                component DynamicHost {
+                component DynamicHost inherits VerticalLayout {
                     #[param]
                     #[inject]
                     vm: DynamicViewModel,
                 }
                 view DynamicHost {
-                    VerticalLayout {
-                        for item in vm.items { ItemView { item: item } }
-                    }
+                    for item in vm.items { ItemView { item: item } }
                 }
             "#,
         )
@@ -11145,44 +11289,40 @@ viewmodel Document {
         let document_view_src = r#"
 use crate::Document;
 
-component DocumentView {
+component DocumentView inherits VerticalLayout {
     #[bindable]
     doc: std::rc::Rc<Document>,
 }
 
 view DocumentView {
-    VerticalLayout {
-        TextArea { text <=> doc.content }
-    }
+    TextArea { text <=> doc.content }
 }
 "#;
         let window_src = r#"
 use crate::NotepadViewModel;
 use crate::DocumentView;
 
-component NotepadWindow {
+component NotepadWindow inherits Window {
     #[bindable]
     vm: std::rc::Rc<NotepadViewModel>,
 }
 
 view NotepadWindow {
-    Window {
-        title: t!("notepad-window-title")
+    title: t!("notepad-window-title")
 
-        TabView {
-            for doc in vm.documents {
-                TabViewItem {
-                    header: doc.file_name
-                    DocumentView { doc: doc }
-                }
-                TabViewItem {
-                    header: "Details"
-                    TextBlock { text: doc.file_name }
-                }
+    TabView {
+        for doc in vm.documents {
+            TabViewItem {
+                header: doc.file_name
+                DocumentView { doc: doc }
             }
-            selected_index <=> vm.active_tab
-            on_new_tab: vm.new_tab
+            TabViewItem {
+                header: "Details"
+                TextBlock { text: doc.file_name }
+            }
         }
+        selected_index <=> vm.active_tab
+        on_new_tab: vm.new_tab
     }
 }
 "#;
@@ -11208,7 +11348,11 @@ view NotepadWindow {
         let document_view_code = generate_module(&document_view_module, &table);
         assert_valid_rust("document_view", &document_view_code);
         let document_view_str = document_view_code.to_string();
-        assert!(document_view_str.contains("fn new (doc : std :: rc :: Rc < Document >)"));
+        // `DocumentView` now `inherits VerticalLayout` (shape composition), so its own
+        // `#[elwindui::class]`-wrapped `impl` emits a private `construct(..)` entry point rather
+        // than the base-less path's public `new(..)` — the public `new(..)` wrapper is synthesized
+        // by the outer `#[elwindui_macros::class]` machinery this test doesn't expand.
+        assert!(document_view_str.contains("fn construct (doc : std :: rc :: Rc < Document >)"));
         assert!(
             !document_view_str.contains("fn show"),
             "DocumentView's root isn't `Window` — `show()` shouldn't be generated"
@@ -11279,26 +11423,24 @@ viewmodel Document {
         let window_src = r#"
 use crate::NotepadViewModel;
 
-component NotepadWindow {
+component NotepadWindow inherits Window {
     #[bindable]
     vm: std::rc::Rc<NotepadViewModel>,
 }
 
 view NotepadWindow {
-    Window {
-        title: t!("notepad-window-title")
+    title: t!("notepad-window-title")
 
-        TabView {
-            for doc in vm.documents {
-                TabViewItem {
-                    header: doc.file_name
-                    closable: true
-                    on_close: vm.close_active_tab
-                    TextBlock { text: doc.file_name }
-                }
+    TabView {
+        for doc in vm.documents {
+            TabViewItem {
+                header: doc.file_name
+                closable: true
+                on_close: vm.close_active_tab
+                TextBlock { text: doc.file_name }
             }
-            selected_index <=> vm.active_tab
         }
+        selected_index <=> vm.active_tab
     }
 }
 "#;
@@ -11410,15 +11552,13 @@ view NotepadWindow {
         let document_view_src = r#"
 use crate::document_view_model::Document;
 
-component DocumentView {
+component DocumentView inherits VerticalLayout {
     #[bindable]
     doc: std::rc::Rc<Document>,
 }
 
 view DocumentView {
-    VerticalLayout {
-        TextArea { text <=> doc.content }
-    }
+    TextArea { text <=> doc.content }
 }
 "#;
         // Mirrors `notepad_window.rs`: `use`s `NotepadViewModel` and `DocumentView`, but never
@@ -11427,25 +11567,23 @@ view DocumentView {
 use crate::notepad_view_model::NotepadViewModel;
 use crate::DocumentView;
 
-component NotepadWindow {
+component NotepadWindow inherits Window {
     #[bindable]
     vm: std::rc::Rc<NotepadViewModel>,
 }
 
 view NotepadWindow {
-    Window {
-        title: t!("notepad-window-title")
+    title: t!("notepad-window-title")
 
-        TabView {
-            for doc in vm.documents {
-                TabViewItem {
-                    header: doc.file_name
-                    DocumentView { doc: doc }
-                }
+    TabView {
+        for doc in vm.documents {
+            TabViewItem {
+                header: doc.file_name
+                DocumentView { doc: doc }
             }
-            selected_index <=> vm.active_tab
-            on_new_tab: vm.new_tab
         }
+        selected_index <=> vm.active_tab
+        on_new_tab: vm.new_tab
     }
 }
 "#;

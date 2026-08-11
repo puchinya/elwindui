@@ -139,6 +139,34 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         }
                     }
 
+                    // `body: view! { .. }` requires `inherits <Base>` (docs/specs/dsl_spec.md §3):
+                    // `view!`'s top-level attribute assignments write into the inherited base's own
+                    // fields (or bind them, for `<=>`), and a bare nested child element binds into
+                    // the base's `#[content(field_name)]`-designated property — with no `inherits`
+                    // base, neither has anywhere to go. Left unchecked, a base-less component with
+                    // its own `view!` still reaches `codegen.rs`'s non-composed path, which always
+                    // tags `component_property_api`'s methods `#[inherent]` (`codegen::mark_inherent`,
+                    // meaningful only inside an `#[elwindui::class]`-wrapped `impl`) — surfacing as a
+                    // baffling `cannot find attribute 'inherent' in this scope` from `rustc` on the
+                    // plain, unwrapped `impl` this path emits, instead of a real diagnostic here
+                    // (Issue #68 bug 1).
+                    if c.base.is_none() {
+                        let has_own_view = module
+                            .items
+                            .iter()
+                            .any(|item| matches!(item, Item::View(v) if v.target == c.name));
+                        if has_own_view {
+                            errors.push(format!(
+                                "{}: a component with a `body: view! {{ .. }}` field must declare \
+                                 `inherits <Base>` — `view!`'s top-level attributes write into the \
+                                 base's own fields and its bare child elements bind into the base's \
+                                 `#[content(field_name)]` property, so there is no destination \
+                                 without a base",
+                                c.name
+                            ));
+                        }
+                    }
+
                     // `#[content(field_name)]` (docs/specs/dsl_spec.md 付録A, WinUI3's
                     // `ContentPropertyAttribute` equivalent, `ComponentDef::content_field`'s doc
                     // comment) must actually name one of this component's own effective fields
@@ -1880,13 +1908,13 @@ mod tests {
         "#,
         );
         let window_src = r#"
-component NotepadWindow {
+component NotepadWindow inherits Window {
     #[bindable]
     vm: std::rc::Rc<NotepadViewModel>,
 }
 
 view NotepadWindow {
-    Window { TextArea { text <=> vm.content } }
+    TextArea { text <=> vm.content }
 }
 "#;
         let modules: Vec<_> = [viewmodel_module, parse_module(window_src).unwrap()]
@@ -1921,11 +1949,11 @@ view Window2 { Window { TextArea { text <=> vm.does_not_exist } } }
     fn accepts_bindable_field_whose_type_is_a_viewmodel() {
         let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
         let window_src = r#"
-component Window2 {
+component Window2 inherits Window {
     #[bindable]
     vm: std::rc::Rc<Vm>,
 }
-view Window2 { Window { TextBlock { text: "x" } } }
+view Window2 { TextBlock { text: "x" } }
 "#;
         let modules = vec![
             parse_module(viewmodel_src).unwrap(),
@@ -1986,20 +2014,18 @@ view Window2 { Window { NotAViewModel { label: "x" } } }
         "#,
         );
         let window_src = r#"
-component NotepadWindow {
+component NotepadWindow inherits Window {
     #[param]
     #[inject]
     vm: NotepadViewModel,
 }
 
 view NotepadWindow {
-    Window {
-        title: vm.documents
-        Button {
-            text: t!("save-label")
-            on_click: vm.save
-            enabled: vm.save_can_execute
-        }
+    title: vm.documents
+    Button {
+        text: t!("save-label")
+        on_click: vm.save
+        enabled: vm.save_can_execute
     }
 }
 "#;
@@ -2104,12 +2130,12 @@ view Window6 { Window { TextArea { text: vm.content } } }
         let window_src = r#"
 use crate::some_vm_mod::Vm;
 
-component Window7 {
+component Window7 inherits Window {
     #[param]
     #[inject]
     vm: Vm,
 }
-view Window7 { Window { TextArea { text: vm.content } } }
+view Window7 { TextArea { text: vm.content } }
 "#;
         let modules = vec![vm_module, parse_module(window_src).unwrap()];
         assert_eq!(validate(&modules), Ok(()));
@@ -2244,18 +2270,16 @@ component DocumentView {
     doc: std::rc::Rc<Doc>,
 }
 
-component Window11 {
+component Window11 inherits Window {
     #[param]
     #[inject]
     vm: Documents,
 }
 
 view Window11 {
-    Window {
-        TabView {
-            for doc in vm.documents {
-                TabViewItem { DocumentView { doc: doc } }
-            }
+    TabView {
+        for doc in vm.documents {
+            TabViewItem { DocumentView { doc: doc } }
         }
     }
 }
@@ -2661,6 +2685,52 @@ view Foo {
         );
     }
 
+    /// Issue #68 bug 1: a component with its own `view` but no `inherits <Base>` used to sail
+    /// through `validate::validate` and only fail much later, at real `cargo build` time, with a
+    /// baffling `cannot find attribute 'inherent' in this scope` from `rustc` (`codegen.rs`'s
+    /// non-composed path always tags `component_property_api` `#[inherent]`, meaningful only
+    /// inside an `#[elwindui::class]`-wrapped `impl`). `view!`'s top-level attributes write into
+    /// the inherited base's own fields and its bare child elements bind into the base's
+    /// `#[content(field_name)]` property — with no base, neither has anywhere to go — so this is
+    /// now a real, early diagnostic instead.
+    #[test]
+    fn rejects_own_view_with_no_inherits_base() {
+        let src = r#"
+component Foo {
+}
+
+view Foo {
+    TextBlock { text: "hi" }
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("Foo") && e.contains("inherits")),
+            "errors: {errs:?}"
+        );
+    }
+
+    /// A `view`-less component has no such requirement — §4's "pure data definition" components
+    /// never need a base at all (only a `view!` field creates the "where does this write to"
+    /// question `rejects_own_view_with_no_inherits_base` covers).
+    #[test]
+    fn accepts_view_less_component_with_no_inherits_base() {
+        let src = r#"
+component Foo {
+    #[param]
+    value: i32,
+}
+"#;
+        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+            .chain(crate::test_builtin_modules())
+            .collect();
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
     /// `#[native]`, like `#[embedded]`, only makes sense on one of this crate's own builtin shape
     /// components — a consumer's own source has no way to actually provide a hand-written
     /// per-backend implementation for it.
@@ -2849,12 +2919,12 @@ component Derived inherits Base {
     #[test]
     fn accepts_computed_field_override_with_override_attr() {
         let src = r#"
-component Base {
+component Base inherits VerticalLayout {
     #[computed]
     label: String = "base".to_string(),
 }
 
-view Base { VerticalLayout { } }
+view Base { }
 
 component Derived inherits Base {
     #[override]
@@ -2921,14 +2991,14 @@ component Derived inherits Base {
     #[test]
     fn accepts_override_method_with_matching_signature() {
         let src = r#"
-component Base {
+component Base inherits VerticalLayout {
     #[virtual]
     fn label(&self) -> String {
         "base".to_string()
     }
 }
 
-view Base { VerticalLayout { } }
+view Base { }
 
 component Derived inherits Base {
     #[override]
@@ -3016,13 +3086,11 @@ component MyGrid {
     column: i32 = 0,
 }
 
-component Foo {
+component Foo inherits VerticalLayout {
 }
 
 view Foo {
-    VerticalLayout {
-        TextBlock { text: "hi", MyGrid::row: 1, MyGrid::column: 0 }
-    }
+    TextBlock { text: "hi", MyGrid::row: 1, MyGrid::column: 0 }
 }
 "#;
         let modules = vec![parse_module(src).unwrap()];
@@ -3101,7 +3169,7 @@ view SaveField {
     #[test]
     fn accepts_valid_shortcut_on_routed_attribute() {
         let src = r#"
-component SaveField { }
+component SaveField inherits VerticalLayout { }
 view SaveField {
     Button {
         #[shortcut("Ctrl+S")]
@@ -3186,14 +3254,12 @@ viewmodel Rows {
     #[observable]
     rows: Vec<Row> = Vec::new(),
 }
-component Search {
+component Search inherits VerticalLayout {
     #[bindable]
     vm: Rc<Rows>,
 }
 view Search {
-    VerticalLayout {
-        for row in vm.rows { TextArea { text <=> row.content } }
-    }
+    for row in vm.rows { TextArea { text <=> row.content } }
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(valid_src).unwrap())
@@ -3206,14 +3272,12 @@ viewmodel Row {
     #[observable]
     content: String = String::new(),
 }
-component Search {
+component Search inherits VerticalLayout {
     #[param]
     items: Vec<Rc<Row>>,
 }
 view Search {
-    VerticalLayout {
-        for row in items { TextArea { text <=> row.content } }
-    }
+    for row in items { TextArea { text <=> row.content } }
 }
 "#;
         let modules: Vec<_> = std::iter::once(parse_module(explicit_rc_src).unwrap())

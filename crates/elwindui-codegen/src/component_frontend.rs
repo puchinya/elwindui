@@ -735,6 +735,60 @@ mod tests {
         assert!(s.contains("impl"));
     }
 
+    /// Issue #68 bug 4: a component's own `dyn UIElement`-typed field, inserted bare (no `key:`)
+    /// in child-element position of its own `view!` — mirrors `docs/specs/dsl_spec.md`'s
+    /// `ContentControl` example (§3), but built through this struct/`impl`-based frontend, whose
+    /// `attr_frontend::type_to_compact_string` used to strip the mandatory space out of `dyn
+    /// UIElement`, so `generate_view`'s `lets_map` seeding never recognized `content` as a valid
+    /// bare child reference and codegen panicked with "does not refer to an earlier `let`
+    /// binding". The equivalent DSL-text form (`parser.rs` slicing raw source) never hit this,
+    /// since it never strips that space to begin with.
+    #[test]
+    fn bare_self_field_resolves_as_child_via_struct_frontend() {
+        let src = r#"
+            struct Wrapper {
+                content: std::rc::Rc<dyn UIElement>,
+
+                body: view! {
+                    padding: padding
+                    content
+                }
+            }
+        "#;
+        let generated = generate(Some("Control"), src);
+        syn::parse2::<syn::File>(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
+    }
+
+    /// Issue #68 bug 5: `format!("{field}!")`'s inline capture (RFC 2795) only sees whatever raw
+    /// local happens to be in scope at the exact point the call gets embedded — for a component's
+    /// own field, the generated code used to compile only by accident, relying on a local that a
+    /// *second* element's own construction had usually already consumed by the time it got there.
+    /// One element referencing the field this way always worked; two or more broke.
+    #[test]
+    fn format_inline_capture_compiles_across_multiple_elements() {
+        let src = r#"
+            struct VolumeControl {
+                #[prop(default = 50.0)]
+                volume: f32,
+
+                body: view! {
+                    TextBlock { text: format!("{volume}%") }
+                    TextBlock { text: format!("Level: {volume}%") }
+                }
+            }
+        "#;
+        let generated = generate(Some("VerticalLayout"), src);
+        syn::parse2::<syn::File>(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
+        let s = generated.to_string();
+        assert!(
+            s.matches("volume =").count() >= 2,
+            "expected an explicit named `volume = ..` format! argument at each of the two \
+             call sites in generated code:\n{s}"
+        );
+    }
+
     // Phase 2: a `view!`-less component is legal (the Rust-macro-path counterpart of a DSL
     // `component X { .. }` with no paired `view X { .. }` block) — see
     // `component_and_view_from_item_struct`'s own doc comment.
@@ -918,7 +972,7 @@ mod doc_example_own_default_and_computed_fields {
     #[test]
     fn own_default_prop_referenced_bare_in_own_view() {
         let src = r#"
-component Greeter {
+component Greeter inherits VerticalLayout {
     #[prop]
     title: String = "hi".to_string(),
 }
@@ -944,7 +998,7 @@ view Greeter {
     #[test]
     fn own_computed_field_depending_on_own_default_prop() {
         let src = r#"
-component Greeter {
+component Greeter inherits VerticalLayout {
     #[prop]
     volume: i32 = 50,
 

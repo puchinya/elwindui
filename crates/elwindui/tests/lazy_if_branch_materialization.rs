@@ -13,15 +13,18 @@
 //!
 //! The toggling condition (`show_then`) is deliberately `ToggleHost`'s own mutable `#[prop]`
 //! field, not an injected `#[bindable]` viewmodel property — mirrors `examples/notepad`'s real,
-//! screenshot-verified `CustomCheckBox` (`is_checked`, toggled via `on_tapped`). A *bind-owner*-
-//! driven `if`/`match` condition (e.g. `if vm.show { .. }` for a `#[bindable] vm`) turns out to
-//! have a separate, pre-existing gap unrelated to lazy-once materialization:
-//! `property_resync_methods_for` only scans each dynamic node's own *attributes* for which
-//! bind-owner properties they depend on, never a dynamic region's own `condition`/`match value`
-//! expression — so `__resync_<owner>` never fires `__refresh_dynamic_regions()` off of a condition-
-//! only dependency. An own-field condition doesn't hit this gap: `component_self_subscription`
-//! calls `__refresh_dynamic_regions()` unconditionally on every own-property change, regardless of
-//! which attribute/condition actually depends on it.
+//! screenshot-verified `CustomCheckBox` (`is_checked`, toggled via `on_tapped`). Writing this test
+//! against a *bind-owner*-driven `if`/`match` condition (e.g. `if vm.show { .. }` for a
+//! `#[bindable] vm`) surfaced two separate, pre-existing gaps unrelated to lazy-once materialization
+//! (fixed for Issue #58, see `bind_owner_dynamic_resync.rs` for the runtime proof and
+//! `property_resync_methods_for`'s own doc comment for the fix): `property_resync_methods_for` used
+//! to scan each dynamic node's own *attributes* only, never a dynamic region's own `condition`/
+//! `match value`/`for` `collection` expression, and (independently) a composed component's bind-
+//! owner resync arms were built with `include_refresh: false` on the mistaken premise that something
+//! else already called `__refresh_dynamic_regions()` for them. An own-field condition never hit
+//! either gap: `component_self_subscription` calls `__refresh_dynamic_regions()` unconditionally on
+//! every own-property change, regardless of which attribute/condition depends on it or whether the
+//! component is composed.
 
 // Required in the crate root of anything using `#[elwindui_macros::class]` (which every
 // `inherits`-carrying component becomes) — see docs/specs/macro_class_spec.md §10 and

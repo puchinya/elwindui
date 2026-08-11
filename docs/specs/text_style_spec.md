@@ -31,7 +31,7 @@
 ## 4. Inheritance and local values
 
 - 各propertyは独立に継承される。子にlocal valueがあるpropertyだけが祖先値を上書きする。
-- local valueがない場合、logical content relationを優先し、必要な場合にvisual parentを通じて最も近いtext-style ownerを探索する。
+- local valueがない場合、visual parentを通じて最も近いtext-style ownerを探索する。text styleの継承経路をlogical content relationへ切り替えてはならない。
 - `ContentControl`のcontentはcontrolからtext styleを継承できる。backend用の補助hostは公開上の継承境界を変更してはならない。
 - 祖先にも値がないpropertyは、backend-independentなfallbackから解決される。ただしsystem font/foregroundを要求する値はbackend既定へ委ねる。
 

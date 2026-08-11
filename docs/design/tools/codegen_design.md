@@ -58,7 +58,7 @@ validatorは [`dsl_spec.md`](../../specs/dsl_spec.md) のcompile-time ruleをAST
 - `#[param]`、`#[prop]`、`#[state]` の利用制約
 - `for`、`if`、`match` など動的領域の構造
 - DSL enumについてmacro展開時に判定できる網羅性
-- `native!` など配置制約を持つconstruct
+- content fieldの形状、native/virtual root互換性、shortcut targetと配置などの構造制約
 
 macro processで完全に解決できないRust型やpathは、生成するRust構文によってrustcのtype checkとpattern exhaustiveness checkへ引き継ぐ。正しさを隠す合成的なwildcard armは生成しない。
 

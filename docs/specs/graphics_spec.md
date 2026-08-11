@@ -6,9 +6,9 @@
 
 ## 1. Scope
 
-本書は `elwindui::core::graphics` モジュールが公開するグラフィックス表現型（Color, Brush, Path, Image, VectorImage 等）の型定義および公開意味論を規定する。
+本書は `elwindui::core::graphics` モジュールが公開するグラフィックス表現型（Color, Brush, Path, Image, VectorImage 等）とbackend-neutralな描画記録型の公開意味論を規定する。
 
-Retained render tree、backend replay、layer/cache strategyは公開graphics valueではないため、[`../design/runtime/rendering_design.md`](../design/runtime/rendering_design.md) とbackend designを参照する。
+描画記録型はbackend実装を接続する公開surfaceである。一方、reconciliation algorithm、backend replay、layer/cache strategyは内部設計であり、[`../design/runtime/rendering_design.md`](../design/runtime/rendering_design.md) とbackend designを参照する。
 
 ---
 
@@ -19,7 +19,8 @@ Retained render tree、backend replay、layer/cache strategyは公開graphics va
 ```rust
 use elwindui::core::graphics::{
     Color, Brush, LinearGradientBrush, RadialGradientBrush, ImageBrush,
-    StrokeStyle, Path, PathBuilder, Image, ImageData, VectorImage, ...
+    StrokeStyle, Path, PathBuilder, Image, ImageData, VectorImage,
+    RenderCommand, RenderContext, RenderGroup, RenderTree, ...
 };
 ```
 
@@ -224,7 +225,28 @@ SVG等のベクター文書の保持・レンダリング構造。
 
 ---
 
-## 10. Related specifications
+## 10. SVG loading
+
+Cargo feature `svg` が有効な場合、facadeは `elwindui::svg` を公開する。
+
+- `load_svg_file`、`load_svg_bytes`、`load_svg_str` はdefault optionでSVGを `VectorImage` へ変換し、失敗時は `SvgError` を返す。`load_svg_bytes` はgzip圧縮されたSVGZも受け付ける。
+- `SvgLoader` は `SvgLoadOptions` と `SvgLimits` を受け取り、制限違反をerrorとして返す。diagnosticsを返すload pathは変換できた画像とwarningを分離する。
+- 外部resourceの解決は `SvgResourcePolicy` と `SvgResourceResolver` に従う。default policyは外部file参照を許可しない。
+- 個別SVG featureのbackend対応状況は本仕様ではなく [`../status/backend_status.md`](../status/backend_status.md) に記録する。
+
+---
+
+## 11. Drawing recording and retained tree
+
+- `RenderContext` は1つのVisualのlocal drawing commandsを記録する。fill/stroke、text、raster/vector imageに加え、clip、transform、opacityのpush/popとscope guardを提供する。
+- `RenderCommand` はそのbackend-neutralな記録を表し、backendはvariantの順序とstack操作を保持してreplayする。
+- `RenderGroup` はVisual identity、local extent、clip、commands、子groupを保持する。commandsを再記録するたびに `generation` を進める。
+- `RenderTree` はroot groupとidentity lookupを保持し、`mark_dirty(id)` は存在するgroupを再記録対象にする。groupのreconciliationとcache寿命は内部設計である。
+- `CommandFingerprint` はgeometryとpaintを分けたfast-reject値であり、一致だけを再利用の正しさ判定にしてはならない。backendは `RenderCommand::visually_eq` で一致を確認する。
+
+---
+
+## 12. Related specifications
 
 - [UI Specification](ui_spec.md) - 本グラフィックス型を利用するUI要素仕様
 - [DSL Specification](dsl_spec.md) - DSLにおける属性指定ルール

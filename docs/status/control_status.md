@@ -22,9 +22,10 @@ Snapshot: 2026-08-11. Public behavior is defined by [`../specs/ui_spec.md`](../s
 
 ## Current gaps
 
-- `ControlTemplate<Self>` does not have a complete runtime replacement pipeline.
+- `ControlTemplate<Self>` does not have a complete runtime replacement pipeline ([#83](https://github.com/puchinya/elwindui/issues/83)).
 - `tooltip` is implemented for NativeControl descendants, not backend-neutral self-rendered elements.
 - Native control support has no GTK4 implementation.
+- Accessibility scaffolds and the NavigationHost/VirtualList/ErrorBoundary surface require an explicit public-contract decision ([#85](https://github.com/puchinya/elwindui/issues/85)).
 - Additional planned controls remain backlog items until their public contract and design are approved.
 
 ## Verification

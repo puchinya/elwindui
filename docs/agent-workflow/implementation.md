@@ -16,7 +16,9 @@ Before editing:
 4. Documentation-only or workflow-only changes may use a `docs/` or `agent/` branch instead.
 5. Replace `phase:ready` with `phase:implementation`.
 
-The approved Issue is the implementation contract.
+The approved Issue is the implementation contract for the task scope.
+
+It does not silently override normative specifications. If an approved change intentionally changes a normative public contract, update the corresponding `docs/specs/` document as part of the same change.
 
 ## Implementation rules
 
@@ -26,7 +28,15 @@ The approved Issue is the implementation contract.
 - Do not expose backend-specific types through common APIs unless explicitly approved.
 - Do not introduce a new dependency without recording and justifying the decision.
 - Add or update tests that verify behavior and acceptance criteria, not only implementation details.
-- Update durable documentation when the public API, behavior, or architecture changes.
+- Update durable documentation (`docs/specs/`, `docs/design/`, `docs/status/`) when public contracts, implementation architecture, or status change.
+
+## Handling specification disagreement during implementation
+
+When code, design, status, and normative specifications disagree during implementation:
+
+1. **Implementation gap**: If the code does not yet support the specification, keep the specification and fix or complete the implementation.
+2. **Approved specification change**: If the approved Issue explicitly authorizes a specification change, update both the implementation and the corresponding `docs/specs/` document as part of the same change.
+3. **Unapproved specification difference**: If the Issue does not authorize a specification change, do not silently change `docs/specs/`. Return to `phase:design` if the specification or architecture needs to be revised.
 
 ## When implementation invalidates the design
 

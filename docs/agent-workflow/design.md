@@ -6,6 +6,12 @@ Read this file only while the associated Issue is in `phase:design`.
 
 Define how the approved requirements will be implemented, with enough precision that implementation does not require unreviewed architectural decisions.
 
+Issue-level design may propose changes to public behavior, but once approved:
+
+- normative public contracts belong in [`docs/specs/`](../specs/);
+- durable implementation architecture belongs in [`docs/design/`](../design/);
+- current implementation progress belongs in [`docs/status/`](../status/).
+
 ## Required design topics
 
 Cover only the topics relevant to the change:
@@ -35,6 +41,8 @@ Create a repository design document, proposal, or ADR only when the decision is 
 - ownership, threading, or persistence model changes;
 - compatibility-breaking changes;
 - major dependency introductions.
+
+A durable design document may explain how an approved public API change is implemented, but the normative public contract itself must be reflected in the relevant [`docs/specs/`](../specs/) document.
 
 ## Approval gate
 

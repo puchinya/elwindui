@@ -24,7 +24,7 @@ Turn the initial request into a bounded, testable problem statement without star
    - unresolved questions that block progress.
    When the request includes a file that defines or materially constrains the work (for example,
    an implementation directive), attach the original file to the Issue before implementation.
-5. Inspect the relevant code and only the relevant sections of long specification documents.
+5. Inspect the relevant code and only the relevant sections of long specification documents. Treat existing normative specifications in [`docs/specs/`](../specs/) as the authoritative baseline for requirements unless the request explicitly proposes a specification change.
 6. Separate the following explicitly:
    - background;
    - objective;

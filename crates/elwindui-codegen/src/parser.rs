@@ -1591,7 +1591,13 @@ impl<'a> Parser<'a> {
     fn looks_like_next_attribute_ahead(&mut self) -> bool {
         let save = self.pos;
         self.skip_trivia();
-        let looks_like_attribute = self.peek_str("#[") || {
+        // Tolerate whitespace between `#` and `[`: `view!` tokens recovered via
+        // `TokenStream::to_string()` (`component_frontend.rs`) always render `#[shortcut(...)]`
+        // as two separate tokens with an inserted space (`# [shortcut (...)]`), never the literal
+        // `#[` a hand-typed `.elwind`/DSL-text source would have — a plain `peek_str("#[")` misses
+        // that spelling entirely and lets this attribute's tokens get swallowed into the previous
+        // attribute's raw-text capture (`take_expr_until_line_end_or`) instead.
+        let looks_like_attribute = (self.eat_char('#') && self.eat_char('[')) || {
             self.parse_ident().is_ok() && {
                 self.skip_trivia();
                 self.peek_char() == Some(':') && !self.peek_str("::")
@@ -2254,6 +2260,24 @@ view SaveField {
             ]
         );
         assert_eq!(*scope, ShortcutScope::Local);
+    }
+
+    #[test]
+    fn parses_shortcut_attr_after_token_recovered_closure_value() {
+        // `component_frontend.rs` recovers a `view! { .. }` field's macro tokens via
+        // `proc_macro2::TokenStream::to_string()`, which always renders `#[shortcut(...)]` as two
+        // separate tokens with an inserted space (`# [shortcut (...)]`) and collapses the DSL's own
+        // no-comma-needed line breaks onto one line — never the literal, unspaced `#[` a hand-typed
+        // source has. Reproduce that exact shape (Issue #68 bug 3) instead of hand-typed spacing.
+        let src = r#"Button { on_select : | index | vm . select_tab (index) # [shortcut ("Ctrl+S")] on_click : || { save () } , }"#;
+        let (_, _, _, root) = parse_view_body(src).expect("should parse");
+        let element = literal(&root.children[0]);
+        assert_eq!(element.type_path, "Button");
+        assert_eq!(element.attribute_shortcuts.len(), 1);
+        let (name, chords, scope) = &element.attribute_shortcuts[0];
+        assert_eq!(name, "on_click");
+        assert_eq!(chords, &[(None, "Ctrl+S".to_string())]);
+        assert_eq!(*scope, ShortcutScope::Global);
     }
 }
 

@@ -123,7 +123,7 @@ if let Some(path) = platform::file_dialog::open().await {
 | 書く内容 | 型・制約・初期値のみ | `if`/`for`/`match`による要素ツリーの組み立て |
 | 変更頻度 | 低い(型は安定) | 高い(レイアウト調整で頻繁に変わる) |
 
-**`body: view! { .. }` フィールドを持つcomponentは、必ず`inherits`(次項)で何らかのbaseを指定する。** base無しで自分自身の視覚ツリーを一から組み立てるcomponentは現状サポートされない——`view`を持つcomponentは常に何らかの合成可能なbase(`VerticalLayout`/`HorizontalLayout`/`Control`等、または他のユーザー定義component)の上に構築する。子要素を並べたいだけの単純なcomponentは、`inherits VerticalLayout`/`inherits HorizontalLayout`(次項の2番目のケース、シェイプ合成)を使うのが最も基本的な書き方になる——この場合`view`の中身がそのままそのレイアウトの子要素になるため、ラッパー要素を書く必要もない。`view!`を持たないcomponent(データ定義のみ、§4参照)にはこの制約はない。
+**`body: view! { .. }` フィールドを持つcomponentは、必ず`inherits`(次項)で何らかのbaseを指定する。** これは単なる制限ではなく、`view!`の中身の書き込み先そのものがbaseに依存するためである——`view!`のトップレベルの属性設定(`padding: padding`のような`key: value`行)はbaseが持つ同名フィールドへの設定・バインディングであり、属性名を書かない裸のネスト子要素は、baseが宣言する`#[content(field_name)]`(§12/付録A参照)が指定するbase自身のフィールドへの格納である。`inherits`で指定するbaseが無ければ、このどちらにも書き込み先が存在しない。したがってbase無しで自分自身の視覚ツリーを一から組み立てるcomponentは現状サポートされない——`view`を持つcomponentは常に何らかの合成可能なbase(`VerticalLayout`/`HorizontalLayout`/`Control`等、または他のユーザー定義component)の上に構築する。子要素を並べたいだけの単純なcomponentは、`inherits VerticalLayout`/`inherits HorizontalLayout`(次項の2番目のケース、シェイプ合成)を使うのが最も基本的な書き方になる——この場合`view`の中身がそのままそのレイアウトの子要素になるため、ラッパー要素を書く必要もない。`view!`を持たないcomponent(データ定義のみ、§4参照)にはこの制約はない。
 
 ```rust
 #[elwindui::component(inherits VerticalLayout)]
@@ -155,7 +155,7 @@ impl VolumeControl {}
 
 - デフォルト値・算出式は`#[prop(default = expr)]`/`#[computed(expr = expr)]`/`#[attached(default = expr)]`のように対応する属性の名前付き引数として渡す。ViewModelの`#[observable(default = expr)]`/`#[computed(expr = expr)]`も同じ表記を使う
 - `#[param]`も`#[param(default = expr)]`でデフォルト値を持てる。ただし静的評価式だけを許可し、リアクティブなフィールド参照は拒否する(§4参照)
-- 同じcomponentの`#[prop]`/`#[computed]`フィールドは`view`から裸の識別子で参照でき、依存値の変更時に該当する算出値とviewだけが再同期される。依存fieldは通常の式として直接参照しなければならず、`format!("{volume}%")`のようなmacro token内だけに隠れた参照は依存として扱われない。`volume.to_string() + "%"`のようにfield参照が通常の式として現れる形を使う
+- 同じcomponentの`#[prop]`/`#[computed]`フィールドは`view`から裸の識別子で参照でき、依存値の変更時に該当する算出値とviewだけが再同期される。依存fieldは通常の式として直接参照するか、`format!("{volume}%")`のような`format!`/`format_args!`のインラインキャプチャ(Rustの`{field}`記法)として参照する——どちらも依存として追跡される。`volume.to_string() + "%"`のようにfield参照が通常の式として現れる形も引き続き使える。それ以外の(`format!`/`format_args!`ではない)任意のmacro token内だけに隠れた参照は、依然として依存として扱われない
 - `if`/`match`の条件式は裸のfield参照だけを受け付ける。`if orientation == Orientation::Horizontal`のような比較式は書けないため、enum分岐は`match`を使う
 
 **呼び出し側:**

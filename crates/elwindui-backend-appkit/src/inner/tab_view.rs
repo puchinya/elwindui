@@ -183,7 +183,7 @@ impl InnerTabView {
         );
         host.setFrame(self.content_container.bounds());
         host.setHidden(true);
-        // Every new host starts suppressed (docs/design/gui_framework_design.md §5.4a) — only
+        // Every new host starts suppressed (docs/design/runtime/layout_design.md) — only
         // `set_tab_content_visible(host, true)` below ever reactivates one, including the very
         // first time a tab becomes selected (see that method's own doc comment). Suppressing here
         // rather than leaving the default `active: true` matters even for a tab that never gets

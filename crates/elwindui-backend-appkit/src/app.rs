@@ -12,7 +12,7 @@ use objc2_app_kit::{NSApplication, NSApplicationDelegate};
 use objc2_foundation::NSObjectProtocol;
 use std::cell::RefCell;
 
-/// AppKit's `Dispatcher` (docs/design/gui_framework_design.md §7.3): hops back to the main thread via GCD's
+/// AppKit's `Dispatcher` (docs/design/runtime/state_management_design.md): hops back to the main thread via GCD's
 /// main queue, which `NSApplication.run()` (`application::run()` below) actively services as part
 /// of its own event loop — so a job enqueued from any thread (a background `tokio` task
 /// completing, say) is guaranteed to run promptly. See `elwindui_core::task` for how this lets a

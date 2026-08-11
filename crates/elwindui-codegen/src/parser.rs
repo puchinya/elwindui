@@ -160,7 +160,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // `parse_module` only ever sees source text, not a file path — real module paths (docs/design/tools/codegen_design.md §3)
+        // `parse_module` only ever sees source text, not a file path — real module paths (docs/design/tools/codegen_design.md)
         // are assigned by the caller (`compile_dir_impl`), which knows where each file actually
         // lands in the crate. Defaults to `[]` (crate root), matching `Module`'s `Default`.
         Ok(Module {
@@ -279,7 +279,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses `Name [inherits Base] { field/method, ... }` for both `component` and `viewmodel`
-    /// (§3, docs/design/gui_framework_design.md §7.2 share the same field grammar). `default_kind` is `Prop` for `component`,
+    /// (§3, docs/design/runtime/state_management_design.md share the same field grammar). `default_kind` is `Prop` for `component`,
     /// `Observable` for `viewmodel` (a field with no kind attribute defaults to its container's
     /// usual kind). `inherits` is only meaningful for `component` (see `ComponentDef::base`'s doc
     /// comment) — parsed here regardless since the grammar up to `{` is otherwise identical, but
@@ -625,7 +625,7 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
             if self.eat_keyword("on_mount") {
                 self.skip_trivia();
-                self.eat_char(':'); // docs/design/gui_framework_design.md §6.1's `on_mount: { .. }` — the `:` is optional sugar.
+                self.eat_char(':'); // docs/design/runtime/ui_tree_design.md's `on_mount: { .. }` — the `:` is optional sugar.
                 self.skip_trivia();
                 let block_src = self.take_block_src()?;
                 on_mount = Some(
@@ -752,7 +752,7 @@ impl<'a> Parser<'a> {
                 self.eat_char(',');
                 continue;
             }
-            // `#[shortcut(...)]` (docs/design/gui_framework_design.md §8.1) — the only
+            // `#[shortcut(...)]` (docs/design/runtime/input_focus_design.md) — the only
             // attribute-prefix syntax an element body supports today (unlike `#[id("...")]`, which
             // only ever precedes a `let` binding, never an ordinary attribute line — see
             // `parse_view_def`). Must be immediately followed by a plain `ident: value` attribute

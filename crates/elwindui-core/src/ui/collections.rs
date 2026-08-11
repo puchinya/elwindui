@@ -86,7 +86,7 @@ impl UIElementVisualCollection {
 }
 
 /// The Logical-tree-shaped child list a container (`Layout`/`Control` family) declares in
-/// the DSL — WinUI3's own `UIElementCollection` (docs/design/gui_framework_design.md §5.2), e.g.
+/// the DSL — WinUI3's own `UIElementCollection` (docs/design/runtime/ui_tree_design.md), e.g.
 /// `Panel.Children`. There is no separate, generically-traversable Logical tree: this is simply the
 /// convenience API a *particular* component exposes for its own children, which automatically stays
 /// in sync with the real Visual tree — `add`/`insert`/`remove`/`remove_at`/`clear` all mutate the

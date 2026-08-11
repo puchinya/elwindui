@@ -7,7 +7,8 @@ cd "$repo_root"
 
 readonly sample_count=5
 readonly settle_ms=5000
-readonly report_path="docs/status/appkit_memory_baseline.md"
+readonly evidence_root=".agent-state/issues/60"
+readonly report_path="$evidence_root/appkit-memory-baseline.md"
 readonly baseline_binary="target/release/examples/appkit-memory-baseline"
 readonly graphics_demo_binary="target/release/graphics-demo"
 
@@ -86,6 +87,8 @@ for ((run = 1; run <= sample_count; run++)); do
         run_case "$case_name" "$run"
     done
 done
+
+mkdir -p "$evidence_root"
 
 {
     printf '# AppKit 基礎メモリ Baseline\n\n'

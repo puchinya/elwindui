@@ -38,7 +38,7 @@ impl InnerDropdown {
 
     /// Full rebuild rather than incremental diffing against the previous item list — unlike a
     /// `TabView` tab's own content subtree, a `DropdownItem` carries no live native editing state
-    /// worth preserving across an update (`docs/status/nativecontrol_status.md` §2, `Dropdown`).
+    /// worth preserving across an update (`docs/status/control_status.md`, `Dropdown`).
     pub(crate) fn rebuild_items(&self, texts: &[String]) {
         self.ns.removeAllItems();
         for text in texts {

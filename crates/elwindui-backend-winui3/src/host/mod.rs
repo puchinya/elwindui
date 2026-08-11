@@ -93,7 +93,7 @@ pub struct TreeHostPanel {
 /// coalesced by AppKit into a single pass per display cycle, no matter how many times it's called),
 /// `relayout_static` here rebuilds `Canvas.Children` synchronously and from scratch — so
 /// `request_relayout` debounces via `pending` + this thread's `DispatcherQueue`, matching
-/// docs/design/gui_framework_design.md §5.4's `RelayoutHost` coalescing contract: repeated calls within the same
+/// docs/design/runtime/layout_design.md's `RelayoutHost` coalescing contract: repeated calls within the same
 /// synchronous burst (e.g. several property setters inside one `resync()`) collapse into a single
 /// deferred relayout pass, not one synchronous pass per call.
 pub(crate) struct WinUI3RelayoutHost {

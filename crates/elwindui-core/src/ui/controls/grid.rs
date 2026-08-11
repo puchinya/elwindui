@@ -14,7 +14,7 @@ use super::*;
 /// `rows`/`columns` (not `row_definitions`/`column_definitions`) to match `elwindui::ui::Grid`'s own
 /// `#[param] rows`/`#[param] columns` names — `elwindui-codegen`'s setter-based construction calls
 /// `.set_{param name}(..)` generically, so the Rust field/setter name must agree with the DSL's.
-/// `Grid`'s own class trait (docs/design/gui_framework_design.md §5.1) — inherits `Layout` (like
+/// `Grid`'s own class trait (docs/design/runtime/ui_tree_design.md) — inherits `Layout` (like
 /// `VerticalLayout`/`HorizontalLayout`), so `children` comes from that shared base rather than
 /// being declared on `Grid` itself (`docs/specs/ui_spec.md#grid`).
 /// Reads a child's `Grid::row`/`Grid::column` attached-property values back out of its

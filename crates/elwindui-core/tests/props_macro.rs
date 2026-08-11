@@ -135,7 +135,7 @@ fn props_macro_sets_is_default() {
 /// and passes the value through untouched, so an `Option<String>` prop whose setter takes `&str` —
 /// `tooltip` here, and `TextBox::placeholder` before it — can only be given something that already
 /// *is* a `&str`. A DSL string literal is; a `String`-valued viewmodel expression is not. See
-/// `docs/status/nativecontrol_status.md` §5 for this and the other `Option<T>` wrapping gaps.
+/// `docs/status/control_status.md` for this and the other `Option<T>` wrapping gaps.
 #[test]
 fn props_macro_forwards_tooltip_up_to_native_control() {
     let button = FakeButton::default();

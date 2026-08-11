@@ -1,7 +1,7 @@
 //! Backend-independent drawing API — value types (color/brush/stroke/path/image), the
 //! `RenderCommand`/`RenderContext` recording layer `UIElement::render` implementations write
 //! against, and the retained `RenderGroup`/`RenderTree` visual tree each backend replays.
-//! See `docs/design/gui_framework_design.md` §5.7 for how `elwindui::ui::Canvas`'s (currently
+//! See `docs/design/runtime/rendering_design.md` for how `elwindui::ui::Canvas`'s (currently
 //! unimplemented) `Painter` abstraction will eventually sit on top of `RenderContext`.
 
 mod brush;

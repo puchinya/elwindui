@@ -2,11 +2,14 @@
 
 Guidelines for AI agents modifying `elwindui-backend-appkit` or testing on macOS.
 
-## Related Status Documents
+## Related documents
 
-- [`docs/status/macos_ui_driver_status.md`](../status/macos_ui_driver_status.md) — CLI driver commands and status.
-- [`docs/status/appkit_memory_baseline.md`](../status/appkit_memory_baseline.md) — AppKit baseline memory measurements.
-- [`docs/status/appkit_graphics_demo_rss_breakdown.md`](../status/appkit_graphics_demo_rss_breakdown.md) — AppKit graphics-demo footprint breakdown.
+- Architecture: [`docs/design/backends/appkit_backend_design.md`](../design/backends/appkit_backend_design.md)
+- Backend state: [`docs/status/backend_status.md`](../status/backend_status.md)
+- Control state: [`docs/status/control_status.md`](../status/control_status.md)
+- Tool state: [`docs/status/tooling_status.md`](../status/tooling_status.md)
+
+Raw memory reports and GUI logs belong under `.agent-state/issues/<issue>/` according to [`docs/agent-workflow/evidence.md`](../agent-workflow/evidence.md), not in durable status documents.
 
 ## Visual & Screenshot Verification
 

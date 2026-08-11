@@ -48,7 +48,7 @@ pub trait RelayoutHost {
 /// on a hosted tree's root, set by the host's own `set_tree`), discovered the same way
 /// (`request_focus` walks `visual_parent` up to the root, mirroring `request_relayout`), and backed
 /// by the same "wrap a weak handle back to the host" convention. `UIElementExt::focus()` is the
-/// public entry point every element gets for free — see docs/design/gui_framework_design.md §5.5.
+/// public entry point every element gets for free — see docs/design/runtime/input_focus_design.md.
 pub trait FocusHost {
     /// Always requests `FocusState::Programmatic` — matching real WinUI3, where `Control.Focus()`'s
     /// public entry point only ever sets `Programmatic`; `Keyboard`/`Pointer` are set exclusively by
@@ -79,7 +79,7 @@ pub trait FocusHost {
 /// New kinds (a future `Grid`, say) are added by implementing this trait; nothing here or in
 /// `layout_root` needs to change.
 ///
-/// `UIElement` is the root of the class hierarchy (docs/design/gui_framework_design.md §5.1) —
+/// `UIElement` is the root of the class hierarchy (docs/design/runtime/ui_tree_design.md) —
 /// `#[elwindui_macros::class]`'s "root class mode" (no `inherits`): every method on the paired
 /// `impl UIElement { .. }` below becomes a *default* method here, embedded body and all, so every
 /// other `#[class(inherits = ..)]`-managed subclass inherits all of them for free via Rust's own
@@ -371,7 +371,7 @@ impl UIElement {
     /// Currently equivalent to `visibility() == Visibility::Visible`, but kept as its own method
     /// (rather than inlining that comparison at each call site) so a future container-level
     /// participation signal — e.g. a hosted tree being temporarily deactivated by its own
-    /// `TreeHostView`/`TreeHostPanel` (docs/design/gui_framework_design.md §5) — has exactly one
+    /// `TreeHostView`/`TreeHostPanel` (docs/design/runtime/ui_tree_design.md) — has exactly one
     /// place to fold in, without hunting down every call site again. As of this writing no such
     /// second signal exists in this crate: TabView/ScrollView content lives in its own separately
     /// hosted tree rather than as `visual_children()` of the tab strip, so a hosted tree simply
@@ -433,7 +433,7 @@ impl UIElement {
     fn arranged_offset(&self) -> Option<Point> {
         self.as_ui_element().arranged_offset.get()
     }
-    /// Post-construction setters (docs/design/gui_framework_design.md §5.1) for every field this trait
+    /// Post-construction setters (docs/design/runtime/ui_tree_design.md) for every field this trait
     /// already exposes a getter for — declared here (not just as `UIElement`'s own inherent
     /// methods) so they're reachable generically through `dyn UIElement`/any bound on this trait,
     /// not only through the concrete backing struct.
@@ -513,7 +513,7 @@ impl UIElement {
             .and_then(|p| p.upgrade())
     }
     /// This element's own children in the **Visual tree** (WinUI3's own Visual-tree children,
-    /// docs/design/gui_framework_design.md §5.2) — the only tree any code ever actually walks (there is no
+    /// docs/design/runtime/ui_tree_design.md) — the only tree any code ever actually walks (there is no
     /// separate, generically-traversable Logical tree data structure; some components merely *have*
     /// Logical-tree-shaped children of their own — see `UIElementCollection`). A default method,
     /// not overridden by any concrete type: it reads `self.as_ui_element().visual_children` directly, which
@@ -575,7 +575,7 @@ impl UIElement {
     }
     /// `Some(&self.handle)` (the raw native handle itself, erased to `&dyn Any`) for a backend's own
     /// `NativeControlImpl { handle: AnyView, .. }` and for any type that composes one as its own
-    /// `base` field (docs/design/gui_framework_design.md §5.1 — e.g. a backend's `ButtonImpl { base:
+    /// `base` field (docs/design/runtime/ui_tree_design.md — e.g. a backend's `ButtonImpl { base:
     /// NativeControlImpl, .. }` overrides this to return `Some(&self.base.handle)`); `None` for every
     /// other `UIElement` (the default). `collect_render_items<H>` downcasts this directly to `H`
     /// (`downcast_ref::<H>()`), not to any `elwindui-core`-defined wrapper struct — measuring/placing
@@ -868,7 +868,7 @@ impl UIElement {
     ///
     /// Overridable so a Popup/Portal/ControlTemplate-style element whose *visual* parent doesn't
     /// reach its real inheritance source (指示書 §28) can substitute its own answer — no such
-    /// override exists yet (未対応, see `docs/status/font_status.md`), but the hook is here.
+    /// override exists yet (未対応, see `docs/design/runtime/text_design.md`), but the hook is here.
     #[overridable]
     fn inheritance_parent(&self, kind: InheritanceParentKind) -> Option<Rc<dyn UIElementExt>> {
         match kind {

@@ -6,7 +6,7 @@
 //! `elwindui_core::graphics::TextBackend`) both go through it, so a `TextBlock`'s measured size and
 //! its painted glyphs are always built from the exact same `NSFont`/`NSAttributedString`.
 //!
-//! See `docs/status/font_status.md` for the full design writeup, including the approximation
+//! See `docs/design/runtime/text_design.md` for the full design writeup, including the approximation
 //! table below and what's out of scope for this pass (gradient/image foreground text degrades to
 //! a flat color — see `foreground_ns_color` — the same documented gap `render::paint::apply_fill`
 //! already has for gradient fills elsewhere in this crate).

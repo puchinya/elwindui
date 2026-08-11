@@ -35,7 +35,7 @@ pub struct KeyModifiers {
 }
 
 /// Payload for `on_pointer_pressed`/`on_pointer_released`/`on_pointer_moved`/`on_pointer_entered`/
-/// `on_pointer_exited` (docs/design/gui_framework_design.md §5.10). `position` is in the hosting
+/// `on_pointer_exited` (docs/design/runtime/ui_tree_design.md). `position` is in the hosting
 /// tree's own root-relative coordinate space (the same space `elwindui_core::ui::hit_test`'s `at`
 /// argument uses) — not relative to whichever ancestor happens to handle the bubbled event, since a
 /// single payload value is shared across every handler on the bubble path. `button` is `Some` only
@@ -141,7 +141,7 @@ struct TapRecord {
 /// Turns raw mouse input into `elwindui_core::ui::hit_test`/`dispatch_routed` calls against a
 /// hosted tree — one instance per hosted tree (owned by a backend's own host view, e.g.
 /// `elwindui-backend-appkit`'s `TreeHostView`), fed every native mouse event via [`Self::handle`].
-/// Modeled on WinUI3's input manager + `GestureRecognizer` (docs/design/gui_framework_design.md
+/// Modeled on WinUI3's input manager + `GestureRecognizer` (docs/design/README.md
 /// §5.10), with two deliberate simplifications from real WinUI3, both documented where they apply:
 ///
 /// - **Implicit-only capture**: while a button is held, `Moved`/`Released` are redirected to the
@@ -409,7 +409,7 @@ impl PointerDispatcher {
 }
 
 /// WinUI3's `VirtualKey`, scoped down to the subset every desktop platform reports uniformly —
-/// see docs/design/gui_framework_design.md §8.1. `Character` covers ordinary printable keys
+/// see docs/design/runtime/input_focus_design.md. `Character` covers ordinary printable keys
 /// (layout-dependent, best-effort — a backend maps its own native keycode/character to this
 /// directly; no keyboard-layout remapping is attempted by `elwindui-core` itself).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -443,7 +443,7 @@ pub enum Key {
     F12,
 }
 
-/// Payload for `on_key_down`/`on_key_up` (docs/design/gui_framework_design.md §8.1). Dispatched
+/// Payload for `on_key_down`/`on_key_up` (docs/design/runtime/input_focus_design.md). Dispatched
 /// only to whichever element `FocusTracker::focused` currently names — unlike the pointer events,
 /// there is no hit-testing involved.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -455,7 +455,7 @@ pub struct KeyEventArgs {
 
 /// Payload for `on_text_input` — the IME-committed string, or a directly-typed character when no
 /// IME is involved. Only ever carries already-committed text; in-progress IME composition previews
-/// are not exposed to the DSL (see docs/design/gui_framework_design.md §8.1's own caveat).
+/// are not exposed to the DSL (see docs/design/runtime/input_focus_design.md's own caveat).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextInputEventArgs {
     pub text: String,
@@ -497,7 +497,7 @@ pub enum FocusState {
 }
 
 /// A single key combination a `#[shortcut(...)]`-annotated field registers into a
-/// `ShortcutRegistry` — docs/design/gui_framework_design.md §8.1.
+/// `ShortcutRegistry` — docs/design/runtime/input_focus_design.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyChord {
     pub key: Key,
@@ -618,7 +618,7 @@ impl ShortcutRegistry {
 /// against a hosted tree's currently-focused element — the keyboard counterpart to
 /// `PointerDispatcher`, owned the same way (one instance per hosted tree, fed every native key
 /// event via [`Self::handle_key`]/[`Self::handle_text_input`]). Modeled on WinUI3's input manager +
-/// `FocusManager` (docs/design/gui_framework_design.md §5.5/§8.1).
+/// `FocusManager` (docs/design/runtime/input_focus_design.md).
 #[derive(Default)]
 pub struct KeyboardDispatcher {
     pub focus: crate::focus::FocusTracker,

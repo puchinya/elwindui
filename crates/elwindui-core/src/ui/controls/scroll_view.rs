@@ -4,7 +4,7 @@ use super::*;
 
 /// Hosts arbitrary elwindui content inside a native scrolling container —
 /// `ScrollView -> NativeScrollHost -> ElwinduiContentRoot -> content`
-/// (`docs/status/nativecontrol_status.md`). Unlike every other `NativeControl` leaf so
+/// (`docs/status/control_status.md`). Unlike every other `NativeControl` leaf so
 /// far (`Button`/`TextArea`/`TextBox`/`PasswordBox`/`TabView`, all self-contained native widgets),
 /// `ScrollView`'s own content is a full elwindui subtree with its own layout/paint/hit-test/focus —
 /// each backend's `ElwinduiContentRoot` is a second, nested instance of that same backend's own

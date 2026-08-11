@@ -1,428 +1,159 @@
-# Issue-driven AI development workflow
+# ElwindUI Issue-driven development workflow
 
-This document explains the development workflow for human maintainers.
+Updated: 2026-08-11
 
-Agent-facing instructions are intentionally split across `AGENTS.md` and
-`docs/agent-workflow/`. Humans may read this document as a single overview.
-AI agents should not load this file during ordinary work unless a user
-explicitly asks for the human-facing explanation.
+この文書は人間向けの全体像である。AI Agentが実際に従うrepository-wide ruleは [`AGENTS.md`](../AGENTS.md)、phaseごとの正確な手順は [`docs/agent-workflow/`](../docs/agent-workflow/) を正本とする。この文書だけに必須ruleを置かない。
 
-## Purpose
+## 1. Actors and entry points
 
-The workflow is designed to keep AI-assisted development traceable without
-placing every rule in the always-loaded `AGENTS.md`.
+- Codexを含むAI Agentは [`AGENTS.md`](../AGENTS.md) をentry pointとする。
+- Claude Codeは [`CLAUDE.md`](../CLAUDE.md) から入り、共通ruleについて必ず `AGENTS.md` へ従う。
+- どちらも文書検索は [`docs/README.md`](../docs/README.md) から開始し、category READMEを経て必要な1～少数の文書を選ぶ。
 
-It separates:
+CodexとClaude Codeで異なるのはentry pointだけで、Issue workflow、document authority、GitHub CLI、product contractは共通である。
 
-- the request and approved specification in a GitHub Issue;
-- the implementation and verification evidence in a Pull Request;
-- project-wide rules in `AGENTS.md`;
-- phase-specific agent instructions in `docs/agent-workflow/`.
+## 2. GitHub and Git tools
 
-This reduces context-window use and prevents requirements, design,
-implementation, and review responsibilities from being mixed.
+このrepositoryでは次に統一する。
 
-## Lifecycle
-
-```text
-Request
-  -> Issue created or located
-  -> Requirements
-  -> Design
-  -> Approval
-  -> Ready
-  -> Implementation and verification
-  -> Pull Request and review
-  -> Merge
-  -> Issue closed
-```
-
-## Phase labels
-
-Exactly one of the following phase labels should be active:
-
-- `phase:requirements`
-- `phase:design`
-- `phase:ready`
-- `phase:implementation`
-- `phase:review`
-
-The following labels are supplementary and may coexist with a phase:
-
-- `blocked`
-- `needs-user-decision`
-
-`blocked` is not a phase. It means work cannot continue because of an external
-or technical dependency.
-
-`needs-user-decision` means a product, API, compatibility, scope, or
-architecture decision is required from the requester or maintainer.
-
-## When to create an Issue
-
-Create or locate an Issue before changing source code or documentation.
-
-Do not create an Issue automatically for:
-
-- explanation;
-- code reading;
-- research;
-- exploratory design discussion;
-- comparison with another framework.
-
-Create an Issue when:
-
-- a repository change is requested;
-- work should be tracked;
-- an exploratory discussion is approved as planned work;
-- a bug, feature, refactoring, test, or documentation change will be made.
-
-## Initial Issue
-
-The first Issue does not need a complete specification.
-
-A minimal Issue may contain:
-
-```markdown
-## Initial request
-
-The request as received.
-
-## Planning state
-
-Requirements and design are being discussed.
-The approved specification will be added after approval.
-```
-
-During a short planning session, draft reasoning stays in the conversation.
-
-If planning spans multiple sessions, add one concise checkpoint comment with:
-
-- decisions already made;
-- unresolved questions;
-- next action.
-
-Do not rewrite the Issue body after every conversation turn.
-
-## Requirements phase
-
-The requirements phase determines what will be built.
-
-The Issue should ultimately identify:
-
-- background;
-- objective;
-- functional requirements;
-- non-goals;
-- constraints;
-- verifiable acceptance criteria;
-- unresolved questions.
-
-A requirement should describe externally observable behavior or a testable
-condition. It should not merely say that a type or function was implemented.
-
-## Design phase
-
-The design phase determines how the requirements will be implemented.
-
-Relevant topics may include:
-
-- public API;
-- type and module responsibilities;
-- ownership and lifetime model;
-- data and event flow;
-- backend boundary;
-- threading and async behavior;
-- error handling;
-- compatibility;
-- performance constraints;
-- test strategy;
-- alternatives and rejection reasons.
-
-Ordinary changes can keep the design in the Issue.
-
-Create a proposal or ADR only when the decision should remain useful beyond
-the Issue, such as a substantial public API, architecture, ownership,
-threading, compatibility, or dependency decision.
-
-## Approval
-
-Nontrivial implementation begins after requirements and design are approved.
-
-After approval:
-
-1. Replace the planning text in the Issue with the approved requirements,
-   non-goals, design summary, and acceptance criteria.
-2. Set `phase:ready`.
-3. Begin implementation.
-
-A narrowly scoped bug fix or documentation correction may treat the original
-implementation request as approval when existing behavior already defines the
-solution and no architecture or public API decision is required.
-
-## Feature branches
-
-Any change to source code must be made on a dedicated feature branch.
-
-Branch format:
-
-```text
-feature/<issue-number>-<short-slug>
-```
-
-Examples:
-
-```text
-feature/123-graphics-path
-feature/245-pointer-capture
-```
-
-Create the branch from the current remote default branch, not from an arbitrary
-local branch. Do not edit source code directly on `master`, `main`, or another
-default branch.
-
-Use on macOS/Linux:
-
-```bash
-scripts/agent/start-feature-branch.sh 123 "graphics path"
-```
-
-Use in Windows PowerShell:
-
-```powershell
-.\scripts\agent\start-feature-branch.ps1 123 "graphics path"
-```
-
-Documentation-only or workflow-only changes may use a `docs/` or `agent/`
-branch instead.
-
-## Implementation and verification
-
-When work starts:
-
-1. Create or switch to the Issue feature branch.
-2. Set `phase:implementation`.
-3. Treat the approved Issue as the implementation contract.
-4. Keep unrelated refactoring out of the change.
-5. Run the repository checks documented in `AGENTS.md`.
-6. Record checks that were not run and why.
-
-If implementation reveals that the approved design must materially change,
-return the Issue to `phase:design` before continuing.
-
-Examples include:
-
-- changing an approved public API;
-- expanding a non-goal into scope;
-- breaking compatibility;
-- changing backend, ownership, or threading boundaries;
-- adding a major dependency;
-- changing acceptance criteria.
-
-## Pull Request and review
-
-The Pull Request should contain:
-
-- purpose and impact;
-- main changes;
-- important implementation decisions;
-- verification commands and results;
-- untested environments;
-- compatibility and residual risks;
-- reviewer guidance;
-- `Closes #<issue-number>`.
-
-Detailed implementation and verification evidence belongs primarily in the
-Pull Request. The Issue remains the approved specification.
-
-Set `phase:review` after opening the Pull Request.
-
-The Issue is not complete merely because the Pull Request is approved. It is
-complete only after required CI succeeds and the Pull Request is merged into
-the default branch.
-
-## Issue and Pull Request responsibilities
-
-### Issue
-
-The Issue owns:
-
-- background and objective;
-- requirements;
-- non-goals and constraints;
-- approved design summary;
-- acceptance criteria;
-- material approved specification changes;
-- link to the Pull Request.
-
-### Pull Request
-
-The Pull Request owns:
-
-- actual code and documentation changes;
-- implementation-specific decisions;
-- test and verification evidence;
-- residual risks;
-- reviewer guidance;
-- review discussion.
-
-## Rust version milestone
-
-For a Rust repository, each tracked Issue is assigned to the GitHub Milestone
-matching the version in the root `Cargo.toml`.
-
-Resolution order:
-
-1. `[workspace.package].version`
-2. `[package].version`
-
-The version string is used exactly as the Milestone title.
-
-Examples:
-
-```text
-0.1.0
-1.4.0-beta.2
-```
-
-Do not add a `v` prefix.
-
-Use on macOS/Linux:
-
-```bash
-scripts/agent/ensure-version-milestone.sh <issue-number>
-```
-
-Use in Windows PowerShell:
-
-```powershell
-.\scripts\agent\ensure-version-milestone.ps1 <issue-number>
-```
-
-Both helpers:
-
-- reads the root Cargo version;
-- finds an exact-title Milestone;
-- creates it when absent;
-- assigns the Issue when an Issue number is supplied;
-- rejects duplicate exact-title Milestones;
-- stops when the exact-title Milestone exists but is closed.
-
-A closed matching Milestone usually means either the Milestone must be
-reopened intentionally or `Cargo.toml` should move to the next development
-version. The helper does not make that release decision automatically.
-
-## Cross-platform helper scripts
-
-| Operation | macOS/Linux | Windows PowerShell |
-|---|---|---|
-| Start feature branch | `scripts/agent/start-feature-branch.sh` | `scripts/agent/start-feature-branch.ps1` |
-| Ensure version milestone | `scripts/agent/ensure-version-milestone.sh` | `scripts/agent/ensure-version-milestone.ps1` |
-
-Both variants implement the same repository rules. Use the native script for
-the current operating system rather than invoking the other platform through
-an emulation layer.
-
-## Agent instruction files
-
-Agents load only the file for the current phase:
-
-| Effective phase | Agent instruction |
+| Operation | Tool |
 |---|---|
-| `phase:requirements` | `docs/agent-workflow/requirements.md` |
-| `phase:design` | `docs/agent-workflow/design.md` |
-| `phase:ready`, `phase:implementation` | `docs/agent-workflow/implementation.md` |
-| `phase:review`, open associated PR | `docs/agent-workflow/review.md` |
+| Issue、label、milestone、comment、Pull Request、review、Actions | `gh` |
+| branch、stage、commit、push、local diff/history | `git` |
 
-The complete human explanation is this file. It is not part of the normal
-agent phase-routing path.
+別のGitHub integrationは、ユーザーが明示した場合または`gh`で必要操作を実行できない場合だけ使う。
 
-## Manual operational example
+## 3. Issue phases
 
-Create an Issue:
+Repositoryを変更する作業は一つのGitHub Issueに紐付ける。説明・調査だけならIssueを自動作成しない。
 
-```bash
-ISSUE_URL="$(
-  gh issue create \
-    --title "Add GraphicsPath API" \
-    --body-file /tmp/issue.md
-)"
-ISSUE_NUMBER="${ISSUE_URL##*/}"
-scripts/agent/ensure-version-milestone.sh "$ISSUE_NUMBER"
-```
-
-After requirements and design are approved:
-
-```bash
-gh issue edit "$ISSUE_NUMBER" \
-  --remove-label "phase:design" \
-  --add-label "phase:ready"
-```
-
-When implementation starts on macOS/Linux:
-
-```bash
-scripts/agent/start-feature-branch.sh \
-  "$ISSUE_NUMBER" \
-  "graphics path"
-
-gh issue edit "$ISSUE_NUMBER" \
-  --remove-label "phase:ready" \
-  --add-label "phase:implementation"
-```
-
-When implementation starts in Windows PowerShell:
-
-```powershell
-.\scripts\agent\start-feature-branch.ps1 `
-  $IssueNumber `
-  "graphics path"
-
-gh issue edit $IssueNumber `
-  --remove-label "phase:ready" `
-  --add-label "phase:implementation"
-```
-
-When the Pull Request is opened:
-
-```bash
-gh issue edit "$ISSUE_NUMBER" \
-  --remove-label "phase:implementation" \
-  --add-label "phase:review"
-```
-
-The Pull Request body should contain:
-
-```text
-Closes #<issue-number>
-```
-
-After merge, GitHub closes the Issue automatically.
-
-<!-- BEGIN LOCAL STATE AND EVIDENCE HUMAN GUIDE -->
-## Local state, screenshots, and logs
-
-Incomplete work is stored locally under:
-
-```text
-.agent-state/issues/<issue-number>/
-  checkpoint.md
-  screenshots/
-  logs/
-```
-
-Use native helpers:
-
-| Operation | macOS/Linux | Windows PowerShell |
+| State | Purpose | Agent instructions |
 |---|---|---|
-| Save checkpoint | `scripts/agent/save-work-checkpoint.sh N` | `.\\scripts\\agent\\save-work-checkpoint.ps1 N` |
-| Resume and compare | `scripts/agent/resume-work.sh N` | `.\\scripts\\agent\\resume-work.ps1 N` |
-| Prepare evidence folders | `scripts/agent/prepare-work-evidence.sh N` | `.\\scripts\\agent\\prepare-work-evidence.ps1 N` |
+| `phase:requirements` | 目的、scope、non-goal、acceptanceを確定 | [`requirements.md`](../docs/agent-workflow/requirements.md) |
+| `phase:design` | 実装判断とtest strategyを承認可能にする | [`design.md`](../docs/agent-workflow/design.md) |
+| `phase:ready` | requirements/design承認済み | [`implementation.md`](../docs/agent-workflow/implementation.md) |
+| `phase:implementation` | branch上で実装・verification中 | [`implementation.md`](../docs/agent-workflow/implementation.md) |
+| `phase:review` | PR review・CI対応中 | [`review.md`](../docs/agent-workflow/review.md) |
 
-`.agent-state/` is excluded only in the current clone. Before moving work
-between macOS and Windows, post one concise `Work checkpoint` Issue comment.
+`needs-user-decision` はproduct/architecture decision待ち、`blocked` は外部または技術的な進行不能を表す。単に作業量が多いことはblockedではない。
 
-Commit only small screenshots needed for review under
-`docs/issues/<issue>-<slug>/evidence/`. Keep raw logs and investigation images
-local; use CI artifacts for large logs, videos, dumps, and image sets.
-<!-- END LOCAL STATE AND EVIDENCE HUMAN GUIDE -->
+## 4. Requirements phase
+
+1. 既存Issue/PRと関連specを検索する。
+2. 変更作業にIssueがなければ、実装前に作成する。
+3. Rust workspace versionと同名のmilestoneへIssueを割り当てる。
+4. background、objective、requirements、non-goals、constraints、acceptance、unresolved questionsを分離する。
+5. 変更をpublic contract、internal architecture、implementation-only、bug fix、verification-onlyに分類する。
+6. user decisionを勝手に決めず、要件がtestableになってから`phase:design`へ進む。
+
+詳細とcompletion criteriaは [`requirements.md`](../docs/agent-workflow/requirements.md) を参照する。
+
+## 5. Design phase
+
+Issue固有designはIssue本文またはcommentへ記録する。次の作業を超えて再利用されるpublic contractやdurable architectureだけをrepository docsへ昇格させる。
+
+Designは必要な項目だけを扱う。
+
+- public behavior;
+- responsibilities、ownership、lifetime;
+- data/event flow;
+- backend boundary;
+- thread/async/error behavior;
+- compatibility、performance、cache;
+- tests、alternatives。
+
+承認後にIssue本文をrequirements/design/acceptanceの正本へ更新し、`phase:ready`へ進む。詳細は [`design.md`](../docs/agent-workflow/design.md) を参照する。
+
+## 6. Document authority and synchronization
+
+永続情報の責務は次のとおりである。
+
+| Location | Meaning |
+|---|---|
+| [`docs/specs/`](../docs/specs/) | normative public contract |
+| [`docs/design/`](../docs/design/) | durable internal architecture |
+| source code | current implementation |
+| tests | executable evidence |
+| [`docs/status/`](../docs/status/) | current implementation/verification summary |
+| [`docs/agents/`](../docs/agents/) | technical Agent rules |
+
+依存方向は次であり、逆向きにdesired behaviorを決めない。
+
+```text
+specs -> design -> code -> status
+```
+
+| Change | Synchronization order |
+|---|---|
+| Public behavior / DSL contract | spec -> design when needed -> code -> status |
+| Internal architecture | design -> code -> status when needed |
+| Approved implementation gap | code -> status |
+| Bug fix against existing contract | code -> status when needed |
+| Verification only | tests/evidence -> status |
+
+現在のbugにspecを合わせない。設計が変わらない変更でdesignを無意味に書き換えない。実装中にcontract/design不足を発見したら、Issueをrequirements/designへ戻して承認を得る。
+
+この表のAgent向け正本は [`AGENTS.md`](../AGENTS.md) である。
+
+## 7. Implementation phase
+
+実装前にIssue本文と新しいcommentを確認し、remote default branchから専用branchを作る。source変更は通常 `feature/<issue>-<slug>`、docs/workflow-onlyは `docs/` / `agent/` またはrepositoryで承認されたprefixを使う。
+
+Implementationでは:
+
+- approved scopeだけを変更する;
+- unrelated formatting/refactorを混ぜない;
+- document synchronization orderを守る;
+- testとverificationを実行する;
+- 未実行platformやresidual riskを正直に記録する;
+- staging前に全diffをself-reviewする。
+
+詳細は [`implementation.md`](../docs/agent-workflow/implementation.md) を参照する。
+
+## 8. Pull Request and review
+
+PR本文には次を含める。
+
+- purposeとimpact;
+- main changesと重要なdecision;
+- verification command/result;
+- untested environment;
+- compatibility/residual risk;
+- reviewer guidance;
+- `Closes #<issue-number>`。
+
+PR作成、review/comment取得、check確認、label更新は`gh`を使う。reviewでrequirements/design変更が必要になった場合はIssueを`phase:design`へ戻し、承認後に再実装する。
+
+merge条件とreview処理は [`review.md`](../docs/agent-workflow/review.md) を参照する。
+
+## 9. Checkpoints and resuming
+
+Pause/resume時は [`checkpoint.md`](../docs/agent-workflow/checkpoint.md) とrepository helper scriptを使う。checkpointにはdecision、current branch/commit、dirty changes、verification、残作業、未完了のspec/design/code/status同期を含める。
+
+Checkpointは新しいproduct decisionの正本ではない。再開後はIssueと現在のdiffを再確認する。
+
+## 10. Evidence
+
+| Evidence | Storage |
+|---|---|
+| local investigation logs/screenshots | `.agent-state/issues/<issue>/` |
+| small durable review evidence | `docs/issues/<issue>-<slug>/evidence/` with README |
+| large logs/videos/dumps/image sets | CI artifact |
+| concise result and links | Issue or PR |
+
+`.agent-state/` はgitignore対象である。secret、token、private data、不要なuser-specific pathを保存しない。raw measurementやdebugging historyを `docs/status` へ常設しない。
+
+正確な保存ruleは [`evidence.md`](../docs/agent-workflow/evidence.md) を参照する。
+
+## 11. Document maintenance checklist
+
+コードまたは文書の変更後に確認する。
+
+- public behaviorが変わったのにspecが古くないか;
+- architectureが変わったのにdesignが古くないか;
+- implementation/verification stateが変わったのにstatusが古くないか;
+- Agent command/invariantが古くないか;
+- `AGENTS.md`と`CLAUDE.md`が矛盾していないか;
+- category READMEから対象文書へ到達できるか;
+- removed path、broken link、古いIssue説明が残っていないか;
+- human overviewにしか存在しない必須ruleがないか。

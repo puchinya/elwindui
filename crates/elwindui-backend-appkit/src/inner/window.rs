@@ -52,7 +52,7 @@ fn resolve_focus_owner(
 
 define_class!(
     /// A plain `NSWindow` subclass whose only job is bridging AppKit's own first-responder changes
-    /// into `elwindui_core::focus::FocusTracker` — see `docs/design/gui_framework_design.md` §5.5.
+    /// into `elwindui_core::focus::FocusTracker` — see `docs/design/runtime/input_focus_design.md`.
     /// Subclassing the window (rather than every individual native leaf class) is the standard,
     /// minimal-surface-area AppKit technique for observing "did some view anywhere in this window
     /// become/stop being first responder" without per-widget-class overrides, and mirrors this same
@@ -72,7 +72,7 @@ define_class!(
         /// unconditionally for the gained side (Phase 1 simplification — distinguishing a real
         /// mouse click from AppKit's own Tab-driven key-view-loop focus change would need
         /// inspecting `NSApp.currentEvent`, and no such key-view loop is wired between elwindui
-        /// elements yet regardless — see `docs/design/gui_framework_design.md` §5.5/§8.1's "known
+        /// elements yet regardless — see `docs/design/runtime/input_focus_design.md`'s "known
         /// limitation" notes on Tab/Shift+Tab out of a focused native control).
         ///
         /// Resolves the target through `host.ivars().render_tree.borrow()` in its own `let`

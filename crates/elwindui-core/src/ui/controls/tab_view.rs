@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// `TabView`'s class trait (docs/design/gui_framework_design.md §5.1). Its content is a live, ordered
+/// `TabView`'s class trait (docs/design/runtime/ui_tree_design.md). Its content is a live, ordered
 /// collection of `TabViewItem`s. Dynamic child ranges update this collection directly; the
 /// backend reconciles the corresponding native tabs.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]

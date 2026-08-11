@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// `Window`'s own class trait (docs/design/gui_framework_design.md §5.1) — also the `component X inherits
+/// `Window`'s own class trait (docs/design/runtime/ui_tree_design.md) — also the `component X inherits
 /// Window` (host-composition) bare name every backend's own `WindowImpl` implements.
 /// `set_menu_bar`'s `Rc<dyn MenuBar>` follows the same trait-object-argument convention as
 /// `Menu`/`MenuBar`/`MenuBarItem` just above (see this module's own doc comment on that group) —

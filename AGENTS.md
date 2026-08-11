@@ -1,61 +1,80 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file is the repository-wide instruction source for AI coding agents, including Codex and Claude Code. Claude Code enters through [`CLAUDE.md`](CLAUDE.md), which must defer to this file for shared rules.
 
 ## Communication
 
-When asking the user a question (clarifying questions, `AskUserQuestion`, plan checkpoints, etc.), always ask in Japanese.
+When asking the user a question (clarifying questions, plan checkpoints, or approval requests), always ask in Japanese.
 
 ## Issue-driven development workflow
 
 - Every repository-changing task must be associated with one GitHub Issue.
 - Do not create an Issue for explanation, research, or exploratory discussion unless explicitly requested.
-- Determine the active phase from Issue labels / PR state and read **only** the required workflow document:
-  - `phase:requirements`: read [`docs/agent-workflow/requirements.md`](docs/agent-workflow/requirements.md)
-  - `phase:design`: read [`docs/agent-workflow/design.md`](docs/agent-workflow/design.md)
-  - `phase:ready` / `phase:implementation`: read [`docs/agent-workflow/implementation.md`](docs/agent-workflow/implementation.md)
-  - `phase:review` / open PR: read [`docs/agent-workflow/review.md`](docs/agent-workflow/review.md)
-- Pause / resume checkpoint rules: [`docs/agent-workflow/checkpoint.md`](docs/agent-workflow/checkpoint.md) (read only when pausing/resuming).
-- Screenshot & log storage rules: [`docs/agent-workflow/evidence.md`](docs/agent-workflow/evidence.md) (read only when capturing evidence).
+- Use the GitHub CLI (`gh`) for GitHub Issue, label, milestone, Pull Request, comment, review, and Actions operations. Use `git` for local branch, staging, commit, and push operations. Do not switch to another GitHub integration unless the user explicitly requests it or `gh` cannot perform the required operation.
+- Determine the active phase from Issue labels / PR state and read only the required workflow document:
+  - `phase:requirements`: [`docs/agent-workflow/requirements.md`](docs/agent-workflow/requirements.md)
+  - `phase:design`: [`docs/agent-workflow/design.md`](docs/agent-workflow/design.md)
+  - `phase:ready` / `phase:implementation`: [`docs/agent-workflow/implementation.md`](docs/agent-workflow/implementation.md)
+  - `phase:review` / open PR: [`docs/agent-workflow/review.md`](docs/agent-workflow/review.md)
+- Read [`docs/agent-workflow/checkpoint.md`](docs/agent-workflow/checkpoint.md) only when pausing/resuming and [`docs/agent-workflow/evidence.md`](docs/agent-workflow/evidence.md) only when capturing evidence.
 
-## Context Minimization & Document Routing
+## Document authority
 
-- **Primary document router**: Use [`docs/README.md`](docs/README.md) to locate relevant specifications, designs, status reports, and technical rules.
-- **Code-first investigation**: Start task research from target source code and symbols to locate the affected implementation and understand its current state. This is an investigation strategy, not a source-of-truth rule for normative behavior. When desired behavior or public contracts matter, consult the relevant [`docs/specs/`](docs/specs/) section.
-- **Do not read large documents in full**: Search [`docs/specs/`](docs/specs/), [`docs/design/`](docs/design/), and [`docs/status/`](docs/status/) using ripgrep (`rg`) first and read only the required section ranges.
-- **Do not inspect sibling backends**: When working on one backend (e.g. AppKit), do not read sibling backend code (e.g. WinUI3) unless cross-backend parity or shared behavior changes are explicitly requested.
-- **Human-only docs**: Do not load files in `docs_only_human/` during ordinary agent tasks.
+| Source | Authority | Question answered |
+|---|---|---|
+| [`docs/specs/`](docs/specs/) | normative public contract | What must ElwindUI do? |
+| [`docs/design/`](docs/design/) | durable internal architecture | How is the contract implemented? |
+| Source code | current implementation | What code exists now? |
+| Tests | executable implementation evidence | What behavior is demonstrated? |
+| [`docs/status/`](docs/status/) | current implementation/verification summary | What is implemented or missing now? |
+| [`docs/agents/`](docs/agents/) | technical working rules | What must an implementing agent preserve? |
+| [`docs/agent-workflow/`](docs/agent-workflow/) | Issue phase workflow | How is repository work advanced? |
 
-## Technical Domain Agent Rules
+The dependency direction is:
 
-When implementing or editing code, read only the relevant agent guide under [`docs/agents/`](docs/agents/):
+```text
+specs -> design -> code -> status
+```
 
-- General Rust rules: [`docs/agents/common.md`](docs/agents/common.md)
-- DSL / Codegen rules: [`docs/agents/codegen.md`](docs/agents/codegen.md)
-- Class hierarchy & `#[class]`: [`docs/agents/class-model.md`](docs/agents/class-model.md)
-- Backend architecture & layering: [`docs/agents/backend-common.md`](docs/agents/backend-common.md)
-- AppKit (macOS): [`docs/agents/appkit.md`](docs/agents/appkit.md)
-- WinUI 3 (Windows): [`docs/agents/winui3.md`](docs/agents/winui3.md)
-- Testing & verification commands: [`docs/agents/testing.md`](docs/agents/testing.md)
+Do not use current code or status to mechanically redefine a normative specification. When sources disagree, classify the difference as an implementation gap, stale design/status, or an explicitly approved specification change. Return to requirements/design approval when the desired contract or architecture is not determined.
 
-## Document Authority
+## Code and documentation synchronization
 
-Different document classes answer different questions. Do not use one class as a substitute for another.
+Before changing code, use [`docs/README.md`](docs/README.md) and the category README files to select only the relevant spec, design, source, and—when current-state context is needed—status document.
 
-- **Normative behavior and public contracts**:
-  [`docs/specs/`](docs/specs/) is authoritative. It defines what ElwindUI should do, including adopted specifications that may not yet be fully implemented.
-- **Implementation architecture**:
-  [`docs/design/`](docs/design/) defines how the normative specifications are intended to be implemented. Design documents must conform to `docs/specs/` and do not override them.
-- **Current implementation status**:
-  Source code is the actual current implementation. Tests provide executable evidence of implemented behavior. [`docs/status/`](docs/status/) summarizes implementation progress, backend support, known gaps, and verification state. A difference between source/status and a specification does not by itself mean the specification should be changed.
-- **Agent rules and workflow**:
-  [`docs/agents/`](docs/agents/) and [`docs/agent-workflow/`](docs/agent-workflow/) define how agents should perform work. They do not redefine product specifications.
+| Change | Required order |
+|---|---|
+| Public API, DSL, property/event/binding/lifecycle semantics, public validation | relevant spec -> design when architecture changes -> code -> status |
+| Internal architecture, ownership, cache, parser/codegen pipeline, backend internals | relevant design -> code -> status when state changes |
+| Implementing an already-approved spec/design gap | code -> status |
+| Bug fix where code violates an existing contract | code -> status when state/verification changes |
+| Verification only | tests/evidence -> status |
 
-When code, design, status, and specifications disagree:
+Rules:
 
-1. Do not silently treat the current code as the desired behavior.
-2. Determine whether the difference is:
-   - an implementation gap,
-   - stale design/status documentation, or
-   - an intentionally approved specification change.
-3. Only change a normative specification when the task explicitly requires or approves a specification change.
+- Do not change a spec to match a bug.
+- Do not update design when the architecture did not change.
+- Do not use status as input for deciding desired behavior or architecture.
+- If implementation reveals a missing/contradictory contract or a durable architecture decision, stop and follow the Issue requirements/design approval gate before deciding it in code.
+- After code changes, check whether the relevant spec, design, status, Agent invariant, commands, and document paths remain synchronized.
+
+## Context minimization and routing
+
+- Start at [`docs/README.md`](docs/README.md), then one category README, then the smallest relevant document set.
+- Start code investigation from target symbols. This is an investigation strategy, not a source-of-truth rule for desired behavior.
+- Search headings/symbols first and read only relevant ranges. Do not begin by scanning all specs, designs, or status files.
+- Do not inspect sibling backend code unless cross-backend parity or shared behavior is in scope.
+- Do not load `docs_only_human/` during ordinary Agent tasks. It is a human overview and cannot be the only source of a required contract, architecture invariant, command, or current status.
+
+## Technical domain guides
+
+When implementing or editing code, read only the relevant guide:
+
+- General Rust: [`docs/agents/common.md`](docs/agents/common.md)
+- DSL / Codegen: [`docs/agents/codegen.md`](docs/agents/codegen.md)
+- Class hierarchy and `#[class]`: [`docs/agents/class-model.md`](docs/agents/class-model.md)
+- Backend-common layering: [`docs/agents/backend-common.md`](docs/agents/backend-common.md)
+- AppKit: [`docs/agents/appkit.md`](docs/agents/appkit.md)
+- WinUI 3: [`docs/agents/winui3.md`](docs/agents/winui3.md)
+- Windows host setup shared by tools: [`docs/agents/windows.md`](docs/agents/windows.md)
+- Testing and verification: [`docs/agents/testing.md`](docs/agents/testing.md)

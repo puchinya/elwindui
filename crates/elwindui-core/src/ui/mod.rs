@@ -9,7 +9,7 @@
 //! `Margin`/`HorizontalAlignment`/`VerticalAlignment` (`UIElement`) are common to every one of
 //! them, applied generically by this module's `measure`/`arrange` (WinUI3's
 //! `UIElement.Measure`/`Arrange` wrapping each type's own `MeasureOverride`/`ArrangeOverride`) —
-//! see docs/design/gui_framework_design.md §5.3.
+//! see docs/design/runtime/layout_design.md.
 //!
 //! `H` (whatever a backend uses as its native widget handle, e.g. `elwindui-backend-appkit`'s
 //! `AnyView`) appears only while RenderTree builds or reconciles a native command,

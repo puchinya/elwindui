@@ -58,7 +58,7 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// so `view!`'s tokens never survive into anything Rust itself expands. They're recovered here as
 /// plain DSL text instead (`elwindui_codegen::component_frontend`), the same way the (now removed)
 /// `elwindui::component!` bang macro treated its whole input as DSL text via `input.to_string()`.
-/// See docs/design/tools/codegen_design.md §3.
+/// See docs/design/tools/codegen_design.md
 ///
 /// Also accepts a companion `#[elwindui::component] impl Name { .. }` (no arguments), holding
 /// `#[overridable]`/`#[overrides]` methods — a bare `struct` has nowhere to put a method *body*, so
@@ -223,7 +223,7 @@ fn path_to_string(path: &syn::Path) -> String {
 
 /// `#[elwindui_macros::class(inherits = SuperClass, struct_only = existing::TraitPath, trait_only, abstract_class, sealed)]`
 /// applied to a bare `struct ClassName { .. }` and, separately, a bare `impl ClassName { .. }`
-/// (no `for`) — automates the H.2.1a class-hierarchy convention (docs/design/gui_framework_design.md §5.1).
+/// (no `for`) — automates the H.2.1a class-hierarchy convention (docs/design/runtime/ui_tree_design.md).
 /// See `class::expand`'s own doc comment for the full design and its deliberate simplifications
 /// versus a fully generic cross-crate manifest system.
 #[proc_macro_attribute]

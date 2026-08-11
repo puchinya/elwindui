@@ -5,7 +5,7 @@
 //! Kept out of `lib.rs` so the crate root is only wiring; `run` is the one well-defined place
 //! that installs the task executor before any generated code runs.
 
-/// WinUI3's `Dispatcher` (docs/design/gui_framework_design.md §7.3): hops back to the UI thread via the
+/// WinUI3's `Dispatcher` (docs/design/runtime/state_management_design.md): hops back to the UI thread via the
 /// current thread's `DispatcherQueue` — the WinUI3/WinAppSDK analog of AppKit's
 /// `dispatch2::DispatchQueue::main()`. `application::run()` (below) is what pumps this queue as
 /// part of its own message loop, so a job enqueued from any thread is guaranteed to run promptly.

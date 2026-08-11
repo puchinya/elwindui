@@ -5,7 +5,7 @@ use super::*;
 /// A composable, multi-part component (WinUI3's `Control`) — Visually built from any number of
 /// other `UIElement`s (`VerticalLayout`/`HorizontalLayout`/`Shape`/`TextBlock`/
 /// `NativeControlImpl`/other `Control`s), stored as its own `UIElementCollection` (the Logical
-/// tree this component declares, docs/design/gui_framework_design.md §5.2) — unlike `Shape`, which has
+/// tree this component declares, docs/design/runtime/ui_tree_design.md) — unlike `Shape`, which has
 /// no children at all. `padding` shrinks the area its children are overlaid into, the
 /// `Control`-level analog of `margin` on an individual element.
 ///
@@ -14,7 +14,7 @@ use super::*;
 /// child's *own* `horizontal_alignment`/`vertical_alignment`, applied generically by `arrange`
 /// below, already governs its placement within the padded content area); template
 /// replacement is future work.
-/// `Control`'s own class trait (docs/design/gui_framework_design.md §5.1) — exposes the fields a
+/// `Control`'s own class trait (docs/design/runtime/ui_tree_design.md) — exposes the fields a
 /// DSL-level subclass composed via `base: Control` (e.g. `elwindui::ui::ContentControl`,
 /// `elwindui-core::ui`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]

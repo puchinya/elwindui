@@ -101,7 +101,7 @@ impl FakeTextBoxWidget {
 
 /// Backend-independent stand-in for `PasswordBox` — see `FakeTextBoxWidget`'s own doc comment
 /// for the pattern. `PasswordBoxExt`'s dispatch is exercised the same way; the test below
-/// additionally checks the no-leak policy (`docs/status/nativecontrol_status.md`)
+/// additionally checks the no-leak policy (`docs/status/control_status.md`)
 /// that every `PasswordBox` implementation — fake or real — must uphold: nothing about this
 /// fake ever prints or `Debug`s the password value.
 pub(crate) struct FakePasswordBoxState {
@@ -603,7 +603,7 @@ mod tests {
     /// No-leak policy check: only the *length* of what `on_change` observed is asserted, and every
     /// assertion in this test uses a fixed, content-free message (never `assert_eq!`'s default
     /// panic message, which would print the actual value on failure) — the same discipline
-    /// `docs/status/nativecontrol_status.md` requires of the real AppKit/WinUI3
+    /// `docs/status/control_status.md` requires of the real AppKit/WinUI3
     /// implementations too.
     #[test]
     fn fake_password_box_set_password_dispatches_on_change_without_exposing_it_on_failure() {
@@ -633,7 +633,7 @@ mod tests {
 
     /// Verifies `content` stays reachable via `visual_children()` once set — the property a real
     /// backend's nested `TreeHostView`/`TreeHostPanel` content host relies on for hit-testing/
-    /// tree-dump purposes (`docs/status/nativecontrol_status.md`).
+    /// tree-dump purposes (`docs/status/control_status.md`).
     #[test]
     fn fake_scroll_view_content_reachable_via_visual_children() {
         let widget = FakeScrollViewWidget::new(FakeHandle("scrollview", size(300.0, 200.0)));

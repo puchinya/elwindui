@@ -1,7 +1,7 @@
 # macos-ui-driver
 
 AI-agent-drivable CLI for launching, inspecting, screenshotting, and interacting with elwindui (or
-any) macOS app windows — see `docs/status/macos_ui_driver_status.md` for what's implemented
+any) macOS app windows — see `docs/status/tooling_status.md` for what's implemented
 (Phase 1: launch/terminate/list-windows/capture-window/doctor/focus-window; Phase 2:
 dump-tree/find/set-focus/click/type-text/press-key/wait-for — driver-side only, see that doc for the
 Rust-side accessibility-identifier wiring left out of scope) versus deferred (Phase 3+:
@@ -43,7 +43,7 @@ macos-ui-driver focus-window --pid <pid> [--title <substring>] [--timeout <secon
 # AXFocusedWindow) — never trusts activate()/AXRaise return values alone. On success or failure,
 # reports rich diagnostics (frontmost app, activation policy, macOS version, etc.). If the
 # environment refuses to actually foreground the app (observed in this project's own sandboxed
-# agent shell — see docs/status/macos_ui_driver_status.md §1.5), this reports
+# agent shell — see docs/status/tooling_status.md), this reports
 # success:false with full diagnostics rather than retrying or claiming success.
 # {"success":true,"pid":...,"is_active":true,"ax_main":true,...}
 ```

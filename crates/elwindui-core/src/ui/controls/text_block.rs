@@ -5,7 +5,7 @@ use super::*;
 /// Self-drawn primitive text (WinUI3's `TextBlock`) — no native widget. A leaf, like `NativeControlImpl`. Field named `text` (not `content`) to match `elwindui::ui::TextBlock`'s own `#[param]
 /// text` name — `elwindui-codegen`'s setter-based construction calls `.set_{param name}(..)`
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
-/// `TextBlock`'s own class trait (docs/design/gui_framework_design.md §5.1); `TextBlock` has no
+/// `TextBlock`'s own class trait (docs/design/runtime/ui_tree_design.md); `TextBlock` has no
 /// further DSL-level subclass today.
 ///
 /// `text_style` replaces the old `color: RefCell<Option<Color>>` field — foreground is now one of
@@ -34,7 +34,7 @@ impl TextBlock {
                 style: &style,
                 available,
                 // `TextBlock` has no `text_wrapping` DSL property yet (未対応, outside the seven
-                // properties this pass covers — see `docs/status/font_status.md`); the request
+                // properties this pass covers — see `docs/design/runtime/text_design.md`); the request
                 // shape already has the field so adding it later needs no signature change here.
                 wrapping: crate::graphics::TextWrapping::NoWrap,
                 alignment: self.alignment.get(),
@@ -53,7 +53,7 @@ impl TextBlock {
         // Re-resolved rather than cached from `measure_override` — nothing mutates between measure
         // and render within one pass, so the two resolutions are identical, and re-resolving avoids
         // a second, potentially-stale source of truth if a render pass ever runs without a
-        // preceding full layout pass (see `docs/status/font_status.md`).
+        // preceding full layout pass (see `docs/design/runtime/text_design.md`).
         let cascaded_style = self.cascaded_text_style();
         let style = cascaded_style
             .materialize(&crate::graphics::text_backend().default_text_style());

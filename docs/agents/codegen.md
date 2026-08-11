@@ -5,6 +5,7 @@ Guidelines for AI agents modifying `elwindui-codegen`, proc-macros (`#[component
 ## Specification Source of Truth
 
 - **Normative specification**: [`docs/specs/dsl_spec.md`](../specs/dsl_spec.md).
+- **Compiler architecture**: [`docs/design/tools/codegen_design.md`](../design/tools/codegen_design.md).
 - **Core language & scoping**: `dsl_spec.md` §1–§12.
 - **Static verification rules**: `dsl_spec.md` §13 (Rule 1 through Rule 32). Read the specific rule number in `dsl_spec.md` when implementing or modifying compile-time checks.
 

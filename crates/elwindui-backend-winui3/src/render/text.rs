@@ -4,7 +4,7 @@
 //! sharing one conversion path, gradient/image foreground degrading to a flat color, etc.).
 //!
 //! **Unverifiable on this machine.** `#![cfg(target_os = "windows")]` — this file is never
-//! compiled, type-checked, or run here; see `docs/status/font_status.md` §6/§9. Every API name
+//! compiled, type-checked, or run here; see `docs/design/runtime/text_design.md` Every API name
 //! below (`FontFamily::CreateInstanceWithName`, `Control::SetFontSize`, ...) is written to the
 //! standard `windows-rs`/WinRT projection convention this crate's other `render`/`ffi` code
 //! already uses, but none of it has been checked against the real generated `bindings.rs`.
@@ -108,7 +108,7 @@ pub(crate) fn flat_foreground_color(brush: &Brush) -> Color {
 /// tree is not the XAML tree (`Control`/`Grid` are virtual builtins with no XAML peer; native
 /// leaves are flat children of a `Canvas`), so an ordinary XAML ancestor carrying the inherited
 /// value never exists to fall back to. Re-interpreted (ユーザー確認済み,
-/// `docs/status/font_status.md` §10) as "only write a property whose resolved value differs
+/// `docs/design/runtime/text_design.md`) as "only write a property whose resolved value differs
 /// from this element's own current value" — the `ClearValue`-avoidance §18 actually cares about —
 /// which the equality check below approximates for the common "nothing changed" case.
 #[cfg(test)]
@@ -360,7 +360,7 @@ impl TextBackend for WinUi3TextBackend {
                     height: desired.Height,
                 },
                 // No direct baseline query without `IDWriteTextLayout` (未対応, see
-                // `docs/status/font_status.md` §9) — approximated from the font size the same
+                // `docs/design/runtime/text_design.md`) — approximated from the font size the same
                 // way the core-only `DummyTextBackend` does.
                 baseline: 0.8 * req.style.font_size,
                 line_count: 1,

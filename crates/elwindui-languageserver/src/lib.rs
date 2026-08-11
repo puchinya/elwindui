@@ -12,7 +12,7 @@
 //! `view! { .. }` macro bodies (Issue #14's "未解決の論点" — the one part of the file rust-analyzer
 //! can't highlight, since `view!` is never a real macro) rather than the whole file, avoiding any
 //! double-coloring/conflict with rust-analyzer's own semantic tokens. Generated-code preview and
-//! hover (docs/design/tools/languageserver_design.md §3) and the offscreen-rendering pipeline
+//! hover (docs/design/tools/languageserver_design.md) and the offscreen-rendering pipeline
 //! (docs/design/tools/preview_design.md) remain later phases, not attempted here.
 
 pub mod completion;

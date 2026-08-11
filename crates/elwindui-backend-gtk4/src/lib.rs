@@ -1,5 +1,5 @@
 //! GTK4 (gtk-rs) implementation of `elwindui-core`'s backend traits.
-//! See docs/design/gui_framework_design.md §3.
+//! See docs/design/README.md and docs/status/backend_status.md.
 /// Performs process-wide GTK setup required before creating views.
 ///
 /// The GTK backend is presently a placeholder, but it still participates in the uniform facade

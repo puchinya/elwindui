@@ -1,6 +1,6 @@
 //! Adapter between `elwindui_codegen::{component_frontend, validate}` and the LSP's `Diagnostic`
 //! type — kept separate from the protocol plumbing (`lib.rs`) so it's testable without a real
-//! `lsp_server::Connection`. See docs/design/tools/languageserver_design.md §3.1.
+//! `lsp_server::Connection`. See docs/design/tools/languageserver_design.md
 //!
 //! Operates on a single `.rs` file's source text (Phase 7, `docs/status/implementation_status.md`)
 //! — the successor to the old directory-based model, retired along with DSL text compilation

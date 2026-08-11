@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// `Dropdown`'s class trait (docs/design/gui_framework_design.md §5.1). Its content is a live,
+/// `Dropdown`'s class trait (docs/design/runtime/ui_tree_design.md). Its content is a live,
 /// ordered collection of `DropdownItem`s — mirrors `TabView`'s own `children` shape exactly.
 /// `selected_index` is the single source of truth for which item is selected (no per-item
 /// `selected` flag — see `docs/specs/ui_spec.md#dropdown`).

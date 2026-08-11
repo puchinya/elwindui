@@ -8,7 +8,7 @@
 
 本書は `elwindui::core::graphics` モジュールが公開するグラフィックス表現型（Color, Brush, Path, Image, VectorImage 等）の型定義および公開意味論を規定する。
 
-描画コマンドの保持構造（`RenderTree`, `RenderGroup`, `RenderCommand`）の基本モデルは本書 §10 で規定する。各プラットフォームバックエンド（CoreGraphics / Win2D / Cairo）への具体的な描画命令再生（Replay）およびレイヤーキャッシュ戦略の詳細は [GUI Framework Design](../design/gui_framework_design.md) §5.7 を参照すること。
+Retained render tree、backend replay、layer/cache strategyは公開graphics valueではないため、[`../design/runtime/rendering_design.md`](../design/runtime/rendering_design.md) とbackend designを参照する。
 
 ---
 
@@ -224,45 +224,8 @@ SVG等のベクター文書の保持・レンダリング構造。
 
 ---
 
-## 10. Retained render tree (`RenderTree`, `RenderGroup`, `RenderCommand`)
-
-`RenderTree` は、UI 視覚ツリー（`UIElement` 階層）のレイアウト計算結果および描画コマンドを保持（Retained）し、ネイティブプラットフォームのレンダリング出力パス（CoreGraphics, Win2D, Cairo 等）へ引き渡す保持型グラフィックス描画データ構造である。内部設計の詳細（dirty トラッキング、世代管理、リコンサイルアルゴリズム、バックエンドレイヤーキャッシュ）は [GUI Framework Design](../design/gui_framework_design.md) §5.7 を参照すること。
-
-### 10.1 `RenderGroup` Node Architecture
-
-- **`RenderGroup`**:
-  - 視覚ツリー上の 1 つの描画単位（Visual Node）。
-  - **`id` (`u64`)**: 対応する UI 要素の一意識別子。
-  - **`offset` (`Point`)**: 親 `RenderGroup` からのローカル相対位置オフセット。
-  - **`size` (`Size`)**: 要素のローカル確定サイズ。
-  - **`clip` (`Option<Clip>`)**: 要素に適用される局所クリッピング矩形/パス。
-  - **`commands` (`Vec<RenderCommand>`)**: 該当要素自身が出力する描画コマンド列。
-  - **`children` (`Vec<RenderGroup>`)**: 子視覚要素の `RenderGroup` リスト。
-
-### 10.2 `RenderCommand` Primitive Set
-
-`RenderGroup::commands` に保持されるバックエンド非依存の描画命令プリミティブ。
-
-| Command Variant | Fields / Parameters | Description |
-|---|---|---|
-| `FillRect` | `rect`, `brush` | 矩形の塗りつぶし描画 |
-| `StrokeRect` | `rect`, `brush`, `stroke` | 矩形の輪郭線描画 |
-| `FillRoundedRect` | `rect`, `radii`, `brush` | 角丸矩形の塗りつぶし描画 |
-| `StrokeRoundedRect` | `rect`, `radii`, `brush`, `stroke` | 角丸矩形の輪郭線描画 |
-| `FillEllipse` | `rect`, `brush` | 楕円の塗りつぶし描画 |
-| `StrokeEllipse` | `rect`, `brush`, `stroke` | 楕円の輪郭線描画 |
-| `DrawLine` | `from`, `to`, `brush`, `stroke` | 直線の描画 |
-| `FillPath` | `path`, `brush`, `rule` | パス（ベクター図形）の塗りつぶし |
-| `StrokePath` | `path`, `brush`, `stroke` | パス（ベクター図形）の輪郭線描画 |
-| `DrawText` | `rect`, `text`, `style`, `alignment`, `foreground` | テキスト描画 |
-| `DrawImage` | `dest`, `image`, `source`, `options` | ラスタ画像（`Image`）の描画 |
-| `DrawVectorImage` | `dest`, `image`, `source`, `options` | ベクター画像（`VectorImage`）の描画 |
-| `PushClip` / `PopClip` | `clip` (`Clip`) | クリッピング領域のスタック操作 |
-| `NativeControl` | `bounds`, `owner_id` | ネイティブウィジェットの埋め込み座標および所有要素 ID |
-
----
-
-## 11. Related specifications
+## 10. Related specifications
 
 - [UI Specification](ui_spec.md) - 本グラフィックス型を利用するUI要素仕様
 - [DSL Specification](dsl_spec.md) - DSLにおける属性指定ルール
+- [Rendering Design](../design/runtime/rendering_design.md) - retained render treeとbackend replayの内部設計

@@ -173,7 +173,7 @@ impl TextViewDelegate {
 /// `InnerTextBox` and reused verbatim by `InnerPasswordBox` — both widgets need the exact same
 /// value-compare-guarded `set_string_value`/delegate-wiring/`max_length`-truncation logic, and
 /// writing it twice would just be two copies of the same bug surface (see
-/// `docs/status/nativecontrol_status.md` on the "generalize before duplicating" policy
+/// `docs/status/control_status.md` on the "generalize before duplicating" policy
 /// this follows).
 ///
 /// Unlike `InnerTextArea`'s `TextViewDelegate` (constructed fresh, once, inside `set_on_change`
@@ -358,7 +358,7 @@ impl InnerTextBox {
     }
 
     /// TextBox-specific, narrowly-scoped addition (not the general native-keyboard-forwarding
-    /// problem `docs/design/gui_framework_design.md` §5.5/§8.1 documents as a known limitation for
+    /// problem `docs/status/backend_status.md` records for
     /// Tab-out-of-a-focused-native-leaf): detects the Enter key via
     /// `NSControlTextEditingDelegate::control:textView:doCommandBySelector:` (`insertNewline:`) and
     /// forwards it through `callback`, letting `native_ui::TextBox::on_constructed` dispatch it as an
@@ -425,7 +425,7 @@ impl InnerPasswordBox {
     /// A full implementation would compose a custom "eye" toggle button that swaps the live
     /// obscured field for a plain `NSTextField` showing the same string — real, but disproportionate
     /// scope for this control's Phase 1 first cut (see
-    /// docs/status/nativecontrol_status.md). `true` is therefore silently a no-op here;
+    /// docs/status/control_status.md). `true` is therefore silently a no-op here;
     /// the setter stays wired so a future pass has a real place to land.
     pub(crate) fn set_reveal_enabled(&self, _enabled: bool) {}
 }

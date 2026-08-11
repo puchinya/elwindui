@@ -1,5 +1,5 @@
 //! WinUI 3 backend — the concrete widget surface `elwindui-codegen` targets on Windows.
-//! See docs/design/gui_framework_design.md §3.
+//! See docs/design/backends/winui3_backend_design.md.
 //!
 //! Layering — dependencies run one way only, `native_ui -> inner -> host -> render -> ffi`:
 //!
@@ -71,7 +71,7 @@ pub fn init() -> windows::core::Result<()> {
 
     // Registers this crate's `elwindui_core::graphics::TextBackend` — see
     // `elwindui-backend-appkit::lib.rs::init()`'s identical registration and
-    // `docs/status/font_status.md` §6 for why this needs to happen before any `TextBlock`
+    // `docs/design/runtime/text_design.md` for why this needs to happen before any `TextBlock`
     // measurement or `NativeControl::sync_text_style` call.
     elwindui_core::graphics::set_text_backend(std::rc::Rc::new(render::WinUi3TextBackend));
 

@@ -2,10 +2,11 @@
 
 Guidelines for AI agents modifying `elwindui-backend-winui3` or building/testing on Windows.
 
-## Related Status Documents
+## Related documents
 
-- [`docs/status/winui3_backend_status.md`](../status/winui3_backend_status.md) — WinUI3 build environment, C++/WinRT shim status, and pitfalls.
-- [`docs/status/nativecontrol_status.md`](../status/nativecontrol_status.md) — NativeControl implementation status checklist across backends.
+- Architecture: [`docs/design/backends/winui3_backend_design.md`](../design/backends/winui3_backend_design.md)
+- Backend state: [`docs/status/backend_status.md`](../status/backend_status.md)
+- Control state: [`docs/status/control_status.md`](../status/control_status.md)
 
 ## Windows Build Environment
 

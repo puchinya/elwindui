@@ -1,8 +1,8 @@
-//! `builtin::TextBlock` — self-drawn text display, and its local text-style storage.
+//! `elwindui::ui::TextBlock` — self-drawn text display, and its local text-style storage.
 
 use super::*;
 
-/// Self-drawn primitive text (WinUI3's `TextBlock`) — no native widget. A leaf, like `NativeControlImpl`. Field named `text` (not `content`) to match `builtin::TextBlock`'s own `#[param]
+/// Self-drawn primitive text (WinUI3's `TextBlock`) — no native widget. A leaf, like `NativeControlImpl`. Field named `text` (not `content`) to match `elwindui::ui::TextBlock`'s own `#[param]
 /// text` name — `elwindui-codegen`'s setter-based construction calls `.set_{param name}(..)`
 /// generically, so the Rust field/setter name must agree with the DSL's own field name.
 /// `TextBlock`'s own class trait (docs/design/gui_framework_design.md §5.1); `TextBlock` has no

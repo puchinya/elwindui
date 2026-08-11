@@ -41,28 +41,33 @@ elwindui::ui::<Type>
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
-| `margin` | `Thickness` | OneWay | 外側余白 |
-| `horizontal_alignment` | `HorizontalAlignment` | OneWay | 水平方向の配置（`Left`, `Center`, `Right`, `Stretch`） |
-| `vertical_alignment` | `VerticalAlignment` | OneWay | 垂直方向の配置（`Top`, `Center`, `Bottom`, `Stretch`） |
-| `visibility` | `Visibility` | OneWay | 表示状態（`Visible`, `Collapsed`, `Hidden`） |
-| `grid_cell` | `GridCell` | OneWay | `Grid` 配置時の行・列位置（添付プロパティ `Grid::row` / `Grid::column`） |
+| `margin` | `Option<f32>` | OneWay | 外側余白 |
+| `horizontal_alignment` | `Option<HorizontalAlignment>` | OneWay | 水平方向の配置（`Left`, `Center`, `Right`, `Stretch`） |
+| `vertical_alignment` | `Option<VerticalAlignment>` | OneWay | 垂直方向の配置（`Top`, `Center`, `Bottom`, `Stretch`） |
+| `visibility` | `Option<Visibility>` | OneWay | 表示状態（`Visible`, `Collapsed`） |
 | `width` | `Option<f32>` | OneWay | 明示的幅 |
 | `height` | `Option<f32>` | OneWay | 明示的高さ |
 | `min_width` | `Option<f32>` | OneWay | 最小幅 |
 | `max_width` | `Option<f32>` | OneWay | 最大幅 |
 | `min_height` | `Option<f32>` | OneWay | 最小高さ |
 | `max_height` | `Option<f32>` | OneWay | 最大高さ |
-| `is_focusable` | `Option<bool>` | OneWay | キーボードフォーカスを受け取り可能か |
-| `is_tab_stop` | `Option<bool>` | OneWay | Tab キーフォーカス移動の対象に含まれるか |
-| `tab_index` | `Option<i32>` | OneWay | Tab キー移動時の明示的な優先度順序 |
-| `is_focused` | `Option<bool>` | TwoWay | 現在キーボードフォーカスを保持しているかを示す状態 |
+| `hit_test_visible` | `Option<bool>` | OneWay | ヒットテスト判定の有効/無効 |
+| `tab_stop` | `Option<bool>` | OneWay | Tab キーフォーカス移動の対象に含まれるか |
+| `focus_order` | `Option<i32>` | OneWay | Tab キー移動時の明示的な優先度順序 |
 
-`NativeControl` を継承する全ての具象コントロールは、さらに以下のプロパティを持つ。
+`NativeControl` を継承する全ての具象コントロールは、さらに以下の共通プロパティを持つ。
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
-| `enabled` | `Option<bool>` | OneWay | コントロールの有効/無効状態 |
+| `background` | `Option<Brush>` | OneWay | 背景ブラシ |
 | `tooltip` | `Option<String>` | OneWay | ツールチップテキスト |
+| `font_family` | `Option<FontFamily>` | OneWay | フォントファミリー（`#[text_style]`） |
+| `font_size` | `Option<f32>` | OneWay | フォントサイズ（`#[text_style]`） |
+| `font_weight` | `Option<FontWeight>` | OneWay | フォントウェイト（`#[text_style]`） |
+| `font_style` | `Option<FontStyle>` | OneWay | フォントスタイル（`#[text_style]`） |
+| `font_stretch` | `Option<FontStretch>` | OneWay | フォントストレッチ（`#[text_style]`） |
+| `character_spacing` | `Option<f32>` | OneWay | 文字間隔（`#[text_style]`） |
+| `foreground` | `Option<Brush>` | OneWay | 文字色ブラシ（`#[text_style]`） |
 
 ### 2.4 Content model
 
@@ -86,7 +91,6 @@ ElwindUI のすべてのビジュアル要素（`UIElement`）は、**Measure（
   3. コレクション・コンテンツを持つ要素は、各子要素の `measure` を呼び出し、レイアウト規則（縦並び、横並び、グリッド等）に従って自身の Desired Size を決定する。
 - **`visibility` の影響**:
   - `Visible`: 通常通りサイズ計測を行い、レイアウト領域を占有する。
-  - `Hidden`: サイズ計測を行いレイアウト領域を占有するが、描画パスでは不可視（透明）となる。
   - `Collapsed`: 計測結果を常に Desired Size `(0, 0)` とみなし、レイアウト計算から完全に除外される。
 - **無制約計測（Unconstrained Measure）**:
   - `ScrollView` などのスクロール可能軸では、利用可能サイズとして `f32::INFINITY`（無制約）を子要素へ渡し、コンテンツ本来の自然サイズへ成長させる。
@@ -113,34 +117,31 @@ ElwindUI のすべてのビジュアル要素（`UIElement`）は、**Measure（
 
 ### 2.6 Event routing model
 
-ElwindUI のイベント伝播は、WPF / WinUI 3 に倣うルーティングイベントモデルを採用している。`#[routed]` が指定されたイベントは、単一要素内にとどまらず視覚ツリー（Visual Tree）に沿って伝播する。
+ElwindUI のイベント伝播はルーティングイベントモデルを採用している。`#[routed]` が指定されたイベントは、単一要素内にとどまらず視覚ツリー（Visual Tree）に沿って伝播する。
 
 #### 1. Routing Strategies（ルーティング戦略）
 
-イベントの種類に応じて以下の3つのルーティング戦略が用いられる。
+イベントの種類に応じて以下の2つのルーティング戦略が用いられる。
 
 1. **Bubbling（バブリング / 下から上へ）**:
    - イベント発生源（Target）のノードから開始し、`visual_parent` チェーンを辿ってルート要素（Window/Root）に向けて親方向へ順次伝播する。
-   - 主な対象: マウス/ポインタイベント（`on_pointer_down`, `on_pointer_up`, `on_click`）、キーボード入力（`on_key_down`, `on_key_up`, `on_text_input`）。
-2. **Tunneling（トンネリング / 上から下へ）**:
-   - ルート要素から開始し、ターゲット要素に向けてツリーを下降伝播する（Previewイベント）。
-   - 主な対象: キー押下の事前検証やグローバルショートカットの横取り（`preview_key_down` 等）。
-3. **Direct（ダイレクト / ルーティングなし）**:
+   - 主な対象: マウス/ポインタイベント（`on_pointer_pressed`, `on_pointer_released`, `on_pointer_moved`, `on_pointer_wheel_changed`, `on_tapped`, `on_double_tapped`, `on_right_tapped`）、キーボード入力（`on_key_down`, `on_key_up`, `on_text_input`）。
+2. **Direct（ダイレクト / ルーティングなし）**:
    - ツリー伝播を行わず、イベントが発生した特定の要素のハンドラのみを直接呼び出す。
-   - 主な対象: コントロール固有の状態変化通知（例: `TabView::on_select(usize)`）。
+   - 主な対象: 領域進入/退出（`on_pointer_entered`, `on_pointer_exited`）、フォーカス変化（`on_got_focus`, `on_lost_focus`）、コントロール固有の状態変化通知（`TabView::on_select` 等）。
 
 #### 2. Event Handling & Handled Flag
 
 ルーティングイベントは引数として `RoutedEventArgs` を受け取る。
-- **`handled` フラグ**: いずれかのハンドラが `args.set_handled(true)` を呼び出すと、その時点で上位/下位ノードへのイベント伝播が打ち切られる。
+- **`handled` フラグ**: いずれかのハンドラが `args.set_handled(true)` を呼び出すと、その時点で上位ノードへのイベント伝播が打ち切られる。
 - コントロールが固有の標準動作（例: `Button` が Enter キーでクリックを発火する処理）を完了した場合、通常 `handled = true` を設定して親要素への重複伝播を防止する。
 
 #### 3. Input Dispatch & Hit Testing
 
 - **ポインタイベント**:
-  - 画面座標を基に視覚ツリーを検索（`hit_test`）し、クリッピング、表示状態（`visibility`）、ヒットテスト有効性（`is_hit_test_visible`）を考慮して最前面のターゲット要素を決定した後、Bubbling ルーティングを開始する。
+  - 画面座標を基に視覚ツリーを検索（`hit_test`）し、クリッピング、表示状態（`visibility`）、ヒットテスト有効性（`hit_test_visible`）を考慮して最前面のターゲット要素を決定した後、Bubbling/Direct ルーティングを開始する。
 - **キーボードイベント**:
-  - フォーカス管理機構（Focus Tracker）が保持する現在のフォーカス要素（`focused`）をターゲットとして決定した後、Bubbling ルーティングを開始する。
+  - フォーカス管理機構（Focus Tracker）が保持する現在のフォーカス要素をターゲットとして決定した後、Bubbling ルーティングを開始する。
 
 ### 2.7 Focus management and keyboard navigation
 
@@ -148,7 +149,7 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 
 #### 1. Focus Model & Scope
 
-- **フォーカスモデル**: 各ウィンドウ/ルートコンテナは、ツリー内で現在アクティブな単一のキーボードフォーカス保持要素（`focused`）を追跡・管理する。
+- **フォーカスモデル**: 各ウィンドウ/ルートコンテナは、ツリー内で現在アクティブな単一のキーボードフォーカス保持要素を追跡・管理する。
 - **フォーカス移動**: マウスクリック、Tabキー操作、またはプログラムによる `focus()` 呼び出しによってフォーカスが切り替わる。
 
 #### 2. Focus Events
@@ -157,17 +158,15 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 
 | Event Name | Signature | Strategy | Description |
 |---|---|---|---|
-| `on_got_focus` | `fn(RoutedEventArgs)` | Bubbling | 要素がフォーカスを獲得した際に発火 |
-| `on_lost_focus` | `fn(RoutedEventArgs)` | Bubbling | 要素からフォーカスが離脱した際に発火 |
+| `on_got_focus` | `fn()` | Direct | 要素がフォーカスを獲得した際に発火 |
+| `on_lost_focus` | `fn()` | Direct | 要素からフォーカスが離脱した際に発火 |
 
 #### 3. Keyboard Navigation Semantics
 
 - **Tab / Shift+Tab 遷移**:
-  - `tab_index` の昇順に従ってフォーカスを移動する。`tab_index` が同値の場合は視覚ツリーの先順位（Pre-order traversal）に従う。
+  - `focus_order` の昇順に従ってフォーカスを移動する。`focus_order` が同値の場合は視覚ツリーの先順位（Pre-order traversal）に従う。`tab_stop: false` の要素はスキップされる。
 - **デフォルトボタン（Default Accelerator）**:
   - 単一ラインテキストボックス（`TextBox`）等の入力中に Enter キーが押下された場合、現在のウィンドウ内で `is_default: true` が指定された `Button` のクリックイベントを自動発火する。
-- **フォーカストラップ（Focus Trap / Modal Scope）**:
-  - モーダルダイアログやポップアップが表示されている間、フォーカストラップスコープがスタックに積まれ、Tabキーによるフォーカス遷移がそのサブツリー内に限定される。
 
 ---
 
@@ -181,16 +180,20 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 
 | Event Name | Signature | Strategy | Description |
 |---|---|---|---|
-| `on_pointer_down` | `fn(PointerEventArgs)` | Bubbling | ポインタ（マウス/タッチ）が要素上で押下された際に発火 |
-| `on_pointer_up` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で離された際に発火 |
-| `on_pointer_move` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で移動した際に発火 |
-| `on_pointer_enter` | `fn(PointerEventArgs)` | Direct | ポインタが要素領域内に進入した際に発火 |
-| `on_pointer_leave` | `fn(PointerEventArgs)` | Direct | ポインタが要素領域外へ退出した際に発火 |
 | `on_key_down` | `fn(KeyEventArgs)` | Bubbling | フォーカス保持中に物理キーが押下された際に発火 |
 | `on_key_up` | `fn(KeyEventArgs)` | Bubbling | フォーカス保持中に物理キーが離された際に発火 |
 | `on_text_input` | `fn(TextInputEventArgs)` | Bubbling | 文字列テキスト入力が行われた際に発火 |
-| `on_got_focus` | `fn(RoutedEventArgs)` | Bubbling | 要素がフォーカスを獲得した際に発火 |
-| `on_lost_focus` | `fn(RoutedEventArgs)` | Bubbling | 要素からフォーカスが脱落した際に発火 |
+| `on_got_focus` | `fn()` | Direct | 要素がフォーカスを獲得した際に発火 |
+| `on_lost_focus` | `fn()` | Direct | 要素からフォーカスが脱落した際に発火 |
+| `on_pointer_pressed` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で押下された際に発火 |
+| `on_pointer_released` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で離された際に発火 |
+| `on_pointer_moved` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で移動した際に発火 |
+| `on_pointer_entered` | `fn(PointerEventArgs)` | Direct | ポインタが要素領域内に進入した際に発火 |
+| `on_pointer_exited` | `fn(PointerEventArgs)` | Direct | ポインタが要素領域外へ退出した際に発火 |
+| `on_pointer_wheel_changed` | `fn(PointerWheelEventArgs)` | Bubbling | マウスホイール操作時に発火 |
+| `on_tapped` | `fn(TappedEventArgs)` | Bubbling | タップ/クリック操作時に発火 |
+| `on_double_tapped` | `fn(TappedEventArgs)` | Bubbling | ダブルタップ操作時に発火 |
+| `on_right_tapped` | `fn(TappedEventArgs)` | Bubbling | 右クリック/副操作時に発火 |
 
 ### `NativeControl`
 
@@ -210,7 +213,7 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 |---|---|---|---|
 | `fill` | `Option<Brush>` | OneWay | 塗りつぶしブラシ |
 | `stroke` | `Option<Brush>` | OneWay | 輪郭線ブラシ |
-| `stroke_style` | `Option<StrokeStyle>` | OneWay | 輪郭線のスタイル |
+| `stroke_width` | `Option<f32>` | OneWay | 輪郭線の太さ |
 
 ### `Control`
 
@@ -220,8 +223,8 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
-| `padding` | `Thickness` | OneWay | 内側余白 |
-| `background` | `Option<Brush>` | OneWay | 背景ブラシ |
+| `children` | `UIElementCollection` | OneWay | 子要素のコレクション |
+| `padding` | `Option<f32>` | OneWay | 内側余白 |
 
 ### `ContentControl`
 
@@ -269,53 +272,54 @@ Window {
 
 ---
 
+---
+
 ## 5. Layout
 
 ### `elwindui::ui::VerticalLayout`
 
-子要素を上から下へ垂直方向に一列に配置するレイアウトコンテナ。
+子要素を上から下へ垂直方向に一列に配置するレイアウトコンテナ。`Layout` を継承し `children` および `background` を共有する。
 
 #### Properties
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
-| `children` | `Vec<UIElement>` | OneWay | 子要素のコレクション |
+| `spacing` | `Option<f32>` | OneWay | 子要素間の垂直スペーシング |
 
 ### `elwindui::ui::HorizontalLayout`
 
-子要素を左から右へ水平方向に一列に配置するレイアウトコンテナ。
+子要素を左から右へ水平方向に一列に配置するレイアウトコンテナ。`Layout` を継承し `children` および `background` を共有する。
 
 #### Properties
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
-| `children` | `Vec<UIElement>` | OneWay | 子要素のコレクション |
+| `spacing` | `Option<f32>` | OneWay | 子要素間の水平スペーシング |
 
 ### `elwindui::ui::Grid`
 
-行（Row）と列（Column）の格子状に子要素を配置するレイアウトコンテナ。
+行（Row）と列（Column）の格子状に子要素を配置するレイアウトコンテナ。`Layout` を継承し `children` および `background` を共有する。
 
 #### Properties
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
-| `rows` | `Vec<GridLength>` | OneTime | 行サイズ定義（`Auto`, `Px(f32)`, `Star(f32)`） |
-| `columns` | `Vec<GridLength>` | OneTime | 列サイズ定義（`Auto`, `Px(f32)`, `Star(f32)`） |
-| `children` | `Vec<UIElement>` | OneWay | 子要素のコレクション |
+| `rows` | `Vec<GridLength>` | OneTime | 行サイズ定義（`Auto`, `Fixed(f32)`, `Star(f32)`） |
+| `columns` | `Vec<GridLength>` | OneTime | 列サイズ定義（`Auto`, `Fixed(f32)`, `Star(f32)`） |
 
 #### Attached Properties
 
 Gridの直下にある子要素は以下の添付プロパティを指定できる。
 
-- `Grid::row`: 配置対象の行インデックス（0開始）
-- `Grid::column`: 配置対象の列インデックス（0開始）
+- `Grid::row`: 配置対象の行インデックス（0開始、既定値 `0`）
+- `Grid::column`: 配置対象の列インデックス（0開始、既定値 `0`）
 
 #### Example
 
 ```rust
 Grid {
     rows: [GridLength::Auto, GridLength::Star(1.0)]
-    columns: [GridLength::Px(200.0), GridLength::Star(1.0)]
+    columns: [GridLength::Fixed(200.0), GridLength::Star(1.0)]
     children: [
         TextBlock {
             Grid::row: 0
@@ -357,12 +361,8 @@ Grid {
 |---|---|---|---|
 | `text` | `String` | OneWay | 表示テキスト |
 | `text_alignment` | `Option<TextAlignment>` | OneWay | テキスト配置（`Left`, `Center`, `Right`, `Justified`） |
-| `text_wrapping` | `Option<TextWrapping>` | OneWay | テキスト折り返し（`NoWrap`, `Wrap`） |
-| `font_family` | `Option<FontFamily>` | OneWay | フォントファミリー |
-| `font_size` | `Option<f32>` | OneWay | フォントサイズ（pt/px） |
-| `font_weight` | `Option<FontWeight>` | OneWay | フォントウェイト |
-| `font_style` | `Option<FontStyle>` | OneWay | フォントスタイル（`Normal`, `Italic`） |
-| `foreground` | `Option<Brush>` | OneWay | 文字色ブラシ |
+
+`TextBlock` は `#[text_style]` を持ち、共通フォント属性（`font_family`, `font_size`, `font_weight`, `font_style`, `font_stretch`, `character_spacing`, `foreground`）が使用可能である。
 
 ### `elwindui::ui::Image`
 
@@ -373,8 +373,8 @@ Grid {
 | Name | Type | Binding | Description |
 |---|---|---|---|
 | `source` | `Option<ImageSource>` | OneWay | 画像データソース（ファイルパス/ビットマップ/VectorImage） |
-| `fit` | `Option<ImageFit>` | OneWay | 拡大縮小フィットモード（`None`, `Fill`, `Contain`, `Cover`） |
-| `sampling` | `Option<ImageSampling>` | OneWay | サンプリングフィルタ（`Linear`, `Nearest`） |
+| `stretch` | `Option<Stretch>` | OneWay | 拡大縮小ストレッチモード（`None`, `Fill`, `Uniform`, `UniformToFill`） |
+| `rasterize` | `Option<VectorRasterizeMode>` | OneWay | ベクターラスタライズモード |
 
 ---
 
@@ -382,28 +382,17 @@ Grid {
 
 ### `elwindui::ui::Rectangle`
 
-長方形を描画する図形要素。角丸（`corner_radius`）をサポートする。
+長方形を描画する図形要素。`Shape` を継承し `fill`, `stroke`, `stroke_width` を共有する。
 
 #### Properties
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
-| `corner_radius` | `Option<CornerRadius>` | OneWay | 長方形の四角の角丸半径 |
-| `fill` | `Option<Brush>` | OneWay | 塗りつぶしブラシ |
-| `stroke` | `Option<Brush>` | OneWay | 輪郭線ブラシ |
-| `stroke_style` | `Option<StrokeStyle>` | OneWay | 輪郭線のスタイル |
+| `corner_radius` | `Option<f32>` | OneWay | 長方形の四角の角丸半径 |
 
 ### `elwindui::ui::Ellipse`
 
-楕円・円を描画する図形要素。
-
-#### Properties
-
-| Name | Type | Binding | Description |
-|---|---|---|---|
-| `fill` | `Option<Brush>` | OneWay | 塗りつぶしブラシ |
-| `stroke` | `Option<Brush>` | OneWay | 輪郭線ブラシ |
-| `stroke_style` | `Option<StrokeStyle>` | OneWay | 輪郭線のスタイル |
+楕円・円を描画する図形要素。`Shape` を継承し `fill`, `stroke`, `stroke_width` を共有する。
 
 ---
 

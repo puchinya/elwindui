@@ -1,4 +1,4 @@
-//! `builtin::TextArea`/`TextBox`/`PasswordBox` — the text-entry `*Ext` implementations.
+//! `elwindui::ui::TextArea`/`TextBox`/`PasswordBox` — the text-entry `*Ext` implementations.
 
 use super::NativeControl;
 use crate::AnyView;

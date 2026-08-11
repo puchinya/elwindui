@@ -1,4 +1,4 @@
-//! `builtin::TextArea` — multi-line text entry.
+//! `elwindui::ui::TextArea` — multi-line text entry.
 
 #[elwindui_macros::class(trait_only, inherits = crate::ui::NativeControl, sealed)]
 #[prop(two_way, text: String)]

@@ -1,4 +1,4 @@
-//! `builtin::PasswordBox` — masked single-line entry.
+//! `elwindui::ui::PasswordBox` — masked single-line entry.
 
 /// Secure single-line text input (masked entry). Deliberately narrower than `TextBox`: no
 /// `read_only`/`text_alignment` (neither platform's password widget meaningfully supports them the

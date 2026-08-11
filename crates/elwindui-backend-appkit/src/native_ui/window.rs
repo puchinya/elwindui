@@ -1,4 +1,4 @@
-//! `builtin::Window` — the `WindowExt` implementation.
+//! `elwindui::ui::Window` — the `WindowExt` implementation.
 
 use super::MenuBar;
 use crate::inner::InnerWindow;

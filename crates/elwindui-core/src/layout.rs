@@ -219,7 +219,7 @@ pub fn stack_natural_size(orientation: Orientation, spacing: f32, child_sizes: &
 /// WPF/WinUI3-style `Grid` sizing unit — `Auto` (a track's size follows its content's natural
 /// size), `Fixed(px)` (a literal size), or `Star(weight)` (a share of whatever space is left after
 /// every `Fixed`/`Auto` track has taken its own size, proportional to `weight` among all `Star`
-/// tracks — WPF's `*`/`2*` etc.). See `builtin::Grid`, docs/specs/dsl_spec.md §3.
+/// tracks — WPF's `*`/`2*` etc.). See `elwindui::ui::Grid`, docs/specs/dsl_spec.md.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridLength {
     Auto,

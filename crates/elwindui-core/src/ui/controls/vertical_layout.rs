@@ -1,4 +1,4 @@
-//! `builtin::VerticalLayout` — stacks children top to bottom.
+//! `elwindui::ui::VerticalLayout` — stacks children top to bottom.
 
 use super::*;
 

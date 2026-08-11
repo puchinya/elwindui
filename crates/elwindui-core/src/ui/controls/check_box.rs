@@ -1,4 +1,4 @@
-//! `builtin::CheckBox` — a native tri-state checkbox.
+//! `elwindui::ui::CheckBox` — a native tri-state checkbox.
 
 /// A [`CheckBox`]'s check state.
 ///
@@ -16,7 +16,7 @@ pub enum CheckState {
     Indeterminate,
 }
 
-/// `builtin::CheckBox` — a native tri-state checkbox (AppKit: `NSButton` with
+/// `elwindui::ui::CheckBox` — a native tri-state checkbox (AppKit: `NSButton` with
 /// `NSButtonType::Switch`; WinUI3: `CheckBox`).
 ///
 /// **User interaction only ever toggles between `Unchecked` and `Checked`.** Both backends

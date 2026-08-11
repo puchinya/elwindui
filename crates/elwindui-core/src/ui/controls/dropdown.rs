@@ -1,4 +1,4 @@
-//! `builtin::Dropdown` — a native, non-editable selection control (AppKit: `NSPopUpButton`;
+//! `elwindui::ui::Dropdown` — a native, non-editable selection control (AppKit: `NSPopUpButton`;
 //! WinUI3: `ComboBox`).
 
 use super::*;

@@ -1,4 +1,4 @@
-//! `builtin::DropdownItem` — one entry in a `Dropdown`.
+//! `elwindui::ui::DropdownItem` — one entry in a `Dropdown`.
 
 /// `DropdownItem`'s own class trait. No `inherits`: like `MenuItem`/`TabViewItem`, a `DropdownItem`
 /// has no native view of its own — `Dropdown` reads each item's `text` to rebuild its native

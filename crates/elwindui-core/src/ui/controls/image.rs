@@ -1,4 +1,4 @@
-//! `builtin::Image` — self-drawn raster/vector image, plus the `Stretch` -> `ImageFit` mapping it arranges with.
+//! `elwindui::ui::Image` — self-drawn raster/vector image, plus the `Stretch` -> `ImageFit` mapping it arranges with.
 
 use super::*;
 
@@ -16,7 +16,7 @@ pub(crate) fn stretch_to_image_fit(stretch: Stretch) -> ImageFit {
     }
 }
 
-/// `builtin::Image`(SVG読み込み・ベクター描画対応 実装指示書§24) — a self-drawing leaf like `Shape`,
+/// `elwindui::ui::Image`(SVG読み込み・ベクター描画対応 実装指示書§24) — a self-drawing leaf like `Shape`,
 /// not backed by any native widget on any backend: `render()` calls `RenderContext::draw_image`/
 /// `draw_vector_image` directly depending on which `ImageSource` variant `source` holds, so no
 /// per-backend construction code is needed at all (unlike `NativeControl`-family builtins).

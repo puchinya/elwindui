@@ -1,4 +1,4 @@
-//! `builtin::Slider` — the `SliderExt` implementation.
+//! `elwindui::ui::Slider` — the `SliderExt` implementation.
 
 use super::NativeControl;
 use crate::AnyView;

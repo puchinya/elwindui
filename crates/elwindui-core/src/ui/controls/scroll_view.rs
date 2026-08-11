@@ -1,4 +1,4 @@
-//! `builtin::ScrollView` — hosts an elwindui subtree inside a native scrolling container.
+//! `elwindui::ui::ScrollView` — hosts an elwindui subtree inside a native scrolling container.
 
 use super::*;
 

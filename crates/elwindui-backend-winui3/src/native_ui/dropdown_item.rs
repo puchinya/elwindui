@@ -1,4 +1,4 @@
-//! `builtin::DropdownItem` — the `DropdownItemExt` implementation. No native view of its own;
+//! `elwindui::ui::DropdownItem` — the `DropdownItemExt` implementation. No native view of its own;
 //! `native_ui::Dropdown` rebuilds its `ComboBox` item list directly from each item's own `text()`
 //! (see that file's own doc comment).
 

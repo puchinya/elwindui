@@ -1,4 +1,4 @@
-//! `builtin::MenuBarItem` — one top-level entry in a `MenuBar`.
+//! `elwindui::ui::MenuBarItem` — one top-level entry in a `MenuBar`.
 
 use super::*;
 

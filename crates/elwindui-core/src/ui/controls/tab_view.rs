@@ -1,4 +1,4 @@
-//! `builtin::TabView` — multi-document tab container.
+//! `elwindui::ui::TabView` — multi-document tab container.
 
 use super::*;
 

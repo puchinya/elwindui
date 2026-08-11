@@ -1,17 +1,17 @@
-//! `builtin::Grid` — row/column layout, plus the attached-property read-back its cell placement uses.
+//! `elwindui::ui::Grid` — row/column layout, plus the attached-property read-back its cell placement uses.
 
 use super::*;
 
-/// WPF/WinUI3-style row/column layout (`builtin::Grid`, docs/specs/dsl_spec.md §3). Each child's
+/// WPF/WinUI3-style row/column layout (`elwindui::ui::Grid`, docs/specs/dsl_spec.md §3). Each child's
 /// cell placement comes from its own `UIElement::attached` bag (the `Grid::row`/`Grid::column`
 /// attached properties it was constructed with, read back via `grid_cell_of` since only `Grid`
 /// itself knows those two fields are `i32`), not a field on `Grid` itself — see `attached`'s
 /// own doc comment. A child whose cell falls outside `row_definitions`/`column_definitions`'
 /// bounds is clamped to the last row/column, mirroring `grid_arrange`'s own clamping. Row/column
 /// spanning is out of scope for this pass (one child per cell) — a future `#[attached]
-/// row_span`/`column_span` pair on `builtin::Grid` would extend this the same way `row`/`column`
+/// row_span`/`column_span` pair on `elwindui::ui::Grid` would extend this the same way `row`/`column`
 /// were added, with no changes needed here beyond consulting the extra fields.
-/// `rows`/`columns` (not `row_definitions`/`column_definitions`) to match `builtin::Grid`'s own
+/// `rows`/`columns` (not `row_definitions`/`column_definitions`) to match `elwindui::ui::Grid`'s own
 /// `#[param] rows`/`#[param] columns` names — `elwindui-codegen`'s setter-based construction calls
 /// `.set_{param name}(..)` generically, so the Rust field/setter name must agree with the DSL's.
 /// `Grid`'s own class trait (docs/design/gui_framework_design.md §5.1) — inherits `Layout` (like

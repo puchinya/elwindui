@@ -1,6 +1,6 @@
-//! `builtin::RadioButton` — a native mutually-exclusive selection button.
+//! `elwindui::ui::RadioButton` — a native mutually-exclusive selection button.
 
-/// `builtin::RadioButton` — a native mutually-exclusive selection button (AppKit: `NSButton` with
+/// `elwindui::ui::RadioButton` — a native mutually-exclusive selection button (AppKit: `NSButton` with
 /// `NSButtonType::Radio`; WinUI3: `RadioButton`).
 ///
 /// **Grouping is managed by elwindui, not by either native toolkit.** AppKit's own automatic

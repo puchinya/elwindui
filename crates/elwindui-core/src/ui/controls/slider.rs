@@ -1,6 +1,6 @@
-//! `builtin::Slider` — a native continuous-value slider.
+//! `elwindui::ui::Slider` — a native continuous-value slider.
 
-/// `builtin::Slider` — a native continuous-value slider (AppKit: `NSSlider`; WinUI3: `Slider`).
+/// `elwindui::ui::Slider` — a native continuous-value slider (AppKit: `NSSlider`; WinUI3: `Slider`).
 ///
 /// **Has no `text` property**, the same as `ToggleSwitch` — pair it with an adjacent `TextBlock`
 /// if a label is needed.

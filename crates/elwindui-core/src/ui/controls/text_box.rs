@@ -1,4 +1,4 @@
-//! `builtin::TextBox` — single-line text entry.
+//! `elwindui::ui::TextBox` — single-line text entry.
 
 use super::*;
 

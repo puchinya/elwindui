@@ -1,4 +1,4 @@
-//! `builtin::Control` — the self-drawn templated-control base, and its local text-style storage.
+//! `elwindui::ui::Control` — the self-drawn templated-control base, and its local text-style storage.
 
 use super::*;
 
@@ -15,7 +15,7 @@ use super::*;
 /// below, already governs its placement within the padded content area); template
 /// replacement is future work.
 /// `Control`'s own class trait (docs/design/gui_framework_design.md §5.1) — exposes the fields a
-/// DSL-level subclass composed via `base: Control` (e.g. `builtin::ContentControl`,
+/// DSL-level subclass composed via `base: Control` (e.g. `elwindui::ui::ContentControl`,
 /// `elwindui-core::ui`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 #[text_style]

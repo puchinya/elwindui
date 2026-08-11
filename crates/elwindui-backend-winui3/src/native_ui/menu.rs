@@ -1,4 +1,4 @@
-//! `builtin::MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` and their `ListExt` collections.
+//! `elwindui::ui::MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` and their `ListExt` collections.
 
 use crate::inner::{
     InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem,

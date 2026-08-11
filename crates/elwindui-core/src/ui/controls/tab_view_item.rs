@@ -1,4 +1,4 @@
-//! `builtin::TabViewItem` — one tab of a `TabView`.
+//! `elwindui::ui::TabViewItem` — one tab of a `TabView`.
 
 /// `TabViewItem`'s own class trait. No `inherits`: like `Window`,
 /// `TabViewItem` is never itself embedded as a real `Rc<dyn UIElement>` node (see its own

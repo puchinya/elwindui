@@ -40,7 +40,7 @@ pub enum ButtonRole {
     Destructive,
 }
 
-/// `builtin::Button`. The `#[dsl(..)]`/`#[dsl_prop(..)]` lines below are this builtin's DSL-visible
+/// `elwindui::ui::Button`. The `#[dsl(..)]`/`#[dsl_prop(..)]` lines below are this element's DSL-visible
 /// surface, declared here on the interface itself rather than duplicated in a separate compiler-side
 /// shape table — `#[class]` turns them into `__elwindui_shape_Button!`, which the generated view
 /// code invokes (see `build_shape_macro` for why the shape has to reach consumers as a macro).

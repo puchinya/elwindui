@@ -228,3 +228,13 @@ DSL側は`EnumName::Member`という(裸の文字列リテラルではなく)パ
 | 静的検証 | 言語仕様13章のルール一覧をASTに対して実行し、違反はビルド時エラー |
 | バックエンド分岐の除去 | `target::backend()`の定数畳み込みにより非該当分岐を静的除去(**未実装**。現状は生成コードがバックエンド非依存で、リンクする`elwindui-backend-*`クレートの選択のみでバックエンドが決まる) |
 | 他ツールとの関係 | LanguageServer/preview/hotreloadは本コンパイラの解析結果・生成コードを利用する側であり、検証ロジックの二重実装を避ける |
+
+---
+
+## 8. 附録: マクロマクロ展開内部状態管理 (`store_class_args` / `load_class_args`)
+
+`#[elwindui_macros::class]` 属性マクロが `struct` 宣言と `impl` ブロックの2箇所に独立して付与される際、`struct` 側で指定された属性引数（`inherits`, `struct_only` 等）はコンパイルプロセスのグローバルメモリ領域へ保存され（`store_class_args`）、後続の `impl` 側の展開処理（`load_class_args`）から自動的に復元・参照される。
+
+- **保存ルール**: `struct` 宣言の展開時に `store_class_args(class_name, args)` が呼び出され、型名をキーとしてマクロ状態ストアに保存される。
+- **復元ルール**: `impl ClassName` の無引数 `#[elwindui_macros::class]` 展開時に `load_class_args(class_name)` によりメタデータを取り出して継承コードを生成する。
+- **優先順位**: `impl` 側に明示的に引数が記述された場合は、ストアを無視して `impl` 側の引数が優先される。

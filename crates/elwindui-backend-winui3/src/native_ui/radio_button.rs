@@ -1,4 +1,4 @@
-//! `builtin::RadioButton` — the `RadioButtonExt` implementation, including elwindui's own
+//! `elwindui::ui::RadioButton` — the `RadioButtonExt` implementation, including elwindui's own
 //! group-exclusivity bookkeeping (`elwindui_core::ui::RadioButton`'s own doc comment explains why
 //! this is deliberately not delegated to native grouping — mirrors
 //! `elwindui_backend_appkit::native_ui::RadioButton`'s own registry exactly).

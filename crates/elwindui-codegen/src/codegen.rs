@@ -4137,15 +4137,18 @@ fn generate_view(
         // tags each with `#[inherent]` and they all land in the single `#[elwindui::class] impl
         // #target { .. }` block below instead of needing a second, separate plain `impl` purely to
         // hold them.
-        let property_resync_methods: TokenStream = mark_inherent(property_resync_methods_for(
-            &bind_owners,
-            &plan,
-            &ctx,
-            from,
-            table,
-            false,
-            is_shape_composition || is_host_composition,
-        ));
+        //
+        // `property_resync_methods` (bind-owner `__resync_<owner>` methods) is reused as-is from the
+        // outer scope above, already built with `include_refresh: true` — a composed component's
+        // `on_constructed` only calls `self.__refresh_dynamic_regions()` once, at construction, same
+        // as the non-composed path (see that call's own site); nothing else calls it again on a bind
+        // owner's later `PropertyChanged`, so composed and non-composed both need every bind-owner
+        // resync arm to call it itself, exactly like `component_property_dispatch` (own-field changes,
+        // a few lines above) already does unconditionally regardless of `is_composed`. A second
+        // `include_refresh: false` copy used to be built here on the mistaken premise that composed
+        // components get this call from elsewhere — they don't, so a bind-owner property referenced
+        // only by a dynamic region's own condition/value/collection expression never switched the
+        // active branch in a composed component (issue #58).
         let component_property_resync_methods = mark_inherent(component_property_resync_methods);
         let own_computed_recompute_methods = mark_inherent(own_computed_recompute_methods);
 
@@ -9108,6 +9111,40 @@ fn property_resync_methods_for(
                         );
                     }
                 }
+                // `plan` is already flat — `plan_dynamic_entry` plans every eager branch/arm's own
+                // content straight into the same `out` before pushing the region's own marker node,
+                // so this single pass also reaches nested dynamic regions without recursing. Only
+                // the condition/value/collection expression itself is missing from the attribute
+                // scan above; a bind owner referenced *only* there (never in a sibling attribute)
+                // must still get a `__resync_<owner>` arm, or its `PropertyChanged` notifications
+                // never reach `__refresh_dynamic_regions()` (issue #58).
+                match node.dynamic.as_ref() {
+                    Some(DynamicPlan::If { condition, .. }) => {
+                        collect_view_expr_owner_properties(
+                            condition,
+                            ctx,
+                            &owner_name,
+                            &mut properties,
+                        );
+                    }
+                    Some(DynamicPlan::Match { value, .. }) => {
+                        collect_view_expr_owner_properties(
+                            value,
+                            ctx,
+                            &owner_name,
+                            &mut properties,
+                        );
+                    }
+                    Some(DynamicPlan::For { collection, .. }) => {
+                        collect_view_expr_owner_properties(
+                            collection,
+                            ctx,
+                            &owner_name,
+                            &mut properties,
+                        );
+                    }
+                    None => {}
+                }
             }
             for (_, leaf) in &lazy_leaves {
                 for attribute in &leaf.attributes {
@@ -10470,6 +10507,184 @@ view NotepadWindow {
         let rendered = generated.to_string();
         assert!(rendered.contains("replace_rc_items"));
         assert!(rendered.contains("item . clone"));
+    }
+
+    // --- Issue #58: bind-owner-only dynamic region conditions must still resync -----------------
+    //
+    // `property_resync_methods_for` used to scan only `PlannedNode::attributes` (via
+    // `collect_view_expr_owner_properties`) to decide which properties a bind owner's
+    // `__resync_<owner>` reacts to, never a dynamic region's own `DynamicPlan::If.condition` /
+    // `Match.value` / `For.collection`. A bind-owner property referenced *only* there (never in a
+    // sibling attribute) therefore never got a `match property { .. }` arm at all — its
+    // `PropertyChanged` notification reached `__resync_<owner>` (the subscription itself was fine)
+    // but fell through the `_ => {}` catch-all, so `__refresh_dynamic_regions()` never ran. The
+    // property name below is chosen so it appears in the rendered output *only* if a resync arm was
+    // actually generated for it (nothing else in the generated code would ever spell it out).
+
+    #[test]
+    fn resyncs_bind_owner_property_used_only_in_if_condition() {
+        let module = parse_module(
+            r#"
+                viewmodel ToggleViewModel {
+                    #[observable]
+                    show_then: bool = true,
+                }
+                component ToggleHost {
+                    #[bindable]
+                    vm: Rc<ToggleViewModel>,
+                }
+                view ToggleHost {
+                    VerticalLayout {
+                        if vm.show_then {
+                            TextBlock { text: "then" }
+                        } else {
+                            TextBlock { text: "else" }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("bind-owner if-condition source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("bind_owner_if_condition", &generated);
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("fn __resync_vm (& self , property : & 'static str)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\"show_then\""),
+            "condition-only property must still get a __resync_vm arm: {rendered}"
+        );
+        assert!(rendered.contains("__refresh_dynamic_regions"), "{rendered}");
+    }
+
+    #[test]
+    fn resyncs_bind_owner_property_used_only_in_match_value() {
+        let module = parse_module(
+            r#"
+                enum Status { Ready, Busy }
+                viewmodel StatusViewModel {
+                    #[observable]
+                    current_status: Status = Status::Ready,
+                }
+                component StatusHost {
+                    #[bindable]
+                    vm: Rc<StatusViewModel>,
+                }
+                view StatusHost {
+                    VerticalLayout {
+                        match vm.current_status {
+                            Status::Ready => { TextBlock { text: "ready" } }
+                            Status::Busy => { TextBlock { text: "busy" } }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("bind-owner match-value source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("bind_owner_match_value", &generated);
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("fn __resync_vm (& self , property : & 'static str)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\"current_status\""),
+            "value-only property must still get a __resync_vm arm: {rendered}"
+        );
+        assert!(rendered.contains("__refresh_dynamic_regions"), "{rendered}");
+    }
+
+    #[test]
+    fn resyncs_bind_owner_property_used_only_in_for_collection() {
+        let module = parse_module(
+            r#"
+                viewmodel RowItem { }
+                viewmodel RowsViewModel {
+                    #[observable]
+                    row_items: Vec<std::rc::Rc<RowItem>> = Vec::new(),
+                }
+                component RowView {
+                    #[param]
+                    item: std::rc::Rc<RowItem>,
+                }
+                view RowView { TextBlock { text: "row" } }
+                component RowsHost {
+                    #[bindable]
+                    vm: Rc<RowsViewModel>,
+                }
+                view RowsHost {
+                    VerticalLayout {
+                        for item in vm.row_items { RowView { item: item } }
+                    }
+                }
+            "#,
+        )
+        .expect("bind-owner for-collection source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("bind_owner_for_collection", &generated);
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("fn __resync_vm (& self , property : & 'static str)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\"row_items\""),
+            "collection-only property must still get a __resync_vm arm: {rendered}"
+        );
+        assert!(rendered.contains("__refresh_dynamic_regions"), "{rendered}");
+    }
+
+    #[test]
+    fn resyncs_bind_owner_property_used_only_in_nested_if_condition() {
+        let module = parse_module(
+            r#"
+                viewmodel NestedViewModel {
+                    #[observable]
+                    outer_flag: bool = true,
+                    #[observable]
+                    inner_flag: bool = true,
+                }
+                component NestedHost {
+                    #[bindable]
+                    vm: Rc<NestedViewModel>,
+                }
+                view NestedHost {
+                    VerticalLayout {
+                        if vm.outer_flag {
+                            VerticalLayout {
+                                if vm.inner_flag {
+                                    TextBlock { text: "inner-then" }
+                                } else {
+                                    TextBlock { text: "inner-else" }
+                                }
+                            }
+                        } else {
+                            TextBlock { text: "outer-else" }
+                        }
+                    }
+                }
+            "#,
+        )
+        .expect("nested bind-owner if-condition source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("bind_owner_nested_if_condition", &generated);
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("\"outer_flag\""),
+            "outer condition property must get a __resync_vm arm: {rendered}"
+        );
+        assert!(
+            rendered.contains("\"inner_flag\""),
+            "nested condition property must also get a __resync_vm arm: {rendered}"
+        );
+        assert!(rendered.contains("__refresh_dynamic_regions"), "{rendered}");
     }
 
     #[test]

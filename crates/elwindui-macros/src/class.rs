@@ -1868,9 +1868,12 @@ fn is_named(ty: &Type, name: &str) -> bool {
 /// time, i.e. once per *declaration*), instead of by `elwindui-codegen` once per *use site* (which,
 /// once a builtin's shape lives only here, no longer has this type information available at all).
 ///
-/// - `String` — real hand-written-native/virtual-builtin setters take `&str` by convention; `&(..)`
-///   derefs an owned `String` down to it, and is a harmless reborrow when the value is already a
-///   `&str` literal.
+/// - `String`, bare or `Option`-wrapped — real hand-written-native/virtual-builtin setters take
+///   `&str` by convention, never `Option<&str>`/`Option<String>` (an empty string is the "clear"
+///   convention for these, e.g. `NativeControl::set_tooltip`/`TextBox::set_placeholder` — see their
+///   own doc comments); `&(..)` derefs an owned `String` down to `&str`, and is a harmless reborrow
+///   when the value is already a `&str` literal. Unlike `Brush`/`Color` below, the `Option`-wrapped
+///   case is *not* additionally `Some(..)`-wrapped, since the real setter never takes `Option`.
 /// - `Brush`/`Color`, bare or `Option`-wrapped — `.into()` lets a hex-string DSL literal
 ///   (`fill: "#3a3a3c"`) reach the setter via `Color`/`Brush`'s own `From<&str>` (elwindui-core),
 ///   and is a no-op (std's reflexive `From<T> for T`) when the value already is the target type.
@@ -1906,6 +1909,9 @@ fn wrap_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
         Some(inner) => (inner, true),
         None => (ty, false),
     };
+    if is_string_type(target) {
+        return quote! { &(#value) };
+    }
     if is_named(target, "Brush") || is_named(target, "Color") {
         let converted = quote! { (#value).into() };
         return if wrap_in_some {

@@ -670,9 +670,9 @@ pub(crate) fn resolve_effective_fields<'m>(
 
 /// `resolve_effective_fields`'s fallback when `base` has no local `ComponentDef` visible to this
 /// macro invocation at all — the normal case for every real builtin in production
-/// (`elwindui_codegen::TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment: the old workspace-wide
-/// `builtin_modules()` was removed, so a real `Control`/`ContentControl`/... is never parsed DSL
-/// text here, only a compiled Rust type reachable through `__elwindui_props_{Name}!`, Refs #90).
+/// (`elwindui_codegen::testdata`'s own doc comment: the old workspace-wide `builtin_modules()` was
+/// removed, so a real `Control`/`ContentControl`/... is never parsed DSL text here, only a compiled
+/// Rust type reachable through `__elwindui_props_{Name}!`, Refs #90).
 /// Without a local field list there's nothing to filter a *known* base field list against the way
 /// the `find_component_and_module`-succeeds branch does — so this takes the DSL author's own bare
 /// same-name attribute-value reference (`padding: padding`, dsl_spec.md §3's `ContentControl`
@@ -10205,7 +10205,6 @@ fn emit_setter(path: &[String], mode: &EmitMode) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse_module;
 
     /// Builtins (`Window`/`VerticalLayout`/`TextArea`/etc.) only resolve when their shape modules
     /// (`crate::builtin_modules`) are part of the symbol table — `compile_dir`/`generate_from_source`
@@ -10247,18 +10246,37 @@ mod tests {
 
     #[test]
     fn embedded_attribute_is_the_builtin_boundary_within_builtin_module() {
-        let mut module = parse_module(
-            r#"
-                #[embedded]
-                component EmbeddedShape { }
-
-                component OrdinaryComponent { }
-            "#,
-        )
-        .unwrap();
-        // `Module::is_builtin` only authorizes `#[embedded]`; it must not by itself turn every
-        // declaration in the source into a builtin.
-        module.is_builtin = true;
+        // `#[embedded]` has no current-syntax spelling at all (`component_frontend.rs`'s real
+        // frontend never recognizes the attribute name — see `ComponentDef::embedded`'s own doc
+        // comment) — built directly as `ComponentDef` struct literals instead, the same way
+        // `testdata.rs` builds the real builtins' `embedded`/`native` flags.
+        fn minimal_component(name: &str, embedded: bool) -> ComponentDef {
+            ComponentDef {
+                name: name.to_string(),
+                base: None,
+                base_path: None,
+                fields: Vec::new(),
+                methods: Vec::new(),
+                embedded,
+                sealed: false,
+                native: false,
+                is_abstract: false,
+                text_style: false,
+                content_field: None,
+            }
+        }
+        let module = Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items: vec![
+                Item::Component(minimal_component("EmbeddedShape", true)),
+                Item::Component(minimal_component("OrdinaryComponent", false)),
+            ],
+            // `Module::is_builtin` only authorizes `#[embedded]`; it must not by itself turn every
+            // declaration in the source into a builtin.
+            is_builtin: true,
+            allows_external_builtins: false,
+        };
 
         let table = build_symbol_table(&[module.clone()]);
         assert!(table.resolve(&module, "EmbeddedShape").unwrap().is_builtin);
@@ -10287,6 +10305,125 @@ mod tests {
             items: vec![Item::ViewModel(def)],
             ..Default::default()
         }
+    }
+
+    /// Builds one `Module` combining a `#[elwindui::viewmodel]`-style `mod` and a
+    /// `#[elwindui::component]`-style `struct`, mirroring how one old `parser::parse_module` call
+    /// could declare a `viewmodel` and a `component` together in one source blob.
+    fn viewmodel_and_component_module(vm_src: &str, base: Option<&str>, struct_src: &str) -> Module {
+        let item_mod: syn::ItemMod = syn::parse_str(vm_src).expect("mod should parse");
+        let vm_def = crate::attr_frontend::viewmodel_def_from_item_mod(&item_mod)
+            .expect("viewmodel should build");
+        let item_struct: syn::ItemStruct = syn::parse_str(struct_src).expect("struct should parse");
+        let (component_def, view_def) = crate::component_frontend::component_and_view_from_item_struct(
+            base.map(str::to_string),
+            &item_struct,
+        )
+        .expect("component should build");
+        let mut items = vec![Item::ViewModel(vm_def)];
+        items.extend(crate::component_frontend::component_module_items(
+            component_def,
+            view_def,
+        ));
+        Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items,
+            is_builtin: false,
+            allows_external_builtins: false,
+        }
+    }
+
+    /// One entry in a [`multi_item_module`] fixture list — either a `#[elwindui::viewmodel]`-style
+    /// `mod` source or a `#[elwindui::component]`-style `struct` source (with its `inherits` base,
+    /// if any, passed separately since the bare `struct` text carries no macro attribute).
+    enum TestItem<'a> {
+        ViewModel(&'a str),
+        Enum(&'a str),
+        Component(Option<&'a str>, &'a str),
+    }
+
+    /// Generalizes [`viewmodel_and_component_module`] to an arbitrary ordered mix of `viewmodel`/
+    /// `enum`/`component` declarations, mirroring how one old `parser::parse_module` call could
+    /// declare several top-level items together in one source blob.
+    fn multi_item_module(items: &[TestItem]) -> Module {
+        let mut out = Vec::new();
+        for item in items {
+            match item {
+                TestItem::ViewModel(src) => {
+                    let item_mod: syn::ItemMod = syn::parse_str(src).expect("mod should parse");
+                    let def = crate::attr_frontend::viewmodel_def_from_item_mod(&item_mod)
+                        .expect("viewmodel should build");
+                    out.push(Item::ViewModel(def));
+                }
+                TestItem::Enum(src) => {
+                    let item_enum: syn::ItemEnum = syn::parse_str(src).expect("enum should parse");
+                    let def = crate::component_frontend::enum_def_from_item_enum(&item_enum)
+                        .expect("enum should build");
+                    out.push(Item::Enum(def));
+                }
+                TestItem::Component(base, src) => {
+                    let item_struct: syn::ItemStruct =
+                        syn::parse_str(src).expect("struct should parse");
+                    let (component_def, view_def) =
+                        crate::component_frontend::component_and_view_from_item_struct(
+                            base.map(|b| b.to_string()),
+                            &item_struct,
+                        )
+                        .expect("component should build");
+                    out.extend(crate::component_frontend::component_module_items(
+                        component_def,
+                        view_def,
+                    ));
+                }
+            }
+        }
+        Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items: out,
+            is_builtin: false,
+            allows_external_builtins: false,
+        }
+    }
+
+    /// Builds a `Module` containing exactly one `#[elwindui::component]`-style `struct` — the
+    /// single-component case of [`multi_item_module`], kept separate (rather than merged into a
+    /// combined `viewmodel_and_component_module`/`multi_item_module` call) whenever a test needs its
+    /// `viewmodel`/`component` `Module`s to stay independently `generate_module`-able, mirroring how
+    /// `parse_module` used to be called once per source blob rather than once for everything.
+    fn component_module(base: Option<&str>, struct_src: &str) -> Module {
+        let item_struct: syn::ItemStruct = syn::parse_str(struct_src).expect("struct should parse");
+        let (component_def, view_def) = crate::component_frontend::component_and_view_from_item_struct(
+            base.map(|b| b.to_string()),
+            &item_struct,
+        )
+        .expect("component should build");
+        Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items: crate::component_frontend::component_module_items(component_def, view_def),
+            is_builtin: false,
+            allows_external_builtins: false,
+        }
+    }
+
+    /// Like [`component_module`], but also attaches `uses` (each a `::`-separated path, e.g.
+    /// `"crate::document_view_model::Document"`) — needed only for a test whose fixture actually
+    /// exercises cross-module `use`-based type resolution (a type declared at a non-crate-root
+    /// `Module::path`, `viewmodel_module_from_rust_at_its_own_module_path`'s whole reason to exist);
+    /// every other `component_module` caller's referenced types live at the crate-root path (`[]`,
+    /// `Module`'s own default), where `validate::validate`'s bindable-owner-in-scope check never
+    /// needs a `use` at all — see `ast::Module::path`'s own doc comment on crate-root placement.
+    fn component_module_with_uses(base: Option<&str>, struct_src: &str, uses: &[&str]) -> Module {
+        let mut module = component_module(base, struct_src);
+        module.uses = uses
+            .iter()
+            .map(|path| crate::ast::UseDecl {
+                path: path.split("::").map(str::to_string).collect(),
+            })
+            .collect();
+        module
     }
 
     fn notepad_viewmodel_module() -> Module {
@@ -10330,38 +10467,39 @@ mod tests {
         )
     }
 
+    // The old DSL text form's own top-level `use` declaration (§12) has no counterpart on this
+    // (real, production) frontend — an ordinary Rust `use` in the surrounding source file is
+    // already resolved by `rustc` itself, with no DSL-side parsing involved at all.
     const WINDOW_SRC: &str = r#"
-use crate::NotepadViewModel;
-
-component NotepadWindow {
+struct NotepadWindow {
     #[bindable]
     vm: NotepadViewModel,
-}
 
-view NotepadWindow {
-    Window {
-        title: vm.window_title
+    body: view! {
+        Window {
+            title: vm.window_title
 
-        VerticalLayout {
-            HorizontalLayout {
-                Button {
-                    text: t!("notepad-menu-save")
-                    on_click: vm.save
-                    enabled: vm.save_can_execute
+            VerticalLayout {
+                HorizontalLayout {
+                    Button {
+                        text: t!("notepad-menu-save")
+                        on_click: vm.save
+                        enabled: vm.save_can_execute
+                    }
+                    Button {
+                        text: t!("notepad-menu-open")
+                        on_click: vm.open
+                    }
                 }
-                Button {
-                    text: t!("notepad-menu-open")
-                    on_click: vm.open
+
+                TextArea { text <=> vm.content }
+
+                HorizontalLayout {
+                    TextBlock { text: t!("notepad-status-chars", count: vm.char_count) }
                 }
-            }
-
-            TextArea { text <=> vm.content }
-
-            HorizontalLayout {
-                TextBlock { text: t!("notepad-status-chars", count: vm.char_count) }
             }
         }
-    }
+    },
 }
 "#;
 
@@ -10375,14 +10513,17 @@ view NotepadWindow {
 
     #[test]
     fn text_block_font_size_emits_as_text_style_owner_dispatch() {
-        let module = parse_module(
+        let module = crate::test_module(&[(
+            None,
             r#"
-                component FontHost { }
-                view FontHost {
-                    TextBlock { text: "hi" font_size: 20.0 }
+                struct FontHost {
+                    body: view! {
+                        TextBlock { text: "hi" font_size: 20.0 }
+                    },
                 }
             "#,
-        )
+            None,
+        )])
         .expect("source should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
@@ -10399,14 +10540,17 @@ view NotepadWindow {
 
     #[test]
     fn foreground_hex_literal_coerces_to_brush_solid() {
-        let module = parse_module(
+        let module = crate::test_module(&[(
+            None,
             r##"
-                component FontHost { }
-                view FontHost {
-                    TextBlock { text: "hi" foreground: "#3a3a3c" }
+                struct FontHost {
+                    body: view! {
+                        TextBlock { text: "hi" foreground: "#3a3a3c" }
+                    },
                 }
             "##,
-        )
+            None,
+        )])
         .expect("source should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
@@ -10422,28 +10566,31 @@ view NotepadWindow {
 
     #[test]
     fn dynamic_font_family_and_foreground_are_owned_text_style_arguments() {
-        let module = parse_module(
+        let module = crate::test_module(&[(
+            None,
             r#"
-                component FontHost {
+                struct FontHost {
                     #[bindable]
                     vm: FontDemoViewModel,
-                }
-                view FontHost {
-                    VerticalLayout {
-                        TextBlock {
-                            text: "sample"
-                            font_family: vm.font_family
-                            foreground: vm.foreground
+
+                    body: view! {
+                        VerticalLayout {
+                            TextBlock {
+                                text: "sample"
+                                font_family: vm.font_family
+                                foreground: vm.foreground
+                            }
+                            Button {
+                                text: "sample"
+                                font_family: vm.font_family
+                                foreground: vm.foreground
+                            }
                         }
-                        Button {
-                            text: "sample"
-                            font_family: vm.font_family
-                            foreground: vm.foreground
-                        }
-                    }
+                    },
                 }
             "#,
-        )
+            None,
+        )])
         .expect("source should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
@@ -10463,26 +10610,29 @@ view NotepadWindow {
 
     #[test]
     fn theme_references_generate_typed_set_clear_and_theme_only_resync() {
-        let module = parse_module(
+        let module = crate::test_module(&[(
+            None,
             r#"
-                component ThemeHost { }
-                view ThemeHost {
-                    VerticalLayout {
-                        background: theme!(AppTheme::layout_background)
-                        spacing: theme!(AppTheme::layout_spacing)
-                        TextBlock {
-                            text: "sample"
-                            foreground: theme!(AppTheme::text_block_foreground)
+                struct ThemeHost {
+                    body: view! {
+                        VerticalLayout {
+                            background: theme!(AppTheme::layout_background)
+                            spacing: theme!(AppTheme::layout_spacing)
+                            TextBlock {
+                                text: "sample"
+                                foreground: theme!(AppTheme::text_block_foreground)
+                            }
+                            Button {
+                                text: "native"
+                                background: theme!(AppTheme::button_background)
+                                foreground: theme!(AppTheme::button_foreground)
+                            }
                         }
-                        Button {
-                            text: "native"
-                            background: theme!(AppTheme::button_background)
-                            foreground: theme!(AppTheme::button_foreground)
-                        }
-                    }
+                    },
                 }
             "#,
-        )
+            None,
+        )])
         .expect("theme source should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
@@ -10509,14 +10659,17 @@ view NotepadWindow {
         // `Button` doesn't declare `font_size` itself (`#[text_style]` is only on `NativeControl`,
         // §E's own rationale) — its use site must still compile and dispatch through
         // `as_text_style_owner()`, not a `ButtonExt`-qualified call (which doesn't exist).
-        let module = parse_module(
+        let module = crate::test_module(&[(
+            None,
             r#"
-                component FontHost { }
-                view FontHost {
-                    Button { text: "Click" font_size: 16.0 }
+                struct FontHost {
+                    body: view! {
+                        Button { text: "Click" font_size: 16.0 }
+                    },
                 }
             "#,
-        )
+            None,
+        )])
         .expect("source should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
@@ -10567,18 +10720,20 @@ view NotepadWindow {
         // behavior that made `emit_path_get` panic downstream with "unsupported path shape after
         // bind resolution: `padding`" the moment a real consumer crate actually compiled this
         // dsl_spec.md §3 pattern against a genuinely external builtin.
-        let module = parse_module(
+        let module = crate::test_module(&[(
+            Some("Control"),
             r#"
-                component Wrapper inherits Control {
+                struct Wrapper {
                     content: std::rc::Rc<dyn UIElement>,
-                }
 
-                view Wrapper {
-                    padding: padding
-                    content
+                    body: view! {
+                        padding: padding
+                        content
+                    },
                 }
             "#,
-        )
+            None,
+        )])
         .expect("source should parse");
         let table = build_symbol_table(&[module.clone()]);
         let info = table
@@ -10607,20 +10762,23 @@ view NotepadWindow {
 
     #[test]
     fn generates_dynamic_if_region_that_reads_the_current_property() {
-        let module = parse_module(
+        let module = viewmodel_and_component_module(
             r#"
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    show: bool = true,
+            mod dynamic_view_model_mod {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    show: bool,
                 }
+            }
+            "#,
+            None,
+            r#"
+            struct DynamicHost {
+                #[param]
+                #[inject]
+                vm: DynamicViewModel,
 
-                component DynamicHost {
-                    #[param]
-                    #[inject]
-                    vm: DynamicViewModel,
-                }
-
-                view DynamicHost {
+                body: view! {
                     VerticalLayout {
                         if vm.show {
                             TextBlock { text: "shown" }
@@ -10628,10 +10786,10 @@ view NotepadWindow {
                             TextBlock { text: "hidden" }
                         }
                     }
-                }
+                },
+            }
             "#,
-        )
-        .expect("dynamic if source should parse");
+        );
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("dynamic_if", &generated);
@@ -10647,22 +10805,25 @@ view NotepadWindow {
     /// the most basic case of the nesting this phase fixes.
     #[test]
     fn generates_else_if_chain() {
-        let module = parse_module(
+        let module = viewmodel_and_component_module(
             r#"
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    is_zero: bool = true,
-                    #[observable]
-                    is_one: bool = false,
+            mod dynamic_view_model_mod {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    is_zero: bool,
+                    #[observable(default = false)]
+                    is_one: bool,
                 }
+            }
+            "#,
+            None,
+            r#"
+            struct DynamicHost {
+                #[param]
+                #[inject]
+                vm: DynamicViewModel,
 
-                component DynamicHost {
-                    #[param]
-                    #[inject]
-                    vm: DynamicViewModel,
-                }
-
-                view DynamicHost {
+                body: view! {
                     VerticalLayout {
                         if vm.is_zero {
                             TextBlock { text: "zero" }
@@ -10672,10 +10833,10 @@ view NotepadWindow {
                             TextBlock { text: "many" }
                         }
                     }
-                }
+                },
+            }
             "#,
-        )
-        .expect("else-if source should parse");
+        );
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("else_if_chain", &generated);
@@ -10688,20 +10849,23 @@ view NotepadWindow {
     /// selected, instead of unconditionally at `new()` time like every branch used to be.
     #[test]
     fn generates_lazy_branch_cache_for_a_childless_literal_branch() {
-        let module = parse_module(
+        let module = viewmodel_and_component_module(
             r#"
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    show: bool = true,
+            mod dynamic_view_model_mod {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    show: bool,
                 }
+            }
+            "#,
+            None,
+            r#"
+            struct DynamicHost {
+                #[param]
+                #[inject]
+                vm: DynamicViewModel,
 
-                component DynamicHost {
-                    #[param]
-                    #[inject]
-                    vm: DynamicViewModel,
-                }
-
-                view DynamicHost {
+                body: view! {
                     VerticalLayout {
                         if vm.show {
                             TextBlock { text: "shown" }
@@ -10709,10 +10873,10 @@ view NotepadWindow {
                             TextBlock { text: "hidden" }
                         }
                     }
-                }
+                },
+            }
             "#,
-        )
-        .expect("dynamic if source should parse");
+        );
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("lazy_branch_cache", &generated);
@@ -10743,20 +10907,23 @@ view NotepadWindow {
     /// mis-selecting the branch.
     #[test]
     fn scalar_content_field_on_a_nested_literal_evaluates_condition_once_at_construction() {
-        let module = parse_module(
+        let module = viewmodel_and_component_module(
             r#"
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    show_a: bool = false,
+            mod dynamic_view_model_mod {
+                struct DynamicViewModel {
+                    #[observable(default = false)]
+                    show_a: bool,
                 }
+            }
+            "#,
+            None,
+            r#"
+            struct DynamicHost {
+                #[param]
+                #[inject]
+                vm: DynamicViewModel,
 
-                component DynamicHost {
-                    #[param]
-                    #[inject]
-                    vm: DynamicViewModel,
-                }
-
-                view DynamicHost {
+                body: view! {
                     ContentControl {
                         if vm.show_a {
                             TextBlock { text: "a" }
@@ -10764,10 +10931,10 @@ view NotepadWindow {
                             TextBlock { text: "b" }
                         }
                     }
-                }
+                },
+            }
             "#,
-        )
-        .expect("nested scalar dynamic content source should parse");
+        );
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("nested_scalar_dynamic_content_construction", &generated);
@@ -10800,37 +10967,52 @@ view NotepadWindow {
     /// (`replace_children` with an empty `vec`) whenever the `if` picks the static branch instead.
     #[test]
     fn generates_nested_for_inside_if_then_branch() {
-        let module = parse_module(
-            r#"
-                viewmodel Item { }
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    show_list: bool = true,
-                    #[observable]
-                    items: Vec<std::rc::Rc<Item>> = Vec::new(),
+        let module = multi_item_module(&[
+            TestItem::ViewModel(r#"mod item_mod { struct Item { } }"#),
+            TestItem::ViewModel(
+                r#"
+                mod dynamic_view_model_mod {
+                    struct DynamicViewModel {
+                        #[observable(default = true)]
+                        show_list: bool,
+                        #[observable(default = Vec::new())]
+                        items: Vec<std::rc::Rc<Item>>,
+                    }
                 }
-                component ItemView {
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct ItemView {
                     #[param]
                     item: std::rc::Rc<Item>,
+
+                    body: view! { TextBlock { text: "item" } },
                 }
-                view ItemView { TextBlock { text: "item" } }
-                component DynamicHost {
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct DynamicHost {
                     #[param]
                     #[inject]
                     vm: DynamicViewModel,
-                }
-                view DynamicHost {
-                    VerticalLayout {
-                        if vm.show_list {
-                            for item in vm.items { ItemView { item: item } }
-                        } else {
-                            TextBlock { text: "empty" }
+
+                    body: view! {
+                        VerticalLayout {
+                            if vm.show_list {
+                                for item in vm.items { ItemView { item: item } }
+                            } else {
+                                TextBlock { text: "empty" }
+                            }
                         }
-                    }
+                    },
                 }
-            "#,
-        )
-        .expect("nested for-in-if source should parse");
+                "#,
+            ),
+        ]);
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("nested_for_in_if", &generated);
@@ -10847,37 +11029,46 @@ view NotepadWindow {
     /// `__refresh_dynamic_regions`'s per-arm "clear every *other* arm's own nested markers" logic.
     #[test]
     fn generates_nested_if_inside_match_arm() {
-        let module = parse_module(
-            r#"
-                enum Status { Ready, Busy }
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    status: Status = Status::Ready,
-                    #[observable]
-                    urgent: bool = false,
+        let module = multi_item_module(&[
+            TestItem::Enum("enum Status { Ready, Busy }"),
+            TestItem::ViewModel(
+                r#"
+                mod dynamic_view_model_mod {
+                    struct DynamicViewModel {
+                        #[observable(default = Status::Ready)]
+                        status: Status,
+                        #[observable(default = false)]
+                        urgent: bool,
+                    }
                 }
-                component DynamicHost {
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct DynamicHost {
                     #[param]
                     #[inject]
                     vm: DynamicViewModel,
-                }
-                view DynamicHost {
-                    VerticalLayout {
-                        match vm.status {
-                            Status::Ready => {
-                                if vm.urgent {
-                                    TextBlock { text: "ready-urgent" }
-                                } else {
-                                    TextBlock { text: "ready" }
+
+                    body: view! {
+                        VerticalLayout {
+                            match vm.status {
+                                Status::Ready => {
+                                    if vm.urgent {
+                                        TextBlock { text: "ready-urgent" }
+                                    } else {
+                                        TextBlock { text: "ready" }
+                                    }
                                 }
+                                Status::Busy => { TextBlock { text: "busy" } }
                             }
-                            Status::Busy => { TextBlock { text: "busy" } }
                         }
-                    }
+                    },
                 }
-            "#,
-        )
-        .expect("nested if-in-match source should parse");
+                "#,
+            ),
+        ]);
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("nested_if_in_match", &generated);
@@ -10893,29 +11084,32 @@ view NotepadWindow {
     /// `DynamicChildSlot` (there is nowhere to keep a list position for a single-value field).
     #[test]
     fn generates_scalar_content_dynamic_region_via_content_control() {
-        let module = parse_module(
+        let module = viewmodel_and_component_module(
             r#"
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    show_a: bool = true,
+            mod dynamic_view_model_mod {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    show_a: bool,
                 }
+            }
+            "#,
+            Some("ContentControl"),
+            r#"
+            struct DynamicHost {
+                #[param]
+                #[inject]
+                vm: DynamicViewModel,
 
-                component DynamicHost inherits ContentControl {
-                    #[param]
-                    #[inject]
-                    vm: DynamicViewModel,
-                }
-
-                view DynamicHost {
+                body: view! {
                     if vm.show_a {
                         TextBlock { text: "a" }
                     } else {
                         TextBlock { text: "b" }
                     }
-                }
+                },
+            }
             "#,
-        )
-        .expect("scalar dynamic content source should parse");
+        );
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let all_modules: Vec<_> = std::iter::once(module.clone())
             .chain(crate::test_builtin_modules())
@@ -10935,30 +11129,33 @@ view NotepadWindow {
     /// `emit_scalar_dynamic_node_refresh` don't special-case either type by name).
     #[test]
     fn generates_scalar_content_dynamic_region_via_window_host_composition() {
-        let module = parse_module(
+        let module = viewmodel_and_component_module(
             r#"
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    show_a: bool = true,
+            mod dynamic_view_model_mod {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    show_a: bool,
                 }
+            }
+            "#,
+            Some("Window"),
+            r#"
+            struct DynamicHost {
+                #[param]
+                #[inject]
+                vm: DynamicViewModel,
 
-                component DynamicHost inherits Window {
-                    #[param]
-                    #[inject]
-                    vm: DynamicViewModel,
-                }
-
-                view DynamicHost {
+                body: view! {
                     title: "Dynamic"
                     if vm.show_a {
                         TextBlock { text: "a" }
                     } else {
                         TextBlock { text: "b" }
                     }
-                }
+                },
+            }
             "#,
-        )
-        .expect("scalar dynamic content (host composition) source should parse");
+        );
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let all_modules: Vec<_> = std::iter::once(module.clone())
             .chain(crate::test_builtin_modules())
@@ -10976,29 +11173,38 @@ view NotepadWindow {
 
     #[test]
     fn generates_dynamic_match_region() {
-        let module = parse_module(
-            r#"
-                enum Status { Ready, Busy }
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    status: Status = Status::Ready,
+        let module = multi_item_module(&[
+            TestItem::Enum("enum Status { Ready, Busy }"),
+            TestItem::ViewModel(
+                r#"
+                mod dynamic_view_model_mod {
+                    struct DynamicViewModel {
+                        #[observable(default = Status::Ready)]
+                        status: Status,
+                    }
                 }
-                component DynamicHost {
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct DynamicHost {
                     #[param]
                     #[inject]
                     vm: DynamicViewModel,
-                }
-                view DynamicHost {
-                    VerticalLayout {
-                        match vm.status {
-                            Status::Ready => { TextBlock { text: "ready" } }
-                            Status::Busy => { TextBlock { text: "busy" } }
+
+                    body: view! {
+                        VerticalLayout {
+                            match vm.status {
+                                Status::Ready => { TextBlock { text: "ready" } }
+                                Status::Busy => { TextBlock { text: "busy" } }
+                            }
                         }
-                    }
+                    },
                 }
-            "#,
-        )
-        .expect("dynamic match source should parse");
+                "#,
+            ),
+        ]);
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("dynamic_match", &generated);
@@ -11008,31 +11214,46 @@ view NotepadWindow {
 
     #[test]
     fn generates_dynamic_for_region_with_an_item_local_template() {
-        let module = parse_module(
-            r#"
-                viewmodel Item { }
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    items: Vec<std::rc::Rc<Item>> = Vec::new(),
+        let module = multi_item_module(&[
+            TestItem::ViewModel(r#"mod item_mod { struct Item { } }"#),
+            TestItem::ViewModel(
+                r#"
+                mod dynamic_view_model_mod {
+                    struct DynamicViewModel {
+                        #[observable(default = Vec::new())]
+                        items: Vec<std::rc::Rc<Item>>,
+                    }
                 }
-                component ItemView {
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct ItemView {
                     #[param]
                     item: std::rc::Rc<Item>,
+
+                    body: view! { TextBlock { text: "item" } },
                 }
-                view ItemView { TextBlock { text: "item" } }
-                component DynamicHost {
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct DynamicHost {
                     #[param]
                     #[inject]
                     vm: DynamicViewModel,
+
+                    body: view! {
+                        VerticalLayout {
+                            for item in vm.items { ItemView { item: item } }
+                        }
+                    },
                 }
-                view DynamicHost {
-                    VerticalLayout {
-                        for item in vm.items { ItemView { item: item } }
-                    }
-                }
-            "#,
-        )
-        .expect("dynamic for source should parse");
+                "#,
+            ),
+        ]);
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("dynamic_for", &generated);
@@ -11055,17 +11276,22 @@ view NotepadWindow {
 
     #[test]
     fn resyncs_bind_owner_property_used_only_in_if_condition() {
-        let module = parse_module(
+        let module = viewmodel_and_component_module(
             r#"
-                viewmodel ToggleViewModel {
-                    #[observable]
-                    show_then: bool = true,
+            mod toggle_view_model_mod {
+                struct ToggleViewModel {
+                    #[observable(default = true)]
+                    show_then: bool,
                 }
-                component ToggleHost {
-                    #[bindable]
-                    vm: Rc<ToggleViewModel>,
-                }
-                view ToggleHost {
+            }
+            "#,
+            None,
+            r#"
+            struct ToggleHost {
+                #[bindable]
+                vm: Rc<ToggleViewModel>,
+
+                body: view! {
                     VerticalLayout {
                         if vm.show_then {
                             TextBlock { text: "then" }
@@ -11073,10 +11299,10 @@ view NotepadWindow {
                             TextBlock { text: "else" }
                         }
                     }
-                }
+                },
+            }
             "#,
-        )
-        .expect("bind-owner if-condition source should parse");
+        );
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("bind_owner_if_condition", &generated);
@@ -11094,28 +11320,37 @@ view NotepadWindow {
 
     #[test]
     fn resyncs_bind_owner_property_used_only_in_match_value() {
-        let module = parse_module(
-            r#"
-                enum Status { Ready, Busy }
-                viewmodel StatusViewModel {
-                    #[observable]
-                    current_status: Status = Status::Ready,
-                }
-                component StatusHost {
-                    #[bindable]
-                    vm: Rc<StatusViewModel>,
-                }
-                view StatusHost {
-                    VerticalLayout {
-                        match vm.current_status {
-                            Status::Ready => { TextBlock { text: "ready" } }
-                            Status::Busy => { TextBlock { text: "busy" } }
-                        }
+        let module = multi_item_module(&[
+            TestItem::Enum("enum Status { Ready, Busy }"),
+            TestItem::ViewModel(
+                r#"
+                mod status_view_model_mod {
+                    struct StatusViewModel {
+                        #[observable(default = Status::Ready)]
+                        current_status: Status,
                     }
                 }
-            "#,
-        )
-        .expect("bind-owner match-value source should parse");
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct StatusHost {
+                    #[bindable]
+                    vm: Rc<StatusViewModel>,
+
+                    body: view! {
+                        VerticalLayout {
+                            match vm.current_status {
+                                Status::Ready => { TextBlock { text: "ready" } }
+                                Status::Busy => { TextBlock { text: "busy" } }
+                            }
+                        }
+                    },
+                }
+                "#,
+            ),
+        ]);
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("bind_owner_match_value", &generated);
@@ -11133,30 +11368,45 @@ view NotepadWindow {
 
     #[test]
     fn resyncs_bind_owner_property_used_only_in_for_collection() {
-        let module = parse_module(
-            r#"
-                viewmodel RowItem { }
-                viewmodel RowsViewModel {
-                    #[observable]
-                    row_items: Vec<std::rc::Rc<RowItem>> = Vec::new(),
-                }
-                component RowView {
-                    #[param]
-                    item: std::rc::Rc<RowItem>,
-                }
-                view RowView { TextBlock { text: "row" } }
-                component RowsHost {
-                    #[bindable]
-                    vm: Rc<RowsViewModel>,
-                }
-                view RowsHost {
-                    VerticalLayout {
-                        for item in vm.row_items { RowView { item: item } }
+        let module = multi_item_module(&[
+            TestItem::ViewModel(r#"mod row_item_mod { struct RowItem { } }"#),
+            TestItem::ViewModel(
+                r#"
+                mod rows_view_model_mod {
+                    struct RowsViewModel {
+                        #[observable(default = Vec::new())]
+                        row_items: Vec<std::rc::Rc<RowItem>>,
                     }
                 }
-            "#,
-        )
-        .expect("bind-owner for-collection source should parse");
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct RowView {
+                    #[param]
+                    item: std::rc::Rc<RowItem>,
+
+                    body: view! { TextBlock { text: "row" } },
+                }
+                "#,
+            ),
+            TestItem::Component(
+                None,
+                r#"
+                struct RowsHost {
+                    #[bindable]
+                    vm: Rc<RowsViewModel>,
+
+                    body: view! {
+                        VerticalLayout {
+                            for item in vm.row_items { RowView { item: item } }
+                        }
+                    },
+                }
+                "#,
+            ),
+        ]);
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("bind_owner_for_collection", &generated);
@@ -11174,19 +11424,24 @@ view NotepadWindow {
 
     #[test]
     fn resyncs_bind_owner_property_used_only_in_nested_if_condition() {
-        let module = parse_module(
+        let module = viewmodel_and_component_module(
             r#"
-                viewmodel NestedViewModel {
-                    #[observable]
-                    outer_flag: bool = true,
-                    #[observable]
-                    inner_flag: bool = true,
+            mod nested_view_model_mod {
+                struct NestedViewModel {
+                    #[observable(default = true)]
+                    outer_flag: bool,
+                    #[observable(default = true)]
+                    inner_flag: bool,
                 }
-                component NestedHost {
-                    #[bindable]
-                    vm: Rc<NestedViewModel>,
-                }
-                view NestedHost {
+            }
+            "#,
+            None,
+            r#"
+            struct NestedHost {
+                #[bindable]
+                vm: Rc<NestedViewModel>,
+
+                body: view! {
                     VerticalLayout {
                         if vm.outer_flag {
                             VerticalLayout {
@@ -11200,10 +11455,10 @@ view NotepadWindow {
                             TextBlock { text: "outer-else" }
                         }
                     }
-                }
+                },
+            }
             "#,
-        )
-        .expect("nested bind-owner if-condition source should parse");
+        );
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("bind_owner_nested_if_condition", &generated);
@@ -11221,26 +11476,41 @@ view NotepadWindow {
 
     #[test]
     fn generates_two_way_wiring_for_an_rc_for_item() {
-        let module = parse_module(
-            r#"
-viewmodel Row {
-    #[observable]
-    content: String = String::new(),
-}
-viewmodel Rows {
-    #[observable]
-    rows: Vec<Row> = Vec::new(),
-}
-component Search inherits VerticalLayout {
-    #[bindable]
-    vm: Rc<Rows>,
-}
-view Search {
-    for row in vm.rows { TextArea { text <=> row.content } }
-}
-"#,
-        )
-        .expect("for-item two-way source should parse");
+        let module = multi_item_module(&[
+            TestItem::ViewModel(
+                r#"
+                mod row_mod {
+                    struct Row {
+                        #[observable(default = String::new())]
+                        content: String,
+                    }
+                }
+                "#,
+            ),
+            TestItem::ViewModel(
+                r#"
+                mod rows_mod {
+                    struct Rows {
+                        #[observable(default = Vec::new())]
+                        rows: Vec<Row>,
+                    }
+                }
+                "#,
+            ),
+            TestItem::Component(
+                Some("VerticalLayout"),
+                r#"
+                struct Search {
+                    #[bindable]
+                    vm: Rc<Rows>,
+
+                    body: view! {
+                        for row in vm.rows { TextArea { text <=> row.content } }
+                    },
+                }
+                "#,
+            ),
+        ]);
         let all_modules: Vec<_> = std::iter::once(module.clone())
             .chain(crate::test_builtin_modules())
             .collect();
@@ -11265,28 +11535,43 @@ view Search {
 
     #[test]
     fn rebuilds_only_the_for_slot_for_non_rc_items() {
-        let module = parse_module(
-            r#"
-                viewmodel DynamicViewModel {
-                    #[observable]
-                    items: Vec<String> = Vec::new(),
+        let module = multi_item_module(&[
+            TestItem::ViewModel(
+                r#"
+                mod dynamic_view_model_mod {
+                    struct DynamicViewModel {
+                        #[observable(default = Vec::new())]
+                        items: Vec<String>,
+                    }
                 }
-                component ItemView inherits VerticalLayout {
+                "#,
+            ),
+            TestItem::Component(
+                Some("VerticalLayout"),
+                r#"
+                struct ItemView {
                     #[param]
                     item: String,
+
+                    body: view! { TextBlock { text: item } },
                 }
-                view ItemView { TextBlock { text: item } }
-                component DynamicHost inherits VerticalLayout {
+                "#,
+            ),
+            TestItem::Component(
+                Some("VerticalLayout"),
+                r#"
+                struct DynamicHost {
                     #[param]
                     #[inject]
                     vm: DynamicViewModel,
+
+                    body: view! {
+                        for item in vm.items { ItemView { item: item } }
+                    },
                 }
-                view DynamicHost {
-                    for item in vm.items { ItemView { item: item } }
-                }
-            "#,
-        )
-        .expect("plain dynamic for source should parse");
+                "#,
+            ),
+        ]);
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         assert_eq!(crate::validate::validate(&[module.clone()]), Ok(()));
         let generated = generate_module(&module, &table);
@@ -11299,7 +11584,7 @@ view Search {
     #[test]
     fn generates_valid_rust_for_notepad() {
         let viewmodel_module = notepad_viewmodel_module();
-        let window_module = parse_module(WINDOW_SRC).unwrap();
+        let window_module = component_module(None, WINDOW_SRC);
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
@@ -11329,28 +11614,26 @@ view Search {
     #[test]
     fn on_star_closures_support_block_bodies_and_generalized_arity() {
         let window_src = r#"
-use crate::NotepadViewModel;
-
-component NotepadWindow {
+struct NotepadWindow {
     #[bindable]
     vm: std::rc::Rc<NotepadViewModel>,
-}
 
-view NotepadWindow {
-    Window {
-        title: vm.window_title
-        Button {
-            text: t!("notepad-menu-save")
-            on_click: || {
-                vm.save();
-                vm.save();
+    body: view! {
+        Window {
+            title: vm.window_title
+            Button {
+                text: t!("notepad-menu-save")
+                on_click: || {
+                    vm.save();
+                    vm.save();
+                }
             }
         }
-    }
+    },
 }
 "#;
         let viewmodel_module = notepad_viewmodel_module();
-        let window_module = parse_module(window_src).unwrap();
+        let window_module = component_module(None, window_src);
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
@@ -11371,25 +11654,23 @@ view NotepadWindow {
     #[test]
     fn routed_pointer_event_derives_its_payload_type_from_the_field_declaration() {
         let window_src = r#"
-use crate::NotepadViewModel;
-
-component NotepadWindow {
+struct NotepadWindow {
     #[param]
     #[inject]
     vm: NotepadViewModel,
-}
 
-view NotepadWindow {
-    Window {
-        title: vm.window_title
-        VerticalLayout {
-            on_tapped: |e| { vm.save(); }
+    body: view! {
+        Window {
+            title: vm.window_title
+            VerticalLayout {
+                on_tapped: |e| { vm.save(); }
+            }
         }
-    }
+    },
 }
 "#;
         let viewmodel_module = notepad_viewmodel_module();
-        let window_module = parse_module(window_src).unwrap();
+        let window_module = component_module(None, window_src);
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
@@ -11417,26 +11698,24 @@ view NotepadWindow {
     #[test]
     fn distinct_routed_pointer_events_each_resolve_their_own_distinct_payload_type() {
         let window_src = r#"
-use crate::NotepadViewModel;
-
-component NotepadWindow {
+struct NotepadWindow {
     #[param]
     #[inject]
     vm: NotepadViewModel,
-}
 
-view NotepadWindow {
-    Window {
-        title: vm.window_title
-        VerticalLayout {
-            on_pointer_entered: |e| { vm.save(); }
-            on_pointer_wheel_changed: |e| { vm.save(); }
+    body: view! {
+        Window {
+            title: vm.window_title
+            VerticalLayout {
+                on_pointer_entered: |e| { vm.save(); }
+                on_pointer_wheel_changed: |e| { vm.save(); }
+            }
         }
-    }
+    },
 }
 "#;
         let viewmodel_module = notepad_viewmodel_module();
-        let window_module = parse_module(window_src).unwrap();
+        let window_module = component_module(None, window_src);
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
@@ -11454,25 +11733,23 @@ view NotepadWindow {
     #[test]
     fn on_tapped_closure_with_wrong_param_count_panics() {
         let window_src = r#"
-use crate::NotepadViewModel;
-
-component NotepadWindow {
+struct NotepadWindow {
     #[param]
     #[inject]
     vm: NotepadViewModel,
-}
 
-view NotepadWindow {
-    Window {
-        title: vm.window_title
-        VerticalLayout {
-            on_tapped: || vm.save()
+    body: view! {
+        Window {
+            title: vm.window_title
+            VerticalLayout {
+                on_tapped: || vm.save()
+            }
         }
-    }
+    },
 }
 "#;
         let viewmodel_module = notepad_viewmodel_module();
-        let window_module = parse_module(window_src).unwrap();
+        let window_module = component_module(None, window_src);
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
@@ -11486,26 +11763,24 @@ view NotepadWindow {
     #[test]
     fn on_select_closure_with_wrong_param_count_panics() {
         let window_src = r#"
-use crate::NotepadViewModel;
-
-component NotepadWindow {
+struct NotepadWindow {
     #[param]
     #[inject]
     vm: NotepadViewModel,
-}
 
-view NotepadWindow {
-    Window {
-        title: vm.window_title
-        TabView {
-            selected_index: 0
-            on_select: || vm.save
+    body: view! {
+        Window {
+            title: vm.window_title
+            TabView {
+                selected_index: 0
+                on_select: || vm.save
+            }
         }
-    }
+    },
 }
 "#;
         let viewmodel_module = notepad_viewmodel_module();
-        let window_module = parse_module(window_src).unwrap();
+        let window_module = component_module(None, window_src);
         let table =
             build_symbol_table_with_builtins(&[viewmodel_module.clone(), window_module.clone()]);
 
@@ -11518,18 +11793,19 @@ view NotepadWindow {
 
     #[test]
     fn generates_valid_rust_for_menubar_and_tabview() {
-        let document_module = parse_module(
+        let document_module = viewmodel_module_from_rust(
             r#"
-viewmodel Document {
-    #[observable]
-    content: String = String::new(),
+            mod document_mod {
+                struct Document {
+                    #[observable(default = String::new())]
+                    content: String,
 
-    #[observable]
-    file_name: String = "untitled.txt",
-}
-"#,
-        )
-        .expect("document viewmodel should parse");
+                    #[observable(default = "untitled.txt")]
+                    file_name: String,
+                }
+            }
+            "#,
+        );
         let viewmodel_module = viewmodel_module_from_rust(
             r#"
             mod notepad_view_model {
@@ -11559,41 +11835,39 @@ viewmodel Document {
         "#,
         );
         let window_src = r#"
-use crate::NotepadViewModel;
-
-component NotepadWindow {
+struct NotepadWindow {
     #[param]
     #[inject]
     vm: NotepadViewModel,
-}
 
-view NotepadWindow {
-    Window {
-        title: t!("notepad-window-title")
+    body: view! {
+        Window {
+            title: t!("notepad-window-title")
 
-        menu_bar: MenuBar {
-            MenuBarItem {
-                text: t!("menu-file")
-                Menu {
-                    MenuItem { text: t!("menu-new"), shortcut: "n", on_select: vm.new_tab }
+            menu_bar: MenuBar {
+                MenuBarItem {
+                    text: t!("menu-file")
+                    Menu {
+                        MenuItem { text: t!("menu-new"), shortcut: "n", on_select: vm.new_tab }
+                    }
                 }
             }
-        }
 
-        content: TabView {
-            for doc in vm.documents {
-                TabViewItem {
-                    header: doc.file_name
-                    TextArea { text: doc.content }
+            content: TabView {
+                for doc in vm.documents {
+                    TabViewItem {
+                        header: doc.file_name
+                        TextArea { text: doc.content }
+                    }
                 }
+                selected_index <=> vm.active_tab
+                on_new_tab: vm.new_tab
             }
-            selected_index <=> vm.active_tab
-            on_new_tab: vm.new_tab
         }
-    }
+    },
 }
 "#;
-        let window_module = parse_module(window_src).expect("window should parse");
+        let window_module = component_module(None, window_src);
         let table = build_symbol_table_with_builtins(&[
             document_module.clone(),
             viewmodel_module.clone(),
@@ -11634,14 +11908,16 @@ view NotepadWindow {
     #[test]
     fn generates_dynamic_tabview_children_and_refreshes_after_new_tab() {
         let viewmodel_src = r#"
-viewmodel Document {
-    #[observable]
-    content: String = String::new(),
+        mod document_mod {
+            struct Document {
+                #[observable(default = String::new())]
+                content: String,
 
-    #[observable]
-    file_name: String = "untitled.txt",
-}
-"#;
+                #[observable(default = "untitled.txt")]
+                file_name: String,
+            }
+        }
+        "#;
         let notepad_viewmodel_module = viewmodel_module_from_rust(
             r#"
             mod notepad_view_model {
@@ -11671,49 +11947,43 @@ viewmodel Document {
         "#,
         );
         let document_view_src = r#"
-use crate::Document;
+        struct DocumentView {
+            #[bindable]
+            doc: std::rc::Rc<Document>,
 
-component DocumentView inherits VerticalLayout {
-    #[bindable]
-    doc: std::rc::Rc<Document>,
-}
-
-view DocumentView {
-    TextArea { text <=> doc.content }
-}
-"#;
-        let window_src = r#"
-use crate::NotepadViewModel;
-use crate::DocumentView;
-
-component NotepadWindow inherits Window {
-    #[bindable]
-    vm: std::rc::Rc<NotepadViewModel>,
-}
-
-view NotepadWindow {
-    title: t!("notepad-window-title")
-
-    TabView {
-        for doc in vm.documents {
-            TabViewItem {
-                header: doc.file_name
-                DocumentView { doc: doc }
-            }
-            TabViewItem {
-                header: "Details"
-                TextBlock { text: doc.file_name }
-            }
+            body: view! {
+                TextArea { text <=> doc.content }
+            },
         }
-        selected_index <=> vm.active_tab
-        on_new_tab: vm.new_tab
-    }
-}
-"#;
-        let document_module = parse_module(viewmodel_src).expect("viewmodel should parse");
-        let document_view_module =
-            parse_module(document_view_src).expect("document view should parse");
-        let window_module = parse_module(window_src).expect("window should parse");
+        "#;
+        let window_src = r#"
+        struct NotepadWindow {
+            #[bindable]
+            vm: std::rc::Rc<NotepadViewModel>,
+
+            body: view! {
+                title: t!("notepad-window-title")
+
+                TabView {
+                    for doc in vm.documents {
+                        TabViewItem {
+                            header: doc.file_name
+                            DocumentView { doc: doc }
+                        }
+                        TabViewItem {
+                            header: "Details"
+                            TextBlock { text: doc.file_name }
+                        }
+                    }
+                    selected_index <=> vm.active_tab
+                    on_new_tab: vm.new_tab
+                }
+            },
+        }
+        "#;
+        let document_module = viewmodel_module_from_rust(viewmodel_src);
+        let document_view_module = component_module(Some("VerticalLayout"), document_view_src);
+        let window_module = component_module(Some("Window"), window_src);
         let modules = [
             document_module.clone(),
             notepad_viewmodel_module.clone(),
@@ -11776,11 +12046,13 @@ view NotepadWindow {
     #[test]
     fn generates_on_close_wiring_for_a_for_loop_item_template_element() {
         let viewmodel_src = r#"
-viewmodel Document {
-    #[observable]
-    file_name: String = "untitled.txt",
-}
-"#;
+        mod document_mod {
+            struct Document {
+                #[observable(default = "untitled.txt")]
+                file_name: String,
+            }
+        }
+        "#;
         let notepad_viewmodel_module = viewmodel_module_from_rust(
             r#"
             mod notepad_view_model {
@@ -11805,31 +12077,29 @@ viewmodel Document {
         "#,
         );
         let window_src = r#"
-use crate::NotepadViewModel;
+        struct NotepadWindow {
+            #[bindable]
+            vm: std::rc::Rc<NotepadViewModel>,
 
-component NotepadWindow inherits Window {
-    #[bindable]
-    vm: std::rc::Rc<NotepadViewModel>,
-}
+            body: view! {
+                title: t!("notepad-window-title")
 
-view NotepadWindow {
-    title: t!("notepad-window-title")
-
-    TabView {
-        for doc in vm.documents {
-            TabViewItem {
-                header: doc.file_name
-                closable: true
-                on_close: vm.close_active_tab
-                TextBlock { text: doc.file_name }
-            }
+                TabView {
+                    for doc in vm.documents {
+                        TabViewItem {
+                            header: doc.file_name
+                            closable: true
+                            on_close: vm.close_active_tab
+                            TextBlock { text: doc.file_name }
+                        }
+                    }
+                    selected_index <=> vm.active_tab
+                }
+            },
         }
-        selected_index <=> vm.active_tab
-    }
-}
-"#;
-        let document_module = parse_module(viewmodel_src).expect("viewmodel should parse");
-        let window_module = parse_module(window_src).expect("window should parse");
+        "#;
+        let document_module = viewmodel_module_from_rust(viewmodel_src);
+        let window_module = component_module(Some("Window"), window_src);
         let modules = [
             document_module.clone(),
             notepad_viewmodel_module.clone(),
@@ -11931,49 +12201,55 @@ view NotepadWindow {
             }
         "#,
         );
-        // Mirrors `document_view.rs`: `#[bindable]` (not `#[param] #[inject]`), and `use`s
-        // `Document` since it names the type directly in its own field declaration.
+        // Mirrors `document_view.rs`: `#[bindable]` (not `#[param] #[inject]`). The old DSL text
+        // form's own `use` (§12) has no counterpart on this (real, production) frontend — an
+        // ordinary Rust `use` in the surrounding source file is already resolved by `rustc` itself.
         let document_view_src = r#"
-use crate::document_view_model::Document;
+        struct DocumentView {
+            #[bindable]
+            doc: std::rc::Rc<Document>,
 
-component DocumentView inherits VerticalLayout {
-    #[bindable]
-    doc: std::rc::Rc<Document>,
-}
-
-view DocumentView {
-    TextArea { text <=> doc.content }
-}
-"#;
-        // Mirrors `notepad_window.rs`: `use`s `NotepadViewModel` and `DocumentView`, but never
-        // `Document` — `doc` is only ever referenced through the `for` loop's own binding.
-        let window_src = r#"
-use crate::notepad_view_model::NotepadViewModel;
-use crate::DocumentView;
-
-component NotepadWindow inherits Window {
-    #[bindable]
-    vm: std::rc::Rc<NotepadViewModel>,
-}
-
-view NotepadWindow {
-    title: t!("notepad-window-title")
-
-    TabView {
-        for doc in vm.documents {
-            TabViewItem {
-                header: doc.file_name
-                DocumentView { doc: doc }
-            }
+            body: view! {
+                TextArea { text <=> doc.content }
+            },
         }
-        selected_index <=> vm.active_tab
-        on_new_tab: vm.new_tab
-    }
-}
-"#;
-        let document_view_module =
-            parse_module(document_view_src).expect("document view should parse");
-        let window_module = parse_module(window_src).expect("window should parse");
+        "#;
+        // Mirrors `notepad_window.rs`: never references `Document` directly — `doc` is only ever
+        // referenced through the `for` loop's own binding.
+        let window_src = r#"
+        struct NotepadWindow {
+            #[bindable]
+            vm: std::rc::Rc<NotepadViewModel>,
+
+            body: view! {
+                title: t!("notepad-window-title")
+
+                TabView {
+                    for doc in vm.documents {
+                        TabViewItem {
+                            header: doc.file_name
+                            DocumentView { doc: doc }
+                        }
+                    }
+                    selected_index <=> vm.active_tab
+                    on_new_tab: vm.new_tab
+                }
+            },
+        }
+        "#;
+        let document_view_module = component_module_with_uses(
+            Some("VerticalLayout"),
+            document_view_src,
+            &["crate::document_view_model::Document"],
+        );
+        let window_module = component_module_with_uses(
+            Some("Window"),
+            window_src,
+            &[
+                "crate::notepad_view_model::NotepadViewModel",
+                "crate::DocumentView",
+            ],
+        );
         let modules = [
             notepad_viewmodel_module.clone(),
             document_module.clone(),
@@ -12001,23 +12277,28 @@ view NotepadWindow {
 
     #[test]
     fn generate_view_ctor_uses_component_field_names_not_a_hardcoded_vm() {
-        let src = r#"
-viewmodel Greeter {
-    #[observable]
-    name: String = String::new(),
-}
+        let module = viewmodel_and_component_module(
+            r#"
+            mod greeter_mod {
+                struct Greeter {
+                    #[observable(default = String::new())]
+                    name: String,
+                }
+            }
+            "#,
+            None,
+            r#"
+            struct Greeting {
+                #[param]
+                #[inject]
+                greeter: Greeter,
 
-component Greeting {
-    #[param]
-    #[inject]
-    greeter: Greeter,
-}
-
-view Greeting {
-    TextBlock { text: greeter.name }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+                body: view! {
+                    TextBlock { text: greeter.name }
+                },
+            }
+            "#,
+        );
         let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
         let generated = generate_module(&module, &table);
         assert_valid_rust("greeting_ctor", &generated);
@@ -12038,29 +12319,34 @@ view Greeting {
 
     #[test]
     fn property_update_does_not_reapply_unrelated_common_attributes() {
-        let src = r#"
-viewmodel Document {
-    #[observable]
-    content: String = String::new(),
+        let module = viewmodel_and_component_module(
+            r#"
+            mod document_mod {
+                struct Document {
+                    #[observable(default = String::new())]
+                    content: String,
 
-    #[observable]
-    file_name: String = String::new(),
-}
+                    #[observable(default = String::new())]
+                    file_name: String,
+                }
+            }
+            "#,
+            None,
+            r#"
+            struct DocumentView {
+                #[param]
+                #[inject]
+                doc: Document,
 
-component DocumentView {
-    #[param]
-    #[inject]
-    doc: Document,
-}
-
-view DocumentView {
-    VerticalLayout {
-        TextArea { text: doc.content }
-        TextBlock { margin: 4.0, text: doc.file_name }
-    }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+                body: view! {
+                    VerticalLayout {
+                        TextArea { text: doc.content }
+                        TextBlock { margin: 4.0, text: doc.file_name }
+                    }
+                },
+            }
+            "#,
+        );
         let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
         let generated = generate_module(&module, &table);
         assert_valid_rust("property_update_common_attributes", &generated);
@@ -12074,19 +12360,20 @@ view DocumentView {
     #[test]
     fn component_state_is_private_reactive_and_supports_explicit_two_way() {
         let src = r#"
-component Search {
-    #[state]
-    query: String = "",
-}
-view Search {
-    VerticalLayout {
-        TextArea { text <=> query }
-        TextBlock { text: format!("Live: {}", query) }
-        TextBlock { text: once!(format!("Snapshot: {}", query)) }
-    }
-}
-"#;
-        let module = parse_module(src).expect("state source should parse");
+            struct Search {
+                #[state(default = String::new())]
+                query: String,
+
+                body: view! {
+                    VerticalLayout {
+                        TextArea { text <=> query }
+                        TextBlock { text: format!("Live: {}", query) }
+                        TextBlock { text: once!(format!("Snapshot: {}", query)) }
+                    }
+                },
+            }
+        "#;
+        let module = crate::test_module(&[(None, src, None)]).expect("state source should parse");
         let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
         let generated = generate_module(&module, &table);
         assert_valid_rust("component_state", &generated);
@@ -12106,13 +12393,15 @@ view Search {
     #[test]
     fn normal_assignment_never_generates_reverse_wiring() {
         let src = r#"
-component Search {
-    #[state]
-    query: String = "",
-}
-view Search { TextArea { text: query } }
-"#;
-        let module = parse_module(src).expect("one-way state source should parse");
+            struct Search {
+                #[state(default = String::new())]
+                query: String,
+
+                body: view! { TextArea { text: query } },
+            }
+        "#;
+        let module =
+            crate::test_module(&[(None, src, None)]).expect("one-way state source should parse");
         let table = build_symbol_table_with_builtins(std::slice::from_ref(&module));
         let rendered = generate_module(&module, &table).to_string();
         assert!(!rendered.contains("set_on_text_change"), "{rendered}");
@@ -12169,17 +12458,16 @@ view Search { TextArea { text: query } }
     #[test]
     fn rectangle_fill_hex_literal_is_coerced_to_a_brush() {
         let src = r##"
-component Foo {
-}
-
-view Foo {
-    Rectangle {
-        fill: "#3a3a3c"
-        corner_radius: 8.0
-    }
-}
-"##;
-        let module = parse_module(src).expect("should parse");
+            struct Foo {
+                body: view! {
+                    Rectangle {
+                        fill: "#3a3a3c"
+                        corner_radius: 8.0
+                    }
+                },
+            }
+        "##;
+        let module = crate::test_module(&[(None, src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("rectangle_fill_literal", &generated);
@@ -12199,16 +12487,15 @@ view Foo {
     #[should_panic(expected = "invalid hex color literal")]
     fn malformed_fill_hex_literal_panics_at_codegen_time() {
         let src = r##"
-component Foo {
-}
-
-view Foo {
-    Rectangle {
-        fill: "#zzzzzz"
-    }
-}
-"##;
-        let module = parse_module(src).expect("should parse");
+            struct Foo {
+                body: view! {
+                    Rectangle {
+                        fill: "#zzzzzz"
+                    }
+                },
+            }
+        "##;
+        let module = crate::test_module(&[(None, src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let _ = generate_module(&module, &table);
     }
@@ -12220,17 +12507,16 @@ view Foo {
     #[test]
     fn generates_valid_rust_for_content_control() {
         let src = r#"
-component Foo {
-}
-
-view Foo {
-    ContentControl {
-        padding: 8.0
-        TextBlock { text: "hi" }
-    }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+            struct Foo {
+                body: view! {
+                    ContentControl {
+                        padding: 8.0
+                        TextBlock { text: "hi" }
+                    }
+                },
+            }
+        "#;
+        let module = crate::test_module(&[(None, src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("content_control", &generated);
@@ -12311,16 +12597,15 @@ view Foo {
     #[should_panic(expected = "has no `children` field or `#[content(field_name)]`")]
     fn panics_on_bare_child_with_no_content_field_declared() {
         let src = r#"
-component Foo {
-}
-
-view Foo {
-    Button {
-        TextBlock { text: "not a valid Button child" }
-    }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+            struct Foo {
+                body: view! {
+                    Button {
+                        TextBlock { text: "not a valid Button child" }
+                    }
+                },
+            }
+        "#;
+        let module = crate::test_module(&[(None, src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         generate_module(&module, &table);
     }
@@ -12332,18 +12617,17 @@ view Foo {
     #[should_panic(expected = "can only bind a single nested child element")]
     fn panics_on_multiple_bare_children_for_a_single_content_field() {
         let src = r#"
-component Foo {
-}
-
-view Foo {
-    MenuBarItem {
-        text: "File"
-        Menu { }
-        Menu { }
-    }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+            struct Foo {
+                body: view! {
+                    MenuBarItem {
+                        text: "File"
+                        Menu { }
+                        Menu { }
+                    }
+                },
+            }
+        "#;
+        let module = crate::test_module(&[(None, src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         generate_module(&module, &table);
     }
@@ -12355,10 +12639,11 @@ view Foo {
     #[test]
     fn generates_valid_rust_for_template_inheritance_with_no_own_view() {
         let src = r#"
-component LabeledPanel inherits ContentControl {
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+            struct LabeledPanel {
+            }
+        "#;
+        let module =
+            crate::test_module(&[(Some("ContentControl"), src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("labeled_panel_template_inheritance", &generated);
@@ -12401,37 +12686,56 @@ component LabeledPanel inherits ContentControl {
     /// is spliced into `new()` chaining into the base's own `on_mount`.
     #[test]
     fn generates_valid_rust_for_method_override_and_on_mount_base_call() {
-        let src = r#"
-component Base {
-    #[virtual]
-    fn label(&self) -> String {
-        "base".to_string()
-    }
-}
-
-view Base {
-    on_mount {
-        println!("base mounted");
-    }
-    VerticalLayout { }
-}
-
-component Derived inherits Base {
-    #[override]
-    fn label(&self) -> String {
-        format!("{}!", base::label())
-    }
-}
-
-view Derived {
-    on_mount {
-        base::on_mount();
-        println!("derived mounted");
-    }
-    VerticalLayout { }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"
+                struct Base {
+                    body: view! {
+                        on_mount {
+                            println!("base mounted");
+                        }
+                        VerticalLayout { }
+                    },
+                }
+                "#,
+                Some(
+                    r#"
+                    impl Base {
+                        #[overridable]
+                        fn label(&self) -> String {
+                            "base".to_string()
+                        }
+                    }
+                    "#,
+                ),
+            ),
+            (
+                Some("Base"),
+                r#"
+                struct Derived {
+                    body: view! {
+                        on_mount {
+                            base::on_mount();
+                            println!("derived mounted");
+                        }
+                        VerticalLayout { }
+                    },
+                }
+                "#,
+                Some(
+                    r#"
+                    impl Derived {
+                        #[overrides]
+                        fn label(&self) -> String {
+                            format!("{}!", base::label())
+                        }
+                    }
+                    "#,
+                ),
+            ),
+        ])
+        .expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("method_override_and_on_mount", &generated);
@@ -12455,19 +12759,18 @@ view Derived {
     #[test]
     fn generates_valid_rust_for_grid_with_attached_properties() {
         let src = r##"
-component Foo {
-}
-
-view Foo {
-    Grid {
-        rows: [elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Star(1.0)]
-        columns: [elwindui::core::layout::GridLength::Fixed(120.0), elwindui::core::layout::GridLength::Star(1.0)]
-        TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
-        Shape { fill: "#000000", Grid::row: 1, Grid::column: 1 }
-    }
-}
-"##;
-        let module = parse_module(src).expect("should parse");
+            struct Foo {
+                body: view! {
+                    Grid {
+                        rows: [elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Star(1.0)]
+                        columns: [elwindui::core::layout::GridLength::Fixed(120.0), elwindui::core::layout::GridLength::Star(1.0)]
+                        TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
+                        Shape { fill: "#000000", Grid::row: 1, Grid::column: 1 }
+                    }
+                },
+            }
+        "##;
+        let module = crate::test_module(&[(None, src, None)]).expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("grid_with_attached_properties", &generated);
@@ -12509,26 +12812,35 @@ view Foo {
     /// that child's own view-root `UIElementImpl`, not be silently dropped.
     #[test]
     fn generates_valid_rust_for_grid_child_that_is_a_user_component() {
-        let src = r#"
-component Cell {
-}
-
-view Cell {
-    TextBlock { text: "x" }
-}
-
-component Foo {
-}
-
-view Foo {
-    Grid {
-        rows: [elwindui::core::layout::GridLength::Auto]
-        columns: [elwindui::core::layout::GridLength::Auto]
-        Cell { Grid::row: 1, Grid::column: 2 }
-    }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"
+                struct Cell {
+                    body: view! {
+                        TextBlock { text: "x" }
+                    },
+                }
+                "#,
+                None,
+            ),
+            (
+                None,
+                r#"
+                struct Foo {
+                    body: view! {
+                        Grid {
+                            rows: [elwindui::core::layout::GridLength::Auto]
+                            columns: [elwindui::core::layout::GridLength::Auto]
+                            Cell { Grid::row: 1, Grid::column: 2 }
+                        }
+                    },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should parse");
         let table = build_symbol_table_with_builtins(&[module.clone()]);
         let generated = generate_module(&module, &table);
         assert_valid_rust("grid_child_that_is_a_user_component", &generated);

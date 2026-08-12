@@ -106,9 +106,9 @@ pub fn component_and_view_from_item_struct(
         fields,
         methods: Vec::new(),
         // `#[embedded]`/`#[native]` are no longer recognized attribute names for this (real,
-        // production) frontend — see `component_item_attrs`'s own doc comment. Only `parser.rs`'s
-        // test-only textual-DSL frontend (feeding `TEST_BUILTIN_SHAPE_SOURCE`) can still produce a
-        // `ComponentDef` with either field `true`.
+        // production) frontend — see `component_item_attrs`'s own doc comment. Only `testdata.rs`'s
+        // test-only Rust-literal `builtin_component` helper still produces a `ComponentDef` with
+        // either field `true`.
         embedded: false,
         sealed,
         native: false,
@@ -136,21 +136,20 @@ fn split_base_path(base: Option<String>) -> (Option<String>, Option<String>) {
 }
 
 /// `#[sealed]`/`#[abstract_]`/`#[text_style]`/`#[content(field_name)]`, read off
-/// `item_struct.attrs` — the Rust-macro-path counterpart of `parser.rs`'s `parse_item_attrs`,
-/// same vocabulary, minus the DSL-text-only wart of `abstract` colliding with the reserved Rust
-/// keyword (spelled `abstract_` here instead — decided over introducing a raw-identifier
-/// `r#abstract`, since this whole attribute vocabulary is otherwise plain identifiers). Any other
-/// component-level attribute the user wrote (`#[derive(..)]`, doc comments, ...) is left
-/// alone/ignored — `#[elwindui::component]` replaces the whole struct with generated code, so
-/// nothing downstream ever re-emits `item_struct.attrs` verbatim.
+/// `item_struct.attrs` — decided `abstract` should be spelled `abstract_` here instead of the
+/// reserved Rust keyword colliding with a raw identifier (`r#abstract`), since this whole attribute
+/// vocabulary is otherwise plain identifiers. Any other component-level attribute the user wrote
+/// (`#[derive(..)]`, doc comments, ...) is left alone/ignored — `#[elwindui::component]` replaces
+/// the whole struct with generated code, so nothing downstream ever re-emits `item_struct.attrs`
+/// verbatim.
 ///
 /// Deliberately does **not** recognize `#[embedded]`/`#[native]` — those are for
-/// `elwindui-codegen`'s own test-only builtin-shape fixture only (`parser.rs`'s sibling
-/// `parse_item_attrs`, feeding `TEST_BUILTIN_SHAPE_SOURCE`); `validate::validate` rejects both on
-/// any component whose `Module::is_builtin` isn't set, which no real (non-test) invocation of this
-/// frontend ever produces. A consumer writing `#[embedded]`/`#[native]` on their own component now
-/// just gets it silently ignored, the same as any other unrecognized attribute name, rather than
-/// that internal-sounding rejection message.
+/// `elwindui-codegen`'s own test-only builtin-shape fixture only (`testdata.rs`'s Rust-literal
+/// `ComponentDef` construction); `validate::validate` rejects both on any component whose
+/// `Module::is_builtin` isn't set, which no real (non-test) invocation of this frontend ever
+/// produces. A consumer writing `#[embedded]`/`#[native]` on their own component now just gets it
+/// silently ignored, the same as any other unrecognized attribute name, rather than that
+/// internal-sounding rejection message.
 fn component_item_attrs(
     attrs: &[syn::Attribute],
 ) -> Result<(bool, bool, bool, Option<String>), String> {
@@ -593,7 +592,7 @@ pub fn methods_from_item_impl(
 /// cleanly gets the identical `ComponentDef`/`ViewModelDef`/`EnumDef` shapes here. Every returned
 /// `Module` sets `allows_external_builtins: true` for the same reason the real entry points do —
 /// there is no builtin `Module` to resolve `Window`/`VerticalLayout`/etc. against (see
-/// `crate::TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment).
+/// `crate::testdata`'s own doc comment).
 ///
 /// Items that don't parse as a `ComponentDef`/`ViewModelDef`/`EnumDef` (a malformed `view!` body, a
 /// non-unit enum variant, ...) make the whole call fail — matching how a real macro invocation
@@ -827,52 +826,6 @@ mod tests {
         );
     }
 
-    /// The attribute-macro frontend must produce *the same* generated code as the equivalent
-    /// DSL text through the existing `parser.rs` — proving `codegen.rs` really is
-    /// unchanged/shared, not just superficially similar.
-    #[test]
-    fn matches_dsl_frontend_output_for_an_equivalent_component() {
-        let attr_src = r#"
-            struct Counter {
-                #[param]
-                #[inject]
-                start: i32,
-
-                body: view! {
-                    title: "counter"
-                    content: VerticalLayout {
-                        TextBlock { text: "hi" }
-                    }
-                }
-            }
-        "#;
-        let attr_generated = generate(Some("Window"), attr_src).to_string();
-
-        let dsl_src = r#"
-component Counter inherits Window {
-    #[param]
-    #[inject]
-    start: i32,
-}
-
-view Counter {
-    title: "counter"
-    content: VerticalLayout {
-        TextBlock { text: "hi" }
-    }
-}
-"#;
-        let module = crate::parser::parse_module(dsl_src).expect("dsl should parse");
-        let all_modules: Vec<_> = std::iter::once(module.clone())
-            .chain(crate::test_builtin_modules())
-            .collect();
-        crate::validate::validate(&all_modules).expect("dsl should validate");
-        let table = build_symbol_table(&all_modules);
-        let dsl_generated = generate_module(&module, &table).to_string();
-
-        assert_eq!(attr_generated, dsl_generated);
-    }
-
     // Phase 2: component-level attributes read straight off `item_struct.attrs`, the Rust-macro
     // counterpart of `parser.rs`'s `#[embedded]`/`#[sealed]`/`#[native]`/`#[content(field)]`
     // vocabulary (`abstract_` here, not `abstract` — a reserved Rust keyword). Checked directly
@@ -972,16 +925,16 @@ mod doc_example_own_default_and_computed_fields {
     #[test]
     fn own_default_prop_referenced_bare_in_own_view() {
         let src = r#"
-component Greeter inherits VerticalLayout {
-    #[prop]
-    title: String = "hi".to_string(),
-}
+            struct Greeter {
+                #[prop(default = "hi".to_string())]
+                title: String,
 
-view Greeter {
-    TextBlock { text: title }
-}
-"#;
-        let generated = generate_and_check(src);
+                body: view! {
+                    TextBlock { text: title }
+                },
+            }
+        "#;
+        let generated = generate_and_check(Some("VerticalLayout"), src);
         assert!(
             generated.contains("fn title"),
             "expected a `title` getter:\n{generated}"
@@ -998,19 +951,19 @@ view Greeter {
     #[test]
     fn own_computed_field_depending_on_own_default_prop() {
         let src = r#"
-component Greeter inherits VerticalLayout {
-    #[prop]
-    volume: i32 = 50,
+            struct Greeter {
+                #[prop(default = 50)]
+                volume: i32,
 
-    #[computed]
-    label: String = volume.to_string() + "%",
-}
+                #[computed(expr = volume.to_string() + "%")]
+                label: String,
 
-view Greeter {
-    TextBlock { text: label }
-}
-"#;
-        let generated = generate_and_check(src);
+                body: view! {
+                    TextBlock { text: label }
+                },
+            }
+        "#;
+        let generated = generate_and_check(Some("VerticalLayout"), src);
         assert!(
             generated.contains("fn label"),
             "expected a `label` getter:\n{generated}"
@@ -1048,7 +1001,16 @@ enum Orientation {
     Vertical,
 }
 "#;
-        let deps_module = crate::parser::parse_module(deps_src).expect("deps should parse");
+        let item_enum: syn::ItemEnum = syn::parse_str(deps_src).expect("enum should parse");
+        let enum_def =
+            crate::component_frontend::enum_def_from_item_enum(&item_enum).expect("enum should build");
+        let deps_module = crate::ast::Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items: vec![crate::ast::Item::Enum(enum_def)],
+            is_builtin: false,
+            allows_external_builtins: false,
+        };
 
         let struct_src = r#"
             struct VolumeControl {
@@ -1112,15 +1074,15 @@ enum Orientation {
     #[test]
     fn view_less_component_own_default_and_computed_fields() {
         let src = r#"
-component Settings {
-    #[prop]
-    volume: i32 = 50,
+            struct Settings {
+                #[prop(default = 50)]
+                volume: i32,
 
-    #[computed]
-    label: String = volume.to_string() + "%",
-}
-"#;
-        let module = crate::parser::parse_module(src).expect("dsl should parse");
+                #[computed(expr = volume.to_string() + "%")]
+                label: String,
+            }
+        "#;
+        let module = crate::test_module(&[(None, src, None)]).expect("should build");
         let all_modules: Vec<_> = std::iter::once(module.clone())
             .chain(crate::test_builtin_modules())
             .collect();
@@ -1149,8 +1111,8 @@ component Settings {
         );
     }
 
-    fn generate_and_check(src: &str) -> String {
-        let module = crate::parser::parse_module(src).expect("dsl should parse");
+    fn generate_and_check(base: Option<&str>, struct_src: &str) -> String {
+        let module = crate::test_module(&[(base, struct_src, None)]).expect("should build");
         let all_modules: Vec<_> = std::iter::once(module.clone())
             .chain(crate::test_builtin_modules())
             .collect();

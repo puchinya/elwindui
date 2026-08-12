@@ -174,6 +174,40 @@ pub fn theme_definition(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Declares a typed Environment Key (`docs/specs/theme_environment_spec.md` §2).
+///
+/// The annotated item must be a unit struct — it is a marker type, never instantiated. The
+/// expansion implements `elwindui::core::environment::EnvironmentKey` for it and registers `name`
+/// so a same-crate `#[environment(name)]` field or `EnvironmentScope { name: .. }` override
+/// (`docs/specs/dsl_spec.md` §4/§5) can resolve it.
+///
+/// # Example
+///
+/// ```ignore
+/// #[elwindui::environment_key(
+///     name = locale,
+///     value = Locale,
+///     default = Locale::system()
+/// )]
+/// pub struct LocaleEnvironment;
+/// ```
+#[proc_macro_attribute]
+pub fn environment_key(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item_struct = match syn::parse::<syn::ItemStruct>(item) {
+        Ok(item) => item,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    match elwindui_codegen::environment_frontend::generate_environment_key_from_item_struct(
+        attr.into(),
+        &item_struct,
+    ) {
+        Ok(output) => output.into(),
+        Err(error) => syn::Error::new_spanned(item_struct, error)
+            .to_compile_error()
+            .into(),
+    }
+}
+
 
 /// Parses `#[component]`'s own argument list: empty (no base), or exactly `inherits Base` (no
 /// `=`, matching the DSL's own `component Name inherits Base` spelling — unlike `#[class]`'s

@@ -20,7 +20,7 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 | ReactiveGraph fallback API | ⬜ | public operations still terminate through `todo!()` ([#81](https://github.com/puchinya/elwindui/issues/81)) |
 | Global store / async computed / undo-redo | ⬜ | DSL declarations and generated runtime integration are not implemented ([#82](https://github.com/puchinya/elwindui/issues/82)) |
 | Text style cascade | ✅ | AppKit and WinUI 3 adapters exist; GTK4 is absent |
-| Theme / Environment | 🚧 | application/window Theme state, token resolution, and primary backend adapters exist; public Environment values are absent ([#84](https://github.com/puchinya/elwindui/issues/84)) |
+| Theme / Environment | 🚧 | application/window Theme state, token resolution, and primary backend adapters exist; `EnvironmentKey`/`EnvironmentContext`/`#[environment(name)]` are implemented and tested (`crates/elwindui-core/src/environment.rs`, `crates/elwindui/tests/environment_field.rs`); the `EnvironmentScope` DSL construct is not yet implemented ([#100](https://github.com/puchinya/elwindui/issues/100)); Theme itself has not been migrated to the Environment-Preset model ([#96](https://github.com/puchinya/elwindui/issues/96)) |
 | File dialog | ✅ | current platform service implementation exists |
 | Clipboard, notifications, drag and drop | ⬜ | no complete cross-platform implementation |
 

@@ -322,9 +322,19 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                     // already key off this exact same `on_` name prefix, not `FieldKind`), never
                     // construction-time values, and never had a matching `set_on_<x>` on
                     // hand-written natives (only `register_routed_handler` for `#[routed]` ones).
+                    // `#[environment(name)]` fields are excluded too, for a different reason than
+                    // `on_*`: they also have no initializer, but are resolved from the ambient
+                    // `EnvironmentContext` at construction (`docs/design/runtime/
+                    // theme_environment_design.md`'s "Environment" section), never supplied by a
+                    // caller — `f.kind`-based here since (unlike `on_*`) there is no name convention
+                    // to key off instead.
                     let param_fields = effective_fields
                         .iter()
-                        .filter(|f| f.initializer.is_none() && !f.name.starts_with("on_"))
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && !f.name.starts_with("on_")
+                                && f.kind != FieldKind::Environment
+                        })
                         .map(|f| (f.name.clone(), f.ty.clone()))
                         .collect();
                     let two_way_fields = effective_fields
@@ -361,7 +371,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         .collect();
                     let field_types = effective_fields
                         .iter()
-                        .filter(|f| f.initializer.is_none())
+                        .filter(|f| f.initializer.is_none() && f.kind != FieldKind::Environment)
                         .map(|f| (f.name.clone(), f.ty.clone()))
                         .collect();
                     let attached_field_types = effective_fields
@@ -2070,7 +2080,11 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     });
                 }
             }
-            FieldKind::Prop | FieldKind::Param | FieldKind::Attached | FieldKind::State => {
+            FieldKind::Prop
+            | FieldKind::Param
+            | FieldKind::Attached
+            | FieldKind::State
+            | FieldKind::Environment => {
                 panic!(
                     "viewmodel field `{}` must be #[observable]/#[computed]",
                     f.name
@@ -2464,6 +2478,35 @@ fn rewrite_action_body(
     quote! { #block }
 }
 
+/// Extracts `#[environment(name)]`'s referenced Environment Key name from a
+/// `FieldKind::Environment` field's `attrs` — see `Attr::Environment`'s own doc comment.
+fn environment_key_name(f: &FieldDef) -> &str {
+    f.attrs
+        .iter()
+        .find_map(|a| match a {
+            Attr::Environment(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .expect(
+            "internal: FieldKind::Environment field must carry Attr::Environment(name) \
+             (attr_frontend.rs invariant)",
+        )
+}
+
+/// Resolves `#[environment(name)]`'s referenced Key type from the same-crate registry
+/// (`component_frontend::lookup_same_crate_environment_key`) — `validate::validate` (rule 34,
+/// `docs/specs/dsl_spec.md` §13) already rejected an unresolvable name before codegen runs.
+fn environment_key_type(name: &str) -> syn::Type {
+    let (key_type_name, _value_type) =
+        crate::component_frontend::lookup_same_crate_environment_key(name).unwrap_or_else(|| {
+            panic!(
+                "internal: `#[environment({name})]` referenced an unregistered Environment Key \
+                 — validate::validate should have rejected this before codegen"
+            )
+        });
+    syn::parse_str(&key_type_name).expect("registered environment key type name must parse")
+}
+
 fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
     let struct_name = format_ident!("{}", c.name);
     let mut struct_fields = TokenStream::new();
@@ -2512,6 +2555,21 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
         let init_expr = rewrite_t_macro_bare(coerce_to_owned_string(&f.ty, raw_expr.clone()));
         default_let_stmts.extend(quote! { let #field_ident: #ty = #init_expr; });
     }
+    // `#[environment(name)]` fields resolve from the ambient `EnvironmentContext` at construction
+    // (`docs/design/runtime/theme_environment_design.md`'s "Environment" section) rather than from
+    // a declared expression — seeded as a bare `let` the same way, so the view-body bare-identifier
+    // reference this field's own name still resolves during construction (`own_fields`, `emit_expr`).
+    // This view-less component has no `Rc<Self>`/property-changed dispatch to subscribe a live
+    // update through (unlike `generate_view`'s composed/plain paths, both `Rc`-returning) — the
+    // value is resolved once, here, and never updates afterward.
+    for f in c.fields.iter().filter(|f| f.kind == FieldKind::Environment) {
+        let field_ident = format_ident!("{}", f.name);
+        let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
+        let key_type = environment_key_type(environment_key_name(f));
+        default_let_stmts.extend(quote! {
+            let #field_ident: #ty = elwindui::core::environment::EnvironmentContext::current().get::<#key_type>();
+        });
+    }
     let component_property_enum = format_ident!("{}Property", c.name);
     let property_variants: Vec<syn::Ident> = c
         .fields
@@ -2531,6 +2589,17 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
         let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
 
         match &f.initializer {
+            None if f.kind == FieldKind::Environment => {
+                // Seeded by the `let #field_ident = ..;` emitted into `default_let_stmts` above —
+                // never a constructor argument (`param_fields`/`param_names` exclude
+                // `FieldKind::Environment` explicitly), never mutated after construction on this
+                // view-less path (see that loop's own doc comment).
+                struct_fields.extend(quote! { #field_ident: #ty, });
+                ctor_field_inits.extend(quote! { #field_ident, });
+                accessors.extend(quote! {
+                    pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                });
+            }
             None => {
                 // `#[param] #[inject]` field: supplied by the caller. `Option<T>`-typed fields
                 // (docs/design/runtime/ui_tree_design.md's post-construction setter convention,
@@ -2876,10 +2945,19 @@ fn generate_view(
             f.kind == FieldKind::Computed && matches!(f.initializer, Some(Initializer::Expr(_)))
         })
         .collect();
+    // `#[environment(name)]` fields — see `own_computed_fields`'s own construction-time/storage
+    // shape just above; unlike it, the initial (and every later) value comes from the ambient
+    // `EnvironmentContext` (`own_environment_construct_stmts`, below), not a declared expression.
+    let own_environment_fields: Vec<&FieldDef> = component
+        .fields
+        .iter()
+        .filter(|f| f.kind == FieldKind::Environment)
+        .collect();
     own_fields.extend(
         own_stored_fields
             .iter()
             .chain(own_computed_fields.iter())
+            .chain(own_environment_fields.iter())
             .map(|f| (f.name.clone(), f.ty.clone())),
     );
     // Dependency graph (mirrors `generate_viewmodel`'s own `dependents_of`, `codegen.rs` above) so
@@ -2929,6 +3007,24 @@ fn generate_view(
         let init_expr = rewrite_t_macro_bare(coerce_to_owned_string(&f.ty, raw_expr.clone()));
         own_default_construct_stmts.extend(quote! { let #field_ident: #ty = #init_expr; });
     }
+    // `#[environment(name)]` fields resolve from the ambient `EnvironmentContext` at construction
+    // (`docs/design/runtime/theme_environment_design.md`'s "Environment" section) — captured once
+    // into `__elwindui_environment` (also stored on `Self`, below, so a later subscription callback
+    // can re-read it without depending on whatever happens to be ambient at that later, unrelated
+    // point in time) and read per field from that capture, never from a declared expression.
+    if !own_environment_fields.is_empty() {
+        own_default_construct_stmts.extend(quote! {
+            let __elwindui_environment = elwindui::core::environment::EnvironmentContext::current();
+        });
+        for f in &own_environment_fields {
+            let field_ident = format_ident!("{}", f.name);
+            let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
+            let key_type = environment_key_type(environment_key_name(f));
+            own_default_construct_stmts.extend(quote! {
+                let #field_ident: #ty = __elwindui_environment.get::<#key_type>();
+            });
+        }
+    }
 
     // `mutable_own_fields` is populated below, once `mutable_required_names` is known (it needs
     // `required_own_names`/`deferred_own_names`, computed further down using `ctx.own_fields`
@@ -2951,16 +3047,26 @@ fn generate_view(
     // here, every `has_view` composed component's `new(..)` silently gained 9 required
     // `fn(PointerEventArgs)`-typed parameters nothing ever supplied, breaking every existing call
     // site the moment these fields became inheritable (`RoundedPanel`/`DocumentView`, e.g.).
+    // `#[environment(name)]` fields are excluded here too — see `build_symbol_table`'s matching
+    // `param_fields` filter (`codegen.rs`, `Item::Component` arm) for why.
     let param_names: Vec<syn::Ident> = component
         .fields
         .iter()
-        .filter(|f| f.initializer.is_none() && !f.name.starts_with("on_"))
+        .filter(|f| {
+            f.initializer.is_none()
+                && !f.name.starts_with("on_")
+                && f.kind != FieldKind::Environment
+        })
         .map(|f| format_ident!("{}", f.name))
         .collect();
     let param_types: Vec<syn::Type> = component
         .fields
         .iter()
-        .filter(|f| f.initializer.is_none() && !f.name.starts_with("on_"))
+        .filter(|f| {
+            f.initializer.is_none()
+                && !f.name.starts_with("on_")
+                && f.kind != FieldKind::Environment
+        })
         .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
         .collect();
 
@@ -3373,14 +3479,60 @@ fn generate_view(
         .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
         .collect();
 
+    // `#[environment(name)]` fields — same Cell/RefCell storage shape as `own_computed_*` just
+    // above (read through the same generic own-field bare-path branch, `ctx.mutable_own_fields`),
+    // seeded from `own_default_construct_stmts`'s `let`s instead of a declared expression.
+    let own_environment_names: Vec<syn::Ident> = own_environment_fields
+        .iter()
+        .map(|f| format_ident!("{}", f.name))
+        .collect();
+    let own_environment_types: Vec<syn::Type> = own_environment_fields
+        .iter()
+        .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
+        .collect();
+    let own_environment_cell_types: Vec<TokenStream> = own_environment_fields
+        .iter()
+        .map(|f| {
+            if is_copy_type(&f.ty) {
+                quote! { std::cell::Cell }
+            } else {
+                quote! { std::cell::RefCell }
+            }
+        })
+        .collect();
+    let own_environment_field_decls: TokenStream = own_environment_names
+        .iter()
+        .zip(own_environment_types.iter())
+        .zip(own_environment_cell_types.iter())
+        .map(|((name, ty), cell_ty)| quote! { #name: #cell_ty<#ty>, })
+        .collect();
+    let own_environment_field_inits: TokenStream = own_environment_names
+        .iter()
+        .zip(own_environment_cell_types.iter())
+        .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
+        .collect();
+    // Present only when this component actually declares at least one `#[environment(name)]`
+    // field — `docs/design/runtime/theme_environment_design.md`'s memory policy ("a component that
+    // declares no `#[environment(..)]` field ... pays no cost").
+    let has_own_environment_fields = !own_environment_fields.is_empty();
+    let environment_context_field_decl = has_own_environment_fields.then(|| {
+        quote! { __environment: elwindui::core::environment::EnvironmentContext, }
+    });
+    let environment_context_field_init = has_own_environment_fields.then(|| {
+        quote! { __environment: __elwindui_environment, }
+    });
+
     let mut component_property_variants = mutable_required_names.clone();
     component_property_variants.extend(own_default_names.iter().cloned());
     component_property_variants.extend(own_computed_names.iter().cloned());
+    component_property_variants.extend(own_environment_names.iter().cloned());
     ctx.mutable_own_fields = mutable_required_names_set.clone();
     ctx.mutable_own_fields
         .extend(own_default_names.iter().map(|n| n.to_string()));
     ctx.mutable_own_fields
         .extend(own_computed_names.iter().map(|n| n.to_string()));
+    ctx.mutable_own_fields
+        .extend(own_environment_names.iter().map(|n| n.to_string()));
     let mutable_required_types: Vec<syn::Type> = required_own_names
         .iter()
         .zip(required_own_types.iter())
@@ -3718,6 +3870,79 @@ fn generate_view(
                 fn #recompute(&self) {
                     let value: #ty = #compute_expr;
                     #set_cache
+                }
+            }
+        })
+        .collect();
+
+    // Getter for a component's own `#[environment(name)]` field (`own_environment_names`) — same
+    // read-only, same-name field/method shape as the `#[computed]` loop just above.
+    for (name, ty) in own_environment_names.iter().zip(own_environment_types.iter()) {
+        let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
+        let get_body = if is_copy_type(ty_str) {
+            quote! { self.#name.get() }
+        } else {
+            quote! { self.#name.borrow().clone() }
+        };
+        if is_composed {
+            own_class_methods.extend(quote! {
+                fn #name(&self) -> #ty { #get_body }
+            });
+        } else {
+            named_accessors.extend(quote! {
+                pub fn #name(&self) -> #ty { #get_body }
+            });
+        }
+    }
+    // `recompute_<name>` for every own `#[environment(name)]` field — unlike `#[computed]`'s (which
+    // recomputes from sibling fields), this re-reads `self.__environment` (the `EnvironmentContext`
+    // captured at construction, not the ambient one at call time — see
+    // `environment_context_field_init`'s own comment) and is called from that field's live
+    // subscription callback (`own_environment_subscribe_stmts`, below), never from a sibling
+    // setter's cascade.
+    let own_environment_recompute_methods: TokenStream = own_environment_fields
+        .iter()
+        .map(|f| {
+            let name = format_ident!("{}", f.name);
+            let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
+            let key_type = environment_key_type(environment_key_name(f));
+            let set_cache = if is_copy_type(&f.ty) {
+                quote! { self.#name.set(value); }
+            } else {
+                quote! { *self.#name.borrow_mut() = value; }
+            };
+            let recompute = format_ident!("recompute_{}", name);
+            quote! {
+                fn #recompute(&self) {
+                    let value: #ty = self.__environment.get::<#key_type>();
+                    #set_cache
+                }
+            }
+        })
+        .collect();
+    // Live subscription for every own `#[environment(name)]` field — mirrors `subscribe_stmts`'
+    // bind-owner shape (weak `this`, pushed into `__property_changed_subscriptions`) but against
+    // this field's own Environment cell instead of a viewmodel's `PropertyChanged`; unconditionally
+    // also calls `__refresh_dynamic_regions()`, the same as `component_property_dispatch` already
+    // does for every other own-field change (`docs/design/runtime/theme_environment_design.md`,
+    // "Change propagation").
+    let own_environment_subscribe_stmts: TokenStream = own_environment_fields
+        .iter()
+        .map(|f| {
+            let name = format_ident!("{}", f.name);
+            let key_type = environment_key_type(environment_key_name(f));
+            let recompute = format_ident!("recompute_{}", name);
+            quote! {
+                {
+                    let weak = std::rc::Rc::downgrade(&this);
+                    let subscription = this.__environment.subscribe::<#key_type>(move || {
+                        if let Some(this) = weak.upgrade() {
+                            this.#recompute();
+                            this.on_property_changed(#component_property_enum::#name);
+                            this.__refresh_dynamic_regions();
+                        }
+                    });
+                    this.__property_changed_subscriptions.borrow_mut().push(subscription);
                 }
             }
         })
@@ -4431,6 +4656,7 @@ fn generate_view(
         // active branch in a composed component (issue #58).
         let component_property_resync_methods = mark_inherent(component_property_resync_methods);
         let own_computed_recompute_methods = mark_inherent(own_computed_recompute_methods);
+        let own_environment_recompute_methods = mark_inherent(own_environment_recompute_methods);
 
         let resync_method = mark_inherent(quote! {
             fn resync(&self) {
@@ -4458,6 +4684,8 @@ fn generate_view(
                 #mutable_required_field_decls
                 #own_default_field_decls
                 #own_computed_field_decls
+                #own_environment_field_decls
+                #environment_context_field_decl
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
@@ -4476,7 +4704,7 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased) }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased) }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -4528,6 +4756,7 @@ fn generate_view(
                     if let Some(this) = __most_derived {
                         #component_self_subscription
                         #subscribe_stmts
+                        #own_environment_subscribe_stmts
                         #theme_subscribe_stmt
                         #on_mount_stmt
                     }
@@ -4539,6 +4768,7 @@ fn generate_view(
                 #property_resync_methods
                 #component_property_resync_methods
                 #own_computed_recompute_methods
+                #own_environment_recompute_methods
                 #dynamic_region_refresh_method
                 #root_embed_method
                 #named_accessors
@@ -4559,13 +4789,14 @@ fn generate_view(
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) });
+                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) });
                     #content_attach_stmt
                     #wiring_stmts
                     this.resync();
                     this.__refresh_dynamic_regions();
                     #component_self_subscription
                     #subscribe_stmts
+                    #own_environment_subscribe_stmts
                     #theme_subscribe_stmt
                     #on_mount_stmt
                     this
@@ -4582,6 +4813,7 @@ fn generate_view(
                 #property_resync_methods
                 #component_property_resync_methods
                 #own_computed_recompute_methods
+                #own_environment_recompute_methods
                 #dynamic_region_refresh_method
                 #component_property_api
 
@@ -4598,6 +4830,8 @@ fn generate_view(
                 #mutable_required_field_decls
                 #own_default_field_decls
                 #own_computed_field_decls
+                #own_environment_field_decls
+                #environment_context_field_decl
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,

@@ -101,15 +101,18 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
 }
 
 /// Builds `FieldDef`s from a `syn::ItemStruct`'s named fields, recognizing the field-attribute
-/// vocabulary `docs/specs/dsl_spec.md` §3 documents — `param`/`prop`/
-/// `state`/`observable`/`computed`/`attached`/`inject`/`two_way`/`routed`/`overrides`/`onetime`/
-/// `length` — uniformly whether the caller is a `viewmodel` (`default_kind: FieldKind::Observable`,
-/// via `viewmodel_def_from_item_mod`) or a `component` (`default_kind: FieldKind::Prop`, via
-/// `component_frontend.rs`), exactly mirroring `parse_module`'s two `parse_fields_block` call
-/// sites. Whether a particular kind/attribute combination is actually *sensible* (e.g.
-/// `#[observable]` on a component field) is left to `validate::validate`, same as hand-written DSL
-/// text — no duplicate validation here. `FieldKind::Action` never appears here — actions are
-/// synthesized separately from the `impl` block, see `synthesize_action_fields`.
+/// vocabulary `docs/specs/dsl_spec.md` §3/§4 documents — `param`/`prop`/
+/// `state`/`observable`/`computed`/`attached`/`environment`/`inject`/`two_way`/`routed`/`overrides`/
+/// `onetime`/`length` — uniformly whether the caller is a `viewmodel` (`default_kind:
+/// FieldKind::Observable`, via `viewmodel_def_from_item_mod`) or a `component` (`default_kind:
+/// FieldKind::Prop`, via `component_frontend.rs`), exactly mirroring `parse_module`'s two
+/// `parse_fields_block` call sites. Whether a particular kind/attribute combination is actually
+/// *sensible* (e.g. `#[observable]` on a component field) is left to `validate::validate`, same as
+/// hand-written DSL text — no duplicate validation here. `FieldKind::Action` never appears here —
+/// actions are synthesized separately from the `impl` block, see `synthesize_action_fields`.
+///
+/// `allow_state` also gates `#[environment]`: both are component-only concepts (a `viewmodel` has
+/// no UI context to inherit, docs/specs/dsl_spec.md §4/§13 rule 19's MVVM separation).
 ///
 /// `#[state(default = expr)]`/`#[observable(default = expr)]`/`#[computed(expr = expr)]` parse their value as a plain
 /// `syn::Expr` (`parse_name_value_expr`) — fine since neither needs view-attribute syntax.
@@ -202,6 +205,19 @@ pub(crate) fn fields_from_item_struct(
                                 format!("field `{name}`: invalid #[attached(default = ...)]: {e}")
                             })?);
                     }
+                }
+                "environment" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "environment")?;
+                    if !allow_state {
+                        return Err(format!(
+                            "field `{name}`: #[environment] is only allowed on a component"
+                        ));
+                    }
+                    kind = FieldKind::Environment;
+                    let key_name = attr.parse_args::<syn::Ident>().map_err(|e| {
+                        format!("field `{name}`: invalid #[environment(name)]: {e}")
+                    })?;
+                    attrs.push(Attr::Environment(key_name.to_string()));
                 }
                 "inject" => attrs.push(Attr::Inject),
                 "bindable" => {

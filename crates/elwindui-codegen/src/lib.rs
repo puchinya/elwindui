@@ -2,6 +2,7 @@ pub mod ast;
 pub mod attr_frontend;
 pub mod codegen;
 pub mod component_frontend;
+pub mod environment_frontend;
 pub mod parser;
 #[cfg(test)]
 mod testdata;
@@ -551,6 +552,125 @@ mod component_impl_tests {
         let err = methods(r#"impl Clone for MiTraitImpl { fn clone(&self) -> Self { todo!() } }"#)
             .expect_err("a trait impl should be rejected");
         assert!(err.contains("trait impl"), "error: {err}");
+    }
+}
+
+/// Issue #84: exercises `#[elwindui::environment_key]` + `#[environment(name)]` end to end through
+/// the exact same path production code uses — register the Key via
+/// `environment_frontend::generate_environment_key_from_item_struct`, then build a sibling
+/// component declaring `#[environment(name)]`, confirming both the registry lookup
+/// (`component_frontend::lookup_same_crate_environment_key`, `validate.rs` rule 34) and the
+/// generated construction/subscription code (`codegen.rs`'s `own_environment_*` machinery)
+/// succeed. Names are unique per test for the same reason `dsl_enum_tests` uses unique names
+/// (`component_frontend`'s same-crate registries are process-global statics shared by every test
+/// in this binary).
+#[cfg(test)]
+mod environment_key_tests {
+    use super::*;
+
+    fn register_environment_key(src: &str, args: &str) {
+        let item_struct: syn::ItemStruct = syn::parse_str(src).expect("struct should parse");
+        let args: proc_macro2::TokenStream = args.parse().expect("args should parse");
+        environment_frontend::generate_environment_key_from_item_struct(args, &item_struct)
+            .expect("environment key generation should succeed");
+    }
+
+    #[test]
+    fn component_field_resolves_registered_key_and_generates_construction_and_subscription() {
+        register_environment_key(
+            "pub struct EnvKeyTestLocaleA;",
+            "name = env_key_test_locale_a, value = String, default = String::from(\"en-US\")",
+        );
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct EnvKeyTestScreenA {
+                #[environment(env_key_test_locale_a)]
+                locale: String,
+                body: view! {
+                    TextBlock { text: locale }
+                },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let out =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct);
+        assert!(out.is_ok(), "expected success, got: {:?}", out.err());
+        let item_impl: syn::ItemImpl =
+            syn::parse_str("impl EnvKeyTestScreenA {}").expect("impl should parse");
+        let generated = generate_component_from_item_impl(&item_impl)
+            .expect("impl half should generate")
+            .to_string();
+        assert!(
+            generated.contains("EnvironmentContext :: current ()"),
+            "should resolve from the ambient context at construction: {generated}"
+        );
+        assert!(
+            generated.contains(". get :: < EnvKeyTestLocaleA > ()"),
+            "should call get::<KeyType>(): {generated}"
+        );
+        assert!(
+            generated.contains(". subscribe :: < EnvKeyTestLocaleA > ("),
+            "should subscribe to the Key's cell for live updates: {generated}"
+        );
+        assert!(
+            generated.contains("__refresh_dynamic_regions"),
+            "the subscription callback should refresh dynamic regions on change: {generated}"
+        );
+        // Never a constructor argument (docs/specs/dsl_spec.md §4).
+        assert!(
+            !generated.contains("pub fn new (locale"),
+            "an #[environment(..)] field must not become a new() parameter: {generated}"
+        );
+    }
+
+    #[test]
+    fn unregistered_key_name_is_rejected() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct EnvKeyTestScreenB {
+                #[environment(env_key_test_never_registered)]
+                locale: String,
+                body: view! {
+                    TextBlock { text: locale }
+                },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let err = generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
+            .expect_err("an unresolvable #[environment(name)] should be rejected");
+        assert!(
+            err.contains("env_key_test_never_registered") && err.contains("isn't declared"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn combining_environment_with_param_is_rejected() {
+        register_environment_key(
+            "pub struct EnvKeyTestLocaleC;",
+            "name = env_key_test_locale_c, value = String, default = String::from(\"en-US\")",
+        );
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct EnvKeyTestScreenC {
+                #[param]
+                #[environment(env_key_test_locale_c)]
+                locale: String,
+                body: view! {
+                    TextBlock { text: locale }
+                },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let err = generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
+            .expect_err("#[environment] combined with #[param] should be rejected");
+        assert!(
+            err.contains("cannot be combined"),
+            "error: {err}"
+        );
     }
 }
 

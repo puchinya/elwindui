@@ -1872,7 +1872,33 @@ fn validate_field_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse_module;
+
+    /// Test-only replacement for the old DSL text frontend's `parser::parse_module`, for a single
+    /// current-syntax component (`struct Name { ..fields.., body: view! { .. } }`, no
+    /// `#[elwindui::component(...)]` attribute of its own — `base` supplies what that attribute's
+    /// own `inherits Base` argument used to).
+    fn component_module(base: Option<&str>, struct_src: &str) -> Module {
+        crate::test_module(&[(base, struct_src, None)]).expect("should build")
+    }
+
+    /// `#[embedded]`/`#[native]` (`ComponentDef::embedded`/`.native`) have no current-syntax
+    /// spelling at all — `component_frontend.rs`'s real frontend never recognizes either attribute
+    /// name (see that struct field's own doc comment in `ast.rs`). A test that specifically exists
+    /// to check `#[native]`-gated validation logic has to build its `ComponentDef` by hand instead
+    /// of parsing it from any DSL text (old or new) — the same reasoning `testdata.rs` already uses
+    /// for the 25 real builtins.
+    fn module_with_component(component: ComponentDef, view: Option<crate::ast::ViewDef>) -> Module {
+        let mut items = vec![Item::Component(component)];
+        if let Some(view) = view {
+            items.push(Item::View(view));
+        }
+        Module {
+            path: Vec::new(),
+            uses: Vec::new(),
+            items,
+            ..Default::default()
+        }
+    }
 
     /// Actions can't be declared in the DSL text form's `viewmodel` (only `#[observable]`/
     /// `#[computed]` can) — a viewmodel with an action is always built via the Rust-native
@@ -1908,16 +1934,15 @@ mod tests {
         "#,
         );
         let window_src = r#"
-component NotepadWindow inherits Window {
-    #[bindable]
-    vm: std::rc::Rc<NotepadViewModel>,
-}
-
-view NotepadWindow {
-    TextArea { text <=> vm.content }
-}
-"#;
-        let modules: Vec<_> = [viewmodel_module, parse_module(window_src).unwrap()]
+        struct NotepadWindow {
+            #[bindable]
+            vm: std::rc::Rc<NotepadViewModel>,
+            body: view! {
+                TextArea { text <=> vm.content }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [viewmodel_module, component_module(Some("Window"), window_src)]
             .into_iter()
             .chain(crate::test_builtin_modules())
             .collect();
@@ -1926,39 +1951,55 @@ view NotepadWindow {
 
     #[test]
     fn rejects_bind_to_unknown_field() {
-        let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod vm_mod {
+                struct Vm {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+            "#,
+        );
         let window_src = r#"
-component Window2 {
-    #[bindable]
-    vm: std::rc::Rc<Vm>,
-}
-view Window2 { Window { TextArea { text <=> vm.does_not_exist } } }
-"#;
-        let modules: Vec<_> = [
-            parse_module(viewmodel_src).unwrap(),
-            parse_module(window_src).unwrap(),
-        ]
-        .into_iter()
-        .chain(crate::test_builtin_modules())
-        .collect();
+        struct Window2 {
+            #[bindable]
+            vm: std::rc::Rc<Vm>,
+            body: view! {
+                Window { TextArea { text <=> vm.does_not_exist } }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [viewmodel_module, component_module(None, window_src)]
+            .into_iter()
+            .chain(crate::test_builtin_modules())
+            .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("does_not_exist")));
     }
 
     #[test]
     fn accepts_bindable_field_whose_type_is_a_viewmodel() {
-        let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod vm_mod {
+                struct Vm {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+            "#,
+        );
         let window_src = r#"
-component Window2 inherits Window {
-    #[bindable]
-    vm: std::rc::Rc<Vm>,
-}
-view Window2 { TextBlock { text: "x" } }
-"#;
-        let modules = vec![
-            parse_module(viewmodel_src).unwrap(),
-            parse_module(window_src).unwrap(),
-        ];
+        struct Window2 {
+            #[bindable]
+            vm: std::rc::Rc<Vm>,
+            body: view! {
+                TextBlock { text: "x" }
+            },
+        }
+        "#;
+        let modules = vec![viewmodel_module, component_module(Some("Window"), window_src)];
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -1968,20 +2009,32 @@ view Window2 { TextBlock { text: "x" } }
     /// must be trusted — see the check's own doc comment in this file).
     #[test]
     fn rejects_bindable_field_whose_type_is_not_a_viewmodel() {
-        let src = r#"
-component NotAViewModel {
-    #[param]
-    label: String,
-}
-view NotAViewModel { TextBlock { text: label } }
-
-component Window2 {
-    #[bindable]
-    thing: std::rc::Rc<NotAViewModel>,
-}
-view Window2 { Window { NotAViewModel { label: "x" } } }
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"
+                struct NotAViewModel {
+                    #[param]
+                    label: String,
+                    body: view! { TextBlock { text: label } },
+                }
+                "#,
+                None,
+            ),
+            (
+                None,
+                r#"
+                struct Window2 {
+                    #[bindable]
+                    thing: std::rc::Rc<NotAViewModel>,
+                    body: view! { Window { NotAViewModel { label: "x" } } },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should build");
+        let modules = vec![module];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("isn't a `viewmodel`")),
@@ -2014,40 +2067,45 @@ view Window2 { Window { NotAViewModel { label: "x" } } }
         "#,
         );
         let window_src = r#"
-component NotepadWindow inherits Window {
-    #[param]
-    #[inject]
-    vm: NotepadViewModel,
-}
-
-view NotepadWindow {
-    title: vm.documents
-    Button {
-        text: t!("save-label")
-        on_click: vm.save
-        enabled: vm.save_can_execute
-    }
-}
-"#;
-        let modules = vec![viewmodel_module, parse_module(window_src).unwrap()];
+        struct NotepadWindow {
+            #[param]
+            #[inject]
+            vm: NotepadViewModel,
+            body: view! {
+                title: vm.documents
+                Button {
+                    text: t!("save-label")
+                    on_click: vm.save
+                    enabled: vm.save_can_execute
+                }
+            },
+        }
+        "#;
+        let modules = vec![viewmodel_module, component_module(Some("Window"), window_src)];
         assert_eq!(validate(&modules), Ok(()));
     }
 
     #[test]
     fn rejects_reference_to_unknown_vm_field() {
-        let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod vm_mod {
+                struct Vm {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+            "#,
+        );
         let window_src = r#"
-component Window3 {
-    #[param]
-    #[inject]
-    vm: Vm,
-}
-view Window3 { Window { TextBlock { text: vm.no_such_field } } }
-"#;
-        let modules = vec![
-            parse_module(viewmodel_src).unwrap(),
-            parse_module(window_src).unwrap(),
-        ];
+        struct Window3 {
+            #[param]
+            #[inject]
+            vm: Vm,
+            body: view! { Window { TextBlock { text: vm.no_such_field } } },
+        }
+        "#;
+        let modules = vec![viewmodel_module, component_module(None, window_src)];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("no_such_field")),
@@ -2060,19 +2118,25 @@ view Window3 { Window { TextBlock { text: vm.no_such_field } } }
     /// `rejects_reference_to_unknown_vm_field` already covers for ordinary fields.
     #[test]
     fn rejects_reference_to_unknown_vm_command() {
-        let viewmodel_src = "viewmodel Vm { #[observable] content: String = String::new(), }";
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod vm_mod {
+                struct Vm {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+            "#,
+        );
         let window_src = r#"
-component Window4 {
-    #[param]
-    #[inject]
-    vm: Vm,
-}
-view Window4 { Window { Button { text: "x", on_click: vm.no_such_command } } }
-"#;
-        let modules = vec![
-            parse_module(viewmodel_src).unwrap(),
-            parse_module(window_src).unwrap(),
-        ];
+        struct Window4 {
+            #[param]
+            #[inject]
+            vm: Vm,
+            body: view! { Window { Button { text: "x", on_click: vm.no_such_command } } },
+        }
+        "#;
+        let modules = vec![viewmodel_module, component_module(None, window_src)];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("no_such_command")),
@@ -2091,23 +2155,26 @@ view Window4 { Window { Button { text: "x", on_click: vm.no_such_command } } }
     /// let the reference through anyway).
     #[test]
     fn rejects_reference_to_a_type_in_a_different_real_module_without_a_use() {
-        let vm_module = Module {
-            path: vec!["some_vm_mod".to_string()],
-            uses: Vec::new(),
-            items: parse_module("viewmodel Vm { #[observable] content: String = String::new(), }")
-                .unwrap()
-                .items,
-            ..Default::default()
-        };
+        let mut vm_module = viewmodel_module_from_rust(
+            r#"
+            mod some_vm_mod {
+                struct Vm {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+            "#,
+        );
+        vm_module.path = vec!["some_vm_mod".to_string()];
         let window_src = r#"
-component Window6 {
-    #[param]
-    #[inject]
-    vm: Vm,
-}
-view Window6 { Window { TextArea { text: vm.content } } }
-"#;
-        let modules = vec![vm_module, parse_module(window_src).unwrap()];
+        struct Window6 {
+            #[param]
+            #[inject]
+            vm: Vm,
+            body: view! { Window { TextArea { text: vm.content } } },
+        }
+        "#;
+        let modules = vec![vm_module, component_module(None, window_src)];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("not in scope")),
@@ -2119,25 +2186,30 @@ view Window6 { Window { TextArea { text: vm.content } } }
     /// cleanly, exactly like real Rust once the right `use` is in place.
     #[test]
     fn accepts_reference_to_a_type_in_a_different_real_module_when_used() {
-        let vm_module = Module {
-            path: vec!["some_vm_mod".to_string()],
-            uses: Vec::new(),
-            items: parse_module("viewmodel Vm { #[observable] content: String = String::new(), }")
-                .unwrap()
-                .items,
-            ..Default::default()
-        };
+        let mut vm_module = viewmodel_module_from_rust(
+            r#"
+            mod some_vm_mod {
+                struct Vm {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+            "#,
+        );
+        vm_module.path = vec!["some_vm_mod".to_string()];
         let window_src = r#"
-use crate::some_vm_mod::Vm;
-
-component Window7 inherits Window {
-    #[param]
-    #[inject]
-    vm: Vm,
-}
-view Window7 { TextArea { text: vm.content } }
-"#;
-        let modules = vec![vm_module, parse_module(window_src).unwrap()];
+        struct Window7 {
+            #[param]
+            #[inject]
+            vm: Vm,
+            body: view! { TextArea { text: vm.content } },
+        }
+        "#;
+        let mut window_module = component_module(Some("Window"), window_src);
+        window_module.uses.push(crate::ast::UseDecl {
+            path: vec!["crate".to_string(), "some_vm_mod".to_string(), "Vm".to_string()],
+        });
+        let modules = vec![vm_module, window_module];
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -2146,29 +2218,33 @@ view Window7 { TextArea { text: vm.content } }
     /// `emit_construction`'s codegen-time fallback.
     #[test]
     fn rejects_render_content_targeting_unknown_component() {
-        let src = r#"
-viewmodel Doc {
-    #[observable]
-    documents: String = String::new(),
-}
-
-component Window8 {
-    #[param]
-    #[inject]
-    vm: Doc,
-}
-
-view Window8 {
-    Window {
-        TabView {
-            tabs: vm.documents
-            render_content: |doc| Nonexistent { x: doc }
-            selected: vm.documents
+        let vm_module = viewmodel_module_from_rust(
+            r#"
+            mod doc_mod {
+                struct Doc {
+                    #[observable(default = String::new())]
+                    documents: String,
+                }
+            }
+            "#,
+        );
+        let window_src = r#"
+        struct Window8 {
+            #[param]
+            #[inject]
+            vm: Doc,
+            body: view! {
+                Window {
+                    TabView {
+                        tabs: vm.documents
+                        render_content: |doc| Nonexistent { x: doc }
+                        selected: vm.documents
+                    }
+                }
+            },
         }
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        "#;
+        let modules = vec![vm_module, component_module(None, window_src)];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("Nonexistent")),
@@ -2180,35 +2256,44 @@ view Window8 {
     /// otherwise `emit_construction`'s generated `Target::new(...)` call is missing an argument.
     #[test]
     fn rejects_render_content_missing_required_attribute() {
-        let src = r#"
-viewmodel Doc {
-    #[observable]
-    documents: String = String::new(),
-}
-
-component DocumentView {
-    #[param]
-    #[inject]
-    doc: Doc,
-}
-
-component Window9 {
-    #[param]
-    #[inject]
-    vm: Doc,
-}
-
-view Window9 {
-    Window {
-        TabView {
-            tabs: vm.documents
-            render_content: |doc| DocumentView { }
-            selected: vm.documents
+        let vm_module = viewmodel_module_from_rust(
+            r#"
+            mod doc_mod {
+                struct Doc {
+                    #[observable(default = String::new())]
+                    documents: String,
+                }
+            }
+            "#,
+        );
+        let document_view_src = r#"
+        struct DocumentView {
+            #[param]
+            #[inject]
+            doc: Doc,
         }
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        "#;
+        let window_src = r#"
+        struct Window9 {
+            #[param]
+            #[inject]
+            vm: Doc,
+            body: view! {
+                Window {
+                    TabView {
+                        tabs: vm.documents
+                        render_content: |doc| DocumentView { }
+                        selected: vm.documents
+                    }
+                }
+            },
+        }
+        "#;
+        let modules = vec![
+            vm_module,
+            component_module(None, document_view_src),
+            component_module(None, window_src),
+        ];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter()
@@ -2223,29 +2308,33 @@ view Window9 {
     /// instead of a silent miscompile (see `emit_tabview_resync`'s doc comment in `codegen.rs`).
     #[test]
     fn rejects_closure_body_referencing_unrelated_name() {
-        let src = r#"
-viewmodel Doc {
-    #[observable]
-    documents: String = String::new(),
-}
-
-component Window10 {
-    #[param]
-    #[inject]
-    vm: Doc,
-}
-
-view Window10 {
-    Window {
-        TabView {
-            tabs: vm.documents
-            render_label: |doc| other_thing.file_name
-            selected: vm.documents
+        let vm_module = viewmodel_module_from_rust(
+            r#"
+            mod doc_mod {
+                struct Doc {
+                    #[observable(default = String::new())]
+                    documents: String,
+                }
+            }
+            "#,
+        );
+        let window_src = r#"
+        struct Window10 {
+            #[param]
+            #[inject]
+            vm: Doc,
+            body: view! {
+                Window {
+                    TabView {
+                        tabs: vm.documents
+                        render_label: |doc| other_thing.file_name
+                        selected: vm.documents
+                    }
+                }
+            },
         }
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        "#;
+        let modules = vec![vm_module, component_module(None, window_src)];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("other_thing")),
@@ -2256,35 +2345,44 @@ view Window10 {
     /// The `for` item passthrough case (`doc: doc`) must validate cleanly.
     #[test]
     fn accepts_well_formed_render_content() {
-        let src = r#"
-viewmodel Doc { }
-
-viewmodel Documents {
-    #[observable]
-    documents: Vec<std::rc::Rc<Doc>> = Vec::new(),
-}
-
-component DocumentView {
-    #[param]
-    #[inject]
-    doc: std::rc::Rc<Doc>,
-}
-
-component Window11 inherits Window {
-    #[param]
-    #[inject]
-    vm: Documents,
-}
-
-view Window11 {
-    TabView {
-        for doc in vm.documents {
-            TabViewItem { DocumentView { doc: doc } }
+        let doc_module = viewmodel_module_from_rust("mod doc_mod { struct Doc {} }");
+        let documents_module = viewmodel_module_from_rust(
+            r#"
+            mod documents_mod {
+                struct Documents {
+                    #[observable(default = Vec::new())]
+                    documents: Vec<std::rc::Rc<Doc>>,
+                }
+            }
+            "#,
+        );
+        let document_view_src = r#"
+        struct DocumentView {
+            #[param]
+            #[inject]
+            doc: std::rc::Rc<Doc>,
         }
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        "#;
+        let window_src = r#"
+        struct Window11 {
+            #[param]
+            #[inject]
+            vm: Documents,
+            body: view! {
+                TabView {
+                    for doc in vm.documents {
+                        TabViewItem { DocumentView { doc: doc } }
+                    }
+                }
+            },
+        }
+        "#;
+        let modules = vec![
+            doc_module,
+            documents_module,
+            component_module(None, document_view_src),
+            component_module(Some("Window"), window_src),
+        ];
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -2297,17 +2395,16 @@ view Window11 {
     #[test]
     fn accepts_component_inheriting_a_shape_primitive_via_implicit_composition() {
         let src = r#"
-component RoundedPanel inherits Shape {
-    #[param]
-    corner_style: Option<String>,
-}
-
-view RoundedPanel {
-    kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }
-    fill: fill
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct RoundedPanel {
+            #[param]
+            corner_style: Option<String>,
+            body: view! {
+                kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }
+                fill: fill
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("Shape"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
@@ -2321,14 +2418,13 @@ view RoundedPanel {
     #[test]
     fn rejects_abstract_component_used_as_a_bare_view_root_without_inherits() {
         let src = r#"
-component Foo {
-}
-
-view Foo {
-    Shape { kind: elwindui_core::ui::ShapeKind::Oval }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct Foo {
+            body: view! {
+                Shape { kind: elwindui_core::ui::ShapeKind::Oval }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2344,16 +2440,15 @@ view Foo {
     #[test]
     fn rejects_abstract_component_used_as_a_nested_child() {
         let src = r#"
-component Foo {
-}
-
-view Foo {
-    VerticalLayout {
-        NativeControl { }
-    }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct Foo {
+            body: view! {
+                VerticalLayout {
+                    NativeControl { }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2375,16 +2470,15 @@ view Foo {
     #[test]
     fn accepts_inherits_regardless_of_bare_child_shape_since_composition_is_now_always_implicit() {
         let src = r#"
-component RoundedPanel inherits Shape {
-    #[param]
-    corner_style: Option<String>,
-}
-
-view RoundedPanel {
-    VerticalLayout { }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct RoundedPanel {
+            #[param]
+            corner_style: Option<String>,
+            body: view! {
+                VerticalLayout { }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("Shape"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
@@ -2395,23 +2489,28 @@ view RoundedPanel {
     /// variable-length list can never fit a single-value slot.
     #[test]
     fn rejects_for_under_a_scalar_content_field() {
-        let src = r#"
-viewmodel DynamicViewModel {
-    #[observable]
-    items: Vec<String> = Vec::new(),
-}
-
-component DynamicHost inherits ContentControl {
-    #[param]
-    #[inject]
-    vm: DynamicViewModel,
-}
-
-view DynamicHost {
-    for item in vm.items { TextBlock { text: item } }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        let vm_module = viewmodel_module_from_rust(
+            r#"
+            mod dynamic_view_model_mod {
+                struct DynamicViewModel {
+                    #[observable(default = Vec::new())]
+                    items: Vec<String>,
+                }
+            }
+            "#,
+        );
+        let host_src = r#"
+        struct DynamicHost {
+            #[param]
+            #[inject]
+            vm: DynamicViewModel,
+            body: view! {
+                for item in vm.items { TextBlock { text: item } }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [vm_module, component_module(Some("ContentControl"), host_src)]
+            .into_iter()
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2426,28 +2525,33 @@ view DynamicHost {
     /// element — a branch with two bare children has nowhere for the second one to go.
     #[test]
     fn rejects_multiple_children_in_one_branch_under_a_scalar_content_field() {
-        let src = r#"
-viewmodel DynamicViewModel {
-    #[observable]
-    show_a: bool = true,
-}
-
-component DynamicHost inherits ContentControl {
-    #[param]
-    #[inject]
-    vm: DynamicViewModel,
-}
-
-view DynamicHost {
-    if vm.show_a {
-        TextBlock { text: "a" }
-        TextBlock { text: "a2" }
-    } else {
-        TextBlock { text: "b" }
-    }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        let vm_module = viewmodel_module_from_rust(
+            r#"
+            mod dynamic_view_model_mod2 {
+                struct DynamicViewModel {
+                    #[observable(default = true)]
+                    show_a: bool,
+                }
+            }
+            "#,
+        );
+        let host_src = r#"
+        struct DynamicHost {
+            #[param]
+            #[inject]
+            vm: DynamicViewModel,
+            body: view! {
+                if vm.show_a {
+                    TextBlock { text: "a" }
+                    TextBlock { text: "a2" }
+                } else {
+                    TextBlock { text: "b" }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [vm_module, component_module(Some("ContentControl"), host_src)]
+            .into_iter()
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2464,16 +2568,15 @@ view DynamicHost {
     #[test]
     fn rejects_redeclaring_an_inherited_field() {
         let src = r#"
-component RoundedPanel inherits Shape {
-    #[param]
-    fill: Option<String>,
-}
-
-view RoundedPanel {
-    Shape { kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct RoundedPanel {
+            #[param]
+            fill: Option<String>,
+            body: view! {
+                Shape { kind: elwindui_core::ui::ShapeKind::RoundedRect { corner_radius: 4.0 }, fill: fill }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("Shape"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2493,14 +2596,13 @@ view RoundedPanel {
     #[test]
     fn accepts_inherits_of_an_unresolved_base_deferring_to_the_generated_code() {
         let src = r#"
-component Foo inherits DoesNotExist {
-}
-
-view Foo {
-    VerticalLayout { }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct Foo {
+            body: view! {
+                VerticalLayout { }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("DoesNotExist"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert!(
@@ -2515,14 +2617,13 @@ view Foo {
     #[test]
     fn rejects_inherits_native_control_when_view_root_is_virtual() {
         let src = r#"
-component Foo inherits NativeControl {
-}
-
-view Foo {
-    VerticalLayout { }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct Foo {
+            body: view! {
+                VerticalLayout { }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("NativeControl"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2535,14 +2636,13 @@ view Foo {
     #[test]
     fn accepts_inherits_native_control_when_view_root_is_native() {
         let src = r#"
-component Foo inherits NativeControl {
-}
-
-view Foo {
-    Window { title: "x", content: TextBlock { text: "hi" } }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct Foo {
+            body: view! {
+                Window { title: "x", content: TextBlock { text: "hi" } }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("NativeControl"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
@@ -2554,14 +2654,13 @@ view Foo {
     #[test]
     fn is_native_is_inferred_recursively_without_requiring_inherits() {
         let src = r#"
-component DocumentViewLike {
-}
-
-view DocumentViewLike {
-    VerticalLayout { }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct DocumentViewLike {
+            body: view! {
+                VerticalLayout { }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let table = codegen::build_symbol_table(&modules);
@@ -2623,13 +2722,13 @@ view DocumentViewLike {
     #[test]
     fn rejects_content_attribute_naming_an_unknown_field() {
         let src = r#"
-#[content(no_such_field)]
-component Foo {
-    #[param]
-    label: String,
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        #[content(no_such_field)]
+        struct Foo {
+            #[param]
+            label: String,
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2645,12 +2744,20 @@ component Foo {
     /// ignoring one.
     #[test]
     fn rejects_native_attribute_combined_with_inherits() {
-        let src = r#"
-#[native]
-component Foo inherits NativeControl {
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        let component = ComponentDef {
+            name: "Foo".to_string(),
+            base: Some("NativeControl".to_string()),
+            base_path: None,
+            fields: Vec::new(),
+            methods: Vec::new(),
+            embedded: false,
+            sealed: false,
+            native: true,
+            is_abstract: false,
+            text_style: false,
+            content_field: None,
+        };
+        let modules: Vec<_> = std::iter::once(module_with_component(component, None))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2665,16 +2772,29 @@ component Foo inherits NativeControl {
     /// `view` contradicts that (there'd be generated Rust *and* a claimed hand-written one).
     #[test]
     fn rejects_native_attribute_combined_with_own_view() {
-        let src = r#"
-#[native]
-component Foo {
-}
-
-view Foo {
-    VerticalLayout { }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        let component = ComponentDef {
+            name: "Foo".to_string(),
+            base: None,
+            base_path: None,
+            fields: Vec::new(),
+            methods: Vec::new(),
+            embedded: false,
+            sealed: false,
+            native: true,
+            is_abstract: false,
+            text_style: false,
+            content_field: None,
+        };
+        let (on_mount, on_unmount, lets, root) =
+            crate::parser::parse_view_body("VerticalLayout { }").expect("view body should parse");
+        let view = crate::ast::ViewDef {
+            target: "Foo".to_string(),
+            on_mount,
+            on_unmount,
+            lets,
+            root,
+        };
+        let modules: Vec<_> = std::iter::once(module_with_component(component, Some(view)))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2696,14 +2816,13 @@ view Foo {
     #[test]
     fn rejects_own_view_with_no_inherits_base() {
         let src = r#"
-component Foo {
-}
-
-view Foo {
-    TextBlock { text: "hi" }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct Foo {
+            body: view! {
+                TextBlock { text: "hi" }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2720,12 +2839,12 @@ view Foo {
     #[test]
     fn accepts_view_less_component_with_no_inherits_base() {
         let src = r#"
-component Foo {
-    #[param]
-    value: i32,
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct Foo {
+            #[param]
+            value: i32,
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
@@ -2736,12 +2855,20 @@ component Foo {
     /// per-backend implementation for it.
     #[test]
     fn rejects_native_attribute_outside_builtin_module() {
-        let src = r#"
-#[native]
-component Foo {
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        let component = ComponentDef {
+            name: "Foo".to_string(),
+            base: None,
+            base_path: None,
+            fields: Vec::new(),
+            methods: Vec::new(),
+            embedded: false,
+            sealed: false,
+            native: true,
+            is_abstract: false,
+            text_style: false,
+            content_field: None,
+        };
+        let modules: Vec<_> = std::iter::once(module_with_component(component, None))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2755,11 +2882,11 @@ component Foo {
     #[test]
     fn rejects_text_style_attribute_outside_builtin_module() {
         let src = r#"
-#[text_style]
-component Foo {
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        #[text_style]
+        struct Foo {
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2772,15 +2899,33 @@ component Foo {
 
     #[test]
     fn rejects_text_style_attribute_combined_with_own_field_of_the_same_name() {
-        let mut module = parse_module(
-            r#"
-#[text_style]
-component Foo {
-    font_size: Option<f32>,
-}
-"#,
-        )
-        .unwrap();
+        // `component_frontend.rs`'s real frontend never auto-injects `TEXT_STYLE_FIELDS` into
+        // `ComponentDef::fields` at all (only `testdata.rs`'s Rust-literal builtin fixtures do, the
+        // same way `parser.rs`'s old text-DSL frontend used to) — this check specifically fires on
+        // a *duplicate* `font_size` entry, so the fixture is built by hand to reproduce that shape
+        // rather than parsed from any DSL text.
+        let mut fields = crate::text_style::text_style_field_defs();
+        fields.push(FieldDef {
+            name: "font_size".to_string(),
+            ty: "Option<f32>".to_string(),
+            kind: FieldKind::Prop,
+            attrs: Vec::new(),
+            initializer: None,
+        });
+        let component = ComponentDef {
+            name: "Foo".to_string(),
+            base: None,
+            base_path: None,
+            fields,
+            methods: Vec::new(),
+            embedded: false,
+            sealed: false,
+            native: false,
+            is_abstract: false,
+            text_style: true,
+            content_field: None,
+        };
+        let mut module = module_with_component(component, None);
         module.is_builtin = true;
         let modules: Vec<_> = std::iter::once(module)
             .chain(crate::test_builtin_modules())
@@ -2802,10 +2947,10 @@ component Foo {
     #[test]
     fn rejects_inherits_of_a_native_leaf_with_no_matching_view() {
         let src = r#"
-component MyWindow inherits Window {
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct MyWindow {
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("Window"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2823,14 +2968,13 @@ component MyWindow inherits Window {
     #[test]
     fn accepts_inherits_of_a_native_host_with_matching_view_root() {
         let src = r#"
-component MyWindow inherits Window {
-}
-
-view MyWindow {
-    Window { title: "x", content: TextBlock { text: "hi" } }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct MyWindow {
+            body: view! {
+                Window { title: "x", content: TextBlock { text: "hi" } }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("Window"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
@@ -2842,10 +2986,10 @@ view MyWindow {
     #[test]
     fn rejects_inherits_of_a_sealed_component() {
         let src = r#"
-component MyButton inherits Button {
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct MyButton {
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("Button"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errs = validate(&modules).unwrap_err();
@@ -2861,12 +3005,12 @@ component MyButton inherits Button {
     #[test]
     fn accepts_inheriting_a_logical_component_with_no_own_view() {
         let src = r#"
-component LabeledPanel inherits ContentControl {
-    #[param]
-    label: String,
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct LabeledPanel {
+            #[param]
+            label: String,
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("ContentControl"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
@@ -2878,16 +3022,15 @@ component LabeledPanel inherits ContentControl {
     #[test]
     fn accepts_full_view_override_of_a_logical_component_base() {
         let src = r#"
-component LabeledPanel inherits ContentControl {
-    #[param]
-    label: String,
-}
-
-view LabeledPanel {
-    VerticalLayout { TextBlock { text: label } }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct LabeledPanel {
+            #[param]
+            label: String,
+            body: view! {
+                VerticalLayout { TextBlock { text: label } }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("ContentControl"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
@@ -2897,18 +3040,20 @@ view LabeledPanel {
     /// when marked `#[override]` — otherwise it's an accidental-shadowing error.
     #[test]
     fn rejects_computed_field_override_without_override_attr() {
-        let src = r#"
-component Base {
-    #[computed]
-    label: String = "base".to_string(),
-}
-
-component Derived inherits Base {
-    #[computed]
-    label: String = "derived".to_string(),
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"struct Base { #[computed(expr = "base".to_string())] label: String, }"#,
+                None,
+            ),
+            (
+                Some("Base"),
+                r#"struct Derived { #[computed(expr = "derived".to_string())] label: String, }"#,
+                None,
+            ),
+        ])
+        .expect("should build");
+        let modules = vec![module];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("add #[override]")),
@@ -2918,43 +3063,73 @@ component Derived inherits Base {
 
     #[test]
     fn accepts_computed_field_override_with_override_attr() {
-        let src = r#"
-component Base inherits VerticalLayout {
-    #[computed]
-    label: String = "base".to_string(),
-}
-
-view Base { }
-
-component Derived inherits Base {
-    #[override]
-    #[computed]
-    label: String = "derived".to_string(),
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        // `#[override]` (bare, singular) isn't valid Rust syntax at all — `override` is a reserved
+        // keyword, and `attr_frontend::fields_from_item_struct`'s matching only recognizes the plain
+        // string `"override"` (never reachable via real struct-field-attribute syntax; the raw-
+        // identifier spelling `#[r#override]` parses to the ident text `"r#override"` instead, which
+        // doesn't match either) — so this field-level override marker currently has no working
+        // current-syntax spelling to parse from at all (docs/specs/dsl_spec.md §3 documents the
+        // *method*-level pair `#[overridable]`/`#[overrides]`, and says field-level uses the same
+        // `#[overrides]`, but `fields_from_item_struct` never implements that). Build the `Derived`
+        // component's `ComponentDef` by hand instead of parsing it, to keep testing
+        // `validate_field_overrides`'s own logic (`Attr::Override`) independent of that separate,
+        // pre-existing gap in the struct-field frontend.
+        let base_module = component_module(
+            Some("VerticalLayout"),
+            r#"struct Base { #[computed(expr = "base".to_string())] label: String, body: view! { }, }"#,
+        );
+        let derived = ComponentDef {
+            name: "Derived".to_string(),
+            base: Some("Base".to_string()),
+            base_path: None,
+            fields: vec![FieldDef {
+                name: "label".to_string(),
+                ty: "String".to_string(),
+                kind: FieldKind::Computed,
+                attrs: vec![Attr::Override],
+                initializer: Some(crate::ast::Initializer::Expr(
+                    syn::parse_str(r#""derived".to_string()"#).expect("expr should parse"),
+                )),
+            }],
+            methods: Vec::new(),
+            embedded: false,
+            sealed: false,
+            native: false,
+            is_abstract: false,
+            text_style: false,
+            content_field: None,
+        };
+        let modules = vec![base_module, module_with_component(derived, None)];
         assert_eq!(validate(&modules), Ok(()));
     }
 
     /// `#[override] fn` must name-match a base `#[virtual]` method with the same signature.
     #[test]
     fn rejects_override_method_with_no_matching_virtual_base_method() {
-        let src = r#"
-component Base {
-    #[virtual]
-    fn label(&self) -> String {
-        "base".to_string()
-    }
-}
-
-component Derived inherits Base {
-    #[override]
-    fn not_label(&self) -> String {
-        "derived".to_string()
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"struct Base {}"#,
+                Some(
+                    r#"impl Base {
+                        #[overridable]
+                        fn label(&self) -> String { "base".to_string() }
+                    }"#,
+                ),
+            ),
+            (
+                Some("Base"),
+                r#"struct Derived {}"#,
+                Some(
+                    r#"impl Derived {
+                        #[overrides]
+                        fn not_label(&self) -> String { "derived".to_string() }
+                    }"#,
+                ),
+            ),
+        ])
+        .expect("should build");
+        let modules = vec![module];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter()
@@ -2965,22 +3140,30 @@ component Derived inherits Base {
 
     #[test]
     fn rejects_override_method_with_mismatched_signature() {
-        let src = r#"
-component Base {
-    #[virtual]
-    fn label(&self) -> String {
-        "base".to_string()
-    }
-}
-
-component Derived inherits Base {
-    #[override]
-    fn label(&self, suffix: i32) -> String {
-        format!("derived{}", suffix)
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"struct Base {}"#,
+                Some(
+                    r#"impl Base {
+                        #[overridable]
+                        fn label(&self) -> String { "base".to_string() }
+                    }"#,
+                ),
+            ),
+            (
+                Some("Base"),
+                r#"struct Derived {}"#,
+                Some(
+                    r#"impl Derived {
+                        #[overrides]
+                        fn label(&self, suffix: i32) -> String { format!("derived{}", suffix) }
+                    }"#,
+                ),
+            ),
+        ])
+        .expect("should build");
+        let modules = vec![module];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("different signature")),
@@ -2990,36 +3173,42 @@ component Derived inherits Base {
 
     #[test]
     fn accepts_override_method_with_matching_signature() {
-        let src = r#"
-component Base inherits VerticalLayout {
-    #[virtual]
-    fn label(&self) -> String {
-        "base".to_string()
-    }
-}
-
-view Base { }
-
-component Derived inherits Base {
-    #[override]
-    fn label(&self) -> String {
-        format!("{}!", base::label())
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        let module = crate::test_module(&[
+            (
+                Some("VerticalLayout"),
+                r#"struct Base { body: view! { }, }"#,
+                Some(
+                    r#"impl Base {
+                        #[overridable]
+                        fn label(&self) -> String { "base".to_string() }
+                    }"#,
+                ),
+            ),
+            (
+                Some("Base"),
+                r#"struct Derived {}"#,
+                Some(
+                    r#"impl Derived {
+                        #[overrides]
+                        fn label(&self) -> String { format!("{}!", base::label()) }
+                    }"#,
+                ),
+            ),
+        ])
+        .expect("should build");
+        let modules = vec![module];
         assert_eq!(validate(&modules), Ok(()));
     }
 
     #[test]
     fn rejects_attached_field_without_default_value() {
         let src = r#"
-component Grid {
-    #[attached]
-    row: i32,
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        struct Grid {
+            #[attached]
+            row: i32,
+        }
+        "#;
+        let modules = vec![component_module(None, src)];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter().any(|e| e.contains("default value")),
@@ -3029,22 +3218,28 @@ component Grid {
 
     #[test]
     fn rejects_unknown_attached_property() {
-        let src = r#"
-component MyGrid {
-    #[attached]
-    row: i32 = 0,
-}
-
-component Foo {
-}
-
-view Foo {
-    VerticalLayout {
-        TextBlock { text: "hi", MyGrid::column: 1 }
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"struct MyGrid { #[attached(default = 0)] row: i32, }"#,
+                None,
+            ),
+            (
+                None,
+                r#"
+                struct Foo {
+                    body: view! {
+                        VerticalLayout {
+                            TextBlock { text: "hi", MyGrid::column: 1 }
+                        }
+                    },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should build");
+        let modules = vec![module];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter()
@@ -3056,16 +3251,15 @@ view Foo {
     #[test]
     fn rejects_attached_property_on_unknown_owner() {
         let src = r#"
-component Foo {
-}
-
-view Foo {
-    VerticalLayout {
-        TextBlock { text: "hi", NoSuchOwner::row: 1 }
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        struct Foo {
+            body: view! {
+                VerticalLayout {
+                    TextBlock { text: "hi", NoSuchOwner::row: 1 }
+                }
+            },
+        }
+        "#;
+        let modules = vec![component_module(None, src)];
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter()
@@ -3078,43 +3272,59 @@ view Foo {
     /// owner anywhere — like WPF, this is inert at runtime, not a static error.
     #[test]
     fn accepts_attached_property_even_when_not_nested_under_its_owner() {
-        let src = r#"
-component MyGrid {
-    #[attached]
-    row: i32 = 0,
-    #[attached]
-    column: i32 = 0,
-}
-
-component Foo inherits VerticalLayout {
-}
-
-view Foo {
-    TextBlock { text: "hi", MyGrid::row: 1, MyGrid::column: 0 }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"
+                struct MyGrid {
+                    #[attached(default = 0)]
+                    row: i32,
+                    #[attached(default = 0)]
+                    column: i32,
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("VerticalLayout"),
+                r#"
+                struct Foo {
+                    body: view! {
+                        TextBlock { text: "hi", MyGrid::row: 1, MyGrid::column: 0 }
+                    },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should build");
+        let modules = vec![module];
         assert_eq!(validate(&modules), Ok(()));
     }
 
     #[test]
     fn rejects_non_exhaustive_enum_match_in_a_view() {
-        let src = r#"
-enum Status { Loading, Ready }
-
-component Screen {
-    status: Status,
-}
-
-view Screen {
-    VerticalLayout {
-        match status {
-            Status::Loading => TextBlock { text: "loading" },
-        }
-    }
-}
-"#;
-        let modules = vec![parse_module(src).unwrap()];
+        let item_enum: syn::ItemEnum =
+            syn::parse_str("enum Status { Loading, Ready }").expect("enum should parse");
+        let enum_def = crate::component_frontend::enum_def_from_item_enum(&item_enum)
+            .expect("enum should build");
+        let mut module = component_module(
+            None,
+            r#"
+            struct Screen {
+                status: Status,
+                body: view! {
+                    VerticalLayout {
+                        match status {
+                            Status::Loading => TextBlock { text: "loading" },
+                        }
+                    }
+                },
+            }
+            "#,
+        );
+        module.items.insert(0, Item::Enum(enum_def));
+        let modules = vec![module];
         let errors = validate(&modules).unwrap_err();
         assert!(
             errors
@@ -3127,15 +3337,16 @@ view Screen {
     #[test]
     fn rejects_shortcut_on_non_routed_attribute() {
         let src = r#"
-component SaveField { }
-view SaveField {
-    Button {
-        #[shortcut("Ctrl+S")]
-        text: "Save"
-    }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct SaveField {
+            body: view! {
+                Button {
+                    #[shortcut("Ctrl+S")]
+                    text: "Save"
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
@@ -3148,15 +3359,16 @@ view SaveField {
     #[test]
     fn rejects_invalid_shortcut_key_spec() {
         let src = r#"
-component SaveField { }
-view SaveField {
-    Button {
-        #[shortcut("Hyper+S")]
-        on_click: save
-    }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct SaveField {
+            body: view! {
+                Button {
+                    #[shortcut("Hyper+S")]
+                    on_click: save
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
@@ -3169,15 +3381,16 @@ view SaveField {
     #[test]
     fn accepts_valid_shortcut_on_routed_attribute() {
         let src = r#"
-component SaveField inherits VerticalLayout { }
-view SaveField {
-    Button {
-        #[shortcut("Ctrl+S")]
-        on_click: save
-    }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct SaveField {
+            body: view! {
+                Button {
+                    #[shortcut("Ctrl+S")]
+                    on_click: save
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(Some("VerticalLayout"), src))
             .chain(crate::test_builtin_modules())
             .collect();
         assert_eq!(validate(&modules), Ok(()));
@@ -3186,13 +3399,13 @@ view SaveField {
     #[test]
     fn rejects_two_way_target_without_capability() {
         let src = r#"
-component Search {
-    #[state]
-    query: String = String::new(),
-}
-view Search { TextBlock { text <=> query } }
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(src).unwrap())
+        struct Search {
+            #[state(default = String::new())]
+            query: String,
+            body: view! { TextBlock { text <=> query } },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
@@ -3204,13 +3417,59 @@ view Search { TextBlock { text <=> query } }
         );
     }
 
+    /// Builds the `viewmodel Row` + `viewmodel Rows` + `component Search inherits VerticalLayout`
+    /// combination `validates_for_item_two_way_targets` exercises repeatedly, parameterized over
+    /// `Rows.rows`'s item type and the two-way target expression — the same two knobs the old
+    /// DSL-text version of this test turned via `str::replace` on one shared `valid_src` string.
+    fn for_item_two_way_modules(row_item_type: &str, two_way_target: &str) -> Vec<Module> {
+        let row_module = viewmodel_module_from_rust(
+            r#"
+            mod row_mod {
+                struct Row {
+                    #[observable(default = String::new())]
+                    content: String,
+                    #[computed(expr = content)]
+                    label: String,
+                }
+            }
+            "#,
+        );
+        let rows_module = viewmodel_module_from_rust(&format!(
+            r#"
+            mod rows_mod {{
+                struct Rows {{
+                    #[observable(default = Vec::new())]
+                    rows: Vec<{row_item_type}>,
+                }}
+            }}
+            "#
+        ));
+        let search_src = format!(
+            r#"
+            struct Search {{
+                #[bindable]
+                vm: Rc<Rows>,
+                body: view! {{
+                    for row in vm.rows {{ TextArea {{ text <=> {two_way_target} }} }}
+                }},
+            }}
+            "#
+        );
+        vec![
+            row_module,
+            rows_module,
+            component_module(Some("VerticalLayout"), &search_src),
+        ]
+    }
+
     #[test]
     fn validates_for_item_two_way_targets() {
         let expression_src = r#"
-component Search { }
-view Search { TextArea { text <=> format!("fixed") } }
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(expression_src).unwrap())
+        struct Search {
+            body: view! { TextArea { text <=> format!("fixed") } },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, expression_src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
@@ -3222,17 +3481,17 @@ view Search { TextArea { text <=> format!("fixed") } }
         );
 
         let for_src = r#"
-component Search {
-    #[param]
-    items: Vec<String>,
-}
-view Search {
-    VerticalLayout {
-        for item in items { TextArea { text <=> item.content } }
-    }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(for_src).unwrap())
+        struct Search {
+            #[param]
+            items: Vec<String>,
+            body: view! {
+                VerticalLayout {
+                    for item in items { TextArea { text <=> item.content } }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, for_src))
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
@@ -3243,50 +3502,42 @@ view Search {
             "errors: {errors:?}"
         );
 
-        let valid_src = r#"
-viewmodel Row {
-    #[observable]
-    content: String = String::new(),
-    #[computed]
-    label: String = content,
-}
-viewmodel Rows {
-    #[observable]
-    rows: Vec<Row> = Vec::new(),
-}
-component Search inherits VerticalLayout {
-    #[bindable]
-    vm: Rc<Rows>,
-}
-view Search {
-    for row in vm.rows { TextArea { text <=> row.content } }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(valid_src).unwrap())
+        let modules: Vec<_> = for_item_two_way_modules("Row", "row.content")
+            .into_iter()
             .chain(crate::test_builtin_modules())
             .collect();
         validate(&modules).expect("direct observable for-item field must be writable");
 
-        let explicit_rc_src = r#"
-viewmodel Row {
-    #[observable]
-    content: String = String::new(),
-}
-component Search inherits VerticalLayout {
-    #[param]
-    items: Vec<Rc<Row>>,
-}
-view Search {
-    for row in items { TextArea { text <=> row.content } }
-}
-"#;
-        let modules: Vec<_> = std::iter::once(parse_module(explicit_rc_src).unwrap())
-            .chain(crate::test_builtin_modules())
-            .collect();
+        let explicit_rc_row_module = viewmodel_module_from_rust(
+            r#"
+            mod explicit_rc_row_mod {
+                struct Row {
+                    #[observable(default = String::new())]
+                    content: String,
+                }
+            }
+            "#,
+        );
+        let explicit_rc_search_src = r#"
+        struct Search {
+            #[param]
+            items: Vec<Rc<Row>>,
+            body: view! {
+                for row in items { TextArea { text <=> row.content } }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [
+            explicit_rc_row_module,
+            component_module(Some("VerticalLayout"), explicit_rc_search_src),
+        ]
+        .into_iter()
+        .chain(crate::test_builtin_modules())
+        .collect();
         validate(&modules).expect("explicit Vec<Rc<T>> item field must be writable");
 
-        let computed_src = valid_src.replace("row.content", "row.label");
-        let modules: Vec<_> = std::iter::once(parse_module(&computed_src).unwrap())
+        let modules: Vec<_> = for_item_two_way_modules("Row", "row.label")
+            .into_iter()
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
@@ -3295,8 +3546,8 @@ view Search {
             "errors: {errors:?}"
         );
 
-        let nested_src = valid_src.replace("row.content", "row.content.value");
-        let modules: Vec<_> = std::iter::once(parse_module(&nested_src).unwrap())
+        let modules: Vec<_> = for_item_two_way_modules("Row", "row.content.value")
+            .into_iter()
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
@@ -3307,8 +3558,8 @@ view Search {
             "errors: {errors:?}"
         );
 
-        let transient_src = valid_src.replace("row.content", "format!(\"{}\", row.content)");
-        let modules: Vec<_> = std::iter::once(parse_module(&transient_src).unwrap())
+        let modules: Vec<_> = for_item_two_way_modules("Row", "format!(\"{}\", row.content)")
+            .into_iter()
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();
@@ -3319,8 +3570,8 @@ view Search {
             "errors: {errors:?}"
         );
 
-        let unresolved_src = valid_src.replace("Vec<Row>", "Vec<Missing>");
-        let modules: Vec<_> = std::iter::once(parse_module(&unresolved_src).unwrap())
+        let modules: Vec<_> = for_item_two_way_modules("Missing", "row.content")
+            .into_iter()
             .chain(crate::test_builtin_modules())
             .collect();
         let errors = validate(&modules).unwrap_err();

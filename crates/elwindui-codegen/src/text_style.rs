@@ -1,6 +1,7 @@
 //! The seven fields `#[text_style]` (指示書 §9, `docs/specs/dsl_spec.md` 付録A) injects into a
-//! component's field set — shared by `parser.rs` (injection) and `validate.rs` (duplicate-name
-//! checking) so the two can never drift out of sync with each other.
+//! `#[text_style]` builtin's field set — shared by `testdata.rs` (injection, for the real builtins
+//! that carry the attribute) and `validate.rs` (duplicate-name checking) so the two can never drift
+//! out of sync with each other.
 
 #[cfg(test)]
 use crate::ast::{Attr, FieldDef, FieldKind};
@@ -22,11 +23,14 @@ pub(crate) const TEXT_STYLE_FIELDS: [(&str, &str); 7] = [
     ("foreground", "Option<elwindui::core::graphics::Brush>"),
 ];
 
-/// Builds the seven injected `FieldDef`s, in the order above — `parser.rs`'s test-only
-/// `Parser::parse_module` prepends these to a `#[text_style]` component's own hand-written fields
-/// (指示書 §9's ban on hand-writing the same six-plus-one properties per component). The macro-path
-/// frontend (`component_frontend.rs`, production) injects the same fields its own way and never
-/// calls this.
+/// Builds the seven injected `FieldDef`s, in the order above — `testdata.rs`'s `builtin_component`
+/// prepends these to a `#[text_style]` builtin's own hand-written fields (指示書 §9's ban on
+/// hand-writing the same six-plus-one properties per component). Real `#[elwindui::component]`
+/// usage never calls this: `#[text_style]` is only ever legal on a `Module::is_builtin` component
+/// (`validate::validate`), and `component_frontend.rs` never injects these as literal `FieldDef`s at
+/// all — a `#[text_style]` field reference is resolved dynamically at codegen time instead
+/// (`codegen.rs`'s `is_text_style_field_name` checks), regardless of which frontend produced the
+/// `ComponentDef`.
 #[cfg(test)]
 pub(crate) fn text_style_field_defs() -> Vec<FieldDef> {
     TEXT_STYLE_FIELDS

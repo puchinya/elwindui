@@ -11,24 +11,24 @@ pub struct Module {
     pub path: Vec<String>,
     pub uses: Vec<UseDecl>,
     pub items: Vec<Item>,
-    /// Whether this module came from `elwindui-codegen`'s own test-only `TEST_BUILTIN_SHAPE_SOURCE`
+    /// Whether this module came from `elwindui-codegen`'s own test-only `testdata::test_builtin_modules`
     /// (`lib.rs::test_builtin_modules`, `#[cfg(test)]` only, set there) rather than a consumer's own
     /// source directory. `validate::validate` uses this to gate `#[text_style]`, and (test-only
-    /// `parser.rs` frontend only — see `ComponentDef::embedded`/`.native`'s own doc comments)
+    /// fixture only — see `ComponentDef::embedded`/`.native`'s own doc comments)
     /// `#[embedded]`/`#[native]`, to that fixture — never `true` for any real (non-test) module, since
     /// nothing in production ever constructs one this way.
     pub is_builtin: bool,
     /// Whether this module was built by `component_frontend.rs` from a real `#[elwindui::component]`
     /// Rust struct (`generate_component_from_item_struct`'s own module, or one of
-    /// `component_frontend::sibling_component_modules`), as opposed to `parser::parse_module`'s
-    /// text-based DSL frontend. Defaults to `false` (`Module`'s `Default`), matching every
-    /// `parser::parse_module` output — real DSL text has no notion of "a type that exists in
-    /// real Rust but isn't declared anywhere in this compilation unit's own AST", so an unresolved
-    /// name there is always a genuine typo (`check_element_value`'s `None` arm relies on this to
-    /// keep catching them). A proc-macro-built module, by contrast, may legitimately reference a
+    /// `component_frontend::sibling_component_modules`), which may legitimately reference a
     /// builtin/class declared entirely in `elwindui-core`/a backend crate with no local `TypeInfo`
-    /// at all (`codegen::emit_external_construction`'s whole reason for existing) — `check_element_value`
-    /// uses this flag, not `table.resolve`'s `None` alone, to tell that apart from a typo.
+    /// at all (`codegen::emit_external_construction`'s whole reason for existing). Defaults to
+    /// `false` (`Module`'s `Default`) — a hand-assembled test-only `Module` (`lib.rs::test_module`,
+    /// `testdata::test_builtin_modules`) has no such excuse for an unresolved name, so leaving it
+    /// unset there keeps `check_element_value`'s `None` arm treating one as a genuine typo, the same
+    /// as any other test fixture that never chains in the real builtin/sibling modules it
+    /// references. `check_element_value` uses this flag, not `table.resolve`'s `None` alone, to tell
+    /// a legitimate external reference apart from a typo.
     pub allows_external_builtins: bool,
 }
 
@@ -108,13 +108,12 @@ pub struct ComponentDef {
     pub fields: Vec<FieldDef>,
     pub methods: Vec<MethodDef>,
     /// `#[embedded]`: marks this component as one of `elwindui-codegen`'s own test-only builtin
-    /// shape declarations (`TEST_BUILTIN_SHAPE_SOURCE`) — `validate::validate` rejects it on a
-    /// component whose `Module::is_builtin` is `false`. **Not a real DSL attribute** —
-    /// `component_frontend.rs` (the real, production frontend for `#[elwindui::component]`) doesn't
-    /// even recognize the name; only `parser.rs`'s test-only textual-DSL frontend does, so this field
-    /// is always `false` for any real (non-test) `ComponentDef`. Real builtins are declared via
-    /// `#[elwindui_macros::class]` in `elwindui-core`/backend crates, entirely outside
-    /// `elwindui-codegen`'s own AST.
+    /// shape declarations (`testdata::test_builtin_modules`) — `validate::validate` rejects it on a
+    /// component whose `Module::is_builtin` is `false`. **Not a real DSL attribute** — no current
+    /// DSL syntax (text or `#[elwindui::component]` struct) can express it; `testdata.rs` sets it
+    /// directly as a Rust struct-literal field, so this field is always `false` for any real
+    /// (non-test) `ComponentDef`. Real builtins are declared via `#[elwindui_macros::class]` in
+    /// `elwindui-core`/backend crates, entirely outside `elwindui-codegen`'s own AST.
     pub embedded: bool,
     /// `#[sealed]` (same position): marks this component as unable to be named as a `base` in
     /// `component X inherits Y` — `validate::validate_inherits` rejects `inherits` naming a sealed
@@ -263,9 +262,9 @@ pub enum Attr {
     /// `#[bindable]`: shorthand for `#[param] #[inject]` on a field whose type is expected to
     /// implement `elwindui::core::reactive::ObservableExt` (currently: a `viewmodel`) — the
     /// canonical, project-wide way to inject a viewmodel into a `component` (docs/design/runtime/state_management_design.md). Parsing
-    /// this attribute (`parser::parse_field_def`/`attr_frontend::fields_from_item_struct`) sets
-    /// `FieldKind::Param` and pushes `Attr::Inject` alongside it, exactly as if both had been
-    /// written by hand — so `#[bindable]` never appears without `Inject` also present.
+    /// this attribute (`attr_frontend::fields_from_item_struct`) sets `FieldKind::Param` and pushes
+    /// `Attr::Inject` alongside it, exactly as if both had been written by hand — so `#[bindable]`
+    /// never appears without `Inject` also present.
     ///
     /// Unlike plain `#[inject]` (also used for non-reactive dependencies, e.g. docs/design/runtime/state_management_design.md `store`),
     /// `#[bindable]` is what `codegen.rs`'s `generate_view` looks for when deciding which fields

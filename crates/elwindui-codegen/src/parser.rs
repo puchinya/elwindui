@@ -1,25 +1,13 @@
-//! Hand-written lexer-free recursive-descent parser for the DSL's own structural syntax
-//! (`use`/`enum`/`component`/`viewmodel`/`view`). Field/attribute-value expressions that aren't
-//! one of the DSL's own macro forms (`once!`, `command!`, `t!`) are handed off to `syn` for real
-//! parsing. See docs/specs/dsl_spec.md §1-14.
+//! Hand-written lexer-free recursive-descent parser for a `view! { .. }` macro body's own inner
+//! syntax (element trees, control flow, closures, attached-property setters, ...). Field/attribute-
+//! value expressions that aren't one of the DSL's own macro forms (`once!`, `command!`, `t!`) are
+//! handed off to `syn` for real parsing. `component`/`viewmodel`/`enum`/`use` items are current-
+//! syntax Rust items instead (`#[elwindui::component]` struct+impl, `#[elwindui::viewmodel]` mod,
+//! `#[elwindui::dsl_enum]` enum, ordinary `use`), parsed by `component_frontend.rs`/`attr_frontend.rs`
+//! via `syn` — this module only ever parses what a `view! { .. }` macro invocation's tokens contain.
+//! See docs/specs/dsl_spec.md §1-14.
 
 use crate::ast::*;
-
-/// Test-only (Refs #14's "未解決の論点"): production code no longer parses whole text-form
-/// modules — the top-level `component`/`view`/`viewmodel`/`enum`/`use` structure `Parser::
-/// parse_module` (below) recognizes only ever existed to feed the removed `build.rs`/`compile_dir`
-/// path (see `lib.rs`'s own `TEST_BUILTIN_SHAPE_SOURCE` doc comment). `parse_view_body`/
-/// `parse_initializer` stay real production API — `view! { .. }`'s own *contents* are still this
-/// same hand-written DSL text, by design (Issue #14's own non-goals), just no longer wrapped in a
-/// top-level `component`/`view` pair. Kept `#[cfg(test)]` rather than deleted (and this crate's
-/// ~105 existing `parser.rs`/`validate.rs`/`codegen.rs`/`component_frontend.rs` tests rather than
-/// rewritten) since every one of them already exercises real parser/validator/codegen behavior
-/// through this same entry point — rewriting all of them to build `ast::Module` values by hand
-/// would trade a large, low-value mechanical diff for no behavioral coverage gained.
-#[cfg(test)]
-pub(crate) fn parse_module(src: &str) -> Result<Module, String> {
-    Parser::new(src).parse_module()
-}
 
 /// Parses the content that would appear inside `view Name { <this> }` — on_mount/on_unmount
 /// blocks, `let`-bindings, then the root body — from a standalone string with no enclosing
@@ -42,16 +30,15 @@ pub fn parse_view_body(
     Parser::new(&format!("{src}\n}}")).parse_view_body_tail()
 }
 
-/// Parses a single field/attribute initializer expression from standalone text, exactly like the
-/// `= ...` right-hand side of a DSL field declaration (`parse_field_def`).
+/// Parses a single field/attribute initializer expression from standalone text — the
+/// `default = ...`/`expr = ...` right-hand side of a `#[prop(default = ...)]`/`#[computed(expr =
+/// ...)]`-style field attribute (`attr_frontend::fields_from_item_struct`).
 pub fn parse_initializer(src: &str) -> Result<Initializer, String> {
-    // Unlike the `= ...` right-hand side of a hand-written DSL field declaration (parsed by
-    // `self.parse_initializer()` below while more source always follows, guaranteeing a trailing
-    // `,`/`}` for the plain-expression fallback's `take_balanced_until` to find), `src` here is a
-    // whole, self-contained attribute-token string (`parse_name_value_tokens`'s `tokens.to_string()`)
-    // with nothing after it — so a bare literal/expr default (`#[prop(default = 50)]`) would hit
-    // EOF before any terminator and fail. Appending a synthetic terminator gives that fallback the
-    // same trailing character a hand-written field declaration always has.
+    // `src` here is a whole, self-contained attribute-token string
+    // (`parse_name_value_tokens`'s `tokens.to_string()`) with nothing after it — so a bare
+    // literal/expr default (`#[prop(default = 50)]`) would hit EOF before any terminator and fail
+    // the plain-expression fallback's `take_balanced_until` lookup. Appending a synthetic
+    // terminator gives that fallback a trailing character to find.
     Parser::new(&format!("{src}}}")).parse_initializer()
 }
 
@@ -65,470 +52,14 @@ impl<'a> Parser<'a> {
         Parser { src, pos: 0 }
     }
 
-    #[cfg(test)]
-    fn parse_module(&mut self) -> Result<Module, String> {
-        let mut uses = Vec::new();
-        let mut items = Vec::new();
-
-        loop {
-            self.skip_trivia();
-            if self.at_eof() {
-                break;
-            }
-            let (embedded, sealed, native, is_abstract, text_style, content_field) =
-                self.parse_item_attrs()?;
-            if self.eat_keyword("use") {
-                self.reject_item_attrs(
-                    embedded,
-                    sealed,
-                    native,
-                    is_abstract,
-                    text_style,
-                    &content_field,
-                    "use",
-                )?;
-                uses.push(self.parse_use_decl()?);
-            } else if self.eat_keyword("enum") {
-                self.reject_item_attrs(
-                    embedded,
-                    sealed,
-                    native,
-                    is_abstract,
-                    text_style,
-                    &content_field,
-                    "enum",
-                )?;
-                items.push(Item::Enum(self.parse_enum_def()?));
-            } else if self.eat_keyword("component") {
-                items.push(Item::Component(self.parse_fields_block(
-                    FieldKind::Prop,
-                    |name, base, mut fields, methods| {
-                        // Injected first, ahead of the component's own hand-written fields, so
-                        // `resolve_effective_fields`'s "first still-unclaimed field" positional
-                        // fallbacks (bare-nested-child, etc.) see them in the same relative order
-                        // every other builtin field appears in (指示書 §9).
-                        if text_style {
-                            let mut injected = crate::text_style::text_style_field_defs();
-                            injected.append(&mut fields);
-                            fields = injected;
-                        }
-                        ComponentDef {
-                            name,
-                            base,
-                            // The DSL text frontend's `inherits Base` has no qualified-path spelling
-                            // (that's Rust-macro-only syntax, see `ComponentDef::base_path`'s own doc
-                            // comment) — always `None` here.
-                            base_path: None,
-                            fields,
-                            methods,
-                            embedded,
-                            sealed,
-                            native,
-                            is_abstract,
-                            text_style,
-                            content_field,
-                        }
-                    },
-                )?));
-            } else if self.eat_keyword("viewmodel") {
-                self.reject_item_attrs(
-                    embedded,
-                    sealed,
-                    native,
-                    is_abstract,
-                    text_style,
-                    &content_field,
-                    "viewmodel",
-                )?;
-                items.push(Item::ViewModel(self.parse_fields_block(
-                    FieldKind::Observable,
-                    |name, _base, fields, _methods| ViewModelDef { name, fields },
-                )?));
-            } else if self.eat_keyword("view") {
-                self.reject_item_attrs(
-                    embedded,
-                    sealed,
-                    native,
-                    is_abstract,
-                    text_style,
-                    &content_field,
-                    "view",
-                )?;
-                items.push(Item::View(self.parse_view_def()?));
-            } else {
-                return Err(self.err("expected `use`/`enum`/`component`/`viewmodel`/`view`"));
-            }
-        }
-
-        // `parse_module` only ever sees source text, not a file path — real module paths (docs/design/tools/codegen_design.md)
-        // are assigned by the caller (`compile_dir_impl`), which knows where each file actually
-        // lands in the crate. Defaults to `[]` (crate root), matching `Module`'s `Default`.
-        Ok(Module {
-            path: Vec::new(),
-            uses,
-            items,
-            ..Default::default()
-        })
-    }
-
-    /// `#[sealed]`/`#[abstract]`/`#[text_style]`/`#[content(field_name)]` (docs/specs/dsl_spec.md
-    /// 付録A) plus `#[embedded]`/`#[native]`, written immediately before a top-level item — only
-    /// meaningful on `component` (see `reject_item_attrs`). Zero or more, any order; unknown
-    /// attribute names are a parse error just like the field-level `#[...]` loop
-    /// (`parse_field_def`) this mirrors. `#[embedded]`/`#[native]` are no longer part of
-    /// `docs/specs/dsl_spec.md`'s user-facing surface — this test-only parser still recognizes them
-    /// solely to feed `lib.rs::test_builtin_modules`'s `TEST_BUILTIN_SHAPE_SOURCE` fixture (see
-    /// `component_frontend.rs::component_item_attrs`'s own doc comment, the real production
-    /// frontend, for why they're dead there).
-    #[cfg(test)]
-    #[allow(clippy::type_complexity)]
-    fn parse_item_attrs(
-        &mut self,
-    ) -> Result<(bool, bool, bool, bool, bool, Option<String>), String> {
-        let mut embedded = false;
-        let mut sealed = false;
-        let mut native = false;
-        let mut is_abstract = false;
-        let mut text_style = false;
-        let mut content_field = None;
-        loop {
-            self.skip_trivia();
-            if !self.eat_char('#') {
-                break;
-            }
-            self.expect_char('[')?;
-            let attr_name = self.parse_ident()?;
-            match attr_name.as_str() {
-                "embedded" => embedded = true,
-                "sealed" => sealed = true,
-                "native" => native = true,
-                "abstract" => is_abstract = true,
-                "text_style" => text_style = true,
-                "content" => {
-                    self.expect_char('(')?;
-                    content_field = Some(self.parse_ident()?);
-                    self.expect_char(')')?;
-                }
-                other => {
-                    return Err(self.err(&format!(
-                        "unknown item attribute #[{other}] (expected `embedded`, `sealed`, `native`, `abstract`, `text_style`, or `content(field_name)`)"
-                    )))
-                }
-            }
-            self.expect_char(']')?;
-            self.skip_trivia();
-        }
-        Ok((
-            embedded,
-            sealed,
-            native,
-            is_abstract,
-            text_style,
-            content_field,
-        ))
-    }
-
-    /// `#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(..)]` only
-    /// make sense on `component` — reject them (with a clear error naming the offending keyword)
-    /// if `parse_item_attrs` found any ahead of anything else.
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    fn reject_item_attrs(
-        &self,
-        embedded: bool,
-        sealed: bool,
-        native: bool,
-        is_abstract: bool,
-        text_style: bool,
-        content_field: &Option<String>,
-        keyword: &str,
-    ) -> Result<(), String> {
-        if embedded || sealed || native || is_abstract || text_style || content_field.is_some() {
-            return Err(self.err(&format!(
-                "`#[embedded]`/`#[sealed]`/`#[native]`/`#[abstract]`/`#[text_style]`/`#[content(..)]` may only precede `component`, not `{keyword}`"
-            )));
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn parse_use_decl(&mut self) -> Result<UseDecl, String> {
-        let mut path = vec![self.parse_ident()?];
-        while self.eat_str("::") {
-            path.push(self.parse_ident()?);
-        }
-        self.expect_char(';')?;
-        Ok(UseDecl { path })
-    }
-
-    #[cfg(test)]
-    fn parse_enum_def(&mut self) -> Result<EnumDef, String> {
-        let name = self.parse_ident()?;
-        self.expect_char('{')?;
-        let mut variants = Vec::new();
-        loop {
-            self.skip_trivia();
-            if self.eat_char('}') {
-                break;
-            }
-            variants.push(self.parse_ident()?);
-            self.skip_trivia();
-            self.eat_char(',');
-        }
-        Ok(EnumDef { name, variants })
-    }
-
-    /// Parses `Name [inherits Base] { field/method, ... }` for both `component` and `viewmodel`
-    /// (§3, docs/design/runtime/state_management_design.md share the same field grammar). `default_kind` is `Prop` for `component`,
-    /// `Observable` for `viewmodel` (a field with no kind attribute defaults to its container's
-    /// usual kind). `inherits` is only meaningful for `component` (see `ComponentDef::base`'s doc
-    /// comment) — parsed here regardless since the grammar up to `{` is otherwise identical, but
-    /// `viewmodel`'s `build` closure simply discards it and `methods` (`fn`-shaped entries, §3's
-    /// `#[virtual]`/`#[override]` hooks — only meaningful for `component`).
-    #[cfg(test)]
-    fn parse_fields_block<T>(
-        &mut self,
-        default_kind: FieldKind,
-        build: impl FnOnce(String, Option<String>, Vec<FieldDef>, Vec<MethodDef>) -> T,
-    ) -> Result<T, String> {
-        let name = self.parse_ident()?;
-        self.skip_trivia();
-        let base = if self.eat_keyword("inherits") {
-            self.skip_trivia();
-            Some(self.parse_ident()?)
-        } else {
-            None
-        };
-        self.skip_trivia();
-        self.expect_char('{')?;
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
-        loop {
-            self.skip_trivia();
-            if self.eat_char('}') {
-                break;
-            }
-            if self.looks_like_method() {
-                methods.push(self.parse_method_def()?);
-            } else {
-                fields.push(self.parse_field_def(default_kind)?);
-            }
-        }
-        Ok(build(name, base, fields, methods))
-    }
-
-    /// Lookahead-and-rewind: a field/method entry both start with zero or more `#[...]`
-    /// attributes; the entry is a method iff `fn` follows them (a field name can never be the
-    /// literal identifier `fn`, since it's a reserved Rust keyword).
-    #[cfg(test)]
-    fn looks_like_method(&mut self) -> bool {
-        let save = self.pos;
-        let is_method = self.try_skip_attrs_and_check_fn();
-        self.pos = save;
-        is_method
-    }
-
-    #[cfg(test)]
-    fn try_skip_attrs_and_check_fn(&mut self) -> bool {
-        loop {
-            self.skip_trivia();
-            if !self.eat_char('#') {
-                break;
-            }
-            if self.expect_char('[').is_err() {
-                return false;
-            }
-            if self.take_balanced_until(&[']']).is_err() {
-                return false;
-            }
-            if self.expect_char(']').is_err() {
-                return false;
-            }
-        }
-        self.eat_keyword("fn")
-    }
-
-    /// `[#[virtual]|#[override]]? fn name(&self, param: Type, ...) [-> RetTy] { body }` (§3).
-    #[cfg(test)]
-    fn parse_method_def(&mut self) -> Result<MethodDef, String> {
-        let mut is_virtual = false;
-        let mut is_override = false;
-        loop {
-            self.skip_trivia();
-            if !self.eat_char('#') {
-                break;
-            }
-            self.expect_char('[')?;
-            let attr_name = self.parse_ident()?;
-            match attr_name.as_str() {
-                "virtual" => is_virtual = true,
-                "override" => is_override = true,
-                other => return Err(self.err(&format!("unknown method attribute #[{other}]"))),
-            }
-            self.expect_char(']')?;
-        }
-
-        self.skip_trivia();
-        if !self.eat_keyword("fn") {
-            return Err(self.err("expected `fn`"));
-        }
-        self.skip_trivia();
-        let name = self.parse_ident()?;
-        self.skip_trivia();
-        self.expect_char('(')?;
-        self.skip_trivia();
-        if !self.eat_str("&self") {
-            return Err(self.err("expected `&self` as a method's first parameter"));
-        }
-        self.skip_trivia();
-        self.eat_char(',');
-
-        let mut params = Vec::new();
-        loop {
-            self.skip_trivia();
-            if self.eat_char(')') {
-                break;
-            }
-            let param_name = self.parse_ident()?;
-            self.skip_trivia();
-            self.expect_char(':')?;
-            let ty_src = self.take_balanced_until(&[',', ')'])?;
-            let ty = syn::parse_str::<syn::Type>(ty_src.trim())
-                .map_err(|e| format!("invalid method param type: {e}"))?;
-            params.push((param_name, ty));
-            self.skip_trivia();
-            self.eat_char(',');
-        }
-
-        self.skip_trivia();
-        let return_ty = if self.eat_str("->") {
-            self.skip_trivia();
-            let ty_src = self.take_balanced_until(&['{'])?;
-            Some(
-                syn::parse_str::<syn::Type>(ty_src.trim())
-                    .map_err(|e| format!("invalid method return type: {e}"))?,
-            )
-        } else {
-            None
-        };
-
-        self.skip_trivia();
-        let body_src = self.take_block_src()?;
-        let body = syn::parse_str::<syn::Block>(&body_src)
-            .map_err(|e| format!("invalid method body: {e}"))?;
-
-        self.skip_trivia();
-        self.eat_char(',');
-
-        Ok(MethodDef {
-            name,
-            is_virtual,
-            is_override,
-            params,
-            return_ty,
-            body,
-        })
-    }
-
-    #[cfg(test)]
-    fn parse_field_def(&mut self, default_kind: FieldKind) -> Result<FieldDef, String> {
-        let mut kind = default_kind;
-        let mut explicit_kind: Option<String> = None;
-        let mut attrs = Vec::new();
-
-        loop {
-            self.skip_trivia();
-            if !self.eat_char('#') {
-                break;
-            }
-            self.expect_char('[')?;
-            let attr_name = self.parse_ident()?;
-            match attr_name.as_str() {
-                "param" | "prop" | "state" | "observable" | "computed" | "attached" => {
-                    if let Some(previous) = &explicit_kind {
-                        return Err(self.err(&format!(
-                            "conflicting field attributes #[{previous}] and #[{attr_name}]"
-                        )));
-                    }
-                    explicit_kind = Some(attr_name.clone());
-                    kind = match attr_name.as_str() {
-                        "param" => FieldKind::Param,
-                        "prop" => FieldKind::Prop,
-                        "state" => FieldKind::State,
-                        "observable" => FieldKind::Observable,
-                        "computed" => FieldKind::Computed,
-                        "attached" => FieldKind::Attached,
-                        _ => unreachable!(),
-                    };
-                }
-                "inject" => attrs.push(Attr::Inject),
-                "bindable" => {
-                    if let Some(previous) = &explicit_kind {
-                        return Err(self.err(&format!(
-                            "conflicting field attributes #[{previous}] and #[bindable]"
-                        )));
-                    }
-                    explicit_kind = Some("bindable".to_string());
-                    kind = FieldKind::Param;
-                    attrs.push(Attr::Inject);
-                    attrs.push(Attr::Bindable);
-                }
-                "two_way" => attrs.push(Attr::TwoWay),
-                "routed" => attrs.push(Attr::Routed),
-                "override" => attrs.push(Attr::Override),
-                "onetime" => attrs.push(Attr::Onetime),
-                "length" => {
-                    self.expect_char('(')?;
-                    let range_src = self.take_balanced_until(&[')'])?;
-                    let (start, end, inclusive) = parse_range(&range_src)?;
-                    self.expect_char(')')?;
-                    attrs.push(Attr::Length {
-                        start,
-                        end,
-                        inclusive,
-                    });
-                }
-                other => return Err(self.err(&format!("unknown attribute #[{other}]"))),
-            }
-            self.expect_char(']')?;
-        }
-
-        self.skip_trivia();
-        let name = self.parse_ident()?;
-        self.skip_trivia();
-        self.expect_char(':')?;
-        let ty = self
-            .take_balanced_until(&['=', ',', '}'])
-            .map(|s| s.trim().to_string())?;
-
-        self.skip_trivia();
-        let initializer = if self.eat_char('=') {
-            self.skip_trivia();
-            Some(self.parse_initializer()?)
-        } else {
-            None
-        };
-
-        self.skip_trivia();
-        self.eat_char(',');
-
-        Ok(FieldDef {
-            name,
-            ty,
-            kind,
-            attrs,
-            initializer,
-        })
-    }
-
     /// Parses the comma-separated contents of `#[shortcut(...)]`, *not* including the surrounding
     /// parens (the caller already consumed the opening one and consumes the closing one). Each
     /// entry is either a bare string literal (`"Ctrl+S"`, a chord for every backend with no more
     /// specific entry), `scope: local`/`scope: global` (sets `ShortcutScope`, default `Global`), or
     /// `backend_name: "chord"` (a per-backend override, e.g. `winui3: "Ctrl+S"`) — see
     /// `ast::ElementNode::attribute_shortcuts`'s own doc comment. Called from
-    /// `parse_element_body`'s attribute-prefix handling, *not* from `parse_field_def` — a shortcut
-    /// is a per-usage-site annotation, not part of any field's own declaration.
+    /// `parse_element_body`'s attribute-prefix handling, *not* from any field-declaration parser —
+    /// a shortcut is a per-usage-site annotation, not part of any field's own declaration.
     fn parse_shortcut_attr(
         &mut self,
     ) -> Result<(Vec<(Option<String>, String)>, ShortcutScope), String> {
@@ -588,25 +119,10 @@ impl<'a> Parser<'a> {
         Ok(Initializer::Expr(expr))
     }
 
-    #[cfg(test)]
-    fn parse_view_def(&mut self) -> Result<ViewDef, String> {
-        let target = self.parse_ident()?;
-        self.expect_char('{')?;
-        self.skip_trivia();
-        let (on_mount, on_unmount, lets, root) = self.parse_view_body_tail()?;
-        Ok(ViewDef {
-            target,
-            on_mount,
-            on_unmount,
-            lets,
-            root,
-        })
-    }
-
-    /// The part of `view Name { <this> }` that follows the opening `{` — on_mount/on_unmount
-    /// blocks, `let`-bindings, then the root body (attributes/attached/children). Factored out of
-    /// `parse_view_def` so `parse_view_body` (below) can parse the same content standalone, with
-    /// no `target`/wrapping braces of its own — see that function's doc comment.
+    /// The part of a `view! { <this> }` macro body — on_mount/on_unmount blocks, `let`-bindings,
+    /// then the root body (attributes/attached/children). Wrapped by `parse_view_body` (above),
+    /// which parses this same content standalone, with no `target`/wrapping braces of its own — see
+    /// that function's doc comment.
     #[allow(clippy::type_complexity)]
     fn parse_view_body_tail(
         &mut self,
@@ -721,9 +237,9 @@ impl<'a> Parser<'a> {
 
     /// The part of an element's `{ ... }` body that follows the opening `{` — attribute/attached-
     /// property lines and bare/control-flow child entries, up to (and consuming) the matching `}`.
-    /// Shared between `parse_element_node` (called after its own `type_path {`) and `parse_view_def`
-    /// (called after `view Name {`, which — unlike an element — names no type of its own; see
-    /// `ast::ViewBody`).
+    /// Shared between `parse_element_node` (called after its own `type_path {`) and
+    /// `parse_view_body_tail` (called after a `view! { .. }` macro's own leading on_mount/on_unmount/
+    /// `let`-bindings, which — unlike an element — name no type of their own; see `ast::ViewBody`).
     #[allow(clippy::type_complexity)]
     fn parse_element_body(
         &mut self,
@@ -755,8 +271,9 @@ impl<'a> Parser<'a> {
             // `#[shortcut(...)]` (docs/design/runtime/input_focus_design.md) — the only
             // attribute-prefix syntax an element body supports today (unlike `#[id("...")]`, which
             // only ever precedes a `let` binding, never an ordinary attribute line — see
-            // `parse_view_def`). Must be immediately followed by a plain `ident: value` attribute
-            // line; it annotates that specific attribute's value, not a child or attached property.
+            // `parse_view_body_tail`). Must be immediately followed by a plain `ident: value`
+            // attribute line; it annotates that specific attribute's value, not a child or attached
+            // property.
             let mut pending_shortcut = None;
             if self.peek_char() == Some('#') {
                 self.eat_char('#');
@@ -848,8 +365,8 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 // bare identifier with neither `:` nor `{` following: a reference to an earlier
-                // `#[id(...)]? let <ident> = ...;` binding (see `parse_view_def`), e.g. `Column {
-                // editor, StatusBar {} }`'s `editor`.
+                // `#[id(...)]? let <ident> = ...;` binding (see `parse_view_body_tail`), e.g.
+                // `Column { editor, StatusBar {} }`'s `editor`.
                 children.push(ChildEntry::Ref(ident));
             }
             self.skip_trivia();
@@ -1629,47 +1146,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_style_attribute_injects_seven_fields_ahead_of_own_fields() {
-        let module = parse_module(
-            r#"
-                #[text_style]
-                component FontHost {
-                    label: String,
-                }
-            "#,
-        )
-        .expect("#[text_style] source should parse");
-        let Item::Component(c) = &module.items[0] else {
-            panic!("expected component");
-        };
-        assert!(c.text_style);
-        let names: Vec<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "font_family",
-                "font_size",
-                "font_weight",
-                "font_style",
-                "font_stretch",
-                "character_spacing",
-                "foreground",
-                "label",
-            ]
-        );
-        assert_eq!(
-            c.fields[1].ty, // font_size
-            "Option<f32>"
-        );
-        assert!(
-            c.fields[1]
-                .attrs
-                .iter()
-                .any(|a| matches!(a, Attr::TextStyle))
-        );
-    }
-
-    #[test]
     fn parses_theme_macro_as_a_rust_macro_expression() {
         let mut parser = Parser::new("theme!(AppTheme::layout_background)");
         let expression = parser
@@ -1680,63 +1156,21 @@ mod tests {
     }
 
     #[test]
-    fn text_style_attribute_rejected_before_use_enum_viewmodel_view() {
-        for keyword_src in [
-            "#[text_style] use foo::Bar;",
-            "#[text_style] enum E { A }",
-            "#[text_style] viewmodel V { }",
-            "#[text_style] view V { TextBlock { text: \"a\" } }",
-        ] {
-            let err = parse_module(keyword_src)
-                .expect_err("#[text_style] should be rejected outside `component`");
-            assert!(
-                err.contains("text_style"),
-                "error should mention text_style: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn text_style_combines_with_embedded_and_abstract() {
-        let module = parse_module(
-            r#"
-                #[embedded]
-                #[abstract]
-                #[text_style]
-                component FontHost { }
-            "#,
-        )
-        .expect("combined attributes should parse");
-        let Item::Component(c) = &module.items[0] else {
-            panic!("expected component");
-        };
-        assert!(c.embedded);
-        assert!(c.is_abstract);
-        assert!(c.text_style);
-    }
-
-    #[test]
     fn parses_dynamic_if_match_and_for_children() {
-        let module = parse_module(
+        let (_, _, _, root) = parse_view_body(
             r#"
-                component DynamicHost { }
-                view DynamicHost {
-                    VerticalLayout {
-                        if vm.visible { TextBlock { text: "yes" } } else { TextBlock { text: "no" } }
-                        match vm.status {
-                            Status::Ready => { TextBlock { text: "ready" } }
-                            _ => { TextBlock { text: "other" } }
-                        }
-                        for item in vm.items { TextBlock { text: "item" } }
+                VerticalLayout {
+                    if vm.visible { TextBlock { text: "yes" } } else { TextBlock { text: "no" } }
+                    match vm.status {
+                        Status::Ready => { TextBlock { text: "ready" } }
+                        _ => { TextBlock { text: "other" } }
                     }
+                    for item in vm.items { TextBlock { text: "item" } }
                 }
             "#,
         )
         .expect("dynamic control-flow source should parse");
-        let Item::View(view) = &module.items[1] else {
-            panic!("expected view");
-        };
-        let root = literal(&view.root.children[0]);
+        let root = literal(&root.children[0]);
         assert_eq!(root.type_path, "VerticalLayout");
         assert!(matches!(root.children[0], ChildEntry::If { .. }));
         assert!(matches!(root.children[1], ChildEntry::Match { .. }));
@@ -1745,42 +1179,42 @@ mod tests {
 
     #[test]
     fn parses_notepad_viewmodel() {
-        let src = r#"
-enum SaveState { Unsaved, Saving, Saved }
-
-viewmodel NotepadViewModel {
-    #[observable]
-    #[length(0..=100000)]
-    content: String = String::new(),
-
-    #[observable]
-    file_name: String = "untitled.txt",
-
-    #[observable]
-    state: SaveState = SaveState::Unsaved,
-
-    #[computed]
-    char_count: i32 = content.chars().count() as i32,
-
-    #[computed]
-    window_title: String = t!("notepad-window-title", file_name: file_name),
-
-    #[computed]
-    save_can_execute: bool = state != SaveState::Saving,
-}
-"#;
-        let module = parse_module(src).expect("should parse");
-        assert_eq!(module.items.len(), 2);
-
-        let Item::Enum(enum_def) = &module.items[0] else {
-            panic!("expected enum");
-        };
+        let item_enum: syn::ItemEnum =
+            syn::parse_str("enum SaveState { Unsaved, Saving, Saved }").expect("enum should parse");
+        let enum_def = crate::component_frontend::enum_def_from_item_enum(&item_enum)
+            .expect("enum should build");
         assert_eq!(enum_def.name, "SaveState");
         assert_eq!(enum_def.variants, vec!["Unsaved", "Saving", "Saved"]);
 
-        let Item::ViewModel(vm) = &module.items[1] else {
-            panic!("expected viewmodel");
-        };
+        let item_mod: syn::ItemMod = syn::parse_str(
+            r#"
+            mod notepad_view_model_mod {
+                struct NotepadViewModel {
+                    #[observable(default = String::new())]
+                    #[length(0..=100000)]
+                    content: String,
+
+                    #[observable(default = "untitled.txt")]
+                    file_name: String,
+
+                    #[observable(default = SaveState::Unsaved)]
+                    state: SaveState,
+
+                    #[computed(expr = content.chars().count() as i32)]
+                    char_count: i32,
+
+                    #[computed(expr = t!("notepad-window-title", file_name: file_name))]
+                    window_title: String,
+
+                    #[computed(expr = state != SaveState::Saving)]
+                    save_can_execute: bool,
+                }
+            }
+            "#,
+        )
+        .expect("mod should parse");
+        let vm = crate::attr_frontend::viewmodel_def_from_item_mod(&item_mod)
+            .expect("viewmodel should build");
         assert_eq!(vm.name, "NotepadViewModel");
         assert_eq!(vm.fields.len(), 6);
 
@@ -1811,62 +1245,53 @@ viewmodel NotepadViewModel {
 
     #[test]
     fn parses_notepad_window() {
+        // The old DSL text form's own top-level `use` declaration (§12) has no counterpart on this
+        // (real, production) frontend — an ordinary Rust `use` in the surrounding source file is
+        // already resolved by `rustc` itself, with no DSL-side parsing involved at all.
         let src = r#"
-use crate::notepad_view_model::NotepadViewModel;
+        struct NotepadWindow {
+            #[param]
+            #[inject]
+            vm: NotepadViewModel,
 
-component NotepadWindow {
-    #[param]
-    #[inject]
-    vm: NotepadViewModel,
+            body: view! {
+                Window {
+                    title: vm.window_title
 
-}
+                    Column {
+                        Row {
+                            Button {
+                                text: t!("notepad-menu-save")
+                                on_click: vm.save
+                                enabled: vm.save_can_execute
+                            }
+                            Button {
+                                text: t!("notepad-menu-open")
+                                on_click: vm.open
+                            }
+                        }
 
-view NotepadWindow {
-    Window {
-        title: vm.window_title
+                        TextArea { text <=> vm.content }
 
-        Column {
-            Row {
-                Button {
-                    text: t!("notepad-menu-save")
-                    on_click: vm.save
-                    enabled: vm.save_can_execute
+                        Row {
+                            Text { text: t!("notepad-status-chars", count: vm.char_count) }
+                        }
+                    }
                 }
-                Button {
-                    text: t!("notepad-menu-open")
-                    on_click: vm.open
-                }
-            }
-
-            TextArea { text <=> vm.content }
-
-            Row {
-                Text { text: t!("notepad-status-chars", count: vm.char_count) }
-            }
+            },
         }
-    }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
-        assert_eq!(module.uses.len(), 1);
-        assert_eq!(
-            module.uses[0].path,
-            vec!["crate", "notepad_view_model", "NotepadViewModel"]
-        );
-        assert_eq!(module.items.len(), 2);
-
-        let Item::Component(component) = &module.items[0] else {
-            panic!("expected component");
-        };
+        "#;
+        let item_struct: syn::ItemStruct = syn::parse_str(src).expect("struct should parse");
+        let (component, view) =
+            crate::component_frontend::component_and_view_from_item_struct(None, &item_struct)
+                .expect("should build");
         assert_eq!(component.name, "NotepadWindow");
         assert_eq!(component.fields.len(), 1);
         assert_eq!(component.fields[0].name, "vm");
         assert_eq!(component.fields[0].kind, FieldKind::Param);
         assert!(component.fields[0].initializer.is_none());
 
-        let Item::View(view) = &module.items[1] else {
-            panic!("expected view");
-        };
+        let view = view.expect("view should be present");
         assert_eq!(view.target, "NotepadWindow");
         assert_eq!(view.root.children.len(), 1);
         let root = literal(&view.root.children[0]);
@@ -1907,12 +1332,9 @@ view NotepadWindow {
     }
 
     fn parse_closure_attr(attr_src: &str) -> ViewExpr {
-        let src = format!("view V {{ TabView {{ {attr_src} }} }}");
-        let module = parse_module(&src).expect("should parse");
-        let Item::View(view) = &module.items[0] else {
-            panic!("expected view")
-        };
-        let root = literal(&view.root.children[0]);
+        let src = format!("TabView {{ {attr_src} }}");
+        let (_, _, _, root_body) = parse_view_body(&src).expect("should parse");
+        let root = literal(&root_body.children[0]);
         let expr = root
             .attributes
             .iter()
@@ -1989,33 +1411,28 @@ view NotepadWindow {
 
     #[test]
     fn parses_typed_attribute_assignments_and_source_spans() {
-        let module = parse_module(
+        let (_, _, _, root) = parse_view_body(
             r#"
-view Demo {
-    TextBox {
-        text: "initial"
-        placeholder: once!(format!("snapshot"))
-        text <=> query
-    }
+TextBox {
+    text: "initial"
+    placeholder: once!(format!("snapshot"))
+    text <=> query
 }
 "#,
         )
         .expect("assignment forms should parse");
-        let Item::View(view) = &module.items[0] else {
-            panic!("expected view")
-        };
-        let root = literal(&view.root.children[0]);
+        let root = literal(&root.children[0]);
         assert_eq!(root.attributes[0].kind, AssignmentKind::Normal);
         assert_eq!(root.attributes[1].kind, AssignmentKind::Once);
         assert_eq!(root.attributes[2].kind, AssignmentKind::TwoWay);
-        assert_eq!(root.attributes[0].span.line, 4);
-        assert_eq!(root.attributes[0].span.column, 9);
+        assert_eq!(root.attributes[0].span.line, 3);
+        assert_eq!(root.attributes[0].span.column, 5);
         assert!(root.attributes[0].span.end > root.attributes[0].span.start);
     }
 
     #[test]
     fn rejects_removed_bind_macro_in_view_attributes() {
-        let error = parse_module("view Demo { TextArea { text: bind!(vm.content, TwoWay) } }")
+        let error = parse_view_body("TextArea { text: bind!(vm.content, TwoWay) }")
             .expect_err("removed bind syntax must be rejected");
         assert!(error.contains("bind!(...) was removed"), "{error}");
     }
@@ -2041,21 +1458,16 @@ view Demo {
     #[test]
     fn parses_multiple_closures_without_trailing_commas() {
         let src = r#"
-view V {
-    TabView {
-        tabs: vm.documents
-        key: |doc| std::rc::Rc::as_ptr(doc) as usize
-        render_label: |doc| doc.file_name
-        render_content: |doc| DocumentView { doc: doc }
-        selected: vm.active_tab
-    }
+TabView {
+    tabs: vm.documents
+    key: |doc| std::rc::Rc::as_ptr(doc) as usize
+    render_label: |doc| doc.file_name
+    render_content: |doc| DocumentView { doc: doc }
+    selected: vm.active_tab
 }
 "#;
-        let module = parse_module(src).expect("should parse");
-        let Item::View(view) = &module.items[0] else {
-            panic!("expected view")
-        };
-        let root = literal(&view.root.children[0]);
+        let (_, _, _, root_body) = parse_view_body(src).expect("should parse");
+        let root = literal(&root_body.children[0]);
         let attr = |name: &str| {
             root.attributes
                 .iter()
@@ -2085,28 +1497,37 @@ view V {
 
     #[test]
     fn parses_virtual_and_override_methods() {
-        let src = r#"
-component Control {
-    #[param]
-    padding: Option<f32>,
-
-    #[virtual]
-    fn label(&self) -> String {
-        "control".to_string()
-    }
-}
-
-component ContentControl inherits Control {
-    #[param]
-    content: std::rc::Rc<dyn UIElement>,
-
-    #[override]
-    fn label(&self, suffix: i32) -> String {
-        format!("{}!{}", base::label(), suffix)
-    }
-}
-"#;
-        let module = parse_module(src).expect("should parse");
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"struct Control { #[param] padding: Option<f32>, }"#,
+                Some(
+                    r#"
+                    impl Control {
+                        #[overridable]
+                        fn label(&self) -> String {
+                            "control".to_string()
+                        }
+                    }
+                    "#,
+                ),
+            ),
+            (
+                Some("Control"),
+                r#"struct ContentControl { #[param] content: std::rc::Rc<dyn UIElement>, }"#,
+                Some(
+                    r#"
+                    impl ContentControl {
+                        #[overrides]
+                        fn label(&self, suffix: i32) -> String {
+                            format!("{}!{}", base::label(), suffix)
+                        }
+                    }
+                    "#,
+                ),
+            ),
+        ])
+        .expect("should parse");
         let Item::Component(control) = &module.items[0] else {
             panic!("expected component")
         };
@@ -2131,65 +1552,57 @@ component ContentControl inherits Control {
     #[test]
     fn parses_on_mount_and_on_unmount() {
         let src = r#"
-view Widget {
-    on_mount {
-        base::on_mount();
-        println!("mounted");
-    }
-    on_unmount {
-        println!("unmounted");
-    }
-
-    Text { text: "hi" }
+on_mount {
+    base::on_mount();
+    println!("mounted");
 }
+on_unmount {
+    println!("unmounted");
+}
+
+Text { text: "hi" }
 "#;
-        let module = parse_module(src).expect("should parse");
-        let Item::View(view) = &module.items[0] else {
-            panic!("expected view")
-        };
-        assert!(view.on_mount.is_some());
-        assert!(view.on_unmount.is_some());
-        assert_eq!(view.root.children.len(), 1);
-        assert_eq!(literal(&view.root.children[0]).type_path, "Text");
+        let (on_mount, on_unmount, _, root) = parse_view_body(src).expect("should parse");
+        assert!(on_mount.is_some());
+        assert!(on_unmount.is_some());
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(literal(&root.children[0]).type_path, "Text");
     }
 
     #[test]
     fn parses_attached_property_field() {
-        let src = r#"
-component Grid {
-    #[attached]
-    row: i32 = 0,
-    #[attached]
-    column: i32 = 0,
-}
-"#;
-        let module = parse_module(src).expect("should parse");
-        let Item::Component(grid) = &module.items[0] else {
-            panic!("expected component")
-        };
-        assert_eq!(grid.fields.len(), 2);
-        assert_eq!(grid.fields[0].kind, FieldKind::Attached);
-        assert_eq!(grid.fields[1].kind, FieldKind::Attached);
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct Grid {
+                #[attached(default = 0)]
+                row: i32,
+                #[attached(default = 0)]
+                column: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let fields =
+            crate::attr_frontend::fields_from_item_struct(&item_struct, FieldKind::Prop, true)
+                .expect("fields should build");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].kind, FieldKind::Attached);
+        assert_eq!(fields[1].kind, FieldKind::Attached);
     }
 
     #[test]
     fn parses_owner_colon_colon_field_attached_setter() {
         let src = r#"
-view MainGrid {
-    Grid {
-        rows: [GridLength::Auto, GridLength::Star(1.0)]
-        columns: [GridLength::Fixed(120.0), GridLength::Star(1.0)]
-        TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
-        Button { text: "Click", Grid::row: 1, Grid::column: 1 }
-    }
+Grid {
+    rows: [GridLength::Auto, GridLength::Star(1.0)]
+    columns: [GridLength::Fixed(120.0), GridLength::Star(1.0)]
+    TextBlock { text: "Header", Grid::row: 0, Grid::column: 0 }
+    Button { text: "Click", Grid::row: 1, Grid::column: 1 }
 }
 "#;
-        let module = parse_module(src).expect("should parse");
-        let Item::View(view) = &module.items[0] else {
-            panic!("expected view")
-        };
-        assert_eq!(view.root.children.len(), 1);
-        let root = literal(&view.root.children[0]);
+        let (_, _, _, root_body) = parse_view_body(src).expect("should parse");
+        assert_eq!(root_body.children.len(), 1);
+        let root = literal(&root_body.children[0]);
         assert_eq!(root.type_path, "Grid");
         assert!(matches!(
             &root.attributes[0].value,
@@ -2226,22 +1639,16 @@ view MainGrid {
     #[test]
     fn parses_shortcut_attr_variants() {
         let src = r#"
-component SaveField { }
-view SaveField {
-    Button {
-        #[shortcut("Ctrl+S")]
-        on_click: vm.save
+Button {
+    #[shortcut("Ctrl+S")]
+    on_click: vm.save
 
-        #[shortcut(winui3: "Ctrl+F", appkit: "Cmd+F", scope: local)]
-        on_find: vm.find
-    }
+    #[shortcut(winui3: "Ctrl+F", appkit: "Cmd+F", scope: local)]
+    on_find: vm.find
 }
 "#;
-        let module = parse_module(src).expect("should parse");
-        let Item::View(view) = &module.items[1] else {
-            panic!("expected view")
-        };
-        let root = literal(&view.root.children[0]);
+        let (_, _, _, root_body) = parse_view_body(src).expect("should parse");
+        let root = literal(&root_body.children[0]);
         assert_eq!(root.type_path, "Button");
         assert_eq!(root.attribute_shortcuts.len(), 2);
 
@@ -2278,34 +1685,5 @@ view SaveField {
         assert_eq!(name, "on_click");
         assert_eq!(chords, &[(None, "Ctrl+S".to_string())]);
         assert_eq!(*scope, ShortcutScope::Global);
-    }
-}
-
-/// Parses `start..=end` / `start..end` for `#[length(...)]`/`#[range(...)]`-style attributes.
-#[cfg(test)]
-fn parse_range(src: &str) -> Result<(i64, i64, bool), String> {
-    let src = src.trim();
-    if let Some((start, rest)) = src.split_once("..=") {
-        let start: i64 = start
-            .trim()
-            .parse()
-            .map_err(|_| "invalid range start".to_string())?;
-        let end: i64 = rest
-            .trim()
-            .parse()
-            .map_err(|_| "invalid range end".to_string())?;
-        Ok((start, end, true))
-    } else if let Some((start, rest)) = src.split_once("..") {
-        let start: i64 = start
-            .trim()
-            .parse()
-            .map_err(|_| "invalid range start".to_string())?;
-        let end: i64 = rest
-            .trim()
-            .parse()
-            .map_err(|_| "invalid range end".to_string())?;
-        Ok((start, end, false))
-    } else {
-        Err(format!("invalid range `{src}`"))
     }
 }

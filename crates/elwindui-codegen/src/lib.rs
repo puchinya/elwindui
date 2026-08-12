@@ -3,52 +3,59 @@ pub mod attr_frontend;
 pub mod codegen;
 pub mod component_frontend;
 pub mod parser;
+#[cfg(test)]
+mod testdata;
 mod text_style;
 pub mod theme_frontend;
 pub mod validate;
 
-/// Test-only stand-in for the old, workspace-wide builtin shape source and `builtin_modules()` (removed —
-/// see 05d4861/29ced3d/c916322/d255f31/36292fb, `docs/status/implementation_status.md`, Refs #14):
-/// every real builtin's shape now lives as `#[elwindui_macros::class]` DSL attributes on its actual
-/// `elwindui-core`/`elwindui-backend-*` declaration, propagated to a consumer crate via the
-/// `__elwindui_shape_*!` macro chain (`elwindui-macros::class::build_props_macro`) rather than a
-/// parsed text `Module` — so production code (`generate_component_from_item_struct`,
-/// `compile_dir_impl`) no longer chains a builtin `Module` in at all, relying entirely on
-/// `codegen::emit_external_construction`'s "no local `TypeInfo`, construct via `elwindui::ui::{Name}`
-/// and the shape macro's `@set`/`@clear`/`@children` protocol" path (validated end-to-end by
-/// temporarily emptying this exact file and confirming every real example still builds and runs).
-///
-/// What that production path structurally *can't* do is compiler-side validation that needs an
-/// actual field list (`is_abstract`/`#[sealed]`/required-attribute completeness/`#[routed]`-ness) —
-/// a real Rust `type` has no equivalent a proc-macro can read across a crate boundary, so those
-/// checks silently no-op for an external reference (`check_element_value`/`check_shortcut_attrs`/
-/// `validate_inherits`'s own doc comments). That's an acceptable trade for *production* code (a
-/// wrong reference still fails to compile, just later, via `elwindui::ui::{Name}::new()`/its shape
-/// macro directly) — but several of `codegen.rs`/`validate.rs`'s own unit tests exist specifically to
-/// exercise those richer checks, and unlike production they call `validate::validate`/
-/// `codegen::generate_module` directly (no later rustc pass to fall back on). This file — a private
-/// copy of the old real shape source, now allowed to drift out of sync with the real builtins without
-/// consequence, since nothing production-facing reads it — gives those tests real `TypeInfo` to
-/// check against again, exactly as `builtin_modules()` used to for everyone. It carries a `.txt`
-/// extension rather than the DSL text form's old one, so that no source file in the repo claims to
-/// be a compilable DSL module. Its content is still the same hand-written DSL text
-/// `parser::parse_module` (test-only) parses; only the file extension changed.
-#[cfg(test)]
-const TEST_BUILTIN_SHAPE_SOURCE: &str = include_str!("testdata/builtins_dsl_text.txt");
-
-/// Test-only counterpart to the removed `builtin_modules()` — see `TEST_BUILTIN_SHAPE_SOURCE`'s own
-/// doc comment. `pub(crate)` (not `pub`): only `codegen.rs`/`validate.rs`/`component_frontend.rs`'s
-/// own `#[cfg(test)] mod tests` blocks call this, never production code.
+/// Test-only counterpart to the removed `builtin_modules()` — see `testdata`'s own doc comment.
+/// `pub(crate)` (not `pub`): only `codegen.rs`/`validate.rs`/`component_frontend.rs`'s own
+/// `#[cfg(test)] mod tests` blocks call this, never production code.
 #[cfg(test)]
 pub(crate) fn test_builtin_modules() -> Vec<ast::Module> {
-    // `parse_module` always defaults a freshly-parsed module's `path` to `[]` already.
-    let mut module = parser::parse_module(TEST_BUILTIN_SHAPE_SOURCE).unwrap_or_else(|e| {
-        panic!("failed to parse test builtin shapes: {e}\n---\n{TEST_BUILTIN_SHAPE_SOURCE}")
-    });
-    // Marks every component parsed from here as eligible for `#[embedded]` — see
-    // `ast::Module::is_builtin`'s doc comment and `validate::validate`'s check.
-    module.is_builtin = true;
-    vec![module]
+    testdata::test_builtin_modules()
+}
+
+/// Test-only replacement for the old DSL text frontend's `parser::parse_module(text)` — builds one
+/// `Module` from one or more new-syntax component definitions, each `(base, struct_src, impl_src)`:
+/// `struct_src` is a full `struct Name { ..fields.., body: view! { .. } }` (no `#[elwindui::component]`
+/// attribute — that macro attribute only ever contributes `base`/`inherits`, supplied here as the
+/// first tuple element, same convention `dsl_enum_tests`/`component_impl_tests` below already use),
+/// `impl_src` an optional full `impl Name { ..#[overridable]/#[overrides] fns.. }`. Reuses the exact
+/// same production parsing `generate_component_from_item_struct`/`generate_component_from_item_impl`
+/// call (`component_frontend::component_and_view_from_item_struct`/`methods_from_item_impl`/
+/// `component_module_items`) — unlike those, doesn't touch the process-global same-crate sibling
+/// registries (`component_frontend::register_same_crate_component`), so it stays a pure, side-effect-
+/// free `Module` builder, exactly like `parser::parse_module` was. `is_builtin`/`allows_external_builtins`
+/// both default to `false`, matching `parser::parse_module`'s own output (`Module::default()`) — an
+/// unresolved reference in one of these fixtures stays a genuine test failure unless the test itself
+/// also chains in `test_builtin_modules()` or another `test_module` call's items.
+#[cfg(test)]
+pub(crate) fn test_module(defs: &[(Option<&str>, &str, Option<&str>)]) -> Result<ast::Module, String> {
+    let mut items = Vec::new();
+    for (base, struct_src, impl_src) in defs {
+        let item_struct: syn::ItemStruct = syn::parse_str(struct_src)
+            .map_err(|e| format!("test fixture struct failed to parse: {e}\n---\n{struct_src}"))?;
+        let (mut component_def, view_def) = component_frontend::component_and_view_from_item_struct(
+            base.map(|b| b.to_string()),
+            &item_struct,
+        )?;
+        if let Some(impl_src) = impl_src {
+            let item_impl: syn::ItemImpl = syn::parse_str(impl_src)
+                .map_err(|e| format!("test fixture impl failed to parse: {e}\n---\n{impl_src}"))?;
+            let (_, methods) = component_frontend::methods_from_item_impl(&item_impl)?;
+            component_def.methods = methods;
+        }
+        items.extend(component_frontend::component_module_items(component_def, view_def));
+    }
+    Ok(ast::Module {
+        path: Vec::new(),
+        uses: Vec::new(),
+        items,
+        is_builtin: false,
+        allows_external_builtins: false,
+    })
 }
 
 /// The attribute-macro counterpart to `generate_component_from_item_struct`: takes a
@@ -115,8 +122,7 @@ pub fn generate_dsl_enum_from_item_enum(
 /// `component_frontend::same_crate_components`'s own doc comment for the full mechanism and its
 /// declaration-order requirement). A `view!` body routinely references
 /// `Window`/`VerticalLayout`/etc. too, but those resolve with no `Module` chained in for them at all —
-/// see `TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment on why, and
-/// `codegen::emit_external_construction`.
+/// see `testdata`'s own doc comment on why, and `codegen::emit_external_construction`.
 pub fn generate_component_from_item_struct(
     base: Option<String>,
     item_struct: &syn::ItemStruct,

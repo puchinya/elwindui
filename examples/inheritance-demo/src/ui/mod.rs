@@ -4,6 +4,7 @@
 // own comment explains the mechanism in full). `labeled_panel` has no sibling dependencies;
 // `loud_panel` inherits it (`inherits crate::ui::LabeledPanel`) and also references it as a plain
 // view element; `inheritance_demo_window` uses both.
+mod content_wrapper;
 mod labeled_panel;
 mod loud_panel;
 mod inheritance_demo_window;
@@ -13,6 +14,7 @@ mod inheritance_demo_window;
 // `inherits crate::ui::LabeledPanel` needs that companion reachable at this exact
 // `crate::ui::LabeledPanel` path (Refs #25). A named re-export here (`pub use
 // labeled_panel::LabeledPanel;`) would strand it and break the inheriting component.
+pub use content_wrapper::*;
 pub use inheritance_demo_window::InheritanceDemoWindow;
 pub use labeled_panel::*;
 pub use loud_panel::*;

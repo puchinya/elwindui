@@ -1,4 +1,4 @@
-use crate::ui::{LabeledPanel, LoudPanel};
+use crate::ui::{ContentWrapper, LabeledPanel, LoudPanel};
 
 #[elwindui::component(inherits Window)]
 struct InheritanceDemoWindow {
@@ -7,7 +7,7 @@ struct InheritanceDemoWindow {
         left: 200.0
         top: 200.0
         width: 480.0
-        height: 260.0
+        height: 300.0
 
         content: VerticalLayout {
             margin: 24.0
@@ -16,6 +16,11 @@ struct InheritanceDemoWindow {
             LabeledPanel { }
             TextBlock { text: "LoudPanel (derived, inherits crate::ui::LabeledPanel)" }
             LoudPanel { }
+            TextBlock { text: "ContentWrapper (inherits Control, external builtin, Refs #90)" }
+            ContentWrapper {
+                padding: 12.0
+                content: TextBlock { text: "padded content" }
+            }
         }
     },
 }

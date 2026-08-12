@@ -1234,6 +1234,39 @@ fn build_props_macro(
         })
         .collect();
 
+    // `@field_type` answers "what Rust type does this class (or an ancestor) declare property
+    // `$name` as", expanded in *type position* rather than value/expr position — the missing half
+    // of `elwindui-codegen::codegen::resolve_effective_fields`'s external-base fallback (Refs #90):
+    // a consumer crate's `#[elwindui::component(inherits Control)]` that bare-forwards an inherited
+    // attribute (`padding: padding`) has no local `TypeInfo` for `Control` to read a field type
+    // from (real builtins no longer have one at all, see `elwindui_codegen::TEST_BUILTIN_SHAPE_SOURCE`'s
+    // own doc comment) — so the derived component's own synthesized struct field/constructor
+    // parameter for `padding` is given `elwindui::core::__elwindui_props_Control!(@field_type
+    // padding)` as its literal type text, deferring to *this* macro (which does know the real type,
+    // declared right here) at the consumer's own expansion time. Same two-hop `@field_type`/
+    // `@field_type_from` shape as `@clear`/`@clear_from` (`$origin` seeded at the entry so a
+    // terminal-chain `compile_error!` can still name the type the use site actually wrote), same
+    // `takes_set_arm`-filtered property set (a routed callback/attached/children-shaped property
+    // has no single settable "value type" a struct field could hold). `rewrite_crate_segment` is
+    // required here (unlike `@set_from`'s `wrap_prop_value` calls) because this type is spliced
+    // literally into the *generated* type position rather than only consulted to decide how to
+    // wrap a value — a bare `crate::`-relative type spelled in the declaring crate (`elwindui-core`)
+    // must resolve there, not in whichever consumer crate eventually expands this arm, exactly like
+    // `attached_arms`'s identical `#[attached]` type handling above.
+    let field_type_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| takes_set_arm(p) && !p.routed)
+        .map(|p| {
+            let name = &p.name;
+            let prop_ty = &p.ty;
+            let ty = rewrite_crate_segment(quote! { #prop_ty });
+            quote! {
+                (@field_type_from $origin:ident, #name) => { #ty };
+            }
+        })
+        .collect();
+
     let set_arms: Vec<TokenStream2> = shape
         .props
         .iter()
@@ -1491,6 +1524,7 @@ fn build_props_macro(
     let (
         fallback,
         clear_fallback,
+        field_type_fallback,
         routed_fallback,
         assert_fallback,
         declared_fallback,
@@ -1508,6 +1542,11 @@ fn build_props_macro(
                 quote! {
                     (@clear_from $origin:ident, $recv:expr, $name:ident) => {
                         #parent_macro!(@clear_from $origin, $recv, $name);
+                    };
+                },
+                quote! {
+                    (@field_type_from $origin:ident, $name:ident) => {
+                        #parent_macro!(@field_type_from $origin, $name)
                     };
                 },
                 quote! {
@@ -1554,6 +1593,16 @@ fn build_props_macro(
                         "` (or any of its ancestors) has no such property: ",
                         stringify!($name)
                     ));
+                };
+            },
+            quote! {
+                (@field_type_from $origin:ident, $name:ident) => {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` (or any of its ancestors) has no such property: ",
+                        stringify!($name)
+                    ))
                 };
             },
             quote! {
@@ -1702,6 +1751,11 @@ fn build_props_macro(
             };
             #(#clear_arms)*
             #clear_fallback
+            (@field_type $name:ident) => {
+                $crate::#macro_ident!(@field_type_from #bare_ident, $name)
+            };
+            #(#field_type_arms)*
+            #field_type_fallback
             (@routed $recv:expr, $name:ident, $value:expr) => {
                 $crate::#macro_ident!(@routed_from #bare_ident, $recv, $name, $value);
             };

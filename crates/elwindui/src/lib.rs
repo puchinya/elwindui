@@ -23,7 +23,9 @@ pub use elwindui_svg as svg;
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` opts a plain user `enum` into the same
 /// `match`/`if let` exhaustiveness checking a DSL-text `enum` always got — see
 /// `elwindui_macros::dsl_enum`'s own doc comment.
-pub use elwindui_macros::{class, component, dsl_enum, main, theme_definition, viewmodel};
+pub use elwindui_macros::{
+    class, component, dsl_enum, environment_key, main, theme_definition, viewmodel,
+};
 
 /// Resolves a typed token from the current application theme.
 ///

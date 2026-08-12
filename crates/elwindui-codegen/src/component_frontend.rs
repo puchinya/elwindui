@@ -407,6 +407,71 @@ pub fn sibling_enum_modules() -> Vec<Module> {
         .collect()
 }
 
+/// A registered `#[elwindui::environment_key]` struct — see `same_crate_environment_keys`'s own
+/// doc comment.
+struct StoredEnvironmentKey {
+    key_type_name: String,
+    value_type: String,
+}
+
+/// Keyed by `(compiling_crate_key(), environment key name)` — mirrors `same_crate_enums`, but for
+/// an `#[elwindui::environment_key(name = .., value = .., default = ..)]` declaration
+/// (`docs/specs/theme_environment_spec.md` §2). Populated by
+/// `environment_frontend::generate_environment_key_from_item_struct`; read by `validate.rs` to
+/// resolve `#[environment(name)]`/`EnvironmentScope { name: .. }` (`docs/specs/dsl_spec.md` §13
+/// rules 34/35) and by `codegen.rs` to know which concrete Key type to call
+/// `EnvironmentContext::get`/`subscribe` with. Same declaration-order requirement as the other
+/// registries in this file — an environment key must be declared before the component(s)/
+/// `EnvironmentScope` that reference its name.
+fn same_crate_environment_keys()
+-> &'static Mutex<HashMap<(String, String), StoredEnvironmentKey>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredEnvironmentKey>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers `name`'s already-emitted `#[elwindui::environment_key]` Key type and its `Value` type
+/// — see `same_crate_environment_keys`'s own doc comment. Returns an error if `name` is already
+/// registered by a *different* Key type in this crate (two `#[elwindui::environment_key]`
+/// declarations must not claim the same DSL-facing name).
+pub fn register_same_crate_environment_key(
+    name: &str,
+    key_type_name: &str,
+    value_type: &str,
+) -> Result<(), String> {
+    let map_key = (compiling_crate_key(), name.to_string());
+    let mut registry = same_crate_environment_keys().lock().unwrap();
+    if let Some(existing) = registry.get(&map_key) {
+        if existing.key_type_name != key_type_name {
+            return Err(format!(
+                "environment key name `{name}` is already registered by `{}`",
+                existing.key_type_name
+            ));
+        }
+        return Ok(());
+    }
+    registry.insert(
+        map_key,
+        StoredEnvironmentKey {
+            key_type_name: key_type_name.to_string(),
+            value_type: value_type.to_string(),
+        },
+    );
+    Ok(())
+}
+
+/// Resolves `name` to its registered Key type name and `Value` type, if any
+/// `#[elwindui::environment_key]` in this same-crate compilation has claimed it — see
+/// `same_crate_environment_keys`'s own doc comment.
+pub fn lookup_same_crate_environment_key(name: &str) -> Option<(String, String)> {
+    let map_key = (compiling_crate_key(), name.to_string());
+    same_crate_environment_keys()
+        .lock()
+        .unwrap()
+        .get(&map_key)
+        .map(|stored| (stored.key_type_name.clone(), stored.value_type.clone()))
+}
+
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` -> `EnumDef { name: "Name", variants: ["A", "B",
 /// "C"] }`. Every variant must be a bare unit variant — same restriction the DSL's own `enum`
 /// syntax has (§7 of the DSL spec: "no anonymous unions", enums are plain value sets), and there's

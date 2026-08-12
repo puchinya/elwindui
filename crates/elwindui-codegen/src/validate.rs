@@ -208,6 +208,37 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 c.name, f.name
                             ));
                         }
+                        // `#[environment(name)]` (§4) must reference a Key registered by a
+                        // same-crate `#[elwindui::environment_key]` declaration (dsl_spec.md §13
+                        // rule 34) — same declaration-order requirement as every other same-crate
+                        // registry in this file (`component_frontend::
+                        // lookup_same_crate_environment_key`).
+                        if f.kind == FieldKind::Environment {
+                            let key_name = f
+                                .attrs
+                                .iter()
+                                .find_map(|a| match a {
+                                    Attr::Environment(name) => Some(name.as_str()),
+                                    _ => None,
+                                })
+                                .expect(
+                                    "internal: FieldKind::Environment field must carry \
+                                     Attr::Environment(name)",
+                                );
+                            if crate::component_frontend::lookup_same_crate_environment_key(
+                                key_name,
+                            )
+                            .is_none()
+                            {
+                                errors.push(format!(
+                                    "{}.{}: #[environment({key_name})] references an Environment \
+                                     Key that isn't declared by any \
+                                     #[elwindui::environment_key(name = {key_name}, ..)] earlier \
+                                     in this crate",
+                                    c.name, f.name
+                                ));
+                            }
+                        }
                         // `#[bindable]` (`ast::Attr::Bindable`'s own doc comment) wires an
                         // auto-refreshing `PropertyChanged` subscription via
                         // `elwindui::core::reactive::ObservableExt`, whose generated call

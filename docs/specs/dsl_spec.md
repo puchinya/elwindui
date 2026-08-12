@@ -371,6 +371,38 @@ impl Cart {}
 
 `#[bindable]`はcomponentがviewmodelを保持するための専用アトリビュートで、**指定できる型はviewmodel(`#[elwindui::viewmodel]`で定義された型)に限られる**——viewmodel以外の型を指定すると、生成されるコードがviewmodel専用のPropertyChanged購読の仕組みを満たせずコンパイルエラーになる。実体化時に一度だけ固定される(以後差し替え不可)という点は`#[param]`と同様だが、`#[bindable]`自身が値を書き換えるわけではなく、保持しているviewmodelの中のフィールドが変化した際に依存する`view`部分を自動再同期させるための購読を張る(`docs/design/runtime/state_management_design.md`参照)。
 
+### `#[environment(name)]`:継承されるUI context値の参照
+
+親から継承される型付きの `Environment` 値(`docs/specs/theme_environment_spec.md`参照)を読み取るためのフィールドアトリビュート。`name` は `#[elwindui::environment_key]`(同spec参照)で定義されたEnvironment Keyの名前を指す。
+
+```rust
+#[elwindui::component]
+struct SettingsView {
+    #[environment(locale)]
+    locale: Locale,
+
+    body: view! {
+        TextBlock {
+            text: format!("{}", locale.identifier())
+        }
+    }
+}
+
+#[elwindui::component]
+impl SettingsView {}
+```
+
+`#[environment]`フィールドは:
+
+- 読み取り専用(`instance.field()`のgetterのみ。setter相当の操作は静的エラー)
+- リアクティブ——参照元のEnvironment値が変化すると、依存する`view`の該当箇所だけが再同期される(§9「変更の伝搬」と同じ仕組み)
+- 実体化時に固定される値ではなく親から継承される値であり、コンストラクタ引数にはならない
+- public propertyではなく、component自身のstateでもなく、TwoWay Bindingのtargetにもならない
+
+`#[param]`/`#[prop]`/`#[state]`/`#[bindable]`との併用は静的エラー(13章ルール33)。
+
+`#[param]`初期化式中の`env::*`(§8「動的定数」)とは別の仕組みである。`env::*`は実体化時に一度だけ評価される静的なOS/実行環境定数(`env::os()`等)で、以後変化せず継承もされない。`#[environment(name)]`は親から継承され実行時に変化しうるリアクティブなUI context値であり、`EnvironmentScope`によってsubtreeごとに上書きできる(§5「`EnvironmentScope`」参照)。
+
 ### 添付プロパティ(`#[attached]`):WPF/WinUI3方式
 
 あるcomponentが宣言し、**任意の別要素が自分自身に設定できる**プロパティ(WPFの`Grid.Row`/`Grid.Column`相当)。
@@ -665,6 +697,24 @@ impl ItemList {}
 
 子要素の格納先フィールド(付録A `#[content(field_name)]`参照)がリスト型(`Vec<..>`/`ListExt<..>`)の場合、`if`/`match`/`for`のいずれも使える(前節の入れ子ルールも同様)。フィールドが単一値型(例:`ContentControl`/`Window`の`content: Rc<dyn UIElementExt>`)の場合は`if`/`match`のみ使え、`for`は使えない(可変長のリストは単一の格納先に収まらないため)。単一値フィールド配下の`if`/`match`は、入れ子も含めたあらゆる分岐が最終的にちょうど1個の要素に還元できなければならない(1分岐に複数の裸の子要素を書くこともできない)。
 
+### `EnvironmentScope`:subtreeへのEnvironment override
+
+`view!`内で`EnvironmentScope { key: value ... }`と書くと、その内側のchildrenに限り指定したEnvironment Key(`docs/specs/theme_environment_spec.md`参照)の値を上書きできる。`key`は`#[elwindui::environment_key]`で定義されたKeyの名前、`value`はそのKeyの`Value`型に一致する式。
+
+```rust
+body: view! {
+    EnvironmentScope {
+        locale: Locale::new("en-US")
+
+        SettingsView {}
+    }
+}
+```
+
+- `EnvironmentScope`自身はUI要素・Render nodeを生成しない——親のEnvironmentをderiveし、指定したKeyだけを上書きした派生Environmentをchildrenの構築に渡すだけである
+- 上書きされなかったKeyは親のEnvironment値をそのまま参照する(`docs/specs/theme_environment_spec.md`の継承規則を参照)
+- `EnvironmentScope`のbodyは`for`/`if`/`match`と自由に組み合わせられる——child側の動的領域の扱いはそれぞれの規則に従う
+
 ---
 
 ## 6. 値制約(アトリビュートによる数式的表現)
@@ -778,6 +828,8 @@ struct TitleBar {
 - `env::platform()` — `"desktop" | "mobile" | "web"`
 - `env::locale()` — 実行環境の既定ロケール
 - `env::direction()` — `"ltr" | "rtl"`
+
+`env::*`は実体化時に一度だけ確定する静的なOS/実行環境定数であり、親から継承されたり実行時に変化したりはしない。UI階層に沿って継承され、実行時に変化しリアクティブに再同期される値は`Environment`(4章「`#[environment(name)]`」、`docs/specs/theme_environment_spec.md`参照)を使う。
 
 ---
 
@@ -1135,6 +1187,9 @@ impl SaveButton {}
 30. `#[shortcut(...)]` が `#[routed]` でない属性に付与されている → エラー(12章「`#[shortcut(...)]`」参照。`on_click`等のコールバック属性以外に付けても意味を持たない)
 31. `#[shortcut(...)]` に指定されたキー表記(修飾キー名/キー名)が不正 → エラー(`docs/design/runtime/input_focus_design.md`参照。`codegen::parse_shortcut_spec`と同じパーサーで検査するため、ここを通れば必ずコード生成もパースに成功する)
 32. `elwindui::core::graphics::Brush`/`Color`(または`Option<..>`)型のフィールドへ文字列リテラルを代入する場合(例: `Rectangle { fill: "#3a3a3c" }`)、その文字列が`"#rrggbb"`/`"#rrggbbaa"`(`#`省略可)のいずれの形式にも一致しない → コード生成時エラー(`codegen::coerce_color_literal`。動的な`String`式には適用されない——`Brush`/`Color`型の値を直接渡す必要がある)
+33. `#[environment(...)]` が同一フィールドの `#[param]`/`#[prop]`/`#[state]`/`#[bindable]` と併用されている → エラー(4章「`#[environment(name)]`」参照)
+34. `#[environment(name)]` の `name` が、解決可能な `#[elwindui::environment_key]` 定義を持たない → エラー(`docs/specs/theme_environment_spec.md`参照)
+35. `EnvironmentScope { key: value .. }` の `key` が、解決可能な `#[elwindui::environment_key]` 定義を持たない、または `value` の型がそのKeyの `Value` 型と一致しない → エラー(5章「`EnvironmentScope`」参照)
 
 ---
 

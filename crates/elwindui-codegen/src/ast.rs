@@ -219,6 +219,15 @@ pub enum FieldKind {
     /// `build_symbol_table` filters `param_fields`/etc. by `f.initializer.is_none()`, and this kind
     /// requires an initializer — see `validate::validate` — so it's excluded there for free).
     Attached,
+    /// `#[environment(name)]`: a read-only field resolved from the inherited `EnvironmentContext`
+    /// under Environment Key `name` (docs/specs/dsl_spec.md §4, docs/specs/theme_environment_spec.md
+    /// §2). Like [`Self::Computed`], has no caller-supplied initializer and no setter — unlike it,
+    /// the value comes from `elwindui::core::environment::EnvironmentContext::current()` at
+    /// construction (docs/design/runtime/theme_environment_design.md), not from a declared
+    /// expression over sibling fields. Never a constructor argument, never part of the component's
+    /// external construction/property surface — see `Attr::Environment`'s own doc comment for where
+    /// the referenced Key name is stored.
+    Environment,
 }
 
 #[derive(Debug, Clone)]
@@ -286,6 +295,12 @@ pub enum Attr {
     /// doesn't bare-reference it, so a `#[text_style]` component with its own `view`
     /// (`ContentControl`, any user component) doesn't silently lose these seven setters.
     TextStyle,
+    /// `#[environment(name)]`'s argument — the Environment Key's registered name (from
+    /// `#[elwindui::environment_key(name = ..)]`, `component_frontend::
+    /// register_same_crate_environment_key`), independent of this field's own Rust identifier.
+    /// Always paired with `FieldKind::Environment` (`attr_frontend::fields_from_item_struct`), the
+    /// same way `Attr::Bindable` is always paired with `FieldKind::Param`.
+    Environment(String),
 }
 
 /// See `ElementNode::attribute_shortcuts`'s own doc comment.

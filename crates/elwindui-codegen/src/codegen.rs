@@ -619,7 +619,7 @@ pub(crate) fn resolve_effective_fields<'m>(
         return c.fields.clone();
     };
     let Some((base_module, base_c)) = find_component_and_module(from, base, modules) else {
-        return c.fields.clone();
+        return synthesize_external_base_fields(c, base, find_view(from, &c.name));
     };
     let base_fields: Vec<FieldDef> = resolve_effective_fields(base_module, base_c, modules)
         .into_iter()
@@ -666,6 +666,250 @@ pub(crate) fn resolve_effective_fields<'m>(
         .collect();
     result.extend(c.fields.iter().cloned());
     result
+}
+
+/// `resolve_effective_fields`'s fallback when `base` has no local `ComponentDef` visible to this
+/// macro invocation at all — the normal case for every real builtin in production
+/// (`elwindui_codegen::TEST_BUILTIN_SHAPE_SOURCE`'s own doc comment: the old workspace-wide
+/// `builtin_modules()` was removed, so a real `Control`/`ContentControl`/... is never parsed DSL
+/// text here, only a compiled Rust type reachable through `__elwindui_props_{Name}!`, Refs #90).
+/// Without a local field list there's nothing to filter a *known* base field list against the way
+/// the `find_component_and_module`-succeeds branch does — so this takes the DSL author's own bare
+/// same-name attribute-value reference (`padding: padding`, dsl_spec.md §3's `ContentControl`
+/// example) as the *only* available evidence that `base` declares such a field at all, exactly
+/// mirroring how a bare `ChildEntry::Ref` (`content`) is already accepted structurally with no
+/// `TypeInfo` lookup (`generate_view`'s `PASSTHROUGH_NODE` seeding). Each recovered name is given
+/// `elwindui::core::__elwindui_props_{base}!(@field_type {name})` as its literal `FieldDef::ty` —
+/// a type-position macro invocation `generate_view`'s existing `syn::parse_str::<syn::Type>` calls
+/// already handle as an ordinary `syn::Type::Macro` — deferring the actual type (and, for a
+/// nonexistent name, a real `compile_error!`) to `base`'s own shape-macro chain
+/// (`elwindui_macros::class::build_props_macro`'s `@field_type` arm) at the *consumer's* expansion
+/// time, the same "defer to rustc" trade-off `emit_external_construction`'s own doc comment already
+/// accepts for every other external-base construction path. `view` is `None` for a component with
+/// no own view at all (pure template/shape composition) — there is no bare reference to read in
+/// that case, so this can only return `c`'s own literal fields, same as it always could.
+fn synthesize_external_base_fields(c: &ComponentDef, base: &str, view: Option<&ViewDef>) -> Vec<FieldDef> {
+    let Some(view) = view else {
+        return c.fields.clone();
+    };
+    let own_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
+    let bound_names = collect_locally_bound_names(view);
+    let mut bare_names: Vec<String> = collect_bare_attribute_value_names(view)
+        .into_iter()
+        .filter(|name| !own_names.contains(name.as_str()) && !bound_names.contains(name.as_str()))
+        .collect();
+    // Deterministic output order — `collect_bare_attribute_value_names` returns a `HashSet`, whose
+    // iteration order must not leak into generated constructor-parameter order.
+    bare_names.sort();
+    let mut result = c.fields.clone();
+    result.extend(bare_names.into_iter().map(|name| FieldDef {
+        ty: format!("elwindui::core::__elwindui_props_{base}!(@field_type {name})"),
+        name,
+        kind: FieldKind::Param,
+        attrs: Vec::new(),
+        initializer: None,
+    }));
+    result
+}
+
+/// Every name a `view` binds locally — `let`-binding names, `for`-loop item bindings, and every
+/// identifier-shaped token appearing in a `match` arm's pattern text (`MatchArm::pattern` is plain
+/// source text, not a parsed `syn::Pat`, so this can't distinguish an actual binding from an enum
+/// path segment inside it — treating every token as bound is the safe direction). Flat and scope-
+/// independent (a `for`-loop's own `binding` is really only shadowed within its own `body`, not the
+/// whole view) rather than lexically precise, because over-excluding here is harmless —
+/// `synthesize_external_base_fields` just leaves that name unsynthesized, falling back to
+/// `resolve_effective_fields`'s pre-existing "not found" behavior, no worse than before this
+/// function existed — while under-excluding is a real regression: a loop/match-bound identifier
+/// misread as a forwarded external-base field reference (Refs #90's own regression this guards
+/// against: `for doc in vm.documents { DocumentView { doc: doc } }` bare-referencing the loop's own
+/// `doc` binding, not any inherited field of `Window`).
+fn collect_locally_bound_names(view: &ViewDef) -> HashSet<String> {
+    let mut bound = HashSet::new();
+    for l in &view.lets {
+        bound.insert(l.name.clone());
+        collect_locally_bound_names_in_element(&l.element, &mut bound);
+    }
+    for attribute in &view.root.attributes {
+        collect_locally_bound_names_in_view_expr(&attribute.value, &mut bound);
+    }
+    for child in &view.root.children {
+        collect_locally_bound_names_in_child(child, &mut bound);
+    }
+    bound
+}
+
+fn collect_locally_bound_names_in_element(node: &ElementNode, bound: &mut HashSet<String>) {
+    for attribute in &node.attributes {
+        collect_locally_bound_names_in_view_expr(&attribute.value, bound);
+    }
+    for child in &node.children {
+        collect_locally_bound_names_in_child(child, bound);
+    }
+}
+
+// Mirrors `collect_view_expr_bare_names`'s exact traversal shape (same reachable `ElementNode`/
+// `ChildEntry` set) — a bound name hiding inside an element-valued attribute (`content: Grid { for
+// doc in .. { .. } }`) or a closure body (`render_content: |item| Card { title: item }`) must be
+// found here too, or `synthesize_external_base_fields`'s exclusion filter misses it exactly the way
+// it missed `NotepadWindow`'s `content: Grid { .. TabView { for doc in vm.documents { .. } .. } }`
+// during development of this function (`doc` lives inside an attribute value, not `view.root`'s own
+// `children`, so an earlier version that only walked `children` never saw it).
+fn collect_locally_bound_names_in_view_expr(expr: &ViewExpr, bound: &mut HashSet<String>) {
+    match expr {
+        ViewExpr::Element(elem) => collect_locally_bound_names_in_element(elem, bound),
+        ViewExpr::Closure { params, body } => {
+            bound.extend(params.iter().cloned());
+            match body {
+                ClosureBody::Element(elem) => collect_locally_bound_names_in_element(elem, bound),
+                ClosureBody::Expr(_) | ClosureBody::Block(_) => {}
+            }
+        }
+        ViewExpr::TFluent(_, args) => {
+            for (_, v) in args {
+                collect_locally_bound_names_in_view_expr(v, bound);
+            }
+        }
+        ViewExpr::Path(_) | ViewExpr::Expr(_) => {}
+    }
+}
+
+fn collect_locally_bound_names_in_child(child: &ChildEntry, bound: &mut HashSet<String>) {
+    match child {
+        ChildEntry::Literal(element) => collect_locally_bound_names_in_element(element, bound),
+        ChildEntry::Ref(_) => {}
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_locally_bound_names_in_view_expr(condition, bound);
+            for c in then_branch {
+                collect_locally_bound_names_in_child(c, bound);
+            }
+            for c in else_branch {
+                collect_locally_bound_names_in_child(c, bound);
+            }
+        }
+        ChildEntry::Match { value, arms } => {
+            collect_locally_bound_names_in_view_expr(value, bound);
+            for arm in arms {
+                for token in arm
+                    .pattern
+                    .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                {
+                    if !token.is_empty() {
+                        bound.insert(token.to_string());
+                    }
+                }
+                for c in &arm.body {
+                    collect_locally_bound_names_in_child(c, bound);
+                }
+            }
+        }
+        ChildEntry::For {
+            binding,
+            collection,
+            body,
+        } => {
+            collect_locally_bound_names_in_view_expr(collection, bound);
+            bound.insert(binding.clone());
+            for c in body {
+                collect_locally_bound_names_in_child(c, bound);
+            }
+        }
+    }
+}
+
+/// Collects every 1-segment bare `ViewExpr::Path` name referenced as an *attribute value* anywhere
+/// in `view`'s element tree — same traversal `view_references_bare_name` checks membership against,
+/// gathering candidates instead. Deliberately does not collect a bare `ChildEntry::Ref` (`Control {
+/// content }`): that is a *child*-position forward, already resolved independently of `TypeInfo` by
+/// `generate_view`'s `PASSTHROUGH_NODE`/`lets_map` seeding, not an attribute value this function's
+/// only caller (`synthesize_external_base_fields`) needs to recover a type for. Does not itself
+/// exclude a locally bound name (`collect_locally_bound_names`) — callers combine the two.
+fn collect_bare_attribute_value_names(view: &ViewDef) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for l in &view.lets {
+        collect_element_bare_names(&l.element, &mut names);
+    }
+    for attribute in &view.root.attributes {
+        collect_view_expr_bare_names(&attribute.value, &mut names);
+    }
+    for child in &view.root.children {
+        collect_child_bare_names(child, &mut names);
+    }
+    names
+}
+
+fn collect_element_bare_names(node: &ElementNode, names: &mut HashSet<String>) {
+    for attribute in &node.attributes {
+        collect_view_expr_bare_names(&attribute.value, names);
+    }
+    for child in &node.children {
+        collect_child_bare_names(child, names);
+    }
+}
+
+fn collect_child_bare_names(child: &ChildEntry, names: &mut HashSet<String>) {
+    match child {
+        ChildEntry::Literal(element) => collect_element_bare_names(element, names),
+        ChildEntry::Ref(_) => {}
+        ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_view_expr_bare_names(condition, names);
+            for c in then_branch {
+                collect_child_bare_names(c, names);
+            }
+            for c in else_branch {
+                collect_child_bare_names(c, names);
+            }
+        }
+        ChildEntry::Match { value, arms } => {
+            collect_view_expr_bare_names(value, names);
+            for arm in arms {
+                for c in &arm.body {
+                    collect_child_bare_names(c, names);
+                }
+            }
+        }
+        ChildEntry::For {
+            collection, body, ..
+        } => {
+            collect_view_expr_bare_names(collection, names);
+            for c in body {
+                collect_child_bare_names(c, names);
+            }
+        }
+    }
+}
+
+fn collect_view_expr_bare_names(expr: &ViewExpr, names: &mut HashSet<String>) {
+    match expr {
+        ViewExpr::Path(path) => {
+            if let [only] = path.as_slice() {
+                names.insert(only.clone());
+            }
+        }
+        ViewExpr::Element(elem) => collect_element_bare_names(elem, names),
+        ViewExpr::Closure {
+            body: ClosureBody::Element(elem),
+            ..
+        } => collect_element_bare_names(elem, names),
+        ViewExpr::TFluent(_, args) => {
+            for (_, v) in args {
+                collect_view_expr_bare_names(v, names);
+            }
+        }
+        ViewExpr::Expr(_)
+        | ViewExpr::Closure {
+            body: ClosureBody::Expr(_) | ClosureBody::Block(_),
+            ..
+        } => {}
+    }
 }
 
 /// `field_name -> declaring component name`, for every field `resolve_effective_fields(from, c,
@@ -717,6 +961,24 @@ fn resolve_field_declaring_types(
                 }
                 None => result.extend(base_declaring),
             }
+        } else if let Some(view) = find_view(from, &c.name) {
+            // `synthesize_external_base_fields`'s own counterpart: a name recovered only from the
+            // view's own bare attribute-value reference (no local `ComponentDef` for `base` at all)
+            // has no findable ancestor to attribute it to, so it counts as declared by `c` itself —
+            // correctly so, not merely a fallback default: `emit_field_setter_call`'s UFCS
+            // disambiguation only matters when some ancestor's own `#[class]`-generated `..Ext`
+            // trait is also in scope providing the same setter, and no such local ancestor chain
+            // exists here to collide with in the first place.
+            let own_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
+            let bound_names = collect_locally_bound_names(view);
+            result.extend(
+                collect_bare_attribute_value_names(view)
+                    .into_iter()
+                    .filter(|name| {
+                        !own_names.contains(name.as_str()) && !bound_names.contains(name.as_str())
+                    })
+                    .map(|name| (name, c.name.clone())),
+            );
         }
     }
     for f in &c.fields {
@@ -2890,7 +3152,25 @@ fn generate_view(
             .filter(|name| {
                 let is_bare_forward =
                     matches!(find_attr(root_node, name), Some(ViewExpr::Path(p)) if p.as_slice() == [name.clone()]);
-                let is_copy = ctx.own_fields.get(name).is_some_and(|ty| is_copy_type(strip_option(ty).0));
+                let ty = ctx.own_fields.get(name);
+                // A `synthesize_external_base_fields`-synthesized field's `ty` is a type-position
+                // macro invocation (`{Base}!(@field_type {name})`, always containing a literal `!`
+                // no ordinary Rust type spelling in this codebase ever does), opaque to
+                // `is_copy_type`'s string matching — it always answers "not Copy" for a string it
+                // doesn't recognize, which would otherwise wrongly move such a field out of
+                // `own_struct_param_names` here and into the `self.base.#name.borrow().clone()`
+                // accessor branch below (assuming `RefCell`-backed storage that may not exist —
+                // `Control::padding` is `Cell<f32>`, Refs #90). Never necessary to forward one of
+                // these regardless of the field's real Copy-ness: unlike `build_virtual_value`'s
+                // local-`TypeInfo` construction (which *moves* a bare-forwarded value, motivating
+                // this whole mechanism), a synthesized field's root is always genuinely external —
+                // `emit_construction` always routes it through `emit_external_construction`, whose
+                // `emit_external_attribute_sets` already unconditionally `.clone()`s any bare-
+                // forwarded own field (`bare_own_field_type`'s own branch there) — so keeping it as
+                // its own struct field too is always safe, exactly like a real Copy field.
+                let is_synthesized_external_ty = ty.is_some_and(|ty| ty.contains('!'));
+                let is_copy = is_synthesized_external_ty
+                    || ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
                 is_bare_forward && !is_copy
             })
             .collect()
@@ -7026,9 +7306,21 @@ fn emit_external_attribute_sets(
                 }
             }
         };
-        sets.extend(quote! {
-            elwindui::core::#props_macro!(@set #binding, #name_ident, #value);
-        });
+        // Same `synthesize_external_base_fields`-synthesized-field unwrap as `emit_resync`'s own
+        // `info.is_none()` branch (see that call site's doc comment) — construction time needs the
+        // identical `Option<T>`-vs-bare-`T` normalization for the exact same reason, since this is
+        // the *other* place a bare-forwarded own field's value reaches `@set`.
+        if bare_own_field_type(expr, ctx).is_some_and(|ty| ty.contains('!')) {
+            sets.extend(quote! {
+                if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
+                    elwindui::core::#props_macro!(@set #binding, #name_ident, __v);
+                }
+            });
+        } else {
+            sets.extend(quote! {
+                elwindui::core::#props_macro!(@set #binding, #name_ident, #value);
+            });
+        }
     }
     sets
 }
@@ -7413,11 +7705,26 @@ fn build_component_args(
             }
             None => panic!("`{}` requires attribute `{name}`", node.type_path),
         };
-        args.push(if is_option {
-            quote! { Some(#value) }
+        // `ty` is one of `synthesize_external_base_fields`'s synthesized fields (a type-position
+        // macro invocation, always containing a literal `!` — Refs #90): `strip_option`'s string
+        // matching can't tell whether the base declared it `Option<T>` or bare `T` (`padding` is the
+        // former, `Control`'s own `children` the latter), so `is_option` above is unreliable here —
+        // always `false`, since the opaque string never literally starts with `"Option<"`. `.into()`
+        // resolves this generically at the *consumer's* own expansion time instead of guessing here:
+        // the blanket `impl<T> From<T> for Option<T>` handles the `Option<T>`-declared case (`value`
+        // is always a bare `T` at this point — a DSL literal/computed expression, never already
+        // `Option`-wrapped, unlike the bare-own-field-forward value `emit_resync`'s matching branch
+        // has to handle), and `core`'s own reflexive `impl<T> From<T> for T` makes it a no-op for the
+        // bare-`T`-declared case — so this is correct either way, with no need to know which.
+        if ty.contains('!') {
+            args.push(quote! { (#value).into() });
         } else {
-            value
-        });
+            args.push(if is_option {
+                quote! { Some(#value) }
+            } else {
+                value
+            });
+        }
     }
     args
 }
@@ -9663,9 +9970,37 @@ fn emit_resync_with_receiver(
             // here instead of re-deriving anything.
             let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
             let name_ident = format_ident!("{name}");
-            out.extend(quote! {
-                elwindui::core::#props_macro!(@set #receiver, #name_ident, #value);
-            });
+            // A bare reference to one of `synthesize_external_base_fields`'s synthesized fields
+            // (`ty.contains('!')` — a type-position macro invocation, never a real Rust type
+            // spelling in this codebase) carries whatever shape the *base* declared it as — which,
+            // for an `Option<T>`-declared prop (`Control`'s own `padding`, Refs #90), is `Option<T>`
+            // itself, not the bare `T` every other `@set` call site here already supplies (a DSL
+            // literal, a themed value, ...). `@set`'s own `wrap_prop_value` expects that bare-`T`
+            // shape uniformly — it doesn't (and, being a `#[class]`-side macro with no visibility
+            // into which call sites forward an own field, structurally can't) special-case this —
+            // so unwrap here, at the one call site that can actually be in this position: skip the
+            // push entirely on `None` (this field was never set, so the base keeps its own default —
+            // the same "absent = leave default" convention `deferred_own_names`'s own setters
+            // already use elsewhere) rather than trying to call a `clear_<name>` that, for most
+            // props (anything not theme-capable), was never hand-written to begin with.
+            // `Option::from` — not a direct `if let Some(..) = #value` — because `#value` here is
+            // always `self.<field>` for one of *these* fields specifically (never a bare `T`, see
+            // `synthesize_external_base_fields`'s doc comment: every synthesized field is `Option<T>`
+            // only if that's genuinely what the base declared; this branch only ever fires for one
+            // of them), so a plain `Option<T>` match would already do — `Option::from` is kept anyway
+            // for symmetry with nothing else needing it, and to fail loudly (a real type error) if
+            // that invariant is ever violated instead of silently miscompiling.
+            if bare_own_field_type(expr, ctx).is_some_and(|ty| ty.contains('!')) {
+                out.extend(quote! {
+                    if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
+                        elwindui::core::#props_macro!(@set #receiver, #name_ident, __v);
+                    }
+                });
+            } else {
+                out.extend(quote! {
+                    elwindui::core::#props_macro!(@set #receiver, #name_ident, #value);
+                });
+            }
             continue;
         }
         let is_copy = field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0));
@@ -10219,6 +10554,55 @@ view NotepadWindow {
             );
             assert_eq!(info.declaring_types[name], "Control");
         }
+    }
+
+    #[test]
+    fn external_base_bare_attribute_forward_synthesizes_field_type_macro_call() {
+        // Refs #90: `Control` here has *no* local `TypeInfo` at all (unlike
+        // `content_control_declares_seven_text_style_fields_via_control_base`'s builtins-chained
+        // setup, which is exactly why that test never caught this) — `find_component_and_module`
+        // fails to find it, so `resolve_effective_fields` must fall back to
+        // `synthesize_external_base_fields`, recovering `padding` from the view's own bare same-
+        // name reference (`padding: padding`) rather than silently dropping it — the pre-fix
+        // behavior that made `emit_path_get` panic downstream with "unsupported path shape after
+        // bind resolution: `padding`" the moment a real consumer crate actually compiled this
+        // dsl_spec.md §3 pattern against a genuinely external builtin.
+        let module = parse_module(
+            r#"
+                component Wrapper inherits Control {
+                    content: std::rc::Rc<dyn UIElement>,
+                }
+
+                view Wrapper {
+                    padding: padding
+                    content
+                }
+            "#,
+        )
+        .expect("source should parse");
+        let table = build_symbol_table(&[module.clone()]);
+        let info = table
+            .resolve(&module, "Wrapper")
+            .expect("Wrapper should resolve");
+        let (_, padding_ty) = info
+            .param_fields
+            .iter()
+            .find(|(name, _)| name == "padding")
+            .expect("padding should be synthesized as an effective field, not dropped");
+        assert!(
+            padding_ty.contains("__elwindui_props_Control!") && padding_ty.contains("@field_type"),
+            "padding's synthesized type should defer to Control's own shape macro at the \
+             consumer's expansion time, got `{padding_ty}`"
+        );
+        assert_eq!(
+            info.declaring_types.get("padding").map(String::as_str),
+            Some("Wrapper"),
+            "a synthesized field has no findable ancestor to declare it, so it counts as \
+             `Wrapper`'s own — never ambiguous, so `emit_field_setter_call` needs no UFCS \
+             disambiguation for it"
+        );
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("external_base_bare_attribute_forward", &generated);
     }
 
     #[test]

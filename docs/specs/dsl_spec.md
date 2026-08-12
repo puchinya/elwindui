@@ -119,7 +119,7 @@ if let Some(path) = platform::file_dialog::open().await {
 | | component | view |
 |---|---|---|
 | 役割 | 状態(フィールド)の定義 | 状態→見た目の写像 |
-| 対応するRust概念 | `struct Foo { ... }` | `impl Foo { fn view(&self) -> Rc<dyn UIElement> }` |
+| 対応するRust概念 | `struct Foo { ... }` | `impl Foo { fn view(&self) -> Rc<dyn UIElementExt> }` |
 | 書く内容 | 型・制約・初期値のみ | `if`/`for`/`match`による要素ツリーの組み立て |
 | 変更頻度 | 低い(型は安定) | 高い(レイアウト調整で頻繁に変わる) |
 
@@ -216,7 +216,7 @@ impl Dashboard {}
 ```rust
 #[elwindui::component(inherits Control)]
 struct ContentControl {
-    content: std::rc::Rc<dyn UIElement>,
+    content: std::rc::Rc<dyn UIElementExt>,
     // padding は Control から自動的に継承される — 再宣言不要、self.padding() がそのまま使える
 
     body: view! {
@@ -431,7 +431,7 @@ impl FormPanel {}
   `Rectangle`/`Ellipse`/`VerticalLayout`/`HorizontalLayout`/`Control`/入れ子の`Grid`)の場合、
   `inherits NativeControl`で各バックエンドの`NativeControl`実装を`base`として合成するネイティブ
   リーフ(`Button`/`TextArea`/`TabView`)の場合、およびユーザー定義の`component`+`view`ペアで
-  その`view`ルートがネイティブでない場合(`into_node()`経由で`Rc<dyn UIElement>`として取り出せる場合)
+  その`view`ルートがネイティブでない場合(`into_node()`経由で`Rc<dyn UIElementExt>`として取り出せる場合)
   ——いずれも構築直後に`elwindui-codegen`の`emit_common_ui_element_setters`/`emit_construction`が
   `(erased).base().set_attached::<T>(..)`を呼ぶことで反映される(`docs/design/runtime/ui_tree_design.md`)。`view`ルート自身が
   ネイティブに解決するユーザー定義component(`inherits NativeControl`を宣言せず`Button`等を
@@ -529,7 +529,7 @@ struct Control {
 ```
 
 - ジェネリック引数は常に文字通り`Self`のみを許す(コンポーネント自身の型)。それ以外を書くとエラー(13章ルール26)。
-- 意味的には`Rc<dyn Fn(&Self) -> Rc<dyn UIElement>>`の糖衣だが、単なる`fn(&Self) -> Rc<dyn UIElement>`コールバック糖衣とは扱いが異なる専用の型として区別する:
+- 意味的には`Rc<dyn Fn(&Self) -> Rc<dyn UIElementExt>>`の糖衣だが、単なる`fn(&Self) -> Rc<dyn UIElementExt>`コールバック糖衣とは扱いが異なる専用の型として区別する:
   - **`prop`必須**(`#[param]`不可、13章ルール27)——直前の「値計算コールバックは`#[param]`側専有」という原則(§4冒頭)に対する**意図的な例外**。テンプレートは実行時に差し替えられて初めて意味があるため、実体化時固定の`#[param]`では目的を果たせない
   - 値が変わったとき、対応する`body`(下記)配下の視覚ツリーを丸ごと再構築するという、通常のプロパティ値の再代入とは異なる**構造的な**再同期が必要([`ui_tree_design.md`](../design/runtime/ui_tree_design.md)参照)
 
@@ -569,7 +569,7 @@ struct Control {
 
 ```rust
 #[elwindui::template]
-fn button_template(inst: &Button) -> Rc<dyn UIElement> {
+fn button_template(inst: &Button) -> Rc<dyn UIElementExt> {
     HorizontalLayout {
         Rectangle { .. }
         inst.content
@@ -577,7 +577,7 @@ fn button_template(inst: &Button) -> Rc<dyn UIElement> {
 }
 ```
 
-- パラメータは必ず1個。型注釈は普通のRustとして必須(DSLの値クロージャと違い、これは生Rustの`fn`宣言なので型省略はできない)。戻り値の型は`Rc<dyn UIElement>`固定
+- パラメータは必ず1個。型注釈は普通のRustとして必須(DSLの値クロージャと違い、これは生Rustの`fn`宣言なので型省略はできない)。戻り値の型は`Rc<dyn UIElementExt>`固定
 - `#[elwindui::component]`(`elwindui_macros::component`、`crates/elwindui-macros/src/lib.rs`)と同じトリック——`fn`の本体ブロックをRustとして解釈させず、生のDSLテキストとして`elwindui-codegen`の既存パーサに渡し、パラメータ名(`inst`)を「テンプレート対象インスタンス」として束縛した状態でコード生成する想定(`elwindui-codegen`側に姉妹フロントエンドを追加する実装になる見込み)
 - 値としての参照は裸パス(`template: button_template`)。これは`ControlTemplate<Self>`型フィールドへの裸パス代入の規則(前節参照——関数アイテムそのものを値として使う、既存の0引数呼び出し糖衣とは別の意味)に従う。パラメータ型が厳密にフィールドの`Self`と一致しない関数を指している場合はエラー(13章ルール29)
 - `docs/design/tools/codegen_design.md`も参照(`component`/`viewmodel`と並ぶ3つ目のRust代替記法として言及)
@@ -663,7 +663,7 @@ impl ItemList {}
 
 ### 子要素の格納先フィールドによる制約
 
-子要素の格納先フィールド(付録A `#[content(field_name)]`参照)がリスト型(`Vec<..>`/`ListExt<..>`)の場合、`if`/`match`/`for`のいずれも使える(前節の入れ子ルールも同様)。フィールドが単一値型(例:`ContentControl`/`Window`の`content: Rc<dyn UIElement>`)の場合は`if`/`match`のみ使え、`for`は使えない(可変長のリストは単一の格納先に収まらないため)。単一値フィールド配下の`if`/`match`は、入れ子も含めたあらゆる分岐が最終的にちょうど1個の要素に還元できなければならない(1分岐に複数の裸の子要素を書くこともできない)。
+子要素の格納先フィールド(付録A `#[content(field_name)]`参照)がリスト型(`Vec<..>`/`ListExt<..>`)の場合、`if`/`match`/`for`のいずれも使える(前節の入れ子ルールも同様)。フィールドが単一値型(例:`ContentControl`/`Window`の`content: Rc<dyn UIElementExt>`)の場合は`if`/`match`のみ使え、`for`は使えない(可変長のリストは単一の格納先に収まらないため)。単一値フィールド配下の`if`/`match`は、入れ子も含めたあらゆる分岐が最終的にちょうど1個の要素に還元できなければならない(1分岐に複数の裸の子要素を書くこともできない)。
 
 ---
 
@@ -956,18 +956,18 @@ use components::card::Card as ProductCard;
 |---|---|
 | 親子構造の宣言 | DSL構文(`{}` ネスト。追加構文は不要) |
 | 動的生成された子要素(`if`/`for`/`match`の結果)をchildrenとして集約する規約 | コード生成器 |
-| 全要素が親子を辿れるという契約(`visual_children()`/`parent()`) | `UIElement`(`docs/design/runtime/ui_tree_design.md`、コード生成器が全要素型に自動実装) |
+| 全要素が親子を辿れるという契約(`visual_children()`/`parent()`) | `UIElementExt`(`docs/design/runtime/ui_tree_design.md`、コード生成器が全要素型に自動実装) |
 | 再帰探索アルゴリズム(`visual_tree::find_all` 等) | 共通ランタイムライブラリ(DSLとは独立に拡張・最適化可能) |
 | 特定要素への後からのアクセス | `#[id(...)]` アトリビュート |
 
 ### 共通トレイト(コード生成器が自動実装)
 
-`children()`/`id()`だけのための別トレイトは無い。全要素型が既に実装している`UIElement`(`docs/design/runtime/ui_tree_design.md`)がその役割を兼ねる:
+`children()`/`id()`だけのための別トレイトは無い。全要素型が既に実装している`UIElementExt`(`docs/design/runtime/ui_tree_design.md`)がその役割を兼ねる:
 
 ```rust
-trait UIElement: AsAny {
-    fn visual_children(&self) -> Vec<Rc<dyn UIElement>>;
-    fn parent(&self) -> Option<Rc<dyn UIElement>>;
+trait UIElementExt: AsAny {
+    fn visual_children(&self) -> Vec<Rc<dyn UIElementExt>>;
+    fn parent(&self) -> Option<Rc<dyn UIElementExt>>;
     // ... 他多数(margin/alignment/measure/arrangeなど。内部方式は`docs/design/runtime/ui_tree_design.md`参照)
 }
 ```
@@ -997,15 +997,15 @@ impl Toolbar {}
 
 ### 再帰探索API:`visual_tree`(共通ランタイムライブラリ、DSL非依存)
 
-`elwindui_core::visual_tree`は、WinUI3の`VisualTreeHelper`に相当する自由関数群を提供する。`UIElement`自体が既に`visual_children()`/`parent()`を持つため、木の走査そのものはこのモジュールを経由しなくても行えるが、`visual_tree`は(a) WinUI3に近い呼び出し形(`visual_tree::get_child(elem, i)`)と、(b) `UIElement`単体には無い型ベースの再帰収集(`find_all`)をまとめて提供する。
+`elwindui_core::visual_tree`は、WinUI3の`VisualTreeHelper`に相当する自由関数群を提供する。`UIElementExt`自体が既に`visual_children()`/`parent()`を持つため、木の走査そのものはこのモジュールを経由しなくても行えるが、`visual_tree`は(a) WinUI3に近い呼び出し形(`visual_tree::get_child(elem, i)`)と、(b) `UIElementExt`単体には無い型ベースの再帰収集(`find_all`)をまとめて提供する。
 
 ```rust
-pub fn get_children_count(element: &dyn UIElement) -> usize;
-pub fn get_child(element: &dyn UIElement, index: usize) -> Option<Rc<dyn UIElement>>;
-pub fn get_parent(element: &dyn UIElement) -> Option<Rc<dyn UIElement>>; // UIElement::parentのラップ
+pub fn get_children_count(element: &dyn UIElementExt) -> usize;
+pub fn get_child(element: &dyn UIElementExt, index: usize) -> Option<Rc<dyn UIElementExt>>;
+pub fn get_parent(element: &dyn UIElementExt) -> Option<Rc<dyn UIElementExt>>; // UIElementExt::parentのラップ
 
 // 型による再帰探索(該当する型の要素をすべて収集。WinUI3のVisualTreeHelperには無い拡張)
-pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
+pub fn find_all<T: 'static>(root: &dyn UIElementExt) -> Vec<Rc<dyn UIElementExt>> {
     // visual_children() を再帰的に辿り、as_any().downcast_ref::<T>()が成功するものを収集する
     ...
 }
@@ -1013,7 +1013,7 @@ pub fn find_all<T: 'static>(root: &dyn UIElement) -> Vec<Rc<dyn UIElement>> {
 
 - idによる文字列検索(`find_by_id`相当)は無い。理由は次項参照 — ランタイムidを保持する要素が存在しない
 - 探索方式(深さ優先/幅優先)やキャッシュ戦略の変更は、**DSLの構文を一切変えずに**ライブラリ側の実装更新だけで完結する
-- DSL側が保証するのは「`UIElement` トレイトを介してツリー全体に到達可能である」という契約のみ
+- DSL側が保証するのは「`UIElementExt` トレイトを介してツリー全体に到達可能である」という契約のみ
 
 ### 特定要素への名前付きアクセス:`#[id(...)]`
 

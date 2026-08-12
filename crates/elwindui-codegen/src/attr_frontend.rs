@@ -100,9 +100,9 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
     Ok(ViewModelDef { name, fields })
 }
 
-/// Builds `FieldDef`s from a `syn::ItemStruct`'s named fields, recognizing the same attribute
-/// vocabulary `parser.rs`'s DSL field parser (`parse_field_def`) does — `param`/`prop`/
-/// `state`/`observable`/`computed`/`attached`/`inject`/`two_way`/`routed`/`override`/`onetime`/
+/// Builds `FieldDef`s from a `syn::ItemStruct`'s named fields, recognizing the field-attribute
+/// vocabulary `docs/specs/dsl_spec.md` §3 documents — `param`/`prop`/
+/// `state`/`observable`/`computed`/`attached`/`inject`/`two_way`/`routed`/`overrides`/`onetime`/
 /// `length` — uniformly whether the caller is a `viewmodel` (`default_kind: FieldKind::Observable`,
 /// via `viewmodel_def_from_item_mod`) or a `component` (`default_kind: FieldKind::Prop`, via
 /// `component_frontend.rs`), exactly mirroring `parse_module`'s two `parse_fields_block` call
@@ -212,7 +212,7 @@ pub(crate) fn fields_from_item_struct(
                 }
                 "two_way" => attrs.push(Attr::TwoWay),
                 "routed" => attrs.push(Attr::Routed),
-                "override" => attrs.push(Attr::Override),
+                "overrides" => attrs.push(Attr::Override),
                 "onetime" => attrs.push(Attr::Onetime),
                 "length" => {
                     let (start, end, inclusive) = parse_length_range(attr)?;
@@ -228,7 +228,7 @@ pub(crate) fn fields_from_item_struct(
 
         if kind == FieldKind::State && !attrs.is_empty() {
             return Err(format!(
-                "field `{name}`: #[state] cannot be combined with inject, bindable, two_way, routed, override, onetime, or length"
+                "field `{name}`: #[state] cannot be combined with inject, bindable, two_way, routed, overrides, onetime, or length"
             ));
         }
 

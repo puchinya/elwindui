@@ -3063,44 +3063,24 @@ mod tests {
 
     #[test]
     fn accepts_computed_field_override_with_override_attr() {
-        // `#[override]` (bare, singular) isn't valid Rust syntax at all — `override` is a reserved
-        // keyword, and `attr_frontend::fields_from_item_struct`'s matching only recognizes the plain
-        // string `"override"` (never reachable via real struct-field-attribute syntax; the raw-
-        // identifier spelling `#[r#override]` parses to the ident text `"r#override"` instead, which
-        // doesn't match either) — so this field-level override marker currently has no working
-        // current-syntax spelling to parse from at all (docs/specs/dsl_spec.md §3 documents the
-        // *method*-level pair `#[overridable]`/`#[overrides]`, and says field-level uses the same
-        // `#[overrides]`, but `fields_from_item_struct` never implements that). Build the `Derived`
-        // component's `ComponentDef` by hand instead of parsing it, to keep testing
-        // `validate_field_overrides`'s own logic (`Attr::Override`) independent of that separate,
-        // pre-existing gap in the struct-field frontend.
-        let base_module = component_module(
-            Some("VerticalLayout"),
-            r#"struct Base { #[computed(expr = "base".to_string())] label: String, body: view! { }, }"#,
-        );
-        let derived = ComponentDef {
-            name: "Derived".to_string(),
-            base: Some("Base".to_string()),
-            base_path: None,
-            fields: vec![FieldDef {
-                name: "label".to_string(),
-                ty: "String".to_string(),
-                kind: FieldKind::Computed,
-                attrs: vec![Attr::Override],
-                initializer: Some(crate::ast::Initializer::Expr(
-                    syn::parse_str(r#""derived".to_string()"#).expect("expr should parse"),
-                )),
-            }],
-            methods: Vec::new(),
-            embedded: false,
-            sealed: false,
-            native: false,
-            is_abstract: false,
-            text_style: false,
-            content_field: None,
-        };
-        let modules = vec![base_module, module_with_component(derived, None)];
-        assert_eq!(validate(&modules), Ok(()));
+        // Field-level `#[overrides]` (docs/specs/dsl_spec.md §3) now parses via
+        // `attr_frontend::fields_from_item_struct`, so this exercises the real
+        // struct-field frontend end to end instead of hand-building the `Derived`
+        // `ComponentDef`.
+        let module = crate::test_module(&[
+            (
+                Some("VerticalLayout"),
+                r#"struct Base { #[computed(expr = "base".to_string())] label: String, body: view! { }, }"#,
+                None,
+            ),
+            (
+                Some("Base"),
+                r#"struct Derived { #[computed(expr = "derived".to_string())] #[overrides] label: String, body: view! { }, }"#,
+                None,
+            ),
+        ])
+        .expect("should build");
+        assert_eq!(validate(&[module]), Ok(()));
     }
 
     /// `#[override] fn` must name-match a base `#[virtual]` method with the same signature.

@@ -711,7 +711,7 @@ body: view! {
 }
 ```
 
-- `EnvironmentScope`自身はUI要素・Render nodeを生成しない——親のEnvironmentをderiveし、指定したKeyだけを上書きした派生Environmentをchildrenの構築に渡すだけである
+- `EnvironmentScope`自身はUI要素・Render nodeを生成しない——親のEnvironmentをderiveし、指定したKeyだけを上書きした派生Environmentをchildrenの`mount`に渡すだけである(構築時ではない——`docs/design/runtime/component_lifecycle_design.md`参照)
 - 上書きされなかったKeyは親のEnvironment値をそのまま参照する(`docs/specs/theme_environment_spec.md`の継承規則を参照)
 - `EnvironmentScope`のbodyは`for`/`if`/`match`と自由に組み合わせられる——child側の動的領域の扱いはそれぞれの規則に従う
 

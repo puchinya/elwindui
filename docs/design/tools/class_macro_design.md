@@ -12,6 +12,8 @@ Ordinary and root classes generate their own extension trait surface. `trait_onl
 
 Generated `__elwindui_inherit_*!` macros carry the ancestor chain across module and crate boundaries. `#[overridable]` emits dynamic accessors used by forwarding; `#[overrides]` routes through the subclass implementation. Sealed members omit the override route.
 
+**Known limitation** (found during CI-8 of the elwindui #80 lifecycle-refactor tracking issue, `docs/design/runtime/component_lifecycle_design.md` §4g): `#[overridable]`/`#[overrides]` does not propagate correctly across a `trait_only` → `struct_only` → ordinary two-hop ancestor chain — an `#[overridable]` method declared on a `trait_only` interface is not recognized as an available override slot by an ordinary class that `inherits` a `struct_only` implementor of that interface, even though the `struct_only` type itself correctly implements the plain (non-overridable) trait method. `macro_class_spec.md` documents that `struct_only` cannot *declare* new overridable slots of its own; this is the separate, narrower observation that an *ancestor's* overridable declaration also fails to reach two hops down through a `struct_only` link. Worked around at CI-8's one call site by using a plain inherent method (via `mark_inherent`) instead, reached from outside via ordinary Rust method-resolution shadowing rather than the override-chain machinery. Not otherwise investigated or fixed here.
+
 Generated macros use fully qualified paths. `$crate` is retained where it must refer to the declaring crate; tokens that intentionally refer to the consuming crate are rewritten during expansion.
 
 ## Construction

@@ -4491,6 +4491,54 @@ fn generate_view(
         quote! { #[allow(dead_code)] fn __run_on_unmount(&self) #rewritten }
     });
 
+    // CI-8 of #80 (docs/design/runtime/component_lifecycle_design.md §4g): a host-composition
+    // (`inherits Window`) component's own generated `new()` no longer auto-mounts (see this
+    // function's `on_constructed` splice below) — `show()` must do it instead, on first call only.
+    //
+    // `Window::show`/`hide`/`close` are deliberately plain, non-`#[overridable]` methods
+    // (`elwindui-core/src/ui/controls/window.rs`) — `#[overridable]`/`#[overrides]` does not
+    // propagate correctly across the `trait_only` (Window) -> `struct_only` (each backend's
+    // concrete Window) -> ordinary (this generated component) two-hop chain, verified empirically
+    // (`#[overrides]: no ancestor declared these methods #[overridable]`, even with `#[overridable]`
+    // declared on the trait). Instead, this emits a plain **inherent** `show`/`hide`/`close` (not
+    // `#[overrides]`) on the generated component — Rust's own method resolution prefers an inherent
+    // method over a same-named trait method for calls on the concrete type (`window.show()` where
+    // `window: Rc<SomeWindowComponent>`), so this shadows the ordinary auto-forwarded `WindowExt`
+    // impl `#[class(inherits = ..)]` still generates unconditionally. Reaches that auto-forwarded
+    // implementation via UFCS (`<Self as elwindui::core::ui::WindowExt>::show(self)`), not
+    // `self.show()`/`self.base.show()`, to avoid infinite recursion into itself.
+    let on_constructed_mount_call = (!is_host_composition).then(|| {
+        quote! { self.mount(elwindui::core::environment::application_environment()); }
+    });
+    let call_on_unmount_from_close =
+        on_unmount_method.is_some().then(|| quote! { self.__run_on_unmount(); });
+    let window_lifecycle_overrides = is_host_composition.then(|| {
+        quote! {
+            pub fn show(&self) {
+                if self.__mount_environment.get().is_none() {
+                    self.mount(elwindui::core::environment::application_environment());
+                }
+                <Self as elwindui::core::ui::WindowExt>::show(self);
+            }
+
+            pub fn hide(&self) {
+                <Self as elwindui::core::ui::WindowExt>::hide(self);
+            }
+
+            // Cancels this component's own property-changed/on_update/Environment subscriptions
+            // (`__property_changed_subscriptions` — every `Subscription` unregisters on drop) and
+            // releases the native window, in that order (spec §16: on_unmount fires "once before
+            // the subtree and subscriptions are discarded"). Does NOT recursively cascade unmount
+            // into descendant Components' own subscriptions/state — full recursive teardown is not
+            // yet implemented; see docs/design/runtime/component_lifecycle_design.md §4g.
+            pub fn close(&self) {
+                #call_on_unmount_from_close
+                self.__property_changed_subscriptions.borrow_mut().clear();
+                <Self as elwindui::core::ui::WindowExt>::close(self);
+            }
+        }
+    });
+
     let methods = emit_methods(&component.methods);
 
     // A composed ContentControl starts with an empty bare base. Content can only be attached once
@@ -4777,6 +4825,7 @@ fn generate_view(
             }
         });
         let root_embed_method = mark_inherent(root_embed_method);
+        let window_lifecycle_overrides = window_lifecycle_overrides.map(mark_inherent);
         let named_accessors = mark_inherent(named_accessors);
         let methods = mark_inherent(methods);
         let shadow_hooks = mark_inherent(shadow_hooks);
@@ -4856,9 +4905,12 @@ fn generate_view(
                     // propagation (`EnvironmentContext::current()`/`.enter()`) is removed entirely;
                     // this is now a plain, deterministic, non-stack function call. Real per-subtree
                     // derivation (something other than the single process-wide
-                    // `application_environment()`) is CI-7 (`EnvironmentScope`)/CI-8 (Window
-                    // overrides)'s work.
-                    self.mount(elwindui::core::environment::application_environment());
+                    // `application_environment()`) is CI-7 (`EnvironmentScope`)'s work. A host-
+                    // composition (`inherits Window`) component omits this call entirely — its own
+                    // `show()` override (CI-8 of #80,
+                    // docs/design/runtime/component_lifecycle_design.md §4g) mounts on first call
+                    // instead, so `new()` alone never builds a Window-rooted component's content.
+                    #on_constructed_mount_call
                 }
 
                 // Establishes this component's effective Environment and performs its initial view
@@ -4920,6 +4972,7 @@ fn generate_view(
                 #own_environment_recompute_methods
                 #dynamic_region_refresh_method
                 #root_embed_method
+                #window_lifecycle_overrides
                 #named_accessors
                 #methods
                 #shadow_hooks

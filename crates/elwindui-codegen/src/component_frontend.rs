@@ -800,6 +800,50 @@ mod tests {
         assert!(s.contains("impl"));
     }
 
+    /// CI-8 of #80 (docs/design/runtime/component_lifecycle_design.md §4g): a host-composition
+    /// (`inherits Window`, matching `Counter` above) component must NOT auto-mount from
+    /// `on_constructed`, and must instead gain a plain inherent `show`/`hide`/`close` that
+    /// mount-checks (via `__mount_environment`) and reaches the auto-forwarded `WindowExt`
+    /// implementation through UFCS, not `#[overrides]` (verified not to propagate correctly across
+    /// the `trait_only` -> `struct_only` -> ordinary chain — see this codegen's own comment at the
+    /// `window_lifecycle_overrides` definition in `codegen.rs`).
+    #[test]
+    fn host_composition_gets_inherent_show_hide_close_and_no_auto_mount_on_constructed() {
+        let src = r#"
+            struct AppWindow {
+                body: view! {
+                    title: "app"
+                    content: VerticalLayout {
+                        TextBlock { text: "hi" }
+                    }
+                }
+            }
+        "#;
+        let generated = generate(Some("Window"), src);
+        syn::parse2::<syn::File>(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
+        let s = generated.to_string();
+        assert!(s.contains("pub fn show"), "{s}");
+        assert!(s.contains("pub fn hide"), "{s}");
+        assert!(s.contains("pub fn close"), "{s}");
+        assert!(
+            s.contains("__mount_environment . get () . is_none ()"),
+            "show() must mount-check before mounting: {s}"
+        );
+        assert!(
+            s.contains("as elwindui :: core :: ui :: WindowExt > :: show"),
+            "show() must reach the real implementation via UFCS, not recurse into itself: {s}"
+        );
+        // `on_constructed` must NOT unconditionally auto-mount for this host-composition case —
+        // the only `self.mount(` call in the whole generated output must be the one inside `show()`
+        // above, not a second, unconditional one inside `on_constructed`.
+        let mount_call_count = s.matches("self . mount (").count();
+        assert_eq!(
+            mount_call_count, 1,
+            "expected exactly one self.mount(..) call site (inside show()), found {mount_call_count}: {s}"
+        );
+    }
+
     /// Issue #68 bug 4: a component's own `dyn UIElement`-typed field, inserted bare (no `key:`)
     /// in child-element position of its own `view!` — mirrors `docs/specs/dsl_spec.md`'s
     /// `ContentControl` example (§3), but built through this struct/`impl`-based frontend, whose

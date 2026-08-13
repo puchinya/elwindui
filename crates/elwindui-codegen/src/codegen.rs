@@ -5191,7 +5191,14 @@ enum DynamicPlan {
 ///   *descendant*, several `child_bindings` hops down, also needs lazy treatment — resync only
 ///   ever walks a lazy leaf's own direct attributes, see `emit_lazy_branch_resync`);
 /// - a `ChildEntry::Ref` (an `#[id(...)]`-bound `let`, always constructed once at the top level
-///   regardless of which branch currently uses it — nothing of this branch's own to defer).
+///   regardless of which branch currently uses it — nothing of this branch's own to defer);
+/// - (CI-7 follow-up) any entry inside an active `EnvironmentScope` (`environment_scope: Some(_)`)
+///   — a lazily-materialized leaf constructs later, from `__refresh_dynamic_regions`, a *different*
+///   generated method than `__build_view()`'s own one-time statement sequence, where the scope's
+///   derived `EnvironmentContext` was bound as a local variable — that variable is simply out of
+///   scope there, so forcing eager construction instead (still correctly mounting against the
+///   scope, since eager construction stays inside `__build_view()`) is the only way to keep this
+///   correct without a deeper, field-backed storage mechanism for the derived context.
 /// Any of these falls back to eager construction, unchanged from before lazy-once existed.
 ///
 /// `unique_prefix` disambiguates this branch's own leaf bindings from every other branch's: each
@@ -5202,6 +5209,7 @@ enum DynamicPlan {
 /// cache_ident` derives each field's name from its own leaf's binding). The caller passes
 /// something derived from the enclosing marker's own about-to-be-assigned `plan` position (already
 /// unique per `if`/`match` region) plus which branch this is.
+#[allow(clippy::too_many_arguments)]
 fn lazy_branch_plan(
     branch: &[ChildEntry],
     parent_type_path: &str,
@@ -5210,8 +5218,12 @@ fn lazy_branch_plan(
     table: &SymbolTable,
     lets: &HashMap<String, (syn::Ident, String)>,
     unique_prefix: &str,
+    environment_scope: Option<&syn::Ident>,
 ) -> Option<(Vec<(syn::Ident, String)>, Vec<PlannedNode>)> {
     if branch.is_empty() {
+        return None;
+    }
+    if environment_scope.is_some() {
         return None;
     }
     let eligible = branch
@@ -5222,7 +5234,7 @@ fn lazy_branch_plan(
     }
     let mut leaves = Vec::new();
     for entry in branch {
-        plan_child_entry(entry, parent_type_path, ctx, from, table, &mut leaves, lets);
+        plan_child_entry(entry, parent_type_path, ctx, from, table, &mut leaves, lets, None);
     }
     // Rename every leaf's binding to be unique across every branch of every `if`/`match` region in
     // this view — see this function's own doc comment on why the fresh, branch-local `leaves`
@@ -5499,14 +5511,16 @@ fn plan_children_in_scope(
                 });
                 child_bindings.push(resolved.clone());
             }
-            ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. } => {
-                // Not supported in this first implementation (CI-7 of #80) when `environment_scope`
-                // is `Some(_)` — a dynamic (`if`/`match`/`for`) region directly inside an
-                // `EnvironmentScope` falls back to the ordinary, non-scoped dynamic-region path
-                // (its own descendants self-mount via `application_environment()`, same as if no
-                // `EnvironmentScope` were present) rather than failing to compile — `dsl_spec.md`
-                // §5 already documents `EnvironmentScope` composing freely with `for`/`if`/`match`,
-                // so this is a real (if narrow) gap, not a rejection; flagged as residual risk.
+            ChildEntry::If { .. } | ChildEntry::Match { .. } => {
+                // `if`/`match` directly inside an `EnvironmentScope` (CI-7 follow-up,
+                // docs/design/runtime/component_lifecycle_design.md §4f): threaded through so each
+                // branch's own literal elements mount against the active scope, same as a bare
+                // literal child would. A branch that would otherwise qualify for lazy-once
+                // materialization (`lazy_branch_plan`) is instead forced eager while inside a scope
+                // — see that function's own eligibility-rule doc comment for why (the scope's
+                // derived `EnvironmentContext` lives in a `__build_view()`-local variable that a
+                // *lazily* materialized leaf, constructed later from `__refresh_dynamic_regions`,
+                // cannot reach).
                 child_bindings.push(plan_dynamic_entry(
                     child,
                     parent_type_path,
@@ -5515,6 +5529,27 @@ fn plan_children_in_scope(
                     table,
                     out,
                     lets,
+                    environment_scope,
+                ));
+            }
+            ChildEntry::For { .. } => {
+                // Not yet supported inside an `EnvironmentScope` (CI-7 follow-up) — a `for` loop's
+                // items are constructed on demand by a persistent renderer closure that outlives
+                // `__build_view()` entirely (unlike an eager `if`/`match` branch, which is part of
+                // that same one-time statement sequence), so its items self-mount via the ordinary,
+                // non-scoped `application_environment()` bridge, same as if no `EnvironmentScope`
+                // were present — `environment_scope` is deliberately not threaded to
+                // `plan_dynamic_entry` for this arm. `docs/specs/dsl_spec.md` §5 documents this
+                // narrower remaining gap explicitly.
+                child_bindings.push(plan_dynamic_entry(
+                    child,
+                    parent_type_path,
+                    ctx,
+                    from,
+                    table,
+                    out,
+                    lets,
+                    None,
                 ));
             }
         }
@@ -6840,6 +6875,7 @@ fn emit_scalar_branch_value(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_child_entry(
     entry: &ChildEntry,
     parent_type_path: &str,
@@ -6848,12 +6884,14 @@ fn plan_child_entry(
     table: &SymbolTable,
     out: &mut Vec<PlannedNode>,
     lets: &HashMap<String, (syn::Ident, String)>,
+    environment_scope: Option<&syn::Ident>,
 ) -> (syn::Ident, String) {
     match entry {
         ChildEntry::Literal(element) => {
-            let resolved = plan_element(element, ctx, from, table, out, false, lets);
+            let resolved =
+                plan_element_in_scope(element, ctx, from, table, out, false, lets, environment_scope);
             out.last_mut()
-                .expect("plan_element pushed the child root")
+                .expect("plan_element_in_scope pushed the child root")
                 .stored = true;
             resolved
         }
@@ -6861,7 +6899,16 @@ fn plan_child_entry(
             panic!("`{name}` does not refer to an earlier `let` binding in this view")
         }),
         ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. } => {
-            plan_dynamic_entry(entry, parent_type_path, ctx, from, table, out, lets)
+            plan_dynamic_entry(
+                entry,
+                parent_type_path,
+                ctx,
+                from,
+                table,
+                out,
+                lets,
+                environment_scope,
+            )
         }
     }
 }
@@ -6877,6 +6924,7 @@ fn plan_child_entry(
 /// own `dynamic_collection_item_trait` lookup; `__refresh_dynamic_regions` (`emit_dynamic_region_refresh`)
 /// separately re-derives each region's real host/insertion-point at generation time by walking
 /// `plan` itself, so this function does not need to record the parent any more permanently than that.
+#[allow(clippy::too_many_arguments)]
 fn plan_dynamic_entry(
     entry: &ChildEntry,
     parent_type_path: &str,
@@ -6885,6 +6933,7 @@ fn plan_dynamic_entry(
     table: &SymbolTable,
     out: &mut Vec<PlannedNode>,
     lets: &HashMap<String, (syn::Ident, String)>,
+    environment_scope: Option<&syn::Ident>,
 ) -> (syn::Ident, String) {
     match entry {
         ChildEntry::Literal(_) | ChildEntry::Ref(_) => {
@@ -6909,12 +6958,24 @@ fn plan_dynamic_entry(
                 table,
                 lets,
                 &then_lazy_prefix,
+                environment_scope,
             ) {
                 Some((bindings, leaves)) => (bindings, Some(leaves)),
                 None => (
                     then_branch
                         .iter()
-                        .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
+                        .map(|e| {
+                            plan_child_entry(
+                                e,
+                                parent_type_path,
+                                ctx,
+                                from,
+                                table,
+                                out,
+                                lets,
+                                environment_scope,
+                            )
+                        })
                         .collect(),
                     None,
                 ),
@@ -6928,12 +6989,24 @@ fn plan_dynamic_entry(
                 table,
                 lets,
                 &else_lazy_prefix,
+                environment_scope,
             ) {
                 Some((bindings, leaves)) => (bindings, Some(leaves)),
                 None => (
                     else_branch
                         .iter()
-                        .map(|e| plan_child_entry(e, parent_type_path, ctx, from, table, out, lets))
+                        .map(|e| {
+                            plan_child_entry(
+                                e,
+                                parent_type_path,
+                                ctx,
+                                from,
+                                table,
+                                out,
+                                lets,
+                                environment_scope,
+                            )
+                        })
                         .collect(),
                     None,
                 ),
@@ -6982,6 +7055,7 @@ fn plan_dynamic_entry(
                         table,
                         lets,
                         &lazy_prefix,
+                        environment_scope,
                     ) {
                         Some((bindings, leaves)) => (bindings, Some(leaves)),
                         None => (
@@ -6996,6 +7070,7 @@ fn plan_dynamic_entry(
                                         table,
                                         out,
                                         lets,
+                                        environment_scope,
                                     )
                                 })
                                 .collect(),

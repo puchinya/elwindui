@@ -714,7 +714,8 @@ body: view! {
 - `EnvironmentScope`自身はUI要素・Render nodeを生成しない——親のEnvironmentをderiveし、指定したKeyだけを上書きした派生Environmentをchildrenの`mount`に渡すだけである(構築時ではない——`docs/design/runtime/component_lifecycle_design.md`参照)
 - 上書きされなかったKeyは親のEnvironment値をそのまま参照する(`docs/specs/theme_environment_spec.md`の継承規則を参照)
 - `EnvironmentScope`は入れ子にできる——内側の`EnvironmentScope`は自身を囲む(外側の)`EnvironmentScope`の派生Environmentからさらにderiveする(コンポーネント自身の`__mount_environment`から直接deriveするわけではない)
-- 現在の実装では、`EnvironmentScope`の直接の子として書かれた裸の要素(bare element)のみがscope付きmountの対象になる。`EnvironmentScope`の直下に`if`/`match`/`for`を直接書いた場合、その動的領域配下の子要素は(`EnvironmentScope`が存在しない場合と同様に)通常の非scope経路でmount・構築される——既知の制限であり、`EnvironmentScope`で囲んだ`SettingsView {}`のような単純な裸の要素の並びには影響しない
+- `EnvironmentScope`の直下、または`EnvironmentScope`直下の`if`/`match`分岐内に書かれた裸の要素は、いずれもscope付きmountの対象になる。`if`/`match`分岐が(分岐内が子要素を持たない単一の裸要素のみで構成されるなど)本来ならlazy-once化(初回到達時まで構築を遅延)の対象になる形であっても、`EnvironmentScope`の内側にある場合は常に即時(eager)構築される——lazy化された枝は`__build_view()`とは別の生成メソッド(`__refresh_dynamic_regions`)から後で構築されるため、scopeが導出した`EnvironmentContext`を保持するローカル変数を参照できないための制約であり、mount先のEnvironmentが誤る(scopeが適用されない)ことはない
+- `EnvironmentScope`の直下に`for`を直接書いた場合は現時点で未対応——`for`の各要素は`__build_view()`より後まで存続する専用のrendererから随時構築されるため、(`EnvironmentScope`が存在しない場合と同様に)通常の非scope経路でmount・構築される——既知の制限
 
 ---
 

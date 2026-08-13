@@ -212,3 +212,68 @@ fn nested_environment_scope_derives_from_its_own_enclosing_scope() {
     assert_eq!(NESTED_INNER_TINT.with(|c| c.borrow().clone()), "outer-tint");
     assert_eq!(NESTED_INNER_LOCALE.with(|c| c.borrow().clone()), "ja-JP");
 }
+
+// CI-7 follow-up: an `if` directly inside an `EnvironmentScope` must be scope-aware — the residual
+// gap noted in PR #121 ("Known limitation: only a bare literal element... an if/match/for... falls
+// back to the ordinary, non-scoped path"). Both branches here are single childless leaves — the
+// exact shape that would otherwise qualify for lazy-once materialization (`lazy_branch_plan`) —
+// deliberately, so this test also exercises the "force eager while inside a scope" fallback
+// (`lazy_branch_plan` returns `None` whenever `environment_scope.is_some()`), not just the ordinary
+// eager path.
+thread_local! {
+    static IF_IN_SCOPE_LOCALE: RefCell<String> = RefCell::new(String::new());
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeIfChild {
+    #[environment(environment_scope_locale)]
+    locale: String,
+
+    body: view! {
+        on_mount {
+            IF_IN_SCOPE_LOCALE.with(|c| *c.borrow_mut() = self.locale());
+        }
+        TextBlock { text: locale }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeIfChild {}
+
+#[elwindui::component(inherits ContentControl)]
+struct EnvironmentScopeIfParent {
+    #[param]
+    show_child: bool,
+
+    body: view! {
+        VerticalLayout {
+            EnvironmentScope {
+                environment_scope_locale: "fr-FR",
+                if show_child {
+                    EnvironmentScopeIfChild {}
+                } else {
+                    TextBlock { text: "placeholder" }
+                }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl EnvironmentScopeIfParent {}
+
+#[test]
+fn an_if_directly_inside_environment_scope_is_scope_aware() {
+    elwindui::core::environment::application_environment()
+        .set::<EnvironmentScopeLocale>("en-US".to_string());
+    IF_IN_SCOPE_LOCALE.with(|c| *c.borrow_mut() = String::new());
+
+    let _parent = EnvironmentScopeIfParent::new(true);
+
+    assert_eq!(
+        IF_IN_SCOPE_LOCALE.with(|c| c.borrow().clone()),
+        "fr-FR",
+        "a literal element inside an `if` branch that is itself inside an EnvironmentScope must \
+         observe the scope's override, not the un-overridden application_environment() value"
+    );
+}

@@ -602,8 +602,12 @@ mod environment_key_tests {
             .expect("impl half should generate")
             .to_string();
         assert!(
-            generated.contains("EnvironmentContext :: current ()"),
-            "should resolve from the ambient context at construction: {generated}"
+            generated.contains("application_environment ()"),
+            "mount() should bridge with application_environment(), not an ambient read (CI-6 of #80): {generated}"
+        );
+        assert!(
+            generated.contains("__mount_environment . get ()"),
+            "the environment field should resolve from __mount_environment, populated by mount() (CI-5 of #80), not a second independent ambient read: {generated}"
         );
         assert!(
             generated.contains(". get :: < EnvKeyTestLocaleA > ()"),

@@ -222,11 +222,11 @@ pub enum FieldKind {
     /// `#[environment(name)]`: a read-only field resolved from the inherited `EnvironmentContext`
     /// under Environment Key `name` (docs/specs/dsl_spec.md §4, docs/specs/theme_environment_spec.md
     /// §2). Like [`Self::Computed`], has no caller-supplied initializer and no setter — unlike it,
-    /// the value comes from `elwindui::core::environment::EnvironmentContext::current()` at
-    /// construction (docs/design/runtime/theme_environment_design.md), not from a declared
-    /// expression over sibling fields. Never a constructor argument, never part of the component's
-    /// external construction/property surface — see `Attr::Environment`'s own doc comment for where
-    /// the referenced Key name is stored.
+    /// the value comes from `self.__mount_environment` (the `EnvironmentContext` this component's
+    /// `mount()` was called with — docs/design/runtime/component_lifecycle_design.md §4d, CI-5 of
+    /// #80), not from a declared expression over sibling fields. Never a constructor argument, never
+    /// part of the component's external construction/property surface — see `Attr::Environment`'s
+    /// own doc comment for where the referenced Key name is stored.
     Environment,
 }
 

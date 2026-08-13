@@ -68,13 +68,10 @@ where
 {
     elwindui_core::task::set_current(LocalExecutor::new(AppKitDispatcher));
 
-    // Held for `app.run()`'s entire (blocking) event-loop lifetime, so every component built on
-    // this thread — during `startup()` and later, from any event callback — observes
-    // `application_environment()` as ambient (`EnvironmentContext::current()`). See
+    // No ambient Environment entry needed (CI-6 of #80): every generated component's `mount()`
+    // calls `elwindui_core::environment::application_environment()` directly, a plain deterministic
+    // function call reachable from `startup()` and from any later event callback alike. See
     // `docs/design/runtime/theme_environment_design.md`'s "Application boundary".
-    let application_environment = elwindui_core::environment::application_environment();
-    let _environment_guard = application_environment.enter();
-
     let mtm = mtm();
     let app = NSApplication::sharedApplication(mtm);
     let delegate = AppDelegate::new(mtm);

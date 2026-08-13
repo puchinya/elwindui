@@ -1,10 +1,12 @@
 //! Typed, reactive UI context values inherited down the component tree.
 //!
-//! Environment resolution happens during component construction, never through Visual Tree
-//! attachment: `view!` bodies build their descendant tree synchronously inside a generated
-//! `Component::new()`, before any `UIElement` exists to attach to. See
-//! `docs/design/runtime/theme_environment_design.md` (`## Environment`) for the full ownership and
-//! propagation model, and `docs/specs/theme_environment_spec.md` §2 for the normative contract.
+//! Environment is established at mount, not through ambient thread-local propagation: a generated
+//! component's `mount(environment: EnvironmentContext)` (CI-3 of #80) receives its effective
+//! context as an explicit argument — today, always `application_environment()` (CI-6 of #80;
+//! `EnvironmentContext::current()`/`.enter()`/the ambient stack this module used to expose were
+//! removed as part of that issue). See `docs/design/runtime/theme_environment_design.md`
+//! (`## Environment`) for the full ownership and propagation model, and
+//! `docs/specs/theme_environment_spec.md` §2 for the normative contract.
 //!
 //! Theme and Environment are separate systems and share no runtime type here — see
 //! [`crate::theme`].
@@ -197,45 +199,9 @@ impl EnvironmentContext {
         })
     }
 
-    /// Returns the ambient context in effect right now.
-    ///
-    /// `elwindui-codegen` calls this from a `#[environment(name)]` field's generated initializer.
-    /// `view!` bodies evaluate a component's descendant tree synchronously and in construction
-    /// order (`docs/design/runtime/theme_environment_design.md`), so a nested-call thread-local
-    /// stack observes exactly the same ambient context at each construction point that explicitly
-    /// threading a hidden constructor parameter through every call would — without changing every
-    /// generated constructor's signature to carry it. DSL author code never calls this directly
-    /// (`docs/specs/dsl_spec.md` §4).
-    #[doc(hidden)]
-    pub fn current() -> EnvironmentContext {
-        CURRENT.with(|stack| {
-            stack
-                .borrow()
-                .last()
-                .cloned()
-                .unwrap_or_else(EnvironmentContext::root)
-        })
-    }
-
-    /// Makes `self` the ambient context (see [`Self::current`]) for as long as the returned guard
-    /// is alive, restoring whatever was ambient before on drop — including on unwind, so a panic
-    /// during nested construction cannot leave a stale context ambient for unrelated later work on
-    /// this thread.
-    ///
-    /// `elwindui-codegen` uses this to implement `EnvironmentScope { .. }`
-    /// (`docs/specs/dsl_spec.md` §5): it derives an overridden context, enters it, builds the
-    /// scope's children while it is ambient, then lets the guard drop before returning. DSL author
-    /// code never calls this directly.
-    #[doc(hidden)]
-    #[must_use = "the ambient context reverts as soon as the guard is dropped"]
-    pub fn enter(&self) -> EnvironmentContextGuard {
-        CURRENT.with(|stack| stack.borrow_mut().push(self.clone()));
-        EnvironmentContextGuard { _private: () }
-    }
 }
 
 thread_local! {
-    static CURRENT: RefCell<Vec<EnvironmentContext>> = RefCell::new(Vec::new());
     static APPLICATION_ENVIRONMENT: EnvironmentContext = EnvironmentContext::root();
 }
 
@@ -243,28 +209,14 @@ thread_local! {
 /// thread and reused on every later call — unlike [`EnvironmentContext::root`], which always
 /// allocates a new, unrelated state.
 ///
-/// A [`crate::theme::Theme`] applied to this context is what a whole application observes: each
-/// backend's `run()` holds this context [`EnvironmentContext::enter`]ed for the run loop's entire
-/// lifetime (`docs/design/runtime/theme_environment_design.md`, "Application boundary"), so
-/// construction anywhere in the application sees overrides applied here through
-/// [`EnvironmentContext::current`].
+/// A [`crate::theme::Theme`] applied to this context is what a whole application observes: a
+/// generated component's `mount(environment)` (CI-3 of #80) is called with this value directly
+/// (CI-6 of #80 — no ambient thread-local propagation is involved; this is a plain, deterministic
+/// function call reachable from anywhere, including an event callback with no natural parent
+/// Component). Real per-subtree derivation (a component receiving something other than this single
+/// process-wide context) is `EnvironmentScope`/Window-override work, not yet implemented.
 pub fn application_environment() -> EnvironmentContext {
     APPLICATION_ENVIRONMENT.with(|env| env.clone())
-}
-
-/// RAII guard restoring the previously ambient [`EnvironmentContext`] on drop. See
-/// [`EnvironmentContext::enter`].
-#[doc(hidden)]
-pub struct EnvironmentContextGuard {
-    _private: (),
-}
-
-impl Drop for EnvironmentContextGuard {
-    fn drop(&mut self) {
-        CURRENT.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-    }
 }
 
 #[cfg(test)]
@@ -398,29 +350,12 @@ mod tests {
     }
 
     #[test]
-    fn current_falls_back_to_a_default_root_before_anything_ever_entered() {
-        assert_eq!(EnvironmentContext::current().get::<LocaleKey>(), "en-US");
-    }
-
-    #[test]
-    fn entering_a_context_makes_it_ambient_until_the_guard_drops() {
-        let scoped = EnvironmentContext::root();
-        scoped.set::<LocaleKey>("ja-JP");
-
-        assert_eq!(EnvironmentContext::current().get::<LocaleKey>(), "en-US");
-        {
-            let _guard = scoped.enter();
-            assert_eq!(EnvironmentContext::current().get::<LocaleKey>(), "ja-JP");
-
-            // Nested entry stacks and unwinds correctly.
-            let inner = EnvironmentContext::current().derive();
-            inner.set::<LocaleKey>("fr-FR");
-            {
-                let _inner_guard = inner.enter();
-                assert_eq!(EnvironmentContext::current().get::<LocaleKey>(), "fr-FR");
-            }
-            assert_eq!(EnvironmentContext::current().get::<LocaleKey>(), "ja-JP");
-        }
-        assert_eq!(EnvironmentContext::current().get::<LocaleKey>(), "en-US");
+    fn application_environment_is_a_persistent_singleton_reused_across_calls() {
+        // CI-6 of #80: `application_environment()` replaces the removed ambient
+        // `EnvironmentContext::current()`/`.enter()` stack as the mount-time bridge value — confirm
+        // it is the same persistent context every call, unlike `EnvironmentContext::root()` (which
+        // always allocates a fresh, unrelated state).
+        super::application_environment().set::<LocaleKey>("ja-JP");
+        assert_eq!(super::application_environment().get::<LocaleKey>(), "ja-JP");
     }
 }

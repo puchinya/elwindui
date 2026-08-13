@@ -18,7 +18,9 @@ Generated macros use fully qualified paths. `$crate` is retained where it must r
 
 `construct` is the single source for constructor arguments. Expansion generates `new`, initializes the weak self handle after allocation, and invokes `on_constructed` only after the object can be safely upgraded through that handle.
 
-Hand-written `new` is rejected because it would compete with the generated ownership sequence.
+Expansion also generates a second, unconditional constructor, `__new_unmounted` (CI-7 of the elwindui #80 lifecycle-refactor tracking issue, `docs/design/runtime/component_lifecycle_design.md` §4f) — the same allocation step as `new`, without the trailing `on_constructed` invocation. It exists so a caller (today, only `EnvironmentScope`'s own generated code) can construct an object and then call `mount(environment)` on it explicitly, against a specific `EnvironmentContext`, instead of letting construction auto-mount it. Both constructors are always emitted together; there is no class-level flag selecting one or the other, because the choice belongs to the call site, not the type.
+
+Hand-written `new` or `__new_unmounted` is rejected because either would compete with the generated ownership sequence.
 
 ## Registry and analysis
 

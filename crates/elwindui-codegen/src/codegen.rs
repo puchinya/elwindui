@@ -4936,21 +4936,34 @@ fn generate_view(
 
             impl #struct_ident {
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
-                    #content_capture_stmt
-                    #construct_stmts
-                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new() });
+                    let this = Self::__new_unmounted(#(#ctor_param_names),*);
                     // See the composed shape's own `on_constructed` doc comment above — same
                     // `application_environment()` call, same reasoning (CI-6 of #80).
                     this.mount(elwindui::core::environment::application_environment());
                     this
                 }
 
+                // CI-7 of #80 (docs/design/runtime/component_lifecycle_design.md §4f): the same
+                // construction step as `new()` above, but without the trailing `.mount(..)` call —
+                // the caller (only ever `EnvironmentScope`'s own generated code today) is
+                // responsible for calling `.mount(environment)` on the returned `Rc<Self>` itself,
+                // explicitly, afterward. `pub` (unlike this shape's other `#[doc(hidden)]` internals)
+                // because `EnvironmentScope`'s generated code calling it lives in a *different*
+                // component's own generated module.
+                #[doc(hidden)]
+                pub fn __new_unmounted(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
+                    #content_capture_stmt
+                    #construct_stmts
+                    std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new() })
+                }
+
                 // Establishes this component's effective Environment and performs its initial view
                 // build, exactly once (docs/design/runtime/component_lifecycle_design.md §4a, CI-3 of
                 // #80). `new()` invokes this immediately today, so timing/behavior is unchanged from
-                // before this method existed.
+                // before this method existed. `pub` (CI-7 of #80): `EnvironmentScope`'s generated code
+                // calls this explicitly on a node it constructed via `__new_unmounted` above.
                 #[doc(hidden)]
-                fn mount(self: &std::rc::Rc<Self>, environment: elwindui::core::environment::EnvironmentContext) {
+                pub fn mount(self: &std::rc::Rc<Self>, environment: elwindui::core::environment::EnvironmentContext) {
                     self.__mount_environment
                         .set(environment)
                         .expect("mount: component is already mounted");
@@ -5096,7 +5109,35 @@ struct PlannedNode {
     /// by `plan_element`. Drives `emit_named_accessors`.
     id: Option<String>,
     dynamic: Option<DynamicPlan>,
+    /// CI-7 of #80 (docs/design/runtime/component_lifecycle_design.md §4f): dual-purpose, per
+    /// `type_path`.
+    ///
+    /// - On an ordinary node (any `type_path` other than [`ENVIRONMENT_SCOPE_MARKER`]): the local
+    ///   variable name of the `EnvironmentScope` this node was declared inside, if any. `None`
+    ///   means "not inside an `EnvironmentScope`" — construct via the ordinary `Type::new(..)` path
+    ///   (self-mounts via its own `application_environment()` bridge, unchanged since CI-6).
+    ///   `Some(var)` means: construct via `Type::__new_unmounted(..)` instead, then call
+    ///   `.mount(#var.clone())` explicitly — `#var` names a local `EnvironmentContext` some
+    ///   earlier [`ENVIRONMENT_SCOPE_MARKER`] node in this same flat `plan` (always earlier: plan
+    ///   order is the emission order, and a scope's setup is always planned/pushed before its own
+    ///   children) already bound via `let`.
+    /// - On an [`ENVIRONMENT_SCOPE_MARKER`] node itself: the *outer* scope this scope derives from,
+    ///   if this `EnvironmentScope` is nested inside another one. `None` means it derives directly
+    ///   from `self.__mount_environment` (the enclosing component's own effective Environment).
+    environment_scope: Option<syn::Ident>,
 }
+
+/// Internal planning marker for an `EnvironmentScope { key: value, ..; <children> }` block (CI-7 of
+/// #80, closes #100) — mirrors [`DYNAMIC_CHILD_SLOT_MARKER`]'s own "never a real resolved type"
+/// convention. A node with this `type_path` never reaches `table.resolve` — `emit_construction`
+/// checks for it before any type-table lookup — and produces no `UIElement`/Visual/Render/Layout
+/// node of its own: it only ever emits a `let #binding = <outer>.derive(); #binding.set::<Key>(v);
+/// ...;` local-variable statement (`binding` is the fresh per-instance `EnvironmentContext` local
+/// variable name every child inside this scope references via its own `environment_scope: Some(_)`
+/// field). Its own `attributes` (reused verbatim from the parsed `EnvironmentScope { key: value }`
+/// element — same `ViewAttribute` shape any ordinary element's attributes use) are this scope's
+/// declared key overrides, not properties of a real widget.
+const ENVIRONMENT_SCOPE_MARKER: &str = "__environment_scope";
 
 /// Internal planning marker for a transparent dynamic child range. It never names a generated
 /// Rust type or a runtime element: the generated component owns a `DynamicChildSlot` field and
@@ -5351,6 +5392,40 @@ fn lazy_leaf_or_field_value(
     }
 }
 
+/// Plans an `EnvironmentScope { key: value, ..; <children> }` element (CI-7 of #80, closes #100)
+/// into an [`ENVIRONMENT_SCOPE_MARKER`] `PlannedNode`, pushed *before* any of its own children are
+/// planned — deliberately breaking the post-order (children-before-parent) convention every other
+/// `plan_element_in_scope` push follows, since this node's own emitted statement (its children's
+/// derived `EnvironmentContext` local variable) must exist *before* any of those children's own
+/// construction statements run, not after. Returns the fresh local variable's identifier so the
+/// caller can pass it down as `environment_scope` to each of the scope's own children.
+///
+/// `EnvironmentScope { .. }`'s own `{ key: value, .. }` body parses as an entirely ordinary
+/// `ElementNode` — its override assignments are indistinguishable, syntactically, from any other
+/// element's `key: value` attributes (`parser.rs`'s generic `parse_element_body` already handles
+/// this; no dedicated grammar was needed for `EnvironmentScope`, unlike `if`/`match`/`for`).
+fn plan_environment_scope(
+    elem: &ElementNode,
+    out: &mut Vec<PlannedNode>,
+    outer_scope: Option<&syn::Ident>,
+) -> syn::Ident {
+    let binding = format_ident!("__elwindui_scope_environment_{}", out.len());
+    out.push(PlannedNode {
+        binding: binding.clone(),
+        type_path: ENVIRONMENT_SCOPE_MARKER.to_string(),
+        attributes: elem.attributes.clone(),
+        attached: Vec::new(),
+        attribute_shortcuts: HashMap::new(),
+        child_bindings: Vec::new(),
+        element_attr_bindings: HashMap::new(),
+        stored: false,
+        id: None,
+        dynamic: None,
+        environment_scope: outer_scope.cloned(),
+    });
+    binding
+}
+
 fn plan_element(
     node: &ElementNode,
     ctx: &ViewCtx,
@@ -5360,12 +5435,64 @@ fn plan_element(
     is_root: bool,
     lets: &HashMap<String, (syn::Ident, String)>,
 ) -> (syn::Ident, String) {
+    plan_element_in_scope(node, ctx, from, table, out, is_root, lets, None)
+}
+
+/// Plans one `{ .. }` body's worth of bare child entries (CI-7 of #80,
+/// docs/design/runtime/component_lifecycle_design.md §4f) — shared between an ordinary element's
+/// own `node.children` (`plan_element_in_scope`, below) and an `EnvironmentScope`'s own `elem.
+/// children` (`plan_environment_scope`'s caller), which is exactly why this exists as its own
+/// function rather than being inlined into `plan_element_in_scope`: an `EnvironmentScope` nested
+/// directly inside another `EnvironmentScope` must be detected by *this same* `elem.type_path ==
+/// "EnvironmentScope"` check regardless of which of the two call sites is currently walking its
+/// enclosing children list — inlining this into `plan_element_in_scope` only (an earlier revision
+/// of this code did exactly that) left the scope's own children loop without the check, silently
+/// treating a nested `EnvironmentScope` as an ordinary, unresolvable component type instead.
+#[allow(clippy::too_many_arguments)]
+fn plan_children_in_scope(
+    children: &[ChildEntry],
+    parent_type_path: &str,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut Vec<PlannedNode>,
+    lets: &HashMap<String, (syn::Ident, String)>,
+    environment_scope: Option<&syn::Ident>,
+) -> Vec<(syn::Ident, String)> {
     let mut child_bindings = Vec::new();
-    for child in &node.children {
+    for child in children {
         match child {
-            ChildEntry::Literal(elem) => {
-                child_bindings.push(plan_element(elem, ctx, from, table, out, false, lets))
+            ChildEntry::Literal(elem) if elem.type_path == "EnvironmentScope" => {
+                // This position produces no `child_bindings` entry of its own — every one of the
+                // scope's own bare children is planned as if it were a direct child of whatever
+                // `children` belongs to instead (spec §9: "`EnvironmentScope` itself creates no
+                // UIElement... purely a construction/mount context boundary"). Derives from the
+                // *currently* active `environment_scope` (this call's own parameter — the outer
+                // scope, for a nested `EnvironmentScope`), not unconditionally from
+                // `self.__mount_environment` — that's what makes derive-chaining correct for
+                // nesting.
+                let scope_var = plan_environment_scope(elem, out, environment_scope);
+                child_bindings.extend(plan_children_in_scope(
+                    &elem.children,
+                    &elem.type_path,
+                    ctx,
+                    from,
+                    table,
+                    out,
+                    lets,
+                    Some(&scope_var),
+                ));
             }
+            ChildEntry::Literal(elem) => child_bindings.push(plan_element_in_scope(
+                elem,
+                ctx,
+                from,
+                table,
+                out,
+                false,
+                lets,
+                environment_scope,
+            )),
             ChildEntry::Ref(name) => {
                 let resolved = lets.get(name).unwrap_or_else(|| {
                     panic!("`{name}` does not refer to an earlier `let` binding in this view")
@@ -5373,9 +5500,16 @@ fn plan_element(
                 child_bindings.push(resolved.clone());
             }
             ChildEntry::If { .. } | ChildEntry::Match { .. } | ChildEntry::For { .. } => {
+                // Not supported in this first implementation (CI-7 of #80) when `environment_scope`
+                // is `Some(_)` — a dynamic (`if`/`match`/`for`) region directly inside an
+                // `EnvironmentScope` falls back to the ordinary, non-scoped dynamic-region path
+                // (its own descendants self-mount via `application_environment()`, same as if no
+                // `EnvironmentScope` were present) rather than failing to compile — `dsl_spec.md`
+                // §5 already documents `EnvironmentScope` composing freely with `for`/`if`/`match`,
+                // so this is a real (if narrow) gap, not a rejection; flagged as residual risk.
                 child_bindings.push(plan_dynamic_entry(
                     child,
-                    &node.type_path,
+                    parent_type_path,
                     ctx,
                     from,
                     table,
@@ -5385,6 +5519,37 @@ fn plan_element(
             }
         }
     }
+    child_bindings
+}
+
+/// `plan_element`'s real implementation, with an added `environment_scope` parameter (CI-7 of #80,
+/// docs/design/runtime/component_lifecycle_design.md §4f): the local variable name of the
+/// currently-active `EnvironmentScope` (if any) this node's own recursive planning is nested
+/// inside. `plan_element` itself is kept as a `None`-forwarding wrapper so its many existing call
+/// sites (top-level `let`-bindings/root, `for`-loop item templates, `render_content` closure
+/// bodies, dynamic-region children) don't all need updating merely to pass `None` explicitly — none
+/// of them currently need to propagate an enclosing scope in.
+#[allow(clippy::too_many_arguments)]
+fn plan_element_in_scope(
+    node: &ElementNode,
+    ctx: &ViewCtx,
+    from: &Module,
+    table: &SymbolTable,
+    out: &mut Vec<PlannedNode>,
+    is_root: bool,
+    lets: &HashMap<String, (syn::Ident, String)>,
+    environment_scope: Option<&syn::Ident>,
+) -> (syn::Ident, String) {
+    let child_bindings = plan_children_in_scope(
+        &node.children,
+        &node.type_path,
+        ctx,
+        from,
+        table,
+        out,
+        lets,
+        environment_scope,
+    );
 
     let mut element_attr_bindings = HashMap::new();
     for attribute in &node.attributes {
@@ -5421,6 +5586,7 @@ fn plan_element(
         stored,
         id: None,
         dynamic: None,
+        environment_scope: environment_scope.cloned(),
     });
     (binding, node.type_path.clone())
 }
@@ -6790,6 +6956,7 @@ fn plan_dynamic_entry(
                     then_lazy,
                     else_lazy,
                 }),
+                environment_scope: None,
             });
             (binding, DYNAMIC_CHILD_SLOT_MARKER.to_string())
         }
@@ -6853,6 +7020,7 @@ fn plan_dynamic_entry(
                     value: value.clone(),
                     arms,
                 }),
+                environment_scope: None,
             });
             (binding, DYNAMIC_CHILD_SLOT_MARKER.to_string())
         }
@@ -6879,6 +7047,7 @@ fn plan_dynamic_entry(
                 stored: false,
                 id: None,
                 dynamic: None,
+                environment_scope: None,
             };
             let item_trait = dynamic_collection_item_trait_ty(&parent, from, table);
             let rc_identity =
@@ -6901,6 +7070,7 @@ fn plan_dynamic_entry(
                     renderer,
                     rc_identity,
                 }),
+                environment_scope: None,
             });
             (node_binding, DYNAMIC_CHILD_SLOT_MARKER.to_string())
         }
@@ -7631,6 +7801,63 @@ fn emit_external_attribute_sets(
     sets
 }
 
+/// Emits an `EnvironmentScope { key: value, .. }` node's own statement (CI-7 of #80, closes #100):
+/// `let #binding = <outer>.derive(); #binding.set::<Key1>(v1); #binding.set::<Key2>(v2); ...;`.
+/// `<outer>` is either the enclosing `EnvironmentScope`'s own already-`let`-bound local variable
+/// (`node.environment_scope: Some(outer_var)`, for a nested scope) or, for a top-level scope,
+/// `self.__mount_environment.get().expect(..)` (the enclosing *component's* own effective
+/// Environment, established by `mount()` before `__build_view()` — see
+/// docs/design/runtime/component_lifecycle_design.md §4a). Each override's key name is checked
+/// against the same-crate `#[elwindui::environment_key(name = ..)]` registry
+/// (`component_frontend::lookup_same_crate_environment_key`, mirroring `environment_key_type`'s own
+/// resolution for `#[environment(name)]` fields) — an unknown name is a `compile_error!` (spec §13
+/// rule 35), not a runtime panic; a type-mismatched value surfaces as an ordinary `rustc` type
+/// error on the generated `.set::<Key>(value)` call itself, the same way every other DSL value-type
+/// mismatch in this codebase does.
+fn emit_environment_scope_construction(node: &PlannedNode, ctx: &ViewCtx, out: &mut TokenStream) {
+    let binding = &node.binding;
+    let outer = match &node.environment_scope {
+        Some(outer_var) => quote! { #outer_var },
+        None => quote! {
+            self.__mount_environment
+                .get()
+                .expect("EnvironmentScope: component is not yet mounted")
+        },
+    };
+    let mut sets = TokenStream::new();
+    for attribute in &node.attributes {
+        match crate::component_frontend::lookup_same_crate_environment_key(&attribute.name) {
+            Some((key_type_name, _value_type)) => {
+                let key_type: syn::Type = syn::parse_str(&key_type_name)
+                    .expect("registered environment key type name must parse");
+                let value = emit_expr(&attribute.value, ctx, &EmitMode::Construction);
+                // `.into()`, not the bare value: a DSL author writes a bare literal (`"ja-JP"`,
+                // parsed as `&str`) the same way any other DSL attribute value does
+                // (`build_component_setters`'s own `wrap_prop_value` applies the identical
+                // convention for a `String`-typed property/Brush/Color) — `EnvironmentContext::set`
+                // needs an owned `K::Value`, and `Into` covers both this coercion and the
+                // reflexive already-typed case for free.
+                sets.extend(quote! {
+                    #binding.set::<#key_type>((#value).into());
+                });
+            }
+            None => {
+                let name = &attribute.name;
+                let msg = format!(
+                    "EnvironmentScope: `{name}` is not declared by any \
+                     #[elwindui::environment_key(name = {name}, ..)] earlier in this crate \
+                     (docs/specs/dsl_spec.md §13 rule 35)"
+                );
+                sets.extend(quote! { compile_error!(#msg); });
+            }
+        }
+    }
+    out.extend(quote! {
+        let #binding = #outer.derive();
+        #sets
+    });
+}
+
 fn emit_construction(
     node: &PlannedNode,
     ctx: &ViewCtx,
@@ -7639,6 +7866,10 @@ fn emit_construction(
     out: &mut TokenStream,
     plan: &[PlannedNode],
 ) {
+    if node.type_path == ENVIRONMENT_SCOPE_MARKER {
+        emit_environment_scope_construction(node, ctx, out);
+        return;
+    }
     if table.resolve(from, &node.type_path).is_none() {
         emit_external_construction(node, ctx, from, table, out);
         // `DYNAMIC_CHILD_SLOT_MARKER` bindings are never actually constructed (`build_component_setters`'s
@@ -7701,6 +7932,21 @@ fn emit_construction(
         // calls for whichever of them this use site actually gives a value.
         let args = build_component_args(node, ctx, from, table, info, plan);
         let optional_setters = build_component_optional_setters(node, ctx, from, table, info);
+        // CI-7 of #80 (docs/design/runtime/component_lifecycle_design.md §4f): a node declared
+        // inside an `EnvironmentScope` constructs via `__new_unmounted` (no automatic self-mount)
+        // and is then mounted explicitly, right here, against the scope's own derived
+        // `EnvironmentContext` local variable — instead of `new()`'s ordinary path, which would
+        // otherwise auto-mount it against `application_environment()` before this statement even
+        // gets a chance to override anything.
+        let construct_call = match &node.environment_scope {
+            Some(scope_var) => quote! {
+                let #binding = #type_ident::__new_unmounted(#(#args),*);
+                #binding.mount(#scope_var.clone());
+            },
+            None => quote! {
+                let #binding = #type_ident::new(#(#args),*);
+            },
+        };
         out.extend(quote! {
             // A deferred field inherited from `UIElement` itself (`margin`/`width`/`height`/... —
             // `resolve_effective_fields`'s own doc comment) is set through `UIElementExt`, a shared
@@ -7710,7 +7956,7 @@ fn emit_construction(
             // `#[allow(unused_imports)]`.
             #[allow(unused_imports)]
             use elwindui::core::ui::UIElementExt as _;
-            let #binding = #type_ident::new(#(#args),*);
+            #construct_call
             #(#optional_setters)*
         });
         // A non-native component exposes its view root through `into_node()`, allowing attached

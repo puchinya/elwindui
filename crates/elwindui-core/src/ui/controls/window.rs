@@ -7,6 +7,18 @@ use super::*;
 /// `set_menu_bar`'s `Rc<dyn MenuBar>` follows the same trait-object-argument convention as
 /// `Menu`/`MenuBar`/`MenuBarItem` just above (see this module's own doc comment on that group) —
 /// `impl Window for WindowImpl` downcasts it back to its own concrete `MenuBarImpl` internally.
+///
+/// `show`/`hide`/`close` are plain (not `#[overridable]`, CI-8 of #80,
+/// docs/design/runtime/component_lifecycle_design.md §4g): `#[overridable]`/`#[overrides]` does not
+/// propagate correctly across the `trait_only` (this trait) -> `struct_only` (each backend's
+/// concrete `Window`) -> ordinary (a generated host-composition component) two-hop chain — verified
+/// empirically (`#[overrides]: no ancestor declared these methods #[overridable]` at the ordinary
+/// hop, even with `#[overridable]` declared here). `generate_view`'s host-composition codegen
+/// instead adds a plain **inherent** `show`/`hide`/`close` on the generated component itself (not
+/// `#[overrides]`), which Rust's own method resolution prefers over the auto-forwarded trait methods
+/// for calls on the concrete type (`window.show()` where `window: Rc<SomeWindowComponent>`); that
+/// inherent method reaches this trait's real implementation via UFCS
+/// (`<Self as WindowExt>::show(self)`), not `self.base.show()`, avoiding infinite recursion.
 #[elwindui_macros::class(trait_only)]
 #[prop(title: String)]
 #[prop(menu_bar: Option<std::rc::Rc<dyn crate::ui::MenuBarExt>>)]
@@ -21,6 +33,15 @@ pub trait Window {
     fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>);
     fn set_content(&self, content: Rc<dyn UIElementExt>);
     fn show(&self);
+    /// Visibility only: the mounted subtree, Environment subscriptions, and state all remain alive.
+    /// A subsequent `show()` makes the window visible again without remounting/rebuilding
+    /// (docs/specs/dsl_spec.md's Window contract; CI-8 of #80).
+    fn hide(&self);
+    /// Ends this Window's mount lifetime: releases the native window and (for a host-composition
+    /// generated component's own inherent override — see this trait's own doc comment) its own
+    /// Environment subscriptions. See docs/design/runtime/component_lifecycle_design.md §4g for
+    /// exactly what today's implementation does and does not clean up.
+    fn close(&self);
     fn left(&self) -> f32;
     fn set_left(&self, left: f32);
     fn top(&self) -> f32;

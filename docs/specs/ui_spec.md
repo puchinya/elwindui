@@ -267,6 +267,14 @@ Window {
 }
 ```
 
+#### Lifecycle (CI-8 of #80, `docs/design/runtime/component_lifecycle_design.md` §4g)
+
+A `#[elwindui::component(inherits Window)]`-declared component ("host composition") is initially not mounted: `let window = MyWindow::new(..);` creates the logical instance and the native window shell but does not evaluate its `view!` body or build its content tree.
+
+- `show()`: on the first call on an unmounted instance, establishes this Window's effective Environment (derived from the Application Environment — `elwindui::core::environment::application_environment()`), performs the initial `view!` build exactly once, then displays the native window. A property set between `new()` and the first `show()` (e.g. `set_title`) is observed by that initial build. Re-showing an already-mounted, hidden window does not remount or rebuild it.
+- `hide()`: visibility only. The mounted content tree, Environment subscriptions, and component state all remain alive. A subsequent `show()` makes the window visible again without remounting/rebuilding.
+- `close()`: ends the mount lifetime — cancels this component's own property-changed/`on_update`/Environment subscriptions and releases the native window. Does not (yet) recursively cascade unmount into descendant Components' own subscriptions/state; see the design doc for the current implementation boundary.
+
 ---
 
 ---

@@ -189,6 +189,19 @@ impl InnerWindow {
         app.activate();
     }
 
+    /// Visibility only (CI-8 of #80) — `orderOut:` is `makeKeyAndOrderFront:`'s natural AppKit
+    /// counterpart; does not close/release the `NSWindow`.
+    pub(crate) fn hide(&self) {
+        self.ns.orderOut(None);
+    }
+
+    /// Releases the native window (CI-8 of #80). `NSWindow::close` (distinct from this same crate's
+    /// unrelated `Path::close()` vector-drawing method) triggers the standard AppKit teardown,
+    /// including releasing the window from any owner that retains it only via being on-screen.
+    pub(crate) fn close(&self) {
+        self.ns.close();
+    }
+
     fn screen_height(&self) -> f64 {
         self.ns
             .screen()

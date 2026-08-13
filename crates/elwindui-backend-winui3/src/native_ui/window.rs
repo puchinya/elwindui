@@ -48,6 +48,14 @@ impl Window {
         self.inner.show();
     }
 
+    fn hide(&self) {
+        self.inner.hide();
+    }
+
+    fn close(&self) {
+        self.inner.close();
+    }
+
     fn left(&self) -> f32 {
         self.inner.left()
     }

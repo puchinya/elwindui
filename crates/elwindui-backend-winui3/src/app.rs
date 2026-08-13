@@ -127,12 +127,10 @@ where
         assert!(slot.borrow().is_none(), "elwindui::application::run may only be called once");
         *slot.borrow_mut() = Some(Box::new(startup));
     });
-    // Held for `elwindui_winui3_run`'s entire (blocking) message-loop lifetime, so every
-    // component built on this thread — during `startup()` and later, from any event callback —
-    // observes `application_environment()` as ambient (`EnvironmentContext::current()`). See
+    // No ambient Environment entry needed (CI-6 of #80): every generated component's `mount()`
+    // calls `elwindui_core::environment::application_environment()` directly, a plain deterministic
+    // function call reachable from `startup()` and from any later event callback alike. See
     // `docs/design/runtime/theme_environment_design.md`'s "Application boundary" and
     // `elwindui-backend-appkit`'s `app::run` for the mirrored AppKit shape.
-    let application_environment = elwindui_core::environment::application_environment();
-    let _environment_guard = application_environment.enter();
     unsafe { elwindui_winui3_run(startup_trampoline) };
 }

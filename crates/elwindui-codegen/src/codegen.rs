@@ -2555,19 +2555,20 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
         let init_expr = rewrite_t_macro_bare(coerce_to_owned_string(&f.ty, raw_expr.clone()));
         default_let_stmts.extend(quote! { let #field_ident: #ty = #init_expr; });
     }
-    // `#[environment(name)]` fields resolve from the ambient `EnvironmentContext` at construction
-    // (`docs/design/runtime/theme_environment_design.md`'s "Environment" section) rather than from
-    // a declared expression — seeded as a bare `let` the same way, so the view-body bare-identifier
-    // reference this field's own name still resolves during construction (`own_fields`, `emit_expr`).
-    // This view-less component has no `Rc<Self>`/property-changed dispatch to subscribe a live
-    // update through (unlike `generate_view`'s composed/plain paths, both `Rc`-returning) — the
-    // value is resolved once, here, and never updates afterward.
+    // `#[environment(name)]` fields resolve from `application_environment()` at construction
+    // (CI-6 of #80, docs/design/runtime/component_lifecycle_design.md §4e — this view-less
+    // component has no `Rc<Self>`/`mount()`/property-changed dispatch to subscribe a live update
+    // through, unlike `generate_view`'s composed/plain paths, so there is no later point to defer
+    // resolution to; it is resolved once, here, and never updates afterward, same as before this
+    // change — only *what* it reads from changed, not *when*) rather than from a declared
+    // expression — seeded as a bare `let` the same way, so the view-body bare-identifier reference
+    // this field's own name still resolves during construction (`own_fields`, `emit_expr`).
     for f in c.fields.iter().filter(|f| f.kind == FieldKind::Environment) {
         let field_ident = format_ident!("{}", f.name);
         let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
         let key_type = environment_key_type(environment_key_name(f));
         default_let_stmts.extend(quote! {
-            let #field_ident: #ty = elwindui::core::environment::EnvironmentContext::current().get::<#key_type>();
+            let #field_ident: #ty = elwindui::core::environment::application_environment().get::<#key_type>();
         });
     }
     let component_property_enum = format_ident!("{}Property", c.name);
@@ -4850,13 +4851,14 @@ fn generate_view(
                 // embedded this way — reaching it needs a typed weak reference alongside `__self_weak`
                 // (or deferring these closures' downcast to call time), out of scope here.
                 fn on_constructed(&self) {
-                    // `EnvironmentContext::current()` is an explicitly temporary bridge value
-                    // (docs/design/runtime/component_lifecycle_design.md §4a, CI-3 of #80) — the same
-                    // ambient read `#[environment(name)]` fields already perform elsewhere in
-                    // `construct` above. A later issue in that tracking issue removes ambient
-                    // propagation entirely and threads a real, non-ambient Environment through here
-                    // instead.
-                    self.mount(elwindui::core::environment::EnvironmentContext::current());
+                    // `application_environment()` (CI-6 of #80,
+                    // docs/design/runtime/component_lifecycle_design.md §4e) — ambient thread-local
+                    // propagation (`EnvironmentContext::current()`/`.enter()`) is removed entirely;
+                    // this is now a plain, deterministic, non-stack function call. Real per-subtree
+                    // derivation (something other than the single process-wide
+                    // `application_environment()`) is CI-7 (`EnvironmentScope`)/CI-8 (Window
+                    // overrides)'s work.
+                    self.mount(elwindui::core::environment::application_environment());
                 }
 
                 // Establishes this component's effective Environment and performs its initial view
@@ -4938,8 +4940,8 @@ fn generate_view(
                     #construct_stmts
                     let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new() });
                     // See the composed shape's own `on_constructed` doc comment above — same
-                    // temporary `EnvironmentContext::current()` bridge, same reasoning.
-                    this.mount(elwindui::core::environment::EnvironmentContext::current());
+                    // `application_environment()` call, same reasoning (CI-6 of #80).
+                    this.mount(elwindui::core::environment::application_environment());
                     this
                 }
 

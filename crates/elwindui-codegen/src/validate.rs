@@ -2806,12 +2806,13 @@ mod tests {
             text_style: false,
             content_field: None,
         };
-        let (on_mount, on_unmount, lets, root) =
+        let (on_mount, on_unmount, on_update, lets, root) =
             crate::parser::parse_view_body("VerticalLayout { }").expect("view body should parse");
         let view = crate::ast::ViewDef {
             target: "Foo".to_string(),
             on_mount,
             on_unmount,
+            on_update,
             lets,
             root,
         };

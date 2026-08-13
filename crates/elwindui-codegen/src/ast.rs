@@ -338,6 +338,15 @@ pub enum Initializer {
     Expr(syn::Expr),
 }
 
+/// `on_update(field, ...) { .. }`'s parsed shape (docs/specs/dsl_spec.md §3). `fields: None` is the
+/// bare `on_update { .. }` form (watches every listed property); `Some(names)` is the parenthesized
+/// form, restricted to those names.
+#[derive(Debug, Clone)]
+pub struct OnUpdateHook {
+    pub fields: Option<Vec<String>>,
+    pub block: syn::Block,
+}
+
 /// `view Name { on_mount { .. } on_unmount { .. } let-bindings... ElementTree }`. See
 /// docs/specs/dsl_spec.md §2, §13, docs/design/runtime/ui_tree_design.md.
 #[derive(Debug, Clone)]
@@ -353,6 +362,13 @@ pub struct ViewDef {
     /// not yet wired to any runtime teardown trigger — `elwindui_core::ui` has no detach/removal
     /// hook today. See docs/design/runtime/ui_tree_design.md.
     pub on_unmount: Option<syn::Block>,
+    /// `on_update(field, ...) { .. }` / bare `on_update { .. }` (docs/specs/dsl_spec.md §3). Runs
+    /// after any listed `#[prop]`/`#[computed]`/`#[state]`/`#[environment(name)]` field changes (or
+    /// any of them, for the bare form) — installed as a `subscribe_property_changed` listener
+    /// alongside `on_mount`, CI-4 of #80 (docs/design/runtime/component_lifecycle_design.md §4c), so
+    /// it never observes the initial construction-time value-set (that happens via plain struct-
+    /// literal field init, never through the setter/`on_property_changed` path this listens on).
+    pub on_update: Option<OnUpdateHook>,
     /// Zero or more `#[id("...")]? let name = Element { .. };` statements, in source order,
     /// preceding `root`. Each introduces a name referenceable later (as a bare `ChildEntry::Ref`)
     /// within `root` or a later `let`'s own element.

@@ -91,12 +91,13 @@ fn builtin_component(
 /// `component_frontend.rs` uses for a real `#[elwindui::component]`'s `body: view! { .. }` field) and
 /// wraps the result as `target`'s `ViewDef`.
 fn builtin_view(target: &str, body_src: &str) -> ViewDef {
-    let (on_mount, on_unmount, lets, root) = parser::parse_view_body(body_src)
+    let (on_mount, on_unmount, on_update, lets, root) = parser::parse_view_body(body_src)
         .unwrap_or_else(|e| panic!("failed to parse builtin view `{target}`: {e}\n---\n{body_src}"));
     ViewDef {
         target: target.to_string(),
         on_mount,
         on_unmount,
+        on_update,
         lets,
         root,
     }

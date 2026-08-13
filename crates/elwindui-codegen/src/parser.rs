@@ -536,7 +536,27 @@ impl<'a> Parser<'a> {
         }
 
         if self.peek_char() == Some('"') {
-            let lit_src = self.take_string_literal()?;
+            // A bare string literal is common enough (`text: "hello"`) to deserve its own fast
+            // path, but a literal immediately followed by a method chain (`locale:
+            // "ja-JP".to_string()`) is a larger expression, not just the literal — probing one
+            // character ahead (after the literal, past any trivia) and rewinding to the whole
+            // expression's start when a `.` follows avoids silently truncating at the closing
+            // quote (CI-7 of #80 found this: `EnvironmentScope`'s override values are ordinary
+            // `t!("locale", value: "ja-JP".to_string())`-style expressions and hit exactly this).
+            let start = self.pos;
+            self.take_string_literal()?;
+            let after_literal = self.pos;
+            self.skip_trivia();
+            let continues_as_method_chain = self.peek_char() == Some('.');
+            self.pos = start;
+            if continues_as_method_chain {
+                let expr_src = self.take_expr_until_line_end_or(&[',', '}'])?;
+                let expr = syn::parse_str::<syn::Expr>(expr_src.trim())
+                    .map_err(|e| format!("invalid expression `{}`: {e}", expr_src.trim()))?;
+                return Ok(ViewExpr::Expr(expr));
+            }
+            self.pos = after_literal;
+            let lit_src = self.src[start..after_literal].to_string();
             let expr = syn::parse_str::<syn::Expr>(&lit_src)
                 .map_err(|e| format!("invalid string literal: {e}"))?;
             return Ok(ViewExpr::Expr(expr));
@@ -1455,6 +1475,40 @@ TextBox {
         let error = parse_view_body("TextArea { text: bind!(vm.content, TwoWay) }")
             .expect_err("removed bind syntax must be rejected");
         assert!(error.contains("bind!(...) was removed"), "{error}");
+    }
+
+    // CI-7 of #80 residual-risk follow-up: `parse_view_expr` used to silently truncate a string
+    // literal directly followed by a method chain (e.g. `"ja-JP".to_string()`) at the closing
+    // quote, discovered while implementing `EnvironmentScope`'s override-value codegen (worked
+    // around there via `.into()`, which sidesteps but does not fix the parser bug for DSL
+    // attribute values in general — see `emit_environment_scope_construction`'s doc comment).
+    #[test]
+    fn a_string_literal_followed_by_a_method_chain_parses_as_one_expression() {
+        let (_, _, _, _, root) = parse_view_body(
+            r#"TextBlock { text: once!("hello-world".replace("-", " ").to_uppercase()) }"#,
+        )
+        .expect("string literal + method chain should parse as one expression");
+        let root = literal(&root.children[0]);
+        let ViewExpr::Expr(expr) = &root.attributes[0].value else {
+            panic!("expected a plain expression, got {:?}", root.attributes[0].value);
+        };
+        let rendered = quote::quote!(#expr).to_string();
+        assert!(
+            rendered.contains("replace") && rendered.contains("to_uppercase"),
+            "the whole method chain must be captured, not just the leading string literal: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_bare_string_literal_with_no_trailing_method_chain_still_parses() {
+        let (_, _, _, _, root) = parse_view_body(r#"TextBlock { text: "hello" }"#)
+            .expect("a plain string literal must still parse on its own");
+        let root = literal(&root.children[0]);
+        let ViewExpr::Expr(expr) = &root.attributes[0].value else {
+            panic!("expected a plain expression, got {:?}", root.attributes[0].value);
+        };
+        let rendered = quote::quote!(#expr).to_string();
+        assert_eq!(rendered, "\"hello\"");
     }
 
     #[test]

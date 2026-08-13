@@ -2833,6 +2833,12 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                            wiring, event wiring, ...) into `on_constructed` instead.";
                 return syn::Error::new_spanned(&f.sig, msg).to_compile_error();
             }
+            ImplItem::Fn(f) if f.sig.ident == "__new_unmounted" => {
+                let msg = "#[class]: `__new_unmounted` is a reserved, auto-generated name (CI-7 of \
+                           #80, docs/design/runtime/component_lifecycle_design.md §4f) — do not \
+                           define it by hand.";
+                return syn::Error::new_spanned(&f.sig, msg).to_compile_error();
+            }
             ImplItem::Fn(mut f) => {
                 // `#[inherent]` opts a `&self` method *out* of trait-impl routing entirely — for
                 // helpers that aren't part of any trait (ancestor's or `ClassNameExt`'s own), e.g. the
@@ -3230,7 +3236,9 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         // `transform_construct_fn` inserted — `new`'s own public signature/forwarded call skips it
         // (index 0) and restates only the user's original parameters.
         let params = &ctor_methods[construct_index].0.sig.inputs;
-        let public_params = params.iter().skip(1);
+        // Materialized (not a bare iterator) because `quote!` below consumes it twice — once for
+        // `new`'s signature, once for `__new_unmounted`'s identical one (CI-7 of #80).
+        let public_params: Vec<_> = params.iter().skip(1).collect();
         let arg_names: Vec<TokenStream2> = params
             .iter()
             .skip(1)
@@ -3249,6 +3257,21 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 });
                 __obj.__elwindui_run_on_constructed();
                 __obj
+            }
+
+            // CI-7 of #80 (docs/design/runtime/component_lifecycle_design.md §4f): the same
+            // construction step as `new()` above, but WITHOUT the trailing
+            // `__elwindui_run_on_constructed()` call — the caller (only ever `EnvironmentScope`'s
+            // own generated code today) is responsible for calling `.mount(environment)` on the
+            // returned `Rc<Self>` itself, explicitly, afterward. Unconditionally emitted alongside
+            // `new` (not gated by any class-level flag) because the choice between the two is a
+            // per-call-site decision, not a per-type one — the same reusable class may be
+            // constructed ordinarily in one place and inside an `EnvironmentScope` in another.
+            #[doc(hidden)]
+            pub fn __new_unmounted(#(#public_params),*) -> std::rc::Rc<Self> {
+                std::rc::Rc::new_cyclic(|__weak_self: &std::rc::Weak<Self>| {
+                    Self::__class_construct(__weak_self.clone(), #(#arg_names),*)
+                })
             }
         }
     });

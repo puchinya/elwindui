@@ -4635,6 +4635,13 @@ fn generate_view(
                 // supertrait chain always transitively reaches `AsAny: Any`, so `__self_weak` (see
                 // `construct`, below) always coerces into this regardless of which chain it's in.
                 __self_weak: std::cell::RefCell<std::rc::Weak<dyn std::any::Any>>,
+                // Set exactly once, by `mount()` (docs/design/runtime/component_lifecycle_design.md
+                // §4a, CI-3 of #80). `OnceCell::set` failing on a second call *is* this component's
+                // build-idempotency guard — no separate boolean flag needed. Present unconditionally
+                // (not gated on `has_own_environment_fields`, unlike the pre-existing `__environment`
+                // field `#environment_context_field_decl` declares) because every view-bearing
+                // component needs this guard, whether or not it consumes Environment itself.
+                __mount_environment: std::cell::OnceCell<elwindui::core::environment::EnvironmentContext>,
             }
 
             #[elwindui::class]
@@ -4642,7 +4649,7 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased) }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new() }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -4672,14 +4679,33 @@ fn generate_view(
                 // embedded this way — reaching it needs a typed weak reference alongside `__self_weak`
                 // (or deferring these closures' downcast to call time), out of scope here.
                 fn on_constructed(&self) {
+                    // `EnvironmentContext::current()` is an explicitly temporary bridge value
+                    // (docs/design/runtime/component_lifecycle_design.md §4a, CI-3 of #80) — the same
+                    // ambient read `#[environment(name)]` fields already perform elsewhere in
+                    // `construct` above. A later issue in that tracking issue removes ambient
+                    // propagation entirely and threads a real, non-ambient Environment through here
+                    // instead.
+                    self.mount(elwindui::core::environment::EnvironmentContext::current());
+                }
+
+                // Establishes this component's effective Environment and performs its initial view
+                // build, exactly once (docs/design/runtime/component_lifecycle_design.md §4a, CI-3 of
+                // #80). `on_constructed` invokes this immediately today, so timing/behavior is
+                // unchanged from before this method existed — a later issue in that tracking issue
+                // moves the call site so child components are mounted explicitly by their parent
+                // instead of automatically by `#[class]`.
+                #[doc(hidden)]
+                pub fn mount(&self, environment: elwindui::core::environment::EnvironmentContext) {
+                    self.__mount_environment
+                        .set(environment)
+                        .expect("mount: component is already mounted");
                     self.__build_view();
                 }
 
                 // View-construction statements, split out of `on_constructed` so this component's
                 // `new()`/`construct()`/`on_constructed()` do not themselves textually contain them
-                // (docs/design/runtime/component_lifecycle_design.md §4, CI-2 of #80). `on_constructed`
-                // still invokes this immediately, so today's timing/behavior is unchanged — a later
-                // issue in that tracking issue defers this call to an explicit `mount()`.
+                // (docs/design/runtime/component_lifecycle_design.md §4, CI-2 of #80). Called from
+                // `mount()`, once, per the build-idempotency guard there.
                 #[doc(hidden)]
                 fn __build_view(&self) {
                     #content_attach_stmt
@@ -4736,16 +4762,28 @@ fn generate_view(
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) });
-                    this.__build_view();
+                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new() });
+                    // See the composed shape's own `on_constructed` doc comment above — same
+                    // temporary `EnvironmentContext::current()` bridge, same reasoning.
+                    this.mount(elwindui::core::environment::EnvironmentContext::current());
                     this
                 }
 
-                // View-construction statements, split out of `new()` so `new()` itself does not
-                // textually contain them (docs/design/runtime/component_lifecycle_design.md §4, CI-2
-                // of #80). `new()` still invokes this immediately, so today's timing/behavior is
-                // unchanged — a later issue in that tracking issue defers this call to an explicit
-                // `mount()`.
+                // Establishes this component's effective Environment and performs its initial view
+                // build, exactly once (docs/design/runtime/component_lifecycle_design.md §4a, CI-3 of
+                // #80). `new()` invokes this immediately today, so timing/behavior is unchanged from
+                // before this method existed.
+                #[doc(hidden)]
+                fn mount(self: &std::rc::Rc<Self>, environment: elwindui::core::environment::EnvironmentContext) {
+                    self.__mount_environment
+                        .set(environment)
+                        .expect("mount: component is already mounted");
+                    self.__build_view();
+                }
+
+                // View-construction statements, split out of `mount()` so `new()`/`mount()` do not
+                // themselves textually contain them (docs/design/runtime/component_lifecycle_design.md
+                // §4, CI-2 of #80). Called from `mount()`, once, per the build-idempotency guard there.
                 #[doc(hidden)]
                 fn __build_view(self: &std::rc::Rc<Self>) {
                     #content_attach_stmt
@@ -4788,6 +4826,10 @@ fn generate_view(
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
                 __property_changed_handlers: std::rc::Rc<std::cell::RefCell<Vec<(std::rc::Rc<std::cell::Cell<bool>>, std::rc::Rc<dyn Fn(#component_property_enum)>)>>>,
+                // See the composed-shape struct's own `__mount_environment` doc comment above
+                // (docs/design/runtime/component_lifecycle_design.md §4a, CI-3 of #80) — same guard,
+                // same reasoning, for this non-`#[class]` shape.
+                __mount_environment: std::cell::OnceCell<elwindui::core::environment::EnvironmentContext>,
             }
         }
     }

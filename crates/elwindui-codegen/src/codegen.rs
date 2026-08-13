@@ -3007,23 +3007,21 @@ fn generate_view(
         let init_expr = rewrite_t_macro_bare(coerce_to_owned_string(&f.ty, raw_expr.clone()));
         own_default_construct_stmts.extend(quote! { let #field_ident: #ty = #init_expr; });
     }
-    // `#[environment(name)]` fields resolve from the ambient `EnvironmentContext` at construction
-    // (`docs/design/runtime/theme_environment_design.md`'s "Environment" section) — captured once
-    // into `__elwindui_environment` (also stored on `Self`, below, so a later subscription callback
-    // can re-read it without depending on whatever happens to be ambient at that later, unrelated
-    // point in time) and read per field from that capture, never from a declared expression.
-    if !own_environment_fields.is_empty() {
+    // `#[environment(name)]` fields no longer resolve here (CI-5 of #80,
+    // docs/design/runtime/component_lifecycle_design.md §4d) — real resolution happens in
+    // `__build_view()`, from the `EnvironmentContext` `mount()` was actually called with
+    // (`self.__mount_environment`), not the ambient thread-local. `construct()`/`Self { .. }` still
+    // needs *some* value to seed each field's `Cell`/`RefCell` with (a struct literal can't leave a
+    // field unset), so this seeds the same fallback `EnvironmentContext::get::<K>()` itself would
+    // return for an unmounted/un-overridden key — `K::default_value()` — never a real resolution.
+    for f in &own_environment_fields {
+        let field_ident = format_ident!("{}", f.name);
+        let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
+        let key_type = environment_key_type(environment_key_name(f));
         own_default_construct_stmts.extend(quote! {
-            let __elwindui_environment = elwindui::core::environment::EnvironmentContext::current();
+            let #field_ident: #ty =
+                <#key_type as elwindui::core::environment::EnvironmentKey>::default_value();
         });
-        for f in &own_environment_fields {
-            let field_ident = format_ident!("{}", f.name);
-            let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
-            let key_type = environment_key_type(environment_key_name(f));
-            own_default_construct_stmts.extend(quote! {
-                let #field_ident: #ty = __elwindui_environment.get::<#key_type>();
-            });
-        }
     }
 
     // `mutable_own_fields` is populated below, once `mutable_required_names` is known (it needs
@@ -3511,16 +3509,13 @@ fn generate_view(
         .zip(own_environment_cell_types.iter())
         .map(|(name, cell_ty)| quote! { #name: <#cell_ty<_>>::new(#name), })
         .collect();
-    // Present only when this component actually declares at least one `#[environment(name)]`
-    // field — `docs/design/runtime/theme_environment_design.md`'s memory policy ("a component that
-    // declares no `#[environment(..)]` field ... pays no cost").
-    let has_own_environment_fields = !own_environment_fields.is_empty();
-    let environment_context_field_decl = has_own_environment_fields.then(|| {
-        quote! { __environment: elwindui::core::environment::EnvironmentContext, }
-    });
-    let environment_context_field_init = has_own_environment_fields.then(|| {
-        quote! { __environment: __elwindui_environment, }
-    });
+    // The legacy, ambient-captured `__environment: EnvironmentContext` field (and its
+    // `has_own_environment_fields`-gated memory policy) is gone (CI-5 of #80,
+    // docs/design/runtime/component_lifecycle_design.md §4d) — every view-bearing component already
+    // carries `__mount_environment: OnceCell<EnvironmentContext>` unconditionally (CI-3), populated
+    // by `mount()` with the *real* context (not an ambient re-read), which is exactly what this
+    // field used to approximate. `own_environment_recompute_methods`/`own_environment_subscribe_stmts`
+    // below read `self.__mount_environment.get().expect(..)` directly instead.
 
     let mut component_property_variants = mutable_required_names.clone();
     component_property_variants.extend(own_default_names.iter().cloned());
@@ -3925,11 +3920,11 @@ fn generate_view(
         }
     }
     // `recompute_<name>` for every own `#[environment(name)]` field — unlike `#[computed]`'s (which
-    // recomputes from sibling fields), this re-reads `self.__environment` (the `EnvironmentContext`
-    // captured at construction, not the ambient one at call time — see
-    // `environment_context_field_init`'s own comment) and is called from that field's live
-    // subscription callback (`own_environment_subscribe_stmts`, below), never from a sibling
-    // setter's cascade.
+    // recomputes from sibling fields), this re-reads `self.__mount_environment` (CI-5 of #80,
+    // docs/design/runtime/component_lifecycle_design.md §4d: the real `EnvironmentContext` `mount()`
+    // was called with, not an ambient re-read) and is called from that field's live subscription
+    // callback (`own_environment_subscribe_stmts`, below), never from a sibling setter's cascade —
+    // always after `mount()` has run, so the `.expect(..)` below can never actually fire.
     let own_environment_recompute_methods: TokenStream = own_environment_fields
         .iter()
         .map(|f| {
@@ -3944,7 +3939,11 @@ fn generate_view(
             let recompute = format_ident!("recompute_{}", name);
             quote! {
                 fn #recompute(&self) {
-                    let value: #ty = self.__environment.get::<#key_type>();
+                    let value: #ty = self
+                        .__mount_environment
+                        .get()
+                        .expect("recompute: component is not yet mounted")
+                        .get::<#key_type>();
                     #set_cache
                 }
             }
@@ -3955,7 +3954,8 @@ fn generate_view(
     // this field's own Environment cell instead of a viewmodel's `PropertyChanged`; unconditionally
     // also calls `__refresh_dynamic_regions()`, the same as `component_property_dispatch` already
     // does for every other own-field change (`docs/design/runtime/theme_environment_design.md`,
-    // "Change propagation").
+    // "Change propagation"). Subscribes against `self.__mount_environment` (CI-5), installed from
+    // `__build_view()` — i.e. always after `mount()` set it.
     let own_environment_subscribe_stmts: TokenStream = own_environment_fields
         .iter()
         .map(|f| {
@@ -3965,18 +3965,52 @@ fn generate_view(
             quote! {
                 {
                     let weak = std::rc::Rc::downgrade(&this);
-                    let subscription = this.__environment.subscribe::<#key_type>(move || {
-                        if let Some(this) = weak.upgrade() {
-                            this.#recompute();
-                            this.on_property_changed(#component_property_enum::#name);
-                            this.__refresh_dynamic_regions();
-                        }
-                    });
+                    let subscription = this
+                        .__mount_environment
+                        .get()
+                        .expect("subscribe: component is not yet mounted")
+                        .subscribe::<#key_type>(move || {
+                            if let Some(this) = weak.upgrade() {
+                                this.#recompute();
+                                this.on_property_changed(#component_property_enum::#name);
+                                this.__refresh_dynamic_regions();
+                            }
+                        });
                     this.__property_changed_subscriptions.borrow_mut().push(subscription);
                 }
             }
         })
         .collect();
+    // Real `#[environment(name)]` resolution (CI-5 of #80,
+    // docs/design/runtime/component_lifecycle_design.md §4d) — spliced into `__build_view()`, before
+    // `#child_construct_stmts`, so this component's own environment-dependent field values (and
+    // anything descendant construction reads through their `self.#name()` accessors, per
+    // `child_construct_stmts`' own bare-name-redeclaration preamble) are correct *before* any
+    // descendant element gets built. Overwrites each field's already-`Cell`/`RefCell`-backed storage
+    // (seeded with `K::default_value()` in `construct()`, above) with the real value read from
+    // `self.__mount_environment` — never a second, independent ambient read.
+    let own_environment_resolve_stmts: TokenStream = if own_environment_fields.is_empty() {
+        TokenStream::new()
+    } else {
+        let mut stmts = quote! {
+            let __elwindui_environment = self
+                .__mount_environment
+                .get()
+                .expect("__build_view: component is not yet mounted")
+                .clone();
+        };
+        for f in &own_environment_fields {
+            let field_ident = format_ident!("{}", f.name);
+            let key_type = environment_key_type(environment_key_name(f));
+            let set_stmt = if is_copy_type(&f.ty) {
+                quote! { self.#field_ident.set(__elwindui_environment.get::<#key_type>()); }
+            } else {
+                quote! { *self.#field_ident.borrow_mut() = __elwindui_environment.get::<#key_type>(); }
+            };
+            stmts.extend(set_stmt);
+        }
+        stmts
+    };
 
     // `is_template_composition`'s `plan`/`view` are the *base's* own (cloned, `resolve_view_for`)
     // tree, not this component's — its only real construction step is calling the base's own
@@ -4760,7 +4794,6 @@ fn generate_view(
                 #own_default_field_decls
                 #own_computed_field_decls
                 #own_environment_field_decls
-                #environment_context_field_decl
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,
@@ -4775,9 +4808,10 @@ fn generate_view(
                 // Set exactly once, by `mount()` (docs/design/runtime/component_lifecycle_design.md
                 // §4a, CI-3 of #80). `OnceCell::set` failing on a second call *is* this component's
                 // build-idempotency guard — no separate boolean flag needed. Present unconditionally
-                // (not gated on `has_own_environment_fields`, unlike the pre-existing `__environment`
-                // field `#environment_context_field_decl` declares) because every view-bearing
-                // component needs this guard, whether or not it consumes Environment itself.
+                // because every view-bearing component needs this guard, whether or not it consumes
+                // Environment itself — and, as of CI-5 (§4d), it's also every `#[environment(name)]`
+                // field's own resolution source, replacing the legacy, ambient-captured
+                // `__environment` field this struct used to declare separately.
                 __mount_environment: std::cell::OnceCell<elwindui::core::environment::EnvironmentContext>,
             }
 
@@ -4786,7 +4820,7 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new() }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new() }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -4845,6 +4879,7 @@ fn generate_view(
                 // `mount()`, once, per the build-idempotency guard there.
                 #[doc(hidden)]
                 fn __build_view(&self) {
+                    #own_environment_resolve_stmts
                     #child_construct_stmts
                     #content_attach_stmt
                     let __most_derived: Option<std::rc::Rc<#target>> = self
@@ -4901,7 +4936,7 @@ fn generate_view(
                 pub fn new(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new() });
+                    let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new() });
                     // See the composed shape's own `on_constructed` doc comment above — same
                     // temporary `EnvironmentContext::current()` bridge, same reasoning.
                     this.mount(elwindui::core::environment::EnvironmentContext::current());
@@ -4925,6 +4960,7 @@ fn generate_view(
                 // §4, CI-2 of #80). Called from `mount()`, once, per the build-idempotency guard there.
                 #[doc(hidden)]
                 fn __build_view(self: &std::rc::Rc<Self>) {
+                    #own_environment_resolve_stmts
                     #child_construct_stmts
                     #content_attach_stmt
                     #wiring_stmts
@@ -4962,7 +4998,6 @@ fn generate_view(
                 #own_default_field_decls
                 #own_computed_field_decls
                 #own_environment_field_decls
-                #environment_context_field_decl
                 #deferred_own_field_decls
                 #struct_fields
                 __property_changed_subscriptions: std::cell::RefCell<Vec<elwindui::core::reactive::Subscription>>,

@@ -109,13 +109,6 @@ impl TextStyleOwner for Control {
     fn text_style_storage(&self) -> &crate::graphics::TextStyleStorage {
         &self.text_style
     }
-
-    fn cascaded_text_style(&self) -> crate::graphics::CascadedTextStyle {
-        let inherited = inherited_cascaded_text_style(self.as_ui_element());
-        let mut style = self.text_style_storage().cascade_onto(&inherited);
-        apply_standard_text_theme(&self.theme_handle(), "control", &mut style);
-        style
-    }
 }
 
 #[cfg(test)]

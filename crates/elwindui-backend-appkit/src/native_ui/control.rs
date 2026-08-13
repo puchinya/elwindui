@@ -2,7 +2,6 @@
 
 use crate::AnyView;
 use elwindui_core::graphics::{Brush, CascadedTextStyle, TextStyleStorage};
-use elwindui_core::theme::{SystemTheme, ThemeHandle, ThemeToken, ThemeValue};
 use elwindui_core::ui::{TextStyleOwner, UIElementExt};
 use std::any::Any;
 use std::cell::RefCell;
@@ -20,7 +19,6 @@ use std::cell::RefCell;
 pub struct NativeControl {
     handle: AnyView,
     background: RefCell<Option<Brush>>,
-    applied_background: RefCell<Option<ThemeValue<Brush>>>,
     text_style: TextStyleStorage,
     /// The style last actually pushed to `handle` — lets `sync_text_style` skip a redundant
     /// AppKit call when nothing changed since the previous measure pass.
@@ -31,7 +29,6 @@ pub struct NativeControl {
 impl NativeControl {
     #[overrides]
     fn measure_override(&self, available: elwindui_core::base::Size) -> elwindui_core::base::Size {
-        self.sync_background();
         self.sync_text_style();
         self.handle.measure(available)
     }
@@ -49,20 +46,18 @@ impl NativeControl {
             return;
         };
         self.handle.apply_background(Some(&background));
-        *self.background.borrow_mut() = Some(background.clone());
-        *self.applied_background.borrow_mut() = Some(ThemeValue::Value(background));
+        *self.background.borrow_mut() = Some(background);
         self.invalidate();
     }
     fn clear_background(&self) {
         self.background.borrow_mut().take();
-        self.applied_background.borrow_mut().take();
-        self.sync_background();
+        self.handle.apply_background(None);
         self.invalidate();
     }
     /// Pushed straight to the view rather than pull-synced from `measure_override` the way
-    /// `background`/`text_style` are: those two have theme tokens and so must be re-resolved
-    /// whenever the theme revision changes, while a tooltip is plain text with no token and no
-    /// lazy resolution. It also has no effect on layout, so there is nothing to invalidate.
+    /// `text_style` is: `text_style` must be re-pulled on every layout pass because it can inherit
+    /// from an ancestor that changed, while a tooltip is local, non-inherited, plain text with
+    /// nothing to re-resolve. It also has no effect on layout, so there is nothing to invalidate.
     fn set_tooltip(&self, tooltip: &str) {
         self.handle
             .set_tooltip(if tooltip.is_empty() {
@@ -76,7 +71,6 @@ impl NativeControl {
             base: elwindui_core::ui::UIElement::construct(),
             handle,
             background: RefCell::new(None),
-            applied_background: RefCell::new(None),
             text_style: TextStyleStorage::new(),
             applied: RefCell::new(None),
         }
@@ -84,26 +78,6 @@ impl NativeControl {
 }
 
 impl NativeControl {
-    fn sync_background(&self) {
-        let desired = self
-            .background
-            .borrow()
-            .clone()
-            .map(ThemeValue::Value)
-            .unwrap_or_else(|| {
-                self.theme_handle()
-                    .resolve(background_token(self.handle.theme_prefix()))
-            });
-        if self.applied_background.borrow().as_ref() == Some(&desired) {
-            return;
-        }
-        match desired.as_ref() {
-            ThemeValue::Value(background) => self.handle.apply_background(Some(background)),
-            ThemeValue::PlatformDefault => self.handle.apply_background(None),
-        }
-        *self.applied_background.borrow_mut() = Some(desired);
-    }
-
     /// Pulls this element's resolved text style and pushes it to `handle`, but only when it
     /// actually differs from what was last applied — pull-based (called from `measure_override`,
     /// which `UIElementExt::measure` runs unconditionally every layout pass) rather than pushed
@@ -124,53 +98,17 @@ impl NativeControl {
             return;
         }
         let mut cascaded = self.cascaded_text_style();
-        apply_theme_text_style(&self.theme_handle(), &mut cascaded);
         // AppKit native controls have no supported way to take an arbitrary custom text color
         // without abandoning their own system-drawn appearance — same platform constraint as
         // `AppKitHandle::apply_background`'s own doc comment. They always keep the system's own
-        // Light/Dark-following text color; a `foreground` requested via `set_foreground`/`theme!`
-        // (explicit or theme-resolved) is intentionally discarded here, never reaching `handle`.
+        // Light/Dark-following text color; an explicit `foreground` request is intentionally
+        // discarded here, never reaching `handle`.
         cascaded.foreground = None;
         if self.applied.borrow().as_ref() != Some(&cascaded) {
             self.handle.apply_text_style(&cascaded);
             *self.applied.borrow_mut() = Some(cascaded);
         }
     }
-}
-
-fn background_token(prefix: &str) -> ThemeToken<Brush> {
-    match prefix {
-        "button" => SystemTheme::button_background,
-        "text_box" => SystemTheme::text_box_background,
-        "password_box" => SystemTheme::password_box_background,
-        "text_area" => SystemTheme::text_area_background,
-        "scroll_view" => SystemTheme::scroll_view_background,
-        "tab_view" => SystemTheme::tab_view_background,
-        _ => SystemTheme::native_control_background,
-    }
-}
-
-/// Fills only font metrics from the theme — never `foreground` (see `sync_text_style`'s own doc
-/// comment on why a native control's text color always stays platform-default).
-fn apply_theme_text_style(theme: &ThemeHandle, style: &mut CascadedTextStyle) {
-    macro_rules! fill {
-        ($field:ident, $token:expr) => {
-            if style.$field.is_none() {
-                if let ThemeValue::Value(value) = theme.resolve($token) {
-                    style.$field = Some(value);
-                }
-            }
-        };
-    }
-    fill!(font_family, SystemTheme::native_control_font_family);
-    fill!(font_size, SystemTheme::native_control_font_size);
-    fill!(font_weight, SystemTheme::native_control_font_weight);
-    fill!(font_style, SystemTheme::native_control_font_style);
-    fill!(font_stretch, SystemTheme::native_control_font_stretch);
-    fill!(
-        character_spacing,
-        SystemTheme::native_control_character_spacing
-    );
 }
 
 impl TextStyleOwner for NativeControl {

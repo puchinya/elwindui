@@ -770,7 +770,7 @@ fn unsupported_dependency_macro(expr: &ViewExpr) -> Option<String> {
                         .last()
                         .map(|segment| segment.ident.to_string())
                         .unwrap_or_default();
-                    if matches!(name.as_str(), "format" | "format_args" | "vec" | "theme") {
+                    if matches!(name.as_str(), "format" | "format_args" | "vec") {
                         use syn::parse::Parser as _;
                         if let Ok(arguments) = syn::punctuated::Punctuated::<
                             syn::Expr,
@@ -1206,16 +1206,6 @@ fn check_static_view_expr(expr: &syn::Expr, component_name: &str, errors: &mut V
             syn::Expr::Unary(unary) => allowed(&unary.expr),
             syn::Expr::Binary(binary) => allowed(&binary.left) && allowed(&binary.right),
             syn::Expr::Cast(cast) => allowed(&cast.expr),
-            syn::Expr::Macro(expression)
-                if expression
-                    .mac
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == "theme") =>
-            {
-                syn::parse2::<syn::Path>(expression.mac.tokens.clone()).is_ok()
-            }
             syn::Expr::Macro(expression)
                 if expression.mac.path.segments.last().is_some_and(|segment| {
                     matches!(

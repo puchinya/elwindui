@@ -229,46 +229,6 @@ pub fn inherited_cascaded_text_style(
     crate::graphics::CascadedTextStyle::default()
 }
 
-pub(crate) fn apply_standard_text_theme(
-    theme: &ThemeHandle,
-    kind: &str,
-    style: &mut crate::graphics::CascadedTextStyle,
-) {
-    macro_rules! fill {
-        ($field:ident, $token:expr) => {
-            if style.$field.is_none() {
-                if let ThemeValue::Value(value) = theme.resolve($token) {
-                    style.$field = Some(value);
-                }
-            }
-        };
-    }
-    match kind {
-        "text_block" => {
-            fill!(font_family, SystemTheme::text_block_font_family);
-            fill!(font_size, SystemTheme::text_block_font_size);
-            fill!(font_weight, SystemTheme::text_block_font_weight);
-            fill!(font_style, SystemTheme::text_block_font_style);
-            fill!(font_stretch, SystemTheme::text_block_font_stretch);
-            fill!(
-                character_spacing,
-                SystemTheme::text_block_character_spacing
-            );
-            fill!(foreground, SystemTheme::text_block_foreground);
-        }
-        "control" => {
-            fill!(font_family, SystemTheme::control_font_family);
-            fill!(font_size, SystemTheme::control_font_size);
-            fill!(font_weight, SystemTheme::control_font_weight);
-            fill!(font_style, SystemTheme::control_font_style);
-            fill!(font_stretch, SystemTheme::control_font_stretch);
-            fill!(character_spacing, SystemTheme::control_character_spacing);
-            fill!(foreground, SystemTheme::control_foreground);
-        }
-        _ => {}
-    }
-}
-
 /// Returns the inherited text style materialized for framework-owned drawing and measurement.
 ///
 /// Native controls should use [`inherited_cascaded_text_style`] instead, preserving unset values

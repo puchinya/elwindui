@@ -52,11 +52,6 @@ fn flat_foreground_nscolor(style: &CascadedTextStyle) -> Retained<objc2_app_kit:
 pub(crate) trait AppKitHandle: AsAny {
     fn as_nsview(&self) -> Retained<NSView>;
 
-    /// Returns the ElwindUI standard-token prefix for this concrete native control.
-    fn theme_prefix(&self) -> &'static str {
-        "native_control"
-    }
-
     /// Deliberately a no-op: a real AppKit native control (`NSButton`/`NSTextField`/`NSTextView`/
     /// `NSTabView`/...) has no supported way to take an arbitrary background color without
     /// abandoning native rendering. Forcing `wantsLayer(true)` on these system-drawn controls to
@@ -64,7 +59,7 @@ pub(crate) trait AppKitHandle: AsAny {
     /// observed as the control's whole content silently disappearing after a later redraw/
     /// appearance-invalidation pass, not merely the wrong color. Native controls on this backend
     /// therefore always keep the system's own Light/Dark-following background; only non-native,
-    /// ElwindUI-painted elements (`Window`/layout backgrounds, `Rectangle`, ...) apply a themed
+    /// ElwindUI-painted elements (`Window`/layout backgrounds, `Rectangle`, ...) apply an explicit
     /// `Brush` background.
     fn apply_background(&self, _background: Option<&Brush>) {}
 
@@ -86,13 +81,6 @@ pub(crate) trait AppKitHandle: AsAny {
 impl AppKitHandle for Retained<NSScrollView> {
     fn as_nsview(&self) -> Retained<NSView> {
         Retained::into_super(self.clone())
-    }
-    fn theme_prefix(&self) -> &'static str {
-        if self.supports_text_style() {
-            "text_area"
-        } else {
-            "scroll_view"
-        }
     }
     fn apply_text_style(&self, style: &CascadedTextStyle) {
         // `ScrollView`'s own document view is `ElwinduiContentRoot` (a nested tree host, not
@@ -122,16 +110,10 @@ impl AppKitHandle for Retained<NSScrollView> {
 /// (`NSButtonType::Switch`) and `RadioButton` (`NSButtonType::Radio`) are the same Rust type with
 /// a different button type, so they share this one impl too — there is no distinct `Retained<T>`
 /// to hang a separate `impl` off, the way `PasswordBox`'s `NSSecureTextField` gets its own.
-/// `theme_prefix() == "button"` for all three is therefore imprecise, but harmless: this impl
-/// never overrides `apply_background` (the trait's own no-op default applies), so no background
-/// token is ever actually resolved through it for any of them.
 impl AppKitHandle for Retained<NSButton> {
     fn as_nsview(&self) -> Retained<NSView> {
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
         Retained::into_super(control)
-    }
-    fn theme_prefix(&self) -> &'static str {
-        "button"
     }
     fn apply_text_style(&self, style: &CascadedTextStyle) {
         let materialized = materialized_text_style(style);
@@ -166,9 +148,6 @@ impl AppKitHandle for Retained<NSPopUpButton> {
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(button);
         Retained::into_super(control)
     }
-    fn theme_prefix(&self) -> &'static str {
-        "dropdown"
-    }
     // No `apply_text_style` override — `Dropdown` has no `#[text_style]` prop of its own (F.5);
     // its displayed title is driven entirely by whichever `DropdownItem` is selected, not by an
     // app-set text/font the way `Button`'s title is.
@@ -183,9 +162,6 @@ impl AppKitHandle for Retained<NSSwitch> {
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
         Retained::into_super(control)
     }
-    fn theme_prefix(&self) -> &'static str {
-        "toggle_switch"
-    }
     // `NSSwitch` has no title/text of its own (see `ToggleSwitch`'s own doc comment), so it never
     // overrides `apply_text_style`/`supports_text_style` — the trait's defaults (no-op, `false`)
     // are exactly right.
@@ -195,9 +171,6 @@ impl AppKitHandle for Retained<NSSlider> {
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
         Retained::into_super(control)
     }
-    fn theme_prefix(&self) -> &'static str {
-        "slider"
-    }
     // `NSSlider` has no title/text of its own (see `Slider`'s own doc comment), so it never
     // overrides `apply_text_style`/`supports_text_style` — the trait's defaults (no-op, `false`)
     // are exactly right.
@@ -206,11 +179,6 @@ impl AppKitHandle for Retained<NSTextField> {
     fn as_nsview(&self) -> Retained<NSView> {
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(self.clone());
         Retained::into_super(control)
-    }
-    fn theme_prefix(&self) -> &'static str {
-        // AppKit uses NSTextField for both TextBox and PasswordBox. Password controls are secure
-        // text fields, but both share the same base foreground/background fallback behavior.
-        "text_box"
     }
     fn apply_text_style(&self, style: &CascadedTextStyle) {
         let materialized = materialized_text_style(style);
@@ -229,9 +197,6 @@ impl AppKitHandle for Retained<NSSecureTextField> {
         let text_field: Retained<NSTextField> = Retained::into_super(self.clone());
         let control: Retained<objc2_app_kit::NSControl> = Retained::into_super(text_field);
         Retained::into_super(control)
-    }
-    fn theme_prefix(&self) -> &'static str {
-        "password_box"
     }
     fn apply_text_style(&self, style: &CascadedTextStyle) {
         let materialized = materialized_text_style(style);
@@ -275,11 +240,6 @@ impl AnyView {
     /// Forwards to the wrapped handle's own `AppKitHandle::supports_text_style`.
     pub(crate) fn supports_text_style(&self) -> bool {
         self.0.supports_text_style()
-    }
-
-    /// Returns the standard-token prefix for the concrete wrapped control.
-    pub(crate) fn theme_prefix(&self) -> &'static str {
-        self.0.theme_prefix()
     }
 
     /// Applies an explicit background or restores the native toolkit default.

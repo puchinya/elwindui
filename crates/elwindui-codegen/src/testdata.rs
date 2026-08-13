@@ -200,7 +200,6 @@ pub(crate) fn test_builtin_modules() -> Vec<Module> {
             title: String,
             menu_bar: Option<MenuBar>,
             content: std::rc::Rc<dyn UIElement>,
-            theme: Option<elwindui::core::theme::ThemeHandle>,
             #[onetime]
             left: Option<f32>,
             #[onetime]

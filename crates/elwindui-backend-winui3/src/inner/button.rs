@@ -264,9 +264,9 @@ mod hosted_xaml_regression_tests {
             XamlFontStyle::Italic
         );
 
-        // A theme's `PlatformDefault` branch clears every local text DependencyProperty rather
-        // than materializing a fixed ElwindUI default. The resolved value therefore returns to
-        // the live XAML theme resource on the same reused control.
+        // Clearing every local text DependencyProperty (an unset `CascadedTextStyle` field)
+        // rather than materializing a fixed ElwindUI default. The resolved value therefore
+        // returns to the live XAML theme resource on the same reused control.
         apply_cascaded_text_style_to_control(&control, &CascadedTextStyle::default())
             .expect("clear native control text style");
         assert_eq!(

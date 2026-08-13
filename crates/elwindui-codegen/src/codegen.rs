@@ -3580,7 +3580,6 @@ fn generate_view(
     let mut field_inits = TokenStream::new();
     let mut wiring_stmts = TokenStream::new();
     let mut resync_stmts = TokenStream::new();
-    let mut theme_resync_stmts = TokenStream::new();
     // `#[id("...")]` bindings (§13) — a monomorphized `pub fn <id>(&self) -> Rc<ConcreteType>`
     // per binding, not a runtime string-keyed lookup (every `#[id(...)]` name is fixed at compile
     // time, so a plain accessor is strictly sufficient — see docs/specs/dsl_spec.md §12 and
@@ -4119,34 +4118,6 @@ fn generate_view(
                 &mut resync_stmts,
                 self_is_node,
             );
-            emit_resync(
-                node,
-                &ctx,
-                from,
-                table,
-                ResyncFilter::Theme,
-                &mut theme_resync_stmts,
-                self_is_node,
-            );
-        }
-        // `resync_stmts` (`ResyncFilter::All`) is deliberately NOT threaded through lazy leaves
-        // here: it only ever runs once, from `on_constructed`, and by that point
-        // `__refresh_dynamic_regions()` has already materialized whichever branch is initially
-        // active (`on_constructed` calls it before `self.resync()`) — `emit_lazy_leaf_value`'s own
-        // `emit_construction` call already reads every attribute at its current, live value, so a
-        // freshly-materialized leaf is never stale. A theme change, in contrast, can happen at any
-        // later point against an already-materialized (and now possibly reactivated) leaf, so
-        // `__resync_theme` does need to reach it.
-        for (cache_field, leaf) in collect_lazy_leaves(&plan) {
-            emit_lazy_branch_resync(
-                &cache_field,
-                leaf,
-                &ctx,
-                from,
-                table,
-                ResyncFilter::Theme,
-                &mut theme_resync_stmts,
-            );
         }
     }
 
@@ -4266,36 +4237,6 @@ fn generate_view(
             }
         })
         .collect();
-    let uses_theme = plan.iter().any(|node| {
-        node.attributes
-            .iter()
-            .any(|attribute| theme_token_path(&attribute.value).is_some())
-    });
-    // A Window host always tracks the application handle, even when its view has no explicit
-    // `theme!` expression. Native controls resolve their standard tokens automatically, so a
-    // variant change must still invalidate and restyle that hosted tree.
-    if is_host_composition {
-        let sync_window_theme = quote! {
-            elwindui::core::ui::WindowExt::set_theme(
-                self,
-                Some(elwindui::core::theme::application_theme()),
-            );
-        };
-        resync_stmts.extend(sync_window_theme.clone());
-        theme_resync_stmts.extend(sync_window_theme);
-    }
-    let theme_subscribe_stmt = (uses_theme || is_host_composition).then(|| {
-        quote! {
-            {
-                let weak = std::rc::Rc::downgrade(&this);
-                elwindui::core::theme::subscribe_application_theme(move |_| {
-                    if let Some(this) = weak.upgrade() {
-                        this.__resync_theme();
-                    }
-                });
-            }
-        }
-    });
     // Only real-anchored (top-level) dynamic nodes get their own top-level statement here — a
     // nested one (Phase 1) has no entry in any real element's own `child_bindings`, so the `find`
     // below returns `None` for it and `?` skips it; it's reached instead through
@@ -4662,9 +4603,6 @@ fn generate_view(
             fn resync(&self) {
                 #resync_stmts
             }
-            fn __resync_theme(&self) {
-                #theme_resync_stmts
-            }
         });
         let root_embed_method = mark_inherent(root_embed_method);
         let named_accessors = mark_inherent(named_accessors);
@@ -4717,7 +4655,7 @@ fn generate_view(
                 // safe to call unconditionally, on `self` directly, regardless of how this object was
                 // constructed.
                 //
-                // `wiring_stmts`/`component_self_subscription`/`subscribe_stmts`/`theme_subscribe_stmt`/
+                // `wiring_stmts`/`component_self_subscription`/`subscribe_stmts`/
                 // `on_mount_stmt`, in contrast, `move` a cloned `this`/`Rc::downgrade(&this)` into a
                 // callback that outlives this call, which needs a genuine `Rc<#target>` — reconstructed
                 // from the `__self_weak` field `construct` populated. `__self_weak` always upgrades
@@ -4757,7 +4695,6 @@ fn generate_view(
                         #component_self_subscription
                         #subscribe_stmts
                         #own_environment_subscribe_stmts
-                        #theme_subscribe_stmt
                         #on_mount_stmt
                     }
                 }
@@ -4797,17 +4734,12 @@ fn generate_view(
                     #component_self_subscription
                     #subscribe_stmts
                     #own_environment_subscribe_stmts
-                    #theme_subscribe_stmt
                     #on_mount_stmt
                     this
                 }
 
                 fn resync(&self) {
                     #resync_stmts
-                }
-
-                fn __resync_theme(&self) {
-                    #theme_resync_stmts
                 }
 
                 #property_resync_methods
@@ -7224,64 +7156,6 @@ fn emit_field_setter_call(
     }
 }
 
-/// Returns the typed associated-const path inside `theme!(ThemeType::token)`. The component
-/// attribute consumes `view!` before ordinary macro expansion, so theme references must be
-/// recognized structurally here.
-fn theme_token_path(expr: &ViewExpr) -> Option<syn::Path> {
-    let ViewExpr::Expr(syn::Expr::Macro(expr_macro)) = expr else {
-        return None;
-    };
-    if !expr_macro
-        .mac
-        .path
-        .segments
-        .last()
-        .is_some_and(|segment| segment.ident == "theme" || segment.ident == "theme_value")
-    {
-        return None;
-    }
-    syn::parse2(expr_macro.mac.tokens.clone()).ok()
-}
-
-/// Emits the reset half of a themed property assignment. Text style values use their orthogonal
-/// owner trait; ordinary inherited fields use the same declaring-trait UFCS disambiguation as
-/// `emit_field_setter_call`.
-fn emit_field_clear_call(
-    name: &str,
-    node_type: &str,
-    receiver: &TokenStream,
-    from: &Module,
-    table: &SymbolTable,
-) -> TokenStream {
-    let clear = format_ident!("clear_{name}");
-    if crate::text_style::is_text_style_field_name(name) {
-        return quote! {
-            elwindui::core::ui::UIElementExt::as_text_style_owner(&*(#receiver))
-                .expect(concat!(
-                    "`", #name, "` was declared with #[text_style] but the resolved node has no \
-                     TextStyleOwner at runtime"
-                ))
-                .#clear();
-        };
-    }
-    let declaring_type = table
-        .resolve(from, node_type)
-        .and_then(|info| info.declaring_types.get(name));
-    match declaring_type {
-        Some(declarer) if declarer != node_type => {
-            let declarer_info = table.resolve(from, declarer);
-            let ext_ident = format_ident!("{declarer}Ext");
-            let ext_path = if declarer_info.is_some_and(|info| info.is_builtin) {
-                quote! { elwindui::ui::#ext_ident }
-            } else {
-                quote! { #ext_ident }
-            };
-            quote! { #ext_path::#clear(&*(#receiver)); }
-        }
-        _ => quote! { #receiver.#clear(); },
-    }
-}
-
 fn builtin_trait_use(type_path: &str, info: Option<&TypeInfo>) -> TokenStream {
     if info.is_some_and(|i| i.is_native || i.is_virtual_builtin) {
         let ext_ident = format_ident!("{type_path}Ext");
@@ -7403,58 +7277,6 @@ fn emit_external_attribute_sets(
         // `TypeInfo`-free (routes through `TextStyleOwner::as_text_style_owner()`, not a declaring
         // type). Reused verbatim here — no reason for this function to have its own copy.
         let is_text_style = crate::text_style::is_text_style_field_name(name);
-        if let Some(token) = theme_token_path(expr) {
-            if is_text_style {
-                // A text-style field's real setter lives on `TextStyleOwner`, never on this
-                // type's own `__elwindui_props_*!` macro (see this fn's own doc comment on
-                // `is_text_style`) — `emit_field_setter_call`/`emit_field_clear_call` already
-                // special-case it, table-independently, so this keeps using them directly rather
-                // than routing through `@set`/`@clear` (which have no arm for it at all).
-                let setter_ident = format_ident!("set_{name}");
-                let themed_value = if name == "foreground" {
-                    quote! { Some(__theme_value) }
-                } else {
-                    quote! { __theme_value }
-                };
-                let set = emit_field_setter_call(
-                    name,
-                    &node.type_path,
-                    &setter_ident,
-                    themed_value,
-                    &binding_ts,
-                    from,
-                    table,
-                );
-                let clear = emit_field_clear_call(name, &node.type_path, &binding_ts, from, table);
-                sets.extend(quote! {
-                    match #binding.theme_handle().resolve(#token) {
-                        elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
-                        elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
-                    }
-                });
-                continue;
-            }
-            // An ordinary (non-text-style) themed property (`background`, `fill`/`stroke`, ...) —
-            // routed through `@set`/`@clear` rather than `emit_field_setter_call`/
-            // `emit_field_clear_call` directly: those need `TypeInfo` to know whether the real
-            // setter's own parameter is `Option`-wrapped (`build_virtual_value`'s own `is_option`
-            // check, unavailable here), while `@set`'s `wrap_prop_value` already makes that same
-            // decision from the property's *declared* type, at macro-expansion time — a themed
-            // value resolved to `__theme_value` is already the real inner type (never a DSL literal
-            // needing `.into()`), but `Option`-wrapping it when the target is `Option<Brush>` is
-            // exactly what `wrap_prop_value` already does unconditionally for any such field.
-            sets.extend(quote! {
-                match #binding.theme_handle().resolve(#token) {
-                    elwindui::core::theme::ThemeValue::Value(__theme_value) => {
-                        elwindui::core::#props_macro!(@set #binding, #name_ident, __theme_value);
-                    }
-                    elwindui::core::theme::ThemeValue::PlatformDefault => {
-                        elwindui::core::#props_macro!(@clear #binding, #name_ident);
-                    }
-                }
-            });
-            continue;
-        }
         // A named single-child slot (`content: Grid { .. }`, `menu_bar: MenuBar { .. }`) —
         // `plan_element` already planned and will separately construct the nested element as its
         // own `PlannedNode`, recorded here by name (mirrors `build_component_args`'s own
@@ -7844,14 +7666,6 @@ fn build_component_args(
 
         let (inner_ty, is_option) = strip_option(ty);
         let attr = find_attr(node, name);
-        // A theme reference on an optional generated-component field is applied by the ordinary
-        // post-construction `resync()` setter/clear path. Construct the component with no local
-        // value first so `PlatformDefault` has an honest representation and the raw
-        // `ThemeValue<T>` is never forced into `Option<T>`.
-        if is_option && attr.and_then(theme_token_path).is_some() {
-            args.push(quote! { None });
-            continue;
-        }
         let value = match attr {
             Some(ViewExpr::Element(_)) => {
                 let (nested_binding, nested_ty) = node
@@ -8057,37 +7871,6 @@ fn build_component_setters(
 
         let (inner_ty, is_option) = strip_option(ty);
         let attr = find_attr(node, name);
-        if let Some(token) = attr.and_then(theme_token_path) {
-            // `foreground` (`TextStyleOwner::set_foreground`) and `background`
-            // (`NativeControl::set_background`) are the two hand-written-native fields whose real
-            // setter keeps `Option<Brush>` in its own signature rather than the bare-inner-type
-            // convention every other hand-written-native field's setter uses — see
-            // `NativeControl::set_background`'s own doc comment for why `background` needed this
-            // widened from a `foreground`-only check.
-            let themed_value = if name == "foreground" || name == "background" {
-                quote! { Some(__theme_value) }
-            } else {
-                quote! { __theme_value }
-            };
-            let receiver = quote! { #binding };
-            let set = emit_field_setter_call(
-                name,
-                &node.type_path,
-                &setter_ident,
-                themed_value,
-                &receiver,
-                from,
-                table,
-            );
-            let clear = emit_field_clear_call(name, &node.type_path, &receiver, from, table);
-            setters.push(quote! {
-                match #binding.theme_handle().resolve(#token) {
-                    elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
-                    elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
-                }
-            });
-            continue;
-        }
         let value = match attr {
             Some(ViewExpr::Element(_)) => {
                 let (nested_binding, nested_ty) = node
@@ -8726,42 +8509,6 @@ fn build_virtual_value(
             }
             panic!("`{}` requires attribute `{name}`", node.type_path);
         };
-        if let Some(token) = theme_token_path(expr) {
-            if crate::text_style::is_text_style_field_name(name) {
-                needs_text_style_trait = true;
-            } else if common_field_names.contains(name.as_str()) {
-                needs_ui_element_ext = true;
-            } else {
-                needs_type_trait = true;
-            }
-            let themed_value = if name == "foreground"
-                || (is_option
-                    && !crate::text_style::is_text_style_field_name(name)
-                    && !is_copy_type(inner_ty))
-            {
-                quote! { Some(__theme_value) }
-            } else {
-                quote! { __theme_value }
-            };
-            let receiver = quote! { __v };
-            let set = emit_field_setter_call(
-                name,
-                &node.type_path,
-                &setter,
-                themed_value,
-                &receiver,
-                from,
-                table,
-            );
-            let clear = emit_field_clear_call(name, &node.type_path, &receiver, from, table);
-            setters.extend(quote! {
-                match __v.theme_handle().resolve(#token) {
-                    elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
-                    elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
-                }
-            });
-            continue;
-        }
         let value = if let Some(coerced) = coerce_color_literal(inner_ty, expr) {
             if is_option {
                 quote! { Some(#coerced) }
@@ -9589,7 +9336,7 @@ fn collect_view_expr_owner_properties(
 
 fn supported_macro_expr_arguments(node: &syn::ExprMacro) -> Option<Vec<syn::Expr>> {
     let name = node.mac.path.segments.last()?.ident.to_string();
-    if !matches!(name.as_str(), "format" | "format_args" | "vec" | "theme") {
+    if !matches!(name.as_str(), "format" | "format_args" | "vec") {
         return None;
     }
     use syn::parse::Parser as _;
@@ -9654,8 +9401,8 @@ fn expr_as_lit_str(expr: &syn::Expr) -> Option<&syn::LitStr> {
 }
 
 /// Whether `node` is specifically a `format!`/`format_args!` call — narrower than
-/// `supported_macro_expr_arguments`'s gate (which also allows `vec!`/`theme!`), since only these
-/// two ever have inline-capture format-string semantics worth scanning for.
+/// `supported_macro_expr_arguments`'s gate (which also allows `vec!`), since only these two ever
+/// have inline-capture format-string semantics worth scanning for.
 fn is_format_macro(node: &syn::ExprMacro) -> bool {
     node.mac
         .path
@@ -9931,7 +9678,6 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
 enum ResyncFilter<'a> {
     All,
     Property(&'a str, &'a str),
-    Theme,
 }
 
 fn emit_resync(
@@ -10041,8 +9787,7 @@ fn emit_resync_with_receiver(
             {
                 continue;
             }
-            ResyncFilter::Theme if theme_token_path(expr).is_none() => continue,
-            ResyncFilter::Property(_, _) | ResyncFilter::Theme => {}
+            ResyncFilter::Property(_, _) => {}
         }
         // `#[onetime]` fields (`Window`'s own `left`/`top`/`width`/`height`,
         // docs/specs/ui_spec.md#window) are one-time initial-placement/size setters,
@@ -10084,70 +9829,6 @@ fn emit_resync_with_receiver(
         let field_ty = info
             .and_then(|i| i.field_types.get(name))
             .map(String::as_str);
-        if let Some(token) = theme_token_path(expr) {
-            // External (no local `TypeInfo`) and not text-style: same reasoning as
-            // `emit_external_attribute_sets`'s own construction-time theme branch — resyncing a
-            // themed value still needs to know whether the real setter's parameter is
-            // `Option`-wrapped (`Shape::set_fill`/`set_stroke`, `Option<Brush>`), which
-            // `emit_field_setter_call` can't determine without `TypeInfo`. Route through `@set`/
-            // `@clear` instead, whose `wrap_prop_value` already makes that call from the
-            // property's declared type. `#[allow(unused_imports)] use elwindui::ui::*;` was already
-            // injected once above (this function's own `info.is_none()` branch) — no separate `use`
-            // needed here the way `emit_external_attribute_sets` needs its own scoped one.
-            if info.is_none() && !crate::text_style::is_text_style_field_name(name) {
-                let name_ident = format_ident!("{name}");
-                let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
-                out.extend(quote! {
-                    match #receiver.theme_handle().resolve(#token) {
-                        elwindui::core::theme::ThemeValue::Value(__theme_value) => {
-                            elwindui::core::#props_macro!(@set #receiver, #name_ident, __theme_value);
-                        }
-                        elwindui::core::theme::ThemeValue::PlatformDefault => {
-                            elwindui::core::#props_macro!(@clear #receiver, #name_ident);
-                        }
-                    }
-                });
-                continue;
-            }
-            let themed_value = if crate::text_style::is_text_style_field_name(name) {
-                if name == "foreground" {
-                    quote! { Some(__theme_value) }
-                } else {
-                    quote! { __theme_value }
-                }
-            } else if name == "background" {
-                // `NativeControl::set_background`'s own doc comment: unlike every other
-                // hand-written-native field's bare-inner-type setter, `background` keeps
-                // `Option<Brush>` in its real signature, matching `foreground` above. Checked
-                // before the `is_copy_type`/`node_uses_owned_setters` branches below since those
-                // exist for hand-written-native fields whose setter takes the *bare* inner type —
-                // `background`, alongside `foreground`, is the one exception.
-                quote! { Some(__theme_value) }
-            } else if field_ty.is_some_and(|ty| is_copy_type(strip_option(ty).0)) {
-                quote! { __theme_value }
-            } else if node_uses_owned_setters {
-                virtual_builtin_resync_value(field_ty.unwrap_or(""), quote! { __theme_value })
-            } else {
-                quote! { __theme_value }
-            };
-            let set = emit_field_setter_call(
-                name,
-                &node.type_path,
-                &setter,
-                themed_value,
-                &receiver,
-                from,
-                table,
-            );
-            let clear = emit_field_clear_call(name, &node.type_path, &receiver, from, table);
-            out.extend(quote! {
-                match #receiver.theme_handle().resolve(#token) {
-                    elwindui::core::theme::ThemeValue::Value(__theme_value) => { #set }
-                    elwindui::core::theme::ThemeValue::PlatformDefault => { #clear }
-                }
-            });
-            continue;
-        }
         if let Some(coerced) = coerce_color_literal(strip_option(field_ty.unwrap_or("")).0, expr) {
             // `virtual_builtin_resync_value` would otherwise splice the raw (uncoerced) literal
             // straight into `Some(..)`/the bare setter argument — this mirrors its own
@@ -10842,44 +10523,6 @@ struct NotepadWindow {
         assert!(!rendered.contains("set_font_family (& (self . vm . font_family ()))"));
     }
 
-    #[test]
-    fn theme_references_generate_typed_set_clear_and_theme_only_resync() {
-        let module = crate::test_module(&[(
-            None,
-            r#"
-                struct ThemeHost {
-                    body: view! {
-                        VerticalLayout {
-                            background: theme!(AppTheme::layout_background)
-                            spacing: theme!(AppTheme::layout_spacing)
-                            TextBlock {
-                                text: "sample"
-                                foreground: theme!(AppTheme::text_block_foreground)
-                            }
-                            Button {
-                                text: "native"
-                                background: theme!(AppTheme::button_background)
-                                foreground: theme!(AppTheme::button_foreground)
-                            }
-                        }
-                    },
-                }
-            "#,
-            None,
-        )])
-        .expect("theme source should parse");
-        let table = build_symbol_table_with_builtins(&[module.clone()]);
-        let generated = generate_module(&module, &table);
-        assert_valid_rust("typed_theme_references", &generated);
-        let rendered = generated.to_string();
-        assert!(rendered.contains("theme_handle () . resolve"));
-        assert!(rendered.contains("ThemeValue :: Value"));
-        assert!(rendered.contains("ThemeValue :: PlatformDefault"));
-        assert!(rendered.contains("clear_background"));
-        assert!(rendered.contains("clear_foreground"));
-        assert!(rendered.contains("subscribe_application_theme"));
-        assert!(rendered.contains("fn __resync_theme"));
-    }
 
     #[test]
     fn font_family_and_brush_are_not_assumed_copy_by_viewmodels() {
@@ -11400,8 +11043,6 @@ struct NotepadWindow {
         let rendered = generated.to_string();
         assert!(rendered.contains("fn __refresh_dynamic_regions"));
         assert!(rendered.contains("set_content"));
-        assert!(rendered.contains("subscribe_application_theme"));
-        assert!(rendered.contains("WindowExt :: set_theme"));
         assert!(!rendered.contains("DynamicChildSlot"));
     }
 

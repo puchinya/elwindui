@@ -23,27 +23,7 @@ pub use elwindui_svg as svg;
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` opts a plain user `enum` into the same
 /// `match`/`if let` exhaustiveness checking a DSL-text `enum` always got — see
 /// `elwindui_macros::dsl_enum`'s own doc comment.
-pub use elwindui_macros::{
-    class, component, dsl_enum, environment_key, main, theme_definition, viewmodel,
-};
-
-/// Resolves a typed token from the current application theme.
-///
-/// Inside a `view!` body this expression is recognized by the Rust component frontend. A theme
-/// revision then re-applies only attributes whose value uses this macro; `PlatformDefault` takes
-/// the matching property clear path.
-///
-/// # Example
-///
-/// ```ignore
-/// background: theme!(AppTheme::layout_background)
-/// ```
-#[macro_export]
-macro_rules! theme {
-    ($token:path) => {
-        $crate::core::theme::resolve_application_theme($token)
-    };
-}
+pub use elwindui_macros::{class, component, dsl_enum, environment_key, main, theme, viewmodel};
 
 /// Initializes the native UI runtime selected for the current operating system.
 ///

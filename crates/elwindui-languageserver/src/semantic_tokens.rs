@@ -58,7 +58,7 @@ const ATTR_NAMES: &[&str] = &[
     "length",
 ];
 // DSL and dependency-analyzable expression macros accepted inside `view!` values.
-const MACRO_NAMES: &[&str] = &["once", "t", "format", "format_args", "vec", "theme"];
+const MACRO_NAMES: &[&str] = &["once", "t", "format", "format_args", "vec"];
 
 /// Finds every `view! { .. }` field's exact byte range in `src` and returns semantic tokens for
 /// their contents only — see this module's own doc comment. Returns an empty `Vec` (rather than

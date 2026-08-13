@@ -6,8 +6,8 @@ Snapshot: 2026-08-11. Architecture is indexed in [`../design/README.md`](../desi
 
 | Backend | Build/runtime state | Verification state |
 |---|---|---|
-| AppKit (macOS) | ✅ primary backend | Local builds, core examples, screenshots, Accessibility-driven control interaction, text/theme paths |
-| WinUI 3 (Windows) | 🚧 substantial implementation | Windows builds and real interaction verified for application startup, graphics, text/theme, Button and selection controls; requirement-by-requirement audit remains incomplete |
+| AppKit (macOS) | ✅ primary backend | Local builds, core examples, screenshots, Accessibility-driven control interaction, text/Environment paths |
+| WinUI 3 (Windows) | 🚧 substantial implementation | Windows builds and real interaction verified for application startup, graphics, text/Environment, Button and selection controls; requirement-by-requirement audit remains incomplete |
 | GTK4 (Linux) | ⬜ stub | No functional backend or toolkit dependency |
 | UIKit / Android | ⬜ absent | No code |
 

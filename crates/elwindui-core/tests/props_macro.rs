@@ -442,7 +442,7 @@ fn props_macro_sets_slider_enabled() {
     assert_eq!(*slider.enabled.borrow(), Some(false));
 }
 
-// --- `@clear`: resetting a themed property to its platform default ------------------------------
+// --- `@clear`: resetting a property to its platform default --------------------------------------
 
 #[test]
 fn clear_resets_a_property_declared_by_an_ancestor() {

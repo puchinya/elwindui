@@ -220,9 +220,6 @@ pub struct UIElement {
     /// The `FocusHost` counterpart to `invalidate_host` — see that field's own doc comment and
     /// `FocusHost`'s own.
     pub focus_host: RefCell<Option<Rc<dyn FocusHost>>>,
-    /// Window-level override for this hosted root. Descendants resolve it through the Visual
-    /// parent chain; `None` reaches the current application theme.
-    pub theme_context: RefCell<Option<ThemeContext>>,
     /// `#[shortcut(...)]`-annotated fields declared on this element, registered here by
     /// `elwindui-codegen`'s generated `new()` — not yet reachable from any `ShortcutRegistry` (this
     /// element doesn't know which tree/window it'll end up hosted under yet). A host's own
@@ -282,7 +279,6 @@ impl std::fmt::Debug for UIElement {
             .field("focus_order", &self.focus_order.get())
             .field("focus_state", &self.focus_state.get())
             .field("focus_host", &self.focus_host.borrow().is_some())
-            .field("theme_context", &self.theme_context.borrow().is_some())
             .finish()
     }
 }
@@ -342,7 +338,6 @@ impl UIElement {
             focus_order: Cell::new(None),
             focus_state: Cell::new(FocusState::Unfocused),
             focus_host: RefCell::new(None),
-            theme_context: RefCell::new(None),
             declared_shortcuts: RefCell::new(Vec::new()),
         }
     }
@@ -713,37 +708,6 @@ impl UIElement {
     /// caller. `None` un-registers.
     fn set_focus_host(&self, host: Option<Rc<dyn FocusHost>>) {
         *self.as_ui_element().focus_host.borrow_mut() = host;
-    }
-    /// Stores a Window-specific theme only on a hosted root. A nested host does not need to copy
-    /// it: its content remains in the same Visual-parent chain and resolves this context lazily.
-    fn set_theme_context(&self, context: Option<ThemeContext>) {
-        let impact = context
-            .as_ref()
-            .map_or(ThemeChangeImpact::NativeStyle, |context| {
-                context.theme().last_change_impact()
-            });
-        *self.as_ui_element().theme_context.borrow_mut() = context;
-        match impact {
-            // `ThemeChangeImpact::Paint` is `set_theme_context`'s own guarantee that a themed
-            // brush/paint value changed and nothing that could affect `measure_override`/
-            // `arrange_override` did — the sibling `Measure` branch below is what themes route
-            // through instead when that's not true. Safe to use `invalidate_render` here without
-            // the wider per-call-site audit `InvalidationKind::Render`'s own doc comment asks for.
-            ThemeChangeImpact::Paint => self.invalidate_render(),
-            ThemeChangeImpact::Measure | ThemeChangeImpact::NativeStyle => {
-                self.invalidate_measure()
-            }
-        }
-    }
-    /// Resolves the nearest Window theme, falling back to the application default.
-    fn theme_handle(&self) -> ThemeHandle {
-        if let Some(context) = self.as_ui_element().theme_context.borrow().as_ref() {
-            return context.theme();
-        }
-        if let Some(parent) = self.visual_parent() {
-            return parent.theme_handle();
-        }
-        crate::theme::application_theme()
     }
     /// Registers a `#[shortcut(...)]`-annotated field's binding on this element — see
     /// `UIElement::declared_shortcuts`'s own doc comment.

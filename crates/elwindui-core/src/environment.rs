@@ -236,6 +236,20 @@ impl EnvironmentContext {
 
 thread_local! {
     static CURRENT: RefCell<Vec<EnvironmentContext>> = RefCell::new(Vec::new());
+    static APPLICATION_ENVIRONMENT: EnvironmentContext = EnvironmentContext::root();
+}
+
+/// Returns the process's single persistent root [`EnvironmentContext`], lazily created once per
+/// thread and reused on every later call — unlike [`EnvironmentContext::root`], which always
+/// allocates a new, unrelated state.
+///
+/// A [`crate::theme::Theme`] applied to this context is what a whole application observes: each
+/// backend's `run()` holds this context [`EnvironmentContext::enter`]ed for the run loop's entire
+/// lifetime (`docs/design/runtime/theme_environment_design.md`, "Application boundary"), so
+/// construction anywhere in the application sees overrides applied here through
+/// [`EnvironmentContext::current`].
+pub fn application_environment() -> EnvironmentContext {
+    APPLICATION_ENVIRONMENT.with(|env| env.clone())
 }
 
 /// RAII guard restoring the previously ambient [`EnvironmentContext`] on drop. See

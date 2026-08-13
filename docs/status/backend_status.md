@@ -1,6 +1,6 @@
 # Backend status
 
-Snapshot: 2026-08-11. Architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-08-14. Architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Support matrix
 
@@ -20,12 +20,14 @@ Snapshot: 2026-08-11. Architecture is indexed in [`../design/README.md`](../desi
 - SVG filter replay passes through turbulence, diffuse/specular lighting, displacement maps, unsupported convolve kernels, and Table/Discrete/Gamma component-transfer functions. Group blend modes fall back when no Core Image filter is available.
 - SVG nested masks with mismatched bounds use the outer mask only; image-brush path fills, pattern strokes, and degenerate/offscreen patterns use documented simpler fallbacks.
 - Memory investigations for Issue #60 found no durable evidence that retained ElwindUI render data directly owns the previously observed multi-megabyte process delta. Raw measurements remain Issue evidence rather than status documents.
+- Window's new `hide()`/`close()` (Issue #80 CI-8: `NSWindow::orderOut`/`NSWindow::close`) are implemented and covered by the workspace test suite (constructed, type-checked; interactive on-screen confirmation was attempted but inconclusive in this sandboxed development environment — no crash or early-exit was observed running a real example either before or after the change, but a spawned GUI process's window did not appear in a `screencapture` capture, a pre-existing environment characteristic unrelated to this change).
 
 ## WinUI 3 current gaps
 
 - SVG group blend modes without direct `CanvasBlend` mappings, isolation, filters, and luminance-mask rasterization need an offscreen effect graph.
 - Cross-backend parity has been verified for the controls recorded in [`control_status.md`](control_status.md), but the entire backend contract has not been re-audited.
 - Whole-workspace rust-analyzer diagnostics have pre-existing failures and were not established as a clean Windows backend gate.
+- Window's new `hide()`/`close()` (Issue #80 CI-8: `AppWindow::Hide`/`Window::Close`, reusing the existing `Closed`-event `release_window` bookkeeping) are implemented but **not verified** — no Windows environment was available during CI-8/CI-9's implementation. This is the primary outstanding cross-backend parity gap from the Issue #80 lifecycle refactor.
 
 ## Verification baseline
 

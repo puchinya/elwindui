@@ -76,12 +76,13 @@ pub fn component_and_view_from_item_struct(
                 );
             };
             let view_src = view_macro.mac.tokens.to_string();
-            let (on_mount, on_unmount, lets, root) = parser::parse_view_body(&view_src)
+            let (on_mount, on_unmount, on_update, lets, root) = parser::parse_view_body(&view_src)
                 .map_err(|e| format!("`{name}`: invalid `view! {{ .. }}` body: {e}"))?;
             Ok::<_, String>(ViewDef {
                 target: name.clone(),
                 on_mount,
                 on_unmount,
+                on_update,
                 lets,
                 root,
             })

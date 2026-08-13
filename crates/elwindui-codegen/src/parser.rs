@@ -22,6 +22,7 @@ pub fn parse_view_body(
     (
         Option<syn::Block>,
         Option<syn::Block>,
+        Option<OnUpdateHook>,
         Vec<LetBinding>,
         ViewBody,
     ),
@@ -130,6 +131,7 @@ impl<'a> Parser<'a> {
         (
             Option<syn::Block>,
             Option<syn::Block>,
+            Option<OnUpdateHook>,
             Vec<LetBinding>,
             ViewBody,
         ),
@@ -137,6 +139,7 @@ impl<'a> Parser<'a> {
     > {
         let mut on_mount = None;
         let mut on_unmount = None;
+        let mut on_update = None;
         loop {
             self.skip_trivia();
             if self.eat_keyword("on_mount") {
@@ -157,6 +160,45 @@ impl<'a> Parser<'a> {
                     syn::parse_str::<syn::Block>(&block_src)
                         .map_err(|e| format!("invalid on_unmount body: {e}"))?,
                 );
+            } else if self.eat_keyword("on_update") {
+                self.skip_trivia();
+                // Optional `(field, ...)` — bare `on_update { .. }`/`on_update: { .. }` watches any
+                // `#[prop]`/`#[computed]`/`#[state]`/`#[environment(name)]` change instead (dsl_spec.md
+                // §3).
+                let fields = if self.eat_char('(') {
+                    let mut names = Vec::new();
+                    loop {
+                        self.skip_trivia();
+                        if self.peek_char() == Some(')') {
+                            break;
+                        }
+                        names.push(self.parse_ident()?);
+                        self.skip_trivia();
+                        if !self.eat_char(',') {
+                            break;
+                        }
+                    }
+                    self.skip_trivia();
+                    self.expect_char(')')?;
+                    if names.is_empty() {
+                        return Err(
+                            self.err("on_update(...) needs at least one field name, or omit the parens for `on_update { .. }`")
+                        );
+                    }
+                    Some(names)
+                } else {
+                    None
+                };
+                self.skip_trivia();
+                self.eat_char(':');
+                self.skip_trivia();
+                let block_src = self.take_block_src()?;
+                let block = syn::parse_str::<syn::Block>(&block_src)
+                    .map_err(|e| format!("invalid on_update body: {e}"))?;
+                if on_update.is_some() {
+                    return Err(self.err("only one on_update block is supported per view"));
+                }
+                on_update = Some(OnUpdateHook { fields, block });
             } else {
                 break;
             }
@@ -210,6 +252,7 @@ impl<'a> Parser<'a> {
         Ok((
             on_mount,
             on_unmount,
+            on_update,
             lets,
             ViewBody {
                 attributes,
@@ -1134,7 +1177,7 @@ mod tests {
 
     #[test]
     fn parses_dynamic_if_match_and_for_children() {
-        let (_, _, _, root) = parse_view_body(
+        let (_, _, _, _, root) = parse_view_body(
             r#"
                 VerticalLayout {
                     if vm.visible { TextBlock { text: "yes" } } else { TextBlock { text: "no" } }
@@ -1310,7 +1353,7 @@ mod tests {
 
     fn parse_closure_attr(attr_src: &str) -> ViewExpr {
         let src = format!("TabView {{ {attr_src} }}");
-        let (_, _, _, root_body) = parse_view_body(&src).expect("should parse");
+        let (_, _, _, _, root_body) = parse_view_body(&src).expect("should parse");
         let root = literal(&root_body.children[0]);
         let expr = root
             .attributes
@@ -1388,7 +1431,7 @@ mod tests {
 
     #[test]
     fn parses_typed_attribute_assignments_and_source_spans() {
-        let (_, _, _, root) = parse_view_body(
+        let (_, _, _, _, root) = parse_view_body(
             r#"
 TextBox {
     text: "initial"
@@ -1443,7 +1486,7 @@ TabView {
     selected: vm.active_tab
 }
 "#;
-        let (_, _, _, root_body) = parse_view_body(src).expect("should parse");
+        let (_, _, _, _, root_body) = parse_view_body(src).expect("should parse");
         let root = literal(&root_body.children[0]);
         let attr = |name: &str| {
             root.attributes
@@ -1539,7 +1582,7 @@ on_unmount {
 
 Text { text: "hi" }
 "#;
-        let (on_mount, on_unmount, _, root) = parse_view_body(src).expect("should parse");
+        let (on_mount, on_unmount, _, _, root) = parse_view_body(src).expect("should parse");
         assert!(on_mount.is_some());
         assert!(on_unmount.is_some());
         assert_eq!(root.children.len(), 1);
@@ -1577,7 +1620,7 @@ Grid {
     Button { text: "Click", Grid::row: 1, Grid::column: 1 }
 }
 "#;
-        let (_, _, _, root_body) = parse_view_body(src).expect("should parse");
+        let (_, _, _, _, root_body) = parse_view_body(src).expect("should parse");
         assert_eq!(root_body.children.len(), 1);
         let root = literal(&root_body.children[0]);
         assert_eq!(root.type_path, "Grid");
@@ -1624,7 +1667,7 @@ Button {
     on_find: vm.find
 }
 "#;
-        let (_, _, _, root_body) = parse_view_body(src).expect("should parse");
+        let (_, _, _, _, root_body) = parse_view_body(src).expect("should parse");
         let root = literal(&root_body.children[0]);
         assert_eq!(root.type_path, "Button");
         assert_eq!(root.attribute_shortcuts.len(), 2);
@@ -1654,7 +1697,7 @@ Button {
         // no-comma-needed line breaks onto one line — never the literal, unspaced `#[` a hand-typed
         // source has. Reproduce that exact shape (Issue #68 bug 3) instead of hand-typed spacing.
         let src = r#"Button { on_select : | index | vm . select_tab (index) # [shortcut ("Ctrl+S")] on_click : || { save () } , }"#;
-        let (_, _, _, root) = parse_view_body(src).expect("should parse");
+        let (_, _, _, _, root) = parse_view_body(src).expect("should parse");
         let element = literal(&root.children[0]);
         assert_eq!(element.type_path, "Button");
         assert_eq!(element.attribute_shortcuts.len(), 1);

@@ -3577,6 +3577,37 @@ fn generate_view(
 
     let mut struct_fields = TokenStream::new();
     let mut construct_stmts = own_default_construct_stmts;
+    // CI-4 of #80 (docs/design/runtime/component_lifecycle_design.md §4b): plan-driven descendant
+    // construction — every ordinary (non-root-composition) `PlannedNode` — is emitted here instead
+    // of into `construct_stmts`, so it runs from `__build_view()` (post-`Rc::new_cyclic`, once this
+    // component's own `Rc<Self>`/mount context exists) rather than from `construct()` (pre-`Rc`).
+    // The shape/host-composition root's own `base` field is a distinct, always-required mechanism
+    // (never a `stored` `PlannedNode`) and stays in `construct_stmts`, unmoved.
+    let mut child_construct_stmts = TokenStream::new();
+    // `emit_expr`'s `EmitMode::Construction` (used throughout `emit_construction` and its helpers,
+    // unchanged by the `child_construct_stmts` move above) emits a bare own-field reference (e.g.
+    // `tint` in `TextBlock { text: format!("{tint}") }`) as a plain local identifier — correct when
+    // this code ran inside `construct()`, where `own_default_construct_stmts`'s `let #field = ..;`
+    // declarations put those names directly in scope. Now that this code runs inside `__build_view`
+    // instead, those `let`s are out of scope (they still exist, but only inside `construct()`/
+    // `__class_construct`, a different function) — so re-declare the same bare names here, sourced
+    // from each field's own already-generated `self.#name()` accessor (every `ctx.own_fields` entry
+    // has one, per the `param_names`/own-default/own-computed/own-environment accessor-generation
+    // loops elsewhere in this function, *except* an `on_*`-named `#[routed]` field, which is wired
+    // through event handling, not read as a value — excluded here, matching `param_names`' own
+    // exclusion of it). `#[allow(unused_variables)]` since not every field is necessarily referenced
+    // by name inside the view tree. Order doesn't matter (each reads independently from `self`,
+    // unlike `own_default_construct_stmts`'s own sibling-dependent expressions).
+    for own_field_name in ctx.own_fields.keys() {
+        if own_field_name.starts_with("on_") {
+            continue;
+        }
+        let own_field_ident = format_ident!("{}", own_field_name);
+        child_construct_stmts.extend(quote! {
+            #[allow(unused_variables)]
+            let #own_field_ident = self.#own_field_ident();
+        });
+    }
     let mut field_inits = TokenStream::new();
     let mut wiring_stmts = TokenStream::new();
     let mut resync_stmts = TokenStream::new();
@@ -4055,11 +4086,25 @@ fn generate_view(
                 match table.resolve(from, &node.type_path) {
                     Some(info) => {
                         let type_ident = concrete_type_ident(&node.type_path, Some(info));
+                        // CI-4 of #80 (docs/design/runtime/component_lifecycle_design.md §4b): the
+                        // root's own attribute setters (e.g. `set_content(..)`) may reference an
+                        // ordinary stored child's binding (e.g. the content tree's root), which is
+                        // now built later, in `child_construct_stmts`/`__build_view()` — so the
+                        // setters themselves must run there too, not here. Only the bare skeleton
+                        // (needed by `field_inits`'s `base: #root_binding` below) stays in
+                        // `construct_stmts`. `#binding` is re-bound to `&self.base` (the skeleton,
+                        // already moved into `Self` by the time `__build_view()` runs) so the
+                        // existing `#(#setters)*` tokens — which call methods on `#binding` — keep
+                        // working unchanged.
                         let setters = build_component_setters(node, &ctx, from, table, info, &plan);
                         let trait_use = builtin_trait_use(&node.type_path, Some(info));
                         construct_stmts.extend(quote! {
                             #trait_use
                             let #binding: #type_ident = #type_ident::construct();
+                        });
+                        child_construct_stmts.extend(quote! {
+                            #trait_use
+                            let #binding = &self.base;
                             #(#setters)*
                         });
                     }
@@ -4073,13 +4118,18 @@ fn generate_view(
                             #[allow(unused_imports)]
                             use elwindui::ui::*;
                             let #binding = elwindui::ui::#type_ident::construct();
+                        });
+                        child_construct_stmts.extend(quote! {
+                            #[allow(unused_imports)]
+                            use elwindui::ui::*;
+                            let #binding = &self.base;
                             #sets
                         });
                     }
                 }
                 continue;
             }
-            emit_construction(node, &ctx, from, table, &mut construct_stmts, &plan);
+            emit_construction(node, &ctx, from, table, &mut child_construct_stmts, &plan);
             if node.stored {
                 let binding = &node.binding;
                 // Every resolved type (a `component`/`view` pair or a hand-written builtin in
@@ -4088,13 +4138,30 @@ fn generate_view(
                 // just `Rc<Type>` — no backend-crate-qualified path, no per-type bookkeeping fields.
                 let type_ident =
                     concrete_type_ident(&node.type_path, table.resolve(from, &node.type_path));
-                struct_fields.extend(quote! { #binding: std::rc::Rc<#type_ident>, });
-                field_inits.extend(quote! { #binding: #binding.clone(), });
+                // `OnceCell`, not a plain field: this node is now constructed in `__build_view()`
+                // (CI-4 of #80, docs/design/runtime/component_lifecycle_design.md §4b), which runs
+                // after `Self` already exists, so it can no longer be set directly inside a `Self {
+                // .. }` literal. `OnceCell::set` below (in `child_construct_stmts`) is a plain,
+                // first-and-only write — no double-set possible, since each node is constructed
+                // exactly once per `__build_view()` call, which is itself guarded by `mount()`'s own
+                // idempotency check (docs/design/runtime/component_lifecycle_design.md §4a).
+                struct_fields.extend(
+                    quote! { #binding: std::cell::OnceCell<std::rc::Rc<#type_ident>>, },
+                );
+                field_inits.extend(quote! { #binding: std::cell::OnceCell::new(), });
+                child_construct_stmts.extend(quote! {
+                    self.#binding.set(#binding.clone()).ok();
+                });
                 if let Some(id) = &node.id {
                     let accessor = format_ident!("{}", id);
+                    let not_mounted_msg =
+                        format!("{id}: component is not yet mounted");
                     named_accessors.extend(quote! {
                         pub fn #accessor(&self) -> std::rc::Rc<#type_ident> {
-                            self.#binding.clone()
+                            self.#binding
+                                .get()
+                                .expect(#not_mounted_msg)
+                                .clone()
                         }
                     });
                 }
@@ -4193,7 +4260,10 @@ fn generate_view(
         // A top-level window must use `inherits Window` to receive the `WindowExt` API.
         TokenStream::new()
     } else if root_is_native {
-        let root_expr = into_any_view_if_needed(quote! { self.#root_binding }, "AnyView");
+        let root_expr = into_any_view_if_needed(
+            quote! { self.#root_binding.get().expect("into_any_view: component is not yet mounted") },
+            "AnyView",
+        );
         quote! {
             pub fn into_any_view(self: std::rc::Rc<Self>) -> elwindui::backend::AnyView {
                 #root_expr
@@ -4201,7 +4271,7 @@ fn generate_view(
         }
     } else {
         let root_expr = into_node_if_needed(
-            quote! { self.#root_binding },
+            quote! { self.#root_binding.get().expect("into_node: component is not yet mounted") },
             &resolved_root.type_path,
             from,
             table,
@@ -4268,11 +4338,20 @@ fn generate_view(
                 let host = match parent_info.and_then(|info| info.content_field.as_deref()) {
                     Some(field) => {
                         let field_ident = format_ident!("{field}");
-                        quote! { self.#parent_binding.#field_ident() }
+                        quote! {
+                            self.#parent_binding
+                                .get()
+                                .expect("__refresh_dynamic_regions: component is not yet mounted")
+                                .#field_ident()
+                        }
                     }
                     None => {
                         let props_macro = format_ident!("__elwindui_props_{}", parent.type_path);
-                        let recv = quote! { self.#parent_binding };
+                        let recv = quote! {
+                            self.#parent_binding
+                                .get()
+                                .expect("__refresh_dynamic_regions: component is not yet mounted")
+                        };
                         quote! { elwindui::core::#props_macro!(@content_field_get #recv) }
                     }
                 };
@@ -4391,9 +4470,16 @@ fn generate_view(
             .and_then(|root| root.child_bindings.first())
             .unwrap_or_else(|| panic!("ContentControl composition requires one content child"));
         // `#content_binding` is a real, already-stored struct field (see `struct_fields`/
-        // `field_inits` above), reachable directly off `&self` — no capture step needed.
+        // `field_inits` above), reachable directly off `&self` — no capture step needed. Reads
+        // through `OnceCell` (CI-4 of #80): this statement now runs from `__build_view()` right
+        // after `child_construct_stmts` populates it, so it is always already set here.
         let content = into_node_if_needed(
-            quote! { self.#content_binding.clone() },
+            quote! {
+                self.#content_binding
+                    .get()
+                    .expect("content_attach: component is not yet mounted")
+                    .clone()
+            },
             content_type,
             from,
             table,
@@ -4577,6 +4663,57 @@ fn generate_view(
         }
     };
 
+    // `on_update(field, ...)`/bare `on_update { .. }` (docs/specs/dsl_spec.md §3, CI-4 of #80,
+    // docs/design/runtime/component_lifecycle_design.md §4c). Reuses the exact same
+    // `subscribe_property_changed` mechanism `component_self_subscription` above already installs
+    // (own-field-changed -> `__resync_<field>` dispatch) — a second, independent subscription rather
+    // than folding into that one, since this one runs the DSL author's own block instead of an
+    // internal resync method, and is optional (most components have none). Installed from the same
+    // post-construction point as `on_mount_stmt` (never from `construct`), so it can never observe
+    // the initial, construction-time field value-set: that happens via the plain `Self { field:
+    // value, .. }` struct literal, which never calls `self.on_property_changed(..)` — only a
+    // generated setter does, and only a setter call after this subscription exists can be observed
+    // by it.
+    let own_on_update_subscription = view.on_update.as_ref().map(|hook| {
+        let block = &hook.block;
+        let match_arms = match &hook.fields {
+            None => quote! { _ => { #block } },
+            Some(names) => {
+                let mut variant_idents = Vec::new();
+                let mut unknown_errors = TokenStream::new();
+                for name in names {
+                    if component_property_variants.iter().any(|v| v == name) {
+                        variant_idents.push(format_ident!("{}", name));
+                    } else {
+                        let msg = format!(
+                            "on_update({name}, ..): `{name}` is not a #[prop]/#[computed]/#[state]/#[environment(..)] field of this component"
+                        );
+                        unknown_errors.extend(quote! { compile_error!(#msg); });
+                    }
+                }
+                if !unknown_errors.is_empty() {
+                    unknown_errors
+                } else {
+                    quote! {
+                        #(#component_property_enum::#variant_idents)|* => { #block }
+                        _ => {}
+                    }
+                }
+            }
+        };
+        quote! {
+            {
+                let weak = std::rc::Rc::downgrade(&this);
+                let subscription = this.subscribe_property_changed(move |property| {
+                    if let Some(this) = weak.upgrade() {
+                        match property { #match_arms }
+                    }
+                });
+                this.__property_changed_subscriptions.borrow_mut().push(subscription);
+            }
+        }
+    });
+
     if is_composed {
         // Every one of these is purely inherent (`resync`/`#[id(..)]` child accessors/user methods/
         // lifecycle shadow hooks) — none is part of `#target`'s own generated trait — so `mark_inherent`
@@ -4708,6 +4845,7 @@ fn generate_view(
                 // `mount()`, once, per the build-idempotency guard there.
                 #[doc(hidden)]
                 fn __build_view(&self) {
+                    #child_construct_stmts
                     #content_attach_stmt
                     let __most_derived: Option<std::rc::Rc<#target>> = self
                         .__self_weak
@@ -4731,6 +4869,7 @@ fn generate_view(
                         #component_self_subscription
                         #subscribe_stmts
                         #own_environment_subscribe_stmts
+                        #own_on_update_subscription
                         #on_mount_stmt
                     }
                 }
@@ -4786,6 +4925,7 @@ fn generate_view(
                 // §4, CI-2 of #80). Called from `mount()`, once, per the build-idempotency guard there.
                 #[doc(hidden)]
                 fn __build_view(self: &std::rc::Rc<Self>) {
+                    #child_construct_stmts
                     #content_attach_stmt
                     #wiring_stmts
                     self.resync();
@@ -4793,6 +4933,7 @@ fn generate_view(
                     #component_self_subscription
                     #subscribe_stmts
                     #own_environment_subscribe_stmts
+                    #own_on_update_subscription
                     #on_mount_stmt
                 }
 
@@ -5164,7 +5305,12 @@ fn lazy_leaf_or_field_value(
 ) -> TokenStream {
     match lazy.and_then(|leaves| leaves.iter().find(|n| &n.binding == child)) {
         Some(leaf) => emit_lazy_leaf_value(leaf, ctx, from, table),
-        None => quote! { self.#child.clone() },
+        None => quote! {
+            self.#child
+                .get()
+                .expect("__refresh_dynamic_regions: component is not yet mounted")
+                .clone()
+        },
     }
 }
 
@@ -6483,7 +6629,12 @@ fn emit_scalar_branch_value(
     }
     let value = lazy_leaf_or_field_value(lazy, binding, ctx, from, table);
     let value = dynamic_child_binding(value, ty, item_ext, from, table);
-    quote! { self.#owner_binding.#setter(#value); }
+    quote! {
+        self.#owner_binding
+            .get()
+            .expect("__refresh_dynamic_regions: component is not yet mounted")
+            .#setter(#value);
+    }
 }
 
 fn plan_child_entry(
@@ -8761,7 +8912,12 @@ fn emit_wiring(
     let widget_binding = if self_is_node {
         quote! { this.clone() }
     } else {
-        quote! { this.#binding.clone() }
+        quote! {
+            this.#binding
+                .get()
+                .expect("emit_wiring: component is not yet mounted")
+                .clone()
+        }
     };
     // Only inject the trait `use` when this node actually has something to wire up below — an
     // unconditional injection here left an always-unused import on any stored node with no `on_*`/
@@ -9782,7 +9938,17 @@ fn emit_resync_with_receiver(
     let receiver = match receiver_override {
         Some(receiver) => receiver,
         None if self_is_node => quote! { self },
-        None => quote! { self.#binding },
+        // `.clone()` (matching `emit_wiring`'s own receiver, just below) so this evaluates to an
+        // owned `Rc<ConcreteType>` place, not `&Rc<ConcreteType>` — some downstream call sites
+        // (`#[text_style]`'s `&*(#receiver)` wrapping, in particular) deref exactly one layer,
+        // assuming an `Rc<T>` input the way a plain (pre-`OnceCell`, CI-4 of #80) field access
+        // always was; an extra un-cloned reference layer here breaks that arithmetic.
+        None => quote! {
+            self.#binding
+                .get()
+                .expect("emit_resync: component is not yet mounted")
+                .clone()
+        },
     };
     // `resync()` is its own function, a separate lexical scope from `new()` — the `use` already
     // injected alongside construction (`emit_construction`'s `builtin_trait_use`, or

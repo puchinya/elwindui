@@ -1215,10 +1215,9 @@ fn build_props_macro(
     // (below) stay as the lower-level primitive this delegates to, for a caller that already has a
     // fully-built handler in hand.
     // `@clear` resets a property to its platform default (`clear_<name>()`, no arguments) — the
-    // other half of a themed property's dispatch (`ThemeValue::PlatformDefault`), alongside `@set`'s
-    // `ThemeValue::Value` half. Same forwarding shape as `@set`, minus a value to carry. Routed
-    // properties are excluded (unlike `@set`, which handles them too) — an event registration has no
-    // "reset to platform default" concept.
+    // other half of a clearable property's dispatch, alongside `@set`. Same forwarding shape as
+    // `@set`, minus a value to carry. Routed properties are excluded (unlike `@set`, which handles
+    // them too) — an event registration has no "reset to platform default" concept.
     let clear_arms: Vec<TokenStream2> = shape
         .props
         .iter()

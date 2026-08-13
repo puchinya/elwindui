@@ -20,8 +20,8 @@ use super::*;
 #[prop(background: Option<crate::graphics::Brush>)]
 #[prop(tooltip: Option<String>)]
 pub trait NativeControl {
-    /// Sets an explicit native-control background, or removes it (`None`) so the backend control
-    /// theme can supply it again — matching `#[prop(background: Option<Brush>)]`'s own declared
+    /// Sets an explicit native-control background, or removes it (`None`) so the platform's own
+    /// default appearance applies again — matching `#[prop(background: Option<Brush>)]`'s own declared
     /// type exactly, unlike the virtual-builtin/native-leaf signature mismatch this used to have
     /// (`Layout::set_background` always took `Option<Brush>`; this took a bare `Brush`, relying on
     /// the separate `clear_background` below for the `None` case). `clear_background` stays a
@@ -30,7 +30,7 @@ pub trait NativeControl {
     /// transitions from `Some` to not-written across a re-render.
     fn set_background(&self, background: Option<Brush>);
 
-    /// Removes an explicit background so the backend control theme can supply it again.
+    /// Removes an explicit background so the platform's own default appearance applies again.
     fn clear_background(&self);
 
     /// Sets the hover-delayed explanatory text shown for this control.
@@ -42,8 +42,8 @@ pub trait NativeControl {
     /// its backend's own `NativeControl` struct, exactly as `background` above already does.
     ///
     /// Passing an empty string removes the tooltip. There is no `clear_tooltip` counterpart:
-    /// `elwindui-codegen` only emits `clear_<name>()` for properties that can carry a
-    /// `theme!(..)` value and resolve to `PlatformDefault`, and a tooltip is plain text with no
-    /// theme token — the same reason `TextBox::set_placeholder` has no `clear_placeholder`.
+    /// unlike `background` (`Option<Brush>`), `tooltip` is declared as a plain `&str`, so an empty
+    /// string already expresses "no tooltip" — the same reason `TextBox::set_placeholder` has no
+    /// `clear_placeholder`.
     fn set_tooltip(&self, tooltip: &str);
 }

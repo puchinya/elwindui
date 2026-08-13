@@ -4,24 +4,11 @@ use crate::host::TreeHostPanel;
 use super::InnerMenuBar;
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
-use crate::bindings::Microsoft::UI::Xaml::{
-    ElementTheme, SizeChangedEventHandler, Window as XamlWindow,
-};
-use crate::ffi::{invoke_ui_event_callback, register_ui_event_callback};
-use elwindui_core::theme::{ThemeAppearance, ThemePreference};
-use windows::Foundation::TypedEventHandler;
+use crate::bindings::Microsoft::UI::Xaml::{SizeChangedEventHandler, Window as XamlWindow};
 use windows::Graphics::{PointInt32, SizeInt32};
 use std::cell::Cell;
 use std::rc::Rc;
-use windows::core::{HSTRING, Interface};
-
-unsafe extern "C" {
-    fn elwindui_winui3_set_element_theme(
-        inspectable: *mut core::ffi::c_void,
-        requested: i32,
-        actual: *mut i32,
-    ) -> i32;
-}
+use windows::core::HSTRING;
 
 pub(crate) struct InnerWindow {
     xaml: XamlWindow,
@@ -34,20 +21,6 @@ impl InnerWindow {
         let xaml = XamlWindow::new().expect("Window::new");
         let content_host = TreeHostPanel::new();
         let _ = xaml.SetContent(&content_host.as_element());
-        let theme_element = content_host.as_element();
-        let observed_element = theme_element.clone();
-        let observed_host = content_host.clone();
-        let callback_id = register_ui_event_callback(Rc::new(move || {
-            let appearance = match observed_element.ActualTheme() {
-                Ok(ElementTheme::Dark) => ThemeAppearance::Dark,
-                _ => ThemeAppearance::Light,
-            };
-            observed_host.theme_handle().set_appearance(appearance);
-        }));
-        let _ = theme_element.ActualThemeChanged(&TypedEventHandler::new(move |_, _| {
-            invoke_ui_event_callback(callback_id);
-            Ok(())
-        }));
         Self { xaml, content_host, retained: Cell::new(false) }
     }
 
@@ -60,30 +33,6 @@ impl InnerWindow {
 
     pub(crate) fn set_title(&self, title: &str) {
         let _ = self.xaml.SetTitle(&HSTRING::from(title));
-    }
-
-    /// Applies only an appearance request. Token values remain on their individual dependency
-    /// properties, and `PlatformDefault` continues to mean `ClearValue`.
-    pub(crate) fn set_theme_preference(&self, preference: ThemePreference) {
-        let requested = match preference {
-            ThemePreference::System => 0,
-            ThemePreference::Light => 1,
-            ThemePreference::Dark => 2,
-        };
-        let element = self.content_host.as_element();
-        let mut actual = requested;
-        let _ = unsafe {
-            elwindui_winui3_set_element_theme(
-                Interface::as_raw(&element),
-                requested,
-                &mut actual,
-            )
-        };
-        let appearance = match actual {
-            2 => ThemeAppearance::Dark,
-            _ => ThemeAppearance::Light,
-        };
-        self.content_host.theme_handle().set_appearance(appearance);
     }
 
     /// `Microsoft.UI.Xaml.Controls.MenuBar` is placed as a real element *above* the content host,

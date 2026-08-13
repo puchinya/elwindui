@@ -135,30 +135,25 @@ pub fn dsl_enum(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Declares a typed Rust theme.
+/// Declares a Theme Preset: a batch of Environment value overrides
+/// (`docs/specs/theme_environment_spec.md` §3/§4).
 ///
-/// The annotated struct is a declaration surface; its fields become typed tokens and the
-/// expansion emits a variant enum plus a live `ThemeController`. The name is intentionally
-/// `theme_definition` because Rust uses one macro namespace for attribute and function-like
-/// macros, while token references reserve the shorter `theme!(...)` spelling.
+/// The annotated struct is a schema-only declaration surface — its fields are never stored; each
+/// `#[theme(value = ..)]` field's own identifier must match the `name` of an
+/// `#[elwindui::environment_key]` declared earlier in the same crate, and the expansion emits a
+/// zero-sized marker type implementing `elwindui::core::theme::Theme`.
 ///
 /// # Example
 ///
 /// ```ignore
-/// #[elwindui::theme_definition(
-///     extends = SystemTheme,
-///     variants(Default, Ocean)
-/// )]
-/// struct AppTheme {
-///     #[theme(default = platform_default, Ocean = Brush::Solid(Color::rgb(0, 80, 120)))]
-///     layout_background: Brush,
-///
-///     #[theme(default = Brush::Solid(Color::rgb(39, 103, 216)))]
+/// #[elwindui::theme]
+/// struct OceanTheme {
+///     #[theme(value = Brush::Solid(Color::rgb(0, 166, 200)))]
 ///     brand: Brush,
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn theme_definition(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn theme(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item_struct = match syn::parse::<syn::ItemStruct>(item) {
         Ok(item) => item,
         Err(error) => return error.to_compile_error().into(),

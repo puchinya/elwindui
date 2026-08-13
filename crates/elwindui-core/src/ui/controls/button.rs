@@ -5,11 +5,10 @@
 /// Mapped to each toolkit's *own* emphasis affordance rather than to elwindui-drawn styling, so a
 /// `Primary` button looks like the platform's accent button and follows the user's system accent
 /// colour instead of a colour this framework picked (AppKit `NSButton.bezelColor` /
-/// `hasDestructiveAction`, WinUI3 `AccentButtonStyle`). There is deliberately no theme token per
-/// role: `button_background` and friends already exist as the app-level override for all roles, and
-/// a role-specific token would fight the system accent colour users expect to control themselves.
-/// An explicit `background:` still wins, because `NativeControl`'s background is applied
-/// independently of — and after — the role's bezel.
+/// `hasDestructiveAction`, WinUI3 `AccentButtonStyle`). There is deliberately no per-role override
+/// beyond this: a role-specific background would fight the system accent colour users expect to
+/// control themselves. An explicit `background:` still wins, because `NativeControl`'s background
+/// is applied independently of — and after — the role's bezel.
 ///
 /// Orthogonal to [`Button`]'s `is_default`: a role says what kind of action this is, `is_default`
 /// says whether Return activates it. A destructive button can be the default one, and often should

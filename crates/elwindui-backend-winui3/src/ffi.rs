@@ -255,11 +255,6 @@ pub(crate) fn invoke_ui_text_event_callback(id: usize, text: String) {
 pub(crate) trait WinUiHandle: elwindui_core::base::AsAny {
     fn as_element(&self) -> FrameworkElement;
 
-    /// Returns the ElwindUI standard-token prefix for this concrete native control.
-    fn theme_prefix(&self) -> &'static str {
-        "native_control"
-    }
-
     /// Applies an explicit background or clears it back to the native control default.
     fn apply_background(
         &self,
@@ -293,9 +288,6 @@ impl WinUiHandle for XamlTextBox {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TextBox implements FrameworkElement")
     }
-    fn theme_prefix(&self) -> &'static str {
-        "text_box"
-    }
     fn apply_text_style(
         &self,
         style: &elwindui_core::graphics::CascadedTextStyle,
@@ -314,9 +306,6 @@ impl WinUiHandle for XamlPasswordBox {
         self.cast()
             .expect("PasswordBox implements FrameworkElement")
     }
-    fn theme_prefix(&self) -> &'static str {
-        "password_box"
-    }
     fn apply_text_style(
         &self,
         style: &elwindui_core::graphics::CascadedTextStyle,
@@ -334,13 +323,6 @@ impl WinUiHandle for ScrollViewer {
     fn as_element(&self) -> FrameworkElement {
         self.cast()
             .expect("ScrollViewer implements FrameworkElement")
-    }
-    fn theme_prefix(&self) -> &'static str {
-        if self.supports_text_style() {
-            "text_area"
-        } else {
-            "scroll_view"
-        }
     }
     fn apply_text_style(
         &self,
@@ -364,9 +346,6 @@ impl WinUiHandle for XamlButton {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("Button implements FrameworkElement")
     }
-    fn theme_prefix(&self) -> &'static str {
-        "button"
-    }
     fn apply_text_style(
         &self,
         style: &elwindui_core::graphics::CascadedTextStyle,
@@ -387,9 +366,6 @@ macro_rules! impl_button_like_handle {
                 self.cast()
                     .expect(concat!($name, " implements FrameworkElement"))
             }
-            fn theme_prefix(&self) -> &'static str {
-                "button"
-            }
             fn apply_text_style(
                 &self,
                 style: &elwindui_core::graphics::CascadedTextStyle,
@@ -409,29 +385,23 @@ impl_button_like_handle!(XamlCheckBox, "CheckBox");
 impl_button_like_handle!(XamlRadioButton, "RadioButton");
 
 macro_rules! impl_textless_control_handle {
-    ($ty:ty, $name:literal, $prefix:literal) => {
+    ($ty:ty, $name:literal) => {
         impl WinUiHandle for $ty {
             fn as_element(&self) -> FrameworkElement {
                 self.cast()
                     .expect(concat!($name, " implements FrameworkElement"))
             }
-            fn theme_prefix(&self) -> &'static str {
-                $prefix
-            }
         }
     };
 }
 
-impl_textless_control_handle!(XamlToggleSwitch, "ToggleSwitch", "toggle_switch");
-impl_textless_control_handle!(XamlComboBox, "ComboBox", "dropdown");
-impl_textless_control_handle!(XamlSlider, "Slider", "slider");
+impl_textless_control_handle!(XamlToggleSwitch, "ToggleSwitch");
+impl_textless_control_handle!(XamlComboBox, "ComboBox");
+impl_textless_control_handle!(XamlSlider, "Slider");
 
 impl WinUiHandle for XamlTabView {
     fn as_element(&self) -> FrameworkElement {
         self.cast().expect("TabView implements FrameworkElement")
-    }
-    fn theme_prefix(&self) -> &'static str {
-        "tab_view"
     }
 }
 
@@ -461,11 +431,6 @@ impl AnyView {
     /// Forwards to the wrapped handle's own `WinUiHandle::supports_text_style`.
     pub(crate) fn supports_text_style(&self) -> bool {
         self.0.supports_text_style()
-    }
-
-    /// Returns the standard-token prefix for the concrete wrapped control.
-    pub(crate) fn theme_prefix(&self) -> &'static str {
-        self.0.theme_prefix()
     }
 
     /// Applies an explicit background or restores the native toolkit default.

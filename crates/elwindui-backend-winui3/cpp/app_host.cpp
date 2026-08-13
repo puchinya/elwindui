@@ -131,19 +131,3 @@ extern "C" __declspec(dllexport) int32_t elwindui_winui3_clear_text_block_foregr
     }
 }
 
-extern "C" __declspec(dllexport) int32_t elwindui_winui3_set_element_theme(
-    void* inspectable,
-    int32_t requested,
-    int32_t* actual) {
-    try {
-        FrameworkElement element{nullptr};
-        copy_from_abi(element, inspectable);
-        element.RequestedTheme(static_cast<ElementTheme>(requested));
-        if (actual != nullptr) {
-            *actual = static_cast<int32_t>(element.ActualTheme());
-        }
-        return 0;
-    } catch (hresult_error const& error) {
-        return error.code().value;
-    }
-}

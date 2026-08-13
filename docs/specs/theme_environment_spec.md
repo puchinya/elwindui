@@ -2,7 +2,7 @@
 
 ## 1. Scope
 
-本仕様はEnvironment value、Theme definition、variant、token、appearance、lookup、override、platform defaultの公開contractを定義する。runtimeの実現方式は [`../design/runtime/theme_environment_design.md`](../design/runtime/theme_environment_design.md) を参照する。
+本仕様はEnvironment value、lookup、override、および Environment valuesをまとめて設定するPresetとしてのThemeの公開contractを定義する。runtimeの実現方式は [`../design/runtime/theme_environment_design.md`](../design/runtime/theme_environment_design.md) を参照する。
 
 ## 2. Environment
 
@@ -15,38 +15,28 @@
 - Environment entryはreactive cellとして保持する。overrideされていないKeyは親のcellをそのまま共有し、overrideされたKeyのみ新しいcellを持つ——`derive()`はこの共有・分岐を行う。
 - Environment解決はVisual Treeへのattachに依存しない。Component生成時に親から渡された `EnvironmentContext` を用いてbody/`view!`を評価し、child Componentの生成へそのcontextを伝播してからUIElementを生成し、最後にVisual Treeへattachする。
 - `EnvironmentScope` はUIElement・Render nodeを生成しない。親Environmentをderiveし、指定したKeyのみ上書きした派生Environmentをchildrenの生成へ渡す。
-- EnvironmentとThemeの責務は分離する。Themeの解決方式(§3–§7)はEnvironmentのlookup/継承機構を再定義しない。
+- EnvironmentとThemeの責務は分離する。Theme(§3–§6)はEnvironmentのlookup/継承機構を再定義せず、`EnvironmentContext`のoverride経路を呼び出すのみである。
 
-## 3. Theme definition
+## 3. Theme
 
-- `#[elwindui::theme_definition]` はvariant enum、controller、型付きtokenを生成する公開定義方法である。
-- 未知variant、重複variant、必要なdefaultを持たないcustom tokenはcompile-time errorとなる。
-- standard tokenはElwindUIの公開型階層に沿う。custom tokenにはstandard tokenの命名制約を適用しない。
-- `theme!` はtoken参照をproperty valueとして利用するDSL接続点である。
+- Themeはresource containerでもtoken lookup systemでもない。Environment valuesをまとめて設定する **Preset** である(Issue #96)。
+- UIコードはTheme型を直接参照しない。Themeが設定したEnvironment値(`#[environment(name)]`)またはsemantic valueを参照する。
+- Theme適用は概念的に「Environment overrideの一括適用」である: `trait Theme { fn apply(&self, env: &EnvironmentContext); }`。`EnvironmentContext::set`(§2)を直接呼び出す以外の専用overrides型を公開APIに導入しない。
 
-## 4. Theme values and lookup
+## 4. Theme definition
 
-- `ThemeValue<T>::Value(T)` は解決済みの具体値を表す。
-- `ThemeValue<T>::PlatformDefault` は共通層で具体値を決めず、対象backendの既定値へ戻すことを表す。
-- application themeが既定contextであり、`Window.theme` はそのWindow subtreeを上書きする。
-- concrete standard tokenがvariantにない場合は対応するbase tokenへfallbackする。
-- concrete tokenに `platform_default` が明示されている場合、base tokenへ進まずその地点でplatform defaultへ解決する。
+- `#[elwindui::theme] struct Name { #[theme(value = expr)] field: Type, .. }` はTheme Presetを生成する公開定義方法である。
+- 各fieldの識別子は、同一crate内で先に宣言された `#[elwindui::environment_key(name = <field識別子>, ..)]` のKeyへ解決される。解決できないfield名はcompile-time errorとなる(`#[environment(name)]` と同じ解決規則、[`dsl_spec.md`](dsl_spec.md) §13参照)。
+- `value` 式の型はそのKeyの `Value` 型と一致しなければならない。不一致はcompile-time errorとなる。
+- Themeはvariantを持たない。異なる見た目ごとに別個の `#[elwindui::theme]` 型(またはインスタンス)を定義する。「切り替え」は同一 `EnvironmentContext` へ別のTheme instanceを適用することであり、1つの型が持つvariant selectionではない。
 
-## 5. Appearance and variant
+## 5. Theme application boundary
 
-- theme variantとOS appearance preferenceは独立した軸である。
-- `ThemePreference` は `System`、`Light`、`Dark` を表す。
-- `ThemeAppearance` は少なくとも `Light`、`Dark`、`HighContrast` を表す。
-- `System` は現在のOS appearanceへ追従し、観測可能なappearance変更をsubtreeへ通知する。
+- Themeはapplication-level(`EnvironmentContext::application_environment()`、§2の一種)へ適用できる。
+- Window単位のTheme override(旧`Window.theme`)は提供しない。任意のsubtree単位でのTheme適用は `EnvironmentScope` (§2) が実装され次第、その仕組み経由で提供される。
+- Theme適用はEnvironmentの通常のoverride・通知経路(§2)をそのまま用いる。Theme専用のrevision counterや変更影響分類は存在しない。
 
 ## 6. Application to UI properties
 
-- `theme!` の `Value` は通常のsetter semanticsで適用される。
-- `PlatformDefault` は対応するclear/reset経路で適用される。
-- Theme値は公開propertyの意味を変更しない。Styleはproperty集合、Themeはその値の供給源である。
-- 自前描画要素とNativeControlは、同じtokenが適用可能な公開propertyについて同じ解決結果を観測する。
-- native APIが公開setterを持たないstateはTheme適用対象にならない。その対応状況はstatusに記録する。
-
-## 7. Change impact
-
-Theme変更はpropertyごとの影響に従い、paint、measure、native styleの必要な範囲だけを更新する。値が変化していないpropertyを無条件に再構築してはならない。
+- Theme適用の効果はEnvironment値のoverrideとして観測される。公開propertyの意味はTheme適用によって変化しない。
+- NativeControlの既定外観(背景色・フォント等)はThemeの適用対象ではない。ElwindUIはNativeControlへ既定のnative外観以外の値を自動供給しない(#96時点)。個別のNative Control外観のEnvironment経由での上書きは別仕様(Native Style / Control Style)の対象である。

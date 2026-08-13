@@ -871,7 +871,7 @@ impl VolumeSlider {}
 - **見つかれば OneWay**(依存先が変わるたびに再評価): 自componentの`#[prop]`/`#[state]`/`#[computed]`フィールドへの裸参照、または`#[bindable]`ownerに対する`owner.property`という形の参照
 - **見つからなければ Once**(初期化時に一度だけ評価): リテラル・`#[param]`フィールドの参照のみで構成される式
 
-この判定は式を実際に構文木として走査して行う——`format!(..)`/`format_args!(..)`/`vec!(..)`/`theme!(..)`の引数の中は再帰的に見るが、それ以外のマクロ呼び出しは中身を検査できないため、依存の有無に関わらず**安全側に倒してOneWay扱い**にする(§3の`#[computed(expr = ...)]`の依存検出にも同じ不透明マクロの制約がある)。
+この判定は式を実際に構文木として走査して行う——`format!(..)`/`format_args!(..)`/`vec!(..)`の引数の中は再帰的に見るが、それ以外のマクロ呼び出しは中身を検査できないため、依存の有無に関わらず**安全側に倒してOneWay扱い**にする(§3の`#[computed(expr = ...)]`の依存検出にも同じ不透明マクロの制約がある)。
 
 ### `once!(expr)`:明示的なOnce
 
@@ -1176,7 +1176,7 @@ impl SaveButton {}
 19. `viewmodel`定義内に`view`ブロック、またはビルトイン要素(`Row`/`Text`等)への直接参照が存在する → エラー(`docs/design/runtime/state_management_design.md`参照。ViewModelは表示ロジックを持たず、MVVMのV/VM分離を静的に強制する)
 20. `#[async_computed]` が `viewmodel`/`store` 以外(通常の`component`のprop等)に付与されている → エラー(`docs/design/runtime/state_management_design.md`参照。非同期状態はVM/Model層に閉じ込める)
 21. `#[undoable]` が `viewmodel` の `#[observable]` フィールド以外(`store`や`component`のprop等)に付与されている → エラー(`docs/design/runtime/state_management_design.md`参照)
-22. `theme`の`variant`ブロックが`tokens{}`で宣言されていないトークン名を定義している、または`tokens{}`で宣言された一部のトークンを欠いている → エラー(`docs/design/runtime/theme_environment_design.md`参照。全variant間でトークン集合の一致を保証する)
+22. (欠番 — Themeがtoken/variantモデルからEnvironment上のPresetモデルへ再定義されたことに伴い(#96)、`tokens{}`/`variant`ブロック自体が存在しなくなったため不要)
 23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(`docs/specs/ui_spec.md`参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(`docs/specs/ui_spec.md`参照)。`TabView` は `TabViewItem` を子として指定する。
 24. `on_foreground`/`on_background`/`on_terminate`(`docs/design/runtime/ui_tree_design.md`)が、アプリのエントリポイント(ルート)コンポーネント以外で宣言されている → 警告(OSレベルのライフサイクルは単一箇所への集約を推奨)
 25. コールバック型のフィールドで `Rc<dyn Fn(...)>` / `Box<dyn Fn(...)>` のような型消去表現を直接使用している(`fn(...)` 糖衣構文を使っていない) → エラー(4章「コールバック型フィールド」参照)
@@ -1190,6 +1190,7 @@ impl SaveButton {}
 33. `#[environment(...)]` が同一フィールドの `#[param]`/`#[prop]`/`#[state]`/`#[bindable]` と併用されている → エラー(4章「`#[environment(name)]`」参照)
 34. `#[environment(name)]` の `name` が、解決可能な `#[elwindui::environment_key]` 定義を持たない → エラー(`docs/specs/theme_environment_spec.md`参照)
 35. `EnvironmentScope { key: value .. }` の `key` が、解決可能な `#[elwindui::environment_key]` 定義を持たない、または `value` の型がそのKeyの `Value` 型と一致しない → エラー(5章「`EnvironmentScope`」参照)
+36. `#[elwindui::theme] struct Name { #[theme(value = ..)] field: Type, .. }` の `field` の識別子が、解決可能な `#[elwindui::environment_key]` 定義を持たない → コード生成時エラー(`docs/specs/theme_environment_spec.md`§3/§4参照。`#[environment(name)]`と同じ同一crate内解決規則)
 
 ---
 

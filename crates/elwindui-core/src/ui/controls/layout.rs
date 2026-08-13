@@ -7,8 +7,7 @@ use super::*;
 /// `HorizontalLayout`/`Grid`), the same way `NativeControl` groups every native leaf.
 ///
 /// Holds `children` plus an optional, explicitly assigned background shared by every layout
-/// container. An unset background remains transparent; `SystemTheme::layout_background` is never
-/// applied implicitly.
+/// container. An unset background remains transparent; nothing applies a background implicitly.
 /// `spacing` is *not* here: it only means anything to
 /// `VerticalLayout`/`HorizontalLayout` (`Grid` has no use for it), so each of those two declares
 /// its own `spacing` field instead of it living on this shared base. `VerticalLayout`/

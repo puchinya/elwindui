@@ -53,3 +53,15 @@ fn each_new_instance_builds_exactly_once() {
     drop(first);
     drop(second);
 }
+
+// CI-3 of #80 (docs/design/runtime/component_lifecycle_design.md §4a): `mount()` is a real,
+// separately-callable, idempotent method now — `new()`'s own call into it is just its first (and,
+// today, only) caller. `OnceCell::set` failing on a second call is the whole idempotency guard;
+// this proves it deterministically panics rather than silently rebuilding/duplicating the view.
+#[test]
+#[should_panic(expected = "mount: component is already mounted")]
+fn mounting_an_already_mounted_component_panics() {
+    let probe = LifecycleBuildSplitProbe::new();
+    let env = elwindui::core::environment::EnvironmentContext::root();
+    probe.mount(env);
+}

@@ -2,31 +2,82 @@
 
 Related specification: [`../../specs/theme_environment_spec.md`](../../specs/theme_environment_spec.md).
 
-Theme and Environment are separate runtime systems (`theme_environment_spec.md` §2, §7, §39 and Issue #84/#96). They share no runtime type; this document keeps their internals in separate sections for that reason. `docs/agents/codegen.md`/`class-model.md` invariants apply to both.
+Theme and Environment are separate concerns (`theme_environment_spec.md` §2, §9, §39 and Issue #84/#96), but since #96 Theme is defined *in terms of* Environment — a Theme's only job is to call `EnvironmentContext::set` (see `## Theme`) — rather than owning any runtime state of its own. This document keeps their internals in separate sections because they have different responsibilities, not because they share no type. `docs/agents/codegen.md`/`class-model.md` invariants apply to both.
 
 ## Theme
 
-### Context
+Issue #96 replaced the token/variant model this section used to describe (`ThemeToken`/`ThemeValue`/`ThemeHandle`/`ThemeFactory`/`ThemeController`/`ThemeContext`/`SystemTheme`/`#[elwindui::theme_definition]`, and each backend's pull-based native-control default-appearance resolution) with the Preset-over-Environment model below. There is no migration/compatibility path — the old types no longer exist in `crates/elwindui-core/src/theme.rs`.
 
-`ThemeContext` is attached at application and Window host boundaries. Elements resolve the nearest context through the visual host relation while logical inheritance remains available to property cascades. A Window override derives from, rather than mutating, the application default.
+### Theme is a Preset, not a runtime lookup system
 
-The context owns the selected definition, variant, appearance preference, resolved appearance, and monotonically increasing revision. Handles allow controls to observe a context without owning the UI tree.
+A Theme is not a second resolution mechanism alongside Environment (`theme_environment_spec.md` §9). It is a batch of `EnvironmentContext::set` calls:
 
-### Resolution
+```rust
+pub trait Theme {
+    fn apply(&self, env: &crate::environment::EnvironmentContext);
+}
+```
 
-Typed `ThemeToken<T>` lookup first checks the selected concrete token. Missing standard concrete tokens fall back through the declared base-token chain. An explicit `PlatformDefault` terminates lookup.
+`crates/elwindui-core/src/theme.rs` now contains only this trait. There is no `EnvironmentOverrides` type distinct from `EnvironmentContext` — the specification's illustrative `fn apply(&self, env: &mut EnvironmentOverrides)` is non-normative on this point, the same way `EnvironmentContext::current()`/`enter()` already superseded the specification's constructor-threading illustration for Environment itself (see "Alternatives considered" in the `## Environment` section below). `EnvironmentContext::set` already has exactly the right shape for a Preset to call directly: it takes `&self` (interior-mutable cells), so a Theme's `apply` needs no exclusive borrow of the context, and re-applying a different Theme to the *same* context re-mutates existing cells in place, which is what makes switching Themes at runtime reach every live subscriber for free (see "Change propagation" below).
+
+### `#[elwindui::theme]`
+
+```rust
+#[elwindui::theme]
+struct OceanTheme {
+    #[theme(value = Brush::Solid(Color::rgb(0, 166, 200)))]
+    tint: Brush,
+}
+```
+
+is a Rust-only frontend (`elwindui-codegen/src/theme_frontend.rs`, mirroring `environment_frontend.rs`'s shape — it never enters the DSL/`view!` parser, the same way `#[elwindui::environment_key]` doesn't). For each `#[theme(value = expr)]` field, the frontend resolves the field's own identifier through `component_frontend::lookup_same_crate_environment_key` — the exact same same-crate, declaration-ordered registry `#[environment(name)]` fields already resolve against (`theme_environment_spec.md` §2/§9's field-name convention: a Theme field named `tint` targets the Environment Key declared `#[elwindui::environment_key(name = tint, ..)]`, not a field of that name on some other struct). An unresolvable field name is a macro-expansion-time error, not a runtime one — consistent with `dsl_spec.md` §13 rule 34/35's treatment of `#[environment(name)]` itself.
+
+The macro discards the parsed struct's fields entirely (schema-only, exactly like the old `theme_definition` macro's field list) and emits a zero-sized marker struct plus a `Theme` impl:
+
+```rust
+pub struct OceanTheme;
+
+impl elwindui::core::theme::Theme for OceanTheme {
+    fn apply(&self, env: &elwindui::core::environment::EnvironmentContext) {
+        env.set::<TintEnvironment>(Brush::Solid(Color::rgb(0, 166, 200)));
+    }
+}
+```
+
+`env.set::<KeyType>(expr)` is itself the field-type check — a `#[theme(value = ..)]` expression whose type doesn't match the resolved Key's `Value` is a straightforward rustc type error at that call site, so the frontend does not need its own duplicate type-compatibility validation.
+
+### Application boundary — `application_environment()`
+
+Environment resolution is construction-time and ambient-stack-based (see `## Environment` below): a value only reaches a component if that component was constructed while some entered `EnvironmentContext` was ambient. Before #96, nothing in the workspace ever called `EnvironmentContext::enter()` outside tests — `EnvironmentContext::current()`'s fallback (a fresh, unshared `EnvironmentContext::root()`) was the only context any real application ever observed, so a Theme applied to *some* context would not have been observable by already-constructed (or even not-yet-constructed, on a different accidental root) components.
+
+#96 closes this gap with one new piece of API, in `crates/elwindui-core/src/environment.rs`:
+
+```rust
+/// The process's single persistent root `EnvironmentContext`. Lazily created once per thread,
+/// then reused — unlike `EnvironmentContext::root()`, which always allocates an unrelated new
+/// state. A `Theme::apply` call against this context is what a whole application observes.
+pub fn application_environment() -> EnvironmentContext;
+```
+
+and each backend's `run()` (`elwindui-backend-appkit`/`elwindui-backend-winui3`'s `app.rs`) now holds `application_environment().enter()` for the run loop's entire lifetime, entered before `startup()` runs and dropped only when `run()` itself returns. An application applies a Theme at any point — typically once before/inside `startup()`, and again later from a click handler to switch — by calling `SomeTheme.apply(&elwindui_core::environment::application_environment())` (or the `elwindui::core::environment::application_environment()` facade path).
+
+### Scope reduction relative to the old model (accepted, 2026-08-13)
+
+Two capabilities the old Theme system had are **not** carried into the Preset model by #96 — both confirmed with the user during design, not silently dropped:
+
+- **No per-Window Theme override.** The old `Window.theme: Option<ThemeHandle>` prop is deleted, not reimplemented. Reproducing it correctly needs a Window-scoped Environment override that takes effect *before* the Window's content subtree is constructed — but `Window.content` is a `#[prop(content: Rc<dyn UIElementExt>)]` (an already-built value), so by the time `set_content`/`set_theme` could run, the content's own `#[environment(name)]` fields have already resolved against whatever was ambient at the *caller's* construction point. Doing this correctly needs the same "wrap a contiguous child range's construction in one `enter()`/drop block" codegen support `EnvironmentScope` (#100) needs — out of scope for #96. A future issue can restore per-Window override once #100 lands, by having a Window with an explicit `theme` override behave as an implicit `EnvironmentScope` around its own content.
+- **No automatic native-control default-appearance styling.** The old `SystemTheme` manifest and each backend's pull-based `sync_background`/`sync_text_style` (`native_ui/control.rs`) resolved ~85 standard tokens with a hardcoded fallback chain, so an app could restyle native buttons/text boxes/etc. through a Theme with zero extra declarations. #96 deletes this outright; native controls always render with their platform's own default appearance now. This does not regress the *default* (unthemed) appearance — an unset standard token already resolved to `PlatformDefault` ("do nothing") before #96 — it only removes the *capability* to override it through a Theme, until Semantic Style (#97) and Native Style (#98) reintroduce an Environment-driven equivalent.
+- A consequence of dropping native-control styling: the OS light/dark **appearance-changed observation** each backend's `inner/window.rs` used to translate into `ThemeHandle::set_appearance` (feeding the now-deleted `sync_background`/`sync_text_style`) has no remaining consumer and is deleted too. Native controls still follow OS light/dark mode automatically (the platform toolkit does that on its own for an unstyled control) — only Theme-driven re-styling in response to that OS change is gone, consistent with the point above.
 
 ### Change propagation
 
-Controllers update context state and increment the revision only when an observable value changes. Generated `theme!` bindings record tokens and their `ThemeChangeImpact`, allowing paint, measure, or native-style invalidation to be scheduled narrowly.
+A Theme switch is just `EnvironmentContext::set` calls on `application_environment()`, so it reuses Environment's own per-key subscriber mechanism unchanged (see `## Environment`, "Change propagation" below) — only the components with a live `#[environment(name)]` field on an overridden key re-run. There is no separate Theme-level revision counter or `ThemeChangeImpact` classification; Environment's finer-grained, per-key notification already provides exactly this without a second invalidation system layered on top (`theme_environment_spec.md` §36's memory policy — "必要なControlだけStyle参照").
 
-Backend appearance observers translate OS changes into `ThemeAppearance` and update only contexts using `System` preference.
+### Alternatives considered
 
-### Backend synchronization
-
-Common resolution produces `Value` or `PlatformDefault`. AppKit adapters map them to system fonts/colors/appearance and layer properties. WinUI 3 adapters use dependency-property set/clear operations and `RequestedTheme`. Backend status documents record unsupported mappings; they do not change resolution semantics.
-
-Note (Issue #96): this token/variant model is being replaced by the Preset-over-Environment model described in the specification's Theme sections. This section describes the current implementation and stays authoritative until #96 lands; it is not the target architecture.
+- **A distinct `EnvironmentOverrides` type for `Theme::apply`**, matching the specification's illustrative `fn apply(&self, env: &mut EnvironmentOverrides)` literally: rejected. `EnvironmentContext::set` already takes `&self`, so introducing a second, `&mut`-taking type would only add a translation layer with no behavioral benefit — the same non-normative-illustration situation the `## Environment` section's own "Alternatives considered" already documents for `EnvironmentContext::current()`/`enter()` versus the specification's constructor-threading sketch.
+- **Preserving a variant-enum-per-Theme-type shape** (the old `ThemeFactory::Variant`/`ThemeController::set_variant`): rejected. The specification's Preset model has no variant concept — each named look (`OceanTheme`, `SolarizedTheme`, ...) is its own `#[elwindui::theme]` type/instance; "switching" is applying a different instance to the same `EnvironmentContext`, not selecting a variant within one type. This is strictly simpler and needs no `ThemeFactory`-equivalent trait.
+- **Keeping `SystemTheme`'s fallback-chain machinery running internally (not exposed via the deleted DSL) until #97/#98 land**: rejected per explicit user decision (2026-08-13) in favor of full, immediate deletion — see "Scope reduction", above.
 
 ## Environment
 
@@ -35,6 +86,8 @@ Note (Issue #96): this token/variant model is being replaced by the Preset-over-
 `EnvironmentContext` is a small `Clone` (`Rc`-backed) handle holding a set of typed entries, one per `EnvironmentKey`. Each entry is a reactive cell. A context created by `derive()` shares every entry it does not override with its parent by `Rc` identity, and allocates a fresh cell only for the keys the caller overrides — mirroring `ThemeContext`'s "derive, don't mutate" rule for the application/Window relationship, but per-key rather than per-context.
 
 Lookup is by `EnvironmentKey::Value`'s type, resolved through the key's `TypeId`; there is no string-keyed path (`theme_environment_spec.md` §2, `dsl_spec.md` §4/§8).
+
+`EnvironmentContext::application_environment()` (added by Issue #96 — see `## Theme`) is the one process-lifetime exception to "every context is created and owned by whatever derived it": a lazily-initialized, thread-local persistent root, reused across calls rather than re-allocated. Both backends' `run()` hold it entered for the whole run loop so that construction anywhere in the application observes overrides applied to it. Nothing else in this section changes because of it — it is an ordinary `EnvironmentContext`, just one with a well-known, stable identity an application (or a Theme) can target deliberately instead of relying on whatever happens to be ambient.
 
 ### Resolution and component integration
 

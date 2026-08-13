@@ -4672,12 +4672,22 @@ fn generate_view(
                 // embedded this way — reaching it needs a typed weak reference alongside `__self_weak`
                 // (or deferring these closures' downcast to call time), out of scope here.
                 fn on_constructed(&self) {
+                    self.__build_view();
+                }
+
+                // View-construction statements, split out of `on_constructed` so this component's
+                // `new()`/`construct()`/`on_constructed()` do not themselves textually contain them
+                // (docs/design/runtime/component_lifecycle_design.md §4, CI-2 of #80). `on_constructed`
+                // still invokes this immediately, so today's timing/behavior is unchanged — a later
+                // issue in that tracking issue defers this call to an explicit `mount()`.
+                #[doc(hidden)]
+                fn __build_view(&self) {
                     #content_attach_stmt
                     let __most_derived: Option<std::rc::Rc<#target>> = self
                         .__self_weak
                         .borrow()
                         .upgrade()
-                        .expect("on_constructed: object must already be Rc-constructed")
+                        .expect("__build_view: object must already be Rc-constructed")
                         .downcast::<#target>()
                         .ok();
                     if let Some(this) = __most_derived.clone() {
@@ -4727,15 +4737,25 @@ fn generate_view(
                     #content_capture_stmt
                     #construct_stmts
                     let this = std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #environment_context_field_init #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) });
+                    this.__build_view();
+                    this
+                }
+
+                // View-construction statements, split out of `new()` so `new()` itself does not
+                // textually contain them (docs/design/runtime/component_lifecycle_design.md §4, CI-2
+                // of #80). `new()` still invokes this immediately, so today's timing/behavior is
+                // unchanged — a later issue in that tracking issue defers this call to an explicit
+                // `mount()`.
+                #[doc(hidden)]
+                fn __build_view(self: &std::rc::Rc<Self>) {
                     #content_attach_stmt
                     #wiring_stmts
-                    this.resync();
-                    this.__refresh_dynamic_regions();
+                    self.resync();
+                    self.__refresh_dynamic_regions();
                     #component_self_subscription
                     #subscribe_stmts
                     #own_environment_subscribe_stmts
                     #on_mount_stmt
-                    this
                 }
 
                 fn resync(&self) {

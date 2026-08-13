@@ -26,6 +26,8 @@ Construction establishes the object and local state. Mounting attaches the subtr
 
 Component `on_mount`, `on_update`, and `on_unmount` callbacks are invoked by generated component wiring; the tree runtime supplies stable attach/detach boundaries and does not interpret component business state.
 
+How generated code realizes Construction/Mounting/Unmounting — the `new()`/`mount(environment)`/build split, its interaction with `#[class]`'s `construct`/`on_constructed` contract, and Environment's move to mount-time resolution — is specified in [`component_lifecycle_design.md`](component_lifecycle_design.md) (tracking: [#80](https://github.com/puchinya/elwindui/issues/80)).
+
 ## Participation
 
 Existence and active participation are separate. A collapsed or inactive hosted subtree may retain UI and native-control state while being excluded from layout, render-tree generation, hit testing, focus order, and shortcut dispatch. Host activation is the boundary used by independently hosted content such as `TabView` pages.

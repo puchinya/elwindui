@@ -37,6 +37,32 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// `#[elwindui::store] mod foo { struct Foo { #[observable(default = ...)] field: Ty, ... }
+/// impl Foo { fn some_action(&self) { ... } } }` — identical shape to `#[elwindui::viewmodel]` (same
+/// `struct`+`impl` frontend, same field vocabulary, see `elwindui_codegen::attr_frontend`), but the
+/// resulting type is a process-wide singleton (`Foo::instance() -> Rc<Foo>`) rather than something a
+/// `component` holds via `#[bindable]` — see docs/design/runtime/state_management_design.md
+/// "Stores". A `view!` elsewhere in the same crate references a store field with a bare,
+/// type-qualified path (`Foo.field`), not through an owning field.
+#[proc_macro_attribute]
+pub fn store(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item_mod = match syn::parse::<syn::ItemMod>(item) {
+        Ok(item_mod) => item_mod,
+        Err(e) => {
+            let msg =
+                format!("#[elwindui::store]: expected `mod name {{ struct ... impl ... }}`: {e}");
+            return quote::quote! { compile_error!(#msg); }.into();
+        }
+    };
+    match elwindui_codegen::generate_store_from_item_mod(&item_mod) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => {
+            let msg = format!("#[elwindui::store]: {e}");
+            quote::quote! { compile_error!(#msg); }.into()
+        }
+    }
+}
+
 /// `#[elwindui::component(inherits Base, template = environment_key)] struct Name { ..fields..,
 /// body: view! { .. } }` — lets a
 /// `component`+`view` pair be written as a single ordinary Rust `struct` instead of the DSL text
@@ -434,6 +460,12 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
             if let Err(error) = ::elwindui::init() {
                 panic!("initialize elwindui: {error:?}");
             }
+            // Installed before `application::run` so it's available to any `#[async_computed]`
+            // recompute or user code that runs once the UI event loop is up. Kept alive in this
+            // local binding for the rest of `main`'s scope, which does not return until
+            // `application::run` does (at process exit) — see
+            // `elwindui_core::task::install_background_runtime`'s own doc comment.
+            let __elwindui_background_runtime = ::elwindui::core::task::install_background_runtime();
             ::elwindui::application::run(move || #block);
         }
     }

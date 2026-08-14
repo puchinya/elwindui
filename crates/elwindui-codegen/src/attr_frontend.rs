@@ -10,7 +10,7 @@
 //! — never the original DSL text — nothing in codegen.rs needs to change for this frontend to
 //! work: it just has to produce the same shape of AST parser.rs already produces.
 
-use crate::ast::{Attr, FieldDef, FieldKind, Initializer, ViewModelDef};
+use crate::ast::{Attr, FieldDef, FieldKind, Initializer, StoreDef, ViewModelDef};
 use crate::parser;
 use std::path::Path;
 
@@ -98,6 +98,40 @@ pub fn viewmodel_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<ViewModelD
     }
 
     Ok(ViewModelDef { name, fields })
+}
+
+/// `#[elwindui::store] mod foo { struct Foo { ... } impl Foo { ... } }` — identical shape to
+/// [`viewmodel_def_from_item_mod`] (same `struct`+`impl` frontend, same field vocabulary); the
+/// only difference is the resulting `StoreDef` is a process-wide singleton rather than something a
+/// `component` holds via `#[bindable]`. See `ast::StoreDef`.
+pub fn store_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<StoreDef, String> {
+    let (_, items) = item_mod.content.as_ref().ok_or_else(|| {
+        "#[elwindui::store] mod must have a body (`mod foo { ... }`, not `mod foo;`)".to_string()
+    })?;
+
+    let item_struct = items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Struct(s) => Some(s),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            "expected exactly one `struct` inside the `#[elwindui::store]` mod".to_string()
+        })?;
+
+    let item_impl = items.iter().find_map(|item| match item {
+        syn::Item::Impl(i) => Some(i),
+        _ => None,
+    });
+
+    let name = item_struct.ident.to_string();
+    let mut fields = fields_from_item_struct(item_struct, FieldKind::Observable, false)?;
+
+    if let Some(item_impl) = item_impl {
+        fields.extend(synthesize_action_fields(item_impl));
+    }
+
+    Ok(StoreDef { name, fields })
 }
 
 /// Builds `FieldDef`s from a `syn::ItemStruct`'s named fields, recognizing the field-attribute
@@ -196,6 +230,14 @@ pub(crate) fn fields_from_item_struct(
                     })?;
                     initializer = Some(Initializer::Expr(expr));
                 }
+                "async_computed" => {
+                    record_explicit_kind(&mut explicit_kind, &name, "async_computed")?;
+                    kind = FieldKind::AsyncComputed;
+                    let expr = parse_name_value_expr(attr, "expr")?.ok_or_else(|| {
+                        format!("field `{name}`: #[async_computed(...)] needs `expr = expr`")
+                    })?;
+                    initializer = Some(Initializer::Expr(expr));
+                }
                 "attached" => {
                     record_explicit_kind(&mut explicit_kind, &name, "attached")?;
                     kind = FieldKind::Attached;
@@ -254,12 +296,17 @@ pub(crate) fn fields_from_item_struct(
         // or fell back to `default_kind`) both must end up with an initializer.
         if matches!(
             kind,
-            FieldKind::State | FieldKind::Observable | FieldKind::Computed
+            FieldKind::State
+                | FieldKind::Observable
+                | FieldKind::Computed
+                | FieldKind::AsyncComputed
         ) && initializer.is_none()
         {
             return Err(format!(
-                "field `{name}`: an Observable/Computed field needs #[observable(default = ...)] \
-                 or #[computed(expr = ...)] (plain Rust struct fields have no other way to supply one)"
+                "field `{name}`: an Observable/Computed/AsyncComputed field needs \
+                 #[observable(default = ...)], #[computed(expr = ...)], or \
+                 #[async_computed(expr = ...)] (plain Rust struct fields have no other way to \
+                 supply one)"
             ));
         }
 

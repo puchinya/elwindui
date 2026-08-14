@@ -5,8 +5,8 @@
 
 use crate::ast::{
     AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef,
-    FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, ViewAttribute, ViewBody,
-    ViewDef, ViewExpr, ViewModelDef,
+    FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef, ViewAttribute,
+    ViewBody, ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -101,6 +101,15 @@ pub struct TypeInfo {
     /// emitting a `.subscribe(...)` call because plain component owners expose typed property
     /// subscriptions instead.
     pub is_viewmodel: bool,
+    /// Whether this type is a `store` (`generate_store`'s output — a `ViewModelDef`-shaped body
+    /// wrapped in a singleton `EnvironmentKey`/`instance()` accessor). Always paired with
+    /// `is_viewmodel: true` (a store carries the same `subscribe`/`PropertyChanged` surface a
+    /// viewmodel does, so every existing `is_viewmodel`-gated code path keeps working for a
+    /// store-typed reference unmodified) — this flag additionally distinguishes a store for the
+    /// `TypeName.field` bare-reference resolution `validate.rs`'s store-reference checks perform,
+    /// which a plain `#[bindable]`-injected viewmodel reference does not use. See
+    /// docs/design/runtime/state_management_design.md "Stores".
+    pub is_store: bool,
     /// Whether this type is a genuine native-backed leaf (`Button`/`TextArea`/`Text`/`MenuBar`/
     /// `MenuBarItem`/`Menu`/`MenuItem`/`TabView` — the "NativeControl" family; or `Window`, whose
     /// own `#[native]` attribute marks it native despite having no meaningful `inherits` base at all
@@ -429,6 +438,7 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                                 .collect(),
                             attached_field_types,
                             is_viewmodel: false,
+                            is_store: false,
                             is_native: false,
                             is_native_control_leaf: c.base.as_deref() == Some("NativeControl"),
                             has_view,
@@ -501,6 +511,81 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                                 .collect(),
                             attached_field_types: HashMap::new(),
                             is_viewmodel: true,
+                            is_store: false,
+                            is_native: false,
+                            is_native_control_leaf: false,
+                            has_view: false,
+                            effective_fields: Vec::new(),
+                            effective_methods: Vec::new(),
+                            effective_view: None,
+                            own_on_mount: None,
+                            own_on_unmount: None,
+                            composed_shape: None,
+                            host_composition_base: None,
+                            sealed: false,
+                            is_abstract: false,
+                            content_field: None,
+                            is_builtin: module.is_builtin,
+                        },
+                    );
+                }
+                Item::Store(s) => {
+                    let field_kinds = s.fields.iter().map(|f| (f.name.clone(), f.kind)).collect();
+                    let param_fields = s
+                        .fields
+                        .iter()
+                        .filter(|f| f.initializer.is_none() && !f.name.starts_with("on_"))
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
+                    let two_way_fields = s
+                        .fields
+                        .iter()
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && f.attrs.iter().any(|a| matches!(a, Attr::TwoWay))
+                        })
+                        .map(|f| f.name.clone())
+                        .collect();
+                    let routed_fields = s
+                        .fields
+                        .iter()
+                        .filter(|f| {
+                            f.initializer.is_none()
+                                && f.attrs.iter().any(|a| matches!(a, Attr::Routed))
+                        })
+                        .map(|f| f.name.clone())
+                        .collect();
+                    let field_types = s
+                        .fields
+                        .iter()
+                        .filter(|f| f.initializer.is_none())
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
+                    types.insert(
+                        (module.path.clone(), s.name.clone()),
+                        TypeInfo {
+                            fields: field_kinds,
+                            param_fields,
+                            two_way_fields,
+                            routed_fields,
+                            bindable_fields: HashSet::new(),
+                            declaring_types: HashMap::new(),
+                            onetime_fields: HashSet::new(),
+                            is_virtual_builtin: false,
+                            field_types,
+                            value_field_types: s
+                                .fields
+                                .iter()
+                                .map(|f| (f.name.clone(), f.ty.clone()))
+                                .collect(),
+                            attached_field_types: HashMap::new(),
+                            // A store carries the same `subscribe`/`PropertyChanged` surface a
+                            // viewmodel does (`generate_store` delegates field codegen to
+                            // `generate_viewmodel`), so every existing `is_viewmodel`-gated code
+                            // path (dependency subscription codegen, etc.) keeps working for a
+                            // store-typed reference without auditing every call site.
+                            is_viewmodel: true,
+                            is_store: true,
                             is_native: false,
                             is_native_control_leaf: false,
                             has_view: false,
@@ -1740,6 +1825,7 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
         out.extend(match item {
             Item::Enum(e) => generate_enum(e),
             Item::ViewModel(v) => generate_viewmodel(v, module, table),
+            Item::Store(s) => generate_store(s, module, table),
             Item::Component(c) => {
                 let info = table.resolve(module, &c.name).unwrap_or_else(|| {
                     panic!("component `{}` missing from its own symbol table", c.name)
@@ -1852,6 +1938,34 @@ fn nested_vec_item_type(ty: &str, from: &Module, table: &SymbolTable) -> Option<
     (known || looks_nested).then(|| inner.to_string())
 }
 
+/// Builds the token sequence a dependency's setter emits for one of its dependent fields, branching
+/// on the dependent's own `FieldKind`: a `Computed` dependent recomputes synchronously inline and
+/// notifies immediately (existing behavior); an `AsyncComputed` dependent only spawns a new
+/// recompute (`__spawn_recompute_<dep>`) — its own `on_property_changed` fires later, inside the
+/// spawned future, only if not superseded by a newer trigger before it resolves. Shared by both
+/// `dependents_of` consumption sites (the scalar `Observable` setter and the `Vec<Rc<T>>` arm) so
+/// they can't drift apart.
+fn dependent_recompute_call(
+    dep: &str,
+    field_kind_by_name: &HashMap<&str, FieldKind>,
+    property_enum: &syn::Ident,
+) -> TokenStream {
+    let property = format_ident!("{}", dep);
+    match field_kind_by_name.get(dep) {
+        Some(FieldKind::AsyncComputed) => {
+            let spawn = format_ident!("__spawn_recompute_{}", dep);
+            quote! { self.#spawn(); }
+        }
+        _ => {
+            let recompute = format_ident!("recompute_{}", dep);
+            quote! {
+                self.#recompute();
+                self.on_property_changed(#property_enum::#property);
+            }
+        }
+    }
+}
+
 pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) -> TokenStream {
     let struct_name = format_ident!("{}", v.name);
     let property_enum = format_ident!("{}Property", v.name);
@@ -1874,7 +1988,9 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
         .fields
         .iter()
         .filter_map(|f| match f.kind {
-            FieldKind::Observable | FieldKind::Computed => Some(format_ident!("{}", f.name)),
+            FieldKind::Observable | FieldKind::Computed | FieldKind::AsyncComputed => {
+                Some(format_ident!("{}", f.name))
+            }
             _ => None,
         })
         .collect();
@@ -1891,7 +2007,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
     // ordinary `#[computed]` field the caller writes by hand, so it's already covered here.
     let mut dependents_of: HashMap<String, Vec<String>> = HashMap::new();
     for f in &v.fields {
-        if f.kind == FieldKind::Computed {
+        if matches!(f.kind, FieldKind::Computed | FieldKind::AsyncComputed) {
             if let Some(Initializer::Expr(expr)) = &f.initializer {
                 for dep in referenced_fields(expr, &field_names) {
                     dependents_of.entry(dep).or_default().push(f.name.clone());
@@ -1899,11 +2015,22 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             }
         }
     }
+    // Looked up when a dependency's setter decides how to notify each of its dependents (below):
+    // a `Computed` dependent recomputes synchronously inline, an `AsyncComputed` one only spawns
+    // (its own `on_property_changed` fires later, inside the spawned future, only if not
+    // superseded by a newer trigger in the meantime).
+    let field_kind_by_name: HashMap<&str, FieldKind> =
+        v.fields.iter().map(|f| (f.name.as_str(), f.kind)).collect();
 
     let mut struct_fields = TokenStream::new();
     let mut ctor_fields = TokenStream::new();
     let mut accessors = TokenStream::new();
     let mut recompute_calls_after_new = TokenStream::new();
+    // Unlike `recompute_calls_after_new` (run synchronously inside `Rc::new_cyclic`, before
+    // `__self_weak` is valid), an async-computed field's first spawn must happen after `new()`'s
+    // `Rc::new_cyclic` call has returned — `spawn_local` polls its future once immediately, and
+    // that poll upgrades `__self_weak`, which is `None` until the strong `Rc` is fully installed.
+    let mut async_spawn_calls_after_new = TokenStream::new();
 
     for f in &v.fields {
         match f.kind {
@@ -1925,14 +2052,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     .get(&f.name)
                     .into_iter()
                     .flatten()
-                    .map(|dep| {
-                        let recompute = format_ident!("recompute_{}", dep);
-                        let property = format_ident!("{}", dep);
-                        quote! {
-                            self.#recompute();
-                            self.on_property_changed(#property_enum::#property);
-                        }
-                    })
+                    .map(|dep| dependent_recompute_call(dep, &field_kind_by_name, &property_enum))
                     .collect();
 
                 accessors.extend(quote! {
@@ -1995,14 +2115,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     .get(&f.name)
                     .into_iter()
                     .flatten()
-                    .map(|dep| {
-                        let recompute = format_ident!("recompute_{}", dep);
-                        let property = format_ident!("{}", dep);
-                        quote! {
-                            self.#recompute();
-                            self.on_property_changed(#property_enum::#property);
-                        }
-                    })
+                    .map(|dep| dependent_recompute_call(dep, &field_kind_by_name, &property_enum))
                     .collect();
 
                 accessors.extend(quote! {
@@ -2059,6 +2172,68 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     }
                 });
                 recompute_calls_after_new.extend(quote! { instance.#recompute(); });
+            }
+            FieldKind::AsyncComputed => {
+                let field_ident = format_ident!("{}", f.name);
+                let cache_ident = format_ident!("{}_cache", f.name);
+                let generation_ident = format_ident!("{}_generation", f.name);
+                let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
+                let Some(Initializer::Expr(raw_expr)) = &f.initializer else {
+                    panic!("#[async_computed] field `{}` needs an initializer expr", f.name);
+                };
+                // Rewrites sibling-field references to `__self.<field>()`, not `self.<field>()`:
+                // this expression is evaluated inside `async move { .. }` below, which only ever
+                // captures the owned `__self: Rc<Self>` (required for `spawn_local`'s `'static`
+                // bound) — never the enclosing method's borrowed `&self`, which would otherwise be
+                // implicitly captured by reference and make the whole block non-`'static` (mirrors
+                // `FieldKind::Action`'s `is_async` arm, which rewrites to `__self` for the same
+                // reason).
+                let compute_expr = rewrite_t_macro(
+                    rewrite_field_refs(raw_expr.clone(), &field_names, &format_ident!("__self")),
+                    &field_names,
+                    &format_ident!("__self"),
+                );
+
+                struct_fields.extend(quote! {
+                    #cache_ident: std::cell::RefCell<elwindui::core::reactive::AsyncComputed<#ty>>,
+                    #generation_ident: std::cell::Cell<u64>,
+                });
+                ctor_fields.extend(quote! {
+                    #cache_ident: std::cell::RefCell::new(elwindui::core::reactive::AsyncComputed::Loading),
+                    #generation_ident: std::cell::Cell::new(0),
+                });
+
+                let spawn_recompute = format_ident!("__spawn_recompute_{}", f.name);
+                let property = format_ident!("{}", f.name);
+                accessors.extend(quote! {
+                    pub fn #field_ident(&self) -> elwindui::core::reactive::AsyncComputed<#ty> {
+                        self.#cache_ident.borrow().clone()
+                    }
+                    // Bumps this field's generation counter synchronously (before `spawn_local`
+                    // ever yields), then spawns the recompute. A completion whose captured
+                    // generation no longer matches — because a newer trigger fired and re-bumped
+                    // in the meantime — is discarded without notifying observers: "supersede, not
+                    // cancel" (see docs/design/runtime/state_management_design.md "Async work").
+                    fn #spawn_recompute(&self) {
+                        let __gen = self.#generation_ident.get().wrapping_add(1);
+                        self.#generation_ident.set(__gen);
+                        let __self = self.__self_weak.upgrade().expect(
+                            "elwindui: viewmodel/store was dropped while an #[async_computed] recompute was still pending"
+                        );
+                        elwindui::core::task::spawn_local(async move {
+                            let __result: Result<#ty, _> = (#compute_expr).await;
+                            if __self.#generation_ident.get() == __gen {
+                                let __value = match __result {
+                                    Ok(v) => elwindui::core::reactive::AsyncComputed::Ready(v),
+                                    Err(e) => elwindui::core::reactive::AsyncComputed::Failed(e.to_string()),
+                                };
+                                *__self.#cache_ident.borrow_mut() = __value;
+                                __self.on_property_changed(#property_enum::#property);
+                            }
+                        });
+                    }
+                });
+                async_spawn_calls_after_new.extend(quote! { instance.#spawn_recompute(); });
             }
             FieldKind::Action => {
                 let Some(Initializer::Action {
@@ -2149,7 +2324,7 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
             /// `documents_push(item: Rc<NestedViewModel>)` never needs a redundant caller-side
             /// `Rc::new(..)` around `NestedViewModel::new()`'s result.
             pub fn new() -> std::rc::Rc<Self> {
-                std::rc::Rc::new_cyclic(|__self_weak| {
+                let instance = std::rc::Rc::new_cyclic(|__self_weak| {
                     let instance = Self {
                         #ctor_fields
                         __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -2157,7 +2332,12 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                     };
                     #recompute_calls_after_new
                     instance
-                })
+                });
+                // Must run after `Rc::new_cyclic` returns, not inside its closure: `spawn_local`
+                // polls its future once immediately, and that first poll upgrades `__self_weak` —
+                // which is only valid once the strong `Rc` above is fully installed.
+                #async_spawn_calls_after_new
+                instance
             }
 
             /// Registers a typed PropertyChanged handler. Dropping the returned handle unregisters
@@ -2213,6 +2393,49 @@ pub fn generate_viewmodel(v: &ViewModelDef, from: &Module, table: &SymbolTable) 
                 f: impl Fn(&'static str) + 'static,
             ) -> elwindui::core::reactive::Subscription {
                 self.subscribe_property_changed(move |property| f(property.name()))
+            }
+        }
+    }
+}
+
+/// `store Name { fields }` — converts `s` into a throwaway `ViewModelDef` (same name, same fields)
+/// and delegates all field codegen to `generate_viewmodel` unchanged (a store's `#[observable]`/
+/// `#[computed]`/`#[async_computed]`/action fields behave identically to a viewmodel's own), then
+/// appends the singleton access surface: a `#[doc(hidden)]` `EnvironmentKey` whose `Value` is
+/// `Rc<Name>` and whose `default_value()` constructs one via `Name::new()` — the same
+/// `EnvironmentContext`/`application_environment()` mechanism `#[elwindui::theme]` already uses —
+/// plus `Name::instance() -> Rc<Name>`, which any Rust code (including another store's own field
+/// expressions, or a `view!`'s generated `TypeName.field` reference codegen) calls to reach the
+/// lazily-constructed shared instance. See docs/design/runtime/state_management_design.md "Stores".
+pub fn generate_store(s: &StoreDef, from: &Module, table: &SymbolTable) -> TokenStream {
+    let as_viewmodel = ViewModelDef {
+        name: s.name.clone(),
+        fields: s.fields.clone(),
+    };
+    let body = generate_viewmodel(&as_viewmodel, from, table);
+    let struct_name = format_ident!("{}", s.name);
+    let key_name = format_ident!("__{}StoreKey", s.name);
+
+    quote! {
+        #body
+
+        #[doc(hidden)]
+        pub struct #key_name;
+
+        impl elwindui::core::environment::EnvironmentKey for #key_name {
+            type Value = std::rc::Rc<#struct_name>;
+
+            fn default_value() -> Self::Value {
+                #struct_name::new()
+            }
+        }
+
+        impl #struct_name {
+            /// Returns the process-wide shared instance, lazily constructing it on first access
+            /// (`EnvironmentContext::get`'s own "materialize the default at the root, once" — see
+            /// `elwindui_core::environment`).
+            pub fn instance() -> std::rc::Rc<Self> {
+                elwindui::core::environment::application_environment().get::<#key_name>()
             }
         }
     }

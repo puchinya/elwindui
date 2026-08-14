@@ -374,6 +374,64 @@ pub fn sibling_viewmodel_modules() -> Vec<Module> {
         .collect()
 }
 
+/// A registered `#[elwindui::store] mod foo { .. }` — kept as reparseable source text for the same
+/// reason `StoredViewModel` is. A **separate** registry from `same_crate_viewmodels`, not a reuse
+/// of it — `Item::Store` and `Item::ViewModel` must remain distinct symbol-table entries (a store
+/// is a process-wide singleton referenced by a bare type-qualified `TypeName.field` path, not
+/// something a component holds via `#[bindable]`; see docs/design/runtime/state_management_design.md
+/// "Stores").
+struct StoredStore {
+    item_mod_src: String,
+}
+
+/// Keyed by `(compiling_crate_key(), store type name)` — mirrors `same_crate_viewmodels`, but for
+/// `#[elwindui::store] mod foo { struct Foo { .. } }`. Populated by
+/// `lib.rs::generate_store_from_item_mod`; read by `sibling_store_modules` so a component/viewmodel
+/// elsewhere in the same crate referencing `Foo.field` can be checked against the store's real
+/// fields. Same declaration-order requirement as `same_crate_viewmodels` — a store must be declared
+/// before anything that references it.
+fn same_crate_stores() -> &'static Mutex<HashMap<(String, String), StoredStore>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredStore>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers `name`'s already-successfully-generated `#[elwindui::store] mod item_mod { .. }` — see
+/// `same_crate_stores`'s own doc comment. `name` is the store *struct's* name, not the enclosing
+/// `mod`'s name. Only call this after this store's own codegen has actually succeeded.
+pub fn register_same_crate_store(name: &str, item_mod: &syn::ItemMod) {
+    let stored = StoredStore {
+        item_mod_src: quote::quote! { #item_mod }.to_string(),
+    };
+    same_crate_stores()
+        .lock()
+        .unwrap()
+        .insert((compiling_crate_key(), name.to_string()), stored);
+}
+
+/// Every same-crate `#[elwindui::store]` registered so far, rebuilt as one `Module` each — see
+/// `same_crate_stores`'s own doc comment.
+pub fn sibling_store_modules() -> Vec<Module> {
+    let key = compiling_crate_key();
+    let store = same_crate_stores().lock().unwrap();
+    store
+        .iter()
+        .filter(|((crate_key, _), _)| crate_key == &key)
+        .map(|(_, stored)| {
+            let item_mod: syn::ItemMod = syn::parse_str(&stored.item_mod_src)
+                .expect("internal: failed to reparse a registered sibling store's mod text");
+            let def = attr_frontend::store_def_from_item_mod(&item_mod)
+                .expect("internal: failed to rebuild a registered sibling store");
+            Module {
+                path: Vec::new(),
+                uses: Vec::new(),
+                items: vec![ast::Item::Store(def)],
+                allows_external_builtins: true,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
 /// A registered `#[elwindui::dsl_enum] enum Foo { .. }` — kept as reparseable source text for the
 /// same reason `StoredComponent`/`StoredViewModel` are.
 struct StoredEnum {

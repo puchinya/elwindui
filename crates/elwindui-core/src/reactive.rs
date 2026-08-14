@@ -52,6 +52,33 @@ pub trait ObservableExt {
     fn subscribe_property_changed(&self, f: impl Fn(&'static str) + 'static) -> Subscription;
 }
 
+/// The value of a `#[async_computed]` field — what its generated getter returns instead of the
+/// bare declared type `T`. See docs/design/runtime/state_management_design.md "Async work",
+/// docs/specs/dsl_spec.md §3 "`viewmodel`と`store`:宣言構文".
+///
+/// `Failed(String)` rather than a generic `AsyncComputed<T, E>`: matches this codebase's existing
+/// stringly-typed-error idiom at API boundaries (e.g. `elwindui::InitError`, `validate::validate`'s
+/// `Vec<String>`), and avoids forcing a second type parameter into every `#[async_computed]`
+/// field's inference. Generated codegen builds this by `.to_string()`-ing whatever `E: Display`
+/// the field's `expr` produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsyncComputed<T> {
+    /// No recompute has completed yet — the field's initial state before its first spawn resolves,
+    /// or (transiently) while a supersede is in flight if the caller re-reads before it resolves.
+    Loading,
+    /// The most recent non-superseded recompute completed successfully.
+    Ready(T),
+    /// The most recent non-superseded recompute completed with an error, stringified via
+    /// `E: Display`.
+    Failed(String),
+}
+
+impl<T> Default for AsyncComputed<T> {
+    fn default() -> Self {
+        AsyncComputed::Loading
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Subscription;

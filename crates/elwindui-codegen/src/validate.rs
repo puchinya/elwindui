@@ -44,6 +44,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
         .filter_map(|item| match item {
             Item::Component(c) => Some(c.name.as_str()),
             Item::ViewModel(v) => Some(v.name.as_str()),
+            Item::Store(s) => Some(s.name.as_str()),
             Item::Enum(_) | Item::View(_) => None,
         })
         .collect();
@@ -190,6 +191,17 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         if f.kind == FieldKind::State && f.initializer.is_none() {
                             errors.push(format!(
                                 "{}.{}: #[state] field needs `default = expr`",
+                                c.name, f.name
+                            ));
+                        }
+                        // dsl_spec.md §13 rule 20: `#[async_computed]` may only attach to a
+                        // `viewmodel`/`store` field — async state belongs in the VM/Model layer,
+                        // never a plain `component` prop (docs/design/runtime/state_management_design.md
+                        // "Async work").
+                        if f.kind == FieldKind::AsyncComputed {
+                            errors.push(format!(
+                                "{}.{}: #[async_computed] may only attach to a viewmodel/store \
+                                 field, not a component prop",
                                 c.name, f.name
                             ));
                         }
@@ -425,6 +437,19 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                             errors.push(format!(
                                 "{}.{}: #[state] is only allowed on a component",
                                 viewmodel.name, field.name
+                            ));
+                        }
+                    }
+                }
+                Item::Store(store) => {
+                    // Rule 19 holds by construction here too: `StoreDef` has no `view` body in
+                    // this AST (same `attr_frontend::fields_from_item_struct` frontend a
+                    // `viewmodel` uses, which has no syntax that could carry an `ElementNode`).
+                    for field in &store.fields {
+                        if field.kind == FieldKind::State {
+                            errors.push(format!(
+                                "{}.{}: #[state] is only allowed on a component",
+                                store.name, field.name
                             ));
                         }
                     }

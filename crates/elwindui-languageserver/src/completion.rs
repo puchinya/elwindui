@@ -104,9 +104,10 @@ fn components_in(module: &Module) -> impl Iterator<Item = &elwindui_codegen::ast
 fn field_completion_item(name: &str, kind: FieldKind) -> CompletionItem {
     let item_kind = match kind {
         FieldKind::Action => CompletionItemKind::METHOD,
-        FieldKind::Computed | FieldKind::Attached | FieldKind::Environment => {
-            CompletionItemKind::PROPERTY
-        }
+        FieldKind::Computed
+        | FieldKind::AsyncComputed
+        | FieldKind::Attached
+        | FieldKind::Environment => CompletionItemKind::PROPERTY,
         FieldKind::Observable | FieldKind::Prop | FieldKind::Param | FieldKind::State => {
             CompletionItemKind::FIELD
         }

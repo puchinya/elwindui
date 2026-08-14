@@ -241,9 +241,8 @@ fn returns_semantic_tokens_scoped_to_the_view_macro_body() {
         };
         match messages.recv_timeout(remaining) {
             Ok(Message::Response(r)) if r.id == RequestId::from(2) => {
-                let result: Option<SemanticTokensResult> = r
-                    .result
-                    .and_then(|v| serde_json::from_value(v).ok());
+                let result: Option<SemanticTokensResult> =
+                    r.result.and_then(|v| serde_json::from_value(v).ok());
                 token_count = match result {
                     Some(SemanticTokensResult::Tokens(t)) => Some(t.data.len()),
                     _ => Some(0),
@@ -271,9 +270,5 @@ fn returns_semantic_tokens_scoped_to_the_view_macro_body() {
     // `TextBlock`/`text`/`"hi"` — `SemanticTokens::data` is `Vec<SemanticToken>`, already decoded
     // from LSP's five-`u32`-per-token wire encoding into one struct per token, so this is a token
     // count, not a `u32` count.
-    assert_eq!(
-        token_count,
-        Some(3),
-        "expected 3 tokens for the view! body"
-    );
+    assert_eq!(token_count, Some(3), "expected 3 tokens for the view! body");
 }

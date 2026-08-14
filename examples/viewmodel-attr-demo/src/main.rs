@@ -52,7 +52,6 @@ impl LabeledPanel {
     }
 }
 
-
 fn main() {
     elwindui::init().expect("initialize elwindui");
 

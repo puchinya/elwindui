@@ -35,13 +35,6 @@
 //! `UIElement::construct`) — well before any child is ever added.
 
 use crate::base::{CornerRadius, Point, Rect, Size};
-use crate::input::{FocusState, RoutedEventArgs};
-use crate::layout::{
-    GridCell, GridLength, HorizontalAlignment, Orientation, VerticalAlignment, Visibility,
-    align_within, apply_size_constraints, grid_arrange, grid_measure_pass1_available,
-    grid_pass2_available, grid_resolve_track_sizes, grow_by_margin, shrink_by_margin,
-    shrink_rect_by_margin, stack_arrange, stack_natural_size,
-};
 #[cfg(test)]
 use crate::graphics::Color;
 #[cfg(test)]
@@ -50,6 +43,13 @@ pub use crate::graphics::TextAlignment;
 use crate::graphics::{
     Brush, ImageDrawOptions, ImageFit, ImageSource, RenderContext, RenderGroup, RenderTree,
     Stretch, StrokeStyle, VectorImageDrawOptions, VectorRasterizeMode,
+};
+use crate::input::{FocusState, RoutedEventArgs};
+use crate::layout::{
+    GridCell, GridLength, HorizontalAlignment, Orientation, VerticalAlignment, Visibility,
+    align_within, apply_size_constraints, grid_arrange, grid_measure_pass1_available,
+    grid_pass2_available, grid_resolve_track_sizes, grow_by_margin, shrink_by_margin,
+    shrink_rect_by_margin, stack_arrange, stack_natural_size,
 };
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -91,4 +91,3 @@ pub use controls::*;
 pub use element::*;
 pub use engine::*;
 pub use text_style::*;
-

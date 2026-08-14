@@ -55,8 +55,8 @@ impl TextBlock {
         // a second, potentially-stale source of truth if a render pass ever runs without a
         // preceding full layout pass (see `docs/design/runtime/text_design.md`).
         let cascaded_style = self.cascaded_text_style();
-        let style = cascaded_style
-            .materialize(&crate::graphics::text_backend().default_text_style());
+        let style =
+            cascaded_style.materialize(&crate::graphics::text_backend().default_text_style());
         context.draw_text_with_foreground(
             &self.text.borrow(),
             Rect {
@@ -152,7 +152,12 @@ mod tests {
         assert!(matches!(
             commands[0],
             RenderCommand::Text {
-                foreground: Some(Brush::Solid(Color { r: 1, g: 2, b: 3, .. })),
+                foreground: Some(Brush::Solid(Color {
+                    r: 1,
+                    g: 2,
+                    b: 3,
+                    ..
+                })),
                 ..
             }
         ));

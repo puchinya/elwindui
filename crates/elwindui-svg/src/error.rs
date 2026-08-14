@@ -119,11 +119,23 @@ impl From<usvg::Error> for SvgError {
 
 #[derive(Debug, Clone)]
 pub enum SvgWarning {
-    UnsupportedDynamicFeature { feature: SvgFeature },
-    MissingFontFallbackUsed { requested: Arc<str>, selected: Arc<str> },
-    ExternalResourceSkipped { href: Arc<str> },
-    InvalidElementRemoved { id: Option<Arc<str>> },
-    ApproximationUsed { feature: Arc<str>, detail: Arc<str> },
+    UnsupportedDynamicFeature {
+        feature: SvgFeature,
+    },
+    MissingFontFallbackUsed {
+        requested: Arc<str>,
+        selected: Arc<str>,
+    },
+    ExternalResourceSkipped {
+        href: Arc<str>,
+    },
+    InvalidElementRemoved {
+        id: Option<Arc<str>>,
+    },
+    ApproximationUsed {
+        feature: Arc<str>,
+        detail: Arc<str>,
+    },
 }
 
 impl fmt::Display for SvgWarning {
@@ -132,7 +144,10 @@ impl fmt::Display for SvgWarning {
             Self::UnsupportedDynamicFeature { feature } => {
                 write!(f, "unsupported dynamic feature ignored: {feature}")
             }
-            Self::MissingFontFallbackUsed { requested, selected } => write!(
+            Self::MissingFontFallbackUsed {
+                requested,
+                selected,
+            } => write!(
                 f,
                 "font '{requested}' not found, falling back to '{selected}'"
             ),

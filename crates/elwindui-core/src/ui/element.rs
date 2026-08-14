@@ -774,7 +774,9 @@ impl UIElement {
             // this element *did* arrange) — a reader that only checks `arranged_offset().is_some()`
             // to decide "has this element ever been positioned" would otherwise see a leftover
             // real position for an element that currently contributes nothing to the tree.
-            self.as_ui_element().arranged_offset.set(Some(Point { x: 0.0, y: 0.0 }));
+            self.as_ui_element()
+                .arranged_offset
+                .set(Some(Point { x: 0.0, y: 0.0 }));
             return;
         }
         // WinUI3: `Arrange` implicitly re-`Measure`s if `Measure` hasn't run since the last

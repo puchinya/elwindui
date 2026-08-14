@@ -2,16 +2,13 @@
 //! (groups, blend modes, pattern fills, masks).
 
 use super::win2d::*;
-use crate::render::composition::{
-    CompositionPrimitive,
-    DesiredCompositionNode,
-};
 use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::Graphics::Canvas::{
     CanvasActiveLayer, CanvasAntialiasing, CanvasBlend, CanvasImageInterpolation,
     ICanvasResourceCreator,
 };
 use crate::bindings::Microsoft::UI::Composition::CompositionDrawingSurface;
+use crate::render::composition::{CompositionPrimitive, DesiredCompositionNode};
 use windows::UI::Color;
 use windows::core::{Interface, Result};
 
@@ -53,24 +50,37 @@ pub(crate) fn svg_view_box_transform(
         let height = source.height * scale;
         let offset_x = match aspect.align {
             Align::XMinYMin | Align::XMinYMid | Align::XMinYMax => 0.0,
-            Align::XMidYMin | Align::XMidYMid | Align::XMidYMax => (destination.width - width) / 2.0,
+            Align::XMidYMin | Align::XMidYMid | Align::XMidYMax => {
+                (destination.width - width) / 2.0
+            }
             Align::XMaxYMin | Align::XMaxYMid | Align::XMaxYMax => destination.width - width,
             Align::None => 0.0,
         };
         let offset_y = match aspect.align {
             Align::XMinYMin | Align::XMidYMin | Align::XMaxYMin => 0.0,
-            Align::XMinYMid | Align::XMidYMid | Align::XMaxYMid => (destination.height - height) / 2.0,
+            Align::XMinYMid | Align::XMidYMid | Align::XMaxYMid => {
+                (destination.height - height) / 2.0
+            }
             Align::XMinYMax | Align::XMidYMax | Align::XMaxYMax => destination.height - height,
             Align::None => 0.0,
         };
         (scale, scale, offset_x, offset_y)
     };
-    elwindui_core::base::AffineTransform::translation(destination.x + extra_x, destination.y + extra_y)
-        .concat(&elwindui_core::base::AffineTransform::scale(scale_x, scale_y))
-        .concat(&elwindui_core::base::AffineTransform::translation(-source.x, -source.y))
+    elwindui_core::base::AffineTransform::translation(
+        destination.x + extra_x,
+        destination.y + extra_y,
+    )
+    .concat(&elwindui_core::base::AffineTransform::scale(
+        scale_x, scale_y,
+    ))
+    .concat(&elwindui_core::base::AffineTransform::translation(
+        -source.x, -source.y,
+    ))
 }
 
-pub(crate) fn vector_mask_path(mask: &elwindui_core::graphics::VectorMask) -> elwindui_core::graphics::Path {
+pub(crate) fn vector_mask_path(
+    mask: &elwindui_core::graphics::VectorMask,
+) -> elwindui_core::graphics::Path {
     use elwindui_core::graphics::{PathBuilder, VectorNode};
 
     fn append_group(
@@ -93,7 +103,9 @@ pub(crate) fn vector_mask_path(mask: &elwindui_core::graphics::VectorMask) -> el
     let mut builder = PathBuilder::new();
     append_group(&mut builder, &mask.root, mask.transform);
     let local = builder.build().unwrap_or_else(|_| {
-        PathBuilder::new().build().expect("an empty PathBuilder must build")
+        PathBuilder::new()
+            .build()
+            .expect("an empty PathBuilder must build")
     });
     match &mask.nested {
         Some(nested) => elwindui_core::graphics::Path::combine(
@@ -107,7 +119,9 @@ pub(crate) fn vector_mask_path(mask: &elwindui_core::graphics::VectorMask) -> el
     }
 }
 
-pub(crate) fn win2d_vector_blend(mode: elwindui_core::graphics::VectorBlendMode) -> Option<CanvasBlend> {
+pub(crate) fn win2d_vector_blend(
+    mode: elwindui_core::graphics::VectorBlendMode,
+) -> Option<CanvasBlend> {
     match mode {
         elwindui_core::graphics::VectorBlendMode::Normal => Some(CanvasBlend::SourceOver),
         // Win2D's Min/Add composition modes are direct GPU implementations of the two blend
@@ -151,7 +165,10 @@ pub(crate) fn emit_vector_pattern_fill(
             width_px,
         }),
         None => out.push(Win2dPrimitive::PushClip {
-            clip: Clip::Path { path: path.clone(), rule },
+            clip: Clip::Path {
+                path: path.clone(),
+                rule,
+            },
             x: 0.0,
             y: 0.0,
         }),
@@ -168,7 +185,9 @@ pub(crate) fn emit_vector_pattern_fill(
         for column in first_x..last_x {
             if count == MAX_PATTERN_TILES {
                 #[cfg(debug_assertions)]
-                eprintln!("elwindui-backend-winui3: SVG pattern tile expansion reached its safety limit");
+                eprintln!(
+                    "elwindui-backend-winui3: SVG pattern tile expansion reached its safety limit"
+                );
                 break 'tiles;
             }
             count += 1;
@@ -176,10 +195,15 @@ pub(crate) fn emit_vector_pattern_fill(
             let y = tile.y + row as f32 * tile.height;
             let tile_transform = svg_view_box_transform(
                 source,
-                elwindui_core::base::Rect { x, y, width: tile.width, height: tile.height },
+                elwindui_core::base::Rect {
+                    x,
+                    y,
+                    width: tile.width,
+                    height: tile.height,
+                },
                 pattern.preserve_aspect_ratio,
             )
-                .concat(&pattern.transform);
+            .concat(&pattern.transform);
             emit_vector_group(&pattern.root, node_world.concat(&tile_transform), 1.0, out);
         }
     }
@@ -199,9 +223,12 @@ pub(crate) fn emit_vector_group(
     };
 
     let world = parent_transform.concat(&group.transform);
-    if win2d_vector_blend(group.blend_mode).is_none() || group.isolate || !group.filters.is_empty() {
+    if win2d_vector_blend(group.blend_mode).is_none() || group.isolate || !group.filters.is_empty()
+    {
         #[cfg(debug_assertions)]
-        eprintln!("elwindui-backend-winui3: SVG blend, isolation, mask, or filter requires an offscreen effect graph and is not yet supported");
+        eprintln!(
+            "elwindui-backend-winui3: SVG blend, isolation, mask, or filter requires an offscreen effect graph and is not yet supported"
+        );
     }
     if let Some(blend) = win2d_vector_blend(group.blend_mode) {
         out.push(Win2dPrimitive::SetBlend(blend));
@@ -220,7 +247,9 @@ pub(crate) fn emit_vector_group(
     if let Some(mask) = &group.mask {
         if mask.mask_type == elwindui_core::graphics::VectorMaskType::Luminance {
             #[cfg(debug_assertions)]
-            eprintln!("elwindui-backend-winui3: SVG luminance masks require an offscreen alpha conversion; using mask geometry");
+            eprintln!(
+                "elwindui-backend-winui3: SVG luminance masks require an offscreen alpha conversion; using mask geometry"
+            );
         }
         out.push(Win2dPrimitive::PushClip {
             clip: Clip::Rect(mask.bounds),
@@ -236,7 +265,9 @@ pub(crate) fn emit_vector_group(
             y: 0.0,
         });
     }
-    out.push(Win2dPrimitive::PushOpacityLayer(group.opacity.clamp(0.0, 1.0)));
+    out.push(Win2dPrimitive::PushOpacityLayer(
+        group.opacity.clamp(0.0, 1.0),
+    ));
 
     for node in group.children.iter() {
         match node {
@@ -253,10 +284,15 @@ pub(crate) fn emit_vector_group(
                     if let Some(fill) = &path_node.fill {
                         match &fill.paint {
                             elwindui_core::graphics::VectorPaint::Brush(brush) => {
-                                out.push(Win2dPrimitive::SetOpacity((base_opacity * fill.opacity).clamp(0.0, 1.0)));
+                                out.push(Win2dPrimitive::SetOpacity(
+                                    (base_opacity * fill.opacity).clamp(0.0, 1.0),
+                                ));
                                 out.push(Win2dPrimitive::FillPath {
-                                    commands: path_node.path.commands().to_vec(), x: 0.0, y: 0.0,
-                                    brush: brush.clone(), rule: fill.rule,
+                                    commands: path_node.path.commands().to_vec(),
+                                    x: 0.0,
+                                    y: 0.0,
+                                    brush: brush.clone(),
+                                    rule: fill.rule,
                                 });
                                 out.push(Win2dPrimitive::SetOpacity(base_opacity));
                             }
@@ -278,10 +314,15 @@ pub(crate) fn emit_vector_group(
                     if let Some(stroke) = &path_node.stroke {
                         match &stroke.paint {
                             elwindui_core::graphics::VectorPaint::Brush(brush) => {
-                                out.push(Win2dPrimitive::SetOpacity((base_opacity * stroke.opacity).clamp(0.0, 1.0)));
+                                out.push(Win2dPrimitive::SetOpacity(
+                                    (base_opacity * stroke.opacity).clamp(0.0, 1.0),
+                                ));
                                 out.push(Win2dPrimitive::StrokePath {
-                                    commands: path_node.path.commands().to_vec(), x: 0.0, y: 0.0,
-                            brush: brush.clone(), stroke: stroke.style.clone(),
+                                    commands: path_node.path.commands().to_vec(),
+                                    x: 0.0,
+                                    y: 0.0,
+                                    brush: brush.clone(),
+                                    stroke: stroke.style.clone(),
                                 });
                                 out.push(Win2dPrimitive::SetOpacity(base_opacity));
                             }
@@ -300,8 +341,14 @@ pub(crate) fn emit_vector_group(
                     }
                 };
                 match path_node.paint_order {
-                    VectorPaintOrder::FillStroke => { emit_fill(out); emit_stroke(out); }
-                    VectorPaintOrder::StrokeFill => { emit_stroke(out); emit_fill(out); }
+                    VectorPaintOrder::FillStroke => {
+                        emit_fill(out);
+                        emit_stroke(out);
+                    }
+                    VectorPaintOrder::StrokeFill => {
+                        emit_stroke(out);
+                        emit_fill(out);
+                    }
                 }
                 out.push(Win2dPrimitive::SetAntialiasing(false));
                 push_win2d_transform(out, world);
@@ -359,7 +406,9 @@ pub(crate) fn emit_vector_image(
             placed.width / source.width,
             placed.height / source.height,
         ))
-        .concat(&elwindui_core::base::AffineTransform::translation(-source.x, -source.y));
+        .concat(&elwindui_core::base::AffineTransform::translation(
+            -source.x, -source.y,
+        ));
     if options.clip_to_dest {
         push_win2d_transform(out, parent_transform);
         out.push(Win2dPrimitive::PushClip {
@@ -368,8 +417,15 @@ pub(crate) fn emit_vector_image(
             y: 0.0,
         });
     }
-    out.push(Win2dPrimitive::PushOpacityLayer(options.opacity.clamp(0.0, 1.0)));
-    emit_vector_group(image.root(), parent_transform.concat(&local), base_opacity, out);
+    out.push(Win2dPrimitive::PushOpacityLayer(
+        options.opacity.clamp(0.0, 1.0),
+    ));
+    emit_vector_group(
+        image.root(),
+        parent_transform.concat(&local),
+        base_opacity,
+        out,
+    );
     out.push(Win2dPrimitive::PopOpacityLayer);
     if options.clip_to_dest {
         out.push(Win2dPrimitive::PopClip);
@@ -385,19 +441,37 @@ pub(crate) fn draw_vector_image_surface(
     desired: &DesiredCompositionNode,
     rasterization_scale: f32,
 ) -> Result<()> {
-    let CompositionPrimitive::VectorImage { image, dest, source, options } = &desired.primitive else {
+    let CompositionPrimitive::VectorImage {
+        image,
+        dest,
+        source,
+        options,
+    } = &desired.primitive
+    else {
         return Err(windows::core::Error::new(
             windows::core::HRESULT(0x80070057_u32 as i32),
             "vector surface node received a non-vector primitive",
         ));
     };
     let mut primitives = vec![
-        Win2dPrimitive::SetTransform { m11: 1.0, m12: 0.0, m21: 0.0, m22: 1.0, dx: 0.0, dy: 0.0 },
+        Win2dPrimitive::SetTransform {
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            dx: 0.0,
+            dy: 0.0,
+        },
         Win2dPrimitive::SetOpacity(1.0),
     ];
     emit_vector_image(
         image,
-        elwindui_core::base::Rect { x: 0.0, y: 0.0, width: dest.width, height: dest.height },
+        elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: dest.width,
+            height: dest.height,
+        },
         *source,
         options,
         elwindui_core::base::AffineTransform::identity(),
@@ -405,13 +479,25 @@ pub(crate) fn draw_vector_image_surface(
         &mut primitives,
     );
     let session = CanvasComposition::CreateDrawingSession(surface)?;
-    session.Clear(Color { A: 0, R: 0, G: 0, B: 0 })?;
+    session.Clear(Color {
+        A: 0,
+        R: 0,
+        G: 0,
+        B: 0,
+    })?;
     let creator: ICanvasResourceCreator = session.clone().cast()?;
     let mut opacity = 1.0_f32;
     let mut active_layers = Vec::<CanvasActiveLayer>::new();
     for primitive in &primitives {
         match primitive {
-            Win2dPrimitive::SetTransform { m11, m12, m21, m22, dx, dy } => session.SetTransform(windows_numerics::Matrix3x2 {
+            Win2dPrimitive::SetTransform {
+                m11,
+                m12,
+                m21,
+                m22,
+                dx,
+                dy,
+            } => session.SetTransform(windows_numerics::Matrix3x2 {
                 // The CompositionDrawingSurface extent is in physical pixels,
                 // while SVG lowering produces DIPs. Compose the XAML scale into
                 // every scene transform so geometry, clips, and brushes replay
@@ -424,53 +510,156 @@ pub(crate) fn draw_vector_image_surface(
                 M32: *dy * rasterization_scale,
             })?,
             Win2dPrimitive::SetOpacity(value) => opacity = *value,
-            Win2dPrimitive::SetAntialiasing(aliased) => session.SetAntialiasing(
-                if *aliased { CanvasAntialiasing::Aliased } else { CanvasAntialiasing::Antialiased },
-            )?,
+            Win2dPrimitive::SetAntialiasing(aliased) => session.SetAntialiasing(if *aliased {
+                CanvasAntialiasing::Aliased
+            } else {
+                CanvasAntialiasing::Antialiased
+            })?,
             Win2dPrimitive::SetBlend(blend) => session.SetBlend(*blend)?,
-            Win2dPrimitive::FillPath { commands, x, y, brush, rule } => {
+            Win2dPrimitive::FillPath {
+                commands,
+                x,
+                y,
+                brush,
+                rule,
+            } => {
                 let geometry = win2d_path_geometry(&creator, commands, *x, *y, *rule)?;
                 let bounds = win2d_path_bounds(commands);
-                let brush = win2d_brush(&creator, brush, elwindui_core::base::Rect { x: bounds.x + *x, y: bounds.y + *y, ..bounds }, opacity)?;
+                let brush = win2d_brush(
+                    &creator,
+                    brush,
+                    elwindui_core::base::Rect {
+                        x: bounds.x + *x,
+                        y: bounds.y + *y,
+                        ..bounds
+                    },
+                    opacity,
+                )?;
                 session.FillGeometryAtCoordsWithBrush(&geometry, 0.0, 0.0, &brush)?;
             }
-            Win2dPrimitive::StrokePath { commands, x, y, brush, stroke } => {
-                let geometry = win2d_path_geometry(&creator, commands, *x, *y, elwindui_core::graphics::FillRule::NonZero)?;
+            Win2dPrimitive::StrokePath {
+                commands,
+                x,
+                y,
+                brush,
+                stroke,
+            } => {
+                let geometry = win2d_path_geometry(
+                    &creator,
+                    commands,
+                    *x,
+                    *y,
+                    elwindui_core::graphics::FillRule::NonZero,
+                )?;
                 let bounds = win2d_path_bounds(commands);
-                let brush = win2d_brush(&creator, brush, elwindui_core::base::Rect { x: bounds.x + *x, y: bounds.y + *y, ..bounds }, opacity)?;
+                let brush = win2d_brush(
+                    &creator,
+                    brush,
+                    elwindui_core::base::Rect {
+                        x: bounds.x + *x,
+                        y: bounds.y + *y,
+                        ..bounds
+                    },
+                    opacity,
+                )?;
                 let style = win2d_stroke_style(stroke)?;
-                session.DrawGeometryWithBrushAndStrokeWidthAndStrokeStyle(&geometry, windows_numerics::Vector2 { X: 0.0, Y: 0.0 }, &brush, stroke.width, &style)?;
+                session.DrawGeometryWithBrushAndStrokeWidthAndStrokeStyle(
+                    &geometry,
+                    windows_numerics::Vector2 { X: 0.0, Y: 0.0 },
+                    &brush,
+                    stroke.width,
+                    &style,
+                )?;
             }
             Win2dPrimitive::PushClip { clip, x, y } => {
                 let geometry = win2d_clip_geometry(&creator, clip, *x, *y)?;
                 active_layers.push(session.CreateLayerWithOpacityAndClipGeometry(1.0, &geometry)?);
             }
-            Win2dPrimitive::PushPathStrokeClip { commands, x, y, width_px } => {
-                let geometry = win2d_path_geometry(&creator, commands, *x, *y, elwindui_core::graphics::FillRule::NonZero)?;
+            Win2dPrimitive::PushPathStrokeClip {
+                commands,
+                x,
+                y,
+                width_px,
+            } => {
+                let geometry = win2d_path_geometry(
+                    &creator,
+                    commands,
+                    *x,
+                    *y,
+                    elwindui_core::graphics::FillRule::NonZero,
+                )?;
                 let stroke_geometry = geometry.Stroke(*width_px)?;
-                active_layers.push(session.CreateLayerWithOpacityAndClipGeometry(1.0, &stroke_geometry)?);
+                active_layers
+                    .push(session.CreateLayerWithOpacityAndClipGeometry(1.0, &stroke_geometry)?);
             }
             Win2dPrimitive::PopClip | Win2dPrimitive::PopOpacityLayer => {
-                if let Some(layer) = active_layers.pop() { layer.Close()?; }
+                if let Some(layer) = active_layers.pop() {
+                    layer.Close()?;
+                }
             }
             Win2dPrimitive::PushOpacityLayer(layer_opacity) => {
                 active_layers.push(session.CreateLayerWithOpacity(*layer_opacity)?);
             }
-            Win2dPrimitive::DrawImage { image, dest, source, options, x, y } => {
+            Win2dPrimitive::DrawImage {
+                image,
+                dest,
+                source,
+                options,
+                x,
+                y,
+            } => {
                 let bitmap = win2d_bitmap(&creator, image)?;
                 let size = bitmap.SizeInPixels()?;
-                let source = source.unwrap_or(elwindui_core::base::Rect { x: 0.0, y: 0.0, width: size.Width as f32, height: size.Height as f32 });
-                let placed = win2d_fitted_image_rect(elwindui_core::base::Rect { x: *x + dest.x, y: *y + dest.y, width: dest.width, height: dest.height }, (source.width, source.height), options);
+                let source = source.unwrap_or(elwindui_core::base::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: size.Width as f32,
+                    height: size.Height as f32,
+                });
+                let placed = win2d_fitted_image_rect(
+                    elwindui_core::base::Rect {
+                        x: *x + dest.x,
+                        y: *y + dest.y,
+                        width: dest.width,
+                        height: dest.height,
+                    },
+                    (source.width, source.height),
+                    options,
+                );
                 let interpolation = match options.sampling {
-                    elwindui_core::graphics::ImageSampling::Nearest => CanvasImageInterpolation::NearestNeighbor,
-                    elwindui_core::graphics::ImageSampling::Linear => CanvasImageInterpolation::Linear,
-                    elwindui_core::graphics::ImageSampling::Cubic => CanvasImageInterpolation::HighQualityCubic,
+                    elwindui_core::graphics::ImageSampling::Nearest => {
+                        CanvasImageInterpolation::NearestNeighbor
+                    }
+                    elwindui_core::graphics::ImageSampling::Linear => {
+                        CanvasImageInterpolation::Linear
+                    }
+                    elwindui_core::graphics::ImageSampling::Cubic => {
+                        CanvasImageInterpolation::HighQualityCubic
+                    }
                 };
-                session.DrawImageToRectWithSourceRectAndOpacityAndInterpolation(&bitmap, windows::Foundation::Rect { X: placed.x, Y: placed.y, Width: placed.width, Height: placed.height }, windows::Foundation::Rect { X: source.x, Y: source.y, Width: source.width, Height: source.height }, (opacity * options.opacity).clamp(0.0, 1.0), interpolation)?;
+                session.DrawImageToRectWithSourceRectAndOpacityAndInterpolation(
+                    &bitmap,
+                    windows::Foundation::Rect {
+                        X: placed.x,
+                        Y: placed.y,
+                        Width: placed.width,
+                        Height: placed.height,
+                    },
+                    windows::Foundation::Rect {
+                        X: source.x,
+                        Y: source.y,
+                        Width: source.width,
+                        Height: source.height,
+                    },
+                    (opacity * options.opacity).clamp(0.0, 1.0),
+                    interpolation,
+                )?;
             }
         }
     }
-    while let Some(layer) = active_layers.pop() { layer.Close()?; }
+    while let Some(layer) = active_layers.pop() {
+        layer.Close()?;
+    }
     session.Close()
 }
 
@@ -484,7 +673,12 @@ mod vector_view_box_tests {
     };
 
     fn rect(width: f32, height: f32) -> Rect {
-        Rect { x: 0.0, y: 0.0, width, height }
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        }
     }
 
     #[test]
@@ -492,9 +686,15 @@ mod vector_view_box_tests {
         let transform = svg_view_box_transform(
             rect(100.0, 50.0),
             rect(100.0, 100.0),
-            PreserveAspectRatio { align: Align::XMidYMid, meet_or_slice: MeetOrSlice::Meet },
+            PreserveAspectRatio {
+                align: Align::XMidYMid,
+                meet_or_slice: MeetOrSlice::Meet,
+            },
         );
-        assert_eq!((transform.m11, transform.m22, transform.dx, transform.dy), (1.0, 1.0, 0.0, 25.0));
+        assert_eq!(
+            (transform.m11, transform.m22, transform.dx, transform.dy),
+            (1.0, 1.0, 0.0, 25.0)
+        );
     }
 
     #[test]
@@ -502,9 +702,15 @@ mod vector_view_box_tests {
         let transform = svg_view_box_transform(
             rect(100.0, 50.0),
             rect(100.0, 100.0),
-            PreserveAspectRatio { align: Align::XMidYMid, meet_or_slice: MeetOrSlice::Slice },
+            PreserveAspectRatio {
+                align: Align::XMidYMid,
+                meet_or_slice: MeetOrSlice::Slice,
+            },
         );
-        assert_eq!((transform.m11, transform.m22, transform.dx, transform.dy), (2.0, 2.0, -50.0, 0.0));
+        assert_eq!(
+            (transform.m11, transform.m22, transform.dx, transform.dy),
+            (2.0, 2.0, -50.0, 0.0)
+        );
     }
 
     #[test]
@@ -512,8 +718,14 @@ mod vector_view_box_tests {
         let transform = svg_view_box_transform(
             rect(100.0, 50.0),
             rect(100.0, 100.0),
-            PreserveAspectRatio { align: Align::None, meet_or_slice: MeetOrSlice::Meet },
+            PreserveAspectRatio {
+                align: Align::None,
+                meet_or_slice: MeetOrSlice::Meet,
+            },
         );
-        assert_eq!((transform.m11, transform.m22, transform.dx, transform.dy), (1.0, 2.0, 0.0, 0.0));
+        assert_eq!(
+            (transform.m11, transform.m22, transform.dx, transform.dy),
+            (1.0, 2.0, 0.0, 0.0)
+        );
     }
 }

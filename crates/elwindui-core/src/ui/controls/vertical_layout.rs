@@ -65,9 +65,11 @@ impl VerticalLayout {
         let mut rects = child_rects.into_iter();
         for child in children.iter() {
             if child.participates_in_layout() {
-                child.arrange(rects.next().expect(
-                    "stack_arrange returns exactly one rect per participating child size",
-                ));
+                child.arrange(
+                    rects.next().expect(
+                        "stack_arrange returns exactly one rect per participating child size",
+                    ),
+                );
             } else {
                 child.arrange(Rect {
                     x: 0.0,

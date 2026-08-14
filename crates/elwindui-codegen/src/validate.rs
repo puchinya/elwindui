@@ -1963,10 +1963,13 @@ mod tests {
             },
         }
         "#;
-        let modules: Vec<_> = [viewmodel_module, component_module(Some("Window"), window_src)]
-            .into_iter()
-            .chain(crate::test_builtin_modules())
-            .collect();
+        let modules: Vec<_> = [
+            viewmodel_module,
+            component_module(Some("Window"), window_src),
+        ]
+        .into_iter()
+        .chain(crate::test_builtin_modules())
+        .collect();
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -2020,7 +2023,10 @@ mod tests {
             },
         }
         "#;
-        let modules = vec![viewmodel_module, component_module(Some("Window"), window_src)];
+        let modules = vec![
+            viewmodel_module,
+            component_module(Some("Window"), window_src),
+        ];
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -2102,7 +2108,10 @@ mod tests {
             },
         }
         "#;
-        let modules = vec![viewmodel_module, component_module(Some("Window"), window_src)];
+        let modules = vec![
+            viewmodel_module,
+            component_module(Some("Window"), window_src),
+        ];
         assert_eq!(validate(&modules), Ok(()));
     }
 
@@ -2228,7 +2237,11 @@ mod tests {
         "#;
         let mut window_module = component_module(Some("Window"), window_src);
         window_module.uses.push(crate::ast::UseDecl {
-            path: vec!["crate".to_string(), "some_vm_mod".to_string(), "Vm".to_string()],
+            path: vec![
+                "crate".to_string(),
+                "some_vm_mod".to_string(),
+                "Vm".to_string(),
+            ],
         });
         let modules = vec![vm_module, window_module];
         assert_eq!(validate(&modules), Ok(()));
@@ -2530,10 +2543,13 @@ mod tests {
             },
         }
         "#;
-        let modules: Vec<_> = [vm_module, component_module(Some("ContentControl"), host_src)]
-            .into_iter()
-            .chain(crate::test_builtin_modules())
-            .collect();
+        let modules: Vec<_> = [
+            vm_module,
+            component_module(Some("ContentControl"), host_src),
+        ]
+        .into_iter()
+        .chain(crate::test_builtin_modules())
+        .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter()
@@ -2571,10 +2587,13 @@ mod tests {
             },
         }
         "#;
-        let modules: Vec<_> = [vm_module, component_module(Some("ContentControl"), host_src)]
-            .into_iter()
-            .chain(crate::test_builtin_modules())
-            .collect();
+        let modules: Vec<_> = [
+            vm_module,
+            component_module(Some("ContentControl"), host_src),
+        ]
+        .into_iter()
+        .chain(crate::test_builtin_modules())
+        .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
             errs.iter()

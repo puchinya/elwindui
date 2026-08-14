@@ -710,7 +710,9 @@ impl TreeHostView {
             &mut new_native_order,
             &mut state,
         );
-        state.image_cache.retain(|id, _| live_image_ids.contains(id));
+        state
+            .image_cache
+            .retain(|id, _| live_image_ids.contains(id));
         state
             .vector_raster_cache
             .retain(|id, _| live_vector_image_ids.contains(id));
@@ -722,7 +724,9 @@ impl TreeHostView {
                 false
             }
         });
-        state.group_cache.retain(|id, _| live_group_ids.contains(id));
+        state
+            .group_cache
+            .retain(|id, _| live_group_ids.contains(id));
 
         // Z-order repair: `replay_group` only `addSublayer`s a container the first time it's ever
         // created (see that function's own doc comment) — a group whose position in the traversal

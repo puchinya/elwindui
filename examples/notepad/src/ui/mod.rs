@@ -4,8 +4,8 @@
 // `elwindui_codegen::component_frontend::sibling_component_modules`'s own doc comment. `RoundedPanel`
 // has no sibling dependencies; `document_view` uses `RoundedPanel`; `notepad_window` uses
 // `DocumentView` (and declares/uses its own sibling, `CustomCheckBox`).
-mod rounded_panel;
 mod document_view;
 mod notepad_window;
+mod rounded_panel;
 
 pub use notepad_window::NotepadWindow;

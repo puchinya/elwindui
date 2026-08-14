@@ -135,7 +135,9 @@ impl SvgLoader {
     }
 
     pub fn load_str(&self, source: &str) -> Result<VectorImage, SvgError> {
-        Ok(self.load_bytes_with_diagnostics(source.as_bytes(), None)?.image)
+        Ok(self
+            .load_bytes_with_diagnostics(source.as_bytes(), None)?
+            .image)
     }
 
     pub fn load_file_with_diagnostics(
@@ -237,7 +239,12 @@ impl SvgLoader {
             dpi: self.options.dpi,
             font_family: self.options.default_font_family.to_string(),
             font_size: self.options.default_font_size,
-            languages: self.options.languages.iter().map(|s| s.to_string()).collect(),
+            languages: self
+                .options
+                .languages
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             shape_rendering: usvg::ShapeRendering::default(),
             text_rendering: usvg::TextRendering::default(),
             image_rendering: usvg::ImageRendering::default(),

@@ -273,7 +273,10 @@ impl<T: ?Sized> ChildList<T> {
     /// Identity-based (`Rc::ptr_eq`), not value-based — `T` is a trait object with no `PartialEq`.
     pub fn remove(&self, item: &Rc<T>) -> bool {
         let mut items = self.items.borrow_mut();
-        let Some(index) = items.iter().position(|candidate| Rc::ptr_eq(candidate, item)) else {
+        let Some(index) = items
+            .iter()
+            .position(|candidate| Rc::ptr_eq(candidate, item))
+        else {
             return false;
         };
         items.remove(index);

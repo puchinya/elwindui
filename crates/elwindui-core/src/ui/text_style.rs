@@ -209,9 +209,7 @@ pub trait TextStyleOwner: UIElementExt {
 /// `Grid`/`Layout`/`Shape`/`Image` in between is transparent (its `as_text_style_owner()` is `None`,
 /// so the walk simply continues past it) — inheritance is never blocked by a non-owning element
 /// (指示書 §11).
-pub fn inherited_cascaded_text_style(
-    base: &UIElement,
-) -> crate::graphics::CascadedTextStyle {
+pub fn inherited_cascaded_text_style(base: &UIElement) -> crate::graphics::CascadedTextStyle {
     // `base` is the bare `UIElement` struct, not a `dyn UIElementExt` — read its `visual_parent`
     // field directly for this first hop (mirroring `request_relayout`'s identical first step);
     // every subsequent hop is a real `Rc<dyn UIElementExt>`, which does implement the trait method.
@@ -291,7 +289,10 @@ mod tests {
         control.set_font_size(24.0);
         let text_block = TextBlock::new();
         text_block.set_font_size(12.0);
-        control.as_ui_element().visual_collection.add(text_block.clone());
+        control
+            .as_ui_element()
+            .visual_collection
+            .add(text_block.clone());
 
         assert_eq!(text_block.resolved_text_style().font_size, 12.0);
     }
@@ -307,11 +308,17 @@ mod tests {
         control.set_font_weight(crate::graphics::FontWeight::BOLD);
         let text_block = TextBlock::new();
         text_block.set_font_size(12.0);
-        control.as_ui_element().visual_collection.add(text_block.clone());
+        control
+            .as_ui_element()
+            .visual_collection
+            .add(text_block.clone());
 
         let style = text_block.resolved_text_style();
         assert_eq!(style.font_size, 12.0); // local wins
-        assert_eq!(style.font_family, crate::graphics::FontFamily::new("Helvetica")); // inherited
+        assert_eq!(
+            style.font_family,
+            crate::graphics::FontFamily::new("Helvetica")
+        ); // inherited
         assert_eq!(style.font_weight, crate::graphics::FontWeight::BOLD); // inherited
     }
 
@@ -321,7 +328,10 @@ mod tests {
         control.set_font_size(24.0);
         let text_block = TextBlock::new();
         text_block.set_font_size(12.0);
-        control.as_ui_element().visual_collection.add(text_block.clone());
+        control
+            .as_ui_element()
+            .visual_collection
+            .add(text_block.clone());
         assert_eq!(text_block.resolved_text_style().font_size, 12.0);
 
         text_block.clear_font_size();
@@ -333,7 +343,10 @@ mod tests {
         let text_block = TextBlock::new();
         let host = Rc::new(RecordingRelayoutHost::default());
         text_block.set_invalidate_host(Some(host.clone() as Rc<dyn RelayoutHost>));
-        layout_root(&(text_block.clone() as Rc<dyn UIElementExt>), size(100.0, 100.0));
+        layout_root(
+            &(text_block.clone() as Rc<dyn UIElementExt>),
+            size(100.0, 100.0),
+        );
         assert!(text_block.measured_size().is_some());
         assert!(text_block.arranged_width().is_some());
 
@@ -343,9 +356,14 @@ mod tests {
             "a font-size change must invalidate measure"
         );
 
-        layout_root(&(text_block.clone() as Rc<dyn UIElementExt>), size(100.0, 100.0));
+        layout_root(
+            &(text_block.clone() as Rc<dyn UIElementExt>),
+            size(100.0, 100.0),
+        );
         assert!(text_block.measured_size().is_some());
-        text_block.set_foreground(Some(crate::graphics::Brush::Solid(crate::graphics::Color::white())));
+        text_block.set_foreground(Some(crate::graphics::Brush::Solid(
+            crate::graphics::Color::white(),
+        )));
         assert!(
             text_block.measured_size().is_some(),
             "a foreground-only change must not invalidate measure"
@@ -360,11 +378,20 @@ mod tests {
         let new_parent = Control::new();
         new_parent.set_font_size(30.0);
         let text_block = TextBlock::new();
-        old_parent.as_ui_element().visual_collection.add(text_block.clone());
+        old_parent
+            .as_ui_element()
+            .visual_collection
+            .add(text_block.clone());
         assert_eq!(text_block.resolved_text_style().font_size, 10.0);
 
-        old_parent.as_ui_element().visual_collection.remove(&(text_block.clone() as Rc<dyn UIElementExt>));
-        new_parent.as_ui_element().visual_collection.add(text_block.clone());
+        old_parent
+            .as_ui_element()
+            .visual_collection
+            .remove(&(text_block.clone() as Rc<dyn UIElementExt>));
+        new_parent
+            .as_ui_element()
+            .visual_collection
+            .add(text_block.clone());
         assert_eq!(text_block.resolved_text_style().font_size, 30.0);
     }
 
@@ -373,13 +400,21 @@ mod tests {
         let parent = Control::new();
         parent.set_font_size(30.0);
         let text_block = TextBlock::new();
-        parent.as_ui_element().visual_collection.add(text_block.clone());
+        parent
+            .as_ui_element()
+            .visual_collection
+            .add(text_block.clone());
         assert_eq!(text_block.resolved_text_style().font_size, 30.0);
 
-        parent.as_ui_element().visual_collection.remove(&(text_block.clone() as Rc<dyn UIElementExt>));
+        parent
+            .as_ui_element()
+            .visual_collection
+            .remove(&(text_block.clone() as Rc<dyn UIElementExt>));
         assert_eq!(
             text_block.resolved_text_style().font_size,
-            crate::graphics::text_backend().default_text_style().font_size
+            crate::graphics::text_backend()
+                .default_text_style()
+                .font_size
         );
     }
 
@@ -395,7 +430,10 @@ mod tests {
         let via_logical = child
             .inheritance_parent(InheritanceParentKind::Logical)
             .expect("Logical must fall back to Visual when there is no logical parent");
-        assert!(Rc::ptr_eq(&via_logical, &(root.clone() as Rc<dyn UIElementExt>)));
+        assert!(Rc::ptr_eq(
+            &via_logical,
+            &(root.clone() as Rc<dyn UIElementExt>)
+        ));
         let via_visual = child
             .inheritance_parent(InheritanceParentKind::Visual)
             .expect("Visual parent must be reachable directly");

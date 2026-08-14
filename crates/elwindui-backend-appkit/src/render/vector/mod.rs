@@ -332,7 +332,8 @@ pub(crate) fn render_group(
     }
 
     if let Some(mask) = &group.mask {
-        if let Some(mask_layer) = build_mask_layer(mask, &world, layer.contentsScale() as f32, image_cache)
+        if let Some(mask_layer) =
+            build_mask_layer(mask, &world, layer.contentsScale() as f32, image_cache)
         {
             set_mask_scaled(&wrapper, &mask_layer);
         }

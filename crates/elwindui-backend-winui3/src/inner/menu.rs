@@ -1,15 +1,13 @@
 //! `MenuBar`/`MenuFlyout` for the app menu bar and context menus.
 
-use crate::ffi::{register_ui_event_callback, invoke_ui_event_callback};
 use crate::bindings;
-use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    MenuFlyoutItem, MenuFlyoutItemBase,
-};
+use crate::bindings::Microsoft::UI::Xaml::Controls::{MenuFlyoutItem, MenuFlyoutItemBase};
 use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use windows::System::{VirtualKey, VirtualKeyModifiers};
+use crate::ffi::{invoke_ui_event_callback, register_ui_event_callback};
 use std::cell::RefCell;
 use std::rc::Rc;
+use windows::System::{VirtualKey, VirtualKeyModifiers};
 use windows::core::{HSTRING, Interface};
 
 /// See `elwindui_backend_appkit::inner::InnerMenuItem`'s doc comment — same role, backed by a
@@ -29,14 +27,16 @@ impl InnerMenuItem {
             on_select: Rc::new(RefCell::new(None)),
         };
         {
-        let callback = this.on_select.clone();
-        let callback_id = register_ui_event_callback(Rc::new(move || {
-            if let Some(callback) = callback.borrow().as_ref() { callback(); }
-        }));
-        let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
-            invoke_ui_event_callback(callback_id);
-            Ok(())
-        }));
+            let callback = this.on_select.clone();
+            let callback_id = register_ui_event_callback(Rc::new(move || {
+                if let Some(callback) = callback.borrow().as_ref() {
+                    callback();
+                }
+            }));
+            let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
+                invoke_ui_event_callback(callback_id);
+                Ok(())
+            }));
         }
         this
     }
@@ -86,9 +86,7 @@ impl InnerMenuItem {
 #[derive(Clone)]
 pub(crate) struct InnerMenu {
     items: Rc<RefCell<Vec<InnerMenuItem>>>,
-    installed_into: Rc<
-        RefCell<Option<windows_collections::IVector<MenuFlyoutItemBase>>>,
-    >,
+    installed_into: Rc<RefCell<Option<windows_collections::IVector<MenuFlyoutItemBase>>>>,
 }
 
 impl InnerMenu {

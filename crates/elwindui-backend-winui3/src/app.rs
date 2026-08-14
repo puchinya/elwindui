@@ -100,7 +100,10 @@ pub(crate) fn retain_window(window: &bindings::Microsoft::UI::Xaml::Window) {
         .Closed(&closed)
         .expect("Window::Closed event registration");
     WINDOWS.with(|windows| {
-        windows.borrow_mut().push(RetainedWindow { id, _window: window.clone() });
+        windows.borrow_mut().push(RetainedWindow {
+            id,
+            _window: window.clone(),
+        });
     });
 }
 
@@ -150,7 +153,10 @@ where
     F: FnOnce() + 'static,
 {
     STARTUP.with(|slot| {
-        assert!(slot.borrow().is_none(), "elwindui::application::run may only be called once");
+        assert!(
+            slot.borrow().is_none(),
+            "elwindui::application::run may only be called once"
+        );
         *slot.borrow_mut() = Some(Box::new(startup));
     });
     // No ambient Environment entry needed (CI-6 of #80): every generated component's `mount()`

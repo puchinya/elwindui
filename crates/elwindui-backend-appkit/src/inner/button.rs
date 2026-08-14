@@ -1,12 +1,10 @@
 //! `NSButton` plus the target/action trampoline that turns a click into an `on_click` dispatch.
 
 use crate::ffi::{AnyView, mtm};
+use elwindui_core::ui::ButtonRole;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{
-    AnyThread, DefinedClass, define_class, msg_send, sel,
-};
-use elwindui_core::ui::ButtonRole;
+use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{NSButton, NSColor};
 use objc2_foundation::{NSObjectProtocol, NSString};
 use std::cell::RefCell;

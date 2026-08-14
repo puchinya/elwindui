@@ -2,9 +2,7 @@
 
 use super::NativeControl;
 use crate::AnyView;
-use crate::inner::{
-    InnerPasswordBox, InnerTextArea, InnerTextBox,
-};
+use crate::inner::{InnerPasswordBox, InnerTextArea, InnerTextBox};
 use elwindui_core::ui::UIElementExt;
 use std::rc::Rc;
 

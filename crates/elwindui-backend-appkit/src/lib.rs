@@ -58,7 +58,6 @@ pub use native_ui::*;
 // though the rest of `inner` is private.
 pub use ffi::AnyView;
 
-
 /// Re-exported so `elwindui`'s own facade can expose `application::run` uniformly across
 /// backends. See `app`'s module doc.
 pub mod application {

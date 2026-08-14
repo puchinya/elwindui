@@ -10,11 +10,6 @@
 pub use elwindui_core as core;
 pub use elwindui_core::visual_tree;
 pub use elwindui_i18n as i18n;
-/// SVG loading (`load_svg_file`/`load_svg_bytes`/`load_svg_str`, `SvgLoader`) — backends never
-/// depend on this crate directly, only on the `elwindui_core::graphics::VectorImage` it produces
-/// (SVG読み込み・ベクター描画対応 実装指示書§1.5/§4.3).
-#[cfg(feature = "svg")]
-pub use elwindui_svg as svg;
 /// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — writes
 /// a `component`+`view` pair (docs/specs/dsl_spec.md §3/§13) as a single ordinary Rust `struct`,
 /// alongside `#[elwindui::viewmodel] mod foo { struct Foo { .. } impl Foo { .. } }` for the
@@ -24,6 +19,11 @@ pub use elwindui_svg as svg;
 /// `match`/`if let` exhaustiveness checking a DSL-text `enum` always got — see
 /// `elwindui_macros::dsl_enum`'s own doc comment.
 pub use elwindui_macros::{class, component, dsl_enum, environment_key, main, theme, viewmodel};
+/// SVG loading (`load_svg_file`/`load_svg_bytes`/`load_svg_str`, `SvgLoader`) — backends never
+/// depend on this crate directly, only on the `elwindui_core::graphics::VectorImage` it produces
+/// (SVG読み込み・ベクター描画対応 実装指示書§1.5/§4.3).
+#[cfg(feature = "svg")]
+pub use elwindui_svg as svg;
 
 /// Initializes the native UI runtime selected for the current operating system.
 ///
@@ -59,10 +59,10 @@ pub fn init() -> Result<(), InitError> {
 
 #[cfg(all(target_os = "macos", feature = "backend-appkit"))]
 pub use elwindui_backend_appkit as backend;
-#[cfg(all(target_os = "windows", feature = "backend-winui3"))]
-pub use elwindui_backend_winui3 as backend;
 #[cfg(all(target_os = "linux", feature = "backend-gtk4"))]
 pub use elwindui_backend_gtk4 as backend;
+#[cfg(all(target_os = "windows", feature = "backend-winui3"))]
+pub use elwindui_backend_winui3 as backend;
 
 #[cfg(all(target_os = "macos", not(feature = "backend-appkit")))]
 compile_error!("elwindui on macOS requires the `backend-appkit` feature");
@@ -81,10 +81,10 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 pub mod ui {
     #[cfg(all(target_os = "macos", feature = "backend-appkit"))]
     pub use elwindui_backend_appkit::*;
-    #[cfg(all(target_os = "windows", feature = "backend-winui3"))]
-    pub use elwindui_backend_winui3::*;
     #[cfg(all(target_os = "linux", feature = "backend-gtk4"))]
     pub use elwindui_backend_gtk4::*;
+    #[cfg(all(target_os = "windows", feature = "backend-winui3"))]
+    pub use elwindui_backend_winui3::*;
     pub use elwindui_core::ui::*;
 }
 

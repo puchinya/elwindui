@@ -1,41 +1,35 @@
 //! The caches that let a render pass reuse geometry, brushes, clips, and image surfaces
 //! instead of rebuilding them every frame.
 
-
 use super::geometry::*;
 use super::*;
 
 use crate::bindings::Microsoft::Graphics::Canvas::Geometry::{
     CanvasArcSize, CanvasFigureLoop, CanvasFilledRegionDetermination, CanvasGeometry,
-    CanvasGeometryCombine,
-    CanvasPathBuilder, CanvasSweepDirection,
+    CanvasGeometryCombine, CanvasPathBuilder, CanvasSweepDirection,
 };
-use crate::bindings::Microsoft::Graphics::Canvas::{
-    CanvasDevice,
-    ICanvasResourceCreator,
-};
+use crate::bindings::Microsoft::Graphics::Canvas::{CanvasDevice, ICanvasResourceCreator};
 use crate::bindings::Microsoft::UI::Composition::{
-    Compositor, CompositionBrush, CompositionClip, CompositionColorBrush,
-    CompositionColorGradientStopCollection, CompositionEllipseGeometry,
-    CompositionGeometricClip, CompositionGeometry, CompositionGradientBrush,
-    CompositionGradientExtendMode, CompositionLineGeometry, CompositionLinearGradientBrush,
-    CompositionMappingMode, CompositionPath, CompositionPathGeometry,
-    CompositionRadialGradientBrush, CompositionRectangleGeometry,
-    CompositionRoundedRectangleGeometry, CompositionSpriteShape,
-    CompositionStrokeCap, CompositionStrokeLineJoin,
+    CompositionBrush, CompositionClip, CompositionColorBrush,
+    CompositionColorGradientStopCollection, CompositionEllipseGeometry, CompositionGeometricClip,
+    CompositionGeometry, CompositionGradientBrush, CompositionGradientExtendMode,
+    CompositionLineGeometry, CompositionLinearGradientBrush, CompositionMappingMode,
+    CompositionPath, CompositionPathGeometry, CompositionRadialGradientBrush,
+    CompositionRectangleGeometry, CompositionRoundedRectangleGeometry, CompositionSpriteShape,
+    CompositionStrokeCap, CompositionStrokeLineJoin, Compositor,
 };
 use crate::bindings::Microsoft::UI::Xaml::Media::{
     LoadedImageSourceLoadCompletedEventArgs, LoadedImageSurface,
 };
 use elwindui_core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui_core::graphics::{
-    Brush, BrushMappingMode, FillRule, GradientSpreadMethod, LineCap, LineJoin, PathCommand,
-    StrokeStyle, Image, ImageData,
+    Brush, BrushMappingMode, FillRule, GradientSpreadMethod, Image, ImageData, LineCap, LineJoin,
+    PathCommand, StrokeStyle,
 };
 use std::collections::{HashMap, HashSet};
-use windows::core::{Interface, Result};
 use windows::Foundation::TypedEventHandler;
-use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, IRandomAccessStream};
+use windows::Storage::Streams::{DataWriter, IRandomAccessStream, InMemoryRandomAccessStream};
+use windows::core::{Interface, Result};
 use windows_numerics::Matrix3x2;
 
 /// Keeps the WinRT stream alive until WinUI has finished decoding the corresponding surface.
@@ -57,7 +51,9 @@ impl ImageSurfaceCache {
         let mut live = HashSet::new();
         for node in islands.iter().flat_map(|island| &island.nodes) {
             for brush in std::iter::once(node.fill.as_ref())
-                .chain(std::iter::once(node.stroke.as_ref().map(|(brush, _)| brush)))
+                .chain(std::iter::once(
+                    node.stroke.as_ref().map(|(brush, _)| brush),
+                ))
                 .flatten()
             {
                 if let Brush::Image(image) = brush {
@@ -90,19 +86,29 @@ impl ImageSurfaceCache {
         }
     }
 
-    pub(crate) fn surface_for(&mut self, image: &Image) -> std::result::Result<LoadedImageSurface, &'static str> {
+    pub(crate) fn surface_for(
+        &mut self,
+        image: &Image,
+    ) -> std::result::Result<LoadedImageSurface, &'static str> {
         let key = image.data() as *const ImageData as usize;
         if let Some(entry) = self.entries.get(&key) {
             return Ok(entry.surface.clone());
         }
 
         let ImageData::Encoded { bytes, .. } = image.data() else {
-            return Err("RGBA and backend image handles require CompositionDrawingSurface fallback");
+            return Err(
+                "RGBA and backend image handles require CompositionDrawingSurface fallback",
+            );
         };
-        let stream = InMemoryRandomAccessStream::new().map_err(|_| "image stream creation failed")?;
-        let writer = DataWriter::CreateDataWriter(&stream).map_err(|_| "image writer creation failed")?;
-        writer.WriteBytes(bytes).map_err(|_| "image stream write failed")?;
-        writer.StoreAsync()
+        let stream =
+            InMemoryRandomAccessStream::new().map_err(|_| "image stream creation failed")?;
+        let writer =
+            DataWriter::CreateDataWriter(&stream).map_err(|_| "image writer creation failed")?;
+        writer
+            .WriteBytes(bytes)
+            .map_err(|_| "image stream write failed")?;
+        writer
+            .StoreAsync()
             .map_err(|_| "image stream flush failed")?
             .join()
             .map_err(|_| "image stream flush failed")?;
@@ -127,7 +133,11 @@ impl ImageSurfaceCache {
                 );
                 Ok(())
             });
-            Some(surface.LoadCompleted(&handler).map_err(|_| "LoadedImageSurface event registration failed")?)
+            Some(
+                surface
+                    .LoadCompleted(&handler)
+                    .map_err(|_| "LoadedImageSurface event registration failed")?,
+            )
         } else {
             None
         };
@@ -216,10 +226,14 @@ impl ClipState {
             .CreateGeometricClipWithGeometry(&base)
             .map_err(|_| "CreateGeometricClipWithGeometry failed")?;
         clip.SetTransformMatrix(Matrix3x2 {
-            M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0,
-            M31: -island_bounds.x, M32: -island_bounds.y,
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: -island_bounds.x,
+            M32: -island_bounds.y,
         })
-            .map_err(|_| "clip transform failed")?;
+        .map_err(|_| "clip transform failed")?;
         Ok(Self {
             clip,
             _geometry: geometry,
@@ -239,18 +253,33 @@ pub(crate) fn canvas_clip_geometry(
 ) -> std::result::Result<CanvasGeometry, &'static str> {
     match spec {
         CompositionClipSpec::Rect { rect, .. } => CanvasGeometry::CreateRectangleAtCoords(
-            creator, rect.x, rect.y, rect.width, rect.height,
-        ).map_err(|_| "clip rectangle geometry creation failed"),
+            creator,
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+        )
+        .map_err(|_| "clip rectangle geometry creation failed"),
         CompositionClipSpec::RoundedRect { rect, radii, .. } => {
             let radius = uniform_radius(*radii)
                 .ok_or("per-corner rounded clip requires surface fallback")?;
             CanvasGeometry::CreateRoundedRectangleAtCoords(
-                creator, rect.x, rect.y, rect.width, rect.height, radius, radius,
-            ).map_err(|_| "clip rounded geometry creation failed")
+                creator,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                radius,
+                radius,
+            )
+            .map_err(|_| "clip rounded geometry creation failed")
         }
-        CompositionClipSpec::Path { commands, rule, origin, .. } => {
-            create_canvas_path(creator, commands, *origin, *rule)
-        }
+        CompositionClipSpec::Path {
+            commands,
+            rule,
+            origin,
+            ..
+        } => create_canvas_path(creator, commands, *origin, *rule),
     }
 }
 
@@ -366,15 +395,11 @@ impl GeometryState {
                     .clone()
                     .cast()
                     .map_err(|_| "CanvasDevice is not an ICanvasResourceCreator")?;
-                let canvas_geometry: CanvasGeometry = match create_canvas_path(
-                    &creator,
-                    commands,
-                    *origin,
-                    *rule,
-                ) {
-                    Ok(geometry) => geometry,
-                    Err(reason) => return Err(reason),
-                };
+                let canvas_geometry: CanvasGeometry =
+                    match create_canvas_path(&creator, commands, *origin, *rule) {
+                        Ok(geometry) => geometry,
+                        Err(reason) => return Err(reason),
+                    };
                 let (path, geometry): (CompositionPath, CompositionPathGeometry) =
                     match composition_path_geometry(compositor, &canvas_geometry) {
                         Ok(result) => result,
@@ -386,7 +411,9 @@ impl GeometryState {
                     _canvas_geometry: canvas_geometry,
                 })
             }
-            CompositionPrimitive::VectorImage { .. } => Err("vector images require a CompositionDrawingSurface"),
+            CompositionPrimitive::VectorImage { .. } => {
+                Err("vector images require a CompositionDrawingSurface")
+            }
         }
     }
 
@@ -422,11 +449,7 @@ pub(crate) enum BrushState {
 }
 
 impl BrushState {
-    pub(crate) fn create(
-        compositor: &Compositor,
-        brush: &Brush,
-        opacity: f32,
-    ) -> Result<Self> {
+    pub(crate) fn create(compositor: &Compositor, brush: &Brush, opacity: f32) -> Result<Self> {
         match brush {
             Brush::Solid(color) => Ok(Self::Solid(
                 compositor.CreateColorBrushWithColor(color_with_opacity(*color, opacity))?,
@@ -505,11 +528,10 @@ pub(crate) fn apply_gradient_common(
     let collection: CompositionColorGradientStopCollection = brush.ColorStops()?;
     collection.Clear()?;
     for stop in stops {
-        let native = compositor
-            .CreateColorGradientStopWithOffsetAndColor(
-                stop.offset,
-                color_with_opacity(stop.color, opacity),
-            )?;
+        let native = compositor.CreateColorGradientStopWithOffsetAndColor(
+            stop.offset,
+            color_with_opacity(stop.color, opacity),
+        )?;
         collection.Append(&native)?;
     }
     Ok(())
@@ -543,7 +565,8 @@ pub(crate) fn create_canvas_path(
 ) -> std::result::Result<CanvasGeometry, &'static str> {
     use elwindui_core::graphics::SweepDirection;
 
-    let builder = CanvasPathBuilder::Create(creator).map_err(|_| "CanvasPathBuilder::Create failed")?;
+    let builder =
+        CanvasPathBuilder::Create(creator).map_err(|_| "CanvasPathBuilder::Create failed")?;
     builder
         .SetFilledRegionDetermination(match rule {
             FillRule::EvenOdd => CanvasFilledRegionDetermination::Alternate,
@@ -592,9 +615,7 @@ pub(crate) fn create_canvas_path(
                     arc.x_axis_rotation,
                     match arc.sweep {
                         SweepDirection::Clockwise => CanvasSweepDirection::Clockwise,
-                        SweepDirection::CounterClockwise => {
-                            CanvasSweepDirection::CounterClockwise
-                        }
+                        SweepDirection::CounterClockwise => CanvasSweepDirection::CounterClockwise,
                     },
                     if arc.large_arc {
                         CanvasArcSize::Large
@@ -622,11 +643,7 @@ pub(crate) fn create_canvas_path(
 
 pub(crate) fn uniform_radius(radii: CornerRadius) -> Option<f32> {
     let radius = radii.top_left;
-    let values = [
-        radii.top_right,
-        radii.bottom_right,
-        radii.bottom_left,
-    ];
+    let values = [radii.top_right, radii.bottom_right, radii.bottom_left];
     values
         .into_iter()
         .all(|value| (value - radius).abs() <= f32::EPSILON)

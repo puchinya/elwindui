@@ -1,17 +1,19 @@
 //! `TabView` and its per-tab content hosting.
 
-use crate::ffi::{AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_index_event_callback};
-use crate::host::TreeHostPanel;
 use crate::bindings;
+use crate::bindings::Microsoft::UI::Xaml::Controls::SelectionChangedEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
     TabView as XamlTabView, TabViewCloseButtonOverlayMode, TabViewItem,
     TabViewTabCloseRequestedEventArgs,
 };
 use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
-use crate::bindings::Microsoft::UI::Xaml::Controls::SelectionChangedEventHandler;
-use windows::Foundation::{PropertyValue, TypedEventHandler};
+use crate::ffi::{
+    AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_index_event_callback,
+};
+use crate::host::TreeHostPanel;
 use std::cell::RefCell;
 use std::rc::Rc;
+use windows::Foundation::{PropertyValue, TypedEventHandler};
 use windows::core::{HSTRING, Interface};
 
 /// See docs/specs/ui_spec.md#tabs. `Microsoft.UI.Xaml.Controls.TabView` is a real native
@@ -64,74 +66,89 @@ impl InnerTabView {
         };
 
         {
-        let on_content_size_changed = this.on_content_size_changed.clone();
-        let xaml_for_resize = this.xaml.clone();
-        let callback_id = this.callback_owner.register_event(Rc::new(move || {
-            let (width, height) = content_size(&xaml_for_resize);
-            if let Some(callback) = on_content_size_changed.borrow().as_ref() {
-                callback(width, height);
-            }
-        }));
-        let _ = this.xaml.SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
-            invoke_ui_event_callback(callback_id);
-            Ok(())
-        }));
-        }
-
-        {
-        let on_select = this.on_select.clone();
-        let callback_id = this.callback_owner.register_index(Rc::new(move |index| {
-            if let Some(callback) = on_select.borrow().as_ref() { callback(index); }
-        }));
-        let _ = this.xaml.SelectionChanged(&SelectionChangedEventHandler::new(move |sender, _| {
-            if let Some(sender) = sender.cloned().and_then(|sender| sender.cast::<XamlTabView>().ok()) {
-                let index = sender.SelectedIndex().unwrap_or(-1);
-                if index >= 0 {
-                    invoke_ui_index_event_callback(callback_id, index as usize);
+            let on_content_size_changed = this.on_content_size_changed.clone();
+            let xaml_for_resize = this.xaml.clone();
+            let callback_id = this.callback_owner.register_event(Rc::new(move || {
+                let (width, height) = content_size(&xaml_for_resize);
+                if let Some(callback) = on_content_size_changed.borrow().as_ref() {
+                    callback(width, height);
                 }
-            }
-            Ok(())
-        }));
+            }));
+            let _ = this
+                .xaml
+                .SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
+                    invoke_ui_event_callback(callback_id);
+                    Ok(())
+                }));
         }
 
         {
-        let on_close = this.on_close.clone();
-        let callback_id = this.callback_owner.register_index(Rc::new(move |index| {
-            if let Some(callback) = on_close.borrow().as_ref() { callback(index); }
-        }));
-        let _ = this.xaml.TabCloseRequested(&TypedEventHandler::<
-            XamlTabView,
-            TabViewTabCloseRequestedEventArgs,
-        >::new(move |sender, args| {
-            if let (Some(sender), Some(args)) = (
-                sender.cloned().and_then(|sender| sender.cast::<XamlTabView>().ok()),
-                args.cloned(),
-            ) {
-                if let Ok(items) = sender.TabItems() {
-                    if let Ok(item) = args.Tab() {
-                        let mut index = 0;
-                        let item: windows::core::IInspectable = item.into();
-                        if items.IndexOf(&item, &mut index).unwrap_or(false) {
+            let on_select = this.on_select.clone();
+            let callback_id = this.callback_owner.register_index(Rc::new(move |index| {
+                if let Some(callback) = on_select.borrow().as_ref() {
+                    callback(index);
+                }
+            }));
+            let _ = this
+                .xaml
+                .SelectionChanged(&SelectionChangedEventHandler::new(move |sender, _| {
+                    if let Some(sender) = sender
+                        .cloned()
+                        .and_then(|sender| sender.cast::<XamlTabView>().ok())
+                    {
+                        let index = sender.SelectedIndex().unwrap_or(-1);
+                        if index >= 0 {
                             invoke_ui_index_event_callback(callback_id, index as usize);
                         }
                     }
-                }
-            }
-            Ok(())
-        }));
+                    Ok(())
+                }));
         }
 
         {
-        let on_new_tab = this.on_new_tab.clone();
-        let callback_id = this.callback_owner.register_event(Rc::new(move || {
-            if let Some(callback) = on_new_tab.borrow().as_ref() { callback(); }
-        }));
-        let _ = this
-            .xaml
-            .AddTabButtonClick(&TypedEventHandler::new(move |_, _| {
-                invoke_ui_event_callback(callback_id);
+            let on_close = this.on_close.clone();
+            let callback_id = this.callback_owner.register_index(Rc::new(move |index| {
+                if let Some(callback) = on_close.borrow().as_ref() {
+                    callback(index);
+                }
+            }));
+            let _ = this.xaml.TabCloseRequested(&TypedEventHandler::<
+                XamlTabView,
+                TabViewTabCloseRequestedEventArgs,
+            >::new(move |sender, args| {
+                if let (Some(sender), Some(args)) = (
+                    sender
+                        .cloned()
+                        .and_then(|sender| sender.cast::<XamlTabView>().ok()),
+                    args.cloned(),
+                ) {
+                    if let Ok(items) = sender.TabItems() {
+                        if let Ok(item) = args.Tab() {
+                            let mut index = 0;
+                            let item: windows::core::IInspectable = item.into();
+                            if items.IndexOf(&item, &mut index).unwrap_or(false) {
+                                invoke_ui_index_event_callback(callback_id, index as usize);
+                            }
+                        }
+                    }
+                }
                 Ok(())
             }));
+        }
+
+        {
+            let on_new_tab = this.on_new_tab.clone();
+            let callback_id = this.callback_owner.register_event(Rc::new(move || {
+                if let Some(callback) = on_new_tab.borrow().as_ref() {
+                    callback();
+                }
+            }));
+            let _ = this
+                .xaml
+                .AddTabButtonClick(&TypedEventHandler::new(move |_, _| {
+                    invoke_ui_event_callback(callback_id);
+                    Ok(())
+                }));
         }
 
         this
@@ -168,7 +185,12 @@ impl InnerTabView {
     /// Applies a viewport to one host and requests its synchronous layout. Suppressed hosts still
     /// retain the explicit size but make `force_relayout` a no-op, so selection can size first and
     /// activate second without doing a wasted pass.
-    pub(crate) fn resize_content_host(&self, content_host: &TreeHostPanel, width: f64, height: f64) {
+    pub(crate) fn resize_content_host(
+        &self,
+        content_host: &TreeHostPanel,
+        width: f64,
+        height: f64,
+    ) {
         let element = content_host.as_element();
         let _ = element.SetWidth(width);
         let _ = element.SetHeight(height);

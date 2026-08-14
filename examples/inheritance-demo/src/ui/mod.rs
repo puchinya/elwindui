@@ -5,9 +5,9 @@
 // `loud_panel` inherits it (`inherits crate::ui::LabeledPanel`) and also references it as a plain
 // view element; `inheritance_demo_window` uses both.
 mod content_wrapper;
+mod inheritance_demo_window;
 mod labeled_panel;
 mod loud_panel;
-mod inheritance_demo_window;
 
 // Glob re-exports, not a named list: `#[class]` generates a companion
 // `__elwindui_macros_of_LabeledPanel` alongside `LabeledPanel` itself — `loud_panel.rs`'s

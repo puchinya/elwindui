@@ -1,13 +1,13 @@
 //! The XAML `Window` and its content-host wiring.
 
-use crate::host::TreeHostPanel;
 use super::InnerMenuBar;
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::{SizeChangedEventHandler, Window as XamlWindow};
-use windows::Graphics::{PointInt32, SizeInt32};
+use crate::host::TreeHostPanel;
 use std::cell::Cell;
 use std::rc::Rc;
+use windows::Graphics::{PointInt32, SizeInt32};
 use windows::core::HSTRING;
 
 pub(crate) struct InnerWindow {
@@ -21,7 +21,11 @@ impl InnerWindow {
         let xaml = XamlWindow::new().expect("Window::new");
         let content_host = TreeHostPanel::new();
         let _ = xaml.SetContent(&content_host.as_element());
-        Self { xaml, content_host, retained: Cell::new(false) }
+        Self {
+            xaml,
+            content_host,
+            retained: Cell::new(false),
+        }
     }
 
     /// Replaces the window's whole content tree — see `TreeHostPanel` for how an `Rc<dyn

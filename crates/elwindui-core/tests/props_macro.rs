@@ -167,14 +167,20 @@ impl FakeTextBox {
 fn props_macro_sets_text_box_placeholder_as_a_literal() {
     let text_box = FakeTextBox::default();
     elwindui_core::__elwindui_props_TextBox!(@set text_box, placeholder, "Enter your name");
-    assert_eq!(text_box.placeholder.borrow().as_deref(), Some("Enter your name"));
+    assert_eq!(
+        text_box.placeholder.borrow().as_deref(),
+        Some("Enter your name")
+    );
 }
 
 #[test]
 fn props_macro_sets_text_box_placeholder_from_a_string_variable() {
     let text_box = FakeTextBox::default();
     elwindui_core::__elwindui_props_TextBox!(@set text_box, placeholder, String::from("Enter your name"));
-    assert_eq!(text_box.placeholder.borrow().as_deref(), Some("Enter your name"));
+    assert_eq!(
+        text_box.placeholder.borrow().as_deref(),
+        Some("Enter your name")
+    );
 }
 
 #[derive(Default)]
@@ -192,7 +198,10 @@ impl FakePasswordBox {
 fn props_macro_sets_password_box_placeholder_as_a_literal() {
     let password_box = FakePasswordBox::default();
     elwindui_core::__elwindui_props_PasswordBox!(@set password_box, placeholder, "Enter your password");
-    assert_eq!(password_box.placeholder.borrow().as_deref(), Some("Enter your password"));
+    assert_eq!(
+        password_box.placeholder.borrow().as_deref(),
+        Some("Enter your password")
+    );
 }
 
 #[test]
@@ -201,7 +210,10 @@ fn props_macro_sets_password_box_placeholder_from_a_string_variable() {
     elwindui_core::__elwindui_props_PasswordBox!(
         @set password_box, placeholder, String::from("Enter your password")
     );
-    assert_eq!(password_box.placeholder.borrow().as_deref(), Some("Enter your password"));
+    assert_eq!(
+        password_box.placeholder.borrow().as_deref(),
+        Some("Enter your password")
+    );
 }
 
 // --- Selection controls (Phase 2: CheckBox / RadioButton / ToggleSwitch) ------------------------

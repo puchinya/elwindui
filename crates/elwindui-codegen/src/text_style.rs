@@ -11,9 +11,15 @@ use crate::ast::{Attr, FieldDef, FieldKind};
 /// on the literal path `"elwindui::core::graphics::Brush"`, so `foreground: "#3a3a3c"` only keeps
 /// working through that existing mechanism if the spelling agrees exactly.
 pub(crate) const TEXT_STYLE_FIELDS: [(&str, &str); 7] = [
-    ("font_family", "Option<elwindui::core::graphics::FontFamily>"),
+    (
+        "font_family",
+        "Option<elwindui::core::graphics::FontFamily>",
+    ),
     ("font_size", "Option<f32>"),
-    ("font_weight", "Option<elwindui::core::graphics::FontWeight>"),
+    (
+        "font_weight",
+        "Option<elwindui::core::graphics::FontWeight>",
+    ),
     ("font_style", "Option<elwindui::core::graphics::FontStyle>"),
     (
         "font_stretch",
@@ -48,5 +54,7 @@ pub(crate) fn text_style_field_defs() -> Vec<FieldDef> {
 /// Every field name `#[text_style]` injects — used by `validate.rs` to reject a component that
 /// also hand-declares one of these itself.
 pub(crate) fn is_text_style_field_name(name: &str) -> bool {
-    TEXT_STYLE_FIELDS.iter().any(|(field_name, _)| *field_name == name)
+    TEXT_STYLE_FIELDS
+        .iter()
+        .any(|(field_name, _)| *field_name == name)
 }

@@ -3,7 +3,6 @@
 //!
 //! One file per control family; see `lib.rs` for the crate's layering.
 
-
 pub(crate) mod button;
 mod check_box;
 mod dropdown;

@@ -187,7 +187,10 @@ pub fn resolve_native_focus_target(
     render_tree: &RenderTree,
     owner_id: u64,
 ) -> Option<Rc<dyn UIElementExt>> {
-    render_tree.visual_index.get(&owner_id).and_then(Weak::upgrade)
+    render_tree
+        .visual_index
+        .get(&owner_id)
+        .and_then(Weak::upgrade)
 }
 
 pub fn native_focus_gained(target: &Rc<dyn UIElementExt>, focus: &FocusTracker, state: FocusState) {

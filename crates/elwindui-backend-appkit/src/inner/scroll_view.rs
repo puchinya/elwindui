@@ -61,7 +61,8 @@ impl InnerScrollView {
     /// bit so AppKit's ordinary autoresizing machinery keeps that axis synced to the clip view.
     fn apply_axes(&self) {
         let (horizontal, vertical) = self.axes.get();
-        self.content_host.set_unconstrained_axes(horizontal, vertical);
+        self.content_host
+            .set_unconstrained_axes(horizontal, vertical);
         let mut mask = objc2_app_kit::NSAutoresizingMaskOptions::ViewNotSizable;
         if !horizontal {
             mask |= objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable;

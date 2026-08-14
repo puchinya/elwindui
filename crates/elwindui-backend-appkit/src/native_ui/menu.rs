@@ -1,8 +1,6 @@
 //! `elwindui::ui::MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` and their `ListExt` collections.
 
-use crate::inner::{
-    InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem,
-};
+use crate::inner::{InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem};
 use std::rc::Rc;
 
 #[elwindui_macros::class(struct_only = elwindui_core::ui::MenuBarExt)]
@@ -91,7 +89,8 @@ impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuBarItemExt> for MenuB
         if !self.children.remove(item) {
             return false;
         }
-        self.inner.remove_item(&downcast_menu_bar_item(&**item).inner);
+        self.inner
+            .remove_item(&downcast_menu_bar_item(&**item).inner);
         true
     }
     fn remove_at(&self, index: usize) -> Rc<dyn elwindui_core::ui::MenuBarItemExt> {

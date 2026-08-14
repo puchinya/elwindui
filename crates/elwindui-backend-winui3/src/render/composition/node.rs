@@ -1,7 +1,6 @@
 //! Per-node retained state: one struct per `CompositionPrimitive` shape, holding the visuals
 //! and brushes that survive between render passes.
 
-
 use super::cache::*;
 use super::geometry::*;
 use super::*;
@@ -9,11 +8,9 @@ use super::*;
 use crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice;
 use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::UI::Composition::{
-    Compositor, CompositionBrush, CompositionClip,
-    CompositionGeometricClip,
-    CompositionDrawingSurface, CompositionGraphicsDevice, CompositionShape, CompositionSpriteShape, CompositionStretch,
-    CompositionSurfaceBrush, ICompositionSurface, ShapeVisual, SpriteVisual,
-    Visual,
+    CompositionBrush, CompositionClip, CompositionDrawingSurface, CompositionGeometricClip,
+    CompositionGraphicsDevice, CompositionShape, CompositionSpriteShape, CompositionStretch,
+    CompositionSurfaceBrush, Compositor, ICompositionSurface, ShapeVisual, SpriteVisual, Visual,
 };
 use crate::bindings::Microsoft::UI::Xaml::Media::LoadedImageSurface;
 use elwindui_core::base::Rect;
@@ -59,7 +56,11 @@ impl CompositionNodeState {
         ShapeNodeState::create(compositor, canvas_device, desired, island_bounds).map(Self::Shape)
     }
 
-    pub(crate) fn can_update(&self, desired: &DesiredCompositionNode, rasterization_scale: f32) -> bool {
+    pub(crate) fn can_update(
+        &self,
+        desired: &DesiredCompositionNode,
+        rasterization_scale: f32,
+    ) -> bool {
         match self {
             Self::Shape(node) => !is_image_node(desired) && node.can_update(desired),
             Self::Image(node) => {
@@ -130,9 +131,7 @@ impl ShapeNodeState {
         island_bounds: Rect,
     ) -> std::result::Result<Self, &'static str> {
         let geometry = GeometryState::create(compositor, canvas_device, &desired.primitive)?;
-        let base_geometry = geometry
-            .as_geometry()
-            .map_err(|_| "geometry cast failed")?;
+        let base_geometry = geometry.as_geometry().map_err(|_| "geometry cast failed")?;
         let shape = compositor
             .CreateSpriteShapeWithGeometry(&base_geometry)
             .map_err(|_| "CreateSpriteShapeWithGeometry failed")?;
@@ -172,9 +171,7 @@ impl ShapeNodeState {
         if self.snapshot.primitive != desired.primitive {
             self._geometry.update(&desired.primitive)?;
         }
-        if (self.fill.is_none() && desired.fill.is_some())
-            || self.snapshot.fill != desired.fill
-        {
+        if (self.fill.is_none() && desired.fill.is_some()) || self.snapshot.fill != desired.fill {
             self.fill = desired
                 .fill
                 .as_ref()
@@ -241,8 +238,14 @@ impl ImageNodeState {
             )
             .map(Self::DrawingSurface)
         } else {
-            SpriteImageNode::create(compositor, canvas_device, desired, island_bounds, image_surfaces)
-                .map(Self::Sprite)
+            SpriteImageNode::create(
+                compositor,
+                canvas_device,
+                desired,
+                island_bounds,
+                image_surfaces,
+            )
+            .map(Self::Sprite)
         }
     }
 
@@ -315,9 +318,13 @@ impl SpriteImageNode {
         let clip = ImageClipState::create(compositor, canvas_device, &desired.primitive)
             .map_err(|_| "SpriteVisual image clip creation failed")?;
         if let Some(clip) = &clip {
-            let clip_interface: CompositionClip = clip.clip.clone().cast()
+            let clip_interface: CompositionClip = clip
+                .clip
+                .clone()
+                .cast()
                 .map_err(|_| "SpriteVisual image clip cast failed")?;
-            visual.SetClip(&clip_interface)
+            visual
+                .SetClip(&clip_interface)
                 .map_err(|_| "SpriteVisual image clip assignment failed")?;
         }
         let mut state = Self {
@@ -354,9 +361,13 @@ impl SpriteImageNode {
             ));
         }
         self.visual.SetSize(vector2(rect.width, rect.height))?;
+        self.visual.SetTransformMatrix(image_visual_matrix(
+            desired.transform,
+            rect,
+            island_bounds,
+        ))?;
         self.visual
-            .SetTransformMatrix(image_visual_matrix(desired.transform, rect, island_bounds))?;
-        self.visual.SetOpacity((desired.opacity * image.opacity).clamp(0.0, 1.0))?;
+            .SetOpacity((desired.opacity * image.opacity).clamp(0.0, 1.0))?;
         self.snapshot = desired.clone();
         Ok(())
     }
@@ -376,21 +387,38 @@ impl ImageClipState {
         let bounds = primitive.local_bounds();
         let local = match primitive {
             CompositionPrimitive::Rectangle { .. } => return Ok(None),
-            CompositionPrimitive::RoundedRectangle { radii, .. } => CompositionPrimitive::RoundedRectangle {
-                rect: Rect { x: 0.0, y: 0.0, width: bounds.width, height: bounds.height },
-                radii: *radii,
-            },
+            CompositionPrimitive::RoundedRectangle { radii, .. } => {
+                CompositionPrimitive::RoundedRectangle {
+                    rect: Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: bounds.width,
+                        height: bounds.height,
+                    },
+                    radii: *radii,
+                }
+            }
             CompositionPrimitive::Ellipse { .. } => CompositionPrimitive::Ellipse {
-                rect: Rect { x: 0.0, y: 0.0, width: bounds.width, height: bounds.height },
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: bounds.width,
+                    height: bounds.height,
+                },
             },
             _ => return Err("image SpriteVisual primitive is not clip-compatible"),
         };
         let geometry = GeometryState::create(compositor, canvas_device, &local)?;
-        let geometry_interface = geometry.as_geometry().map_err(|_| "image clip geometry cast failed")?;
+        let geometry_interface = geometry
+            .as_geometry()
+            .map_err(|_| "image clip geometry cast failed")?;
         let clip = compositor
             .CreateGeometricClipWithGeometry(&geometry_interface)
             .map_err(|_| "CreateGeometricClipWithGeometry failed")?;
-        Ok(Some(Self { clip, _geometry: geometry }))
+        Ok(Some(Self {
+            clip,
+            _geometry: geometry,
+        }))
     }
 }
 
@@ -420,13 +448,12 @@ impl DrawingSurfaceImageNode {
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return Err("image has an empty destination rectangle");
         }
-        let graphics_device = CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device)
-            .map_err(|_| "CreateCompositionGraphicsDevice failed")?;
-        let surface = create_drawing_surface(
-            &graphics_device,
-            surface_size(rect, rasterization_scale),
-        )
-        .map_err(|_| "CreateDrawingSurface fallback failed")?;
+        let graphics_device =
+            CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device)
+                .map_err(|_| "CreateCompositionGraphicsDevice failed")?;
+        let surface =
+            create_drawing_surface(&graphics_device, surface_size(rect, rasterization_scale))
+                .map_err(|_| "CreateDrawingSurface fallback failed")?;
         if let Err(error) = draw_image_surface(&surface, desired, rasterization_scale) {
             if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
                 eprintln!("elwindui-winui3: CompositionDrawingSurface replay failed: {error:?}");
@@ -440,7 +467,8 @@ impl DrawingSurfaceImageNode {
         let brush = compositor
             .CreateSurfaceBrushWithSurface(&surface_interface)
             .map_err(|_| "fallback CreateSurfaceBrush failed")?;
-        brush.SetStretch(CompositionStretch::Fill)
+        brush
+            .SetStretch(CompositionStretch::Fill)
             .map_err(|_| "fallback SurfaceBrush stretch failed")?;
         let brush_interface: CompositionBrush = brush
             .clone()
@@ -483,9 +511,13 @@ impl DrawingSurfaceImageNode {
         let image = image_brush(desired).expect("checked by is_image_node");
         let rect = desired.primitive.local_bounds();
         self.visual.SetSize(vector2(rect.width, rect.height))?;
+        self.visual.SetTransformMatrix(image_visual_matrix(
+            desired.transform,
+            rect,
+            island_bounds,
+        ))?;
         self.visual
-            .SetTransformMatrix(image_visual_matrix(desired.transform, rect, island_bounds))?;
-        self.visual.SetOpacity((desired.opacity * image.opacity).clamp(0.0, 1.0))?;
+            .SetOpacity((desired.opacity * image.opacity).clamp(0.0, 1.0))?;
         self.rasterization_scale = rasterization_scale;
         self.snapshot = desired.clone();
         Ok(())
@@ -515,13 +547,12 @@ impl VectorSurfaceNode {
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return Err("vector image has an empty destination rectangle");
         }
-        let graphics_device = CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device)
-            .map_err(|_| "CreateCompositionGraphicsDevice failed")?;
-        let surface = create_drawing_surface(
-            &graphics_device,
-            surface_size(rect, rasterization_scale),
-        )
-        .map_err(|_| "CreateDrawingSurface vector fallback failed")?;
+        let graphics_device =
+            CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device)
+                .map_err(|_| "CreateCompositionGraphicsDevice failed")?;
+        let surface =
+            create_drawing_surface(&graphics_device, surface_size(rect, rasterization_scale))
+                .map_err(|_| "CreateDrawingSurface vector fallback failed")?;
         crate::render::draw_vector_image_surface(&surface, desired, rasterization_scale)
             .map_err(|_| "CompositionDrawingSurface vector replay failed")?;
         let surface_interface: ICompositionSurface = surface
@@ -531,7 +562,8 @@ impl VectorSurfaceNode {
         let brush = compositor
             .CreateSurfaceBrushWithSurface(&surface_interface)
             .map_err(|_| "vector fallback CreateSurfaceBrush failed")?;
-        brush.SetStretch(CompositionStretch::Fill)
+        brush
+            .SetStretch(CompositionStretch::Fill)
             .map_err(|_| "vector fallback SurfaceBrush stretch failed")?;
         let brush_interface: CompositionBrush = brush
             .clone()
@@ -561,7 +593,8 @@ impl VectorSurfaceNode {
         // A changed document, source rectangle, or destination changes the raster contents or
         // its pixel extent, so reconciliation recreates the surface. Transform and opacity remain
         // retained visual properties.
-        self.rasterization_scale == rasterization_scale && self.snapshot.primitive == desired.primitive
+        self.rasterization_scale == rasterization_scale
+            && self.snapshot.primitive == desired.primitive
     }
 
     fn update(
@@ -572,8 +605,11 @@ impl VectorSurfaceNode {
     ) -> Result<()> {
         let rect = desired.primitive.local_bounds();
         self.visual.SetSize(vector2(rect.width, rect.height))?;
-        self.visual
-            .SetTransformMatrix(image_visual_matrix(desired.transform, rect, island_bounds))?;
+        self.visual.SetTransformMatrix(image_visual_matrix(
+            desired.transform,
+            rect,
+            island_bounds,
+        ))?;
         self.visual.SetOpacity(desired.opacity.clamp(0.0, 1.0))?;
         self.rasterization_scale = rasterization_scale;
         self.snapshot = desired.clone();
@@ -624,7 +660,8 @@ impl ShapeRunState {
         visual.SetOpacity(opacity)?;
         let shapes = visual.Shapes()?;
         for id in &node_ids {
-            let CompositionNodeState::Shape(node) = nodes.get(id).expect("shape run node exists") else {
+            let CompositionNodeState::Shape(node) = nodes.get(id).expect("shape run node exists")
+            else {
                 unreachable!("shape run contains only shape nodes");
             };
             let shape: CompositionShape = node.shape.clone().cast()?;

@@ -59,8 +59,9 @@ fn builtin_component(
     fields_src: &str,
 ) -> ComponentDef {
     let full_src = format!("struct {name} {{ {fields_src} }}");
-    let item_struct: syn::ItemStruct = syn::parse_str(&full_src)
-        .unwrap_or_else(|e| panic!("failed to parse builtin `{name}` fields: {e}\n---\n{full_src}"));
+    let item_struct: syn::ItemStruct = syn::parse_str(&full_src).unwrap_or_else(|e| {
+        panic!("failed to parse builtin `{name}` fields: {e}\n---\n{full_src}")
+    });
     let mut fields = attr_frontend::fields_from_item_struct(&item_struct, FieldKind::Prop, true)
         .unwrap_or_else(|e| panic!("failed to build fields for builtin `{name}`: {e}"));
     // Injected first, ahead of the component's own hand-written fields, matching the old DSL text
@@ -92,7 +93,9 @@ fn builtin_component(
 /// wraps the result as `target`'s `ViewDef`.
 fn builtin_view(target: &str, body_src: &str) -> ViewDef {
     let (on_mount, on_unmount, on_update, lets, root) = parser::parse_view_body(body_src)
-        .unwrap_or_else(|e| panic!("failed to parse builtin view `{target}`: {e}\n---\n{body_src}"));
+        .unwrap_or_else(|e| {
+            panic!("failed to parse builtin view `{target}`: {e}\n---\n{body_src}")
+        });
     ViewDef {
         target: target.to_string(),
         on_mount,

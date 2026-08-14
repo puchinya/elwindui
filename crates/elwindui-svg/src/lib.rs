@@ -170,7 +170,8 @@ mod tests {
 
     #[test]
     fn max_nodes_limit_is_enforced() {
-        let mut svg = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">"#);
+        let mut svg =
+            String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">"#);
         for i in 0..50 {
             svg.push_str(&format!(r#"<rect x="{i}" y="{i}" width="1" height="1"/>"#));
         }
@@ -199,7 +200,8 @@ mod tests {
 
     #[test]
     fn max_group_depth_limit_is_enforced() {
-        let mut svg = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+        let mut svg =
+            String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
         for _ in 0..30 {
             svg.push_str(r#"<g transform="translate(0.01,0.01)">"#);
         }
@@ -232,14 +234,18 @@ mod tests {
         // A long run of a single repeated comment character compresses extremely well — a stand-in
         // for a real decompression-bomb payload without needing gigabytes of actual test fixture
         // data.
-        let mut svg = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><!--"#);
+        let mut svg =
+            String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><!--"#);
         svg.push_str(&"x".repeat(2_000_000));
         svg.push_str("--></svg>");
 
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
         encoder.write_all(svg.as_bytes()).unwrap();
         let gzipped = encoder.finish().unwrap();
-        assert!(gzipped.len() < 10_000, "fixture should compress far smaller than its decompressed size");
+        assert!(
+            gzipped.len() < 10_000,
+            "fixture should compress far smaller than its decompressed size"
+        );
 
         let options = SvgLoadOptions {
             limits: SvgLimits {
@@ -294,7 +300,9 @@ mod tests {
     #[test]
     fn malformed_data_url_does_not_panic_and_yields_no_image() {
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="data:image/png;base64,!!!not-valid-base64!!!" width="10" height="10"/></svg>"#;
-        let image = SvgLoader::new(SvgLoadOptions::default()).load_str(svg).unwrap();
+        let image = SvgLoader::new(SvgLoadOptions::default())
+            .load_str(svg)
+            .unwrap();
         assert!(image.root().children.is_empty());
     }
 
@@ -309,7 +317,8 @@ mod tests {
 
     #[test]
     fn circular_same_directory_reference_is_bounded_by_nested_svg_depth() {
-        let dir = std::env::temp_dir().join(format!("elwindui-svg-circular-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("elwindui-svg-circular-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a_path = dir.join("a.svg");
         let b_path = dir.join("b.svg");

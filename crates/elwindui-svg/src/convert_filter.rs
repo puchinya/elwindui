@@ -9,8 +9,8 @@ use elwindui_core::graphics::{
     VectorFilterImage, VectorFilterInput, VectorFilterPrimitive, VectorFilterPrimitiveNode,
     VectorFilterResultId, VectorFloodFilter, VectorGaussianBlurFilter, VectorLightSource,
     VectorMergeFilter, VectorMorphologyFilter, VectorMorphologyOperator, VectorOffsetFilter,
-    VectorSpecularLightingFilter, VectorTileFilter, VectorTransferFunction,
-    VectorTurbulenceFilter, VectorTurbulenceKind,
+    VectorSpecularLightingFilter, VectorTileFilter, VectorTransferFunction, VectorTurbulenceFilter,
+    VectorTurbulenceKind,
 };
 use std::collections::HashMap;
 
@@ -96,7 +96,9 @@ fn convert_light_source(light: usvg::filter::LightSource) -> VectorLightSource {
 fn convert_transfer_function(func: &usvg::filter::TransferFunction) -> VectorTransferFunction {
     match func {
         usvg::filter::TransferFunction::Identity => VectorTransferFunction::Identity,
-        usvg::filter::TransferFunction::Table(v) => VectorTransferFunction::Table(v.as_slice().into()),
+        usvg::filter::TransferFunction::Table(v) => {
+            VectorTransferFunction::Table(v.as_slice().into())
+        }
         usvg::filter::TransferFunction::Discrete(v) => {
             VectorTransferFunction::Discrete(v.as_slice().into())
         }
@@ -181,20 +183,22 @@ fn convert_kind(
                 alpha: convert_transfer_function(fe.func_a()),
             })
         }
-        usvg::filter::Kind::Composite(fe) => VectorFilterPrimitive::Composite(VectorCompositeFilter {
-            input1: input(fe.input1()),
-            input2: input(fe.input2()),
-            operator: match fe.operator() {
-                usvg::filter::CompositeOperator::Over => VectorCompositeOperator::Over,
-                usvg::filter::CompositeOperator::In => VectorCompositeOperator::In,
-                usvg::filter::CompositeOperator::Out => VectorCompositeOperator::Out,
-                usvg::filter::CompositeOperator::Atop => VectorCompositeOperator::Atop,
-                usvg::filter::CompositeOperator::Xor => VectorCompositeOperator::Xor,
-                usvg::filter::CompositeOperator::Arithmetic { k1, k2, k3, k4 } => {
-                    VectorCompositeOperator::Arithmetic { k1, k2, k3, k4 }
-                }
-            },
-        }),
+        usvg::filter::Kind::Composite(fe) => {
+            VectorFilterPrimitive::Composite(VectorCompositeFilter {
+                input1: input(fe.input1()),
+                input2: input(fe.input2()),
+                operator: match fe.operator() {
+                    usvg::filter::CompositeOperator::Over => VectorCompositeOperator::Over,
+                    usvg::filter::CompositeOperator::In => VectorCompositeOperator::In,
+                    usvg::filter::CompositeOperator::Out => VectorCompositeOperator::Out,
+                    usvg::filter::CompositeOperator::Atop => VectorCompositeOperator::Atop,
+                    usvg::filter::CompositeOperator::Xor => VectorCompositeOperator::Xor,
+                    usvg::filter::CompositeOperator::Arithmetic { k1, k2, k3, k4 } => {
+                        VectorCompositeOperator::Arithmetic { k1, k2, k3, k4 }
+                    }
+                },
+            })
+        }
         usvg::filter::Kind::ConvolveMatrix(fe) => {
             let matrix = fe.matrix();
             VectorFilterPrimitive::ConvolveMatrix(VectorConvolveMatrixFilter {
@@ -228,15 +232,17 @@ fn convert_kind(
                 y_channel: convert_color_channel(fe.y_channel_selector()),
             })
         }
-        usvg::filter::Kind::DropShadow(fe) => VectorFilterPrimitive::DropShadow(VectorDropShadowFilter {
-            input: input(fe.input()),
-            dx: fe.dx(),
-            dy: fe.dy(),
-            std_dev_x: fe.std_dev_x().get(),
-            std_dev_y: fe.std_dev_y().get(),
-            color: color_from_usvg(fe.color(), 1.0),
-            opacity: fe.opacity().get(),
-        }),
+        usvg::filter::Kind::DropShadow(fe) => {
+            VectorFilterPrimitive::DropShadow(VectorDropShadowFilter {
+                input: input(fe.input()),
+                dx: fe.dx(),
+                dy: fe.dy(),
+                std_dev_x: fe.std_dev_x().get(),
+                std_dev_y: fe.std_dev_y().get(),
+                color: color_from_usvg(fe.color(), 1.0),
+                opacity: fe.opacity().get(),
+            })
+        }
         usvg::filter::Kind::Flood(fe) => VectorFilterPrimitive::Flood(VectorFloodFilter {
             color: color_from_usvg(fe.color(), 1.0),
             opacity: fe.opacity().get(),
@@ -283,17 +289,21 @@ fn convert_kind(
         usvg::filter::Kind::Tile(fe) => VectorFilterPrimitive::Tile(VectorTileFilter {
             input: input(fe.input()),
         }),
-        usvg::filter::Kind::Turbulence(fe) => VectorFilterPrimitive::Turbulence(VectorTurbulenceFilter {
-            base_frequency_x: fe.base_frequency_x().get(),
-            base_frequency_y: fe.base_frequency_y().get(),
-            num_octaves: fe.num_octaves(),
-            seed: fe.seed(),
-            stitch_tiles: fe.stitch_tiles(),
-            kind: match fe.kind() {
-                usvg::filter::TurbulenceKind::FractalNoise => VectorTurbulenceKind::FractalNoise,
-                usvg::filter::TurbulenceKind::Turbulence => VectorTurbulenceKind::Turbulence,
-            },
-        }),
+        usvg::filter::Kind::Turbulence(fe) => {
+            VectorFilterPrimitive::Turbulence(VectorTurbulenceFilter {
+                base_frequency_x: fe.base_frequency_x().get(),
+                base_frequency_y: fe.base_frequency_y().get(),
+                num_octaves: fe.num_octaves(),
+                seed: fe.seed(),
+                stitch_tiles: fe.stitch_tiles(),
+                kind: match fe.kind() {
+                    usvg::filter::TurbulenceKind::FractalNoise => {
+                        VectorTurbulenceKind::FractalNoise
+                    }
+                    usvg::filter::TurbulenceKind::Turbulence => VectorTurbulenceKind::Turbulence,
+                },
+            })
+        }
     }
 }
 

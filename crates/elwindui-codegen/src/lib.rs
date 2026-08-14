@@ -33,22 +33,28 @@ pub(crate) fn test_builtin_modules() -> Vec<ast::Module> {
 /// unresolved reference in one of these fixtures stays a genuine test failure unless the test itself
 /// also chains in `test_builtin_modules()` or another `test_module` call's items.
 #[cfg(test)]
-pub(crate) fn test_module(defs: &[(Option<&str>, &str, Option<&str>)]) -> Result<ast::Module, String> {
+pub(crate) fn test_module(
+    defs: &[(Option<&str>, &str, Option<&str>)],
+) -> Result<ast::Module, String> {
     let mut items = Vec::new();
     for (base, struct_src, impl_src) in defs {
         let item_struct: syn::ItemStruct = syn::parse_str(struct_src)
             .map_err(|e| format!("test fixture struct failed to parse: {e}\n---\n{struct_src}"))?;
-        let (mut component_def, view_def) = component_frontend::component_and_view_from_item_struct(
-            base.map(|b| b.to_string()),
-            &item_struct,
-        )?;
+        let (mut component_def, view_def) =
+            component_frontend::component_and_view_from_item_struct(
+                base.map(|b| b.to_string()),
+                &item_struct,
+            )?;
         if let Some(impl_src) = impl_src {
             let item_impl: syn::ItemImpl = syn::parse_str(impl_src)
                 .map_err(|e| format!("test fixture impl failed to parse: {e}\n---\n{impl_src}"))?;
             let (_, methods) = component_frontend::methods_from_item_impl(&item_impl)?;
             component_def.methods = methods;
         }
-        items.extend(component_frontend::component_module_items(component_def, view_def));
+        items.extend(component_frontend::component_module_items(
+            component_def,
+            view_def,
+        ));
     }
     Ok(ast::Module {
         path: Vec::new(),
@@ -268,7 +274,8 @@ mod dsl_enum_tests {
             "#,
         )
         .expect("struct should parse");
-        let result = generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct);
+        let result =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct);
         assert!(result.is_ok(), "expected success, got: {:?}", result.err());
     }
 
@@ -642,8 +649,9 @@ mod environment_key_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
-            .expect_err("an unresolvable #[environment(name)] should be rejected");
+        let err =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
+                .expect_err("an unresolvable #[environment(name)] should be rejected");
         assert!(
             err.contains("env_key_test_never_registered") && err.contains("isn't declared"),
             "error: {err}"
@@ -669,12 +677,10 @@ mod environment_key_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
-            .expect_err("#[environment] combined with #[param] should be rejected");
-        assert!(
-            err.contains("cannot be combined"),
-            "error: {err}"
-        );
+        let err =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
+                .expect_err("#[environment] combined with #[param] should be rejected");
+        assert!(err.contains("cannot be combined"), "error: {err}");
     }
 }
 

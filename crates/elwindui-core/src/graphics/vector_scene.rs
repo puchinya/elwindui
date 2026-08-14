@@ -286,7 +286,10 @@ mod tests {
         let clip = VectorClipPath {
             transform: AffineTransform::IDENTITY,
             root: VectorGroup {
-                children: Arc::from([square_path_node(0.0, 0.0, 10.0), square_path_node(20.0, 0.0, 10.0)]),
+                children: Arc::from([
+                    square_path_node(0.0, 0.0, 10.0),
+                    square_path_node(20.0, 0.0, 10.0),
+                ]),
                 ..VectorGroup::default()
             },
             nested: None,

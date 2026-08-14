@@ -11,7 +11,10 @@
 
 use super::*;
 
-pub(crate) fn layout_tree<H: Clone + 'static>(root: &Rc<dyn UIElementExt>, available: Size) -> RenderTree {
+pub(crate) fn layout_tree<H: Clone + 'static>(
+    root: &Rc<dyn UIElementExt>,
+    available: Size,
+) -> RenderTree {
     layout_root(root, available);
     RenderTree::new::<H>(root)
 }
@@ -98,7 +101,6 @@ impl FakeTextBoxWidget {
     fn set_text_alignment(&self, _alignment: TextAlignment) {}
 }
 
-
 /// Backend-independent stand-in for `PasswordBox` — see `FakeTextBoxWidget`'s own doc comment
 /// for the pattern. `PasswordBoxExt`'s dispatch is exercised the same way; the test below
 /// additionally checks the no-leak policy (`docs/status/control_status.md`)
@@ -140,7 +142,6 @@ impl FakePasswordBoxWidget {
     fn set_reveal_enabled(&self, _enabled: bool) {}
 }
 
-
 /// Backend-independent stand-in for `ScrollView` — see `FakeTextBoxWidget`'s own doc comment
 /// for the pattern. Unlike every other `Fake*Widget` here, `ScrollView`'s own content is a full
 /// child subtree, not a plain value — this fake models that by overriding the already-
@@ -178,7 +179,6 @@ impl FakeScrollViewWidget {
     fn set_horizontal_scroll_enabled(&self, _enabled: bool) {}
     fn set_vertical_scroll_enabled(&self, _enabled: bool) {}
 }
-
 
 /// `#[overridable]`/`#[overrides]` usage example, exercised across a genuine 3-hop chain
 /// (`OverridableBase` -> `OverridableMid` -> `OverridableLeaf`) with two overridable methods —
@@ -242,7 +242,6 @@ impl OverridableLeaf {
         }
     }
 }
-
 
 pub(crate) fn size(width: f32, height: f32) -> Size {
     Size { width, height }
@@ -362,7 +361,6 @@ pub(crate) fn split(tree: RenderTree) -> (Vec<(FakeHandle, Rect)>, Vec<(RenderCo
     (natives, paints)
 }
 
-
 /// Records every `available` it's actually measured with (in call order), so tests below can
 /// assert on it directly instead of inferring it indirectly through a returned size — including
 /// `Grid`'s two-pass measurement, where the same child is measured twice and both calls matter.
@@ -393,10 +391,13 @@ impl MeasureProbe {
 
 impl MeasureProbe {
     pub(crate) fn last_available(&self) -> Size {
-        *self.calls.borrow().last().expect("measure_override was never called")
+        *self
+            .calls
+            .borrow()
+            .last()
+            .expect("measure_override was never called")
     }
 }
-
 
 /// A minimal test-only fixture that both paints itself *and* has children — no real builtin
 /// combines the two today (`Shape` is a childless leaf; `Layout`/`Control`/`Grid`
@@ -486,7 +487,6 @@ impl UIElementExt for PaintingContainer {
     }
 }
 
-
 #[derive(Default)]
 pub(crate) struct RecordingRelayoutHost {
     requests: RefCell<Vec<u64>>,
@@ -497,7 +497,6 @@ impl RelayoutHost for RecordingRelayoutHost {
     }
 }
 
-
 pub(crate) fn rectangle(fill: Option<&str>, stroke: Option<&str>) -> Rc<dyn UIElementExt> {
     let to_brush = |hex: &str| Brush::Solid(Color::parse_hex(hex).unwrap());
     let rect = Rectangle::new();
@@ -505,7 +504,6 @@ pub(crate) fn rectangle(fill: Option<&str>, stroke: Option<&str>) -> Rc<dyn UIEl
     rect.set_stroke(stroke.map(to_brush));
     rect
 }
-
 
 pub(crate) fn count_calls<T: 'static>(
     elem: &Rc<dyn UIElementExt>,
@@ -559,8 +557,6 @@ pub(crate) fn release_event(
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,7 +585,10 @@ mod tests {
         }
         widget.set_text("hello");
         widget.set_text("hello world");
-        assert_eq!(*seen.borrow(), vec!["hello".to_string(), "hello world".to_string()]);
+        assert_eq!(
+            *seen.borrow(),
+            vec!["hello".to_string(), "hello world".to_string()]
+        );
     }
 
     #[test]

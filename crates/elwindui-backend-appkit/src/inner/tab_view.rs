@@ -5,11 +5,9 @@ use super::InnerButton;
 use crate::ffi::{AnyView, mtm, new_stack};
 use crate::host::TreeHostView;
 use crate::render::parse_color;
-use objc2::rc::Retained;
 use objc2::MainThreadOnly;
-use objc2_app_kit::{
-    NSStackView, NSUserInterfaceLayoutOrientation, NSView,
-};
+use objc2::rc::Retained;
+use objc2_app_kit::{NSStackView, NSUserInterfaceLayoutOrientation, NSView};
 use objc2_foundation::NSRect;
 
 /// See docs/specs/ui_spec.md#tabs. A single tab's header: a title button (click to

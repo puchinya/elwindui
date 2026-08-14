@@ -179,7 +179,12 @@ impl PointerDispatcher {
     /// receive the OS pointer event directly via ordinary native hit-testing — see
     /// `TreeHostIvars::pointer`'s own doc comment), so their own focus-on-click is handled entirely
     /// separately (`elwindui_core::focus::native_focus_gained`).
-    pub fn handle(&self, root: &Rc<dyn UIElementExt>, focus: &crate::focus::FocusTracker, event: RawPointerEvent) {
+    pub fn handle(
+        &self,
+        root: &Rc<dyn UIElementExt>,
+        focus: &crate::focus::FocusTracker,
+        event: RawPointerEvent,
+    ) {
         match event.kind {
             RawPointerEventKind::Moved => {
                 let hit = crate::ui::hit_test(root, event.position);

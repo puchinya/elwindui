@@ -12,22 +12,23 @@
 //! already has for gradient fills elsewhere in this crate).
 
 use elwindui_core::graphics::{
-    Brush, Color, ComputedTextStyle, FontStyle, TextBackend, TextMeasureRequest,
-    TextMeasureResult, TextWrapping,
+    Brush, Color, ComputedTextStyle, FontStyle, TextBackend, TextMeasureRequest, TextMeasureResult,
+    TextWrapping,
 };
 use elwindui_core::ui::TextAlignment;
-use objc2::{AnyThread, msg_send};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
+use objc2::{AnyThread, msg_send};
 use objc2_app_kit::{
-    NSAttributedStringNSExtendedStringDrawing, NSColor, NSFont, NSFontDescriptor,
-    NSFontDescriptorSymbolicTraits, NSFontAttributeName, NSFontTraitsAttribute,
-    NSFontWeightTrait, NSFontWidthTrait, NSForegroundColorAttributeName, NSKernAttributeName,
-    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStringDrawingOptions,
-    NSTextAlignment,
+    NSAttributedStringNSExtendedStringDrawing, NSColor, NSFont, NSFontAttributeName,
+    NSFontDescriptor, NSFontDescriptorSymbolicTraits, NSFontTraitsAttribute, NSFontWeightTrait,
+    NSFontWidthTrait, NSForegroundColorAttributeName, NSKernAttributeName, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName, NSStringDrawingOptions, NSTextAlignment,
 };
 use objc2_core_foundation::CGFloat;
-use objc2_foundation::{NSAttributedString, NSAttributedStringKey, NSDictionary, NSNumber, NSString};
+use objc2_foundation::{
+    NSAttributedString, NSAttributedStringKey, NSDictionary, NSNumber, NSString,
+};
 
 /// AppKit's `NSFontWeightTrait`/`NSFontWeight*` scale is a continuous `-1.0..1.0` float —
 /// approximated here by linearly interpolating between Apple's own documented named constants
@@ -127,9 +128,8 @@ fn apply_traits(
         // requested symbolic traits. objc2-app-kit currently declares it as non-null, so using the
         // generated method would panic before we could fall back. Send it with an explicitly
         // nullable result and retain the pre-italic descriptor when AppKit returns `nil`.
-        let italic_descriptor: Option<Retained<NSFontDescriptor>> = unsafe {
-            msg_send![&descriptor, fontDescriptorWithSymbolicTraits: symbolic]
-        };
+        let italic_descriptor: Option<Retained<NSFontDescriptor>> =
+            unsafe { msg_send![&descriptor, fontDescriptorWithSymbolicTraits: symbolic] };
         italic_descriptor.unwrap_or(descriptor)
     } else {
         descriptor
@@ -304,14 +304,18 @@ impl TextBackend for AppKitTextBackend {
     }
 
     fn measure_text(&self, req: &TextMeasureRequest<'_>) -> TextMeasureResult {
-        let attributed =
-            attributed_string(req.text, req.style, Some(&req.style.foreground), req.alignment);
-        let constraint_width = if req.wrapping == TextWrapping::NoWrap || !req.available.width.is_finite()
-        {
-            CGFloat::MAX
-        } else {
-            req.available.width as CGFloat
-        };
+        let attributed = attributed_string(
+            req.text,
+            req.style,
+            Some(&req.style.foreground),
+            req.alignment,
+        );
+        let constraint_width =
+            if req.wrapping == TextWrapping::NoWrap || !req.available.width.is_finite() {
+                CGFloat::MAX
+            } else {
+                req.available.width as CGFloat
+            };
         let constraint = objc2_core_foundation::CGSize::new(constraint_width, CGFloat::MAX);
         let options = NSStringDrawingOptions::UsesLineFragmentOrigin
             | NSStringDrawingOptions::UsesFontLeading;
@@ -392,14 +396,18 @@ mod tests {
             font_style: elwindui_core::graphics::FontStyle::Italic,
             ..style(16.0)
         });
-        assert!(!normal
-            .fontDescriptor()
-            .symbolicTraits()
-            .contains(objc2_app_kit::NSFontDescriptorSymbolicTraits::TraitItalic));
-        assert!(italic
-            .fontDescriptor()
-            .symbolicTraits()
-            .contains(objc2_app_kit::NSFontDescriptorSymbolicTraits::TraitItalic));
+        assert!(
+            !normal
+                .fontDescriptor()
+                .symbolicTraits()
+                .contains(objc2_app_kit::NSFontDescriptorSymbolicTraits::TraitItalic)
+        );
+        assert!(
+            italic
+                .fontDescriptor()
+                .symbolicTraits()
+                .contains(objc2_app_kit::NSFontDescriptorSymbolicTraits::TraitItalic)
+        );
     }
 
     #[test]

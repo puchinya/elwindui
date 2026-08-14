@@ -59,12 +59,11 @@ impl NativeControl {
     /// from an ancestor that changed, while a tooltip is local, non-inherited, plain text with
     /// nothing to re-resolve. It also has no effect on layout, so there is nothing to invalidate.
     fn set_tooltip(&self, tooltip: &str) {
-        self.handle
-            .set_tooltip(if tooltip.is_empty() {
-                None
-            } else {
-                Some(tooltip)
-            });
+        self.handle.set_tooltip(if tooltip.is_empty() {
+            None
+        } else {
+            Some(tooltip)
+        });
     }
     fn construct(handle: AnyView) -> Self {
         Self {

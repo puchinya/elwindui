@@ -84,8 +84,15 @@ pub enum VectorTransferFunction {
     Identity,
     Table(Arc<[f32]>),
     Discrete(Arc<[f32]>),
-    Linear { slope: f32, intercept: f32 },
-    Gamma { amplitude: f32, exponent: f32, offset: f32 },
+    Linear {
+        slope: f32,
+        intercept: f32,
+    },
+    Gamma {
+        amplitude: f32,
+        exponent: f32,
+        offset: f32,
+    },
 }
 
 impl Default for VectorTransferFunction {
@@ -337,11 +344,13 @@ mod tests {
                     color: Color::black(),
                     opacity: 1.0,
                 })),
-                primitive_node(VectorFilterPrimitive::GaussianBlur(VectorGaussianBlurFilter {
-                    input: VectorFilterInput::Result(VectorFilterResultId(0)),
-                    std_dev_x: 2.0,
-                    std_dev_y: 2.0,
-                })),
+                primitive_node(VectorFilterPrimitive::GaussianBlur(
+                    VectorGaussianBlurFilter {
+                        input: VectorFilterInput::Result(VectorFilterResultId(0)),
+                        std_dev_x: 2.0,
+                        std_dev_y: 2.0,
+                    },
+                )),
             ]),
         };
         assert_eq!(filter.primitives.len(), 2);

@@ -1,14 +1,10 @@
 //! WinRT key/modifier -> `elwindui_core::input` translation. Pure value mapping; the dispatch
 //! itself lives on `TreeHostPanel` in this module's parent.
 
-
-
 use crate::bindings::Microsoft::UI::Input::InputKeyboardSource;
+use elwindui_core::input::{Key, KeyModifiers};
 use windows::System::VirtualKey;
 use windows::UI::Core::CoreVirtualKeyStates;
-use elwindui_core::input::{
-    Key, KeyModifiers,
-};
 
 /// `VirtualKey.0`(a fixed `i32` code, the classic Win32 `VK_*` constants) -> `elwindui_core::input::
 /// Key` for the named keys `Key` distinguishes; every other key falls back to treating the code as

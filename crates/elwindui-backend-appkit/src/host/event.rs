@@ -1,14 +1,8 @@
 //! `NSEvent` -> `elwindui_core::input` translation. Pure value mapping; the dispatch itself
 //! lives on `TreeHostView` in this module's parent.
 
-
-use elwindui_core::input::{
-    Key, KeyModifiers,
-};
-use objc2_app_kit::{
-    NSEvent, NSEventModifierFlags,
-};
-
+use elwindui_core::input::{Key, KeyModifiers};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags};
 
 /// `NSEvent.modifierFlags()` -> `elwindui_core::input::KeyModifiers`.
 pub(crate) fn nsevent_modifiers(event: &NSEvent) -> KeyModifiers {

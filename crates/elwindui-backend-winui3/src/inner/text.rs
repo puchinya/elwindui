@@ -1,18 +1,18 @@
 //! The three text controls: `TextBox` (multiline = `TextArea`), single-line `TextBox`, and
 //! `PasswordBox`.
 
-use crate::render::xaml_text_alignment;
-use crate::ffi::{AnyView, register_ui_event_callback, invoke_ui_event_callback};
 use crate::bindings;
+use crate::bindings::Microsoft::UI::Xaml::Controls::TextChangedEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
     PasswordBox as XamlPasswordBox, TextBox as XamlTextBox,
 };
 use crate::bindings::Microsoft::UI::Xaml::Input::KeyEventHandler;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
-use crate::bindings::Microsoft::UI::Xaml::Controls::TextChangedEventHandler;
-use windows::System::VirtualKey;
+use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use crate::render::xaml_text_alignment;
 use std::cell::RefCell;
 use std::rc::Rc;
+use windows::System::VirtualKey;
 use windows::core::HSTRING;
 
 /// Raw `TextBox` (multi-line configured — `SetAcceptsReturn(true)`/`SetTextWrapping(Wrap)`, unlike
@@ -36,25 +36,23 @@ impl InnerTextArea {
             on_change: Rc::new(RefCell::new(None)),
         };
         {
-        let callback = this.on_change.clone();
-        let text_box_for_handler = this.text_box.clone();
-        let callback_id = register_ui_event_callback(Rc::new(move || {
-            if let Some(callback) = callback.borrow().as_ref() {
-                let text = text_box_for_handler
-                    .Text()
-                    .map(|value| value.to_string_lossy())
-                    .unwrap_or_default();
-                callback(text);
-            }
-        }));
-        let _ =
-            this.text_box
-                .TextChanged(&TextChangedEventHandler::new(
-                    move |_, _| {
-                        invoke_ui_event_callback(callback_id);
-                        Ok(())
-                    },
-                ));
+            let callback = this.on_change.clone();
+            let text_box_for_handler = this.text_box.clone();
+            let callback_id = register_ui_event_callback(Rc::new(move || {
+                if let Some(callback) = callback.borrow().as_ref() {
+                    let text = text_box_for_handler
+                        .Text()
+                        .map(|value| value.to_string_lossy())
+                        .unwrap_or_default();
+                    callback(text);
+                }
+            }));
+            let _ = this
+                .text_box
+                .TextChanged(&TextChangedEventHandler::new(move |_, _| {
+                    invoke_ui_event_callback(callback_id);
+                    Ok(())
+                }));
         }
         this
     }
@@ -119,12 +117,12 @@ impl InnerTextBox {
                     callback(text);
                 }
             }));
-            let _ = this.text_box.TextChanged(&TextChangedEventHandler::new(
-                move |_, _| {
+            let _ = this
+                .text_box
+                .TextChanged(&TextChangedEventHandler::new(move |_, _| {
                     invoke_ui_event_callback(callback_id);
                     Ok(())
-                },
-            ));
+                }));
         }
         this
     }
@@ -167,7 +165,9 @@ impl InnerTextBox {
     }
 
     pub(crate) fn set_text_alignment(&self, alignment: elwindui_core::ui::TextAlignment) {
-        let _ = self.text_box.SetTextAlignment(xaml_text_alignment(alignment));
+        let _ = self
+            .text_box
+            .SetTextAlignment(xaml_text_alignment(alignment));
     }
 
     /// Submit-on-Enter — unlike AppKit (which needs
@@ -177,18 +177,20 @@ impl InnerTextBox {
     /// special-casing.
     pub(crate) fn set_on_submit(&self, callback: Box<dyn Fn()>) {
         let callback_id = register_ui_event_callback(Rc::new(move || callback()));
-        let _ = self.text_box.KeyDown(&KeyEventHandler::new(move |_sender, args| {
-            let Some(args) = args.cloned() else {
-                return Ok(());
-            };
-            let Ok(virtual_key) = args.Key() else {
-                return Ok(());
-            };
-            if virtual_key == VirtualKey::Enter {
-                invoke_ui_event_callback(callback_id);
-            }
-            Ok(())
-        }));
+        let _ = self
+            .text_box
+            .KeyDown(&KeyEventHandler::new(move |_sender, args| {
+                let Some(args) = args.cloned() else {
+                    return Ok(());
+                };
+                let Ok(virtual_key) = args.Key() else {
+                    return Ok(());
+                };
+                if virtual_key == VirtualKey::Enter {
+                    invoke_ui_event_callback(callback_id);
+                }
+                Ok(())
+            }));
     }
 }
 
@@ -265,7 +267,9 @@ impl InnerPasswordBox {
     }
 
     pub(crate) fn set_max_length(&self, max_length: Option<u32>) {
-        let _ = self.password_box.SetMaxLength(max_length.unwrap_or(0) as i32);
+        let _ = self
+            .password_box
+            .SetMaxLength(max_length.unwrap_or(0) as i32);
     }
 
     /// `PasswordBox.PasswordRevealMode` is native (`Peek`/`Hidden`) — the full-support side of the

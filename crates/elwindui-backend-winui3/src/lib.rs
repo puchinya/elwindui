@@ -15,9 +15,9 @@
 //! | `platform`  | OS services that are not UI elements (file dialogs) |
 //! | `bindings`  | the generated WinRT projection (`windows-bindgen` output) |
 //!
-//! `elwindui-backend-appkit` mirrors this file-for-file; keep the two in step. NOTE: this crate
-//! is `#![cfg(target_os = "windows")]` and has never been built — see
-//! docs/status/implementation_status.md.
+//! `elwindui-backend-appkit` mirrors this file-for-file; keep the two in step. This crate is
+//! `#![cfg(target_os = "windows")]`; current build and runtime verification is recorded in
+//! docs/status/backend_status.md.
 
 #![cfg(target_os = "windows")]
 // `#[elwindui_macros::class]`'s `__elwindui_inherit_*!` chain mechanism needs a same-crate

@@ -1,15 +1,12 @@
 //! CI-8 of #80 (docs/design/runtime/component_lifecycle_design.md §4g): `Window::show()` now
 //! implicitly mounts an unmounted host-composition component on first call; `hide()`/`close()` are
-//! new. Type-checked but **not executed** — same reasoning as `for_item_two_way.rs`: AppKit requires
-//! native window/view construction on the process main thread (`elwindui_backend_appkit::inner`'s
-//! `mtm()`/`MainThreadMarker` calls panic off it), while Rust's default test harness invokes `#[test]`
-//! functions from worker threads. Runtime verification of `show`/`hide`/`close`'s actual mount-once/
-//! visibility/cleanup behavior was done via `crates/elwindui-codegen`'s own generated-source-text
-//! test (`component_frontend::tests::host_composition_gets_inherent_show_hide_close_and_no_auto_mount_on_constructed`)
-//! and manual reasoning from the AppKit backend build succeeding — not by running this file.
+//! new. AppKit keeps the usage shape type-checked but does not execute it because native window/view
+//! construction requires the process main thread (`elwindui_backend_appkit::inner`'s
+//! `mtm()`/`MainThreadMarker` calls panic from Rust's test-harness worker threads). WinUI3 executes
+//! the same lifecycle in a real hosted application and verifies that hide/re-show does not rebuild.
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
-#![cfg(feature = "backend-appkit")]
+#![cfg(any(feature = "backend-appkit", feature = "backend-winui3"))]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -42,6 +39,7 @@ impl MountHideCloseWindow {}
 /// by the initial build; `show()` mounts+builds exactly once; `show(); hide(); show();` does not
 /// rebuild; `close()` runs cleanup.
 #[allow(dead_code)]
+#[cfg(feature = "backend-appkit")]
 fn type_checked_new_show_hide_close_usage() {
     BUILD_COUNT.with(|c| c.set(0));
 
@@ -60,4 +58,40 @@ fn type_checked_new_show_hide_close_usage() {
     debug_assert_eq!(BUILD_COUNT.with(|c| c.get()), 1);
 
     window.close(); // ends the mount lifetime; releases the native window
+}
+
+#[cfg(feature = "backend-winui3")]
+#[test]
+fn winui3_show_hide_show_builds_once_and_close_exits() {
+    elwindui::init().expect("initialize WinUI3");
+    BUILD_COUNT.with(|count| count.set(0));
+
+    elwindui::application::run(|| {
+        let window: Rc<MountHideCloseWindow> = MountHideCloseWindow::new("initial".to_string());
+        assert_eq!(
+            BUILD_COUNT.with(Cell::get),
+            0,
+            "new() must not build a Window-rooted component"
+        );
+
+        window.set_subtitle("changed before first show".to_string());
+        window.show();
+        assert_eq!(
+            BUILD_COUNT.with(Cell::get),
+            1,
+            "first show() must mount and build exactly once"
+        );
+
+        window.hide();
+        window.show();
+        assert_eq!(
+            BUILD_COUNT.with(Cell::get),
+            1,
+            "hide() followed by show() must not rebuild"
+        );
+
+        window.close();
+    });
+
+    assert_eq!(BUILD_COUNT.with(Cell::get), 1);
 }

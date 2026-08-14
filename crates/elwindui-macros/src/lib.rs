@@ -37,11 +37,14 @@ pub fn viewmodel(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[elwindui::component(inherits Base)] struct Name { ..fields.., body: view! { .. } }` — lets a
+/// `#[elwindui::component(inherits Base, template = environment_key)] struct Name { ..fields..,
+/// body: view! { .. } }` — lets a
 /// `component`+`view` pair be written as a single ordinary Rust `struct` instead of the DSL text
 /// form's `component Name inherits Base { .. } view Name { .. }` block pair. Ordinary fields become
 /// the component's own `#[param]`/`#[prop]`/etc. fields, exactly as in DSL text; exactly one
 /// field, typed as a `view! { .. }` macro invocation, supplies the view tree.
+/// `template` is optional; when present, its Environment Key selects an
+/// `Option<ControlTemplate<Name>>` once during mount and the `body` is the default template.
 ///
 /// `Base` is a bare name (`inherits ContentControl`) when inheriting a builtin, or a full
 /// crate-root-qualified path (`inherits crate::ui::LabeledPanel`) when inheriting another
@@ -94,18 +97,50 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
             return quote::quote! { compile_error!(#msg); }.into();
         }
     };
-    let base = match parse_inherits_arg(attr.into()) {
-        Ok(base) => base,
+    let args = match parse_component_args(attr.into()) {
+        Ok(args) => args,
         Err(e) => {
             let msg = format!("#[elwindui::component]: {e}");
             return quote::quote! { compile_error!(#msg); }.into();
         }
     };
-    match elwindui_codegen::generate_component_from_item_struct(base, &item_struct) {
+    match elwindui_codegen::generate_component_from_item_struct_with_template(
+        args.base,
+        args.template,
+        &item_struct,
+    ) {
         Ok(tokens) => tokens.into(),
         Err(e) => {
             let msg = format!("#[elwindui::component]: {e}");
             quote::quote! { compile_error!(#msg); }.into()
+        }
+    }
+}
+
+/// Defines a typed, reusable `ControlTemplate` factory.
+#[proc_macro_attribute]
+pub fn control_template(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let target = match parse_control_template_target(attr.into()) {
+        Ok(target) => target,
+        Err(error) => {
+            let message = format!("#[elwindui::control_template]: {error}");
+            return quote::quote! { compile_error!(#message); }.into();
+        }
+    };
+    let item_struct = match syn::parse::<syn::ItemStruct>(item) {
+        Ok(item_struct) => item_struct,
+        Err(error) => {
+            let message = format!(
+                "#[elwindui::control_template]: expected `struct Name {{ body: view! {{ .. }} }}`: {error}"
+            );
+            return quote::quote! { compile_error!(#message); }.into();
+        }
+    };
+    match elwindui_codegen::generate_control_template_from_item_struct(&target, &item_struct) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => {
+            let message = format!("#[elwindui::control_template]: {error}");
+            quote::quote! { compile_error!(#message); }.into()
         }
     }
 }
@@ -211,21 +246,70 @@ pub fn environment_key(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// crate-root-qualified path (`crate::ui::LabeledPanel`), required for a user-defined base for the
 /// exact same reason. Either form is accepted here; `elwindui_codegen::component_frontend` is what
 /// splits the result back into a bare symbol-table name plus an optional qualifying path (Refs #25).
-fn parse_inherits_arg(attr: proc_macro2::TokenStream) -> syn::Result<Option<String>> {
+struct ComponentArgs {
+    base: Option<String>,
+    template: Option<String>,
+}
+
+/// Parses `#[component]` arguments: optional `inherits Path` and optional `template = key`.
+fn parse_component_args(attr: proc_macro2::TokenStream) -> syn::Result<ComponentArgs> {
     use syn::parse::Parser;
     if attr.is_empty() {
-        return Ok(None);
+        return Ok(ComponentArgs {
+            base: None,
+            template: None,
+        });
     }
     (|input: syn::parse::ParseStream| {
-        let kw: syn::Ident = input.parse()?;
-        if kw != "inherits" {
+        let mut base = None;
+        let mut template = None;
+        while !input.is_empty() {
+            let kw: syn::Ident = input.parse()?;
+            if kw == "inherits" {
+                if base.is_some() {
+                    return Err(syn::Error::new(kw.span(), "duplicate `inherits` argument"));
+                }
+                let path: syn::Path = input.parse()?;
+                base = Some(path_to_string(&path));
+            } else if kw == "template" {
+                if template.is_some() {
+                    return Err(syn::Error::new(kw.span(), "duplicate `template` argument"));
+                }
+                input.parse::<syn::Token![=]>()?;
+                let key: syn::Ident = input.parse()?;
+                template = Some(key.to_string());
+            } else {
+                return Err(syn::Error::new(
+                    kw.span(),
+                    "expected `inherits <Base>` or `template = <environment_key_name>`",
+                ));
+            }
+            if input.is_empty() {
+                break;
+            }
+            input.parse::<syn::Token![,]>()?;
+        }
+        Ok(ComponentArgs { base, template })
+    })
+    .parse2(attr)
+}
+
+fn parse_control_template_target(attr: proc_macro2::TokenStream) -> syn::Result<syn::Path> {
+    use syn::parse::Parser;
+    (|input: syn::parse::ParseStream| {
+        let name: syn::Ident = input.parse()?;
+        if name != "target" {
             return Err(syn::Error::new(
-                kw.span(),
-                "expected `inherits <Base>` or `inherits <crate::path::To::Base>`",
+                name.span(),
+                "expected `target = <ControlType>`",
             ));
         }
-        let path: syn::Path = input.parse()?;
-        Ok(Some(path_to_string(&path)))
+        input.parse::<syn::Token![=]>()?;
+        let target: syn::Path = input.parse()?;
+        if !input.is_empty() {
+            return Err(input.error("unexpected tokens after ControlTemplate target"));
+        }
+        Ok(target)
     })
     .parse2(attr)
 }

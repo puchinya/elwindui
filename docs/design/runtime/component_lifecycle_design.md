@@ -140,6 +140,14 @@ Concretely, `show()`'s body: if `self.__mount_environment.get().is_none()` (this
 
 **Runtime verification of `show`/`hide`/`close`'s actual behavior** (mount-exactly-once, hide-does-not-unmount, re-show-does-not-rebuild): performed via `crates/elwindui-codegen`'s own generated-source-text test (`component_frontend::tests::host_composition_gets_inherent_show_hide_close_and_no_auto_mount_on_constructed`), not by executing real AppKit window construction in `cargo test` — `crates/elwindui/tests/window_mount_hide_close.rs` is type-checked but not executed, following the existing `for_item_two_way.rs` precedent (AppKit requires native window/view construction on the process main thread; Rust's default test harness invokes `#[test]` functions from worker threads).
 
+### 4h. ControlTemplate mount selection
+
+`#[component(template = key)]`はown Environment field解決後、descendant construction前にKeyを一度読む。
+`Some(template)`ではdefault planを構築せず、typed factoryへtarget `Rc`と確定済みcontextを渡す。
+macro-authored template instanceは同じcontextでmountされ、その`on_mount`完了後にtargetの`on_mount`を実行する。
+`None`ではdefault bodyを直接構築する。Key subscriptionとruntime re-templateは生成しない。
+詳細なownership/wiring順序は[`control_template_design.md`](control_template_design.md)を参照する。
+
 ## 5. Forward-compatibility notes (no implementation; spec §19–§22)
 
 - **NativeControl** (§19): the native backend widget does not need to exist at `Component::new()` time under this model — nothing in the Created state requires a materialized native handle. Whether a given backend chooses to allocate the native object eagerly anyway (as both AppKit and WinUI3 already do for `Window`'s native shell, per §5's discussion of Window specifically — a different question, deferred to CI-8) versus lazily at mount/build is a backend implementation choice this lifecycle model does not constrain either way, as long as Environment-dependent configuration happens no earlier than `mount()`.

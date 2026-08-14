@@ -14,6 +14,7 @@
 - 共有 `EnvironmentContext`(`Clone`)が型付きlookupを提供する: `get<K: EnvironmentKey>(&self) -> K::Value`、`set<K>(&self, value: K::Value)`、`derive(&self) -> EnvironmentContext`。内部storageはKeyの型消去(`TypeId`等)を用いてよいが、文字列によるruntime lookupは提供しない。
 - Environment entryはreactive cellとして保持する。overrideされていないKeyは親のcellをそのまま共有し、overrideされたKeyのみ新しいcellを持つ——`derive()`はこの共有・分岐を行う。
 - Environment解決はVisual Treeへのattachに依存しない。Componentは`mount`時に確立された`EnvironmentContext`を用いて自身の`#[environment(name)]` fieldを解決し、その後にbody/`view!`を評価してUIElementを生成する。child Componentへは、`mount`時に確立された(または`EnvironmentScope`が派生させた)contextを明示的に伝播してから、そのchildをmountする。
+- `#[component(template = key)]`は同じmount-time contextから`Option<ControlTemplate<Component>>`を一度だけ解決する。Key変更はmount済みControlを再テンプレート化しない。詳細は[`control_template_spec.md`](control_template_spec.md)を参照する。
 - `EnvironmentScope` はUIElement・Render nodeを生成しない。親Environmentをderiveし、指定したKeyのみ上書きした派生Environmentをchildrenの`mount`へ渡す。
 - EnvironmentとThemeの責務は分離する。Theme(§3–§6)はEnvironmentのlookup/継承機構を再定義せず、`EnvironmentContext`のoverride経路を呼び出すのみである。
 

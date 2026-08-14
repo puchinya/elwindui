@@ -9,6 +9,7 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 | Area | State | Current evidence / gap |
 |---|---|---|
 | Component frontend and `view!` DSL | ✅ | proc-macro frontend, parser, validation, and code generation are in workspace tests |
+| ControlTemplate | ✅ | `#[component(template = key)]` mount-time selection, `#[control_template]`, typed/reactive `templated_parent`, backend-neutral template-root ownership, and `ContentPresenter`/ContentControl logical-Visual separation are implemented and tested ([#83](https://github.com/puchinya/elwindui/issues/83)); runtime re-template/per-instance template/TemplatePart/VisualState remain out of scope |
 | `param` / `prop` / `state` / `computed` / `bindable` | ✅ | generated storage, notifications, and dependency refresh are used by examples |
 | Once / OneWay / TwoWay binding | ✅ | component and ViewModel examples exercise generated paths |
 | `if` / `match` dynamic regions | ✅ | conditional region replacement is implemented |
@@ -37,12 +38,12 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 ## Samples
 
-`controls-demo`, `font-demo`, `graphics-demo`, `inheritance-demo`, `notepad`, `theme-demo`, and `viewmodel-attr-demo` exercise the implemented public surface. A sample demonstrates usage but is not itself normative evidence.
+`control-template-demo`, `controls-demo`, `font-demo`, `graphics-demo`, `inheritance-demo`, `notepad`, `theme-demo`, and `viewmodel-attr-demo` exercise the implemented public surface. A sample demonstrates usage but is not itself normative evidence.
 
 ## Primary gaps
 
 - GTK4 is a stub and mobile backends have no implementation.
-- General control templates are not complete ([#83](https://github.com/puchinya/elwindui/issues/83)); accessibility scaffolds and the NavigationHost/VirtualList/ErrorBoundary contract require a decision ([#85](https://github.com/puchinya/elwindui/issues/85)).
+- ControlTemplateのruntime re-template/per-instance template/TemplatePart/VisualStateは未実装である ([#83](https://github.com/puchinya/elwindui/issues/83)); accessibility scaffolds and the NavigationHost/VirtualList/ErrorBoundary contract require a decision ([#85](https://github.com/puchinya/elwindui/issues/85)).
 - Clipboard, drag/drop, and notifications are not complete.
 - Language-server cross-file resolution, preview tooling, and hot reload are incomplete.
 - Whole-workspace rust-analyzer diagnostics are not currently a clean gate because of pre-existing generated-code diagnostics.

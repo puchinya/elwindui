@@ -17,7 +17,6 @@
 use elwindui::core::environment::application_environment;
 use elwindui::core::graphics::{Brush, Color, FontWeight};
 use elwindui::core::theme::Theme;
-use elwindui::ui::WindowExt;
 
 #[elwindui::environment_key(
     name = brand,

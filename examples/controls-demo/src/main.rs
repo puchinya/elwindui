@@ -20,7 +20,6 @@
 
 use elwindui::core::input::Key;
 use elwindui::core::ui::CheckState;
-use elwindui::ui::WindowExt;
 
 #[elwindui::viewmodel]
 mod controls_demo_view_model {

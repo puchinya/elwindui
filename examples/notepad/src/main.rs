@@ -7,7 +7,6 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::platform;
-use elwindui::ui::WindowExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveState {

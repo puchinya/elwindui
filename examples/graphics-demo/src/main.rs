@@ -40,7 +40,6 @@ use elwindui::core::graphics::{
     VectorImage, VectorImageDrawOptions,
 };
 use elwindui::core::ui::UIElementExt;
-use elwindui::ui::WindowExt;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 

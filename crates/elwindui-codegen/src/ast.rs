@@ -74,7 +74,8 @@ pub enum Item {
 ///   inherits ContentControl`, `TypeInfo::composed_shape`/`codegen.rs`'s `resolve_composed_shape`):
 ///   `Name`'s struct embeds a real `base: Base` field, built by calling `Base`'s own
 ///   `create_<snake case>(..)` factory (which every composed component exposes, precisely so a
-///   *further* derived one can call it directly — see `generate_view`'s `is_template_composition`).
+///   *further* derived one can call it directly — see `generate_view`'s
+///   `is_inherited_view_composition`).
 ///   A `Name` that instead defines its *own* `view` reusing `Base`'s *code* rather than its structure
 ///   (`Derived inherits Base`, both independently rooted, `#[override] fn`/`base::name(...)`) keeps
 ///   the original field-flattening/`__base_<name>` shadow-method mechanism unchanged — there's no

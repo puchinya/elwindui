@@ -20,6 +20,12 @@ UI nodes are shared handles because a node is referenced by its owner, parent tr
 
 Logical and visual child enumeration remains centralized on the element abstraction. Containers must not maintain a second unsynchronized public child list.
 
+Template-enabled `Control`はlogical childrenとは別に単一のVisual template rootをstrong保持する。
+template rootのlogical parentは設定しない。`ContentControl`のlogical contentは常にtargetをlogical parentとし、
+`ContentPresenter`が同じcontentを自身のVisual childとして配置する。targetからtemplate rootへのedgeはstrong、
+template instanceからtemplated parentへのedgeはWeakでありcycleを作らない。詳細は
+[`control_template_design.md`](control_template_design.md)を参照する。
+
 ## Lifecycle
 
 Construction establishes the object and local state. Mounting attaches the subtree to a host and enables inherited-context resolution, layout, rendering, input, and native reconciliation. Unmounting removes subscriptions, host resources, focus ownership, and render state before the subtree becomes unreachable.

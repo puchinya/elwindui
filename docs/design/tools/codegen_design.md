@@ -43,6 +43,10 @@ backend-independent Rust token generation
 
 `component_frontend` と `attr_frontend` は `struct`、`mod`、`enum` を共通ASTへ変換する。`view!` fieldの内側だけは `parser` がDSL grammarとして解析する。この境界より後のvalidationとgenerationは、どの属性macroから入力されたかに依存しない。
 
+`#[control_template(target = T)]`も同じView ASTへlowerし、reserved `templated_parent: Weak<T>`を持つ
+private template-instance Componentと`ControlTemplate<T>` factoryを生成する。public declarationは
+`Name::template()`を提供するzero-sized namespaceとして残す。
+
 ### 3.2 Registry resolution
 
 同一crate内のcomponent、viewmodel、DSL enumのmetadataはmacro展開中のregistryへ登録する。後続の展開はregistryから宣言済みmetadataを参照するため、DSLのcross-item検証は宣言順に依存する。
@@ -61,8 +65,12 @@ validatorは [`dsl_spec.md`](../../specs/dsl_spec.md) のcompile-time ruleをAST
 - `for`、`if`、`match` など動的領域の構造
 - DSL enumについてmacro展開時に判定できる網羅性
 - content fieldの形状、native/virtual root互換性、shortcut targetと配置などの構造制約
+- replaceable template内の`#[id]`、複数`ContentPresenter`、dynamic region内`ContentPresenter`
 
 macro processで完全に解決できないRust型やpathは、生成するRust構文によってrustcのtype checkとpattern exhaustiveness checkへ引き継ぐ。正しさを隠す合成的なwildcard armは生成しない。
+
+ControlTemplateのcross-crate target、Environment Key Value、`templated_parent` getter、
+`ContentPresenter` targetはそれぞれ生成した`ControlExt`、型一致、method resolution、`ContentControlExt` boundで検査する。
 
 ### 3.4 Dependency analysis
 

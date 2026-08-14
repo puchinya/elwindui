@@ -215,6 +215,8 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 ### `Control`
 
 スタイリング、テーマ設定、テンプレート合成に対応した汎用コントロール基底。
+template-enabled派生型ではmount時に選択した単一template rootをVisual childとして保持し、logical childにはしない。
+typed factoryと選択規則は[ControlTemplate Specification](control_template_spec.md)で定義する。
 
 #### Properties
 
@@ -226,12 +228,20 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 ### `ContentControl`
 
 `Control` を継承し、単一のコンテンツプロパティを提供する基底。
+raw `ContentControl`は従来どおりcontentをdirect Visual childとして表示する。template-enabled派生型では
+contentのlogical parentを`ContentControl`に保ったまま、template内の`ContentPresenter`だけがVisual配置する。
 
 #### Properties
 
 | Name | Type | Binding | Description |
 |---|---|---|---|
 | `content` | `UIElement` | OneWay | 保持する単一の子要素 |
+
+### `ContentPresenter`
+
+templated parentのlogical contentを自身の単一Visual childとして表示するbackend非依存Control。
+logical parentは書き換えず、`set_content`による置換へ追従する。通常のapplication treeで独立した
+content containerとして使うためのControlではない。
 
 ---
 

@@ -222,6 +222,7 @@ fn compiling_crate_key() -> String {
 /// for its `inherits`/`struct_only` fields.
 struct StoredComponent {
     base: Option<String>,
+    template: Option<String>,
     struct_src: String,
     /// The companion `#[elwindui::component] impl Name { .. }` block's source, if one was expanded
     /// after this struct. Kept as text for the same reason `struct_src` is. Empty until
@@ -255,8 +256,19 @@ pub fn register_same_crate_component(
     base: Option<&str>,
     item_struct: &syn::ItemStruct,
 ) {
+    register_same_crate_component_with_template(name, base, None, item_struct);
+}
+
+/// Registers a component and its optional ControlTemplate Environment Key.
+pub fn register_same_crate_component_with_template(
+    name: &str,
+    base: Option<&str>,
+    template: Option<&str>,
+    item_struct: &syn::ItemStruct,
+) {
     let stored = StoredComponent {
         base: base.map(str::to_string),
+        template: template.map(str::to_string),
         struct_src: quote::quote! { #item_struct }.to_string(),
         impl_src: None,
     };
@@ -264,6 +276,15 @@ pub fn register_same_crate_component(
         .lock()
         .unwrap()
         .insert((compiling_crate_key(), name.to_string()), stored);
+}
+
+/// Returns the template Environment Key declared by a same-crate component.
+pub fn lookup_same_crate_component_template(name: &str) -> Option<String> {
+    same_crate_components()
+        .lock()
+        .unwrap()
+        .get(&(compiling_crate_key(), name.to_string()))
+        .and_then(|stored| stored.template.clone())
 }
 
 /// Rebuilds `name`'s `ComponentDef`/`ViewDef` from its registered struct text — the same

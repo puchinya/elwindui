@@ -6,7 +6,7 @@ use crate::ast::{
     AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind,
     Item, Module, ViewExpr,
 };
-use crate::codegen::{self, SymbolTable, strip_rc_wrapper};
+use crate::codegen::{self, SymbolTable, strip_rc_wrapper, strip_weak_wrapper};
 use std::collections::{HashMap, HashSet};
 use syn::visit::Visit;
 
@@ -507,9 +507,15 @@ fn check_binding_assignments(
                     let property = &path[1];
                     match component.fields.iter().find(|field| &field.name == owner) {
                         Some(field)
-                            if field.attrs.iter().any(|attr| matches!(attr, Attr::Bindable)) =>
+                            if field.attrs.iter().any(|attr| matches!(attr, Attr::Bindable))
+                                || (field.name == "templated_parent"
+                                    && strip_weak_wrapper(&field.ty) != field.ty.trim()) =>
                         {
-                            let owner_ty = strip_rc_wrapper(&field.ty);
+                            let owner_ty = if field.name == "templated_parent" {
+                                strip_weak_wrapper(&field.ty)
+                            } else {
+                                strip_rc_wrapper(&field.ty)
+                            };
                             match table.resolve(from, owner_ty) {
                                 Some(info) if info.fields.contains_key(property) => {}
                                 Some(_) => errors.push(format!(
@@ -691,14 +697,21 @@ fn resolve_for_item_info<'a>(
                 .iter()
                 .find(|field| &field.name == owner)
                 .ok_or_else(|| format!("collection owner `{owner}` is not a component field"))?;
+            let is_templated_parent = owner_field.name == "templated_parent"
+                && strip_weak_wrapper(&owner_field.ty) != owner_field.ty.trim();
             if !owner_field
                 .attrs
                 .iter()
                 .any(|attr| matches!(attr, Attr::Bindable))
+                && !is_templated_parent
             {
                 return Err(format!("collection owner `{owner}` is not #[bindable]"));
             }
-            let owner_ty = strip_rc_wrapper(&owner_field.ty);
+            let owner_ty = if is_templated_parent {
+                strip_weak_wrapper(&owner_field.ty)
+            } else {
+                strip_rc_wrapper(&owner_field.ty)
+            };
             let owner_info = table
                 .resolve(from, owner_ty)
                 .ok_or_else(|| format!("cannot resolve collection owner type `{owner_ty}`"))?;
@@ -999,7 +1012,11 @@ fn find_vm_fields<'a>(
 ) -> HashMap<&'a str, &'a str> {
     let mut vm_fields = HashMap::new();
     for f in fields {
-        let ty = strip_rc_wrapper(&f.ty);
+        let ty = if f.name == "templated_parent" {
+            strip_weak_wrapper(&f.ty)
+        } else {
+            strip_rc_wrapper(&f.ty)
+        };
         if !known_type_names.contains(ty) {
             continue;
         }

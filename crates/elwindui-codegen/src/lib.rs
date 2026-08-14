@@ -134,11 +134,54 @@ pub fn generate_component_from_item_struct(
     base: Option<String>,
     item_struct: &syn::ItemStruct,
 ) -> Result<proc_macro2::TokenStream, String> {
+    generate_component_from_item_struct_with_template(base, None, item_struct)
+}
+
+/// Generates a component whose `body: view!` is replaceable by a typed Environment template.
+pub fn generate_component_from_item_struct_with_template(
+    base: Option<String>,
+    template: Option<String>,
+    item_struct: &syn::ItemStruct,
+) -> Result<proc_macro2::TokenStream, String> {
     // Shape errors (a malformed `view!`, a bad field attribute, ...) are reported here, against the
     // struct that actually contains them, rather than being deferred to the `impl` half.
     let (component_def, view_def) =
         component_frontend::component_and_view_from_item_struct(base.clone(), item_struct)?;
     let name = component_def.name.clone();
+    if let Some(template_name) = &template {
+        let is_control = component_def
+            .base
+            .as_deref()
+            .map(|base| {
+                same_crate_control_target(base)
+                    .or_else(|| component_def.base_path.is_none().then_some(false))
+            })
+            .unwrap_or(Some(false));
+        if is_control == Some(false) {
+            return Err(format!(
+                "`{name}`: template-enabled components must inherit Control; NativeControl and non-Control components are not supported"
+            ));
+        }
+        if view_def.is_none() {
+            return Err(format!(
+                "`{name}`: `template = {template_name}` requires a `body: view! {{ .. }}` default template"
+            ));
+        }
+        validate_replaceable_template_view(view_def.as_ref().unwrap())?;
+        match component_frontend::lookup_same_crate_environment_key(template_name) {
+            None => {
+                return Err(format!(
+                    "`{name}`: template Environment Key `{template_name}` is not registered; declare it with #[elwindui::environment_key] before the component"
+                ));
+            }
+            Some((_, value_type)) if !is_control_template_key_value(&value_type, &name) => {
+                return Err(format!(
+                    "`{name}`: template Environment Key `{template_name}` must have Value = Option<ControlTemplate<{name}>>, found `{value_type}`"
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     // Validate here as well as in the `impl` half. Everything except `#[overrides]`-vs-base method
     // checking is already decidable from the struct alone (a non-exhaustive `match`, a typo'd
     // `vm.field`, a `#[bindable]` field whose type isn't a viewmodel, ...), and a diagnostic is far
@@ -156,7 +199,12 @@ pub fn generate_component_from_item_struct(
         .chain(component_frontend::sibling_enum_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
-    component_frontend::register_same_crate_component(&name, base.as_deref(), item_struct);
+    component_frontend::register_same_crate_component_with_template(
+        &name,
+        base.as_deref(),
+        template.as_deref(),
+        item_struct,
+    );
     // Emits nothing on purpose: the paired `#[elwindui::component] impl Name { .. }` generates the
     // whole type. This mirrors `#[elwindui_macros::class]` exactly — there too the `struct` half
     // only stashes what the `impl` half needs (`store_class_args`/`load_class_args`), and the
@@ -234,6 +282,436 @@ pub fn generate_component_from_item_impl(
     let generated = codegen::generate_module(&module, &table);
     component_frontend::register_same_crate_component_methods(&name, item_impl);
     Ok(generated)
+}
+
+/// Generates the private component instance and typed factory for
+/// `#[elwindui::control_template(target = Target)] struct Name { body: view! { .. } }`.
+pub fn generate_control_template_from_item_struct(
+    target: &syn::Path,
+    item_struct: &syn::ItemStruct,
+) -> Result<proc_macro2::TokenStream, String> {
+    let target_name = target
+        .segments
+        .last()
+        .expect("a syn::Path always has at least one segment")
+        .ident
+        .to_string();
+    if same_crate_control_target(&target_name) == Some(false) {
+        return Err(format!(
+            "target `{target_name}` is not a Control-derived component; NativeControl and non-Control targets cannot be templated"
+        ));
+    }
+    if !item_struct.generics.params.is_empty() {
+        return Err("ControlTemplate declarations cannot be generic".to_string());
+    }
+    let syn::Fields::Named(fields) = &item_struct.fields else {
+        return Err("expected a struct with exactly `body: view! { .. }`".to_string());
+    };
+    let mut fields_iter = fields.named.iter();
+    let Some(body) = fields_iter.next() else {
+        return Err("expected `body: view! { .. }`".to_string());
+    };
+    if fields_iter.next().is_some()
+        || body.ident.as_ref().is_none_or(|ident| ident != "body")
+        || !matches!(
+            &body.ty,
+            syn::Type::Macro(mac)
+                if mac.mac.path.segments.last().is_some_and(|segment| segment.ident == "view")
+        )
+    {
+        return Err("expected exactly one field: `body: view! { .. }`".to_string());
+    }
+
+    let (_, authored_view) = component_frontend::component_and_view_from_item_struct(
+        Some("Control".to_string()),
+        item_struct,
+    )?;
+    validate_replaceable_template_view(
+        authored_view
+            .as_ref()
+            .ok_or_else(|| "expected `body: view! { .. }`".to_string())?,
+    )?;
+
+    let name = &item_struct.ident;
+    let hidden_name = quote::format_ident!("__ElwinduiControlTemplateInstanceFor{}", name);
+    let body_ty = &body.ty;
+    let hidden_struct: syn::ItemStruct = syn::parse_quote! {
+        struct #hidden_name {
+            #[param]
+            templated_parent: std::rc::Weak<#target>,
+            body: #body_ty,
+        }
+    };
+    // `ContentControl` gives the private instance a single, ordinary content slot for the authored
+    // root. The instance itself is the template root stored by the target; its content remains an
+    // implementation detail and is unrelated to the target's logical content/presenter channel.
+    generate_component_from_item_struct(Some("ContentControl".to_string()), &hidden_struct)?;
+    let hidden_impl: syn::ItemImpl = syn::parse_quote! { impl #hidden_name {} };
+    let hidden_generated = generate_component_from_item_impl(&hidden_impl)?;
+
+    let attrs = &item_struct.attrs;
+    let vis = &item_struct.vis;
+    Ok(quote::quote! {
+        #hidden_generated
+
+        #(#attrs)*
+        #vis struct #name;
+
+        impl #name {
+            pub fn template() -> elwindui::core::ui::ControlTemplate<#target> {
+                elwindui::core::ui::ControlTemplate::new(|context| {
+                    let instance = #hidden_name::__new_unmounted(std::rc::Rc::downgrade(&context.control));
+                    instance.mount(context.environment);
+                    instance.into_node()
+                })
+            }
+        }
+    })
+}
+
+fn same_crate_control_target(name: &str) -> Option<bool> {
+    fn visit(name: &str, visited: &mut std::collections::HashSet<String>) -> Option<bool> {
+        match name {
+            "Control" | "ContentControl" => return Some(true),
+            "UIElement" | "Layout" | "Shape" | "NativeControl" | "Window" => {
+                return Some(false);
+            }
+            _ => {}
+        }
+        if !visited.insert(name.to_string()) {
+            return None;
+        }
+        let (component, _) = component_frontend::registered_component_parts(name)?;
+        let base = component.base.as_deref()?;
+        visit(base, visited).or_else(|| component.base_path.is_none().then_some(false))
+    }
+
+    visit(name, &mut std::collections::HashSet::new())
+}
+
+fn is_control_template_key_value(value_type: &str, target_name: &str) -> bool {
+    fn last_path_ident(ty: &syn::Type) -> Option<&syn::PathSegment> {
+        let syn::Type::Path(path) = ty else {
+            return None;
+        };
+        path.path.segments.last()
+    }
+
+    let Ok(value_type) = syn::parse_str::<syn::Type>(value_type) else {
+        return false;
+    };
+    let Some(option) = last_path_ident(&value_type) else {
+        return false;
+    };
+    if option.ident != "Option" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(option_args) = &option.arguments else {
+        return false;
+    };
+    let [syn::GenericArgument::Type(template_type)] =
+        option_args.args.iter().collect::<Vec<_>>().as_slice()
+    else {
+        return false;
+    };
+    let Some(template) = last_path_ident(template_type) else {
+        return false;
+    };
+    if template.ident != "ControlTemplate" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(template_args) = &template.arguments else {
+        return false;
+    };
+    let [syn::GenericArgument::Type(target_type)] =
+        template_args.args.iter().collect::<Vec<_>>().as_slice()
+    else {
+        return false;
+    };
+    last_path_ident(target_type).is_some_and(|target| target.ident == target_name)
+}
+
+fn validate_replaceable_template_view(view: &ast::ViewDef) -> Result<(), String> {
+    if view.lets.iter().any(|binding| binding.id.is_some()) {
+        return Err("#[id(...)] is not supported inside a replaceable ControlTemplate".to_string());
+    }
+
+    fn is_presenter(type_path: &str) -> bool {
+        type_path.rsplit("::").next() == Some("ContentPresenter")
+    }
+
+    fn visit_expr(
+        expr: &ast::ViewExpr,
+        dynamic: bool,
+        presenters: &mut usize,
+    ) -> Result<(), String> {
+        match expr {
+            ast::ViewExpr::Element(element) => visit_element(element, dynamic, presenters),
+            ast::ViewExpr::Closure { body, .. } => match body {
+                ast::ClosureBody::Element(element) => visit_element(element, dynamic, presenters),
+                ast::ClosureBody::Expr(expr) => visit_expr(expr, dynamic, presenters),
+                ast::ClosureBody::Block(_) => Ok(()),
+            },
+            ast::ViewExpr::TFluent(_, args) => {
+                for (_, expr) in args {
+                    visit_expr(expr, dynamic, presenters)?;
+                }
+                Ok(())
+            }
+            ast::ViewExpr::Path(_) | ast::ViewExpr::Expr(_) => Ok(()),
+        }
+    }
+
+    fn visit_element(
+        element: &ast::ElementNode,
+        dynamic: bool,
+        presenters: &mut usize,
+    ) -> Result<(), String> {
+        if is_presenter(&element.type_path) {
+            if dynamic {
+                return Err(
+                    "ContentPresenter is not supported inside a dynamic template region"
+                        .to_string(),
+                );
+            }
+            *presenters += 1;
+            if *presenters > 1 {
+                return Err(
+                    "a ControlTemplate may contain at most one ContentPresenter".to_string()
+                );
+            }
+        }
+        for attribute in &element.attributes {
+            visit_expr(&attribute.value, dynamic, presenters)?;
+        }
+        for child in &element.children {
+            visit_child(child, dynamic, presenters)?;
+        }
+        Ok(())
+    }
+
+    fn visit_child(
+        child: &ast::ChildEntry,
+        dynamic: bool,
+        presenters: &mut usize,
+    ) -> Result<(), String> {
+        match child {
+            ast::ChildEntry::Literal(element) => visit_element(element, dynamic, presenters),
+            ast::ChildEntry::Ref(_) => Ok(()),
+            ast::ChildEntry::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                visit_expr(condition, dynamic, presenters)?;
+                for child in then_branch.iter().chain(else_branch) {
+                    visit_child(child, true, presenters)?;
+                }
+                Ok(())
+            }
+            ast::ChildEntry::Match { value, arms } => {
+                visit_expr(value, dynamic, presenters)?;
+                for arm in arms {
+                    for child in &arm.body {
+                        visit_child(child, true, presenters)?;
+                    }
+                }
+                Ok(())
+            }
+            ast::ChildEntry::For {
+                collection, body, ..
+            } => {
+                visit_expr(collection, dynamic, presenters)?;
+                for child in body {
+                    visit_child(child, true, presenters)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    let mut presenters = 0;
+    for binding in &view.lets {
+        visit_element(&binding.element, false, &mut presenters)?;
+    }
+    for child in &view.root.children {
+        visit_child(child, false, &mut presenters)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod control_template_tests {
+    use super::*;
+
+    fn author(src: &str) -> Result<String, String> {
+        author_for("Control", src)
+    }
+
+    fn author_for(target: &str, src: &str) -> Result<String, String> {
+        let item: syn::ItemStruct = syn::parse_str(src).expect("template struct should parse");
+        let target: syn::Path = syn::parse_str(target).unwrap();
+        generate_control_template_from_item_struct(&target, &item).map(|tokens| tokens.to_string())
+    }
+
+    #[test]
+    fn authoring_generates_a_typed_factory_and_weak_templated_parent() {
+        let generated = author(
+            r#"
+            struct CodegenControlTemplateValidA {
+                body: view! { TextBlock { text: "ok" } },
+            }
+            "#,
+        )
+        .expect("valid template should generate");
+        assert!(generated.contains("ControlTemplate < Control >"));
+        assert!(generated.contains("Weak < Control >"));
+        assert!(generated.contains("templated_parent"));
+    }
+
+    #[test]
+    fn authoring_rejects_ids_multiple_presenters_and_dynamic_presenters() {
+        let id = author(
+            r#"
+            struct CodegenControlTemplateIdB {
+                body: view! {
+                    #[id("part")]
+                    let part = TextBlock { text: "x" };
+                    part
+                },
+            }
+            "#,
+        )
+        .expect_err("replaceable template ids must be rejected");
+        assert!(id.contains("#[id"), "error: {id}");
+
+        let multiple = author(
+            r#"
+            struct CodegenControlTemplateMultipleB {
+                body: view! {
+                    VerticalLayout { ContentPresenter {} ContentPresenter {} }
+                },
+            }
+            "#,
+        )
+        .expect_err("multiple presenters must be rejected");
+        assert!(
+            multiple.contains("at most one ContentPresenter"),
+            "error: {multiple}"
+        );
+
+        let dynamic = author(
+            r#"
+            struct CodegenControlTemplateDynamicB {
+                body: view! {
+                    VerticalLayout { if true { ContentPresenter {} } }
+                },
+            }
+            "#,
+        )
+        .expect_err("dynamic presenters must be rejected");
+        assert!(
+            dynamic.contains("dynamic template region"),
+            "error: {dynamic}"
+        );
+    }
+
+    #[test]
+    fn template_enabled_default_body_rejects_id() {
+        component_frontend::register_same_crate_environment_key(
+            "codegen_control_template_key_c",
+            "CodegenControlTemplateKeyC",
+            "Option<ControlTemplate<CodegenControlTemplatePanelC>>",
+        )
+        .unwrap();
+        let item: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct CodegenControlTemplatePanelC {
+                body: view! {
+                    #[id("part")]
+                    let part = TextBlock { text: "x" };
+                    part
+                },
+            }
+            "#,
+        )
+        .unwrap();
+        let error = generate_component_from_item_struct_with_template(
+            Some("ContentControl".to_string()),
+            Some("codegen_control_template_key_c".to_string()),
+            &item,
+        )
+        .expect_err("default template ids must be rejected");
+        assert!(error.contains("#[id"), "error: {error}");
+    }
+
+    #[test]
+    fn template_environment_key_value_must_match_the_component() {
+        component_frontend::register_same_crate_environment_key(
+            "codegen_control_template_key_mismatch_e",
+            "CodegenControlTemplateKeyMismatchE",
+            "Option<ControlTemplate<AnotherPanel>>",
+        )
+        .unwrap();
+        let item: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct CodegenControlTemplatePanelE {
+                body: view! { TextBlock { text: "x" } },
+            }
+            "#,
+        )
+        .unwrap();
+        let error = generate_component_from_item_struct_with_template(
+            Some("ContentControl".to_string()),
+            Some("codegen_control_template_key_mismatch_e".to_string()),
+            &item,
+        )
+        .expect_err("mismatched template key target must be rejected");
+        assert!(
+            error.contains("Option<ControlTemplate<CodegenControlTemplatePanelE>>"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn same_crate_non_control_and_native_control_targets_are_rejected_early() {
+        let target: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct CodegenControlTemplateNotControlD {
+                body: view! { VerticalLayout {} },
+            }
+            "#,
+        )
+        .unwrap();
+        generate_component_from_item_struct(Some("VerticalLayout".to_string()), &target).unwrap();
+
+        let template = r#"
+            struct CodegenControlTemplateInvalidTargetD {
+                body: view! { TextBlock { text: "x" } },
+            }
+        "#;
+        let non_control = author_for("CodegenControlTemplateNotControlD", template)
+            .expect_err("same-crate non-Control target must be rejected");
+        assert!(non_control.contains("not a Control-derived"));
+
+        let native = author_for("NativeControl", template)
+            .expect_err("NativeControl target must be rejected");
+        assert!(native.contains("NativeControl"));
+
+        component_frontend::register_same_crate_environment_key(
+            "codegen_control_template_key_d",
+            "CodegenControlTemplateKeyD",
+            "Option<ControlTemplate<CodegenControlTemplateNotControlD>>",
+        )
+        .unwrap();
+        let component_error = generate_component_from_item_struct_with_template(
+            Some("VerticalLayout".to_string()),
+            Some("codegen_control_template_key_d".to_string()),
+            &target,
+        )
+        .expect_err("template-enabled non-Control component must be rejected");
+        assert!(component_error.contains("must inherit Control"));
+    }
 }
 
 /// Phase 4 (`docs/status/implementation_status.md`): exercises `#[elwindui::dsl_enum]` end to

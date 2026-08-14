@@ -92,8 +92,6 @@ impl InnerWindow {
     /// Visibility only (CI-8 of #80): `AppWindow.Hide()` (Windows App SDK 1.3+, already available
     /// here via `app_window()` for position/size) is the natural counterpart to `show()`'s
     /// `Activate()` — does not close the window or release `crate::app`'s retain-list entry.
-    /// **Unverified on Windows** — this crate cannot be built/tested from this (macOS) environment;
-    /// mirrors the AppKit `orderOut:` shape as closely as the WinUI3/AppSDK API allows.
     pub(crate) fn hide(&self) {
         if let Some(app_window) = self.app_window() {
             let _ = app_window.Hide();
@@ -105,9 +103,15 @@ impl InnerWindow {
     /// (`crate::app::release_window`), so closing programmatically here reaches the exact same
     /// retain-list cleanup / possible-app-exit path a user clicking the close box already does —
     /// deliberately reusing that reactive path rather than duplicating its bookkeeping.
-    /// **Unverified on Windows** — see `hide`'s own doc comment.
     pub(crate) fn close(&self) {
         let _ = self.xaml.Close();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_visible_for_test(&self) -> bool {
+        self.app_window()
+            .and_then(|window| window.IsVisible().ok())
+            .unwrap_or(false)
     }
 
     /// `Window.AppWindow` (Windows App SDK 1.3+) already handles the `WinRT.Interop.WindowNative`/

@@ -144,8 +144,9 @@ fn lookup_resource<T: Interface>(key: &str) -> Option<T> {
 }
 
 /// Windows-only hosted-XAML regression tests. The `AnyView::measure`/`arrange` `Width`/`Height`
-/// stickiness case below needs a real `Application`, and the text-style checks intentionally share
-/// that one application instance because WinUI 3 cannot be started twice in one test process.
+/// stickiness case below needs a real `Application`; the text-style and Window lifecycle checks
+/// intentionally share that one application instance because WinUI 3 cannot be started twice in
+/// one test process.
 /// bug — see that method's own doc comment and `docs/design/backends/winui3_backend_design.md`'s "`AnyView::
 /// measure` resets `Width`/`Height` to `NaN`..." section for the full root cause. Needs a real,
 /// fully-hosted `Application` (via `crate::application::run`/the C++/WinRT shim) — not just COM/
@@ -155,7 +156,6 @@ fn lookup_resource<T: Interface>(key: &str) -> Option<T> {
 #[cfg(test)]
 mod hosted_xaml_regression_tests {
     use super::*;
-    use crate::bindings;
     use crate::bindings::Microsoft::UI::Xaml::Controls::{
         Canvas, Control, TextBlock, TextBox as XamlTextBox, ToolTip as XamlToolTip, ToolTipService,
     };
@@ -164,6 +164,7 @@ mod hosted_xaml_regression_tests {
     };
     use crate::bindings::Microsoft::UI::Xaml::Window as XamlWindow;
     use crate::bindings::winui_text::{FontStretch as XamlFontStretch, FontStyle as XamlFontStyle};
+    use crate::inner::InnerWindow;
     use crate::render::{
         WinUi3TextBackend, apply_cascaded_text_style_to_control, apply_text_style_to_control,
         apply_text_style_to_text_block, apply_text_style_to_text_block_with_foreground,
@@ -335,7 +336,7 @@ mod hosted_xaml_regression_tests {
     }
 
     #[test]
-    fn button_measure_and_text_style_round_trip_work_in_a_hosted_application() {
+    fn hosted_button_text_and_window_lifecycle_regressions_work() {
         // `RoutedEventHandler::new`'s generated wrapper requires `Send`, whereas `AnyView`/`Rc` are
         // deliberately UI-thread-local (same constraint `application::run`'s own `STARTUP`/
         // `WINDOWS` TLS work around — see that module's doc comment). Keeping both the view and the
@@ -431,7 +432,53 @@ mod hosted_xaml_regression_tests {
 
                 assert_text_style_round_trip(&canvas);
 
-                bindings::Microsoft::UI::Xaml::Application::Current()?.Exit()?;
+                crate::app::reset_window_lifecycle_test_state();
+                let lifecycle_window = InnerWindow::new();
+
+                lifecycle_window.show();
+                assert!(
+                    lifecycle_window.is_visible_for_test(),
+                    "show() must make the AppWindow visible"
+                );
+                assert_eq!(crate::app::retained_window_count_for_test(), 1);
+
+                lifecycle_window.hide();
+                assert!(
+                    !lifecycle_window.is_visible_for_test(),
+                    "hide() must make the AppWindow invisible"
+                );
+                assert_eq!(
+                    crate::app::retained_window_count_for_test(),
+                    1,
+                    "hide() must retain the existing native window"
+                );
+
+                lifecycle_window.show();
+                assert!(
+                    lifecycle_window.is_visible_for_test(),
+                    "show() after hide() must make the same AppWindow visible again"
+                );
+                assert_eq!(
+                    crate::app::retained_window_count_for_test(),
+                    1,
+                    "re-showing must not retain the same native window twice"
+                );
+
+                lifecycle_window.close();
+                assert!(
+                    !lifecycle_window.is_visible_for_test(),
+                    "close() must leave no visible native window"
+                );
+                assert_eq!(
+                    crate::app::retained_window_count_for_test(),
+                    0,
+                    "the Closed handler must release the retained native window"
+                );
+                assert_eq!(
+                    crate::app::release_window_call_count_for_test(),
+                    1,
+                    "programmatic close() must reach release_window exactly once"
+                );
                 Ok(())
             });
             let _ = element.Loaded(&loaded);

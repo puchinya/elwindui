@@ -478,9 +478,13 @@ fn copy_win2d_runtime(out_dir: &str) {
         .ancestors()
         .nth(3)
         .expect("target profile directory");
+    let deps_dir = profile_dir.join("deps");
+    std::fs::create_dir_all(&deps_dir).expect("create target/<profile>/deps directory");
     let target = profile_dir.join("Microsoft.Graphics.Canvas.dll");
     std::fs::copy(&source, &target)
         .expect("copy Microsoft.Graphics.Canvas.dll beside application binary");
+    std::fs::copy(&source, deps_dir.join("Microsoft.Graphics.Canvas.dll"))
+        .expect("copy Microsoft.Graphics.Canvas.dll beside test binaries");
     println!("cargo:rerun-if-changed={}", source.display());
 
     let mut bootstrap_candidates = Vec::new();
@@ -506,6 +510,11 @@ fn copy_win2d_runtime(out_dir: &str) {
     let target = profile_dir.join("Microsoft.WindowsAppRuntime.Bootstrap.dll");
     std::fs::copy(&source, &target)
         .expect("copy Microsoft.WindowsAppRuntime.Bootstrap.dll beside application binary");
+    std::fs::copy(
+        &source,
+        deps_dir.join("Microsoft.WindowsAppRuntime.Bootstrap.dll"),
+    )
+    .expect("copy Microsoft.WindowsAppRuntime.Bootstrap.dll beside test binaries");
     println!("cargo:rerun-if-changed={}", source.display());
 }
 

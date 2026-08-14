@@ -42,6 +42,8 @@ thread_local! {
     static STARTUP: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     static WINDOWS: RefCell<Vec<RetainedWindow>> = const { RefCell::new(Vec::new()) };
     static NEXT_WINDOW_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    #[cfg(test)]
+    static RELEASE_WINDOW_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 pub(crate) struct RetainedWindow {
@@ -103,6 +105,9 @@ pub(crate) fn retain_window(window: &bindings::Microsoft::UI::Xaml::Window) {
 }
 
 pub(crate) fn release_window(id: u64) {
+    #[cfg(test)]
+    RELEASE_WINDOW_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     let has_windows = WINDOWS.with(|windows| {
         let mut windows = windows.borrow_mut();
         windows.retain(|entry| entry.id != id);
@@ -114,6 +119,27 @@ pub(crate) fn release_window(id: u64) {
             .Exit()
             .expect("Microsoft.UI.Xaml.Application::Exit");
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_window_lifecycle_test_state() {
+    WINDOWS.with(|windows| {
+        assert!(
+            windows.borrow().is_empty(),
+            "window lifecycle test must start without retained windows"
+        );
+    });
+    RELEASE_WINDOW_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn retained_window_count_for_test() -> usize {
+    WINDOWS.with(|windows| windows.borrow().len())
+}
+
+#[cfg(test)]
+pub(crate) fn release_window_call_count_for_test() -> usize {
+    RELEASE_WINDOW_CALLS.with(std::cell::Cell::get)
 }
 
 /// Runs `startup` from the C++/WinRT shim's `App::OnLaunched` (via `startup_trampoline`), then

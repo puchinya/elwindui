@@ -94,8 +94,8 @@ pub mod platform {
     pub use elwindui_backend_appkit::platform::file_dialog;
 }
 
-/// See the `backend-appkit` `platform` module above. `elwindui-backend-winui3` is best-effort/
-/// unverified (see its crate-level doc comment) — not built or run on a real Windows machine.
+/// See the `backend-appkit` `platform` module above. WinUI3 verification state is recorded in
+/// `docs/status/backend_status.md`.
 #[cfg(all(target_os = "windows", feature = "backend-winui3"))]
 pub mod platform {
     pub use elwindui_backend_winui3::platform::file_dialog;
@@ -108,8 +108,8 @@ pub mod application {
     pub use elwindui_backend_appkit::application::run;
 }
 
-/// See the `backend-appkit` `application` module above. `elwindui-backend-winui3` is best-effort/
-/// unverified (see its crate-level doc comment) — not built or run on a real Windows machine.
+/// See the `backend-appkit` `application` module above. WinUI3 verification state is recorded in
+/// `docs/status/backend_status.md`.
 #[cfg(all(target_os = "windows", feature = "backend-winui3"))]
 pub mod application {
     pub use elwindui_backend_winui3::application::run;

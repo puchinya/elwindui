@@ -118,7 +118,13 @@ pub(crate) struct GroupCacheKey {
 /// two in sync. One struct, one lookup, no coupling to maintain.
 pub(crate) struct GroupCacheEntry {
     key: GroupCacheKey,
-    native_controls: Vec<usize>,
+    /// `(identity, owner_id, local_rect)` for every native control this group's commands placed —
+    /// `local_rect` is that control's `visible_local` rect (relative to this group's own absolute
+    /// origin, already clip-intersected) as of the pass that last rebuilt this entry. Kept (rather
+    /// than just `identity`) so a cache-hit pass can still re-derive each control's *current*
+    /// absolute frame from this group's freshly recomputed `origin` — see `replay_group`'s
+    /// unconditional native-control resync step, right after the `stale`/cache-hit branch.
+    native_controls: Vec<(usize, u64, elwindui_core::base::Rect)>,
     image_ids: Vec<ImageId>,
     vector_image_ids: Vec<VectorImageId>,
     /// Per-command `CommandKind`, in the same order as `RenderGroup::commands`, captured only
@@ -537,7 +543,7 @@ pub(crate) fn replay_group(
                 entry.key = key;
             }
             if let Some(entry) = state.group_cache.get(&group.id) {
-                live_native_controls.extend(&entry.native_controls);
+                live_native_controls.extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
                 live_image_ids.extend(&entry.image_ids);
                 live_vector_image_ids.extend(&entry.vector_image_ids);
             }
@@ -553,13 +559,13 @@ pub(crate) fn replay_group(
                     sub.removeFromSuperlayer();
                 }
             }
-            let native_controls_before: HashSet<usize> = live_native_controls.clone();
             // A flat, non-nested leaf list under a clip that needs no per-leaf culling can be
             // replayed directly (skipping `replay_commands`'s general recursion) so each
             // position's own fast-path `CALayer` can be captured for a future in-place update —
             // see `replay_flat_commands`'s own doc comment. Anything else (nested `Push*` scopes,
             // `NativeControl`, or a `Partial` clip needing bbox culling) still goes through the
             // general path, and simply never becomes eligible for in-place updates later.
+            let mut native_controls = Vec::new();
             let (command_kinds, fast_path_layers) =
                 if leaf_clip.is_none() && is_flat_leaf_only(&group.commands) {
                     let layers = replay_flat_commands(
@@ -585,15 +591,12 @@ pub(crate) fn replay_group(
                         origin,
                         live_native_controls,
                         new_native_order,
+                        &mut native_controls,
                         &mut state.image_cache,
                         &mut state.vector_raster_cache,
                     );
                     (Vec::new(), Vec::new())
                 };
-            let discovered_native_controls: Vec<usize> = live_native_controls
-                .difference(&native_controls_before)
-                .copied()
-                .collect();
             let (image_ids, vector_image_ids) = resource_ids(&group.commands);
             live_image_ids.extend(image_ids.iter().copied());
             live_vector_image_ids.extend(vector_image_ids.iter().copied());
@@ -601,7 +604,7 @@ pub(crate) fn replay_group(
                 group.id,
                 GroupCacheEntry {
                     key,
-                    native_controls: discovered_native_controls,
+                    native_controls,
                     image_ids,
                     vector_image_ids,
                     command_kinds,
@@ -612,9 +615,31 @@ pub(crate) fn replay_group(
     } else {
         crate::render::stats::bump(|s| s.groups_cache_hit += 1);
         if let Some(entry) = state.group_cache.get(&group.id) {
-            live_native_controls.extend(&entry.native_controls);
+            live_native_controls.extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
             live_image_ids.extend(&entry.image_ids);
             live_vector_image_ids.extend(&entry.vector_image_ids);
+        }
+    }
+
+    // Native islands are real `NSView` subviews, not `CALayer` sublayers of `container` — so
+    // unlike `container`'s own `position` (`set_position_if_changed` above, unconditional on
+    // every pass), their frame does *not* ride along for free when only an ancestor's offset
+    // changed and this group's own `GroupCacheKey` (no `origin` field, see that struct's own doc
+    // comment) stayed a cache hit. Re-derive each control's absolute frame from this pass's fresh
+    // `origin` and this group's cached `local_rect` unconditionally, regardless of whether the
+    // branch above rebuilt or hit cache — otherwise a control whose owning group never itself goes
+    // stale (e.g. a `Button` sitting in a row whose *ancestor* spacing changed, but whose own
+    // local offset within that row didn't) freezes at its last-applied screen position forever.
+    if let Some(entry) = state.group_cache.get(&group.id) {
+        for &(identity, owner_id, local_rect) in &entry.native_controls {
+            let (container, _is_new) = native.island(identity, owner_id);
+            container.setFrame(NSRect::new(
+                objc2_foundation::NSPoint::new(
+                    (origin.x + local_rect.x) as f64,
+                    (origin.y + local_rect.y) as f64,
+                ),
+                objc2_foundation::NSSize::new(local_rect.width as f64, local_rect.height as f64),
+            ));
         }
     }
 
@@ -665,6 +690,11 @@ pub(crate) fn replay_commands(
     group_origin: elwindui_core::base::Point,
     live_native_controls: &mut HashSet<usize>,
     new_native_order: &mut Vec<usize>,
+    // `(identity, owner_id, visible_local)` for every `NativeControl` command this call (or its
+    // own `Push*` recursion) placed — collected here rather than re-derived from
+    // `live_native_controls`'s before/after diff so the owning `GroupCacheEntry` can keep each
+    // control's local rect around for `replay_group`'s unconditional per-pass resync step.
+    native_control_rects: &mut Vec<(usize, u64, elwindui_core::base::Rect)>,
     image_cache: &mut HashMap<ImageId, CFRetained<CGImage>>,
     vector_raster_cache: &mut HashMap<VectorImageId, (u32, u32, u8, CFRetained<CGImage>)>,
 ) -> usize {
@@ -712,6 +742,7 @@ pub(crate) fn replay_commands(
                     group_origin,
                     live_native_controls,
                     new_native_order,
+                    native_control_rects,
                     image_cache,
                     vector_raster_cache,
                 );
@@ -729,6 +760,7 @@ pub(crate) fn replay_commands(
                     group_origin,
                     live_native_controls,
                     new_native_order,
+                    native_control_rects,
                     image_cache,
                     vector_raster_cache,
                 );
@@ -746,6 +778,7 @@ pub(crate) fn replay_commands(
                     group_origin,
                     live_native_controls,
                     new_native_order,
+                    native_control_rects,
                     image_cache,
                     vector_raster_cache,
                 );
@@ -780,6 +813,7 @@ pub(crate) fn replay_commands(
                     idx += 1;
                     continue;
                 }
+                native_control_rects.push((identity, *owner_id, visible_local));
                 let visible_rect = elwindui_core::base::Rect {
                     x: group_origin.x + visible_local.x,
                     y: group_origin.y + visible_local.y,

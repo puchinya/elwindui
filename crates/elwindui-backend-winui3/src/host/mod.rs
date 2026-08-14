@@ -4,34 +4,33 @@
 //!
 //! Depends downward on `render` for all drawing.
 
-
 mod event;
 mod replay;
 
-use crate::ffi::{AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_key_event_callback, invoke_ui_text_event_callback};
+use crate::ffi::{
+    AnyView, UiCallbackRegistryOwner, invoke_ui_event_callback, invoke_ui_key_event_callback,
+    invoke_ui_text_event_callback,
+};
 use event::*;
 use replay::*;
 
-use crate::render::composition::{
-    CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
-    DesiredCompositionNode, IslandId,
-};
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::Input::{
     CharacterReceivedRoutedEventArgs, KeyEventHandler,
 };
-use crate::bindings::Microsoft::UI::Xaml::{
-    FrameworkElement, SizeChangedEventHandler, UIElement,
+use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, SizeChangedEventHandler, UIElement};
+use crate::render::composition::{
+    CompositionClipSpec, CompositionPrimitive, CompositionRenderer, DesiredCompositionIsland,
+    DesiredCompositionNode, IslandId,
 };
-use windows::Foundation::TypedEventHandler;
 use elwindui_core::input::{
-    FocusState, KeyboardDispatcher, RawKeyEvent, RawKeyEventKind,
-    RawTextInputEvent,
+    FocusState, KeyboardDispatcher, RawKeyEvent, RawKeyEventKind, RawTextInputEvent,
 };
 use elwindui_core::ui::{FocusHost, UIElementExt as _};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use windows::Foundation::TypedEventHandler;
 use windows::core::Interface;
 
 /// The single reusable "reflect an `Rc<dyn elwindui_core::ui::UIElement>` into real XAML
@@ -218,61 +217,85 @@ impl TreeHostPanel {
             let tree_for_key = Rc::downgrade(&this.tree);
             let keyboard_for_key = Rc::downgrade(&this.keyboard);
             let callback_id = this.callback_owner.register_key(Rc::new(move |event| {
-                if let (Some(tree), Some(keyboard)) = (tree_for_key.upgrade(), keyboard_for_key.upgrade()) {
-                    if let Some(tree) = tree.borrow().clone() { keyboard.handle_key(&tree, event); }
+                if let (Some(tree), Some(keyboard)) =
+                    (tree_for_key.upgrade(), keyboard_for_key.upgrade())
+                {
+                    if let Some(tree) = tree.borrow().clone() {
+                        keyboard.handle_key(&tree, event);
+                    }
                 }
             }));
             let _ = this
                 .canvas
-                .KeyDown(&KeyEventHandler::new(
-                    move |_sender, args| {
-                        let Some(args) = args.cloned() else { return Ok(()); };
-                        let Ok(virtual_key) = args.Key() else { return Ok(()); };
-                        let Some(key) = winui_key(virtual_key) else {
-                            return Ok(());
-                        };
-                        let is_repeat = args
-                            .KeyStatus()
-                            .map(|status| status.RepeatCount > 1)
-                            .unwrap_or(false);
-                        invoke_ui_key_event_callback(callback_id, RawKeyEvent {
-                            kind: RawKeyEventKind::Down { is_repeat }, key,
-                            modifiers: winui_modifiers(), timestamp_ms: 0.0,
-                        });
-                        Ok(())
-                    },
-                ));
+                .KeyDown(&KeyEventHandler::new(move |_sender, args| {
+                    let Some(args) = args.cloned() else {
+                        return Ok(());
+                    };
+                    let Ok(virtual_key) = args.Key() else {
+                        return Ok(());
+                    };
+                    let Some(key) = winui_key(virtual_key) else {
+                        return Ok(());
+                    };
+                    let is_repeat = args
+                        .KeyStatus()
+                        .map(|status| status.RepeatCount > 1)
+                        .unwrap_or(false);
+                    invoke_ui_key_event_callback(
+                        callback_id,
+                        RawKeyEvent {
+                            kind: RawKeyEventKind::Down { is_repeat },
+                            key,
+                            modifiers: winui_modifiers(),
+                            timestamp_ms: 0.0,
+                        },
+                    );
+                    Ok(())
+                }));
         }
         {
             let tree_for_key = Rc::downgrade(&this.tree);
             let keyboard_for_key = Rc::downgrade(&this.keyboard);
             let callback_id = this.callback_owner.register_key(Rc::new(move |event| {
-                if let (Some(tree), Some(keyboard)) = (tree_for_key.upgrade(), keyboard_for_key.upgrade()) {
-                    if let Some(tree) = tree.borrow().clone() { keyboard.handle_key(&tree, event); }
+                if let (Some(tree), Some(keyboard)) =
+                    (tree_for_key.upgrade(), keyboard_for_key.upgrade())
+                {
+                    if let Some(tree) = tree.borrow().clone() {
+                        keyboard.handle_key(&tree, event);
+                    }
                 }
             }));
             let _ = this
                 .canvas
-                .KeyUp(&KeyEventHandler::new(
-                    move |_sender, args| {
-                        let Some(args) = args.cloned() else { return Ok(()); };
-                        let Ok(virtual_key) = args.Key() else { return Ok(()); };
-                        let Some(key) = winui_key(virtual_key) else {
-                            return Ok(());
-                        };
-                        invoke_ui_key_event_callback(callback_id, RawKeyEvent {
-                            kind: RawKeyEventKind::Up, key,
-                            modifiers: winui_modifiers(), timestamp_ms: 0.0,
-                        });
-                        Ok(())
-                    },
-                ));
+                .KeyUp(&KeyEventHandler::new(move |_sender, args| {
+                    let Some(args) = args.cloned() else {
+                        return Ok(());
+                    };
+                    let Ok(virtual_key) = args.Key() else {
+                        return Ok(());
+                    };
+                    let Some(key) = winui_key(virtual_key) else {
+                        return Ok(());
+                    };
+                    invoke_ui_key_event_callback(
+                        callback_id,
+                        RawKeyEvent {
+                            kind: RawKeyEventKind::Up,
+                            key,
+                            modifiers: winui_modifiers(),
+                            timestamp_ms: 0.0,
+                        },
+                    );
+                    Ok(())
+                }));
         }
         {
             let tree_for_text = Rc::downgrade(&this.tree);
             let keyboard_for_text = Rc::downgrade(&this.keyboard);
             let callback_id = this.callback_owner.register_text(Rc::new(move |text| {
-                if let (Some(tree), Some(keyboard)) = (tree_for_text.upgrade(), keyboard_for_text.upgrade()) {
+                if let (Some(tree), Some(keyboard)) =
+                    (tree_for_text.upgrade(), keyboard_for_text.upgrade())
+                {
                     if let Some(tree) = tree.borrow().clone() {
                         keyboard.handle_text_input(&tree, RawTextInputEvent { text });
                     }
@@ -280,10 +303,14 @@ impl TreeHostPanel {
             }));
             let _ = this.canvas.CharacterReceived(&TypedEventHandler::<
                 UIElement,
-            CharacterReceivedRoutedEventArgs,
+                CharacterReceivedRoutedEventArgs,
             >::new(move |_sender, args| {
-                let Some(args) = args.cloned() else { return Ok(()); };
-                let Ok(code_unit) = args.Character() else { return Ok(()); };
+                let Some(args) = args.cloned() else {
+                    return Ok(());
+                };
+                let Ok(code_unit) = args.Character() else {
+                    return Ok(());
+                };
                 let Some(ch) = char::from_u32(code_unit as u32) else {
                     return Ok(());
                 };
@@ -294,59 +321,61 @@ impl TreeHostPanel {
             }));
         }
         {
-        let weak = Rc::downgrade(&this.tree);
-        let weak_render_tree = Rc::downgrade(&this.render_tree);
-        let weak_native_children = Rc::downgrade(&this.native_children);
-        let weak_composition = Rc::downgrade(&this.composition);
-        let weak_keyboard = Rc::downgrade(&this.keyboard);
-        let weak_unconstrained_axes = Rc::downgrade(&this.unconstrained_axes);
-        let weak_active = Rc::downgrade(&this.active);
-        let canvas_for_handler = this.canvas.clone();
-        let callback_id = this.callback_owner.register_event(Rc::new(move || {
-            if let (
-                Some(tree),
-                Some(render_tree),
-                Some(native_children),
-                Some(composition),
-                Some(keyboard),
-                Some(unconstrained_axes),
-                Some(active),
-            ) = (
-                weak.upgrade(),
-                weak_render_tree.upgrade(),
-                weak_native_children.upgrade(),
-                weak_composition.upgrade(),
-                weak_keyboard.upgrade(),
-                weak_unconstrained_axes.upgrade(),
-                weak_active.upgrade(),
-            ) {
-                Self::relayout_static(
-                    &canvas_for_handler,
-                    &composition,
-                    &tree,
-                    &render_tree,
-                    &native_children,
-                    &keyboard,
-                    unconstrained_axes.get(),
-                    &active,
-                );
-            }
-        }));
-        // `SizeChanged` fires whenever this panel's own allotted space changes (window resize,
-        // or — for a `NativeTabView`'s per-tab content area — the tab strip/window resizing together)
-        // — the same role `layout()` plays for AppKit's `TreeHostView`.
-        let _ = this
-            .canvas
-            .SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
-                invoke_ui_event_callback(callback_id);
-                Ok(())
+            let weak = Rc::downgrade(&this.tree);
+            let weak_render_tree = Rc::downgrade(&this.render_tree);
+            let weak_native_children = Rc::downgrade(&this.native_children);
+            let weak_composition = Rc::downgrade(&this.composition);
+            let weak_keyboard = Rc::downgrade(&this.keyboard);
+            let weak_unconstrained_axes = Rc::downgrade(&this.unconstrained_axes);
+            let weak_active = Rc::downgrade(&this.active);
+            let canvas_for_handler = this.canvas.clone();
+            let callback_id = this.callback_owner.register_event(Rc::new(move || {
+                if let (
+                    Some(tree),
+                    Some(render_tree),
+                    Some(native_children),
+                    Some(composition),
+                    Some(keyboard),
+                    Some(unconstrained_axes),
+                    Some(active),
+                ) = (
+                    weak.upgrade(),
+                    weak_render_tree.upgrade(),
+                    weak_native_children.upgrade(),
+                    weak_composition.upgrade(),
+                    weak_keyboard.upgrade(),
+                    weak_unconstrained_axes.upgrade(),
+                    weak_active.upgrade(),
+                ) {
+                    Self::relayout_static(
+                        &canvas_for_handler,
+                        &composition,
+                        &tree,
+                        &render_tree,
+                        &native_children,
+                        &keyboard,
+                        unconstrained_axes.get(),
+                        &active,
+                    );
+                }
             }));
+            // `SizeChanged` fires whenever this panel's own allotted space changes (window resize,
+            // or — for a `NativeTabView`'s per-tab content area — the tab strip/window resizing together)
+            // — the same role `layout()` plays for AppKit's `TreeHostView`.
+            let _ = this
+                .canvas
+                .SizeChanged(&SizeChangedEventHandler::new(move |_, _| {
+                    invoke_ui_event_callback(callback_id);
+                    Ok(())
+                }));
         }
         this
     }
 
     pub(crate) fn as_element(&self) -> FrameworkElement {
-        self.canvas.cast().expect("Canvas must be a FrameworkElement")
+        self.canvas
+            .cast()
+            .expect("Canvas must be a FrameworkElement")
     }
 
     /// Forces an immediate, synchronous relayout pass against `canvas`'s *current*
@@ -393,7 +422,8 @@ impl TreeHostPanel {
         }
 
         self.keyboard.focus.clear_focus();
-        let _ = self.composition
+        let _ = self
+            .composition
             .borrow_mut()
             .reconcile(&self.canvas, Vec::new());
         reconcile_native_children(
@@ -485,8 +515,16 @@ impl TreeHostPanel {
         // `elwindui_backend_appkit::inner::TreeHostView::relayout`'s own `unconstrained_axes`
         // handling; every other host has both `false` and this is a no-op.
         let available = LSize {
-            width: if unconstrained_width { f32::INFINITY } else { width },
-            height: if unconstrained_height { f32::INFINITY } else { height },
+            width: if unconstrained_width {
+                f32::INFINITY
+            } else {
+                width
+            },
+            height: if unconstrained_height {
+                f32::INFINITY
+            } else {
+                height
+            },
         };
 
         let tree_ref = tree.borrow();
@@ -592,12 +630,17 @@ impl TreeHostPanel {
         for (group_id, command_index, command, origin) in commands {
             match command {
                 elwindui_core::graphics::RenderCommand::PushTransform { transform } => {
-                    let next = transforms.last().expect("transform stack").concat(transform);
+                    let next = transforms
+                        .last()
+                        .expect("transform stack")
+                        .concat(transform);
                     transforms.push(next);
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PopTransform => {
-                    if transforms.len() > 1 { transforms.pop(); }
+                    if transforms.len() > 1 {
+                        transforms.pop();
+                    }
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PushOpacity { opacity } => {
@@ -614,17 +657,15 @@ impl TreeHostPanel {
                     );
                     let transform = *transforms.last().expect("transform stack");
                     let spec = match clip {
-                        elwindui_core::graphics::Clip::Rect(rect) => {
-                            CompositionClipSpec::Rect {
-                                rect: elwindui_core::base::Rect {
-                                    x: origin.x + rect.x,
-                                    y: origin.y + rect.y,
-                                    width: rect.width,
-                                    height: rect.height,
-                                },
-                                transform,
-                            }
-                        }
+                        elwindui_core::graphics::Clip::Rect(rect) => CompositionClipSpec::Rect {
+                            rect: elwindui_core::base::Rect {
+                                x: origin.x + rect.x,
+                                y: origin.y + rect.y,
+                                width: rect.width,
+                                height: rect.height,
+                            },
+                            transform,
+                        },
                         elwindui_core::graphics::Clip::RoundedRect { rect, radii } => {
                             CompositionClipSpec::RoundedRect {
                                 rect: elwindui_core::base::Rect {
@@ -660,7 +701,9 @@ impl TreeHostPanel {
                     continue;
                 }
                 elwindui_core::graphics::RenderCommand::PopOpacity => {
-                    if opacities.len() > 1 { opacities.pop(); }
+                    if opacities.len() > 1 {
+                        opacities.pop();
+                    }
                     continue;
                 }
                 _ => {}
@@ -695,18 +738,20 @@ impl TreeHostPanel {
                         opacity,
                     })
                 }
-                elwindui_core::graphics::RenderCommand::StrokeRect { rect, brush, stroke } => {
-                    Some(DesiredCompositionNode {
-                        id: node_id,
-                        primitive: fallback_if_clipped(CompositionPrimitive::Rectangle {
-                            rect: absolute_rect(rect),
-                        }),
-                        fill: None,
-                        stroke: Some((brush.clone(), stroke.clone())),
-                        transform,
-                        opacity,
-                    })
-                }
+                elwindui_core::graphics::RenderCommand::StrokeRect {
+                    rect,
+                    brush,
+                    stroke,
+                } => Some(DesiredCompositionNode {
+                    id: node_id,
+                    primitive: fallback_if_clipped(CompositionPrimitive::Rectangle {
+                        rect: absolute_rect(rect),
+                    }),
+                    fill: None,
+                    stroke: Some((brush.clone(), stroke.clone())),
+                    transform,
+                    opacity,
+                }),
                 elwindui_core::graphics::RenderCommand::FillRoundedRect { rect, radii, brush } => {
                     Some(DesiredCompositionNode {
                         id: node_id,
@@ -720,19 +765,22 @@ impl TreeHostPanel {
                         opacity,
                     })
                 }
-                elwindui_core::graphics::RenderCommand::StrokeRoundedRect { rect, radii, brush, stroke } => {
-                    Some(DesiredCompositionNode {
-                        id: node_id,
-                        primitive: fallback_if_clipped(CompositionPrimitive::RoundedRectangle {
-                            rect: absolute_rect(rect),
-                            radii: *radii,
-                        }),
-                        fill: None,
-                        stroke: Some((brush.clone(), stroke.clone())),
-                        transform,
-                        opacity,
-                    })
-                }
+                elwindui_core::graphics::RenderCommand::StrokeRoundedRect {
+                    rect,
+                    radii,
+                    brush,
+                    stroke,
+                } => Some(DesiredCompositionNode {
+                    id: node_id,
+                    primitive: fallback_if_clipped(CompositionPrimitive::RoundedRectangle {
+                        rect: absolute_rect(rect),
+                        radii: *radii,
+                    }),
+                    fill: None,
+                    stroke: Some((brush.clone(), stroke.clone())),
+                    transform,
+                    opacity,
+                }),
                 elwindui_core::graphics::RenderCommand::FillEllipse { rect, brush } => {
                     Some(DesiredCompositionNode {
                         id: node_id,
@@ -745,18 +793,20 @@ impl TreeHostPanel {
                         opacity,
                     })
                 }
-                elwindui_core::graphics::RenderCommand::StrokeEllipse { rect, brush, stroke } => {
-                    Some(DesiredCompositionNode {
-                        id: node_id,
-                        primitive: fallback_if_clipped(CompositionPrimitive::Ellipse {
-                            rect: absolute_rect(rect),
-                        }),
-                        fill: None,
-                        stroke: Some((brush.clone(), stroke.clone())),
-                        transform,
-                        opacity,
-                    })
-                }
+                elwindui_core::graphics::RenderCommand::StrokeEllipse {
+                    rect,
+                    brush,
+                    stroke,
+                } => Some(DesiredCompositionNode {
+                    id: node_id,
+                    primitive: fallback_if_clipped(CompositionPrimitive::Ellipse {
+                        rect: absolute_rect(rect),
+                    }),
+                    fill: None,
+                    stroke: Some((brush.clone(), stroke.clone())),
+                    transform,
+                    opacity,
+                }),
                 elwindui_core::graphics::RenderCommand::DrawLine {
                     from,
                     to,
@@ -793,76 +843,79 @@ impl TreeHostPanel {
                         opacity,
                     })
                 }
-                elwindui_core::graphics::RenderCommand::StrokePath { path, brush, stroke } => {
-                    Some(DesiredCompositionNode {
-                        id: node_id,
-                        primitive: fallback_if_clipped(CompositionPrimitive::Path {
-                            commands: path.commands().to_vec(),
-                            rule: elwindui_core::graphics::FillRule::NonZero,
-                            origin,
-                        }),
-                        fill: None,
-                        stroke: Some((brush.clone(), stroke.clone())),
-                        transform,
-                        opacity,
-                    })
-                }
+                elwindui_core::graphics::RenderCommand::StrokePath {
+                    path,
+                    brush,
+                    stroke,
+                } => Some(DesiredCompositionNode {
+                    id: node_id,
+                    primitive: fallback_if_clipped(CompositionPrimitive::Path {
+                        commands: path.commands().to_vec(),
+                        rule: elwindui_core::graphics::FillRule::NonZero,
+                        origin,
+                    }),
+                    fill: None,
+                    stroke: Some((brush.clone(), stroke.clone())),
+                    transform,
+                    opacity,
+                }),
                 elwindui_core::graphics::RenderCommand::DrawImage {
                     image,
                     dest,
                     source,
                     options,
-                } => {
-                    Some(DesiredCompositionNode {
-                        id: node_id,
-                        primitive: fallback_if_clipped(CompositionPrimitive::Rectangle {
-                            rect: absolute_rect(dest),
-                        }),
-                        fill: Some(elwindui_core::graphics::Brush::Image(
-                            elwindui_core::graphics::ImageBrush {
-                                image: image.clone(),
-                                source_rect: *source,
-                                stretch: match options.fit {
-                                    elwindui_core::graphics::ImageFit::Fill => {
-                                        elwindui_core::graphics::Stretch::Fill
-                                    }
-                                    elwindui_core::graphics::ImageFit::Contain => {
-                                        elwindui_core::graphics::Stretch::Uniform
-                                    }
-                                    elwindui_core::graphics::ImageFit::Cover => {
-                                        elwindui_core::graphics::Stretch::UniformToFill
-                                    }
-                                    elwindui_core::graphics::ImageFit::None => {
-                                        elwindui_core::graphics::Stretch::None
-                                    }
-                                },
-                                alignment_x: options.alignment_x,
-                                alignment_y: options.alignment_y,
-                                tile_mode: options.repeat,
-                                opacity: options.opacity,
-                                transform: elwindui_core::base::AffineTransform::IDENTITY,
-                            },
-                        )),
-                        stroke: None,
-                        transform,
-                        opacity,
-                    })
-                }
-                elwindui_core::graphics::RenderCommand::DrawVectorImage { image, dest, source, options } => {
-                    Some(DesiredCompositionNode {
-                        id: node_id,
-                        primitive: CompositionPrimitive::VectorImage {
+                } => Some(DesiredCompositionNode {
+                    id: node_id,
+                    primitive: fallback_if_clipped(CompositionPrimitive::Rectangle {
+                        rect: absolute_rect(dest),
+                    }),
+                    fill: Some(elwindui_core::graphics::Brush::Image(
+                        elwindui_core::graphics::ImageBrush {
                             image: image.clone(),
-                            dest: absolute_rect(dest),
-                            source: *source,
-                            options: *options,
+                            source_rect: *source,
+                            stretch: match options.fit {
+                                elwindui_core::graphics::ImageFit::Fill => {
+                                    elwindui_core::graphics::Stretch::Fill
+                                }
+                                elwindui_core::graphics::ImageFit::Contain => {
+                                    elwindui_core::graphics::Stretch::Uniform
+                                }
+                                elwindui_core::graphics::ImageFit::Cover => {
+                                    elwindui_core::graphics::Stretch::UniformToFill
+                                }
+                                elwindui_core::graphics::ImageFit::None => {
+                                    elwindui_core::graphics::Stretch::None
+                                }
+                            },
+                            alignment_x: options.alignment_x,
+                            alignment_y: options.alignment_y,
+                            tile_mode: options.repeat,
+                            opacity: options.opacity,
+                            transform: elwindui_core::base::AffineTransform::IDENTITY,
                         },
-                        fill: None,
-                        stroke: None,
-                        transform,
-                        opacity,
-                    })
-                }
+                    )),
+                    stroke: None,
+                    transform,
+                    opacity,
+                }),
+                elwindui_core::graphics::RenderCommand::DrawVectorImage {
+                    image,
+                    dest,
+                    source,
+                    options,
+                } => Some(DesiredCompositionNode {
+                    id: node_id,
+                    primitive: CompositionPrimitive::VectorImage {
+                        image: image.clone(),
+                        dest: absolute_rect(dest),
+                        source: *source,
+                        options: *options,
+                    },
+                    fill: None,
+                    stroke: None,
+                    transform,
+                    opacity,
+                }),
                 elwindui_core::graphics::RenderCommand::Text { .. } => {
                     flush_composition_island(
                         &mut composition_nodes,

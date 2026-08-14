@@ -84,8 +84,14 @@ fn syn_error_diagnostic(e: &syn::Error) -> Diagnostic {
 fn point_diagnostic(message: &str) -> Diagnostic {
     Diagnostic {
         range: Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 0 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
         },
         severity: Some(DiagnosticSeverity::ERROR),
         source: Some("elwindui".to_string()),

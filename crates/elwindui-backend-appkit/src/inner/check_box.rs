@@ -5,7 +5,9 @@ use crate::ffi::{AnyView, mtm};
 use crate::inner::button::ButtonTarget;
 use elwindui_core::ui::CheckState;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSButton, NSButtonType, NSControlStateValueMixed, NSControlStateValueOff, NSControlStateValueOn};
+use objc2_app_kit::{
+    NSButton, NSButtonType, NSControlStateValueMixed, NSControlStateValueOff, NSControlStateValueOn,
+};
 use objc2_foundation::NSString;
 use std::cell::RefCell;
 use std::rc::Rc;

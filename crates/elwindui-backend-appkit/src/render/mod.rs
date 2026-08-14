@@ -31,8 +31,7 @@ pub(crate) use image::{
 };
 pub(crate) use layer::{
     ImplicitAnimationGuard, add_sublayer_scaled, paint_layer_name, set_bounds_if_changed,
-    set_contents_scale_if_changed, set_hidden_if_changed, set_mask_scaled,
-    set_position_if_changed,
+    set_contents_scale_if_changed, set_hidden_if_changed, set_mask_scaled, set_position_if_changed,
 };
 pub(crate) use paint::{
     GradientMaskShape, add_shape_layer, apply_fill, apply_stroke, first_gradient_stop_color,

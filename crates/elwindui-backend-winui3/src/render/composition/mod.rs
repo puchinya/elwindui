@@ -4,7 +4,6 @@
 //! owns one empty XAML Canvas with a child ContainerVisual. The island's figures are retained as
 //! CompositionSpriteShapes in a shared ShapeVisual and reconciled by stable RenderNodeId.
 
-
 mod cache;
 mod geometry;
 mod node;
@@ -16,23 +15,20 @@ use node::*;
 use crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice;
 use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::UI::Composition::{
-    Compositor,
-    CompositionDrawingSurface, CompositionGraphicsDevice, ContainerVisual,
-    Visual,
+    CompositionDrawingSurface, CompositionGraphicsDevice, Compositor, ContainerVisual, Visual,
 };
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::Hosting::ElementCompositionPreview;
 use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, UIElement};
 use elwindui_core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui_core::graphics::{
-    Brush, FillRule, PathCommand,
-    StrokeStyle, VectorImage, VectorImageDrawOptions,
+    Brush, FillRule, PathCommand, StrokeStyle, VectorImage, VectorImageDrawOptions,
 };
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use windows::core::{Interface, Result, Type};
 use windows::Foundation::Size as WinSize;
 use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
+use windows::core::{Interface, Result, Type};
 use windows_numerics::Vector2;
 
 pub(crate) type RenderNodeId = (u64, usize);
@@ -50,7 +46,10 @@ windows::core::imp::define_interface!(
 );
 
 #[repr(C)]
-#[allow(dead_code, reason = "the vtable is read through RawCompositionGraphicsDevice")]
+#[allow(
+    dead_code,
+    reason = "the vtable is read through RawCompositionGraphicsDevice"
+)]
 pub struct RawCompositionGraphicsDeviceVtbl {
     base__: windows::core::IInspectable_Vtbl,
     create_drawing_surface: unsafe extern "system" fn(
@@ -107,9 +106,10 @@ pub(crate) enum CompositionClipSpec {
 impl CompositionClipSpec {
     fn world_bounds(&self) -> Rect {
         match self {
-            Self::Rect { rect, transform } | Self::RoundedRect { rect, transform, .. } => {
-                transformed_bounds(*rect, *transform)
-            }
+            Self::Rect { rect, transform }
+            | Self::RoundedRect {
+                rect, transform, ..
+            } => transformed_bounds(*rect, *transform),
             Self::Path {
                 commands,
                 origin,
@@ -293,19 +293,14 @@ pub(crate) struct CompositionRenderer {
     image_surfaces: ImageSurfaceCache,
 }
 
-
-
-
 impl CompositionRenderer {
     pub(crate) fn new(canvas: &Canvas) -> Result<Self> {
         let host: UIElement = canvas.clone().cast()?;
         let element_visual = ElementCompositionPreview::GetElementVisual(&host)?;
         let compositor = element_visual.Compositor()?;
         let canvas_device = CanvasDevice::GetSharedDevice()?;
-        let graphics_device = CanvasComposition::CreateCompositionGraphicsDevice(
-            &compositor,
-            &canvas_device,
-        )?;
+        let graphics_device =
+            CanvasComposition::CreateCompositionGraphicsDevice(&compositor, &canvas_device)?;
         if std::env::var_os("ELWINDUI_WINUI3_DIAGNOSTICS").is_some() {
             // Exercise the one raw ABI call during explicit diagnostics. This is
             // deliberately a tiny, detached surface: it verifies the fallback
@@ -375,7 +370,6 @@ impl CompositionRenderer {
 
         Ok((ordered_hosts, unsupported))
     }
-
 }
 
 impl Drop for CompositionRenderer {
@@ -429,10 +423,7 @@ impl CompositionIslandState {
 
     fn detach(self, canvas: &Canvas) -> Result<()> {
         let host_ui: UIElement = self.host.clone().cast()?;
-        ElementCompositionPreview::SetElementChildVisual(
-            &host_ui,
-            Option::<&Visual>::None,
-        )?;
+        ElementCompositionPreview::SetElementChildVisual(&host_ui, Option::<&Visual>::None)?;
         let children = canvas.Children()?;
         let mut index = 0;
         if children.IndexOf(&host_ui, &mut index)? {
@@ -460,16 +451,9 @@ impl CompositionIslandState {
                 .map(|_| ClipState::create(compositor, canvas_device, &wanted.clips, wanted.bounds))
                 .transpose()
                 .map_err(|reason| {
-                    windows::core::Error::new(
-                        windows::core::HRESULT(0x80004001_u32 as i32),
-                        reason,
-                    )
+                    windows::core::Error::new(windows::core::HRESULT(0x80004001_u32 as i32), reason)
                 })?;
-            let clip = self
-                .clip
-                .as_ref()
-                .map(ClipState::as_clip)
-                .transpose()?;
+            let clip = self.clip.as_ref().map(ClipState::as_clip).transpose()?;
             self.root.SetClip(clip.as_ref())?;
             self.clip_snapshot = wanted.clips.clone();
         }
@@ -578,12 +562,14 @@ impl CompositionIslandState {
         }));
 
         let unchanged = wanted.len() == self.shape_runs.len()
-            && wanted.iter().zip(&self.shape_runs).all(|((ids, opacity), run)| {
-                *ids == run.node_ids && *opacity == run.opacity
-            });
+            && wanted
+                .iter()
+                .zip(&self.shape_runs)
+                .all(|((ids, opacity), run)| *ids == run.node_ids && *opacity == run.opacity);
         if unchanged {
             for run in &self.shape_runs {
-                run.visual.SetSize(vector2(self.bounds.width, self.bounds.height))?;
+                run.visual
+                    .SetSize(vector2(self.bounds.width, self.bounds.height))?;
             }
             return Ok(false);
         }
@@ -626,55 +612,6 @@ impl CompositionIslandState {
         Ok(())
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -733,7 +670,12 @@ mod tests {
         let nodes = vec![DesiredCompositionNode {
             id: (7, 1),
             primitive: CompositionPrimitive::Rectangle {
-                rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 100.0,
+                },
             },
             fill: None,
             stroke: None,
@@ -742,18 +684,33 @@ mod tests {
         }];
         let clips = vec![
             CompositionClipSpec::Rect {
-                rect: Rect { x: 10.0, y: 10.0, width: 80.0, height: 80.0 },
+                rect: Rect {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 80.0,
+                    height: 80.0,
+                },
                 transform: AffineTransform::IDENTITY,
             },
             CompositionClipSpec::Rect {
-                rect: Rect { x: 25.0, y: 20.0, width: 50.0, height: 60.0 },
+                rect: Rect {
+                    x: 25.0,
+                    y: 20.0,
+                    width: 50.0,
+                    height: 60.0,
+                },
                 transform: AffineTransform::IDENTITY,
             },
         ];
         let island = DesiredCompositionIsland::from_nodes(nodes, clips).expect("clipped island");
         assert_eq!(
             island.bounds,
-            Rect { x: 25.0, y: 20.0, width: 50.0, height: 60.0 },
+            Rect {
+                x: 25.0,
+                y: 20.0,
+                width: 50.0,
+                height: 60.0
+            },
         );
         assert_eq!(island.clips.len(), 2);
     }
@@ -813,7 +770,12 @@ mod tests {
 
     #[test]
     fn drawing_surface_sizes_cover_supported_dpi_scales() {
-        let rect = Rect { x: 0.0, y: 0.0, width: 80.0, height: 40.0 };
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 40.0,
+        };
         for (scale, width, height) in [
             (1.0, 80.0, 40.0),
             (1.25, 100.0, 50.0),

@@ -42,9 +42,7 @@ fn field_value_expr(field: &Field) -> Result<Expr, String> {
             return Err(format!("`{ident}`: theme attribute key must be `value`"));
         };
         if key != "value" {
-            return Err(format!(
-                "`{ident}`: expected `value = ..`, found `{key}`"
-            ));
+            return Err(format!("`{ident}`: expected `value = ..`, found `{key}`"));
         }
         if value.replace(entry.value).is_some() {
             return Err(format!("`{ident}`: duplicate `value` argument"));
@@ -91,8 +89,9 @@ pub fn generate_theme_from_item_struct(
                      Key's `name`"
                 )
             })?;
-        let key_type: syn::Type = syn::parse_str(&key_type_name)
-            .map_err(|_| format!("registered environment key type name `{key_type_name}` must parse"))?;
+        let key_type: syn::Type = syn::parse_str(&key_type_name).map_err(|_| {
+            format!("registered environment key type name `{key_type_name}` must parse")
+        })?;
         set_calls.push(quote! {
             env.set::<#key_type>(#value);
         });
@@ -141,9 +140,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(output.contains("struct OceanTheme"));
-        assert!(output.contains(
-            "impl elwindui :: core :: theme :: Theme for OceanTheme"
-        ));
+        assert!(output.contains("impl elwindui :: core :: theme :: Theme for OceanTheme"));
         assert!(output.contains("env . set :: < BrandEnvironmentForTestGeneratesThemeImpl > ("));
     }
 

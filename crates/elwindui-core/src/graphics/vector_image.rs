@@ -7,8 +7,8 @@ use super::image::Image;
 use super::vector_scene::VectorGroup;
 use crate::base::{Rect, Size};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// What an `elwindui::ui::Image`-style element draws — a raster bitmap or a loaded vector document, kept
 /// as an enum rather than two separate optional fields (指示書§14: enumが唯一の値集合機構) (SVG読
@@ -294,14 +294,16 @@ mod tests {
             width: f32::NAN,
             height: 24.0,
         };
-        assert!(VectorImageBuilder::new(
-            Size {
-                width: 24.0,
-                height: 24.0
-            },
-            nan_view_box
-        )
-        .is_err());
+        assert!(
+            VectorImageBuilder::new(
+                Size {
+                    width: 24.0,
+                    height: 24.0
+                },
+                nan_view_box
+            )
+            .is_err()
+        );
     }
 
     #[test]

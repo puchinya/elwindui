@@ -4,21 +4,14 @@
 //! Lives under `host` rather than `render` because it operates on `TreeHostPanel`'s own child
 //! bookkeeping — it is this panel's rendering pass, not stateless translation.
 
-
-use crate::render::xaml_text_alignment;
-use crate::ffi::{AnyView, UiCallbackRegistryOwner};
 use super::*;
+use crate::ffi::{AnyView, UiCallbackRegistryOwner};
+use crate::render::xaml_text_alignment;
 
+use crate::bindings::Microsoft::UI::Xaml::Controls::{Canvas, TextBlock};
+use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, RoutedEventHandler};
 use crate::render::composition::IslandId;
-use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    Canvas, TextBlock,
-};
-use crate::bindings::Microsoft::UI::Xaml::{
-    FrameworkElement, RoutedEventHandler,
-};
-use elwindui_core::input::{
-    FocusState, KeyboardDispatcher,
-};
+use elwindui_core::input::{FocusState, KeyboardDispatcher};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -63,7 +56,9 @@ impl Drop for NativeChildState {
 impl NativeChildElement {
     pub(crate) fn framework_element(&self) -> FrameworkElement {
         match self {
-            NativeChildElement::Text(t) => t.clone().cast().expect("TextBlock is a FrameworkElement"),
+            NativeChildElement::Text(t) => {
+                t.clone().cast().expect("TextBlock is a FrameworkElement")
+            }
             NativeChildElement::Native(state) => state.view.as_element(),
         }
     }
@@ -104,11 +99,21 @@ pub(crate) fn reconcile_native_children(
         return;
     };
     let mut existing = existing.borrow_mut();
-    let mut still_wanted: std::collections::HashSet<NativeChildKey> = std::collections::HashSet::new();
+    let mut still_wanted: std::collections::HashSet<NativeChildKey> =
+        std::collections::HashSet::new();
     for (key, wanted_child) in wanted {
         still_wanted.insert(key);
         match (existing.get(&key), wanted_child) {
-            (Some(NativeChildElement::Text(text_block)), RenderedNativeChild::Text { content, rect, style, foreground, alignment }) => {
+            (
+                Some(NativeChildElement::Text(text_block)),
+                RenderedNativeChild::Text {
+                    content,
+                    rect,
+                    style,
+                    foreground,
+                    alignment,
+                },
+            ) => {
                 let _ = text_block.SetText(&HSTRING::from(content.as_str()));
                 // Font metrics use the same helper as measurement; an absent foreground clears
                 // the local XAML value so the active ThemeResource keeps driving text paint.
@@ -120,13 +125,22 @@ pub(crate) fn reconcile_native_children(
                     foreground.as_ref(),
                 );
                 let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
-                let fe: FrameworkElement = text_block.clone().cast().expect("TextBlock is a FrameworkElement");
+                let fe: FrameworkElement = text_block
+                    .clone()
+                    .cast()
+                    .expect("TextBlock is a FrameworkElement");
                 let _ = fe.SetWidth(rect.width as f64);
                 let _ = fe.SetHeight(rect.height as f64);
                 let _ = Canvas::SetLeft(&fe, rect.x as f64);
                 let _ = Canvas::SetTop(&fe, rect.y as f64);
             }
-            (Some(NativeChildElement::Native(state)), RenderedNativeChild::Native { view: new_view, rect }) => {
+            (
+                Some(NativeChildElement::Native(state)),
+                RenderedNativeChild::Native {
+                    view: new_view,
+                    rect,
+                },
+            ) => {
                 let _ = new_view; // same underlying handle identity as `view` — see the key match above
                 let mut view = state.view.clone();
                 view.arrange(rect);
@@ -136,7 +150,13 @@ pub(crate) fn reconcile_native_children(
                 // this exact key (rare — only if a UIElement's own `render()` emits a different
                 // shape of commands than last time); either way, build fresh and attach once.
                 let element = match wanted_child {
-                    RenderedNativeChild::Text { content, rect, style, foreground, alignment } => {
+                    RenderedNativeChild::Text {
+                        content,
+                        rect,
+                        style,
+                        foreground,
+                        alignment,
+                    } => {
                         let text_block = TextBlock::new().expect("TextBlock::new");
                         let _ = text_block.SetText(&HSTRING::from(content.as_str()));
                         let _ = crate::render::apply_text_style_to_text_block_with_foreground(
@@ -145,7 +165,10 @@ pub(crate) fn reconcile_native_children(
                             foreground.as_ref(),
                         );
                         let _ = text_block.SetTextAlignment(xaml_text_alignment(alignment));
-                        let fe: FrameworkElement = text_block.clone().cast().expect("TextBlock is a FrameworkElement");
+                        let fe: FrameworkElement = text_block
+                            .clone()
+                            .cast()
+                            .expect("TextBlock is a FrameworkElement");
                         let _ = fe.SetWidth(rect.width as f64);
                         let _ = fe.SetHeight(rect.height as f64);
                         let _ = Canvas::SetLeft(&fe, rect.x as f64);
@@ -182,9 +205,10 @@ pub(crate) fn reconcile_native_children(
                         // `RelayoutHost::request_relayout`).
                         let callback_owner = UiCallbackRegistryOwner::default();
                         let got_focus_id = callback_owner.register_event(Rc::new(move || {
-                            if let (Some(render_tree), Some(keyboard)) =
-                                (render_tree_for_gained.upgrade(), keyboard_for_gained.upgrade())
-                            {
+                            if let (Some(render_tree), Some(keyboard)) = (
+                                render_tree_for_gained.upgrade(),
+                                keyboard_for_gained.upgrade(),
+                            ) {
                                 let target = render_tree.borrow().as_ref().and_then(|rt| {
                                     elwindui_core::focus::resolve_native_focus_target(rt, owner_id)
                                 });
@@ -197,20 +221,24 @@ pub(crate) fn reconcile_native_children(
                                 }
                             }
                         }));
-                        let got_focus_token = element.GotFocus(&RoutedEventHandler::new(move |_, _| {
-                            invoke_ui_event_callback(got_focus_id);
-                            Ok(())
-                        })).ok();
+                        let got_focus_token = element
+                            .GotFocus(&RoutedEventHandler::new(move |_, _| {
+                                invoke_ui_event_callback(got_focus_id);
+                                Ok(())
+                            }))
+                            .ok();
                         let keyboard_for_lost = Rc::downgrade(keyboard);
                         let lost_focus_id = callback_owner.register_event(Rc::new(move || {
                             if let Some(keyboard) = keyboard_for_lost.upgrade() {
                                 elwindui_core::focus::native_focus_lost(&keyboard.focus, owner_id);
                             }
                         }));
-                        let lost_focus_token = element.LostFocus(&RoutedEventHandler::new(move |_, _| {
-                            invoke_ui_event_callback(lost_focus_id);
-                            Ok(())
-                        })).ok();
+                        let lost_focus_token = element
+                            .LostFocus(&RoutedEventHandler::new(move |_, _| {
+                                invoke_ui_event_callback(lost_focus_id);
+                                Ok(())
+                            }))
+                            .ok();
                         NativeChildElement::Native(NativeChildState {
                             view,
                             got_focus_token,

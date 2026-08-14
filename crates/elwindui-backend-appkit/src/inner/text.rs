@@ -3,12 +3,10 @@
 
 use crate::ffi::{AnyView, mtm};
 use objc2::rc::Retained;
-use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
-};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSControlTextEditingDelegate, NSFont, NSSecureTextField,
-    NSTextDelegate, NSTextField, NSTextFieldDelegate, NSTextView, NSTextViewDelegate,
+    NSControlTextEditingDelegate, NSFont, NSSecureTextField, NSTextDelegate, NSTextField,
+    NSTextFieldDelegate, NSTextView, NSTextViewDelegate,
 };
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
 use std::cell::{Cell, RefCell};
@@ -102,7 +100,10 @@ impl InnerTextArea {
 
     /// See the doc comment on `default_width`/`default_height` for why this exists instead of
     /// `native_ui::NativeControl`'s shared `fittingSize()`-based `measure_override`.
-    pub(crate) fn measure(&self, _available: elwindui_core::base::Size) -> elwindui_core::base::Size {
+    pub(crate) fn measure(
+        &self,
+        _available: elwindui_core::base::Size,
+    ) -> elwindui_core::base::Size {
         elwindui_core::base::Size {
             width: self.default_width.get(),
             height: self.default_height.get(),

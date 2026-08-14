@@ -3,7 +3,7 @@
 use crate::convert::{color_from_usvg, convert_group, rect_from_nonzero, transform_from_usvg};
 use elwindui_core::base::Point;
 use elwindui_core::graphics::{
-    Brush, FillRule, GradientSpreadMethod, GradientStop, LinearGradientBrush, LineCap, LineJoin,
+    Brush, FillRule, GradientSpreadMethod, GradientStop, LineCap, LineJoin, LinearGradientBrush,
     RadialGradientBrush, StrokeStyle, VectorBlendMode, VectorClipPath, VectorFill, VectorMask,
     VectorMaskType, VectorPaint, VectorPattern, VectorStroke,
 };
@@ -60,7 +60,10 @@ fn convert_stroke_style(stroke: &usvg::Stroke) -> StrokeStyle {
         dash_cap: cap,
         line_join: convert_line_join(stroke.linejoin()),
         miter_limit: stroke.miterlimit().get(),
-        dash_pattern: stroke.dasharray().map(Arc::from).unwrap_or_else(|| Arc::from([])),
+        dash_pattern: stroke
+            .dasharray()
+            .map(Arc::from)
+            .unwrap_or_else(|| Arc::from([])),
         dash_offset: stroke.dashoffset(),
     }
 }
@@ -69,7 +72,11 @@ fn convert_gradient_stops(stops: &[usvg::Stop]) -> Vec<GradientStop> {
     stops
         .iter()
         .filter_map(|s| {
-            GradientStop::new(s.offset().get(), color_from_usvg(s.color(), s.opacity().get())).ok()
+            GradientStop::new(
+                s.offset().get(),
+                color_from_usvg(s.color(), s.opacity().get()),
+            )
+            .ok()
         })
         .collect()
 }
@@ -93,8 +100,14 @@ fn convert_paint(paint: &usvg::Paint) -> VectorPaint {
         usvg::Paint::LinearGradient(lg) => {
             let stops = convert_gradient_stops(lg.stops());
             match LinearGradientBrush::new(
-                Point { x: lg.x1(), y: lg.y1() },
-                Point { x: lg.x2(), y: lg.y2() },
+                Point {
+                    x: lg.x1(),
+                    y: lg.y1(),
+                },
+                Point {
+                    x: lg.x2(),
+                    y: lg.y2(),
+                },
                 stops,
             ) {
                 Ok(mut brush) => {
@@ -102,24 +115,34 @@ fn convert_paint(paint: &usvg::Paint) -> VectorPaint {
                     brush.transform = transform_from_usvg(lg.transform());
                     VectorPaint::Brush(Brush::LinearGradient(brush))
                 }
-                Err(_) => VectorPaint::Brush(Brush::Solid(elwindui_core::graphics::Color::TRANSPARENT)),
+                Err(_) => {
+                    VectorPaint::Brush(Brush::Solid(elwindui_core::graphics::Color::TRANSPARENT))
+                }
             }
         }
         usvg::Paint::RadialGradient(rg) => {
             let stops = convert_gradient_stops(rg.stops());
             match RadialGradientBrush::new(
-                Point { x: rg.cx(), y: rg.cy() },
+                Point {
+                    x: rg.cx(),
+                    y: rg.cy(),
+                },
                 rg.r().get(),
                 rg.r().get(),
                 stops,
             ) {
                 Ok(mut brush) => {
-                    brush.gradient_origin = Point { x: rg.fx(), y: rg.fy() };
+                    brush.gradient_origin = Point {
+                        x: rg.fx(),
+                        y: rg.fy(),
+                    };
                     brush.spread = convert_spread(rg.spread_method());
                     brush.transform = transform_from_usvg(rg.transform());
                     VectorPaint::Brush(Brush::RadialGradient(brush))
                 }
-                Err(_) => VectorPaint::Brush(Brush::Solid(elwindui_core::graphics::Color::TRANSPARENT)),
+                Err(_) => {
+                    VectorPaint::Brush(Brush::Solid(elwindui_core::graphics::Color::TRANSPARENT))
+                }
             }
         }
         usvg::Paint::Pattern(pattern) => VectorPaint::Pattern(Arc::new(convert_pattern(pattern))),

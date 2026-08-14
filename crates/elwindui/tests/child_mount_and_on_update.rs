@@ -87,9 +87,18 @@ fn stored_children_build_before_parent_on_mount_and_named_accessors_work_immedia
     let a = CHILD_A_MOUNT_ORDER.with(|c| c.get());
     let b = CHILD_B_MOUNT_ORDER.with(|c| c.get());
     let p = PARENT_MOUNT_ORDER.with(|c| c.get());
-    assert!(a > 0 && b > 0 && p > 0, "all three should have fired: a={a} b={b} p={p}");
-    assert!(a < p, "child_a's on_mount ({a}) must fire before the parent's ({p})");
-    assert!(b < p, "child_b's on_mount ({b}) must fire before the parent's ({p})");
+    assert!(
+        a > 0 && b > 0 && p > 0,
+        "all three should have fired: a={a} b={b} p={p}"
+    );
+    assert!(
+        a < p,
+        "child_a's on_mount ({a}) must fire before the parent's ({p})"
+    );
+    assert!(
+        b < p,
+        "child_b's on_mount ({b}) must fire before the parent's ({p})"
+    );
 
     // `#[id(..)]` named accessors now read through `OnceCell<Rc<ConcreteType>>` instead of a plain
     // field (CI-4) -- these `.expect(..)`-panic internally if the cell was never populated, so a

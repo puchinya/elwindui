@@ -317,7 +317,11 @@ impl RenderCommand {
                 hash_rect(&mut geometry, *rect);
                 hash_brush(&mut paint, brush);
             }
-            RenderCommand::StrokeRect { rect, brush, stroke } => {
+            RenderCommand::StrokeRect {
+                rect,
+                brush,
+                stroke,
+            } => {
                 hash_rect(&mut geometry, *rect);
                 hash_stroke_geometry(&mut geometry, stroke);
                 hash_brush(&mut paint, brush);
@@ -342,12 +346,21 @@ impl RenderCommand {
                 hash_rect(&mut geometry, *rect);
                 hash_brush(&mut paint, brush);
             }
-            RenderCommand::StrokeEllipse { rect, brush, stroke } => {
+            RenderCommand::StrokeEllipse {
+                rect,
+                brush,
+                stroke,
+            } => {
                 hash_rect(&mut geometry, *rect);
                 hash_stroke_geometry(&mut geometry, stroke);
                 hash_brush(&mut paint, brush);
             }
-            RenderCommand::DrawLine { from, to, brush, stroke } => {
+            RenderCommand::DrawLine {
+                from,
+                to,
+                brush,
+                stroke,
+            } => {
                 hash_point(&mut geometry, *from);
                 hash_point(&mut geometry, *to);
                 hash_stroke_geometry(&mut geometry, stroke);
@@ -359,7 +372,11 @@ impl RenderCommand {
                 geometry.write_u8(*rule as u8);
                 hash_brush(&mut paint, brush);
             }
-            RenderCommand::StrokePath { path, brush, stroke } => {
+            RenderCommand::StrokePath {
+                path,
+                brush,
+                stroke,
+            } => {
                 hash_rect(&mut geometry, path.bounds());
                 geometry.write_u64(path.commands().len() as u64);
                 hash_stroke_geometry(&mut geometry, stroke);
@@ -461,8 +478,14 @@ impl RenderCommand {
     pub fn visually_eq(&self, other: &Self) -> bool {
         match (self, other) {
             (
-                RenderCommand::FillRect { rect: r1, brush: b1 },
-                RenderCommand::FillRect { rect: r2, brush: b2 },
+                RenderCommand::FillRect {
+                    rect: r1,
+                    brush: b1,
+                },
+                RenderCommand::FillRect {
+                    rect: r2,
+                    brush: b2,
+                },
             ) => r1 == r2 && brushes_visually_eq(b1, b2),
             (
                 RenderCommand::StrokeRect {
@@ -503,8 +526,14 @@ impl RenderCommand {
                 },
             ) => r1 == r2 && rad1 == rad2 && s1 == s2 && brushes_visually_eq(b1, b2),
             (
-                RenderCommand::FillEllipse { rect: r1, brush: b1 },
-                RenderCommand::FillEllipse { rect: r2, brush: b2 },
+                RenderCommand::FillEllipse {
+                    rect: r1,
+                    brush: b1,
+                },
+                RenderCommand::FillEllipse {
+                    rect: r2,
+                    brush: b2,
+                },
             ) => r1 == r2 && brushes_visually_eq(b1, b2),
             (
                 RenderCommand::StrokeEllipse {
@@ -606,7 +635,9 @@ impl RenderCommand {
                     && text_styles_visually_eq(st1, st2)
                     && brushes_opt_visually_eq(fg1.as_ref(), fg2.as_ref())
             }
-            (RenderCommand::PushClip { clip: c1 }, RenderCommand::PushClip { clip: c2 }) => c1 == c2,
+            (RenderCommand::PushClip { clip: c1 }, RenderCommand::PushClip { clip: c2 }) => {
+                c1 == c2
+            }
             (RenderCommand::PopClip, RenderCommand::PopClip) => true,
             (
                 RenderCommand::PushTransform { transform: t1 },
@@ -659,14 +690,33 @@ mod tests {
             CommandKind::FillRect
         );
         assert_eq!(RenderCommand::PopClip.kind(), CommandKind::PopClip);
-        assert_eq!(RenderCommand::PopTransform.kind(), CommandKind::PopTransform);
+        assert_eq!(
+            RenderCommand::PopTransform.kind(),
+            CommandKind::PopTransform
+        );
         assert_eq!(RenderCommand::PopOpacity.kind(), CommandKind::PopOpacity);
     }
 
     #[test]
     fn identical_commands_fingerprint_equal_and_are_visually_eq() {
-        let a = solid_fill_rect(5.0, Color { r: 10, g: 20, b: 30, a: 255 });
-        let b = solid_fill_rect(5.0, Color { r: 10, g: 20, b: 30, a: 255 });
+        let a = solid_fill_rect(
+            5.0,
+            Color {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255,
+            },
+        );
+        let b = solid_fill_rect(
+            5.0,
+            Color {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255,
+            },
+        );
         assert_eq!(a.fingerprint(), b.fingerprint());
         assert!(a.visually_eq(&b));
     }
@@ -686,8 +736,24 @@ mod tests {
 
     #[test]
     fn a_changed_color_changes_only_the_paint_fingerprint() {
-        let a = solid_fill_rect(5.0, Color { r: 0, g: 0, b: 0, a: 255 });
-        let b = solid_fill_rect(5.0, Color { r: 255, g: 0, b: 0, a: 255 });
+        let a = solid_fill_rect(
+            5.0,
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
+        let b = solid_fill_rect(
+            5.0,
+            Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        );
         assert_eq!(a.fingerprint().geometry, b.fingerprint().geometry);
         assert_ne!(a.fingerprint().paint, b.fingerprint().paint);
         assert!(!a.visually_eq(&b));

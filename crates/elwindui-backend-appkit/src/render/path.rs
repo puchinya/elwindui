@@ -1,13 +1,12 @@
 //! `elwindui_core::graphics::Path` and the stroke enums -> `CGPath`/`CAShapeLayer` attributes.
 //! Pure geometry translation: nothing here touches a layer tree or a `RenderCommand`.
 
-
 use super::geometry::*;
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGMutablePath;
 use objc2_quartz_core::{
-    CAShapeLayerLineCap, CAShapeLayerLineJoin, kCALineCapButt, kCALineCapRound,
-    kCALineCapSquare, kCALineJoinBevel, kCALineJoinMiter, kCALineJoinRound,
+    CAShapeLayerLineCap, CAShapeLayerLineJoin, kCALineCapButt, kCALineCapRound, kCALineCapSquare,
+    kCALineJoinBevel, kCALineJoinMiter, kCALineJoinRound,
 };
 
 pub(crate) fn ca_line_cap(cap: elwindui_core::graphics::LineCap) -> &'static CAShapeLayerLineCap {
@@ -20,7 +19,9 @@ pub(crate) fn ca_line_cap(cap: elwindui_core::graphics::LineCap) -> &'static CAS
     }
 }
 
-pub(crate) fn ca_line_join(join: elwindui_core::graphics::LineJoin) -> &'static CAShapeLayerLineJoin {
+pub(crate) fn ca_line_join(
+    join: elwindui_core::graphics::LineJoin,
+) -> &'static CAShapeLayerLineJoin {
     unsafe {
         match join {
             elwindui_core::graphics::LineJoin::Miter => kCALineJoinMiter,

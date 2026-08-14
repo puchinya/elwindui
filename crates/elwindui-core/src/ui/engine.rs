@@ -969,7 +969,11 @@ mod tests {
         layout_root(&root, size(40.0, 40.0));
         assert!(render_tree.reconcile::<FakeHandle>(&root));
 
-        assert_eq!(render_tree.root_id(), root_id, "the root's own group id never changes");
+        assert_eq!(
+            render_tree.root_id(),
+            root_id,
+            "the root's own group id never changes"
+        );
         assert!(render_tree.root.children.is_empty());
         assert!(render_tree.root.commands.is_empty());
         assert!(render_tree.group_paths.contains_key(&root_id));

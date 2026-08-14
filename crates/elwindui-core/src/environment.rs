@@ -198,7 +198,6 @@ impl EnvironmentContext {
             }
         })
     }
-
 }
 
 thread_local! {

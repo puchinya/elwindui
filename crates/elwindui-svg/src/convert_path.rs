@@ -49,7 +49,9 @@ fn path_from_usvg(data: &tiny_skia_path::Path) -> Path {
             }
         }
     }
-    builder
-        .build()
-        .unwrap_or_else(|_| PathBuilder::new().build().expect("an empty path always builds"))
+    builder.build().unwrap_or_else(|_| {
+        PathBuilder::new()
+            .build()
+            .expect("an empty path always builds")
+    })
 }

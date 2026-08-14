@@ -1,11 +1,9 @@
 //! `ScrollViewer` and its per-axis scrollbar visibility.
 
-use crate::ffi::{AnyView, register_ui_event_callback, invoke_ui_event_callback};
-use crate::host::TreeHostPanel;
-use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    ScrollMode, ScrollViewer,
-};
+use crate::bindings::Microsoft::UI::Xaml::Controls::{ScrollMode, ScrollViewer};
 use crate::bindings::Microsoft::UI::Xaml::SizeChangedEventHandler;
+use crate::ffi::{AnyView, invoke_ui_event_callback, register_ui_event_callback};
+use crate::host::TreeHostPanel;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -78,7 +76,8 @@ impl InnerScrollView {
     /// `SizeChanged`.
     fn apply_axes(&self) {
         let (horizontal, vertical) = self.axes.get();
-        self.content_host.set_unconstrained_axes(horizontal, vertical);
+        self.content_host
+            .set_unconstrained_axes(horizontal, vertical);
         let _ = self.scroll_viewer.SetHorizontalScrollMode(if horizontal {
             ScrollMode::Auto
         } else {
@@ -89,7 +88,11 @@ impl InnerScrollView {
         } else {
             ScrollMode::Disabled
         });
-        sync_scroll_view_cross_axis(&self.content_host, &self.scroll_viewer, (horizontal, vertical));
+        sync_scroll_view_cross_axis(
+            &self.content_host,
+            &self.scroll_viewer,
+            (horizontal, vertical),
+        );
     }
 
     pub(crate) fn handle(&self) -> AnyView {

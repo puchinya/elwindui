@@ -79,7 +79,9 @@ pub(crate) fn try_batch_fills(
             continue;
         }
         let Some((rect, radii, _)) = fill_shape(command) else {
-            unreachable!("every member in [start, end) was already confirmed fill_shape-extractable above")
+            unreachable!(
+                "every member in [start, end) was already confirmed fill_shape-extractable above"
+            )
         };
         let subpath = rounded_rect_cgpath(world, rect, radii);
         unsafe {
@@ -88,7 +90,14 @@ pub(crate) fn try_batch_fills(
         union_bounds = Some(union_bounds.map_or(rect, |u| u.union(rect)));
     }
     if let Some(bounds) = union_bounds {
-        super::add_shape_layer(layer, &combined, Some(&Brush::Solid(color)), None, opacity, bounds);
+        super::add_shape_layer(
+            layer,
+            &combined,
+            Some(&Brush::Solid(color)),
+            None,
+            opacity,
+            bounds,
+        );
     }
     end - start
 }

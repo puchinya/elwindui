@@ -203,7 +203,6 @@ pub fn environment_key(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-
 /// Parses `#[component]`'s own argument list: empty (no base), or exactly `inherits Base` (no
 /// `=`, matching the DSL's own `component Name inherits Base` spelling — unlike `#[class]`'s
 /// `inherits = ..` convention). `Base` may be a bare name (`ContentControl`) — only ever valid for

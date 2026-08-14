@@ -116,7 +116,6 @@ impl Grid {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

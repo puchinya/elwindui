@@ -1,8 +1,6 @@
 //! `elwindui::ui::MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` and their `ListExt` collections.
 
-use crate::inner::{
-    InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem,
-};
+use crate::inner::{InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem};
 use std::cell::RefCell;
 use std::rc::Rc;
 

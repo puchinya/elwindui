@@ -307,7 +307,8 @@ fn replay_flat_commands(
         // group containing one simply never becomes eligible for Step 7b's in-place update later
         // — the same fate as any other group whose leaf list isn't uniformly single-command
         // fast-path-eligible.
-        let batched = crate::render::try_batch_fills(layer, commands, idx, &transform, None, opacity);
+        let batched =
+            crate::render::try_batch_fills(layer, commands, idx, &transform, None, opacity);
         if batched > 0 {
             idx += batched;
             continue;
@@ -367,9 +368,7 @@ fn try_update_group_in_place(
         .iter()
         .zip(commands)
         .all(|(layer, command)| match layer {
-            Some(layer) => {
-                crate::render::try_update_fast_path(layer, command, &transform, opacity)
-            }
+            Some(layer) => crate::render::try_update_fast_path(layer, command, &transform, opacity),
             None => false,
         })
 }
@@ -543,7 +542,8 @@ pub(crate) fn replay_group(
                 entry.key = key;
             }
             if let Some(entry) = state.group_cache.get(&group.id) {
-                live_native_controls.extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
+                live_native_controls
+                    .extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
                 live_image_ids.extend(&entry.image_ids);
                 live_vector_image_ids.extend(&entry.vector_image_ids);
             }
@@ -615,7 +615,8 @@ pub(crate) fn replay_group(
     } else {
         crate::render::stats::bump(|s| s.groups_cache_hit += 1);
         if let Some(entry) = state.group_cache.get(&group.id) {
-            live_native_controls.extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
+            live_native_controls
+                .extend(entry.native_controls.iter().map(|(identity, ..)| *identity));
             live_image_ids.extend(&entry.image_ids);
             live_vector_image_ids.extend(&entry.vector_image_ids);
         }
@@ -857,9 +858,8 @@ pub(crate) fn replay_commands(
                     // `NativeControl` boundary) and why it's deliberately only reachable from
                     // here, never from `replay_flat_commands`. A `0` result (no run of 2+ found)
                     // falls through to the existing single-command handling completely unchanged.
-                    let batched = crate::render::try_batch_fills(
-                        layer, commands, idx, &world, clip, opacity,
-                    );
+                    let batched =
+                        crate::render::try_batch_fills(layer, commands, idx, &world, clip, opacity);
                     if batched > 0 {
                         idx += batched;
                     } else {
@@ -1209,16 +1209,15 @@ mod tests {
 
     fn parent_with_children(child_ids: &[u64]) -> RenderGroup {
         let mut parent = RenderGroup::new(1, Point { x: 0.0, y: 0.0 }, None);
-        parent.children = child_ids.iter().map(|&id| solid_fill_rect_group(id)).collect();
+        parent.children = child_ids
+            .iter()
+            .map(|&id| solid_fill_rect_group(id))
+            .collect();
         parent
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn replay_once(
-        root_layer: &Retained<CALayer>,
-        group: &RenderGroup,
-        state: &mut ReplayState,
-    ) {
+    fn replay_once(root_layer: &Retained<CALayer>, group: &RenderGroup, state: &mut ReplayState) {
         let mut live_native_controls = HashSet::new();
         let mut live_group_ids = HashSet::new();
         let mut live_image_ids = HashSet::new();
@@ -1271,9 +1270,15 @@ mod tests {
         let stats = crate::render::stats::snapshot();
         assert_eq!(stats.groups_rebuilt, 0, "unchanged group must not rebuild");
         assert_eq!(stats.groups_cache_hit, 1);
-        assert_eq!(stats.layers_created, 0, "cache hit must create no new CALayer");
+        assert_eq!(
+            stats.layers_created, 0,
+            "cache hit must create no new CALayer"
+        );
         assert_eq!(stats.layers_removed, 0);
-        assert_eq!(stats.cgpaths_created, 0, "cache hit must not rebuild any CGPath");
+        assert_eq!(
+            stats.cgpaths_created, 0,
+            "cache hit must not rebuild any CGPath"
+        );
         assert_eq!(
             stats.add_sublayer_calls, 0,
             "an already-attached, unreordered container must not be re-addSublayer'd"
@@ -1315,7 +1320,10 @@ mod tests {
         let mut state = ReplayState::default();
         replay_once(&root_layer, &group, &mut state);
         let container = state.group_layers.get(&1).unwrap().clone();
-        assert_eq!(container.position(), objc2_core_foundation::CGPoint::new(0.0, 0.0));
+        assert_eq!(
+            container.position(),
+            objc2_core_foundation::CGPoint::new(0.0, 0.0)
+        );
 
         crate::render::stats::reset();
         let mut live_native_controls = HashSet::new();
@@ -1343,7 +1351,10 @@ mod tests {
         );
 
         let stats = crate::render::stats::snapshot();
-        assert_eq!(stats.groups_rebuilt, 0, "an unclipped group's origin must not force a rebuild");
+        assert_eq!(
+            stats.groups_rebuilt, 0,
+            "an unclipped group's origin must not force a rebuild"
+        );
         assert_eq!(stats.groups_cache_hit, 1);
         assert_eq!(stats.layers_created, 0);
         assert_eq!(stats.cgpaths_created, 0);
@@ -1604,10 +1615,16 @@ mod tests {
         );
 
         let stats = crate::render::stats::snapshot();
-        assert_eq!(stats.groups_rebuilt, 0, "an Outside group must never be rebuilt");
+        assert_eq!(
+            stats.groups_rebuilt, 0,
+            "an Outside group must never be rebuilt"
+        );
         assert_eq!(stats.cgpaths_created, 0);
         let container = state.group_layers.get(&1).unwrap();
-        assert!(container.isHidden(), "an Outside group's container must be hidden");
+        assert!(
+            container.isHidden(),
+            "an Outside group's container must be hidden"
+        );
     }
 
     #[test]
@@ -1621,9 +1638,9 @@ mod tests {
         let mut state = ReplayState::default();
 
         let replay_with_clip = |root_layer: &Retained<CALayer>,
-                                 group: &RenderGroup,
-                                 state: &mut ReplayState,
-                                 inherited_clip: Option<Rect>| {
+                                group: &RenderGroup,
+                                state: &mut ReplayState,
+                                inherited_clip: Option<Rect>| {
             let mut live_native_controls = HashSet::new();
             let mut live_group_ids = HashSet::new();
             let mut live_image_ids = HashSet::new();
@@ -1720,8 +1737,14 @@ mod tests {
             "an unchanged flat leaf-kind list must update in place"
         );
         assert_eq!(stats.groups_rebuilt, 0);
-        assert_eq!(stats.layers_created, 0, "in-place update must create no new CALayer");
-        assert_eq!(stats.layers_removed, 0, "in-place update must not remove any CALayer");
+        assert_eq!(
+            stats.layers_created, 0,
+            "in-place update must create no new CALayer"
+        );
+        assert_eq!(
+            stats.layers_removed, 0,
+            "in-place update must not remove any CALayer"
+        );
     }
 
     /// A fused fill+stroke pair never gets a tracked per-position `CALayer` (see

@@ -1490,7 +1490,10 @@ TextBox {
         .expect("string literal + method chain should parse as one expression");
         let root = literal(&root.children[0]);
         let ViewExpr::Expr(expr) = &root.attributes[0].value else {
-            panic!("expected a plain expression, got {:?}", root.attributes[0].value);
+            panic!(
+                "expected a plain expression, got {:?}",
+                root.attributes[0].value
+            );
         };
         let rendered = quote::quote!(#expr).to_string();
         assert!(
@@ -1505,7 +1508,10 @@ TextBox {
             .expect("a plain string literal must still parse on its own");
         let root = literal(&root.children[0]);
         let ViewExpr::Expr(expr) = &root.attributes[0].value else {
-            panic!("expected a plain expression, got {:?}", root.attributes[0].value);
+            panic!(
+                "expected a plain expression, got {:?}",
+                root.attributes[0].value
+            );
         };
         let rendered = quote::quote!(#expr).to_string();
         assert_eq!(rendered, "\"hello\"");

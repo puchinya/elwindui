@@ -773,13 +773,8 @@ mod tests {
     fn grid_empty_rows_and_columns_are_treated_as_a_single_implicit_auto_track() {
         let cells = [cell(0, 0), cell(0, 0)];
         let sizes = [size(10.0, 20.0), size(30.0, 5.0)];
-        let (row_sizes, col_sizes) = grid_resolve_track_sizes(
-            &[],
-            &[],
-            &cells,
-            &sizes,
-            size(f32::INFINITY, f32::INFINITY),
-        );
+        let (row_sizes, col_sizes) =
+            grid_resolve_track_sizes(&[], &[], &cells, &sizes, size(f32::INFINITY, f32::INFINITY));
         assert_eq!((col_sizes[0], row_sizes[0]), (30.0, 20.0));
 
         let rects = grid_arrange(size(100.0, 100.0), &[], &[], &cells, &sizes);

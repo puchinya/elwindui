@@ -8,9 +8,7 @@ use elwindui_core::input::FocusState;
 use elwindui_core::ui::UIElementExt;
 use objc2::rc::Retained;
 use objc2::runtime::Bool;
-use objc2::{
-    DefinedClass, MainThreadOnly, define_class, msg_send,
-};
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSResponder, NSScreen,
     NSView, NSWindow, NSWindowStyleMask,
@@ -36,7 +34,9 @@ fn resolve_focus_owner(
     while let Some(view) = current {
         match view.downcast::<TreeHostView>() {
             Ok(host) => {
-                let owner_id = previous.as_deref().and_then(|c| host.resolve_native_owner_id(c))?;
+                let owner_id = previous
+                    .as_deref()
+                    .and_then(|c| host.resolve_native_owner_id(c))?;
                 return Some((host, owner_id));
             }
             Err(view) => {

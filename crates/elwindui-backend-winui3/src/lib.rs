@@ -28,9 +28,6 @@
 // `elwindui-backend-appkit` carries the identical `#![allow(...)]` for the identical reason.
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
-
-
-
 mod app;
 mod bindings;
 mod ffi;

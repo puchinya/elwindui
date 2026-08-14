@@ -424,8 +424,8 @@ struct StoredEnvironmentKey {
 /// `EnvironmentContext::get`/`subscribe` with. Same declaration-order requirement as the other
 /// registries in this file — an environment key must be declared before the component(s)/
 /// `EnvironmentScope` that reference its name.
-fn same_crate_environment_keys()
--> &'static Mutex<HashMap<(String, String), StoredEnvironmentKey>> {
+fn same_crate_environment_keys() -> &'static Mutex<HashMap<(String, String), StoredEnvironmentKey>>
+{
     static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredEnvironmentKey>>> =
         OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1112,8 +1112,8 @@ enum Orientation {
 }
 "#;
         let item_enum: syn::ItemEnum = syn::parse_str(deps_src).expect("enum should parse");
-        let enum_def =
-            crate::component_frontend::enum_def_from_item_enum(&item_enum).expect("enum should build");
+        let enum_def = crate::component_frontend::enum_def_from_item_enum(&item_enum)
+            .expect("enum should build");
         let deps_module = crate::ast::Module {
             path: Vec::new(),
             uses: Vec::new(),

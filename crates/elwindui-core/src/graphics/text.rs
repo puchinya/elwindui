@@ -200,9 +200,7 @@ impl TextStyleValues {
             font_weight: self.font_weight.unwrap_or(fallback.font_weight),
             font_style: self.font_style.unwrap_or(fallback.font_style),
             font_stretch: self.font_stretch.unwrap_or(fallback.font_stretch),
-            character_spacing: self
-                .character_spacing
-                .unwrap_or(fallback.character_spacing),
+            character_spacing: self.character_spacing.unwrap_or(fallback.character_spacing),
             foreground: self
                 .foreground
                 .clone()
@@ -533,9 +531,8 @@ impl TextBackend for DummyTextBackend {
         if req.wrapping == TextWrapping::NoWrap || !req.available.width.is_finite() {
             lines.push(req.text.chars().count());
         } else {
-            let max_chars = ((req.available.width / (advance + kerning).max(0.01)).floor()
-                as usize)
-                .max(1);
+            let max_chars =
+                ((req.available.width / (advance + kerning).max(0.01)).floor() as usize).max(1);
             let mut remaining = req.text.chars().count();
             if remaining == 0 {
                 lines.push(0);

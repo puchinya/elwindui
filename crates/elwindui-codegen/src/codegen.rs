@@ -698,7 +698,11 @@ pub(crate) fn resolve_effective_fields<'m>(
 /// accepts for every other external-base construction path. `view` is `None` for a component with
 /// no own view at all (pure template/shape composition) — there is no bare reference to read in
 /// that case, so this can only return `c`'s own literal fields, same as it always could.
-fn synthesize_external_base_fields(c: &ComponentDef, base: &str, view: Option<&ViewDef>) -> Vec<FieldDef> {
+fn synthesize_external_base_fields(
+    c: &ComponentDef,
+    base: &str,
+    view: Option<&ViewDef>,
+) -> Vec<FieldDef> {
     let Some(view) = view else {
         return c.fields.clone();
     };
@@ -3903,7 +3907,10 @@ fn generate_view(
 
     // Getter for a component's own `#[environment(name)]` field (`own_environment_names`) — same
     // read-only, same-name field/method shape as the `#[computed]` loop just above.
-    for (name, ty) in own_environment_names.iter().zip(own_environment_types.iter()) {
+    for (name, ty) in own_environment_names
+        .iter()
+        .zip(own_environment_types.iter())
+    {
         let ty_str = ctx.own_fields.get(&name.to_string()).unwrap();
         let get_body = if is_copy_type(ty_str) {
             quote! { self.#name.get() }
@@ -4180,17 +4187,15 @@ fn generate_view(
                 // first-and-only write — no double-set possible, since each node is constructed
                 // exactly once per `__build_view()` call, which is itself guarded by `mount()`'s own
                 // idempotency check (docs/design/runtime/component_lifecycle_design.md §4a).
-                struct_fields.extend(
-                    quote! { #binding: std::cell::OnceCell<std::rc::Rc<#type_ident>>, },
-                );
+                struct_fields
+                    .extend(quote! { #binding: std::cell::OnceCell<std::rc::Rc<#type_ident>>, });
                 field_inits.extend(quote! { #binding: std::cell::OnceCell::new(), });
                 child_construct_stmts.extend(quote! {
                     self.#binding.set(#binding.clone()).ok();
                 });
                 if let Some(id) = &node.id {
                     let accessor = format_ident!("{}", id);
-                    let not_mounted_msg =
-                        format!("{id}: component is not yet mounted");
+                    let not_mounted_msg = format!("{id}: component is not yet mounted");
                     named_accessors.extend(quote! {
                         pub fn #accessor(&self) -> std::rc::Rc<#type_ident> {
                             self.#binding
@@ -4510,8 +4515,9 @@ fn generate_view(
     let on_constructed_mount_call = (!is_host_composition).then(|| {
         quote! { self.mount(elwindui::core::environment::application_environment()); }
     });
-    let call_on_unmount_from_close =
-        on_unmount_method.is_some().then(|| quote! { self.__run_on_unmount(); });
+    let call_on_unmount_from_close = on_unmount_method
+        .is_some()
+        .then(|| quote! { self.__run_on_unmount(); });
     let window_lifecycle_overrides = is_host_composition.then(|| {
         quote! {
             pub fn show(&self) {
@@ -5287,7 +5293,16 @@ fn lazy_branch_plan(
     }
     let mut leaves = Vec::new();
     for entry in branch {
-        plan_child_entry(entry, parent_type_path, ctx, from, table, &mut leaves, lets, None);
+        plan_child_entry(
+            entry,
+            parent_type_path,
+            ctx,
+            from,
+            table,
+            &mut leaves,
+            lets,
+            None,
+        );
     }
     // Rename every leaf's binding to be unique across every branch of every `if`/`match` region in
     // this view — see this function's own doc comment on why the fresh, branch-local `leaves`
@@ -6941,8 +6956,16 @@ fn plan_child_entry(
 ) -> (syn::Ident, String) {
     match entry {
         ChildEntry::Literal(element) => {
-            let resolved =
-                plan_element_in_scope(element, ctx, from, table, out, false, lets, environment_scope);
+            let resolved = plan_element_in_scope(
+                element,
+                ctx,
+                from,
+                table,
+                out,
+                false,
+                lets,
+                environment_scope,
+            );
             out.last_mut()
                 .expect("plan_element_in_scope pushed the child root")
                 .stored = true;
@@ -10864,16 +10887,21 @@ mod tests {
     /// Builds one `Module` combining a `#[elwindui::viewmodel]`-style `mod` and a
     /// `#[elwindui::component]`-style `struct`, mirroring how one old `parser::parse_module` call
     /// could declare a `viewmodel` and a `component` together in one source blob.
-    fn viewmodel_and_component_module(vm_src: &str, base: Option<&str>, struct_src: &str) -> Module {
+    fn viewmodel_and_component_module(
+        vm_src: &str,
+        base: Option<&str>,
+        struct_src: &str,
+    ) -> Module {
         let item_mod: syn::ItemMod = syn::parse_str(vm_src).expect("mod should parse");
         let vm_def = crate::attr_frontend::viewmodel_def_from_item_mod(&item_mod)
             .expect("viewmodel should build");
         let item_struct: syn::ItemStruct = syn::parse_str(struct_src).expect("struct should parse");
-        let (component_def, view_def) = crate::component_frontend::component_and_view_from_item_struct(
-            base.map(str::to_string),
-            &item_struct,
-        )
-        .expect("component should build");
+        let (component_def, view_def) =
+            crate::component_frontend::component_and_view_from_item_struct(
+                base.map(str::to_string),
+                &item_struct,
+            )
+            .expect("component should build");
         let mut items = vec![Item::ViewModel(vm_def)];
         items.extend(crate::component_frontend::component_module_items(
             component_def,
@@ -10948,11 +10976,12 @@ mod tests {
     /// `parse_module` used to be called once per source blob rather than once for everything.
     fn component_module(base: Option<&str>, struct_src: &str) -> Module {
         let item_struct: syn::ItemStruct = syn::parse_str(struct_src).expect("struct should parse");
-        let (component_def, view_def) = crate::component_frontend::component_and_view_from_item_struct(
-            base.map(|b| b.to_string()),
-            &item_struct,
-        )
-        .expect("component should build");
+        let (component_def, view_def) =
+            crate::component_frontend::component_and_view_from_item_struct(
+                base.map(|b| b.to_string()),
+                &item_struct,
+            )
+            .expect("component should build");
         Module {
             path: Vec::new(),
             uses: Vec::new(),
@@ -11161,7 +11190,6 @@ struct NotepadWindow {
         assert!(rendered.contains("set_foreground (Some ((self . vm . foreground ()) . into ()))"));
         assert!(!rendered.contains("set_font_family (& (self . vm . font_family ()))"));
     }
-
 
     #[test]
     fn font_family_and_brush_are_not_assumed_copy_by_viewmodels() {

@@ -4,13 +4,10 @@
 //! `AnyView` is re-exported at the crate root because `elwindui-codegen` generates references to
 //! `elwindui::backend::AnyView` directly — that path must stay stable.
 
-
 use elwindui_core::base::AsAny;
-use elwindui_core::graphics::{
-    Brush, CascadedTextStyle, Color, ComputedTextStyle, TextBackend,
-};
-use objc2::rc::Retained;
+use elwindui_core::graphics::{Brush, CascadedTextStyle, Color, ComputedTextStyle, TextBackend};
 use objc2::MainThreadMarker;
+use objc2::rc::Retained;
 use objc2_app_kit::{
     NSButton, NSPopUpButton, NSScrollView, NSSecureTextField, NSSlider, NSStackView, NSSwitch,
     NSTextField, NSTextView, NSUserInterfaceLayoutOrientation, NSView,
@@ -122,8 +119,7 @@ impl AppKitHandle for Retained<NSButton> {
         // an attributed title can. Rebuilding it unconditionally would also silently discard the
         // system's own tinting for special bezel styles, so this only happens when kerning is
         // actually non-zero (the one property a plain title genuinely cannot represent at all).
-        if style.character_spacing.is_some_and(|spacing| spacing != 0)
-            || style.foreground.is_some()
+        if style.character_spacing.is_some_and(|spacing| spacing != 0) || style.foreground.is_some()
         {
             let plain = self.title().to_string();
             let attributed = crate::render::attributed_string(

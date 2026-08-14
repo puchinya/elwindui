@@ -317,7 +317,11 @@ pub(crate) fn try_add_image_fill_layer(
                     pixel_local_bounds,
                 );
                 if let Some((pixels, pixel_width, pixel_height)) =
-                    crate::render::rasterize_calayer_to_pixels(&tile_root, pixel_width, pixel_height)
+                    crate::render::rasterize_calayer_to_pixels(
+                        &tile_root,
+                        pixel_width,
+                        pixel_height,
+                    )
                 {
                     if let Some(tiled_image) =
                         crate::render::pixels_to_cgimage(pixels, pixel_width, pixel_height)

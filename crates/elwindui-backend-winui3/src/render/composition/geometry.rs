@@ -1,29 +1,24 @@
 //! Matrix/rect math and the image-surface helpers shared across the composition renderer.
 
-
 use super::*;
 
-use crate::bindings::Microsoft::Graphics::Canvas::{
-    CanvasBitmap, CanvasEdgeBehavior, CanvasImageInterpolation,
-    ICanvasResourceCreator,
-};
 use crate::bindings::Microsoft::Graphics::Canvas::Brushes::{CanvasImageBrush, ICanvasBrush};
 use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
+use crate::bindings::Microsoft::Graphics::Canvas::{
+    CanvasBitmap, CanvasEdgeBehavior, CanvasImageInterpolation, ICanvasResourceCreator,
+};
 use crate::bindings::Microsoft::UI::Composition::{
-    CompositionDrawingSurface, CompositionStretch,
-    CompositionSurfaceBrush,
+    CompositionDrawingSurface, CompositionStretch, CompositionSurfaceBrush,
 };
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::UIElement;
 use elwindui_core::base::{AffineTransform, Point, Rect};
-use elwindui_core::graphics::{
-    Brush, Image, ImageData, Stretch, TileMode,
-};
-use windows::core::{Interface, Result};
-use windows::Foundation::Size as WinSize;
+use elwindui_core::graphics::{Brush, Image, ImageData, Stretch, TileMode};
 use windows::Foundation::Rect as WinRect;
+use windows::Foundation::Size as WinSize;
+use windows::Storage::Streams::{DataWriter, IRandomAccessStream, InMemoryRandomAccessStream};
 use windows::UI::Color as WinColor;
-use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream, IRandomAccessStream};
+use windows::core::{Interface, Result};
 use windows_numerics::{Matrix3x2, Matrix4x4, Vector2};
 
 pub(crate) fn island_local_matrix(transform: AffineTransform, island: Rect) -> Matrix3x2 {
@@ -48,7 +43,11 @@ pub(crate) fn matrix(transform: AffineTransform) -> Matrix3x2 {
     }
 }
 
-pub(crate) fn image_visual_matrix(transform: AffineTransform, rect: Rect, island: Rect) -> Matrix4x4 {
+pub(crate) fn image_visual_matrix(
+    transform: AffineTransform,
+    rect: Rect,
+    island: Rect,
+) -> Matrix4x4 {
     // SpriteVisual coordinates start at the image's top-left, unlike a
     // SpriteShape whose geometry already carries `rect.x/y`. Fold that local
     // translation into the visual transform, then convert the 2D affine matrix
@@ -123,7 +122,12 @@ pub(crate) fn draw_image_surface(
     let image = image_brush(desired).expect("checked by requires_drawing_surface");
     let rect = desired.primitive.local_bounds();
     let session = CanvasComposition::CreateDrawingSession(surface)?;
-    session.Clear(WinColor { A: 0, R: 0, G: 0, B: 0 })?;
+    session.Clear(WinColor {
+        A: 0,
+        R: 0,
+        G: 0,
+        B: 0,
+    })?;
     session.SetTransform(raster_scale_matrix(rasterization_scale))?;
     let creator: ICanvasResourceCreator = session.clone().cast()?;
     let bitmap = canvas_bitmap(&creator, &image.image)?;
@@ -166,9 +170,13 @@ pub(crate) fn draw_image_surface(
         image_brush.SetTransform(matrix(image.transform))?;
         let brush: ICanvasBrush = image_brush.cast()?;
         match desired.primitive {
-            CompositionPrimitive::Rectangle { .. } => session.FillRectangleWithBrush(win_rect(local), &brush)?,
+            CompositionPrimitive::Rectangle { .. } => {
+                session.FillRectangleWithBrush(win_rect(local), &brush)?
+            }
             CompositionPrimitive::RoundedRectangle { radii, .. } => {
-                let radius = (radii.top_left + radii.top_right + radii.bottom_right + radii.bottom_left) / 4.0;
+                let radius =
+                    (radii.top_left + radii.top_right + radii.bottom_right + radii.bottom_left)
+                        / 4.0;
                 session.FillRoundedRectangleWithBrush(win_rect(local), radius, radius, &brush)?;
             }
             CompositionPrimitive::Ellipse { .. } => session.FillEllipseWithBrush(
@@ -186,7 +194,11 @@ pub(crate) fn draw_image_surface(
 pub(crate) fn rasterization_scale(canvas: &Canvas) -> Result<f32> {
     let element: UIElement = canvas.clone().cast()?;
     let scale = element.RasterizationScale()? as f32;
-    Ok(if scale.is_finite() && scale > 0.0 { scale } else { 1.0 })
+    Ok(if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    })
 }
 
 pub(crate) fn surface_size(rect: Rect, rasterization_scale: f32) -> WinSize {
@@ -208,7 +220,10 @@ pub(crate) fn raster_scale_matrix(rasterization_scale: f32) -> Matrix3x2 {
     }
 }
 
-pub(crate) fn canvas_bitmap(creator: &ICanvasResourceCreator, image: &Image) -> Result<CanvasBitmap> {
+pub(crate) fn canvas_bitmap(
+    creator: &ICanvasResourceCreator,
+    image: &Image,
+) -> Result<CanvasBitmap> {
     let ImageData::Encoded { bytes, .. } = image.data() else {
         return Err(windows::core::Error::new(
             windows::core::HRESULT(0x80004001_u32 as i32),
@@ -269,7 +284,9 @@ pub(crate) fn win_rect(rect: Rect) -> WinRect {
     }
 }
 
-pub(crate) fn image_brush(desired: &DesiredCompositionNode) -> Option<&elwindui_core::graphics::ImageBrush> {
+pub(crate) fn image_brush(
+    desired: &DesiredCompositionNode,
+) -> Option<&elwindui_core::graphics::ImageBrush> {
     let Some(Brush::Image(image)) = desired.fill.as_ref() else {
         return None;
     };
@@ -279,8 +296,8 @@ pub(crate) fn image_brush(desired: &DesiredCompositionNode) -> Option<&elwindui_
             | CompositionPrimitive::RoundedRectangle { .. }
             | CompositionPrimitive::Ellipse { .. }
     )
-        .then_some(image)
-        .filter(|_| desired.stroke.is_none())
+    .then_some(image)
+    .filter(|_| desired.stroke.is_none())
 }
 
 pub(crate) fn is_image_node(desired: &DesiredCompositionNode) -> bool {

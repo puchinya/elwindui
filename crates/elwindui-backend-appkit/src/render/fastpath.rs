@@ -32,9 +32,11 @@ pub(crate) fn fill_shape(command: &RenderCommand) -> Option<(Rect, CornerRadius,
 /// Extracts `(rect, radii, brush, stroke)` from a stroke command this module can fast-path.
 fn stroke_shape(command: &RenderCommand) -> Option<(Rect, CornerRadius, &Brush, &StrokeStyle)> {
     match command {
-        RenderCommand::StrokeRect { rect, brush, stroke } => {
-            Some((*rect, CornerRadius::default(), brush, stroke))
-        }
+        RenderCommand::StrokeRect {
+            rect,
+            brush,
+            stroke,
+        } => Some((*rect, CornerRadius::default(), brush, stroke)),
         RenderCommand::StrokeRoundedRect {
             rect,
             radii,
@@ -140,7 +142,10 @@ pub(crate) fn try_fast_path(
         }
     }
 
-    let origin = world.transform_point(elwindui_core::base::Point { x: rect.x, y: rect.y });
+    let origin = world.transform_point(elwindui_core::base::Point {
+        x: rect.x,
+        y: rect.y,
+    });
     let ca_layer = CALayer::new();
     super::stats::bump(|s| s.layers_created += 1);
     place(&ca_layer, origin, rect, opacity);
@@ -172,7 +177,10 @@ fn try_stroke_only(
     if !is_simple_border(stroke) {
         return (0, None);
     }
-    let origin = world.transform_point(elwindui_core::base::Point { x: rect.x, y: rect.y });
+    let origin = world.transform_point(elwindui_core::base::Point {
+        x: rect.x,
+        y: rect.y,
+    });
     let ca_layer = CALayer::new();
     super::stats::bump(|s| s.layers_created += 1);
     place(&ca_layer, origin, rect, opacity);
@@ -212,7 +220,10 @@ pub(crate) fn try_update_fast_path(
         let Some(radius) = uniform_radius(radii) else {
             return false;
         };
-        let origin = world.transform_point(elwindui_core::base::Point { x: rect.x, y: rect.y });
+        let origin = world.transform_point(elwindui_core::base::Point {
+            x: rect.x,
+            y: rect.y,
+        });
         place(layer, origin, rect, opacity);
         layer.setBackgroundColor(Some(&color_to_cgcolor(fill_color)));
         layer.setBorderColor(None);
@@ -229,7 +240,10 @@ pub(crate) fn try_update_fast_path(
         if !is_simple_border(stroke) {
             return false;
         }
-        let origin = world.transform_point(elwindui_core::base::Point { x: rect.x, y: rect.y });
+        let origin = world.transform_point(elwindui_core::base::Point {
+            x: rect.x,
+            y: rect.y,
+        });
         place(layer, origin, rect, opacity);
         layer.setBackgroundColor(None);
         layer.setBorderColor(Some(&color_to_cgcolor(color)));

@@ -255,6 +255,14 @@ define_class!(
             true
         }
 
+        /// AppKit normally consumes the first click on an inactive window only to activate it.
+        /// ElwindUI's self-drawn controls must receive that same click so pointer gestures (most
+        /// visibly dragging a mascot window) can begin without a separate activation click.
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: &NSEvent) -> bool {
+            true
+        }
+
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             self.dispatch_key(event, true);

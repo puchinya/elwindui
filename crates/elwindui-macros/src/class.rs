@@ -2211,6 +2211,7 @@ fn build_inherit_macros(
         let accessor_ident = named_accessor_ident(bare_name);
         quote! {
             impl $SubType {
+                #[allow(dead_code)]
                 pub fn #accessor_ident(&self) -> &$OwnConcrete { self.base.#accessor_ident() }
             }
         }
@@ -3317,6 +3318,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             // recurse forever, since its own `dyn_ident` is reflexive.
             quote! {
                 impl #impl_generics #ext_ident #ty_generics for #impl_name #ty_generics #where_clause {
+                    #[allow(dead_code)]
                     fn as_ui_element(&self) -> &#impl_name { self }
                     fn #dyn_ident(&self) -> &dyn #ext_ty { self }
                     #(#overridable_accessor_impls)*
@@ -3483,6 +3485,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         let accessor_ident = named_accessor_ident(&bare_name);
         quote! {
             impl #impl_generics #impl_name #ty_generics #where_clause {
+                #[allow(dead_code)]
                 pub fn #accessor_ident(&self) -> &Self { self }
             }
         }

@@ -18,7 +18,7 @@ pub trait Theme {
 }
 ```
 
-`crates/elwindui-core/src/theme.rs` now contains only this trait. There is no `EnvironmentOverrides` type distinct from `EnvironmentContext` — the specification's illustrative `fn apply(&self, env: &mut EnvironmentOverrides)` is non-normative on this point, the same way `EnvironmentContext::current()`/`enter()` already superseded the specification's constructor-threading illustration for Environment itself (see "Alternatives considered" in the `## Environment` section below). `EnvironmentContext::set` already has exactly the right shape for a Preset to call directly: it takes `&self` (interior-mutable cells), so a Theme's `apply` needs no exclusive borrow of the context, and re-applying a different Theme to the *same* context re-mutates existing cells in place, which is what makes switching Themes at runtime reach every live subscriber for free (see "Change propagation" below).
+`crates/elwindui-core/src/theme.rs` contains this trait plus Semantic Style's `BrushStyle`, `ResolvedValue<T>`, and framework Environment Keys (Issue #97). There is no `EnvironmentOverrides` type distinct from `EnvironmentContext` — the specification's illustrative `fn apply(&self, env: &mut EnvironmentOverrides)` is non-normative on this point. `EnvironmentContext::set` already has exactly the right shape for a Preset to call directly: it takes `&self` (interior-mutable cells), so a Theme's `apply` needs no exclusive borrow of the context, and re-applying a different Theme to the *same* context re-mutates existing cells in place, which is what makes switching Themes at runtime reach every live subscriber for free (see "Change propagation" below).
 
 ### `#[elwindui::theme]`
 
@@ -30,7 +30,7 @@ struct OceanTheme {
 }
 ```
 
-is a Rust-only frontend (`elwindui-codegen/src/theme_frontend.rs`, mirroring `environment_frontend.rs`'s shape — it never enters the DSL/`view!` parser, the same way `#[elwindui::environment_key]` doesn't). For each `#[theme(value = expr)]` field, the frontend resolves the field's own identifier through `component_frontend::lookup_same_crate_environment_key` — the exact same same-crate, declaration-ordered registry `#[environment(name)]` fields already resolve against (`theme_environment_spec.md` §2/§9's field-name convention: a Theme field named `tint` targets the Environment Key declared `#[elwindui::environment_key(name = tint, ..)]`, not a field of that name on some other struct). An unresolvable field name is a macro-expansion-time error, not a runtime one — consistent with `dsl_spec.md` §13 rule 34/35's treatment of `#[environment(name)]` itself.
+is a Rust-only frontend (`elwindui-codegen/src/theme_frontend.rs`, mirroring `environment_frontend.rs`'s shape — it never enters the DSL/`view!` parser, the same way `#[elwindui::environment_key]` doesn't). For each `#[theme(value = expr)]` field, the frontend first resolves the field's own identifier through `component_frontend::lookup_same_crate_environment_key`. If no user Key exists, Issue #97's fixed semantic names resolve statically to the corresponding framework Key. Any other unresolvable field name is a macro-expansion-time error, not a runtime one — consistent with `dsl_spec.md` §13 rule 34/35's treatment of `#[environment(name)]` itself. No runtime string-keyed fallback is introduced.
 
 The macro discards the parsed struct's fields entirely (schema-only, exactly like the old `theme_definition` macro's field list) and emits a zero-sized marker struct plus a `Theme` impl:
 
@@ -78,6 +78,41 @@ A Theme switch is just `EnvironmentContext::set` calls on `application_environme
 - **A distinct `EnvironmentOverrides` type for `Theme::apply`**, matching the specification's illustrative `fn apply(&self, env: &mut EnvironmentOverrides)` literally: rejected. `EnvironmentContext::set` already takes `&self`, so introducing a second, `&mut`-taking type would only add a translation layer with no behavioral benefit — the same non-normative-illustration situation the `## Environment` section's own "Alternatives considered" already documents for `EnvironmentContext::current()`/`enter()` versus the specification's constructor-threading sketch.
 - **Preserving a variant-enum-per-Theme-type shape** (the old `ThemeFactory::Variant`/`ThemeController::set_variant`): rejected. The specification's Preset model has no variant concept — each named look (`OceanTheme`, `SolarizedTheme`, ...) is its own `#[elwindui::theme]` type/instance; "switching" is applying a different instance to the same `EnvironmentContext`, not selecting a variant within one type. This is strictly simpler and needs no `ThemeFactory`-equivalent trait.
 - **Keeping `SystemTheme`'s fallback-chain machinery running internally (not exposed via the deleted DSL) until #97/#98 land**: rejected per explicit user decision (2026-08-13) in favor of full, immediate deletion — see "Scope reduction", above.
+
+## Semantic Style
+
+Issue #97 adds a narrow static DSL → Environment → concrete-property path; it does not recreate the removed Theme token runtime or introduce a generic Binding API.
+
+### Types and framework keys
+
+`crates/elwindui-core/src/theme.rs` owns `BrushStyle` and generic `ResolvedValue<T>` because both describe semantic appearance resolution rather than graphics primitives. `BrushStyle::Value(Brush)` is the concrete terminal. Each semantic role maps to one public zero-sized `EnvironmentKey<Value = BrushStyle>` whose default is `BrushStyle::PlatformDefault`.
+
+The code generator has a fixed compile-time table for the eleven framework names (`primary`, `secondary`, `tertiary`, `foreground`, `background`, `window_background`, `tint`, `selection`, `separator`, `placeholder`, `link`). Same-crate user declarations remain the first lookup target; only a miss falls back to this table. `#[environment(name)]`, `EnvironmentScope`, and `#[elwindui::theme]` all share that resolution function. The generated Rust names concrete Key types, so no string survives into runtime lookup.
+
+`BrushStyle::resolve` follows aliases through the effective `EnvironmentContext`. A fixed role bitset detects a repeated role without allocation; a cycle resolves to `ResolvedValue::PlatformDefault`. `Value(Brush)` and `PlatformDefault` terminate immediately.
+
+### Brush-property codegen
+
+The semantic Brush surface is deliberately limited to the existing `foreground`, `background`, `fill`, and `stroke` DSL properties. Capability is declared beside the property rather than inferred from those spellings: ordinary class properties use `#[prop(semantic_brush, ..)]`, while `#[text_style]` marks its injected `foreground` field as semantic-brush capable. Same-crate `TypeInfo` retains this marker; cross-crate builtin use defers both the capability query and value application to `__elwindui_props_{Name}!(@is_semantic_brush ..)` / `@set_with_environment`. Therefore an unrelated user property named `fill` or `foreground` keeps its declared type and setter semantics.
+
+The concrete Rust setters stay `Option<Brush>`-shaped. At construction and resync, generated code converts only a marked property's authored expression through `Into<BrushStyle>`, resolves it against the node's effective mount-time context, calls the existing setter for `ResolvedValue::Value`, and calls the existing `@clear`/`clear_*` path for `PlatformDefault`. `From<Brush>`, `From<Color>`, and `From<&str>` preserve existing concrete DSL forms.
+
+An `EnvironmentScope` marker's derived context is retained in a generated `OnceCell<EnvironmentContext>` so later semantic resync uses the same scope rather than the component's outer context. Scope override expressions are replayed before child property resync when a component dependency changes.
+
+### Change propagation and lifetime
+
+A component whose planned view contains at least one semantic Brush property installs one deduplicated subscription set for the framework semantic Keys on its mount context. A notification upgrades the component's existing weak self and calls its generated `resync`; each semantic property then resolves against its retained effective context. Existing `__property_changed_subscriptions` ownership cancels these listeners when the component is released. Components without semantic Brush properties allocate no listeners.
+
+### Backend boundary
+
+No backend API is added by #97. Native properties already expose `clear_*` paths that restore toolkit appearance; self-drawn foreground/background/fill/stroke clear to their existing inherited, transparent, or no-paint defaults. Core never invents a platform color for `PlatformDefault`.
+
+### Test strategy
+
+- core unit tests cover concrete resolution, defaults, alias chains, and cycles;
+- codegen tests cover the static framework-Key fallback and semantic set/clear emission;
+- facade integration tests compile and execute `TextBlock.foreground`, layout/native `background`, and shape `fill`/`stroke`, including Theme/Environment changes and `EnvironmentScope`;
+- existing concrete Brush/Color/string tests remain unchanged as compatibility evidence.
 
 ## Environment
 

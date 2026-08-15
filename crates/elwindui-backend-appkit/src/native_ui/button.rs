@@ -40,6 +40,7 @@ impl Button {
     }
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
+        self.base.reapply_text_style();
     }
     fn set_role(&self, role: elwindui_core::ui::ButtonRole) {
         self.inner.set_role(role);

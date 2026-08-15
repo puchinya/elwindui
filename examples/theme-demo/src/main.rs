@@ -8,46 +8,57 @@
 //! `ThemeDemoWindow`'s `#[environment(..)]` fields re-render through Environment's own per-key
 //! reactive subscription (`docs/design/runtime/theme_environment_design.md`).
 //!
-//! Native controls are intentionally absent from this demo: automatic Theme-driven native-control
-//! styling was dropped in #96 (see the design doc's "Scope reduction") and is not yet restored by
-//! Semantic Style (#97) / Native Style (#98).
+//! Issue #97's Semantic Style path is demonstrated by assigning `BrushStyle` to
+//! foreground/background/fill/stroke. These values re-resolve when a different Theme is applied;
+//! automatic native-control appearance remains separate work tracked by #98.
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::environment::application_environment;
 use elwindui::core::graphics::{Brush, Color, FontWeight};
-use elwindui::core::theme::Theme;
-
-#[elwindui::environment_key(
-    name = brand,
-    value = Brush,
-    default = Brush::Solid(Color::rgb(39, 103, 216))
-)]
-struct BrandEnvironment;
+use elwindui::core::theme::{BrushStyle, Theme};
 
 #[elwindui::environment_key(name = layout_spacing, value = f32, default = 10.0)]
 struct LayoutSpacingEnvironment;
 
 #[elwindui::theme]
 struct DefaultTheme {
-    #[theme(value = Brush::Solid(Color::rgb(39, 103, 216)))]
-    brand: Brush,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(39, 103, 216))))]
+    primary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(24, 32, 44))))]
+    foreground: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(242, 245, 249))))]
+    background: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(148, 163, 184))))]
+    separator: BrushStyle,
     #[theme(value = 10.0)]
     layout_spacing: f32,
 }
 
 #[elwindui::theme]
 struct OceanTheme {
-    #[theme(value = Brush::Solid(Color::rgb(0, 166, 200)))]
-    brand: Brush,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(0, 166, 200))))]
+    primary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(7, 45, 54))))]
+    foreground: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(224, 247, 250))))]
+    background: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(8, 120, 140))))]
+    separator: BrushStyle,
     #[theme(value = 20.0)]
     layout_spacing: f32,
 }
 
 #[elwindui::theme]
 struct SolarizedTheme {
-    #[theme(value = Brush::Solid(Color::rgb(181, 137, 0)))]
-    brand: Brush,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(181, 137, 0))))]
+    primary: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(88, 110, 117))))]
+    foreground: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(253, 246, 227))))]
+    background: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::rgb(147, 161, 161))))]
+    separator: BrushStyle,
     #[theme(value = 4.0)]
     layout_spacing: f32,
 }
@@ -91,8 +102,6 @@ mod theme_demo_view_model {
 
 #[elwindui::component(inherits Window)]
 struct ThemeDemoWindow {
-    #[environment(brand)]
-    brand: Brush,
     #[environment(layout_spacing)]
     layout_spacing: f32,
 
@@ -106,29 +115,49 @@ struct ThemeDemoWindow {
         content: VerticalLayout {
             margin: 16.0
             spacing: layout_spacing
+            background: BrushStyle::Background
 
             TextBlock {
                 text: "Theme-as-Preset-over-Environment"
                 font_size: 22.0
                 font_weight: FontWeight::BOLD
+                foreground: BrushStyle::Primary
             }
             TextBlock {
-                text: "brand/layout_spacing below are ordinary #[environment(name)] fields. A Theme only sets the Environment values behind them — it never sets a property directly."
+                text: "BrushStyle resolves semantic roles through the effective Environment."
+                foreground: BrushStyle::Foreground
             }
 
             HorizontalLayout {
                 spacing: 8.0
-                TextBlock { text: "Theme:" font_weight: FontWeight::BOLD }
-                Button { text: "Default" on_click: vm.choose_default }
-                Button { text: "Ocean" on_click: vm.choose_ocean }
-                Button { text: "Solarized" on_click: vm.choose_solarized }
-                TextBlock { text: vm.theme_name }
+                TextBlock {
+                    text: "Theme:"
+                    font_weight: FontWeight::BOLD
+                    foreground: BrushStyle::Foreground
+                }
+                Button {
+                    text: "Default"
+                    foreground: BrushStyle::Foreground
+                    on_click: vm.choose_default
+                }
+                Button {
+                    text: "Ocean"
+                    foreground: BrushStyle::Foreground
+                    on_click: vm.choose_ocean
+                }
+                Button {
+                    text: "Solarized"
+                    foreground: BrushStyle::Foreground
+                    on_click: vm.choose_solarized
+                }
+                TextBlock { text: vm.theme_name foreground: BrushStyle::Foreground }
             }
 
             Rectangle {
                 width: 200.0
                 height: 80.0
-                fill: brand
+                fill: BrushStyle::Primary
+                stroke: BrushStyle::Separator
                 corner_radius: layout_spacing
             }
         }
@@ -140,6 +169,7 @@ impl ThemeDemoWindow {}
 
 #[elwindui::main]
 fn main() {
+    select_default();
     let vm = ThemeDemoViewModel::new();
     let window = ThemeDemoWindow::new(vm);
     window.show();

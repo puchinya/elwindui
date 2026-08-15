@@ -44,6 +44,7 @@ impl RadioButton {
 
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
+        self.base.reapply_text_style();
     }
 
     /// Setting `checked: true` also unchecks every other member of this button's group — the

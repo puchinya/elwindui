@@ -25,7 +25,7 @@ use super::*;
 /// same shape one level up the hierarchy, where the base *is* directly instantiable).
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
 #[prop(children: crate::ui::UIElementCollection)]
-#[prop(background: Option<crate::graphics::Brush>)]
+#[prop(semantic_brush, background: Option<crate::graphics::Brush>)]
 pub struct Layout {
     /// Logical children for this layout. Its mutations update the owner's Visual collection.
     pub children: UIElementCollection,

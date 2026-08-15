@@ -552,6 +552,34 @@ pub fn lookup_same_crate_environment_key(name: &str) -> Option<(String, String)>
         .map(|stored| (stored.key_type_name.clone(), stored.value_type.clone()))
 }
 
+/// Resolves an unqualified Environment Key name, preferring a user declaration and then the
+/// framework's fixed Semantic Style keys (`theme_environment_spec.md` §7, Issue #97).
+///
+/// The returned strings are emitted as Rust types; this is compile-time fallback only, never a
+/// runtime string-keyed Environment lookup.
+pub fn lookup_environment_key(name: &str) -> Option<(String, String)> {
+    lookup_same_crate_environment_key(name).or_else(|| {
+        let key = match name {
+            "primary" => "PrimaryBrushEnvironment",
+            "secondary" => "SecondaryBrushEnvironment",
+            "tertiary" => "TertiaryBrushEnvironment",
+            "foreground" => "ForegroundBrushEnvironment",
+            "background" => "BackgroundBrushEnvironment",
+            "window_background" => "WindowBackgroundBrushEnvironment",
+            "tint" => "TintBrushEnvironment",
+            "selection" => "SelectionBrushEnvironment",
+            "separator" => "SeparatorBrushEnvironment",
+            "placeholder" => "PlaceholderBrushEnvironment",
+            "link" => "LinkBrushEnvironment",
+            _ => return None,
+        };
+        Some((
+            format!("elwindui::core::theme::{key}"),
+            "elwindui::core::theme::BrushStyle".to_string(),
+        ))
+    })
+}
+
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` -> `EnumDef { name: "Name", variants: ["A", "B",
 /// "C"] }`. Every variant must be a bare unit variant — same restriction the DSL's own `enum`
 /// syntax has (§7 of the DSL spec: "no anonymous unions", enums are plain value sets), and there's

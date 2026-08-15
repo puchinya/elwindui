@@ -7,6 +7,8 @@ pub mod parser;
 #[cfg(test)]
 mod testdata;
 mod text_style;
+#[doc(hidden)]
+pub use text_style::TEXT_STYLE_FIELDS;
 pub mod theme_frontend;
 pub mod validate;
 

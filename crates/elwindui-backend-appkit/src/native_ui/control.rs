@@ -96,17 +96,20 @@ impl NativeControl {
         if !self.handle.supports_text_style() {
             return;
         }
-        let mut cascaded = self.cascaded_text_style();
-        // AppKit native controls have no supported way to take an arbitrary custom text color
-        // without abandoning their own system-drawn appearance — same platform constraint as
-        // `AppKitHandle::apply_background`'s own doc comment. They always keep the system's own
-        // Light/Dark-following text color; an explicit `foreground` request is intentionally
-        // discarded here, never reaching `handle`.
-        cascaded.foreground = None;
+        let cascaded = self.cascaded_text_style();
         if self.applied.borrow().as_ref() != Some(&cascaded) {
             self.handle.apply_text_style(&cascaded);
             *self.applied.borrow_mut() = Some(cascaded);
         }
+    }
+
+    /// Reapplies the current resolved style after a native widget mutation that discards its
+    /// attributed text. `NSButton.setTitle` is the relevant AppKit case: component resync may set
+    /// the same title again after the cached style was applied, so cache equality alone cannot
+    /// prove that the native handle still carries that style.
+    pub(crate) fn reapply_text_style(&self) {
+        self.applied.borrow_mut().take();
+        self.sync_text_style();
     }
 }
 

@@ -137,7 +137,7 @@ pub fn store_def_from_item_mod(item_mod: &syn::ItemMod) -> Result<StoreDef, Stri
 /// Builds `FieldDef`s from a `syn::ItemStruct`'s named fields, recognizing the field-attribute
 /// vocabulary `docs/specs/dsl_spec.md` §3/§4 documents — `param`/`prop`/
 /// `state`/`observable`/`computed`/`attached`/`environment`/`inject`/`two_way`/`routed`/`overrides`/
-/// `onetime`/`length` — uniformly whether the caller is a `viewmodel` (`default_kind:
+/// `onetime`/`length` plus the builtin-only `semantic_brush` marker — uniformly whether the caller is a `viewmodel` (`default_kind:
 /// FieldKind::Observable`, via `viewmodel_def_from_item_mod`) or a `component` (`default_kind:
 /// FieldKind::Prop`, via `component_frontend.rs`), exactly mirroring `parse_module`'s two
 /// `parse_fields_block` call sites. Whether a particular kind/attribute combination is actually
@@ -274,6 +274,7 @@ pub(crate) fn fields_from_item_struct(
                 "routed" => attrs.push(Attr::Routed),
                 "overrides" => attrs.push(Attr::Override),
                 "onetime" => attrs.push(Attr::Onetime),
+                "semantic_brush" => attrs.push(Attr::SemanticBrush),
                 "length" => {
                     let (start, end, inclusive) = parse_length_range(attr)?;
                     attrs.push(Attr::Length {

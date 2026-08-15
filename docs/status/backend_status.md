@@ -1,6 +1,6 @@
 # Backend status
 
-Snapshot: 2026-08-14. Architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-08-15. Architecture is indexed in [`../design/README.md`](../design/README.md).
 
 ## Support matrix
 
@@ -21,12 +21,14 @@ Snapshot: 2026-08-14. Architecture is indexed in [`../design/README.md`](../desi
 - SVG nested masks with mismatched bounds use the outer mask only; image-brush path fills, pattern strokes, and degenerate/offscreen patterns use documented simpler fallbacks.
 - Memory investigations for Issue #60 found no durable evidence that retained ElwindUI render data directly owns the previously observed multi-megabyte process delta. Raw measurements remain Issue evidence rather than status documents.
 - Window's new `hide()`/`close()` (Issue #80 CI-8: `NSWindow::orderOut`/`NSWindow::close`) are implemented and covered by the workspace test suite (constructed, type-checked; interactive on-screen confirmation was attempted but inconclusive in this sandboxed development environment — no crash or early-exit was observed running a real example either before or after the change, but a spawned GUI process's window did not appear in a `screencapture` capture, a pre-existing environment characteristic unrelated to this change).
+- Window transparency and floating/normal levels are implemented through `NSWindow`; `mascot-demo` is the focused alpha-image verification surface ([#150](https://github.com/puchinya/elwindui/issues/150)).
 
 ## WinUI 3 current gaps
 
 - SVG group blend modes without direct `CanvasBlend` mappings, isolation, filters, and luminance-mask rasterization need an offscreen effect graph.
 - Cross-backend parity has been verified for the controls recorded in [`control_status.md`](control_status.md), but the entire backend contract has not been re-audited.
 - Whole-workspace rust-analyzer diagnostics have pre-existing failures and were not established as a clean Windows backend gate.
+- Window transparency uses the XAML root's transparent background and topmost state uses `OverlappedPresenter`; Windows runtime verification for Issue #150 remains platform-specific.
 
 ## Verification baseline
 

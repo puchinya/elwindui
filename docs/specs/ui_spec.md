@@ -259,6 +259,8 @@ content containerとして使うためのControlではない。
 | `menu_bar` | `Option<MenuBar>` | OneWay | アプリケーションメニューバー |
 | `content` | `UIElement` | OneWay | ウィンドウのメインコンテンツ |
 | `theme` | `Option<ThemeHandle>` | OneWay | ウィンドウ固有のテーマ設定 |
+| `transparent` | `bool` | OneWay | `true` ではclient領域のalphaを保持し、未描画・透明pixel越しに背後のwindowを表示する。既定値は`false`。window decorationは変更しない |
+| `always_on_top` | `bool` | OneWay | `true` では通常windowより上のplatform topmost/floating levelを使い、`false` では通常levelへ戻す。既定値は`false` |
 | `left` | `Option<f32>` | OneTime | 初期X座標 |
 | `top` | `Option<f32>` | OneTime | 初期Y座標 |
 | `width` | `Option<f32>` | OneTime | 初期幅 |
@@ -269,6 +271,8 @@ content containerとして使うためのControlではない。
 ```rust
 Window {
     title: "ElwindUI Application"
+    transparent: false
+    always_on_top: false
     width: 800.0
     height: 600.0
     content: VerticalLayout {
@@ -276,6 +280,8 @@ Window {
     }
 }
 ```
+
+`transparent` と `always_on_top` は初回 `show()` の前でも表示中でも setter により変更できる。透過はclick-through、frameless化、任意contentからのwindow dragを含まない。
 
 #### Lifecycle (CI-8 of #80, `docs/design/runtime/component_lifecycle_design.md` §4g)
 

@@ -10,8 +10,9 @@ use objc2::rc::Retained;
 use objc2::runtime::Bool;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSResponder, NSScreen,
-    NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor,
+    NSFloatingWindowLevel, NSNormalWindowLevel, NSResponder, NSScreen, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{NSObjectProtocol, NSRect, NSString};
 use std::rc::Rc;
@@ -161,6 +162,24 @@ impl InnerWindow {
 
     pub(crate) fn set_content(&self, content: Rc<dyn UIElementExt>) {
         self.content_host.set_tree(content);
+    }
+
+    pub(crate) fn set_transparent(&self, transparent: bool) {
+        self.ns.setOpaque(!transparent);
+        let background = if transparent {
+            NSColor::clearColor()
+        } else {
+            NSColor::windowBackgroundColor()
+        };
+        self.ns.setBackgroundColor(Some(&background));
+    }
+
+    pub(crate) fn set_always_on_top(&self, always_on_top: bool) {
+        self.ns.setLevel(if always_on_top {
+            NSFloatingWindowLevel
+        } else {
+            NSNormalWindowLevel
+        });
     }
 
     fn sync_content_host_frame(&self) {

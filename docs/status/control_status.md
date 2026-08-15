@@ -1,10 +1,10 @@
 # Control implementation status
 
-Snapshot: 2026-08-14. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
+Snapshot: 2026-08-15. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
 
 | Control | AppKit | WinUI 3 | GTK4 | Notes |
 |---|---|---|---|---|
-| Window | ✅ | ✅ | ⬜ | startup plus show/hide/re-show/close verified on primary backends |
+| Window | ✅ | ✅ | ⬜ | lifecycle plus transparent client surface and normal/topmost Z-order; Issue #150 AppKit runtime verified, WinUI 3 additions not recompiled on macOS |
 | TextBlock | ✅ | ✅ | ⬜ | backend text measurement and rendering |
 | TextArea | ✅ | ✅ | ⬜ | native editable multiline control |
 | TextBox | ✅ | ✅ | ⬜ | value, placeholder, submit/focus paths |
@@ -31,4 +31,4 @@ Snapshot: 2026-08-14. Public behavior is defined by [`../specs/ui_spec.md`](../s
 
 ## Verification
 
-`examples/controls-demo` covers TextBox, PasswordBox, ScrollView, Button, selection controls, Dropdown, Slider, and existing TextArea/Button regressions. `examples/control-template-demo` covers typed Environment override, capturing factory, reactive `templated_parent`, and `ContentPresenter`. AppKit uses `tools/macos-ui-driver`; WinUI 3 verification uses Windows UI Automation and real input.
+`examples/controls-demo` covers TextBox, PasswordBox, ScrollView, Button, selection controls, Dropdown, Slider, and existing TextArea/Button regressions. `examples/control-template-demo` covers typed Environment override, capturing factory, reactive `templated_parent`, and `ContentPresenter`. `examples/mascot-demo` covers a draggable transparent always-on-top Window with a real alpha PNG. AppKit uses `tools/macos-ui-driver`; WinUI 3 verification uses Windows UI Automation and real input.

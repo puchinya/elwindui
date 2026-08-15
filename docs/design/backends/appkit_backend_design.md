@@ -18,6 +18,8 @@ Native AppKit types never cross the common `elwindui-core` API.
 
 Application startup runs on the main thread. Window and tree hosts own AppKit views and schedule coalesced layout/render passes on that thread. An independently hosted subtree, such as TabView content, has its own `TreeHostView` and activation state.
 
+`Window.transparent` is applied by `InnerWindow` through `NSWindow.opaque` and a clear/window background color; decorations remain untouched. `Window.always_on_top` switches the same native window between `NSFloatingWindowLevel` and `NSNormalWindowLevel`, so both properties can change before or after display without recreating the host tree.
+
 Owner mapping associates native views and event targets with weak ElwindUI owners. Disposal removes delegates, notifications, and mappings before releasing the view.
 
 ## Layout and native controls

@@ -91,7 +91,6 @@ fn main() {
     let mascot = MascotCanvas::new();
     let window = MascotWindow::new(mascot.clone());
     let window_ext: Rc<dyn WindowExt> = window.clone();
-    let weak_window = Rc::downgrade(&window_ext);
     let drag_anchor = Rc::new(RefCell::new(None::<Point>));
 
     {
@@ -107,14 +106,14 @@ fn main() {
     }
     {
         let drag_anchor = drag_anchor.clone();
-        let weak_window = weak_window.clone();
+        // The application retains the native window after this startup function returns, but not
+        // the generated Rust host component. Keep its Window façade alive for the demo's lifetime
+        // so drag events can still call the position setters after `main` has returned.
+        let window = window_ext.clone();
         mascot.register_routed_handler(
             "on_pointer_moved",
             Box::new(move |args: &PointerEventArgs, _| {
                 let Some(anchor) = *drag_anchor.borrow() else {
-                    return;
-                };
-                let Some(window) = weak_window.upgrade() else {
                     return;
                 };
                 let (left, top) =

@@ -1,0 +1,11 @@
+[package]
+name = "elwindui-environment-key-fixture"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+elwindui = { path = "../elwindui" }
+
+[lints]
+workspace = true

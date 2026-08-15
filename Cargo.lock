@@ -183,6 +183,7 @@ dependencies = [
  "elwindui-backend-gtk4",
  "elwindui-backend-winui3",
  "elwindui-core",
+ "elwindui-environment-key-fixture",
  "elwindui-i18n",
  "elwindui-macros",
  "elwindui-svg",
@@ -245,6 +246,13 @@ dependencies = [
  "elwindui-macros",
  "flo_curves",
  "tokio",
+]
+
+[[package]]
+name = "elwindui-environment-key-fixture"
+version = "0.1.0"
+dependencies = [
+ "elwindui",
 ]
 
 [[package]]

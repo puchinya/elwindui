@@ -446,6 +446,30 @@ struct SettingsView {
 impl SettingsView {}
 ```
 
+`name`は次の2形式を取る(Issue #129):
+
+- bare識別子(`locale`): 宣言元と**同一crate内**で先に宣言された`#[elwindui::environment_key(name = locale, ..)]`のKeyへ解決される(従来通り)。
+- 完全修飾クレートパス(`some_crate::locale`): 宣言元crateが`pub`にエクスポートしたKeyへ、**クレート境界を越えて**解決される。パスの先頭部分(最終セグメントを除く全体)は、呼び出し側で解決可能な任意のcrateパス(依存クレート名、`use`で導入したエイリアス、ネストしたモジュールパスなど)でよい——`#[elwindui::environment_key]`は宣言元クレートのルートへ常にエクスポートされるため、Key構造体自身がどのモジュールに置かれているかとは無関係である。
+
+```rust
+#[elwindui::component]
+struct SettingsView {
+    #[environment(locale_crate::locale)]
+    locale: Locale,
+
+    body: view! {
+        TextBlock {
+            text: format!("{}", locale.identifier())
+        }
+    }
+}
+
+#[elwindui::component]
+impl SettingsView {}
+```
+
+両形式は排他的であり、bareで見つからない場合に完全修飾形式へフォールバックする、といった動作はしない。完全修飾形式で参照したKeyが宣言元crateに存在しない場合、`elwindui-codegen`はコード生成時点でこれを検出できない(別crateがどのマクロをエクスポートしているかはproc-macro展開からは分からない)——実際にコンパイルされた時点で`rustc`自身の「マクロが見つからない」エラーとして検出される(bare識別子形式の`compile_error!`とは異なる。13章ルール34参照)。`value`の型不一致はいずれの形式でも通常の`rustc`型エラーとして検出される。実装は`docs/design/tools/environment_key_macro_design.md`を参照。
+
 `#[environment]`フィールドは:
 
 - 読み取り専用(`instance.field()`のgetterのみ。setter相当の操作は静的エラー)
@@ -713,6 +737,20 @@ body: view! {
     }
 }
 ```
+
+`#[environment(name)]`と同様、`key`は同一crate内のbare識別子(`locale`)に加えて、クレート境界を越えた完全修飾形式(Issue #129)も取れる:
+
+```rust
+body: view! {
+    EnvironmentScope {
+        locale_crate::locale: Locale::new("en-US")
+
+        SettingsView {}
+    }
+}
+```
+
+ただしこちらは`key: value`が付属プロパティ構文(`Owner::field: value`、§3)の構文をそのまま流用しているため、`#[environment(name)]`の完全修飾形式(任意の深さの`syn::Path`を受け付ける)と異なり、**必ずちょうど1個の`::`**(クレート名/エイリアス + キー名)でなければならない——多段モジュールパスは書けない(`docs/design/tools/environment_key_macro_design.md`参照)。
 
 - `EnvironmentScope`自身はUI要素・Render nodeを生成しない——親のEnvironmentをderiveし、指定したKeyだけを上書きした派生Environmentをchildrenの`mount`に渡すだけである(構築時ではない——`docs/design/runtime/component_lifecycle_design.md`参照)
 - 上書きされなかったKeyは親のEnvironment値をそのまま参照する(`docs/specs/theme_environment_spec.md`の継承規則を参照)
@@ -1193,8 +1231,8 @@ impl SaveButton {}
 31. `#[shortcut(...)]` に指定されたキー表記(修飾キー名/キー名)が不正 → エラー(`docs/design/runtime/input_focus_design.md`参照。`codegen::parse_shortcut_spec`と同じパーサーで検査するため、ここを通れば必ずコード生成もパースに成功する)
 32. `elwindui::core::graphics::Brush`/`Color`(または`Option<..>`)型のフィールドへ文字列リテラルを代入する場合(例: `Rectangle { fill: "#3a3a3c" }`)、その文字列が`"#rrggbb"`/`"#rrggbbaa"`(`#`省略可)のいずれの形式にも一致しない → コード生成時エラー(`codegen::coerce_color_literal`。動的な`String`式には適用されない——`Brush`/`Color`型の値を直接渡す必要がある)
 33. `#[environment(...)]` が同一フィールドの `#[param]`/`#[prop]`/`#[state]`/`#[bindable]` と併用されている → エラー(4章「`#[environment(name)]`」参照)
-34. `#[environment(name)]` の `name` が、解決可能な `#[elwindui::environment_key]` 定義を持たない → エラー(`docs/specs/theme_environment_spec.md`参照)
-35. `EnvironmentScope { key: value .. }` の `key` が、解決可能な `#[elwindui::environment_key]` 定義を持たない、または `value` の型がそのKeyの `Value` 型と一致しない → エラー(5章「`EnvironmentScope`」参照)
+34. `#[environment(name)]` の `name` が、解決可能な `#[elwindui::environment_key]` 定義を持たない → エラー(`docs/specs/theme_environment_spec.md`参照)。bare識別子(同一crate内解決)の場合はコード生成時の`compile_error!`。完全修飾クレートパス(Issue #129、クレート境界を越えた解決)の場合は、生成コードが実際にコンパイルされた時点の`rustc`自身の「マクロが見つからない」エラー——proc-macro展開からは他クレートが何をエクスポートしているか分からないため、`elwindui-codegen`側の早期検査は原理的に行えない(`docs/design/tools/environment_key_macro_design.md`参照)。
+35. `EnvironmentScope { key: value .. }` の `key` が、解決可能な `#[elwindui::environment_key]` 定義を持たない、または `value` の型がそのKeyの `Value` 型と一致しない → エラー(5章「`EnvironmentScope`」参照)。名前解決エラーの検出方式(コード生成時`compile_error!` vs 実コンパイル時`rustc`エラー)はルール34と同じ、bare/完全修飾の別で決まる。`value`の型不一致はどちらの形式でも常に通常の`rustc`型エラー。
 36. `#[elwindui::theme] struct Name { #[theme(value = ..)] field: Type, .. }` の `field` の識別子が、解決可能な `#[elwindui::environment_key]` 定義を持たない → コード生成時エラー(`docs/specs/theme_environment_spec.md`§3/§4参照。`#[environment(name)]`と同じ同一crate内解決規則)
 
 ---

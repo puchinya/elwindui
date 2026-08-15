@@ -2728,27 +2728,109 @@ fn environment_key_name(f: &FieldDef) -> &str {
     f.attrs
         .iter()
         .find_map(|a| match a {
-            Attr::Environment(name) => Some(name.as_str()),
+            Attr::Environment(name, _prefix) => Some(name.as_str()),
             _ => None,
         })
         .expect(
-            "internal: FieldKind::Environment field must carry Attr::Environment(name) \
+            "internal: FieldKind::Environment field must carry Attr::Environment(name, prefix) \
              (attr_frontend.rs invariant)",
         )
 }
 
-/// Resolves `#[environment(name)]`'s referenced Key type from the same-crate registry
+/// The crate-qualifying prefix of a cross-crate `#[environment(some_crate::name)]` (Issue #129,
+/// `attr_frontend::split_environment_key_path`) — `None` for the same-crate bare form
+/// (`#[environment(name)]`).
+fn environment_key_prefix(f: &FieldDef) -> Option<&str> {
+    f.attrs
+        .iter()
+        .find_map(|a| match a {
+            Attr::Environment(_name, prefix) => Some(prefix.as_deref()),
+            _ => None,
+        })
+        .expect(
+            "internal: FieldKind::Environment field must carry Attr::Environment(name, prefix) \
+             (attr_frontend.rs invariant)",
+        )
+}
+
+/// Resolves `#[environment(name)]`'s referenced Key type. Returns `(preamble, key_type)` — the
+/// caller must splice `preamble` into the *same* local block as its own use of `key_type`, before
+/// that use (an empty `TokenStream` for the bare form, so existing call sites are unaffected).
+///
+/// Bare form (`environment_key_prefix(f)` is `None`): resolved from the same-crate registry
 /// (`component_frontend::lookup_same_crate_environment_key`) — `validate::validate` (rule 34,
 /// `docs/specs/dsl_spec.md` §13) already rejected an unresolvable name before codegen runs.
-fn environment_key_type(name: &str) -> syn::Type {
-    let (key_type_name, _value_type) =
-        crate::component_frontend::lookup_same_crate_environment_key(name).unwrap_or_else(|| {
-            panic!(
-                "internal: `#[environment({name})]` referenced an unregistered Environment Key \
-                 — validate::validate should have rejected this before codegen"
+/// `preamble` is empty and `key_type` is the registered Key type path directly, exactly as before
+/// this function returned a plain `syn::Type`.
+///
+/// Qualified form (`some_crate::name`, Issue #129): naively splicing a type-position invocation of
+/// the declaring crate's exported `__elwindui_environment_key_{name}!` macro *by absolute path*
+/// (`some_crate::__elwindui_environment_key_name!()`, the same technique `elwindui-codegen`'s
+/// `#[class]`-facing code uses for `__elwindui_props_*!(@field_type ..)`) was tried first and
+/// rejected: unlike the `#[class]` case, this one is a `macro_export`-declared `macro_rules!`
+/// referenced via an absolute path from *other* macro-generated code, which trips rustc's
+/// deny-by-default `macro_expanded_macro_exports_accessed_by_absolute_paths` future-incompatible
+/// lint (confirmed by an isolated multi-crate repro before this function was written — this is
+/// exactly the lint Issue #129's own constraints section rules out depending on, unlike `#[class]`'s
+/// own `__elwindui_inherit_*!`/`__elwindui_props_*!`, which use `#[allow(..)]` for it). Instead this
+/// emits `preamble = "use #prefix::#macro; type #alias = #macro!();"` (a local item pair — a
+/// `use`-import followed by a bare, unqualified macro call, not an absolute-path one) and returns
+/// `key_type = #alias`, a plain local type identifier the caller splices in place of the type it
+/// used to receive directly. `#alias` is derived from `alias_seed` (a per-call-site-unique name,
+/// e.g. the field name) specifically so that a caller accumulating several fields' preambles into
+/// one shared enclosing scope (`generate_component`'s own `default_let_stmts`, for one) never
+/// emits two colliding `type` aliases with the same name in that scope.
+///
+/// There is no same-crate-style early validation for the qualified form: a proc-macro genuinely
+/// cannot see whether another crate exports a given macro name before real compilation runs, so an
+/// unresolvable qualified name surfaces later as `rustc`'s own "cannot find macro" error, not a
+/// `compile_error!` — deliberately accepted asymmetry with the bare form, documented in
+/// `docs/specs/dsl_spec.md` §13 rules 34/35.
+fn environment_key_type(f: &FieldDef) -> (TokenStream, syn::Type) {
+    environment_key_type_by_name(environment_key_name(f), environment_key_prefix(f), &f.name)
+}
+
+/// Core resolution shared by `environment_key_type` (`#[environment(name)]` fields) and
+/// `#[component(template = key)]`'s own same-crate-only lookup (`environment_key_type_by_name(name,
+/// None, ..)`, `docs/specs/control_template_spec.md`) — the latter is out of scope for Issue #129's
+/// cross-crate resolution (`template = key` is always called with `prefix: None` today) and keeps
+/// its existing same-crate-only behavior unchanged (empty preamble). See `environment_key_type`'s
+/// own doc comment for `preamble`/`alias_seed`.
+fn environment_key_type_by_name(
+    name: &str,
+    prefix: Option<&str>,
+    alias_seed: &str,
+) -> (TokenStream, syn::Type) {
+    match prefix {
+        Some(prefix) => {
+            let macro_ident = format_ident!("__elwindui_environment_key_{name}");
+            let prefix_path: syn::Path = syn::parse_str(prefix)
+                .expect("qualified environment key crate prefix must parse as a path");
+            let alias_ident = format_ident!("__ElwindEnvKeyAlias_{alias_seed}");
+            let preamble = quote! {
+                use #prefix_path::#macro_ident;
+                type #alias_ident = #macro_ident!();
+            };
+            (preamble, syn::parse_quote!(#alias_ident))
+        }
+        None => {
+            let (key_type_name, _value_type) =
+                crate::component_frontend::lookup_same_crate_environment_key(name).unwrap_or_else(
+                    || {
+                        panic!(
+                            "internal: `#[environment({name})]` referenced an unregistered \
+                             Environment Key — validate::validate should have rejected this \
+                             before codegen"
+                        )
+                    },
+                );
+            (
+                TokenStream::new(),
+                syn::parse_str(&key_type_name)
+                    .expect("registered environment key type name must parse"),
             )
-        });
-    syn::parse_str(&key_type_name).expect("registered environment key type name must parse")
+        }
+    }
 }
 
 fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
@@ -2810,8 +2892,9 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
     for f in c.fields.iter().filter(|f| f.kind == FieldKind::Environment) {
         let field_ident = format_ident!("{}", f.name);
         let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
-        let key_type = environment_key_type(environment_key_name(f));
+        let (key_type_preamble, key_type) = environment_key_type(f);
         default_let_stmts.extend(quote! {
+            #key_type_preamble
             let #field_ident: #ty = elwindui::core::environment::application_environment().get::<#key_type>();
         });
     }
@@ -3107,7 +3190,11 @@ fn generate_view(
     let has_own_view = find_view(from, &target_name).is_some();
     let template_key_name =
         crate::component_frontend::lookup_same_crate_component_template(&target_name);
-    let template_key_type = template_key_name.as_deref().map(environment_key_type);
+    // Always same-crate (`prefix: None`), so the returned preamble is always empty — see
+    // `environment_key_type_by_name`'s own doc comment.
+    let template_key_type = template_key_name
+        .as_deref()
+        .map(|name| environment_key_type_by_name(name, None, name).1);
     let is_control_template_enabled = template_key_type.is_some();
 
     // `component X inherits Y` where `Y` is a virtual-builtin shape primitive (`Control`/
@@ -3266,8 +3353,9 @@ fn generate_view(
     for f in &own_environment_fields {
         let field_ident = format_ident!("{}", f.name);
         let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
-        let key_type = environment_key_type(environment_key_name(f));
+        let (key_type_preamble, key_type) = environment_key_type(f);
         own_default_construct_stmts.extend(quote! {
+            #key_type_preamble
             let #field_ident: #ty =
                 <#key_type as elwindui::core::environment::EnvironmentKey>::default_value();
         });
@@ -4216,7 +4304,7 @@ fn generate_view(
         .map(|f| {
             let name = format_ident!("{}", f.name);
             let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
-            let key_type = environment_key_type(environment_key_name(f));
+            let (key_type_preamble, key_type) = environment_key_type(f);
             let set_cache = if is_copy_type(&f.ty) {
                 quote! { self.#name.set(value); }
             } else {
@@ -4225,6 +4313,7 @@ fn generate_view(
             let recompute = format_ident!("recompute_{}", name);
             quote! {
                 fn #recompute(&self) {
+                    #key_type_preamble
                     let value: #ty = self
                         .__mount_environment
                         .get()
@@ -4246,10 +4335,11 @@ fn generate_view(
         .iter()
         .map(|f| {
             let name = format_ident!("{}", f.name);
-            let key_type = environment_key_type(environment_key_name(f));
+            let (key_type_preamble, key_type) = environment_key_type(f);
             let recompute = format_ident!("recompute_{}", name);
             quote! {
                 {
+                    #key_type_preamble
                     let weak = std::rc::Rc::downgrade(&this);
                     let subscription = this
                         .__mount_environment
@@ -4287,12 +4377,13 @@ fn generate_view(
         };
         for f in &own_environment_fields {
             let field_ident = format_ident!("{}", f.name);
-            let key_type = environment_key_type(environment_key_name(f));
+            let (key_type_preamble, key_type) = environment_key_type(f);
             let set_stmt = if is_copy_type(&f.ty) {
                 quote! { self.#field_ident.set(__elwindui_environment.get::<#key_type>()); }
             } else {
                 quote! { *self.#field_ident.borrow_mut() = __elwindui_environment.get::<#key_type>(); }
             };
+            stmts.extend(key_type_preamble);
             stmts.extend(set_stmt);
         }
         stmts
@@ -5885,6 +5976,20 @@ fn lazy_leaf_or_field_value(
 /// `ElementNode` — its override assignments are indistinguishable, syntactically, from any other
 /// element's `key: value` attributes (`parser.rs`'s generic `parse_element_body` already handles
 /// this; no dedicated grammar was needed for `EnvironmentScope`, unlike `if`/`match`/`for`).
+///
+/// A qualified cross-crate override (`EnvironmentScope { some_crate::name: value }`, Issue #129)
+/// reuses the *same* parser's `Owner::field: value` attached-property grammar for the same reason
+/// — `some_crate::name: value` parses into `elem.attached` exactly like a real attached-property
+/// setter would, with `owner` = `some_crate`, `field` = `name`. `EnvironmentScope` never has real
+/// attached properties of its own, so `elem.attached` is unambiguous here and is carried through
+/// to the `PlannedNode` (unlike an ordinary element's `attached`, which `check_attached_properties`
+/// validates as `Owner::field` — that check is skipped for `EnvironmentScope` specifically, see
+/// `validate.rs`). `emit_environment_scope_construction` resolves `elem.attributes`'s bare entries
+/// via the same-crate registry and `elem.attached`'s qualified entries via the cross-crate macro
+/// (`environment_key_type_by_name`), never a fallback between the two. This restricts a qualified
+/// key path to exactly one `::` (crate/alias + name) — unlike `#[environment(..)]`'s own qualified
+/// form, which accepts an arbitrary-depth `syn::Path` (`attr_frontend::split_environment_key_path`)
+/// since it's parsed by `syn`, not this hand-written grammar.
 fn plan_environment_scope(
     elem: &ElementNode,
     out: &mut Vec<PlannedNode>,
@@ -5895,7 +6000,7 @@ fn plan_environment_scope(
         binding: binding.clone(),
         type_path: ENVIRONMENT_SCOPE_MARKER.to_string(),
         attributes: elem.attributes.clone(),
-        attached: Vec::new(),
+        attached: elem.attached.clone(),
         attribute_shortcuts: HashMap::new(),
         child_bindings: Vec::new(),
         element_attr_bindings: HashMap::new(),
@@ -8366,6 +8471,15 @@ fn emit_external_attribute_sets(
 /// rule 35), not a runtime panic; a type-mismatched value surfaces as an ordinary `rustc` type
 /// error on the generated `.set::<Key>(value)` call itself, the same way every other DSL value-type
 /// mismatch in this codebase does.
+///
+/// A qualified cross-crate override (`EnvironmentScope { some_crate::name: value }`, Issue #129,
+/// `plan_environment_scope`'s own doc comment) arrives as `node.attached` instead of
+/// `node.attributes`, resolved via `environment_key_type_by_name(name, Some(prefix))` — a
+/// type-position invocation of the declaring crate's exported
+/// `__elwindui_environment_key_{name}!` macro. There is no same-crate-style `compile_error!` for an
+/// unresolvable qualified name: `rustc` itself reports "cannot find macro" once the generated code
+/// is compiled (see `environment_key_type_by_name`'s own doc comment) — a type mismatch still
+/// surfaces as an ordinary `rustc` type error on `.set::<Key>(value)`, same as the bare form.
 fn emit_environment_scope_construction(node: &PlannedNode, ctx: &ViewCtx, out: &mut TokenStream) {
     let binding = &node.binding;
     let outer = match &node.environment_scope {
@@ -8403,6 +8517,20 @@ fn emit_environment_scope_construction(node: &PlannedNode, ctx: &ViewCtx, out: &
                 sets.extend(quote! { compile_error!(#msg); });
             }
         }
+    }
+    for (owner, field, value_expr) in &node.attached {
+        // `alias_seed` includes `owner`, not just `field`: two overrides in the same
+        // `EnvironmentScope` block could otherwise reference same-named keys from two different
+        // crates (`crate_a::locale`, `crate_b::locale`) and collide on the local type alias
+        // `environment_key_type_by_name` generates (see its own doc comment).
+        let alias_seed = format!("{owner}_{field}");
+        let (key_type_preamble, key_type) =
+            environment_key_type_by_name(field, Some(owner), &alias_seed);
+        let value = emit_expr(value_expr, ctx, &EmitMode::Construction);
+        sets.extend(quote! {
+            #key_type_preamble
+            #binding.set::<#key_type>((#value).into());
+        });
     }
     out.extend(quote! {
         let #binding = #outer.derive();

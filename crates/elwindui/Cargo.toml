@@ -23,6 +23,12 @@ elwindui-backend-gtk4 = { path = "../elwindui-backend-gtk4", optional = true }
 # #[async_computed] supersede check) — elwindui-core's own [dependencies] entry only requests
 # "rt-multi-thread", so this feature is not pulled into a downstream consumer's non-test build.
 tokio = { version = "1", features = ["time"] }
+# Issue #129: a real second crate (depending back on `elwindui`, a Cargo-supported dev-dependency
+# cycle since dev-dependencies never affect the library build itself) declaring a `pub`
+# `#[elwindui::environment_key]`, so `tests/environment_field_cross_crate.rs`/
+# `tests/environment_scope_cross_crate.rs` can prove `#[environment(some_crate::name)]`/
+# `EnvironmentScope { some_crate::name: value }` actually cross a real crate boundary.
+elwindui-environment-key-fixture = { path = "../elwindui-environment-key-fixture" }
 
 [features]
 default = []

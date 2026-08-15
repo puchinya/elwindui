@@ -226,21 +226,30 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         // registry in this file (`component_frontend::
                         // lookup_same_crate_environment_key`).
                         if f.kind == FieldKind::Environment {
-                            let key_name = f
+                            let (key_name, crate_prefix) = f
                                 .attrs
                                 .iter()
                                 .find_map(|a| match a {
-                                    Attr::Environment(name) => Some(name.as_str()),
+                                    Attr::Environment(name, prefix) => {
+                                        Some((name.as_str(), prefix.as_deref()))
+                                    }
                                     _ => None,
                                 })
                                 .expect(
                                     "internal: FieldKind::Environment field must carry \
-                                     Attr::Environment(name)",
+                                     Attr::Environment(name, prefix)",
                                 );
-                            if crate::component_frontend::lookup_same_crate_environment_key(
-                                key_name,
-                            )
-                            .is_none()
+                            // Qualified cross-crate form (`some_crate::name`, Issue #129) has no
+                            // same-crate registry to check here — a proc-macro cannot see whether
+                            // another crate exports a given macro name before real compilation
+                            // runs, so this is left to `rustc`'s own "cannot find macro" error at
+                            // the generated `environment_key_type` call site instead (see that
+                            // function's own doc comment).
+                            if crate_prefix.is_none()
+                                && crate::component_frontend::lookup_same_crate_environment_key(
+                                    key_name,
+                                )
+                                .is_none()
                             {
                                 errors.push(format!(
                                     "{}.{}: #[environment({key_name})] references an Environment \
@@ -1477,20 +1486,30 @@ fn check_attached_properties(
     table: &SymbolTable,
     errors: &mut Vec<String>,
 ) {
-    for (owner, field, _value) in &node.attached {
-        match table.resolve(from, owner) {
-            Some(info) if info.fields.get(field.as_str()) == Some(&FieldKind::Attached) => {}
-            Some(_) => errors.push(format!(
-                "{component_name}: `{owner}::{field}` — `{owner}` has no #[attached] property named `{field}`"
-            )),
-            // External (no local `TypeInfo`) — same tradeoff as `check_element_value`'s own `None`
-            // arm: only legitimate on the proc-macro path (`from.allows_external_builtins`), where
-            // this can't be checked without a shape table at all; a genuinely wrong `Owner::field`
-            // still fails to compile, just later, via `@attached_set`'s own generated dispatch.
-            None if from.allows_external_builtins => {}
-            None => errors.push(format!(
-                "{component_name}: `{owner}::{field}` — `{owner}` is not a known component/builtin (missing `use`?)"
-            )),
+    // `EnvironmentScope { some_crate::name: value }` (Issue #129) reuses this same
+    // `Owner::field: value` grammar for its own qualified cross-crate key overrides — `owner` is a
+    // crate path, not a component/builtin type, so it must not be checked as an attached-property
+    // setter here. There is no early check to run in its place either (see
+    // `codegen::environment_key_type_by_name`'s own doc comment: a proc-macro cannot see whether
+    // another crate exports a given macro name before real compilation runs), so this is skipped
+    // entirely rather than misfiring.
+    if node.type_path != "EnvironmentScope" {
+        for (owner, field, _value) in &node.attached {
+            match table.resolve(from, owner) {
+                Some(info) if info.fields.get(field.as_str()) == Some(&FieldKind::Attached) => {}
+                Some(_) => errors.push(format!(
+                    "{component_name}: `{owner}::{field}` — `{owner}` has no #[attached] property named `{field}`"
+                )),
+                // External (no local `TypeInfo`) — same tradeoff as `check_element_value`'s own
+                // `None` arm: only legitimate on the proc-macro path
+                // (`from.allows_external_builtins`), where this can't be checked without a shape
+                // table at all; a genuinely wrong `Owner::field` still fails to compile, just
+                // later, via `@attached_set`'s own generated dispatch.
+                None if from.allows_external_builtins => {}
+                None => errors.push(format!(
+                    "{component_name}: `{owner}::{field}` — `{owner}` is not a known component/builtin (missing `use`?)"
+                )),
+            }
         }
     }
     for child in &node.children {

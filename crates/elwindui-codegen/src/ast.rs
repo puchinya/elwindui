@@ -321,10 +321,15 @@ pub enum Attr {
     TextStyle,
     /// `#[environment(name)]`'s argument — the Environment Key's registered name (from
     /// `#[elwindui::environment_key(name = ..)]`, `component_frontend::
-    /// register_same_crate_environment_key`), independent of this field's own Rust identifier.
+    /// register_same_crate_environment_key`), independent of this field's own Rust identifier, plus
+    /// an optional crate-qualifying path prefix when the DSL author wrote a fully-qualified form
+    /// (`#[environment(some_crate::locale)]`, Issue #129) instead of a bare name
+    /// (`#[environment(locale)]`). `None` means same-crate resolution via the same-crate registry
+    /// (unchanged); `Some(prefix)` means cross-crate resolution via the declaring crate's exported
+    /// `__elwindui_environment_key_{name}!` macro (`docs/design/tools/environment_key_macro_design.md`).
     /// Always paired with `FieldKind::Environment` (`attr_frontend::fields_from_item_struct`), the
     /// same way `Attr::Bindable` is always paired with `FieldKind::Param`.
-    Environment(String),
+    Environment(String, Option<String>),
 }
 
 /// See `ElementNode::attribute_shortcuts`'s own doc comment.

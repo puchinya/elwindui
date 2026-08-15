@@ -1258,6 +1258,63 @@ mod environment_key_tests {
                 .expect_err("#[environment] combined with #[param] should be rejected");
         assert!(err.contains("cannot be combined"), "error: {err}");
     }
+
+    /// Issue #129: `#[environment(some_crate::name)]` must bypass the same-crate registry
+    /// entirely — `some_crate_env_key_test_never_registered_here` is deliberately never
+    /// registered by this test file's own `register_environment_key`, proving rule 34's
+    /// same-crate check (exercised by `unregistered_key_name_is_rejected` above) does not fire
+    /// for the qualified form. The real cross-crate integration coverage (an actual second crate,
+    /// compiled and run for real) lives in `crates/elwindui/tests/environment_field_cross_crate.rs`.
+    #[test]
+    fn qualified_cross_crate_key_bypasses_the_same_crate_registry() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct EnvKeyTestScreenD {
+                #[environment(some_crate::some_crate_env_key_test_never_registered_here)]
+                locale: String,
+                body: view! {
+                    TextBlock { text: locale }
+                },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let out =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct);
+        assert!(
+            out.is_ok(),
+            "a qualified cross-crate #[environment(..)] must not be rejected by the same-crate \
+             registry check: {:?}",
+            out.err()
+        );
+        let item_impl: syn::ItemImpl =
+            syn::parse_str("impl EnvKeyTestScreenD {}").expect("impl should parse");
+        let generated = generate_component_from_item_impl(&item_impl)
+            .expect("impl half should generate")
+            .to_string();
+        // Not a direct absolute-path macro call (`some_crate :: __elwindui_environment_key_..! ()`
+        // spliced straight into `.get::<..>()`) — that form trips rustc's deny-by-default
+        // `macro_expanded_macro_exports_accessed_by_absolute_paths` lint for a macro-expanded
+        // `macro_export` macro referenced from other macro-expanded code (confirmed by an isolated
+        // multi-crate repro; see `environment_key_type`'s own doc comment). Instead: a `use`-import
+        // of the bare macro name, a local `type` alias invoking it, then the alias used bare.
+        assert!(
+            generated.contains(
+                "use some_crate :: __elwindui_environment_key_some_crate_env_key_test_never_registered_here ;"
+            ),
+            "should use-import the declaring crate's exported macro by bare name: {generated}"
+        );
+        assert!(
+            generated.contains(
+                "type __ElwindEnvKeyAlias_locale = __elwindui_environment_key_some_crate_env_key_test_never_registered_here ! () ;"
+            ),
+            "should alias a bare (unqualified) invocation of the imported macro to a local type: {generated}"
+        );
+        assert!(
+            generated.contains(". get :: < __ElwindEnvKeyAlias_locale > ()"),
+            "should use the local alias type, not the macro call directly, at the use site: {generated}"
+        );
+    }
 }
 
 /// Reproduction scaffolding for `Derived inherits <user component>` (Refs #23's investigation,

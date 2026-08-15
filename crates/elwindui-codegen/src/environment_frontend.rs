@@ -6,11 +6,19 @@
 //! `name` into the same-crate registry `#[environment(name)]`/`EnvironmentScope` resolve against
 //! (`component_frontend::register_same_crate_environment_key`).
 //!
+//! It also exports a `__elwindui_environment_key_{name}!` declarative macro (Issue #129,
+//! `docs/design/tools/environment_key_macro_design.md`) — the cross-crate counterpart to the
+//! same-crate registry, carrying the Key type across the crate boundary the same way `#[class]`'s
+//! own `__elwindui_props_*!`/`__elwindui_inherit_*!` macros do (`docs/design/tools/
+//! class_macro_design.md` "Shape macro protocol"), mirrored down to a single flat macro per Key
+//! (no ancestor-chain forwarding is needed here, so — unlike `#[class]`'s macros — this one needs
+//! no catch-all arm and no `#[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]`).
+//!
 //! See `docs/specs/theme_environment_spec.md` §2 and `docs/specs/dsl_spec.md` §4/§5.
 
 use crate::component_frontend::register_same_crate_environment_key;
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Ident, ItemStruct, Token, Type};
 
@@ -92,6 +100,20 @@ pub fn generate_environment_key_from_item_struct(
          `docs/specs/theme_environment_spec.md` §2."
     );
 
+    // Cross-crate counterpart to the same-crate registry above (Issue #129): a consuming crate's
+    // `#[environment(this_crate::{key_name})]`/`EnvironmentScope { this_crate::{key_name}: .. }`
+    // invokes this by name (`codegen::environment_key_type_by_name`) to splice `$ident` into type
+    // position. `$crate` (not a literal `crate`/bare `#ident`) is required precisely because this
+    // macro is meant to be invoked from a *different* crate than the one it's defined in — it always
+    // resolves to the crate that defines this `macro_rules!` item, regardless of where it's called
+    // from (`docs/design/tools/environment_key_macro_design.md`).
+    let macro_ident = format_ident!("__elwindui_environment_key_{key_name}");
+    let macro_doc = format!(
+        "Cross-crate resolution macro for Environment Key `{key_name}` (Issue #129). Not \
+         user-facing API — invoked only by `elwindui-codegen`'s generated code for a qualified \
+         `#[environment(..)]`/`EnvironmentScope` reference."
+    );
+
     Ok(quote! {
         #[doc = #doc]
         #visibility struct #ident;
@@ -102,6 +124,15 @@ pub fn generate_environment_key_from_item_struct(
             fn default_value() -> Self::Value {
                 #default_expr
             }
+        }
+
+        #[doc(hidden)]
+        #[doc = #macro_doc]
+        #[macro_export]
+        macro_rules! #macro_ident {
+            () => {
+                $crate::#ident
+            };
         }
     })
 }

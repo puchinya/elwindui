@@ -256,10 +256,12 @@ pub(crate) fn fields_from_item_struct(
                         ));
                     }
                     kind = FieldKind::Environment;
-                    let key_name = attr.parse_args::<syn::Ident>().map_err(|e| {
+                    let key_path = attr.parse_args::<syn::Path>().map_err(|e| {
                         format!("field `{name}`: invalid #[environment(name)]: {e}")
                     })?;
-                    attrs.push(Attr::Environment(key_name.to_string()));
+                    let (key_name, crate_prefix) = split_environment_key_path(&key_path)
+                        .map_err(|e| format!("field `{name}`: invalid #[environment(..)]: {e}"))?;
+                    attrs.push(Attr::Environment(key_name, crate_prefix));
                 }
                 "inject" => attrs.push(Attr::Inject),
                 "bindable" => {
@@ -333,6 +335,47 @@ fn record_explicit_kind(
     }
     *current = Some(new_kind.to_string());
     Ok(())
+}
+
+/// Splits `#[environment(..)]`'s argument path into `(key_name, crate_prefix)` (Issue #129).
+/// `locale` (a single segment) → `("locale", None)` — same-crate resolution via the same-crate
+/// registry, unchanged. `some_crate::locale` (more than one segment) → `("locale",
+/// Some("some_crate"))` — cross-crate resolution via `some_crate`'s exported
+/// `__elwindui_environment_key_locale!` macro (`docs/design/tools/environment_key_macro_design.md`).
+/// Only the last segment is the Key's registered `name`; everything before it is spliced verbatim
+/// as the macro-invocation path prefix, so it may itself be multiple segments
+/// (`some_crate::nested::locale`) as long as it resolves to something callable at the use site —
+/// unlike `EnvironmentScope`'s own qualified form, which reuses the attached-property grammar and
+/// is therefore limited to exactly one `::` (see `EnvironmentScope`'s own doc comment in
+/// `codegen.rs`). Rejects a path segment carrying generic/fn-style arguments (e.g. `Foo<T>::bar`)
+/// — an Environment Key path is a plain module/crate path, never a generic type path.
+fn split_environment_key_path(path: &syn::Path) -> Result<(String, Option<String>), String> {
+    for segment in &path.segments {
+        if !matches!(segment.arguments, syn::PathArguments::None) {
+            return Err(format!(
+                "`{}` must be a plain path (no generic arguments)",
+                quote::quote!(#path)
+            ));
+        }
+    }
+    let name = path
+        .segments
+        .last()
+        .expect("syn::Path always has at least one segment")
+        .ident
+        .to_string();
+    let prefix = if path.segments.len() > 1 {
+        let prefix_segments: Vec<String> = path
+            .segments
+            .iter()
+            .take(path.segments.len() - 1)
+            .map(|s| s.ident.to_string())
+            .collect();
+        Some(prefix_segments.join("::"))
+    } else {
+        None
+    };
+    Ok((name, prefix))
 }
 
 /// Builds one `FieldDef { kind: Action, .. }` per `fn`/`async fn` in the mod's `impl` block — no

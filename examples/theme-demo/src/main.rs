@@ -124,16 +124,32 @@ struct ThemeDemoWindow {
                 foreground: BrushStyle::Primary
             }
             TextBlock {
-                text: "BrushStyle resolves semantic roles through the effective Environment. Theme buttons update foreground, background, fill, and stroke live."
+                text: "BrushStyle resolves semantic roles through the effective Environment."
                 foreground: BrushStyle::Foreground
             }
 
             HorizontalLayout {
                 spacing: 8.0
-                TextBlock { text: "Theme:" font_weight: FontWeight::BOLD }
-                Button { text: "Default" on_click: vm.choose_default }
-                Button { text: "Ocean" on_click: vm.choose_ocean }
-                Button { text: "Solarized" on_click: vm.choose_solarized }
+                TextBlock {
+                    text: "Theme:"
+                    font_weight: FontWeight::BOLD
+                    foreground: BrushStyle::Foreground
+                }
+                Button {
+                    text: "Default"
+                    foreground: BrushStyle::Foreground
+                    on_click: vm.choose_default
+                }
+                Button {
+                    text: "Ocean"
+                    foreground: BrushStyle::Foreground
+                    on_click: vm.choose_ocean
+                }
+                Button {
+                    text: "Solarized"
+                    foreground: BrushStyle::Foreground
+                    on_click: vm.choose_solarized
+                }
                 TextBlock { text: vm.theme_name foreground: BrushStyle::Foreground }
             }
 

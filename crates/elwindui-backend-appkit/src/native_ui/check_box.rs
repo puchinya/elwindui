@@ -19,6 +19,7 @@ impl CheckBox {
 
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
+        self.base.reapply_text_style();
     }
     fn set_checked(&self, checked: CheckState) {
         self.inner.set_checked(checked);

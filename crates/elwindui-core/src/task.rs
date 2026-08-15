@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 
 /// Modeled on WinUI3's `DispatcherQueue.TryEnqueue`: marshals a closure onto the host's UI
@@ -146,4 +146,63 @@ fn with_current(f: impl FnOnce(&Rc<dyn ErasedExecutor>)) {
 pub fn spawn_local(fut: impl Future<Output = ()> + 'static) {
     let boxed: LocalFuture = Box::pin(fut);
     with_current(move |executor| executor.spawn_local_erased(boxed));
+}
+
+/// Process-wide (not thread-local, unlike `CURRENT`/`LocalExecutor`): a `tokio::runtime::Handle`
+/// is `Send + Sync + Clone`, so it can be shared freely with whatever thread a `spawn_background`
+/// call happens to run on, unlike `LocalExecutor` which must stay confined to the UI thread.
+static BACKGROUND_RUNTIME_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Installs a process-wide background `tokio` runtime for `spawn_background`. `#[elwindui::main]`
+/// (`elwindui_macros::main`) calls this exactly once, immediately after `elwindui::init()` and
+/// before `elwindui::application::run(...)` — the same "before any generated/component code runs"
+/// point `set_current` is installed at, per each backend's `application::run`. The caller must
+/// keep the returned `Runtime` alive for as long as background work should keep running; binding
+/// it in a local in `main()`'s own generated body is sufficient, since `main` does not return
+/// until `application::run` does, at process exit — worker threads shut down once the `Runtime`
+/// value is dropped.
+///
+/// See docs/design/runtime/state_management_design.md "Async work" for why ElwindUI installs this
+/// unconditionally rather than requiring each application to set up its own runtime: every
+/// application pays the worker-thread startup cost, even one with no `#[async_computed]` fields,
+/// in exchange for `#[async_computed]` working with no manual runtime wiring.
+///
+/// # Panics
+///
+/// Panics if called more than once per process.
+pub fn install_background_runtime() -> tokio::runtime::Runtime {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("elwindui: failed to start background async runtime");
+    BACKGROUND_RUNTIME_HANDLE
+        .set(rt.handle().clone())
+        .expect("elwindui: install_background_runtime called more than once");
+    rt
+}
+
+/// Spawns `fut` onto the background runtime installed by `install_background_runtime` (installed
+/// automatically by `#[elwindui::main]`). An `#[async_computed]` expression that needs genuine
+/// off-thread I/O wraps that work in `spawn_background(..)` and `.await`s the returned
+/// `JoinHandle` — `spawn_local`'s executor only ever drives the UI-affine resumption around that
+/// `.await`, never the I/O itself. See docs/design/runtime/state_management_design.md "Async
+/// work".
+///
+/// # Panics
+///
+/// Panics with a descriptive message if no background runtime has been installed yet — mirrors
+/// `spawn_local`'s own "no executor installed" panic.
+pub fn spawn_background<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    BACKGROUND_RUNTIME_HANDLE
+        .get()
+        .expect(
+            "elwindui: spawn_background called with no background runtime installed \
+             (an app using #[elwindui::main] gets one automatically; otherwise call \
+             elwindui_core::task::install_background_runtime() once at startup)",
+        )
+        .spawn(fut)
 }

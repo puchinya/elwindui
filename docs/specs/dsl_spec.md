@@ -306,6 +306,60 @@ body: view! {
 attach/detach、subscription、backend resourceの内部順序は
 [`ui_tree_design.md`](../design/runtime/ui_tree_design.md)を参照する。
 
+### `viewmodel`と`store`:宣言構文
+
+`viewmodel`と`store`は、`component`とは別のアイテム種別で、実Rustの属性マクロを`mod`に付けて宣言する。`mod`内に`struct`(必須、1つ)と`impl`(任意、1つ)を書く:
+
+```rust
+#[elwindui::viewmodel]
+mod counter_vm {
+    pub struct Counter {
+        #[observable(default = 0i32)]
+        count: i32,
+
+        #[computed(expr = count * 2)]
+        doubled: i32,
+
+        #[async_computed(expr = fetch_remote_total(count))]
+        remote_total: i64,
+    }
+
+    impl Counter {
+        fn increment(&self) { count = count + 1; }
+    }
+}
+
+#[elwindui::store]
+mod counter_store {
+    pub struct CounterStore {
+        #[observable(default = 0i32)]
+        count: i32,
+    }
+
+    impl CounterStore {
+        fn increment(&self) { count = count + 1; }
+    }
+}
+```
+
+`store`は`viewmodel`と同一のフィールド文法を再利用する:
+
+- `#[observable(default = expr)]`:実行時に読み書き可能な状態。setterは変更後に型付き`PropertyChanged`(§9参照)を発火する。
+- `#[computed(expr = expr)]`:`component`の`#[computed]`と同じ意味——依存する`#[observable]`/`#[computed]`フィールドの変化に同期的に追従する読み取り専用の算出値。
+- `#[async_computed(expr = expr)]`:`expr`は`Result<T, E>`(`E: std::fmt::Display`)を返す非同期式で、依存フィールドが変化するたびに`spawn_local`(`docs/design/runtime/state_management_design.md`「Async work」参照)へ再スポーンされる。生成されるgetterの戻り値型は宣言した値型`T`ではなく`elwindui::core::reactive::AsyncComputed<T>`(`Loading`/`Ready(T)`/`Failed(String)`)——フィールド宣言自体は`T`のままでよく、ラップはコード生成が行う。再スポーンは直前の実行中タスクをフィールド単位の世代カウンタで supersede するだけで、真のキャンセルではない(詳細は設計ドキュメント参照)。`viewmodel`/`store`以外への付与は§13ルール20により拒否される。
+- `impl`ブロック内の`fn`/`async fn`はそのままaction(§13で別途言及)として自動検出され、追加の属性は不要。
+
+**`store`固有の性質——プロセス全体のシングルトン**: `store`型のインスタンスは`component`が保持する`viewmodel`(`#[bindable]`)とは異なり、どのcomponentにも所有されない。`TypeName::instance() -> Rc<TypeName>`が、初回呼び出し時に遅延構築される共有インスタンスを返す(`docs/design/runtime/state_management_design.md`「Stores」参照)。`view!`内からは所有フィールドを介さず、型名で修飾した裸参照`TypeName.field`で直接参照する想定である:
+
+```rust
+body: view! {
+    TextBlock { text: CounterStore.count }
+    Button { on_click: || CounterStore::instance().increment() }
+}
+```
+
+このパスは§13ルール12(参照先フィールドの存在検証)・ルール13(`#[param]`側からの直接参照の禁止)の対象になる。**現状の実装状況**: `store`宣言・シングルトンアクセス(`TypeName::instance()`)・`#[async_computed]`は実装済みだが、`view!`内での`TypeName.field`裸参照とその自動購読コード生成、および対応するルール12/13の検証はまだ実装されていない——`docs/status/implementation_status.md`を参照。それまでは、storeのフィールドは`TypeName::instance().field()`という通常のRust呼び出しとして(actionや`on_click`等の中で)読み書きする。
+
 ---
 
 ## 4. componentフィールドの種類(param/prop/state/computed)
@@ -1118,7 +1172,7 @@ impl SaveButton {}
 10. `view`内に`Canvas`が含まれているが `#[accessible(...)]` が付与されていない → 警告(`docs/design/runtime/input_focus_design.md`参照)
 11. `on_mount`/`on_update`/`on_unmount`を含むあらゆる実行contextで`#[param]`フィールドの再代入相当の操作が行われている → エラー([`ui_tree_design.md`](../design/runtime/ui_tree_design.md)参照。paramの不変性は生涯を通じて保証される)
 12. リアクティブ属性式または`<=>`の参照先が`store`宣言(`docs/design/runtime/state_management_design.md`)の型・フィールドとして存在しない → エラー
-13. `store`フィールドへの`#[param]`側からの直接参照 → エラー(`docs/design/runtime/state_management_design.md`参照。storeはViewのリアクティブ属性式から参照する)
+13. `store`/`viewmodel`フィールドへの`#[param]`側からの直接参照 → エラー(`docs/design/runtime/state_management_design.md`、`docs/agents/codegen.md`参照。store/viewmodelはViewのリアクティブ属性式または明示的な`<=>`から参照する)
 14. `NavigationHost`内の`match route { ... }` がRoute enumの全メンバーを網羅していない(`_ =>`なし) → エラー(7章の網羅性検査と同じ仕組み、`docs/specs/ui_spec.md`参照)
 15. (欠番 — `native!` / `target::backend()` 構文の廃止に伴い不要)
 16. `Transition`/`KeyframeAnimation`(`docs/specs/ui_spec.md`参照)で存在しないイージング関数名、または範囲外のキーフレーム位置(`0.0..=1.0`外)が指定されている → エラー
@@ -1126,7 +1180,7 @@ impl SaveButton {}
 18. (欠番 — アクションはRustの`impl`ブロックの`fn`として自動検出されるため、対応する型検査が存在しない)
 19. `viewmodel`定義内に`view`ブロック、またはビルトイン要素(`Row`/`Text`等)への直接参照が存在する → エラー(`docs/design/runtime/state_management_design.md`参照。ViewModelは表示ロジックを持たず、MVVMのV/VM分離を静的に強制する)
 20. `#[async_computed]` が `viewmodel`/`store` 以外(通常の`component`のprop等)に付与されている → エラー(`docs/design/runtime/state_management_design.md`参照。非同期状態はVM/Model層に閉じ込める)
-21. `#[undoable]` が `viewmodel` の `#[observable]` フィールド以外(`store`や`component`のprop等)に付与されている → エラー(`docs/design/runtime/state_management_design.md`参照)
+21. (欠番 — ElwindUIは宣言的なundo/redo(`#[undoable]`)を提供しないため。SwiftUIの`UndoManager`同様、必要であればアプリ側がhostレベルの仕組みに自分で配線する)
 22. (欠番 — Themeがtoken/variantモデルからEnvironment上のPresetモデルへ再定義されたことに伴い(#96)、`tokens{}`/`variant`ブロック自体が存在しなくなったため不要)
 23. `VirtualList`に`key`が指定されていない状態で`items`の順序が変わる更新が行われる → 警告(`docs/specs/ui_spec.md`参照。挿入位置ベースの再利用にフォールバックし、リコンサイル効率が低下する可能性がある)。一般の `for` は `Vec<Rc<T>>` のとき各要素の `Rc<T>` ポインタ同一性で子を再利用し、その他の collection は当該範囲を再構築する(`docs/specs/ui_spec.md`参照)。`TabView` は `TabViewItem` を子として指定する。
 24. `on_foreground`/`on_background`/`on_terminate`(`docs/design/runtime/ui_tree_design.md`)が、アプリのエントリポイント(ルート)コンポーネント以外で宣言されている → 警告(OSレベルのライフサイクルは単一箇所への集約を推奨)

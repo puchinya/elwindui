@@ -18,6 +18,12 @@ elwindui-backend-appkit = { path = "../elwindui-backend-appkit", optional = true
 [target.'cfg(target_os = "linux")'.dependencies]
 elwindui-backend-gtk4 = { path = "../elwindui-backend-gtk4", optional = true }
 
+[dev-dependencies]
+# "time" is test-only (a deterministic delay in tests/store_and_async_computed.rs's cross-thread
+# #[async_computed] supersede check) — elwindui-core's own [dependencies] entry only requests
+# "rt-multi-thread", so this feature is not pulled into a downstream consumer's non-test build.
+tokio = { version = "1", features = ["time"] }
+
 [features]
 default = []
 svg = ["dep:elwindui-svg"]

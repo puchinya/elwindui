@@ -93,6 +93,32 @@ pub fn generate_viewmodel_from_item_mod(
     Ok(generated)
 }
 
+/// The attribute-macro counterpart to `generate_viewmodel_from_item_mod`, for
+/// `#[elwindui::store] mod foo { struct Foo { ... } impl Foo { ... } }`. Same shape: no sibling
+/// modules are chained in (a store never needs cross-referencing another DSL item to generate its
+/// own fields — a store referencing another store does so as an ordinary Rust
+/// `OtherStore::instance()` call, not DSL-resolved syntax), just `validate`/`build_symbol_table`/
+/// `generate_module` over this one module, then registration for
+/// `component_frontend::sibling_store_modules()` so a later same-crate component/viewmodel's
+/// `TypeName.field` reference can be checked against it.
+pub fn generate_store_from_item_mod(
+    item_mod: &syn::ItemMod,
+) -> Result<proc_macro2::TokenStream, String> {
+    let def = attr_frontend::store_def_from_item_mod(item_mod)?;
+    let name = def.name.clone();
+    let module = ast::Module {
+        path: Vec::new(),
+        uses: Vec::new(),
+        items: vec![ast::Item::Store(def)],
+        ..Default::default()
+    };
+    validate::validate(std::slice::from_ref(&module)).map_err(|errors| errors.join("\n"))?;
+    let table = codegen::build_symbol_table(std::slice::from_ref(&module));
+    let generated = codegen::generate_module(&module, &table);
+    component_frontend::register_same_crate_store(&name, item_mod);
+    Ok(generated)
+}
+
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` — the opt-in that makes a plain Rust `enum`
 /// visible to `validate::validate`'s `match`-exhaustiveness checking the same way the DSL's own
 /// `enum Name { .. }` syntax always was (§14's user-enum rule; see
@@ -196,6 +222,7 @@ pub fn generate_component_from_item_struct_with_template(
     let all_modules: Vec<_> = std::iter::once(module)
         .chain(component_frontend::sibling_component_modules(&name))
         .chain(component_frontend::sibling_viewmodel_modules())
+        .chain(component_frontend::sibling_store_modules())
         .chain(component_frontend::sibling_enum_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
@@ -254,6 +281,7 @@ pub fn generate_component_from_item_impl(
     let all_modules: Vec<_> = std::iter::once(module.clone())
         .chain(component_frontend::sibling_component_modules(&name))
         .chain(component_frontend::sibling_viewmodel_modules())
+        .chain(component_frontend::sibling_store_modules())
         .chain(component_frontend::sibling_enum_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
@@ -865,6 +893,76 @@ mod viewmodel_registry_tests {
         let err = generate_component_from_item_struct(None, &item_struct)
             .expect_err("#[bindable] on a non-viewmodel type should be rejected");
         assert!(err.contains("isn't a `viewmodel`"), "error: {err}");
+    }
+}
+
+/// `#[elwindui::store] mod foo { .. }` (Issue #82) — the macro-path counterpart to
+/// `viewmodel_registry_tests` above, covering `store`'s own AST/codegen shape and the rule-20
+/// (`#[async_computed]` attachment surface) validation it shares with `viewmodel`.
+#[cfg(test)]
+mod store_registry_tests {
+    use super::*;
+
+    #[test]
+    fn store_with_observable_computed_and_async_computed_generates_a_singleton_accessor() {
+        let item_mod: syn::ItemMod = syn::parse_str(
+            r#"
+            mod counter_store_gen_test_mod {
+                struct CounterStoreGenTest {
+                    #[observable(default = 0i32)]
+                    count: i32,
+
+                    #[computed(expr = count * 2)]
+                    doubled: i32,
+
+                    #[async_computed(expr = fetch(count))]
+                    remote: i64,
+                }
+            }
+            "#,
+        )
+        .expect("mod should parse");
+        let generated = generate_store_from_item_mod(&item_mod)
+            .expect("store generation should succeed")
+            .to_string();
+
+        // Delegates field codegen to `generate_viewmodel` unchanged — same accessor shapes a
+        // viewmodel would get.
+        assert!(generated.contains("fn count"), "generated: {generated}");
+        assert!(generated.contains("fn set_count"), "generated: {generated}");
+        assert!(generated.contains("fn doubled"), "generated: {generated}");
+        // `#[async_computed]`'s getter returns the `AsyncComputed<T>` wrapper, not bare `T`.
+        assert!(
+            generated.contains("AsyncComputed < i64 >") || generated.contains("AsyncComputed<i64>"),
+            "generated: {generated}"
+        );
+        assert!(
+            generated.contains("__spawn_recompute_remote"),
+            "generated: {generated}"
+        );
+        // The singleton wrapper: a generated `EnvironmentKey` and `instance()`.
+        assert!(
+            generated.contains("EnvironmentKey") && generated.contains("fn instance"),
+            "generated: {generated}"
+        );
+    }
+
+    #[test]
+    fn async_computed_on_a_plain_component_prop_is_rejected() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct AsyncComputedMisuseComponent {
+                #[async_computed(expr = fetch())]
+                remote: i32,
+                body: view! { TextBlock { text: "x" } },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let err = generate_component_from_item_struct(None, &item_struct)
+            .expect_err("#[async_computed] on a component prop should be rejected (rule 20)");
+        assert!(err.contains("#[async_computed]"), "error: {err}");
+        assert!(err.contains("viewmodel/store"), "error: {err}");
     }
 }
 

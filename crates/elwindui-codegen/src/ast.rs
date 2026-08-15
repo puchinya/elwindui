@@ -43,6 +43,7 @@ pub struct UseDecl {
 pub enum Item {
     Component(ComponentDef),
     ViewModel(ViewModelDef),
+    Store(StoreDef),
     Enum(EnumDef),
     View(ViewDef),
 }
@@ -183,6 +184,19 @@ pub struct ViewModelDef {
     pub fields: Vec<FieldDef>,
 }
 
+/// `store Name { fields }` — structurally identical to [`ViewModelDef`] (same field vocabulary:
+/// `#[observable]`/`#[computed]`/`#[async_computed]`/`impl`-detected actions), but a `store`
+/// instance is a process-wide singleton rather than something a `component` holds via
+/// `#[bindable]`. See docs/specs/dsl_spec.md §3 "`viewmodel`と`store`:宣言構文",
+/// docs/design/runtime/state_management_design.md "Stores". `codegen.rs`'s `generate_store`
+/// converts this into a throwaway `ViewModelDef` and delegates to `generate_viewmodel` for the
+/// field codegen, then appends the singleton `EnvironmentKey`/`instance()` wrapper.
+#[derive(Debug, Clone)]
+pub struct StoreDef {
+    pub name: String,
+    pub fields: Vec<FieldDef>,
+}
+
 /// See docs/specs/dsl_spec.md §7.
 #[derive(Debug, Clone)]
 pub struct EnumDef {
@@ -206,6 +220,15 @@ pub enum FieldKind {
     Observable,
     /// `#[computed]`: read-only, recomputed from its dependencies. See §4, docs/design/runtime/state_management_design.md.
     Computed,
+    /// `#[async_computed]`: read-only, re-runs an `async` expression (returning `Result<T, E:
+    /// Display>`) via `elwindui_core::task::spawn_local` whenever a dependency changes. Only valid
+    /// on a `viewmodel`/`store` field (`validate.rs`, dsl_spec.md §13 rule 20) — never a plain
+    /// `component` prop. The generated getter's return type is
+    /// `elwindui::core::reactive::AsyncComputed<T>` (`Loading`/`Ready(T)`/`Failed(String)`), not
+    /// the declared `T` itself; a per-field generation counter supersedes a stale in-flight
+    /// recompute rather than truly cancelling it. See docs/design/runtime/state_management_design.md
+    /// "Async work".
+    AsyncComputed,
     /// A `viewmodel` action method, auto-detected from an `impl` block's `fn`/`async fn` (Rust-
     /// native `#[elwindui::viewmodel] mod { struct .. impl .. }` frontend only — the DSL text
     /// form has no syntax to declare one). Not a real struct field: `attr_frontend.rs` synthesizes

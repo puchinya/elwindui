@@ -17,6 +17,7 @@
 | WinUI 3 backend | [`backends/winui3_backend_design.md`](backends/winui3_backend_design.md) |
 | DSL parser / codegen | [`tools/codegen_design.md`](tools/codegen_design.md) |
 | `#[class]` macro internals | [`tools/class_macro_design.md`](tools/class_macro_design.md) |
+| Environment Key cross-crate macro | [`tools/environment_key_macro_design.md`](tools/environment_key_macro_design.md) |
 | Language server | [`tools/languageserver_design.md`](tools/languageserver_design.md) |
 | Preview | [`tools/preview_design.md`](tools/preview_design.md) |
 | Hot reload | [`tools/hotreload_design.md`](tools/hotreload_design.md) |

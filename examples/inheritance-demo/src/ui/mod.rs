@@ -4,10 +4,18 @@
 // own comment explains the mechanism in full). `labeled_panel` has no sibling dependencies;
 // `loud_panel` inherits it (`inherits crate::ui::LabeledPanel`) and also references it as a plain
 // view element; `inheritance_demo_window` uses both.
+//
+// Each `mod` below is kept on its own blank-line-separated line rather than a contiguous block:
+// `cargo fmt`'s `reorder_modules` (on by default) alphabetizes any *contiguous* run of `mod` items,
+// which previously scrambled this load-bearing order silently (Issue #139) — the blank lines match
+// `elwindui-core/src/ui/mod.rs`'s own defense against the same hazard.
 mod content_wrapper;
-mod inheritance_demo_window;
+
 mod labeled_panel;
+
 mod loud_panel;
+
+mod inheritance_demo_window;
 
 // Glob re-exports, not a named list: `#[class]` generates a companion
 // `__elwindui_macros_of_LabeledPanel` alongside `LabeledPanel` itself — `loud_panel.rs`'s

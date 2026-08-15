@@ -45,6 +45,11 @@ pub struct TypeInfo {
     /// `routed_handlers()` into the `NativeControl`/virtual-builtin `UIElementBase` wrapping it,
     /// rather than starting that wrapper with a fresh, empty one.
     pub routed_fields: HashSet<String>,
+    /// Fields implemented through the orthogonal `TextStyleOwner` capability. Derived from the
+    /// injected `Attr::TextStyle` marker, never from a field-name list in codegen.
+    pub text_style_fields: HashSet<String>,
+    /// Brush properties that accept `BrushStyle`, derived from declaration metadata.
+    pub semantic_brush_fields: HashSet<String>,
     /// Names of `#[bindable]` fields (`ast::Attr::Bindable`'s own doc comment,
     /// `docs/design/runtime/state_management_design.md`) — a component field injecting a viewmodel by
     /// syntax marker rather than type resolution. `collection_uses_rc_identity` consults this on a
@@ -379,6 +384,16 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                         })
                         .map(|f| f.name.clone())
                         .collect();
+                    let text_style_fields = effective_fields
+                        .iter()
+                        .filter(|f| f.attrs.iter().any(|a| matches!(a, Attr::TextStyle)))
+                        .map(|f| f.name.clone())
+                        .collect();
+                    let semantic_brush_fields = effective_fields
+                        .iter()
+                        .filter(|f| f.attrs.iter().any(|a| matches!(a, Attr::SemanticBrush)))
+                        .map(|f| f.name.clone())
+                        .collect();
                     let bindable_fields = effective_fields
                         .iter()
                         .filter(|f| {
@@ -416,6 +431,8 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             param_fields,
                             two_way_fields,
                             routed_fields,
+                            text_style_fields,
+                            semantic_brush_fields,
                             bindable_fields,
                             onetime_fields,
                             // A "virtual builtin" is exactly: an `#[embedded]` shape declaration
@@ -499,6 +516,8 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             param_fields,
                             two_way_fields,
                             routed_fields,
+                            text_style_fields: HashSet::new(),
+                            semantic_brush_fields: HashSet::new(),
                             bindable_fields: HashSet::new(),
                             declaring_types: HashMap::new(),
                             onetime_fields: HashSet::new(),
@@ -568,6 +587,8 @@ pub fn build_symbol_table(modules: &[Module]) -> SymbolTable {
                             param_fields,
                             two_way_fields,
                             routed_fields,
+                            text_style_fields: HashSet::new(),
+                            semantic_brush_fields: HashSet::new(),
                             bindable_fields: HashSet::new(),
                             declaring_types: HashMap::new(),
                             onetime_fields: HashSet::new(),
@@ -4358,19 +4379,29 @@ fn generate_view(
             }
         })
         .collect();
-    let has_semantic_brush_properties = plan.iter().any(|node| {
-        node.type_path != ENVIRONMENT_SCOPE_MARKER
-            && node
-                .attributes
+    let semantic_brush_query = |node: &PlannedNode, name: &str| {
+        if let Some(info) = table.resolve(from, &node.type_path) {
+            let value = is_semantic_brush_property(info, name);
+            quote! { #value }
+        } else {
+            let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
+            let name = format_ident!("{name}");
+            quote! { elwindui::core::#props_macro!(@is_semantic_brush #name) }
+        }
+    };
+    let semantic_brush_lazy_leaves = collect_lazy_leaves(&plan);
+    let semantic_brush_queries: Vec<TokenStream> = plan
+        .iter()
+        .filter(|node| node.type_path != ENVIRONMENT_SCOPE_MARKER)
+        .chain(semantic_brush_lazy_leaves.iter().map(|(_, node)| *node))
+        .flat_map(|node| {
+            node.attributes
                 .iter()
-                .any(|attribute| is_semantic_brush_property(&attribute.name))
-    }) || collect_lazy_leaves(&plan).iter().any(|(_, node)| {
-        node.attributes
-            .iter()
-            .any(|attribute| is_semantic_brush_property(&attribute.name))
-    });
-    let semantic_brush_subscribe_stmts = has_semantic_brush_properties.then(|| {
-        quote! {
+                .map(|attribute| semantic_brush_query(node, &attribute.name))
+        })
+        .collect();
+    let semantic_brush_subscribe_stmts = quote! {
+        if false #(|| #semantic_brush_queries)* {
             {
                 let weak = std::rc::Rc::downgrade(&this);
                 let listener: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(move || {
@@ -4390,7 +4421,7 @@ fn generate_view(
                     .extend(subscriptions);
             }
         }
-    });
+    };
     // Real `#[environment(name)]` resolution (CI-5 of #80,
     // docs/design/runtime/component_lifecycle_design.md §4d) — spliced into `__build_view()`, before
     // `#child_construct_stmts`, so this component's own environment-dependent field values (and
@@ -7870,6 +7901,10 @@ pub(crate) fn strip_option(ty: &str) -> (&str, bool) {
     }
 }
 
+fn is_brush_type(ty: &str) -> bool {
+    ty.trim() == "elwindui::core::graphics::Brush"
+}
+
 /// Parses a `"#rrggbb"`/`"#rrggbbaa"` hex string into its four byte components — the same rule
 /// `elwindui_core::graphics::Color::parse_hex` implements at runtime, duplicated here (rather than
 /// depending on `elwindui-core` from this crate just for this) since it's a tiny, stable parsing
@@ -8249,7 +8284,10 @@ fn emit_field_setter_call(
     // than `TextStyleOwner::#setter` directly) is what makes this work for a composed type, not
     // just the three classes that implement `TextStyleOwner` by hand. Always fully path-qualified,
     // so no `use` needs to be threaded through for it (mirrors the ordinary UFCS branch below).
-    if crate::text_style::is_text_style_field_name(name) {
+    if table
+        .resolve(from, node_type)
+        .is_some_and(|info| info.text_style_fields.contains(name))
+    {
         return quote! {
             elwindui::core::ui::UIElementExt::as_text_style_owner(&*(#receiver))
                 .expect(concat!(
@@ -8295,7 +8333,10 @@ fn emit_field_clear_call(
     table: &SymbolTable,
 ) -> TokenStream {
     let clear = format_ident!("clear_{name}");
-    if crate::text_style::is_text_style_field_name(name) {
+    if table
+        .resolve(from, node_type)
+        .is_some_and(|info| info.text_style_fields.contains(name))
+    {
         return quote! {
             elwindui::core::ui::UIElementExt::as_text_style_owner(&*(#receiver))
                 .expect(concat!(
@@ -8323,8 +8364,8 @@ fn emit_field_clear_call(
     }
 }
 
-fn is_semantic_brush_property(name: &str) -> bool {
-    matches!(name, "foreground" | "background" | "fill" | "stroke")
+fn is_semantic_brush_property(info: &TypeInfo, name: &str) -> bool {
+    info.semantic_brush_fields.contains(name)
 }
 
 fn semantic_brush_construction_environment(node: &PlannedNode) -> TokenStream {
@@ -8475,7 +8516,6 @@ fn emit_external_attribute_sets(
     table: &SymbolTable,
 ) -> TokenStream {
     let binding = &node.binding;
-    let binding_ts = quote! { #binding };
     let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
     let mut sets = TokenStream::new();
     for attribute in &node.attributes {
@@ -8485,15 +8525,6 @@ fn emit_external_attribute_sets(
             continue;
         }
         let name_ident = format_ident!("{name}");
-        // The seven `#[text_style]`-injected properties (`font_size`/`foreground`/...) are never a
-        // real `#[prop]` on any single builtin — they're injected uniformly onto any `#[text_style]`
-        // class by `parser.rs`/`component_frontend.rs`, so no `__elwindui_props_*!` macro knows about
-        // them at all. `is_text_style_field_name` is a fixed, table-independent name list — the same
-        // one `build_component_setters`/`emit_resync` already dispatch through
-        // `emit_field_setter_call`/`emit_field_clear_call`, whose own text-style branch is *already*
-        // `TypeInfo`-free (routes through `TextStyleOwner::as_text_style_owner()`, not a declaring
-        // type). Reused verbatim here — no reason for this function to have its own copy.
-        let is_text_style = crate::text_style::is_text_style_field_name(name);
         // A named single-child slot (`content: Grid { .. }`, `menu_bar: MenuBar { .. }`) —
         // `plan_element` already planned and will separately construct the nested element as its
         // own `PlannedNode`, recorded here by name (mirrors `build_component_args`'s own
@@ -8531,60 +8562,6 @@ fn emit_external_attribute_sets(
             });
             continue;
         }
-        if is_semantic_brush_property(name) {
-            let raw = emit_expr(expr, ctx, &EmitMode::Construction);
-            let environment = semantic_brush_construction_environment(node);
-            let set = if is_text_style {
-                let setter_ident = format_ident!("set_{name}");
-                emit_field_setter_call(
-                    name,
-                    &node.type_path,
-                    &setter_ident,
-                    quote! { Some(__elwindui_semantic_brush) },
-                    &binding_ts,
-                    from,
-                    table,
-                )
-            } else {
-                quote! {
-                    elwindui::core::#props_macro!(
-                        @set #binding, #name_ident, __elwindui_semantic_brush
-                    );
-                }
-            };
-            let clear = if is_text_style {
-                emit_field_clear_call(name, &node.type_path, &binding_ts, from, table)
-            } else {
-                quote! { elwindui::core::#props_macro!(@clear #binding, #name_ident); }
-            };
-            sets.extend(emit_semantic_brush_resolution(raw, environment, set, clear));
-            continue;
-        }
-        if is_text_style {
-            let setter_ident = format_ident!("set_{name}");
-            let raw = emit_expr(expr, ctx, &EmitMode::Construction);
-            // `foreground` is always `Option<Brush>` (`TextStyleOwner::set_foreground`, one of the
-            // seven fixed, universal `TEXT_STYLE_FIELDS` — never builtin-specific, so this needs no
-            // shape table to know, the same reasoning `common_routed_payload_type` documents for
-            // the common routed events) — `.into()` lets a hex-string DSL literal (`foreground:
-            // "#ffffff"`) reach it via `Brush`'s own `From<&str>`, mirroring `wrap_prop_value`'s
-            // identical Brush/Color handling for every *non*-text-style property.
-            let value = if name == "foreground" {
-                quote! { Some((#raw).into()) }
-            } else {
-                raw
-            };
-            sets.extend(emit_field_setter_call(
-                name,
-                &node.type_path,
-                &setter_ident,
-                value,
-                &binding_ts,
-                from,
-                table,
-            ));
-            continue;
-        }
         let value = match expr {
             ViewExpr::Closure { params, body } => {
                 emit_closure_value(params, body, ctx, from, table)
@@ -8613,14 +8590,20 @@ fn emit_external_attribute_sets(
         // identical `Option<T>`-vs-bare-`T` normalization for the exact same reason, since this is
         // the *other* place a bare-forwarded own field's value reaches `@set`.
         if bare_own_field_type(expr, ctx).is_some_and(|ty| ty.contains('!')) {
+            let environment = semantic_brush_construction_environment(node);
             sets.extend(quote! {
                 if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
-                    elwindui::core::#props_macro!(@set #binding, #name_ident, __v);
+                    elwindui::core::#props_macro!(
+                        @set_with_environment #binding, #name_ident, __v, #environment
+                    );
                 }
             });
         } else {
+            let environment = semantic_brush_construction_environment(node);
             sets.extend(quote! {
-                elwindui::core::#props_macro!(@set #binding, #name_ident, #value);
+                elwindui::core::#props_macro!(
+                    @set_with_environment #binding, #name_ident, #value, #environment
+                );
             });
         }
     }
@@ -9061,7 +9044,7 @@ fn build_component_args(
             }
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
-                    if name == "foreground" {
+                    if is_option && is_brush_type(inner_ty) {
                         quote! { Some(#coerced) }
                     } else {
                         coerced
@@ -9249,7 +9232,7 @@ fn build_component_setters(
 
         let (inner_ty, is_option) = strip_option(ty);
         let attr = find_attr(node, name);
-        if let Some(expr) = attr.filter(|_| is_semantic_brush_property(name)) {
+        if let Some(expr) = attr.filter(|_| is_semantic_brush_property(info, name)) {
             let raw = emit_expr(expr, ctx, &EmitMode::Construction);
             let environment = semantic_brush_construction_environment(node);
             let receiver = quote! { #binding };
@@ -9287,7 +9270,7 @@ fn build_component_setters(
                 } else {
                     emit_expr(other, ctx, &EmitMode::Construction)
                 };
-                if name == "foreground" || name == "background" {
+                if is_option && is_brush_type(inner_ty) {
                     quote! { Some(#value) }
                 } else if inner_ty == "String" {
                     quote! { &(#value) }
@@ -9369,7 +9352,8 @@ fn build_component_optional_setters(
         // `strip_option` is a no-op for the latter, so `inner_ty` is always the right type either
         // way.
         let (inner_ty, _) = strip_option(ty);
-        if let Some(expr) = find_attr(node, name).filter(|_| is_semantic_brush_property(name)) {
+        if let Some(expr) = find_attr(node, name).filter(|_| is_semantic_brush_property(info, name))
+        {
             let raw = emit_expr(expr, ctx, &EmitMode::Construction);
             let environment = semantic_brush_construction_environment(node);
             let receiver = quote! { #binding };
@@ -9410,9 +9394,7 @@ fn build_component_optional_setters(
                     // type, e.g. `String` — not `&str` the way a hand-written builtin's setter does
                     // (`build_component_setters`) — matching `build_component_args`'s own
                     // `has_view`-conditional `.to_string()` convention.
-                    if name == "foreground" {
-                        quote! { Some(#value) }
-                    } else if inner_ty == "String" {
+                    if inner_ty == "String" {
                         quote! { (#value).to_string() }
                     } else {
                         value
@@ -9921,8 +9903,8 @@ fn build_virtual_value(
             }
             panic!("`{}` requires attribute `{name}`", node.type_path);
         };
-        if is_semantic_brush_property(name) {
-            if crate::text_style::is_text_style_field_name(name) {
+        if is_semantic_brush_property(info, name) {
+            if info.text_style_fields.contains(name) {
                 needs_text_style_trait = true;
             } else if common_field_names.contains(name.as_str()) {
                 needs_ui_element_ext = true;
@@ -9953,10 +9935,7 @@ fn build_virtual_value(
             }
         } else {
             let value = emit_expr(expr, ctx, &EmitMode::Construction);
-            if is_option && name == "foreground" {
-                // `TextStyleOwner::set_foreground` records a local brush as `Some(Brush)`.
-                // Unlike the other six text-style setters, it deliberately keeps that Option in
-                // its public signature, so a dynamic Brush expression needs an explicit wrapper.
+            if is_option && is_brush_type(inner_ty) {
                 quote! { Some(#value) }
             } else if is_option && inner_ty == "String" {
                 if is_own_option_field(expr) {
@@ -9981,7 +9960,7 @@ fn build_virtual_value(
                 value
             }
         };
-        if crate::text_style::is_text_style_field_name(name) {
+        if info.text_style_fields.contains(name) {
             needs_text_style_trait = true;
         } else if common_field_names.contains(name.as_str()) {
             needs_ui_element_ext = true;
@@ -11284,10 +11263,10 @@ fn emit_resync_with_receiver(
         let field_ty = info
             .and_then(|i| i.field_types.get(name))
             .map(String::as_str);
-        if is_semantic_brush_property(name) {
+        if info.is_some_and(|info| is_semantic_brush_property(info, name)) {
             let raw = emit_expr(expr, ctx, &self_mode);
             let environment = semantic_brush_resync_environment(node);
-            let is_text_style = crate::text_style::is_text_style_field_name(name);
+            let is_text_style = info.is_some_and(|info| info.text_style_fields.contains(name));
             let (set, clear) = if info.is_none() && !is_text_style {
                 let props_macro = format_ident!("__elwindui_props_{}", node.type_path);
                 let name_ident = format_ident!("{name}");
@@ -11340,19 +11319,11 @@ fn emit_resync_with_receiver(
             continue;
         }
         let value = emit_expr(expr, ctx, &self_mode);
-        if crate::text_style::is_text_style_field_name(name) {
+        if info.is_some_and(|info| info.text_style_fields.contains(name)) {
             // The style-owner API consumes the six font values. `foreground` keeps its Option so
             // a caller can distinguish an explicit local brush from an unset inherited value.
             // Do this before the generic native-control branch, which normally borrows non-Copy
             // values for `&str`-style setters and would make `FontFamily`/`Brush` fail to compile.
-            // `.into()` (matching `emit_external_attribute_sets`'s identical construction-time
-            // branch): `foreground` is always `Option<Brush>` — a hex-string DSL literal needs
-            // `Brush`'s own `From<&str>` to reach it, same as any other Brush-typed property.
-            let value = if name == "foreground" {
-                quote! { Some((#value).into()) }
-            } else {
-                value
-            };
             out.extend(emit_field_setter_call(
                 name,
                 &node.type_path,
@@ -11395,14 +11366,20 @@ fn emit_resync_with_receiver(
             // for symmetry with nothing else needing it, and to fail loudly (a real type error) if
             // that invariant is ever violated instead of silently miscompiling.
             if bare_own_field_type(expr, ctx).is_some_and(|ty| ty.contains('!')) {
+                let environment = semantic_brush_resync_environment(node);
                 out.extend(quote! {
                     if let ::std::option::Option::Some(__v) = ::std::option::Option::from(#value) {
-                        elwindui::core::#props_macro!(@set #receiver, #name_ident, __v);
+                        elwindui::core::#props_macro!(
+                            @set_with_environment #receiver, #name_ident, __v, #environment
+                        );
                     }
                 });
             } else {
+                let environment = semantic_brush_resync_environment(node);
                 out.extend(quote! {
-                    elwindui::core::#props_macro!(@set #receiver, #name_ident, #value);
+                    elwindui::core::#props_macro!(
+                        @set_with_environment #receiver, #name_ident, #value, #environment
+                    );
                 });
             }
             continue;

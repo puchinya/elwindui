@@ -856,6 +856,8 @@ fn props_macro_ident(bare_name: &str) -> Ident {
 /// - `#[prop(onetime, left: Option<f32>)]` — applied once at construction, never re-pushed by a
 ///   later resync (`Window`'s geometry — the window manager owns the live value)
 /// - `#[prop(two_way, text: String)]` — opts into automatic two-way wiring
+/// - `#[prop(semantic_brush, background: Option<Brush>)]` — accepts `BrushStyle` and resolves it
+///   against the effective Environment before calling the concrete-brush setter
 /// - `#[prop(attached, row: i32 = 0)]` — an attached property (`Grid::row`), which a *child* element
 ///   sets on itself to address its parent. Always needs a default value.
 ///
@@ -884,6 +886,7 @@ struct PropDecl {
     #[allow(dead_code)]
     onetime: bool,
     two_way: bool,
+    semantic_brush: bool,
 }
 
 impl Parse for PropDecl {
@@ -892,6 +895,7 @@ impl Parse for PropDecl {
         let mut onetime = false;
         let mut two_way = false;
         let mut attached = false;
+        let mut semantic_brush = false;
         // Flags come first and are all bare idents; the property itself is the one `name: Type`
         // pair, so "an ident *not* followed by `:`" is unambiguously a flag.
         loop {
@@ -935,6 +939,7 @@ impl Parse for PropDecl {
                     default,
                     onetime,
                     two_way,
+                    semantic_brush,
                 });
             }
             match ident.to_string().as_str() {
@@ -942,12 +947,14 @@ impl Parse for PropDecl {
                 "onetime" => onetime = true,
                 "two_way" => two_way = true,
                 "attached" => attached = true,
+                "semantic_brush" => semantic_brush = true,
                 other => {
                     return Err(syn::Error::new_spanned(
                         &ident,
                         format!(
                             "#[prop]: unknown flag `{other}` — expected `routed`, `onetime`, \
-                             `two_way`, `attached`, or a `name: Type` property declaration"
+                             `two_way`, `attached`, `semantic_brush`, or a `name: Type` property \
+                             declaration"
                         ),
                     ));
                 }
@@ -1291,6 +1298,109 @@ fn build_props_macro(
         })
         .collect();
 
+    // Semantic-brush capability belongs to the property declaration, not to its spelling in
+    // elwindui-codegen. `@set_with_environment` lets cross-crate codegen defer that decision until
+    // this macro is expanded beside the real `#[prop]`: marked properties resolve `BrushStyle`,
+    // ordinary properties delegate to the existing `@set` conversion path unchanged.
+    let set_with_environment_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .filter(|p| takes_set_arm(p))
+        .map(|p| {
+            let name = &p.name;
+            if p.semantic_brush {
+                quote! {
+                    (@set_with_environment_from $origin:ident, $recv:expr, #name, $value:expr, $environment:expr) => {
+                        match ::core::convert::Into::<$crate::theme::BrushStyle>::into($value)
+                            .resolve($environment)
+                        {
+                            $crate::theme::ResolvedValue::Value(__elwindui_semantic_brush) => {
+                                $crate::#macro_ident!(
+                                    @set_from $origin, $recv, #name, __elwindui_semantic_brush
+                                );
+                            }
+                            $crate::theme::ResolvedValue::PlatformDefault => {
+                                $crate::#macro_ident!(@clear_from $origin, $recv, #name);
+                            }
+                        }
+                    };
+                }
+            } else {
+                quote! {
+                    (@set_with_environment_from $origin:ident, $recv:expr, #name, $value:expr, $environment:expr) => {
+                        $crate::#macro_ident!(@set_from $origin, $recv, #name, $value);
+                    };
+                }
+            }
+        })
+        .collect();
+
+    let semantic_brush_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let value = p.semantic_brush;
+            quote! { (@is_semantic_brush_from $origin:ident, #name) => { #value }; }
+        })
+        .collect();
+
+    // `#[text_style]` injects these properties as one declared capability rather than seven
+    // handwritten `#[prop]`s. Generate the same deferred setter metadata here so codegen never has
+    // to infer text-style ownership from a field name. The shared declaration metadata decides
+    // which injected fields are semantic brushes; the others forward concrete values directly.
+    let text_style_set_with_environment_arms = shape.text_style.then(|| {
+        let arms = elwindui_codegen::TEXT_STYLE_FIELDS
+            .iter()
+            .map(|(name, _, semantic_brush)| {
+            let name = format_ident!("{name}");
+            let setter = format_ident!("set_{name}");
+            let clear = format_ident!("clear_{name}");
+            if *semantic_brush {
+                quote! {
+                    (@set_with_environment_from $origin:ident, $recv:expr, #name, $value:expr, $environment:expr) => {
+                        match ::core::convert::Into::<$crate::theme::BrushStyle>::into($value)
+                            .resolve($environment)
+                        {
+                            $crate::theme::ResolvedValue::Value(__elwindui_semantic_brush) => {
+                                $crate::ui::UIElementExt::as_text_style_owner(&*($recv))
+                                    .expect(concat!(
+                                        "`", stringify!(#name), "` is declared by #[text_style], \
+                                         but the resolved node has no TextStyleOwner"
+                                    ))
+                                    .#setter(::core::option::Option::Some(__elwindui_semantic_brush));
+                            }
+                            $crate::theme::ResolvedValue::PlatformDefault => {
+                                $crate::ui::UIElementExt::as_text_style_owner(&*($recv))
+                                    .expect(concat!(
+                                        "`", stringify!(#name), "` is declared by #[text_style], \
+                                         but the resolved node has no TextStyleOwner"
+                                    ))
+                                    .#clear();
+                            }
+                        }
+                    };
+                    (@is_semantic_brush_from $origin:ident, #name) => { true };
+                }
+            } else {
+                quote! {
+                    (@set_with_environment_from $origin:ident, $recv:expr, #name, $value:expr, $environment:expr) => {
+                        $crate::ui::UIElementExt::as_text_style_owner(&*($recv))
+                            .expect(concat!(
+                                "`", stringify!(#name), "` is declared by #[text_style], but the \
+                                 resolved node has no TextStyleOwner"
+                            ))
+                            .#setter($value);
+                    };
+                    (@is_semantic_brush_from $origin:ident, #name) => { false };
+                }
+            }
+        });
+        quote! {
+            #(#arms)*
+        }
+    });
+
     // `@routed` registers a `#[routed]` callback (`dispatch_routed`-style bubbling) instead of
     // assigning it — the same two-hop entry/forward shape as `@set`, but dispatching to
     // `UIElementExt::register_routed_handler::<Payload>(name, handler)` instead of a setter. The
@@ -1522,6 +1632,8 @@ fn build_props_macro(
 
     let (
         fallback,
+        set_with_environment_fallback,
+        semantic_brush_fallback,
         clear_fallback,
         field_type_fallback,
         routed_fallback,
@@ -1536,6 +1648,16 @@ fn build_props_macro(
                 quote! {
                     (@set_from $origin:ident, $recv:expr, $name:ident, $value:expr) => {
                         #parent_macro!(@set_from $origin, $recv, $name, $value);
+                    };
+                },
+                quote! {
+                    (@set_with_environment_from $origin:ident, $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                        #parent_macro!(@set_with_environment_from $origin, $recv, $name, $value, $environment);
+                    };
+                },
+                quote! {
+                    (@is_semantic_brush_from $origin:ident, $name:ident) => {
+                        #parent_macro!(@is_semantic_brush_from $origin, $name)
                     };
                 },
                 quote! {
@@ -1582,6 +1704,26 @@ fn build_props_macro(
                         "` (or any of its ancestors) has no such property: ",
                         stringify!($name)
                     ));
+                };
+            },
+            quote! {
+                (@set_with_environment_from $origin:ident, $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` (or any of its ancestors) has no such property: ",
+                        stringify!($name)
+                    ));
+                };
+            },
+            quote! {
+                (@is_semantic_brush_from $origin:ident, $name:ident) => {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        "` (or any of its ancestors) has no such property: ",
+                        stringify!($name)
+                    ))
                 };
             },
             quote! {
@@ -1745,6 +1887,19 @@ fn build_props_macro(
             };
             #(#set_arms)*
             #fallback
+            (@set_with_environment $recv:expr, $name:ident, $value:expr, $environment:expr) => {
+                $crate::#macro_ident!(
+                    @set_with_environment_from #bare_ident, $recv, $name, $value, $environment
+                );
+            };
+            #text_style_set_with_environment_arms
+            #(#set_with_environment_arms)*
+            #set_with_environment_fallback
+            (@is_semantic_brush $name:ident) => {
+                $crate::#macro_ident!(@is_semantic_brush_from #bare_ident, $name)
+            };
+            #(#semantic_brush_arms)*
+            #semantic_brush_fallback
             (@clear $recv:expr, $name:ident) => {
                 $crate::#macro_ident!(@clear_from #bare_ident, $recv, $name);
             };

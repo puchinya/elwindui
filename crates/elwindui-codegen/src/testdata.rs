@@ -175,6 +175,7 @@ pub(crate) fn test_builtin_modules() -> Vec<Module> {
             None,
             r#"
             children: UIElementCollection,
+            #[semantic_brush]
             background: Option<elwindui::core::graphics::Brush>,
             "#,
         )),
@@ -188,6 +189,7 @@ pub(crate) fn test_builtin_modules() -> Vec<Module> {
             true,
             None,
             r#"
+            #[semantic_brush]
             background: Option<elwindui::core::graphics::Brush>,
             "#,
         )),
@@ -250,7 +252,9 @@ pub(crate) fn test_builtin_modules() -> Vec<Module> {
             false,
             None,
             r#"
+            #[semantic_brush]
             fill: Option<elwindui::core::graphics::Brush>,
+            #[semantic_brush]
             stroke: Option<elwindui::core::graphics::Brush>,
             stroke_width: Option<f32>,
             "#,

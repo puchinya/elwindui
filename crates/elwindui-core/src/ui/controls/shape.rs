@@ -8,8 +8,8 @@ use super::*;
 /// `Shape`'s own class trait (docs/design/runtime/ui_tree_design.md); `Shape` has no further
 /// DSL-level subclass today.
 #[elwindui_macros::class(inherits = crate::ui::UIElement, abstract_class)]
-#[prop(fill: Option<crate::graphics::Brush>)]
-#[prop(stroke: Option<crate::graphics::Brush>)]
+#[prop(semantic_brush, fill: Option<crate::graphics::Brush>)]
+#[prop(semantic_brush, stroke: Option<crate::graphics::Brush>)]
 #[prop(stroke_width: Option<f32>)]
 pub struct Shape {
     pub fill: RefCell<Option<Brush>>,

@@ -17,7 +17,7 @@ use super::*;
 /// wrapper struct type needs to be nameable from `elwindui-core` for this to work.
 #[elwindui_macros::class(trait_only, inherits = crate::ui::UIElement, abstract_class)]
 #[text_style]
-#[prop(background: Option<crate::graphics::Brush>)]
+#[prop(semantic_brush, background: Option<crate::graphics::Brush>)]
 #[prop(tooltip: Option<String>)]
 pub trait NativeControl {
     /// Sets an explicit native-control background, or removes it (`None`) so the platform's own

@@ -85,6 +85,51 @@ fn theme_roles_resolve_reactively_for_all_brush_dsl_properties() {
 }
 
 thread_local! {
+    static NON_SEMANTIC_FILL: std::cell::RefCell<String> = const {
+        std::cell::RefCell::new(String::new())
+    };
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct NonSemanticFillLeaf {
+    #[prop(default = String::from("default"))]
+    fill: String,
+
+    body: view! {
+        on_mount {
+            NON_SEMANTIC_FILL.with(|value| *value.borrow_mut() = self.fill());
+        }
+        on_update(fill) {
+            NON_SEMANTIC_FILL.with(|value| *value.borrow_mut() = this.fill());
+        }
+        TextBlock { text: fill }
+    },
+}
+
+#[elwindui::component]
+impl NonSemanticFillLeaf {}
+
+#[elwindui::component(inherits ContentControl)]
+struct NonSemanticFillHost {
+    body: view! {
+        NonSemanticFillLeaf { fill: "ordinary string" }
+    },
+}
+
+#[elwindui::component]
+impl NonSemanticFillHost {}
+
+#[test]
+fn an_unrelated_property_named_fill_is_not_treated_as_a_semantic_brush() {
+    NON_SEMANTIC_FILL.with(|value| value.borrow_mut().clear());
+    let _host = NonSemanticFillHost::new();
+    assert_eq!(
+        NON_SEMANTIC_FILL.with(|value| value.borrow().clone()),
+        "ordinary string"
+    );
+}
+
+thread_local! {
     static SCOPED_PRIMARY: std::cell::RefCell<BrushStyle> =
         std::cell::RefCell::new(BrushStyle::PlatformDefault);
 }

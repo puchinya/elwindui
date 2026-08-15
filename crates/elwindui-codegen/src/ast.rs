@@ -319,6 +319,10 @@ pub enum Attr {
     /// doesn't bare-reference it, so a `#[text_style]` component with its own `view`
     /// (`ContentControl`, any user component) doesn't silently lose these seven setters.
     TextStyle,
+    /// Marks a brush property as accepting `BrushStyle`. This capability is declaration metadata,
+    /// never inferred from the field name; builtins carry it from `#[prop(semantic_brush, ..)]`,
+    /// while `#[text_style]` injects it on `foreground`.
+    SemanticBrush,
     /// `#[environment(name)]`'s argument — the Environment Key's registered name (from
     /// `#[elwindui::environment_key(name = ..)]`, `component_frontend::
     /// register_same_crate_environment_key`), independent of this field's own Rust identifier, plus

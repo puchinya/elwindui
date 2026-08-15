@@ -6,27 +6,38 @@
 #[cfg(test)]
 use crate::ast::{Attr, FieldDef, FieldKind};
 
-/// `(field name, declared DSL type)`. The `foreground` type string must stay byte-identical to
+/// `(field name, declared DSL type, accepts semantic BrushStyle)`. The `foreground` type string must stay byte-identical to
 /// `Shape.fill`'s own declared type — `codegen::coerce_color_literal` matches
 /// on the literal path `"elwindui::core::graphics::Brush"`, so `foreground: "#3a3a3c"` only keeps
 /// working through that existing mechanism if the spelling agrees exactly.
-pub(crate) const TEXT_STYLE_FIELDS: [(&str, &str); 7] = [
+pub const TEXT_STYLE_FIELDS: [(&str, &str, bool); 7] = [
     (
         "font_family",
         "Option<elwindui::core::graphics::FontFamily>",
+        false,
     ),
-    ("font_size", "Option<f32>"),
+    ("font_size", "Option<f32>", false),
     (
         "font_weight",
         "Option<elwindui::core::graphics::FontWeight>",
+        false,
     ),
-    ("font_style", "Option<elwindui::core::graphics::FontStyle>"),
+    (
+        "font_style",
+        "Option<elwindui::core::graphics::FontStyle>",
+        false,
+    ),
     (
         "font_stretch",
         "Option<elwindui::core::graphics::FontStretch>",
+        false,
     ),
-    ("character_spacing", "Option<i32>"),
-    ("foreground", "Option<elwindui::core::graphics::Brush>"),
+    ("character_spacing", "Option<i32>", false),
+    (
+        "foreground",
+        "Option<elwindui::core::graphics::Brush>",
+        true,
+    ),
 ];
 
 /// Builds the seven injected `FieldDef`s, in the order above — `testdata.rs`'s `builtin_component`
@@ -41,11 +52,15 @@ pub(crate) const TEXT_STYLE_FIELDS: [(&str, &str); 7] = [
 pub(crate) fn text_style_field_defs() -> Vec<FieldDef> {
     TEXT_STYLE_FIELDS
         .iter()
-        .map(|(name, ty)| FieldDef {
+        .map(|(name, ty, semantic_brush)| FieldDef {
             name: (*name).to_string(),
             ty: (*ty).to_string(),
             kind: FieldKind::Prop,
-            attrs: vec![Attr::TextStyle],
+            attrs: if *semantic_brush {
+                vec![Attr::TextStyle, Attr::SemanticBrush]
+            } else {
+                vec![Attr::TextStyle]
+            },
             initializer: None,
         })
         .collect()
@@ -56,5 +71,5 @@ pub(crate) fn text_style_field_defs() -> Vec<FieldDef> {
 pub(crate) fn is_text_style_field_name(name: &str) -> bool {
     TEXT_STYLE_FIELDS
         .iter()
-        .any(|(field_name, _)| *field_name == name)
+        .any(|(field_name, _, _)| *field_name == name)
 }

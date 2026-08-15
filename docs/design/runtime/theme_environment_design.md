@@ -93,7 +93,9 @@ The code generator has a fixed compile-time table for the eleven framework names
 
 ### Brush-property codegen
 
-The semantic Brush surface is deliberately limited to the existing `foreground`, `background`, `fill`, and `stroke` DSL properties. Their concrete Rust setters stay `Option<Brush>`-shaped. At construction and resync, codegen converts the authored expression through `Into<BrushStyle>`, resolves it against the node's effective mount-time context, calls the existing setter for `ResolvedValue::Value`, and calls the existing `@clear`/`clear_*` path for `PlatformDefault`. `From<Brush>`, `From<Color>`, and `From<&str>` preserve existing concrete DSL forms.
+The semantic Brush surface is deliberately limited to the existing `foreground`, `background`, `fill`, and `stroke` DSL properties. Capability is declared beside the property rather than inferred from those spellings: ordinary class properties use `#[prop(semantic_brush, ..)]`, while `#[text_style]` marks its injected `foreground` field as semantic-brush capable. Same-crate `TypeInfo` retains this marker; cross-crate builtin use defers both the capability query and value application to `__elwindui_props_{Name}!(@is_semantic_brush ..)` / `@set_with_environment`. Therefore an unrelated user property named `fill` or `foreground` keeps its declared type and setter semantics.
+
+The concrete Rust setters stay `Option<Brush>`-shaped. At construction and resync, generated code converts only a marked property's authored expression through `Into<BrushStyle>`, resolves it against the node's effective mount-time context, calls the existing setter for `ResolvedValue::Value`, and calls the existing `@clear`/`clear_*` path for `PlatformDefault`. `From<Brush>`, `From<Color>`, and `From<&str>` preserve existing concrete DSL forms.
 
 An `EnvironmentScope` marker's derived context is retained in a generated `OnceCell<EnvironmentContext>` so later semantic resync uses the same scope rather than the component's outer context. Scope override expressions are replayed before child property resync when a component dependency changes.
 

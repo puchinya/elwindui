@@ -100,15 +100,25 @@ git fetch origin "$DEFAULT_BRANCH"
 git fetch origin "$BRANCH_NAME" 2>/dev/null || true
 
 CURRENT_BRANCH="$(git branch --show-current)"
+BRANCH_CHANGED=0
 
 if [[ "$CURRENT_BRANCH" == "$BRANCH_NAME" ]]; then
   :
 elif git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
   git switch "$BRANCH_NAME"
+  BRANCH_CHANGED=1
 elif git show-ref --verify --quiet "refs/remotes/origin/$BRANCH_NAME"; then
   git switch --track -c "$BRANCH_NAME" "origin/$BRANCH_NAME"
+  BRANCH_CHANGED=1
 else
   git switch -c "$BRANCH_NAME" "origin/$DEFAULT_BRANCH"
+  BRANCH_CHANGED=1
+fi
+
+# Branch switches accumulate stale target/ build artifacts across feature
+# branches; clean them here rather than leaving disk usage to grow unbounded.
+if [[ "$BRANCH_CHANGED" -eq 1 ]] && command -v cargo >/dev/null 2>&1; then
+  cargo clean
 fi
 
 printf '%s\n' "$BRANCH_NAME"

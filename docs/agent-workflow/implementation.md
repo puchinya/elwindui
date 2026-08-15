@@ -12,7 +12,8 @@ Before editing:
    - name it `feature/<issue-number>-<short-slug>`;
    - create it from the current remote default branch;
    - never edit source code directly on the default branch;
-   - use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` on macOS/Linux or `scripts/agent/start-feature-branch.ps1 <issue-number> <short-description>` in PowerShell.
+   - use `scripts/agent/start-feature-branch.sh <issue-number> <short-description>` on macOS/Linux or `scripts/agent/start-feature-branch.ps1 <issue-number> <short-description>` in PowerShell;
+   - the script runs `cargo clean` automatically whenever it actually switches branches, to avoid accumulating stale `target/` build artifacts across feature branches.
 4. Documentation-only or workflow-only changes may use a `docs/` or `agent/` branch instead.
 5. Replace `phase:ready` with `phase:implementation`.
 6. Classify the change using the synchronization table in the root [`AGENTS.md`](../../AGENTS.md) and confirm that every required upstream spec/design update has been approved before code is edited.

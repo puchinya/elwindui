@@ -1,6 +1,6 @@
 # ElwindUI implementation status
 
-Snapshot: 2026-08-14. Desired behavior is defined by [`../specs/README.md`](../specs/README.md).
+Snapshot: 2026-08-15. Desired behavior is defined by [`../specs/README.md`](../specs/README.md).
 
 Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
@@ -17,7 +17,7 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 | Static diagnostics | 🚧 | main DSL validations exist; cross-file resolution and some planned rules are absent |
 | Class hierarchy macro | ✅ | ordinary/root/trait-only/struct-only forms are used throughout core/backends |
 | UI tree, layout, routed events, focus | ✅ | core tests and AppKit runtime examples cover the implemented model |
-| Window lifecycle (mount/show/hide/close) | ✅ | a `Window`-rooted component's `new()` no longer builds its content; first `show()` implicitly mounts it into `application_environment()` and builds exactly once; repeated `show()` does not rebuild; `hide()` is visibility-only; `close()` cancels the Window's own top-level Environment subscriptions and releases the native window (no recursive descendant-Component unmount cascade yet) — AppKit and WinUI3 are implemented and tested, including WinUI3 native visibility and `Closed`-event retain-list cleanup ([#80](https://github.com/puchinya/elwindui/issues/80), [#125](https://github.com/puchinya/elwindui/issues/125)) |
+| Window lifecycle and presentation | ✅ | mount/show/hide/close behavior remains implemented; `transparent` and `always_on_top` default false and map to AppKit `NSWindow` plus WinUI 3 root/presenter state ([#80](https://github.com/puchinya/elwindui/issues/80), [#125](https://github.com/puchinya/elwindui/issues/125), [#150](https://github.com/puchinya/elwindui/issues/150)) |
 | Component lifecycle hooks | ✅ | `new()`/`mount(environment)`/build are separate generated phases (`docs/design/runtime/component_lifecycle_design.md`); `on_mount` fires after the component's own view builds and its children have mounted; `on_update(field, ...)` dispatches through the existing property-changed subscription machinery, excluding the initial construction-time value-set; `on_unmount` is wired for `Window`-rooted components' own `close()` (top-level subscriptions/native release only — no recursive descendant-Component unmount cascade yet) ([#80](https://github.com/puchinya/elwindui/issues/80), done) |
 | ReactiveGraph fallback API | ✅ | the unreachable `SignalId`/`ReactiveGraph` stub (no constructor, no callers anywhere in the workspace) was removed from `crates/elwindui-core/src/reactive.rs`; dependency tracking and change notification for `#[computed]`/`#[async_computed]`/`#[bindable]` fields continue to be handled entirely by `elwindui-codegen`'s static analysis plus `Subscription`/`ObservableExt` in the same file, which are unaffected ([#81](https://github.com/puchinya/elwindui/issues/81), done) |
 | Global store / async computed | 🚧 | `#[elwindui::store] mod Name { .. }` (`Item::Store`/`StoreDef`, same field vocabulary as `viewmodel`), the process-wide `EnvironmentContext`-backed singleton (`Name::instance()`), and `#[async_computed(expr = ..)]` on both `viewmodel` and `store` (generation-counter "supersede, not cancel", `AsyncComputed<T>` `Loading`/`Ready`/`Failed` getter) are implemented and tested end-to-end, including a real cross-thread supersede (`crates/elwindui/tests/store_and_async_computed.rs`); `#[elwindui::main]` auto-installs a background `tokio` runtime (`elwindui_core::task::install_background_runtime`/`spawn_background`, verified against a genuinely suspending future by `crates/elwindui-core/tests/spawn_local_cross_thread_wake.rs`); validation rule 20 (`#[async_computed]` viewmodel/store-only) is implemented. **Not yet implemented**: the `view!`-side bare `TypeName.field` store-reference syntax and its auto-subscription codegen (dsl_spec.md §3), and validation rules 12 (store field-reference resolution, which checks exactly that unimplemented syntax) and 13 (`#[param]` isolation from store/viewmodel fields) — a store's fields can be read today from ordinary Rust code (`Name::instance().field()`, e.g. inside an action or `on_click`), just not yet bare-referenced directly inside a `view! { .. }` attribute expression. `#[undoable]`/undo-redo has been removed from the contract entirely (not deferred — ElwindUI does not support declarative undo/redo, matching SwiftUI's `UndoManager`-bridge approach); dsl_spec.md §13 rule 21 is retired (`(欠番)`) ([#82](https://github.com/puchinya/elwindui/issues/82)) |
@@ -38,7 +38,7 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 ## Samples
 
-`control-template-demo`, `controls-demo`, `font-demo`, `graphics-demo`, `inheritance-demo`, `notepad`, `theme-demo`, and `viewmodel-attr-demo` exercise the implemented public surface. A sample demonstrates usage but is not itself normative evidence.
+`control-template-demo`, `controls-demo`, `font-demo`, `graphics-demo`, `inheritance-demo`, `mascot-demo`, `notepad`, `theme-demo`, and `viewmodel-attr-demo` exercise the implemented public surface. A sample demonstrates usage but is not itself normative evidence.
 
 ## Primary gaps
 

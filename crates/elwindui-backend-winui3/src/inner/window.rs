@@ -9,11 +9,13 @@ use std::cell::Cell;
 use std::rc::Rc;
 use windows::Graphics::{PointInt32, SizeInt32};
 use windows::core::HSTRING;
+use windows::core::Interface;
 
 pub(crate) struct InnerWindow {
     xaml: XamlWindow,
     content_host: TreeHostPanel,
     retained: Cell<bool>,
+    always_on_top: Cell<bool>,
 }
 
 impl InnerWindow {
@@ -25,6 +27,7 @@ impl InnerWindow {
             xaml,
             content_host,
             retained: Cell::new(false),
+            always_on_top: Cell::new(false),
         }
     }
 
@@ -33,6 +36,27 @@ impl InnerWindow {
     /// gets reflected into real XAML elements.
     pub(crate) fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
         self.content_host.set_tree(content);
+    }
+
+    pub(crate) fn set_transparent(&self, transparent: bool) {
+        self.content_host.set_transparent_background(transparent);
+    }
+
+    pub(crate) fn set_always_on_top(&self, always_on_top: bool) {
+        self.always_on_top.set(always_on_top);
+        self.apply_always_on_top();
+    }
+
+    fn apply_always_on_top(&self) {
+        use crate::bindings::Microsoft::UI::Windowing::OverlappedPresenter;
+
+        if let Some(presenter) = self
+            .app_window()
+            .and_then(|window| window.Presenter().ok())
+            .and_then(|presenter| presenter.cast::<OverlappedPresenter>().ok())
+        {
+            let _ = presenter.SetIsAlwaysOnTop(self.always_on_top.get());
+        }
     }
 
     pub(crate) fn set_title(&self, title: &str) {
@@ -87,6 +111,7 @@ impl InnerWindow {
 
     /// Shows the window and retains its native wrapper until WinUI reports that it closed.
     pub(crate) fn show(&self) {
+        self.apply_always_on_top();
         if !self.retained.replace(true) {
             crate::app::retain_window(&self.xaml);
         }

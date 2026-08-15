@@ -14,6 +14,8 @@ This boundary is load-bearing: replacing the shim requires a separately approved
 
 Tree hosts own XAML roots, ElwindUI owner mappings, viewport layout, activation, and native child reconciliation. WinUI widgets remain leaves selected by the common NativeControl design.
 
+`Window.transparent` sets or clears a transparent background on the root `TreeHostPanel` without changing decorations. `Window.always_on_top` is retained by `InnerWindow` and applied to the `AppWindow`'s `OverlappedPresenter`; `show()` reapplies it so a pre-activation setter is not lost while the native presenter is being established.
+
 Arrange writes explicit `Width` / `Height` for Canvas positioning. Before every natural `Measure`, the adapter resets both values to `NaN` (`Auto`), invalidates native measure, and then measures with the current constraint. This prevents arrange-time sizes from becoming a self-reinforcing natural-size cache.
 
 ## Rendering

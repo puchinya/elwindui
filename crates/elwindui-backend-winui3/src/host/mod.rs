@@ -378,6 +378,25 @@ impl TreeHostPanel {
             .expect("Canvas must be a FrameworkElement")
     }
 
+    pub(crate) fn set_transparent_background(&self, transparent: bool) {
+        use crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
+        use windows::UI::Color;
+
+        if transparent {
+            if let Ok(brush) = SolidColorBrush::new() {
+                let _ = brush.SetColor(Color {
+                    A: 0,
+                    R: 0,
+                    G: 0,
+                    B: 0,
+                });
+                let _ = self.canvas.SetBackground(&brush);
+            }
+        } else if let Ok(property) = Canvas::BackgroundProperty() {
+            let _ = self.canvas.ClearValue(&property);
+        }
+    }
+
     /// Forces an immediate, synchronous relayout pass against `canvas`'s *current*
     /// `ActualWidth`/`ActualHeight` — for hosts whose size is pushed in explicitly (e.g. a
     /// `TabViewItem`'s own content `Canvas`, sized by `native_ui::TabView`/`InnerTabView` rather

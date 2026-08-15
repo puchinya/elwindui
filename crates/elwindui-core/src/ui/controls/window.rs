@@ -24,6 +24,8 @@ use super::*;
 #[prop(menu_bar: Option<std::rc::Rc<dyn crate::ui::MenuBarExt>>)]
 #[content(content)]
 #[prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
+#[prop(transparent: bool)]
+#[prop(always_on_top: bool)]
 #[prop(onetime, left: Option<f32>)]
 #[prop(onetime, top: Option<f32>)]
 #[prop(onetime, width: Option<f32>)]
@@ -32,6 +34,12 @@ pub trait Window {
     fn set_title(&self, title: &str);
     fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>);
     fn set_content(&self, content: Rc<dyn UIElementExt>);
+    /// Enables or disables an alpha-capable client surface.
+    ///
+    /// Transparent pixels reveal windows behind this one; native window decorations are unchanged.
+    fn set_transparent(&self, transparent: bool);
+    /// Pins this window above normal application windows, or restores normal Z-order when false.
+    fn set_always_on_top(&self, always_on_top: bool);
     fn show(&self);
     /// Visibility only: the mounted subtree, Environment subscriptions, and state all remain alive.
     /// A subsequent `show()` makes the window visible again without remounting/rebuilding

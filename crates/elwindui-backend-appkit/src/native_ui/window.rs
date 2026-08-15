@@ -44,6 +44,14 @@ impl Window {
         *self.content.borrow_mut() = Some(content);
     }
 
+    fn set_transparent(&self, transparent: bool) {
+        self.inner.set_transparent(transparent);
+    }
+
+    fn set_always_on_top(&self, always_on_top: bool) {
+        self.inner.set_always_on_top(always_on_top);
+    }
+
     fn show(&self) {
         self.inner.show();
     }

@@ -114,6 +114,7 @@ Invoke-Checked git @('fetch', 'origin', $defaultBranch) | Out-Null
 # A missing remote feature branch is expected and is not an error.
 
 $currentBranch = Invoke-Checked git @('branch', '--show-current')
+$branchChanged = $false
 
 if ($currentBranch -eq $branchName) {
     # Already on the requested branch.
@@ -138,6 +139,13 @@ else {
             'switch', '-c', $branchName, "origin/$defaultBranch"
         ) | Out-Null
     }
+    $branchChanged = $true
+}
+
+# Branch switches accumulate stale target/ build artifacts across feature
+# branches; clean them here rather than leaving disk usage to grow unbounded.
+if ($branchChanged -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    Invoke-Checked cargo @('clean') | Out-Null
 }
 
 Write-Output $branchName

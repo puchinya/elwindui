@@ -60,7 +60,7 @@ fn type_checked_new_show_hide_close_usage() {
     window.close(); // ends the mount lifetime; releases the native window
 }
 
-#[cfg(feature = "backend-winui3")]
+#[cfg(all(feature = "backend-winui3", target_os = "windows"))]
 #[test]
 fn winui3_show_hide_show_builds_once_and_close_exits() {
     elwindui::init().expect("initialize WinUI3");

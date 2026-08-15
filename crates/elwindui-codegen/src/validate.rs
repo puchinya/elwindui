@@ -246,10 +246,8 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                             // the generated `environment_key_type` call site instead (see that
                             // function's own doc comment).
                             if crate_prefix.is_none()
-                                && crate::component_frontend::lookup_same_crate_environment_key(
-                                    key_name,
-                                )
-                                .is_none()
+                                && crate::component_frontend::lookup_environment_key(key_name)
+                                    .is_none()
                             {
                                 errors.push(format!(
                                     "{}.{}: #[environment({key_name})] references an Environment \

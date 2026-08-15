@@ -10,7 +10,7 @@
 //! See `docs/specs/theme_environment_spec.md` §3/§4 and
 //! `docs/design/runtime/theme_environment_design.md` (`## Theme`).
 
-use crate::component_frontend::lookup_same_crate_environment_key;
+use crate::component_frontend::lookup_environment_key;
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
@@ -81,7 +81,7 @@ pub fn generate_theme_from_item_struct(
             return Err(format!("duplicate theme field `{ident}`"));
         }
         let value = field_value_expr(field)?;
-        let (key_type_name, _value_type) = lookup_same_crate_environment_key(&ident.to_string())
+        let (key_type_name, _value_type) = lookup_environment_key(&ident.to_string())
             .ok_or_else(|| {
                 format!(
                     "`{ident}`: no `#[elwindui::environment_key(name = {ident}, ..)]` was declared \

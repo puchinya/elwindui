@@ -27,7 +27,7 @@
 ## 4. Theme definition
 
 - `#[elwindui::theme] struct Name { #[theme(value = expr)] field: Type, .. }` はTheme Presetを生成する公開定義方法である。
-- 各fieldの識別子は、同一crate内で先に宣言された `#[elwindui::environment_key(name = <field識別子>, ..)]` のKeyへ解決される。解決できないfield名はcompile-time errorとなる(`#[environment(name)]` と同じ解決規則、[`dsl_spec.md`](dsl_spec.md) §13参照)。
+- 各fieldの識別子は、同一crate内で先に宣言された `#[elwindui::environment_key(name = <field識別子>, ..)]` のKeyへ解決される。Semantic Styleの組み込みKey名(§7)は宣言不要でframework Keyへ解決される。それ以外の解決できないfield名はcompile-time errorとなる(`#[environment(name)]` と同じ解決規則、[`dsl_spec.md`](dsl_spec.md) §13参照)。
 - `value` 式の型はそのKeyの `Value` 型と一致しなければならない。不一致はcompile-time errorとなる。
 - Themeはvariantを持たない。異なる見た目ごとに別個の `#[elwindui::theme]` 型(またはインスタンス)を定義する。「切り替え」は同一 `EnvironmentContext` へ別のTheme instanceを適用することであり、1つの型が持つvariant selectionではない。
 
@@ -41,3 +41,106 @@
 
 - Theme適用の効果はEnvironment値のoverrideとして観測される。公開propertyの意味はTheme適用によって変化しない。
 - NativeControlの既定外観(背景色・フォント等)はThemeの適用対象ではない。ElwindUIはNativeControlへ既定のnative外観以外の値を自動供給しない(#96時点)。個別のNative Control外観のEnvironment経由での上書きは別仕様(Native Style / Control Style)の対象である。
+
+## 7. Semantic Style
+
+具体的な[`Brush`](graphics_spec.md#5-brush)と、UI上の意味を表すbrush指定を分離する。
+
+```rust
+pub enum BrushStyle {
+    Value(Brush),
+    Primary,
+    Secondary,
+    Tertiary,
+    Foreground,
+    Background,
+    WindowBackground,
+    Tint,
+    Selection,
+    Separator,
+    Placeholder,
+    Link,
+    PlatformDefault,
+}
+```
+
+- `BrushStyle::Value` は指定された具体的な`Brush`をそのまま表す。
+- 各semantic variantは同名のframework組み込みEnvironment Keyから現在値を読む。組み込みKeyの`Value`型は`BrushStyle`、未override時のdefaultは`BrushStyle::PlatformDefault`である。
+- 組み込みKey名は `primary` / `secondary` / `tertiary` / `foreground` / `background` / `window_background` / `tint` / `selection` / `separator` / `placeholder` / `link` とする。これらは `#[environment(name)]`、`EnvironmentScope`、`#[elwindui::theme]` から同一crate内のKey宣言なしで利用できる。
+- Environment値は別のsemantic variantを参照してよい。解決は`Value`または`PlatformDefault`へ到達するまで再帰し、循環参照はpanic・無限再帰ではなく`PlatformDefault`へ解決する。
+- `BrushStyle::resolve(&EnvironmentContext) -> ResolvedValue<Brush>` は、引数で明示されたeffective Environmentだけを読む。application-globalなambient lookupは行わない。
+
+## 8. ResolvedValue and Brush properties
+
+```rust
+pub enum ResolvedValue<T> {
+    Value(T),
+    PlatformDefault,
+}
+```
+
+- `ResolvedValue::PlatformDefault` はcoreで固定値へmaterializeしない。Native propertyではbackend/toolkitのclear/default経路へ渡し、self-drawn propertyではそのproperty固有の既定(clear)状態へ戻す。
+- `view!` の既存Brush系property `foreground` / `background` / `fill` / `stroke` は`BrushStyle`を受け付け、Componentのmount-time effective Environmentから解決する。
+- semantic Brush propertyを含むmount済みComponentは組み込みsemantic Keyの変更を購読し、同じeffective Environmentからpropertyを再解決する。`EnvironmentScope`内ではその派生Contextを用いる。
+- 既存の`Brush`、`Color`、16進文字列カラー指定は`BrushStyle::Value`相当として引き続き利用できる。
+- Rust setterの既存concrete `Brush` contractは変更しない。Semantic Styleからconcrete setter/clearへの変換はDSL codegen境界で行う。
+
+## 9. 使用例
+
+組み込みKeyは事前宣言せず、そのままTheme fieldと`view!`から利用できる。
+
+```rust
+use elwindui::core::environment::application_environment;
+use elwindui::core::graphics::{Brush, Color};
+use elwindui::core::theme::{BrushStyle, Theme};
+
+#[elwindui::theme]
+struct LightTheme {
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::white())))]
+    background: BrushStyle,
+    #[theme(value = BrushStyle::Value(Brush::Solid(Color::black())))]
+    foreground: BrushStyle,
+    // semantic role同士をaliasできる。
+    #[theme(value = BrushStyle::Foreground)]
+    primary: BrushStyle,
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct MyView {
+    body: view! {
+        VerticalLayout {
+            background: BrushStyle::Background,
+            TextBlock {
+                text: "Hello",
+                foreground: BrushStyle::Foreground,
+            }
+            Rectangle {
+                fill: BrushStyle::Primary,
+                stroke: BrushStyle::Separator,
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl MyView {}
+
+fn build_view() -> std::rc::Rc<MyView> {
+    LightTheme.apply(&application_environment());
+    MyView::new()
+}
+```
+
+subtreeだけを上書きする場合は`EnvironmentScope`を用いる。外側のThemeを変更しても、scope内の`primary` overrideは維持される。
+
+```rust
+body: view! {
+    EnvironmentScope {
+        primary: BrushStyle::Value("#ff0066".into()),
+        TextBlock {
+            text: "Scoped accent",
+            foreground: BrushStyle::Primary,
+        }
+    }
+}
+```

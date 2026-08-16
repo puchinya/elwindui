@@ -343,19 +343,93 @@ impl ContextMenuService {
         work_area: Rect,
     ) -> Rc<dyn PopupSurfaceHandle> {
         let content = template.build(PopupContentContext { environment });
-        crate::ui::layout_root(
-            &content,
-            Size {
-                width: work_area.width,
-                height: work_area.height,
-            },
-        );
+        content.measure(Size {
+            width: work_area.width,
+            height: work_area.height,
+        });
+        let measured = content.measured_size().unwrap_or(Size {
+            width: 200.0,
+            height: 200.0,
+        });
         let popup_size = Size {
-            width: content.arranged_width().unwrap_or(200.0).max(1.0),
-            height: content.arranged_height().unwrap_or(200.0).max(1.0),
+            width: measured.width.max(1.0),
+            height: measured.height.max(1.0),
         };
         let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
         host.show_popup(content, position, popup_size)
+    }
+
+    /// Opens a custom-rendered standard menu on the provided popup host.
+    pub fn open_custom_menu(
+        host: &dyn PopupHost,
+        menu: &dyn MenuExt,
+        anchor: &PopupAnchor,
+        work_area: Rect,
+    ) -> Rc<dyn PopupSurfaceHandle> {
+        let handle_cell: Rc<std::cell::RefCell<Option<Rc<dyn PopupSurfaceHandle>>>> =
+            Rc::new(std::cell::RefCell::new(None));
+        let handle_weak = Rc::downgrade(&handle_cell);
+
+        let on_close: Rc<dyn Fn()> = Rc::new(move || {
+            if let Some(cell) = handle_weak.upgrade() {
+                if let Some(handle) = cell.borrow().as_ref() {
+                    handle.close();
+                }
+            }
+        });
+
+        let content = ContextMenuPresenter::build_menu_view(menu, on_close);
+        content.measure(Size {
+            width: work_area.width,
+            height: work_area.height,
+        });
+        let measured = content.measured_size().unwrap_or(Size {
+            width: 180.0,
+            height: 100.0,
+        });
+        let popup_size = Size {
+            width: measured.width.max(1.0),
+            height: measured.height.max(1.0),
+        };
+        let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
+        let handle = host.show_popup(content, position, popup_size);
+        *handle_cell.borrow_mut() = Some(Rc::clone(&handle));
+        handle
+    }
+}
+
+/// Default presenter that builds an ElwindUI custom-rendered `UIElement` tree from a [`MenuExt`].
+pub struct ContextMenuPresenter;
+
+impl ContextMenuPresenter {
+    /// Builds a custom-rendered context menu UIElement tree for a menu.
+    /// When an item is clicked, `on_close` is invoked to dismiss the popup surface.
+    pub fn build_menu_view(
+        menu: &dyn MenuExt,
+        on_close: Rc<dyn Fn()>,
+    ) -> Rc<dyn UIElementExt> {
+        let layout = crate::ui::VerticalLayout::new();
+        layout.set_margin(4.0);
+
+        for _item in menu.items().to_vec() {
+            let row = crate::ui::HorizontalLayout::new();
+            row.set_margin(2.0);
+
+            let label = crate::ui::TextBlock::new();
+            crate::ui::LayoutExt::children(&*row).add(Rc::clone(&label) as Rc<dyn UIElementExt>);
+
+            let close_cb = Rc::clone(&on_close);
+            row.register_routed_handler::<crate::input::PointerEventArgs>(
+                "on_pointer_pressed",
+                Box::new(move |_args, _routed| {
+                    close_cb();
+                }),
+            );
+
+            crate::ui::LayoutExt::children(&*layout).add(row as Rc<dyn UIElementExt>);
+        }
+
+        layout as Rc<dyn UIElementExt>
     }
 }
 
@@ -489,6 +563,37 @@ mod tests {
         let (_, pos, size) = &host.shown.borrow()[0];
         assert_eq!(*pos, Point { x: 50.0, y: 50.0 });
         assert_eq!(*size, Size { width: 120.0, height: 80.0 });
+
+        assert!(!host.closed.get());
+        handle.close();
+        assert!(host.closed.get());
+    }
+
+    #[test]
+    fn open_custom_menu_measures_and_displays_on_host() {
+        let host = FakePopupHost::new();
+        let menu = FakeMenu::new();
+
+        let anchor = PopupAnchor::Point(Point { x: 100.0, y: 100.0 });
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 768.0,
+        };
+
+        let handle = ContextMenuService::open_custom_menu(
+            &host,
+            &*menu,
+            &anchor,
+            work_area,
+        );
+
+        assert_eq!(host.shown.borrow().len(), 1);
+        let (_, pos, size) = &host.shown.borrow()[0];
+        assert_eq!(*pos, Point { x: 100.0, y: 100.0 });
+        assert!(size.width > 0.0);
+        assert!(size.height > 0.0);
 
         assert!(!host.closed.get());
         handle.close();

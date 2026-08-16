@@ -277,6 +277,9 @@ impl MenuItem {
         }
     }
 
+    fn text(&self) -> String {
+        self.inner.text()
+    }
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
@@ -288,5 +291,8 @@ impl MenuItem {
     }
     fn set_on_select(&self, callback: Box<dyn Fn()>) {
         self.inner.set_on_select(callback);
+    }
+    fn select(&self) {
+        self.inner.select();
     }
 }

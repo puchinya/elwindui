@@ -71,6 +71,16 @@ impl InnerMenuItem {
         }
     }
 
+    pub(crate) fn text(&self) -> String {
+        self.xaml.Text().map(|h| h.to_string()).unwrap_or_default()
+    }
+
+    pub(crate) fn select(&self) {
+        if let Some(callback) = self.on_select.borrow().as_ref() {
+            callback();
+        }
+    }
+
     pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
         *self.on_select.borrow_mut() = Some(callback);
     }

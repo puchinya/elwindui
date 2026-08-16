@@ -282,6 +282,9 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            if let Some(prev) = self.ivars().active_popup.borrow_mut().take() {
+                prev.close();
+            }
             self.dispatch_pointer(event, RawPointerEventKind::Pressed(MouseButton::Left));
         }
 
@@ -380,6 +383,9 @@ impl TreeHostView {
         ) else {
             return std::ptr::null_mut();
         };
+        if let Some(prev) = self.ivars().active_popup.borrow_mut().take() {
+            prev.close();
+        }
         match resolved.definition {
             ResolvedContextDefinition::Menu { menu, presentation } => {
                 match presentation {

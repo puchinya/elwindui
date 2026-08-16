@@ -19,11 +19,17 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::input::Key;
-use elwindui::core::ui::{CheckState, ContextMenuPresentation};
+use elwindui::core::ui::{
+    CheckState, ContextMenuPresentation, LayoutExt, PopupContentTemplate, TextBlockExt,
+    UIElementExt,
+};
 
 #[elwindui::viewmodel]
 mod controls_demo_view_model {
-    use super::{CheckState, Key};
+    use super::{
+        CheckState, ContextMenuPresentation, Key, LayoutExt, PopupContentTemplate, TextBlockExt,
+        TextStyleOwner, UIElementExt,
+    };
 
     struct ControlsDemoViewModel {
         // `<=>` installs `TabView`'s typed selected-index write-back callback; a chip click updates
@@ -82,6 +88,17 @@ mod controls_demo_view_model {
             else { "(none)".to_string() }
         })]
         radio_selected_label: String,
+
+        #[computed(expr = Some(PopupContentTemplate::new(|_ctx| {
+            let layout = elwindui::core::ui::VerticalLayout::new();
+            layout.set_margin(12.0);
+            let text = elwindui::core::ui::TextBlock::new();
+            text.set_text("✨ Rich Context Popup (Custom UIElement)");
+            text.text_style.set_foreground(Some(elwindui::core::graphics::Color::rgb(20, 20, 25).into()));
+            LayoutExt::children(&*layout).add(text as std::rc::Rc<dyn UIElementExt>);
+            layout as std::rc::Rc<dyn UIElementExt>
+        })))]
+        custom_popup_template: Option<PopupContentTemplate>,
 
         // A second logical group under the same native parent catches WinUI's implicit
         // parent-based grouping: changing this pair must never clear the `size` group above.
@@ -596,6 +613,16 @@ struct ControlsDemoWindow {
                                     }
                                 }
                                 context_menu_presentation: ContextMenuPresentation::Custom
+                            }
+                        }
+
+                        TextBlock { text: "3. Custom Context Popup (arbitrary UIElement subtree):" }
+                        VerticalLayout {
+                            margin: 4.0
+                            TextBlock {
+                                margin: 8.0
+                                text: "【Custom Context Popup Target — Right-click here】"
+                                context_popup: vm.custom_popup_template
                             }
                         }
                     }

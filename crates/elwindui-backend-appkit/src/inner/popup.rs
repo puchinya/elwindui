@@ -32,8 +32,9 @@ impl InnerPopupSurface {
         size: Size,
     ) -> Rc<Self> {
         let m = mtm();
+        let bottom_y = (position.y - size.height) as f64;
         let content_rect = NSRect::new(
-            NSPoint::new(position.x as f64, position.y as f64),
+            NSPoint::new(position.x as f64, bottom_y),
             NSSize::new(size.width as f64, size.height as f64),
         );
         let style = NSWindowStyleMask::Borderless;
@@ -52,7 +53,7 @@ impl InnerPopupSurface {
         window.setLevel(NSFloatingWindowLevel + 2);
         window.setOpaque(false);
         window.setHasShadow(true);
-        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        window.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
 
         let content_host = TreeHostView::new();
         content_host.setTranslatesAutoresizingMaskIntoConstraints(true);
@@ -69,7 +70,9 @@ impl InnerPopupSurface {
             is_open: RefCell::new(true),
         });
 
+        surface.window.makeKeyAndOrderFront(None);
         surface.window.orderFrontRegardless();
+        surface.window.display();
         surface
     }
 

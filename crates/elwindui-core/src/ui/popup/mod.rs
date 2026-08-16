@@ -5,7 +5,7 @@
 use crate::base::{Point, Rect, Size};
 use crate::environment::EnvironmentContext;
 use crate::focus::FocusTracker;
-use crate::ui::{MenuExt, UIElementExt};
+use crate::ui::{LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt};
 use std::rc::Rc;
 
 /// The presentation mode for a standard [`crate::ui::Menu`]-backed context menu.
@@ -410,18 +410,23 @@ impl ContextMenuPresenter {
     ) -> Rc<dyn UIElementExt> {
         let layout = crate::ui::VerticalLayout::new();
         layout.set_margin(4.0);
+        layout.set_background(Some(crate::graphics::Color::rgb(45, 45, 48).into()));
 
-        for _item in menu.items().to_vec() {
+        for item in menu.items().to_vec() {
             let row = crate::ui::HorizontalLayout::new();
-            row.set_margin(2.0);
+            row.set_margin(4.0);
 
             let label = crate::ui::TextBlock::new();
+            label.set_text(&item.text());
+            label.set_foreground(Some(crate::graphics::Color::rgb(240, 240, 240).into()));
             crate::ui::LayoutExt::children(&*row).add(Rc::clone(&label) as Rc<dyn UIElementExt>);
 
+            let item_clone = Rc::clone(&item);
             let close_cb = Rc::clone(&on_close);
             row.register_routed_handler::<crate::input::PointerEventArgs>(
                 "on_pointer_pressed",
                 Box::new(move |_args, _routed| {
+                    item_clone.select();
                     close_cb();
                 }),
             );

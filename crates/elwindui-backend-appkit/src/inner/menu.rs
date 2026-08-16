@@ -52,6 +52,16 @@ impl InnerMenuItem {
             .setKeyEquivalent(&NSString::from_str(key_equivalent));
     }
 
+    pub(crate) fn text(&self) -> String {
+        self.ns.title().to_string()
+    }
+
+    pub(crate) fn select(&self) {
+        if let Some(target) = self.target_storage.borrow().as_ref() {
+            (target.ivars().callback)();
+        }
+    }
+
     pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
         let target = MenuItemTarget::new(MenuItemTargetIvars { callback });
         unsafe {

@@ -378,6 +378,10 @@ impl TreeHostPanel {
             .expect("Canvas must be a FrameworkElement")
     }
 
+    pub(crate) fn canvas(&self) -> &Canvas {
+        &self.canvas
+    }
+
     pub(crate) fn set_transparent_background(&self, transparent: bool) {
         use crate::bindings::Microsoft::UI::Xaml::Media::SolidColorBrush;
         use windows::UI::Color;

@@ -6,6 +6,7 @@ use crate::base::{Point, Rect, Size};
 use crate::environment::EnvironmentContext;
 use crate::focus::FocusTracker;
 use crate::ui::{LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// The presentation mode for a standard [`crate::ui::Menu`]-backed context menu.
@@ -342,7 +343,10 @@ impl ContextMenuService {
         environment: EnvironmentContext,
         work_area: Rect,
     ) -> Rc<dyn PopupSurfaceHandle> {
-        let content = template.build(PopupContentContext { environment });
+        let content = template.build(PopupContentContext {
+            environment: environment.clone(),
+        });
+        content.set_environment_context(environment);
         content.measure(Size {
             width: work_area.width,
             height: work_area.height,
@@ -403,7 +407,7 @@ pub struct ContextMenuPresenter;
 
 impl ContextMenuPresenter {
     /// Builds a custom-rendered context menu UIElement tree for a menu.
-    /// When an item is clicked, `on_close` is invoked to dismiss the popup surface.
+    /// When an item is selected or dismissed, `on_close` is invoked.
     pub fn build_menu_view(
         menu: &dyn MenuExt,
         on_close: Rc<dyn Fn()>,
@@ -411,28 +415,170 @@ impl ContextMenuPresenter {
         let layout = crate::ui::VerticalLayout::new();
         layout.set_margin(4.0);
         layout.set_background(Some(crate::graphics::Color::rgb(45, 45, 48).into()));
+        layout.set_tab_stop(true);
 
-        for item in menu.items().to_vec() {
+        let items = menu.items().to_vec();
+        let rows: Rc<RefCell<Vec<Rc<crate::ui::HorizontalLayout>>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let selected_index: Rc<std::cell::Cell<Option<usize>>> =
+            Rc::new(std::cell::Cell::new(None));
+
+        let rows_for_highlight = Rc::clone(&rows);
+        let items_for_highlight = items.clone();
+        let selected_for_highlight = Rc::clone(&selected_index);
+        let update_highlight = Rc::new(move || {
+            let sel = selected_for_highlight.get();
+            let rows_borrow = rows_for_highlight.borrow();
+            for (i, row) in rows_borrow.iter().enumerate() {
+                let enabled = items_for_highlight.get(i).map(|it| it.enabled()).unwrap_or(true);
+                if enabled && sel == Some(i) {
+                    row.set_background(Some(crate::graphics::Color::rgb(0, 120, 215).into()));
+                } else {
+                    row.set_background(Some(crate::graphics::Color::transparent().into()));
+                }
+            }
+        });
+
+        for (i, item) in items.iter().enumerate() {
             let row = crate::ui::HorizontalLayout::new();
             row.set_margin(4.0);
 
+            let enabled = item.enabled();
+
             let label = crate::ui::TextBlock::new();
             label.set_text(&item.text());
-            label.set_foreground(Some(crate::graphics::Color::rgb(240, 240, 240).into()));
+            let text_color = if enabled {
+                crate::graphics::Color::rgb(240, 240, 240)
+            } else {
+                crate::graphics::Color::rgb(128, 128, 128)
+            };
+            label.set_foreground(Some(text_color.into()));
             crate::ui::LayoutExt::children(&*row).add(Rc::clone(&label) as Rc<dyn UIElementExt>);
 
-            let item_clone = Rc::clone(&item);
-            let close_cb = Rc::clone(&on_close);
-            row.register_routed_handler::<crate::input::PointerEventArgs>(
-                "on_pointer_pressed",
-                Box::new(move |_args, _routed| {
-                    item_clone.select();
-                    close_cb();
-                }),
-            );
+            if let Some(shortcut_str) = item.shortcut() {
+                let shortcut_label = crate::ui::TextBlock::new();
+                shortcut_label.set_text(&format!("   {}", shortcut_str));
+                let sc_color = if enabled {
+                    crate::graphics::Color::rgb(160, 160, 160)
+                } else {
+                    crate::graphics::Color::rgb(100, 100, 100)
+                };
+                shortcut_label.set_foreground(Some(sc_color.into()));
+                crate::ui::LayoutExt::children(&*row).add(Rc::clone(&shortcut_label) as Rc<dyn UIElementExt>);
+            }
 
+            let item_clone = Rc::clone(item);
+            let close_cb = Rc::clone(&on_close);
+            let sel_cell = Rc::clone(&selected_index);
+            let highlight_cb = Rc::clone(&update_highlight);
+
+            if enabled {
+                let sel_enter = Rc::clone(&sel_cell);
+                let hl_enter = Rc::clone(&highlight_cb);
+                row.register_routed_handler::<crate::input::PointerEventArgs>(
+                    "on_pointer_entered",
+                    Box::new(move |_args, _routed| {
+                        sel_enter.set(Some(i));
+                        hl_enter();
+                    }),
+                );
+
+                let sel_exit = Rc::clone(&sel_cell);
+                let hl_exit = Rc::clone(&highlight_cb);
+                row.register_routed_handler::<crate::input::PointerEventArgs>(
+                    "on_pointer_exited",
+                    Box::new(move |_args, _routed| {
+                        if sel_exit.get() == Some(i) {
+                            sel_exit.set(None);
+                            hl_exit();
+                        }
+                    }),
+                );
+
+                row.register_routed_handler::<crate::input::PointerEventArgs>(
+                    "on_pointer_released",
+                    Box::new(move |_args, _routed| {
+                        item_clone.select();
+                        close_cb();
+                    }),
+                );
+            }
+
+            rows.borrow_mut().push(Rc::clone(&row));
             crate::ui::LayoutExt::children(&*layout).add(row as Rc<dyn UIElementExt>);
         }
+
+        // Keyboard navigation on custom menu:
+        let items_len = items.len();
+        let items_for_key = items.clone();
+        let sel_key = Rc::clone(&selected_index);
+        let hl_key = Rc::clone(&update_highlight);
+        let close_key = Rc::clone(&on_close);
+
+        layout.register_routed_handler::<crate::input::KeyEventArgs>(
+            "on_key_down",
+            Box::new(move |args, _routed| {
+                match args.key {
+                    crate::input::Key::Down => {
+                        let current = sel_key.get().unwrap_or(usize::MAX);
+                        let mut next = (current.wrapping_add(1)) % items_len.max(1);
+                        // Skip disabled items
+                        for _ in 0..items_len {
+                            if items_for_key.get(next).map(|it| it.enabled()).unwrap_or(false) {
+                                sel_key.set(Some(next));
+                                hl_key();
+                                break;
+                            }
+                            next = (next + 1) % items_len;
+                        }
+                    }
+                    crate::input::Key::Up => {
+                        let current = sel_key.get().unwrap_or(0);
+                        let mut prev = if current == 0 { items_len.saturating_sub(1) } else { current - 1 };
+                        for _ in 0..items_len {
+                            if items_for_key.get(prev).map(|it| it.enabled()).unwrap_or(false) {
+                                sel_key.set(Some(prev));
+                                hl_key();
+                                break;
+                            }
+                            prev = if prev == 0 { items_len.saturating_sub(1) } else { prev - 1 };
+                        }
+                    }
+                    crate::input::Key::Home => {
+                        for idx in 0..items_len {
+                            if items_for_key.get(idx).map(|it| it.enabled()).unwrap_or(false) {
+                                sel_key.set(Some(idx));
+                                hl_key();
+                                break;
+                            }
+                        }
+                    }
+                    crate::input::Key::End => {
+                        for idx in (0..items_len).rev() {
+                            if items_for_key.get(idx).map(|it| it.enabled()).unwrap_or(false) {
+                                sel_key.set(Some(idx));
+                                hl_key();
+                                break;
+                            }
+                        }
+                    }
+                    crate::input::Key::Enter | crate::input::Key::Space => {
+                        if let Some(idx) = sel_key.get() {
+                            if let Some(it) = items_for_key.get(idx) {
+                                if it.enabled() {
+                                    it.select();
+                                    close_key();
+                                }
+                            }
+                        }
+                    }
+                    crate::input::Key::Escape => {
+                        close_key();
+                    }
+                    _ => {}
+                }
+            }),
+        );
 
         layout as Rc<dyn UIElementExt>
     }
@@ -459,7 +605,7 @@ pub trait PopupHost {
 mod tests {
     use super::*;
     use crate::ui::testsupport::FakeMenu;
-    use crate::ui::{LayoutExt, TextBlock, VerticalLayout};
+    use crate::ui::{LayoutExt, ListExt, MenuItemExt, TextBlock, VerticalLayout};
     use std::cell::{Cell, RefCell};
 
     struct FakePopupHandle {
@@ -707,5 +853,132 @@ mod tests {
             PopupPlacement::AutoFlip,
         );
         assert_eq!(pos_br, Point { x: 750.0, y: 100.0 });
+    }
+
+    struct TestKey;
+    impl crate::environment::EnvironmentKey for TestKey {
+        type Value = u32;
+        fn default_value() -> Self::Value {
+            100
+        }
+    }
+
+    #[test]
+    fn open_custom_popup_inherits_effective_environment() {
+        let root = VerticalLayout::new();
+        let env = EnvironmentContext::root();
+        env.set::<TestKey>(42);
+        root.set_environment_context(env);
+
+        let child = VerticalLayout::new();
+        root.children().add(Rc::clone(&child) as Rc<dyn UIElementExt>);
+
+        let leaf = TextBlock::new();
+        child.children().add(Rc::clone(&leaf) as Rc<dyn UIElementExt>);
+
+        let leaf_dyn: Rc<dyn UIElementExt> = leaf;
+        let effective = leaf_dyn.effective_environment();
+        assert_eq!(effective.get::<TestKey>(), 42);
+
+        let captured_env: Rc<RefCell<Option<EnvironmentContext>>> = Rc::new(RefCell::new(None));
+        let captured_clone = Rc::clone(&captured_env);
+
+        let template = PopupContentTemplate::new(move |ctx| {
+            *captured_clone.borrow_mut() = Some(ctx.environment.clone());
+            let b = TextBlock::new();
+            b as Rc<dyn UIElementExt>
+        });
+
+        let host = FakePopupHost::new();
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        ContextMenuService::open_custom_popup(
+            &host,
+            &template,
+            &anchor,
+            leaf_dyn.effective_environment(),
+            work_area,
+        );
+
+        let resolved_env = captured_env.borrow().clone().expect("popup should capture environment");
+        assert_eq!(resolved_env.get::<TestKey>(), 42);
+    }
+
+    #[test]
+    fn custom_menu_keyboard_navigation_and_item_state() {
+        let menu = FakeMenu::new();
+
+        let item1 = crate::ui::testsupport::FakeMenuItem::new();
+        item1.set_text("Item 1");
+        item1.set_shortcut("1");
+        let item1_selected = Rc::new(Cell::new(false));
+        let item1_sel_clone = Rc::clone(&item1_selected);
+        item1.set_on_select(Box::new(move || item1_sel_clone.set(true)));
+
+        let item2_disabled = crate::ui::testsupport::FakeMenuItem::new();
+        item2_disabled.set_text("Item 2 Disabled");
+        item2_disabled.set_enabled(false);
+        let item2_selected = Rc::new(Cell::new(false));
+        let item2_sel_clone = Rc::clone(&item2_selected);
+        item2_disabled.set_on_select(Box::new(move || item2_sel_clone.set(true)));
+
+        let item3 = crate::ui::testsupport::FakeMenuItem::new();
+        item3.set_text("Item 3");
+        item3.set_shortcut("3");
+        let item3_selected = Rc::new(Cell::new(false));
+        let item3_sel_clone = Rc::clone(&item3_selected);
+        item3.set_on_select(Box::new(move || item3_sel_clone.set(true)));
+
+        menu.add(Rc::clone(&item1) as Rc<dyn MenuItemExt>);
+        menu.add(Rc::clone(&item2_disabled) as Rc<dyn MenuItemExt>);
+        menu.add(Rc::clone(&item3) as Rc<dyn MenuItemExt>);
+
+        let closed = Rc::new(Cell::new(false));
+        let closed_clone = Rc::clone(&closed);
+        let menu_view = ContextMenuPresenter::build_menu_view(&*menu, Rc::new(move || closed_clone.set(true)));
+
+        let routed_args = crate::input::RoutedEventArgs::default();
+
+        // Down key moves to item1
+        crate::ui::dispatch_routed(
+            &menu_view,
+            "on_key_down",
+            &crate::input::KeyEventArgs {
+                key: crate::input::Key::Down,
+                modifiers: crate::input::KeyModifiers::default(),
+                is_repeat: false,
+            },
+            &routed_args,
+        );
+
+        // Next Down key skips disabled item2 and selects item3
+        crate::ui::dispatch_routed(
+            &menu_view,
+            "on_key_down",
+            &crate::input::KeyEventArgs {
+                key: crate::input::Key::Down,
+                modifiers: crate::input::KeyModifiers::default(),
+                is_repeat: false,
+            },
+            &routed_args,
+        );
+
+        // Enter key activates item3
+        crate::ui::dispatch_routed(
+            &menu_view,
+            "on_key_down",
+            &crate::input::KeyEventArgs {
+                key: crate::input::Key::Enter,
+                modifiers: crate::input::KeyModifiers::default(),
+                is_repeat: false,
+            },
+            &routed_args,
+        );
+
+        assert!(!item1_selected.get());
+        assert!(!item2_selected.get());
+        assert!(item3_selected.get());
+        assert!(closed.get());
     }
 }

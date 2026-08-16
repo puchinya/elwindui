@@ -399,6 +399,56 @@ impl MeasureProbe {
     }
 }
 
+#[elwindui_macros::class(struct_only = crate::ui::MenuItemExt)]
+pub(crate) struct FakeMenuItem {
+    text: RefCell<String>,
+    enabled: Cell<bool>,
+    shortcut: RefCell<Option<String>>,
+    on_select: RefCell<Option<Box<dyn Fn()>>>,
+}
+
+#[elwindui_macros::class]
+impl FakeMenuItem {
+    fn construct() -> Self {
+        Self {
+            text: RefCell::new(String::new()),
+            enabled: Cell::new(true),
+            shortcut: RefCell::new(None),
+            on_select: RefCell::new(None),
+        }
+    }
+    fn text(&self) -> String {
+        self.text.borrow().clone()
+    }
+    fn set_text(&self, text: &str) {
+        *self.text.borrow_mut() = text.to_string();
+    }
+    fn enabled(&self) -> bool {
+        self.enabled.get()
+    }
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.set(enabled);
+    }
+    fn shortcut(&self) -> Option<String> {
+        self.shortcut.borrow().clone()
+    }
+    fn set_shortcut(&self, key_equivalent: &str) {
+        *self.shortcut.borrow_mut() = if key_equivalent.is_empty() {
+            None
+        } else {
+            Some(key_equivalent.to_string())
+        };
+    }
+    fn set_on_select(&self, callback: Box<dyn Fn()>) {
+        *self.on_select.borrow_mut() = Some(callback);
+    }
+    fn select(&self) {
+        if let Some(cb) = self.on_select.borrow().as_ref() {
+            cb();
+        }
+    }
+}
+
 #[elwindui_macros::class(struct_only = crate::ui::MenuExt)]
 pub(crate) struct FakeMenu {
     items: crate::ui::ChildList<dyn crate::ui::MenuItemExt>,

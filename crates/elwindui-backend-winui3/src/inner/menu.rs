@@ -18,6 +18,7 @@ use windows::core::{HSTRING, Interface};
 #[derive(Clone)]
 pub(crate) struct InnerMenuItem {
     xaml: MenuFlyoutItem,
+    shortcut: Rc<RefCell<Option<String>>>,
     on_select: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
@@ -26,6 +27,7 @@ impl InnerMenuItem {
         let xaml = MenuFlyoutItem::new().expect("MenuFlyoutItem::new");
         let this = Self {
             xaml,
+            shortcut: Rc::new(RefCell::new(None)),
             on_select: Rc::new(RefCell::new(None)),
         };
         {
@@ -53,10 +55,19 @@ impl InnerMenuItem {
         let _ = self.xaml.SetIsEnabled(enabled);
     }
 
+    pub(crate) fn enabled(&self) -> bool {
+        self.xaml.IsEnabled().unwrap_or(true)
+    }
+
     /// A bare key character (e.g. `"s"`), matching AppKit's `set_shortcut` convention — mapped to
     /// a `Ctrl`-modifier `KeyboardAccelerator` (WinUI3 has no single-string key-equivalent setter
     /// the way `NSMenuItem.keyEquivalent` does).
     pub(crate) fn set_shortcut(&self, key_equivalent: &str) {
+        *self.shortcut.borrow_mut() = if key_equivalent.is_empty() {
+            None
+        } else {
+            Some(key_equivalent.to_string())
+        };
         let Some(key) = key_equivalent.chars().next() else {
             return;
         };
@@ -69,6 +80,10 @@ impl InnerMenuItem {
         if let Ok(accelerators) = self.xaml.KeyboardAccelerators() {
             let _ = accelerators.Append(&accelerator);
         }
+    }
+
+    pub(crate) fn shortcut(&self) -> Option<String> {
+        self.shortcut.borrow().clone()
     }
 
     pub(crate) fn text(&self) -> String {

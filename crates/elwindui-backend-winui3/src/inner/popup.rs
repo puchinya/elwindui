@@ -35,6 +35,7 @@ impl InnerPopupSurface {
         popup.SetChild(&uie).ok();
         popup.SetHorizontalOffset(position.x as f64).ok();
         popup.SetVerticalOffset(position.y as f64).ok();
+        popup.SetShouldConstrainToRootBounds(false).ok();
         popup.SetIsLightDismissEnabled(true).ok();
         popup.SetIsOpen(true).ok();
 

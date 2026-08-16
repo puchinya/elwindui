@@ -507,7 +507,7 @@ impl TreeHostView {
                     &host,
                     &template,
                     &popup_anchor,
-                    elwindui_core::environment::EnvironmentContext::default(),
+                    resolved.owner.effective_environment(),
                     work_area,
                 );
                 *self.ivars().active_popup.borrow_mut() = Some(handle);

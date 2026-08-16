@@ -8,7 +8,9 @@
 pub trait MenuItem {
     fn text(&self) -> String;
     fn set_text(&self, text: &str);
+    fn enabled(&self) -> bool;
     fn set_enabled(&self, enabled: bool);
+    fn shortcut(&self) -> Option<String>;
     fn set_shortcut(&self, key_equivalent: &str);
     fn set_on_select(&self, callback: Box<dyn Fn()>);
     fn select(&self);

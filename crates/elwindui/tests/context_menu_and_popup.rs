@@ -3,12 +3,11 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::base::{Point, Rect, Size};
-use elwindui::core::environment::EnvironmentContext;
 use elwindui::core::ui::popup::{
     ContextMenuService, ContextRequest, PopupAnchor,
     PopupContentTemplate, PopupHost, PopupSurfaceHandle, ResolvedContextDefinition,
 };
-use elwindui::core::ui::{LayoutExt, UIElementExt};
+use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -220,7 +219,7 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
                 &host,
                 &t,
                 &anchor,
-                EnvironmentContext::default(),
+                resolved.owner.effective_environment(),
                 work_area,
             );
 
@@ -234,4 +233,69 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
         }
         _ => panic!("expected Popup definition"),
     }
+}
+
+#[elwindui::class(struct_only = elwindui::core::ui::MenuItemExt)]
+struct TestMenuItem {
+    text: RefCell<String>,
+    enabled: Cell<bool>,
+    shortcut: RefCell<Option<String>>,
+    on_select: RefCell<Option<Box<dyn Fn()>>>,
+}
+
+#[elwindui::class]
+impl TestMenuItem {
+    fn construct() -> Self {
+        Self {
+            text: RefCell::new(String::new()),
+            enabled: Cell::new(true),
+            shortcut: RefCell::new(None),
+            on_select: RefCell::new(None),
+        }
+    }
+    fn text(&self) -> String {
+        self.text.borrow().clone()
+    }
+    fn set_text(&self, text: &str) {
+        *self.text.borrow_mut() = text.to_string();
+    }
+    fn enabled(&self) -> bool {
+        self.enabled.get()
+    }
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.set(enabled);
+    }
+    fn shortcut(&self) -> Option<String> {
+        self.shortcut.borrow().clone()
+    }
+    fn set_shortcut(&self, key_equivalent: &str) {
+        *self.shortcut.borrow_mut() = if key_equivalent.is_empty() {
+            None
+        } else {
+            Some(key_equivalent.to_string())
+        };
+    }
+    fn set_on_select(&self, callback: Box<dyn Fn()>) {
+        *self.on_select.borrow_mut() = Some(callback);
+    }
+    fn select(&self) {
+        if let Some(cb) = self.on_select.borrow().as_ref() {
+            cb();
+        }
+    }
+}
+
+#[test]
+fn custom_menu_items_support_enabled_and_shortcut_semantics() {
+    let item = TestMenuItem::new();
+    item.set_text("Save As");
+    item.set_shortcut("S");
+    item.set_enabled(false);
+
+    assert_eq!(item.text(), "Save As");
+    assert_eq!(item.shortcut(), Some("S".to_string()));
+    assert!(!item.enabled());
+
+    item.set_enabled(true);
+    assert!(item.enabled());
 }

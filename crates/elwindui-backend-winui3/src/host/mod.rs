@@ -369,6 +369,100 @@ impl TreeHostPanel {
                     Ok(())
                 }));
         }
+        {
+            let tree_for_context = Rc::downgrade(&this.tree);
+            let keyboard_for_context = Rc::downgrade(&this.keyboard);
+            let canvas_for_context = this.canvas.clone();
+            let _ = this.canvas.RightTapped(
+                &crate::bindings::Microsoft::UI::Xaml::Input::RightTappedEventHandler::new(
+                    move |_sender, args| {
+                        let Some(args) = args.cloned() else {
+                            return Ok(());
+                        };
+                        if let (Some(tree), Some(keyboard)) = (
+                            tree_for_context.upgrade(),
+                            keyboard_for_context.upgrade(),
+                        ) {
+                            if let Some(tree) = tree.borrow().clone() {
+                                let Ok(point) = args.GetPosition(&canvas_for_context) else {
+                                    return Ok(());
+                                };
+                                let request = elwindui_core::ui::ContextRequest::pointer(
+                                    elwindui_core::base::Point {
+                                        x: point.X,
+                                        y: point.Y,
+                                    },
+                                );
+                                if let Some((resolved, anchor)) =
+                                    elwindui_core::ui::ContextMenuService::process_request(
+                                        &tree,
+                                        &keyboard.focus,
+                                        &request,
+                                    )
+                                {
+                                    match resolved.definition {
+                                        elwindui_core::ui::popup::ResolvedContextDefinition::Menu {
+                                            menu,
+                                            presentation,
+                                        } => match presentation {
+                                            elwindui_core::ui::ContextMenuPresentation::Native => {
+                                                if let Some(winui_menu) = menu
+                                                    .as_any()
+                                                    .downcast_ref::<crate::native_ui::Menu>()
+                                                {
+                                                    if let Ok(flyout) = winui_menu.create_flyout() {
+                                                        let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
+                                                            canvas_for_context
+                                                                .cast()
+                                                                .expect("Canvas as UIElement");
+                                                        let _ = flyout.ShowAt(&uie);
+                                                    }
+                                                }
+                                            }
+                                            elwindui_core::ui::ContextMenuPresentation::Custom => {
+                                                let host = crate::inner::WinUI3PopupHost;
+                                                let work_area = elwindui_core::base::Rect {
+                                                    x: 0.0,
+                                                    y: 0.0,
+                                                    width: 1920.0,
+                                                    height: 1080.0,
+                                                };
+                                                let _ = elwindui_core::ui::ContextMenuService::open_custom_menu(
+                                                    &host,
+                                                    &*menu,
+                                                    &anchor,
+                                                    work_area,
+                                                );
+                                            }
+                                        },
+                                        elwindui_core::ui::popup::ResolvedContextDefinition::Popup {
+                                            template,
+                                        } => {
+                                            let host = crate::inner::WinUI3PopupHost;
+                                            let work_area = elwindui_core::base::Rect {
+                                                x: 0.0,
+                                                y: 0.0,
+                                                width: 1920.0,
+                                                height: 1080.0,
+                                            };
+                                            let _ = elwindui_core::ui::ContextMenuService::open_custom_popup(
+                                                &host,
+                                                &template,
+                                                &anchor,
+                                                resolved.owner.effective_environment(),
+                                                work_area,
+                                            );
+                                        }
+                                    }
+                                    let _ = args.SetHandled(true);
+                                }
+                            }
+                        }
+                        Ok(())
+                    },
+                ),
+            );
+        }
         this
     }
 

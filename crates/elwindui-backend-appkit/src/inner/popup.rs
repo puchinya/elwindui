@@ -144,6 +144,12 @@ impl InnerPopupSurface {
     }
 }
 
+impl Drop for InnerPopupSurface {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// Handle implementing [`PopupSurfaceHandle`] for programmatic dismissal.
 #[derive(Clone)]
 pub struct AppKitPopupHandle {

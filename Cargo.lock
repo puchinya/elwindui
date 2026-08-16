@@ -194,6 +194,7 @@ dependencies = [
 name = "elwindui-backend-appkit"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "dispatch2",
  "elwindui-core",
  "elwindui-macros",

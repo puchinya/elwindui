@@ -39,15 +39,16 @@ ElwindUI のコンテキストメニューおよびポップアップ基盤は�
 ### 責務境界
 
 - **Backend (OS Input Translation)**:
-  - 各 OS / ツールキットの固有入力を検知し、`ContextRequest` (`source`, `local_position`, `screen_position`) を生成して Core に渡す。
+  - 各 OS / ツールキットの固有入力を検知し、`ContextRequest` (`source`, `local_position`, `screen_anchor`) を生成して Core に渡す。
   - `local_position`: TreeHost-local 論理座標（`hit_test` によるターゲット要素解決用）。
-  - `screen_position`: デスクトップ screen 論理座標（Top-Left 0,0, Y-down、ポップアップ配置アンカー用）。
+  - `screen_anchor`: デスクトップ screen 論理座標アンカー（`PopupAnchor::Point` または `PopupAnchor::Rect`、ポップアップ配置計算用）。
   - OS 固有のキー組み合わせ（Windows: Shift+F10/Menuキー, macOS: Ctrl+Click）やマウスボタン割り当て（左右反転設定等）を Backend 内で解釈する。
 - **Core (`ContextMenuService` & Target Resolution)**:
-  - `ContextRequestSource::Pointer`: 指定された `local_position` に基づき `hit_test` を行いターゲット要素を決定し、`screen_position` を `PopupAnchor::Point` としてアンカーに設定。
-  - `ContextRequestSource::Keyboard`: `FocusTracker.focused()` から現在フォーカスを持つ要素を決定。
-  - `ContextRequestSource::Accessibility` / `NativeControl`: 通知されたターゲット要素または owner identity を直接利用。
+  - `ContextRequestSource::Pointer`: 指定された `local_position` に基づき `hit_test` を行いターゲット要素を決定し、`screen_anchor` を配置アンカーとして利用。
+  - `ContextRequestSource::Keyboard`: `FocusTracker.focused()` から現在フォーカスを持つ要素を決定し、Backend が算出した `screen_anchor` を配置アンカーとして利用。
+  - `ContextRequestSource::Accessibility` / `NativeControl`: 通知されたターゲット要素または owner identity を直接利用し、`screen_anchor` を配置アンカーとして利用。
   - ターゲット要素から `visual_parent` チェーンをルート方向へ探索し、**最も近い祖先（nearest ancestor）** に設定された `context_menu` または `context_popup` を解決する。
+  - `screen_anchor` が与えられない場合、ローカル `arranged_offset` を screen 座標と誤認してフォールバックすることは行わず、安全に `None` を返す。
 - **Presentation**:
   - `ContextMenuPresentation::Native`: `Menu` / `MenuItem` のセマンティックモデルを Backend のネイティブメニュー（`NSMenu` / `MenuFlyout`）に渡して表示。
   - `ContextMenuPresentation::Custom`: 標準 `Menu` モデルを `ContextMenuPresenter` により通常 UIElement ツリーとして構築し、`PopupSurface` 上で表示。
@@ -100,8 +101,8 @@ Resolve nearest context owner:
 | レイヤー | 原点 / 単位 | 用途 |
 |---|---|---|
 | **TreeHost-local Logical DIP** | View / Canvas 左上 (0,0), Y-down | 入力ルーティング、ヒットテスト、レイアウト |
-| **Core Screen Logical DIP** | デスクトップ仮想スクリーン左上 (0,0), Y-down | ポップアップ配置計算 (`calculate_popup_placement`)、アンカー座標 |
-| **OS Physical Pixels** | ディスプレイ物理座標系 | Windows `AppWindow.Position`, `DisplayArea.OuterBounds`/`WorkArea` 等のネイティブ境界 |
+| **Core Screen Logical DIP** | デスクトップ仮想スクリーン空間（Y-down、マルチモニター配置により負の X/Y 座標を取り得る） | ポップアップ配置計算 (`calculate_popup_placement`)、アンカー座標 |
+| **OS Physical Pixels** | ディスプレイ物理座標系 | Windows `ContentCoordinateConverter`, `AppWindow.Position`, `DisplayArea.OuterBounds`/`WorkArea` 等のネイティブ境界 |
 | **WinUI XAML Local DIP** | XamlRoot / Window Client 左上 (0,0), Y-down | `Popup.HorizontalOffset` / `VerticalOffset` の設定 |
 | **AppKit Native Screen** | Primary Screen 左下 (0,0), Y-up | `NSWindow.setFrame`, `NSScreen.frame` のネイティブ境界 |
 
@@ -223,9 +224,9 @@ Restore focus to original target if necessary
 - **Native Context Menu**: `MenuFlyout` の `ShowAt(target_element, point)` を使用。
 - **PopupSurface**: `Microsoft.UI.Xaml.Controls.Primitives.Popup` を使用して `TreeHostPanel` をホスト。
 - **Coordinate Conversion**:
-  - `canvas_to_screen_point`: Canvas ローカル DIP -> `TransformToVisual(XamlRoot.Content)` による Window Client Local DIP -> `+ (AppWindow.Position / scale)` による Desktop Screen Logical DIP。
-  - `screen_logical_to_xaml_local`: Desktop Screen Logical DIP -> `- (AppWindow.Position / scale)` による XamlRoot / Window Client Local DIP -> `Popup.SetHorizontalOffset` / `SetVerticalOffset`。
-- **Work Area**: `Microsoft.UI.Windowing.DisplayArea::GetFromPoint` を用いて実モニターの OuterBounds / WorkArea を取得し、`display_area_to_core_work_area` によりグローバル Screen Logical Rect へ変換。
+  - `canvas_to_screen_point`: Canvas ローカル DIP -> `TransformToVisual(XamlRoot.Content)` による Window Client Local DIP -> `ContentCoordinateConverter::ConvertLocalToScreen` (または `+ (AppWindow.Position / scale)` fallback) による Desktop Screen Logical DIP。
+  - `screen_logical_to_xaml_local`: Desktop Screen Logical DIP -> Screen Physical Px -> `ContentCoordinateConverter::ConvertScreenToLocal` (または `- (AppWindow.Position / scale)` fallback) による XamlRoot / Window Client Local DIP -> `Popup.SetHorizontalOffset` / `SetVerticalOffset`。
+- **Work Area**: `Microsoft.UI.Windowing.DisplayArea::GetFromPoint` を用いて実モニターの OuterBounds / WorkArea を取得し、`display_area_to_core_work_area` (`outer_x + work_x`, `outer_y + work_y`) によりグローバル Screen Logical Rect へ変換。
 - **Focus & Lifetime**: `PopupFocusPolicy::Root` にて開いた popup の root UIElement にフォーカスを設定。`TreeHostPanel` / `InnerPopupSurface` が `active_popup` として handle を保持し、新規 popup open 時に既存 popup を安全にクローズ。
 - **Menu Realization Ownership**: `Menu` / `MenuItem` は論理セマンティックモデルであり、Context Menu 表示時は `InnerMenu::create_flyout` により専用の `MenuFlyoutItem` インスタンスを生成することで `MenuBarItem` とのネイティブインスタンス競合を回避。
 - Outside pointer press および `ProcessKeyboardAccelerators` (Escape) で dismiss。

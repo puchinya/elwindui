@@ -176,6 +176,8 @@ fn main() {
         "Microsoft.Windows.ApplicationModel.Resources.IResourceManager".to_owned(),
         "Microsoft.UI.Input.InputKeyboardSource".to_owned(),
         "Microsoft.UI.Input.InputObject".to_owned(),
+        "Microsoft.UI.Content.ContentCoordinateConverter".to_owned(),
+        "Microsoft.UI.Content.ContentIsland".to_owned(),
         "Microsoft.UI.Windowing.AppWindow".to_owned(),
         "Microsoft.UI.Windowing.DisplayArea".to_owned(),
         "Microsoft.UI.Windowing.DisplayAreaFallback".to_owned(),

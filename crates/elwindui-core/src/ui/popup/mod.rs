@@ -292,10 +292,7 @@ impl ContextMenuService {
         };
 
         let resolved = resolve_context_target(&target)?;
-        let anchor = request.screen_anchor.clone().unwrap_or_else(|| {
-            let offset = target.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-            PopupAnchor::Point(offset)
-        });
+        let anchor = request.screen_anchor.clone()?;
 
         Some((resolved, anchor))
     }
@@ -306,10 +303,7 @@ impl ContextMenuService {
         request: &ContextRequest,
     ) -> Option<(ResolvedContextTarget, PopupAnchor)> {
         let resolved = resolve_context_target(target)?;
-        let anchor = request.screen_anchor.clone().unwrap_or_else(|| {
-            let offset = target.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-            PopupAnchor::Point(offset)
-        });
+        let anchor = request.screen_anchor.clone()?;
         Some((resolved, anchor))
     }
 

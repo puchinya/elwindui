@@ -40,8 +40,11 @@ impl InnerPopupSurface {
         popup.SetChild(&uie).ok();
 
         let (offset_x, offset_y) = if let Some(owner) = owner_canvas {
-            let local = TreeHostPanel::screen_logical_to_xaml_local(owner, request.position);
-            (local.x as f64, local.y as f64)
+            if let Some(local) = TreeHostPanel::screen_logical_to_xaml_local(owner, request.position) {
+                (local.x as f64, local.y as f64)
+            } else {
+                (request.position.x as f64, request.position.y as f64)
+            }
         } else {
             (request.position.x as f64, request.position.y as f64)
         };

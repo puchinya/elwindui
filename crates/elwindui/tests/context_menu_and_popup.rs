@@ -203,7 +203,7 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
     target.set_context_popup(Some(template.clone()));
 
     let target_dyn: Rc<dyn UIElementExt> = target;
-    let request = ContextRequest::keyboard(None);
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 50.0, y: 50.0 })));
     let (resolved, anchor) =
         ContextMenuService::process_request_for_target(&target_dyn, &request).expect("should resolve");
 
@@ -484,7 +484,7 @@ fn environment_scope_dsl_context_popup_integration() {
     let _parent = PopupScopeParent::new();
     let child_target = LAST_TARGET_BLOCK.with(|c| c.borrow().clone()).expect("target block must be mounted");
 
-    let request = ContextRequest::keyboard(None);
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 50.0, y: 50.0 })));
     let (resolved, anchor) =
         ContextMenuService::process_request_for_target(&child_target, &request).expect("should resolve target");
 
@@ -583,4 +583,19 @@ fn context_request_separates_local_hittest_from_screen_anchor() {
         }
         _ => panic!("expected Point anchor"),
     }
+}
+
+#[test]
+fn context_request_without_screen_anchor_returns_none_and_never_falls_back_to_local_offset() {
+    let menu = TestMenu::new();
+    let target = elwindui::core::ui::TextBlock::new();
+    target.set_context_menu(Some(Rc::clone(&menu) as Rc<dyn elwindui::core::ui::MenuExt>));
+    let target_dyn: Rc<dyn UIElementExt> = target;
+
+    let request_no_anchor = ContextRequest::keyboard(None);
+    let resolved = ContextMenuService::process_request_for_target(&target_dyn, &request_no_anchor);
+    assert!(
+        resolved.is_none(),
+        "process_request_for_target must return None when screen_anchor is missing and never fall back to local arranged offset"
+    );
 }

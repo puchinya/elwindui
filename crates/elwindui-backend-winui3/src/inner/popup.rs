@@ -22,7 +22,10 @@ pub(crate) struct InnerPopupSurface {
 
 impl InnerPopupSurface {
     /// Creates and immediately displays a new popup surface.
-    pub(crate) fn show(request: PopupRequest) -> Rc<Self> {
+    pub(crate) fn show(
+        request: PopupRequest,
+        owner_canvas: Option<&crate::bindings::Microsoft::UI::Xaml::Controls::Canvas>,
+    ) -> Rc<Self> {
         let popup = Popup::new().expect("Popup::new");
         let content_host = TreeHostPanel::new();
         content_host.set_tree(Rc::clone(&request.content));
@@ -35,8 +38,16 @@ impl InnerPopupSurface {
         let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
             canvas.cast().expect("Canvas as UIElement");
         popup.SetChild(&uie).ok();
-        popup.SetHorizontalOffset(request.position.x as f64).ok();
-        popup.SetVerticalOffset(request.position.y as f64).ok();
+
+        let (offset_x, offset_y) = if let Some(owner) = owner_canvas {
+            let local = TreeHostPanel::screen_logical_to_xaml_local(owner, request.position);
+            (local.x as f64, local.y as f64)
+        } else {
+            (request.position.x as f64, request.position.y as f64)
+        };
+
+        popup.SetHorizontalOffset(offset_x).ok();
+        popup.SetVerticalOffset(offset_y).ok();
         popup.SetShouldConstrainToRootBounds(false).ok();
         let is_light_dismiss = request.dismiss_policy == PopupDismissPolicy::LightDismiss;
         popup.SetIsLightDismissEnabled(is_light_dismiss).ok();
@@ -96,11 +107,22 @@ impl PopupSurfaceHandle for WinUI3PopupHandle {
 
 /// Default [`PopupHost`] implementation for WinUI 3.
 #[derive(Default, Clone)]
-pub struct WinUI3PopupHost;
+pub struct WinUI3PopupHost {
+    owner_canvas: Option<crate::bindings::Microsoft::UI::Xaml::Controls::Canvas>,
+}
+
+impl WinUI3PopupHost {
+    /// Creates a new popup host associated with an owner canvas context.
+    pub fn new(owner_canvas: crate::bindings::Microsoft::UI::Xaml::Controls::Canvas) -> Self {
+        Self {
+            owner_canvas: Some(owner_canvas),
+        }
+    }
+}
 
 impl PopupHost for WinUI3PopupHost {
     fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle> {
-        let surface = InnerPopupSurface::show(request);
+        let surface = InnerPopupSurface::show(request, self.owner_canvas.as_ref());
         Rc::new(WinUI3PopupHandle { surface })
     }
 }

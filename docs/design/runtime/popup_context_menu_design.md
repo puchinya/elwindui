@@ -68,7 +68,7 @@ pub enum ContextRequestSource {
 pub struct ContextRequest {
     pub source: ContextRequestSource,
     pub local_position: Option<Point>,
-    pub screen_position: Option<Point>,
+    pub screen_anchor: Option<PopupAnchor>,
 }
 ```
 
@@ -77,14 +77,12 @@ pub struct ContextRequest {
 ```text
 ContextRequest arrives
    │
-   ├─ Source == Pointer  ──> hit_test(root, local_position) ──> target UIElement (anchor: screen_position)
-   ├─ Source == Keyboard ──> FocusTracker.focused()         ──> target UIElement (anchor: element bounds)
+   ├─ Source == Pointer  ──> hit_test(root, local_position) ──> target UIElement (anchor: screen_anchor)
+   ├─ Source == Keyboard ──> FocusTracker.focused()         ──> target UIElement (anchor: screen_anchor)
    └─ NativeControl / UIA ──────────────────────────────────> target UIElement
    │
    ▼
 Resolve nearest context owner:
-   current = target
-   loop {
        if current has context_menu or context_popup {
            return Some((current, definition));
        }
@@ -97,6 +95,16 @@ Resolve nearest context owner:
 
 ## 4. PopupSurface & Host Contract
 
+### Coordinate Layers
+
+| レイヤー | 原点 / 単位 | 用途 |
+|---|---|---|
+| **TreeHost-local Logical DIP** | View / Canvas 左上 (0,0), Y-down | 入力ルーティング、ヒットテスト、レイアウト |
+| **Core Screen Logical DIP** | デスクトップ仮想スクリーン左上 (0,0), Y-down | ポップアップ配置計算 (`calculate_popup_placement`)、アンカー座標 |
+| **OS Physical Pixels** | ディスプレイ物理座標系 | Windows `AppWindow.Position`, `DisplayArea.OuterBounds`/`WorkArea` 等のネイティブ境界 |
+| **WinUI XAML Local DIP** | XamlRoot / Window Client 左上 (0,0), Y-down | `Popup.HorizontalOffset` / `VerticalOffset` の設定 |
+| **AppKit Native Screen** | Primary Screen 左下 (0,0), Y-up | `NSWindow.setFrame`, `NSScreen.frame` のネイティブ境界 |
+
 ### InWindowOverlay vs PopupSurface
 
 | 項目 | InWindowOverlay | PopupSurface |
@@ -107,8 +115,6 @@ Resolve nearest context owner:
 | OS プリミティブ | 同一 NSView / XAML Panel 内のレイヤー | 独立した platform window/panel/surface |
 | タスクバー表示 | 表示されない | 表示されない（tool/popup window 扱い） |
 | Global Topmost | なし | なし（owner Window と Z-order 連動） |
-
-### PopupHost Capability Trait
 
 ### PopupHost Capability Trait
 
@@ -216,10 +222,12 @@ Restore focus to original target if necessary
 ### WinUI 3 Backend
 - **Native Context Menu**: `MenuFlyout` の `ShowAt(target_element, point)` を使用。
 - **PopupSurface**: `Microsoft.UI.Xaml.Controls.Primitives.Popup` を使用して `TreeHostPanel` をホスト。
-- **Coordinate Conversion**: Canvas ローカル座標を `TransformToVisual` により XamlRoot / Screen 座標へ変換。
-- **Work Area**: `Microsoft.UI.Windowing.DisplayArea::GetFromPoint` を用いて実モニターの WorkArea を動的に取得。
+- **Coordinate Conversion**:
+  - `canvas_to_screen_point`: Canvas ローカル DIP -> `TransformToVisual(XamlRoot.Content)` による Window Client Local DIP -> `+ (AppWindow.Position / scale)` による Desktop Screen Logical DIP。
+  - `screen_logical_to_xaml_local`: Desktop Screen Logical DIP -> `- (AppWindow.Position / scale)` による XamlRoot / Window Client Local DIP -> `Popup.SetHorizontalOffset` / `SetVerticalOffset`。
+- **Work Area**: `Microsoft.UI.Windowing.DisplayArea::GetFromPoint` を用いて実モニターの OuterBounds / WorkArea を取得し、`display_area_to_core_work_area` によりグローバル Screen Logical Rect へ変換。
 - **Focus & Lifetime**: `PopupFocusPolicy::Root` にて開いた popup の root UIElement にフォーカスを設定。`TreeHostPanel` / `InnerPopupSurface` が `active_popup` として handle を保持し、新規 popup open 時に既存 popup を安全にクローズ。
-- **Menu Realization Ownership**: `Menu` / `MenuItem` は論理セマンティックモデルであり、WinUI 3 ネイティブ XAML `MenuFlyoutItemBase` は同時に1つの親コレクション（MenuBarItem または MenuFlyout）にのみ所属する。
+- **Menu Realization Ownership**: `Menu` / `MenuItem` は論理セマンティックモデルであり、Context Menu 表示時は `InnerMenu::create_flyout` により専用の `MenuFlyoutItem` インスタンスを生成することで `MenuBarItem` とのネイティブインスタンス競合を回避。
 - Outside pointer press および `ProcessKeyboardAccelerators` (Escape) で dismiss。
 - **GUI 実機検証**: Windows 実機環境での描画・マルチモニター・DPI・タッチ操作の検証は Issue [#157](https://github.com/puchinya/elwindui/issues/157) にて管理。
 

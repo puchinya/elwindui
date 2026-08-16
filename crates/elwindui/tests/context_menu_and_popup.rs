@@ -203,7 +203,7 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
     target.set_context_popup(Some(template.clone()));
 
     let target_dyn: Rc<dyn UIElementExt> = target;
-    let request = ContextRequest::keyboard();
+    let request = ContextRequest::keyboard(None);
     let (resolved, anchor) =
         ContextMenuService::process_request_for_target(&target_dyn, &request).expect("should resolve");
 
@@ -484,7 +484,7 @@ fn environment_scope_dsl_context_popup_integration() {
     let _parent = PopupScopeParent::new();
     let child_target = LAST_TARGET_BLOCK.with(|c| c.borrow().clone()).expect("target block must be mounted");
 
-    let request = ContextRequest::keyboard();
+    let request = ContextRequest::keyboard(None);
     let (resolved, anchor) =
         ContextMenuService::process_request_for_target(&child_target, &request).expect("should resolve target");
 

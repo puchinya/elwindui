@@ -158,11 +158,21 @@ impl InnerMenu {
         let flyout = MenuFlyout::new()?;
         let items = flyout.Items()?;
         for item in self.items.borrow().iter() {
-            if let Ok(base) = item.xaml.cast::<MenuFlyoutItemBase>() {
-                let _ = items.Append(&base);
+            let flyout_item = MenuFlyoutItem::new()?;
+            flyout_item.SetText(&windows::core::HSTRING::from(item.text().as_str()))?;
+            flyout_item.SetIsEnabled(item.enabled())?;
+            if let Some(shortcut) = item.shortcut() {
+                let _ = flyout_item
+                    .SetKeyboardAcceleratorTextOverride(&windows::core::HSTRING::from(shortcut.as_str()));
             }
+            let item_clone = item.clone();
+            let _ = flyout_item.Click(&RoutedEventHandler::new(move |_, _| {
+                item_clone.select();
+                Ok(())
+            }));
+            let base: MenuFlyoutItemBase = flyout_item.cast()?;
+            let _ = items.Append(&base);
         }
-        *self.installed_into.borrow_mut() = Some(items);
         Ok(flyout)
     }
 }

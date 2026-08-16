@@ -39,8 +39,11 @@ impl InnerPopupSurface {
         let m = mtm();
         let primary_screen_height = NSScreen::screens(m)
             .firstObject()
+            .or_else(|| NSScreen::mainScreen(m))
+            .or_else(|| owner_window.and_then(|w| w.screen()))
             .map(|s| s.frame().size.height)
-            .unwrap_or(1080.0);
+            .or_else(|| owner_window.map(|w| w.frame().size.height))
+            .unwrap_or(0.0);
 
         let appkit_y = primary_screen_height - (request.position.y as f64 + request.size.height as f64);
         let content_rect = NSRect::new(

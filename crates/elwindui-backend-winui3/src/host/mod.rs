@@ -251,7 +251,21 @@ impl TreeHostPanel {
                         let kb_ref = keyboard_for_key.upgrade();
                         let active_ref = active_for_key.upgrade();
                         if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref) {
-                            let request = elwindui_core::ui::ContextRequest::keyboard();
+                            let screen_anchor = if let Some(focused) = kb.focus.focused() {
+                                let offset = focused.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+                                let w = focused.arranged_width().unwrap_or(0.0);
+                                let h = focused.arranged_height().unwrap_or(0.0);
+                                let screen_pt = Self::canvas_to_screen_point(&this.canvas, offset);
+                                Some(elwindui_core::ui::popup::PopupAnchor::Rect(elwindui_core::base::Rect {
+                                    x: screen_pt.x,
+                                    y: screen_pt.y,
+                                    width: w,
+                                    height: h,
+                                }))
+                            } else {
+                                None
+                            };
+                            let request = elwindui_core::ui::ContextRequest::keyboard(screen_anchor);
                             if Self::dispatch_context_request(
                                 &Some(tree),
                                 &kb,
@@ -454,7 +468,25 @@ impl TreeHostPanel {
                             let screen_pt = TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, local_pt);
                             elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt)
                         } else {
-                            elwindui_core::ui::ContextRequest::keyboard()
+                            let screen_anchor = if let Some(keyboard) = keyboard_for_ctx.upgrade() {
+                                if let Some(focused) = keyboard.focus.focused() {
+                                    let offset = focused.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+                                    let w = focused.arranged_width().unwrap_or(0.0);
+                                    let h = focused.arranged_height().unwrap_or(0.0);
+                                    let screen_pt = TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, offset);
+                                    Some(elwindui_core::ui::popup::PopupAnchor::Rect(elwindui_core::base::Rect {
+                                        x: screen_pt.x,
+                                        y: screen_pt.y,
+                                        width: w,
+                                        height: h,
+                                    }))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            elwindui_core::ui::ContextRequest::keyboard(screen_anchor)
                         };
                         if let (Some(tree), Some(keyboard), Some(active)) = (
                             tree_for_ctx.upgrade(),
@@ -1200,13 +1232,14 @@ impl TreeHostPanel {
         }
     }
 
-    /// Converts canvas-local logical DIPs to screen logical coordinates.
+    /// Converts canvas-local logical DIPs to desktop screen logical coordinates.
     pub(crate) fn canvas_to_screen_point(
         canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
         canvas_point: Point,
     ) -> Point {
-        if let Ok(xaml_root) = canvas.XamlRoot() {
-            if let Ok(content) = xaml_root.Content() {
+        let (transformed_local, scale) = if let Ok(xaml_root) = canvas.XamlRoot() {
+            let scale = xaml_root.RasterizationScale().unwrap_or(1.0);
+            let local_dip = if let Ok(content) = xaml_root.Content() {
                 let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
                     canvas.cast().expect("Canvas as UIElement");
                 if let Ok(transform) = uie.TransformToVisual(&content) {
@@ -1214,16 +1247,37 @@ impl TreeHostPanel {
                         X: canvas_point.x,
                         Y: canvas_point.y,
                     };
-                    if let Ok(transformed) = transform.TransformPoint(pt) {
-                        return Point {
-                            x: transformed.X,
-                            y: transformed.Y,
-                        };
-                    }
+                    transform
+                        .TransformPoint(pt)
+                        .map(|t| Point { x: t.X, y: t.Y })
+                        .unwrap_or(canvas_point)
+                } else {
+                    canvas_point
                 }
-            }
-        }
-        canvas_point
+            } else {
+                canvas_point
+            };
+            (local_dip, scale)
+        } else {
+            (canvas_point, 1.0)
+        };
+
+        let window_origin_phys = (0, 0);
+        canvas_local_to_screen_logical_pure(transformed_local, window_origin_phys, scale)
+    }
+
+    /// Converts desktop screen logical coordinates to XAML root local DIPs.
+    pub(crate) fn screen_logical_to_xaml_local(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        screen_point: Point,
+    ) -> Point {
+        let scale = if let Ok(xaml_root) = canvas.XamlRoot() {
+            xaml_root.RasterizationScale().unwrap_or(1.0)
+        } else {
+            1.0
+        };
+        let window_origin_phys = (0, 0);
+        screen_logical_to_xaml_local_pure(screen_point, window_origin_phys, scale)
     }
 
     /// Queries the real monitor work area in screen logical coordinates for the given canvas and optional anchor point.
@@ -1246,14 +1300,11 @@ impl TreeHostPanel {
                 pt_int,
                 crate::bindings::Microsoft::UI::Windowing::DisplayAreaFallback::Nearest,
             ) {
-                if let Ok(work_area) = display_area.WorkArea() {
-                    return elwindui_core::base::Rect {
-                        x: (work_area.X as f64 / scale) as f32,
-                        y: (work_area.Y as f64 / scale) as f32,
-                        width: (work_area.Width as f64 / scale) as f32,
-                        height: (work_area.Height as f64 / scale) as f32,
-                    };
-                }
+                let outer = display_area.OuterBounds().unwrap_or_default();
+                let work = display_area.WorkArea().unwrap_or_default();
+                return display_area_to_core_work_area(
+                    outer.X, outer.Y, work.X, work.Y, work.Width, work.Height, scale,
+                );
             }
         }
 
@@ -1313,7 +1364,7 @@ impl TreeHostPanel {
                         if let Some(old) = active_popup.borrow_mut().take() {
                             old.close();
                         }
-                        let host = crate::inner::WinUI3PopupHost;
+                        let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
                         let anchor_pt = match &anchor {
                             elwindui_core::ui::popup::PopupAnchor::Point(pt) => Some(*pt),
                             elwindui_core::ui::popup::PopupAnchor::Rect(r) => Some(elwindui_core::base::Point { x: r.x, y: r.y }),
@@ -1334,7 +1385,7 @@ impl TreeHostPanel {
                 if let Some(old) = active_popup.borrow_mut().take() {
                     old.close();
                 }
-                let host = crate::inner::WinUI3PopupHost;
+                let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
                 let anchor_pt = match &anchor {
                     elwindui_core::ui::popup::PopupAnchor::Point(pt) => Some(*pt),
                     elwindui_core::ui::popup::PopupAnchor::Rect(r) => Some(elwindui_core::base::Point { x: r.x, y: r.y }),
@@ -1352,5 +1403,157 @@ impl TreeHostPanel {
             }
         }
         false
+    }
+}
+
+/// Pure helper: converts physical display area bounds and work area into a global screen logical Rect.
+pub fn display_area_to_core_work_area(
+    outer_x: i32,
+    outer_y: i32,
+    work_x: i32,
+    work_y: i32,
+    work_width: i32,
+    work_height: i32,
+    scale: f64,
+) -> Rect {
+    let scale = if scale <= 0.0 { 1.0 } else { scale };
+    let global_x = if outer_x != 0 && work_x >= outer_x {
+        work_x
+    } else {
+        outer_x + work_x
+    };
+    let global_y = if outer_y != 0 && work_y >= outer_y {
+        work_y
+    } else {
+        outer_y + work_y
+    };
+    Rect {
+        x: (global_x as f64 / scale) as f32,
+        y: (global_y as f64 / scale) as f32,
+        width: (work_width as f64 / scale) as f32,
+        height: (work_height as f64 / scale) as f32,
+    }
+}
+
+/// Pure helper: converts canvas-to-window local DIP + window origin physical px into desktop screen logical DIP.
+pub fn canvas_local_to_screen_logical_pure(
+    canvas_to_window_local_dip: Point,
+    window_origin_physical: (i32, i32),
+    scale: f64,
+) -> Point {
+    let scale = if scale <= 0.0 { 1.0 } else { scale };
+    let window_origin_dip_x = window_origin_physical.0 as f64 / scale;
+    let window_origin_dip_y = window_origin_physical.1 as f64 / scale;
+    Point {
+        x: (window_origin_dip_x + canvas_to_window_local_dip.x as f64) as f32,
+        y: (window_origin_dip_y + canvas_to_window_local_dip.y as f64) as f32,
+    }
+}
+
+/// Pure helper: converts desktop screen logical DIP into XAML root local DIP.
+pub fn screen_logical_to_xaml_local_pure(
+    screen_logical: Point,
+    window_origin_physical: (i32, i32),
+    scale: f64,
+) -> Point {
+    let scale = if scale <= 0.0 { 1.0 } else { scale };
+    let window_origin_dip_x = window_origin_physical.0 as f64 / scale;
+    let window_origin_dip_y = window_origin_physical.1 as f64 / scale;
+    Point {
+        x: (screen_logical.x as f64 - window_origin_dip_x) as f32,
+        y: (screen_logical.y as f64 - window_origin_dip_y) as f32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_area_work_area_primary_monitor_scale_1() {
+        let work = display_area_to_core_work_area(0, 0, 0, 0, 1920, 1040, 1.0);
+        assert_eq!(work.x, 0.0);
+        assert_eq!(work.y, 0.0);
+        assert_eq!(work.width, 1920.0);
+        assert_eq!(work.height, 1040.0);
+    }
+
+    #[test]
+    fn display_area_work_area_secondary_monitor_right() {
+        // Secondary monitor to the right at (1920, 0)
+        let work = display_area_to_core_work_area(1920, 0, 1920, 0, 1920, 1080, 1.0);
+        assert_eq!(work.x, 1920.0);
+        assert_eq!(work.y, 0.0);
+        assert_eq!(work.width, 1920.0);
+        assert_eq!(work.height, 1080.0);
+    }
+
+    #[test]
+    fn display_area_work_area_secondary_monitor_left_negative_x() {
+        // Secondary monitor to the left at (-1920, 0)
+        let work = display_area_to_core_work_area(-1920, 0, -1920, 0, 1920, 1080, 1.0);
+        assert_eq!(work.x, -1920.0);
+        assert_eq!(work.y, 0.0);
+        assert_eq!(work.width, 1920.0);
+        assert_eq!(work.height, 1080.0);
+    }
+
+    #[test]
+    fn display_area_work_area_taskbar_top_and_left() {
+        // Taskbar at top (height 40)
+        let work_top = display_area_to_core_work_area(0, 0, 0, 40, 1920, 1040, 1.0);
+        assert_eq!(work_top.x, 0.0);
+        assert_eq!(work_top.y, 40.0);
+
+        // Taskbar at left (width 60)
+        let work_left = display_area_to_core_work_area(0, 0, 60, 0, 1860, 1080, 1.0);
+        assert_eq!(work_left.x, 60.0);
+        assert_eq!(work_left.y, 0.0);
+    }
+
+    #[test]
+    fn display_area_work_area_fractional_scale() {
+        // High-DPI monitor with scale 1.5 (3840x2160 physical -> 2560x1440 logical)
+        let work_15 = display_area_to_core_work_area(0, 0, 0, 0, 3840, 2160, 1.5);
+        assert_eq!(work_15.width, 2560.0);
+        assert_eq!(work_15.height, 1440.0);
+
+        // Scale 2.0
+        let work_20 = display_area_to_core_work_area(1920, 0, 1920, 0, 3840, 2160, 2.0);
+        assert_eq!(work_20.x, 960.0);
+        assert_eq!(work_20.width, 1920.0);
+        assert_eq!(work_20.height, 1080.0);
+    }
+
+    #[test]
+    fn coordinate_round_trip_canvas_to_screen_to_xaml_local() {
+        let canvas_local = Point { x: 50.0, y: 75.0 };
+        let window_phys = (300, 450); // window at (300, 450) physical px
+        let scale = 1.5;
+
+        let screen = canvas_local_to_screen_logical_pure(canvas_local, window_phys, scale);
+        // window_phys (300, 450) at scale 1.5 -> (200.0, 300.0) DIP
+        // screen -> (200 + 50, 300 + 75) = (250.0, 375.0)
+        assert_eq!(screen.x, 250.0);
+        assert_eq!(screen.y, 375.0);
+
+        let xaml_local = screen_logical_to_xaml_local_pure(screen, window_phys, scale);
+        assert_eq!(xaml_local.x, 50.0);
+        assert_eq!(xaml_local.y, 75.0);
+    }
+
+    #[test]
+    fn coordinate_conversion_negative_window_origin() {
+        let canvas_local = Point { x: 10.0, y: 20.0 };
+        let window_phys = (-1920, -100);
+        let scale = 1.0;
+
+        let screen = canvas_local_to_screen_logical_pure(canvas_local, window_phys, scale);
+        assert_eq!(screen.x, -1910.0);
+        assert_eq!(screen.y, -80.0);
+
+        let local = screen_logical_to_xaml_local_pure(screen, window_phys, scale);
+        assert_eq!(local.x, 10.0);
+        assert_eq!(local.y, 20.0);
     }
 }

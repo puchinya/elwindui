@@ -39,8 +39,8 @@ pub struct ContextRequest {
     pub source: ContextRequestSource,
     /// TreeHost-local logical coordinate used for hit-testing the target element.
     pub local_position: Option<Point>,
-    /// Desktop screen logical coordinate (Top-Left 0,0, Y-down) used for popup anchor placement.
-    pub screen_position: Option<Point>,
+    /// Desktop screen anchor (Point or Rect in desktop logical coordinates) used for popup placement.
+    pub screen_anchor: Option<PopupAnchor>,
 }
 
 impl ContextRequest {
@@ -49,25 +49,25 @@ impl ContextRequest {
         Self {
             source: ContextRequestSource::Pointer,
             local_position: Some(local_position),
-            screen_position: Some(screen_position),
+            screen_anchor: Some(PopupAnchor::Point(screen_position)),
         }
     }
 
-    /// Creates a keyboard-driven context request (targeting the focused element).
-    pub fn keyboard() -> Self {
+    /// Creates a keyboard-driven context request (targeting the focused element) with optional screen anchor.
+    pub fn keyboard(screen_anchor: Option<PopupAnchor>) -> Self {
         Self {
             source: ContextRequestSource::Keyboard,
             local_position: None,
-            screen_position: None,
+            screen_anchor,
         }
     }
 
-    /// Creates an accessibility-driven context request.
-    pub fn accessibility(local_position: Option<Point>, screen_position: Option<Point>) -> Self {
+    /// Creates an accessibility-driven context request with optional screen anchor.
+    pub fn accessibility(local_position: Option<Point>, screen_anchor: Option<PopupAnchor>) -> Self {
         Self {
             source: ContextRequestSource::Accessibility,
             local_position,
-            screen_position,
+            screen_anchor,
         }
     }
 }
@@ -278,44 +278,25 @@ impl ContextMenuService {
         focus: &FocusTracker,
         request: &ContextRequest,
     ) -> Option<(ResolvedContextTarget, PopupAnchor)> {
-        let (target, anchor) = match request.source {
+        let target = match request.source {
             ContextRequestSource::Pointer => {
                 let local_pos = request.local_position?;
-                let hit = crate::ui::hit_test(root, local_pos)?;
-                let screen_pos = request.screen_position.unwrap_or(local_pos);
-                (hit, PopupAnchor::Point(screen_pos))
+                crate::ui::hit_test(root, local_pos)?
             }
             ContextRequestSource::Keyboard => {
-                let focused = focus.focused()?;
-                let offset = focused.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-                let arranged_rect = Rect {
-                    x: offset.x,
-                    y: offset.y,
-                    width: focused.arranged_width().unwrap_or(0.0),
-                    height: focused.arranged_height().unwrap_or(0.0),
-                };
-                (focused, PopupAnchor::Rect(arranged_rect))
+                focus.focused()?
             }
             ContextRequestSource::Accessibility | ContextRequestSource::Other => {
-                let target = focus.focused().unwrap_or_else(|| Rc::clone(root));
-                let anchor = match request.screen_position.or(request.local_position) {
-                    Some(pos) => PopupAnchor::Point(pos),
-                    None => {
-                        let offset = target.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-                        let arranged_rect = Rect {
-                            x: offset.x,
-                            y: offset.y,
-                            width: target.arranged_width().unwrap_or(0.0),
-                            height: target.arranged_height().unwrap_or(0.0),
-                        };
-                        PopupAnchor::Rect(arranged_rect)
-                    }
-                };
-                (target, anchor)
+                focus.focused().unwrap_or_else(|| Rc::clone(root))
             }
         };
 
         let resolved = resolve_context_target(&target)?;
+        let anchor = request.screen_anchor.clone().unwrap_or_else(|| {
+            let offset = target.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+            PopupAnchor::Point(offset)
+        });
+
         Some((resolved, anchor))
     }
 
@@ -324,20 +305,11 @@ impl ContextMenuService {
         target: &Rc<dyn UIElementExt>,
         request: &ContextRequest,
     ) -> Option<(ResolvedContextTarget, PopupAnchor)> {
-        let anchor = match request.screen_position.or(request.local_position) {
-            Some(pos) => PopupAnchor::Point(pos),
-            None => {
-                let offset = target.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
-                let arranged_rect = Rect {
-                    x: offset.x,
-                    y: offset.y,
-                    width: target.arranged_width().unwrap_or(0.0),
-                    height: target.arranged_height().unwrap_or(0.0),
-                };
-                PopupAnchor::Rect(arranged_rect)
-            }
-        };
         let resolved = resolve_context_target(target)?;
+        let anchor = request.screen_anchor.clone().unwrap_or_else(|| {
+            let offset = target.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+            PopupAnchor::Point(offset)
+        });
         Some((resolved, anchor))
     }
 

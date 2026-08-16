@@ -226,7 +226,8 @@ Restore focus to original target if necessary
 - **Coordinate Conversion**:
   - `canvas_to_screen_point`: Canvas ローカル DIP -> `TransformToVisual(XamlRoot.Content)` による Window Client Local DIP -> `ContentCoordinateConverter::ConvertLocalToScreen` (または `+ (AppWindow.Position / scale)` fallback) による Desktop Screen Logical DIP。
   - `screen_logical_to_xaml_local`: Desktop Screen Logical DIP -> Screen Physical Px -> `ContentCoordinateConverter::ConvertScreenToLocal` (または `- (AppWindow.Position / scale)` fallback) による XamlRoot / Window Client Local DIP -> `Popup.SetHorizontalOffset` / `SetVerticalOffset`。
-- **Work Area**: `Microsoft.UI.Windowing.DisplayArea::GetFromPoint` を用いて実モニターの OuterBounds / WorkArea を取得し、`display_area_to_core_work_area` (`outer_x + work_x`, `outer_y + work_y`) によりグローバル Screen Logical Rect へ変換。
+  - 変換失敗時に screen 座標を XAML ローカルオフセットとして誤認・再利用することは禁止し、安全にポップアップ表示を中断（`Option::None`）する。
+- **Work Area**: `DisplayArea::GetFromPoint` -> `DisplayArea::GetFromWindowId` -> 明示的 screen 変換済み XamlRoot bounds の優先順で取得し、`display_area_to_core_work_area` (`outer_x + work_x`, `outer_y + work_y`) により必ずグローバル Screen Logical Rect (`Option<Rect>`) として返す。未変換のローカル Rect をスクリーン Rect として偽装返却することは禁止。
 - **Focus & Lifetime**: `PopupFocusPolicy::Root` にて開いた popup の root UIElement にフォーカスを設定。`TreeHostPanel` / `InnerPopupSurface` が `active_popup` として handle を保持し、新規 popup open 時に既存 popup を安全にクローズ。
 - **Menu Realization Ownership**: `Menu` / `MenuItem` は論理セマンティックモデルであり、Context Menu 表示時は `InnerMenu::create_flyout` により専用の `MenuFlyoutItem` インスタンスを生成することで `MenuBarItem` とのネイティブインスタンス競合を回避。
 - Outside pointer press および `ProcessKeyboardAccelerators` (Escape) で dismiss。

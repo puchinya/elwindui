@@ -1325,17 +1325,16 @@ impl TreeHostPanel {
     pub(crate) fn query_work_area_for_canvas(
         canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
         anchor_pt: Option<Point>,
-    ) -> elwindui_core::base::Rect {
-        let scale = if let Ok(xaml_root) = canvas.XamlRoot() {
-            xaml_root.RasterizationScale().unwrap_or(1.0)
-        } else {
-            1.0
-        };
+    ) -> Option<elwindui_core::base::Rect> {
+        let xaml_root = canvas.XamlRoot().ok()?;
+        let scale = xaml_root.RasterizationScale().unwrap_or(1.0);
+        let scale_safe = if scale <= 0.0 { 1.0 } else { scale };
 
+        // 1. Try DisplayArea::GetFromPoint if anchor_pt given
         if let Some(anchor) = anchor_pt {
             let pt_int = windows::Graphics::PointInt32 {
-                X: (anchor.x as f64 * scale) as i32,
-                Y: (anchor.y as f64 * scale) as i32,
+                X: (anchor.x as f64 * scale_safe) as i32,
+                Y: (anchor.y as f64 * scale_safe) as i32,
             };
             if let Ok(display_area) = crate::bindings::Microsoft::UI::Windowing::DisplayArea::GetFromPoint(
                 pt_int,
@@ -1343,32 +1342,44 @@ impl TreeHostPanel {
             ) {
                 let outer = display_area.OuterBounds().unwrap_or_default();
                 let work = display_area.WorkArea().unwrap_or_default();
-                return display_area_to_core_work_area(
-                    outer.X, outer.Y, work.X, work.Y, work.Width, work.Height, scale,
-                );
+                return Some(display_area_to_core_work_area(
+                    outer.X, outer.Y, work.X, work.Y, work.Width, work.Height, scale_safe,
+                ));
             }
         }
 
-        if let Ok(xaml_root) = canvas.XamlRoot() {
-            if let Ok(size) = xaml_root.Size() {
-                return elwindui_core::base::Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: size.Width as f32,
-                    height: size.Height as f32,
-                };
+        // 2. Try DisplayArea::GetFromWindowId
+        if let Ok(island) = xaml_root.ContentIslandEnvironment() {
+            if let Ok(app_window_id) = island.AppWindowId() {
+                if let Ok(display_area) = crate::bindings::Microsoft::UI::Windowing::DisplayArea::GetFromWindowId(
+                    app_window_id,
+                    crate::bindings::Microsoft::UI::Windowing::DisplayAreaFallback::Nearest,
+                ) {
+                    let outer = display_area.OuterBounds().unwrap_or_default();
+                    let work = display_area.WorkArea().unwrap_or_default();
+                    return Some(display_area_to_core_work_area(
+                        outer.X, outer.Y, work.X, work.Y, work.Width, work.Height, scale_safe,
+                    ));
+                }
             }
         }
-        let fe: crate::bindings::Microsoft::UI::Xaml::FrameworkElement =
-            canvas.cast().expect("Canvas as FrameworkElement");
-        let w = fe.ActualWidth().unwrap_or(800.0) as f32;
-        let h = fe.ActualHeight().unwrap_or(600.0) as f32;
-        elwindui_core::base::Rect {
-            x: 0.0,
-            y: 0.0,
-            width: w.max(100.0),
-            height: h.max(100.0),
+
+        // 3. Fallback: Convert XamlRoot bounds (local DIP) explicitly to screen logical coordinates
+        if let Ok(size) = xaml_root.Size() {
+            if let (Some(p0), Some(p1)) = (
+                Self::canvas_to_screen_point(canvas, Point { x: 0.0, y: 0.0 }),
+                Self::canvas_to_screen_point(canvas, Point { x: size.Width as f32, y: size.Height as f32 }),
+            ) {
+                return Some(elwindui_core::base::Rect {
+                    x: p0.x.min(p1.x),
+                    y: p0.y.min(p1.y),
+                    width: (p1.x - p0.x).abs().max(100.0),
+                    height: (p1.y - p0.y).abs().max(100.0),
+                });
+            }
         }
+
+        None
     }
 
     pub(crate) fn dispatch_context_request(
@@ -1402,15 +1413,17 @@ impl TreeHostPanel {
                         }
                     }
                     elwindui_core::ui::ContextMenuPresentation::Custom => {
-                        if let Some(old) = active_popup.borrow_mut().take() {
-                            old.close();
-                        }
-                        let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
                         let anchor_pt = match &anchor {
                             elwindui_core::ui::popup::PopupAnchor::Point(pt) => Some(*pt),
                             elwindui_core::ui::popup::PopupAnchor::Rect(r) => Some(elwindui_core::base::Point { x: r.x, y: r.y }),
                         };
-                        let work_area = Self::query_work_area_for_canvas(canvas, anchor_pt);
+                        let Some(work_area) = Self::query_work_area_for_canvas(canvas, anchor_pt) else {
+                            return false;
+                        };
+                        if let Some(old) = active_popup.borrow_mut().take() {
+                            old.close();
+                        }
+                        let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
                         let handle = elwindui_core::ui::ContextMenuService::open_custom_menu(
                             &host,
                             &*menu,
@@ -1423,15 +1436,17 @@ impl TreeHostPanel {
                 }
             }
             elwindui_core::ui::popup::ResolvedContextDefinition::Popup { template } => {
-                if let Some(old) = active_popup.borrow_mut().take() {
-                    old.close();
-                }
-                let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
                 let anchor_pt = match &anchor {
                     elwindui_core::ui::popup::PopupAnchor::Point(pt) => Some(*pt),
                     elwindui_core::ui::popup::PopupAnchor::Rect(r) => Some(elwindui_core::base::Point { x: r.x, y: r.y }),
                 };
-                let work_area = Self::query_work_area_for_canvas(canvas, anchor_pt);
+                let Some(work_area) = Self::query_work_area_for_canvas(canvas, anchor_pt) else {
+                    return false;
+                };
+                if let Some(old) = active_popup.borrow_mut().take() {
+                    old.close();
+                }
+                let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
                 let handle = elwindui_core::ui::ContextMenuService::open_custom_popup(
                     &host,
                     &template,

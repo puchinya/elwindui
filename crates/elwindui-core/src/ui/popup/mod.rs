@@ -177,7 +177,7 @@ pub enum PopupPlacement {
     Left,
 }
 
-/// Pure calculation of a popup's top-left origin given its anchor, desired size, monitor work area, and placement mode.
+/// Pure calculation of a popup's top-left origin given its anchor, desired size, monitor work area, and placement mode in Core top-left (0, 0), Y-down coordinate space.
 pub fn calculate_popup_placement(
     anchor: &PopupAnchor,
     popup_size: Size,
@@ -190,16 +190,16 @@ pub fn calculate_popup_placement(
     match anchor {
         PopupAnchor::Point(p) => {
             let mut x = p.x;
-            let mut y = p.y - popup_size.height;
+            let mut y = p.y;
 
             if placement == PopupPlacement::AutoFlip || placement == PopupPlacement::Below {
-                if y < work_area.y && p.y + popup_size.height <= work_area_bottom {
-                    y = p.y;
-                }
-            } else if placement == PopupPlacement::Above {
-                y = p.y;
                 if y + popup_size.height > work_area_bottom && p.y - popup_size.height >= work_area.y {
                     y = p.y - popup_size.height;
+                }
+            } else if placement == PopupPlacement::Above {
+                y = p.y - popup_size.height;
+                if y < work_area.y && p.y + popup_size.height <= work_area_bottom {
+                    y = p.y;
                 }
             }
 
@@ -360,7 +360,13 @@ impl ContextMenuService {
             height: measured.height.max(1.0),
         };
         let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
-        host.show_popup(content, position, popup_size)
+        host.show_popup(PopupRequest {
+            content,
+            position,
+            size: popup_size,
+            focus_policy: PopupFocusPolicy::None,
+            dismiss_policy: PopupDismissPolicy::LightDismiss,
+        })
     }
 
     /// Opens a custom-rendered standard menu on the provided popup host.
@@ -370,15 +376,13 @@ impl ContextMenuService {
         anchor: &PopupAnchor,
         work_area: Rect,
     ) -> Rc<dyn PopupSurfaceHandle> {
-        let handle_cell: Rc<std::cell::RefCell<Option<Rc<dyn PopupSurfaceHandle>>>> =
-            Rc::new(std::cell::RefCell::new(None));
-        let handle_weak = Rc::downgrade(&handle_cell);
+        let handle_slot: Rc<RefCell<Option<Rc<dyn PopupSurfaceHandle>>>> =
+            Rc::new(RefCell::new(None));
+        let slot_clone = Rc::clone(&handle_slot);
 
         let on_close: Rc<dyn Fn()> = Rc::new(move || {
-            if let Some(cell) = handle_weak.upgrade() {
-                if let Some(handle) = cell.borrow().as_ref() {
-                    handle.close();
-                }
+            if let Some(handle) = slot_clone.borrow_mut().take() {
+                handle.close();
             }
         });
 
@@ -396,9 +400,47 @@ impl ContextMenuService {
             height: measured.height.max(1.0),
         };
         let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
-        let handle = host.show_popup(content, position, popup_size);
-        *handle_cell.borrow_mut() = Some(Rc::clone(&handle));
-        handle
+        let inner_handle = host.show_popup(PopupRequest {
+            content,
+            position,
+            size: popup_size,
+            focus_policy: PopupFocusPolicy::Root,
+            dismiss_policy: PopupDismissPolicy::LightDismiss,
+        });
+
+        let wrapped_handle = Rc::new(CustomMenuPopupHandle {
+            inner: inner_handle,
+            slot: Rc::clone(&handle_slot),
+            closed: std::cell::Cell::new(false),
+        });
+        *handle_slot.borrow_mut() = Some(Rc::clone(&wrapped_handle) as Rc<dyn PopupSurfaceHandle>);
+        wrapped_handle
+    }
+}
+
+struct CustomMenuPopupHandle {
+    inner: Rc<dyn PopupSurfaceHandle>,
+    slot: Rc<RefCell<Option<Rc<dyn PopupSurfaceHandle>>>>,
+    closed: std::cell::Cell<bool>,
+}
+
+impl PopupSurfaceHandle for CustomMenuPopupHandle {
+    fn close(&self) {
+        if !self.closed.get() {
+            self.closed.set(true);
+            if let Ok(mut borrow) = self.slot.try_borrow_mut() {
+                let _ = borrow.take();
+            }
+            self.inner.close();
+        }
+    }
+}
+
+impl Drop for CustomMenuPopupHandle {
+    fn drop(&mut self) {
+        if let Ok(mut borrow) = self.slot.try_borrow_mut() {
+            let _ = borrow.take();
+        }
     }
 }
 
@@ -590,15 +632,42 @@ pub trait PopupSurfaceHandle {
     fn close(&self);
 }
 
+/// Focus policy for newly opened popup surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PopupFocusPolicy {
+    /// Do not automatically transfer focus.
+    #[default]
+    None,
+    /// Transfer focus to the root UIElement of the popup tree.
+    Root,
+    /// Transfer focus to the first focusable element inside the popup tree.
+    FirstFocusable,
+}
+
+/// Dismissal policy for standalone popup surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PopupDismissPolicy {
+    /// Dismiss automatically on outside click or Escape.
+    #[default]
+    LightDismiss,
+    /// Dismiss only upon explicit programmatic close.
+    Explicit,
+}
+
+/// A request to display a popup surface.
+#[derive(Clone)]
+pub struct PopupRequest {
+    pub content: Rc<dyn UIElementExt>,
+    pub position: Point,
+    pub size: Size,
+    pub focus_policy: PopupFocusPolicy,
+    pub dismiss_policy: PopupDismissPolicy,
+}
+
 /// Capability trait implemented by backend window hosts to display standalone popup surfaces.
 pub trait PopupHost {
-    /// Displays a popup surface containing `content` at `position` with `size`.
-    fn show_popup(
-        &self,
-        content: Rc<dyn UIElementExt>,
-        position: Point,
-        size: Size,
-    ) -> Rc<dyn PopupSurfaceHandle>;
+    /// Displays a popup surface according to `request`.
+    fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle>;
 }
 
 #[cfg(test)]
@@ -635,11 +704,13 @@ mod tests {
     impl PopupHost for FakePopupHost {
         fn show_popup(
             &self,
-            content: Rc<dyn UIElementExt>,
-            position: Point,
-            size: Size,
+            request: PopupRequest,
         ) -> Rc<dyn PopupSurfaceHandle> {
-            self.shown.borrow_mut().push((Rc::clone(&content), position, size));
+            self.shown.borrow_mut().push((
+                Rc::clone(&request.content),
+                request.position,
+                request.size,
+            ));
             Rc::new(FakePopupHandle {
                 closed: Rc::clone(&self.closed),
             })
@@ -742,13 +813,61 @@ mod tests {
 
         assert_eq!(host.shown.borrow().len(), 1);
         let (_, pos, size) = &host.shown.borrow()[0];
-        assert_eq!(*pos, Point { x: 100.0, y: 100.0 - size.height });
+        assert_eq!(*pos, Point { x: 100.0, y: 100.0 });
         assert!(size.width > 0.0);
         assert!(size.height > 0.0);
 
         assert!(!host.closed.get());
         handle.close();
         assert!(host.closed.get());
+    }
+
+    #[test]
+    fn open_custom_menu_item_selection_triggers_on_close_and_dismisses_popup_surface() {
+        let host = FakePopupHost::new();
+        let menu = FakeMenu::new();
+
+        let item = crate::ui::testsupport::FakeMenuItem::new();
+        item.set_text("Selectable Item");
+        let selected = Rc::new(Cell::new(false));
+        let sel_clone = Rc::clone(&selected);
+        item.set_on_select(Box::new(move || sel_clone.set(true)));
+        menu.add(Rc::clone(&item) as Rc<dyn MenuItemExt>);
+
+        let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let _handle = ContextMenuService::open_custom_menu(
+            &host,
+            &*menu,
+            &anchor,
+            work_area,
+        );
+
+        assert_eq!(host.shown.borrow().len(), 1);
+        let (content, _pos, _size) = &host.shown.borrow()[0];
+        assert!(!host.closed.get());
+
+        // Find the first child row in custom menu view and trigger on_pointer_released
+        let layout_children = content.visual_children();
+        assert!(!layout_children.is_empty());
+        let row = &layout_children[0];
+
+        let routed_args = crate::input::RoutedEventArgs::default();
+        crate::ui::dispatch_routed(
+            row,
+            "on_pointer_released",
+            &crate::input::PointerEventArgs {
+                position: Point { x: 10.0, y: 10.0 },
+                button: Some(crate::input::MouseButton::Left),
+                modifiers: crate::input::KeyModifiers::default(),
+            },
+            &routed_args,
+        );
+
+        // Verification: item was selected and popup surface was closed!
+        assert!(selected.get(), "menu item on_select callback should be invoked");
+        assert!(host.closed.get(), "popup surface handle close() should be invoked on item selection");
     }
 
     #[test]
@@ -818,41 +937,41 @@ mod tests {
             height: 300.0,
         };
 
-        // Middle of screen: extends downward normally (y = 500 - 300 = 200)
+        // Middle of screen: extends downward normally (y = 100.0)
         let pos1 = calculate_popup_placement(
-            &PopupAnchor::Point(Point { x: 100.0, y: 500.0 }),
-            popup_size,
-            work_area,
-            PopupPlacement::AutoFlip,
-        );
-        assert_eq!(pos1, Point { x: 100.0, y: 200.0 });
-
-        // Near bottom: flips upward (y = 100)
-        let pos_bottom = calculate_popup_placement(
             &PopupAnchor::Point(Point { x: 100.0, y: 100.0 }),
             popup_size,
             work_area,
             PopupPlacement::AutoFlip,
         );
-        assert_eq!(pos_bottom, Point { x: 100.0, y: 100.0 });
+        assert_eq!(pos1, Point { x: 100.0, y: 100.0 });
 
-        // Near top-right: flips leftward (x = 950 - 200 = 750, y = 750 - 300 = 450)
-        let pos2 = calculate_popup_placement(
-            &PopupAnchor::Point(Point { x: 950.0, y: 750.0 }),
+        // Near bottom: flips upward (y = 700 - 300 = 400.0)
+        let pos_bottom = calculate_popup_placement(
+            &PopupAnchor::Point(Point { x: 100.0, y: 700.0 }),
             popup_size,
             work_area,
             PopupPlacement::AutoFlip,
         );
-        assert_eq!(pos2, Point { x: 750.0, y: 450.0 });
+        assert_eq!(pos_bottom, Point { x: 100.0, y: 400.0 });
 
-        // Near bottom-right: flips both leftward and upward
-        let pos_br = calculate_popup_placement(
+        // Near right: flips leftward (x = 950 - 200 = 750.0, y = 100.0)
+        let pos2 = calculate_popup_placement(
             &PopupAnchor::Point(Point { x: 950.0, y: 100.0 }),
             popup_size,
             work_area,
             PopupPlacement::AutoFlip,
         );
-        assert_eq!(pos_br, Point { x: 750.0, y: 100.0 });
+        assert_eq!(pos2, Point { x: 750.0, y: 100.0 });
+
+        // Near bottom-right: flips both leftward and upward (x = 750.0, y = 400.0)
+        let pos_br = calculate_popup_placement(
+            &PopupAnchor::Point(Point { x: 950.0, y: 700.0 }),
+            popup_size,
+            work_area,
+            PopupPlacement::AutoFlip,
+        );
+        assert_eq!(pos_br, Point { x: 750.0, y: 400.0 });
     }
 
     struct TestKey;

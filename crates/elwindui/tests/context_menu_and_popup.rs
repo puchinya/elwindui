@@ -4,8 +4,8 @@
 
 use elwindui::core::base::{Point, Rect, Size};
 use elwindui::core::ui::popup::{
-    ContextMenuService, ContextRequest, PopupAnchor,
-    PopupContentTemplate, PopupHost, PopupSurfaceHandle, ResolvedContextDefinition,
+    ContextMenuPresenter, ContextMenuService, ContextRequest, PopupAnchor,
+    PopupContentTemplate, PopupHost, PopupRequest, PopupSurfaceHandle, ResolvedContextDefinition,
 };
 use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt};
 use std::cell::{Cell, RefCell};
@@ -38,13 +38,11 @@ impl TestPopupHost {
 impl PopupHost for TestPopupHost {
     fn show_popup(
         &self,
-        content: Rc<dyn UIElementExt>,
-        position: Point,
-        size: Size,
+        request: PopupRequest,
     ) -> Rc<dyn PopupSurfaceHandle> {
         self.shown
             .borrow_mut()
-            .push((Rc::clone(&content), position, size));
+            .push((Rc::clone(&request.content), request.position, request.size));
         Rc::new(TestPopupHandle {
             closed: Rc::clone(&self.closed),
         })
@@ -179,7 +177,7 @@ fn custom_context_menu_service_opens_and_closes_popup() {
 
     assert_eq!(host.shown.borrow().len(), 1);
     let (_content, pos, size) = &host.shown.borrow()[0];
-    assert_eq!(*pos, Point { x: 120.0, y: 80.0 - size.height });
+    assert_eq!(*pos, Point { x: 120.0, y: 80.0 });
     assert!(size.width > 0.0);
     assert!(size.height > 0.0);
 
@@ -298,4 +296,128 @@ fn custom_menu_items_support_enabled_and_shortcut_semantics() {
 
     item.set_enabled(true);
     assert!(item.enabled());
+}
+
+#[test]
+fn custom_menu_keyboard_dispatcher_navigates_and_selects() {
+    let host = TestPopupHost::new();
+    let menu = TestMenu::new();
+
+    let item1 = TestMenuItem::new();
+    item1.set_text("First");
+    let sel1 = Rc::new(Cell::new(false));
+    let sel1_clone = Rc::clone(&sel1);
+    item1.set_on_select(Box::new(move || sel1_clone.set(true)));
+    menu.items.add(Rc::clone(&item1) as Rc<dyn MenuItemExt>);
+
+    let item2 = TestMenuItem::new();
+    item2.set_text("Second");
+    let sel2 = Rc::new(Cell::new(false));
+    let sel2_clone = Rc::clone(&sel2);
+    item2.set_on_select(Box::new(move || sel2_clone.set(true)));
+    menu.items.add(Rc::clone(&item2) as Rc<dyn MenuItemExt>);
+
+    let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
+    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+    let _handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
+
+    let (content, _, _) = &host.shown.borrow()[0];
+    let keyboard = elwindui::core::input::KeyboardDispatcher::new();
+
+    // Give focus to the menu root
+    keyboard.focus.set_focus(content, elwindui::core::input::FocusState::Programmatic);
+
+    // Send Key::Down -> highlights first item
+    keyboard.handle_key(
+        content,
+        elwindui::core::input::RawKeyEvent {
+            kind: elwindui::core::input::RawKeyEventKind::Down { is_repeat: false },
+            key: elwindui::core::input::Key::Down,
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+            timestamp_ms: 0.0,
+        },
+    );
+
+    // Send Key::Down -> highlights second item
+    keyboard.handle_key(
+        content,
+        elwindui::core::input::RawKeyEvent {
+            kind: elwindui::core::input::RawKeyEventKind::Down { is_repeat: false },
+            key: elwindui::core::input::Key::Down,
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+            timestamp_ms: 0.0,
+        },
+    );
+
+    // Send Key::Enter -> selects second item and closes popup
+    keyboard.handle_key(
+        content,
+        elwindui::core::input::RawKeyEvent {
+            kind: elwindui::core::input::RawKeyEventKind::Down { is_repeat: false },
+            key: elwindui::core::input::Key::Enter,
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+            timestamp_ms: 0.0,
+        },
+    );
+
+    assert!(!sel1.get(), "first item should not be selected");
+    assert!(sel2.get(), "second item should be selected via KeyboardDispatcher");
+    assert!(host.closed.get(), "popup surface should be dismissed upon selection");
+}
+
+struct TestThemeKey;
+impl elwindui::core::environment::EnvironmentKey for TestThemeKey {
+    type Value = String;
+    fn default_value() -> Self::Value {
+        "DefaultTheme".to_string()
+    }
+}
+
+#[test]
+fn environment_scope_context_popup_integration() {
+    let root = elwindui::core::ui::VerticalLayout::new();
+    let mut custom_env = elwindui::core::environment::EnvironmentContext::root();
+    custom_env.set::<TestThemeKey>("CustomDarkTheme".to_string());
+    root.set_environment_context(custom_env);
+
+    let child = elwindui::core::ui::TextBlock::new();
+    root.children().add(Rc::clone(&child) as Rc<dyn UIElementExt>);
+
+    let observed_theme = Rc::new(RefCell::new(String::new()));
+    let obs_clone = Rc::clone(&observed_theme);
+    let template = PopupContentTemplate::new(move |ctx| {
+        *obs_clone.borrow_mut() = ctx.environment.get::<TestThemeKey>();
+        let layout = elwindui::core::ui::VerticalLayout::new();
+        layout as Rc<dyn UIElementExt>
+    });
+
+    child.set_context_popup(Some(template));
+
+    let child_dyn: Rc<dyn UIElementExt> = child;
+    let request = ContextRequest::keyboard();
+    let (resolved, anchor) =
+        ContextMenuService::process_request_for_target(&child_dyn, &request).expect("should resolve");
+
+    let host = TestPopupHost::new();
+    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+    match resolved.definition {
+        ResolvedContextDefinition::Popup { template: t } => {
+            let _handle = ContextMenuService::open_custom_popup(
+                &host,
+                &t,
+                &anchor,
+                resolved.owner.effective_environment(),
+                work_area,
+            );
+
+            assert_eq!(
+                *observed_theme.borrow(),
+                "CustomDarkTheme",
+                "popup template should inherit scoped environment from target element's ancestor"
+            );
+        }
+        _ => panic!("expected Popup definition"),
+    }
 }

@@ -107,23 +107,36 @@ Resolve nearest context owner:
 
 ### PopupHost Capability Trait
 
+### PopupHost Capability Trait
+
 ```rust
+pub enum PopupFocusPolicy {
+    None,
+    Root,
+    FirstFocusable,
+}
+
+pub enum PopupDismissPolicy {
+    LightDismiss,
+    Explicit,
+}
+
+pub struct PopupRequest {
+    pub content: Rc<dyn UIElementExt>,
+    pub position: Point,
+    pub size: Size,
+    pub focus_policy: PopupFocusPolicy,
+    pub dismiss_policy: PopupDismissPolicy,
+}
+
 pub trait PopupHost {
     fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle>;
 }
 
 pub trait PopupSurfaceHandle {
-    fn update_position(&self, position: Point);
     fn close(&self);
 }
 ```
-
-`PopupRequest` は以下を包含する:
-- `content`: 表示する `Rc<dyn UIElementExt>`
-- `anchor`: `PopupAnchor`（Point または Rect）
-- `placement`: 配置ポリシー（Below, Above, Right, Left, AutoFlip）
-- `focus_policy`: フォーカス受け入れ可否（`AcceptsFocus`, `NonActivating`）
-- `dismiss_policy`: 閉じる条件（`DismissOnOutsideClick`, `DismissOnEscape`）
 
 ---
 
@@ -133,23 +146,24 @@ Placement 計算は Core 内の純粋関数（Pure logic）として実装され
 
 ### Pure Placement Logic
 
+Core 座標系は **Top-Left (0, 0), +x: right, +y: down** に統一される。
+
 ```text
-1. target anchor (point or rect in screen coordinates)
+1. target anchor (Point or Rect in Core top-left screen coordinates)
 2. desired popup content size (from measure pass)
-3. monitor work area bounds (excluding dock/taskbar)
-4. calculate ideal placement (e.g. bottom-right of anchor)
+3. monitor work area bounds (Rect in Core top-left, excluding dock/menubar/taskbar)
+4. calculate ideal placement (Below / AutoFlip / Above / Right / Left)
 5. test bounds against monitor work area:
-   - if bottom overflows monitor work area -> flip to top
-   - if right overflows monitor work area -> flip to left
-6. clamp within monitor work area if still exceeding
+   - if bottom overflows monitor work area -> flip upward (y = anchor.y - popup.height)
+   - if right overflows monitor work area -> flip leftward (x = anchor.x - popup.width)
+6. clamp within monitor work area bounds
 ```
 
 ### Coordinate Conversion Boundaries
 
-- **Local Logical Coordinates**: UIElement 内のローカルレイアウト座標。
-- **Window Logical Coordinates**: メイン Window の client 領域左上を原点とする論理ピクセル座標。
-- **Screen Logical Coordinates**: プライマリモニター左上（または OS screen origin）を基準とした論理ピクセル座標。
-- **Physical Pixels**: DPI / Scale 適用後の物理ピクセル（Backend の OS API 呼び出し境界でのみ使用）。
+- **Core Screen Coordinates**: プライマリモニター左上 (0, 0) を基準とした論理ピクセル座標（Top-Left, Y-down）。
+- **AppKit Backend**: Core の Top-Left 座標系と AppKit の Bottom-Left (Y-up) 座標系との変換を Backend 境界で行う（`appkit_y = primary_screen_height - (core_y + height)`）。
+- **WinUI 3 Backend**: Top-Left / Y-down セマンティクスをそのまま利用し、XamlRoot / Canvas 経由で配置。
 
 ---
 

@@ -237,16 +237,26 @@ impl TreeHostPanel {
                     let Some(key) = winui_key(virtual_key) else {
                         return Ok(());
                     };
-                    let is_repeat = args
-                        .KeyStatus()
-                        .map(|status| status.RepeatCount > 1)
-                        .unwrap_or(false);
+                    let modifiers = winui_modifiers();
+                    if crate::host::event::is_context_menu_key(virtual_key, modifiers) {
+                        let tree_ref = tree_for_key.upgrade().and_then(|t| t.borrow().clone());
+                        let kb_ref = keyboard_for_key.upgrade();
+                        if let (Some(tree), Some(kb)) = (tree_ref, kb_ref) {
+                            let request = elwindui_core::ui::ContextRequest::keyboard();
+                            let _ = Self::dispatch_context_request(
+                                &Some(tree),
+                                &kb,
+                                &this.canvas,
+                                &request,
+                            );
+                        }
+                    }
                     invoke_ui_key_event_callback(
                         callback_id,
                         RawKeyEvent {
                             kind: RawKeyEventKind::Down { is_repeat },
                             key,
-                            modifiers: winui_modifiers(),
+                            modifiers,
                             timestamp_ms: 0.0,
                         },
                     );
@@ -393,67 +403,12 @@ impl TreeHostPanel {
                                         y: point.Y,
                                     },
                                 );
-                                if let Some((resolved, anchor)) =
-                                    elwindui_core::ui::ContextMenuService::process_request(
-                                        &tree,
-                                        &keyboard.focus,
-                                        &request,
-                                    )
-                                {
-                                    match resolved.definition {
-                                        elwindui_core::ui::popup::ResolvedContextDefinition::Menu {
-                                            menu,
-                                            presentation,
-                                        } => match presentation {
-                                            elwindui_core::ui::ContextMenuPresentation::Native => {
-                                                if let Some(winui_menu) = menu
-                                                    .as_any()
-                                                    .downcast_ref::<crate::native_ui::Menu>()
-                                                {
-                                                    if let Ok(flyout) = winui_menu.create_flyout() {
-                                                        let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
-                                                            canvas_for_context
-                                                                .cast()
-                                                                .expect("Canvas as UIElement");
-                                                        let _ = flyout.ShowAt(&uie);
-                                                    }
-                                                }
-                                            }
-                                            elwindui_core::ui::ContextMenuPresentation::Custom => {
-                                                let host = crate::inner::WinUI3PopupHost;
-                                                let work_area = elwindui_core::base::Rect {
-                                                    x: 0.0,
-                                                    y: 0.0,
-                                                    width: 1920.0,
-                                                    height: 1080.0,
-                                                };
-                                                let _ = elwindui_core::ui::ContextMenuService::open_custom_menu(
-                                                    &host,
-                                                    &*menu,
-                                                    &anchor,
-                                                    work_area,
-                                                );
-                                            }
-                                        },
-                                        elwindui_core::ui::popup::ResolvedContextDefinition::Popup {
-                                            template,
-                                        } => {
-                                            let host = crate::inner::WinUI3PopupHost;
-                                            let work_area = elwindui_core::base::Rect {
-                                                x: 0.0,
-                                                y: 0.0,
-                                                width: 1920.0,
-                                                height: 1080.0,
-                                            };
-                                            let _ = elwindui_core::ui::ContextMenuService::open_custom_popup(
-                                                &host,
-                                                &template,
-                                                &anchor,
-                                                resolved.owner.effective_environment(),
-                                                work_area,
-                                            );
-                                        }
-                                    }
+                                if Self::dispatch_context_request(
+                                    &Some(tree),
+                                    &keyboard,
+                                    &canvas_for_context,
+                                    &request,
+                                ) {
                                     let _ = args.SetHandled(true);
                                 }
                             }
@@ -1154,5 +1109,88 @@ impl TreeHostPanel {
                 }
             }
         }
+    }
+
+    pub(crate) fn query_work_area_for_canvas(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+    ) -> elwindui_core::base::Rect {
+        if let Ok(xaml_root) = canvas.XamlRoot() {
+            if let Ok(size) = xaml_root.Size() {
+                return elwindui_core::base::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: size.Width as f32,
+                    height: size.Height as f32,
+                };
+            }
+        }
+        let fe: crate::bindings::Microsoft::UI::Xaml::FrameworkElement =
+            canvas.cast().expect("Canvas as FrameworkElement");
+        let w = fe.ActualWidth().unwrap_or(1920.0) as f32;
+        let h = fe.ActualHeight().unwrap_or(1080.0) as f32;
+        elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width: if w > 0.0 { w } else { 1920.0 },
+            height: if h > 0.0 { h } else { 1080.0 },
+        }
+    }
+
+    pub(crate) fn dispatch_context_request(
+        tree: &Option<Rc<dyn UIElementExt>>,
+        keyboard: &crate::host::KeyboardDispatcher,
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        request: &elwindui_core::ui::ContextRequest,
+    ) -> bool {
+        let Some(tree) = tree.as_ref() else {
+            return false;
+        };
+        let Some((resolved, anchor)) = elwindui_core::ui::ContextMenuService::process_request(
+            tree,
+            &keyboard.focus,
+            request,
+        ) else {
+            return false;
+        };
+        match resolved.definition {
+            elwindui_core::ui::popup::ResolvedContextDefinition::Menu { menu, presentation } => {
+                match presentation {
+                    elwindui_core::ui::ContextMenuPresentation::Native => {
+                        if let Some(winui_menu) = menu.as_any().downcast_ref::<crate::native_ui::Menu>() {
+                            if let Ok(flyout) = winui_menu.create_flyout() {
+                                let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
+                                    canvas.cast().expect("Canvas as UIElement");
+                                let _ = flyout.ShowAt(&uie);
+                                return true;
+                            }
+                        }
+                    }
+                    elwindui_core::ui::ContextMenuPresentation::Custom => {
+                        let host = crate::inner::WinUI3PopupHost;
+                        let work_area = Self::query_work_area_for_canvas(canvas);
+                        let _ = elwindui_core::ui::ContextMenuService::open_custom_menu(
+                            &host,
+                            &*menu,
+                            &anchor,
+                            work_area,
+                        );
+                        return true;
+                    }
+                }
+            }
+            elwindui_core::ui::popup::ResolvedContextDefinition::Popup { template } => {
+                let host = crate::inner::WinUI3PopupHost;
+                let work_area = Self::query_work_area_for_canvas(canvas);
+                let _ = elwindui_core::ui::ContextMenuService::open_custom_popup(
+                    &host,
+                    &template,
+                    &anchor,
+                    resolved.owner.effective_environment(),
+                    work_area,
+                );
+                return true;
+            }
+        }
+        false
     }
 }

@@ -5,15 +5,16 @@
 
 use crate::ffi::mtm;
 use crate::host::TreeHostView;
-use elwindui_core::base::{Point, Size};
-use elwindui_core::ui::{PopupHost, PopupSurfaceHandle, UIElementExt};
+use elwindui_core::ui::popup::{
+    PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
+};
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, msg_send};
 use block2::RcBlock;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSEvent, NSEventMask, NSEventType, NSFloatingWindowLevel,
-    NSWindow, NSWindowStyleMask,
+    NSScreen, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::RefCell;
@@ -23,7 +24,6 @@ use std::rc::Rc;
 /// Internal AppKit representation of a standalone popup surface.
 pub(crate) struct InnerPopupSurface {
     window: Retained<NSWindow>,
-    #[allow(dead_code)]
     content_host: Retained<TreeHostView>,
     is_open: RefCell<bool>,
     local_monitor: RefCell<Option<Retained<AnyObject>>>,
@@ -33,14 +33,19 @@ pub(crate) struct InnerPopupSurface {
 impl InnerPopupSurface {
     /// Creates and immediately displays a new popup surface.
     pub(crate) fn show(
-        content: Rc<dyn UIElementExt>,
-        position: Point,
-        size: Size,
+        request: PopupRequest,
+        owner_window: Option<&NSWindow>,
     ) -> Rc<Self> {
         let m = mtm();
+        let primary_screen_height = NSScreen::screens(m)
+            .firstObject()
+            .map(|s| s.frame().size.height)
+            .unwrap_or(1080.0);
+
+        let appkit_y = primary_screen_height - (request.position.y as f64 + request.size.height as f64);
         let content_rect = NSRect::new(
-            NSPoint::new(position.x as f64, position.y as f64),
-            NSSize::new(size.width as f64, size.height as f64),
+            NSPoint::new(request.position.x as f64, appkit_y),
+            NSSize::new(request.size.width as f64, request.size.height as f64),
         );
         let style = NSWindowStyleMask::Borderless;
         let window: Retained<NSWindow> = unsafe {
@@ -54,8 +59,8 @@ impl InnerPopupSurface {
             ]
         };
 
-        // Ensure popup displays above floating windows and native controls
-        window.setLevel(NSFloatingWindowLevel + 2);
+        // Floating level ensures popup sits above controls
+        window.setLevel(NSFloatingWindowLevel);
         window.setOpaque(false);
         window.setHasShadow(true);
         window.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
@@ -64,10 +69,16 @@ impl InnerPopupSurface {
         content_host.setTranslatesAutoresizingMaskIntoConstraints(true);
         content_host.setFrame(NSRect::new(
             NSPoint::new(0.0, 0.0),
-            NSSize::new(size.width as f64, size.height as f64),
+            NSSize::new(request.size.width as f64, request.size.height as f64),
         ));
-        content_host.set_tree(content);
+        content_host.set_tree(Rc::clone(&request.content));
         window.setContentView(Some(&content_host));
+
+        if let Some(owner) = owner_window {
+            unsafe {
+                owner.addChildWindow_ordered(&window, NSWindowOrderingMode::Above);
+            }
+        }
 
         let surface = Rc::new(Self {
             window,
@@ -78,53 +89,58 @@ impl InnerPopupSurface {
         });
 
         surface.window.makeKeyAndOrderFront(None);
-        surface.window.orderFrontRegardless();
         surface.window.display();
 
-        // Install local and global event monitors for light-dismiss (dismiss on outside click or Esc)
-        let popup_window_num = surface.window.windowNumber();
-        let mask = NSEventMask::LeftMouseDown
-            | NSEventMask::RightMouseDown
-            | NSEventMask::OtherMouseDown
-            | NSEventMask::KeyDown;
+        if request.focus_policy == PopupFocusPolicy::Root {
+            surface.content_host.focus_element(&request.content);
+        }
 
-        let weak_surface = Rc::downgrade(&surface);
-        let local_block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
-            let event = unsafe { event_ptr.as_ref() };
-            if let Some(s) = weak_surface.upgrade() {
-                if event.r#type() == NSEventType::KeyDown {
-                    if event.keyCode() == 53 {
-                        // Esc key dismisses popup and consumes the key event
+        if request.dismiss_policy == PopupDismissPolicy::LightDismiss {
+            // Install local and global event monitors for light-dismiss (dismiss on outside click or Esc)
+            let popup_window_num = surface.window.windowNumber();
+            let mask = NSEventMask::LeftMouseDown
+                | NSEventMask::RightMouseDown
+                | NSEventMask::OtherMouseDown
+                | NSEventMask::KeyDown;
+
+            let weak_surface = Rc::downgrade(&surface);
+            let local_block = RcBlock::new(move |event_ptr: NonNull<NSEvent>| -> *mut NSEvent {
+                let event = unsafe { event_ptr.as_ref() };
+                if let Some(s) = weak_surface.upgrade() {
+                    if event.r#type() == NSEventType::KeyDown {
+                        if event.keyCode() == 53 {
+                            // Esc key dismisses popup and consumes the key event
+                            s.close();
+                            return std::ptr::null_mut();
+                        }
+                    } else if event.windowNumber() != popup_window_num {
+                        // Click outside the popup window within the app
                         s.close();
-                        return std::ptr::null_mut();
                     }
-                } else if event.windowNumber() != popup_window_num {
-                    // Click outside the popup window within the app
+                }
+                event_ptr.as_ptr()
+            });
+
+            let local_mon = unsafe {
+                NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local_block)
+            };
+            *surface.local_monitor.borrow_mut() = local_mon;
+
+            let weak_surface_global = Rc::downgrade(&surface);
+            let global_mask = NSEventMask::LeftMouseDown
+                | NSEventMask::RightMouseDown
+                | NSEventMask::OtherMouseDown;
+            let global_block = RcBlock::new(move |_event_ptr: NonNull<NSEvent>| {
+                if let Some(s) = weak_surface_global.upgrade() {
+                    // Click outside the application (desktop / other apps / menubar)
                     s.close();
                 }
-            }
-            event_ptr.as_ptr()
-        });
+            });
 
-        let local_mon = unsafe {
-            NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local_block)
-        };
-        *surface.local_monitor.borrow_mut() = local_mon;
-
-        let weak_surface_global = Rc::downgrade(&surface);
-        let global_mask = NSEventMask::LeftMouseDown
-            | NSEventMask::RightMouseDown
-            | NSEventMask::OtherMouseDown;
-        let global_block = RcBlock::new(move |_event_ptr: NonNull<NSEvent>| {
-            if let Some(s) = weak_surface_global.upgrade() {
-                // Click outside the application (desktop / other apps / menubar)
-                s.close();
-            }
-        });
-
-        let global_mon =
-            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(global_mask, &global_block);
-        *surface.global_monitor.borrow_mut() = global_mon;
+            let global_mon =
+                NSEvent::addGlobalMonitorForEventsMatchingMask_handler(global_mask, &global_block);
+            *surface.global_monitor.borrow_mut() = global_mon;
+        }
 
         surface
     }
@@ -139,6 +155,10 @@ impl InnerPopupSurface {
             if let Some(mon) = self.global_monitor.borrow_mut().take() {
                 unsafe { NSEvent::removeMonitor(&mon) };
             }
+            if let Some(parent) = self.window.parentWindow() {
+                parent.removeChildWindow(&self.window);
+            }
+            self.content_host.clear_tree();
             self.window.orderOut(None);
         }
     }
@@ -164,16 +184,20 @@ impl PopupSurfaceHandle for AppKitPopupHandle {
 
 /// Default [`PopupHost`] implementation for AppKit.
 #[derive(Default, Clone)]
-pub struct AppKitPopupHost;
+pub struct AppKitPopupHost {
+    pub(crate) owner_window: Option<Retained<NSWindow>>,
+}
+
+impl AppKitPopupHost {
+    /// Creates a popup host associated with an optional owner window.
+    pub fn new(owner_window: Option<Retained<NSWindow>>) -> Self {
+        Self { owner_window }
+    }
+}
 
 impl PopupHost for AppKitPopupHost {
-    fn show_popup(
-        &self,
-        content: Rc<dyn UIElementExt>,
-        position: Point,
-        size: Size,
-    ) -> Rc<dyn PopupSurfaceHandle> {
-        let surface = InnerPopupSurface::show(content, position, size);
+    fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle> {
+        let surface = InnerPopupSurface::show(request, self.owner_window.as_deref());
         Rc::new(AppKitPopupHandle { surface })
     }
 }

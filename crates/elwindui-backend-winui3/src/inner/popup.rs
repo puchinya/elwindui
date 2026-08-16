@@ -5,8 +5,10 @@
 use crate::bindings::Microsoft::UI::Xaml::Controls::Primitives::Popup;
 use crate::bindings::Microsoft::UI::Xaml::FrameworkElement;
 use crate::host::TreeHostPanel;
-use elwindui_core::base::{Point, Size};
-use elwindui_core::ui::{PopupHost, PopupSurfaceHandle, UIElementExt};
+use elwindui_core::ui::popup::{
+    PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
+};
+use elwindui_core::ui::UIElementExt;
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows::core::Interface;
@@ -20,23 +22,24 @@ pub(crate) struct InnerPopupSurface {
 
 impl InnerPopupSurface {
     /// Creates and immediately displays a new popup surface.
-    pub(crate) fn show(content: Rc<dyn UIElementExt>, position: Point, size: Size) -> Rc<Self> {
+    pub(crate) fn show(request: PopupRequest) -> Rc<Self> {
         let popup = Popup::new().expect("Popup::new");
         let content_host = TreeHostPanel::new();
-        content_host.set_tree(content);
+        content_host.set_tree(request.content);
 
         let canvas = content_host.canvas();
         let fe: FrameworkElement = canvas.cast().expect("Canvas as FrameworkElement");
-        fe.SetWidth(size.width as f64).ok();
-        fe.SetHeight(size.height as f64).ok();
+        fe.SetWidth(request.size.width as f64).ok();
+        fe.SetHeight(request.size.height as f64).ok();
 
         let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
             canvas.cast().expect("Canvas as UIElement");
         popup.SetChild(&uie).ok();
-        popup.SetHorizontalOffset(position.x as f64).ok();
-        popup.SetVerticalOffset(position.y as f64).ok();
+        popup.SetHorizontalOffset(request.position.x as f64).ok();
+        popup.SetVerticalOffset(request.position.y as f64).ok();
         popup.SetShouldConstrainToRootBounds(false).ok();
-        popup.SetIsLightDismissEnabled(true).ok();
+        let is_light_dismiss = request.dismiss_policy == PopupDismissPolicy::LightDismiss;
+        popup.SetIsLightDismissEnabled(is_light_dismiss).ok();
         popup.SetIsOpen(true).ok();
 
         Rc::new(Self {
@@ -72,13 +75,8 @@ impl PopupSurfaceHandle for WinUI3PopupHandle {
 pub struct WinUI3PopupHost;
 
 impl PopupHost for WinUI3PopupHost {
-    fn show_popup(
-        &self,
-        content: Rc<dyn UIElementExt>,
-        position: Point,
-        size: Size,
-    ) -> Rc<dyn PopupSurfaceHandle> {
-        let surface = InnerPopupSurface::show(content, position, size);
+    fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle> {
+        let surface = InnerPopupSurface::show(request);
         Rc::new(WinUI3PopupHandle { surface })
     }
 }

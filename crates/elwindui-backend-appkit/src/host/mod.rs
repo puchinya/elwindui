@@ -20,8 +20,8 @@ use elwindui_core::ui::{
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSMenu, NSTrackingArea, NSTrackingAreaOptions, NSView};
-use objc2_foundation::{NSObjectProtocol, NSRect};
+use objc2_app_kit::{NSEvent, NSMenu, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView};
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -397,53 +397,9 @@ impl TreeHostView {
                         Retained::autorelease_return(appkit_menu.inner_ns())
                     }
                     ContextMenuPresentation::Custom => {
-                        let screen_rect = if let Some(w) = self.window() {
-                            let view_pt = self.convertPoint_toView(location, None);
-                            let screen_pt = w.convertPointToScreen(view_pt);
-                            Rect {
-                                x: screen_pt.x as f32,
-                                y: screen_pt.y as f32,
-                                width: 0.0,
-                                height: 0.0,
-                            }
-                        } else {
-                            Rect {
-                                x: position.x,
-                                y: position.y,
-                                width: 0.0,
-                                height: 0.0,
-                            }
-                        };
-                        let popup_anchor = PopupAnchor::Point(Point {
-                            x: screen_rect.x,
-                            y: screen_rect.y,
-                        });
-                        let work_area = if let Some(w) = self.window() {
-                            if let Some(screen) = w.screen() {
-                                let frame = screen.visibleFrame();
-                                Rect {
-                                    x: frame.origin.x as f32,
-                                    y: frame.origin.y as f32,
-                                    width: frame.size.width as f32,
-                                    height: frame.size.height as f32,
-                                }
-                            } else {
-                                Rect {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    width: 2560.0,
-                                    height: 1440.0,
-                                }
-                            }
-                        } else {
-                            Rect {
-                                x: 0.0,
-                                y: 0.0,
-                                width: 2560.0,
-                                height: 1440.0,
-                            }
-                        };
-                        let host = crate::inner::AppKitPopupHost;
+                        let (screen_anchor_pt, work_area) = self.query_screen_and_work_area(location);
+                        let popup_anchor = PopupAnchor::Point(screen_anchor_pt);
+                        let host = crate::inner::AppKitPopupHost::new(self.window());
                         let handle = ContextMenuService::open_custom_menu(
                             &host,
                             &*menu,
@@ -456,53 +412,9 @@ impl TreeHostView {
                 }
             }
             ResolvedContextDefinition::Popup { template } => {
-                let screen_rect = if let Some(w) = self.window() {
-                    let view_pt = self.convertPoint_toView(location, None);
-                    let screen_pt = w.convertPointToScreen(view_pt);
-                    Rect {
-                        x: screen_pt.x as f32,
-                        y: screen_pt.y as f32,
-                        width: 0.0,
-                        height: 0.0,
-                    }
-                } else {
-                    Rect {
-                        x: position.x,
-                        y: position.y,
-                        width: 0.0,
-                        height: 0.0,
-                    }
-                };
-                let popup_anchor = PopupAnchor::Point(Point {
-                    x: screen_rect.x,
-                    y: screen_rect.y,
-                });
-                let host = crate::inner::AppKitPopupHost;
-                let work_area = if let Some(w) = self.window() {
-                    if let Some(screen) = w.screen() {
-                        let frame = screen.visibleFrame();
-                        Rect {
-                            x: frame.origin.x as f32,
-                            y: frame.origin.y as f32,
-                            width: frame.size.width as f32,
-                            height: frame.size.height as f32,
-                        }
-                    } else {
-                        Rect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: 2560.0,
-                            height: 1440.0,
-                        }
-                    }
-                } else {
-                    Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 2560.0,
-                        height: 1440.0,
-                    }
-                };
+                let (screen_anchor_pt, work_area) = self.query_screen_and_work_area(location);
+                let popup_anchor = PopupAnchor::Point(screen_anchor_pt);
+                let host = crate::inner::AppKitPopupHost::new(self.window());
                 let handle = ContextMenuService::open_custom_popup(
                     &host,
                     &template,
@@ -514,6 +426,51 @@ impl TreeHostView {
                 std::ptr::null_mut()
             }
         }
+    }
+
+    fn query_screen_and_work_area(&self, location: NSPoint) -> (Point, Rect) {
+        let m = mtm();
+        let primary_screen_height = NSScreen::screens(m)
+            .firstObject()
+            .map(|s| s.frame().size.height)
+            .unwrap_or(1080.0);
+
+        let screen_pt = if let Some(w) = self.window() {
+            let view_pt = self.convertPoint_toView(location, None);
+            w.convertPointToScreen(view_pt)
+        } else {
+            location
+        };
+
+        let core_screen_pt = Point {
+            x: screen_pt.x as f32,
+            y: (primary_screen_height - screen_pt.y) as f32,
+        };
+
+        let target_screen = NSScreen::screens(m)
+            .iter()
+            .find(|s| {
+                let f = s.frame();
+                screen_pt.x >= f.origin.x
+                    && screen_pt.x <= f.origin.x + f.size.width
+                    && screen_pt.y >= f.origin.y
+                    && screen_pt.y <= f.origin.y + f.size.height
+            })
+            .or_else(|| self.window().and_then(|w| w.screen()))
+            .or_else(|| NSScreen::mainScreen(m));
+
+        let visible_frame = target_screen
+            .map(|s| s.visibleFrame())
+            .unwrap_or_else(|| NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1920.0, 1080.0)));
+
+        let work_area = Rect {
+            x: visible_frame.origin.x as f32,
+            y: (primary_screen_height - (visible_frame.origin.y + visible_frame.size.height)) as f32,
+            width: visible_frame.size.width as f32,
+            height: visible_frame.size.height as f32,
+        };
+
+        (core_screen_pt, work_area)
     }
 
     pub(crate) fn new() -> Retained<Self> {
@@ -651,6 +608,25 @@ impl TreeHostView {
         *self.ivars().render_tree.borrow_mut() = None;
         self.invalidateIntrinsicContentSize();
         self.relayout();
+    }
+
+    /// Clears this host's tree and releases native compositor islands and focus.
+    pub(crate) fn clear_tree(&self) {
+        for old in self.subviews().iter() {
+            old.removeFromSuperview();
+        }
+        self.ivars().native_containers.borrow_mut().clear();
+        self.ivars().native_owner_ids.borrow_mut().clear();
+        *self.ivars().replay_state.borrow_mut() = ReplayState::default();
+        self.ivars().keyboard.focus.clear_focus();
+        self.ivars().keyboard.shortcuts().clear();
+        *self.ivars().tree.borrow_mut() = None;
+        *self.ivars().render_tree.borrow_mut() = None;
+    }
+
+    /// Focuses the specified element within this host's focus tracker.
+    pub(crate) fn focus_element(&self, element: &Rc<dyn UIElementExt>) {
+        self.ivars().keyboard.focus.set_focus(element, FocusState::Programmatic);
     }
 
     /// Opts this host's own `relayout` into measuring `width`/`height` unconstrained (`f32::

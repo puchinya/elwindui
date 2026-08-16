@@ -190,7 +190,51 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 | `on_pointer_wheel_changed` | `fn(PointerWheelEventArgs)` | Bubbling | マウスホイール操作時に発火 |
 | `on_tapped` | `fn(TappedEventArgs)` | Bubbling | タップ/クリック操作時に発火 |
 | `on_double_tapped` | `fn(TappedEventArgs)` | Bubbling | ダブルタップ操作時に発火 |
-| `on_right_tapped` | `fn(TappedEventArgs)` | Bubbling | 右クリック/副操作時に発火 |
+#### Common UIElement Properties
+
+| Name | Type | Binding | Description |
+|---|---|---|---|
+| `margin` | `Option<f32>` | OneWay | 外側余白 |
+| `horizontal_alignment` | `Option<HorizontalAlignment>` | OneWay | 水平配置（Stretch, Left, Center, Right） |
+| `vertical_alignment` | `Option<VerticalAlignment>` | OneWay | 垂直配置（Stretch, Top, Center, Bottom） |
+| `visibility` | `Option<Visibility>` | OneWay | 表示状態（Visible, Collapsed） |
+| `hit_test_visible` | `Option<bool>` | OneWay | ヒットテスト対象か否か（既定値: `true`） |
+| `tab_stop` | `Option<bool>` | OneWay | キーボードフォーカス遷移（Tabキー）の対象か否か |
+| `focus_order` | `Option<i32>` | OneWay | キーボードフォーカス移動の優先順位 |
+| `width` | `Option<f32>` | OneWay | 明示的な幅 |
+| `height` | `Option<f32>` | OneWay | 明示的な高さ |
+| `min_width` | `Option<f32>` | OneWay | 最小幅 |
+| `min_height` | `Option<f32>` | OneWay | 最小高さ |
+| `max_width` | `Option<f32>` | OneWay | 最大幅 |
+| `max_height` | `Option<f32>` | OneWay | 最大高さ |
+| `context_menu` | `Option<Menu>` | OneWay | 要素またはその子孫に対する標準コンテキストメニュー（既定値: `None`） |
+| `context_menu_presentation` | `ContextMenuPresentation` | OneWay | コンテキストメニューの表示方式（`Native` / `Custom`, 既定値: `Native`） |
+| `context_popup` | `Option<PopupContentTemplate>` | OneWay | 任意のUIElementツリーを内容とするCustom Context Popup（既定値: `None`） |
+
+#### Context Request & Lookup Semantics
+
+- **Context Request**:
+  - コンテキストメニュー/ポップアップの表示要求は、プラットフォーム標準のコンテキスト操作（pointer-based platform context request、platform-standard keyboard context request、アクセシビリティ操作等）によって発生する。
+  - Core は具体的な物理入力（右ボタン、Shift+F10、Ctrl+Click等）に依存せず、プラットフォーム中立な `ContextRequest` セマンティクスを扱う。
+  - 既存の `on_right_tapped` は低レベルなポインタジェスチャイベントとして独立して維持され、コンテキストメニューの有無によって抑止・置換されない。
+- **Ancestor Lookup**:
+  - イベント対象の要素自身に `context_menu` / `context_popup` が指定されていない場合、視覚ツリー（Visual Tree）の親要素（`visual_parent`）をルート方向へ探索し、**最も近い祖先（nearest ancestor）** に設定された定義を採用する。
+- **排他制約**:
+  - 同一の要素に対して `context_menu` と `context_popup` を同時に指定することは禁止され、DSL コンパイル時エラーとなる。
+- **Presentation**:
+  - `ContextMenuPresentation::Native`: プラットフォーム固有のネイティブメニュー（macOS: `NSMenu`, Windows: `MenuFlyout`）を用いて表示する。
+  - `ContextMenuPresentation::Custom`: 標準 `Menu` セマンティックモデルを ElwindUI 自前描画の `ContextMenuPresenter` を介して `PopupSurface` 上に表示する。
+  - `context_popup` は常に Custom Render（`PopupSurface`）として表示される。
+
+#### PopupSurface & Lifecycle
+
+- **PopupSurface**:
+  - プラットフォームの独立ポップアップサーフェス（ウィンドウ/パネル）を利用し、owner Window の境界を越えて表示可能。
+  - owner Window より前面かつ `NativeControl` よりも前面の Z-order を維持する（application-global な最前面にはしない）。
+  - モニターの有効表示領域（work area）内に収まるよう、右/下の端部では自動的に左/上方向へ反転（flip）配置される。
+- **Lifecycle & Environment**:
+  - `context_popup` の内容は表示要求時にターゲット要素の有効な `EnvironmentContext` を継承して構築（build）され、`PopupSurface` に mount される。
+  - ポップアップが閉じられた際（外部クリック、Escape キー、項目選択、owner Window の close/移動等）に unmount され、リソースおよび Visual 接続が解放される。
 
 ### `NativeControl`
 
@@ -641,7 +685,7 @@ ON / OFF を切り替えるスイッチコントロール。
 
 ### `elwindui::ui::Menu`
 
-`MenuItem` のコレクションを保持するドロップダウンメニュー。
+`MenuItem` のコレクションを保持するメニュー。`MenuBarItem` のサブメニュー（`submenu`）および `UIElement` のコンテキストメニュー（`context_menu`）の双方で共通のセマンティックモデルとして再利用される。
 
 #### Properties
 

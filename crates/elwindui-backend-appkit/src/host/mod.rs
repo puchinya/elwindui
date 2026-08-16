@@ -7,11 +7,12 @@
 //! view's own layer caches, which is why it lives here rather than under `render`.
 
 use crate::ffi::{AnyView, mtm};
-use elwindui_core::base::Point;
+use elwindui_core::base::{Point, Rect};
 use elwindui_core::input::{
     FocusState, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
     RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
+use elwindui_core::ui::popup::{PopupAnchor, PopupSurfaceHandle};
 use elwindui_core::ui::{
     ContextMenuPresentation, ContextMenuService, ContextRequest, FocusHost, InvalidationKind,
     RelayoutHost, ResolvedContextDefinition, UIElementExt, layout_root,
@@ -119,6 +120,8 @@ pub struct TreeHostIvars {
     /// (matches every existing host's behavior — only `InnerTabView`'s non-selected-tab hosts ever
     /// set this `false`, immediately after construction). See `set_active`'s own doc comment.
     pub(crate) active: Cell<bool>,
+    /// Retained handle to any currently active custom popup or context menu surface.
+    pub(crate) active_popup: RefCell<Option<Rc<dyn PopupSurfaceHandle>>>,
 }
 
 /// `elwindui_core::ui::RelayoutHost` for `TreeHostView` — wraps a *weak* reference back to the view
@@ -290,6 +293,11 @@ define_class!(
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
             self.dispatch_pointer(event, RawPointerEventKind::Pressed(MouseButton::Right));
+            let menu = self.menu_for_event_inner(event);
+            if !menu.is_null() {
+                let m = unsafe { Retained::retain(menu).unwrap() };
+                NSMenu::popUpContextMenu_withEvent_forView(&m, event, self);
+            }
         }
 
         #[unsafe(method(rightMouseUp:))]
@@ -349,42 +357,121 @@ define_class!(
 
         #[unsafe(method(menuForEvent:))]
         fn menu_for_event(&self, event: &NSEvent) -> *mut NSMenu {
-            let Some(tree) = self.ivars().tree.borrow().clone() else {
-                return std::ptr::null_mut();
-            };
-            let location = self.convertPoint_fromView(event.locationInWindow(), None);
-            let position = Point {
-                x: location.x as f32,
-                y: location.y as f32,
-            };
-            let request = ContextRequest::pointer(position);
-            let Some((resolved, _)) = ContextMenuService::process_request(
-                &tree,
-                &self.ivars().keyboard.focus,
-                &request,
-            ) else {
-                return std::ptr::null_mut();
-            };
-            match resolved.definition {
-                ResolvedContextDefinition::Menu { menu, presentation } => {
-                    match presentation {
-                        ContextMenuPresentation::Native => {
-                            let appkit_menu = menu
-                                .as_any()
-                                .downcast_ref::<crate::native_ui::Menu>()
-                                .expect("AppKit MenuExt: menu must be this backend's Menu");
-                            Retained::autorelease_return(appkit_menu.inner_ns())
-                        }
-                        ContextMenuPresentation::Custom => std::ptr::null_mut(),
-                    }
-                }
-                ResolvedContextDefinition::Popup { .. } => std::ptr::null_mut(),
-            }
+            self.menu_for_event_inner(event)
         }
     }
 );
 
 impl TreeHostView {
+    fn menu_for_event_inner(&self, event: &NSEvent) -> *mut NSMenu {
+        let Some(tree) = self.ivars().tree.borrow().clone() else {
+            return std::ptr::null_mut();
+        };
+        let location = self.convertPoint_fromView(event.locationInWindow(), None);
+        let position = Point {
+            x: location.x as f32,
+            y: location.y as f32,
+        };
+        let request = ContextRequest::pointer(position);
+        let Some((resolved, _anchor)) = ContextMenuService::process_request(
+            &tree,
+            &self.ivars().keyboard.focus,
+            &request,
+        ) else {
+            return std::ptr::null_mut();
+        };
+        match resolved.definition {
+            ResolvedContextDefinition::Menu { menu, presentation } => {
+                match presentation {
+                    ContextMenuPresentation::Native => {
+                        let appkit_menu = menu
+                            .as_any()
+                            .downcast_ref::<crate::native_ui::Menu>()
+                            .expect("AppKit MenuExt: menu must be this backend's Menu");
+                        Retained::autorelease_return(appkit_menu.inner_ns())
+                    }
+                    ContextMenuPresentation::Custom => {
+                        let screen_rect = if let Some(w) = self.window() {
+                            let view_pt = self.convertPoint_toView(location, None);
+                            let screen_pt = w.convertPointToScreen(view_pt);
+                            Rect {
+                                x: screen_pt.x as f32,
+                                y: screen_pt.y as f32,
+                                width: 0.0,
+                                height: 0.0,
+                            }
+                        } else {
+                            Rect {
+                                x: position.x,
+                                y: position.y,
+                                width: 0.0,
+                                height: 0.0,
+                            }
+                        };
+                        let popup_anchor = PopupAnchor::Point(Point {
+                            x: screen_rect.x,
+                            y: screen_rect.y,
+                        });
+                        let host = crate::inner::AppKitPopupHost;
+                        let work_area = Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 2560.0,
+                            height: 1440.0,
+                        };
+                        let handle = ContextMenuService::open_custom_menu(
+                            &host,
+                            &*menu,
+                            &popup_anchor,
+                            work_area,
+                        );
+                        *self.ivars().active_popup.borrow_mut() = Some(handle);
+                        std::ptr::null_mut()
+                    }
+                }
+            }
+            ResolvedContextDefinition::Popup { template } => {
+                let screen_rect = if let Some(w) = self.window() {
+                    let view_pt = self.convertPoint_toView(location, None);
+                    let screen_pt = w.convertPointToScreen(view_pt);
+                    Rect {
+                        x: screen_pt.x as f32,
+                        y: screen_pt.y as f32,
+                        width: 0.0,
+                        height: 0.0,
+                    }
+                } else {
+                    Rect {
+                        x: position.x,
+                        y: position.y,
+                        width: 0.0,
+                        height: 0.0,
+                    }
+                };
+                let popup_anchor = PopupAnchor::Point(Point {
+                    x: screen_rect.x,
+                    y: screen_rect.y,
+                });
+                let host = crate::inner::AppKitPopupHost;
+                let work_area = Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 2560.0,
+                    height: 1440.0,
+                };
+                let handle = ContextMenuService::open_custom_popup(
+                    &host,
+                    &template,
+                    &popup_anchor,
+                    elwindui_core::environment::EnvironmentContext::default(),
+                    work_area,
+                );
+                *self.ivars().active_popup.borrow_mut() = Some(handle);
+                std::ptr::null_mut()
+            }
+        }
+    }
+
     pub(crate) fn new() -> Retained<Self> {
         let m = mtm();
         let ivars = TreeHostIvars {
@@ -404,6 +491,7 @@ impl TreeHostView {
             pending_invalidation: Cell::new(None),
             last_layout_size: Cell::new(objc2_foundation::NSSize::new(-1.0, -1.0)),
             active: Cell::new(true),
+            active_popup: RefCell::new(None),
         };
         let this = Self::alloc(m).set_ivars(ivars);
         let this: Retained<Self> =

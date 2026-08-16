@@ -751,15 +751,18 @@ func resolveContext(_ args: Args) -> (pid: pid_t, appElement: AXUIElement, windo
 ///
 /// Returns the click point if the element had position/size to click, else `nil`.
 @discardableResult
-func synthesizeClick(on element: AXUIElement, xFraction: Double = 0.5) -> CGPoint? {
+func synthesizeClick(on element: AXUIElement, xFraction: Double = 0.5, button: String = "left") -> CGPoint? {
     guard let pos = axPoint(element, kAXPositionAttribute as String),
         let size = axSize(element, kAXSizeAttribute as String)
     else { return nil }
     let point = CGPoint(x: pos.x + size.width * xFraction, y: pos.y + size.height / 2)
+    let downType: CGEventType = (button == "right") ? .rightMouseDown : .leftMouseDown
+    let upType: CGEventType = (button == "right") ? .rightMouseUp : .leftMouseUp
+    let cgButton: CGMouseButton = (button == "right") ? .right : .left
     let down = CGEvent(
-        mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
+        mouseEventSource: nil, mouseType: downType, mouseCursorPosition: point, mouseButton: cgButton)
     let up = CGEvent(
-        mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+        mouseEventSource: nil, mouseType: upType, mouseCursorPosition: point, mouseButton: cgButton)
     down?.post(tap: .cghidEventTap)
     Thread.sleep(forTimeInterval: 0.05)
     up?.post(tap: .cghidEventTap)
@@ -872,16 +875,18 @@ func cmdClick(_ args: Args) -> Never {
     switch via {
     case "mouse":
         let fraction = args.double("fraction") ?? 0.5
+        let button = args.string("button") ?? "left"
         guard fraction >= 0.0, fraction <= 1.0 else {
             fail("--fraction must be within 0.0..=1.0, got \(fraction)")
         }
-        guard let point = synthesizeClick(on: element, xFraction: fraction) else {
+        guard let point = synthesizeClick(on: element, xFraction: fraction, button: button) else {
             fail(
                 "element has no position/size — cannot compute click point",
                 ["element": before.jsonObject()])
         }
         fields["click_point"] = ["x": point.x, "y": point.y]
         fields["fraction"] = fraction
+        fields["button"] = button
     case "ax-press":
         let status = AXUIElementPerformAction(element, kAXPressAction as CFString)
         fields["ax_press_status_ok"] = (status == .success)

@@ -73,6 +73,7 @@ mod controls;
 
 mod collections;
 mod engine;
+pub mod popup;
 mod text_style;
 
 // Last on purpose: several fixtures in here are `#[class]` declarations that inherit real classes
@@ -90,4 +91,5 @@ pub use collections::*;
 pub use controls::*;
 pub use element::*;
 pub use engine::*;
+pub use popup::*;
 pub use text_style::*;

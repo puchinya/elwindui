@@ -12,6 +12,7 @@
 | Text cascade、measurement seam | [`runtime/text_design.md`](runtime/text_design.md) |
 | Theme / Environment runtime | [`runtime/theme_environment_design.md`](runtime/theme_environment_design.md) |
 | ControlTemplate selection、ownership、ContentPresenter | [`runtime/control_template_design.md`](runtime/control_template_design.md) |
+| Context Menu、PopupSurface、ContextRequest | [`runtime/popup_context_menu_design.md`](runtime/popup_context_menu_design.md) |
 | Component state、ViewModel、async | [`runtime/state_management_design.md`](runtime/state_management_design.md) |
 | AppKit backend | [`backends/appkit_backend_design.md`](backends/appkit_backend_design.md) |
 | WinUI 3 backend | [`backends/winui3_backend_design.md`](backends/winui3_backend_design.md) |

@@ -357,6 +357,11 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 &table,
                                 &mut errors,
                             );
+                            check_context_menu_attributes(
+                                &let_binding.element,
+                                &c.name,
+                                &mut errors,
+                            );
                             check_binding_assignments(
                                 &let_binding.element,
                                 module,
@@ -408,6 +413,11 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                     module,
                                     &c.name,
                                     &table,
+                                    &mut errors,
+                                );
+                                check_context_menu_attributes(
+                                    &resolved_root,
+                                    &c.name,
                                     &mut errors,
                                 );
                                 check_binding_assignments(
@@ -1593,6 +1603,55 @@ fn check_shortcut_attrs_in_expr(
         ViewExpr::TFluent(_, args) => {
             for (_, arg) in args {
                 check_shortcut_attrs_in_expr(arg, from, component_name, table, errors);
+            }
+        }
+        ViewExpr::Path(_)
+        | ViewExpr::Expr(_)
+        | ViewExpr::Closure {
+            body: ClosureBody::Expr(_) | ClosureBody::Block(_),
+            ..
+        } => {}
+    }
+}
+
+/// Checks that no element specifies both `context_menu` and `context_popup` simultaneously.
+fn check_context_menu_attributes(
+    node: &ElementNode,
+    component_name: &str,
+    errors: &mut Vec<String>,
+) {
+    let has_context_menu = node.attributes.iter().any(|a| a.name == "context_menu");
+    let has_context_popup = node.attributes.iter().any(|a| a.name == "context_popup");
+    if has_context_menu && has_context_popup {
+        errors.push(format!(
+            "{component_name}: `{}` cannot specify both `context_menu` and `context_popup` simultaneously",
+            node.type_path
+        ));
+    }
+    for child in &node.children {
+        if let ChildEntry::Literal(elem) = child {
+            check_context_menu_attributes(elem, component_name, errors);
+        }
+    }
+    for attribute in &node.attributes {
+        check_context_menu_attributes_in_expr(&attribute.value, component_name, errors);
+    }
+}
+
+fn check_context_menu_attributes_in_expr(
+    expr: &ViewExpr,
+    component_name: &str,
+    errors: &mut Vec<String>,
+) {
+    match expr {
+        ViewExpr::Element(elem) => check_context_menu_attributes(elem, component_name, errors),
+        ViewExpr::Closure {
+            body: ClosureBody::Element(elem),
+            ..
+        } => check_context_menu_attributes(elem, component_name, errors),
+        ViewExpr::TFluent(_, args) => {
+            for (_, arg) in args {
+                check_context_menu_attributes_in_expr(arg, component_name, errors);
             }
         }
         ViewExpr::Path(_)
@@ -3660,6 +3719,32 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("cannot resolve `for` item type `Missing`")),
             "errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_simultaneous_context_menu_and_context_popup() {
+        let window_src = r#"
+        struct WindowWithBoth {
+            body: view! {
+                Window {
+                    TextBlock {
+                        text: "Right click",
+                        context_menu: Menu {},
+                        context_popup: VerticalLayout {},
+                    }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [component_module(None, window_src)]
+            .into_iter()
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("cannot specify both `context_menu` and `context_popup` simultaneously")),
+            "errors: {errs:?}"
         );
     }
 }

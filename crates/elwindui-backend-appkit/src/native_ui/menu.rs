@@ -211,6 +211,11 @@ impl Menu {
     fn items(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuItemExt> {
         self
     }
+
+    #[inherent]
+    pub fn inner_ns(&self) -> objc2::rc::Retained<objc2_app_kit::NSMenu> {
+        self.inner.ns()
+    }
 }
 
 fn downcast_menu_item(item: &dyn elwindui_core::ui::MenuItemExt) -> &MenuItem {
@@ -271,6 +276,9 @@ impl MenuItem {
         }
     }
 
+    fn text(&self) -> String {
+        self.inner.text()
+    }
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
@@ -282,5 +290,8 @@ impl MenuItem {
     }
     fn set_on_select(&self, callback: Box<dyn Fn()>) {
         self.inner.set_on_select(callback);
+    }
+    fn select(&self) {
+        self.inner.select();
     }
 }

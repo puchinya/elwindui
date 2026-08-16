@@ -1,7 +1,9 @@
 //! `MenuBar`/`MenuFlyout` for the app menu bar and context menus.
 
 use crate::bindings;
-use crate::bindings::Microsoft::UI::Xaml::Controls::{MenuFlyoutItem, MenuFlyoutItemBase};
+use crate::bindings::Microsoft::UI::Xaml::Controls::{
+    MenuFlyout, MenuFlyoutItem, MenuFlyoutItemBase,
+};
 use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
 use crate::ffi::{invoke_ui_event_callback, register_ui_event_callback};
@@ -69,6 +71,16 @@ impl InnerMenuItem {
         }
     }
 
+    pub(crate) fn text(&self) -> String {
+        self.xaml.Text().map(|h| h.to_string()).unwrap_or_default()
+    }
+
+    pub(crate) fn select(&self) {
+        if let Some(callback) = self.on_select.borrow().as_ref() {
+            callback();
+        }
+    }
+
     pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
         *self.on_select.borrow_mut() = Some(callback);
     }
@@ -123,6 +135,18 @@ impl InnerMenu {
                 let _ = native_items.RemoveAt(index);
             }
         }
+    }
+
+    pub(crate) fn create_flyout(&self) -> Result<MenuFlyout, windows::core::Error> {
+        let flyout = MenuFlyout::new()?;
+        let items = flyout.Items()?;
+        for item in self.items.borrow().iter() {
+            if let Ok(base) = item.xaml.cast::<MenuFlyoutItemBase>() {
+                let _ = items.Append(&base);
+            }
+        }
+        *self.installed_into.borrow_mut() = Some(items);
+        Ok(flyout)
     }
 }
 

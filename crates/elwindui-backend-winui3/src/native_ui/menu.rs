@@ -204,6 +204,13 @@ impl Menu {
     fn items(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuItemExt> {
         self
     }
+
+    #[inherent]
+    pub fn create_flyout(
+        &self,
+    ) -> Result<crate::bindings::Microsoft::UI::Xaml::Controls::MenuFlyout, windows::core::Error> {
+        self.inner.create_flyout()
+    }
 }
 
 pub(crate) fn downcast_menu_item(item: &dyn elwindui_core::ui::MenuItemExt) -> &MenuItem {
@@ -270,6 +277,9 @@ impl MenuItem {
         }
     }
 
+    fn text(&self) -> String {
+        self.inner.text()
+    }
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
@@ -281,5 +291,8 @@ impl MenuItem {
     }
     fn set_on_select(&self, callback: Box<dyn Fn()>) {
         self.inner.set_on_select(callback);
+    }
+    fn select(&self) {
+        self.inner.select();
     }
 }

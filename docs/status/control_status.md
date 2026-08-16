@@ -15,8 +15,8 @@ Snapshot: 2026-08-15. Public behavior is defined by [`../specs/ui_spec.md`](../s
 | RadioButton | ✅ | ✅ | ⬜ | group behavior verified |
 | ToggleSwitch | ✅ | ✅ | ⬜ | TwoWay state verified |
 | Dropdown / DropdownItem | ✅ | ✅ | ⬜ | selection and dynamic item rebuild verified |
-| Slider | ✅ | ✅ | ⬜ | value/range and explicit-width behavior verified |
-| MenuBar / Menu / MenuItem | ✅ | ✅ | ⬜ | context-menu attachment remains absent |
+| MenuBar / Menu / MenuItem | ✅ | ✅ | ⬜ | menu bar and native/custom context menu attached via `context_menu` / `context_menu_presentation` ([#152](https://github.com/puchinya/elwindui/issues/152)) |
+| PopupSurface / context_popup | ✅ | ✅ | ⬜ | arbitrary UIElement popup surface with auto-flip placement, light dismiss, and above-native-control elevation ([#152](https://github.com/puchinya/elwindui/issues/152)) |
 | TabView / TabViewItem | ✅ | ✅ | ⬜ | hosted page activation and native child reconciliation |
 | Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | backend-neutral self-rendered controls |
 | ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection and ContentControl logical/Visual separation; backend-neutral runtime |

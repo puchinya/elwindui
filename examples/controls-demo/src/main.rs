@@ -19,11 +19,17 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::input::Key;
-use elwindui::core::ui::CheckState;
+use elwindui::core::ui::{
+    CheckState, ContextMenuPresentation, LayoutExt, PopupContentTemplate, TextBlockExt,
+    UIElementExt,
+};
 
 #[elwindui::viewmodel]
 mod controls_demo_view_model {
-    use super::{CheckState, Key};
+    use super::{
+        CheckState, ContextMenuPresentation, Key, LayoutExt, PopupContentTemplate, TextBlockExt,
+        TextStyleOwner, UIElementExt,
+    };
 
     struct ControlsDemoViewModel {
         // `<=>` installs `TabView`'s typed selected-index write-back callback; a chip click updates
@@ -83,6 +89,17 @@ mod controls_demo_view_model {
         })]
         radio_selected_label: String,
 
+        #[computed(expr = Some(PopupContentTemplate::new(|_ctx| {
+            let layout = elwindui::core::ui::VerticalLayout::new();
+            layout.set_margin(12.0);
+            let text = elwindui::core::ui::TextBlock::new();
+            text.set_text("✨ Rich Context Popup (Custom UIElement)");
+            text.text_style.set_foreground(Some(elwindui::core::graphics::Color::rgb(20, 20, 25).into()));
+            LayoutExt::children(&*layout).add(text as std::rc::Rc<dyn UIElementExt>);
+            layout as std::rc::Rc<dyn UIElementExt>
+        })))]
+        custom_popup_template: Option<PopupContentTemplate>,
+
         // A second logical group under the same native parent catches WinUI's implicit
         // parent-based grouping: changing this pair must never clear the `size` group above.
         #[observable(default = true)]
@@ -136,9 +153,16 @@ mod controls_demo_view_model {
         regression_text: String,
         #[observable(default = String::new())]
         regression_log: String,
+
+        #[observable(default = String::new())]
+        context_menu_log: String,
     }
 
     impl ControlsDemoViewModel {
+        fn context_menu_item_selected(&self, which: String) {
+            context_menu_log = format!("{}{which} selected\n", self.context_menu_log.borrow());
+        }
+
         // `text`/`password` themselves are already two-way bound directly (`text <=>
         // vm.text_box_value` in the view below) — model sync doesn't need a manual hook. Only the
         // events that *aren't* otherwise observable (focus, submit) get logged here.
@@ -533,6 +557,86 @@ struct ControlsDemoWindow {
                     Button {
                         text: "Toggle range (0..1 / -100..100)"
                         on_click: vm.toggle_slider_range
+                    }
+                }
+            }
+            TabViewItem {
+                header: "Context Menu"
+                closable: false
+                on_close: || {}
+                content: Grid {
+                    rows: [elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Auto, elwindui::core::layout::GridLength::Star(1.0)]
+                    columns: [elwindui::core::layout::GridLength::Star(1.0)]
+
+                    VerticalLayout {
+                        Grid::row: 0
+                        margin: 12.0
+                        spacing: 8.0
+
+                        TextBlock { text: "1. Native Context Menu (Right-click or Shift+F10 / Menu key):" }
+                        VerticalLayout {
+                            margin: 4.0
+                            TextBlock {
+                                margin: 8.0
+                                text: "【Native Context Menu Target — Right-click here】"
+                                context_menu: Menu {
+                                    MenuItem {
+                                        text: "Cut"
+                                        on_select: || vm.context_menu_item_selected("Native > Cut".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Copy"
+                                        on_select: || vm.context_menu_item_selected("Native > Copy".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Paste"
+                                        on_select: || vm.context_menu_item_selected("Native > Paste".to_string())
+                                    }
+                                }
+                            }
+                        }
+
+                        TextBlock { text: "2. Custom-rendered Context Menu (ElwindUI UIElement presentation):" }
+                        VerticalLayout {
+                            margin: 4.0
+                            TextBlock {
+                                margin: 8.0
+                                text: "【Custom-rendered Context Menu Target — Right-click here】"
+                                context_menu: Menu {
+                                    MenuItem {
+                                        text: "Custom Action 1"
+                                        on_select: || vm.context_menu_item_selected("Custom > Action 1".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Custom Action 2"
+                                        on_select: || vm.context_menu_item_selected("Custom > Action 2".to_string())
+                                    }
+                                }
+                                context_menu_presentation: ContextMenuPresentation::Custom
+                            }
+                        }
+
+                        TextBlock { text: "3. Custom Context Popup (arbitrary UIElement subtree):" }
+                        VerticalLayout {
+                            margin: 4.0
+                            TextBlock {
+                                margin: 8.0
+                                text: "【Custom Context Popup Target — Right-click here】"
+                                context_popup: vm.custom_popup_template
+                            }
+                        }
+                    }
+
+                    TextBlock {
+                        Grid::row: 1
+                        margin: 12.0
+                        text: "Context Menu Event Log:"
+                    }
+
+                    ScrollView {
+                        Grid::row: 2
+                        margin: 12.0
+                        content: TextBlock { text: vm.context_menu_log }
                     }
                 }
             }

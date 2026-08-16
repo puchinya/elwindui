@@ -6,8 +6,10 @@
 #[prop(enabled: Option<bool>)]
 #[prop(on_select: fn())]
 pub trait MenuItem {
+    fn text(&self) -> String;
     fn set_text(&self, text: &str);
     fn set_enabled(&self, enabled: bool);
     fn set_shortcut(&self, key_equivalent: &str);
     fn set_on_select(&self, callback: Box<dyn Fn()>);
+    fn select(&self);
 }

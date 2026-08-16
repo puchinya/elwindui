@@ -333,6 +333,30 @@ impl ContextMenuService {
         let resolved = resolve_context_target(target)?;
         Some((resolved, anchor))
     }
+
+    /// Opens a custom popup definition using the provided popup host, environment context, and work area.
+    pub fn open_custom_popup(
+        host: &dyn PopupHost,
+        template: &PopupContentTemplate,
+        anchor: &PopupAnchor,
+        environment: EnvironmentContext,
+        work_area: Rect,
+    ) -> Rc<dyn PopupSurfaceHandle> {
+        let content = template.build(PopupContentContext { environment });
+        crate::ui::layout_root(
+            &content,
+            Size {
+                width: work_area.width,
+                height: work_area.height,
+            },
+        );
+        let popup_size = Size {
+            width: content.arranged_width().unwrap_or(200.0).max(1.0),
+            height: content.arranged_height().unwrap_or(200.0).max(1.0),
+        };
+        let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
+        host.show_popup(content, position, popup_size)
+    }
 }
 
 /// A handle to an open popup surface for dismissal or updates.
@@ -357,6 +381,45 @@ mod tests {
     use super::*;
     use crate::ui::testsupport::FakeMenu;
     use crate::ui::{LayoutExt, TextBlock, VerticalLayout};
+    use std::cell::{Cell, RefCell};
+
+    struct FakePopupHandle {
+        closed: Rc<Cell<bool>>,
+    }
+
+    impl PopupSurfaceHandle for FakePopupHandle {
+        fn close(&self) {
+            self.closed.set(true);
+        }
+    }
+
+    struct FakePopupHost {
+        shown: RefCell<Vec<(Rc<dyn UIElementExt>, Point, Size)>>,
+        closed: Rc<Cell<bool>>,
+    }
+
+    impl FakePopupHost {
+        fn new() -> Self {
+            Self {
+                shown: RefCell::new(Vec::new()),
+                closed: Rc::new(Cell::new(false)),
+            }
+        }
+    }
+
+    impl PopupHost for FakePopupHost {
+        fn show_popup(
+            &self,
+            content: Rc<dyn UIElementExt>,
+            position: Point,
+            size: Size,
+        ) -> Rc<dyn PopupSurfaceHandle> {
+            self.shown.borrow_mut().push((Rc::clone(&content), position, size));
+            Rc::new(FakePopupHandle {
+                closed: Rc::clone(&self.closed),
+            })
+        }
+    }
 
     #[test]
     fn resolve_target_own_context_menu() {
@@ -374,6 +437,62 @@ mod tests {
             }
             _ => panic!("expected Menu definition"),
         }
+    }
+
+    #[test]
+    fn resolve_target_own_context_popup() {
+        let node = VerticalLayout::new();
+        let template = PopupContentTemplate::new(|_ctx| {
+            let layout = VerticalLayout::new();
+            let label = TextBlock::new();
+            layout.children().add(Rc::clone(&label) as Rc<dyn UIElementExt>);
+            layout as Rc<dyn UIElementExt>
+        });
+        node.set_context_popup(Some(template));
+
+        let node_dyn: Rc<dyn UIElementExt> = node;
+        let resolved = resolve_context_target(&node_dyn).expect("should resolve context target");
+        assert!(Rc::ptr_eq(&resolved.owner, &node_dyn));
+        match resolved.definition {
+            ResolvedContextDefinition::Popup { template: _ } => {}
+            _ => panic!("expected Popup definition"),
+        }
+    }
+
+    #[test]
+    fn open_custom_popup_measures_and_displays_on_host() {
+        let host = FakePopupHost::new();
+        let template = PopupContentTemplate::new(|_ctx| {
+            let block = TextBlock::new();
+            block.set_width(120.0);
+            block.set_height(80.0);
+            block as Rc<dyn UIElementExt>
+        });
+
+        let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+
+        let handle = ContextMenuService::open_custom_popup(
+            &host,
+            &template,
+            &anchor,
+            EnvironmentContext::default(),
+            work_area,
+        );
+
+        assert_eq!(host.shown.borrow().len(), 1);
+        let (_, pos, size) = &host.shown.borrow()[0];
+        assert_eq!(*pos, Point { x: 50.0, y: 50.0 });
+        assert_eq!(*size, Size { width: 120.0, height: 80.0 });
+
+        assert!(!host.closed.get());
+        handle.close();
+        assert!(host.closed.get());
     }
 
     #[test]

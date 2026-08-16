@@ -25,7 +25,7 @@ impl InnerPopupSurface {
     pub(crate) fn show(request: PopupRequest) -> Rc<Self> {
         let popup = Popup::new().expect("Popup::new");
         let content_host = TreeHostPanel::new();
-        content_host.set_tree(request.content);
+        content_host.set_tree(Rc::clone(&request.content));
 
         let canvas = content_host.canvas();
         let fe: FrameworkElement = canvas.cast().expect("Canvas as FrameworkElement");
@@ -42,11 +42,17 @@ impl InnerPopupSurface {
         popup.SetIsLightDismissEnabled(is_light_dismiss).ok();
         popup.SetIsOpen(true).ok();
 
-        Rc::new(Self {
+        let surface = Rc::new(Self {
             popup,
             content_host,
             is_open: RefCell::new(true),
-        })
+        });
+
+        if request.focus_policy == PopupFocusPolicy::Root {
+            surface.content_host.focus_element(&request.content);
+        }
+
+        surface
     }
 
     /// Closes and hides the popup surface.
@@ -54,7 +60,14 @@ impl InnerPopupSurface {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
             self.popup.SetIsOpen(false).ok();
+            self.content_host.clear_tree();
         }
+    }
+}
+
+impl Drop for InnerPopupSurface {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

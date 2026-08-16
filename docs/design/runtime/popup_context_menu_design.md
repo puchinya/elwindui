@@ -212,8 +212,13 @@ Restore focus to original target if necessary
 
 ### WinUI 3 Backend
 - **Native Context Menu**: `MenuFlyout` の `ShowAt(target_element, point)` を使用。
-- **PopupSurface**: `Microsoft.UI.Xaml.Controls.Primitives.Popup` または child `Window` / `ContentIsland` を使用して `TreeHostPanel` をホスト。
+- **PopupSurface**: `Microsoft.UI.Xaml.Controls.Primitives.Popup` を使用して `TreeHostPanel` をホスト。
+- **Coordinate Conversion**: Canvas ローカル座標を `TransformToVisual` により XamlRoot / Screen 座標へ変換。
+- **Work Area**: `Microsoft.UI.Windowing.DisplayArea::GetFromPoint` を用いて実モニターの WorkArea を動的に取得。
+- **Focus & Lifetime**: `PopupFocusPolicy::Root` にて開いた popup の root UIElement にフォーカスを設定。`TreeHostPanel` / `InnerPopupSurface` が `active_popup` として handle を保持し、新規 popup open 時に既存 popup を安全にクローズ。
+- **Menu Realization Ownership**: `Menu` / `MenuItem` は論理セマンティックモデルであり、WinUI 3 ネイティブ XAML `MenuFlyoutItemBase` は同時に1つの親コレクション（MenuBarItem または MenuFlyout）にのみ所属する。
 - Outside pointer press および `ProcessKeyboardAccelerators` (Escape) で dismiss。
+- **GUI 実機検証**: Windows 実機環境での描画・マルチモニター・DPI・タッチ操作の検証は Issue [#157](https://github.com/puchinya/elwindui/issues/157) にて管理。
 
 ### GTK4 Backend
 - GTK4 は現在 placeholder / stub 実装であるため、`PopupHost` および context menu の公開 API contract を整合させ、未実装であることを `docs/status/backend_status.md` および `control_status.md` に明記する。

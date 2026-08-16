@@ -177,6 +177,8 @@ fn main() {
         "Microsoft.UI.Input.InputKeyboardSource".to_owned(),
         "Microsoft.UI.Input.InputObject".to_owned(),
         "Microsoft.UI.Windowing.AppWindow".to_owned(),
+        "Microsoft.UI.Windowing.DisplayArea".to_owned(),
+        "Microsoft.UI.Windowing.DisplayAreaFallback".to_owned(),
         "Microsoft.UI.Windowing.OverlappedPresenter".to_owned(),
         "Microsoft.UI.Xaml.DependencyObject".to_owned(),
         "Microsoft.UI.Xaml.ElementTheme".to_owned(),

@@ -376,13 +376,16 @@ impl ContextMenuService {
         anchor: &PopupAnchor,
         work_area: Rect,
     ) -> Rc<dyn PopupSurfaceHandle> {
-        let handle_slot: Rc<RefCell<Option<Rc<dyn PopupSurfaceHandle>>>> =
+        let handle_slot: Rc<RefCell<Option<std::rc::Weak<dyn PopupSurfaceHandle>>>> =
             Rc::new(RefCell::new(None));
         let slot_clone = Rc::clone(&handle_slot);
 
         let on_close: Rc<dyn Fn()> = Rc::new(move || {
-            if let Some(handle) = slot_clone.borrow_mut().take() {
-                handle.close();
+            let weak_opt = slot_clone.borrow_mut().take();
+            if let Some(weak_handle) = weak_opt {
+                if let Some(handle) = weak_handle.upgrade() {
+                    handle.close();
+                }
             }
         });
 
@@ -408,19 +411,17 @@ impl ContextMenuService {
             dismiss_policy: PopupDismissPolicy::LightDismiss,
         });
 
-        let wrapped_handle = Rc::new(CustomMenuPopupHandle {
+        let wrapped_handle: Rc<dyn PopupSurfaceHandle> = Rc::new(CustomMenuPopupHandle {
             inner: inner_handle,
-            slot: Rc::clone(&handle_slot),
             closed: std::cell::Cell::new(false),
         });
-        *handle_slot.borrow_mut() = Some(Rc::clone(&wrapped_handle) as Rc<dyn PopupSurfaceHandle>);
+        *handle_slot.borrow_mut() = Some(Rc::downgrade(&wrapped_handle));
         wrapped_handle
     }
 }
 
 struct CustomMenuPopupHandle {
     inner: Rc<dyn PopupSurfaceHandle>,
-    slot: Rc<RefCell<Option<Rc<dyn PopupSurfaceHandle>>>>,
     closed: std::cell::Cell<bool>,
 }
 
@@ -428,9 +429,6 @@ impl PopupSurfaceHandle for CustomMenuPopupHandle {
     fn close(&self) {
         if !self.closed.get() {
             self.closed.set(true);
-            if let Ok(mut borrow) = self.slot.try_borrow_mut() {
-                let _ = borrow.take();
-            }
             self.inner.close();
         }
     }
@@ -438,9 +436,7 @@ impl PopupSurfaceHandle for CustomMenuPopupHandle {
 
 impl Drop for CustomMenuPopupHandle {
     fn drop(&mut self) {
-        if let Ok(mut borrow) = self.slot.try_borrow_mut() {
-            let _ = borrow.take();
-        }
+        self.close();
     }
 }
 

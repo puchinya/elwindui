@@ -21,7 +21,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSEvent, NSMenu, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView};
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -430,10 +430,14 @@ impl TreeHostView {
 
     fn query_screen_and_work_area(&self, location: NSPoint) -> (Point, Rect) {
         let m = mtm();
-        let primary_screen_height = NSScreen::screens(m)
+        let primary_screen = NSScreen::screens(m)
             .firstObject()
+            .or_else(|| NSScreen::mainScreen(m));
+        let primary_screen_height = primary_screen
+            .as_ref()
             .map(|s| s.frame().size.height)
-            .unwrap_or(1080.0);
+            .or_else(|| self.window().map(|w| w.frame().size.height))
+            .unwrap_or_else(|| self.frame().size.height);
 
         let screen_pt = if let Some(w) = self.window() {
             let view_pt = self.convertPoint_toView(location, None);
@@ -457,11 +461,12 @@ impl TreeHostView {
                     && screen_pt.y <= f.origin.y + f.size.height
             })
             .or_else(|| self.window().and_then(|w| w.screen()))
-            .or_else(|| NSScreen::mainScreen(m));
+            .or_else(|| primary_screen);
 
         let visible_frame = target_screen
             .map(|s| s.visibleFrame())
-            .unwrap_or_else(|| NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1920.0, 1080.0)));
+            .or_else(|| self.window().map(|w| w.frame()))
+            .unwrap_or_else(|| self.frame());
 
         let work_area = Rect {
             x: visible_frame.origin.x as f32,

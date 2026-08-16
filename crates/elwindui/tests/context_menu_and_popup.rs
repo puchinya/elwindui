@@ -4,7 +4,7 @@
 
 use elwindui::core::base::{Point, Rect, Size};
 use elwindui::core::ui::popup::{
-    ContextMenuPresenter, ContextMenuService, ContextRequest, PopupAnchor,
+    ContextMenuService, ContextRequest, PopupAnchor,
     PopupContentTemplate, PopupHost, PopupRequest, PopupSurfaceHandle, ResolvedContextDefinition,
 };
 use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt};
@@ -23,6 +23,7 @@ impl PopupSurfaceHandle for TestPopupHandle {
 
 struct TestPopupHost {
     shown: RefCell<Vec<(Rc<dyn UIElementExt>, Point, Size)>>,
+    last_request: RefCell<Option<PopupRequest>>,
     closed: Rc<Cell<bool>>,
 }
 
@@ -30,6 +31,7 @@ impl TestPopupHost {
     fn new() -> Self {
         Self {
             shown: RefCell::new(Vec::new()),
+            last_request: RefCell::new(None),
             closed: Rc::new(Cell::new(false)),
         }
     }
@@ -43,6 +45,7 @@ impl PopupHost for TestPopupHost {
         self.shown
             .borrow_mut()
             .push((Rc::clone(&request.content), request.position, request.size));
+        *self.last_request.borrow_mut() = Some(request);
         Rc::new(TestPopupHandle {
             closed: Rc::clone(&self.closed),
         })
@@ -366,38 +369,123 @@ fn custom_menu_keyboard_dispatcher_navigates_and_selects() {
     assert!(host.closed.get(), "popup surface should be dismissed upon selection");
 }
 
-struct TestThemeKey;
-impl elwindui::core::environment::EnvironmentKey for TestThemeKey {
-    type Value = String;
-    fn default_value() -> Self::Value {
-        "DefaultTheme".to_string()
-    }
+#[test]
+fn custom_menu_requests_root_focus_policy() {
+    let host = TestPopupHost::new();
+    let menu = TestMenu::new();
+    let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
+    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+    let _handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
+
+    let req = host.last_request.borrow().clone().expect("must have received PopupRequest");
+    assert_eq!(req.focus_policy, elwindui::core::ui::popup::PopupFocusPolicy::Root);
+    assert_eq!(req.dismiss_policy, elwindui::core::ui::popup::PopupDismissPolicy::LightDismiss);
 }
 
 #[test]
-fn environment_scope_context_popup_integration() {
-    let root = elwindui::core::ui::VerticalLayout::new();
-    let mut custom_env = elwindui::core::environment::EnvironmentContext::root();
-    custom_env.set::<TestThemeKey>("CustomDarkTheme".to_string());
-    root.set_environment_context(custom_env);
+fn custom_menu_popup_handle_cycle_and_weak_release() {
+    let host = TestPopupHost::new();
+    let menu = TestMenu::new();
+    let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
+    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
 
-    let child = elwindui::core::ui::TextBlock::new();
-    root.children().add(Rc::clone(&child) as Rc<dyn UIElementExt>);
+    let handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
+    assert!(!host.closed.get(), "popup is initially open");
 
-    let observed_theme = Rc::new(RefCell::new(String::new()));
-    let obs_clone = Rc::clone(&observed_theme);
-    let template = PopupContentTemplate::new(move |ctx| {
-        *obs_clone.borrow_mut() = ctx.environment.get::<TestThemeKey>();
-        let layout = elwindui::core::ui::VerticalLayout::new();
-        layout as Rc<dyn UIElementExt>
-    });
+    // Explicit drop of the handle should trigger close() and cleanly release without cycle
+    drop(handle);
+    assert!(host.closed.get(), "popup surface should be closed when handle is dropped");
+}
 
-    child.set_context_popup(Some(template));
+#[test]
+fn calculate_placement_secondary_monitor_negative_coordinates() {
+    // Secondary monitor positioned to the left: X [-1920, 0], Y [0, 1080]
+    let work_area = Rect {
+        x: -1920.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let anchor = PopupAnchor::Point(Point { x: -100.0, y: 1000.0 });
+    let popup_size = Size { width: 200.0, height: 150.0 };
 
-    let child_dyn: Rc<dyn UIElementExt> = child;
+    let pos = elwindui::core::ui::popup::calculate_popup_placement(
+        &anchor,
+        popup_size,
+        work_area,
+        elwindui::core::ui::popup::PopupPlacement::AutoFlip,
+    );
+
+    // Y should flip upward because 1000 + 150 = 1150 > 1080
+    assert_eq!(pos.y, 850.0);
+    // X should flip leftward because -100 + 200 = 100 > 0.0 (secondary monitor max X)
+    assert_eq!(pos.x, -300.0);
+}
+
+#[elwindui::environment_key(
+    name = popup_test_scope_theme,
+    value = String,
+    default = String::from("DefaultTheme")
+)]
+pub struct PopupTestScopeTheme;
+
+thread_local! {
+    static OBSERVED_SCOPE_THEME: RefCell<String> = RefCell::new(String::new());
+    static LAST_TARGET_BLOCK: RefCell<Option<Rc<dyn UIElementExt>>> = RefCell::new(None);
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct PopupScopeChild {
+    body: view! {
+        on_mount {
+            let template = PopupContentTemplate::new(|ctx| {
+                OBSERVED_SCOPE_THEME.with(|c| {
+                    *c.borrow_mut() = ctx.environment.get::<PopupTestScopeTheme>();
+                });
+                VerticalLayout::new() as Rc<dyn UIElementExt>
+            });
+            let target = self.target();
+            target.set_context_popup(Some(template));
+            LAST_TARGET_BLOCK.with(|c| *c.borrow_mut() = Some(Rc::clone(&target) as Rc<dyn UIElementExt>));
+        }
+        #[id("target")]
+        let target = TextBlock {
+            text: "Context target",
+        };
+        ContentControl {
+            target
+        }
+    },
+}
+
+#[elwindui::component]
+impl PopupScopeChild {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct PopupScopeParent {
+    body: view! {
+        EnvironmentScope {
+            popup_test_scope_theme: "DerivedDarkTheme",
+            PopupScopeChild {}
+        }
+    },
+}
+
+#[elwindui::component]
+impl PopupScopeParent {}
+
+#[test]
+fn environment_scope_dsl_context_popup_integration() {
+    OBSERVED_SCOPE_THEME.with(|c| *c.borrow_mut() = String::new());
+    LAST_TARGET_BLOCK.with(|c| *c.borrow_mut() = None);
+
+    let _parent = PopupScopeParent::new();
+    let child_target = LAST_TARGET_BLOCK.with(|c| c.borrow().clone()).expect("target block must be mounted");
+
     let request = ContextRequest::keyboard();
     let (resolved, anchor) =
-        ContextMenuService::process_request_for_target(&child_dyn, &request).expect("should resolve");
+        ContextMenuService::process_request_for_target(&child_target, &request).expect("should resolve target");
 
     let host = TestPopupHost::new();
     let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
@@ -412,10 +500,11 @@ fn environment_scope_context_popup_integration() {
                 work_area,
             );
 
+            let observed = OBSERVED_SCOPE_THEME.with(|c| c.borrow().clone());
             assert_eq!(
-                *observed_theme.borrow(),
-                "CustomDarkTheme",
-                "popup template should inherit scoped environment from target element's ancestor"
+                observed,
+                "DerivedDarkTheme",
+                "popup template should inherit derived environment via actual EnvironmentScope DSL"
             );
         }
         _ => panic!("expected Popup definition"),

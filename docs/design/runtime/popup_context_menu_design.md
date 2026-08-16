@@ -39,11 +39,13 @@ ElwindUI のコンテキストメニューおよびポップアップ基盤は�
 ### 責務境界
 
 - **Backend (OS Input Translation)**:
-  - 各 OS / ツールキットの固有入力を検知し、`ContextRequest` (`source: ContextRequestSource`, `position: Option<Point>`) を生成して Core に渡す。
+  - 各 OS / ツールキットの固有入力を検知し、`ContextRequest` (`source`, `local_position`, `screen_position`) を生成して Core に渡す。
+  - `local_position`: TreeHost-local 論理座標（`hit_test` によるターゲット要素解決用）。
+  - `screen_position`: デスクトップ screen 論理座標（Top-Left 0,0, Y-down、ポップアップ配置アンカー用）。
   - OS 固有のキー組み合わせ（Windows: Shift+F10/Menuキー, macOS: Ctrl+Click）やマウスボタン割り当て（左右反転設定等）を Backend 内で解釈する。
 - **Core (`ContextMenuService` & Target Resolution)**:
-  - `ContextRequestSource::Pointer`: 指定された `position` に基づき `hit_test` を行いターゲット要素を決定。
-  - `ContextRequestSource::Keyboard`: `FocusTracker.focused()` から現在フォーカスを持つ要素を決定（ポインタ位置は破棄）。
+  - `ContextRequestSource::Pointer`: 指定された `local_position` に基づき `hit_test` を行いターゲット要素を決定し、`screen_position` を `PopupAnchor::Point` としてアンカーに設定。
+  - `ContextRequestSource::Keyboard`: `FocusTracker.focused()` から現在フォーカスを持つ要素を決定。
   - `ContextRequestSource::Accessibility` / `NativeControl`: 通知されたターゲット要素または owner identity を直接利用。
   - ターゲット要素から `visual_parent` チェーンをルート方向へ探索し、**最も近い祖先（nearest ancestor）** に設定された `context_menu` または `context_popup` を解決する。
 - **Presentation**:
@@ -65,7 +67,8 @@ pub enum ContextRequestSource {
 
 pub struct ContextRequest {
     pub source: ContextRequestSource,
-    pub position: Option<Point>,
+    pub local_position: Option<Point>,
+    pub screen_position: Option<Point>,
 }
 ```
 
@@ -74,9 +77,9 @@ pub struct ContextRequest {
 ```text
 ContextRequest arrives
    │
-   ├─ Source == Pointer  ──> hit_test(root, position) ──> target UIElement
-   ├─ Source == Keyboard ──> FocusTracker.focused()    ──> target UIElement
-   └─ NativeControl / UIA ─────────────────────────────> target UIElement
+   ├─ Source == Pointer  ──> hit_test(root, local_position) ──> target UIElement (anchor: screen_position)
+   ├─ Source == Keyboard ──> FocusTracker.focused()         ──> target UIElement (anchor: element bounds)
+   └─ NativeControl / UIA ──────────────────────────────────> target UIElement
    │
    ▼
 Resolve nearest context owner:

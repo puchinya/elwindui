@@ -92,6 +92,7 @@ impl InnerPopupSurface {
         surface.window.display();
 
         if request.focus_policy == PopupFocusPolicy::Root {
+            surface.window.makeFirstResponder(Some(&surface.content_host));
             surface.content_host.focus_element(&request.content);
         }
 
@@ -158,8 +159,15 @@ impl InnerPopupSurface {
             if let Some(parent) = self.window.parentWindow() {
                 parent.removeChildWindow(&self.window);
             }
-            self.content_host.clear_tree();
             self.window.orderOut(None);
+
+            let host_raw = Retained::into_raw(self.content_host.clone()) as usize;
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                let ptr = host_raw as *mut TreeHostView;
+                if let Some(host) = unsafe { Retained::from_raw(ptr) } {
+                    host.clear_tree();
+                }
+            });
         }
     }
 }

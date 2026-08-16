@@ -37,16 +37,19 @@ pub enum ContextRequestSource {
 pub struct ContextRequest {
     /// The input source that generated the request.
     pub source: ContextRequestSource,
-    /// The location of the interaction in window/screen logical coordinates, if pointer-driven.
-    pub position: Option<Point>,
+    /// TreeHost-local logical coordinate used for hit-testing the target element.
+    pub local_position: Option<Point>,
+    /// Desktop screen logical coordinate (Top-Left 0,0, Y-down) used for popup anchor placement.
+    pub screen_position: Option<Point>,
 }
 
 impl ContextRequest {
-    /// Creates a pointer-driven context request at the specified point.
-    pub fn pointer(position: Point) -> Self {
+    /// Creates a pointer-driven context request with local hit-test position and screen anchor position.
+    pub fn pointer(local_position: Point, screen_position: Point) -> Self {
         Self {
             source: ContextRequestSource::Pointer,
-            position: Some(position),
+            local_position: Some(local_position),
+            screen_position: Some(screen_position),
         }
     }
 
@@ -54,15 +57,17 @@ impl ContextRequest {
     pub fn keyboard() -> Self {
         Self {
             source: ContextRequestSource::Keyboard,
-            position: None,
+            local_position: None,
+            screen_position: None,
         }
     }
 
     /// Creates an accessibility-driven context request.
-    pub fn accessibility(position: Option<Point>) -> Self {
+    pub fn accessibility(local_position: Option<Point>, screen_position: Option<Point>) -> Self {
         Self {
             source: ContextRequestSource::Accessibility,
-            position,
+            local_position,
+            screen_position,
         }
     }
 }
@@ -275,9 +280,10 @@ impl ContextMenuService {
     ) -> Option<(ResolvedContextTarget, PopupAnchor)> {
         let (target, anchor) = match request.source {
             ContextRequestSource::Pointer => {
-                let position = request.position?;
-                let hit = crate::ui::hit_test(root, position)?;
-                (hit, PopupAnchor::Point(position))
+                let local_pos = request.local_position?;
+                let hit = crate::ui::hit_test(root, local_pos)?;
+                let screen_pos = request.screen_position.unwrap_or(local_pos);
+                (hit, PopupAnchor::Point(screen_pos))
             }
             ContextRequestSource::Keyboard => {
                 let focused = focus.focused()?;
@@ -292,7 +298,7 @@ impl ContextMenuService {
             }
             ContextRequestSource::Accessibility | ContextRequestSource::Other => {
                 let target = focus.focused().unwrap_or_else(|| Rc::clone(root));
-                let anchor = match request.position {
+                let anchor = match request.screen_position.or(request.local_position) {
                     Some(pos) => PopupAnchor::Point(pos),
                     None => {
                         let offset = target.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
@@ -318,7 +324,7 @@ impl ContextMenuService {
         target: &Rc<dyn UIElementExt>,
         request: &ContextRequest,
     ) -> Option<(ResolvedContextTarget, PopupAnchor)> {
-        let anchor = match request.position {
+        let anchor = match request.screen_position.or(request.local_position) {
             Some(pos) => PopupAnchor::Point(pos),
             None => {
                 let offset = target.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
@@ -533,8 +539,8 @@ impl ContextMenuPresenter {
                     }),
                 );
 
-                row.register_routed_handler::<crate::input::PointerEventArgs>(
-                    "on_pointer_released",
+                row.register_routed_handler::<crate::input::TappedEventArgs>(
+                    "on_tapped",
                     Box::new(move |_args, _routed| {
                         item_clone.select();
                         close_cb();
@@ -844,7 +850,7 @@ mod tests {
         let (content, _pos, _size) = &host.shown.borrow()[0];
         assert!(!host.closed.get());
 
-        // Find the first child row in custom menu view and trigger on_pointer_released
+        // Find the first child row in custom menu view and trigger on_tapped
         let layout_children = content.visual_children();
         assert!(!layout_children.is_empty());
         let row = &layout_children[0];
@@ -852,10 +858,9 @@ mod tests {
         let routed_args = crate::input::RoutedEventArgs::default();
         crate::ui::dispatch_routed(
             row,
-            "on_pointer_released",
-            &crate::input::PointerEventArgs {
+            "on_tapped",
+            &crate::input::TappedEventArgs {
                 position: Point { x: 10.0, y: 10.0 },
-                button: Some(crate::input::MouseButton::Left),
                 modifiers: crate::input::KeyModifiers::default(),
             },
             &routed_args,

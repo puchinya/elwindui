@@ -241,7 +241,7 @@ struct TestMenuItem {
     text: RefCell<String>,
     enabled: Cell<bool>,
     shortcut: RefCell<Option<String>>,
-    on_select: RefCell<Option<Box<dyn Fn()>>>,
+    on_select: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 }
 
 #[elwindui::class]
@@ -251,7 +251,7 @@ impl TestMenuItem {
             text: RefCell::new(String::new()),
             enabled: Cell::new(true),
             shortcut: RefCell::new(None),
-            on_select: RefCell::new(None),
+            on_select: Rc::new(RefCell::new(None)),
         }
     }
     fn text(&self) -> String {
@@ -277,10 +277,11 @@ impl TestMenuItem {
         };
     }
     fn set_on_select(&self, callback: Box<dyn Fn()>) {
-        *self.on_select.borrow_mut() = Some(callback);
+        *self.on_select.borrow_mut() = Some(Rc::from(callback));
     }
     fn select(&self) {
-        if let Some(cb) = self.on_select.borrow().as_ref() {
+        let cb = self.on_select.borrow().clone();
+        if let Some(cb) = cb {
             cb();
         }
     }
@@ -508,5 +509,78 @@ fn environment_scope_dsl_context_popup_integration() {
             );
         }
         _ => panic!("expected Popup definition"),
+    }
+}
+
+#[test]
+fn custom_menu_callback_mutates_state_and_resyncs_without_panic() {
+    let host = TestPopupHost::new();
+    let menu = TestMenu::new();
+
+    let state_counter = Rc::new(RefCell::new(0));
+    let counter_clone = Rc::clone(&state_counter);
+
+    let item = TestMenuItem::new();
+    item.set_text("Mutate State");
+    let item_clone = item.clone();
+
+    // Callback updates state, triggers setter, and checks item text (reentrant inspection)
+    item.set_on_select(Box::new(move || {
+        *counter_clone.borrow_mut() += 1;
+        item_clone.set_text("Updated");
+        assert_eq!(item_clone.text(), "Updated");
+    }));
+    menu.items.add(Rc::clone(&item) as Rc<dyn MenuItemExt>);
+
+    let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
+    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+    let _handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
+
+    let (content, _, _) = &host.shown.borrow()[0];
+    let row = &content.visual_children()[0];
+
+    // Trigger on_tapped
+    let routed_args = elwindui::core::input::RoutedEventArgs::default();
+    elwindui::core::ui::dispatch_routed(
+        row,
+        "on_tapped",
+        &elwindui::core::input::TappedEventArgs {
+            position: Point { x: 10.0, y: 10.0 },
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+        },
+        &routed_args,
+    );
+
+    assert_eq!(*state_counter.borrow(), 1, "callback should execute cleanly");
+    assert!(host.closed.get(), "popup should close on selection");
+}
+
+#[test]
+fn context_request_separates_local_hittest_from_screen_anchor() {
+    let root = elwindui::core::ui::VerticalLayout::new();
+    let menu = TestMenu::new();
+    let child = elwindui::core::ui::TextBlock::new();
+    child.set_context_menu(Some(Rc::clone(&menu) as Rc<dyn elwindui::core::ui::MenuExt>));
+    root.children().add(Rc::clone(&child) as Rc<dyn UIElementExt>);
+
+    // Local coordinates in window (e.g. at (10, 10)) vs desktop screen coordinates (e.g. at (1930, 500))
+    let local_pos = Point { x: 0.0, y: 0.0 };
+    let screen_pos = Point { x: 1930.0, y: 500.0 };
+
+    let root_dyn: Rc<dyn UIElementExt> = root;
+    let focus = elwindui::core::focus::FocusTracker::new();
+    let request = ContextRequest::pointer(local_pos, screen_pos);
+
+    let (resolved, anchor) = ContextMenuService::process_request(&root_dyn, &focus, &request)
+        .expect("should hit-test child at local position");
+
+    assert!(Rc::ptr_eq(&resolved.owner, &(child as Rc<dyn UIElementExt>)));
+    match anchor {
+        PopupAnchor::Point(pt) => {
+            assert_eq!(pt.x, 1930.0, "anchor must use screen_position, not local_position");
+            assert_eq!(pt.y, 500.0, "anchor must use screen_position, not local_position");
+        }
+        _ => panic!("expected Point anchor"),
     }
 }

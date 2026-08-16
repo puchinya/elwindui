@@ -12,7 +12,7 @@ use elwindui_core::input::{
     FocusState, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
     RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
-use elwindui_core::ui::popup::{PopupAnchor, PopupSurfaceHandle};
+use elwindui_core::ui::popup::PopupSurfaceHandle;
 use elwindui_core::ui::{
     ContextMenuPresentation, ContextMenuService, ContextRequest, FocusHost, InvalidationKind,
     RelayoutHost, ResolvedContextDefinition, UIElementExt, layout_root,
@@ -371,12 +371,13 @@ impl TreeHostView {
             return std::ptr::null_mut();
         };
         let location = self.convertPoint_fromView(event.locationInWindow(), None);
-        let position = Point {
+        let local_point = Point {
             x: location.x as f32,
             y: location.y as f32,
         };
-        let request = ContextRequest::pointer(position);
-        let Some((resolved, _anchor)) = ContextMenuService::process_request(
+        let (screen_anchor_pt, work_area) = self.query_screen_and_work_area(location);
+        let request = ContextRequest::pointer(local_point, screen_anchor_pt);
+        let Some((resolved, anchor)) = ContextMenuService::process_request(
             &tree,
             &self.ivars().keyboard.focus,
             &request,
@@ -397,13 +398,11 @@ impl TreeHostView {
                         Retained::autorelease_return(appkit_menu.inner_ns())
                     }
                     ContextMenuPresentation::Custom => {
-                        let (screen_anchor_pt, work_area) = self.query_screen_and_work_area(location);
-                        let popup_anchor = PopupAnchor::Point(screen_anchor_pt);
                         let host = crate::inner::AppKitPopupHost::new(self.window());
                         let handle = ContextMenuService::open_custom_menu(
                             &host,
                             &*menu,
-                            &popup_anchor,
+                            &anchor,
                             work_area,
                         );
                         *self.ivars().active_popup.borrow_mut() = Some(handle);
@@ -412,13 +411,11 @@ impl TreeHostView {
                 }
             }
             ResolvedContextDefinition::Popup { template } => {
-                let (screen_anchor_pt, work_area) = self.query_screen_and_work_area(location);
-                let popup_anchor = PopupAnchor::Point(screen_anchor_pt);
                 let host = crate::inner::AppKitPopupHost::new(self.window());
                 let handle = ContextMenuService::open_custom_popup(
                     &host,
                     &template,
-                    &popup_anchor,
+                    &anchor,
                     resolved.owner.effective_environment(),
                     work_area,
                 );
@@ -533,10 +530,10 @@ impl TreeHostView {
         kind: RawPointerEventKind,
         timestamp: f64,
     ) {
-        let tree = self.ivars().tree.borrow();
-        let Some(tree) = tree.as_ref() else { return };
+        let tree = self.ivars().tree.borrow().clone();
+        let Some(tree) = tree else { return };
         self.ivars().pointer.handle(
-            tree,
+            &tree,
             &self.ivars().keyboard.focus,
             RawPointerEvent {
                 kind,
@@ -552,13 +549,13 @@ impl TreeHostView {
     /// no tree is hosted yet, or if `event` maps to no `Key` at all (`nsevent_key` returning `None`
     /// — practically never, since it always falls back to the raw character).
     fn dispatch_key(&self, event: &NSEvent, is_down: bool) {
-        let tree = self.ivars().tree.borrow();
-        let Some(tree) = tree.as_ref() else { return };
+        let tree = self.ivars().tree.borrow().clone();
+        let Some(tree) = tree else { return };
         let Some(key) = nsevent_key(event) else {
             return;
         };
         self.ivars().keyboard.handle_key(
-            tree,
+            &tree,
             RawKeyEvent {
                 kind: if is_down {
                     RawKeyEventKind::Down {
@@ -580,8 +577,8 @@ impl TreeHostView {
     /// Enter, Escape, function keys, ...) also produce a non-empty `characters()` string on macOS —
     /// excluding `Unicode` control-category characters keeps those from misfiring as text input.
     fn dispatch_text_input(&self, event: &NSEvent) {
-        let tree = self.ivars().tree.borrow();
-        let Some(tree) = tree.as_ref() else { return };
+        let tree = self.ivars().tree.borrow().clone();
+        let Some(tree) = tree else { return };
         let Some(text) = event.characters().map(|s| s.to_string()) else {
             return;
         };
@@ -590,7 +587,7 @@ impl TreeHostView {
         }
         self.ivars()
             .keyboard
-            .handle_text_input(tree, RawTextInputEvent { text });
+            .handle_text_input(&tree, RawTextInputEvent { text });
     }
 
     /// Replaces this host's entire content, discarding whatever native subviews were there before.

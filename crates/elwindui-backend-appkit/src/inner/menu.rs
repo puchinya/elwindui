@@ -70,7 +70,8 @@ impl InnerMenuItem {
     }
 
     pub(crate) fn select(&self) {
-        if let Some(target) = self.target_storage.borrow().as_ref() {
+        let target = self.target_storage.borrow().clone();
+        if let Some(target) = target {
             (target.ivars().callback)();
         }
     }

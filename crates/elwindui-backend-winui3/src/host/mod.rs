@@ -402,6 +402,9 @@ impl TreeHostPanel {
                         let Some(args) = args.cloned() else {
                             return Ok(());
                         };
+                        if args.Handled().unwrap_or(false) {
+                            return Ok(());
+                        }
                         if let (Some(tree), Some(keyboard), Some(active)) = (
                             tree_for_context.upgrade(),
                             keyboard_for_context.upgrade(),
@@ -416,7 +419,7 @@ impl TreeHostPanel {
                                     y: point.Y,
                                 };
                                 let screen_pt = Self::canvas_to_screen_point(&canvas_for_context, local_pt);
-                                let request = elwindui_core::ui::ContextRequest::pointer(screen_pt);
+                                let request = elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt);
                                 if Self::dispatch_context_request(
                                     &Some(tree),
                                     &keyboard,
@@ -449,7 +452,7 @@ impl TreeHostPanel {
                         let request = if is_pointer {
                             let local_pt = elwindui_core::base::Point { x: pt.X, y: pt.Y };
                             let screen_pt = TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, local_pt);
-                            elwindui_core::ui::ContextRequest::pointer(screen_pt)
+                            elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt)
                         } else {
                             elwindui_core::ui::ContextRequest::keyboard()
                         };

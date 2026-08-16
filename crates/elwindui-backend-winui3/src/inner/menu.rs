@@ -19,7 +19,7 @@ use windows::core::{HSTRING, Interface};
 pub(crate) struct InnerMenuItem {
     xaml: MenuFlyoutItem,
     shortcut: Rc<RefCell<Option<String>>>,
-    on_select: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    on_select: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 }
 
 impl InnerMenuItem {
@@ -33,8 +33,9 @@ impl InnerMenuItem {
         {
             let callback = this.on_select.clone();
             let callback_id = register_ui_event_callback(Rc::new(move || {
-                if let Some(callback) = callback.borrow().as_ref() {
-                    callback();
+                let cb = callback.borrow().clone();
+                if let Some(cb) = cb {
+                    cb();
                 }
             }));
             let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
@@ -91,13 +92,14 @@ impl InnerMenuItem {
     }
 
     pub(crate) fn select(&self) {
-        if let Some(callback) = self.on_select.borrow().as_ref() {
+        let cb = self.on_select.borrow().clone();
+        if let Some(callback) = cb {
             callback();
         }
     }
 
     pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
-        *self.on_select.borrow_mut() = Some(callback);
+        *self.on_select.borrow_mut() = Some(Rc::from(callback));
     }
 }
 

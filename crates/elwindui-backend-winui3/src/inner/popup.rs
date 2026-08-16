@@ -48,7 +48,18 @@ impl InnerPopupSurface {
             is_open: RefCell::new(true),
         });
 
+        let weak_surface = Rc::downgrade(&surface);
+        let _ = surface.popup.Closed(&windows::Foundation::EventHandler::new(move |_, _| {
+            if let Some(s) = weak_surface.upgrade() {
+                s.close();
+            }
+            Ok(())
+        }));
+
         if request.focus_policy == PopupFocusPolicy::Root {
+            let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
+                surface.content_host.canvas().cast().expect("Canvas as UIElement");
+            let _ = uie.Focus(crate::bindings::Microsoft::UI::Xaml::FocusState::Programmatic);
             surface.content_host.focus_element(&request.content);
         }
 

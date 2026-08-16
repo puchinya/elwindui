@@ -2128,6 +2128,21 @@ fn wrap_prop_value(ty: &Type, value: TokenStream2) -> TokenStream2 {
             converted
         };
     }
+    if let Some(bound) = rc_dyn_trait_bound(target) {
+        if let Some(seg) = bound.bounds.iter().find_map(|b| match b {
+            syn::TypeParamBound::Trait(t) => t.path.segments.last(),
+            _ => None,
+        }) {
+            let name = seg.ident.to_string();
+            let method = into_node_ident(name.strip_suffix("Ext").unwrap_or(&name));
+            let converted = quote! { (#value).#method() };
+            return if wrap_in_some {
+                quote! { Some(#converted) }
+            } else {
+                converted
+            };
+        }
+    }
     value
 }
 

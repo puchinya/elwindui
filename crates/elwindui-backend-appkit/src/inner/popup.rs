@@ -10,7 +10,7 @@ use elwindui_core::ui::{PopupHost, PopupSurfaceHandle, UIElementExt};
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::RefCell;
@@ -19,6 +19,7 @@ use std::rc::Rc;
 /// Internal AppKit representation of a standalone popup surface.
 pub(crate) struct InnerPopupSurface {
     window: Retained<NSWindow>,
+    #[allow(dead_code)]
     content_host: Retained<TreeHostView>,
     is_open: RefCell<bool>,
 }

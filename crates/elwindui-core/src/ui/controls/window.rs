@@ -21,7 +21,7 @@ use super::*;
 /// (`<Self as WindowExt>::show(self)`), not `self.base.show()`, avoiding infinite recursion.
 #[elwindui_macros::class(trait_only)]
 #[prop(title: String)]
-#[prop(menu_bar: Option<std::rc::Rc<dyn crate::ui::MenuBarExt>>)]
+#[prop(menu_bar: std::rc::Rc<dyn crate::ui::MenuBarExt>)]
 #[content(content)]
 #[prop(content: std::rc::Rc<dyn crate::ui::UIElementExt>)]
 #[prop(transparent: bool)]

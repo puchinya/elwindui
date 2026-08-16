@@ -73,7 +73,7 @@ mod controls;
 
 mod collections;
 mod engine;
-mod popup;
+pub mod popup;
 mod text_style;
 
 // Last on purpose: several fixtures in here are `#[class]` declarations that inherit real classes

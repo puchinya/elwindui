@@ -23,7 +23,6 @@ pub(crate) use dropdown::InnerDropdown;
 pub(crate) use dropdown_item::InnerDropdownItem;
 pub(crate) use menu::{InnerMenu, InnerMenuBar, InnerMenuBarItem, InnerMenuItem};
 pub use popup::{AppKitPopupHandle, AppKitPopupHost};
-pub(crate) use popup::InnerPopupSurface;
 pub(crate) use radio_button::InnerRadioButton;
 pub(crate) use scroll_view::InnerScrollView;
 pub(crate) use slider::InnerSlider;

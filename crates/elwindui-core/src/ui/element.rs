@@ -119,7 +119,7 @@ pub trait FocusHost {
 #[prop(routed, on_double_tapped: fn(crate::input::TappedEventArgs))]
 #[prop(routed, on_right_tapped: fn(crate::input::TappedEventArgs))]
 #[prop(context_menu: Option<Rc<dyn crate::ui::MenuExt>>)]
-#[prop(context_menu_presentation: Option<crate::ui::ContextMenuPresentation>)]
+#[prop(context_menu_presentation: crate::ui::ContextMenuPresentation)]
 #[prop(context_popup: Option<crate::ui::PopupContentTemplate>)]
 pub struct UIElement {
     /// Stable identity of this Visual's retained RenderGroup. Never reused within a process.
@@ -509,10 +509,10 @@ impl UIElement {
     fn context_menu_presentation(&self) -> ContextMenuPresentation {
         self.as_ui_element().context_menu_presentation.get()
     }
-    fn set_context_menu_presentation(&self, presentation: Option<ContextMenuPresentation>) {
+    fn set_context_menu_presentation(&self, presentation: ContextMenuPresentation) {
         self.as_ui_element()
             .context_menu_presentation
-            .set(presentation.unwrap_or_default());
+            .set(presentation);
     }
     fn context_popup(&self) -> Option<PopupContentTemplate> {
         self.as_ui_element().context_popup.borrow().clone()

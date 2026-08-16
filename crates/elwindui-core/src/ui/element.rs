@@ -118,6 +118,9 @@ pub trait FocusHost {
 #[prop(routed, on_tapped: fn(crate::input::TappedEventArgs))]
 #[prop(routed, on_double_tapped: fn(crate::input::TappedEventArgs))]
 #[prop(routed, on_right_tapped: fn(crate::input::TappedEventArgs))]
+#[prop(context_menu: Option<Rc<dyn crate::ui::MenuExt>>)]
+#[prop(context_menu_presentation: Option<crate::ui::ContextMenuPresentation>)]
+#[prop(context_popup: Option<crate::ui::PopupContentTemplate>)]
 pub struct UIElement {
     /// Stable identity of this Visual's retained RenderGroup. Never reused within a process.
     pub render_group_id: u64,
@@ -145,6 +148,9 @@ pub struct UIElement {
     pub min_height: Cell<Option<f32>>,
     pub max_width: Cell<Option<f32>>,
     pub max_height: Cell<Option<f32>>,
+    pub context_menu: RefCell<Option<Rc<dyn MenuExt>>>,
+    pub context_menu_presentation: Cell<ContextMenuPresentation>,
+    pub context_popup: RefCell<Option<PopupContentTemplate>>,
     /// WinUI3's `UIElement.DesiredSize` — the result of the most recent `UIElement::measure` pass,
     /// `None` before the first one (or right after `invalidate_measure` — see that method's own doc
     /// comment) rather than some zero-value placeholder, so a reader can distinguish "not measured
@@ -339,6 +345,9 @@ impl UIElement {
             focus_state: Cell::new(FocusState::Unfocused),
             focus_host: RefCell::new(None),
             declared_shortcuts: RefCell::new(Vec::new()),
+            context_menu: RefCell::new(None),
+            context_menu_presentation: Cell::new(ContextMenuPresentation::Native),
+            context_popup: RefCell::new(None),
         }
     }
 
@@ -490,6 +499,26 @@ impl UIElement {
     fn set_max_height(&self, max_height: f32) {
         self.as_ui_element().max_height.set(Some(max_height));
         self.invalidate_measure();
+    }
+    fn context_menu(&self) -> Option<Rc<dyn MenuExt>> {
+        self.as_ui_element().context_menu.borrow().clone()
+    }
+    fn set_context_menu(&self, menu: Option<Rc<dyn MenuExt>>) {
+        *self.as_ui_element().context_menu.borrow_mut() = menu;
+    }
+    fn context_menu_presentation(&self) -> ContextMenuPresentation {
+        self.as_ui_element().context_menu_presentation.get()
+    }
+    fn set_context_menu_presentation(&self, presentation: Option<ContextMenuPresentation>) {
+        self.as_ui_element()
+            .context_menu_presentation
+            .set(presentation.unwrap_or_default());
+    }
+    fn context_popup(&self) -> Option<PopupContentTemplate> {
+        self.as_ui_element().context_popup.borrow().clone()
+    }
+    fn set_context_popup(&self, popup: Option<PopupContentTemplate>) {
+        *self.as_ui_element().context_popup.borrow_mut() = popup;
     }
     /// The parent in the Logical tree. `UIElementCollection` owns this relationship.
     fn parent(&self) -> Option<Rc<dyn UIElementExt>> {

@@ -399,6 +399,56 @@ impl MeasureProbe {
     }
 }
 
+#[elwindui_macros::class(struct_only = crate::ui::MenuExt)]
+pub(crate) struct FakeMenu {
+    items: crate::ui::ChildList<dyn crate::ui::MenuItemExt>,
+}
+
+#[elwindui_macros::class]
+impl FakeMenu {
+    fn construct() -> Self {
+        Self {
+            items: crate::ui::ChildList::new(),
+        }
+    }
+    fn add_item(&self, item: &dyn crate::ui::MenuItemExt) {
+        let _ = item;
+    }
+    fn remove_item(&self, item: &dyn crate::ui::MenuItemExt) {
+        let _ = item;
+    }
+    fn items(&self) -> &dyn crate::ui::ListExt<dyn crate::ui::MenuItemExt> {
+        self
+    }
+}
+
+impl crate::ui::ListExt<dyn crate::ui::MenuItemExt> for FakeMenu {
+    fn add(&self, item: Rc<dyn crate::ui::MenuItemExt>) {
+        self.items.add(item);
+    }
+    fn insert(&self, index: usize, item: Rc<dyn crate::ui::MenuItemExt>) {
+        self.items.insert(index, item);
+    }
+    fn remove(&self, item: &Rc<dyn crate::ui::MenuItemExt>) -> bool {
+        self.items.remove(item)
+    }
+    fn remove_at(&self, index: usize) -> Rc<dyn crate::ui::MenuItemExt> {
+        self.items.remove_at(index)
+    }
+    fn clear(&self) {
+        self.items.clear();
+    }
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+    fn to_vec(&self) -> Vec<Rc<dyn crate::ui::MenuItemExt>> {
+        self.items.to_vec()
+    }
+}
+
 /// A minimal test-only fixture that both paints itself *and* has children — no real builtin
 /// combines the two today (`Shape` is a childless leaf; `Layout`/`Control`/`Grid`
 /// never paint), so `render_item_ordering_preserves_traversal_order_across_native_and_paint`

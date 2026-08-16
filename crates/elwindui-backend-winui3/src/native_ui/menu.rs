@@ -204,6 +204,13 @@ impl Menu {
     fn items(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuItemExt> {
         self
     }
+
+    #[inherent]
+    pub fn create_flyout(
+        &self,
+    ) -> Result<crate::bindings::Microsoft::UI::Xaml::Controls::MenuFlyout, windows::core::Error> {
+        self.inner.create_flyout()
+    }
 }
 
 pub(crate) fn downcast_menu_item(item: &dyn elwindui_core::ui::MenuItemExt) -> &MenuItem {

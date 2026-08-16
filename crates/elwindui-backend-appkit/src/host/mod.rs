@@ -12,11 +12,14 @@ use elwindui_core::input::{
     FocusState, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
     RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
-use elwindui_core::ui::{FocusHost, InvalidationKind, RelayoutHost, UIElementExt, layout_root};
+use elwindui_core::ui::{
+    ContextMenuPresentation, ContextMenuService, ContextRequest, FocusHost, InvalidationKind,
+    RelayoutHost, ResolvedContextDefinition, UIElementExt, layout_root,
+};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSView};
+use objc2_app_kit::{NSEvent, NSMenu, NSTrackingArea, NSTrackingAreaOptions, NSView};
 use objc2_foundation::{NSObjectProtocol, NSRect};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -342,6 +345,41 @@ define_class!(
                     delta_y: event.scrollingDeltaY() as f32,
                 },
             );
+        }
+
+        #[unsafe(method(menuForEvent:))]
+        fn menu_for_event(&self, event: &NSEvent) -> *mut NSMenu {
+            let Some(tree) = self.ivars().tree.borrow().clone() else {
+                return std::ptr::null_mut();
+            };
+            let location = self.convertPoint_fromView(event.locationInWindow(), None);
+            let position = Point {
+                x: location.x as f32,
+                y: location.y as f32,
+            };
+            let request = ContextRequest::pointer(position);
+            let Some((resolved, _)) = ContextMenuService::process_request(
+                &tree,
+                &self.ivars().keyboard.focus,
+                &request,
+            ) else {
+                return std::ptr::null_mut();
+            };
+            match resolved.definition {
+                ResolvedContextDefinition::Menu { menu, presentation } => {
+                    match presentation {
+                        ContextMenuPresentation::Native => {
+                            let appkit_menu = menu
+                                .as_any()
+                                .downcast_ref::<crate::native_ui::Menu>()
+                                .expect("AppKit MenuExt: menu must be this backend's Menu");
+                            Retained::autorelease_return(appkit_menu.inner_ns())
+                        }
+                        ContextMenuPresentation::Custom => std::ptr::null_mut(),
+                    }
+                }
+                ResolvedContextDefinition::Popup { .. } => std::ptr::null_mut(),
+            }
         }
     }
 );

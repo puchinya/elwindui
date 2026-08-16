@@ -211,6 +211,11 @@ impl Menu {
     fn items(&self) -> &dyn elwindui_core::ui::ListExt<dyn elwindui_core::ui::MenuItemExt> {
         self
     }
+
+    #[inherent]
+    pub fn inner_ns(&self) -> objc2::rc::Retained<objc2_app_kit::NSMenu> {
+        self.inner.ns()
+    }
 }
 
 fn downcast_menu_item(item: &dyn elwindui_core::ui::MenuItemExt) -> &MenuItem {

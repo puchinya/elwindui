@@ -108,6 +108,9 @@ impl InnerMenu {
     pub(crate) fn remove_item(&self, item: &InnerMenuItem) {
         self.ns.removeItem(&item.ns);
     }
+    pub(crate) fn ns(&self) -> Retained<NSMenu> {
+        self.ns.clone()
+    }
 }
 
 /// One top-level entry in the menu bar (e.g. "File"), holding its dropdown `InnerMenu` — composed

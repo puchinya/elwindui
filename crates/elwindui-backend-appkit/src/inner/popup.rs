@@ -38,9 +38,8 @@ impl InnerPopupSurface {
         size: Size,
     ) -> Rc<Self> {
         let m = mtm();
-        let bottom_y = (position.y - size.height) as f64;
         let content_rect = NSRect::new(
-            NSPoint::new(position.x as f64, bottom_y),
+            NSPoint::new(position.x as f64, position.y as f64),
             NSSize::new(size.width as f64, size.height as f64),
         );
         let style = NSWindowStyleMask::Borderless;

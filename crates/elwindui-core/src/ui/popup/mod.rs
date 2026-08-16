@@ -189,16 +189,16 @@ pub fn calculate_popup_placement(
     match anchor {
         PopupAnchor::Point(p) => {
             let mut x = p.x;
-            let mut y = p.y;
+            let mut y = p.y - popup_size.height;
 
             if placement == PopupPlacement::AutoFlip || placement == PopupPlacement::Below {
-                if y + popup_size.height > work_area_bottom && p.y - popup_size.height >= work_area.y {
-                    y = p.y - popup_size.height;
-                }
-            } else if placement == PopupPlacement::Above {
-                y = p.y - popup_size.height;
                 if y < work_area.y && p.y + popup_size.height <= work_area_bottom {
                     y = p.y;
+                }
+            } else if placement == PopupPlacement::Above {
+                y = p.y;
+                if y + popup_size.height > work_area_bottom && p.y - popup_size.height >= work_area.y {
+                    y = p.y - popup_size.height;
                 }
             }
 
@@ -596,7 +596,7 @@ mod tests {
 
         assert_eq!(host.shown.borrow().len(), 1);
         let (_, pos, size) = &host.shown.borrow()[0];
-        assert_eq!(*pos, Point { x: 100.0, y: 100.0 });
+        assert_eq!(*pos, Point { x: 100.0, y: 100.0 - size.height });
         assert!(size.width > 0.0);
         assert!(size.height > 0.0);
 
@@ -672,16 +672,25 @@ mod tests {
             height: 300.0,
         };
 
-        // Near top-left: fits normally
+        // Middle of screen: extends downward normally (y = 500 - 300 = 200)
         let pos1 = calculate_popup_placement(
+            &PopupAnchor::Point(Point { x: 100.0, y: 500.0 }),
+            popup_size,
+            work_area,
+            PopupPlacement::AutoFlip,
+        );
+        assert_eq!(pos1, Point { x: 100.0, y: 200.0 });
+
+        // Near bottom: flips upward (y = 100)
+        let pos_bottom = calculate_popup_placement(
             &PopupAnchor::Point(Point { x: 100.0, y: 100.0 }),
             popup_size,
             work_area,
             PopupPlacement::AutoFlip,
         );
-        assert_eq!(pos1, Point { x: 100.0, y: 100.0 });
+        assert_eq!(pos_bottom, Point { x: 100.0, y: 100.0 });
 
-        // Near bottom-right: flips left and above
+        // Near top-right: flips leftward (x = 950 - 200 = 750, y = 750 - 300 = 450)
         let pos2 = calculate_popup_placement(
             &PopupAnchor::Point(Point { x: 950.0, y: 750.0 }),
             popup_size,
@@ -689,5 +698,14 @@ mod tests {
             PopupPlacement::AutoFlip,
         );
         assert_eq!(pos2, Point { x: 750.0, y: 450.0 });
+
+        // Near bottom-right: flips both leftward and upward
+        let pos_br = calculate_popup_placement(
+            &PopupAnchor::Point(Point { x: 950.0, y: 100.0 }),
+            popup_size,
+            work_area,
+            PopupPlacement::AutoFlip,
+        );
+        assert_eq!(pos_br, Point { x: 750.0, y: 100.0 });
     }
 }

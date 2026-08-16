@@ -5,7 +5,7 @@
 use elwindui::core::base::{Point, Rect, Size};
 use elwindui::core::environment::EnvironmentContext;
 use elwindui::core::ui::popup::{
-    ContextMenuPresentation, ContextMenuService, ContextRequest, PopupAnchor,
+    ContextMenuService, ContextRequest, PopupAnchor,
     PopupContentTemplate, PopupHost, PopupSurfaceHandle, ResolvedContextDefinition,
 };
 use elwindui::core::ui::{LayoutExt, UIElementExt};
@@ -180,7 +180,7 @@ fn custom_context_menu_service_opens_and_closes_popup() {
 
     assert_eq!(host.shown.borrow().len(), 1);
     let (_content, pos, size) = &host.shown.borrow()[0];
-    assert_eq!(*pos, Point { x: 120.0, y: 80.0 });
+    assert_eq!(*pos, Point { x: 120.0, y: 80.0 - size.height });
     assert!(size.width > 0.0);
     assert!(size.height > 0.0);
 

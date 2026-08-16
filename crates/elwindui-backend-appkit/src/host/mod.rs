@@ -418,13 +418,32 @@ impl TreeHostView {
                             x: screen_rect.x,
                             y: screen_rect.y,
                         });
-                        let host = crate::inner::AppKitPopupHost;
-                        let work_area = Rect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: 2560.0,
-                            height: 1440.0,
+                        let work_area = if let Some(w) = self.window() {
+                            if let Some(screen) = w.screen() {
+                                let frame = screen.visibleFrame();
+                                Rect {
+                                    x: frame.origin.x as f32,
+                                    y: frame.origin.y as f32,
+                                    width: frame.size.width as f32,
+                                    height: frame.size.height as f32,
+                                }
+                            } else {
+                                Rect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 2560.0,
+                                    height: 1440.0,
+                                }
+                            }
+                        } else {
+                            Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 2560.0,
+                                height: 1440.0,
+                            }
                         };
+                        let host = crate::inner::AppKitPopupHost;
                         let handle = ContextMenuService::open_custom_menu(
                             &host,
                             &*menu,
@@ -459,11 +478,30 @@ impl TreeHostView {
                     y: screen_rect.y,
                 });
                 let host = crate::inner::AppKitPopupHost;
-                let work_area = Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 2560.0,
-                    height: 1440.0,
+                let work_area = if let Some(w) = self.window() {
+                    if let Some(screen) = w.screen() {
+                        let frame = screen.visibleFrame();
+                        Rect {
+                            x: frame.origin.x as f32,
+                            y: frame.origin.y as f32,
+                            width: frame.size.width as f32,
+                            height: frame.size.height as f32,
+                        }
+                    } else {
+                        Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 2560.0,
+                            height: 1440.0,
+                        }
+                    }
+                } else {
+                    Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 2560.0,
+                        height: 1440.0,
+                    }
                 };
                 let handle = ContextMenuService::open_custom_popup(
                     &host,

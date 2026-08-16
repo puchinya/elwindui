@@ -282,8 +282,14 @@ impl MenuItem {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
+    fn enabled(&self) -> bool {
+        self.inner.enabled()
+    }
     fn set_enabled(&self, enabled: bool) {
         self.inner.set_enabled(enabled);
+    }
+    fn shortcut(&self) -> Option<String> {
+        self.inner.shortcut()
     }
     fn set_shortcut(&self, key_equivalent: &str) {
         self.inner.set_shortcut(key_equivalent);

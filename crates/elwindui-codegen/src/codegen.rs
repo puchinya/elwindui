@@ -5006,6 +5006,14 @@ fn generate_view(
     let on_constructed_mount_call = (!is_host_composition).then(|| {
         quote! { self.mount(elwindui::core::environment::application_environment()); }
     });
+    let mount_set_env = (!is_host_composition).then(|| {
+        quote! {
+            <Self as elwindui::core::ui::UIElementExt>::set_environment_context(
+                self,
+                environment.clone(),
+            );
+        }
+    });
     let call_on_unmount_from_close = on_unmount_method
         .is_some()
         .then(|| quote! { self.__run_on_unmount(); });
@@ -5489,8 +5497,9 @@ fn generate_view(
                 #[doc(hidden)]
                 pub fn mount(&self, environment: elwindui::core::environment::EnvironmentContext) {
                     self.__mount_environment
-                        .set(environment)
+                        .set(environment.clone())
                         .expect("mount: component is already mounted");
+                    #mount_set_env
                     self.__build_view();
                 }
 
@@ -5589,8 +5598,9 @@ fn generate_view(
                 #[doc(hidden)]
                 pub fn mount(self: &std::rc::Rc<Self>, environment: elwindui::core::environment::EnvironmentContext) {
                     self.__mount_environment
-                        .set(environment)
+                        .set(environment.clone())
                         .expect("mount: component is already mounted");
+                    #mount_set_env
                     self.__build_view();
                 }
 

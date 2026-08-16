@@ -151,6 +151,7 @@ pub struct UIElement {
     pub context_menu: RefCell<Option<Rc<dyn MenuExt>>>,
     pub context_menu_presentation: Cell<ContextMenuPresentation>,
     pub context_popup: RefCell<Option<PopupContentTemplate>>,
+    pub environment: RefCell<Option<crate::environment::EnvironmentContext>>,
     /// WinUI3's `UIElement.DesiredSize` — the result of the most recent `UIElement::measure` pass,
     /// `None` before the first one (or right after `invalidate_measure` — see that method's own doc
     /// comment) rather than some zero-value placeholder, so a reader can distinguish "not measured
@@ -348,6 +349,7 @@ impl UIElement {
             context_menu: RefCell::new(None),
             context_menu_presentation: Cell::new(ContextMenuPresentation::Native),
             context_popup: RefCell::new(None),
+            environment: RefCell::new(None),
         }
     }
 
@@ -519,6 +521,24 @@ impl UIElement {
     }
     fn set_context_popup(&self, popup: Option<PopupContentTemplate>) {
         *self.as_ui_element().context_popup.borrow_mut() = popup;
+    }
+    fn environment_context(&self) -> Option<crate::environment::EnvironmentContext> {
+        self.as_ui_element().environment.borrow().clone()
+    }
+    fn set_environment_context(&self, env: crate::environment::EnvironmentContext) {
+        *self.as_ui_element().environment.borrow_mut() = Some(env);
+    }
+    fn effective_environment(&self) -> crate::environment::EnvironmentContext {
+        if let Some(env) = self.as_ui_element().environment.borrow().as_ref() {
+            return env.clone();
+        }
+        if let Some(parent) = self.visual_parent() {
+            return parent.effective_environment();
+        }
+        if let Some(logical_parent) = self.parent() {
+            return logical_parent.effective_environment();
+        }
+        crate::environment::EnvironmentContext::root()
     }
     /// The parent in the Logical tree. `UIElementCollection` owns this relationship.
     fn parent(&self) -> Option<Rc<dyn UIElementExt>> {

@@ -39,13 +39,16 @@ ElwindUI のコンテキストメニューおよびポップアップ基盤は�
 ### 責務境界
 
 - **Backend (OS Input Translation)**:
-  - 各 OS / ツールキットの固有入力を検知し、`ContextRequest` (`source: ContextRequestSource`, `position: Option<Point>`) を生成して Core に渡す。
+  - 各 OS / ツールキットの固有入力を検知し、`ContextRequest` (`source`, `local_position`, `screen_anchor`) を生成して Core に渡す。
+  - `local_position`: TreeHost-local 論理座標（`hit_test` によるターゲット要素解決用）。
+  - `screen_anchor`: デスクトップ screen 論理座標アンカー（`PopupAnchor::Point` または `PopupAnchor::Rect`、ポップアップ配置計算用）。
   - OS 固有のキー組み合わせ（Windows: Shift+F10/Menuキー, macOS: Ctrl+Click）やマウスボタン割り当て（左右反転設定等）を Backend 内で解釈する。
 - **Core (`ContextMenuService` & Target Resolution)**:
-  - `ContextRequestSource::Pointer`: 指定された `position` に基づき `hit_test` を行いターゲット要素を決定。
-  - `ContextRequestSource::Keyboard`: `FocusTracker.focused()` から現在フォーカスを持つ要素を決定（ポインタ位置は破棄）。
-  - `ContextRequestSource::Accessibility` / `NativeControl`: 通知されたターゲット要素または owner identity を直接利用。
+  - `ContextRequestSource::Pointer`: 指定された `local_position` に基づき `hit_test` を行いターゲット要素を決定し、`screen_anchor` を配置アンカーとして利用。
+  - `ContextRequestSource::Keyboard`: `FocusTracker.focused()` から現在フォーカスを持つ要素を決定し、Backend が算出した `screen_anchor` を配置アンカーとして利用。
+  - `ContextRequestSource::Accessibility` / `NativeControl`: 通知されたターゲット要素または owner identity を直接利用し、`screen_anchor` を配置アンカーとして利用。
   - ターゲット要素から `visual_parent` チェーンをルート方向へ探索し、**最も近い祖先（nearest ancestor）** に設定された `context_menu` または `context_popup` を解決する。
+  - `screen_anchor` が与えられない場合、ローカル `arranged_offset` を screen 座標と誤認してフォールバックすることは行わず、安全に `None` を返す。
 - **Presentation**:
   - `ContextMenuPresentation::Native`: `Menu` / `MenuItem` のセマンティックモデルを Backend のネイティブメニュー（`NSMenu` / `MenuFlyout`）に渡して表示。
   - `ContextMenuPresentation::Custom`: 標準 `Menu` モデルを `ContextMenuPresenter` により通常 UIElement ツリーとして構築し、`PopupSurface` 上で表示。
@@ -65,7 +68,8 @@ pub enum ContextRequestSource {
 
 pub struct ContextRequest {
     pub source: ContextRequestSource,
-    pub position: Option<Point>,
+    pub local_position: Option<Point>,
+    pub screen_anchor: Option<PopupAnchor>,
 }
 ```
 
@@ -74,14 +78,12 @@ pub struct ContextRequest {
 ```text
 ContextRequest arrives
    │
-   ├─ Source == Pointer  ──> hit_test(root, position) ──> target UIElement
-   ├─ Source == Keyboard ──> FocusTracker.focused()    ──> target UIElement
-   └─ NativeControl / UIA ─────────────────────────────> target UIElement
+   ├─ Source == Pointer  ──> hit_test(root, local_position) ──> target UIElement (anchor: screen_anchor)
+   ├─ Source == Keyboard ──> FocusTracker.focused()         ──> target UIElement (anchor: screen_anchor)
+   └─ NativeControl / UIA ──────────────────────────────────> target UIElement
    │
    ▼
 Resolve nearest context owner:
-   current = target
-   loop {
        if current has context_menu or context_popup {
            return Some((current, definition));
        }
@@ -93,6 +95,16 @@ Resolve nearest context owner:
 ---
 
 ## 4. PopupSurface & Host Contract
+
+### Coordinate Layers
+
+| レイヤー | 原点 / 単位 | 用途 |
+|---|---|---|
+| **TreeHost-local Logical DIP** | View / Canvas 左上 (0,0), Y-down | 入力ルーティング、ヒットテスト、レイアウト |
+| **Core Screen Logical DIP** | デスクトップ仮想スクリーン空間（Y-down、マルチモニター配置により負の X/Y 座標を取り得る） | ポップアップ配置計算 (`calculate_popup_placement`)、アンカー座標 |
+| **OS Physical Pixels** | ディスプレイ物理座標系 | Windows `ContentCoordinateConverter`, `AppWindow.Position`, `DisplayArea.OuterBounds`/`WorkArea` 等のネイティブ境界 |
+| **WinUI XAML Local DIP** | XamlRoot / Window Client 左上 (0,0), Y-down | `Popup.HorizontalOffset` / `VerticalOffset` の設定 |
+| **AppKit Native Screen** | Primary Screen 左下 (0,0), Y-up | `NSWindow.setFrame`, `NSScreen.frame` のネイティブ境界 |
 
 ### InWindowOverlay vs PopupSurface
 
@@ -108,22 +120,33 @@ Resolve nearest context owner:
 ### PopupHost Capability Trait
 
 ```rust
+pub enum PopupFocusPolicy {
+    None,
+    Root,
+    FirstFocusable,
+}
+
+pub enum PopupDismissPolicy {
+    LightDismiss,
+    Explicit,
+}
+
+pub struct PopupRequest {
+    pub content: Rc<dyn UIElementExt>,
+    pub position: Point,
+    pub size: Size,
+    pub focus_policy: PopupFocusPolicy,
+    pub dismiss_policy: PopupDismissPolicy,
+}
+
 pub trait PopupHost {
     fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle>;
 }
 
 pub trait PopupSurfaceHandle {
-    fn update_position(&self, position: Point);
     fn close(&self);
 }
 ```
-
-`PopupRequest` は以下を包含する:
-- `content`: 表示する `Rc<dyn UIElementExt>`
-- `anchor`: `PopupAnchor`（Point または Rect）
-- `placement`: 配置ポリシー（Below, Above, Right, Left, AutoFlip）
-- `focus_policy`: フォーカス受け入れ可否（`AcceptsFocus`, `NonActivating`）
-- `dismiss_policy`: 閉じる条件（`DismissOnOutsideClick`, `DismissOnEscape`）
 
 ---
 
@@ -133,23 +156,24 @@ Placement 計算は Core 内の純粋関数（Pure logic）として実装され
 
 ### Pure Placement Logic
 
+Core 座標系は **Top-Left (0, 0), +x: right, +y: down** に統一される。
+
 ```text
-1. target anchor (point or rect in screen coordinates)
+1. target anchor (Point or Rect in Core top-left screen coordinates)
 2. desired popup content size (from measure pass)
-3. monitor work area bounds (excluding dock/taskbar)
-4. calculate ideal placement (e.g. bottom-right of anchor)
+3. monitor work area bounds (Rect in Core top-left, excluding dock/menubar/taskbar)
+4. calculate ideal placement (Below / AutoFlip / Above / Right / Left)
 5. test bounds against monitor work area:
-   - if bottom overflows monitor work area -> flip to top
-   - if right overflows monitor work area -> flip to left
-6. clamp within monitor work area if still exceeding
+   - if bottom overflows monitor work area -> flip upward (y = anchor.y - popup.height)
+   - if right overflows monitor work area -> flip leftward (x = anchor.x - popup.width)
+6. clamp within monitor work area bounds
 ```
 
 ### Coordinate Conversion Boundaries
 
-- **Local Logical Coordinates**: UIElement 内のローカルレイアウト座標。
-- **Window Logical Coordinates**: メイン Window の client 領域左上を原点とする論理ピクセル座標。
-- **Screen Logical Coordinates**: プライマリモニター左上（または OS screen origin）を基準とした論理ピクセル座標。
-- **Physical Pixels**: DPI / Scale 適用後の物理ピクセル（Backend の OS API 呼び出し境界でのみ使用）。
+- **Core Screen Coordinates**: プライマリモニター左上 (0, 0) を基準とした論理ピクセル座標（Top-Left, Y-down）。
+- **AppKit Backend**: Core の Top-Left 座標系と AppKit の Bottom-Left (Y-up) 座標系との変換を Backend 境界で行う（`appkit_y = primary_screen_height - (core_y + height)`）。
+- **WinUI 3 Backend**: Top-Left / Y-down セマンティクスをそのまま利用し、XamlRoot / Canvas 経由で配置。
 
 ---
 
@@ -198,8 +222,16 @@ Restore focus to original target if necessary
 
 ### WinUI 3 Backend
 - **Native Context Menu**: `MenuFlyout` の `ShowAt(target_element, point)` を使用。
-- **PopupSurface**: `Microsoft.UI.Xaml.Controls.Primitives.Popup` または child `Window` / `ContentIsland` を使用して `TreeHostPanel` をホスト。
+- **PopupSurface**: `Microsoft.UI.Xaml.Controls.Primitives.Popup` を使用して `TreeHostPanel` をホスト。
+- **Coordinate Conversion**:
+  - `canvas_to_screen_point`: Canvas ローカル DIP -> `TransformToVisual(XamlRoot.Content)` による Window Client Local DIP -> `ContentCoordinateConverter::ConvertLocalToScreen` (または `+ (AppWindow.Position / scale)` fallback) による Desktop Screen Logical DIP。
+  - `screen_logical_to_xaml_local`: Desktop Screen Logical DIP -> Screen Physical Px -> `ContentCoordinateConverter::ConvertScreenToLocal` (または `- (AppWindow.Position / scale)` fallback) による XamlRoot / Window Client Local DIP -> `Popup.SetHorizontalOffset` / `SetVerticalOffset`。
+  - 変換失敗時に screen 座標を XAML ローカルオフセットとして誤認・再利用することは禁止し、安全にポップアップ表示を中断（`Option::None`）する。
+- **Work Area**: `DisplayArea::GetFromPoint` -> `DisplayArea::GetFromWindowId` -> 明示的 screen 変換済み XamlRoot bounds の優先順で取得し、`display_area_to_core_work_area` (`outer_x + work_x`, `outer_y + work_y`) により必ずグローバル Screen Logical Rect (`Option<Rect>`) として返す。未変換のローカル Rect をスクリーン Rect として偽装返却することは禁止。
+- **Focus & Lifetime**: `PopupFocusPolicy::Root` にて開いた popup の root UIElement にフォーカスを設定。`TreeHostPanel` / `InnerPopupSurface` が `active_popup` として handle を保持し、新規 popup open 時に既存 popup を安全にクローズ。
+- **Menu Realization Ownership**: `Menu` / `MenuItem` は論理セマンティックモデルであり、Context Menu 表示時は `InnerMenu::create_flyout` により専用の `MenuFlyoutItem` インスタンスを生成することで `MenuBarItem` とのネイティブインスタンス競合を回避。
 - Outside pointer press および `ProcessKeyboardAccelerators` (Escape) で dismiss。
+- **GUI 実機検証**: Windows 実機環境での描画・マルチモニター・DPI・タッチ操作の検証は Issue [#157](https://github.com/puchinya/elwindui/issues/157) にて管理。
 
 ### GTK4 Backend
 - GTK4 は現在 placeholder / stub 実装であるため、`PopupHost` および context menu の公開 API contract を整合させ、未実装であることを `docs/status/backend_status.md` および `control_status.md` に明記する。

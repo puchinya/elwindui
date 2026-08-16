@@ -176,7 +176,11 @@ fn main() {
         "Microsoft.Windows.ApplicationModel.Resources.IResourceManager".to_owned(),
         "Microsoft.UI.Input.InputKeyboardSource".to_owned(),
         "Microsoft.UI.Input.InputObject".to_owned(),
+        "Microsoft.UI.Content.ContentCoordinateConverter".to_owned(),
+        "Microsoft.UI.Content.ContentIsland".to_owned(),
         "Microsoft.UI.Windowing.AppWindow".to_owned(),
+        "Microsoft.UI.Windowing.DisplayArea".to_owned(),
+        "Microsoft.UI.Windowing.DisplayAreaFallback".to_owned(),
         "Microsoft.UI.Windowing.OverlappedPresenter".to_owned(),
         "Microsoft.UI.Xaml.DependencyObject".to_owned(),
         "Microsoft.UI.Xaml.ElementTheme".to_owned(),
@@ -196,10 +200,15 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.ContentControl".to_owned(),
         "Microsoft.UI.Xaml.Controls.Control".to_owned(),
         "Microsoft.UI.Xaml.Controls.IControlStatics".to_owned(),
+        "Microsoft.UI.Xaml.Controls.MenuFlyout".to_owned(),
         "Microsoft.UI.Xaml.Controls.MenuFlyoutItem".to_owned(),
         "Microsoft.UI.Xaml.Controls.MenuFlyoutItemBase".to_owned(),
         "Microsoft.UI.Xaml.Controls.MenuBar".to_owned(),
         "Microsoft.UI.Xaml.Controls.MenuBarItem".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Primitives.Popup".to_owned(),
+        "Microsoft.UI.Xaml.Input.ContextRequestedEventArgs".to_owned(),
+        "Microsoft.UI.Xaml.Input.RightTappedEventHandler".to_owned(),
+        "Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs".to_owned(),
         // `PasswordBox.PasswordChanged`'s event type is the same plain `RoutedEventHandler`
         // `Button.Click`/`TabView` already use (unlike `TextBox.TextChanged`, which has its own
         // `TextChangedEventHandler`) — no separate event-args/handler type needs listing here. If

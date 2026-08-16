@@ -19,6 +19,7 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::input::Key;
+#[allow(unused_imports)]
 use elwindui::core::ui::{
     CheckState, ContextMenuPresentation, LayoutExt, PopupContentTemplate, TextBlockExt,
     UIElementExt,
@@ -596,7 +597,7 @@ struct ControlsDemoWindow {
                             }
                         }
 
-                        TextBlock { text: "2. Custom-rendered Context Menu (ElwindUI UIElement presentation):" }
+                        TextBlock { text: "2. Custom-rendered Context Menu (ElwindUI UIElement presentation with shortcuts & disabled item):" }
                         VerticalLayout {
                             margin: 4.0
                             TextBlock {
@@ -604,8 +605,14 @@ struct ControlsDemoWindow {
                                 text: "【Custom-rendered Context Menu Target — Right-click here】"
                                 context_menu: Menu {
                                     MenuItem {
-                                        text: "Custom Action 1"
-                                        on_select: || vm.context_menu_item_selected("Custom > Action 1".to_string())
+                                        text: "Custom Action 1 (Save)"
+                                        shortcut: "S"
+                                        on_select: || vm.context_menu_item_selected("Custom > Action 1 (Save)".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Disabled Action"
+                                        enabled: false
+                                        on_select: || vm.context_menu_item_selected("Custom > Disabled Action".to_string())
                                     }
                                     MenuItem {
                                         text: "Custom Action 2"

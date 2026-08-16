@@ -18,7 +18,8 @@ use windows::core::{HSTRING, Interface};
 #[derive(Clone)]
 pub(crate) struct InnerMenuItem {
     xaml: MenuFlyoutItem,
-    on_select: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    shortcut: Rc<RefCell<Option<String>>>,
+    on_select: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 }
 
 impl InnerMenuItem {
@@ -26,13 +27,15 @@ impl InnerMenuItem {
         let xaml = MenuFlyoutItem::new().expect("MenuFlyoutItem::new");
         let this = Self {
             xaml,
+            shortcut: Rc::new(RefCell::new(None)),
             on_select: Rc::new(RefCell::new(None)),
         };
         {
             let callback = this.on_select.clone();
             let callback_id = register_ui_event_callback(Rc::new(move || {
-                if let Some(callback) = callback.borrow().as_ref() {
-                    callback();
+                let cb = callback.borrow().clone();
+                if let Some(cb) = cb {
+                    cb();
                 }
             }));
             let _ = this.xaml.Click(&RoutedEventHandler::new(move |_, _| {
@@ -53,10 +56,19 @@ impl InnerMenuItem {
         let _ = self.xaml.SetIsEnabled(enabled);
     }
 
+    pub(crate) fn enabled(&self) -> bool {
+        self.xaml.IsEnabled().unwrap_or(true)
+    }
+
     /// A bare key character (e.g. `"s"`), matching AppKit's `set_shortcut` convention — mapped to
     /// a `Ctrl`-modifier `KeyboardAccelerator` (WinUI3 has no single-string key-equivalent setter
     /// the way `NSMenuItem.keyEquivalent` does).
     pub(crate) fn set_shortcut(&self, key_equivalent: &str) {
+        *self.shortcut.borrow_mut() = if key_equivalent.is_empty() {
+            None
+        } else {
+            Some(key_equivalent.to_string())
+        };
         let Some(key) = key_equivalent.chars().next() else {
             return;
         };
@@ -71,18 +83,23 @@ impl InnerMenuItem {
         }
     }
 
+    pub(crate) fn shortcut(&self) -> Option<String> {
+        self.shortcut.borrow().clone()
+    }
+
     pub(crate) fn text(&self) -> String {
         self.xaml.Text().map(|h| h.to_string()).unwrap_or_default()
     }
 
     pub(crate) fn select(&self) {
-        if let Some(callback) = self.on_select.borrow().as_ref() {
+        let cb = self.on_select.borrow().clone();
+        if let Some(callback) = cb {
             callback();
         }
     }
 
     pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
-        *self.on_select.borrow_mut() = Some(callback);
+        *self.on_select.borrow_mut() = Some(Rc::from(callback));
     }
 }
 
@@ -141,11 +158,21 @@ impl InnerMenu {
         let flyout = MenuFlyout::new()?;
         let items = flyout.Items()?;
         for item in self.items.borrow().iter() {
-            if let Ok(base) = item.xaml.cast::<MenuFlyoutItemBase>() {
-                let _ = items.Append(&base);
+            let flyout_item = MenuFlyoutItem::new()?;
+            flyout_item.SetText(&windows::core::HSTRING::from(item.text().as_str()))?;
+            flyout_item.SetIsEnabled(item.enabled())?;
+            if let Some(shortcut) = item.shortcut() {
+                let _ = flyout_item
+                    .SetKeyboardAcceleratorTextOverride(&windows::core::HSTRING::from(shortcut.as_str()));
             }
+            let item_clone = item.clone();
+            let _ = flyout_item.Click(&RoutedEventHandler::new(move |_, _| {
+                item_clone.select();
+                Ok(())
+            }));
+            let base: MenuFlyoutItemBase = flyout_item.cast()?;
+            let _ = items.Append(&base);
         }
-        *self.installed_into.borrow_mut() = Some(items);
         Ok(flyout)
     }
 }

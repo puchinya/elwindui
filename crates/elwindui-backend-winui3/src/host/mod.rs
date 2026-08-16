@@ -77,6 +77,8 @@ pub struct TreeHostPanel {
     unconstrained_axes: Rc<Cell<(bool, bool)>>,
     /// Gates all layout and rendering work while this host belongs to a non-selected tab.
     active: Rc<Cell<bool>>,
+    /// Keeps track of an active standalone custom popup surface, if any, ensuring single-popup ownership.
+    pub(crate) active_popup: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
     /// Keeps every FFI callback registered by this host alive for exactly this host's lifetime.
     callback_owner: UiCallbackRegistryOwner,
 }
@@ -208,6 +210,7 @@ impl TreeHostPanel {
             keyboard: Rc::new(KeyboardDispatcher::new()),
             unconstrained_axes: Rc::new(Cell::new((false, false))),
             active: Rc::new(Cell::new(true)),
+            active_popup: Rc::new(RefCell::new(None)),
             callback_owner: UiCallbackRegistryOwner::default(),
         };
         // WinUI3's `Control.IsTabStop` gate. Once the WinRT event projection is restored this
@@ -216,6 +219,7 @@ impl TreeHostPanel {
         {
             let tree_for_key = Rc::downgrade(&this.tree);
             let keyboard_for_key = Rc::downgrade(&this.keyboard);
+            let active_for_key = Rc::downgrade(&this.active_popup);
             let callback_id = this.callback_owner.register_key(Rc::new(move |event| {
                 if let (Some(tree), Some(keyboard)) =
                     (tree_for_key.upgrade(), keyboard_for_key.upgrade())
@@ -241,12 +245,47 @@ impl TreeHostPanel {
                         .KeyStatus()
                         .map(|status| status.RepeatCount > 1)
                         .unwrap_or(false);
+                    let modifiers = winui_modifiers();
+                    if crate::host::event::is_context_menu_key(virtual_key, modifiers) {
+                        let tree_ref = tree_for_key.upgrade().and_then(|t| t.borrow().clone());
+                        let kb_ref = keyboard_for_key.upgrade();
+                        let active_ref = active_for_key.upgrade();
+                        if let (Some(tree), Some(kb), Some(active)) = (tree_ref, kb_ref, active_ref) {
+                            let screen_anchor = if let Some(focused) = kb.focus.focused() {
+                                let offset = focused.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+                                let w = focused.arranged_width().unwrap_or(0.0);
+                                let h = focused.arranged_height().unwrap_or(0.0);
+                                Self::canvas_to_screen_point(&this.canvas, offset).map(|screen_pt| {
+                                    elwindui_core::ui::popup::PopupAnchor::Rect(elwindui_core::base::Rect {
+                                        x: screen_pt.x,
+                                        y: screen_pt.y,
+                                        width: w,
+                                        height: h,
+                                    })
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some(screen_anchor) = screen_anchor {
+                                let request = elwindui_core::ui::ContextRequest::keyboard(Some(screen_anchor));
+                                if Self::dispatch_context_request(
+                                    &Some(tree),
+                                    &kb,
+                                    &this.canvas,
+                                    &active,
+                                    &request,
+                                ) {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
                     invoke_ui_key_event_callback(
                         callback_id,
                         RawKeyEvent {
                             kind: RawKeyEventKind::Down { is_repeat },
                             key,
-                            modifiers: winui_modifiers(),
+                            modifiers,
                             timestamp_ms: 0.0,
                         },
                     );
@@ -368,6 +407,115 @@ impl TreeHostPanel {
                     invoke_ui_event_callback(callback_id);
                     Ok(())
                 }));
+        }
+        {
+            let tree_for_context = Rc::downgrade(&this.tree);
+            let keyboard_for_context = Rc::downgrade(&this.keyboard);
+            let canvas_for_context = this.canvas.clone();
+            let active_for_context = Rc::downgrade(&this.active_popup);
+            let _ = this.canvas.RightTapped(
+                &crate::bindings::Microsoft::UI::Xaml::Input::RightTappedEventHandler::new(
+                    move |_sender, args| {
+                        let Some(args) = args.cloned() else {
+                            return Ok(());
+                        };
+                        if args.Handled().unwrap_or(false) {
+                            return Ok(());
+                        }
+                        if let (Some(tree), Some(keyboard), Some(active)) = (
+                            tree_for_context.upgrade(),
+                            keyboard_for_context.upgrade(),
+                            active_for_context.upgrade(),
+                        ) {
+                            if let Some(tree) = tree.borrow().clone() {
+                                let Ok(point) = args.GetPosition(&canvas_for_context) else {
+                                    return Ok(());
+                                };
+                                let local_pt = elwindui_core::base::Point {
+                                     x: point.X,
+                                     y: point.Y,
+                                 };
+                                 if let Some(screen_pt) = Self::canvas_to_screen_point(&canvas_for_context, local_pt) {
+                                     let request = elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt);
+                                     if Self::dispatch_context_request(
+                                         &Some(tree),
+                                         &keyboard,
+                                         &canvas_for_context,
+                                         &active,
+                                         &request,
+                                     ) {
+                                         let _ = args.SetHandled(true);
+                                     }
+                                 }
+                            }
+                        }
+                        Ok(())
+                    },
+                ),
+            );
+        }
+        {
+            let tree_for_ctx = Rc::downgrade(&this.tree);
+            let keyboard_for_ctx = Rc::downgrade(&this.keyboard);
+            let canvas_for_ctx = this.canvas.clone();
+            let active_for_ctx = Rc::downgrade(&this.active_popup);
+            let _ = this.canvas.ContextRequested(
+                &TypedEventHandler::new(
+                    move |_sender, args: &Option<Microsoft::UI::Xaml::Input::ContextRequestedEventArgs>| {
+                        let Some(args) = args.as_ref() else {
+                            return Ok(());
+                        };
+                        let mut pt = windows::Foundation::Point::default();
+                        let is_pointer = args.TryGetPosition(&canvas_for_ctx, &mut pt).unwrap_or(false);
+                        let request = if is_pointer {
+                            let local_pt = elwindui_core::base::Point { x: pt.X, y: pt.Y };
+                            TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, local_pt)
+                                .map(|screen_pt| elwindui_core::ui::ContextRequest::pointer(local_pt, screen_pt))
+                        } else {
+                            let screen_anchor = if let Some(keyboard) = keyboard_for_ctx.upgrade() {
+                                if let Some(focused) = keyboard.focus.focused() {
+                                    let offset = focused.arranged_offset().unwrap_or(Point { x: 0.0, y: 0.0 });
+                                    let w = focused.arranged_width().unwrap_or(0.0);
+                                    let h = focused.arranged_height().unwrap_or(0.0);
+                                    TreeHostPanel::canvas_to_screen_point(&canvas_for_ctx, offset).map(|screen_pt| {
+                                        elwindui_core::ui::popup::PopupAnchor::Rect(elwindui_core::base::Rect {
+                                            x: screen_pt.x,
+                                            y: screen_pt.y,
+                                            width: w,
+                                            height: h,
+                                        })
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            screen_anchor.map(|anchor| elwindui_core::ui::ContextRequest::keyboard(Some(anchor)))
+                        };
+                        if let Some(request) = request {
+                            if let (Some(tree), Some(keyboard), Some(active)) = (
+                                tree_for_ctx.upgrade(),
+                                keyboard_for_ctx.upgrade(),
+                                active_for_ctx.upgrade(),
+                            ) {
+                                if let Some(tree) = tree.borrow().clone() {
+                                    if Self::dispatch_context_request(
+                                        &Some(tree),
+                                        &keyboard,
+                                        &canvas_for_ctx,
+                                        &active,
+                                        &request,
+                                    ) {
+                                        let _ = args.SetHandled(true);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(())
+                    },
+                ),
+            );
         }
         this
     }
@@ -496,6 +644,35 @@ impl TreeHostPanel {
         *self.tree.borrow_mut() = Some(tree);
         *self.render_tree.borrow_mut() = None;
         self.force_relayout();
+    }
+
+    /// Clears this host's tree, cleans up native composition and children, and closes any active popup.
+    pub(crate) fn clear_tree(&self) {
+        if let Some(old) = self.active_popup.borrow_mut().take() {
+            old.close();
+        }
+        self.keyboard.focus.clear_focus();
+        self.keyboard.shortcuts().clear();
+        let _ = self
+            .composition
+            .borrow_mut()
+            .reconcile(&self.canvas, Vec::new());
+        reconcile_native_children(
+            &self.canvas,
+            &self.native_children,
+            Vec::new(),
+            &self.render_tree,
+            &self.keyboard,
+        );
+        *self.tree.borrow_mut() = None;
+        *self.render_tree.borrow_mut() = None;
+    }
+
+    /// Focuses the specified element within this host's focus tracker.
+    pub(crate) fn focus_element(&self, element: &Rc<dyn elwindui_core::ui::UIElementExt>) {
+        self.keyboard
+            .focus
+            .set_focus(element, elwindui_core::input::FocusState::Programmatic);
     }
 
     fn relayout_static(
@@ -1060,5 +1237,388 @@ impl TreeHostPanel {
                 }
             }
         }
+    }
+
+    /// Converts canvas-local logical DIPs to desktop screen logical coordinates.
+    pub(crate) fn canvas_to_screen_point(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        canvas_point: Point,
+    ) -> Option<Point> {
+        let xaml_root = canvas.XamlRoot().ok()?;
+        let scale = xaml_root.RasterizationScale().unwrap_or(1.0);
+        let content = xaml_root.Content().ok()?;
+        let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
+            canvas.cast().ok()?;
+        let transform = uie.TransformToVisual(&content).ok()?;
+        let pt = windows::Foundation::Point {
+            X: canvas_point.x,
+            Y: canvas_point.y,
+        };
+        let local_dip = transform.TransformPoint(pt).ok()?;
+
+        // Primary method: ContentCoordinateConverter
+        if let Ok(island) = xaml_root.ContentIslandEnvironment() {
+            if let Ok(app_window_id) = island.AppWindowId() {
+                if let Ok(converter) = crate::bindings::Microsoft::UI::Content::ContentCoordinateConverter::CreateForWindowId(app_window_id) {
+                    if let Ok(screen_phys) = converter.ConvertLocalToScreen(local_dip) {
+                        let scale = if scale <= 0.0 { 1.0 } else { scale };
+                        return Some(Point {
+                            x: (screen_phys.X as f64 / scale) as f32,
+                            y: (screen_phys.Y as f64 / scale) as f32,
+                        });
+                    }
+                }
+                if let Ok(app_window) = crate::bindings::Microsoft::UI::Windowing::AppWindow::GetFromWindowId(app_window_id) {
+                    if let Ok(pos) = app_window.Position() {
+                        return Some(canvas_local_to_screen_logical_pure(
+                            Point { x: local_dip.X, y: local_dip.Y },
+                            (pos.X, pos.Y),
+                            scale,
+                        ));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Converts desktop screen logical coordinates to XAML root local DIPs.
+    pub(crate) fn screen_logical_to_xaml_local(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        screen_point: Point,
+    ) -> Option<Point> {
+        let xaml_root = canvas.XamlRoot().ok()?;
+        let scale = xaml_root.RasterizationScale().unwrap_or(1.0);
+        let scale_safe = if scale <= 0.0 { 1.0 } else { scale };
+        let screen_phys = windows::Graphics::PointInt32 {
+            X: (screen_point.x as f64 * scale_safe) as i32,
+            Y: (screen_point.y as f64 * scale_safe) as i32,
+        };
+
+        if let Ok(island) = xaml_root.ContentIslandEnvironment() {
+            if let Ok(app_window_id) = island.AppWindowId() {
+                if let Ok(converter) = crate::bindings::Microsoft::UI::Content::ContentCoordinateConverter::CreateForWindowId(app_window_id) {
+                    if let Ok(local_dip) = converter.ConvertScreenToLocal(screen_phys) {
+                        return Some(Point {
+                            x: local_dip.X,
+                            y: local_dip.Y,
+                        });
+                    }
+                }
+                if let Ok(app_window) = crate::bindings::Microsoft::UI::Windowing::AppWindow::GetFromWindowId(app_window_id) {
+                    if let Ok(pos) = app_window.Position() {
+                        return Some(screen_logical_to_xaml_local_pure(
+                            screen_point,
+                            (pos.X, pos.Y),
+                            scale,
+                        ));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Queries the real monitor work area in screen logical coordinates for the given canvas and optional anchor point.
+    pub(crate) fn query_work_area_for_canvas(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        anchor_pt: Option<Point>,
+    ) -> Option<elwindui_core::base::Rect> {
+        let xaml_root = canvas.XamlRoot().ok()?;
+        let scale = xaml_root.RasterizationScale().unwrap_or(1.0);
+        let scale_safe = if scale <= 0.0 { 1.0 } else { scale };
+
+        // 1. Try DisplayArea::GetFromPoint if anchor_pt given
+        if let Some(anchor) = anchor_pt {
+            let pt_int = windows::Graphics::PointInt32 {
+                X: (anchor.x as f64 * scale_safe) as i32,
+                Y: (anchor.y as f64 * scale_safe) as i32,
+            };
+            if let Ok(display_area) = crate::bindings::Microsoft::UI::Windowing::DisplayArea::GetFromPoint(
+                pt_int,
+                crate::bindings::Microsoft::UI::Windowing::DisplayAreaFallback::Nearest,
+            ) {
+                let outer = display_area.OuterBounds().unwrap_or_default();
+                let work = display_area.WorkArea().unwrap_or_default();
+                return Some(display_area_to_core_work_area(
+                    outer.X, outer.Y, work.X, work.Y, work.Width, work.Height, scale_safe,
+                ));
+            }
+        }
+
+        // 2. Try DisplayArea::GetFromWindowId
+        if let Ok(island) = xaml_root.ContentIslandEnvironment() {
+            if let Ok(app_window_id) = island.AppWindowId() {
+                if let Ok(display_area) = crate::bindings::Microsoft::UI::Windowing::DisplayArea::GetFromWindowId(
+                    app_window_id,
+                    crate::bindings::Microsoft::UI::Windowing::DisplayAreaFallback::Nearest,
+                ) {
+                    let outer = display_area.OuterBounds().unwrap_or_default();
+                    let work = display_area.WorkArea().unwrap_or_default();
+                    return Some(display_area_to_core_work_area(
+                        outer.X, outer.Y, work.X, work.Y, work.Width, work.Height, scale_safe,
+                    ));
+                }
+            }
+        }
+
+        // 3. Fallback: Convert XamlRoot bounds (local DIP) explicitly to screen logical coordinates
+        if let Ok(size) = xaml_root.Size() {
+            if let (Some(p0), Some(p1)) = (
+                Self::canvas_to_screen_point(canvas, Point { x: 0.0, y: 0.0 }),
+                Self::canvas_to_screen_point(canvas, Point { x: size.Width as f32, y: size.Height as f32 }),
+            ) {
+                return Some(elwindui_core::base::Rect {
+                    x: p0.x.min(p1.x),
+                    y: p0.y.min(p1.y),
+                    width: (p1.x - p0.x).abs().max(100.0),
+                    height: (p1.y - p0.y).abs().max(100.0),
+                });
+            }
+        }
+
+        None
+    }
+
+    pub(crate) fn dispatch_context_request(
+        tree: &Option<Rc<dyn UIElementExt>>,
+        keyboard: &crate::host::KeyboardDispatcher,
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        active_popup: &RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>,
+        request: &elwindui_core::ui::ContextRequest,
+    ) -> bool {
+        let Some(tree) = tree.as_ref() else {
+            return false;
+        };
+        let Some((resolved, anchor)) = elwindui_core::ui::ContextMenuService::process_request(
+            tree,
+            &keyboard.focus,
+            request,
+        ) else {
+            return false;
+        };
+        match resolved.definition {
+            elwindui_core::ui::popup::ResolvedContextDefinition::Menu { menu, presentation } => {
+                match presentation {
+                    elwindui_core::ui::ContextMenuPresentation::Native => {
+                        if let Some(winui_menu) = menu.as_any().downcast_ref::<crate::native_ui::Menu>() {
+                            if let Ok(flyout) = winui_menu.create_flyout() {
+                                let uie: crate::bindings::Microsoft::UI::Xaml::UIElement =
+                                    canvas.cast().expect("Canvas as UIElement");
+                                let _ = flyout.ShowAt(&uie);
+                                return true;
+                            }
+                        }
+                    }
+                    elwindui_core::ui::ContextMenuPresentation::Custom => {
+                        let anchor_pt = match &anchor {
+                            elwindui_core::ui::popup::PopupAnchor::Point(pt) => Some(*pt),
+                            elwindui_core::ui::popup::PopupAnchor::Rect(r) => Some(elwindui_core::base::Point { x: r.x, y: r.y }),
+                        };
+                        let Some(work_area) = Self::query_work_area_for_canvas(canvas, anchor_pt) else {
+                            return false;
+                        };
+                        if let Some(old) = active_popup.borrow_mut().take() {
+                            old.close();
+                        }
+                        let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
+                        let handle = elwindui_core::ui::ContextMenuService::open_custom_menu(
+                            &host,
+                            &*menu,
+                            &anchor,
+                            work_area,
+                        );
+                        *active_popup.borrow_mut() = Some(handle);
+                        return true;
+                    }
+                }
+            }
+            elwindui_core::ui::popup::ResolvedContextDefinition::Popup { template } => {
+                let anchor_pt = match &anchor {
+                    elwindui_core::ui::popup::PopupAnchor::Point(pt) => Some(*pt),
+                    elwindui_core::ui::popup::PopupAnchor::Rect(r) => Some(elwindui_core::base::Point { x: r.x, y: r.y }),
+                };
+                let Some(work_area) = Self::query_work_area_for_canvas(canvas, anchor_pt) else {
+                    return false;
+                };
+                if let Some(old) = active_popup.borrow_mut().take() {
+                    old.close();
+                }
+                let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
+                let handle = elwindui_core::ui::ContextMenuService::open_custom_popup(
+                    &host,
+                    &template,
+                    &anchor,
+                    resolved.owner.effective_environment(),
+                    work_area,
+                );
+                *active_popup.borrow_mut() = Some(handle);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Pure helper: converts physical display area bounds and work area offset into a global screen logical Rect.
+pub fn display_area_to_core_work_area(
+    outer_x: i32,
+    outer_y: i32,
+    work_x: i32,
+    work_y: i32,
+    work_width: i32,
+    work_height: i32,
+    scale: f64,
+) -> Rect {
+    let scale = if scale <= 0.0 { 1.0 } else { scale };
+    let global_x = outer_x + work_x;
+    let global_y = outer_y + work_y;
+    Rect {
+        x: (global_x as f64 / scale) as f32,
+        y: (global_y as f64 / scale) as f32,
+        width: (work_width as f64 / scale) as f32,
+        height: (work_height as f64 / scale) as f32,
+    }
+}
+
+/// Pure helper: converts canvas-to-window local DIP + window origin physical px into desktop screen logical DIP.
+pub fn canvas_local_to_screen_logical_pure(
+    canvas_to_window_local_dip: Point,
+    window_origin_physical: (i32, i32),
+    scale: f64,
+) -> Point {
+    let scale = if scale <= 0.0 { 1.0 } else { scale };
+    let window_origin_dip_x = window_origin_physical.0 as f64 / scale;
+    let window_origin_dip_y = window_origin_physical.1 as f64 / scale;
+    Point {
+        x: (window_origin_dip_x + canvas_to_window_local_dip.x as f64) as f32,
+        y: (window_origin_dip_y + canvas_to_window_local_dip.y as f64) as f32,
+    }
+}
+
+/// Pure helper: converts desktop screen logical DIP into XAML root local DIP.
+pub fn screen_logical_to_xaml_local_pure(
+    screen_logical: Point,
+    window_origin_physical: (i32, i32),
+    scale: f64,
+) -> Point {
+    let scale = if scale <= 0.0 { 1.0 } else { scale };
+    let window_origin_dip_x = window_origin_physical.0 as f64 / scale;
+    let window_origin_dip_y = window_origin_physical.1 as f64 / scale;
+    Point {
+        x: (screen_logical.x as f64 - window_origin_dip_x) as f32,
+        y: (screen_logical.y as f64 - window_origin_dip_y) as f32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_area_work_area_primary_monitor_scale_1() {
+        let work = display_area_to_core_work_area(0, 0, 0, 0, 1920, 1040, 1.0);
+        assert_eq!(work.x, 0.0);
+        assert_eq!(work.y, 0.0);
+        assert_eq!(work.width, 1920.0);
+        assert_eq!(work.height, 1040.0);
+    }
+
+    #[test]
+    fn display_area_work_area_secondary_monitor_right() {
+        // Secondary monitor to the right at (1920, 0) with work area offset (0, 0)
+        let work = display_area_to_core_work_area(1920, 0, 0, 0, 1920, 1080, 1.0);
+        assert_eq!(work.x, 1920.0);
+        assert_eq!(work.y, 0.0);
+        assert_eq!(work.width, 1920.0);
+        assert_eq!(work.height, 1080.0);
+    }
+
+    #[test]
+    fn display_area_work_area_secondary_monitor_left_negative_x() {
+        // Secondary monitor to the left at (-1920, 0) with work area offset (0, 0)
+        let work = display_area_to_core_work_area(-1920, 0, 0, 0, 1920, 1080, 1.0);
+        assert_eq!(work.x, -1920.0);
+        assert_eq!(work.y, 0.0);
+        assert_eq!(work.width, 1920.0);
+        assert_eq!(work.height, 1080.0);
+    }
+
+    #[test]
+    fn display_area_work_area_secondary_left_with_left_taskbar() {
+        // Secondary monitor at (-1920, 0) with 60px left taskbar offset
+        let work = display_area_to_core_work_area(-1920, 0, 60, 0, 1860, 1080, 1.0);
+        assert_eq!(work.x, -1860.0);
+        assert_eq!(work.y, 0.0);
+        assert_eq!(work.width, 1860.0);
+        assert_eq!(work.height, 1080.0);
+    }
+
+    #[test]
+    fn display_area_work_area_taskbar_top() {
+        // Taskbar at top (offset y = 40)
+        let work_top = display_area_to_core_work_area(0, 0, 0, 40, 1920, 1040, 1.0);
+        assert_eq!(work_top.x, 0.0);
+        assert_eq!(work_top.y, 40.0);
+        assert_eq!(work_top.width, 1920.0);
+        assert_eq!(work_top.height, 1040.0);
+    }
+
+    #[test]
+    fn display_area_work_area_negative_y_monitor() {
+        // Secondary monitor above primary at (0, -1080)
+        let work = display_area_to_core_work_area(0, -1080, 0, 0, 1920, 1080, 1.0);
+        assert_eq!(work.x, 0.0);
+        assert_eq!(work.y, -1080.0);
+        assert_eq!(work.width, 1920.0);
+        assert_eq!(work.height, 1080.0);
+    }
+
+    #[test]
+    fn display_area_work_area_fractional_scale() {
+        // High-DPI monitor with scale 1.5 (3840x2160 physical -> 2560x1440 logical)
+        let work_15 = display_area_to_core_work_area(0, 0, 0, 0, 3840, 2160, 1.5);
+        assert_eq!(work_15.width, 2560.0);
+        assert_eq!(work_15.height, 1440.0);
+
+        // Scale 2.0 on secondary right monitor
+        let work_20 = display_area_to_core_work_area(1920, 0, 0, 0, 3840, 2160, 2.0);
+        assert_eq!(work_20.x, 960.0);
+        assert_eq!(work_20.width, 1920.0);
+        assert_eq!(work_20.height, 1080.0);
+    }
+
+    #[test]
+    fn coordinate_round_trip_canvas_to_screen_to_xaml_local() {
+        let canvas_local = Point { x: 50.0, y: 75.0 };
+        let window_phys = (300, 450); // window at (300, 450) physical px
+        let scale = 1.5;
+
+        let screen = canvas_local_to_screen_logical_pure(canvas_local, window_phys, scale);
+        // window_phys (300, 450) at scale 1.5 -> (200.0, 300.0) DIP
+        // screen -> (200 + 50, 300 + 75) = (250.0, 375.0)
+        assert_eq!(screen.x, 250.0);
+        assert_eq!(screen.y, 375.0);
+
+        let xaml_local = screen_logical_to_xaml_local_pure(screen, window_phys, scale);
+        assert_eq!(xaml_local.x, 50.0);
+        assert_eq!(xaml_local.y, 75.0);
+    }
+
+    #[test]
+    fn coordinate_conversion_negative_window_origin() {
+        let canvas_local = Point { x: 10.0, y: 20.0 };
+        let window_phys = (-1920, -100);
+        let scale = 1.0;
+
+        let screen = canvas_local_to_screen_logical_pure(canvas_local, window_phys, scale);
+        assert_eq!(screen.x, -1910.0);
+        assert_eq!(screen.y, -80.0);
+
+        let local = screen_logical_to_xaml_local_pure(screen, window_phys, scale);
+        assert_eq!(local.x, 10.0);
+        assert_eq!(local.y, 20.0);
     }
 }

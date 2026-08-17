@@ -405,7 +405,7 @@ impl TreeHostView {
                             &anchor,
                             work_area,
                         );
-                        *self.ivars().active_popup.borrow_mut() = Some(handle);
+                        *self.ivars().active_popup.borrow_mut() = handle;
                         std::ptr::null_mut()
                     }
                 }
@@ -414,12 +414,13 @@ impl TreeHostView {
                 let host = crate::inner::AppKitPopupHost::new(self.window());
                 let handle = ContextMenuService::open_custom_popup(
                     &host,
+                    &resolved.owner,
                     &template,
                     &anchor,
                     resolved.owner.effective_environment(),
                     work_area,
                 );
-                *self.ivars().active_popup.borrow_mut() = Some(handle);
+                *self.ivars().active_popup.borrow_mut() = handle;
                 std::ptr::null_mut()
             }
         }

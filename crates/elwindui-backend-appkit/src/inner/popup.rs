@@ -8,6 +8,7 @@ use crate::host::TreeHostView;
 use elwindui_core::ui::popup::{
     PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
 };
+use elwindui_core::ui::{UIElementExt, unmount_subtree};
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, msg_send};
 use block2::RcBlock;
@@ -25,6 +26,13 @@ use std::rc::Rc;
 pub(crate) struct InnerPopupSurface {
     window: Retained<NSWindow>,
     content_host: Retained<TreeHostView>,
+    // `RefCell<Option<..>>`, not a bare `Rc`: `close()` must be able to release this surface's own
+    // strong reference to the popup content root once teardown completes, not merely unmount it —
+    // otherwise a closed-but-not-yet-dropped `InnerPopupSurface` (reachable via `active_popup` until
+    // the host replaces or drops it) would keep the entire already-unmounted popup subtree alive.
+    // `close()`'s `.borrow_mut().take()` is this field's only consumer; every other read either
+    // doesn't exist or would be redundant with the local `content_host` tree it was built from.
+    content: RefCell<Option<Rc<dyn UIElementExt>>>,
     is_open: RefCell<bool>,
     local_monitor: RefCell<Option<Retained<AnyObject>>>,
     global_monitor: RefCell<Option<Retained<AnyObject>>>,
@@ -86,6 +94,7 @@ impl InnerPopupSurface {
         let surface = Rc::new(Self {
             window,
             content_host,
+            content: RefCell::new(Some(Rc::clone(&request.content))),
             is_open: RefCell::new(true),
             local_monitor: RefCell::new(None),
             global_monitor: RefCell::new(None),
@@ -150,6 +159,30 @@ impl InnerPopupSurface {
     }
 
     /// Closes and removes the popup surface from the screen.
+    ///
+    /// Teardown-before-detach: generic Component/UIElement lifecycle teardown
+    /// (`unmount_subtree` — `on_unmount` hooks, subscription cancellation) runs synchronously
+    /// here, before *any* native detach — event monitor removal is not itself a detach of the
+    /// popup's window relationship/visibility/host tree, so it may stay ahead of `unmount_subtree`,
+    /// but `removeChildWindow`/`orderOut` (window relationship + visibility) and
+    /// `TreeHostView::clear_tree()` (host tree/native resource release) must both run only after
+    /// `unmount_subtree` has completed, so `on_unmount` observes an intact window/tree/Environment.
+    /// `clear_tree()` itself stays deferred to the next main-queue turn (PR #156): `close()` may be
+    /// invoked reentrantly from inside a popup-internal event handler already on the call stack, and
+    /// `clear_tree()` takes `TreeHostView`'s own `tree`/`render_tree` `RefCell`s mutably, which a
+    /// live event-dispatch frame may still be borrowing. `unmount_subtree` does not touch those
+    /// `TreeHostView`-owned cells (it only walks/mutates the `UIElementExt` tree's own
+    /// `visual_collection`/lifecycle state), so running it synchronously ahead of the window/host
+    /// detach is safe even when `close()` is reentrant — verified by `elwindui-core`'s
+    /// `unmount_subtree_reentrant_from_within_own_event_dispatch_does_not_panic`.
+    ///
+    /// `self.content.borrow_mut().take()` both makes this exactly-once (a second `close()` call
+    /// finds `None` and skips straight to the `is_open` guard above, which already short-circuits)
+    /// and releases this surface's own strong reference to the popup content root once teardown
+    /// completes — see `content`'s own field doc comment for why that release matters. The taken
+    /// local `content` only needs to stay alive long enough for `unmount_subtree` to run; nothing
+    /// after that point in `close()` touches the content root itself (the deferred `clear_tree()`
+    /// below acts on `content_host`'s own independently-owned tree reference, not on this one).
     pub(crate) fn close(&self) {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
@@ -159,6 +192,11 @@ impl InnerPopupSurface {
             if let Some(mon) = self.global_monitor.borrow_mut().take() {
                 unsafe { NSEvent::removeMonitor(&mon) };
             }
+
+            if let Some(content) = self.content.borrow_mut().take() {
+                unmount_subtree(&content);
+            }
+
             if let Some(parent) = self.window.parentWindow() {
                 parent.removeChildWindow(&self.window);
             }
@@ -207,8 +245,10 @@ impl AppKitPopupHost {
 }
 
 impl PopupHost for AppKitPopupHost {
-    fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle> {
+    fn show_popup(&self, request: PopupRequest) -> Option<Rc<dyn PopupSurfaceHandle>> {
+        // `InnerPopupSurface::show` has no fallible step on this backend (unlike WinUI3's
+        // coordinate-conversion/`Popup::new()` path) — always `Some`.
         let surface = InnerPopupSurface::show(request, self.owner_window.as_deref());
-        Rc::new(AppKitPopupHandle { surface })
+        Some(Rc::new(AppKitPopupHandle { surface }))
     }
 }

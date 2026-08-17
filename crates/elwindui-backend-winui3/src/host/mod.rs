@@ -1430,8 +1430,9 @@ impl TreeHostPanel {
                             &anchor,
                             work_area,
                         );
-                        *active_popup.borrow_mut() = Some(handle);
-                        return true;
+                        let opened = handle.is_some();
+                        *active_popup.borrow_mut() = handle;
+                        return opened;
                     }
                 }
             }
@@ -1449,13 +1450,15 @@ impl TreeHostPanel {
                 let host = crate::inner::WinUI3PopupHost::new(canvas.clone());
                 let handle = elwindui_core::ui::ContextMenuService::open_custom_popup(
                     &host,
+                    &resolved.owner,
                     &template,
                     &anchor,
                     resolved.owner.effective_environment(),
                     work_area,
                 );
-                *active_popup.borrow_mut() = Some(handle);
-                return true;
+                let opened = handle.is_some();
+                *active_popup.borrow_mut() = handle;
+                return opened;
             }
         }
         false

@@ -427,7 +427,7 @@ impl Cart {}
 
 ### `#[environment(name)]`:継承されるUI context値の参照
 
-親から継承される型付きの `Environment` 値(`docs/specs/theme_environment_spec.md`参照)を読み取るためのフィールドアトリビュート。`name` は `#[elwindui::environment_key]`(同spec参照)で定義されたEnvironment Keyの名前を指す。
+親から継承される型付きの `Environment` 値(`docs/specs/theme_environment_spec.md`参照)を読み取るためのフィールドアトリビュート。`name` は `#[elwindui::environment_key]`(同spec参照)で定義されたEnvironment Keyの名前か、フレームワーク組み込みのEnvironment Key名(下記)のいずれかを指す。
 
 ```rust
 #[elwindui::component]
@@ -448,8 +448,19 @@ impl SettingsView {}
 
 `name`は次の2形式を取る(Issue #129):
 
-- bare識別子(`locale`): 宣言元と**同一crate内**で先に宣言された`#[elwindui::environment_key(name = locale, ..)]`のKeyへ解決される(従来通り)。
-- 完全修飾クレートパス(`some_crate::locale`): 宣言元crateが`pub`にエクスポートしたKeyへ、**クレート境界を越えて**解決される。パスの先頭部分(最終セグメントを除く全体)は、呼び出し側で解決可能な任意のcrateパス(依存クレート名、`use`で導入したエイリアス、ネストしたモジュールパスなど)でよい——`#[elwindui::environment_key]`は宣言元クレートのルートへ常にエクスポートされるため、Key構造体自身がどのモジュールに置かれているかとは無関係である。
+- bare識別子(`locale`): 次の優先順位で解決される(`component_frontend::lookup_environment_key`)。
+  1. 宣言元と**同一crate内**で先に宣言された`#[elwindui::environment_key(name = locale, ..)]`のKey(従来通り、ユーザー/ライブラリ定義)。
+  2. 上記に該当がなければ、**フレームワーク組み込みのEnvironment Key**——`#[elwindui::environment_key]`宣言なしに常に解決可能な固定名の集合。現在の組み込みKeyは、Semantic Style Brush Key群(`primary`/`secondary`/`tertiary`/`foreground`/`background`/`window_background`/`tint`/`selection`/`separator`/`placeholder`/`link`、`Value = BrushStyle`、`theme_environment_spec.md`§7)と、`popup_dismiss`(`Value = Option<PopupDismissAction>`——Keyの既定値は`None`、`ContextMenuService::open_custom_popup`がpopup-scoped Environmentへ`Some(..)`を設定する。DSL管理経路（popup機構自体）はpopup scopeの外側で`Some(..)`を設定しない。低レベルの型付きRust API（`EnvironmentContext::set`）による明示的な上書きは制限されない——詳細は`theme_environment_spec.md`§2参照)。
+  3. どちらにも該当しなければ、コード生成時の`compile_error!`(13章ルール34)。
+  - ユーザー定義Keyと組み込みKeyの名前が衝突した場合、ユーザー定義Keyが優先される(組み込みKeyへは決してフォールバックしない、フレームワーク自身が同名を再定義することはない)。
+- 完全修飾クレートパス(`some_crate::locale`): 宣言元crateが`pub`にエクスポートしたKeyへ、**クレート境界を越えて**解決される。パスの先頭部分(最終セグメントを除く全体)は、呼び出し側で解決可能な任意のcrateパス(依存クレート名、`use`で導入したエイリアス、ネストしたモジュールパスなど)でよい——`#[elwindui::environment_key]`は宣言元クレートのルートへ常にエクスポートされるため、Key構造体自身がどのモジュールに置かれているかとは無関係である。組み込みKeyには完全修飾形式は存在しない(常にbare識別子でのみ参照する)。
+
+**読み取り（read）専用の解決規則であることに注意**: 上記の bare識別子解決順序(`component_frontend::lookup_environment_key`)は `#[environment(name)]` フィールド(値の**読み取り**)専用であり、Environment値を**書き込む**DSL構文(`EnvironmentScope { key: value }`、5章、および `#[elwindui::theme]`、`docs/specs/theme_environment_spec.md`§3/§4)は別の解決関数(`component_frontend::lookup_writable_environment_key`)を用いる。書き込み側の優先順位は次の2段階のみである。
+
+1. 宣言元と同一crate内で先に宣言された`#[elwindui::environment_key(name = ..)]`のKey(read側と同じ、ユーザー定義Keyは常に書き込み可能)。
+2. Semantic Style Brush Key群(`theme_environment_spec.md`§7)。
+
+**`popup_dismiss` はこの書き込み側の解決には含まれない**——`ContextMenuService::open_custom_popup`のみがpopup-scoped Environmentへ`PopupDismissAction`を設定でき、`EnvironmentScope`や`#[elwindui::theme]`経由でフレームワークの現在のdismissアクションを上書きすることはできない(`docs/specs/theme_environment_spec.md`§2参照)。同名のユーザー定義Key(`#[elwindui::environment_key(name = popup_dismiss, ..)]`)を同一crate内で宣言した場合は、その優先順位(ルール1)により通常のユーザーKeyとして書き込み可能になる——これは他の組み込みKey名のシャドーイングと同じ挙動であり、`popup_dismiss`という名前文字列自体を特別扱いして拒否するわけではない。
 
 ```rust
 #[elwindui::component]
@@ -1231,9 +1242,9 @@ impl SaveButton {}
 31. `#[shortcut(...)]` に指定されたキー表記(修飾キー名/キー名)が不正 → エラー(`docs/design/runtime/input_focus_design.md`参照。`codegen::parse_shortcut_spec`と同じパーサーで検査するため、ここを通れば必ずコード生成もパースに成功する)
 32. `elwindui::core::graphics::Brush`/`Color`(または`Option<..>`)型のフィールドへ文字列リテラルを代入する場合(例: `Rectangle { fill: "#3a3a3c" }`)、その文字列が`"#rrggbb"`/`"#rrggbbaa"`(`#`省略可)のいずれの形式にも一致しない → コード生成時エラー(`codegen::coerce_color_literal`。動的な`String`式には適用されない——`Brush`/`Color`型の値を直接渡す必要がある)。`foreground`/`background`/`fill`/`stroke`は`BrushStyle`も受け付け、effective Environmentから解決した後に同じsetter/clear contractへ接続する。
 33. `#[environment(...)]` が同一フィールドの `#[param]`/`#[prop]`/`#[state]`/`#[bindable]` と併用されている → エラー(4章「`#[environment(name)]`」参照)
-34. `#[environment(name)]` の `name` が、解決可能な `#[elwindui::environment_key]` 定義または`theme_environment_spec.md` §7の組み込みsemantic Key名を持たない → エラー。bare識別子(同一crate内解決または組み込みKey fallback)の場合はコード生成時の`compile_error!`。完全修飾クレートパス(Issue #129、クレート境界を越えた解決)の場合は、生成コードが実際にコンパイルされた時点の`rustc`自身の「マクロが見つからない」エラー——proc-macro展開からは他クレートが何をエクスポートしているか分からないため、`elwindui-codegen`側の早期検査は原理的に行えない(`docs/design/tools/environment_key_macro_design.md`参照)。
-35. `EnvironmentScope { key: value .. }` の `key` が、解決可能な `#[elwindui::environment_key]` 定義または組み込みsemantic Key名を持たない、または `value` の型がそのKeyの `Value` 型と一致しない → エラー(5章「`EnvironmentScope`」参照)。名前解決エラーの検出方式(コード生成時`compile_error!` vs 実コンパイル時`rustc`エラー)はルール34と同じ、bare/完全修飾の別で決まる。`value`の型不一致はどちらの形式でも常に通常の`rustc`型エラー。
-36. `#[elwindui::theme] struct Name { #[theme(value = ..)] field: Type, .. }` の `field` の識別子が、解決可能な `#[elwindui::environment_key]` 定義または組み込みsemantic Key名を持たない → コード生成時エラー(`docs/specs/theme_environment_spec.md`§3/§4/§7参照。`#[environment(name)]`と同じ解決規則)
+34. `#[environment(name)]` の `name` が、解決可能な `#[elwindui::environment_key]` 定義または組み込みEnvironment Key名(Semantic Style Key、`theme_environment_spec.md`§7、または`popup_dismiss`、同spec§2)を持たない → エラー。bare識別子(同一crate内解決または組み込みKey fallback)の場合はコード生成時の`compile_error!`。完全修飾クレートパス(Issue #129、クレート境界を越えた解決)の場合は、生成コードが実際にコンパイルされた時点の`rustc`自身の「マクロが見つからない」エラー——proc-macro展開からは他クレートが何をエクスポートしているか分からないため、`elwindui-codegen`側の早期検査は原理的に行えない(`docs/design/tools/environment_key_macro_design.md`参照)。
+35. `EnvironmentScope { key: value .. }` の `key` が、解決可能な `#[elwindui::environment_key]` 定義または**書き込み可能な**組み込みEnvironment Key名(Semantic Style Key、`theme_environment_spec.md`§7——ルール34の読み取り専用集合とは別で、`popup_dismiss`を含まない。4章「`#[environment(name)]`」の書き込み側解決規則を参照)を持たない、または `value` の型がそのKeyの `Value` 型と一致しない → エラー(5章「`EnvironmentScope`」参照)。名前解決エラーの検出方式(コード生成時`compile_error!` vs 実コンパイル時`rustc`エラー)はルール34と同じ、bare/完全修飾の別で決まる。`value`の型不一致はどちらの形式でも常に通常の`rustc`型エラー。`popup_dismiss`を`EnvironmentScope`で上書きしようとした場合は、書き込み可能な集合に含まれないため、bare識別子の「未解決」と同じコード生成時`compile_error!`となる。
+36. `#[elwindui::theme] struct Name { #[theme(value = ..)] field: Type, .. }` の `field` の識別子が、解決可能な `#[elwindui::environment_key]` 定義または**書き込み可能な**組み込みsemantic Key名を持たない → コード生成時エラー(`docs/specs/theme_environment_spec.md`§2/§3/§4/§7参照。ルール35の`EnvironmentScope`と同じ書き込み側解決規則——`#[environment(name)]`の読み取り側解決規則とは異なり、`popup_dismiss`は含まない)
 
 ---
 

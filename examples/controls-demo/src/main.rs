@@ -21,15 +21,15 @@
 use elwindui::core::input::Key;
 #[allow(unused_imports)]
 use elwindui::core::ui::{
-    CheckState, ContextMenuPresentation, LayoutExt, PopupContentTemplate, TextBlockExt,
-    UIElementExt,
+    CheckState, ContextMenuPresentation, LayoutExt, TextBlockExt,
+    UIElementExt, ViewTemplate,
 };
 
 #[elwindui::viewmodel]
 mod controls_demo_view_model {
     use super::{
-        CheckState, ContextMenuPresentation, Key, LayoutExt, PopupContentTemplate, TextBlockExt,
-        TextStyleOwner, UIElementExt,
+        CheckState, ContextMenuPresentation, Key, LayoutExt, TextBlockExt,
+        TextStyleOwner, UIElementExt, ViewTemplate,
     };
 
     struct ControlsDemoViewModel {
@@ -90,16 +90,16 @@ mod controls_demo_view_model {
         })]
         radio_selected_label: String,
 
-        #[computed(expr = Some(PopupContentTemplate::new(|_ctx| {
+        #[computed(expr = Some(ViewTemplate::new(|_ctx| {
             let layout = elwindui::core::ui::VerticalLayout::new();
             layout.set_margin(12.0);
             let text = elwindui::core::ui::TextBlock::new();
             text.set_text("✨ Rich Context Popup (Custom UIElement)");
             text.text_style.set_foreground(Some(elwindui::core::graphics::Color::rgb(20, 20, 25).into()));
             LayoutExt::children(&*layout).add(text as std::rc::Rc<dyn UIElementExt>);
-            layout as std::rc::Rc<dyn UIElementExt>
+            Some(layout as std::rc::Rc<dyn UIElementExt>)
         })))]
-        custom_popup_template: Option<PopupContentTemplate>,
+        custom_popup_template: Option<ViewTemplate>,
 
         // A second logical group under the same native parent catches WinUI's implicit
         // parent-based grouping: changing this pair must never clear the `size` group above.

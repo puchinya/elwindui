@@ -4,13 +4,15 @@
 //! either. This module consumes a `syn::ItemStruct` whose fields are schema only (never stored —
 //! the emitted type is a zero-sized marker) and emits a `Theme` impl that batches
 //! `EnvironmentContext::set` calls, one per `#[theme(value = ..)]` field, resolving each field's own
-//! identifier through the same same-crate registry `#[environment(name)]` resolves against
-//! (`component_frontend::lookup_same_crate_environment_key`).
+//! identifier through the **writable** Environment Key resolver
+//! (`component_frontend::lookup_writable_environment_key`) — a same-crate `#[elwindui::environment_key]`
+//! declaration or a framework Semantic Style Brush key, but never the framework's read-only
+//! `popup_dismiss` builtin (see that resolver's own doc comment).
 //!
-//! See `docs/specs/theme_environment_spec.md` §3/§4 and
+//! See `docs/specs/theme_environment_spec.md` §2/§3/§4 and
 //! `docs/design/runtime/theme_environment_design.md` (`## Theme`).
 
-use crate::component_frontend::lookup_environment_key;
+use crate::component_frontend::lookup_writable_environment_key;
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
@@ -81,12 +83,14 @@ pub fn generate_theme_from_item_struct(
             return Err(format!("duplicate theme field `{ident}`"));
         }
         let value = field_value_expr(field)?;
-        let (key_type_name, _value_type) = lookup_environment_key(&ident.to_string())
+        let (key_type_name, _value_type) = lookup_writable_environment_key(&ident.to_string())
             .ok_or_else(|| {
                 format!(
-                    "`{ident}`: no `#[elwindui::environment_key(name = {ident}, ..)]` was declared \
-                     earlier in this crate — a theme field's name must match a declared Environment \
-                     Key's `name`"
+                    "`{ident}`: no writable Environment Key named `{ident}` exists; declare a \
+                     same-crate `#[elwindui::environment_key(name = {ident}, ..)]` or use a \
+                     writable framework Semantic Style key (`theme_environment_spec.md` §7) — \
+                     `popup_dismiss` in particular is framework-installed and read-only, not \
+                     settable through a theme (`theme_environment_spec.md` §2)"
                 )
             })?;
         let key_type: syn::Type = syn::parse_str(&key_type_name).map_err(|_| {
@@ -153,7 +157,26 @@ mod tests {
             }
         };
         let error = generate_theme_from_item_struct(TokenStream::new(), &item).unwrap_err();
-        assert!(error.contains("no `#[elwindui::environment_key"));
+        assert!(error.contains("no writable Environment Key named"));
+    }
+
+    #[test]
+    fn rejects_theme_field_writing_the_popup_dismiss_builtin_key() {
+        // Distinct from `rejects_field_with_no_registered_environment_key`: `popup_dismiss` DOES
+        // resolve (it's a real, readable framework built-in key), it just isn't writable — a Theme
+        // must not be able to set the framework-installed active `PopupDismissAction`.
+        let item: ItemStruct = syn::parse_quote! {
+            struct OceanTheme {
+                #[theme(value = None)]
+                popup_dismiss: Option<i32>,
+            }
+        };
+        let error = generate_theme_from_item_struct(TokenStream::new(), &item).unwrap_err();
+        assert!(
+            error.contains("popup_dismiss") && error.contains("read-only"),
+            "error should explain popup_dismiss is framework-installed and read-only, not just \
+             \"unregistered\": {error}"
+        );
     }
 
     #[test]

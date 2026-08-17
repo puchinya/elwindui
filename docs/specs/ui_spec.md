@@ -209,7 +209,7 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 | `max_height` | `Option<f32>` | OneWay | 最大高さ |
 | `context_menu` | `Option<Menu>` | OneWay | 要素またはその子孫に対する標準コンテキストメニュー（既定値: `None`） |
 | `context_menu_presentation` | `ContextMenuPresentation` | OneWay | コンテキストメニューの表示方式（`Native` / `Custom`, 既定値: `Native`） |
-| `context_popup` | `Option<PopupContentTemplate>` | OneWay | 任意のUIElementツリーを内容とするCustom Context Popup（既定値: `None`） |
+| `context_popup` | `Option<ViewTemplate>` | OneWay | 任意のUIElementツリーを内容とするCustom Context Popup（既定値: `None`）。`ViewTemplate` は popup 専用ではない汎用の deferred View factory型 — 詳細は `docs/design/runtime/view_template_design.md` |
 
 #### Context Request & Lookup Semantics
 
@@ -233,8 +233,18 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
   - owner Window より前面かつ `NativeControl` よりも前面の Z-order を維持する（application-global な最前面にはしない）。
   - モニターの有効表示領域（work area）内に収まるよう、右/下の端部では自動的に左/上方向へ反転（flip）配置される。
 - **Lifecycle & Environment**:
-  - `context_popup` の内容は表示要求時にターゲット要素の有効な `EnvironmentContext` を継承して構築（build）され、`PopupSurface` に mount される。
-  - ポップアップが閉じられた際（外部クリック、Escape キー、項目選択、owner Window の close/移動等）に unmount され、リソースおよび Visual 接続が解放される。
+  - `context_popup` の内容は表示要求（open）時点で構築（build）される。owner Component の mount 時点で一度だけ構築されるのではなく、popup が開かれるたびに新たに `ViewTemplate::build` が呼ばれる。
+  - `ViewTemplate` の factory は owner を `Weak` としてのみ捕捉する（strong retain cycle を作らない）。owner が既に解放されている場合、`ViewTemplate::build` は `None` を返し、popup は表示されない。
+  - **契約の区別**: 上記は `ViewTemplate` 自体（現在利用可能な低レベル API、`ViewTemplate::new(|ctx| ...)`）が機械的に保証する範囲である。「owner の現在値を自動的に読む」こと自体は、この低レベル API 単体では保証されない——`ctx.owner`/`ctx.environment` から現在値を読むかどうかはクロージャの書き方次第であり、誤って構築前の値をキャプチャすることも可能である。「owner の bare な識別子参照が自動的に現在値を読む」という保証は、宣言的 `context_popup: view! { .. }` DSL（下記、未実装）が実装された時点で初めて成立する、より強い契約である。詳細は [`../design/runtime/view_template_design.md`](../design/runtime/view_template_design.md) §4 を参照。
+  - build 対象の `EnvironmentContext` は、ターゲット要素の有効な Environment から `derive()` された popup 専用の派生コンテキストであり、ターゲット要素自身の Environment を変更しない。この派生コンテキストには宣言的な dismiss 用の `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`、`#[environment(popup_dismiss)]` フィールド構文で解決可能なフレームワーク組み込みキー）が設定される。
+  - **Build abort（owner 消失）**: `ViewTemplate::build` は owner が既に解放されている場合 `None` を返す（この判定は `ViewTemplate` 自体が機械的に強制する——factory クロージャが `ctx.owner` を一度も参照しなくても、owner が死んでいれば factory 自体が呼ばれない）。`ContextMenuService::open_custom_popup` はこの場合 popup を一切表示せず `None` を返す。
+  - **Pre-show dismiss（build/mount 中の dismiss）**: build 中（将来、宣言的 Component root の `on_mount` を含む）に `PopupDismissAction::dismiss()` が呼ばれた場合、popup は一切表示されない（表示してから即座に閉じる、という動作にはしない）。この時点で構築済みの content は `unmount_subtree` により正しく teardown される。ネイティブサーフェスがまだ存在しない段階の dismiss 要求を握りつぶさないための保証。
+  - **Backend show failure（ネイティブ表示の失敗）**: `PopupHost::show_popup` は表示に失敗した場合 `None` を返す（WinUI3 の座標変換・`Popup` 生成失敗等）。バックエンドは「実体のない `PopupSurfaceHandle`」を返してはならない。表示に失敗した場合、`ContextMenuService::open_custom_popup`/`open_custom_menu` は既に構築済みの content を `unmount_subtree` により teardown してから `None` を返す。
+  - **Close 時の解放（2段階の契約）**: ポップアップが閉じられた際は、`elwindui_core::ui::unmount_subtree` による child-first の再帰的 unmount（`on_unmount`・購読解除を含む）が必ず実行される。ただし「ネイティブ detach のどの部分より前か」は、closeが誰の主導で発生したかによって以下の2段階に分かれる（Issue #161 のレビューで判明した、WinUI3 の `Popup` ネイティブ light-dismiss の実際の挙動に基づく訂正）。
+    - **全 dismissal 経路に共通する移植可能な保証**: `unmount_subtree` は必ず1回、ElwindUI 側の popup host が content tree を detach/解放する処理（`TreeHost::clear_tree()` 相当）より前、かつ `PopupSurfaceHandle` 自身が content root への強参照を解放する前に実行される。close 完了後は `PopupSurfaceHandle` 自身が popup content root への強参照を保持し続けてはならない——unmount 済みだが解放されない、という状態を作らない（`InnerPopupSurface` の `content` フィールドは `RefCell<Option<Rc<..>>>` とし、close 処理内の `take()` で解放する）。
+    - **ElwindUI 主導の close（追加の保証）**: `PopupDismissAction`、項目選択、popup replacement、明示的な `PopupSurfaceHandle::close()`、`Drop` 等、ElwindUI 自身がネイティブ close 要求を発行する経路では、`unmount_subtree` はネイティブの可視性変更・ウィンドウ関係解除などの detach 操作よりも前に実行される（従来通りの teardown-before-detach）。
+    - **バックエンドのネイティブ起源の dismiss 通知（例外）**: バックエンドのツールキットが「閉じた後」の通知しか提供しない経路（現時点では WinUI3 の `Popup.Closed` — ネイティブが `Popup.IsOpen` を `false` にした**後**にのみ発火する、Microsoft公式ドキュメントで確認済み）では、ElwindUI が通知を受け取った時点で既にネイティブの可視性変更が完了している場合がある。この経路でも通知を受けたコールバックは直ちに `unmount_subtree` を実行し、それを ElwindUI 側の host detach/解放より前に置くが、`on_unmount` がネイティブ popup をまだ可視状態として観測できることは保証されない。AppKit の light-dismiss は自前の `NSEvent` 監視で検出しclose自体をAppKit側が発行するため、この例外の対象外である（ElwindUI 主導の close と同じ、より強い順序を維持する）。
+  - `context_popup: view! { .. }` という宣言的 DSL 構文（open 時に評価される deferred View、`view!` の既存文法をそのまま再利用し、owner Component の bare な識別子参照が自動的に現在値へ解決される）は計画中の拡張であり、本改修時点では未実装。現在は `ViewTemplate::new(|ctx| ...)` による低レベル API のみが利用可能 — 進捗は Issue [#162](https://github.com/puchinya/elwindui/issues/162) を参照（ランタイム/バックエンド基盤自体の進捗は [#161](https://github.com/puchinya/elwindui/issues/161)）。
 
 ### `NativeControl`
 

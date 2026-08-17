@@ -164,7 +164,7 @@ pub(crate) fn test_builtin_modules() -> Vec<Module> {
             on_right_tapped: fn(elwindui::core::input::TappedEventArgs),
             context_menu: Option<std::rc::Rc<dyn elwindui::core::ui::MenuExt>>,
             context_menu_presentation: Option<elwindui::core::ui::ContextMenuPresentation>,
-            context_popup: Option<elwindui::core::ui::PopupContentTemplate>,
+            context_popup: Option<elwindui::core::ui::ViewTemplate>,
             "#,
         )),
         Item::Component(builtin_component(

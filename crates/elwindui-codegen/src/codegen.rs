@@ -8919,7 +8919,12 @@ fn emit_environment_scope_construction(node: &PlannedNode, ctx: &ViewCtx, out: &
     };
     let mut sets = TokenStream::new();
     for attribute in &node.attributes {
-        match crate::component_frontend::lookup_environment_key(&attribute.name) {
+        // Writable resolver, not `lookup_environment_key`: `EnvironmentScope` *writes* a value, and
+        // the framework's `popup_dismiss` builtin (readable via `#[environment(popup_dismiss)]`) is
+        // installed only by `ContextMenuService::open_custom_popup` — a DSL author must not be able
+        // to overwrite the active `PopupDismissAction` this way (`lookup_writable_environment_key`'s
+        // own doc comment).
+        match crate::component_frontend::lookup_writable_environment_key(&attribute.name) {
             Some((key_type_name, _value_type)) => {
                 let key_type: syn::Type = syn::parse_str(&key_type_name)
                     .expect("registered environment key type name must parse");
@@ -8938,7 +8943,10 @@ fn emit_environment_scope_construction(node: &PlannedNode, ctx: &ViewCtx, out: &
                 let name = &attribute.name;
                 let msg = format!(
                     "EnvironmentScope: `{name}` is not declared by any \
-                     #[elwindui::environment_key(name = {name}, ..)] earlier in this crate \
+                     #[elwindui::environment_key(name = {name}, ..)] earlier in this crate, is not \
+                     a writable framework built-in key (docs/specs/theme_environment_spec.md §2 — \
+                     `popup_dismiss` is framework-installed and readable only, not settable via \
+                     EnvironmentScope), or is not writable at all \
                      (docs/specs/dsl_spec.md §13 rule 35)"
                 );
                 sets.extend(quote! { compile_error!(#msg); });
@@ -8974,8 +8982,10 @@ fn emit_environment_scope_resync(node: &PlannedNode, ctx: &ViewCtx, out: &mut To
     };
     let self_mode = EmitMode::WithSelf(quote! { self });
     for attribute in &node.attributes {
+        // Writable resolver — see `emit_environment_scope_construction`'s matching call for why
+        // (this is the same `EnvironmentScope` write path, just re-run on resync).
         let Some((key_type_name, _value_type)) =
-            crate::component_frontend::lookup_environment_key(&attribute.name)
+            crate::component_frontend::lookup_writable_environment_key(&attribute.name)
         else {
             continue;
         };
@@ -12211,6 +12221,44 @@ struct NotepadWindow {
         assert!(rendered.contains("as_text_style_owner"));
         assert!(rendered.contains("set_font_size"));
         assert!(rendered.contains("20.0"));
+    }
+
+    #[test]
+    fn environment_scope_rejects_writing_the_popup_dismiss_builtin_key() {
+        // The framework built-in `popup_dismiss` key is readable via `#[environment(popup_dismiss)]`
+        // but must not be writable through `EnvironmentScope` (`lookup_writable_environment_key`
+        // deliberately omits it) — `ContextMenuService::open_custom_popup` is the only thing allowed
+        // to install a `PopupDismissAction`. Verifies elwindui-codegen itself rejects this with a
+        // `compile_error!` at codegen time, distinct from an ordinary `rustc` type mismatch the RHS
+        // value (`0`, not a real `PopupDismissAction`) would otherwise trigger if the write were
+        // ever attempted.
+        let module = crate::test_module(&[(
+            Some("VerticalLayout"),
+            r#"
+                struct EnvironmentScopePopupDismissRejectionFixture {
+                    body: view! {
+                        EnvironmentScope {
+                            popup_dismiss: 0
+                            TextBlock { text: "hi" }
+                        }
+                    },
+                }
+            "#,
+            None,
+        )])
+        .expect("source should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        let rendered = generated.to_string();
+        assert!(
+            rendered.contains("compile_error"),
+            "writing popup_dismiss via EnvironmentScope must be rejected by elwindui-codegen's own \
+             compile_error!, not silently accepted or deferred purely to rustc\n---\n{rendered}"
+        );
+        assert!(
+            rendered.contains("popup_dismiss"),
+            "the compile_error! message should name the rejected key\n---\n{rendered}"
+        );
     }
 
     #[test]

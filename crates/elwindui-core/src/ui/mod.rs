@@ -69,6 +69,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // block, which is what let the original single-file `ui.rs` be split as a pure code move.
 mod element;
 
+mod view_template;
+
 mod controls;
 
 mod collections;
@@ -93,3 +95,4 @@ pub use element::*;
 pub use engine::*;
 pub use popup::*;
 pub use text_style::*;
+pub use view_template::*;

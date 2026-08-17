@@ -28,7 +28,11 @@ pub struct ControlTemplateContext<C: ControlExt + 'static> {
 /// fn invalid(_: ControlTemplate<String>) {}
 /// ```
 pub struct ControlTemplate<C: ControlExt + 'static> {
-    factory: Rc<dyn Fn(ControlTemplateContext<C>) -> Rc<dyn UIElementExt>>,
+    // Shares its boxed-closure storage with `ViewTemplate` (see `crate::ui::view_template`), but
+    // `ControlTemplate`'s contract is that a factory always produces a root — building is
+    // infallible from callers' perspective, so `__build` unwraps the shared `Option`-returning
+    // storage rather than exposing it.
+    factory: DeferredViewFactory<ControlTemplateContext<C>>,
 }
 
 impl<C: ControlExt + 'static> Clone for ControlTemplate<C> {
@@ -45,14 +49,16 @@ impl<C: ControlExt + 'static> ControlTemplate<C> {
         factory: impl Fn(ControlTemplateContext<C>) -> Rc<dyn UIElementExt> + 'static,
     ) -> Self {
         Self {
-            factory: Rc::new(factory),
+            factory: DeferredViewFactory::new(move |context| Some(factory(context))),
         }
     }
 
     /// Builds the template root once for generated mount code.
     #[doc(hidden)]
     pub fn __build(&self, context: ControlTemplateContext<C>) -> Rc<dyn UIElementExt> {
-        (self.factory)(context)
+        self.factory
+            .build(context)
+            .expect("ControlTemplate factories always produce a root")
     }
 }
 

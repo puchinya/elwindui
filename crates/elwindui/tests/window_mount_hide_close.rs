@@ -77,13 +77,28 @@ impl MountHideCloseWindow {}
 /// Type-checked, not executed (see module doc comment). Demonstrates the target usage shape from
 /// spec §10/§11 and Issue #126: `new()` performs no build; a property set between `new()` and `show()`
 /// is observed by the initial build; `show()` mounts+builds exactly once; `show(); hide(); show();`
-/// does not rebuild or unmount; `close()` runs child-first recursive unmount.
+/// does not rebuild or unmount; `close()` runs child-first recursive unmount; `close()` before `show()`
+/// does not run `on_unmount`.
 #[allow(dead_code)]
 #[cfg(feature = "backend-appkit")]
 fn type_checked_new_show_hide_close_usage() {
     BUILD_COUNT.with(|c| c.set(0));
     UNMOUNT_EVENTS.with(|events| events.borrow_mut().clear());
 
+    // 1. Close before show: Created -> Unmounted (does not run on_unmount)
+    let window0: Rc<MountHideCloseWindow> = MountHideCloseWindow::new("w0".to_string());
+    debug_assert_eq!(BUILD_COUNT.with(|c| c.get()), 0);
+    debug_assert_eq!(get_unmount_events().len(), 0);
+
+    window0.close();
+    debug_assert_eq!(BUILD_COUNT.with(|c| c.get()), 0);
+    debug_assert_eq!(get_unmount_events().len(), 0);
+
+    window0.show();
+    debug_assert_eq!(BUILD_COUNT.with(|c| c.get()), 0);
+    debug_assert_eq!(get_unmount_events().len(), 0);
+
+    // 2. Show -> Hide -> Show -> Close
     let window: Rc<MountHideCloseWindow> = MountHideCloseWindow::new("initial".to_string());
     // `new()` alone must not have built the view yet (host-composition `on_constructed` no longer
     // auto-mounts — codegen.rs's `on_constructed_mount_call` is `None` for this case).
@@ -127,6 +142,27 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
     UNMOUNT_EVENTS.with(|events| events.borrow_mut().clear());
 
     elwindui::application::run(|| {
+        // Part 1: close before show
+        let window1: Rc<MountHideCloseWindow> = MountHideCloseWindow::new("w1".to_string());
+        assert_eq!(BUILD_COUNT.with(Cell::get), 0);
+        assert_eq!(get_unmount_events().len(), 0);
+
+        window1.close();
+        assert_eq!(BUILD_COUNT.with(Cell::get), 0);
+        assert_eq!(
+            get_unmount_events().len(),
+            0,
+            "close() on an unshown window must not execute on_unmount"
+        );
+
+        window1.close();
+        assert_eq!(get_unmount_events().len(), 0);
+
+        window1.show();
+        assert_eq!(BUILD_COUNT.with(Cell::get), 0);
+        assert_eq!(get_unmount_events().len(), 0);
+
+        // Part 2: show -> hide -> show -> close
         let window: Rc<MountHideCloseWindow> = MountHideCloseWindow::new("initial".to_string());
         assert_eq!(
             BUILD_COUNT.with(Cell::get),

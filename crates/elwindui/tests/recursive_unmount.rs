@@ -715,3 +715,123 @@ fn test_ancestor_reentrant_unmount_is_safe_and_preserves_child_first_order() {
         vec!["Child:start", "Child:end", "Parent"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// 11. Unmount on Created Component (before mount) must not run on_unmount
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static CREATED_UNMOUNT_COUNT: Cell<u32> = const { Cell::new(0) };
+    static CREATED_MOUNT_COUNT: Cell<u32> = const { Cell::new(0) };
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct UnmountedBeforeMountComponent {
+    body: view! {
+        on_mount {
+            CREATED_MOUNT_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        on_unmount {
+            CREATED_UNMOUNT_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        TextBlock { text: "unmounted before mount" }
+    },
+}
+
+#[elwindui::component]
+impl UnmountedBeforeMountComponent {}
+
+#[test]
+fn test_unmount_on_created_component_does_not_trigger_on_unmount() {
+    CREATED_MOUNT_COUNT.with(|c| c.set(0));
+    CREATED_UNMOUNT_COUNT.with(|c| c.set(0));
+
+    let component = UnmountedBeforeMountComponent::__new_unmounted();
+    assert_eq!(CREATED_MOUNT_COUNT.with(|c| c.get()), 0);
+    assert_eq!(CREATED_UNMOUNT_COUNT.with(|c| c.get()), 0);
+
+    // Unmount before mount: Created -> Unmounted
+    component.unmount();
+    assert_eq!(CREATED_MOUNT_COUNT.with(|c| c.get()), 0);
+    assert_eq!(
+        CREATED_UNMOUNT_COUNT.with(|c| c.get()),
+        0,
+        "on_unmount must not run for a component that was never mounted"
+    );
+
+    // Repeated unmount on Unmounted state is a no-op
+    component.unmount();
+    assert_eq!(CREATED_UNMOUNT_COUNT.with(|c| c.get()), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 12. Intermediate ancestor reentrant unmount from subtree traversal
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static INTERMEDIATE_PARENT_REF: RefCell<Option<Rc<IntermediateParentComponent>>> = const { RefCell::new(None) };
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct IntermediateChildComponent {
+    body: view! {
+        on_unmount {
+            record_unmount("Child:start");
+            if let Some(parent) = INTERMEDIATE_PARENT_REF.with(|r| r.borrow().clone()) {
+                parent.unmount();
+            }
+            record_unmount("Child:end");
+        }
+        TextBlock { text: "child" }
+    },
+}
+
+#[elwindui::component]
+impl IntermediateChildComponent {}
+
+#[elwindui::component(inherits ContentControl)]
+struct IntermediateParentComponent {
+    body: view! {
+        on_mount {
+            INTERMEDIATE_PARENT_REF.with(|r| *r.borrow_mut() = Some(this.clone()));
+        }
+        on_unmount {
+            record_unmount("Parent");
+        }
+        IntermediateChildComponent { }
+    },
+}
+
+#[elwindui::component]
+impl IntermediateParentComponent {}
+
+#[elwindui::component(inherits ContentControl)]
+struct IntermediateGrandParentComponent {
+    body: view! {
+        on_unmount {
+            record_unmount("GrandParent");
+        }
+        IntermediateParentComponent { }
+    },
+}
+
+#[elwindui::component]
+impl IntermediateGrandParentComponent {}
+
+#[test]
+fn test_intermediate_ancestor_reentry_from_subtree_traversal_is_safe() {
+    clear_unmount_events();
+    INTERMEDIATE_PARENT_REF.with(|r| *r.borrow_mut() = None);
+
+    let grand_parent = IntermediateGrandParentComponent::new();
+    assert!(INTERMEDIATE_PARENT_REF.with(|r| r.borrow().is_some()));
+    assert_eq!(get_unmount_events().len(), 0);
+
+    grand_parent.unmount();
+
+    assert_eq!(
+        get_unmount_events(),
+        vec!["Child:start", "Child:end", "Parent", "GrandParent"],
+        "Intermediate parent must be marked Unmounting during subtree descent so child reentrant unmount is a safe no-op"
+    );
+}

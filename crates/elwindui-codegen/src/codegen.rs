@@ -5041,7 +5041,11 @@ fn generate_view(
         quote! {
             #[doc(hidden)]
             pub fn __unmount_local(&self) {
-                if self.__lifecycle_state.get() == elwindui::core::ui::ComponentLifecycleState::Unmounted {
+                let prev = self.__lifecycle_state.get();
+                if prev == elwindui::core::ui::ComponentLifecycleState::Unmounted
+                    || prev == elwindui::core::ui::ComponentLifecycleState::Created
+                {
+                    self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
                     return;
                 }
                 self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
@@ -5052,10 +5056,19 @@ fn generate_view(
 
             #[doc(hidden)]
             pub fn unmount(&self) {
-                if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Mounted {
-                    return;
+                match self.__lifecycle_state.get() {
+                    elwindui::core::ui::ComponentLifecycleState::Created => {
+                        self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
+                        return;
+                    }
+                    elwindui::core::ui::ComponentLifecycleState::Mounted => {
+                        self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
+                    }
+                    elwindui::core::ui::ComponentLifecycleState::Unmounting
+                    | elwindui::core::ui::ComponentLifecycleState::Unmounted => {
+                        return;
+                    }
                 }
-                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
                 if let Some(content) = <Self as elwindui::core::ui::WindowExt>::content_element(self) {
                     elwindui::core::ui::unmount_subtree(&content);
                 }
@@ -5095,7 +5108,11 @@ fn generate_view(
         quote! {
             #[doc(hidden)]
             pub fn __unmount_local(&self) {
-                if self.__lifecycle_state.get() == elwindui::core::ui::ComponentLifecycleState::Unmounted {
+                let prev = self.__lifecycle_state.get();
+                if prev == elwindui::core::ui::ComponentLifecycleState::Unmounted
+                    || prev == elwindui::core::ui::ComponentLifecycleState::Created
+                {
+                    self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
                     return;
                 }
                 self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
@@ -5106,10 +5123,19 @@ fn generate_view(
 
             #[doc(hidden)]
             pub fn unmount(&self) {
-                if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Mounted {
-                    return;
+                match self.__lifecycle_state.get() {
+                    elwindui::core::ui::ComponentLifecycleState::Created => {
+                        self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
+                        return;
+                    }
+                    elwindui::core::ui::ComponentLifecycleState::Mounted => {
+                        self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
+                    }
+                    elwindui::core::ui::ComponentLifecycleState::Unmounting
+                    | elwindui::core::ui::ComponentLifecycleState::Unmounted => {
+                        return;
+                    }
                 }
-                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
                 let children = <Self as elwindui::core::ui::UIElementExt>::visual_children(self);
                 for child in &children {
                     elwindui::core::ui::unmount_subtree(child);
@@ -5139,7 +5165,11 @@ fn generate_view(
     let plain_unmount_method = quote! {
         #[doc(hidden)]
         pub fn __unmount_local(&self) {
-            if self.__lifecycle_state.get() == elwindui::core::ui::ComponentLifecycleState::Unmounted {
+            let prev = self.__lifecycle_state.get();
+            if prev == elwindui::core::ui::ComponentLifecycleState::Unmounted
+                || prev == elwindui::core::ui::ComponentLifecycleState::Created
+            {
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
                 return;
             }
             self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
@@ -5150,10 +5180,19 @@ fn generate_view(
 
         #[doc(hidden)]
         pub fn unmount(&self) {
-            if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Mounted {
-                return;
+            match self.__lifecycle_state.get() {
+                elwindui::core::ui::ComponentLifecycleState::Created => {
+                    self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
+                    return;
+                }
+                elwindui::core::ui::ComponentLifecycleState::Mounted => {
+                    self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
+                }
+                elwindui::core::ui::ComponentLifecycleState::Unmounting
+                | elwindui::core::ui::ComponentLifecycleState::Unmounted => {
+                    return;
+                }
             }
-            self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
             #plain_unmount_root
             self.__unmount_local();
         }
@@ -5525,6 +5564,23 @@ fn generate_view(
     if is_composed {
         let unmount_hook_attach = (!is_host_composition).then(|| {
             quote! {
+                let weak_begin = std::rc::Rc::downgrade(&this);
+                <Self as elwindui::core::ui::UIElementExt>::add_begin_unmount_hook(
+                    self,
+                    Box::new(move || {
+                        if let Some(this) = weak_begin.upgrade() {
+                            match this.__lifecycle_state.get() {
+                                elwindui::core::ui::ComponentLifecycleState::Mounted => {
+                                    this.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
+                                    true
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        }
+                    }),
+                );
                 let weak = std::rc::Rc::downgrade(&this);
                 <Self as elwindui::core::ui::UIElementExt>::add_unmount_hook(
                     self,
@@ -5611,7 +5667,7 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Mounted), __closed: std::cell::Cell::new(false) }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created), __closed: std::cell::Cell::new(false) }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -5662,9 +5718,13 @@ fn generate_view(
                 // instead of automatically by `#[class]`.
                 #[doc(hidden)]
                 pub fn mount(&self, environment: elwindui::core::environment::EnvironmentContext) {
+                    if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Created {
+                        panic!("mount: component is already mounted or unmounted");
+                    }
                     self.__mount_environment
                         .set(environment.clone())
                         .expect("mount: component is already mounted");
+                    self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Mounted);
                     #mount_set_env
                     self.__build_view();
                 }
@@ -5755,7 +5815,7 @@ fn generate_view(
                 pub fn __new_unmounted(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Mounted) })
+                    std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Created) })
                 }
 
                 // Establishes this component's effective Environment and performs its initial view
@@ -5765,9 +5825,13 @@ fn generate_view(
                 // calls this explicitly on a node it constructed via `__new_unmounted` above.
                 #[doc(hidden)]
                 pub fn mount(self: &std::rc::Rc<Self>, environment: elwindui::core::environment::EnvironmentContext) {
+                    if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Created {
+                        panic!("mount: component is already mounted or unmounted");
+                    }
                     self.__mount_environment
                         .set(environment.clone())
                         .expect("mount: component is already mounted");
+                    self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Mounted);
                     #mount_set_env
                     self.__build_view();
                 }
@@ -5780,8 +5844,25 @@ fn generate_view(
                     #own_environment_resolve_stmts
                     #child_construct_stmts
                     #content_attach_stmt
+                    let weak_begin = std::rc::Rc::downgrade(self);
                     let weak = std::rc::Rc::downgrade(self);
                     if let Some(root) = self.#root_binding.get() {
+                        elwindui::core::ui::UIElementExt::add_begin_unmount_hook(
+                            &**root,
+                            Box::new(move || {
+                                if let Some(this) = weak_begin.upgrade() {
+                                    match this.__lifecycle_state.get() {
+                                        elwindui::core::ui::ComponentLifecycleState::Mounted => {
+                                            this.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
+                                            true
+                                        }
+                                        _ => false,
+                                    }
+                                } else {
+                                    false
+                                }
+                            }),
+                        );
                         elwindui::core::ui::UIElementExt::add_unmount_hook(
                             &**root,
                             Box::new(move || {

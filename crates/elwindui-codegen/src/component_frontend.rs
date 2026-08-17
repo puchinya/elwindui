@@ -980,6 +980,7 @@ mod tests {
         let s = generated.to_string();
         assert!(s.contains("pub fn unmount"), "{s}");
         assert!(s.contains("__lifecycle_state : std :: cell :: Cell < elwindui :: core :: ui :: ComponentLifecycleState >"), "{s}");
+        assert!(s.contains("add_begin_unmount_hook"), "{s}");
         assert!(s.contains("add_unmount_hook"), "{s}");
         assert!(s.contains("__run_on_unmount"), "{s}");
         assert!(s.contains("unmount_subtree"), "{s}");
@@ -1002,6 +1003,7 @@ mod tests {
         let s = generated.to_string();
         assert!(s.contains("pub fn unmount"), "{s}");
         assert!(s.contains("__lifecycle_state : std :: cell :: Cell < elwindui :: core :: ui :: ComponentLifecycleState >"), "{s}");
+        assert!(s.contains("add_begin_unmount_hook"), "{s}");
         assert!(s.contains("add_unmount_hook"), "{s}");
         assert!(s.contains("__run_on_unmount"), "{s}");
         assert!(s.contains("unmount_subtree"), "{s}");

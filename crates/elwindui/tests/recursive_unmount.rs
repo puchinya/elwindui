@@ -362,3 +362,244 @@ fn test_dynamic_if_branch_removal_triggers_unmount() {
         "Dynamic if removal must trigger unmount of removed branch component"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 6. Direct component hierarchy recursive unmount test
+// ---------------------------------------------------------------------------
+
+#[elwindui::component(inherits ContentControl)]
+struct PlainChild {
+    body: view! {
+        on_unmount {
+            record_unmount("PlainChild");
+        }
+        TextBlock { text: "plain child" }
+    },
+}
+
+#[elwindui::component]
+impl PlainChild {}
+
+#[elwindui::component(inherits ContentControl)]
+struct PlainParent {
+    body: view! {
+        on_unmount {
+            record_unmount("PlainParent");
+        }
+        VerticalLayout {
+            PlainChild { }
+        }
+    },
+}
+
+#[elwindui::component]
+impl PlainParent {}
+
+#[test]
+fn test_plain_component_recursive_unmount() {
+    clear_unmount_events();
+
+    let parent = PlainParent::new();
+    assert_eq!(get_unmount_events().len(), 0);
+
+    parent.unmount();
+    assert_eq!(
+        get_unmount_events(),
+        vec!["PlainChild", "PlainParent"],
+        "Parent unmount must recursively unmount descendant child in child-first order"
+    );
+
+    // Second unmount must be a no-op (idempotency)
+    parent.unmount();
+    assert_eq!(
+        get_unmount_events(),
+        vec!["PlainChild", "PlainParent"],
+        "Second unmount must be a no-op"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. Dynamic for removal test
+// ---------------------------------------------------------------------------
+
+#[elwindui::viewmodel]
+mod dynamic_item_view_model {
+    struct ItemViewModel {
+        #[observable(default = String::new())]
+        name: String,
+    }
+}
+
+#[elwindui::viewmodel]
+mod dynamic_for_view_model {
+    use super::ItemViewModel;
+
+    struct DynamicForViewModel {
+        #[observable(default = Vec::new())]
+        items: Vec<ItemViewModel>,
+    }
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct DynamicForChild {
+    #[bindable]
+    vm: std::rc::Rc<ItemViewModel>,
+
+    body: view! {
+        on_unmount {
+            if self.vm().name() == "A" {
+                record_unmount("DynamicForChild:A");
+            } else if self.vm().name() == "B" {
+                record_unmount("DynamicForChild:B");
+            } else if self.vm().name() == "C" {
+                record_unmount("DynamicForChild:C");
+            }
+        }
+        TextBlock { text: vm.name }
+    },
+}
+
+#[elwindui::component]
+impl DynamicForChild {}
+
+#[elwindui::component(inherits ContentControl)]
+struct DynamicForHost {
+    #[bindable]
+    vm: std::rc::Rc<DynamicForViewModel>,
+
+    body: view! {
+        VerticalLayout {
+            for item in vm.items {
+                DynamicForChild { vm: item }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl DynamicForHost {}
+
+#[test]
+fn test_dynamic_for_removal_triggers_unmount() {
+    clear_unmount_events();
+
+    let item_a = ItemViewModel::new();
+    item_a.set_name("A".to_string());
+    let item_b = ItemViewModel::new();
+    item_b.set_name("B".to_string());
+    let item_c = ItemViewModel::new();
+    item_c.set_name("C".to_string());
+
+    let vm = DynamicForViewModel::new();
+    vm.items_push(item_a.clone());
+    vm.items_push(item_b.clone());
+    vm.items_push(item_c.clone());
+
+    let _host = DynamicForHost::new(vm.clone());
+
+    assert_eq!(get_unmount_events().len(), 0);
+
+    // Remove C then B
+    vm.items_remove(2);
+    vm.items_remove(1);
+
+    let events = get_unmount_events();
+    assert!(
+        events.contains(&"DynamicForChild:B"),
+        "Removed item B must be unmounted: {events:?}"
+    );
+    assert!(
+        events.contains(&"DynamicForChild:C"),
+        "Removed item C must be unmounted: {events:?}"
+    );
+    assert!(
+        !events.contains(&"DynamicForChild:A"),
+        "Retained item A must not be unmounted: {events:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 8. Dynamic match removal test
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicMatchTab {
+    First,
+    Second,
+}
+
+#[elwindui::viewmodel]
+mod dynamic_match_view_model {
+    use super::DynamicMatchTab;
+    struct DynamicMatchViewModel {
+        #[observable(default = DynamicMatchTab::First)]
+        tab: DynamicMatchTab,
+    }
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct MatchFirstChild {
+    body: view! {
+        on_unmount {
+            record_unmount("MatchFirstChild");
+        }
+        TextBlock { text: "first tab" }
+    },
+}
+
+#[elwindui::component]
+impl MatchFirstChild {}
+
+#[elwindui::component(inherits ContentControl)]
+struct MatchSecondChild {
+    body: view! {
+        on_unmount {
+            record_unmount("MatchSecondChild");
+        }
+        TextBlock { text: "second tab" }
+    },
+}
+
+#[elwindui::component]
+impl MatchSecondChild {}
+
+#[elwindui::component(inherits ContentControl)]
+struct DynamicMatchHost {
+    #[bindable]
+    vm: std::rc::Rc<DynamicMatchViewModel>,
+
+    body: view! {
+        VerticalLayout {
+            match vm.tab {
+                DynamicMatchTab::First => {
+                    MatchFirstChild { }
+                }
+                DynamicMatchTab::Second => {
+                    MatchSecondChild { }
+                }
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl DynamicMatchHost {}
+
+#[test]
+fn test_dynamic_match_branch_removal_triggers_unmount() {
+    clear_unmount_events();
+
+    let vm = DynamicMatchViewModel::new();
+    let _host = DynamicMatchHost::new(vm.clone());
+
+    assert_eq!(get_unmount_events().len(), 0);
+
+    // Switch branch from First to Second
+    vm.set_tab(DynamicMatchTab::Second);
+
+    assert_eq!(
+        get_unmount_events(),
+        vec!["MatchFirstChild"],
+        "Old match branch component must be unmounted when switching branches"
+    );
+}

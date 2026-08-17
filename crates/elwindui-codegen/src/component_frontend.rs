@@ -986,6 +986,28 @@ mod tests {
         assert!(s.contains("__property_changed_subscriptions . borrow_mut () . clear ()"), "{s}");
     }
 
+    #[test]
+    fn layout_component_generates_unmount_and_registers_hook() {
+        let src = r#"
+            struct PlainCard {
+                body: view! {
+                    on_unmount {
+                        // teardown hook
+                    }
+                    TextBlock { text: "card" }
+                }
+            }
+        "#;
+        let generated = generate(Some("VerticalLayout"), src);
+        let s = generated.to_string();
+        assert!(s.contains("pub fn unmount"), "{s}");
+        assert!(s.contains("__unmounted : std :: cell :: Cell < bool >"), "{s}");
+        assert!(s.contains("add_unmount_hook"), "{s}");
+        assert!(s.contains("__run_on_unmount"), "{s}");
+        assert!(s.contains("unmount_subtree"), "{s}");
+        assert!(s.contains("__property_changed_subscriptions . borrow_mut () . clear ()"), "{s}");
+    }
+
     /// Issue #68 bug 4: a component's own `dyn UIElement`-typed field, inserted bare (no `key:`)
     /// in child-element position of its own `view!` — mirrors `docs/specs/dsl_spec.md`'s
     /// `ContentControl` example (§3), but built through this struct/`impl`-based frontend, whose

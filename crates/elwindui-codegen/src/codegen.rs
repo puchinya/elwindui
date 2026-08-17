@@ -5089,12 +5089,29 @@ fn generate_view(
             }
         }
     });
+    let plain_unmount_root = if !root_is_native {
+        let root_expr = into_node_if_needed(
+            quote! { root.clone() },
+            &resolved_root.type_path,
+            from,
+            table,
+        );
+        quote! {
+            if let Some(root) = self.#root_binding.get() {
+                let __root_node = #root_expr;
+                elwindui::core::ui::unmount_subtree(&__root_node);
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
     let plain_unmount_method = quote! {
         #[doc(hidden)]
         pub fn unmount(&self) {
             if self.__unmounted.replace(true) {
                 return;
             }
+            #plain_unmount_root
             #call_on_unmount
             self.__property_changed_handlers.borrow_mut().clear();
             self.__property_changed_subscriptions.borrow_mut().clear();

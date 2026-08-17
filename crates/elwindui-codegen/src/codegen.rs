@@ -3601,14 +3601,34 @@ fn generate_view(
     // attribute) unstored, since nothing about *that* node alone says it needs to live past
     // `construct()`. Forced here — before the `struct_fields`/`field_inits` loop below reads
     // `node.stored` — for the same reason `is_host_composition`'s rename just above runs this early.
-    if is_shape_composition && resolved_root.type_path == "ContentControl" {
-        if let Some(content_binding) = plan
-            .last()
-            .and_then(|root| root.child_bindings.first())
-            .map(|(binding, _)| binding.clone())
+    if is_shape_composition {
+        if resolved_root.type_path == "ContentControl" {
+            if let Some(content_binding) = plan
+                .last()
+                .and_then(|root| root.child_bindings.first())
+                .map(|(binding, _)| binding.clone())
+            {
+                if let Some(content_node) = plan.iter_mut().find(|n| n.binding == content_binding) {
+                    content_node.stored = true;
+                }
+            }
+        } else if resolved_root.type_path == "VerticalLayout"
+            || resolved_root.type_path == "HorizontalLayout"
+            || resolved_root.type_path == "Grid"
+            || resolved_root.type_path == "Layout"
         {
-            if let Some(content_node) = plan.iter_mut().find(|n| n.binding == content_binding) {
-                content_node.stored = true;
+            if let Some(root) = plan.last() {
+                let bindings: Vec<_> = root
+                    .child_bindings
+                    .iter()
+                    .filter(|(_, ty)| *ty != DYNAMIC_CHILD_SLOT_MARKER)
+                    .map(|(b, _)| b.clone())
+                    .collect();
+                for b in bindings {
+                    if let Some(node) = plan.iter_mut().find(|n| n.binding == b) {
+                        node.stored = true;
+                    }
+                }
             }
         }
     }
@@ -5014,11 +5034,24 @@ fn generate_view(
             );
         }
     });
-    let call_on_unmount_from_close = on_unmount_method
+    let call_on_unmount = on_unmount_method
         .is_some()
         .then(|| quote! { self.__run_on_unmount(); });
     let window_lifecycle_overrides = is_host_composition.then(|| {
         quote! {
+            #[doc(hidden)]
+            pub fn unmount(&self) {
+                if self.__unmounted.replace(true) {
+                    return;
+                }
+                if let Some(content) = <Self as elwindui::core::ui::WindowExt>::content_element(self) {
+                    elwindui::core::ui::unmount_subtree(&content);
+                }
+                #call_on_unmount
+                self.__property_changed_handlers.borrow_mut().clear();
+                self.__property_changed_subscriptions.borrow_mut().clear();
+            }
+
             pub fn show(&self) {
                 if self.__mount_environment.get().is_none() {
                     self.mount(elwindui::core::environment::application_environment());
@@ -5030,19 +5063,43 @@ fn generate_view(
                 <Self as elwindui::core::ui::WindowExt>::hide(self);
             }
 
-            // Cancels this component's own property-changed/on_update/Environment subscriptions
-            // (`__property_changed_subscriptions` — every `Subscription` unregisters on drop) and
-            // releases the native window, in that order (spec §16: on_unmount fires "once before
-            // the subtree and subscriptions are discarded"). Does NOT recursively cascade unmount
-            // into descendant Components' own subscriptions/state — full recursive teardown is not
-            // yet implemented; see docs/design/runtime/component_lifecycle_design.md §4g.
+            // Cancels this component's own property-changed/on_update/Environment subscriptions,
+            // recursively cascades unmount to all descendant Components (Issue #126), and releases
+            // the native window.
             pub fn close(&self) {
-                #call_on_unmount_from_close
-                self.__property_changed_subscriptions.borrow_mut().clear();
+                self.unmount();
                 <Self as elwindui::core::ui::WindowExt>::close(self);
             }
         }
     });
+    let composed_unmount_method = (!is_host_composition).then(|| {
+        quote! {
+            #[doc(hidden)]
+            pub fn unmount(&self) {
+                if self.__unmounted.replace(true) {
+                    return;
+                }
+                let children = <Self as elwindui::core::ui::UIElementExt>::visual_children(self);
+                for child in &children {
+                    elwindui::core::ui::unmount_subtree(child);
+                }
+                #call_on_unmount
+                self.__property_changed_handlers.borrow_mut().clear();
+                self.__property_changed_subscriptions.borrow_mut().clear();
+            }
+        }
+    });
+    let plain_unmount_method = quote! {
+        #[doc(hidden)]
+        pub fn unmount(&self) {
+            if self.__unmounted.replace(true) {
+                return;
+            }
+            #call_on_unmount
+            self.__property_changed_handlers.borrow_mut().clear();
+            self.__property_changed_subscriptions.borrow_mut().clear();
+        }
+    };
 
     let methods = emit_methods(&component.methods);
 
@@ -5085,6 +5142,41 @@ fn generate_view(
                     use elwindui::core::ui::ContentControlExt as _;
                     self.set_content(#content);
                 }
+            }
+        };
+        (TokenStream::new(), attach)
+    } else if is_shape_composition
+        && (resolved_root.type_path == "VerticalLayout"
+            || resolved_root.type_path == "HorizontalLayout"
+            || resolved_root.type_path == "Grid"
+            || resolved_root.type_path == "Layout")
+    {
+        let children = plan
+            .last()
+            .map(|root| {
+                root.child_bindings
+                    .iter()
+                    .filter(|(_, child_ty)| child_ty != DYNAMIC_CHILD_SLOT_MARKER)
+                    .map(|(binding, child_ty)| {
+                        into_node_if_needed(
+                            quote! {
+                                self.#binding
+                                    .get()
+                                    .expect("content_attach: component is not yet mounted")
+                                    .clone()
+                            },
+                            child_ty,
+                            from,
+                            table,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let attach = quote! {
+            for __child in vec![ #(#children),* ] {
+                use elwindui::core::ui::LayoutExt as _;
+                self.children().add(__child);
             }
         };
         (TokenStream::new(), attach)
@@ -5373,6 +5465,19 @@ fn generate_view(
     };
 
     if is_composed {
+        let unmount_hook_attach = (!is_host_composition).then(|| {
+            quote! {
+                let weak = std::rc::Rc::downgrade(&this);
+                <Self as elwindui::core::ui::UIElementExt>::add_unmount_hook(
+                    self,
+                    Box::new(move || {
+                        if let Some(this) = weak.upgrade() {
+                            this.unmount();
+                        }
+                    }),
+                );
+            }
+        });
         // Every one of these is purely inherent (`resync`/`#[id(..)]` child accessors/user methods/
         // lifecycle shadow hooks) — none is part of `#target`'s own generated trait — so `mark_inherent`
         // tags each with `#[inherent]` and they all land in the single `#[elwindui::class] impl
@@ -5405,6 +5510,7 @@ fn generate_view(
         let methods = mark_inherent(methods);
         let shadow_hooks = mark_inherent(shadow_hooks);
         let on_unmount_method = on_unmount_method.map(mark_inherent);
+        let composed_unmount_method = composed_unmount_method.map(mark_inherent);
         quote! {
             #[allow(non_camel_case_types)]
             #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5438,6 +5544,7 @@ fn generate_view(
                 // field's own resolution source, replacing the legacy, ambient-captured
                 // `__environment` field this struct used to declare separately.
                 __mount_environment: std::cell::OnceCell<elwindui::core::environment::EnvironmentContext>,
+                __unmounted: std::cell::Cell<bool>,
             }
 
             #[elwindui::class]
@@ -5445,7 +5552,7 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new() }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __unmounted: std::cell::Cell::new(false) }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -5522,6 +5629,7 @@ fn generate_view(
                         .ok();
                     if let Some(this) = __most_derived.clone() {
                         #wiring_stmts
+                        #unmount_hook_attach
                     }
                     self.__refresh_dynamic_regions();
                     // Most widgets already read live model state at construction time, so this is a
@@ -5551,6 +5659,7 @@ fn generate_view(
                 #dynamic_region_refresh_method
                 #root_embed_method
                 #window_lifecycle_overrides
+                #composed_unmount_method
                 #named_accessors
                 #methods
                 #shadow_hooks
@@ -5587,7 +5696,7 @@ fn generate_view(
                 pub fn __new_unmounted(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new() })
+                    std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new(), __unmounted: std::cell::Cell::new(false) })
                 }
 
                 // Establishes this component's effective Environment and performs its initial view
@@ -5612,6 +5721,17 @@ fn generate_view(
                     #own_environment_resolve_stmts
                     #child_construct_stmts
                     #content_attach_stmt
+                    let weak = std::rc::Rc::downgrade(self);
+                    if let Some(root) = self.#root_binding.get() {
+                        elwindui::core::ui::UIElementExt::add_unmount_hook(
+                            &**root,
+                            Box::new(move || {
+                                if let Some(this) = weak.upgrade() {
+                                    this.unmount();
+                                }
+                            }),
+                        );
+                    }
                     #wiring_stmts
                     self.resync();
                     self.__refresh_dynamic_regions();
@@ -5627,6 +5747,7 @@ fn generate_view(
                     #resync_stmts
                 }
 
+                #plain_unmount_method
                 #property_resync_methods
                 #component_property_resync_methods
                 #own_computed_recompute_methods
@@ -5656,6 +5777,7 @@ fn generate_view(
                 // (docs/design/runtime/component_lifecycle_design.md §4a, CI-3 of #80) — same guard,
                 // same reasoning, for this non-`#[class]` shape.
                 __mount_environment: std::cell::OnceCell<elwindui::core::environment::EnvironmentContext>,
+                __unmounted: std::cell::Cell<bool>,
             }
 
             #component_observable_impl

@@ -39,6 +39,10 @@ impl Window {
         self.inner.set_menu_bar(&menu_bar.inner);
     }
 
+    fn content_element(&self) -> Option<Rc<dyn elwindui_core::ui::UIElementExt>> {
+        self.content.borrow().clone()
+    }
+
     fn set_content(&self, content: Rc<dyn elwindui_core::ui::UIElementExt>) {
         self.inner.set_content(content.clone());
         *self.content.borrow_mut() = Some(content);

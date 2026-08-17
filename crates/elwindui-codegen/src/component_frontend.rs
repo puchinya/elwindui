@@ -933,6 +933,15 @@ mod tests {
         assert!(s.contains("pub fn show"), "{s}");
         assert!(s.contains("pub fn hide"), "{s}");
         assert!(s.contains("pub fn close"), "{s}");
+        assert!(s.contains("pub fn unmount"), "{s}");
+        assert!(
+            s.contains("self . unmount ()"),
+            "close() must delegate to self.unmount(): {s}"
+        );
+        assert!(
+            s.contains("unmount_subtree"),
+            "unmount() must cascade to descendant subtree: {s}"
+        );
         assert!(
             s.contains("__mount_environment . get () . is_none ()"),
             "show() must mount-check before mounting: {s}"
@@ -949,6 +958,32 @@ mod tests {
             mount_call_count, 1,
             "expected exactly one self.mount(..) call site (inside show()), found {mount_call_count}: {s}"
         );
+    }
+
+    #[test]
+    fn composed_component_generates_unmount_and_registers_hook() {
+        let src = r#"
+            struct CustomCard {
+                body: view! {
+                    on_unmount {
+                        // teardown hook
+                    }
+                    VerticalLayout {
+                        TextBlock { text: "card" }
+                    }
+                }
+            }
+        "#;
+        let generated = generate(Some("ContentControl"), src);
+        syn::parse2::<syn::File>(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
+        let s = generated.to_string();
+        assert!(s.contains("pub fn unmount"), "{s}");
+        assert!(s.contains("__unmounted : std :: cell :: Cell < bool >"), "{s}");
+        assert!(s.contains("add_unmount_hook"), "{s}");
+        assert!(s.contains("__run_on_unmount"), "{s}");
+        assert!(s.contains("unmount_subtree"), "{s}");
+        assert!(s.contains("__property_changed_subscriptions . borrow_mut () . clear ()"), "{s}");
     }
 
     /// Issue #68 bug 4: a component's own `dyn UIElement`-typed field, inserted bare (no `key:`)

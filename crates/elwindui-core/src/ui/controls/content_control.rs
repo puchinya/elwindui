@@ -47,6 +47,7 @@ impl ContentControl {
             if !self.template_presentation.get() {
                 self.as_ui_element().visual_collection.remove(&old);
             }
+            unmount_subtree(&old);
         }
         // `visual_collection.add` (below) is what routed-event bubbling (`dispatch_routed`) actually
         // relies on now — it walks `visual_parent`. Setting `content`'s Logical `parent` here too is

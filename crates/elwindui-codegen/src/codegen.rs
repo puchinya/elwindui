@@ -5040,16 +5040,24 @@ fn generate_view(
     let window_lifecycle_overrides = is_host_composition.then(|| {
         quote! {
             #[doc(hidden)]
-            pub fn unmount(&self) {
+            pub fn __unmount_local(&self) {
                 if self.__unmounted.replace(true) {
+                    return;
+                }
+                #call_on_unmount
+                self.__property_changed_handlers.borrow_mut().clear();
+                self.__property_changed_subscriptions.borrow_mut().clear();
+            }
+
+            #[doc(hidden)]
+            pub fn unmount(&self) {
+                if self.__unmounted.get() {
                     return;
                 }
                 if let Some(content) = <Self as elwindui::core::ui::WindowExt>::content_element(self) {
                     elwindui::core::ui::unmount_subtree(&content);
                 }
-                #call_on_unmount
-                self.__property_changed_handlers.borrow_mut().clear();
-                self.__property_changed_subscriptions.borrow_mut().clear();
+                self.__unmount_local();
             }
 
             pub fn show(&self) {
@@ -5075,17 +5083,27 @@ fn generate_view(
     let composed_unmount_method = (!is_host_composition).then(|| {
         quote! {
             #[doc(hidden)]
-            pub fn unmount(&self) {
+            pub fn __unmount_local(&self) {
                 if self.__unmounted.replace(true) {
+                    return;
+                }
+                #call_on_unmount
+                self.__property_changed_handlers.borrow_mut().clear();
+                self.__property_changed_subscriptions.borrow_mut().clear();
+            }
+
+            #[doc(hidden)]
+            pub fn unmount(&self) {
+                if self.__unmounted.get() {
                     return;
                 }
                 let children = <Self as elwindui::core::ui::UIElementExt>::visual_children(self);
                 for child in &children {
                     elwindui::core::ui::unmount_subtree(child);
                 }
-                #call_on_unmount
-                self.__property_changed_handlers.borrow_mut().clear();
-                self.__property_changed_subscriptions.borrow_mut().clear();
+                self.__unmount_local();
+                <Self as elwindui::core::ui::UIElementExt>::unmount(self);
+                <Self as elwindui::core::ui::UIElementExt>::as_ui_element(self).visual_collection.clear();
             }
         }
     });
@@ -5107,14 +5125,22 @@ fn generate_view(
     };
     let plain_unmount_method = quote! {
         #[doc(hidden)]
-        pub fn unmount(&self) {
+        pub fn __unmount_local(&self) {
             if self.__unmounted.replace(true) {
                 return;
             }
-            #plain_unmount_root
             #call_on_unmount
             self.__property_changed_handlers.borrow_mut().clear();
             self.__property_changed_subscriptions.borrow_mut().clear();
+        }
+
+        #[doc(hidden)]
+        pub fn unmount(&self) {
+            if self.__unmounted.get() {
+                return;
+            }
+            #plain_unmount_root
+            self.__unmount_local();
         }
     };
 
@@ -5489,7 +5515,7 @@ fn generate_view(
                     self,
                     Box::new(move || {
                         if let Some(this) = weak.upgrade() {
-                            this.unmount();
+                            this.__unmount_local();
                         }
                     }),
                 );
@@ -5744,7 +5770,7 @@ fn generate_view(
                             &**root,
                             Box::new(move || {
                                 if let Some(this) = weak.upgrade() {
-                                    this.unmount();
+                                    this.__unmount_local();
                                 }
                             }),
                         );

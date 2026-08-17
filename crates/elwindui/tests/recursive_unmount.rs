@@ -603,3 +603,52 @@ fn test_dynamic_match_branch_removal_triggers_unmount() {
         "Old match branch component must be unmounted when switching branches"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 9. Teardown ordering: tree connection is intact during on_unmount
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static HAD_PARENT_DURING_UNMOUNT: Cell<bool> = const { Cell::new(false) };
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct TreeConnectionChild {
+    body: view! {
+        on_unmount {
+            use elwindui::core::ui::UIElementExt;
+            if self.visual_parent().is_some() || self.parent().is_some() {
+                HAD_PARENT_DURING_UNMOUNT.with(|c| c.set(true));
+            }
+        }
+        TextBlock { text: "tree check" }
+    },
+}
+
+#[elwindui::component]
+impl TreeConnectionChild {}
+
+#[elwindui::component(inherits ContentControl)]
+struct TreeConnectionParent {
+    body: view! {
+        TreeConnectionChild { }
+    },
+}
+
+#[elwindui::component]
+impl TreeConnectionParent {}
+
+#[test]
+fn test_on_unmount_runs_before_visual_and_logical_detach() {
+    HAD_PARENT_DURING_UNMOUNT.with(|c| c.set(false));
+
+    let parent = TreeConnectionParent::new();
+    assert!(!HAD_PARENT_DURING_UNMOUNT.with(|c| c.get()));
+
+    parent.unmount();
+
+    assert!(
+        HAD_PARENT_DURING_UNMOUNT.with(|c| c.get()),
+        "on_unmount must execute before parent/visual tree connection is detached"
+    );
+}

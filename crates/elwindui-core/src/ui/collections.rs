@@ -464,8 +464,9 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         keys: Vec<usize>,
         items: Vec<Rc<DynamicChild<T>>>,
     ) {
-        let previous = self.items.borrow();
-        let previous_children: Vec<_> = previous
+        let previous_children: Vec<_> = self
+            .items
+            .borrow()
             .iter()
             .flat_map(|item| item.children().cloned())
             .collect();
@@ -476,14 +477,14 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         let shared = previous_children.len().min(next_children.len());
         for index in 0..shared {
             if !Rc::ptr_eq(&previous_children[index], &next_children[index]) {
+                teardown_dynamic_child(&previous_children[index]);
                 host.remove_at(start + index);
                 host.insert(start + index, Rc::clone(&next_children[index]));
-                teardown_dynamic_child(&previous_children[index]);
             }
         }
         for child in previous_children.iter().skip(next_children.len()) {
-            host.remove_at(start + next_children.len());
             teardown_dynamic_child(child);
+            host.remove_at(start + next_children.len());
         }
         for (index, child) in next_children
             .iter()
@@ -492,7 +493,6 @@ impl<T: ?Sized + 'static> DynamicChildSlot<T> {
         {
             host.insert(start + index, Rc::clone(child));
         }
-        drop(previous);
         *self.keys.borrow_mut() = keys;
         *self.items.borrow_mut() = items;
     }

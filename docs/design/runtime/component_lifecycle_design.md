@@ -142,6 +142,8 @@ Concretely, `show()`'s body: if `self.__mount_environment.get().is_none()` (this
   - *AppKit*: type-checked (runtime test execution omitted on macOS harness because native NSWindow construction requires the main thread while Rust's test harness runs on worker threads).
   - *WinUI 3*: runtime test structured for WinUI 3 test execution (Unverified on WinUI 3 runtime in macOS CI/environment).
 
+**PopupSurface consumer** (Issue #161): AppKit's and WinUI3's `InnerPopupSurface::close()` (`crates/elwindui-backend-appkit`/`-winui3`'s `inner/popup.rs`) call `unmount_subtree` on the popup content root before the backend host's own native detach (`TreeHost::clear_tree()`), the same teardown-before-detach ordering as every other consumer here — see `docs/design/runtime/popup_context_menu_design.md` §6 for the full sequence and `docs/design/runtime/view_template_design.md` for the deferred-view type (`ViewTemplate`) popup content is built from.
+
 ### 4h. ControlTemplate mount selection
 
 `#[component(template = key)]`はown Environment field解決後、descendant construction前にKeyを一度読む。

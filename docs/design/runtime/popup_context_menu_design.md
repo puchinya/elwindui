@@ -52,7 +52,7 @@ ElwindUI のコンテキストメニューおよびポップアップ基盤は�
 - **Presentation**:
   - `ContextMenuPresentation::Native`: `Menu` / `MenuItem` のセマンティックモデルを Backend のネイティブメニュー（`NSMenu` / `MenuFlyout`）に渡して表示。
   - `ContextMenuPresentation::Custom`: 標準 `Menu` モデルを `ContextMenuPresenter` により通常 UIElement ツリーとして構築し、`PopupSurface` 上で表示。
-  - `context_popup`: 任意の UIElement を生成する `PopupContentTemplate` をターゲットの有効な `EnvironmentContext` で評価し、`PopupSurface` 上で表示。
+  - `context_popup`: 任意の UIElement を生成する `ViewTemplate`（汎用 deferred View factory 型、`docs/design/runtime/view_template_design.md`）を、ターゲットの有効な `EnvironmentContext` から `derive()` した popup 専用コンテキストで評価し、`PopupSurface` 上で表示。
 
 ---
 
@@ -179,17 +179,27 @@ Core 座標系は **Top-Left (0, 0), +x: right, +y: down** に統一される。
 
 ## 6. Lifecycle & Environment Inheritance
 
+`context_popup` の内容は、ターゲット要素の mount 時点ではなく、**表示要求（open）が発生した時点**で構築される。`ViewTemplate::build`（`docs/design/runtime/view_template_design.md`）は owner を `Weak` としてのみ捕捉し、owner が既に解放されていれば `None` を返す — その場合 popup は表示されない（`ContextMenuService::open_custom_popup` も `Option<Rc<dyn PopupSurfaceHandle>>` を返す）。
+
+`ContextMenuService::open_custom_popup` は、owner の有効な `EnvironmentContext` から `derive()` した popup 専用の `EnvironmentContext` を作る。この派生コンテキストに `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`、`Rc<dyn Fn()>` を保持する薄いラッパー、`open_custom_menu` の weak-handle-slot パターンと同じ仕組みで `PopupSurfaceHandle::close()` へ橋渡しする）を設定してから `ViewTemplate::build` に渡す。owner 自身の Environment は変更しない。
+
 ### Build / Mount / Unmount Sequence
 
 ```text
 Context Request
    │
    ▼
-Capture effective EnvironmentContext from target element
+Resolve owner (nearest-ancestor context_popup/context_menu target)
    │
    ▼
-Build Popup content using PopupContentTemplate(environment)
+Capture effective EnvironmentContext from owner, then derive() a popup-scoped EnvironmentContext
    │
+   ▼
+Install PopupDismissAction into the popup-scoped EnvironmentContext (weak-handle-slot, filled after show_popup)
+   │
+   ▼
+ViewTemplate::build(ViewBuildContext { owner: Weak<owner>, environment: popup-scoped })
+   │  -> None if owner already dropped: abort, nothing shown
    ▼
 Create / Configure PopupSurface via PopupHost
    │
@@ -199,16 +209,29 @@ Mount content tree into Popup's TreeHost (register RelayoutHost, FocusHost)
    ▼
 Show PopupSurface (apply calculated screen position)
    │
-   ▼ [Interaction / Dismissal event: Outside Click, Escape, Selection, Window Move]
+   ▼ [Interaction / Dismissal event: Outside Click, Escape, Selection, PopupDismissAction,
+   │  popup replacement, owner Window close, Drop]
    │
-Close PopupSurface
+Close PopupSurface (idempotent, guarded by is_open)
    │
    ▼
-Unmount content tree (cancel subscriptions, clear Visual parent)
+unmount_subtree(content root) — child-first: on_unmount hooks, subscription cancellation
+   (teardown-before-detach; runs before any backend native detach, including AppKit's PR #156
+   deferred `TreeHostView::clear_tree()` — see `crates/elwindui-backend-appkit/src/inner/popup.rs`)
+   │
+   ▼
+Backend host clear/detach (`TreeHost::clear_tree()` — native resource release only, no lifecycle
+   teardown responsibility of its own)
    │
    ▼
 Restore focus to original target if necessary
 ```
+
+**Declarative `context_popup: view! { .. }` DSL** (evaluating the same `view!` grammar as a normal
+Component body, deferred to open time, reusing `view!`'s existing AST/codegen pipeline) is a planned
+follow-up, not yet implemented as of this design revision — see Issue
+[#161](https://github.com/puchinya/elwindui/issues/161). Today, popup content is authored via the
+low-level `ViewTemplate::new(|ctx| ...)` API directly.
 
 ---
 

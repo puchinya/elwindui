@@ -5,9 +5,9 @@
 use elwindui::core::base::{Point, Rect, Size};
 use elwindui::core::ui::popup::{
     ContextMenuService, ContextRequest, PopupAnchor,
-    PopupContentTemplate, PopupHost, PopupRequest, PopupSurfaceHandle, ResolvedContextDefinition,
+    PopupHost, PopupRequest, PopupSurfaceHandle, ResolvedContextDefinition,
 };
-use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt};
+use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt, ViewTemplate};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -193,11 +193,11 @@ fn custom_context_menu_service_opens_and_closes_popup() {
 #[test]
 fn rich_context_popup_displays_arbitrary_layout_and_controls() {
     let target = elwindui::core::ui::TextBlock::new();
-    let template = PopupContentTemplate::new(|_ctx| {
+    let template = ViewTemplate::new(|_ctx| {
         let layout = elwindui::core::ui::VerticalLayout::new();
         let title = elwindui::core::ui::TextBlock::new();
         layout.children().add(Rc::clone(&title) as Rc<dyn UIElementExt>);
-        layout as Rc<dyn UIElementExt>
+        Some(layout as Rc<dyn UIElementExt>)
     });
 
     target.set_context_popup(Some(template.clone()));
@@ -218,11 +218,13 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
             };
             let handle = ContextMenuService::open_custom_popup(
                 &host,
+                &resolved.owner,
                 &t,
                 &anchor,
                 resolved.owner.effective_environment(),
                 work_area,
-            );
+            )
+            .expect("owner is alive, template should build");
 
             assert_eq!(host.shown.borrow().len(), 1);
             let (_content, _pos, size) = &host.shown.borrow()[0];
@@ -440,11 +442,11 @@ thread_local! {
 struct PopupScopeChild {
     body: view! {
         on_mount {
-            let template = PopupContentTemplate::new(|ctx| {
+            let template = ViewTemplate::new(|ctx| {
                 OBSERVED_SCOPE_THEME.with(|c| {
                     *c.borrow_mut() = ctx.environment.get::<PopupTestScopeTheme>();
                 });
-                VerticalLayout::new() as Rc<dyn UIElementExt>
+                Some(VerticalLayout::new() as Rc<dyn UIElementExt>)
             });
             let target = self.target();
             target.set_context_popup(Some(template));
@@ -495,6 +497,7 @@ fn environment_scope_dsl_context_popup_integration() {
         ResolvedContextDefinition::Popup { template: t } => {
             let _handle = ContextMenuService::open_custom_popup(
                 &host,
+                &resolved.owner,
                 &t,
                 &anchor,
                 resolved.owner.effective_environment(),

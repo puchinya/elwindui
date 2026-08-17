@@ -120,7 +120,7 @@ pub trait FocusHost {
 #[prop(routed, on_right_tapped: fn(crate::input::TappedEventArgs))]
 #[prop(context_menu: Option<Rc<dyn crate::ui::MenuExt>>)]
 #[prop(context_menu_presentation: crate::ui::ContextMenuPresentation)]
-#[prop(context_popup: Option<crate::ui::PopupContentTemplate>)]
+#[prop(context_popup: Option<crate::ui::ViewTemplate>)]
 pub struct UIElement {
     /// Stable identity of this Visual's retained RenderGroup. Never reused within a process.
     pub render_group_id: u64,
@@ -150,7 +150,7 @@ pub struct UIElement {
     pub max_height: Cell<Option<f32>>,
     pub context_menu: RefCell<Option<Rc<dyn MenuExt>>>,
     pub context_menu_presentation: Cell<ContextMenuPresentation>,
-    pub context_popup: RefCell<Option<PopupContentTemplate>>,
+    pub context_popup: RefCell<Option<ViewTemplate>>,
     pub environment: RefCell<Option<crate::environment::EnvironmentContext>>,
     /// WinUI3's `UIElement.DesiredSize` — the result of the most recent `UIElement::measure` pass,
     /// `None` before the first one (or right after `invalidate_measure` — see that method's own doc
@@ -522,10 +522,10 @@ impl UIElement {
             .context_menu_presentation
             .set(presentation);
     }
-    fn context_popup(&self) -> Option<PopupContentTemplate> {
+    fn context_popup(&self) -> Option<ViewTemplate> {
         self.as_ui_element().context_popup.borrow().clone()
     }
-    fn set_context_popup(&self, popup: Option<PopupContentTemplate>) {
+    fn set_context_popup(&self, popup: Option<ViewTemplate>) {
         *self.as_ui_element().context_popup.borrow_mut() = popup;
     }
     fn environment_context(&self) -> Option<crate::environment::EnvironmentContext> {

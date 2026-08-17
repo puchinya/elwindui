@@ -8,6 +8,7 @@ use crate::host::TreeHostView;
 use elwindui_core::ui::popup::{
     PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
 };
+use elwindui_core::ui::{UIElementExt, unmount_subtree};
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, msg_send};
 use block2::RcBlock;
@@ -25,6 +26,7 @@ use std::rc::Rc;
 pub(crate) struct InnerPopupSurface {
     window: Retained<NSWindow>,
     content_host: Retained<TreeHostView>,
+    content: Rc<dyn UIElementExt>,
     is_open: RefCell<bool>,
     local_monitor: RefCell<Option<Retained<AnyObject>>>,
     global_monitor: RefCell<Option<Retained<AnyObject>>>,
@@ -86,6 +88,7 @@ impl InnerPopupSurface {
         let surface = Rc::new(Self {
             window,
             content_host,
+            content: Rc::clone(&request.content),
             is_open: RefCell::new(true),
             local_monitor: RefCell::new(None),
             global_monitor: RefCell::new(None),
@@ -150,6 +153,17 @@ impl InnerPopupSurface {
     }
 
     /// Closes and removes the popup surface from the screen.
+    ///
+    /// Teardown-before-detach: generic Component/UIElement lifecycle teardown
+    /// (`unmount_subtree` — `on_unmount` hooks, subscription cancellation) runs synchronously
+    /// here, before the backend host's native detach. `TreeHostView::clear_tree()` itself stays
+    /// deferred to the next main-queue turn (PR #156): `close()` may be invoked reentrantly from
+    /// inside a popup-internal event handler already on the call stack, and `clear_tree()` takes
+    /// `TreeHostView`'s own `tree`/`render_tree` `RefCell`s mutably, which a live event-dispatch
+    /// frame may still be borrowing. `unmount_subtree` does not touch those `TreeHostView`-owned
+    /// cells (it only walks/mutates the `UIElementExt` tree's own `visual_collection`/lifecycle
+    /// state), so running it synchronously here is safe even when `close()` is reentrant — verified
+    /// by `elwindui-core`'s `open_custom_popup_dismiss_from_nested_click_handler_does_not_panic`.
     pub(crate) fn close(&self) {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
@@ -163,6 +177,8 @@ impl InnerPopupSurface {
                 parent.removeChildWindow(&self.window);
             }
             self.window.orderOut(None);
+
+            unmount_subtree(&self.content);
 
             let host_raw = Retained::into_raw(self.content_host.clone()) as usize;
             dispatch2::DispatchQueue::main().exec_async(move || {

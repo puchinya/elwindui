@@ -23,6 +23,7 @@ Snapshot: 2026-08-15. Architecture is indexed in [`../design/README.md`](../desi
 - Window's new `hide()`/`close()` (Issue #80 CI-8: `NSWindow::orderOut`/`NSWindow::close`) are implemented and covered by the workspace test suite (constructed, type-checked; interactive on-screen confirmation was attempted but inconclusive in this sandboxed development environment — no crash or early-exit was observed running a real example either before or after the change, but a spawned GUI process's window did not appear in a `screencapture` capture, a pre-existing environment characteristic unrelated to this change).
 - Window transparency and floating/normal levels are implemented through `NSWindow`; `mascot-demo` is the focused alpha-image verification surface ([#150](https://github.com/puchinya/elwindui/issues/150)).
 - Context Menu & PopupSurface (`#152`): AppKit popup uses owner child window relationship (`addChildWindow:ordered:`) with floating level, dynamic work-area acquisition via `NSScreen.visibleFrame` by anchor, and Core top-left coordinate conversion.
+- Context Menu & PopupSurface (`#161`): `InnerPopupSurface::close()` runs `unmount_subtree` on the popup content root synchronously before deferring `TreeHostView::clear_tree()` to the next main-queue turn (unchanged PR #156 reentrancy workaround); verified reentrancy-safe (dismiss triggered from within a popup-internal event handler) at the `elwindui-core` level, where the risk lives — `unmount_subtree` never touches `TreeHostView`'s own `RefCell`s.
 
 ## WinUI 3 current gaps
 
@@ -31,6 +32,7 @@ Snapshot: 2026-08-15. Architecture is indexed in [`../design/README.md`](../desi
 - Whole-workspace rust-analyzer diagnostics have pre-existing failures and were not established as a clean Windows backend gate.
 - Window transparency uses the XAML root's transparent background and topmost state uses `OverlappedPresenter`; Windows runtime verification for Issue #150 remains platform-specific.
 - Context Menu & PopupSurface (`#152`): KeyDown context key (Shift+F10 / Apps key), `RightTapped`, and XamlRoot dynamic work-area querying are implemented and unit tested; Windows real-machine GUI runtime verification is tracked in Issue [#157](https://github.com/puchinya/elwindui/issues/157).
+- Context Menu & PopupSurface (`#161`): `InnerPopupSurface::close()` runs `unmount_subtree` on the popup content root synchronously before `TreeHostPanel::clear_tree()` (no existing deferred-dispatch workaround on this backend, unlike AppKit); code-reviewed only, not yet exercised on Windows hardware — folded into the [#157](https://github.com/puchinya/elwindui/issues/157) runtime verification backlog.
 
 ## Verification baseline
 

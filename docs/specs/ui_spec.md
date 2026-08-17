@@ -209,7 +209,7 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 | `max_height` | `Option<f32>` | OneWay | 最大高さ |
 | `context_menu` | `Option<Menu>` | OneWay | 要素またはその子孫に対する標準コンテキストメニュー（既定値: `None`） |
 | `context_menu_presentation` | `ContextMenuPresentation` | OneWay | コンテキストメニューの表示方式（`Native` / `Custom`, 既定値: `Native`） |
-| `context_popup` | `Option<PopupContentTemplate>` | OneWay | 任意のUIElementツリーを内容とするCustom Context Popup（既定値: `None`） |
+| `context_popup` | `Option<ViewTemplate>` | OneWay | 任意のUIElementツリーを内容とするCustom Context Popup（既定値: `None`）。`ViewTemplate` は popup 専用ではない汎用の deferred View factory型 — 詳細は `docs/design/runtime/view_template_design.md` |
 
 #### Context Request & Lookup Semantics
 
@@ -233,8 +233,11 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
   - owner Window より前面かつ `NativeControl` よりも前面の Z-order を維持する（application-global な最前面にはしない）。
   - モニターの有効表示領域（work area）内に収まるよう、右/下の端部では自動的に左/上方向へ反転（flip）配置される。
 - **Lifecycle & Environment**:
-  - `context_popup` の内容は表示要求時にターゲット要素の有効な `EnvironmentContext` を継承して構築（build）され、`PopupSurface` に mount される。
-  - ポップアップが閉じられた際（外部クリック、Escape キー、項目選択、owner Window の close/移動等）に unmount され、リソースおよび Visual 接続が解放される。
+  - `context_popup` の内容は表示要求（open）時点で構築（build）される。owner Component の mount 時点ではなく、要求発生時点の owner の現在値を評価する。
+  - `ViewTemplate` の factory は owner を `Weak` としてのみ捕捉する（strong retain cycle を作らない）。owner が既に解放されている場合、`ViewTemplate::build` は `None` を返し、popup は表示されない。
+  - build 対象の `EnvironmentContext` は、ターゲット要素の有効な Environment から `derive()` された popup 専用の派生コンテキストであり、ターゲット要素自身の Environment を変更しない。この派生コンテキストには宣言的な dismiss 用の `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`）が設定される。
+  - ポップアップが閉じられた際（外部クリック、Escape キー、項目選択、`PopupDismissAction`、popup replacement、owner Window の close 等）は、`elwindui_core::ui::unmount_subtree` による child-first の再帰的 unmount（`on_unmount`・購読解除を含む）が、バックエンドのネイティブ detach より前に必ず実行される（teardown-before-detach）。
+  - `context_popup: view! { .. }` という宣言的 DSL 構文（open 時に評価される deferred View、`view!` の既存文法をそのまま再利用）は計画中の拡張であり、本改修時点では未実装。現在は `ViewTemplate::new(|ctx| ...)` による低レベル API のみが利用可能 — 進捗は Issue [#161](https://github.com/puchinya/elwindui/issues/161) を参照。
 
 ### `NativeControl`
 

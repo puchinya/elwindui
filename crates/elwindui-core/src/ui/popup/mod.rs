@@ -3,11 +3,11 @@
 //! See `docs/specs/ui_spec.md` and `docs/design/runtime/popup_context_menu_design.md`.
 
 use crate::base::{Point, Rect, Size};
-use crate::environment::EnvironmentContext;
+use crate::environment::{EnvironmentContext, EnvironmentKey};
 use crate::focus::FocusTracker;
-use crate::ui::{LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt};
+use crate::ui::{LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt, ViewBuildContext, ViewTemplate};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 /// The presentation mode for a standard [`crate::ui::Menu`]-backed context menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,39 +72,38 @@ impl ContextRequest {
     }
 }
 
-/// Context supplied to a [`PopupContentTemplate`] factory upon building the popup content.
+/// A callback that closes the popup that installed it, invoked from within a
+/// `context_popup: view! { .. }` subtree. Not part of [`ViewBuildContext`] — installed only into
+/// the popup-scoped Environment derived by [`ContextMenuService::open_custom_popup`], via
+/// [`PopupDismissActionKey`], so [`ViewTemplate`] itself stays popup-agnostic.
 #[derive(Clone)]
-pub struct PopupContentContext {
-    /// The effective [`EnvironmentContext`] captured from the target element.
-    pub environment: EnvironmentContext,
+pub struct PopupDismissAction {
+    dismiss: Rc<dyn Fn()>,
 }
 
-/// A lightweight factory for building custom popup content with inherited Environment.
-#[derive(Clone)]
-pub struct PopupContentTemplate {
-    factory: Rc<dyn Fn(PopupContentContext) -> Rc<dyn UIElementExt>>,
-}
-
-impl PopupContentTemplate {
-    /// Creates a new popup content template from a factory closure.
-    pub fn new(factory: impl Fn(PopupContentContext) -> Rc<dyn UIElementExt> + 'static) -> Self {
+impl PopupDismissAction {
+    /// Creates a dismiss action from a closure. No-op if the popup is already closed.
+    pub fn new(dismiss: impl Fn() + 'static) -> Self {
         Self {
-            factory: Rc::new(factory),
+            dismiss: Rc::new(dismiss),
         }
     }
 
-    /// Builds the popup UIElement tree using the provided context.
-    pub fn build(&self, context: PopupContentContext) -> Rc<dyn UIElementExt> {
-        (self.factory)(context)
+    /// Closes the popup that installed this action.
+    pub fn dismiss(&self) {
+        (self.dismiss)()
     }
 }
 
-impl<F> From<F> for PopupContentTemplate
-where
-    F: Fn(PopupContentContext) -> Rc<dyn UIElementExt> + 'static,
-{
-    fn from(factory: F) -> Self {
-        Self::new(factory)
+/// Environment key carrying the active [`PopupDismissAction`] within a popup-scoped Environment.
+/// `None` outside a popup (the default, inherited everywhere a popup has not derived and set it).
+pub struct PopupDismissActionKey;
+
+impl EnvironmentKey for PopupDismissActionKey {
+    type Value = Option<PopupDismissAction>;
+
+    fn default_value() -> Self::Value {
+        None
     }
 }
 
@@ -117,7 +116,7 @@ pub enum ResolvedContextDefinition {
     },
     /// A custom UIElement popup template.
     Popup {
-        template: PopupContentTemplate,
+        template: ViewTemplate,
     },
 }
 
@@ -307,18 +306,43 @@ impl ContextMenuService {
         Some((resolved, anchor))
     }
 
-    /// Opens a custom popup definition using the provided popup host, environment context, and work area.
+    /// Opens a custom popup definition using the provided popup host, owner, environment context,
+    /// and work area.
+    ///
+    /// Derives a popup-scoped `EnvironmentContext` from `environment` (never mutating `environment`
+    /// itself), installs a [`PopupDismissAction`] into it, then builds `template` against that
+    /// derived Environment with `owner` captured only as `Weak`. Returns `None` without showing
+    /// anything if `template` declines to build (e.g. `owner` has already been dropped by the time
+    /// this is called).
     pub fn open_custom_popup(
         host: &dyn PopupHost,
-        template: &PopupContentTemplate,
+        owner: &Rc<dyn UIElementExt>,
+        template: &ViewTemplate,
         anchor: &PopupAnchor,
         environment: EnvironmentContext,
         work_area: Rect,
-    ) -> Rc<dyn PopupSurfaceHandle> {
-        let content = template.build(PopupContentContext {
-            environment: environment.clone(),
+    ) -> Option<Rc<dyn PopupSurfaceHandle>> {
+        let popup_environment = environment.derive();
+
+        let handle_slot: Rc<RefCell<Option<Weak<dyn PopupSurfaceHandle>>>> =
+            Rc::new(RefCell::new(None));
+        let slot_for_dismiss = Rc::clone(&handle_slot);
+        let dismiss_action = PopupDismissAction::new(move || {
+            let weak_opt = slot_for_dismiss.borrow_mut().take();
+            if let Some(weak_handle) = weak_opt {
+                if let Some(handle) = weak_handle.upgrade() {
+                    handle.close();
+                }
+            }
         });
-        content.set_environment_context(environment);
+        popup_environment.set::<PopupDismissActionKey>(Some(dismiss_action));
+
+        let content = template.build(ViewBuildContext {
+            owner: Rc::downgrade(owner),
+            environment: popup_environment.clone(),
+        })?;
+
+        content.set_environment_context(popup_environment);
         content.measure(Size {
             width: work_area.width,
             height: work_area.height,
@@ -332,13 +356,15 @@ impl ContextMenuService {
             height: measured.height.max(1.0),
         };
         let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
-        host.show_popup(PopupRequest {
+        let handle = host.show_popup(PopupRequest {
             content,
             position,
             size: popup_size,
             focus_policy: PopupFocusPolicy::None,
             dismiss_policy: PopupDismissPolicy::LightDismiss,
-        })
+        });
+        *handle_slot.borrow_mut() = Some(Rc::downgrade(&handle));
+        Some(handle)
     }
 
     /// Opens a custom-rendered standard menu on the provided popup host.
@@ -706,11 +732,11 @@ mod tests {
     #[test]
     fn resolve_target_own_context_popup() {
         let node = VerticalLayout::new();
-        let template = PopupContentTemplate::new(|_ctx| {
+        let template = ViewTemplate::new(|_ctx| {
             let layout = VerticalLayout::new();
             let label = TextBlock::new();
             layout.children().add(Rc::clone(&label) as Rc<dyn UIElementExt>);
-            layout as Rc<dyn UIElementExt>
+            Some(layout as Rc<dyn UIElementExt>)
         });
         node.set_context_popup(Some(template));
 
@@ -726,11 +752,12 @@ mod tests {
     #[test]
     fn open_custom_popup_measures_and_displays_on_host() {
         let host = FakePopupHost::new();
-        let template = PopupContentTemplate::new(|_ctx| {
+        let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
+        let template = ViewTemplate::new(|_ctx| {
             let block = TextBlock::new();
             block.set_width(120.0);
             block.set_height(80.0);
-            block as Rc<dyn UIElementExt>
+            Some(block as Rc<dyn UIElementExt>)
         });
 
         let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
@@ -743,11 +770,13 @@ mod tests {
 
         let handle = ContextMenuService::open_custom_popup(
             &host,
+            &owner,
             &template,
             &anchor,
             EnvironmentContext::default(),
             work_area,
-        );
+        )
+        .expect("owner is alive, template should build");
 
         assert_eq!(host.shown.borrow().len(), 1);
         let (_, pos, size) = &host.shown.borrow()[0];
@@ -757,6 +786,30 @@ mod tests {
         assert!(!host.closed.get());
         handle.close();
         assert!(host.closed.get());
+    }
+
+    #[test]
+    fn open_custom_popup_returns_none_when_template_declines_to_build() {
+        // Simulates the "owner already dropped" case: the factory itself decides not to build
+        // (mirroring what a codegen-generated factory does once `ViewBuildContext::owner` fails to
+        // upgrade), independent of which `Rc<dyn UIElementExt>` is passed as `owner` here.
+        let host = FakePopupHost::new();
+        let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
+        let template = ViewTemplate::new(|_ctx| None);
+
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let handle = ContextMenuService::open_custom_popup(
+            &host,
+            &owner,
+            &template,
+            &anchor,
+            EnvironmentContext::default(),
+            work_area,
+        );
+        assert!(handle.is_none());
+        assert_eq!(host.shown.borrow().len(), 0);
     }
 
     #[test]
@@ -969,10 +1022,10 @@ mod tests {
         let captured_env: Rc<RefCell<Option<EnvironmentContext>>> = Rc::new(RefCell::new(None));
         let captured_clone = Rc::clone(&captured_env);
 
-        let template = PopupContentTemplate::new(move |ctx| {
+        let template = ViewTemplate::new(move |ctx| {
             *captured_clone.borrow_mut() = Some(ctx.environment.clone());
             let b = TextBlock::new();
-            b as Rc<dyn UIElementExt>
+            Some(b as Rc<dyn UIElementExt>)
         });
 
         let host = FakePopupHost::new();
@@ -981,6 +1034,7 @@ mod tests {
 
         ContextMenuService::open_custom_popup(
             &host,
+            &leaf_dyn,
             &template,
             &anchor,
             leaf_dyn.effective_environment(),
@@ -989,6 +1043,148 @@ mod tests {
 
         let resolved_env = captured_env.borrow().clone().expect("popup should capture environment");
         assert_eq!(resolved_env.get::<TestKey>(), 42);
+    }
+
+    #[test]
+    fn open_custom_popup_derives_environment_without_mutating_owner() {
+        let owner = VerticalLayout::new();
+        let owner_env = EnvironmentContext::root();
+        owner_env.set::<TestKey>(7);
+        owner.set_environment_context(owner_env.clone());
+        let owner_dyn: Rc<dyn UIElementExt> = owner;
+
+        let captured_env: Rc<RefCell<Option<EnvironmentContext>>> = Rc::new(RefCell::new(None));
+        let captured_clone = Rc::clone(&captured_env);
+        let template = ViewTemplate::new(move |ctx| {
+            *captured_clone.borrow_mut() = Some(ctx.environment.clone());
+            Some(TextBlock::new() as Rc<dyn UIElementExt>)
+        });
+
+        let host = FakePopupHost::new();
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        ContextMenuService::open_custom_popup(
+            &host,
+            &owner_dyn,
+            &template,
+            &anchor,
+            owner_dyn.effective_environment(),
+            work_area,
+        );
+
+        let popup_env = captured_env.borrow().clone().expect("popup should capture environment");
+        // The derived popup Environment inherits the owner's value...
+        assert_eq!(popup_env.get::<TestKey>(), 7);
+        // ...but is a distinct derived context, and a popup-side override never leaks back to the
+        // owner's own Environment.
+        popup_env.set::<TestKey>(99);
+        assert_eq!(popup_env.get::<TestKey>(), 99);
+        assert_eq!(owner_env.get::<TestKey>(), 7);
+    }
+
+    #[test]
+    fn open_custom_popup_installs_dismiss_action_that_closes_popup() {
+        let host = FakePopupHost::new();
+        let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
+
+        let captured_dismiss: Rc<RefCell<Option<PopupDismissAction>>> = Rc::new(RefCell::new(None));
+        let captured_clone = Rc::clone(&captured_dismiss);
+        let template = ViewTemplate::new(move |ctx| {
+            *captured_clone.borrow_mut() = ctx.environment.get::<PopupDismissActionKey>();
+            Some(TextBlock::new() as Rc<dyn UIElementExt>)
+        });
+
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let handle = ContextMenuService::open_custom_popup(
+            &host,
+            &owner,
+            &template,
+            &anchor,
+            EnvironmentContext::default(),
+            work_area,
+        )
+        .expect("owner is alive, template should build");
+
+        let dismiss = captured_dismiss
+            .borrow()
+            .clone()
+            .expect("PopupDismissAction should be installed in the popup-scoped Environment");
+        assert!(!host.closed.get());
+        dismiss.dismiss();
+        assert!(host.closed.get(), "dismiss action should close the popup surface");
+
+        // Idempotent: dismissing again after the handle is already dropped/closed must not panic.
+        dismiss.dismiss();
+        let _ = handle;
+    }
+
+    #[test]
+    fn unmount_subtree_reentrant_from_within_own_event_dispatch_does_not_panic() {
+        // Simulates the AppKit/WinUI3 backend's `close()` sequence: `unmount_subtree` runs
+        // synchronously on the popup content root from *inside* a handler currently being
+        // dispatched on that very tree (a `Button`'s own `on_tapped`, wired the same way a
+        // declarative `context_popup` dismiss action's target would be) — the reentrancy shape
+        // teardown-before-detach requires be safe. `unmount_subtree` walks/mutates only the
+        // `UIElementExt` tree's own `visual_collection`/lifecycle state, never a backend host's own
+        // `RefCell`s, so this must not panic regardless of which handler triggered it.
+        let host = FakePopupHost::new();
+        let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
+
+        let template = ViewTemplate::new(|_ctx| {
+            let layout = VerticalLayout::new();
+            let button = TextBlock::new();
+            let button_dyn: Rc<dyn UIElementExt> = Rc::clone(&button) as Rc<dyn UIElementExt>;
+            let weak_root: Rc<RefCell<Option<std::rc::Weak<dyn UIElementExt>>>> =
+                Rc::new(RefCell::new(None));
+            let weak_root_for_handler = Rc::clone(&weak_root);
+            button.register_routed_handler::<crate::input::TappedEventArgs>(
+                "on_tapped",
+                Box::new(move |_args, _routed| {
+                    if let Some(root) = weak_root_for_handler
+                        .borrow()
+                        .as_ref()
+                        .and_then(|w| w.upgrade())
+                    {
+                        crate::ui::unmount_subtree(&root);
+                    }
+                }),
+            );
+            layout.children().add(button_dyn);
+            let root: Rc<dyn UIElementExt> = layout;
+            *weak_root.borrow_mut() = Some(Rc::downgrade(&root));
+            Some(root)
+        });
+
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let _handle = ContextMenuService::open_custom_popup(
+            &host,
+            &owner,
+            &template,
+            &anchor,
+            EnvironmentContext::default(),
+            work_area,
+        )
+        .expect("owner is alive, template should build");
+
+        let content = Rc::clone(&host.shown.borrow()[0].0);
+        let button_child = Rc::clone(&content.visual_children()[0]);
+
+        let routed_args = crate::input::RoutedEventArgs::default();
+        crate::ui::dispatch_routed(
+            &button_child,
+            "on_tapped",
+            &crate::input::TappedEventArgs {
+                position: Point { x: 0.0, y: 0.0 },
+                modifiers: crate::input::KeyModifiers::default(),
+            },
+            &routed_args,
+        );
+        // Reaching here without panicking is the assertion.
     }
 
     #[test]

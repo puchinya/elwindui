@@ -16,6 +16,7 @@
 - Environment解決はVisual Treeへのattachに依存しない。Componentは`mount`時に確立された`EnvironmentContext`を用いて自身の`#[environment(name)]` fieldを解決し、その後にbody/`view!`を評価してUIElementを生成する。child Componentへは、`mount`時に確立された(または`EnvironmentScope`が派生させた)contextを明示的に伝播してから、そのchildをmountする。
 - `#[component(template = key)]`は同じmount-time contextから`Option<ControlTemplate<Component>>`を一度だけ解決する。Key変更はmount済みControlを再テンプレート化しない。詳細は[`control_template_spec.md`](control_template_spec.md)を参照する。
 - `EnvironmentScope` はUIElement・Render nodeを生成しない。親Environmentをderiveし、指定したKeyのみ上書きした派生Environmentをchildrenの`mount`へ渡す。
+- `context_popup`（`ui_spec.md`）の内容は、owner要素の有効なEnvironmentから`derive()`したpopup専用のEnvironmentContextで構築される。owner自身のEnvironmentは変更しない。この派生Contextには`crate::ui::popup::PopupDismissActionKey`（`Value = Option<PopupDismissAction>`、popup外では常に`None`）が設定され、popup content内から宣言的にpopupを閉じる手段を提供する——詳細は[`../design/runtime/popup_context_menu_design.md`](../design/runtime/popup_context_menu_design.md) §6を参照。
 - EnvironmentとThemeの責務は分離する。Theme(§3–§6)はEnvironmentのlookup/継承機構を再定義せず、`EnvironmentContext`のoverride経路を呼び出すのみである。
 
 ## 3. Theme

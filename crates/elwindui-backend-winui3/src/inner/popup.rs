@@ -8,7 +8,7 @@ use crate::host::TreeHostPanel;
 use elwindui_core::ui::popup::{
     PopupDismissPolicy, PopupFocusPolicy, PopupHost, PopupRequest, PopupSurfaceHandle,
 };
-use elwindui_core::ui::UIElementExt;
+use elwindui_core::ui::{UIElementExt, unmount_subtree};
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows::core::Interface;
@@ -17,6 +17,7 @@ use windows::core::Interface;
 pub(crate) struct InnerPopupSurface {
     popup: Popup,
     content_host: TreeHostPanel,
+    content: Rc<dyn UIElementExt>,
     is_open: RefCell<bool>,
 }
 
@@ -50,6 +51,7 @@ impl InnerPopupSurface {
         let surface = Rc::new(Self {
             popup,
             content_host,
+            content: Rc::clone(&request.content),
             is_open: RefCell::new(true),
         });
 
@@ -72,10 +74,16 @@ impl InnerPopupSurface {
     }
 
     /// Closes and hides the popup surface.
+    ///
+    /// Teardown-before-detach: `unmount_subtree` (generic Component/UIElement lifecycle teardown —
+    /// `on_unmount` hooks, subscription cancellation) runs before `TreeHostPanel::clear_tree()`
+    /// (native detach). Unlike AppKit, WinUI3's `clear_tree()` has no existing deferred-dispatch
+    /// workaround, so both run synchronously here.
     pub(crate) fn close(&self) {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
             self.popup.SetIsOpen(false).ok();
+            unmount_subtree(&self.content);
             self.content_host.clear_tree();
         }
     }

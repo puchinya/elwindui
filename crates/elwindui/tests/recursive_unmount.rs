@@ -652,3 +652,66 @@ fn test_on_unmount_runs_before_visual_and_logical_detach() {
         "on_unmount must execute before parent/visual tree connection is detached"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 10. Ancestor reentrant unmount safety and child-first ordering
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static ANCESTOR_PARENT_REF: RefCell<Option<Rc<AncestorReentrantParent>>> = const { RefCell::new(None) };
+}
+
+#[elwindui::component(inherits ContentControl)]
+struct AncestorReentrantChild {
+    body: view! {
+        on_unmount {
+            record_unmount("Child:start");
+            if let Some(parent) = ANCESTOR_PARENT_REF.with(|r| r.borrow().clone()) {
+                parent.unmount();
+            }
+            record_unmount("Child:end");
+        }
+        TextBlock { text: "child" }
+    },
+}
+
+#[elwindui::component]
+impl AncestorReentrantChild {}
+
+#[elwindui::component(inherits ContentControl)]
+struct AncestorReentrantParent {
+    body: view! {
+        on_unmount {
+            record_unmount("Parent");
+        }
+        AncestorReentrantChild { }
+    },
+}
+
+#[elwindui::component]
+impl AncestorReentrantParent {}
+
+#[test]
+fn test_ancestor_reentrant_unmount_is_safe_and_preserves_child_first_order() {
+    clear_unmount_events();
+
+    let parent = AncestorReentrantParent::new();
+    ANCESTOR_PARENT_REF.with(|r| *r.borrow_mut() = Some(parent.clone()));
+
+    assert_eq!(get_unmount_events().len(), 0);
+
+    parent.unmount();
+
+    assert_eq!(
+        get_unmount_events(),
+        vec!["Child:start", "Child:end", "Parent"],
+        "Child-first ordering must be strictly preserved under ancestor reentrant unmount"
+    );
+
+    // Double unmount is a safe no-op
+    parent.unmount();
+    assert_eq!(
+        get_unmount_events(),
+        vec!["Child:start", "Child:end", "Parent"]
+    );
+}

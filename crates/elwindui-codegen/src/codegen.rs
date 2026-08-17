@@ -5041,9 +5041,10 @@ fn generate_view(
         quote! {
             #[doc(hidden)]
             pub fn __unmount_local(&self) {
-                if self.__unmounted.replace(true) {
+                if self.__lifecycle_state.get() == elwindui::core::ui::ComponentLifecycleState::Unmounted {
                     return;
                 }
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
                 #call_on_unmount
                 self.__property_changed_handlers.borrow_mut().clear();
                 self.__property_changed_subscriptions.borrow_mut().clear();
@@ -5051,9 +5052,10 @@ fn generate_view(
 
             #[doc(hidden)]
             pub fn unmount(&self) {
-                if self.__unmounted.get() {
+                if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Mounted {
                     return;
                 }
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
                 if let Some(content) = <Self as elwindui::core::ui::WindowExt>::content_element(self) {
                     elwindui::core::ui::unmount_subtree(&content);
                 }
@@ -5061,6 +5063,9 @@ fn generate_view(
             }
 
             pub fn show(&self) {
+                if self.__closed.get() {
+                    return;
+                }
                 if self.__mount_environment.get().is_none() {
                     self.mount(elwindui::core::environment::application_environment());
                 }
@@ -5068,13 +5073,19 @@ fn generate_view(
             }
 
             pub fn hide(&self) {
+                if self.__closed.get() {
+                    return;
+                }
                 <Self as elwindui::core::ui::WindowExt>::hide(self);
             }
 
             // Cancels this component's own property-changed/on_update/Environment subscriptions,
             // recursively cascades unmount to all descendant Components (Issue #126), and releases
-            // the native window.
+            // the native window exactly once.
             pub fn close(&self) {
+                if self.__closed.replace(true) {
+                    return;
+                }
                 self.unmount();
                 <Self as elwindui::core::ui::WindowExt>::close(self);
             }
@@ -5084,9 +5095,10 @@ fn generate_view(
         quote! {
             #[doc(hidden)]
             pub fn __unmount_local(&self) {
-                if self.__unmounted.replace(true) {
+                if self.__lifecycle_state.get() == elwindui::core::ui::ComponentLifecycleState::Unmounted {
                     return;
                 }
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
                 #call_on_unmount
                 self.__property_changed_handlers.borrow_mut().clear();
                 self.__property_changed_subscriptions.borrow_mut().clear();
@@ -5094,9 +5106,10 @@ fn generate_view(
 
             #[doc(hidden)]
             pub fn unmount(&self) {
-                if self.__unmounted.get() {
+                if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Mounted {
                     return;
                 }
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
                 let children = <Self as elwindui::core::ui::UIElementExt>::visual_children(self);
                 for child in &children {
                     elwindui::core::ui::unmount_subtree(child);
@@ -5126,9 +5139,10 @@ fn generate_view(
     let plain_unmount_method = quote! {
         #[doc(hidden)]
         pub fn __unmount_local(&self) {
-            if self.__unmounted.replace(true) {
+            if self.__lifecycle_state.get() == elwindui::core::ui::ComponentLifecycleState::Unmounted {
                 return;
             }
+            self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
             #call_on_unmount
             self.__property_changed_handlers.borrow_mut().clear();
             self.__property_changed_subscriptions.borrow_mut().clear();
@@ -5136,9 +5150,10 @@ fn generate_view(
 
         #[doc(hidden)]
         pub fn unmount(&self) {
-            if self.__unmounted.get() {
+            if self.__lifecycle_state.get() != elwindui::core::ui::ComponentLifecycleState::Mounted {
                 return;
             }
+            self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
             #plain_unmount_root
             self.__unmount_local();
         }
@@ -5587,7 +5602,8 @@ fn generate_view(
                 // field's own resolution source, replacing the legacy, ambient-captured
                 // `__environment` field this struct used to declare separately.
                 __mount_environment: std::cell::OnceCell<elwindui::core::environment::EnvironmentContext>,
-                __unmounted: std::cell::Cell<bool>,
+                __lifecycle_state: std::cell::Cell<elwindui::core::ui::ComponentLifecycleState>,
+                __closed: std::cell::Cell<bool>,
             }
 
             #[elwindui::class]
@@ -5595,7 +5611,7 @@ fn generate_view(
                 fn construct(#(#ctor_param_names: #ctor_param_types),*) -> Self {
                     let __self_weak_erased: std::rc::Weak<dyn std::any::Any> = __self_weak.clone();
                     #construct_stmts
-                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __unmounted: std::cell::Cell::new(false) }
+                    Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __self_weak: std::cell::RefCell::new(__self_weak_erased), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Mounted), __closed: std::cell::Cell::new(false) }
                 }
 
                 // Runs automatically, exactly once, right after `#[class]`'s auto-generated `new()`
@@ -5739,7 +5755,7 @@ fn generate_view(
                 pub fn __new_unmounted(#(#ctor_param_names: #ctor_param_types),*) -> std::rc::Rc<Self> {
                     #content_capture_stmt
                     #construct_stmts
-                    std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new(), __unmounted: std::cell::Cell::new(false) })
+                    std::rc::Rc::new(Self { #(#plain_required_names,)* #mutable_required_field_inits #own_default_field_inits #own_computed_field_inits #own_environment_field_inits #deferred_field_inits #field_inits __property_changed_subscriptions: std::cell::RefCell::new(Vec::new()), __property_changed_handlers: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())), __mount_environment: std::cell::OnceCell::new(), __lifecycle_state: std::cell::Cell::new(elwindui::core::ui::ComponentLifecycleState::Mounted) })
                 }
 
                 // Establishes this component's effective Environment and performs its initial view
@@ -5820,7 +5836,7 @@ fn generate_view(
                 // (docs/design/runtime/component_lifecycle_design.md §4a, CI-3 of #80) — same guard,
                 // same reasoning, for this non-`#[class]` shape.
                 __mount_environment: std::cell::OnceCell<elwindui::core::environment::EnvironmentContext>,
-                __unmounted: std::cell::Cell<bool>,
+                __lifecycle_state: std::cell::Cell<elwindui::core::ui::ComponentLifecycleState>,
             }
 
             #component_observable_impl

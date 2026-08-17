@@ -979,7 +979,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         let s = generated.to_string();
         assert!(s.contains("pub fn unmount"), "{s}");
-        assert!(s.contains("__unmounted : std :: cell :: Cell < bool >"), "{s}");
+        assert!(s.contains("__lifecycle_state : std :: cell :: Cell < elwindui :: core :: ui :: ComponentLifecycleState >"), "{s}");
         assert!(s.contains("add_unmount_hook"), "{s}");
         assert!(s.contains("__run_on_unmount"), "{s}");
         assert!(s.contains("unmount_subtree"), "{s}");
@@ -1001,7 +1001,7 @@ mod tests {
         let generated = generate(Some("VerticalLayout"), src);
         let s = generated.to_string();
         assert!(s.contains("pub fn unmount"), "{s}");
-        assert!(s.contains("__unmounted : std :: cell :: Cell < bool >"), "{s}");
+        assert!(s.contains("__lifecycle_state : std :: cell :: Cell < elwindui :: core :: ui :: ComponentLifecycleState >"), "{s}");
         assert!(s.contains("add_unmount_hook"), "{s}");
         assert!(s.contains("__run_on_unmount"), "{s}");
         assert!(s.contains("unmount_subtree"), "{s}");

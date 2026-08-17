@@ -965,6 +965,15 @@ pub(crate) fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
     }
 }
 
+/// Lifecycle state of a UI component during its mount, unmount traversal, and teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ComponentLifecycleState {
+    #[default]
+    Mounted,
+    Unmounting,
+    Unmounted,
+}
+
 /// Recursively unmounts every descendant in the Visual tree rooted at `node` in child-first order,
 /// invokes each node's unmount hooks (including generated Component lifecycle teardown, `on_unmount`,
 /// and subscription cancellations), and detaches visual collections.

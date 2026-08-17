@@ -113,6 +113,10 @@ fn type_checked_new_show_hide_close_usage() {
         get_unmount_events(),
         vec!["WindowChild", "WindowParent", "WindowRoot"]
     );
+
+    // show() after close is a no-op (does not remount or rebuild or reopen)
+    window.show();
+    debug_assert_eq!(BUILD_COUNT.with(|c| c.get()), 1);
 }
 
 #[cfg(all(feature = "backend-winui3", target_os = "windows"))]
@@ -170,6 +174,14 @@ fn winui3_show_hide_show_builds_once_and_close_cascades_unmount() {
             get_unmount_events(),
             vec!["WindowChild", "WindowParent", "WindowRoot"],
             "second close() must be a no-op"
+        );
+
+        // show() after close is a no-op
+        window.show();
+        assert_eq!(
+            BUILD_COUNT.with(Cell::get),
+            1,
+            "show() after close must be a no-op"
         );
     });
 

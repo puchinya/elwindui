@@ -21,3 +21,49 @@ impl BridgeFixtureConcrete {
         Self {}
     }
 }
+
+/// PR #164 final remediation round, T7 (finding A5): a *generic* `struct_only` concrete type,
+/// implementing `elwindui-bridge-fixture-iface`'s *non-generic* `BridgeFixtureGenericInterfaceExt`,
+/// from a different crate than both the interface and (later) the consumer's own generic argument.
+pub trait BridgeFixtureGenericSource: 'static {
+    fn value(&self) -> i32;
+}
+
+#[elwindui_macros::class(
+    struct_only = elwindui_bridge_fixture_iface::BridgeFixtureGenericInterfaceExt
+)]
+pub struct BridgeFixtureGenericConcrete<T: BridgeFixtureGenericSource> {
+    source: T,
+}
+
+#[elwindui_macros::class]
+impl<T: BridgeFixtureGenericSource> BridgeFixtureGenericConcrete<T> {
+    fn value(&self) -> i32 {
+        self.source.value()
+    }
+    fn construct(source: T) -> Self {
+        Self { source }
+    }
+}
+
+/// PR #164 final remediation round, T10 (finding C2): a `struct_only` implementor of
+/// `elwindui-bridge-fixture-iface`'s root-mode `BridgeFixtureRootExt`, composing the exact same root
+/// storage via a matching `inherits = ..` — from a different crate than both the root class and
+/// (later) the ordinary descendant.
+#[elwindui_macros::class(
+    struct_only = elwindui_bridge_fixture_iface::BridgeFixtureRootExt,
+    inherits = elwindui_bridge_fixture_iface::BridgeFixtureRoot
+)]
+pub struct BridgeFixtureRootConcrete {}
+
+#[elwindui_macros::class]
+impl BridgeFixtureRootConcrete {
+    fn value(&self) -> i32 {
+        1
+    }
+    fn construct() -> Self {
+        Self {
+            base: elwindui_bridge_fixture_iface::BridgeFixtureRoot::construct(),
+        }
+    }
+}

@@ -57,7 +57,7 @@ ordinary/root classは、classの公開操作をdyn dispatch可能にするexten
 
 `no_ancestor_forward` を指定した `struct_only`(手書きの既存traitを対象とする、`__dyn_x` 規約に従わない特殊形)は、このoverride透過性の対象外のままである — 挙動は変更されない。
 
-root class(`inherits`を持たない、`UIElement`など)もこの透過性の生成対象ではある(自身のclass-interface bridge macroを生成する)が、root classの `as_ui_element` はdeclaring struct自身の具象型に固定されたreturn typeを持つ必須trait methodであるため、root interfaceに対する実際にruntimeで動作する `struct_only` implementorは原理的に成立しない。これはbridge機構自体の制約ではなく、root modeの既存設計そのものの性質である。
+root class(`inherits`を持たない、`UIElement`など)もこの透過性の生成対象である(自身のclass-interface bridge macroを生成する)。root classの `as_ui_element` はdeclaring struct自身の具象型に固定されたreturn typeを持つ必須trait methodであるため、`struct_only` implementorがこれを単独で満たすことはできない — そのため root interfaceを実装する `struct_only` は、`inherits = <同じroot class>` を**併用**して同じroot storageを合成し(`self.base`)、`as_ui_element` はそこへ forward することが要件となる(`struct_only = ..Ext, inherits = <root>` の組み合わせ)。`inherits` が実装対象のroot classと一致しない場合は、bridge生成時にcompile-time errorとなる。`as_ui_element` の戻り値型自体(具象型を返す契約)は変更されない — root storageを合成することで満たされる。
 
 ## 6. Construction
 

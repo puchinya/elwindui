@@ -592,20 +592,69 @@ impl BridgeOrdinaryMidDerived {
     }
 }
 
-// Issue #128 remediation, T3 (root interface -> struct_only -> descendant): deliberately *not* a
-// runtime fixture here, unlike T2 above. A root-mode class's own `as_ui_element(&self) -> &Self` is
-// a *required* trait method whose return type is hard-pinned to the declaring root struct's own
-// concrete type at that root class's own compile time (`expand_impl`'s root-mode branch) — not
-// generic/associated over the implementor. No `struct_only` implementor other than the root class
-// itself can ever satisfy that signature (confirmed empirically: `E0053`, incompatible return type,
-// against a real `BridgeRootBase`/`BridgeRootConcrete` attempt). This is a genuine, pre-existing
-// architectural incompatibility between root mode's own `as_ui_element` design and `struct_only`
-// bridging to any other concrete type — not something the #128 bridge mechanism itself can address
-// without a material redesign of root mode (out of scope for this remediation; see its own
-// non-goals). T3's coverage is therefore macro-expansion-level only, in
-// `crates/elwindui-macros/src/class.rs`'s own test module: it proves the bridge macro + wrapper
-// module are still generated for a root-mode class (review finding A1's actual requirement), without
-// requiring a working runtime `struct_only` consumer of it.
+/// PR #164 final remediation round, T3/T9/T12 (finding C2): `struct_only` targeting a *root*-mode
+/// interface — a real *runtime* fixture, superseding this file's own earlier note (this remediation
+/// round's own class-model.md/macro_class_spec.md docs) that this combination was architecturally
+/// impossible. A root class's own `as_ui_element(&self) -> &Self` is a required trait method whose
+/// return type is hard-pinned to the declaring root struct's own concrete type — no `struct_only`
+/// implementor can conjure a reference to that type out of nothing, but *can* compose it directly by
+/// also using `inherits = <the same root class>` (the *only* accepted shape — enforced by a
+/// dedicated `#[class]`-level diagnostic otherwise, see `class_interface_bridge_tests`'s own
+/// `root_bridge_missing_matching_base_is_a_clear_diagnostic`), forwarding `as_ui_element` to
+/// `self.base.as_ui_element()`. `BridgeRootConcrete` below also proves T12 (no duplicate `impl
+/// BridgeRootBaseExt for BridgeRootConcrete`, `E0119`) — the ordinary `inherits = BridgeRootBase`
+/// forwarding path is routed into `_skip!` instead of independently re-generating the same `impl`.
+#[elwindui_macros::class]
+pub(crate) struct BridgeRootBase {
+    value: Cell<i32>,
+}
+
+#[elwindui_macros::class]
+impl BridgeRootBase {
+    #[overridable]
+    fn value(&self) -> i32 {
+        self.value.get()
+    }
+    fn construct() -> Self {
+        Self {
+            value: Cell::new(1),
+        }
+    }
+}
+
+#[elwindui_macros::class(
+    struct_only = crate::ui::testsupport::BridgeRootBaseExt,
+    inherits = crate::ui::testsupport::BridgeRootBase
+)]
+pub(crate) struct BridgeRootConcrete {}
+
+#[elwindui_macros::class]
+impl BridgeRootConcrete {
+    fn value(&self) -> i32 {
+        1
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeRootBase::construct(),
+        }
+    }
+}
+
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeRootConcrete)]
+pub(crate) struct BridgeRootDerived {}
+
+#[elwindui_macros::class]
+impl BridgeRootDerived {
+    #[overrides]
+    fn value(&self) -> i32 {
+        self.base.value() + 100
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeRootConcrete::construct(),
+        }
+    }
+}
 
 /// Issue #128 remediation, T8: `no_ancestor_forward` explicit regression coverage — a `struct_only`
 /// implementor of a hand-written trait (not a `#[class]`-generated `*Ext`) bypasses the bridge
@@ -1230,9 +1279,18 @@ mod tests {
         assert_eq!(BridgeBaseExt::value(&*derived), 1);
     }
 
-    // T3 (root interface -> struct_only -> descendant) has no runtime test here — see the doc
-    // comment above `BridgeHandWrittenTrait`'s own fixture block for why, and
-    // `crates/elwindui-macros/src/class.rs`'s own test module for its macro-expansion-level coverage.
+    /// PR #164 final remediation round, T3/T9/T12 (finding C2): `struct_only` targeting a
+    /// *root*-mode interface, composing the exact same root concrete storage via a matching
+    /// `inherits = ..` — dispatches through the bridge that root-mode class generates for itself,
+    /// and `as_ui_element` reaches the composed root base (not the struct_only concrete
+    /// reinterpreted as the root type).
+    #[test]
+    fn bridge_root_interface_struct_only_dispatches_through_generated_bridge() {
+        let derived = BridgeRootDerived::new();
+        assert_eq!(BridgeRootBaseExt::value(&*derived), 101);
+        let root_ref: &BridgeRootBase = BridgeRootBaseExt::as_ui_element(&*derived);
+        assert_eq!(root_ref.value(), 1);
+    }
 
     /// Issue #128 remediation, T8: `no_ancestor_forward` bypasses the bridge entirely — a
     /// `struct_only` implementor of a hand-written trait dispatches via a plain, direct `impl`, with

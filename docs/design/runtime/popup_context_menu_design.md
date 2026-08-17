@@ -235,29 +235,53 @@ Atomic check-and-transition on PopupDismissState (single mutable borrow):
       (dismiss() fired during show_popup itself, above; the handle it raced against is still
       closed here rather than left open or silently dropped)
    │
-   ▼ [Interaction / Dismissal event: Outside Click, Escape, Selection, PopupDismissAction,
-   │  popup replacement, owner Window close, Drop]
+   ▼ Dismissal
    │
-Close PopupSurface (idempotent, guarded by is_open)
+   ├─ ElwindUI-controlled close (PopupDismissAction, item selection, popup replacement, explicit
+   │  PopupSurfaceHandle::close(), Drop, AppKit light-dismiss [own NSEvent monitors, ElwindUI-driven])
+   │      │
+   │      ▼
+   │  internal close guard (idempotent, exactly-once — `begin_close`/`is_open`)
+   │      │
+   │      ▼
+   │  unmount_subtree(content root) — child-first: on_unmount hooks, subscription cancellation
+   │      │
+   │      ▼
+   │  native close/visibility detach (AppKit: removeChildWindow/orderOut; WinUI3: SetIsOpen(false))
+   │      │
+   │      ▼
+   │  ElwindUI host clear/detach (TreeHost::clear_tree() — native resource release only)
    │
-   ▼
-unmount_subtree(content root) — child-first: on_unmount hooks, subscription cancellation
-   (teardown-before-detach; runs before any backend native detach, including AppKit's PR #156
-   deferred `TreeHostView::clear_tree()` — see `crates/elwindui-backend-appkit/src/inner/popup.rs`)
+   └─ backend-native post-dismiss notification (WinUI3 Popup.Closed only — toolkit already changed
+      visibility/IsOpen before ElwindUI is ever notified; see §7's WinUI3 subsection)
+          │
+          ▼
+      internal close guard (same exactly-once guard as the ElwindUI-controlled path)
+          │
+          ▼
+      unmount_subtree(content root) — child-first: on_unmount hooks, subscription cancellation
+          │
+          ▼
+      ElwindUI host clear/detach (TreeHost::clear_tree()) — no further native visibility call here;
+          the toolkit already performed its own close
    │
-   ▼
+   ▼ (either branch)
 Backend host releases its own strong reference to the content root (`InnerPopupSurface::content:
-   RefCell<Option<Rc<..>>>`, taken in close()) — a closed PopupSurfaceHandle must not keep the
-   already-unmounted content subtree alive just because the handle itself is still reachable (e.g.
-   via a host's active_popup field until replaced/dropped)
-   │
-   ▼
-Backend host clear/detach (`TreeHost::clear_tree()` — native resource release only, no lifecycle
-   teardown responsibility of its own)
+   RefCell<Option<Rc<..>>>`, taken during the close guard above) — a closed PopupSurfaceHandle must
+   not keep the already-unmounted content subtree alive just because the handle itself is still
+   reachable (e.g. via a host's active_popup field until replaced/dropped)
    │
    ▼
 Restore focus to original target if necessary
 ```
+
+**Portable invariant, precisely**: `unmount_subtree` runs exactly once, before the ElwindUI popup
+host detaches/clears the content tree and before the surface releases its own content ownership, on
+*every* dismissal path on *every* backend. The *stronger* claim — unmount before any native
+visibility/detach operation — holds for every ElwindUI-controlled close, but not for a backend-native
+post-dismiss notification whose toolkit only reports the dismissal *after* changing visibility itself
+(currently just WinUI3's `Popup.Closed`, see §7). `on_unmount` must never be documented or assumed to
+require the native popup to still be visible/open while it runs.
 
 **Declarative `context_popup: view! { .. }` DSL** (evaluating the same `view!` grammar as a normal
 Component body, deferred to open time, reusing `view!`'s existing AST/codegen pipeline) is a planned
@@ -289,7 +313,8 @@ view_template_design.md` §4 for exactly what that low-level API does and does n
 - **Focus & Lifetime**: `PopupFocusPolicy::Root` にて開いた popup の root UIElement にフォーカスを設定。`TreeHostPanel` / `InnerPopupSurface` が `active_popup` として handle を保持し、新規 popup open 時に既存 popup を安全にクローズ。
 - **Menu Realization Ownership**: `Menu` / `MenuItem` は論理セマンティックモデルであり、Context Menu 表示時は `InnerMenu::create_flyout` により専用の `MenuFlyoutItem` インスタンスを生成することで `MenuBarItem` とのネイティブインスタンス競合を回避。
 - Outside pointer press および `ProcessKeyboardAccelerators` (Escape) で dismiss。
-- **GUI 実機検証**: Windows 実機環境での描画・マルチモニター・DPI・タッチ操作の検証は Issue [#157](https://github.com/puchinya/elwindui/issues/157) にて管理。
+- **Native light-dismiss の close 経路（Issue #161 レビューで確定した例外）**: `Popup.IsLightDismissEnabled = true` の場合、outside pointer press や Escape での dismiss は WinUI 自身が検出して自動的に `Popup.IsOpen` を `false` にする——ElwindUI はこの遷移を制御も事前通知も受けない。`Popup.Closed` イベントは `IsOpen` が `false` になった**後**にのみ発火する（[`Popup`](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.controls.primitives.popup)・[`Popup.Closed`](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.xaml.controls.primitives.popup.closed) 参照）。したがって `InnerPopupSurface` は native-originated close 用に専用の内部ハンドラ（`on_native_closed`、`crates/elwindui-backend-winui3/src/inner/popup.rs`）を持つ: `Popup.Closed` はこのハンドラへルーティングされ、`unmount_subtree` と `TreeHostPanel::clear_tree()` のみを実行し、`SetIsOpen(false)` は呼ばない（WinUI が既に行っているため）。ElwindUI 主導の close（`PopupDismissAction` 等）が使う `close()` はこれとは別に、`unmount_subtree` を native visibility 変更（`SetIsOpen(false)`）より前に実行する、より強い順序を維持する。両者は同一の exactly-once guard（`begin_close`）を共有し、どちらの経路からも teardown は1回だけ実行される。**`Popup.Closed` を「close 前」に発火するイベントとして扱ってはならない** — 常に事後通知である。
+- **GUI 実機検証**: Windows 実機環境での描画・マルチモニター・DPI・タッチ操作、および上記 native light-dismiss の順序保証の検証は Issue [#157](https://github.com/puchinya/elwindui/issues/157) にて管理。
 
 ### GTK4 Backend
 - GTK4 は現在 placeholder / stub 実装であるため、`PopupHost` および context menu の公開 API contract を整合させ、未実装であることを `docs/status/backend_status.md` および `control_status.md` に明記する。

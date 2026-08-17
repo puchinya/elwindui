@@ -159,15 +159,22 @@ Independent of the DSL question above, this revision:
 - Made `ContextMenuService::open_custom_popup` take the owner element, derive a popup-scoped
   `EnvironmentContext`, install a `PopupDismissAction` (also resolvable declaratively, §5), and return
   `Option<Rc<dyn PopupSurfaceHandle>>` (`None` when the template declines to build).
-- Connected AppKit's and WinUI3's popup `close()` to `unmount_subtree` (`crate::ui::unmount_subtree`,
-  PR #160's generic recursive Component/UIElement teardown), run synchronously *before any native
-  detach* — not just before `clear_tree()`, but before `removeChildWindow`/`orderOut`
-  (AppKit)/`SetIsOpen(false)` (WinUI3) too, so `on_unmount` always observes an intact
-  window/tree/Environment — preserving AppKit's PR #156 deferred-`clear_tree` reentrancy workaround
-  unchanged. See `docs/design/runtime/popup_context_menu_design.md` §6 for the full sequence and
+- Connected AppKit's and WinUI3's popup close paths to `unmount_subtree` (`crate::ui::unmount_subtree`,
+  PR #160's generic recursive Component/UIElement teardown). The portable, cross-backend guarantee is
+  unmount-before-ElwindUI-host-tree-detach (`TreeHost::clear_tree()`), on every dismissal path. Each
+  backend's *framework-initiated* close (AppKit's/WinUI3's `close()`, e.g. `PopupDismissAction`, item
+  selection, explicit `PopupSurfaceHandle::close()`) additionally runs unmount before the native
+  visibility/detach call it itself issues (`removeChildWindow`/`orderOut` on AppKit, `SetIsOpen(false)`
+  on WinUI3) — preserving AppKit's PR #156 deferred-`clear_tree` reentrancy workaround unchanged.
+  WinUI3 has one documented exception: its native `Popup.Closed` event (used for light-dismiss) fires
+  only *after* WinUI has already changed `Popup.IsOpen`, so that specific native-originated path
+  (`on_native_closed`, distinct from `close()`) cannot offer the stronger native-visibility ordering —
+  only the portable host-tree-detach one (Issue #161 review finding; corrected after this document's
+  own initial revision overstated the cross-backend guarantee). See `docs/design/runtime/
+  popup_context_menu_design.md` §6/§7 for the full branch-by-branch sequence and
   `crates/elwindui-backend-appkit/src/inner/popup.rs`'s/`crates/elwindui-backend-winui3/src/inner/
-  popup.rs`'s `close()` doc comments for why unmount-before-detach is safe even when `close()` is
-  reentrant from a popup-internal event handler — verified by `elwindui-core`'s
+  popup.rs`'s doc comments for why unmount-before-detach is safe even when close is reentrant from a
+  popup-internal event handler — verified by `elwindui-core`'s
   `unmount_subtree_reentrant_from_within_own_event_dispatch_does_not_panic` and
   `unmount_hook_observes_intact_environment_before_backend_would_detach`.
 - Made both backends' `InnerPopupSurface` release their own strong reference to the popup content

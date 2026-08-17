@@ -17,9 +17,10 @@ use windows::core::Interface;
 pub(crate) struct InnerPopupSurface {
     popup: Popup,
     content_host: TreeHostPanel,
-    // `RefCell<Option<..>>`, not a bare `Rc`: `close()` must release this surface's own strong
-    // reference to the popup content root once teardown completes, not merely unmount it — see
-    // AppKit's `InnerPopupSurface::content` (same shape) for the full rationale.
+    // `RefCell<Option<..>>`, not a bare `Rc`: `close()`/`on_native_closed()` (via
+    // `unmount_owned_content`) must release this surface's own strong reference to the popup
+    // content root once teardown completes, not merely unmount it — see AppKit's
+    // `InnerPopupSurface::content` (same shape) for the full rationale.
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
     is_open: RefCell<bool>,
 }
@@ -76,12 +77,15 @@ impl InnerPopupSurface {
         // 7. Register the native `Closed` handler. On registration failure, `surface` is dropped
         // (nothing else holds a strong reference yet) — `Drop::drop` -> `close()` runs with
         // `content == None`, a safe no-op beyond releasing already-configured native objects.
+        // `on_native_closed`, not `close`: WinUI has already set `Popup.IsOpen = false` by the time
+        // this fires (native light-dismiss included), so this path must not call `SetIsOpen(false)`
+        // again — see `on_native_closed`'s own doc comment.
         let weak_surface = Rc::downgrade(&surface);
         surface
             .popup
             .Closed(&windows::Foundation::EventHandler::new(move |_, _| {
                 if let Some(s) = weak_surface.upgrade() {
-                    s.close();
+                    s.on_native_closed();
                 }
                 Ok(())
             }))
@@ -92,20 +96,20 @@ impl InnerPopupSurface {
 
         // 9. A synchronous `Closed` may already have fired during `SetIsOpen(true)` (e.g.
         // immediate light-dismiss). Content is still unattached in that case — nothing to unmount,
-        // `close()` (already run by the handler) has nothing to do beyond what it already did.
+        // `on_native_closed` (already run by the handler) has nothing further to do.
         if !*surface.is_open.borrow() {
             return None;
         }
 
         // 10. Only now attach the ElwindUI popup content. `content` is stored *before* `set_tree`,
-        // so any future/reentrant `close()` from this point on always has a root to pass to
-        // `unmount_subtree`.
+        // so any future/reentrant `close()`/`on_native_closed()` from this point on always has a
+        // root to pass to `unmount_subtree`.
         *surface.content.borrow_mut() = Some(Rc::clone(&request.content));
         surface.content_host.set_tree(Rc::clone(&request.content));
 
         // 11. Re-check after attachment: `set_tree` itself can dispatch synchronously (layout/
-        // focus wiring). If a close raced in during step 10, `close()` already unmounted the
-        // now-attached content — nothing further to do here beyond reporting failure.
+        // focus wiring). If a close raced in during step 10, `on_native_closed` already unmounted
+        // the now-attached content — nothing further to do here beyond reporting failure.
         if !*surface.is_open.borrow() {
             return None;
         }
@@ -128,30 +132,73 @@ impl InnerPopupSurface {
         Some(surface)
     }
 
-    /// Closes and hides the popup surface.
-    ///
-    /// Teardown-before-detach: `unmount_subtree` (generic Component/UIElement lifecycle teardown —
-    /// `on_unmount` hooks, subscription cancellation) runs before *any* native detach —
-    /// `SetIsOpen(false)` (visibility) and `TreeHostPanel::clear_tree()` (host tree/native resource
-    /// release) both run only after `unmount_subtree` has completed, so `on_unmount` observes an
-    /// intact popup/tree/Environment, matching AppKit's ordering. Unlike AppKit, WinUI3's
-    /// `clear_tree()` has no existing deferred-dispatch workaround, so everything here runs
-    /// synchronously. `is_open` is marked closed *before* `unmount_subtree` runs, so a reentrant
-    /// `close()` call from inside an `on_unmount` hook (or from `SetIsOpen(false)` synchronously
-    /// re-raising `Popup.Closed`, below) is a no-op via the guard at the top of this method.
-    /// `self.content.borrow_mut().take()` releases this surface's own strong reference to the
-    /// popup content root once `unmount_subtree` has run on it — see `content`'s own field doc
-    /// comment. `None` here can only mean an already-closed surface, which the `is_open` guard
-    /// above already routes around.
-    pub(crate) fn close(&self) {
+    /// Exactly-once close guard shared by [`Self::close`] (framework-controlled) and
+    /// [`Self::on_native_closed`] (native-originated). Returns `true` (and marks the surface
+    /// closed) only the first time it is called; every subsequent call — from either path, in any
+    /// order or reentrant combination — returns `false` and does nothing.
+    fn begin_close(&self) -> bool {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
-            if let Some(content) = self.content.borrow_mut().take() {
-                unmount_subtree(&content);
-            }
-            self.popup.SetIsOpen(false).ok();
-            self.content_host.clear_tree();
+            true
+        } else {
+            false
         }
+    }
+
+    /// Takes and unmounts this surface's own strong reference to the popup content root — see
+    /// `content`'s own field doc comment for why a bare `Rc` field would be wrong here. `None`
+    /// means either the surface never got as far as attaching content (an aborted `show()`) or this
+    /// is a second call after content was already taken; both are no-ops.
+    fn unmount_owned_content(&self) {
+        if let Some(content) = self.content.borrow_mut().take() {
+            unmount_subtree(&content);
+        }
+    }
+
+    /// Closes and hides the popup surface **on ElwindUI's own initiative** — `PopupDismissAction`,
+    /// menu item selection, popup replacement, explicit `PopupSurfaceHandle::close()`, `Drop`.
+    ///
+    /// Teardown-before-detach, and — because this path controls the native close itself — before
+    /// native visibility changes too: `unmount_subtree` (via `unmount_owned_content`) runs before
+    /// `SetIsOpen(false)` (visibility) and `TreeHostPanel::clear_tree()` (host tree/native resource
+    /// release), matching AppKit's ordering. Unlike AppKit, WinUI3's `clear_tree()` has no existing
+    /// deferred-dispatch workaround, so everything here runs synchronously. `begin_close` marks the
+    /// surface closed *before* `unmount_subtree` runs, so a reentrant `close()`/`on_native_closed()`
+    /// call from inside an `on_unmount` hook — or from `SetIsOpen(false)` below synchronously
+    /// re-raising `Popup.Closed`, which now routes to `on_native_closed`, not back into `close` — is
+    /// a no-op via that guard.
+    pub(crate) fn close(&self) {
+        if !self.begin_close() {
+            return;
+        }
+        self.unmount_owned_content();
+        self.popup.SetIsOpen(false).ok();
+        self.content_host.clear_tree();
+    }
+
+    /// Handles a **native-originated** `Popup.Closed` event — critically, including WinUI3's own
+    /// automatic light-dismiss (`IsLightDismissEnabled`), which ElwindUI does not control or get
+    /// advance notice of. By the time this fires, WinUI has *already* set `Popup.IsOpen = false`
+    /// (per Microsoft's own `Popup`/`Popup.Closed` documentation — `Closed` is a post-transition
+    /// notification, never a pre-close hook), so:
+    ///
+    /// - this must **not** call `SetIsOpen(false)` again (WinUI already did it; doing so here would
+    ///   be redundant at best and is not part of this surface's own close-initiation responsibility);
+    /// - `on_unmount` on this path is *not* guaranteed to observe the native popup as still open —
+    ///   only the portable invariant holds: `unmount_subtree` still runs exactly once, still before
+    ///   this surface's own `TreeHostPanel::clear_tree()` and content-ownership release.
+    ///
+    /// This is the documented WinUI3-specific exception to `close()`'s stronger
+    /// unmount-before-native-visibility-change ordering — see
+    /// `docs/design/runtime/popup_context_menu_design.md` §7 and Issue #161's design-correction
+    /// section for the full rationale (Microsoft's `Popup.Closed` contract makes the stronger
+    /// ordering unachievable specifically for this one path).
+    fn on_native_closed(&self) {
+        if !self.begin_close() {
+            return;
+        }
+        self.unmount_owned_content();
+        self.content_host.clear_tree();
     }
 }
 

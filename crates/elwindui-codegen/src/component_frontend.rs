@@ -552,32 +552,60 @@ pub fn lookup_same_crate_environment_key(name: &str) -> Option<(String, String)>
         .map(|stored| (stored.key_type_name.clone(), stored.value_type.clone()))
 }
 
-/// Resolves an unqualified Environment Key name, preferring a user declaration and then the
-/// framework's fixed Semantic Style keys (`theme_environment_spec.md` §7, Issue #97).
+/// Resolves an unqualified Environment Key name, preferring a user declaration, then the
+/// framework's fixed Semantic Style keys (`theme_environment_spec.md` §7, Issue #97), then the
+/// framework's other fixed built-in keys (currently just `popup_dismiss`,
+/// `theme_environment_spec.md` §2, Issue #161).
 ///
 /// The returned strings are emitted as Rust types; this is compile-time fallback only, never a
 /// runtime string-keyed Environment lookup.
 pub fn lookup_environment_key(name: &str) -> Option<(String, String)> {
-    lookup_same_crate_environment_key(name).or_else(|| {
-        let key = match name {
-            "primary" => "PrimaryBrushEnvironment",
-            "secondary" => "SecondaryBrushEnvironment",
-            "tertiary" => "TertiaryBrushEnvironment",
-            "foreground" => "ForegroundBrushEnvironment",
-            "background" => "BackgroundBrushEnvironment",
-            "window_background" => "WindowBackgroundBrushEnvironment",
-            "tint" => "TintBrushEnvironment",
-            "selection" => "SelectionBrushEnvironment",
-            "separator" => "SeparatorBrushEnvironment",
-            "placeholder" => "PlaceholderBrushEnvironment",
-            "link" => "LinkBrushEnvironment",
-            _ => return None,
-        };
-        Some((
-            format!("elwindui::core::theme::{key}"),
-            "elwindui::core::theme::BrushStyle".to_string(),
-        ))
-    })
+    lookup_same_crate_environment_key(name)
+        .or_else(|| lookup_builtin_semantic_style_key(name))
+        .or_else(|| lookup_builtin_popup_dismiss_key(name))
+}
+
+/// The framework's fixed Semantic Style keys (`theme_environment_spec.md` §7, Issue #97) — every
+/// one shares the same `Value = BrushStyle`, unlike `lookup_builtin_popup_dismiss_key`'s single
+/// differently-typed key, so this stays its own small match rather than growing one shared arm
+/// list with mismatched value types.
+fn lookup_builtin_semantic_style_key(name: &str) -> Option<(String, String)> {
+    let key = match name {
+        "primary" => "PrimaryBrushEnvironment",
+        "secondary" => "SecondaryBrushEnvironment",
+        "tertiary" => "TertiaryBrushEnvironment",
+        "foreground" => "ForegroundBrushEnvironment",
+        "background" => "BackgroundBrushEnvironment",
+        "window_background" => "WindowBackgroundBrushEnvironment",
+        "tint" => "TintBrushEnvironment",
+        "selection" => "SelectionBrushEnvironment",
+        "separator" => "SeparatorBrushEnvironment",
+        "placeholder" => "PlaceholderBrushEnvironment",
+        "link" => "LinkBrushEnvironment",
+        _ => return None,
+    };
+    Some((
+        format!("elwindui::core::theme::{key}"),
+        "elwindui::core::theme::BrushStyle".to_string(),
+    ))
+}
+
+/// `popup_dismiss` — the framework built-in Environment key carrying the active
+/// [`elwindui_core::ui::popup::PopupDismissAction`], `None` outside a popup and `Some(..)` inside
+/// the popup-scoped Environment `ContextMenuService::open_custom_popup` derives
+/// (`docs/design/runtime/popup_context_menu_design.md` §6). Declaring
+/// `#[environment(popup_dismiss)] dismiss: Option<PopupDismissAction>` on any Component resolves
+/// through this same built-in-key path a Semantic Style field does — no
+/// `#[elwindui::environment_key]` declaration needed, since (like the Brush keys) this is a
+/// framework-owned key, not a user- or library-declared one.
+fn lookup_builtin_popup_dismiss_key(name: &str) -> Option<(String, String)> {
+    if name != "popup_dismiss" {
+        return None;
+    }
+    Some((
+        "elwindui::core::ui::popup::PopupDismissActionKey".to_string(),
+        "Option<elwindui::core::ui::popup::PopupDismissAction>".to_string(),
+    ))
 }
 
 /// `#[elwindui::dsl_enum] enum Name { A, B, C }` -> `EnumDef { name: "Name", variants: ["A", "B",

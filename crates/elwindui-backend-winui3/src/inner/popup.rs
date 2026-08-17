@@ -76,14 +76,19 @@ impl InnerPopupSurface {
     /// Closes and hides the popup surface.
     ///
     /// Teardown-before-detach: `unmount_subtree` (generic Component/UIElement lifecycle teardown —
-    /// `on_unmount` hooks, subscription cancellation) runs before `TreeHostPanel::clear_tree()`
-    /// (native detach). Unlike AppKit, WinUI3's `clear_tree()` has no existing deferred-dispatch
-    /// workaround, so both run synchronously here.
+    /// `on_unmount` hooks, subscription cancellation) runs before *any* native detach —
+    /// `SetIsOpen(false)` (visibility) and `TreeHostPanel::clear_tree()` (host tree/native resource
+    /// release) both run only after `unmount_subtree` has completed, so `on_unmount` observes an
+    /// intact popup/tree/Environment, matching AppKit's ordering. Unlike AppKit, WinUI3's
+    /// `clear_tree()` has no existing deferred-dispatch workaround, so everything here runs
+    /// synchronously. `is_open` is marked closed *before* `unmount_subtree` runs, so a reentrant
+    /// `close()` call from inside an `on_unmount` hook (or from `SetIsOpen(false)` synchronously
+    /// re-raising `Popup.Closed`, below) is a no-op via the guard at the top of this method.
     pub(crate) fn close(&self) {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
-            self.popup.SetIsOpen(false).ok();
             unmount_subtree(&self.content);
+            self.popup.SetIsOpen(false).ok();
             self.content_host.clear_tree();
         }
     }

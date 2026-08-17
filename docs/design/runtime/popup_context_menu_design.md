@@ -229,9 +229,12 @@ Restore focus to original target if necessary
 
 **Declarative `context_popup: view! { .. }` DSL** (evaluating the same `view!` grammar as a normal
 Component body, deferred to open time, reusing `view!`'s existing AST/codegen pipeline) is a planned
-follow-up, not yet implemented as of this design revision — see Issue
-[#161](https://github.com/puchinya/elwindui/issues/161). Today, popup content is authored via the
-low-level `ViewTemplate::new(|ctx| ...)` API directly.
+follow-up, not yet implemented as of this design revision — tracked in Issue
+[#162](https://github.com/puchinya/elwindui/issues/162) (split from
+[#161](https://github.com/puchinya/elwindui/issues/161), which owns the `ViewTemplate` runtime/
+backend foundation this design revision describes). Today, popup content is authored via the
+low-level `ViewTemplate::new(|ctx| ...)` API directly — see `docs/design/runtime/
+view_template_design.md` §4 for exactly what that low-level API does and does not guarantee.
 
 ---
 

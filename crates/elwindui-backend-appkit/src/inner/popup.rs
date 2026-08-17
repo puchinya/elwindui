@@ -156,14 +156,19 @@ impl InnerPopupSurface {
     ///
     /// Teardown-before-detach: generic Component/UIElement lifecycle teardown
     /// (`unmount_subtree` — `on_unmount` hooks, subscription cancellation) runs synchronously
-    /// here, before the backend host's native detach. `TreeHostView::clear_tree()` itself stays
-    /// deferred to the next main-queue turn (PR #156): `close()` may be invoked reentrantly from
-    /// inside a popup-internal event handler already on the call stack, and `clear_tree()` takes
-    /// `TreeHostView`'s own `tree`/`render_tree` `RefCell`s mutably, which a live event-dispatch
-    /// frame may still be borrowing. `unmount_subtree` does not touch those `TreeHostView`-owned
-    /// cells (it only walks/mutates the `UIElementExt` tree's own `visual_collection`/lifecycle
-    /// state), so running it synchronously here is safe even when `close()` is reentrant — verified
-    /// by `elwindui-core`'s `open_custom_popup_dismiss_from_nested_click_handler_does_not_panic`.
+    /// here, before *any* native detach — event monitor removal is not itself a detach of the
+    /// popup's window relationship/visibility/host tree, so it may stay ahead of `unmount_subtree`,
+    /// but `removeChildWindow`/`orderOut` (window relationship + visibility) and
+    /// `TreeHostView::clear_tree()` (host tree/native resource release) must both run only after
+    /// `unmount_subtree` has completed, so `on_unmount` observes an intact window/tree/Environment.
+    /// `clear_tree()` itself stays deferred to the next main-queue turn (PR #156): `close()` may be
+    /// invoked reentrantly from inside a popup-internal event handler already on the call stack, and
+    /// `clear_tree()` takes `TreeHostView`'s own `tree`/`render_tree` `RefCell`s mutably, which a
+    /// live event-dispatch frame may still be borrowing. `unmount_subtree` does not touch those
+    /// `TreeHostView`-owned cells (it only walks/mutates the `UIElementExt` tree's own
+    /// `visual_collection`/lifecycle state), so running it synchronously ahead of the window/host
+    /// detach is safe even when `close()` is reentrant — verified by `elwindui-core`'s
+    /// `unmount_subtree_reentrant_from_within_own_event_dispatch_does_not_panic`.
     pub(crate) fn close(&self) {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
@@ -173,12 +178,13 @@ impl InnerPopupSurface {
             if let Some(mon) = self.global_monitor.borrow_mut().take() {
                 unsafe { NSEvent::removeMonitor(&mon) };
             }
+
+            unmount_subtree(&self.content);
+
             if let Some(parent) = self.window.parentWindow() {
                 parent.removeChildWindow(&self.window);
             }
             self.window.orderOut(None);
-
-            unmount_subtree(&self.content);
 
             let host_raw = Retained::into_raw(self.content_host.clone()) as usize;
             dispatch2::DispatchQueue::main().exec_async(move || {

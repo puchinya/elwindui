@@ -1188,6 +1188,73 @@ mod tests {
     }
 
     #[test]
+    fn unmount_hook_observes_intact_environment_before_backend_would_detach() {
+        // Regression for teardown-before-detach, distinguishing it from detach-before-unmount (not
+        // just "did not panic"): a `close()` that got the order backwards would let a backend
+        // clear/detach native state before `unmount_subtree`'s hooks ever run, so by the time an
+        // `on_unmount`-equivalent hook executes, `effective_environment()` would already be gone.
+        // This proves the opposite: content's own Environment is still fully resolvable *during* the
+        // unmount hook, and becomes unset only once `unmount()` itself (called by `unmount_subtree`)
+        // actually runs — see `InnerPopupSurface::close()`'s own doc comment on both backends for the
+        // native-call-order half of this contract (not independently testable here without a live
+        // window; enforced by code review + this ordering invariant).
+        let host = FakePopupHost::new();
+        let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
+
+        let observed_during_hook: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+        let observed_clone = Rc::clone(&observed_during_hook);
+
+        let template = ViewTemplate::new(move |_ctx| {
+            let root: Rc<dyn UIElementExt> = TextBlock::new();
+            let observed_for_hook = Rc::clone(&observed_clone);
+            let root_for_hook = Rc::clone(&root);
+            root.add_unmount_hook(Box::new(move || {
+                *observed_for_hook.borrow_mut() =
+                    Some(root_for_hook.effective_environment().get::<TestKey>());
+            }));
+            Some(root)
+        });
+
+        let popup_env = EnvironmentContext::root();
+        popup_env.set::<TestKey>(99);
+
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let _handle = ContextMenuService::open_custom_popup(
+            &host,
+            &owner,
+            &template,
+            &anchor,
+            popup_env,
+            work_area,
+        )
+        .expect("owner is alive, template should build");
+
+        let content = Rc::clone(&host.shown.borrow()[0].0);
+        assert!(
+            observed_during_hook.borrow().is_none(),
+            "the unmount hook must not have run yet before close/unmount"
+        );
+
+        // Simulate exactly what both backends' `close()` now correctly do: unmount before any
+        // native/host detach.
+        crate::ui::unmount_subtree(&content);
+
+        assert_eq!(
+            *observed_during_hook.borrow(),
+            Some(99),
+            "on_unmount must observe the popup-scoped Environment while it is still intact, \
+             before any detach"
+        );
+        assert!(
+            content.environment_context().is_none(),
+            "environment_context must be cleared only as part of unmount() itself, after the \
+             hook already ran — proves hook-then-clear, not clear-then-hook"
+        );
+    }
+
+    #[test]
     fn custom_menu_keyboard_navigation_and_item_state() {
         let menu = FakeMenu::new();
 

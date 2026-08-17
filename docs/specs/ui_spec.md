@@ -233,11 +233,12 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
   - owner Window より前面かつ `NativeControl` よりも前面の Z-order を維持する（application-global な最前面にはしない）。
   - モニターの有効表示領域（work area）内に収まるよう、右/下の端部では自動的に左/上方向へ反転（flip）配置される。
 - **Lifecycle & Environment**:
-  - `context_popup` の内容は表示要求（open）時点で構築（build）される。owner Component の mount 時点ではなく、要求発生時点の owner の現在値を評価する。
+  - `context_popup` の内容は表示要求（open）時点で構築（build）される。owner Component の mount 時点で一度だけ構築されるのではなく、popup が開かれるたびに新たに `ViewTemplate::build` が呼ばれる。
   - `ViewTemplate` の factory は owner を `Weak` としてのみ捕捉する（strong retain cycle を作らない）。owner が既に解放されている場合、`ViewTemplate::build` は `None` を返し、popup は表示されない。
-  - build 対象の `EnvironmentContext` は、ターゲット要素の有効な Environment から `derive()` された popup 専用の派生コンテキストであり、ターゲット要素自身の Environment を変更しない。この派生コンテキストには宣言的な dismiss 用の `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`）が設定される。
-  - ポップアップが閉じられた際（外部クリック、Escape キー、項目選択、`PopupDismissAction`、popup replacement、owner Window の close 等）は、`elwindui_core::ui::unmount_subtree` による child-first の再帰的 unmount（`on_unmount`・購読解除を含む）が、バックエンドのネイティブ detach より前に必ず実行される（teardown-before-detach）。
-  - `context_popup: view! { .. }` という宣言的 DSL 構文（open 時に評価される deferred View、`view!` の既存文法をそのまま再利用）は計画中の拡張であり、本改修時点では未実装。現在は `ViewTemplate::new(|ctx| ...)` による低レベル API のみが利用可能 — 進捗は Issue [#161](https://github.com/puchinya/elwindui/issues/161) を参照。
+  - **契約の区別**: 上記は `ViewTemplate` 自体（現在利用可能な低レベル API、`ViewTemplate::new(|ctx| ...)`）が機械的に保証する範囲である。「owner の現在値を自動的に読む」こと自体は、この低レベル API 単体では保証されない——`ctx.owner`/`ctx.environment` から現在値を読むかどうかはクロージャの書き方次第であり、誤って構築前の値をキャプチャすることも可能である。「owner の bare な識別子参照が自動的に現在値を読む」という保証は、宣言的 `context_popup: view! { .. }` DSL（下記、未実装）が実装された時点で初めて成立する、より強い契約である。詳細は [`../design/runtime/view_template_design.md`](../design/runtime/view_template_design.md) §4 を参照。
+  - build 対象の `EnvironmentContext` は、ターゲット要素の有効な Environment から `derive()` された popup 専用の派生コンテキストであり、ターゲット要素自身の Environment を変更しない。この派生コンテキストには宣言的な dismiss 用の `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`、`#[environment(popup_dismiss)]` フィールド構文で解決可能なフレームワーク組み込みキー）が設定される。
+  - ポップアップが閉じられた際（外部クリック、Escape キー、項目選択、`PopupDismissAction`、popup replacement、owner Window の close 等）は、`elwindui_core::ui::unmount_subtree` による child-first の再帰的 unmount（`on_unmount`・購読解除を含む）が、バックエンドのネイティブ detach（ウィンドウ関係の解除・可視性変更・ホストツリーの解放を含む、そのいずれよりも前）に必ず先行して実行される（teardown-before-detach）。
+  - `context_popup: view! { .. }` という宣言的 DSL 構文（open 時に評価される deferred View、`view!` の既存文法をそのまま再利用し、owner Component の bare な識別子参照が自動的に現在値へ解決される）は計画中の拡張であり、本改修時点では未実装。現在は `ViewTemplate::new(|ctx| ...)` による低レベル API のみが利用可能 — 進捗は Issue [#162](https://github.com/puchinya/elwindui/issues/162) を参照（ランタイム/バックエンド基盤自体の進捗は [#161](https://github.com/puchinya/elwindui/issues/161)）。
 
 ### `NativeControl`
 

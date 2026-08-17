@@ -4,10 +4,10 @@
 
 use elwindui::core::base::{Point, Rect, Size};
 use elwindui::core::ui::popup::{
-    ContextMenuService, ContextRequest, PopupAnchor,
+    ContextMenuService, ContextRequest, PopupAnchor, PopupDismissAction,
     PopupHost, PopupRequest, PopupSurfaceHandle, ResolvedContextDefinition,
 };
-use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt, ViewTemplate};
+use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt, ViewTemplate, unmount_subtree};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -601,4 +601,159 @@ fn context_request_without_screen_anchor_returns_none_and_never_falls_back_to_lo
         resolved.is_none(),
         "process_request_for_target must return None when screen_anchor is missing and never fall back to local arranged offset"
     );
+}
+
+thread_local! {
+    static POPUP_DISMISS_FIELD_UNMOUNT_COUNT: Cell<u32> = Cell::new(0);
+}
+
+/// Declares `popup_dismiss` through the ordinary `#[environment(name)]` field syntax (no
+/// `#[elwindui::environment_key]` declaration needed — `popup_dismiss` is a framework built-in key,
+/// same resolution path as the Semantic Style Brush keys, `component_frontend::
+/// lookup_builtin_popup_dismiss_key`).
+#[elwindui::component(inherits VerticalLayout)]
+struct PopupDismissFieldContent {
+    #[environment(popup_dismiss)]
+    dismiss: Option<PopupDismissAction>,
+
+    body: view! {
+        on_unmount {
+            POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        TextBlock {
+            text: "popup dismiss field content",
+        }
+    },
+}
+
+#[elwindui::component]
+impl PopupDismissFieldContent {}
+
+#[test]
+fn popup_dismiss_environment_field_is_none_outside_a_popup() {
+    let outside = PopupDismissFieldContent::new();
+    assert!(
+        outside.dismiss().is_none(),
+        "popup_dismiss must resolve to None outside any popup-scoped Environment"
+    );
+}
+
+#[test]
+fn popup_dismiss_environment_field_resolves_and_dismisses_declaratively() {
+    POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.set(0));
+
+    let host = TestPopupHost::new();
+    let owner: Rc<dyn UIElementExt> = elwindui::core::ui::TextBlock::new();
+
+    let captured_dismiss: Rc<RefCell<Option<PopupDismissAction>>> = Rc::new(RefCell::new(None));
+    let captured_clone = Rc::clone(&captured_dismiss);
+    let template = ViewTemplate::new(move |ctx| {
+        // Mirrors what #162's `context_popup: view! { PopupDismissFieldContent {} }` codegen will
+        // generate: construct without auto-mounting, then mount explicitly against the popup-scoped
+        // Environment `ctx` carries (the same `__new_unmounted`/`mount` split `EnvironmentScope`'s
+        // own generated children already use).
+        let instance = PopupDismissFieldContent::__new_unmounted();
+        instance.mount(ctx.environment);
+        *captured_clone.borrow_mut() = instance.dismiss();
+        Some(instance.into_node())
+    });
+
+    let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+    let _handle = ContextMenuService::open_custom_popup(
+        &host,
+        &owner,
+        &template,
+        &anchor,
+        owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, template should build");
+
+    let dismiss = captured_dismiss
+        .borrow()
+        .clone()
+        .expect("popup_dismiss must resolve to Some(..) inside the popup-scoped Environment");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    assert_eq!(POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.get()), 0);
+
+    assert!(!host.closed.get());
+    dismiss.dismiss();
+    assert!(host.closed.get(), "declarative dismiss() must close the popup surface");
+
+    // The test host doesn't itself run unmount_subtree on close (that's a backend responsibility,
+    // exercised by elwindui-core's own teardown-ordering tests) — simulate it here, exactly as
+    // AppKit's/WinUI3's close() now do, to prove on_unmount fires exactly once from the declarative
+    // dismiss path end to end.
+    unmount_subtree(&content);
+    assert_eq!(
+        POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.get()),
+        1,
+        "on_unmount must run exactly once after declarative dismiss"
+    );
+
+    // Idempotent: a second unmount_subtree (e.g. a duplicate dismissal path) must not re-run it.
+    unmount_subtree(&content);
+    assert_eq!(POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.get()), 1);
+}
+
+#[test]
+fn popup_dismiss_field_content_repeated_open_close_has_independent_lifetimes() {
+    // Regression for repeated-open/close leak-freedom (directive §33) and popup-replacement-style
+    // sequencing (a new popup opened only after the previous one's close() completed, the same
+    // ordering both backends' `dispatch_context_request` already enforce before calling
+    // `open_custom_popup` again) — each open produces a fresh on_unmount call and a fresh
+    // `PopupDismissAction`, and dismissing an already-closed popup a second time stays a safe no-op.
+    POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.set(0));
+
+    let host = TestPopupHost::new();
+    let owner: Rc<dyn UIElementExt> = elwindui::core::ui::TextBlock::new();
+
+    let open_and_close = || -> PopupDismissAction {
+        let captured: Rc<RefCell<Option<PopupDismissAction>>> = Rc::new(RefCell::new(None));
+        let captured_clone = Rc::clone(&captured);
+        let template = ViewTemplate::new(move |ctx| {
+            let instance = PopupDismissFieldContent::__new_unmounted();
+            instance.mount(ctx.environment);
+            *captured_clone.borrow_mut() = instance.dismiss();
+            Some(instance.into_node())
+        });
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let _handle = ContextMenuService::open_custom_popup(
+            &host,
+            &owner,
+            &template,
+            &anchor,
+            owner.effective_environment(),
+            work_area,
+        )
+        .expect("owner is alive, template should build");
+        let content = Rc::clone(&host.shown.borrow().last().unwrap().0);
+        // Mirrors the backend close() sequence this PR fixed: unmount before detach.
+        unmount_subtree(&content);
+        captured.borrow().clone().expect("popup_dismiss must resolve inside the popup")
+    };
+
+    let dismiss_a = open_and_close();
+    assert_eq!(
+        POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.get()),
+        1,
+        "popup A's on_unmount must fire exactly once"
+    );
+
+    let dismiss_b = open_and_close();
+    assert_eq!(
+        POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.get()),
+        2,
+        "popup B's on_unmount must fire independently of A's (no leaked/duplicated teardown)"
+    );
+
+    // Both are already-unmounted-content dismiss actions; calling either now must stay a safe
+    // no-op — no cross-talk between the two popups' independent lifetimes, and no double-teardown.
+    dismiss_a.dismiss();
+    dismiss_b.dismiss();
+    assert_eq!(POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.get()), 2);
 }

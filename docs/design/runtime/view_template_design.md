@@ -2,7 +2,9 @@
 
 Normative contract: [`../../specs/ui_spec.md`](../../specs/ui_spec.md) (`context_popup`)
 
-Tracking: [#161](https://github.com/puchinya/elwindui/issues/161)
+Tracking: [#161](https://github.com/puchinya/elwindui/issues/161) (this document's own scope — the
+`ViewTemplate` runtime/backend foundation); declarative `context_popup: view! { .. }` DSL codegen
+sugar (§3) is split out to [#162](https://github.com/puchinya/elwindui/issues/162).
 
 ## 1. Relationship to `ControlTemplate<C>`
 
@@ -66,32 +68,86 @@ that captured its owner strongly would create an ownership cycle through that pr
 upgrading a dead `owner` and returning `None` (rather than panicking or falling back to some default)
 is the documented, tested contract for "the owner went away between template capture and build time."
 
-## 3. Declarative `context_popup: view! { .. }` — not yet implemented
+## 3. Declarative `context_popup: view! { .. }` — not yet implemented (tracked in #162)
 
 The durable architecture for compiling `context_popup: view! { .. }` (the same `view!` grammar as an
 ordinary Component body, deferred to popup-open time, reusing `view!`'s existing parser/AST/codegen
 construction pipeline rather than a separate DSL) is **not implemented as of this design revision**.
+It is tracked as its own follow-up, Issue [#162](https://github.com/puchinya/elwindui/issues/162).
 
-The investigation for Issue #161 identified the central open design question precisely: unqualified
-identifiers written inside `context_popup: view! { .. }` (e.g. `item: selected_item`, referencing the
-*enclosing* Component's own field) need to resolve exactly the way any other bare name inside an
-ordinary `view!` body already does — through the same `self`/`vm` accessor-rewriting `emit_closure_value`
-already performs for `on_click`-style event-handler closures and `ClosureBody::Element`-shaped values
-(`render_content: |doc| DocumentView { doc: doc }`) — rather than through `ControlTemplate`'s
-`templated_parent.foo`-style *explicit*-qualification convention, which requires an explicit prefix and
-would not match the declarative examples this Issue's directive specifies. Implementing this correctly
-means extending the closure/weak-self-capture machinery already used for event handlers to a
-multi-statement, `on_mount`/`lets`/`if`/`match`/`for`-capable body shape (not just a single
-`ClosureBody::Element` construction) — substantial, delicate `elwindui-codegen` work spanning
+The investigation (recorded on #162) identified the central open design question precisely:
+unqualified identifiers written inside `context_popup: view! { .. }` (e.g. `item: selected_item`,
+referencing the *enclosing* Component's own field) need to resolve exactly the way any other bare
+name inside an ordinary `view!` body already does — through the same `self`/`vm` accessor-rewriting
+`emit_closure_value` already performs for `on_click`-style event-handler closures and
+`ClosureBody::Element`-shaped values (`render_content: |doc| DocumentView { doc: doc }`) — rather than
+through `ControlTemplate`'s `templated_parent.foo`-style *explicit*-qualification convention, which
+requires an explicit prefix and would not match the declarative examples #162's directive specifies.
+Implementing this correctly means extending the closure/weak-self-capture machinery already used for
+event handlers to a multi-statement, `on_mount`/`lets`/`if`/`match`/`for`-capable body shape (not just
+a single `ClosureBody::Element` construction) — substantial, delicate `elwindui-codegen` work spanning
 `parser.rs` (recognizing a nested `view! { .. }` token sequence as an attribute value), `ast.rs` (a new
 `ViewExpr` variant), and every one of `codegen.rs`'s ~20 exhaustive `ViewExpr`/`ClosureBody` match
 sites.
 
-Until that lands, `context_popup` is authored via the low-level `ViewTemplate::new(|ctx| ...)` API
+Until #162 lands, `context_popup` is authored via the low-level `ViewTemplate::new(|ctx| ...)` API
 directly (see `crates/elwindui/tests/context_menu_and_popup.rs` for examples), exactly as
 `PopupContentTemplate::new(|ctx| ...)` was authored before this revision.
 
-## 4. What this revision changed at the `elwindui-core`/backend layer
+## 4. Two distinct contracts — do not conflate them
+
+This document's own scope (§§1–2, delivered) and #162's future scope (§3, not yet delivered) make
+different guarantees, and the difference matters enough to state explicitly rather than leave implicit
+in "not yet implemented":
+
+**The `ViewTemplate` runtime contract (delivered, this document)** guarantees only:
+
+- the factory closure is invoked at deferred build/open time, not at any earlier declaration time;
+- `ViewBuildContext::owner` is supplied as `Weak<dyn UIElementExt>`;
+- a popup-scoped, `derive()`-d `EnvironmentContext` is supplied;
+- the owner may already be gone by build time, in which case `build` returns `None`.
+
+It does **not** guarantee that a hand-written `ViewTemplate::new(|ctx| ...)` closure automatically
+reads the owner's *current* field/state value — `ViewTemplate::new` takes arbitrary Rust code, and a
+caller can just as easily capture a stale value by mistake (e.g. `move |_ctx| { /* uses `selected_item`
+captured by value before this closure was even stored */ }`) as read it correctly through `ctx.owner`.
+The runtime type cannot enforce an authoring discipline it has no visibility into.
+
+**The declarative `context_popup: view! { .. }` DSL contract (§3, not yet delivered, #162)** will, once
+implemented, additionally guarantee:
+
+- bare identifiers referencing the *enclosing* Component's own fields/state are read fresh, at
+  popup-open time, not snapshotted at any earlier point;
+- the generated capture of that enclosing Component is `Weak`, matching this document's own
+  no-strong-cycle rule;
+- bindings/subscriptions the generated popup content creates belong to that popup instance's own
+  lifetime, not the enclosing Component's.
+
+`docs/specs/ui_spec.md`'s "owner の現在値を評価する" wording describes the second (declarative)
+contract's target behavior, not something the first (low-level `ViewTemplate`) contract already
+enforces mechanically today — see that spec section's own note.
+
+## 5. `popup_dismiss` — a framework built-in Environment key
+
+`PopupDismissAction`/`PopupDismissActionKey` (`crates/elwindui-core/src/ui/popup/mod.rs`) are
+resolvable through the ordinary `#[environment(name)]` DSL field syntax under the fixed name
+`popup_dismiss`, via `component_frontend::lookup_builtin_popup_dismiss_key` — the same
+"framework-owned built-in key, no `#[elwindui::environment_key]` declaration needed" resolution path
+the Semantic Style Brush keys (`primary`/`secondary`/.../`link`, `theme_environment_spec.md` §7) already
+use, just with a different (non-`BrushStyle`) `Value` type:
+
+```rust
+#[environment(popup_dismiss)]
+dismiss: Option<elwindui::core::ui::popup::PopupDismissAction>,
+```
+
+`None` outside any popup-scoped Environment; `Some(..)` inside one (installed by
+`ContextMenuService::open_custom_popup`, `docs/design/runtime/popup_context_menu_design.md` §6). This
+works today, independent of #162 — see
+`crates/elwindui/tests/context_menu_and_popup.rs`'s `popup_dismiss_environment_field_*` tests for a
+Component using it end to end via the low-level `ViewTemplate` API (§4's first contract).
+
+## 6. What this revision changed at the `elwindui-core`/backend layer
 
 Independent of the DSL question above, this revision:
 
@@ -99,14 +155,16 @@ Independent of the DSL question above, this revision:
   (breaking rename — no compatibility shim was kept; `context_popup`'s prop type changed from
   `Option<PopupContentTemplate>` to `Option<ViewTemplate>`).
 - Made `ContextMenuService::open_custom_popup` take the owner element, derive a popup-scoped
-  `EnvironmentContext`, install a `PopupDismissAction`, and return `Option<Rc<dyn PopupSurfaceHandle>>`
-  (`None` when the template declines to build).
+  `EnvironmentContext`, install a `PopupDismissAction` (also resolvable declaratively, §5), and return
+  `Option<Rc<dyn PopupSurfaceHandle>>` (`None` when the template declines to build).
 - Connected AppKit's and WinUI3's popup `close()` to `unmount_subtree` (`crate::ui::unmount_subtree`,
-  PR #160's generic recursive Component/UIElement teardown), run synchronously before each backend's
-  native detach (teardown-before-detach), preserving AppKit's PR #156 deferred-`clear_tree` reentrancy
-  workaround unchanged — see `docs/design/runtime/popup_context_menu_design.md` §6 for the full
-  sequence and `crates/elwindui-backend-appkit/src/inner/popup.rs`'s `close()` doc comment for why the
-  two can be split (unmount_subtree touches only the `UIElementExt` tree's own state, never
-  `TreeHostView`'s `RefCell`s, so it's safe to run synchronously even when `close()` is reentrant from
-  a popup-internal event handler — verified by
-  `elwindui-core`'s `unmount_subtree_reentrant_from_within_own_event_dispatch_does_not_panic`).
+  PR #160's generic recursive Component/UIElement teardown), run synchronously *before any native
+  detach* — not just before `clear_tree()`, but before `removeChildWindow`/`orderOut`
+  (AppKit)/`SetIsOpen(false)` (WinUI3) too, so `on_unmount` always observes an intact
+  window/tree/Environment — preserving AppKit's PR #156 deferred-`clear_tree` reentrancy workaround
+  unchanged. See `docs/design/runtime/popup_context_menu_design.md` §6 for the full sequence and
+  `crates/elwindui-backend-appkit/src/inner/popup.rs`'s/`crates/elwindui-backend-winui3/src/inner/
+  popup.rs`'s `close()` doc comments for why unmount-before-detach is safe even when `close()` is
+  reentrant from a popup-internal event handler — verified by `elwindui-core`'s
+  `unmount_subtree_reentrant_from_within_own_event_dispatch_does_not_panic` and
+  `unmount_hook_observes_intact_environment_before_backend_would_detach`.

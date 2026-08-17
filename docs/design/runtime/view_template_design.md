@@ -196,3 +196,33 @@ Independent of the DSL question above, this revision:
   gap between the documented runtime contract and what the type actually did. Verified by
   `elwindui-core`'s `build_returns_none_when_owner_dropped_and_never_invokes_the_factory`, which
   proves the factory itself is never called (stronger than a factory that voluntarily declines).
+- Fixed `open_custom_popup`'s post-`show_popup` `PopupDismissState` transition: it previously
+  assigned `Open(Weak::downgrade(handle))` unconditionally after `host.show_popup` returned, which
+  silently overwrote a `Dismissed` state reached *during* that call (a backend's native "show" can
+  itself dispatch synchronously/reentrantly). The transition out of `Building` is now atomic (one
+  mutable borrow): `Building` → `Open`, or `Dismissed` stays `Dismissed` and the just-created handle
+  is closed immediately rather than published. Verified by `elwindui-core`'s
+  `open_custom_popup_dismiss_during_show_popup_is_not_lost_or_reopened`.
+- Rewrote WinUI3's `InnerPopupSurface::show` to defer attaching `request.content`
+  (`TreeHostPanel::set_tree`) until every fallible structural native setup step — coordinate
+  conversion, `Popup::new()`, casts, every `FrameworkElement`/`Popup` property setter, `Closed`
+  handler registration, and `SetIsOpen(true)` itself — has already succeeded, propagating every one
+  of those failures as `None` instead of silently discarding them with `.ok()`. Previously
+  `SetIsOpen(true)`'s own failure (and several earlier steps') was discarded, so a popup could fail to
+  actually open while `show()` still returned `Some(surface)`. Also checks `is_open` immediately after
+  `SetIsOpen(true)` and again after content attachment, to detect a synchronous native `Closed` event
+  racing the open/attach sequence. Code-reviewed only — `elwindui-backend-winui3` is
+  `#![cfg(target_os = "windows")]`-gated and cannot be compiled on this project's macOS development
+  sandbox; see Issue #157 for the pending hardware verification.
+- Split `component_frontend::lookup_environment_key` (read-only resolution — `#[environment(name)]`)
+  from a new `lookup_writable_environment_key` (`EnvironmentScope`/`#[elwindui::theme]`), so the
+  framework-installed `popup_dismiss` key is readable via `#[environment(popup_dismiss)]` but cannot
+  be overwritten through either DSL write path — only `ContextMenuService::open_custom_popup` may
+  set it. Semantic Style Brush keys remain writable through both resolvers; a same-crate user key
+  named `popup_dismiss` still shadows the builtin and is fully writable, matching how any other
+  builtin name is already shadowed. See `docs/specs/dsl_spec.md` §4/§13 (rules 34–36) and
+  `docs/specs/theme_environment_spec.md` §2 for the normative contract. Verified by
+  `elwindui-codegen`'s `popup_dismiss_resolves_for_read_but_not_for_write`,
+  `semantic_style_builtin_key_resolves_for_both_read_and_write`,
+  `rejects_theme_field_writing_the_popup_dismiss_builtin_key`, and
+  `environment_scope_rejects_writing_the_popup_dismiss_builtin_key`.

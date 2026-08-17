@@ -552,10 +552,18 @@ pub fn lookup_same_crate_environment_key(name: &str) -> Option<(String, String)>
         .map(|stored| (stored.key_type_name.clone(), stored.value_type.clone()))
 }
 
-/// Resolves an unqualified Environment Key name, preferring a user declaration, then the
-/// framework's fixed Semantic Style keys (`theme_environment_spec.md` §7, Issue #97), then the
-/// framework's other fixed built-in keys (currently just `popup_dismiss`,
-/// `theme_environment_spec.md` §2, Issue #161).
+/// Resolves an unqualified Environment Key name **for a read** (`#[environment(name)]` field
+/// syntax), preferring a user declaration, then the framework's fixed Semantic Style keys
+/// (`theme_environment_spec.md` §7, Issue #97), then the framework's other fixed built-in
+/// *read-only* keys (currently just `popup_dismiss`, `theme_environment_spec.md` §2, Issue #161).
+///
+/// This is the **read** resolver — do not reuse it for a DSL construct that *writes* an Environment
+/// value (`EnvironmentScope`, `#[elwindui::theme]`); those must use
+/// [`lookup_writable_environment_key`] instead, which omits `popup_dismiss`. `popup_dismiss` is
+/// installed by `ContextMenuService::open_custom_popup` into the popup-scoped Environment it
+/// derives — a DSL author consumes it via `#[environment(popup_dismiss)]`, but must not be able to
+/// overwrite the framework's own active dismiss action through `EnvironmentScope { popup_dismiss:
+/// .. }` or a `#[elwindui::theme]` field.
 ///
 /// The returned strings are emitted as Rust types; this is compile-time fallback only, never a
 /// runtime string-keyed Environment lookup.
@@ -563,6 +571,18 @@ pub fn lookup_environment_key(name: &str) -> Option<(String, String)> {
     lookup_same_crate_environment_key(name)
         .or_else(|| lookup_builtin_semantic_style_key(name))
         .or_else(|| lookup_builtin_popup_dismiss_key(name))
+}
+
+/// Resolves an unqualified Environment Key name **for a write** (`EnvironmentScope { name: value }`,
+/// `#[elwindui::theme] struct T { name: value }`), preferring a user declaration, then the
+/// framework's fixed Semantic Style keys — deliberately *not* falling through to
+/// `lookup_builtin_popup_dismiss_key` (see [`lookup_environment_key`]'s own doc comment for why: a
+/// DSL write path must not be able to overwrite the framework-installed active
+/// `PopupDismissAction`). A same-crate user key literally named `popup_dismiss` still resolves and
+/// is still writable — this only excludes the *framework builtin* fallback, exactly mirroring how a
+/// user key of any other builtin name already shadows that builtin for both resolvers.
+pub fn lookup_writable_environment_key(name: &str) -> Option<(String, String)> {
+    lookup_same_crate_environment_key(name).or_else(|| lookup_builtin_semantic_style_key(name))
 }
 
 /// The framework's fixed Semantic Style keys (`theme_environment_spec.md` §7, Issue #97) — every
@@ -889,6 +909,35 @@ pub fn sibling_component_modules(skip_name: &str) -> Vec<Module> {
 mod tests {
     use super::*;
     use crate::codegen::{build_symbol_table, generate_module};
+
+    #[test]
+    fn popup_dismiss_resolves_for_read_but_not_for_write() {
+        let read = lookup_environment_key("popup_dismiss");
+        assert!(
+            read.is_some(),
+            "popup_dismiss must resolve as a readable framework built-in key"
+        );
+        let (key_type, value_type) = read.unwrap();
+        assert!(key_type.contains("PopupDismissActionKey"));
+        assert!(value_type.contains("PopupDismissAction"));
+
+        assert!(
+            lookup_writable_environment_key("popup_dismiss").is_none(),
+            "popup_dismiss must not resolve through the writable resolver — EnvironmentScope/Theme \
+             must not be able to overwrite the framework-installed active PopupDismissAction"
+        );
+    }
+
+    #[test]
+    fn semantic_style_builtin_key_resolves_for_both_read_and_write() {
+        // Regression: the writable/read split must not accidentally make every builtin read-only —
+        // only `popup_dismiss` is excluded from the writable resolver.
+        assert!(lookup_environment_key("primary").is_some());
+        assert!(
+            lookup_writable_environment_key("primary").is_some(),
+            "Semantic Style Brush keys must remain writable via EnvironmentScope/Theme"
+        );
+    }
 
     fn generate(base: Option<&str>, src: &str) -> proc_macro2::TokenStream {
         let item_struct: syn::ItemStruct =

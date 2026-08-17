@@ -187,9 +187,11 @@ Core 座標系は **Top-Left (0, 0), +x: right, +y: down** に統一される。
 
 `context_popup` の内容は、ターゲット要素の mount 時点ではなく、**表示要求（open）が発生した時点**で構築される。`ViewTemplate::build`（`docs/design/runtime/view_template_design.md`）は owner を `Weak` としてのみ捕捉し、owner が既に解放されていれば（factory クロージャを一切呼ばずに）`None` を返す — その場合 popup は表示されない（`ContextMenuService::open_custom_popup` も `Option<Rc<dyn PopupSurfaceHandle>>` を返す）。
 
-`ContextMenuService::open_custom_popup` は、owner の有効な `EnvironmentContext` から `derive()` した popup 専用の `EnvironmentContext` を作る。この派生コンテキストに `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`）を設定してから `ViewTemplate::build` に渡す。owner 自身の Environment は変更しない。
+`ContextMenuService::open_custom_popup` は、owner の有効な `EnvironmentContext` から `derive()` した popup 専用の `EnvironmentContext` を作る。この派生コンテキストに `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`）を設定してから `ViewTemplate::build` に渡す。owner 自身の Environment は変更しない。`PopupDismissActionKey` は `open_custom_popup` のみが設定するフレームワーク管理値であり、DSL 側（`EnvironmentScope`/`#[elwindui::theme]`）からは書き込めない——`#[environment(popup_dismiss)]` による読み取りのみが可能（`component_frontend::lookup_environment_key` は読み取り専用の resolver、`lookup_writable_environment_key` は `popup_dismiss` を含まない、`docs/specs/dsl_spec.md` §4/§13 参照）。ただの「上書き可能な通常の Environment 値」ではない点に注意。
 
 `PopupDismissAction` は内部で `PopupDismissState`（`Building` → `Open(Weak<PopupSurfaceHandle>)` / `Dismissed`、`open_custom_popup` に private）という状態を持つ。これは build/mount 中（ネイティブサーフェスがまだ存在しない段階、将来 #162 の生成 Component root の `on_mount` を含む）に dismiss が呼ばれるケースを正しく扱うために必要——単純な weak-handle-slot だけでは、`show_popup` が返る前に dismiss された場合、そのリクエストが握りつぶされてしまう。
+
+`Building` から `Open` への遷移は `host.show_popup` が返った**後**、一度の可変借用の下でアトミックに行う——`show_popup` 自体の中(バックエンドのネイティブ「表示」呼び出しが同期的に再入するケース)で dismiss が呼ばれた場合、状態は `show_popup` が返る前に `Building` → `Dismissed` へ遷移している。この遷移後の状態を確認せずに無条件で `Open` を代入すると、`Dismissed` が `Open` で上書きされ、dismiss 要求が失われる。正しい遷移は: 直前の状態が `Building` なら `Open(Weak(handle))` へ、`Dismissed` なら `Dismissed` のまま据え置いた上でこの `handle` 自体を即座に `close()` して `None` を返す（`Open` は決して経由しない）。
 
 ### Build / Mount / Unmount Sequence
 
@@ -219,12 +221,19 @@ Measure content, compute placement
    │
    ▼
 PopupHost::show_popup(request) -> Option<Rc<dyn PopupSurfaceHandle>>
+   │  (dismiss() may fire from *inside* this call — a backend's native "show" can reenter
+   │   synchronously; state moves Building -> Dismissed here if so, still before any handle exists)
    │
-   ├─ None (backend show failed, e.g. WinUI3 coordinate conversion) ──> unmount_subtree(content)
+   ├─ None (backend show failed, e.g. WinUI3 coordinate conversion) ──> PopupDismissState::Dismissed
+   │                                                                     ──> unmount_subtree(content)
    │                                                                     ──> return None
    ▼ Some(handle)
-PopupDismissState::Open(Weak::downgrade(handle)) — dismiss() past this point upgrades and calls
-   handle.close()
+Atomic check-and-transition on PopupDismissState (single mutable borrow):
+   ├─ was Building  ──> PopupDismissState::Open(Weak::downgrade(handle)) ──> return Some(handle)
+   │                     (dismiss() past this point upgrades and calls handle.close())
+   └─ was Dismissed ──> stays Dismissed (never Open) ──> handle.close() ──> return None
+      (dismiss() fired during show_popup itself, above; the handle it raced against is still
+      closed here rather than left open or silently dropped)
    │
    ▼ [Interaction / Dismissal event: Outside Click, Escape, Selection, PopupDismissAction,
    │  popup replacement, owner Window close, Drop]

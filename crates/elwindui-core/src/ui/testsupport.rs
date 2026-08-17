@@ -243,6 +243,203 @@ impl OverridableLeaf {
     }
 }
 
+/// Issue #128 regression fixtures: `#[overridable]`/`#[overrides]` propagation across a
+/// `trait_only -> struct_only -> ordinary` chain, not just an all-`ordinary` one (contrast with
+/// `OverridableBase`/`Mid`/`Leaf` above, which only exercises the already-working all-`ordinary`
+/// case). `BridgeBase` (`trait_only`) declares the interface, `BridgeConcreteBase` (`struct_only`)
+/// is the concrete backend-style implementor, and `BridgeNoOverride`/`BridgeDerived` are ordinary
+/// descendants reached through that `struct_only` bridge.
+#[elwindui_macros::class(trait_only)]
+pub(crate) trait BridgeBase {
+    #[overridable]
+    fn value(&self) -> i32;
+}
+
+pub(crate) struct BridgeConcreteBaseState {
+    value: Cell<i32>,
+}
+
+#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeBaseExt)]
+pub(crate) struct BridgeConcreteBase {
+    state: BridgeConcreteBaseState,
+}
+
+#[elwindui_macros::class]
+impl BridgeConcreteBase {
+    fn value(&self) -> i32 {
+        self.state.value.get()
+    }
+    fn construct() -> Self {
+        Self {
+            state: BridgeConcreteBaseState {
+                value: Cell::new(1),
+            },
+        }
+    }
+}
+
+/// 7.1: no override anywhere below the `struct_only` bridge — dispatch must reach
+/// `BridgeConcreteBase`'s own concrete implementation.
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeConcreteBase)]
+pub(crate) struct BridgeNoOverride {}
+
+#[elwindui_macros::class]
+impl BridgeNoOverride {
+    fn construct() -> Self {
+        Self {
+            base: BridgeConcreteBase::construct(),
+        }
+    }
+}
+
+/// 7.2/9.1: the exact minimal Issue #128 repro — a single ordinary descendant, reached through the
+/// `struct_only` bridge, using ordinary `#[overrides]` + `self.base.value()` forwarding.
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeConcreteBase)]
+pub(crate) struct BridgeDerived {}
+
+#[elwindui_macros::class]
+impl BridgeDerived {
+    #[overrides]
+    fn value(&self) -> i32 {
+        self.base.value() + 100
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeConcreteBase::construct(),
+        }
+    }
+}
+
+/// 7.3/7.4/9.2: arbitrary ordinary-descendant depth below the `struct_only` bridge —
+/// `BridgeConcreteBase -> BridgeDepthC (overrides) -> BridgeDepthD (no override) -> BridgeDepthE
+/// (overrides)`. No depth-specific code exists anywhere in the fix; this fixture is what proves it.
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeConcreteBase)]
+pub(crate) struct BridgeDepthC {}
+
+#[elwindui_macros::class]
+impl BridgeDepthC {
+    #[overrides]
+    fn value(&self) -> i32 {
+        self.base.value() + 10
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeConcreteBase::construct(),
+        }
+    }
+}
+
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeDepthC)]
+pub(crate) struct BridgeDepthD {}
+
+#[elwindui_macros::class]
+impl BridgeDepthD {
+    fn construct() -> Self {
+        Self {
+            base: BridgeDepthC::construct(),
+        }
+    }
+}
+
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeDepthD)]
+pub(crate) struct BridgeDepthE {}
+
+#[elwindui_macros::class]
+impl BridgeDepthE {
+    #[overrides]
+    fn value(&self) -> i32 {
+        self.base.value() + 1000
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeDepthD::construct(),
+        }
+    }
+}
+
+/// 7.5/9.3/9.4: two independent `#[overridable]` methods on the same `trait_only` interface,
+/// overridden at different descendant depths below the `struct_only` bridge —
+/// `BridgeMultiBase(struct_only) -> BridgeMultiC (overrides first) -> BridgeMultiD (overrides
+/// second) -> BridgeMultiE (overrides first)`. Each override logs its own name before forwarding via
+/// `self.base.*(log)`, letting a test assert both the exact per-method dispatch target and the
+/// forwarding order.
+#[elwindui_macros::class(trait_only)]
+pub(crate) trait BridgeMulti {
+    #[overridable]
+    fn first(&self, log: &RefCell<Vec<&'static str>>) -> i32;
+    #[overridable]
+    fn second(&self, log: &RefCell<Vec<&'static str>>) -> i32;
+}
+
+#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeMultiExt)]
+pub(crate) struct BridgeMultiBase {}
+
+#[elwindui_macros::class]
+impl BridgeMultiBase {
+    fn first(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
+        log.borrow_mut().push("B");
+        1
+    }
+    fn second(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
+        log.borrow_mut().push("B");
+        2
+    }
+    fn construct() -> Self {
+        Self {}
+    }
+}
+
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeMultiBase)]
+pub(crate) struct BridgeMultiC {}
+
+#[elwindui_macros::class]
+impl BridgeMultiC {
+    #[overrides]
+    fn first(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
+        log.borrow_mut().push("C");
+        self.base.first(log) + 10
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeMultiBase::construct(),
+        }
+    }
+}
+
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeMultiC)]
+pub(crate) struct BridgeMultiD {}
+
+#[elwindui_macros::class]
+impl BridgeMultiD {
+    #[overrides]
+    fn second(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
+        log.borrow_mut().push("D");
+        self.base.second(log) + 20
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeMultiC::construct(),
+        }
+    }
+}
+
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeMultiD)]
+pub(crate) struct BridgeMultiE {}
+
+#[elwindui_macros::class]
+impl BridgeMultiE {
+    #[overrides]
+    fn first(&self, log: &RefCell<Vec<&'static str>>) -> i32 {
+        log.borrow_mut().push("E");
+        self.base.first(log) + 100
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeMultiD::construct(),
+        }
+    }
+}
+
 pub(crate) fn size(width: f32, height: f32) -> Size {
     Size { width, height }
 }
@@ -761,5 +958,57 @@ mod tests {
         // stops at `OverridableMid`'s own override.
         assert_eq!(OverridableBaseExt::compute(&*leaf, 5), 6);
         assert_eq!(OverridableBaseExt::label(&*leaf), "mid");
+    }
+
+    /// Issue #128, 7.1: no override anywhere below the `struct_only` bridge reaches the concrete
+    /// base implementation.
+    #[test]
+    fn bridge_two_hop_no_override_reaches_concrete_base() {
+        let leaf = BridgeNoOverride::new();
+        assert_eq!(BridgeBaseExt::value(&*leaf), 1);
+    }
+
+    /// Issue #128, 7.2/9.1: the exact minimal repro — an ordinary `#[overrides]` descendant reached
+    /// through a `struct_only` bridge dispatches to itself, and `self.base.value()` reaches the
+    /// concrete `struct_only` implementation.
+    #[test]
+    fn bridge_two_hop_override_dispatches_through_struct_only() {
+        let derived = BridgeDerived::new();
+        assert_eq!(BridgeBaseExt::value(&*derived), 101);
+    }
+
+    /// Issue #128, 7.3/7.4/9.2: arbitrary ordinary-descendant depth below the `struct_only` bridge,
+    /// with an intermediate hop (`BridgeDepthD`) that overrides nothing — dispatch must still land
+    /// on the nearest real override (`BridgeDepthC`), and the deepest override (`BridgeDepthE`)
+    /// must still be able to forward all the way back to the concrete base. No code anywhere in the
+    /// fix is specific to this depth.
+    #[test]
+    fn bridge_four_hop_override_chain_requires_no_new_code() {
+        let d = BridgeDepthD::new();
+        assert_eq!(BridgeBaseExt::value(&*d), 11);
+
+        let e = BridgeDepthE::new();
+        assert_eq!(BridgeBaseExt::value(&*e), 1011);
+    }
+
+    /// Issue #128, 7.5/9.4: two independent `#[overridable]` methods on the same `trait_only`
+    /// interface, overridden at different descendant depths, must resolve independently.
+    #[test]
+    fn bridge_independent_override_slots_resolve_independently() {
+        let e = BridgeMultiE::new();
+        let log = RefCell::new(Vec::new());
+        assert_eq!(BridgeMultiExt::first(&*e, &log), 111);
+        assert_eq!(BridgeMultiExt::second(&*e, &log), 22);
+    }
+
+    /// Issue #128, 9.3: forwarding order through `self.base.*()` for a method overridden at two
+    /// different hops must visit the closest override first, then each ancestor's own override or
+    /// concrete implementation in turn.
+    #[test]
+    fn bridge_override_chain_order_log_matches_expected_sequence() {
+        let e = BridgeMultiE::new();
+        let log = RefCell::new(Vec::new());
+        BridgeMultiExt::first(&*e, &log);
+        assert_eq!(*log.borrow(), vec!["E", "C", "B"]);
     }
 }

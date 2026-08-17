@@ -182,6 +182,7 @@ dependencies = [
  "elwindui-backend-appkit",
  "elwindui-backend-gtk4",
  "elwindui-backend-winui3",
+ "elwindui-bridge-fixture-backend",
  "elwindui-core",
  "elwindui-environment-key-fixture",
  "elwindui-i18n",
@@ -229,6 +230,23 @@ dependencies = [
  "windows-core",
  "windows-future",
  "windows-numerics",
+]
+
+[[package]]
+name = "elwindui-bridge-fixture-backend"
+version = "0.1.0"
+dependencies = [
+ "elwindui-bridge-fixture-iface",
+ "elwindui-core",
+ "elwindui-macros",
+]
+
+[[package]]
+name = "elwindui-bridge-fixture-iface"
+version = "0.1.0"
+dependencies = [
+ "elwindui-core",
+ "elwindui-macros",
 ]
 
 [[package]]

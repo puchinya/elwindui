@@ -6,6 +6,7 @@
 // same-crate `inherits` chain needs this same line.
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
+use elwindui::core::ui::WindowExt;
 use elwindui::platform;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

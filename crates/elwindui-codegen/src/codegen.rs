@@ -5011,18 +5011,14 @@ fn generate_view(
     // (`inherits Window`) component's own generated `new()` no longer auto-mounts (see this
     // function's `on_constructed` splice below) — `show()` must do it instead, on first call only.
     //
-    // `Window::show`/`hide`/`close` are deliberately plain, non-`#[overridable]` methods
-    // (`elwindui-core/src/ui/controls/window.rs`) — `#[overridable]`/`#[overrides]` does not
-    // propagate correctly across the `trait_only` (Window) -> `struct_only` (each backend's
-    // concrete Window) -> ordinary (this generated component) two-hop chain, verified empirically
-    // (`#[overrides]: no ancestor declared these methods #[overridable]`, even with `#[overridable]`
-    // declared on the trait). Instead, this emits a plain **inherent** `show`/`hide`/`close` (not
-    // `#[overrides]`) on the generated component — Rust's own method resolution prefers an inherent
-    // method over a same-named trait method for calls on the concrete type (`window.show()` where
-    // `window: Rc<SomeWindowComponent>`), so this shadows the ordinary auto-forwarded `WindowExt`
-    // impl `#[class(inherits = ..)]` still generates unconditionally. Reaches that auto-forwarded
-    // implementation via UFCS (`<Self as elwindui::core::ui::WindowExt>::show(self)`), not
-    // `self.show()`/`self.base.show()`, to avoid infinite recursion into itself.
+    // Issue #128 migrated `Window::show`/`hide`/`close` from the CI-8 inherent-method/UFCS
+    // workaround (`elwindui_core::ui::controls::window.rs`'s three methods were plain,
+    // non-`#[overridable]`, because `#[overridable]`/`#[overrides]` did not propagate across the
+    // `trait_only` (Window) -> `struct_only` (each backend's concrete Window) -> ordinary (this
+    // generated component) chain) to normal `#[overridable]`/`#[overrides]`, once #128 fixed that
+    // propagation generically in `#[class]` itself. `window_show_hide_close_overrides` below now
+    // emits ordinary `#[overrides]` methods routed through the real ancestor-forwarding chain
+    // (`self.base.show()`, not UFCS) — see that binding's own comment.
     let on_constructed_mount_call = (!is_host_composition).then(|| {
         quote! { self.mount(elwindui::core::environment::application_environment()); }
     });
@@ -5075,33 +5071,46 @@ fn generate_view(
                 }
                 self.__unmount_local();
             }
-
-            pub fn show(&self) {
+        }
+    });
+    // Issue #128: normal `#[overrides]` methods (not `mark_inherent`-wrapped — these must reach
+    // `#[class]`'s own `override_methods` collection, unlike `__unmount_local`/`unmount` above,
+    // which are framework-internal and never part of `WindowExt`) — `self.base.show()` reaches the
+    // backend's own concrete `impl WindowExt for BackendWindow` directly, exactly like any other
+    // ordinary ancestor call at this layer (see `docs/agents/class-model.md`); no UFCS needed now
+    // that #128 restored the normal override chain across the `trait_only -> struct_only ->
+    // ordinary` boundary.
+    let window_show_hide_close_overrides = is_host_composition.then(|| {
+        quote! {
+            #[overrides]
+            fn show(&self) {
                 if self.__closed.get() {
                     return;
                 }
                 if self.__mount_environment.get().is_none() {
                     self.mount(elwindui::core::environment::application_environment());
                 }
-                <Self as elwindui::core::ui::WindowExt>::show(self);
+                self.base.show();
             }
 
-            pub fn hide(&self) {
+            #[overrides]
+            fn hide(&self) {
                 if self.__closed.get() {
                     return;
                 }
-                <Self as elwindui::core::ui::WindowExt>::hide(self);
+                self.base.hide();
             }
 
             // Cancels this component's own property-changed/on_update/Environment subscriptions,
             // recursively cascades unmount to all descendant Components (Issue #126), and releases
             // the native window exactly once.
-            pub fn close(&self) {
+            #[overrides]
+            fn close(&self) {
                 if self.__closed.replace(true) {
                     return;
                 }
                 self.unmount();
-                <Self as elwindui::core::ui::WindowExt>::close(self);
+                self.base.close();
             }
         }
     });
@@ -5781,6 +5790,7 @@ fn generate_view(
                 #dynamic_region_refresh_method
                 #root_embed_method
                 #window_lifecycle_overrides
+                #window_show_hide_close_overrides
                 #composed_unmount_method
                 #named_accessors
                 #methods

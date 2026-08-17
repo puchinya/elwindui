@@ -8,17 +8,14 @@ use super::*;
 /// `Menu`/`MenuBar`/`MenuBarItem` just above (see this module's own doc comment on that group) —
 /// `impl Window for WindowImpl` downcasts it back to its own concrete `MenuBarImpl` internally.
 ///
-/// `show`/`hide`/`close` are plain (not `#[overridable]`, CI-8 of #80,
-/// docs/design/runtime/component_lifecycle_design.md §4g): `#[overridable]`/`#[overrides]` does not
-/// propagate correctly across the `trait_only` (this trait) -> `struct_only` (each backend's
-/// concrete `Window`) -> ordinary (a generated host-composition component) two-hop chain — verified
-/// empirically (`#[overrides]: no ancestor declared these methods #[overridable]` at the ordinary
-/// hop, even with `#[overridable]` declared here). `generate_view`'s host-composition codegen
-/// instead adds a plain **inherent** `show`/`hide`/`close` on the generated component itself (not
-/// `#[overrides]`), which Rust's own method resolution prefers over the auto-forwarded trait methods
-/// for calls on the concrete type (`window.show()` where `window: Rc<SomeWindowComponent>`); that
-/// inherent method reaches this trait's real implementation via UFCS
-/// (`<Self as WindowExt>::show(self)`), not `self.base.show()`, avoiding infinite recursion.
+/// `show`/`hide`/`close` are `#[overridable]` (Issue #128 restored normal `#[overridable]`/
+/// `#[overrides]` propagation across the `trait_only` (this trait) -> `struct_only` (each backend's
+/// concrete `Window`) -> ordinary (a generated host-composition component) chain — previously (CI-8
+/// of #80) that propagation didn't work, and `generate_view`'s host-composition codegen worked
+/// around it with a plain inherent `show`/`hide`/`close` reached via UFCS instead of `#[overrides]`;
+/// #128 removed that workaround). A host-composition generated component now emits ordinary
+/// `#[overrides]` methods calling `self.base.show()`/etc. directly, exactly like any other ancestor
+/// call at the `#[class]` layer.
 #[elwindui_macros::class(trait_only)]
 #[prop(title: String)]
 #[prop(menu_bar: std::rc::Rc<dyn crate::ui::MenuBarExt>)]
@@ -41,15 +38,18 @@ pub trait Window {
     fn set_transparent(&self, transparent: bool);
     /// Pins this window above normal application windows, or restores normal Z-order when false.
     fn set_always_on_top(&self, always_on_top: bool);
+    #[overridable]
     fn show(&self);
     /// Visibility only: the mounted subtree, Environment subscriptions, and state all remain alive.
     /// A subsequent `show()` makes the window visible again without remounting/rebuilding
     /// (docs/specs/dsl_spec.md's Window contract; CI-8 of #80).
+    #[overridable]
     fn hide(&self);
     /// Ends this Window's mount lifetime: releases the native window and (for a host-composition
-    /// generated component's own inherent override — see this trait's own doc comment) its own
+    /// generated component's own `#[overrides]` — see this trait's own doc comment) its own
     /// Environment subscriptions. See docs/design/runtime/component_lifecycle_design.md §4g for
     /// exactly what today's implementation does and does not clean up.
+    #[overridable]
     fn close(&self);
     fn left(&self) -> f32;
     fn set_left(&self, left: f32);

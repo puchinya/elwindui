@@ -32,7 +32,7 @@
 
 ordinary/root classは、classの公開操作をdyn dispatch可能にするextension traitと、そのclass storageへのaccess pathを生成する。ancestorの公開操作はdescendant handleから利用できる。
 
-`trait_only` はinterfaceを公開するがstorage/constructorを生成しない。`struct_only` は指定された既存interfaceを実装するが、ordinary classと同じ独自override accessorを生成するとは限らない。
+`trait_only` はinterfaceを公開するがstorage/constructorを生成しない。`struct_only` は指定された既存interfaceを実装するが、ordinary classと同じ独自override accessorを生成するとは限らない。ただし `struct_only` は、実装するinterfaceのoverride契約(§5)に対して透過的である — `struct_only` implementorを経由した descendant は、そのinterfaceの `#[overridable]` slotを通常の `#[overrides]` でoverrideできる(§5参照)。
 
 生成名はmacroのpublic contractの一部であり、利用側crateやmoduleを跨いでも同じclass chainとして解決されなければならない。
 
@@ -47,6 +47,14 @@ ordinary/root classは、classの公開操作をdyn dispatch可能にするexten
 `#[overridable]` / `#[overrides]` methodは `&self` receiverとmacroが対応するplain argumentを使う。generic、`where`、`async`、`unsafe`、trait `impl`等の非対応形はcompile-time errorとなる。
 
 `struct_only` は新しいper-class traitを持たないため、そのclassだけの `#[overridable]` slotを追加できない。overrideが必要な操作は既存interface側で定義する。
+
+`struct_only` implementorはこのoverride契約に対して**透過(transparent)**である: あるinterfaceが `#[overridable]` として宣言したmethodは、そのinterfaceを実装する `struct_only` classを経由したordinary descendant chainのどの深さからでも、通常の `#[overrides]` で置き換えられる — chainの途中に `struct_only` implementorが挟まっていることをdescendant側が意識する必要はない。この透過性は:
+
+- 任意のordinary descendant深さで成立する(2ホップに限定されない);
+- `struct_only` implementorの宣言crateとinterfaceの宣言crateが異なっていても成立する;
+- override dispatchの「最も具体的な実装が勝つ」規則、および明示的なancestor forwardingの意味論を変更しない(§5冒頭の規則がそのまま適用される)。
+
+`no_ancestor_forward` を指定した `struct_only`(手書きの既存traitを対象とする、`__dyn_x` 規約に従わない特殊形)は、このoverride透過性の対象外のままである — 挙動は変更されない。
 
 ## 6. Construction
 

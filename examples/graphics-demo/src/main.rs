@@ -39,7 +39,7 @@ use elwindui::core::graphics::{
     PathBuilder, RadialGradientBrush, RenderContext, Stretch, StrokeStyle, TextAlignment, TileMode,
     VectorImage, VectorImageDrawOptions,
 };
-use elwindui::core::ui::UIElementExt;
+use elwindui::core::ui::{UIElementExt, WindowExt};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 

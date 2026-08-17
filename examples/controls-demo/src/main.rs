@@ -21,15 +21,15 @@
 use elwindui::core::input::Key;
 #[allow(unused_imports)]
 use elwindui::core::ui::{
-    CheckState, ContextMenuPresentation, LayoutExt, TextBlockExt,
-    UIElementExt, ViewTemplate,
+    CheckState, ContextMenuPresentation, LayoutExt, TextBlockExt, UIElementExt, ViewTemplate,
+    WindowExt,
 };
 
 #[elwindui::viewmodel]
 mod controls_demo_view_model {
     use super::{
-        CheckState, ContextMenuPresentation, Key, LayoutExt, TextBlockExt,
-        TextStyleOwner, UIElementExt, ViewTemplate,
+        CheckState, ContextMenuPresentation, Key, LayoutExt, TextBlockExt, TextStyleOwner,
+        UIElementExt, ViewTemplate,
     };
 
     struct ControlsDemoViewModel {

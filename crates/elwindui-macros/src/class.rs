@@ -355,6 +355,16 @@ struct SameCrateClassInfo {
     /// `no_ancestor_forward` class's hand-written trait and whatever composes it are always
     /// declared together in the same backend crate).
     no_ancestor_forward: bool,
+    /// Issue #128: `true` only for a `trait_only` registration, `false` for an ordinary/root/
+    /// `struct_only` one. Needed because a `struct_only` implementor's own struct declaration
+    /// registers *itself* under its own bare name too (e.g. a backend's `struct Window` registers
+    /// "Window" in *its own* crate's registry) — the same bare name a `trait_only` interface of the
+    /// same name uses, but declared in a *different* crate (e.g. `elwindui-core`'s `trait_only
+    /// Window`). `class_interface_bridge_path`/`_self_ref_path` must not mistake "this crate has
+    /// *some* class named Window" (true while compiling the backend crate, because of its own
+    /// `struct_only Window`) for "this crate has the *trait_only* Window interface" (never true
+    /// there) — only this flag distinguishes the two.
+    is_trait_only: bool,
 }
 
 /// Same-crate-only bookkeeping — the *only* process-global state this module keeps about other
@@ -439,6 +449,7 @@ fn register_same_crate_class(
     bare_name: &str,
     struct_only: &Option<Path>,
     no_ancestor_forward: bool,
+    is_trait_only: bool,
 ) -> bool {
     let struct_only = struct_only.as_ref().map(|p| quote! { #p }.to_string());
     let key = (compiling_crate_key(), bare_name.to_string());
@@ -451,6 +462,7 @@ fn register_same_crate_class(
             SameCrateClassInfo {
                 struct_only,
                 no_ancestor_forward,
+                is_trait_only,
             },
         );
         true
@@ -563,6 +575,145 @@ fn inherit_macro_self_ref_path(bare_name: &str, ty: &Type, ident: Ident) -> Toke
     }
 }
 
+/// Issue #128: `<ClassName>Ext` -> `ClassName`, the direction `to_ext_ident`/`ext_trait_type` never
+/// go — derives the class name a forwardable `struct_only = some::path::NameExt` argument implements,
+/// so `expand_impl`'s struct_only branch can reach that class's own `__elwindui_class_interface_*!`
+/// bridge (`class_interface_bridge_path`) without needing a manually-maintained name table. Requires
+/// the path's final segment to literally end in `Ext` with a non-empty prefix — a `#[class]`-generated
+/// interface always does (`to_ext_ident`); a hand-written trait that doesn't follow this convention
+/// must use `struct_only = .., no_ancestor_forward` instead (this function is never called for that
+/// case — see `expand_impl`'s own struct_only branch).
+fn class_name_from_ext_trait_path(path: &Path) -> syn::Result<Ident> {
+    let Some(last) = path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            path,
+            "#[class]: empty struct_only path",
+        ));
+    };
+    let name = last.ident.to_string();
+    match name.strip_suffix("Ext").filter(|s| !s.is_empty()) {
+        Some(stripped) => Ok(Ident::new(stripped, last.ident.span())),
+        None => {
+            let msg = format!(
+                "#[class]: `struct_only = ..{name}` does not name a `#[class]`-generated `*Ext` \
+                 interface (a class's own derived trait is always `{{ClassName}}Ext`) — normal \
+                 `struct_only` forwarding targets exactly that convention so this class's descendants \
+                 can use ordinary `#[overrides]` through it; a hand-written trait that doesn't follow \
+                 it must add `no_ancestor_forward` instead (`struct_only = ..{name}, \
+                 no_ancestor_forward`), which opts out of override-slot forwarding entirely"
+            );
+            Err(syn::Error::new_spanned(last, msg))
+        }
+    }
+}
+
+/// `Window` -> `__elwindui_class_interface_Window`: the Issue #128 class-interface bridge macro
+/// every class-managed interface (ordinary class, root class, `trait_only`) generates alongside its
+/// `__elwindui_inherit_*!` trio — see `build_class_interface_bridge_macro`'s own doc comment.
+fn class_interface_bridge_ident(bare_name: &str) -> Ident {
+    format_ident!("__elwindui_class_interface_{bare_name}")
+}
+
+/// Item-position path to `bare_name`'s `__elwindui_class_interface_*!` bridge macro — the direct-
+/// invocation counterpart to `inherit_macro_path`, but keyed by the *derived* class name
+/// (`class_name_from_ext_trait_path`) rather than a `struct_only = ..` argument's own literal last
+/// path segment (which is `{ClassName}Ext`, not `ClassName`, so `path_module_prefix` itself can't be
+/// reused directly here). `existing` is the fully-qualified `struct_only = ..Ext` argument naming the
+/// interface. This is item-position only (used directly by `expand_impl`'s struct_only branch, never
+/// spliced into another `macro_rules!` body), so — unlike `inherit_macro_path`/`_self_ref_path` —
+/// there is no separate self-reference form to keep in sync.
+fn class_interface_bridge_path(bare_name: &str, existing: &Path) -> TokenStream2 {
+    let ident = class_interface_bridge_ident(bare_name);
+    if trait_only_declared_in_this_crate(bare_name) {
+        quote! { crate::#ident }
+    } else {
+        let leading_colon = &existing.leading_colon;
+        let prefix_idents = existing
+            .segments
+            .iter()
+            .rev()
+            .skip(1)
+            .rev()
+            .map(|s| &s.ident);
+        let mod_ident = class_interface_wrapper_mod_ident(bare_name);
+        quote! { #leading_colon #(#prefix_idents)::* :: #mod_ident :: #ident }
+    }
+}
+
+/// Whether `bare_name`'s `trait_only` declaration (not merely *some* same-crate-registered class of
+/// that name — see `SameCrateClassInfo::is_trait_only`'s own doc comment) lives in the crate
+/// currently compiling. The one same-crate question `class_interface_bridge_path` needs that
+/// `same_crate_classes`'s other same-crate questions don't: a registry hit alone isn't enough here,
+/// since a `struct_only` implementor's own struct declaration registers *itself* under this same
+/// bare name too.
+fn trait_only_declared_in_this_crate(bare_name: &str) -> bool {
+    same_crate_classes()
+        .lock()
+        .unwrap()
+        .get(&(compiling_crate_key(), bare_name.to_string()))
+        .is_some_and(|info| info.is_trait_only)
+}
+
+/// Issue #128: builds `__elwindui_class_interface_<bare_name>!`, the hidden bridge macro that makes a
+/// `struct_only` implementor of this class's interface a transparent link in the ordinary
+/// `#[overridable]`/`#[overrides]` override chain — generated alongside the ordinary
+/// `__elwindui_inherit_*!` trio by every class-managed interface (ordinary class, root class,
+/// `trait_only`; never by `struct_only` itself, which only ever *consumes* one). Two arms:
+///
+/// - `@impl_struct_only $ExtTrait:path, $StructTy:ty; $($body:item)*` — invoked once, directly, by
+///   the `struct_only` implementor's own `expand_impl` (item position, not from inside another
+///   `macro_rules!` body) — builds `impl $ExtTrait for $StructTy`, with the ordinary shared `__dyn_x`
+///   accessor plus one *reflexive* per-method accessor for every `#[overridable]` slot *this*
+///   interface declares (baked in here, from `overridable_names`, at this class's own compile time —
+///   never re-discovered or duplicated by the `struct_only` side, satisfying the "no copied slot
+///   list" invariant), then the concrete method bodies verbatim. `$ExtTrait` travels as a macro
+///   parameter rather than being baked as a literal path here for the same reason `$OwnTrait` does in
+///   `build_inherit_macros`: this class's own fully-qualified path is never something `#[class]` can
+///   determine about itself (no `module_path!()`-equivalent) — the caller (`expand_impl`, which
+///   already validated `struct_only = ..` fully-qualified) always has it.
+/// - `@inherit_through_struct_only $SubType:ty, $OwnTrait:path, $OwnConcrete:path; $($overrides:tt)*`
+///   — invoked from inside the `struct_only` implementor's own generated entry-macro body (see
+///   `expand_impl`'s `entry_override` construction), once per ordinary descendant reaching this
+///   interface through that `struct_only` link. Forwards, unexamined, straight into *this*
+///   interface's own real `__elwindui_inherit_<bare_name>!` entry macro (`$crate`-self-referenced,
+///   always same-crate relative to *this* bridge's own definition, regardless of which crate the
+///   `struct_only` implementor — and so this arm — is ultimately expanded from) — reusing the
+///   existing recursive classify muncher exactly as an ordinary `inherits = ..` chain would, so
+///   arbitrary further descendant depth (`C -> D -> E -> ..`) falls out of the *existing* recursion
+///   with no depth-specific code added here.
+fn build_class_interface_bridge_macro(
+    bare_name: &str,
+    dyn_ident: &Ident,
+    overridable_names: &[Ident],
+) -> TokenStream2 {
+    let bridge_ident = class_interface_bridge_ident(bare_name);
+    let entry_ident = inherit_macro_ident(bare_name);
+    let per_method_accessors: Vec<TokenStream2> = overridable_names
+        .iter()
+        .map(|name| {
+            let accessor = per_method_accessor_ident(name);
+            quote! { fn #accessor(&self) -> &dyn $ExtTrait { self } }
+        })
+        .collect();
+    quote! {
+        #[doc(hidden)]
+        #[macro_export]
+        #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+        macro_rules! #bridge_ident {
+            (@impl_struct_only $ExtTrait:path, $StructTy:ty; $($body:item)*) => {
+                impl $ExtTrait for $StructTy {
+                    fn #dyn_ident(&self) -> &dyn $ExtTrait { self }
+                    #(#per_method_accessors)*
+                    $($body)*
+                }
+            };
+            (@inherit_through_struct_only $SubType:ty, $OwnTrait:path, $OwnConcrete:path; $($overrides:tt)*) => {
+                $crate::#entry_ident!($SubType, $OwnTrait, $OwnConcrete, $OwnTrait; $($overrides)*);
+            };
+        }
+    }
+}
+
 /// See `same_crate_classes`'s own doc comment (question 2).
 fn struct_only_collides_with(own_struct_only: &Option<Path>, parent_bare_name: &str) -> bool {
     let Some(own) = own_struct_only else {
@@ -587,20 +738,62 @@ fn struct_only_collides_with(own_struct_only: &Option<Path>, parent_bare_name: &
 /// `struct_only` registration, its real recorded target always wins over the naming-convention
 /// guess.
 fn ancestor_own_trait(bare_name: &str, fallback: &Type) -> TokenStream2 {
+    let p = ancestor_own_trait_path(bare_name, fallback);
+    quote! { #p }
+}
+
+/// `ancestor_own_trait`'s own logic, but returning a parsed `syn::Path` rather than raw tokens —
+/// needed by Issue #128's `ancestor_bridge_path`/`_self_ref_path`, which must pull
+/// this path's own *leading segments* apart (impossible on an opaque `TokenStream2`) to derive the
+/// bridge macro's location, exactly as `class_interface_bridge_path` already does for a directly
+/// known `struct_only = ..Ext` argument.
+fn ancestor_own_trait_path(bare_name: &str, fallback: &Type) -> Path {
     let real = same_crate_classes()
         .lock()
         .unwrap()
         .get(&(compiling_crate_key(), bare_name.to_string()))
         .and_then(|info| info.struct_only.clone());
     match real {
-        Some(s) => s
-            .parse()
+        Some(s) => syn::parse_str(&s)
             .expect("#[class]: internal: failed to reparse stored struct_only path"),
-        None => {
-            let t = ext_trait_type(fallback);
-            quote! { #t }
-        }
+        None => match ext_trait_type(fallback) {
+            Type::Path(tp) => tp.path,
+            _ => panic!(
+                "#[class]: internal: ext_trait_type should always produce a Type::Path from an \
+                 already-validated fully-qualified inherits/struct_only argument"
+            ),
+        },
     }
+}
+
+/// Issue #128: the path to whichever ancestor `bare_name`/`ty` (an `inherits = ..` argument,
+/// exactly as *this* class wrote it) names for its own class-interface-bridge macro — reached
+/// through the *exact same*, already-reliable wrapper module every other macro of that ancestor is
+/// reached through (`inherit_macro_path`, `macro_reexport_mod_ident`), just naming the bridge ident
+/// instead of the entry/skip/classify ones. Deliberately NOT derived from the ancestor's own
+/// *resolved* Ext-trait path (`ancestor_own_trait`'s same-crate-registry lookup, which falls back to
+/// a naming-convention guess when that lookup misses — same-crate declaration order across
+/// *different files* in one crate is not reliably "ancestors first", unlike within one file — see
+/// `same_crate_classes`'s own doc comment; the guessed fallback still resolves correctly for a type
+/// path, since backend crates typically re-export a struct_only ancestor's own real Ext trait by
+/// name, but its wrapper-module *prefix* is not guaranteed to match). Requires the *ancestor itself*
+/// (e.g. `NativeControl`'s own `struct_only` declaration) to re-export the real bridge macro into
+/// this same wrapper module under this same ident — see `expand_impl`'s own `macro_reexports`
+/// construction.
+/// Unlike `entry_ident`/`skip_ident`/`classify_ident` (always `#[macro_export]`'d directly at crate
+/// root, so `inherit_macro_path`'s same-crate branch can use a bare `crate::#ident`), the bridge
+/// ident is *never* at crate root — it only ever exists as a `pub use .. as` re-export *inside*
+/// `bare_name`'s own wrapper module (`expand_impl`'s `macro_reexports` construction). So this always
+/// routes through `path_module_prefix(ty)` (never the bare-`crate::` shortcut), regardless of
+/// same-crate/cross-crate — a validated, fully-qualified `inherits = ..`/`struct_only = ..` argument
+/// always has >= 2 segments, so this always succeeds. The caller decides whether the result needs
+/// `rewrite_crate_segment` afterward (item position: no; self-reference/macro-body position: yes) —
+/// exactly like `next_trait`/`next_concrete` already do, so a single function suffices for both.
+fn ancestor_bridge_path(bare_name: &str, ty: &Type) -> TokenStream2 {
+    let prefix = path_module_prefix(ty)
+        .expect("#[class]: internal: inherits/struct_only argument should already be validated fully-qualified");
+    let ident = class_interface_bridge_ident(bare_name);
+    quote! { #prefix::#ident }
 }
 
 /// Rewrites a leading literal `crate` token to the `$crate` macro_rules metavariable. Needed
@@ -2216,7 +2409,25 @@ fn build_inherit_macros(
     overridable_names: &[Ident],
     extra_required_names: &[Ident],
     recurse_macro_path: &TokenStream2,
-    recurse_next: Option<(&TokenStream2, &TokenStream2)>,
+    // Issue #128: a third tuple element, `next_bridge_path`, travels alongside `next_trait`/
+    // `next_concrete` — the *next* ancestor's own class-interface-bridge path, recomputed fresh at
+    // *this* hop (never forwarded from a higher caller — see `ancestor_bridge_path`'s
+    // own doc comment for why). Every entry macro's own `$BridgePath` parameter is filled in this
+    // same way by whoever invokes it.
+    recurse_next: Option<(&TokenStream2, &TokenStream2, &TokenStream2)>,
+    // Issue #128: overrides the entry macro's own body (`$SubType`/`$OwnTrait`/`$OwnConcrete`/
+    // `$BridgePath`/`$overrides` all still in scope) instead of the default "classify against my own
+    // locally-known `overridable_names`" behavior — used exactly once, by `expand_impl`'s struct_only
+    // branch, to redirect a forwardable `struct_only` implementor's entry macro into its interface's
+    // `__elwindui_class_interface_*!` bridge (`@inherit_through_struct_only`) instead, since a
+    // `struct_only` class's own locally-known `overridable_names` is never the right classification
+    // source for the interface it implements. `$BridgePath` itself is never baked as a literal token
+    // here — it travels as a macro parameter for exactly the same reason `$OwnTrait`/`$OwnConcrete`
+    // do (see `ancestor_bridge_path`'s own doc comment): a path baked once, inside a
+    // macro body invoked from arbitrary third crates, resolves against whichever crate re-invokes
+    // it, not the crate that originally generated the body. `None` (every other caller) preserves
+    // this function's original, unconditional behavior exactly.
+    entry_override: Option<TokenStream2>,
 ) -> TokenStream2 {
     let entry_ident = inherit_macro_ident(bare_name);
     let skip_ident = inherit_macro_skip_ident(bare_name);
@@ -2242,7 +2453,7 @@ fn build_inherit_macros(
     // `, next_trait, next_concrete` (an ordinary further ancestor, so it can build its own `impl`
     // the same way this layer just did) or nothing at all (the terminal check, which never builds
     // an `impl` and so never needs a trait/concrete path).
-    let recurse_extra = recurse_next.map(|(t, c)| quote! { , #t, #c });
+    let recurse_extra = recurse_next.map(|(t, c, b)| quote! { , #t, #c, #b });
 
     // No further ancestor: recurse into a *local* (same-crate, `$crate::`-self-referenced) leftover-
     // `#[overrides]` check instead of the caller-supplied `recurse_macro_path` (ignored in this
@@ -2385,13 +2596,24 @@ fn build_inherit_macros(
     // `macro_reexport_mod_ident`'s own doc comment for why. `#resolve_ident` doesn't need this
     // treatment: it's only ever `$crate::`-self-referenced from *this* class's own classify macro,
     // never named directly by another class's own generated code the way `entry`/`skip` are.
+    // `$BridgePath` is accepted by every entry macro unconditionally (whether or not `entry_override`
+    // is `Some`) so that every caller can compute and pass it the same way, with no need to know in
+    // advance whether the ancestor they're naming happens to be a forwardable `struct_only`
+    // implementor — see `ancestor_bridge_path`'s own doc comment. The default body
+    // (classify invocation) simply never references it.
+    let entry_body = entry_override.unwrap_or_else(|| {
+        quote! {
+            $crate::#classify_ident!($SubType, $OwnTrait, $OwnConcrete; #(#empty_slots)*; []; $($overrides)*);
+        }
+    });
+
     quote! {
         #[doc(hidden)]
         #[macro_export]
         #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
         macro_rules! #entry_ident {
-            ($SubType:ty, $OwnTrait:path, $OwnConcrete:path; $($overrides:tt)*) => {
-                $crate::#classify_ident!($SubType, $OwnTrait, $OwnConcrete; #(#empty_slots)*; []; $($overrides)*);
+            ($SubType:ty, $OwnTrait:path, $OwnConcrete:path, $BridgePath:path; $($overrides:tt)*) => {
+                #entry_body
             };
         }
 
@@ -2446,6 +2668,23 @@ fn macro_reexport_mod_ident(bare_name: &str) -> Ident {
     format_ident!("__elwindui_macros_of_{bare_name}")
 }
 
+/// Issue #128: the wrapper module a `trait_only` class's own `__elwindui_class_interface_*!` bridge
+/// macro is `pub use`-re-exported through — deliberately a *different* name from
+/// `macro_reexport_mod_ident`'s own `__elwindui_macros_of_<bare_name>` (which a `struct_only`
+/// implementor of *the same bare name*, in a completely different crate, also generates for
+/// itself — e.g. `elwindui-core`'s `trait_only Window` and each backend's own `struct_only Window`
+/// deliberately share the bare name "Window", see this module's own top doc comment). Facade crates
+/// that glob-merge a backend crate's own top-level items together with `elwindui-core::ui`'s (e.g.
+/// `elwindui`'s own `pub mod ui { pub use elwindui_backend_appkit::*; pub use elwindui_core::ui::*;
+/// }`) would otherwise hit an ambiguous-glob-reexport collision between the two same-named wrapper
+/// modules — confirmed empirically. Only ever needs to carry the bridge macro itself (unlike
+/// `macro_reexport_mod_ident`'s wrapper, nothing outside this class's own generated code ever
+/// references its entry/skip/classify macros by an external module path — every reference to those
+/// from the bridge macro's own body is a same-crate `$crate::` self-reference instead).
+fn class_interface_wrapper_mod_ident(bare_name: &str) -> Ident {
+    format_ident!("__elwindui_class_interface_macros_of_{bare_name}")
+}
+
 pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     // Checked before parsing: a bare `#[class]` on an `impl` block means "reuse the args already
     // declared on the paired `struct`" (see `expand_impl`) — `ClassArgs::default()` from parsing an
@@ -2481,6 +2720,7 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
                 &item_struct.ident.to_string(),
                 &args.struct_only,
                 args.no_ancestor_forward,
+                false,
             );
             store_class_args(&item_struct.ident.to_string(), &args, owns_inherit_macros);
             expand_struct(&args, item_struct)
@@ -2637,7 +2877,7 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
     } else {
         quote! { : #user_supertraits + #bound }
     };
-    let owns_inherit_macros = register_same_crate_class(&bare_name, &None, false);
+    let owns_inherit_macros = register_same_crate_class(&bare_name, &None, false, true);
     let sigs: Vec<syn::Signature> = items
         .iter()
         .filter_map(|item| match item {
@@ -2645,31 +2885,94 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
             _ => None,
         })
         .collect();
+    // Issue #128: `#[overridable]` *is* meaningful on a `trait_only` method (unlike `sigs` above,
+    // which only ever carries bodyless signatures with no attributes at all) — collected separately
+    // here, from `items`' own `f.attrs`, since previously this was the exact point that silently
+    // discarded it (root cause of #128: nothing downstream, same-crate or cross-crate, could ever
+    // see that a `trait_only` method was declared overridable). Never spliced back into `sigs`/the
+    // generated trait declaration itself — `dyn_methods`/`build_class_interface_bridge_macro` below
+    // are the only consumers.
+    let overridable_names: Vec<Ident> = items
+        .iter()
+        .filter_map(|item| match item {
+            syn::TraitItem::Fn(f) if f.attrs.iter().any(|a| a.path().is_ident("overridable")) => {
+                Some(f.sig.ident.clone())
+            }
+            _ => None,
+        })
+        .collect();
     let dyn_ident = dyn_accessor_ident(&bare_name);
     let ext_ty = quote! { #ext_name };
-    // `trait_only` bodies are bare `fn foo(&self, ..);` signatures with no attribute tags at all
-    // (`#[overridable]` is only meaningful on an `impl ClassName { .. }` method) — so there are
-    // never any per-method accessors to build here, only the one shared `dyn_ident`.
-    let dyn_methods = build_dyn_default_methods(&dyn_ident, &ext_ty, &sigs, &[]);
+    let dyn_methods = build_dyn_default_methods(&dyn_ident, &ext_ty, &sigs, &overridable_names);
     let into_node_ident = into_node_ident(&bare_name);
     let into_node_default = build_into_node_default(&into_node_ident, &ext_ty);
 
-    // Unlike `expand_impl`, `trait_only` never generates its own `__elwindui_inherit_*!` trio (or
-    // the matching `macro_reexport_mod_ident` wrapper module): `trait_only` has no `prelude` at
-    // all (no concrete struct/impl of its own to build one for — the supertrait `bound` above,
-    // computed unconditionally, is the *only* thing that ties it into the ancestor chain, and
-    // Rust's own trait-impl checking enforces it from there), and nothing in this codebase ever
-    // names a `trait_only` class's own bare (pre-rename) name as an `inherits = ..` target — every
-    // backend implements the shared interface via `struct_only = ..XExt` instead, which never
-    // consults this trio. Since `trait_only` declarations are also the one place a bare class name
-    // is deliberately reused *across* crates (e.g. `elwindui-core`'s own `trait_only Window`
-    // interface and each backend's `struct_only`-implementing `Window` struct), generating this
-    // trio here would need cross-crate collision detection `same_crate_classes` (a per-compilation
-    // registry) cannot provide — see `macro_reexport_mod_ident`'s own doc comment. `owns_inherit_macros`
-    // is still computed above (`register_same_crate_class`) purely for the bookkeeping other
-    // same-crate declarations rely on (struct_only collision detection, etc.) — it just has no use
-    // here beyond that.
-    let _ = owns_inherit_macros;
+    // Issue #128: unlike before, `trait_only` now *does* generate its own `__elwindui_inherit_*!`
+    // trio, plus the matching `macro_reexport_mod_ident` wrapper module and a
+    // `__elwindui_class_interface_*!` bridge macro (`build_class_interface_bridge_macro`) — the
+    // cross-crate transport a forwardable `struct_only` implementor's own entry macro redirects
+    // into (`expand_impl`'s `entry_override`), so an `#[overridable]` method declared here is
+    // reachable by an ordinary descendant reached through that `struct_only` link, exactly like an
+    // ordinary `inherits = ..` chain. Nothing outside this bridge mechanism ever names a `trait_only`
+    // class's own bare (pre-rename) name as an `inherits = ..` target directly — every backend still
+    // implements the shared interface via `struct_only = ..Ext` instead — so this trio's own *entry*
+    // macro is, in production, only ever invoked from inside a `struct_only` implementor's own
+    // `entry_override` (via the bridge), never named directly by a further `inherits = ..`. Gated on
+    // `owns_inherit_macros` (a `trait_only` bare name can, like any other, lose the same-crate
+    // ownership race — see `register_same_crate_class`'s own doc comment) exactly as `expand_impl`
+    // gates its own trio.
+    let inherit_macros_and_bridge = owns_inherit_macros.then(|| {
+        let (recurse_macro_path, recurse_next) = match &args.inherits {
+            Some(inh) => {
+                let parent_bare = last_segment_name(inh).unwrap_or_default();
+                let path = inherit_macro_self_ref_path(
+                    &parent_bare,
+                    inh,
+                    inherit_macro_ident(&parent_bare),
+                );
+                let next_trait = rewrite_crate_segment(ancestor_own_trait(&parent_bare, inh));
+                let next_concrete = rewrite_crate_segment(quote! { #inh });
+                let next_bridge_path =
+                    rewrite_crate_segment(ancestor_bridge_path(&parent_bare, inh));
+                (path, Some((next_trait, next_concrete, next_bridge_path)))
+            }
+            None => (TokenStream2::new(), None),
+        };
+        let recurse_next_ref = recurse_next.as_ref().map(|(t, c, b)| (t, c, b));
+        let inherit_macros = build_inherit_macros(
+            &bare_name,
+            &dyn_ident,
+            /* has_concrete_type */ false,
+            /* skip_own_impl */ false,
+            &overridable_names,
+            &[],
+            &recurse_macro_path,
+            recurse_next_ref,
+            None,
+        );
+        let bridge_macro =
+            build_class_interface_bridge_macro(&bare_name, &dyn_ident, &overridable_names);
+        let bridge_ident = class_interface_bridge_ident(&bare_name);
+        // A *different* wrapper module name from `macro_reexport_mod_ident`'s own
+        // `__elwindui_macros_of_<bare_name>` — see `class_interface_wrapper_mod_ident`'s own doc
+        // comment on the same-bare-name collision this avoids. Only the bridge macro needs a
+        // module-addressable home here: nothing outside this class's own generated code ever
+        // references its entry/skip/classify macros by path (see `inherit_macros`, above, whose
+        // own recursion/self-references stay `$crate`-qualified regardless).
+        let mod_ident = class_interface_wrapper_mod_ident(&bare_name);
+        let macro_reexports = quote! {
+            #[doc(hidden)]
+            #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+            pub mod #mod_ident {
+                pub use crate::#bridge_ident;
+            }
+        };
+        quote! {
+            #inherit_macros
+            #bridge_macro
+            #macro_reexports
+        }
+    });
 
     // The shape layer *is* generated for `trait_only` (unlike the inherit trio above): the
     // backend-agnostic DSL surface of every native leaf is declared here in `elwindui-core`, and
@@ -2694,6 +2997,7 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
             #(#dyn_methods)*
             #into_node_default
         }
+        #inherit_macros_and_bridge
         #shape_macro
     }
 }
@@ -3204,8 +3508,9 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             } else {
                 let invoke_path =
                     inherit_macro_path(&parent_bare, inh, inherit_macro_ident(&parent_bare));
+                let parent_bridge_path = ancestor_bridge_path(&parent_bare, inh);
                 prelude.push(quote! {
-                    #invoke_path!(#impl_name #ty_generics, #parent_trait, #inh; #(#overrides)*);
+                    #invoke_path!(#impl_name #ty_generics, #parent_trait, #inh, #parent_bridge_path; #(#overrides)*);
                 });
             }
         }
@@ -3244,29 +3549,44 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         // The concrete, hand-written implementor of someone else's `{Name}Ext` trait — this is the
         // one shape besides root mode that provides *real* bodies directly rather than relying on
         // `{Name}Ext`'s own default methods, so it must also supply that trait's required `__dyn_x`
-        // accessor itself (reflexively — `self` already *is* the concrete implementor). Skipped for
+        // accessor (plus, per Issue #128, one reflexive per-`#[overridable]`-slot accessor) itself
+        // (reflexively — `self` already *is* the concrete implementor). Skipped for
         // `no_ancestor_forward` (e.g. `NativeTabView`'s `struct_only = TabView`): that target is a
         // hand-written trait predating this macro's `__dyn_x` convention, with no such method
-        // declared on it at all — adding one here would be E0407 (method not a member of trait).
-        let existing_name = existing
-            .segments
-            .last()
-            .map(|s| s.ident.to_string())
-            .unwrap_or_default();
-        let dyn_accessor = (!args.no_ancestor_forward).then(|| {
-            let dyn_ident = dyn_accessor_ident(&existing_name);
-            quote! { fn #dyn_ident(&self) -> &dyn #existing { self } }
-        });
+        // declared on it at all — adding one here would be E0407 (method not a member of trait); a
+        // `no_ancestor_forward` target also never has a `__elwindui_class_interface_*!` bridge to
+        // route through (see this module's own doc comment on `no_ancestor_forward`), so this
+        // branch keeps building the `impl` directly, exactly as before #128.
         let bodies = own_methods.iter().map(|f| quote! { #f });
-        (
-            TokenStream2::new(),
-            quote! {
-                impl #impl_generics #existing for #impl_name #ty_generics #where_clause {
-                    #dyn_accessor
-                    #(#bodies)*
-                }
-            },
-        )
+        if args.no_ancestor_forward {
+            (
+                TokenStream2::new(),
+                quote! {
+                    impl #impl_generics #existing for #impl_name #ty_generics #where_clause {
+                        #(#bodies)*
+                    }
+                },
+            )
+        } else {
+            // Issue #128: `existing` (the `struct_only = ..Ext` argument) names a `#[class]`-generated
+            // interface — its own class name, and so its `__elwindui_class_interface_*!` bridge, is
+            // derivable from that `Ext`-suffixed path alone (`class_name_from_ext_trait_path`), with
+            // no manually-maintained table. Routes the shared `__dyn_x` accessor and every one of the
+            // interface's own `#[overridable]` slots (baked into the bridge at *that* interface's own
+            // compile time, never re-discovered here) through `@impl_struct_only`, instead of building
+            // `impl #existing for #impl_name { .. }` directly — see that bridge arm's own doc comment.
+            let class_name = match class_name_from_ext_trait_path(existing) {
+                Ok(name) => name,
+                Err(e) => return e.to_compile_error(),
+            };
+            let bridge_path = class_interface_bridge_path(&class_name.to_string(), existing);
+            (
+                TokenStream2::new(),
+                quote! {
+                    #bridge_path!(@impl_struct_only #existing, #impl_name #ty_generics; #(#bodies)*);
+                },
+            )
+        }
     } else if is_root_mode {
         // Root class mode (`inherits` omitted, e.g. `UIElement` itself): every method the user
         // wrote becomes a *default* trait method (body embedded directly in the trait declaration,
@@ -3550,11 +3870,13 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 );
                 let next_trait = rewrite_crate_segment(ancestor_own_trait(&parent_bare, inh));
                 let next_concrete = rewrite_crate_segment(quote! { #inh });
-                (path, Some((next_trait, next_concrete)))
+                let next_bridge_path =
+                    rewrite_crate_segment(ancestor_bridge_path(&parent_bare, inh));
+                (path, Some((next_trait, next_concrete, next_bridge_path)))
             }
             None => (TokenStream2::new(), None),
         };
-        let recurse_next_ref = recurse_next.as_ref().map(|(t, c)| (t, c));
+        let recurse_next_ref = recurse_next.as_ref().map(|(t, c, b)| (t, c, b));
         // A root class's `as_ui_element` is a *second* required method beyond `dyn_ident` itself
         // (see `build_inherit_macros`'s own doc comment on `extra_required_names`) — every other
         // shape has none.
@@ -3563,6 +3885,33 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         } else {
             Vec::new()
         };
+        // Issue #128: a forwardable `struct_only` implementor (not `no_ancestor_forward`) never
+        // classifies against its own locally-known `overridable_names` (almost always empty — the
+        // interface it implements owns that list, not this concrete struct) — instead its entry
+        // macro redirects straight into that interface's own `__elwindui_class_interface_*!` bridge,
+        // `@inherit_through_struct_only`, forwarding `$SubType`/`$OwnTrait`/`$OwnConcrete`/
+        // `$overrides` through unexamined. `$BridgePath` (the entry macro's own 4th parameter, see
+        // `build_inherit_macros`'s own doc comment) is used directly as the invocation prefix here,
+        // rather than a path computed once at *this* class's own compile time — every caller of this
+        // entry macro supplies it fresh, using its own knowledge of this ancestor, which is the only
+        // way it resolves correctly no matter which crate ends up re-invoking this macro (see
+        // `ancestor_bridge_path`'s own doc comment). The named accessor
+        // (`as_<bare_name>(&self) -> &$OwnConcrete`) is still emitted directly here since it's
+        // classify-independent (`build_inherit_macros`'s own `named_accessor`, bypassed along with
+        // the rest of classify once `entry_override` is `Some`).
+        let entry_override = args.struct_only.as_ref().and_then(|_| {
+            if args.no_ancestor_forward {
+                return None;
+            }
+            let named_accessor_ident_val = named_accessor_ident(&bare_name);
+            Some(quote! {
+                impl $SubType {
+                    #[allow(dead_code)]
+                    pub fn #named_accessor_ident_val(&self) -> &$OwnConcrete { self.base.#named_accessor_ident_val() }
+                }
+                $BridgePath!(@inherit_through_struct_only $SubType, $OwnTrait, $OwnConcrete; $($overrides)*);
+            })
+        });
         Some(build_inherit_macros(
             &bare_name,
             &dyn_ident,
@@ -3572,6 +3921,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             &extra_required_names,
             &recurse_macro_path,
             recurse_next_ref,
+            entry_override,
         ))
     };
 
@@ -3614,6 +3964,27 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         let skip_ident = inherit_macro_skip_ident(&bare_name);
         let classify_ident = inherit_macro_classify_ident(&bare_name);
         let mod_ident = macro_reexport_mod_ident(&bare_name);
+        // Issue #128: a forwardable `struct_only` implementor also re-exports the *real*
+        // class-interface-bridge macro (defined and `#[macro_export]`'d by the interface it
+        // implements, possibly in a different crate) into its own wrapper module, under the same
+        // bridge ident, using a path computed reliably from its own `existing` (no same-crate
+        // registry lookup involved, unlike `ancestor_own_trait`) — this is what lets any descendant
+        // reach it through the exact same, already-reliable wrapper-module route
+        // (`ancestor_bridge_path`) it already uses for this ancestor's entry/skip macros, rather
+        // than through a resolution that can silently fall back to a wrong prefix when this
+        // ancestor's own same-crate registration hasn't happened yet at the point a *different*,
+        // textually-earlier same-crate descendant expands (see `ancestor_bridge_path`'s own doc
+        // comment).
+        let bridge_reexport = args.struct_only.as_ref().and_then(|existing| {
+            if args.no_ancestor_forward {
+                return None;
+            }
+            let class_name = class_name_from_ext_trait_path(existing)
+                .expect("#[class]: internal: struct_only path re-validation should not fail here");
+            let real_bridge_path = class_interface_bridge_path(&class_name.to_string(), existing);
+            let bridge_ident = class_interface_bridge_ident(&bare_name);
+            Some(quote! { pub use #real_bridge_path as #bridge_ident; })
+        });
         quote! {
             #[doc(hidden)]
             #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
@@ -3622,6 +3993,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 pub use crate::#skip_ident;
                 pub use crate::#classify_ident;
                 pub use crate::#sealed_ident;
+                #bridge_reexport
             }
         }
     };

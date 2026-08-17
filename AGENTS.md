@@ -2,6 +2,25 @@
 
 This file is the repository-wide instruction source for AI coding agents, including Codex and Claude Code. Claude Code enters through [`CLAUDE.md`](CLAUDE.md), which must defer to this file for shared rules.
 
+## Mandatory task bootstrap
+
+Before agent-local planning, creating a task list, performing broad repository investigation, or editing any repository-controlled file, classify the user's requested end result.
+
+If fulfilling the request is expected to modify code, documentation, tests, configuration, scripts, workflows, or other repository-controlled files, treat it as a repository-changing task from the beginning. Preliminary investigation for such a task does not make it research-only.
+
+For every repository-changing task:
+
+1. If the user already identified an Issue or Pull Request, use it. Otherwise, perform only the minimal GitHub Issue / Pull Request lookup required to determine whether an existing item already owns the request.
+2. If no Issue owns the request, immediately read [`docs/agent-workflow/requirements.md`](docs/agent-workflow/requirements.md) as the no-Issue bootstrap entry point, create the Issue with `gh issue create`, assign `phase:requirements`, and run the platform-appropriate `scripts/agent/ensure-version-milestone.* <issue-number>` script.
+3. If an Issue already owns the request, determine its active phase from Issue labels / PR state and read only the workflow document for that phase.
+4. Only after the task is associated with an Issue and the required workflow entry step is complete may normal planning, task decomposition, detailed repository investigation, design work, or repository editing begin.
+
+This bootstrap gate takes precedence over agent-local planning workflows. Entering Planning Mode or Plan Mode, generating an implementation plan, or creating a TODO list does not bypass or postpone it.
+
+For a new repository-changing request with no existing Issue, `phase:requirements` is always the workflow entry point.
+
+Research-only means the requested deliverable itself is analysis, explanation, code reading, or exploratory discussion and no repository modification has been requested or approved. If the user later requests or approves a repository change, run this bootstrap at that point before planning or continuing repository-changing work.
+
 ## Communication
 
 When asking the user a question (clarifying questions, plan checkpoints, or approval requests), always ask in Japanese.
@@ -9,9 +28,10 @@ When asking the user a question (clarifying questions, plan checkpoints, or appr
 ## Issue-driven development workflow
 
 - Every repository-changing task must be associated with one GitHub Issue.
-- Do not create an Issue for explanation, research, or exploratory discussion unless explicitly requested.
+- Do not create an Issue for research-only work unless explicitly requested.
 - Use the GitHub CLI (`gh`) for GitHub Issue, label, milestone, Pull Request, comment, review, and Actions operations. Use `git` for local branch, staging, commit, and push operations. Do not switch to another GitHub integration unless the user explicitly requests it or `gh` cannot perform the required operation.
-- Determine the active phase from Issue labels / PR state and read only the required workflow document:
+- For a new repository-changing request with no existing Issue, use [`docs/agent-workflow/requirements.md`](docs/agent-workflow/requirements.md) as the bootstrap entry point and create a `phase:requirements` Issue before normal planning or detailed investigation.
+- For an existing Issue, determine the active phase from Issue labels / PR state and read only the required workflow document:
   - `phase:requirements`: [`docs/agent-workflow/requirements.md`](docs/agent-workflow/requirements.md)
   - `phase:design`: [`docs/agent-workflow/design.md`](docs/agent-workflow/design.md)
   - `phase:ready` / `phase:implementation`: [`docs/agent-workflow/implementation.md`](docs/agent-workflow/implementation.md)

@@ -5048,10 +5048,11 @@ fn generate_view(
                     self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
                     return;
                 }
-                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
                 #call_on_unmount
                 self.__property_changed_handlers.borrow_mut().clear();
                 self.__property_changed_subscriptions.borrow_mut().clear();
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
             }
 
             #[doc(hidden)]
@@ -5115,10 +5116,11 @@ fn generate_view(
                     self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
                     return;
                 }
-                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
                 #call_on_unmount
                 self.__property_changed_handlers.borrow_mut().clear();
                 self.__property_changed_subscriptions.borrow_mut().clear();
+                self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
             }
 
             #[doc(hidden)]
@@ -5172,10 +5174,11 @@ fn generate_view(
                 self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
                 return;
             }
-            self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
+            self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounting);
             #call_on_unmount
             self.__property_changed_handlers.borrow_mut().clear();
             self.__property_changed_subscriptions.borrow_mut().clear();
+            self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Unmounted);
         }
 
         #[doc(hidden)]

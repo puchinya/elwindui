@@ -450,7 +450,7 @@ impl SettingsView {}
 
 - bare識別子(`locale`): 次の優先順位で解決される(`component_frontend::lookup_environment_key`)。
   1. 宣言元と**同一crate内**で先に宣言された`#[elwindui::environment_key(name = locale, ..)]`のKey(従来通り、ユーザー/ライブラリ定義)。
-  2. 上記に該当がなければ、**フレームワーク組み込みのEnvironment Key**——`#[elwindui::environment_key]`宣言なしに常に解決可能な固定名の集合。現在の組み込みKeyは、Semantic Style Brush Key群(`primary`/`secondary`/`tertiary`/`foreground`/`background`/`window_background`/`tint`/`selection`/`separator`/`placeholder`/`link`、`Value = BrushStyle`、`theme_environment_spec.md`§7)と、`popup_dismiss`(`Value = Option<PopupDismissAction>`、popup外では`None`、`context_popup`が開いているpopup-scoped Environment内では`Some(..)`、`theme_environment_spec.md`§2参照)。
+  2. 上記に該当がなければ、**フレームワーク組み込みのEnvironment Key**——`#[elwindui::environment_key]`宣言なしに常に解決可能な固定名の集合。現在の組み込みKeyは、Semantic Style Brush Key群(`primary`/`secondary`/`tertiary`/`foreground`/`background`/`window_background`/`tint`/`selection`/`separator`/`placeholder`/`link`、`Value = BrushStyle`、`theme_environment_spec.md`§7)と、`popup_dismiss`(`Value = Option<PopupDismissAction>`——Keyの既定値は`None`、`ContextMenuService::open_custom_popup`がpopup-scoped Environmentへ`Some(..)`を設定する。DSL管理経路（popup機構自体）はpopup scopeの外側で`Some(..)`を設定しない。低レベルの型付きRust API（`EnvironmentContext::set`）による明示的な上書きは制限されない——詳細は`theme_environment_spec.md`§2参照)。
   3. どちらにも該当しなければ、コード生成時の`compile_error!`(13章ルール34)。
   - ユーザー定義Keyと組み込みKeyの名前が衝突した場合、ユーザー定義Keyが優先される(組み込みKeyへは決してフォールバックしない、フレームワーク自身が同名を再定義することはない)。
 - 完全修飾クレートパス(`some_crate::locale`): 宣言元crateが`pub`にエクスポートしたKeyへ、**クレート境界を越えて**解決される。パスの先頭部分(最終セグメントを除く全体)は、呼び出し側で解決可能な任意のcrateパス(依存クレート名、`use`で導入したエイリアス、ネストしたモジュールパスなど)でよい——`#[elwindui::environment_key]`は宣言元クレートのルートへ常にエクスポートされるため、Key構造体自身がどのモジュールに置かれているかとは無関係である。組み込みKeyには完全修飾形式は存在しない(常にbare識別子でのみ参照する)。

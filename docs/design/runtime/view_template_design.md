@@ -143,9 +143,14 @@ use, just with a different (non-`BrushStyle`) `Value` type:
 dismiss: Option<elwindui::core::ui::popup::PopupDismissAction>,
 ```
 
-`None` outside any popup-scoped Environment; `Some(..)` inside one (installed by
-`ContextMenuService::open_custom_popup`, `docs/design/runtime/popup_context_menu_design.md` §6). This
-works today, independent of #162 — see
+The framework key defaults to `None` (`PopupDismissActionKey::default_value()`).
+`ContextMenuService::open_custom_popup` installs `Some(..)` into the derived popup-scoped
+Environment (`docs/design/runtime/popup_context_menu_design.md` §6). The framework's DSL-managed
+path does not install an active dismiss action outside popup scope; low-level typed Rust
+(`EnvironmentContext::set::<PopupDismissActionKey>(..)`) remains capable of explicitly overriding
+the public key, per `theme_environment_spec.md` §2 — this is not an absolute "always `None` outside
+popup" runtime guarantee, only what the DSL-managed popup machinery itself does. This works today,
+independent of #162 — see
 `crates/elwindui/tests/context_menu_and_popup.rs`'s `popup_dismiss_environment_field_*` tests for a
 Component using it end to end via the low-level `ViewTemplate` API (§4's first contract).
 

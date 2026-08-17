@@ -405,7 +405,7 @@ impl TreeHostView {
                             &anchor,
                             work_area,
                         );
-                        *self.ivars().active_popup.borrow_mut() = Some(handle);
+                        *self.ivars().active_popup.borrow_mut() = handle;
                         std::ptr::null_mut()
                     }
                 }

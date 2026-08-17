@@ -105,7 +105,9 @@ in "not yet implemented":
 - the factory closure is invoked at deferred build/open time, not at any earlier declaration time;
 - `ViewBuildContext::owner` is supplied as `Weak<dyn UIElementExt>`;
 - a popup-scoped, `derive()`-d `EnvironmentContext` is supplied;
-- the owner may already be gone by build time, in which case `build` returns `None`.
+- the owner may already be gone by build time, in which case `build` returns `None` — mechanically
+  enforced by `ViewTemplate::build` itself (`context.owner.upgrade()?` before the factory ever runs),
+  not merely documented intent a factory could still bypass by never checking `ctx.owner`.
 
 It does **not** guarantee that a hand-written `ViewTemplate::new(|ctx| ...)` closure automatically
 reads the owner's *current* field/state value — `ViewTemplate::new` takes arbitrary Rust code, and a
@@ -168,3 +170,29 @@ Independent of the DSL question above, this revision:
   reentrant from a popup-internal event handler — verified by `elwindui-core`'s
   `unmount_subtree_reentrant_from_within_own_event_dispatch_does_not_panic` and
   `unmount_hook_observes_intact_environment_before_backend_would_detach`.
+- Made both backends' `InnerPopupSurface` release their own strong reference to the popup content
+  root once `close()` completes (`content: RefCell<Option<Rc<dyn UIElementExt>>>`, taken — not a bare
+  `Rc<dyn UIElementExt>` field), so a closed-but-still-reachable `PopupSurfaceHandle` (e.g. via a
+  host's `active_popup` field before it's replaced/dropped) no longer keeps the entire
+  already-unmounted popup subtree alive. Verified by `elwindui-core`'s
+  `popup_surface_handle_releases_content_after_close_not_just_unmounted`.
+- Gave `PopupDismissAction` a private `PopupDismissState` (`Building` / `Open(Weak<..>)` /
+  `Dismissed`) inside `open_custom_popup`, so a dismiss request arriving during `ViewTemplate::build`
+  (before any native surface exists — including a generated Component's own `on_mount`, once #162
+  lands) aborts the show entirely (`unmount_subtree`'d, never displayed) instead of being silently
+  lost. Verified by `elwindui-core`'s `open_custom_popup_dismiss_during_build_prevents_the_popup_from_
+  showing` and, end to end with a real `#[elwindui::component]`, `elwindui`'s
+  `popup_dismiss_during_on_mount_prevents_popup_from_showing`.
+- Made `PopupHost::show_popup` fallible (`-> Option<Rc<dyn PopupSurfaceHandle>>`, previously
+  infallible) — WinUI3's `InnerPopupSurface::show` could already fail (coordinate conversion, `Popup`
+  construction), but `WinUI3PopupHost::show_popup` previously papered over it with a handle wrapping a
+  `None` inner surface, so Core believed the popup opened when nothing was shown. Backend show
+  failure now unmounts the already-built content and returns `None` from
+  `open_custom_popup`/`open_custom_menu`, rather than leaking a mounted-but-never-shown subtree.
+  Verified by `elwindui-core`'s `open_custom_popup_unmounts_and_returns_none_when_backend_show_fails`
+  and `open_custom_menu_unmounts_and_returns_none_when_backend_show_fails`.
+- Made `ViewTemplate::build` itself enforce owner liveness (`context.owner.upgrade()?` before
+  invoking the factory) rather than merely documenting that a factory *should* check it — closing the
+  gap between the documented runtime contract and what the type actually did. Verified by
+  `elwindui-core`'s `build_returns_none_when_owner_dropped_and_never_invokes_the_factory`, which
+  proves the factory itself is never called (stronger than a factory that voluntarily declines).

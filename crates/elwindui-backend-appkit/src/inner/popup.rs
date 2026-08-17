@@ -26,7 +26,13 @@ use std::rc::Rc;
 pub(crate) struct InnerPopupSurface {
     window: Retained<NSWindow>,
     content_host: Retained<TreeHostView>,
-    content: Rc<dyn UIElementExt>,
+    // `RefCell<Option<..>>`, not a bare `Rc`: `close()` must be able to release this surface's own
+    // strong reference to the popup content root once teardown completes, not merely unmount it —
+    // otherwise a closed-but-not-yet-dropped `InnerPopupSurface` (reachable via `active_popup` until
+    // the host replaces or drops it) would keep the entire already-unmounted popup subtree alive.
+    // `close()`'s `.borrow_mut().take()` is this field's only consumer; every other read either
+    // doesn't exist or would be redundant with the local `content_host` tree it was built from.
+    content: RefCell<Option<Rc<dyn UIElementExt>>>,
     is_open: RefCell<bool>,
     local_monitor: RefCell<Option<Retained<AnyObject>>>,
     global_monitor: RefCell<Option<Retained<AnyObject>>>,
@@ -88,7 +94,7 @@ impl InnerPopupSurface {
         let surface = Rc::new(Self {
             window,
             content_host,
-            content: Rc::clone(&request.content),
+            content: RefCell::new(Some(Rc::clone(&request.content))),
             is_open: RefCell::new(true),
             local_monitor: RefCell::new(None),
             global_monitor: RefCell::new(None),
@@ -169,6 +175,14 @@ impl InnerPopupSurface {
     /// `visual_collection`/lifecycle state), so running it synchronously ahead of the window/host
     /// detach is safe even when `close()` is reentrant — verified by `elwindui-core`'s
     /// `unmount_subtree_reentrant_from_within_own_event_dispatch_does_not_panic`.
+    ///
+    /// `self.content.borrow_mut().take()` both makes this exactly-once (a second `close()` call
+    /// finds `None` and skips straight to the `is_open` guard above, which already short-circuits)
+    /// and releases this surface's own strong reference to the popup content root once teardown
+    /// completes — see `content`'s own field doc comment for why that release matters. The taken
+    /// local `content` only needs to stay alive long enough for `unmount_subtree` to run; nothing
+    /// after that point in `close()` touches the content root itself (the deferred `clear_tree()`
+    /// below acts on `content_host`'s own independently-owned tree reference, not on this one).
     pub(crate) fn close(&self) {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
@@ -179,7 +193,9 @@ impl InnerPopupSurface {
                 unsafe { NSEvent::removeMonitor(&mon) };
             }
 
-            unmount_subtree(&self.content);
+            if let Some(content) = self.content.borrow_mut().take() {
+                unmount_subtree(&content);
+            }
 
             if let Some(parent) = self.window.parentWindow() {
                 parent.removeChildWindow(&self.window);
@@ -229,8 +245,10 @@ impl AppKitPopupHost {
 }
 
 impl PopupHost for AppKitPopupHost {
-    fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle> {
+    fn show_popup(&self, request: PopupRequest) -> Option<Rc<dyn PopupSurfaceHandle>> {
+        // `InnerPopupSurface::show` has no fallible step on this backend (unlike WinUI3's
+        // coordinate-conversion/`Popup::new()` path) — always `Some`.
         let surface = InnerPopupSurface::show(request, self.owner_window.as_deref());
-        Rc::new(AppKitPopupHandle { surface })
+        Some(Rc::new(AppKitPopupHandle { surface }))
     }
 }

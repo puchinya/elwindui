@@ -38,17 +38,14 @@ impl TestPopupHost {
 }
 
 impl PopupHost for TestPopupHost {
-    fn show_popup(
-        &self,
-        request: PopupRequest,
-    ) -> Rc<dyn PopupSurfaceHandle> {
+    fn show_popup(&self, request: PopupRequest) -> Option<Rc<dyn PopupSurfaceHandle>> {
         self.shown
             .borrow_mut()
             .push((Rc::clone(&request.content), request.position, request.size));
         *self.last_request.borrow_mut() = Some(request);
-        Rc::new(TestPopupHandle {
+        Some(Rc::new(TestPopupHandle {
             closed: Rc::clone(&self.closed),
-        })
+        }))
     }
 }
 
@@ -176,7 +173,8 @@ fn custom_context_menu_service_opens_and_closes_popup() {
     };
 
     let menu = TestMenu::new();
-    let handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
+    let handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area)
+        .expect("host should show successfully");
 
     assert_eq!(host.shown.borrow().len(), 1);
     let (_content, pos, size) = &host.shown.borrow()[0];
@@ -756,4 +754,90 @@ fn popup_dismiss_field_content_repeated_open_close_has_independent_lifetimes() {
     dismiss_a.dismiss();
     dismiss_b.dismiss();
     assert_eq!(POPUP_DISMISS_FIELD_UNMOUNT_COUNT.with(|c| c.get()), 2);
+}
+
+thread_local! {
+    static PRE_SHOW_DISMISS_MOUNT_COUNT: Cell<u32> = Cell::new(0);
+    static PRE_SHOW_DISMISS_UNMOUNT_COUNT: Cell<u32> = Cell::new(0);
+}
+
+/// Calls the declarative `popup_dismiss` action from its own `on_mount` — mirrors what a generated
+/// declarative `context_popup: view! { .. }` root will be able to do once #162 lands (its Component
+/// root mounts *inside* `ViewTemplate::build`, before any native popup surface exists).
+#[elwindui::component(inherits VerticalLayout)]
+struct PreShowDismissContent {
+    #[environment(popup_dismiss)]
+    dismiss: Option<PopupDismissAction>,
+
+    body: view! {
+        on_mount {
+            PRE_SHOW_DISMISS_MOUNT_COUNT.with(|c| c.set(c.get() + 1));
+            if let Some(dismiss) = self.dismiss() {
+                dismiss.dismiss();
+            }
+        }
+        on_unmount {
+            PRE_SHOW_DISMISS_UNMOUNT_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        TextBlock {
+            text: "pre-show dismiss content",
+        }
+    },
+}
+
+#[elwindui::component]
+impl PreShowDismissContent {}
+
+#[test]
+fn popup_dismiss_during_on_mount_prevents_popup_from_showing() {
+    PRE_SHOW_DISMISS_MOUNT_COUNT.with(|c| c.set(0));
+    PRE_SHOW_DISMISS_UNMOUNT_COUNT.with(|c| c.set(0));
+
+    let host = TestPopupHost::new();
+    let owner: Rc<dyn UIElementExt> = elwindui::core::ui::TextBlock::new();
+
+    let weak_content: Rc<RefCell<Option<std::rc::Weak<dyn UIElementExt>>>> = Rc::new(RefCell::new(None));
+    let weak_clone = Rc::clone(&weak_content);
+    let template = ViewTemplate::new(move |ctx| {
+        // Mirrors #162's planned codegen shape: construct without auto-mounting, then mount
+        // explicitly against the popup-scoped Environment (`EnvironmentScope`'s own existing
+        // pattern) — `on_mount` (and therefore the dismiss() call inside it) runs during this
+        // `mount()` call, synchronously, before `open_custom_popup` ever calls `host.show_popup`.
+        let instance = PreShowDismissContent::__new_unmounted();
+        instance.mount(ctx.environment);
+        let node = instance.into_node();
+        *weak_clone.borrow_mut() = Some(Rc::downgrade(&node));
+        Some(node)
+    });
+
+    let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &owner,
+        &template,
+        &anchor,
+        owner.effective_environment(),
+        work_area,
+    );
+
+    assert!(handle.is_none(), "a popup dismissed during on_mount must not be shown");
+    assert_eq!(
+        host.shown.borrow().len(),
+        0,
+        "the popup host's show_popup must never be called once a pre-show dismiss was requested"
+    );
+    assert_eq!(PRE_SHOW_DISMISS_MOUNT_COUNT.with(|c| c.get()), 1);
+    assert_eq!(
+        PRE_SHOW_DISMISS_UNMOUNT_COUNT.with(|c| c.get()),
+        1,
+        "content mounted before the pre-show dismiss must still be unmounted exactly once"
+    );
+
+    let weak = weak_content.borrow().clone().expect("template captured its content");
+    assert!(
+        weak.upgrade().is_none(),
+        "content built/mounted before a pre-show dismiss must be released, not retained"
+    );
 }

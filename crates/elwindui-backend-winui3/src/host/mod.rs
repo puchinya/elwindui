@@ -1430,8 +1430,9 @@ impl TreeHostPanel {
                             &anchor,
                             work_area,
                         );
-                        *active_popup.borrow_mut() = Some(handle);
-                        return true;
+                        let opened = handle.is_some();
+                        *active_popup.borrow_mut() = handle;
+                        return opened;
                     }
                 }
             }

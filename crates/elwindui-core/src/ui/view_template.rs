@@ -74,7 +74,16 @@ impl ViewTemplate {
     }
 
     /// Builds the view subtree using the provided context, or `None` if the owner is gone.
+    ///
+    /// Owner liveness is enforced here, mechanically, before the factory closure ever runs — not
+    /// left to the closure's own discretion. A factory that never itself checks `ctx.owner` (e.g.
+    /// `ViewTemplate::new(|_ctx| Some(TextBlock::new()))`) still cannot build once the owner has been
+    /// dropped, so "a deferred View cannot be built after its owner is gone" is a real invariant of
+    /// this type, not just documented intent. The factory may call `context.owner.upgrade()` again
+    /// itself if it needs the concrete `Rc` — this only re-checks liveness, it doesn't consume or
+    /// strengthen `context.owner`.
     pub fn build(&self, context: ViewBuildContext) -> Option<Rc<dyn UIElementExt>> {
+        context.owner.upgrade()?;
         self.factory.build(context)
     }
 }
@@ -112,9 +121,14 @@ mod tests {
     }
 
     #[test]
-    fn build_returns_none_when_owner_dropped() {
-        let template = ViewTemplate::new(|ctx: ViewBuildContext| {
-            ctx.owner.upgrade()?;
+    fn build_returns_none_when_owner_dropped_and_never_invokes_the_factory() {
+        // Stronger than "the factory itself checks ctx.owner and declines": `ViewTemplate::build`
+        // enforces owner liveness mechanically, before the factory closure runs at all, so even a
+        // factory that never checks `ctx.owner` (like this one) cannot build once the owner is gone.
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_factory = calls.clone();
+        let template = ViewTemplate::new(move |_ctx: ViewBuildContext| {
+            calls_for_factory.set(calls_for_factory.get() + 1);
             Some(crate::ui::TextBlock::new())
         });
         let owner: Rc<dyn UIElementExt> = crate::ui::TextBlock::new();
@@ -125,6 +139,7 @@ mod tests {
             environment: EnvironmentContext::root(),
         });
         assert!(built.is_none());
+        assert_eq!(calls.get(), 0, "factory must not run once the owner is already gone");
     }
 
     #[test]

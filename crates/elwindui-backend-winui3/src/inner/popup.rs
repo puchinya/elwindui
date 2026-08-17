@@ -17,7 +17,10 @@ use windows::core::Interface;
 pub(crate) struct InnerPopupSurface {
     popup: Popup,
     content_host: TreeHostPanel,
-    content: Rc<dyn UIElementExt>,
+    // `RefCell<Option<..>>`, not a bare `Rc`: `close()` must release this surface's own strong
+    // reference to the popup content root once teardown completes, not merely unmount it — see
+    // AppKit's `InnerPopupSurface::content` (same shape) for the full rationale.
+    content: RefCell<Option<Rc<dyn UIElementExt>>>,
     is_open: RefCell<bool>,
 }
 
@@ -51,7 +54,7 @@ impl InnerPopupSurface {
         let surface = Rc::new(Self {
             popup,
             content_host,
-            content: Rc::clone(&request.content),
+            content: RefCell::new(Some(Rc::clone(&request.content))),
             is_open: RefCell::new(true),
         });
 
@@ -84,10 +87,16 @@ impl InnerPopupSurface {
     /// synchronously. `is_open` is marked closed *before* `unmount_subtree` runs, so a reentrant
     /// `close()` call from inside an `on_unmount` hook (or from `SetIsOpen(false)` synchronously
     /// re-raising `Popup.Closed`, below) is a no-op via the guard at the top of this method.
+    /// `self.content.borrow_mut().take()` releases this surface's own strong reference to the
+    /// popup content root once `unmount_subtree` has run on it — see `content`'s own field doc
+    /// comment. `None` here can only mean an already-closed surface, which the `is_open` guard
+    /// above already routes around.
     pub(crate) fn close(&self) {
         if *self.is_open.borrow() {
             *self.is_open.borrow_mut() = false;
-            unmount_subtree(&self.content);
+            if let Some(content) = self.content.borrow_mut().take() {
+                unmount_subtree(&content);
+            }
             self.popup.SetIsOpen(false).ok();
             self.content_host.clear_tree();
         }
@@ -101,16 +110,19 @@ impl Drop for InnerPopupSurface {
 }
 
 /// Handle implementing [`PopupSurfaceHandle`] for programmatic dismissal.
+///
+/// Always wraps a live surface — unlike before this revision, `WinUI3PopupHost::show_popup` no
+/// longer constructs a handle at all when `InnerPopupSurface::show` fails (it returns `None`
+/// instead, per `PopupHost::show_popup`'s fallible contract), so there is no "dummy closed handle"
+/// case to represent here anymore.
 #[derive(Clone)]
 pub struct WinUI3PopupHandle {
-    surface: Option<Rc<InnerPopupSurface>>,
+    surface: Rc<InnerPopupSurface>,
 }
 
 impl PopupSurfaceHandle for WinUI3PopupHandle {
     fn close(&self) {
-        if let Some(surface) = &self.surface {
-            surface.close();
-        }
+        self.surface.close();
     }
 }
 
@@ -128,8 +140,12 @@ impl WinUI3PopupHost {
 }
 
 impl PopupHost for WinUI3PopupHost {
-    fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle> {
-        let surface = InnerPopupSurface::show(request, &self.owner_canvas);
-        Rc::new(WinUI3PopupHandle { surface })
+    fn show_popup(&self, request: PopupRequest) -> Option<Rc<dyn PopupSurfaceHandle>> {
+        // `InnerPopupSurface::show` can fail (coordinate conversion, `Popup::new()`, XAML setup) —
+        // propagate that as `None` rather than a handle wrapping a nonexistent surface. The caller
+        // (`ContextMenuService::open_custom_popup`/`open_custom_menu`) is responsible for unmounting
+        // the already-built popup content in that case.
+        let surface = InnerPopupSurface::show(request, &self.owner_canvas)?;
+        Some(Rc::new(WinUI3PopupHandle { surface }))
     }
 }

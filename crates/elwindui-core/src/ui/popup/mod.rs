@@ -5,7 +5,10 @@
 use crate::base::{Point, Rect, Size};
 use crate::environment::{EnvironmentContext, EnvironmentKey};
 use crate::focus::FocusTracker;
-use crate::ui::{LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt, ViewBuildContext, ViewTemplate};
+use crate::ui::{
+    LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt, ViewBuildContext, ViewTemplate,
+    unmount_subtree,
+};
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
@@ -76,6 +79,14 @@ impl ContextRequest {
 /// `context_popup: view! { .. }` subtree. Not part of [`ViewBuildContext`] — installed only into
 /// the popup-scoped Environment derived by [`ContextMenuService::open_custom_popup`], via
 /// [`PopupDismissActionKey`], so [`ViewTemplate`] itself stays popup-agnostic.
+///
+/// Ownership graph (no strong cycle back to the popup content that holds this value): popup content
+/// → its Environment → this `PopupDismissAction` → `open_custom_popup`'s private
+/// `Rc<RefCell<PopupDismissState>>` (a fresh allocation per call, owned by nothing the popup content
+/// itself reaches) → at most a `Weak<dyn PopupSurfaceHandle>` once shown (`PopupDismissState::Open`)
+/// — never a strong `Rc` back to the surface, and the surface itself does not transitively reach back
+/// to the popup content it displays (a `PopupSurfaceHandle` only reaches its own backend
+/// `InnerPopupSurface`, whose own `content` field is exactly what `close()` releases).
 #[derive(Clone)]
 pub struct PopupDismissAction {
     dismiss: Rc<dyn Fn()>,
@@ -93,6 +104,24 @@ impl PopupDismissAction {
     pub fn dismiss(&self) {
         (self.dismiss)()
     }
+}
+
+/// Private state machine backing a single [`ContextMenuService::open_custom_popup`] call's
+/// [`PopupDismissAction`], distinguishing "not shown yet" from "shown" from "already dismissed" so a
+/// dismiss request arriving before a native surface exists (during `ViewTemplate::build`, i.e. a
+/// generated Component's own `on_mount` once #162 lands) is captured rather than silently lost. Not
+/// part of any public type — `PopupDismissAction`'s own public shape stays a plain `Fn()` callback;
+/// nothing outside `open_custom_popup` ever sees this enum.
+enum PopupDismissState {
+    /// `template.build(..)` (and any Component `on_mount` it runs) is still in progress; no native
+    /// surface exists yet.
+    Building,
+    /// The popup is on-screen; `close()` on the held handle dismisses it. Only ever a `Weak`
+    /// reference — see [`PopupDismissAction`]'s own doc comment for why a strong one would cycle.
+    Open(Weak<dyn PopupSurfaceHandle>),
+    /// Already dismissed (either during `Building` or after `Open`) — any further dismiss call is a
+    /// no-op.
+    Dismissed,
 }
 
 /// Environment key carrying the active [`PopupDismissAction`] within a popup-scoped Environment.
@@ -312,8 +341,15 @@ impl ContextMenuService {
     /// Derives a popup-scoped `EnvironmentContext` from `environment` (never mutating `environment`
     /// itself), installs a [`PopupDismissAction`] into it, then builds `template` against that
     /// derived Environment with `owner` captured only as `Weak`. Returns `None` without showing
-    /// anything if `template` declines to build (e.g. `owner` has already been dropped by the time
-    /// this is called).
+    /// anything in any of these cases:
+    ///
+    /// - `template` declines to build (e.g. `owner` has already been dropped by the time this is
+    ///   called — enforced by `ViewTemplate::build` itself);
+    /// - the built content calls the installed `PopupDismissAction` during its own build/mount
+    ///   (e.g. from a Component's `on_mount`, before a native surface exists) — the built content is
+    ///   unmounted and the popup is never shown, rather than the dismiss request being silently lost;
+    /// - `host.show_popup` itself fails (backend-specific — e.g. WinUI3 coordinate conversion) — the
+    ///   already-built content is unmounted rather than leaked mounted-but-never-shown.
     pub fn open_custom_popup(
         host: &dyn PopupHost,
         owner: &Rc<dyn UIElementExt>,
@@ -324,14 +360,22 @@ impl ContextMenuService {
     ) -> Option<Rc<dyn PopupSurfaceHandle>> {
         let popup_environment = environment.derive();
 
-        let handle_slot: Rc<RefCell<Option<Weak<dyn PopupSurfaceHandle>>>> =
-            Rc::new(RefCell::new(None));
-        let slot_for_dismiss = Rc::clone(&handle_slot);
+        // `PopupDismissState` distinguishes "not shown yet" from "shown" from "already dismissed",
+        // so a dismiss request arriving during `template.build` (i.e. during a generated
+        // Component's own `on_mount`, once #162 lands) is captured rather than lost — see
+        // `PopupDismissState`'s own doc comment for the full state machine. Private to this
+        // function; `PopupDismissAction`'s own public shape stays a plain callback.
+        let dismiss_state = Rc::new(RefCell::new(PopupDismissState::Building));
+        let state_for_dismiss = Rc::clone(&dismiss_state);
         let dismiss_action = PopupDismissAction::new(move || {
-            let weak_opt = slot_for_dismiss.borrow_mut().take();
-            if let Some(weak_handle) = weak_opt {
-                if let Some(handle) = weak_handle.upgrade() {
-                    handle.close();
+            let mut state = state_for_dismiss.borrow_mut();
+            match std::mem::replace(&mut *state, PopupDismissState::Dismissed) {
+                PopupDismissState::Building | PopupDismissState::Dismissed => {}
+                PopupDismissState::Open(weak_handle) => {
+                    drop(state);
+                    if let Some(handle) = weak_handle.upgrade() {
+                        handle.close();
+                    }
                 }
             }
         });
@@ -341,6 +385,13 @@ impl ContextMenuService {
             owner: Rc::downgrade(owner),
             environment: popup_environment.clone(),
         })?;
+
+        if matches!(*dismiss_state.borrow(), PopupDismissState::Dismissed) {
+            // Dismissed synchronously during build/mount, before any native surface exists — the
+            // popup must never be shown at all, not shown-then-immediately-closed.
+            unmount_subtree(&content);
+            return None;
+        }
 
         content.set_environment_context(popup_environment);
         content.measure(Size {
@@ -356,24 +407,32 @@ impl ContextMenuService {
             height: measured.height.max(1.0),
         };
         let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
-        let handle = host.show_popup(PopupRequest {
-            content,
+        let Some(handle) = host.show_popup(PopupRequest {
+            content: Rc::clone(&content),
             position,
             size: popup_size,
             focus_policy: PopupFocusPolicy::None,
             dismiss_policy: PopupDismissPolicy::LightDismiss,
-        });
-        *handle_slot.borrow_mut() = Some(Rc::downgrade(&handle));
+        }) else {
+            // Backend show failed (e.g. WinUI3 coordinate conversion / Popup construction) — the
+            // content above may already carry mounted Component state; tear it down rather than
+            // leaking a mounted-but-never-shown subtree.
+            unmount_subtree(&content);
+            return None;
+        };
+        *dismiss_state.borrow_mut() = PopupDismissState::Open(Rc::downgrade(&handle));
         Some(handle)
     }
 
-    /// Opens a custom-rendered standard menu on the provided popup host.
+    /// Opens a custom-rendered standard menu on the provided popup host. Returns `None` (after
+    /// unmounting the already-built menu content) if `host.show_popup` itself fails, mirroring
+    /// [`Self::open_custom_popup`]'s failure handling.
     pub fn open_custom_menu(
         host: &dyn PopupHost,
         menu: &dyn MenuExt,
         anchor: &PopupAnchor,
         work_area: Rect,
-    ) -> Rc<dyn PopupSurfaceHandle> {
+    ) -> Option<Rc<dyn PopupSurfaceHandle>> {
         let handle_slot: Rc<RefCell<Option<std::rc::Weak<dyn PopupSurfaceHandle>>>> =
             Rc::new(RefCell::new(None));
         let slot_clone = Rc::clone(&handle_slot);
@@ -401,20 +460,23 @@ impl ContextMenuService {
             height: measured.height.max(1.0),
         };
         let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
-        let inner_handle = host.show_popup(PopupRequest {
-            content,
+        let Some(inner_handle) = host.show_popup(PopupRequest {
+            content: Rc::clone(&content),
             position,
             size: popup_size,
             focus_policy: PopupFocusPolicy::Root,
             dismiss_policy: PopupDismissPolicy::LightDismiss,
-        });
+        }) else {
+            unmount_subtree(&content);
+            return None;
+        };
 
         let wrapped_handle: Rc<dyn PopupSurfaceHandle> = Rc::new(CustomMenuPopupHandle {
             inner: inner_handle,
             closed: std::cell::Cell::new(false),
         });
         *handle_slot.borrow_mut() = Some(Rc::downgrade(&wrapped_handle));
-        wrapped_handle
+        Some(wrapped_handle)
     }
 }
 
@@ -660,8 +722,12 @@ pub struct PopupRequest {
 
 /// Capability trait implemented by backend window hosts to display standalone popup surfaces.
 pub trait PopupHost {
-    /// Displays a popup surface according to `request`.
-    fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle>;
+    /// Displays a popup surface according to `request`, or `None` if the backend could not show it
+    /// (e.g. WinUI3 coordinate conversion or `Popup` construction failure). Callers
+    /// (`ContextMenuService::open_custom_popup`/`open_custom_menu`) are responsible for unmounting
+    /// `request.content` when this returns `None` — a backend must never return a handle that
+    /// wraps a nonexistent native surface merely to satisfy an infallible-looking call site.
+    fn show_popup(&self, request: PopupRequest) -> Option<Rc<dyn PopupSurfaceHandle>>;
 }
 
 #[cfg(test)]
@@ -684,6 +750,9 @@ mod tests {
     struct FakePopupHost {
         shown: RefCell<Vec<(Rc<dyn UIElementExt>, Point, Size)>>,
         closed: Rc<Cell<bool>>,
+        /// When `true`, `show_popup` returns `None` without recording anything in `shown` —
+        /// simulates a backend show failure (e.g. WinUI3 coordinate conversion), §8-§12.
+        fail_show: Cell<bool>,
     }
 
     impl FakePopupHost {
@@ -691,23 +760,30 @@ mod tests {
             Self {
                 shown: RefCell::new(Vec::new()),
                 closed: Rc::new(Cell::new(false)),
+                fail_show: Cell::new(false),
             }
+        }
+
+        fn new_failing() -> Self {
+            let host = Self::new();
+            host.fail_show.set(true);
+            host
         }
     }
 
     impl PopupHost for FakePopupHost {
-        fn show_popup(
-            &self,
-            request: PopupRequest,
-        ) -> Rc<dyn PopupSurfaceHandle> {
+        fn show_popup(&self, request: PopupRequest) -> Option<Rc<dyn PopupSurfaceHandle>> {
+            if self.fail_show.get() {
+                return None;
+            }
             self.shown.borrow_mut().push((
                 Rc::clone(&request.content),
                 request.position,
                 request.size,
             ));
-            Rc::new(FakePopupHandle {
+            Some(Rc::new(FakePopupHandle {
                 closed: Rc::clone(&self.closed),
-            })
+            }))
         }
     }
 
@@ -830,7 +906,8 @@ mod tests {
             &*menu,
             &anchor,
             work_area,
-        );
+        )
+        .expect("host should show successfully");
 
         assert_eq!(host.shown.borrow().len(), 1);
         let (_, pos, size) = &host.shown.borrow()[0];
@@ -1251,6 +1328,181 @@ mod tests {
             content.environment_context().is_none(),
             "environment_context must be cleared only as part of unmount() itself, after the \
              hook already ran — proves hook-then-clear, not clear-then-hook"
+        );
+    }
+
+    #[test]
+    fn open_custom_popup_dismiss_during_build_prevents_the_popup_from_showing() {
+        // Simulates a generated declarative Component's `on_mount { dismiss(); }` (#162) calling the
+        // popup_dismiss action synchronously from *inside* `ViewTemplate::build` — before any native
+        // surface exists. The popup must never be shown at all (not shown-then-immediately-closed),
+        // and the already-built content must still be unmounted exactly once.
+        let host = FakePopupHost::new();
+        let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
+
+        let unmount_count = Rc::new(Cell::new(0));
+        let unmount_count_for_hook = Rc::clone(&unmount_count);
+
+        let template = ViewTemplate::new(move |ctx| {
+            let root: Rc<dyn UIElementExt> = TextBlock::new();
+            let count_for_hook = Rc::clone(&unmount_count_for_hook);
+            root.add_unmount_hook(Box::new(move || {
+                count_for_hook.set(count_for_hook.get() + 1);
+            }));
+            // The pre-show dismiss call itself — mirrors what a generated Component's own
+            // `on_mount` will invoke via `#[environment(popup_dismiss)]` once #162 lands.
+            if let Some(dismiss) = ctx.environment.get::<PopupDismissActionKey>() {
+                dismiss.dismiss();
+            }
+            Some(root)
+        });
+
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let handle = ContextMenuService::open_custom_popup(
+            &host,
+            &owner,
+            &template,
+            &anchor,
+            EnvironmentContext::default(),
+            work_area,
+        );
+
+        assert!(handle.is_none(), "a popup dismissed during build/mount must not be shown");
+        assert_eq!(
+            host.shown.borrow().len(),
+            0,
+            "the popup host's show_popup must never be called once a pre-show dismiss was requested"
+        );
+        assert_eq!(
+            unmount_count.get(),
+            1,
+            "content built before the pre-show dismiss must still be unmounted exactly once"
+        );
+    }
+
+    #[test]
+    fn open_custom_popup_unmounts_and_returns_none_when_backend_show_fails() {
+        // Simulates a WinUI3-style backend show failure (coordinate conversion, Popup construction)
+        // — content may already carry mounted Component state by this point; it must be torn down
+        // rather than leaked mounted-but-never-shown, and no active popup handle is ever produced.
+        let host = FakePopupHost::new_failing();
+        let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
+
+        let unmount_count = Rc::new(Cell::new(0));
+        let unmount_count_for_hook = Rc::clone(&unmount_count);
+        let template = ViewTemplate::new(move |_ctx| {
+            let root: Rc<dyn UIElementExt> = TextBlock::new();
+            let count_for_hook = Rc::clone(&unmount_count_for_hook);
+            root.add_unmount_hook(Box::new(move || {
+                count_for_hook.set(count_for_hook.get() + 1);
+            }));
+            Some(root)
+        });
+
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let handle = ContextMenuService::open_custom_popup(
+            &host,
+            &owner,
+            &template,
+            &anchor,
+            EnvironmentContext::default(),
+            work_area,
+        );
+
+        assert!(handle.is_none(), "open_custom_popup must return None when the backend show fails");
+        assert_eq!(host.shown.borrow().len(), 0);
+        assert_eq!(unmount_count.get(), 1, "built content must be unmounted exactly once on show failure");
+    }
+
+    #[test]
+    fn open_custom_menu_unmounts_and_returns_none_when_backend_show_fails() {
+        let host = FakePopupHost::new_failing();
+        let menu = FakeMenu::new();
+
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
+
+        assert!(handle.is_none(), "open_custom_menu must return None when the backend show fails");
+        assert_eq!(host.shown.borrow().len(), 0);
+    }
+
+    #[test]
+    fn popup_surface_handle_releases_content_after_close_not_just_unmounted() {
+        // A `PopupSurfaceHandle` implementation that retains `content: Rc<dyn UIElementExt>` (rather
+        // than `RefCell<Option<Rc<..>>>` + `take()` in `close()`) would unmount content correctly but
+        // still keep it alive for as long as the handle itself is reachable (e.g. via a host's
+        // `active_popup` field, until replaced or dropped). This test distinguishes "unmounted but
+        // retained" from "unmounted and released" using a `PopupSurfaceHandle` that follows the fixed
+        // ownership pattern both `elwindui-backend-appkit`'s and `elwindui-backend-winui3`'s
+        // `InnerPopupSurface` now use (`content: RefCell<Option<Rc<..>>>`, taken in `close()`).
+        struct ReleasingPopupHandle {
+            content: RefCell<Option<Rc<dyn UIElementExt>>>,
+            closed: Cell<bool>,
+        }
+        impl PopupSurfaceHandle for ReleasingPopupHandle {
+            fn close(&self) {
+                if !self.closed.get() {
+                    self.closed.set(true);
+                    if let Some(content) = self.content.borrow_mut().take() {
+                        unmount_subtree(&content);
+                    }
+                }
+            }
+        }
+        impl Drop for ReleasingPopupHandle {
+            fn drop(&mut self) {
+                self.close();
+            }
+        }
+        struct ReleasingPopupHost;
+        impl PopupHost for ReleasingPopupHost {
+            fn show_popup(&self, request: PopupRequest) -> Option<Rc<dyn PopupSurfaceHandle>> {
+                Some(Rc::new(ReleasingPopupHandle {
+                    content: RefCell::new(Some(request.content)),
+                    closed: Cell::new(false),
+                }))
+            }
+        }
+
+        let owner: Rc<dyn UIElementExt> = VerticalLayout::new();
+        let weak_content: Rc<RefCell<Option<Weak<dyn UIElementExt>>>> = Rc::new(RefCell::new(None));
+        let weak_clone = Rc::clone(&weak_content);
+        let template = ViewTemplate::new(move |_ctx| {
+            let root: Rc<dyn UIElementExt> = TextBlock::new();
+            *weak_clone.borrow_mut() = Some(Rc::downgrade(&root));
+            Some(root)
+        });
+
+        let host = ReleasingPopupHost;
+        let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
+        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+
+        let handle = ContextMenuService::open_custom_popup(
+            &host,
+            &owner,
+            &template,
+            &anchor,
+            EnvironmentContext::default(),
+            work_area,
+        )
+        .expect("owner is alive, template should build");
+
+        let weak = weak_content.borrow().clone().expect("template captured its content");
+        assert!(weak.upgrade().is_some(), "content must be alive while the popup is open");
+
+        handle.close();
+        drop(handle);
+
+        assert!(
+            weak.upgrade().is_none(),
+            "a PopupSurfaceHandle must release its retained content after close(), not merely \
+             unmount it in place — a surface keeping a bare `content: Rc<..>` field would fail this"
         );
     }
 

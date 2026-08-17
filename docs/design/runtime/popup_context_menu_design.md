@@ -140,13 +140,19 @@ pub struct PopupRequest {
 }
 
 pub trait PopupHost {
-    fn show_popup(&self, request: PopupRequest) -> Rc<dyn PopupSurfaceHandle>;
+    /// `None` if the backend could not show the popup (e.g. WinUI3 coordinate conversion or
+    /// `Popup` construction failure). A backend must never return a handle wrapping a nonexistent
+    /// native surface — the caller (`ContextMenuService::open_custom_popup`/`open_custom_menu`)
+    /// unmounts `request.content` itself when this is `None`.
+    fn show_popup(&self, request: PopupRequest) -> Option<Rc<dyn PopupSurfaceHandle>>;
 }
 
 pub trait PopupSurfaceHandle {
     fn close(&self);
 }
 ```
+
+`PopupHost::show_popup` became fallible in Issue #161's second review pass (previously `-> Rc<dyn PopupSurfaceHandle>`, unconditionally). Before that, WinUI3's `InnerPopupSurface::show` could already fail, but `WinUI3PopupHost::show_popup` papered over it with a handle wrapping `surface: Option<Rc<InnerPopupSurface>>` — Core saw a successfully-opened popup even when no native surface existed. `WinUI3PopupHandle` no longer has that `Option` layer: it always wraps a live `Rc<InnerPopupSurface>`, and `WinUI3PopupHost::show_popup` returns `None` directly on failure.
 
 ---
 
@@ -179,9 +185,11 @@ Core 座標系は **Top-Left (0, 0), +x: right, +y: down** に統一される。
 
 ## 6. Lifecycle & Environment Inheritance
 
-`context_popup` の内容は、ターゲット要素の mount 時点ではなく、**表示要求（open）が発生した時点**で構築される。`ViewTemplate::build`（`docs/design/runtime/view_template_design.md`）は owner を `Weak` としてのみ捕捉し、owner が既に解放されていれば `None` を返す — その場合 popup は表示されない（`ContextMenuService::open_custom_popup` も `Option<Rc<dyn PopupSurfaceHandle>>` を返す）。
+`context_popup` の内容は、ターゲット要素の mount 時点ではなく、**表示要求（open）が発生した時点**で構築される。`ViewTemplate::build`（`docs/design/runtime/view_template_design.md`）は owner を `Weak` としてのみ捕捉し、owner が既に解放されていれば（factory クロージャを一切呼ばずに）`None` を返す — その場合 popup は表示されない（`ContextMenuService::open_custom_popup` も `Option<Rc<dyn PopupSurfaceHandle>>` を返す）。
 
-`ContextMenuService::open_custom_popup` は、owner の有効な `EnvironmentContext` から `derive()` した popup 専用の `EnvironmentContext` を作る。この派生コンテキストに `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`、`Rc<dyn Fn()>` を保持する薄いラッパー、`open_custom_menu` の weak-handle-slot パターンと同じ仕組みで `PopupSurfaceHandle::close()` へ橋渡しする）を設定してから `ViewTemplate::build` に渡す。owner 自身の Environment は変更しない。
+`ContextMenuService::open_custom_popup` は、owner の有効な `EnvironmentContext` から `derive()` した popup 専用の `EnvironmentContext` を作る。この派生コンテキストに `PopupDismissAction`（`crate::ui::popup::PopupDismissActionKey`）を設定してから `ViewTemplate::build` に渡す。owner 自身の Environment は変更しない。
+
+`PopupDismissAction` は内部で `PopupDismissState`（`Building` → `Open(Weak<PopupSurfaceHandle>)` / `Dismissed`、`open_custom_popup` に private）という状態を持つ。これは build/mount 中（ネイティブサーフェスがまだ存在しない段階、将来 #162 の生成 Component root の `on_mount` を含む）に dismiss が呼ばれるケースを正しく扱うために必要——単純な weak-handle-slot だけでは、`show_popup` が返る前に dismiss された場合、そのリクエストが握りつぶされてしまう。
 
 ### Build / Mount / Unmount Sequence
 
@@ -195,19 +203,28 @@ Resolve owner (nearest-ancestor context_popup/context_menu target)
 Capture effective EnvironmentContext from owner, then derive() a popup-scoped EnvironmentContext
    │
    ▼
-Install PopupDismissAction into the popup-scoped EnvironmentContext (weak-handle-slot, filled after show_popup)
+Install PopupDismissAction into the popup-scoped EnvironmentContext (PopupDismissState::Building)
    │
    ▼
 ViewTemplate::build(ViewBuildContext { owner: Weak<owner>, environment: popup-scoped })
-   │  -> None if owner already dropped: abort, nothing shown
+   │  -> None if owner already dropped (enforced by ViewTemplate::build itself, factory never runs):
+   │     abort, nothing shown, nothing to unmount
    ▼
-Create / Configure PopupSurface via PopupHost
+[content built; PopupDismissAction may already have been called during this step]
+   │
+   ├─ dismissed during build (PopupDismissState::Dismissed) ──> unmount_subtree(content) ──> abort,
+   │                                                              return None, popup never shown
+   ▼ (still Building)
+Measure content, compute placement
    │
    ▼
-Mount content tree into Popup's TreeHost (register RelayoutHost, FocusHost)
+PopupHost::show_popup(request) -> Option<Rc<dyn PopupSurfaceHandle>>
    │
-   ▼
-Show PopupSurface (apply calculated screen position)
+   ├─ None (backend show failed, e.g. WinUI3 coordinate conversion) ──> unmount_subtree(content)
+   │                                                                     ──> return None
+   ▼ Some(handle)
+PopupDismissState::Open(Weak::downgrade(handle)) — dismiss() past this point upgrades and calls
+   handle.close()
    │
    ▼ [Interaction / Dismissal event: Outside Click, Escape, Selection, PopupDismissAction,
    │  popup replacement, owner Window close, Drop]
@@ -218,6 +235,12 @@ Close PopupSurface (idempotent, guarded by is_open)
 unmount_subtree(content root) — child-first: on_unmount hooks, subscription cancellation
    (teardown-before-detach; runs before any backend native detach, including AppKit's PR #156
    deferred `TreeHostView::clear_tree()` — see `crates/elwindui-backend-appkit/src/inner/popup.rs`)
+   │
+   ▼
+Backend host releases its own strong reference to the content root (`InnerPopupSurface::content:
+   RefCell<Option<Rc<..>>>`, taken in close()) — a closed PopupSurfaceHandle must not keep the
+   already-unmounted content subtree alive just because the handle itself is still reachable (e.g.
+   via a host's active_popup field until replaced/dropped)
    │
    ▼
 Backend host clear/detach (`TreeHost::clear_tree()` — native resource release only, no lifecycle

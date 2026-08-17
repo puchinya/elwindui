@@ -381,7 +381,7 @@ impl<T: ?Sized> Default for DynamicChildSlot<T> {
     }
 }
 
-impl<T: ?Sized> DynamicChildSlot<T> {
+impl<T: ?Sized + 'static> DynamicChildSlot<T> {
     /// Number of children this slot currently occupies in its parent collection.
     pub fn len(&self) -> usize {
         self.items
@@ -446,6 +446,17 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         );
     }
 
+    /// Clears this slot and tears down any contained dynamic child subtrees.
+    pub fn clear(&self) {
+        let previous = std::mem::take(&mut *self.items.borrow_mut());
+        self.keys.borrow_mut().clear();
+        for item in &previous {
+            for child in item.children() {
+                teardown_dynamic_child(child);
+            }
+        }
+    }
+
     fn replace_at(
         &self,
         host: &dyn ListExt<T>,
@@ -453,8 +464,9 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         keys: Vec<usize>,
         items: Vec<Rc<DynamicChild<T>>>,
     ) {
-        let previous = self.items.borrow();
-        let previous_children: Vec<_> = previous
+        let previous_children: Vec<_> = self
+            .items
+            .borrow()
             .iter()
             .flat_map(|item| item.children().cloned())
             .collect();
@@ -465,11 +477,13 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         let shared = previous_children.len().min(next_children.len());
         for index in 0..shared {
             if !Rc::ptr_eq(&previous_children[index], &next_children[index]) {
+                teardown_dynamic_child(&previous_children[index]);
                 host.remove_at(start + index);
                 host.insert(start + index, Rc::clone(&next_children[index]));
             }
         }
-        for _ in next_children.len()..previous_children.len() {
+        for child in previous_children.iter().skip(next_children.len()) {
+            teardown_dynamic_child(child);
             host.remove_at(start + next_children.len());
         }
         for (index, child) in next_children
@@ -479,9 +493,14 @@ impl<T: ?Sized> DynamicChildSlot<T> {
         {
             host.insert(start + index, Rc::clone(child));
         }
-        drop(previous);
         *self.keys.borrow_mut() = keys;
         *self.items.borrow_mut() = items;
+    }
+}
+
+fn teardown_dynamic_child<T: ?Sized + 'static>(child: &Rc<T>) {
+    if let Some(elem) = (child as &dyn Any).downcast_ref::<Rc<dyn UIElementExt>>() {
+        unmount_subtree(elem);
     }
 }
 

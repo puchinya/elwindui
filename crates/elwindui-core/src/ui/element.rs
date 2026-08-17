@@ -234,6 +234,10 @@ pub struct UIElement {
     /// `declared_shortcuts` into its `ShortcutRegistry` — see `crate::input::ShortcutDecl`'s own doc
     /// comment.
     pub declared_shortcuts: RefCell<Vec<crate::input::ShortcutDecl>>,
+    /// Pre-unmount hooks registered on this element (invoked before descending into children; returns false to abort traversal).
+    pub begin_unmount_hooks: RefCell<Vec<Box<dyn Fn() -> bool>>>,
+    /// Unmount hooks registered on this element (e.g. Component teardown closures).
+    pub unmount_hooks: RefCell<Vec<Box<dyn Fn()>>>,
 }
 
 impl std::fmt::Debug for UIElement {
@@ -350,6 +354,8 @@ impl UIElement {
             context_menu_presentation: Cell::new(ContextMenuPresentation::Native),
             context_popup: RefCell::new(None),
             environment: RefCell::new(None),
+            begin_unmount_hooks: RefCell::new(Vec::new()),
+            unmount_hooks: RefCell::new(Vec::new()),
         }
     }
 
@@ -766,6 +772,38 @@ impl UIElement {
             .borrow_mut()
             .push(decl);
     }
+    /// Registers a pre-unmount hook invoked before descending into this element's visual children.
+    /// Returning `false` aborts descending into this element's subtree (e.g. already unmounting or unmounted).
+    fn add_begin_unmount_hook(&self, hook: Box<dyn Fn() -> bool>) {
+        self.as_ui_element().begin_unmount_hooks.borrow_mut().push(hook);
+    }
+    /// Invokes all registered begin-unmount hooks. Returns `true` if unmount traversal should continue.
+    fn begin_unmount(&self) -> bool {
+        let hooks = self.as_ui_element().begin_unmount_hooks.borrow();
+        let mut proceed = true;
+        for hook in hooks.iter() {
+            if !hook() {
+                proceed = false;
+            }
+        }
+        proceed
+    }
+    /// Registers an unmount teardown callback on this element (invoked when this element or its
+    /// subtree is unmounted).
+    fn add_unmount_hook(&self, hook: Box<dyn Fn()>) {
+        self.as_ui_element().unmount_hooks.borrow_mut().push(hook);
+    }
+    /// Teardown this element: invokes all registered unmount hooks and clears host / environment references.
+    fn unmount(&self) {
+        let hooks = std::mem::take(&mut *self.as_ui_element().unmount_hooks.borrow_mut());
+        self.as_ui_element().begin_unmount_hooks.borrow_mut().clear();
+        for hook in hooks {
+            hook();
+        }
+        *self.as_ui_element().invalidate_host.borrow_mut() = None;
+        *self.as_ui_element().focus_host.borrow_mut() = None;
+        *self.as_ui_element().environment.borrow_mut() = None;
+    }
     /// Every `#[shortcut(...)]` this element has declared — see `UIElement::declared_shortcuts`'s
     /// own doc comment. A host's own `set_tree` calls this on every node while walking a freshly-set
     /// tree, feeding each result into its `ShortcutRegistry`.
@@ -947,6 +985,31 @@ pub(crate) fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
     }
 }
 
+/// Lifecycle state of a UI component during its creation, mount, unmount traversal, and teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ComponentLifecycleState {
+    #[default]
+    Created,
+    Mounted,
+    Unmounting,
+    Unmounted,
+}
+
+/// Recursively unmounts every descendant in the Visual tree rooted at `node` in child-first order,
+/// invokes each node's unmount hooks (including generated Component lifecycle teardown, `on_unmount`,
+/// and subscription cancellations), and detaches visual collections.
+pub fn unmount_subtree(node: &Rc<dyn UIElementExt>) {
+    if !node.begin_unmount() {
+        return;
+    }
+    let children = node.visual_children();
+    for child in &children {
+        unmount_subtree(child);
+    }
+    node.unmount();
+    node.as_ui_element().visual_collection.clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,6 +1020,7 @@ mod tests {
         struct CountingHost {
             calls: Rc<RefCell<usize>>,
         }
+
         impl RelayoutHost for CountingHost {
             fn request_relayout(&self, _dirty_group_id: u64, _kind: InvalidationKind) {
                 *self.calls.borrow_mut() += 1;

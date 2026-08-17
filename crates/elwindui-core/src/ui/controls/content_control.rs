@@ -43,6 +43,7 @@ impl ContentControl {
 
         let old = self.content.borrow_mut().replace(content.clone());
         if let Some(old) = old {
+            unmount_subtree(&old);
             *old.as_ui_element().parent.borrow_mut() = None;
             if !self.template_presentation.get() {
                 self.as_ui_element().visual_collection.remove(&old);

@@ -33,6 +33,7 @@ use super::*;
 pub trait Window {
     fn set_title(&self, title: &str);
     fn set_menu_bar(&self, menu_bar: Rc<dyn MenuBarExt>);
+    fn content_element(&self) -> Option<Rc<dyn UIElementExt>>;
     fn set_content(&self, content: Rc<dyn UIElementExt>);
     /// Enables or disables an alpha-capable client surface.
     ///

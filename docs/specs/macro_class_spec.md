@@ -52,9 +52,12 @@ ordinary/root classは、classの公開操作をdyn dispatch可能にするexten
 
 - 任意のordinary descendant深さで成立する(2ホップに限定されない);
 - `struct_only` implementorの宣言crateとinterfaceの宣言crateが異なっていても成立する;
+- `struct_only` implementorの具象型名(bare name)は、実装するinterfaceの名前と一致している必要はない — `Window`/`NativeControl`のように名前が一致する例が多いのは既存の命名慣習であって言語上の要件ではなく、名前が異なる場合でも手書きの互換aliasは一切不要である;
 - override dispatchの「最も具体的な実装が勝つ」規則、および明示的なancestor forwardingの意味論を変更しない(§5冒頭の規則がそのまま適用される)。
 
 `no_ancestor_forward` を指定した `struct_only`(手書きの既存traitを対象とする、`__dyn_x` 規約に従わない特殊形)は、このoverride透過性の対象外のままである — 挙動は変更されない。
+
+root class(`inherits`を持たない、`UIElement`など)もこの透過性の生成対象ではある(自身のclass-interface bridge macroを生成する)が、root classの `as_ui_element` はdeclaring struct自身の具象型に固定されたreturn typeを持つ必須trait methodであるため、root interfaceに対する実際にruntimeで動作する `struct_only` implementorは原理的に成立しない。これはbridge機構自体の制約ではなく、root modeの既存設計そのものの性質である。
 
 ## 6. Construction
 

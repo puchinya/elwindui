@@ -37,6 +37,11 @@ elwindui-environment-key-fixture = { path = "../elwindui-environment-key-fixture
 # (`elwindui-core` trait_only -> each backend's struct_only -> a generated host-composition
 # component), reproduced as a minimal, backend-independent fixture.
 elwindui-bridge-fixture-backend = { path = "../elwindui-bridge-fixture-backend" }
+# Issue #128 remediation (review finding A2): `tests/class_bridge_cross_crate.rs` dispatches through
+# the real `BridgeFixtureInterfaceExt` (crate A's own interface trait) directly, not a backend-side
+# `{ConcreteName}Ext` compatibility alias — needs crate A as a direct dev-dependency here too, not
+# just transitively through the backend crate.
+elwindui-bridge-fixture-iface = { path = "../elwindui-bridge-fixture-iface" }
 
 [features]
 default = []

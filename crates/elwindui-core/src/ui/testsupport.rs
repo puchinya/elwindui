@@ -440,6 +440,195 @@ impl BridgeMultiE {
     }
 }
 
+/// Issue #128 remediation, T4: a same-crate `struct_only` implementor whose own bare name does
+/// *not* match the interface it implements (unlike `BridgeConcreteBase`/`BridgeBase`, which happen
+/// to share a naming convention by construction) — proves `ancestor_own_trait`'s `__ElwindUIOwnExt`
+/// alias mechanism needs no naming convention and no manually-authored `{ConcreteName}Ext` alias
+/// (review finding A2).
+#[elwindui_macros::class(trait_only)]
+pub(crate) trait BridgeDifferentNameInterface {
+    #[overridable]
+    fn value(&self) -> i32;
+}
+
+#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeDifferentNameInterfaceExt)]
+pub(crate) struct BridgeOddlyNamedConcrete {}
+
+#[elwindui_macros::class]
+impl BridgeOddlyNamedConcrete {
+    fn value(&self) -> i32 {
+        1
+    }
+    fn construct() -> Self {
+        Self {}
+    }
+}
+
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeOddlyNamedConcrete)]
+pub(crate) struct BridgeDifferentNameDerived {}
+
+#[elwindui_macros::class]
+impl BridgeDifferentNameDerived {
+    #[overrides]
+    fn value(&self) -> i32 {
+        self.base.value() + 100
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeOddlyNamedConcrete::construct(),
+        }
+    }
+}
+
+/// Issue #128 remediation, T6: a generic `struct_only<T>` type, with its own `where` bound,
+/// proving the bridge's members-only arm (`@impl_struct_only_members`) never drops the caller's own
+/// `impl_generics`/`ty_generics`/`where_clause` (review finding A3) — a naive bridge that owned the
+/// outer `impl` header itself would lose `<T: BridgeGenericSource>` here.
+pub(crate) trait BridgeGenericSource: 'static {
+    fn source_value(&self) -> i32;
+}
+
+#[elwindui_macros::class(trait_only)]
+pub(crate) trait BridgeGenericInterface {
+    #[overridable]
+    fn value(&self) -> i32;
+}
+
+#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeGenericInterfaceExt)]
+pub(crate) struct BridgeGenericConcrete<T: BridgeGenericSource> {
+    source: T,
+}
+
+#[elwindui_macros::class]
+impl<T: BridgeGenericSource> BridgeGenericConcrete<T> {
+    fn value(&self) -> i32 {
+        self.source.source_value()
+    }
+    fn construct(source: T) -> Self {
+        Self { source }
+    }
+}
+
+pub(crate) struct BridgeGenericSourceImpl(pub(crate) i32);
+
+impl BridgeGenericSource for BridgeGenericSourceImpl {
+    fn source_value(&self) -> i32 {
+        self.0
+    }
+}
+
+#[elwindui_macros::class(
+    inherits = crate::ui::testsupport::BridgeGenericConcrete<crate::ui::testsupport::BridgeGenericSourceImpl>
+)]
+pub(crate) struct BridgeGenericDerived {}
+
+#[elwindui_macros::class]
+impl BridgeGenericDerived {
+    #[overrides]
+    fn value(&self) -> i32 {
+        self.base.value() + 100
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeGenericConcrete::construct(BridgeGenericSourceImpl(1)),
+        }
+    }
+}
+
+/// Issue #128 remediation, T2: `struct_only` targeting an *ordinary* (non-root) class's own
+/// generated `{ClassName}Ext` — not a `trait_only` interface — proving the bridge an ordinary class
+/// now generates for itself (review finding A1) is consumed identically to a `trait_only` one.
+/// `BridgeOrdinaryMid` inherits the existing `BridgeConcreteBase` fixture purely to give its own
+/// generated `BridgeOrdinaryMidExt` a real (non-`AsAny`-only) supertrait bound to satisfy; the
+/// `struct_only` implementor below composes the same base (`inherits = BridgeConcreteBase`) to
+/// satisfy that supertrait, exactly like `FakeNativeControl` does for `NativeControlExt`/`UIElement`.
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeConcreteBase)]
+pub(crate) struct BridgeOrdinaryMid {}
+
+#[elwindui_macros::class]
+impl BridgeOrdinaryMid {
+    #[overridable]
+    fn extra(&self) -> i32 {
+        7
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeConcreteBase::construct(),
+        }
+    }
+}
+
+#[elwindui_macros::class(
+    struct_only = crate::ui::testsupport::BridgeOrdinaryMidExt,
+    inherits = crate::ui::testsupport::BridgeConcreteBase
+)]
+pub(crate) struct BridgeOrdinaryMidConcrete {}
+
+#[elwindui_macros::class]
+impl BridgeOrdinaryMidConcrete {
+    fn extra(&self) -> i32 {
+        70
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeConcreteBase::construct(),
+        }
+    }
+}
+
+#[elwindui_macros::class(inherits = crate::ui::testsupport::BridgeOrdinaryMidConcrete)]
+pub(crate) struct BridgeOrdinaryMidDerived {}
+
+#[elwindui_macros::class]
+impl BridgeOrdinaryMidDerived {
+    #[overrides]
+    fn extra(&self) -> i32 {
+        self.base.extra() + 1000
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeOrdinaryMidConcrete::construct(),
+        }
+    }
+}
+
+// Issue #128 remediation, T3 (root interface -> struct_only -> descendant): deliberately *not* a
+// runtime fixture here, unlike T2 above. A root-mode class's own `as_ui_element(&self) -> &Self` is
+// a *required* trait method whose return type is hard-pinned to the declaring root struct's own
+// concrete type at that root class's own compile time (`expand_impl`'s root-mode branch) — not
+// generic/associated over the implementor. No `struct_only` implementor other than the root class
+// itself can ever satisfy that signature (confirmed empirically: `E0053`, incompatible return type,
+// against a real `BridgeRootBase`/`BridgeRootConcrete` attempt). This is a genuine, pre-existing
+// architectural incompatibility between root mode's own `as_ui_element` design and `struct_only`
+// bridging to any other concrete type — not something the #128 bridge mechanism itself can address
+// without a material redesign of root mode (out of scope for this remediation; see its own
+// non-goals). T3's coverage is therefore macro-expansion-level only, in
+// `crates/elwindui-macros/src/class.rs`'s own test module: it proves the bridge macro + wrapper
+// module are still generated for a root-mode class (review finding A1's actual requirement), without
+// requiring a working runtime `struct_only` consumer of it.
+
+/// Issue #128 remediation, T8: `no_ancestor_forward` explicit regression coverage — a `struct_only`
+/// implementor of a hand-written trait (not a `#[class]`-generated `*Ext`) bypasses the bridge
+/// entirely; this flag's pre-#128 behavior (direct `impl` of the hand-written trait, no
+/// `#[overridable]`/`#[overrides]` propagation machinery involved at all) must still work unchanged.
+/// No fixture exercising this flag existed anywhere in the repo before this remediation.
+pub(crate) trait BridgeHandWrittenTrait {
+    fn hand_value(&self) -> i32;
+}
+
+#[elwindui_macros::class(struct_only = crate::ui::testsupport::BridgeHandWrittenTrait, no_ancestor_forward)]
+pub(crate) struct BridgeNoForwardConcrete {}
+
+#[elwindui_macros::class]
+impl BridgeNoForwardConcrete {
+    fn hand_value(&self) -> i32 {
+        1
+    }
+    fn construct() -> Self {
+        Self {}
+    }
+}
+
 pub(crate) fn size(width: f32, height: f32) -> Size {
     Size { width, height }
 }
@@ -1010,5 +1199,47 @@ mod tests {
         let log = RefCell::new(Vec::new());
         BridgeMultiExt::first(&*e, &log);
         assert_eq!(*log.borrow(), vec!["E", "C", "B"]);
+    }
+
+    /// Issue #128 remediation, T4 (review finding A2): a same-crate `struct_only` implementor whose
+    /// bare name doesn't match the interface it implements resolves with no manually-authored
+    /// `{ConcreteName}Ext` alias.
+    #[test]
+    fn bridge_same_crate_different_name_struct_only_resolves_without_alias() {
+        let derived = BridgeDifferentNameDerived::new();
+        assert_eq!(BridgeDifferentNameInterfaceExt::value(&*derived), 101);
+    }
+
+    /// Issue #128 remediation, T6 (review finding A3): a generic `struct_only<T>` type compiles with
+    /// its own generic parameter/bound intact and dispatches correctly.
+    #[test]
+    fn bridge_generic_struct_only_preserves_impl_generics_and_dispatches() {
+        let derived = BridgeGenericDerived::new();
+        assert_eq!(BridgeGenericInterfaceExt::value(&*derived), 101);
+    }
+
+    /// Issue #128 remediation, T2 (review finding A1): `struct_only` targeting an *ordinary*
+    /// (non-root) class's own generated `{ClassName}Ext` dispatches through the bridge that
+    /// ordinary class now generates for itself, exactly like a `trait_only` interface's.
+    #[test]
+    fn bridge_ordinary_interface_struct_only_dispatches_through_generated_bridge() {
+        let derived = BridgeOrdinaryMidDerived::new();
+        assert_eq!(BridgeOrdinaryMidExt::extra(&*derived), 1070);
+        // The supertrait slot (`value`, from `BridgeConcreteBase`'s own `trait_only` interface)
+        // still resolves normally through the same composed base.
+        assert_eq!(BridgeBaseExt::value(&*derived), 1);
+    }
+
+    // T3 (root interface -> struct_only -> descendant) has no runtime test here — see the doc
+    // comment above `BridgeHandWrittenTrait`'s own fixture block for why, and
+    // `crates/elwindui-macros/src/class.rs`'s own test module for its macro-expansion-level coverage.
+
+    /// Issue #128 remediation, T8: `no_ancestor_forward` bypasses the bridge entirely — a
+    /// `struct_only` implementor of a hand-written trait dispatches via a plain, direct `impl`, with
+    /// none of the `#[overridable]`/`#[overrides]` machinery involved.
+    #[test]
+    fn bridge_no_ancestor_forward_dispatches_directly_with_no_bridge_involved() {
+        let concrete = BridgeNoForwardConcrete::new();
+        assert_eq!(BridgeHandWrittenTrait::hand_value(&*concrete), 1);
     }
 }

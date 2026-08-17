@@ -19,7 +19,8 @@
 // every crate using `#[class]` with a same-crate `inherits` chain needs this.
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
-use elwindui_bridge_fixture_backend::{BridgeFixtureConcrete, BridgeFixtureConcreteExt};
+use elwindui_bridge_fixture_backend::BridgeFixtureConcrete;
+use elwindui_bridge_fixture_iface::BridgeFixtureInterfaceExt;
 
 #[elwindui::class(inherits = elwindui_bridge_fixture_backend::BridgeFixtureConcrete)]
 struct BridgeFixtureDerived {}
@@ -43,6 +44,8 @@ fn cross_crate_struct_only_bridge_override_dispatches_and_reaches_backend() {
     // `101`: `BridgeFixtureDerived::value` (crate C) overrides and adds 100 to `self.base.value()`,
     // which reaches `BridgeFixtureConcrete::value` (crate B, the `struct_only` implementor of crate
     // A's `trait_only` interface) returning `1` — proving `base::` (here, raw `self.base.value()`)
-    // crosses back into the backend implementation across the real crate boundary.
-    assert_eq!(BridgeFixtureConcreteExt::value(&*derived), 101);
+    // crosses back into the backend implementation across the real crate boundary. Dispatched through
+    // `BridgeFixtureInterfaceExt` directly (crate A's own real interface trait, no backend-side
+    // `{ConcreteName}Ext` compatibility alias — Issue #128 remediation review finding A2).
+    assert_eq!(BridgeFixtureInterfaceExt::value(&*derived), 101);
 }

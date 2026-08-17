@@ -183,6 +183,7 @@ dependencies = [
  "elwindui-backend-gtk4",
  "elwindui-backend-winui3",
  "elwindui-bridge-fixture-backend",
+ "elwindui-bridge-fixture-iface",
  "elwindui-core",
  "elwindui-environment-key-fixture",
  "elwindui-i18n",

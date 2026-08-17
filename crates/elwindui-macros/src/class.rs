@@ -259,6 +259,15 @@ struct StoredClassArgs {
     /// See `register_same_crate_class`'s own doc comment — `true` unless this class's bare name
     /// collided with an earlier same-crate declaration.
     owns_inherit_macros: bool,
+    /// The `struct ClassName`'s own declared visibility, stringified (e.g. `""`/`"pub"`/`"pub(crate)"`)
+    /// — `expand_impl`'s `own_ext_alias` (Issue #128 remediation, review finding A2) caps the
+    /// `pub use .. as __ElwindUIOwnExt;` re-export of a `struct_only` class's own `existing` target at
+    /// this same visibility, since the actual visibility of `existing` itself (declared in a possibly
+    /// different crate, unavailable to a proc-macro) is unknown here — by this codebase's own
+    /// established convention a `struct_only` struct's declared visibility always matches the
+    /// interface it implements (see this module's top doc comment), so this is a safe, accurate proxy
+    /// rather than a guess.
+    struct_vis: String,
 }
 
 /// The identifier of the crate currently being compiled, read fresh from the environment variables
@@ -294,7 +303,12 @@ fn class_arg_store() -> &'static Mutex<HashMap<(String, String), StoredClassArgs
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn store_class_args(class_name: &str, args: &ClassArgs, owns_inherit_macros: bool) {
+fn store_class_args(
+    class_name: &str,
+    args: &ClassArgs,
+    owns_inherit_macros: bool,
+    vis: &Visibility,
+) {
     let stored = StoredClassArgs {
         inherits: args.inherits.as_ref().map(|t| quote! { #t }.to_string()),
         struct_only: args.struct_only.as_ref().map(|p| quote! { #p }.to_string()),
@@ -303,6 +317,7 @@ fn store_class_args(class_name: &str, args: &ClassArgs, owns_inherit_macros: boo
         trait_only: args.trait_only,
         no_ancestor_forward: args.no_ancestor_forward,
         owns_inherit_macros,
+        struct_vis: quote! { #vis }.to_string(),
     };
     class_arg_store()
         .lock()
@@ -318,7 +333,7 @@ fn store_class_args(class_name: &str, args: &ClassArgs, owns_inherit_macros: boo
 /// yet consumed), which the struct-immediately-followed-by-its-own-impl convention this whole macro
 /// depends on never produces. The second element of the returned pair is `owns_inherit_macros` —
 /// see `register_same_crate_class`'s own doc comment.
-fn load_class_args(class_name: &str) -> Option<(ClassArgs, bool)> {
+fn load_class_args(class_name: &str) -> Option<(ClassArgs, bool, Visibility)> {
     let mut store = class_arg_store().lock().unwrap();
     let stored = store.remove(&(compiling_crate_key(), class_name.to_string()))?;
     let parse_type = |s: &String| {
@@ -328,6 +343,8 @@ fn load_class_args(class_name: &str) -> Option<(ClassArgs, bool)> {
     let parse_path = |s: &String| {
         syn::parse_str::<Path>(s).expect("#[class]: internal: failed to reparse stored path")
     };
+    let struct_vis = syn::parse_str::<Visibility>(&stored.struct_vis)
+        .expect("#[class]: internal: failed to reparse stored struct visibility");
     Some((
         ClassArgs {
             inherits: stored.inherits.as_ref().map(parse_type),
@@ -338,6 +355,7 @@ fn load_class_args(class_name: &str) -> Option<(ClassArgs, bool)> {
             no_ancestor_forward: stored.no_ancestor_forward,
         },
         stored.owns_inherit_macros,
+        struct_vis,
     ))
 }
 
@@ -614,6 +632,34 @@ fn class_interface_bridge_ident(bare_name: &str) -> Ident {
     format_ident!("__elwindui_class_interface_{bare_name}")
 }
 
+/// Issue #128 remediation (A2): the stable, class-generated alias name every class-managed
+/// ancestor's own `macro_reexport_mod_ident` wrapper module re-exports its *actual* implemented Ext
+/// interface under (bare, no generic arguments — a `pub use` target never carries them; the
+/// *caller*, `ancestor_own_trait`, reapplies whatever generic arguments its own `inherits = ..`
+/// argument carried). Never written by hand in a `struct_only` declaration — see `expand_impl`'s
+/// own `macro_reexports` construction, the sole place this is generated.
+fn own_ext_alias_ident() -> Ident {
+    format_ident!("__ElwindUIOwnExt")
+}
+
+/// `ty`'s own final path segment's generic arguments, verbatim (e.g. `<H>` from
+/// `crate::NativeControl<H>`), or empty tokens if `ty` has none. Used to re-apply an ancestor's own
+/// generic arguments, exactly as written by *this* class's `inherits = ..`, onto a path resolved
+/// through that ancestor's wrapper module (`ancestor_own_trait`) — a `use`-based alias can only ever
+/// name the bare (ungenericized) item, so the instantiation has to happen at the reference site.
+fn last_segment_generic_args(ty: &Type) -> TokenStream2 {
+    let Type::Path(tp) = ty else {
+        return TokenStream2::new();
+    };
+    let Some(seg) = tp.path.segments.last() else {
+        return TokenStream2::new();
+    };
+    match &seg.arguments {
+        syn::PathArguments::AngleBracketed(args) => quote! { #args },
+        _ => TokenStream2::new(),
+    }
+}
+
 /// Item-position path to `bare_name`'s `__elwindui_class_interface_*!` bridge macro — the direct-
 /// invocation counterpart to `inherit_macro_path`, but keyed by the *derived* class name
 /// (`class_name_from_ext_trait_path`) rather than a `struct_only = ..` argument's own literal last
@@ -700,12 +746,15 @@ fn build_class_interface_bridge_macro(
         #[macro_export]
         #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
         macro_rules! #bridge_ident {
-            (@impl_struct_only $ExtTrait:path, $StructTy:ty; $($body:item)*) => {
-                impl $ExtTrait for $StructTy {
-                    fn #dyn_ident(&self) -> &dyn $ExtTrait { self }
-                    #(#per_method_accessors)*
-                    $($body)*
-                }
+            // Issue #128 remediation (review finding A3): members only, not the outer `impl`
+            // header — the caller (`expand_impl`'s struct_only branch) still owns
+            // `impl #impl_generics $ExtTrait for $StructTy #ty_generics #where_clause { .. }`
+            // itself and splices this invocation (plus the concrete method bodies) directly
+            // inside it, so a generic `struct_only` type's own `impl_generics`/`ty_generics`/
+            // `where_clause` are never lost to opaque macro-token round-tripping.
+            (@impl_struct_only_members $ExtTrait:path) => {
+                fn #dyn_ident(&self) -> &dyn $ExtTrait { self }
+                #(#per_method_accessors)*
             };
             (@inherit_through_struct_only $SubType:ty, $OwnTrait:path, $OwnConcrete:path; $($overrides:tt)*) => {
                 $crate::#entry_ident!($SubType, $OwnTrait, $OwnConcrete, $OwnTrait; $($overrides)*);
@@ -737,33 +786,69 @@ fn struct_only_collides_with(own_struct_only: &Option<Path>, parent_bare_name: &
 /// TabView`, a hand-written trait with an unrelated name). When `bare_name` is a known same-crate
 /// `struct_only` registration, its real recorded target always wins over the naming-convention
 /// guess.
+/// Issue #128 remediation (review finding A2): the *real* Ext trait implemented by `bare_name` (as
+/// named via this class's own `inherits = ..`, `fallback`), resolved through that ancestor's own
+/// generated wrapper module's stable `__ElwindUIOwnExt` alias — never a `{bare_name}Ext`
+/// naming-convention guess (`ext_trait_type`). The naming-convention guess is only correct when an
+/// ancestor's own bare name happens to match the trait it implements (true for `Window`/
+/// `NativeControl` by established, but not required, convention) — it silently produces a
+/// nonexistent path (`{ConcreteName}Ext`, not the real `{InterfaceName}Ext`) whenever a `struct_only`
+/// concrete type's own bare name differs from the interface it implements (e.g. a `struct_only
+/// Concrete = SomeInterfaceExt` where `Concrete != SomeInterface`).
+///
+/// `__ElwindUIOwnExt` is generated unconditionally, by every non-`no_ancestor_forward`,
+/// non-`sealed` class-managed ancestor (ordinary, root, or forwardable `struct_only` — see
+/// `expand_impl`'s own `macro_reexports` construction), inside that ancestor's own
+/// `macro_reexport_mod_ident` wrapper module — the exact same module `entry_ident`/`skip_ident`/
+/// `classify_ident` are already reliably reached through via `path_module_prefix`, so this needs no
+/// same-crate registry lookup at all (unlike the registry-based fast path this replaces, whose own
+/// same-crate-declaration-order assumption does not reliably hold across *different files* in one
+/// crate — see `same_crate_classes`'s own doc comment, and the real `Button`/`CheckBox` regression
+/// this caused when the wrapper module didn't exist yet at the point their own `#[class]` expansion
+/// ran, before this rewrite).
+///
+/// `fallback`'s own trailing generic arguments (if any, e.g. `<H>` in `inherits =
+/// crate::NativeControl<H>`) are preserved on the returned path's final segment, exactly as the old
+/// naming-convention guess already did (`ext_trait_type` only ever renamed the last segment's
+/// identifier, never touched its generic arguments).
 fn ancestor_own_trait(bare_name: &str, fallback: &Type) -> TokenStream2 {
-    let p = ancestor_own_trait_path(bare_name, fallback);
-    quote! { #p }
+    let prefix = path_module_prefix(fallback).expect(
+        "#[class]: internal: inherits/struct_only argument should already be validated fully-qualified",
+    );
+    let alias_ident = own_ext_alias_ident();
+    // The `__ElwindUIOwnExt` alias's own generic arity depends on *which* case produced it
+    // (`macro_reexports`): for an ordinary/root ancestor it's `pub use super::{ClassName}Ext as
+    // __ElwindUIOwnExt;`, generic over the exact same parameters as the ancestor struct itself (so
+    // `fallback`'s own trailing instantiation args, e.g. `<Concrete>` in `inherits =
+    // Parent<Concrete>`, are exactly what the alias needs re-attached — `use` cannot carry them
+    // itself, see `last_segment_generic_args`'s own doc comment). For a `struct_only` ancestor it's
+    // `pub use {existing} as __ElwindUIOwnExt;`, where `{existing}` is a *fixed*, independently-
+    // declared interface path unrelated to the struct_only concrete type's own generics (and, by
+    // `struct_only = ..`'s own validation, can never itself carry generic args) — reattaching
+    // `fallback`'s generics there would apply the wrong type's generic argument list entirely (the
+    // concrete struct's, not the interface's) and only ever fails to compile, never silently
+    // resolves wrong. `struct_only_ancestor_in_this_crate` is a same-crate-only heuristic (like
+    // `struct_only_collides_with`'s own registry use) — a registry miss (cross-crate ancestor)
+    // safely defaults to reattaching, which is a correctness no-op for every non-generic ancestor
+    // (the overwhelming majority, since `last_segment_generic_args` returns nothing for a
+    // non-generic `fallback` regardless) and only actually matters for a same-crate generic
+    // `struct_only` ancestor, which this lookup already covers.
+    let generic_args = if struct_only_ancestor_in_this_crate(bare_name) {
+        TokenStream2::new()
+    } else {
+        last_segment_generic_args(fallback)
+    };
+    quote! { #prefix :: #alias_ident #generic_args }
 }
 
-/// `ancestor_own_trait`'s own logic, but returning a parsed `syn::Path` rather than raw tokens —
-/// needed by Issue #128's `ancestor_bridge_path`/`_self_ref_path`, which must pull
-/// this path's own *leading segments* apart (impossible on an opaque `TokenStream2`) to derive the
-/// bridge macro's location, exactly as `class_interface_bridge_path` already does for a directly
-/// known `struct_only = ..Ext` argument.
-fn ancestor_own_trait_path(bare_name: &str, fallback: &Type) -> Path {
-    let real = same_crate_classes()
+/// See `ancestor_own_trait`'s own doc comment on why this decides generic-arg reattachment, and
+/// `same_crate_classes`'s own doc comment (question 2) for the registry this reuses.
+fn struct_only_ancestor_in_this_crate(bare_name: &str) -> bool {
+    same_crate_classes()
         .lock()
         .unwrap()
         .get(&(compiling_crate_key(), bare_name.to_string()))
-        .and_then(|info| info.struct_only.clone());
-    match real {
-        Some(s) => syn::parse_str(&s)
-            .expect("#[class]: internal: failed to reparse stored struct_only path"),
-        None => match ext_trait_type(fallback) {
-            Type::Path(tp) => tp.path,
-            _ => panic!(
-                "#[class]: internal: ext_trait_type should always produce a Type::Path from an \
-                 already-validated fully-qualified inherits/struct_only argument"
-            ),
-        },
-    }
+        .is_some_and(|info| info.struct_only.is_some())
 }
 
 /// Issue #128: the path to whichever ancestor `bare_name`/`ty` (an `inherits = ..` argument,
@@ -2722,7 +2807,12 @@ pub fn expand(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
                 args.no_ancestor_forward,
                 false,
             );
-            store_class_args(&item_struct.ident.to_string(), &args, owns_inherit_macros);
+            store_class_args(
+                &item_struct.ident.to_string(),
+                &args,
+                owns_inherit_macros,
+                &item_struct.vis,
+            );
             expand_struct(&args, item_struct)
         }
         Item::Impl(item_impl) => expand_impl(args, item_impl, attr_is_empty),
@@ -3412,9 +3502,9 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
     // (bypassing the struct-args store entirely) have no such information available, so they
     // default to `true` (assume no collision), matching this rare, pre-existing form's existing
     // behavior before this check existed.
-    let (args, owns_inherit_macros) = if attr_is_empty {
+    let (args, owns_inherit_macros, struct_vis) = if attr_is_empty {
         match load_class_args(&bare_name) {
-            Some(pair) => pair,
+            Some(triple) => triple,
             None => {
                 // A genuine ordering mistake under rustc (struct declared after its impl, or not at
                 // all) fails here for real — but this lookup can *also* fail spuriously under
@@ -3449,7 +3539,12 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             }
         }
     } else {
-        (attr_args, true)
+        // The rare explicit-args-on-impl form bypasses the struct-args store entirely, so no stored
+        // struct visibility is available either — default to `pub`, matching this form's existing
+        // permissive behavior (Issue #128 remediation's `own_ext_alias` is the only consumer of this
+        // value; a too-narrow guess here would only make the `pub(crate)`-vs-`pub` privacy check on
+        // that alias unnecessarily strict, never silently wrong).
+        (attr_args, true, Visibility::Public(Default::default()))
     };
     let args = &args;
 
@@ -3571,10 +3666,12 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             // Issue #128: `existing` (the `struct_only = ..Ext` argument) names a `#[class]`-generated
             // interface — its own class name, and so its `__elwindui_class_interface_*!` bridge, is
             // derivable from that `Ext`-suffixed path alone (`class_name_from_ext_trait_path`), with
-            // no manually-maintained table. Routes the shared `__dyn_x` accessor and every one of the
-            // interface's own `#[overridable]` slots (baked into the bridge at *that* interface's own
-            // compile time, never re-discovered here) through `@impl_struct_only`, instead of building
-            // `impl #existing for #impl_name { .. }` directly — see that bridge arm's own doc comment.
+            // no manually-maintained table. The bridge (`@impl_struct_only_members`, review finding
+            // A3) only supplies the shared `__dyn_x` accessor and one reflexive per-`#[overridable]`-
+            // slot accessor per member — this branch keeps building and owning the outer `impl`
+            // header itself (`impl_generics`/`ty_generics`/`where_clause` all preserved, exactly as
+            // the `no_ancestor_forward` branch above does), so a generic `struct_only` type does not
+            // lose its own generic parameters/bounds to the bridge's opaque macro tokens.
             let class_name = match class_name_from_ext_trait_path(existing) {
                 Ok(name) => name,
                 Err(e) => return e.to_compile_error(),
@@ -3583,7 +3680,10 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             (
                 TokenStream2::new(),
                 quote! {
-                    #bridge_path!(@impl_struct_only #existing, #impl_name #ty_generics; #(#bodies)*);
+                    impl #impl_generics #existing for #impl_name #ty_generics #where_clause {
+                        #bridge_path!(@impl_struct_only_members #existing);
+                        #(#bodies)*
+                    }
                 },
             )
         }
@@ -3964,28 +4064,152 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
         let skip_ident = inherit_macro_skip_ident(&bare_name);
         let classify_ident = inherit_macro_classify_ident(&bare_name);
         let mod_ident = macro_reexport_mod_ident(&bare_name);
-        // Issue #128: a forwardable `struct_only` implementor also re-exports the *real*
-        // class-interface-bridge macro (defined and `#[macro_export]`'d by the interface it
-        // implements, possibly in a different crate) into its own wrapper module, under the same
-        // bridge ident, using a path computed reliably from its own `existing` (no same-crate
-        // registry lookup involved, unlike `ancestor_own_trait`) — this is what lets any descendant
-        // reach it through the exact same, already-reliable wrapper-module route
-        // (`ancestor_bridge_path`) it already uses for this ancestor's entry/skip macros, rather
-        // than through a resolution that can silently fall back to a wrong prefix when this
-        // ancestor's own same-crate registration hasn't happened yet at the point a *different*,
-        // textually-earlier same-crate descendant expands (see `ancestor_bridge_path`'s own doc
-        // comment).
-        let bridge_reexport = args.struct_only.as_ref().and_then(|existing| {
-            if args.no_ancestor_forward {
-                return None;
+        let own_ext_alias_ident_val = own_ext_alias_ident();
+        // Issue #128 remediation (review finding A1): an ordinary/root class also owns a
+        // class-interface bridge for its own generated `{ClassName}Ext` — not just `trait_only`
+        // interfaces — so a `struct_only` implementor of *this* class's own interface is equally
+        // transparent for override purposes. `struct_only` itself never owns a new bridge (§3.2);
+        // it only ever re-exports the one belonging to the interface it implements (below).
+        let (
+            own_bridge_macro,
+            own_bridge_wrapper_mod,
+            bridge_reexport,
+            own_ext_alias,
+            interface_reflexive_accessor,
+        ) = match &args.struct_only {
+            None => {
+                let bridge_macro = build_class_interface_bridge_macro(
+                    &bare_name,
+                    &dyn_accessor_ident(&bare_name),
+                    &overridable_names,
+                );
+                let bridge_ident = class_interface_bridge_ident(&bare_name);
+                // Issue #128 remediation (review finding A1): an ordinary/root class's own bridge
+                // is re-exported through `class_interface_wrapper_mod_ident` — the *same* naming
+                // scheme `expand_trait_only` already uses for a `trait_only` interface's own bridge
+                // (not `macro_reexport_mod_ident`, which is a different module reserved for this
+                // class's entry/skip/classify trio; `class_interface_bridge_path`'s cross-crate
+                // branch only ever looks in the former). Mirrors `expand_trait_only`'s
+                // `inherit_macros_and_bridge` construction verbatim.
+                let own_bridge_wrapper_mod_ident = class_interface_wrapper_mod_ident(&bare_name);
+                let own_bridge_wrapper_mod = quote! {
+                    #[doc(hidden)]
+                    #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+                    pub mod #own_bridge_wrapper_mod_ident {
+                        pub use crate::#bridge_ident;
+                    }
+                };
+                let own_ext_alias =
+                    quote! { pub use super::#ext_ident as #own_ext_alias_ident_val; };
+                (
+                    Some(bridge_macro),
+                    Some(own_bridge_wrapper_mod),
+                    None,
+                    Some(own_ext_alias),
+                    None,
+                )
             }
-            let class_name = class_name_from_ext_trait_path(existing)
-                .expect("#[class]: internal: struct_only path re-validation should not fail here");
-            let real_bridge_path = class_interface_bridge_path(&class_name.to_string(), existing);
-            let bridge_ident = class_interface_bridge_ident(&bare_name);
-            Some(quote! { pub use #real_bridge_path as #bridge_ident; })
-        });
+            Some(existing) if args.no_ancestor_forward => (None, None, None, None, None),
+            Some(existing) => {
+                // Issue #128: a forwardable `struct_only` implementor also re-exports the *real*
+                // class-interface-bridge macro (defined and `#[macro_export]`'d by the interface it
+                // implements, possibly in a different crate) into its own wrapper module, under the
+                // same bridge ident, using a path computed reliably from its own `existing` (no
+                // same-crate registry lookup involved, unlike `ancestor_own_trait`) — this is what
+                // lets any descendant reach it through the exact same, already-reliable
+                // wrapper-module route (`ancestor_bridge_path`) it already uses for this ancestor's
+                // entry/skip macros, rather than through a resolution that can silently fall back to
+                // a wrong prefix when this ancestor's own same-crate registration hasn't happened yet
+                // at the point a *different*, textually-earlier same-crate descendant expands (see
+                // `ancestor_bridge_path`'s own doc comment).
+                //
+                // Issue #128 remediation (review finding A2): also re-exports `existing` itself
+                // (the *actual* trait this concrete type implements) under the stable
+                // `__ElwindUIOwnExt` alias — never a `{ConcreteName}Ext` naming-convention guess —
+                // so `ancestor_own_trait` never needs to know or guess this concrete type's own bare
+                // name relationship to the interface it implements.
+                let class_name = class_name_from_ext_trait_path(existing).expect(
+                    "#[class]: internal: struct_only path re-validation should not fail here",
+                );
+                let real_bridge_path =
+                    class_interface_bridge_path(&class_name.to_string(), existing);
+                let bridge_ident = class_interface_bridge_ident(&bare_name);
+                // Issue #128 remediation (review finding A2): `existing`'s own actual visibility
+                // (declared, possibly, in a different crate) is unknown to this proc-macro — capped
+                // at this class's own declared `struct_vis` instead, which by this codebase's
+                // established `struct_only` convention always matches it (see `StoredClassArgs::
+                // struct_vis`'s own doc comment). A `pub use` of a narrower-than-`pub` target here
+                // would otherwise be a hard privacy error (E0365), not a silent bug — see this
+                // review round's own two `pub(crate) trait_only` regression fixtures
+                // (`testsupport.rs`'s `BridgeBase`/`BridgeMulti`) that first exposed this.
+                // `build_inherit_macros`'s own `named_accessor` (`has_concrete_type.then(..)`) makes
+                // *every* concrete-typed ancestor's entry macro generate `self.base.as_<bare_name>()`
+                // on whatever `$OwnConcrete` its caller supplies — for an ordinary/root interface
+                // reached the *normal* way (a direct `inherits = Interface` descendant), `$OwnConcrete`
+                // is `Interface` itself, whose own reflexive accessor (`self` returned) already
+                // exists. Reached via *this* bridge instead, `@inherit_through_struct_only` forwards
+                // `$OwnConcrete` as *this* `struct_only` class's own concrete type instead (the only
+                // type that's actually real at this hop) — so *this* class needs the identical
+                // reflexive accessor too, under the *interface's* bare name (not its own — that one's
+                // already supplied by `entry_override`, above), or `self.base.as_<interface>()` has no
+                // implementation to call. Never an issue for a `trait_only` interface (no concrete
+                // type of its own at all, so `has_concrete_type` is `false` there and this accessor is
+                // never generated/called in the first place) — this is purely an A1 (ordinary
+                // non-root class as a `struct_only` target) consequence.
+                //
+                // Deliberately *not* extended to root-mode interfaces (`is_root_mode`, e.g. `UIElement`
+                // itself): a root class's own `as_ui_element(&self) -> &Self` is a *required* trait
+                // method whose return type is hard-pinned to the declaring root struct's own concrete
+                // type at that root class's own compile time (`pub trait #ext_ident { fn
+                // as_ui_element(&self) -> &#impl_name; .. }`, `expand_impl`'s root-mode branch) — not
+                // generic/associated over the implementor. No `struct_only` implementor other than the
+                // root class itself can ever satisfy that signature (it would need to return a
+                // reference to a `BridgeRootBase`, say, that it neither owns nor can conjure). This is
+                // a genuine, pre-existing architectural incompatibility between root mode's own
+                // `as_ui_element` design and `struct_only` bridging to *any* other concrete type,
+                // confirmed empirically (`E0053`: incompatible return type) and *not* something this
+                // remediation's own `__ElwindUIOwnExt`/bridge mechanism can paper over without a
+                // material redesign of root mode's `as_ui_element` itself (out of scope — see this
+                // contract's own non-goals). A/T3's coverage is therefore macro-expansion-level only
+                // (`class.rs`'s own test module: proves the bridge macro + wrapper module are still
+                // generated for a root-mode class, without requiring a working runtime `struct_only`
+                // consumer of it) — reported as a discovered conflict rather than silently designed
+                // around with a real runtime fixture.
+                //
+                // Skipped when `class_name == bare_name` (the established "shares the interface's own
+                // bare name" convention — `Window`/`NativeControl`, per this module's own top doc
+                // comment): this class's own unconditional `reflexive_named_accessor` (below,
+                // `expand_impl`'s final `out`) already defines the exact same accessor in that case
+                // (`pub fn as_<bare_name>(&self) -> &Self`) — redefining it here would be a hard
+                // duplicate-definition error, confirmed empirically against every real
+                // `NativeControlExt`/`MenuBar`-family implementor.
+                let interface_named_accessor = (class_name.to_string() != bare_name)
+                    .then(|| {
+                        let interface_named_accessor_ident =
+                            named_accessor_ident(&class_name.to_string());
+                        quote! {
+                            #[allow(dead_code)]
+                            pub fn #interface_named_accessor_ident(&self) -> &#impl_name #ty_generics { self }
+                        }
+                    });
+                let interface_reflexive_accessor = quote! {
+                    impl #impl_generics #impl_name #ty_generics #where_clause {
+                        #interface_named_accessor
+                    }
+                };
+                (
+                    None,
+                    None,
+                    Some(quote! { pub use #real_bridge_path as #bridge_ident; }),
+                    Some(quote! { #struct_vis use #existing as #own_ext_alias_ident_val; }),
+                    Some(interface_reflexive_accessor),
+                )
+            }
+        };
         quote! {
+            #own_bridge_macro
+            #own_bridge_wrapper_mod
+            #interface_reflexive_accessor
             #[doc(hidden)]
             #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
             pub mod #mod_ident {
@@ -3994,6 +4218,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 pub use crate::#classify_ident;
                 pub use crate::#sealed_ident;
                 #bridge_reexport
+                #own_ext_alias
             }
         }
     };
@@ -4460,6 +4685,223 @@ mod self_weak_on_constructed_tests {
             !trait_slice.contains("into_into_node_test_parent_node"),
             "child's own trait must not redeclare the parent's upcast method (inherited via the \
              supertrait bound instead): {trait_slice}"
+        );
+    }
+}
+
+/// Issue #128 PR #164 review remediation, A4/T12: focused macro-level regression coverage for the
+/// remediation itself, living directly in this crate rather than only in downstream fixture crates
+/// (`elwindui-core`'s `testsupport.rs`, `elwindui-bridge-fixture-*`) — reuses
+/// `self_weak_on_constructed_tests`'s own `expand_pair`/`is_real_compile_error` harness style
+/// (duplicated locally rather than shared, matching that module's own precedent of not exposing test
+/// helpers across `#[cfg(test)]` module boundaries).
+#[cfg(test)]
+mod class_interface_bridge_tests {
+    use super::*;
+
+    fn expand_pair(
+        struct_attr: TokenStream2,
+        struct_item: TokenStream2,
+        impl_item: TokenStream2,
+    ) -> (TokenStream2, TokenStream2) {
+        let struct_out = expand(struct_attr, struct_item);
+        let impl_out = expand(TokenStream2::new(), impl_item);
+        (struct_out, impl_out)
+    }
+
+    fn is_real_compile_error(ts: &TokenStream2) -> bool {
+        ts.to_string().trim_start().starts_with("compile_error")
+    }
+
+    // T12: a `trait_only` interface generates its own `__elwindui_class_interface_*!` bridge macro.
+    #[test]
+    fn bridge_macro_generated_for_trait_only_interface() {
+        let out = expand(
+            quote! { trait_only },
+            quote! {
+                pub trait BridgeTestTraitOnlyIface {
+                    #[overridable]
+                    fn value(&self) -> i32;
+                }
+            },
+        );
+        assert!(!is_real_compile_error(&out), "unexpected error: {out}");
+        let s = out.to_string();
+        assert!(
+            s.contains("__elwindui_class_interface_BridgeTestTraitOnlyIface"),
+            "trait_only interface must generate its own class-interface bridge macro: {s}"
+        );
+    }
+
+    // T12/A1: an *ordinary* (non-root) class also generates its own bridge macro, not just
+    // `trait_only` interfaces.
+    #[test]
+    fn bridge_macro_generated_for_ordinary_interface() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct BridgeTestOrdinaryIface { value: i32 } },
+            quote! {
+                impl BridgeTestOrdinaryIface {
+                    #[overridable]
+                    fn value(&self) -> i32 { self.value }
+                    fn construct() -> Self { Self { value: 1 } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&impl_out),
+            "unexpected error: {impl_out}"
+        );
+        let s = impl_out.to_string();
+        assert!(
+            s.contains("__elwindui_class_interface_BridgeTestOrdinaryIface"),
+            "an ordinary (non-root) class must generate its own class-interface bridge macro: {s}"
+        );
+    }
+
+    // T3/T12/A1: a *root* class (no `inherits`, e.g. `UIElement` itself) also generates its own
+    // bridge macro — macro-expansion-level coverage only, since a real runtime `struct_only`
+    // implementor of a root interface is architecturally impossible (root mode's own `as_ui_element`
+    // has a return type hard-pinned to the declaring root struct — see the doc comment on
+    // `macro_reexports`'s `interface_reflexive_accessor` in `expand_impl`, and
+    // `crates/elwindui-core/src/ui/testsupport.rs`'s own T3 doc comment for the full explanation).
+    #[test]
+    fn bridge_macro_generated_for_root_interface() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct BridgeTestRootIface { value: i32 } },
+            quote! {
+                impl BridgeTestRootIface {
+                    #[overridable]
+                    fn value(&self) -> i32 { self.value }
+                    fn construct() -> Self { Self { value: 1 } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&impl_out),
+            "unexpected error: {impl_out}"
+        );
+        let s = impl_out.to_string();
+        assert!(
+            s.contains("__elwindui_class_interface_BridgeTestRootIface"),
+            "a root class must generate its own class-interface bridge macro too: {s}"
+        );
+    }
+
+    // T12/A3: a generic `struct_only<T>` type preserves its own `impl_generics`/`where_clause` on
+    // the outer `impl` header the bridge's members-only arm is spliced into (runtime-level coverage
+    // already exists in `elwindui-core::ui::testsupport`'s `BridgeGenericConcrete`; this is the
+    // focused macro-level companion).
+    #[test]
+    fn generic_struct_only_preserves_impl_generics_in_expansion() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! { struct_only = some_crate::SomeIfaceExt },
+            quote! {
+                pub struct BridgeTestGenericStructOnly<T> where T: Clone + 'static { source: T }
+            },
+            quote! {
+                impl<T> BridgeTestGenericStructOnly<T> where T: Clone + 'static {
+                    fn value(&self) -> i32 { 1 }
+                    fn construct(source: T) -> Self { Self { source } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&impl_out),
+            "unexpected error: {impl_out}"
+        );
+        let s = impl_out.to_string();
+        let impl_start = s
+            .find("impl < T")
+            .expect("outer impl header for the generic struct_only type must exist");
+        let header = &s[impl_start..impl_start + 220.min(s.len() - impl_start)];
+        assert!(
+            header.contains("SomeIfaceExt for BridgeTestGenericStructOnly < T >")
+                && header.contains("where T : Clone"),
+            "the outer impl header must keep its own impl_generics/ty_generics/where_clause \
+             (review finding A3), not lose them to the bridge's opaque macro tokens: {header}"
+        );
+    }
+
+    // T12/A2: a `struct_only` implementor whose own bare name differs from the interface it
+    // implements gets a `__ElwindUIOwnExt` alias pointing at the *real* interface path, never a
+    // `{ConcreteName}Ext` naming-convention guess.
+    #[test]
+    fn different_concrete_and_interface_name_own_trait_metadata() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! { struct_only = some_crate::OddlyNamedIfaceExt },
+            quote! { pub struct BridgeTestDifferentNameConcrete {} },
+            quote! {
+                impl BridgeTestDifferentNameConcrete {
+                    fn construct() -> Self { Self {} }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&impl_out),
+            "unexpected error: {impl_out}"
+        );
+        let s = impl_out.to_string();
+        assert!(
+            s.contains("some_crate :: OddlyNamedIfaceExt as __ElwindUIOwnExt")
+                || s.contains("some_crate::OddlyNamedIfaceExt as __ElwindUIOwnExt"),
+            "the __ElwindUIOwnExt alias must point at the real `existing` interface path, not a \
+             `{{ConcreteName}}Ext` naming-convention guess: {s}"
+        );
+    }
+
+    // T8/T12: `no_ancestor_forward` bypasses the bridge entirely — no
+    // `__elwindui_class_interface_*!` invocation anywhere in a `no_ancestor_forward` struct_only
+    // class's own expansion.
+    #[test]
+    fn no_ancestor_forward_never_invokes_the_bridge() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! { struct_only = some_crate::HandWrittenTrait, no_ancestor_forward },
+            quote! { pub struct BridgeTestNoForwardConcrete {} },
+            quote! {
+                impl BridgeTestNoForwardConcrete {
+                    fn hand_value(&self) -> i32 { 1 }
+                    fn construct() -> Self { Self {} }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&impl_out),
+            "unexpected error: {impl_out}"
+        );
+        let s = impl_out.to_string();
+        assert!(
+            !s.contains("__elwindui_class_interface_"),
+            "no_ancestor_forward must never reference the class-interface bridge at all: {s}"
+        );
+    }
+
+    // T7: the unknown-`#[overrides]`-target diagnostic. A leaf class (no further ancestor) always
+    // embeds its own `__elwindui_inherit_*_terminal!` check macro, whose literal body is this exact
+    // `compile_error!` — reachable directly from a single `expand()` call without needing to
+    // actually re-expand it through a second macro-invocation pass (which this crate's own test
+    // harness cannot do — see `rust_analyzer_shadow_tests`'s own doc comment on why no proc-macro
+    // integration-test harness exists here).
+    #[test]
+    fn unknown_override_target_terminal_diagnostic_is_present_in_expansion() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! {},
+            quote! { pub struct BridgeTestTerminalDiagnostic { value: i32 } },
+            quote! {
+                impl BridgeTestTerminalDiagnostic {
+                    fn construct() -> Self { Self { value: 1 } }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&impl_out),
+            "unexpected error: {impl_out}"
+        );
+        let s = impl_out.to_string();
+        assert!(
+            s.contains("no ancestor declared these methods #[overridable]"),
+            "a leaf class must still embed the unknown-override terminal diagnostic: {s}"
         );
     }
 }

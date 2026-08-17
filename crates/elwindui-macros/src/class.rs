@@ -821,10 +821,11 @@ fn own_ext_policy_path(bare_name: &str, ty: &Type) -> TokenStream2 {
 
 /// Issue #128 remediation (A2): the stable, class-generated alias name every class-managed
 /// ancestor's own `macro_reexport_mod_ident` wrapper module re-exports its *actual* implemented Ext
-/// interface under (bare, no generic arguments — a `pub use` target never carries them; the
-/// *caller*, `ancestor_own_trait`, reapplies whatever generic arguments its own `inherits = ..`
-/// argument carried). Never written by hand in a `struct_only` declaration — see `expand_impl`'s
-/// own `macro_reexports` construction, the sole place this is generated.
+/// interface under (bare, no generic arguments — a `pub use` target never carries them; the caller
+/// reapplies whatever generic arguments apply, once its own `__elwindui_apply_own_ext_*!` policy
+/// macro has decided whether they do — see `AncestorRoute`'s own doc comment). Never written by
+/// hand in a `struct_only` declaration — see `expand_impl`'s own `macro_reexports` construction, the
+/// sole place this is generated.
 fn own_ext_alias_ident() -> Ident {
     format_ident!("__ElwindUIOwnExt")
 }
@@ -832,8 +833,8 @@ fn own_ext_alias_ident() -> Ident {
 /// `ty`'s own final path segment's generic arguments, verbatim (e.g. `<H>` from
 /// `crate::NativeControl<H>`), or empty tokens if `ty` has none. Used to re-apply an ancestor's own
 /// generic arguments, exactly as written by *this* class's `inherits = ..`, onto a path resolved
-/// through that ancestor's wrapper module (`ancestor_own_trait`) — a `use`-based alias can only ever
-/// name the bare (ungenericized) item, so the instantiation has to happen at the reference site.
+/// through that ancestor's wrapper module — a `use`-based alias can only ever name the bare
+/// (ungenericized) item, so the instantiation has to happen at the reference site.
 fn last_segment_generic_args(ty: &Type) -> TokenStream2 {
     let Type::Path(tp) = ty else {
         return TokenStream2::new();
@@ -1027,94 +1028,17 @@ fn struct_only_collides_with(own_struct_only: &Option<Path>, parent_bare_name: &
         .is_some_and(|v| v == own_str)
 }
 
-/// The ancestor `bare_name`'s own trait type, as anyone naming it as their own `inherits = ..`
-/// target should reference it. `fallback` is that `inherits = ..` type exactly as written
-/// (already validated fully-qualified) — `{fallback's last segment}Ext` (`ext_trait_type`) is
-/// correct for every ordinary/`trait_only` class, and coincidentally also correct for most
-/// `struct_only` classes in this codebase today (their own target's name happens to already
-/// follow the `{Name}Ext` convention) — but not always (e.g. `NativeTabView`'s `struct_only =
-/// TabView`, a hand-written trait with an unrelated name). When `bare_name` is a known same-crate
-/// `struct_only` registration, its real recorded target always wins over the naming-convention
-/// guess.
-/// Issue #128 remediation (review finding A2): the *real* Ext trait implemented by `bare_name` (as
-/// named via this class's own `inherits = ..`, `fallback`), resolved through that ancestor's own
-/// generated wrapper module's stable `__ElwindUIOwnExt` alias — never a `{bare_name}Ext`
-/// naming-convention guess (`ext_trait_type`). The naming-convention guess is only correct when an
-/// ancestor's own bare name happens to match the trait it implements (true for `Window`/
-/// `NativeControl` by established, but not required, convention) — it silently produces a
-/// nonexistent path (`{ConcreteName}Ext`, not the real `{InterfaceName}Ext`) whenever a `struct_only`
-/// concrete type's own bare name differs from the interface it implements (e.g. a `struct_only
-/// Concrete = SomeInterfaceExt` where `Concrete != SomeInterface`).
-///
-/// `__ElwindUIOwnExt` is generated unconditionally, by every non-`no_ancestor_forward`,
-/// non-`sealed` class-managed ancestor (ordinary, root, or forwardable `struct_only` — see
-/// `expand_impl`'s own `macro_reexports` construction), inside that ancestor's own
-/// `macro_reexport_mod_ident` wrapper module — the exact same module `entry_ident`/`skip_ident`/
-/// `classify_ident` are already reliably reached through via `path_module_prefix`, so this needs no
-/// same-crate registry lookup at all (unlike the registry-based fast path this replaces, whose own
-/// same-crate-declaration-order assumption does not reliably hold across *different files* in one
-/// crate — see `same_crate_classes`'s own doc comment, and the real `Button`/`CheckBox` regression
-/// this caused when the wrapper module didn't exist yet at the point their own `#[class]` expansion
-/// ran, before this rewrite).
-///
-/// `fallback`'s own trailing generic arguments (if any, e.g. `<H>` in `inherits =
-/// crate::NativeControl<H>`) are preserved on the returned path's final segment, exactly as the old
-/// naming-convention guess already did (`ext_trait_type` only ever renamed the last segment's
-/// identifier, never touched its generic arguments).
-fn ancestor_own_trait(bare_name: &str, fallback: &Type) -> TokenStream2 {
-    let prefix = path_module_prefix(fallback).expect(
-        "#[class]: internal: inherits/struct_only argument should already be validated fully-qualified",
-    );
-    let alias_ident = own_ext_alias_ident();
-    // The `__ElwindUIOwnExt` alias's own generic arity depends on *which* case produced it
-    // (`macro_reexports`): for an ordinary/root ancestor it's `pub use super::{ClassName}Ext as
-    // __ElwindUIOwnExt;`, generic over the exact same parameters as the ancestor struct itself (so
-    // `fallback`'s own trailing instantiation args, e.g. `<Concrete>` in `inherits =
-    // Parent<Concrete>`, are exactly what the alias needs re-attached — `use` cannot carry them
-    // itself, see `last_segment_generic_args`'s own doc comment). For a `struct_only` ancestor it's
-    // `pub use {existing} as __ElwindUIOwnExt;`, where `{existing}` is a *fixed*, independently-
-    // declared interface path unrelated to the struct_only concrete type's own generics (and, by
-    // `struct_only = ..`'s own validation, can never itself carry generic args) — reattaching
-    // `fallback`'s generics there would apply the wrong type's generic argument list entirely (the
-    // concrete struct's, not the interface's) and only ever fails to compile, never silently
-    // resolves wrong. `struct_only_ancestor_in_this_crate` is a same-crate-only heuristic (like
-    // `struct_only_collides_with`'s own registry use) — a registry miss (cross-crate ancestor)
-    // safely defaults to reattaching, which is a correctness no-op for every non-generic ancestor
-    // (the overwhelming majority, since `last_segment_generic_args` returns nothing for a
-    // non-generic `fallback` regardless) and only actually matters for a same-crate generic
-    // `struct_only` ancestor, which this lookup already covers.
-    let generic_args = if struct_only_ancestor_in_this_crate(bare_name) {
-        TokenStream2::new()
-    } else {
-        last_segment_generic_args(fallback)
-    };
-    quote! { #prefix :: #alias_ident #generic_args }
-}
-
-/// See `ancestor_own_trait`'s own doc comment on why this decides generic-arg reattachment, and
-/// `same_crate_classes`'s own doc comment (question 2) for the registry this reuses.
-fn struct_only_ancestor_in_this_crate(bare_name: &str) -> bool {
-    same_crate_classes()
-        .lock()
-        .unwrap()
-        .get(&(compiling_crate_key(), bare_name.to_string()))
-        .is_some_and(|info| info.struct_only.is_some())
-}
-
 /// Issue #128: the path to whichever ancestor `bare_name`/`ty` (an `inherits = ..` argument,
 /// exactly as *this* class wrote it) names for its own class-interface-bridge macro — reached
 /// through the *exact same*, already-reliable wrapper module every other macro of that ancestor is
 /// reached through (`inherit_macro_path`, `macro_reexport_mod_ident`), just naming the bridge ident
-/// instead of the entry/skip/classify ones. Deliberately NOT derived from the ancestor's own
-/// *resolved* Ext-trait path (`ancestor_own_trait`'s same-crate-registry lookup, which falls back to
-/// a naming-convention guess when that lookup misses — same-crate declaration order across
-/// *different files* in one crate is not reliably "ancestors first", unlike within one file — see
-/// `same_crate_classes`'s own doc comment; the guessed fallback still resolves correctly for a type
-/// path, since backend crates typically re-export a struct_only ancestor's own real Ext trait by
-/// name, but its wrapper-module *prefix* is not guaranteed to match). Requires the *ancestor itself*
-/// (e.g. `NativeControl`'s own `struct_only` declaration) to re-export the real bridge macro into
-/// this same wrapper module under this same ident — see `expand_impl`'s own `macro_reexports`
-/// construction.
+/// instead of the entry/skip/classify ones. Deliberately never derived from a same-crate registry
+/// lookup or naming-convention guess (same-crate declaration order across *different files* in one
+/// crate is not reliably "ancestors first", unlike within one file — see `same_crate_classes`'s own
+/// doc comment) — computed purely from `ty`'s own already-fully-qualified path text. Requires the
+/// *ancestor itself* (e.g. `NativeControl`'s own `struct_only` declaration) to re-export the real
+/// bridge macro into this same wrapper module under this same ident — see `expand_impl`'s own
+/// `macro_reexports` construction.
 /// Unlike `entry_ident`/`skip_ident`/`classify_ident` (always `#[macro_export]`'d directly at crate
 /// root, so `inherit_macro_path`'s same-crate branch can use a bare `crate::#ident`), the bridge
 /// ident is *never* at crate root — it only ever exists as a `pub use .. as` re-export *inside*
@@ -1123,7 +1047,7 @@ fn struct_only_ancestor_in_this_crate(bare_name: &str) -> bool {
 /// same-crate/cross-crate — a validated, fully-qualified `inherits = ..`/`struct_only = ..` argument
 /// always has >= 2 segments, so this always succeeds. The caller decides whether the result needs
 /// `rewrite_crate_segment` afterward (item position: no; self-reference/macro-body position: yes) —
-/// exactly like `next_trait`/`next_concrete` already do, so a single function suffices for both.
+/// exactly like `AncestorRoute`'s own fields already do, so a single function suffices for both.
 fn ancestor_bridge_path(bare_name: &str, ty: &Type) -> TokenStream2 {
     let prefix = path_module_prefix(ty)
         .expect("#[class]: internal: inherits/struct_only argument should already be validated fully-qualified");
@@ -1133,18 +1057,18 @@ fn ancestor_bridge_path(bare_name: &str, ty: &Type) -> TokenStream2 {
 
 /// Rewrites a leading literal `crate` token to the `$crate` macro_rules metavariable. Needed
 /// specifically when a type/trait path is embedded as a *literal* token stream into a macro body
-/// this class generates for its *own* future descendants (`next_trait`/`next_concrete` in
-/// `expand_impl`'s final `inherit_macros` block) — unlike `$crate` (designed exactly for this), a
-/// bare `crate` keyword's hygiene ties it to whatever crate the token was originally authored in,
-/// but once spliced into another macro's generated body and reached via a chain of macro-to-macro
-/// calls that ultimately gets triggered from a *third* crate, it no longer reliably resolves back
-/// to the authoring crate (confirmed empirically: `elwindui-core`'s own `ContentControl`, whose
-/// `inherits = crate::ui::Control` is embedded verbatim as its own trio's recursion target for
-/// descendants, failed to resolve when that recursion was ultimately triggered from `notepad`,
-/// three macro-invocation layers away). `crate` is only ever legally the *first* segment of an
+/// this class generates for its *own* future descendants (`AncestorRoute`'s own fields, threaded
+/// into `build_inherit_macros`) — unlike `$crate` (designed exactly for this), a bare `crate`
+/// keyword's hygiene ties it to whatever crate the token was originally authored in, but once
+/// spliced into another macro's generated body and reached via a chain of macro-to-macro calls that
+/// ultimately gets triggered from a *third* crate, it no longer reliably resolves back to the
+/// authoring crate (confirmed empirically: `elwindui-core`'s own `ContentControl`, whose `inherits =
+/// crate::ui::Control` is embedded verbatim as its own trio's recursion target for descendants,
+/// failed to resolve when that recursion was ultimately triggered from `notepad`, three
+/// macro-invocation layers away). `crate` is only ever legally the *first* segment of an
 /// already-fully-qualified path (`validate_fully_qualified_path`), so only the leading token needs
 /// checking. Operates on tokens (not `syn::Type`) since the caller may already have a
-/// `TokenStream2` in hand (`ancestor_own_trait`'s return value) rather than a parsed type.
+/// `TokenStream2` in hand (e.g. `own_ext_policy_path`'s return value) rather than a parsed type.
 fn rewrite_crate_segment(tokens: TokenStream2) -> TokenStream2 {
     let mut iter = tokens.into_iter();
     match iter.next() {
@@ -1676,10 +1600,10 @@ fn build_dyn_default_methods(
 /// a blind `self.base.#name()` forward returning `&$OwnConcrete` (only ever non-empty for a root
 /// class's own `as_ui_element`; see `expand_impl`'s own doc comment on root class mode).
 /// `recurse_macro_path` is the fully-qualified macro-path (crate-root-prefixed) to continue the
-/// chain with; `recurse_next` is `Some((next_trait, next_concrete))` — this class's *own*
-/// knowledge (from its own `inherits = ..`) of the *next* hop's fully-qualified trait/concrete
-/// path, to pass along to `recurse_macro_path` — or `None` when recursing into the terminal macro
-/// (no next hop, so nothing to pass beyond `$SubType` itself).
+/// chain with; `recurse_next` is `Some(&AncestorRoute)` — this class's *own* knowledge (from its
+/// own `inherits = ..`) of how to reach the *next* hop, deliberately unresolved (see
+/// `AncestorRoute`'s own doc comment on why) — or `None` when recursing into the terminal macro (no
+/// next hop, so nothing to pass beyond `$SubType` itself).
 ///
 /// `skip_own_impl` (`ClassArgs::no_ancestor_forward`) omits the `impl $OwnTrait for $SubType`
 /// block from the classify muncher's base case entirely — this class's own trait is a
@@ -2766,6 +2690,62 @@ fn rc_dyn_trait_bound(ty: &Type) -> Option<&syn::TypeTraitObject> {
     })
 }
 
+/// PR #164 final remediation round (finding A6): unresolved routing metadata to the *next* ancestor
+/// named by a class's own `inherits = Parent<Args>` — deliberately carries no semantic Ext-trait
+/// path at all. `build_inherit_macros`'s generated classify/skip macros are reused for *every*
+/// future descendant depth, not just the immediate `inherits = ..` edge — whether `Parent`'s own
+/// trailing generic arguments (`concrete_args`) apply to `Parent`'s real interface trait is a
+/// decision only `Parent`'s own `__elwindui_apply_own_ext_*!` policy macro can make correctly, at
+/// real macro-expansion time, once whatever future descendant actually reaches this hop is known —
+/// never pre-baked here via a same-crate registry (`same_crate_classes`), which is empty across real
+/// crate boundaries and so cannot answer this correctly beyond the immediate hop. This replaces the
+/// former `ancestor_own_trait`/`struct_only_ancestor_in_this_crate` same-crate-registry heuristic,
+/// which only ever got the immediate `inherits = ..` edge right (fixed separately, by
+/// `expand_impl`'s own prelude, PR #164's earlier A5 fix) — every *recursive* hop beyond that one
+/// still baked a same-crate-registry-derived guess as a literal token, silently wrong across real
+/// crate boundaries (confirmed: a 3+ hop generic `struct_only` chain reattached `<Args>` onto a
+/// non-generic real interface once the ancestor stopped being in the same crate as the reattaching
+/// hop).
+struct AncestorRoute {
+    /// `path_module_prefix(inh)`, rewritten — the wrapper module `Parent`'s own `__ElwindUIOwnExt`
+    /// alias, entry/skip/classify trio, bridge, and policy macro are all reached through.
+    own_ext_prefix: TokenStream2,
+    /// `last_segment_generic_args(inh)`, rewritten — this class's own `inherits = ..` argument's
+    /// trailing generic arguments exactly as written (e.g. `<ConsumerSource>`), handed to `Parent`'s
+    /// own policy macro to keep or discard.
+    concrete_args: TokenStream2,
+    /// `#inh`, rewritten — `Parent`'s own concrete type, exactly as this class named it.
+    concrete: TokenStream2,
+    /// `ancestor_bridge_path(parent_bare, inh)`, rewritten.
+    bridge_path: TokenStream2,
+    /// `own_ext_policy_path(parent_bare, inh)`, rewritten.
+    policy_path: TokenStream2,
+}
+
+/// Builds `parent_bare`/`inh`'s (an `inherits = ..` target) `AncestorRoute` — shared by `expand_impl`
+/// and `expand_trait_only`, the two producers of `build_inherit_macros`'s own `recurse_next`
+/// metadata (PR #164 final remediation round, finding A6). Every field is
+/// `rewrite_crate_segment`-treated: all of them end up embedded as literal tokens inside a
+/// `#[macro_export]`'d macro body (the continuation macro `build_inherit_macros` generates), later
+/// re-expanded from whatever crate an eventual descendant lives in — not necessarily the crate that
+/// generated this route.
+fn build_ancestor_route(parent_bare: &str, inh: &Type) -> AncestorRoute {
+    let own_ext_prefix = rewrite_crate_segment(path_module_prefix(inh).expect(
+        "#[class]: internal: inherits argument should already be validated fully-qualified",
+    ));
+    let concrete_args = rewrite_crate_segment(last_segment_generic_args(inh));
+    let concrete = rewrite_crate_segment(quote! { #inh });
+    let bridge_path = rewrite_crate_segment(ancestor_bridge_path(parent_bare, inh));
+    let policy_path = rewrite_crate_segment(own_ext_policy_path(parent_bare, inh));
+    AncestorRoute {
+        own_ext_prefix,
+        concrete_args,
+        concrete,
+        bridge_path,
+        policy_path,
+    }
+}
+
 fn build_inherit_macros(
     bare_name: &str,
     dyn_ident: &Ident,
@@ -2787,13 +2767,15 @@ fn build_inherit_macros(
     // against a real multi-hop root-mode `struct_only` bridge fixture (`BridgeRootDerived`,
     // `testsupport.rs`) before this fix.
     extra_required_names: &[Ident],
+    // The path to the *next* ancestor's own entry macro (self-ref position — this function always
+    // embeds it inside a `macro_rules!` body it generates, whether used directly, `recurse_next:
+    // None`, or indirectly through the continuation macro `recurse_next: Some` generates). Ignored
+    // when `recurse_next` is `None` (the terminal case recurses into its own local check instead).
     recurse_macro_path: &TokenStream2,
-    // Issue #128: a third tuple element, `next_bridge_path`, travels alongside `next_trait`/
-    // `next_concrete` — the *next* ancestor's own class-interface-bridge path, recomputed fresh at
-    // *this* hop (never forwarded from a higher caller — see `ancestor_bridge_path`'s
-    // own doc comment for why). Every entry macro's own `$BridgePath` parameter is filled in this
-    // same way by whoever invokes it.
-    recurse_next: Option<(&TokenStream2, &TokenStream2, &TokenStream2)>,
+    // PR #164 final remediation round (finding A6): `AncestorRoute`, not a pre-resolved
+    // `(next_trait, next_concrete, next_bridge_path)` tuple — see `AncestorRoute`'s own doc comment
+    // for why the semantic trait can never be baked in here.
+    recurse_next: Option<&AncestorRoute>,
     // Issue #128: overrides the entry macro's own body (`$SubType`/`$OwnTrait`/`$OwnConcrete`/
     // `$BridgePath`/`$overrides` all still in scope) instead of the default "classify against my own
     // locally-known `overridable_names`" behavior — used exactly once, by `expand_impl`'s struct_only
@@ -2857,15 +2839,20 @@ fn build_inherit_macros(
         .collect();
     let extra_forwards = &extra_forwards;
 
-    // The token sequence recursing to the next layer expects, right after `$SubType` -- either
-    // `, next_trait, next_concrete, next_concrete, next_bridge_path` (an ordinary further ancestor,
-    // so it can build its own `impl` the same way this layer just did — `next_concrete` is
-    // deliberately repeated for both the `$OwnConcrete` and `$RootConcrete` slots: a *normal*,
-    // non-bridged recursion step never needs them to differ, see `extra_required_names`'s own
-    // parameter doc comment) or nothing at all (the terminal check, which never builds an `impl` and
-    // so never needs a trait/concrete path).
-    let recurse_extra = recurse_next.map(|(t, c, b)| quote! { , #t, #c, #c, #b });
-
+    // PR #164 final remediation round (finding A6): recursing to the next layer no longer bakes a
+    // pre-resolved ancestor trait as a literal token here (`next_trait`, formerly computed by the
+    // caller via `ancestor_own_trait`'s same-crate-registry heuristic — wrong across real crate
+    // boundaries, since this class's own generated classify/skip macros are reused for *every*
+    // future descendant depth, not just the immediate one a registry lookup might happen to know
+    // about). Instead, a fixed, once-per-class continuation macro (`continuation_ident`, generated
+    // below when `recurse_next: Some`, never duplicated per future invocation — unlike a
+    // per-invocation name, which multiple real future descendants reaching this same hop would
+    // collide on) asks the next ancestor's own `__elwindui_apply_own_ext_*!` policy macro whether its
+    // own generic arguments apply, at the point some real descendant chain actually reaches this
+    // hop — the exact same two-mechanism protocol `expand_impl`'s own prelude already uses for the
+    // immediate hop (`own_ext_policy_path`/`own_ext_bound_trait_ident`'s own doc comments); this is
+    // that same protocol applied recursively, not a new one.
+    let continuation_ident = format_ident!("__elwindui_continue_recursive_inherits_of_{bare_name}");
     // No further ancestor: recurse into a *local* (same-crate, `$crate::`-self-referenced) leftover-
     // `#[overrides]` check instead of the caller-supplied `recurse_macro_path` (ignored in this
     // case) — every "no inherits" class (true root mode's `UIElement`, or any other struct_only/
@@ -2878,28 +2865,66 @@ fn build_inherit_macros(
     // `elwindui-core` — valid there, but not necessarily from `notepad`, which only depends on the
     // `elwindui` facade). A same-crate `$crate::` self-reference has no such problem, since it
     // always resolves against the crate that generated *this* classify macro, regardless of caller.
-    let (recurse_macro_path, recurse_extra, terminal_check) = if recurse_next.is_none() {
-        let terminal_ident = format_ident!("__elwindui_inherit_{bare_name}_terminal");
-        let path = quote! { $crate::#terminal_ident };
-        let check = quote! {
-            #[doc(hidden)]
-            #[macro_export]
-            #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
-            macro_rules! #terminal_ident {
-                ($SubType:ty;) => {};
-                ($SubType:ty; $($leftover:tt)+) => {
-                    compile_error!(concat!(
-                        "#[overrides]: no ancestor declared these methods #[overridable]: ",
-                        stringify!($($leftover)+)
-                    ));
-                };
-            }
-        };
-        (path, None, Some(check))
-    } else {
-        (recurse_macro_path.clone(), recurse_extra, None)
+    let (recurse_macro_path, terminal_check, continuation_macro) = match recurse_next {
+        None => {
+            let terminal_ident = format_ident!("__elwindui_inherit_{bare_name}_terminal");
+            let path = quote! { $crate::#terminal_ident };
+            let check = quote! {
+                #[doc(hidden)]
+                #[macro_export]
+                #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+                macro_rules! #terminal_ident {
+                    ($SubType:ty;) => {};
+                    ($SubType:ty; $($leftover:tt)+) => {
+                        compile_error!(concat!(
+                            "#[overrides]: no ancestor declared these methods #[overridable]: ",
+                            stringify!($($leftover)+)
+                        ));
+                    };
+                }
+            };
+            (path, Some(check), None)
+        }
+        Some(route) => {
+            // `own_ext_prefix`/`concrete`/`bridge_path` are baked here (proc-macro-time-known,
+            // reliably the same every time this hop is reached) — only the resolved trait tokens
+            // themselves (`$($OwnTraitTail)*`) come from the policy macro, fresh, per invocation.
+            let own_ext_prefix = &route.own_ext_prefix;
+            let concrete = &route.concrete;
+            let bridge_path = &route.bridge_path;
+            let alias_ident = own_ext_alias_ident();
+            let path = recurse_macro_path.clone();
+            let continuation = quote! {
+                #[doc(hidden)]
+                #[macro_export]
+                #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
+                macro_rules! #continuation_ident {
+                    ($SubType:ty, [$($OwnTraitTail:tt)*]; $($unmatched:tt)*) => {
+                        #path!($SubType, #own_ext_prefix::#alias_ident $($OwnTraitTail)*, #concrete, #concrete, #bridge_path; $($unmatched)*);
+                    };
+                }
+            };
+            (path, None, Some(continuation))
+        }
     };
     let recurse_macro_path = &recurse_macro_path;
+
+    // The actual "recurse past me" call embedded in `skip_ident`'s and classify's base-case bodies
+    // below — routed through the next ancestor's own policy macro (`recurse_next: Some`) or straight
+    // to the local terminal check (`recurse_next: None`). `trailing` is the differing tail-token
+    // capture each of the two call sites below supplies (`$($overrides)*`/`$($unmatched)*`).
+    let recurse_call = |trailing: TokenStream2| -> TokenStream2 {
+        match recurse_next {
+            None => quote! { #recurse_macro_path!($SubType; #trailing); },
+            Some(route) => {
+                let policy_path = &route.policy_path;
+                let concrete_args = &route.concrete_args;
+                quote! {
+                    #policy_path!($crate::#continuation_ident, $SubType; [#concrete_args]; #trailing);
+                }
+            }
+        }
+    };
 
     // One independent "slot" per `#[overridable]` name, each capturing 0-or-1 `item` (the matching
     // `#[overrides]` body, if this hop provided one) — replaces a single flat `[$($matched:item)*]`
@@ -3018,6 +3043,9 @@ fn build_inherit_macros(
         }
     });
 
+    let skip_recurse_call = recurse_call(quote! { $($overrides)* });
+    let classify_recurse_call = recurse_call(quote! { $($unmatched)* });
+
     quote! {
         #[doc(hidden)]
         #[macro_export]
@@ -3033,7 +3061,7 @@ fn build_inherit_macros(
         #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
         macro_rules! #skip_ident {
             ($SubType:ty; $($overrides:tt)*) => {
-                #recurse_macro_path!($SubType #recurse_extra; $($overrides)*);
+                #skip_recurse_call
             };
         }
 
@@ -3051,10 +3079,11 @@ fn build_inherit_macros(
             ($SubType:ty, $OwnTrait:path, $OwnConcrete:path, $RootConcrete:path; #(#slot_patterns)*; [$($unmatched:tt)*];) => {
                 #own_impl
                 #named_accessor
-                #recurse_macro_path!($SubType #recurse_extra; $($unmatched)*);
+                #classify_recurse_call
             };
         }
 
+        #continuation_macro
         #resolve_macro
         #terminal_check
     }
@@ -3350,15 +3379,11 @@ fn expand_trait_only(args: &ClassArgs, item: syn::ItemTrait) -> TokenStream2 {
                     inh,
                     inherit_macro_ident(&parent_bare),
                 );
-                let next_trait = rewrite_crate_segment(ancestor_own_trait(&parent_bare, inh));
-                let next_concrete = rewrite_crate_segment(quote! { #inh });
-                let next_bridge_path =
-                    rewrite_crate_segment(ancestor_bridge_path(&parent_bare, inh));
-                (path, Some((next_trait, next_concrete, next_bridge_path)))
+                (path, Some(build_ancestor_route(&parent_bare, inh)))
             }
             None => (TokenStream2::new(), None),
         };
-        let recurse_next_ref = recurse_next.as_ref().map(|(t, c, b)| (t, c, b));
+        let recurse_next_ref = recurse_next.as_ref();
         let inherit_macros = build_inherit_macros(
             &bare_name,
             &dyn_ident,
@@ -4194,11 +4219,11 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 return None;
             }
             // PR #164 final remediation round (finding A5): `ancestor_own_trait_bound` (the wrapper
-            // `__ElwindUIOwnExtBound` trait), not `ancestor_own_trait` — a supertrait bound is
-            // resolved at *this* class's own proc-macro time, and Rust does not permit a macro
-            // invocation there, so the macro-expansion-time policy protocol used for dispatch
-            // routing (`own_ext_policy_ident`) cannot apply to this position — see
-            // `own_ext_bound_trait_ident`'s own doc comment for the full reasoning.
+            // `__ElwindUIOwnExtBound` trait) — a supertrait bound is resolved at *this* class's own
+            // proc-macro time, and Rust does not permit a macro invocation there, so the
+            // macro-expansion-time policy protocol used for dispatch routing (`own_ext_policy_ident`)
+            // cannot apply to this position — see `own_ext_bound_trait_ident`'s own doc comment for
+            // the full reasoning.
             let own_trait_ty = ancestor_own_trait_bound(&parent_bare, t);
             Some(quote! { : #own_trait_ty })
         });
@@ -4399,15 +4424,11 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                     inh,
                     inherit_macro_ident(&parent_bare),
                 );
-                let next_trait = rewrite_crate_segment(ancestor_own_trait(&parent_bare, inh));
-                let next_concrete = rewrite_crate_segment(quote! { #inh });
-                let next_bridge_path =
-                    rewrite_crate_segment(ancestor_bridge_path(&parent_bare, inh));
-                (path, Some((next_trait, next_concrete, next_bridge_path)))
+                (path, Some(build_ancestor_route(&parent_bare, inh)))
             }
             None => (TokenStream2::new(), None),
         };
-        let recurse_next_ref = recurse_next.as_ref().map(|(t, c, b)| (t, c, b));
+        let recurse_next_ref = recurse_next.as_ref();
         // A root class's `as_ui_element` is a *second* required method beyond `dyn_ident` itself
         // (see `build_inherit_macros`'s own doc comment on `extra_required_names`) — every other
         // shape has none.
@@ -4446,7 +4467,7 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
             // `Window`/`MenuBar`), there is no such target — this class's own concrete type is used
             // reflexively instead.
             let bridge_root_concrete = match &recurse_next {
-                Some((_, next_concrete, _)) => next_concrete.clone(),
+                Some(route) => route.concrete.clone(),
                 None => quote! { #impl_name #ty_generics },
             };
             Some(quote! {
@@ -4588,8 +4609,21 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                     #[macro_export]
                     #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
                     macro_rules! #policy_ident {
+                        // Immediate-hop form (`expand_impl`'s own prelude): a fixed continuation
+                        // macro, already carrying every other piece of context it needs, receives
+                        // only the resolved trailing generic-argument tokens.
                         ($cont:path; [$($args:tt)*]) => {
                             $cont!( [ $($args)* ] );
+                        };
+                        // PR #164 final remediation round (finding A6): recursive-hop form
+                        // (`build_inherit_macros`'s own generated classify/skip macros, reused for
+                        // *every* future descendant depth) — `$SubType`/the trailing override tokens
+                        // are only known once some real descendant chain actually reaches this hop,
+                        // so they travel alongside `$cont` here instead of being pre-bound into a
+                        // per-invocation continuation macro (which a *second* future descendant
+                        // reaching the same hop would collide on redefining).
+                        ($cont:path, $SubType:ty; [$($args:tt)*]; $($unmatched:tt)*) => {
+                            $cont!( $SubType, [ $($args)* ]; $($unmatched)* );
                         };
                     }
                 };
@@ -4612,18 +4646,18 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 // class-interface-bridge macro (defined and `#[macro_export]`'d by the interface it
                 // implements, possibly in a different crate) into its own wrapper module, under the
                 // same bridge ident, using a path computed reliably from its own `existing` (no
-                // same-crate registry lookup involved, unlike `ancestor_own_trait`) — this is what
-                // lets any descendant reach it through the exact same, already-reliable
-                // wrapper-module route (`ancestor_bridge_path`) it already uses for this ancestor's
-                // entry/skip macros, rather than through a resolution that can silently fall back to
-                // a wrong prefix when this ancestor's own same-crate registration hasn't happened yet
-                // at the point a *different*, textually-earlier same-crate descendant expands (see
+                // same-crate registry lookup involved) — this is what lets any descendant reach it
+                // through the exact same, already-reliable wrapper-module route
+                // (`ancestor_bridge_path`) it already uses for this ancestor's entry/skip macros,
+                // rather than through a resolution that can silently fall back to a wrong prefix when
+                // this ancestor's own same-crate registration hasn't happened yet at the point a
+                // *different*, textually-earlier same-crate descendant expands (see
                 // `ancestor_bridge_path`'s own doc comment).
                 //
                 // Issue #128 remediation (review finding A2): also re-exports `existing` itself
                 // (the *actual* trait this concrete type implements) under the stable
                 // `__ElwindUIOwnExt` alias — never a `{ConcreteName}Ext` naming-convention guess —
-                // so `ancestor_own_trait` never needs to know or guess this concrete type's own bare
+                // so nothing downstream ever needs to know or guess this concrete type's own bare
                 // name relationship to the interface it implements.
                 let class_name = class_name_from_ext_trait_path(existing).expect(
                     "#[class]: internal: struct_only path re-validation should not fail here",
@@ -4719,8 +4753,14 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                     #[macro_export]
                     #[allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
                     macro_rules! #policy_ident {
+                        // Immediate-hop form — see the ordinary/root branch's own identical arm.
                         ($cont:path; [$($args:tt)*]) => {
                             $cont!( [] );
+                        };
+                        // Recursive-hop form (finding A6) — see the ordinary/root branch's own
+                        // identical arm; discards `$args` here too, same as the immediate-hop form.
+                        ($cont:path, $SubType:ty; [$($args:tt)*]; $($unmatched:tt)*) => {
+                            $cont!( $SubType, []; $($unmatched)* );
                         };
                     }
                 };
@@ -5408,6 +5448,52 @@ mod class_interface_bridge_tests {
                 && header.contains("where T : Clone"),
             "the outer impl header must keep its own impl_generics/ty_generics/where_clause \
              (review finding A3), not lose them to the bridge's opaque macro tokens: {header}"
+        );
+    }
+
+    // T21 (finding A6): a class's own generated *recursive* "forward past me" metadata (consulted
+    // by future descendants reaching this hop, not the immediate `inherits = ..` edge A5 already
+    // covers) calls the next ancestor's own `__elwindui_apply_own_ext_*!` policy macro at real
+    // macro-expansion time, through a fixed, once-per-class continuation macro — never a
+    // pre-resolved semantic trait baked in as a literal token (the former `ancestor_own_trait`
+    // same-crate-registry heuristic, which could only ever get the immediate hop right). The
+    // generic argument (`SomeArg`) travels through unresolved too — present in the policy macro's
+    // own bracketed argument, not pre-applied to any trait path here.
+    #[test]
+    fn recursive_forwarding_metadata_uses_the_next_ancestors_own_policy_macro() {
+        let (_struct_out, impl_out) = expand_pair(
+            quote! { inherits = some_crate::SomeGenericParent<SomeArg> },
+            quote! { pub struct BridgeTestRecursiveOrdinary {} },
+            quote! {
+                impl BridgeTestRecursiveOrdinary {
+                    fn construct() -> Self {
+                        Self { base: some_crate::SomeGenericParent::construct() }
+                    }
+                }
+            },
+        );
+        assert!(
+            !is_real_compile_error(&impl_out),
+            "unexpected error: {impl_out}"
+        );
+        let s = impl_out.to_string();
+        assert!(
+            s.contains("__elwindui_continue_recursive_inherits_of_BridgeTestRecursiveOrdinary"),
+            "recursive forwarding must generate a fixed, once-per-class continuation macro: {s}"
+        );
+        assert!(
+            s.contains("__elwindui_apply_own_ext_SomeGenericParent"),
+            "recursive forwarding must call the next ancestor's own policy macro, not a \
+             pre-resolved trait: {s}"
+        );
+        let policy_call_start = s
+            .find("__elwindui_apply_own_ext_SomeGenericParent !")
+            .expect("policy macro invocation must exist");
+        let window = &s[policy_call_start..(policy_call_start + 400).min(s.len())];
+        assert!(
+            window.contains("SomeArg"),
+            "the concrete generic argument must travel through, unresolved, to the next \
+             ancestor's own policy macro (never pre-applied to a trait path here): {window}"
         );
     }
 

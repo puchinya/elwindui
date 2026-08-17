@@ -95,6 +95,42 @@ fn cross_crate_generic_struct_only_never_leaks_concrete_generics_onto_the_real_i
     );
 }
 
+/// PR #164 final remediation round, T19 (finding A6): a *second* ordinary hop below
+/// `BridgeFixtureGenericDerived` — proves the fix applies to *recursive* metadata (this class's own
+/// generated classify/skip macros forwarding *past* `BridgeFixtureGenericDerived` into
+/// `BridgeFixtureGenericConcrete<T>`'s own real interface), not only the immediate
+/// `inherits = Concrete<T>` edge T7 already covers. Before this fix, `BridgeFixtureGenericDerived`'s
+/// own generated recursion metadata baked a same-crate-registry-derived guess for
+/// `BridgeFixtureGenericConcrete`'s own trait as a literal token — always a registry *miss* here
+/// (crate B, not crate C), so it wrongly reattached `<ConsumerSource>` onto the real, non-generic
+/// `BridgeFixtureGenericInterfaceExt`.
+#[elwindui::class(inherits = crate::BridgeFixtureGenericDerived)]
+struct BridgeFixtureGenericDeepDerived {}
+
+#[elwindui::class]
+impl BridgeFixtureGenericDeepDerived {
+    #[overrides]
+    fn value(&self) -> i32 {
+        self.base.value() + 1000
+    }
+    fn construct() -> Self {
+        Self {
+            base: BridgeFixtureGenericDerived::construct(),
+        }
+    }
+}
+
+#[test]
+fn cross_crate_generic_struct_only_deep_descendant_never_leaks_concrete_generics_onto_the_real_interface()
+ {
+    let deep = BridgeFixtureGenericDeepDerived::new();
+    // 1101 = 1 (backend) + 100 (BridgeFixtureGenericDerived) + 1000 (BridgeFixtureGenericDeepDerived).
+    assert_eq!(
+        elwindui_bridge_fixture_iface::BridgeFixtureGenericInterfaceExt::value(&*deep),
+        1101
+    );
+}
+
 /// PR #164 final remediation round, T8 (finding A5): a *generic* ordinary (root-mode) ancestor,
 /// declared in crate A, inherited directly here (crate C) with a consumer-chosen concrete generic
 /// argument (`i32`) — its own generated `BridgeFixtureGenericOrdinaryBaseExt<i32>` *does* need that
@@ -124,6 +160,36 @@ fn cross_crate_generic_ordinary_ancestor_keeps_its_own_generic_argument() {
     assert_eq!(
         elwindui_bridge_fixture_iface::BridgeFixtureGenericOrdinaryBaseExt::value(&*derived),
         101
+    );
+}
+
+/// PR #164 final remediation round, T20 (finding A6): a *second* ordinary hop below
+/// `GenericOrdinaryDerived` — proves the opposite direction from T19 recursively too: a generic
+/// ordinary/root ancestor's own generic argument must still be *kept* through recursive metadata,
+/// not globally dropped by whatever fixes T19's leak.
+#[elwindui::class(inherits = crate::GenericOrdinaryDerived)]
+struct GenericOrdinaryDeepDerived {}
+
+#[elwindui::class]
+impl GenericOrdinaryDeepDerived {
+    #[overrides]
+    fn value(&self) -> i32 {
+        self.base.value() + 1000
+    }
+    fn construct() -> Self {
+        Self {
+            base: GenericOrdinaryDerived::construct(),
+        }
+    }
+}
+
+#[test]
+fn cross_crate_generic_ordinary_ancestor_deep_descendant_keeps_its_own_generic_argument() {
+    let deep = GenericOrdinaryDeepDerived::new();
+    // 1101 = 1 (BridgeFixtureGenericOrdinaryBase) + 100 (GenericOrdinaryDerived) + 1000 (deep).
+    assert_eq!(
+        elwindui_bridge_fixture_iface::BridgeFixtureGenericOrdinaryBaseExt::value(&*deep),
+        1101
     );
 }
 

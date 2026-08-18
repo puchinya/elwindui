@@ -668,6 +668,19 @@ impl TreeHostPanel {
         *self.render_tree.borrow_mut() = None;
     }
 
+    /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —
+    /// `take()`s the slot *before* calling `close()` so a reentrant close triggered from within
+    /// `close()` itself (e.g. the popup's own `on_unmount` closing the owner Window again) finds
+    /// the slot already empty rather than double-closing or double-borrowing it. Shared by the
+    /// existing request-replacement paths above and the owner `Window::unmount_override` path
+    /// (`native_ui::window.rs`).
+    pub(crate) fn close_active_popup(&self) {
+        let popup = self.active_popup.borrow_mut().take();
+        if let Some(popup) = popup {
+            popup.close();
+        }
+    }
+
     /// Focuses the specified element within this host's focus tracker.
     pub(crate) fn focus_element(&self, element: &Rc<dyn elwindui_core::ui::UIElementExt>) {
         self.keyboard

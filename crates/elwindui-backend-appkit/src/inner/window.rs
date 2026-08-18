@@ -50,16 +50,25 @@ fn resolve_focus_owner(
     None
 }
 
+/// Issue #162 §3.21: the native close-request handler `ElwinduiWindow::windowShouldClose:`
+/// consults. Lives on `ElwinduiWindow`'s own ivars (not `InnerWindow`) since that override method
+/// only ever has `self: &ElwinduiWindow`/`self.ivars()` in scope, not a real `InnerWindow`.
+#[derive(Default)]
+pub(crate) struct ElwinduiWindowIvars {
+    close_request_handler: RefCell<Option<Rc<dyn Fn() -> bool>>>,
+}
+
 define_class!(
     /// A plain `NSWindow` subclass whose only job is bridging AppKit's own first-responder changes
     /// into `elwindui_core::focus::FocusTracker` — see `docs/design/runtime/input_focus_design.md`.
     /// Subclassing the window (rather than every individual native leaf class) is the standard,
     /// minimal-surface-area AppKit technique for observing "did some view anywhere in this window
     /// become/stop being first responder" without per-widget-class overrides, and mirrors this same
-    /// file's own `TreeHostView` subclassing convention.
+    /// file's own `TreeHostView` subclassing convention. Also owns the Issue #162 §3.21 native
+    /// close-request veto (`windowShouldClose:`).
     #[unsafe(super(NSWindow))]
     #[thread_kind = objc2::MainThreadOnly]
-    #[ivars = ()]
+    #[ivars = ElwinduiWindowIvars]
     pub(crate) struct ElwinduiWindow;
 
     unsafe impl NSObjectProtocol for ElwinduiWindow {}
@@ -114,6 +123,37 @@ define_class!(
             }
             ok
         }
+
+        /// Issue #162 §3.19-§3.21: AppKit's own pre-close veto hook — participates in both a
+        /// user's title-bar click and a programmatic `-performClose:`, but is *not* consulted by
+        /// `NSWindow::close` itself (Apple's documented contract), so the framework's own
+        /// generated `Window::close()` calling `InnerWindow::close()` -> `self.ns.close()` at the
+        /// end of the common lifecycle never re-enters this method — no reentrancy guard needed
+        /// here (unlike WinUI3's `AppWindow.Closing`, which Step 12's WinUI3 half does need one
+        /// for). No handler installed (`None` — before `mount_override` ever ran, or after
+        /// `unmount_override` cleared it) means "allow the native default": `true`.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+            let handler = self.ivars().close_request_handler.borrow().clone();
+            match handler {
+                None => true,
+                Some(handler) => {
+                    // The generated Window::close() this may call reaches back into AppKit
+                    // (InnerWindow::close -> self.ns.close()) — never re-entering this method
+                    // (see this fn's own doc comment) but still reentering *other* framework
+                    // code, so the handler is called with no borrow of our own ivars held.
+                    if handler() {
+                        // The framework accepted and is handling the request — veto this
+                        // original native attempt; the framework's own close() will issue the
+                        // real native close once its lifecycle completes.
+                        false
+                    } else {
+                        // The generated owner is already gone — fall back to AppKit's default.
+                        true
+                    }
+                }
+            }
+        }
     }
 );
 
@@ -122,11 +162,6 @@ define_class!(
 pub(crate) struct InnerWindow {
     ns: Retained<NSWindow>,
     content_host: Retained<TreeHostView>,
-    /// Issue #162 §3.19-§3.23: the common Window close callback a native close affordance must
-    /// route through — `Weak<GeneratedWindow>`-capturing, never `Rc` (acyclic ownership). Stored
-    /// here (not yet read anywhere — native `windowShouldClose:` routing is tracked separately,
-    /// Issue #162 Step 12) so `WindowLifecycleHost::set_close_request_handler` has real storage.
-    close_request_handler: Rc<RefCell<Option<Rc<dyn Fn() -> bool>>>>,
 }
 
 impl InnerWindow {
@@ -143,7 +178,7 @@ impl InnerWindow {
         // `ElwinduiWindow` (not a stock `NSWindow`) so `makeFirstResponder:` can bridge native
         // focus changes into `elwindui_core::focus` — see that type's own doc comment.
         let ns: Retained<NSWindow> = unsafe {
-            let alloc = ElwinduiWindow::alloc(mtm).set_ivars(());
+            let alloc = ElwinduiWindow::alloc(mtm).set_ivars(ElwinduiWindowIvars::default());
             let window: Retained<ElwinduiWindow> = msg_send![
                 super(alloc),
                 initWithContentRect: content_rect,
@@ -163,11 +198,7 @@ impl InnerWindow {
                 | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         ns.setContentView(Some(&content_host));
-        Self {
-            ns,
-            content_host,
-            close_request_handler: Rc::new(RefCell::new(None)),
-        }
+        Self { ns, content_host }
     }
 
     /// Issue #162 §3.18: closes this window's own active custom popup/context-menu surface, if
@@ -177,10 +208,16 @@ impl InnerWindow {
         self.content_host.close_active_popup();
     }
 
-    /// Issue #162 §3.19-§3.23: stores (or clears) the common Window close callback. See
-    /// `close_request_handler`'s own doc comment for why nothing reads this yet.
+    /// Issue #162 §3.19-§3.23: stores (or clears) the common Window close callback that
+    /// `ElwinduiWindow::windowShouldClose:` (this module's own `define_class!` block) consults.
+    /// `self.ns` was originally constructed as a real `ElwinduiWindow` (see `new`, above) before
+    /// being upcast to `NSWindow` for storage here, so this downcast always succeeds.
     pub(crate) fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
-        *self.close_request_handler.borrow_mut() = handler;
+        let window = self
+            .ns
+            .downcast_ref::<ElwinduiWindow>()
+            .expect("InnerWindow::ns is always a real ElwinduiWindow");
+        *window.ivars().close_request_handler.borrow_mut() = handler;
     }
 
     pub(crate) fn set_content(&self, content: Rc<dyn UIElementExt>) {

@@ -5,7 +5,7 @@ use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::{SizeChangedEventHandler, Window as XamlWindow};
 use crate::host::TreeHostPanel;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use windows::Graphics::{PointInt32, SizeInt32};
 use windows::core::HSTRING;
@@ -16,6 +16,24 @@ pub(crate) struct InnerWindow {
     content_host: TreeHostPanel,
     retained: Cell<bool>,
     always_on_top: Cell<bool>,
+    /// Issue #162 §3.19-§3.23: the common Window close callback a native close affordance
+    /// (`AppWindow.Closing`, below) routes through — `Weak<GeneratedWindow>`-capturing, never
+    /// `Rc` (acyclic ownership). Wrapped in its own `Rc` so `try_register_closing_handler` can
+    /// clone a handle into the event closure without needing a stable reference back to this
+    /// `InnerWindow` itself (this struct is embedded by value inside the generated component's
+    /// own `base` field, never `Rc`-wrapped on its own).
+    close_request_handler: Rc<RefCell<Option<Rc<dyn Fn() -> bool>>>>,
+    /// Issue #162 §3.22: `AppWindow` may not exist yet when `new()` runs (before the window has
+    /// ever been shown) — `true` once `AppWindow.Closing` has actually been registered, so `show`
+    /// only retries when construction's own best-effort attempt didn't already succeed.
+    closing_registered: Cell<bool>,
+    /// Issue #162 §3.22 (final requirement): set for the duration of the framework's own
+    /// `self.xaml.Close()` call (`close`, below — the tail of the common generated Window close
+    /// lifecycle) — `AppWindow.Closing` fires for *any* close, including this one, and the
+    /// registered handler (which shares this same `Rc<Cell<bool>>`, for the same "not `Rc`-
+    /// wrapped, needs an independently clonable handle" reason `close_request_handler` is
+    /// already `Rc`-wrapped) must not treat that as a second, independent user close request.
+    framework_initiated_close: Rc<Cell<bool>>,
 }
 
 impl InnerWindow {
@@ -23,11 +41,60 @@ impl InnerWindow {
         let xaml = XamlWindow::new().expect("Window::new");
         let content_host = TreeHostPanel::new();
         let _ = xaml.SetContent(&content_host.as_element());
-        Self {
+        let inner = Self {
             xaml,
             content_host,
             retained: Cell::new(false),
             always_on_top: Cell::new(false),
+            close_request_handler: Rc::new(RefCell::new(None)),
+            closing_registered: Cell::new(false),
+            framework_initiated_close: Rc::new(Cell::new(false)),
+        };
+        // Best-effort: `AppWindow` is commonly already available by construction time, but isn't
+        // guaranteed to be (see `closing_registered`'s own doc comment) — `show()` retries.
+        inner.try_register_closing_handler();
+        inner
+    }
+
+    /// Issue #162 §3.22: registers `AppWindow.Closing` at most once. A no-op once already
+    /// registered, or while `AppWindow` still isn't available (retried from `show`, below).
+    fn try_register_closing_handler(&self) {
+        if self.closing_registered.get() {
+            return;
+        }
+        let Some(app_window) = self.app_window() else {
+            return;
+        };
+        let close_request_handler = Rc::clone(&self.close_request_handler);
+        let framework_initiated_close = Rc::clone(&self.framework_initiated_close);
+        let handler = windows::Foundation::TypedEventHandler::new(move |_, args: &Option<_>| {
+            let args: &Option<
+                crate::bindings::Microsoft::UI::Windowing::AppWindowClosingEventArgs,
+            > = args;
+            let Some(args) = args else {
+                return Ok(());
+            };
+            if framework_initiated_close.get() {
+                // The framework's own final native close (`InnerWindow::close`, below) — let it
+                // proceed unmodified; the close-request handler must not run again for our own
+                // close (it would try to re-invoke `WindowExt::close()` on an already-closing
+                // Window).
+                return Ok(());
+            }
+            let handler = close_request_handler.borrow().clone();
+            let Some(handler) = handler else {
+                return Ok(());
+            };
+            // Prevent this native close attempt from proceeding independently — the framework's
+            // own lifecycle decides whether/when the real native close happens (via this same
+            // `InnerWindow::close()`, `framework_initiated_close`-guarded so it isn't re-entered
+            // through this same handler once it runs).
+            let _ = args.SetCancel(true);
+            handler();
+            Ok(())
+        });
+        if app_window.Closing(&handler).is_ok() {
+            self.closing_registered.set(true);
         }
     }
 
@@ -112,6 +179,10 @@ impl InnerWindow {
     /// Shows the window and retains its native wrapper until WinUI reports that it closed.
     pub(crate) fn show(&self) {
         self.apply_always_on_top();
+        // Issue #162 §3.22: `AppWindow` is guaranteed to exist by this point (this same method's
+        // own `apply_always_on_top`/`app_window()` calls above already rely on that) — retry here
+        // in case `new()`'s own best-effort attempt ran too early.
+        self.try_register_closing_handler();
         if !self.retained.replace(true) {
             crate::app::retain_window(&self.xaml);
         }
@@ -133,7 +204,28 @@ impl InnerWindow {
     /// retain-list cleanup / possible-app-exit path a user clicking the close box already does —
     /// deliberately reusing that reactive path rather than duplicating its bookkeeping.
     pub(crate) fn close(&self) {
+        // Issue #162 §3.22: guards the registered `AppWindow.Closing` handler against treating
+        // this framework-initiated close as a second, independent user request (see
+        // `framework_initiated_close`'s own doc comment). Cleared unconditionally afterward —
+        // `self.xaml.Close()` is itself idempotent/safe to call again later were `close()` ever
+        // re-entered, and leaving the flag set would incorrectly suppress a *future*, genuinely
+        // new close request.
+        self.framework_initiated_close.set(true);
         let _ = self.xaml.Close();
+        self.framework_initiated_close.set(false);
+    }
+
+    /// Issue #162 §3.18: closes this window's own active custom popup/context-menu surface, if
+    /// any — the owner-Window-close half of the popup-before-owner-content teardown ordering
+    /// (`Window::unmount_override`, `native_ui::window.rs`).
+    pub(crate) fn close_active_popup(&self) {
+        self.content_host.close_active_popup();
+    }
+
+    /// Issue #162 §3.19-§3.23: stores (or clears) the common Window close callback
+    /// `try_register_closing_handler`'s own registered `AppWindow.Closing` handler consults.
+    pub(crate) fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
+        *self.close_request_handler.borrow_mut() = handler;
     }
 
     #[cfg(test)]

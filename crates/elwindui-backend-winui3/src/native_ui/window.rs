@@ -99,4 +99,20 @@ impl Window {
     fn set_height(&self, height: f32) {
         self.inner.set_height(height);
     }
+
+    /// Issue #162 §3.18: no backend mount work required today — `mount_override` exists so the
+    /// generated host-composition Window (`elwindui-codegen`'s own `#[overrides] fn
+    /// mount_override`) has a normal `#[overridable]`/`#[overrides]` chain to reach through, not
+    /// because WinUI3 itself needs to do anything at this point.
+    fn mount_override(&self, _environment: elwindui_core::environment::EnvironmentContext) {}
+
+    fn unmount_override(&self) {
+        self.inner.close_active_popup();
+    }
+}
+
+impl elwindui_core::ui::WindowLifecycleHost for Window {
+    fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
+        self.inner.set_close_request_handler(handler);
+    }
 }

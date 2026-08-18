@@ -273,7 +273,7 @@ pub fn generate_component_from_item_impl(
     component_def.methods = methods;
     let base = component_def.base.clone();
     let base_path = component_def.base_path.clone();
-    let module = ast::Module {
+    let mut module = ast::Module {
         path: Vec::new(),
         uses: Vec::new(),
         items: component_frontend::component_module_items(component_def, view_def),
@@ -287,6 +287,14 @@ pub fn generate_component_from_item_impl(
         .chain(component_frontend::sibling_enum_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
+    // Issue #162 §4.6: lower every `ViewExpr::DeferredView` reachable from `name`'s own `view`
+    // into a synthetic hidden Component/View pair *after* validation (which still needs to see
+    // the original, unlowered `DeferredView` nodes in `name`'s own enclosing lexical scope) and
+    // *before* `build_symbol_table` (which needs to see the newly synthesized hidden components).
+    lower_deferred_views_in_module(&mut module, &name);
+    let all_modules: Vec<_> = std::iter::once(module.clone())
+        .chain(all_modules.into_iter().skip(1))
+        .collect();
     let table = codegen::build_symbol_table(&all_modules);
     // A bare, non-builtin `inherits <Base>` compiles here (unlike `validate::validate_inherits`,
     // shared with the DSL text frontend, which has no qualified-path escape hatch to require at
@@ -312,6 +320,183 @@ pub fn generate_component_from_item_impl(
     let generated = codegen::generate_module(&module, &table);
     component_frontend::register_same_crate_component_methods(&name, item_impl);
     Ok(generated)
+}
+
+/// Issue #162 §3.5/§4.6: finds `outer_component_name`'s own `Item::View` in `module` (if any) and
+/// lowers every `ViewExpr::DeferredView` reachable from it, appending one synthetic hidden
+/// `Item::Component`/`Item::View` pair per deferred view found (`component_frontend::
+/// hidden_view_template_component`) directly into `module.items`. A no-op when `module` has no
+/// matching view (a `view`-less component can't contain a `context_popup: view! { .. }` at all).
+fn lower_deferred_views_in_module(module: &mut ast::Module, outer_component_name: &str) {
+    let Some(view) = module.items.iter_mut().find_map(|item| match item {
+        ast::Item::View(v) if v.target == outer_component_name => Some(v),
+        _ => None,
+    }) else {
+        return;
+    };
+    let mut ordinal = 0usize;
+    let mut new_items = Vec::new();
+    lower_deferred_views_in_view(view, outer_component_name, &mut ordinal, &mut new_items);
+    module.items.extend(new_items);
+}
+
+fn lower_deferred_views_in_view(
+    view: &mut ast::ViewDef,
+    owner_type_name: &str,
+    ordinal: &mut usize,
+    new_items: &mut Vec<ast::Item>,
+) {
+    for l in &mut view.lets {
+        lower_deferred_views_in_element(&mut l.element, owner_type_name, ordinal, new_items);
+    }
+    lower_deferred_views_in_body(&mut view.root, owner_type_name, ordinal, new_items);
+}
+
+fn lower_deferred_views_in_body(
+    body: &mut ast::ViewBody,
+    owner_type_name: &str,
+    ordinal: &mut usize,
+    new_items: &mut Vec<ast::Item>,
+) {
+    for attribute in &mut body.attributes {
+        lower_deferred_views_in_expr(&mut attribute.value, owner_type_name, ordinal, new_items);
+    }
+    for (_, _, expr) in &mut body.attached {
+        lower_deferred_views_in_expr(expr, owner_type_name, ordinal, new_items);
+    }
+    for child in &mut body.children {
+        lower_deferred_views_in_child(child, owner_type_name, ordinal, new_items);
+    }
+}
+
+fn lower_deferred_views_in_element(
+    elem: &mut ast::ElementNode,
+    owner_type_name: &str,
+    ordinal: &mut usize,
+    new_items: &mut Vec<ast::Item>,
+) {
+    for attribute in &mut elem.attributes {
+        lower_deferred_views_in_expr(&mut attribute.value, owner_type_name, ordinal, new_items);
+    }
+    for (_, _, expr) in &mut elem.attached {
+        lower_deferred_views_in_expr(expr, owner_type_name, ordinal, new_items);
+    }
+    for child in &mut elem.children {
+        lower_deferred_views_in_child(child, owner_type_name, ordinal, new_items);
+    }
+}
+
+fn lower_deferred_views_in_child(
+    child: &mut ast::ChildEntry,
+    owner_type_name: &str,
+    ordinal: &mut usize,
+    new_items: &mut Vec<ast::Item>,
+) {
+    match child {
+        ast::ChildEntry::Literal(elem) => {
+            lower_deferred_views_in_element(elem, owner_type_name, ordinal, new_items)
+        }
+        ast::ChildEntry::Ref(_) => {}
+        ast::ChildEntry::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            lower_deferred_views_in_expr(condition, owner_type_name, ordinal, new_items);
+            for c in then_branch.iter_mut().chain(else_branch.iter_mut()) {
+                lower_deferred_views_in_child(c, owner_type_name, ordinal, new_items);
+            }
+        }
+        ast::ChildEntry::Match { value, arms } => {
+            lower_deferred_views_in_expr(value, owner_type_name, ordinal, new_items);
+            for arm in arms {
+                for c in &mut arm.body {
+                    lower_deferred_views_in_child(c, owner_type_name, ordinal, new_items);
+                }
+            }
+        }
+        ast::ChildEntry::For {
+            collection, body, ..
+        } => {
+            lower_deferred_views_in_expr(collection, owner_type_name, ordinal, new_items);
+            for c in body {
+                lower_deferred_views_in_child(c, owner_type_name, ordinal, new_items);
+            }
+        }
+    }
+}
+
+/// The one variant-specific step: everything else in this file's lowering walker only exists to
+/// *reach* every `ViewExpr::DeferredView` anywhere in `owner_type_name`'s own view tree — this is
+/// where one gets turned into a hidden Component/View pair (Issue #162 §3.5). Recurses into the
+/// deferred body's own content *after* assigning this one's ordinal/name, using the newly assigned
+/// `hidden_name` as the lexical owner for any further-nested `view!` found inside it (a popup
+/// opened from within another popup's own content) — deliberately not chained back further than
+/// one level (the doubly-nested case is outside Issue #162's required scope; see
+/// `docs/design/runtime/view_template_design.md` §3 for the single-level contract this lowers).
+fn lower_deferred_views_in_expr(
+    expr: &mut ast::ViewExpr,
+    owner_type_name: &str,
+    ordinal: &mut usize,
+    new_items: &mut Vec<ast::Item>,
+) {
+    match expr {
+        ast::ViewExpr::DeferredView(deferred) => {
+            *ordinal += 1;
+            let hidden_name =
+                format!("__ElwinduiViewTemplateInstanceFor{owner_type_name}_{ordinal}");
+            lower_deferred_views_in_element_lets_and_body(
+                &mut deferred.body.lets,
+                &mut deferred.body.root,
+                &hidden_name,
+                ordinal,
+                new_items,
+            );
+            let (hidden_component, hidden_view) =
+                component_frontend::hidden_view_template_component(
+                    &hidden_name,
+                    owner_type_name,
+                    &deferred.body,
+                );
+            new_items.push(ast::Item::Component(hidden_component));
+            new_items.push(ast::Item::View(hidden_view));
+            deferred.hidden_component = Some(hidden_name);
+        }
+        ast::ViewExpr::Element(elem) => {
+            lower_deferred_views_in_element(elem, owner_type_name, ordinal, new_items)
+        }
+        ast::ViewExpr::Closure { body, .. } => match body {
+            ast::ClosureBody::Element(elem) => {
+                lower_deferred_views_in_element(elem, owner_type_name, ordinal, new_items)
+            }
+            ast::ClosureBody::Expr(inner) => {
+                lower_deferred_views_in_expr(inner, owner_type_name, ordinal, new_items)
+            }
+            // A raw `syn::Block` (`on_*` handler body) has no reachable `ast::ViewExpr` of its own
+            // to recurse into — `view!` only ever appears at a DSL attribute-value position, which
+            // a `syn::Block` doesn't parse through this AST at all.
+            ast::ClosureBody::Block(_) => {}
+        },
+        ast::ViewExpr::TFluent(_, args) => {
+            for (_, v) in args {
+                lower_deferred_views_in_expr(v, owner_type_name, ordinal, new_items);
+            }
+        }
+        ast::ViewExpr::Path(_) | ast::ViewExpr::Expr(_) => {}
+    }
+}
+
+fn lower_deferred_views_in_element_lets_and_body(
+    lets: &mut [ast::LetBinding],
+    root: &mut ast::ViewBody,
+    owner_type_name: &str,
+    ordinal: &mut usize,
+    new_items: &mut Vec<ast::Item>,
+) {
+    for l in lets.iter_mut() {
+        lower_deferred_views_in_element(&mut l.element, owner_type_name, ordinal, new_items);
+    }
+    lower_deferred_views_in_body(root, owner_type_name, ordinal, new_items);
 }
 
 /// Generates the private component instance and typed factory for

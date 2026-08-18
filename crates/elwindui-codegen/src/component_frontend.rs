@@ -197,6 +197,58 @@ pub(crate) fn component_module_items(
     items
 }
 
+/// Issue #162 §3.5: builds the synthetic hidden `ComponentDef`/`ViewDef` pair a single
+/// `ViewExpr::DeferredView` (`context_popup: view! { .. }`) lowers to — a pure AST construction
+/// helper, not a `syn::ItemStruct` frontend, since the deferred body is already fully parsed
+/// (`ast::DeferredViewBody`) by the time this runs (`lib.rs`'s lowering pass, called after
+/// validation, before `codegen::build_symbol_table`).
+///
+/// Mirrors `lib.rs::generate_control_template_from_item_struct`'s existing `ControlTemplate`
+/// precedent (a `#[param]` weak-owner field plus the authored body, composed over
+/// `ContentControl`), but builds the `ComponentDef`/`ViewDef` values directly rather than
+/// round-tripping through a synthesized `syn::ItemStruct` and re-parsing its `view!` tokens — there
+/// is no token-level `view!` invocation left to re-parse here, only already-structured AST.
+///
+/// `hidden_name` must already be the deterministic, ordinal-qualified name the caller assigned
+/// (`__ElwinduiViewTemplateInstanceFor<Outer>_<ordinal>`); `owner_type_name` is the *lexically
+/// enclosing* Component's own bare name (the outer Component being compiled, or another hidden
+/// Component when this deferred body is itself nested inside one — see `lib.rs`'s lowering walker).
+pub(crate) fn hidden_view_template_component(
+    hidden_name: &str,
+    owner_type_name: &str,
+    body: &ast::DeferredViewBody,
+) -> (ComponentDef, ViewDef) {
+    let component_def = ComponentDef {
+        name: hidden_name.to_string(),
+        base: Some("ContentControl".to_string()),
+        base_path: None,
+        fields: vec![ast::FieldDef {
+            name: "__view_owner".to_string(),
+            ty: format!("std::rc::Weak<{owner_type_name}>"),
+            kind: FieldKind::Param,
+            attrs: Vec::new(),
+            initializer: None,
+        }],
+        methods: Vec::new(),
+        embedded: false,
+        sealed: false,
+        native: false,
+        is_abstract: false,
+        text_style: false,
+        content_field: None,
+    };
+    let view_def = ViewDef {
+        target: hidden_name.to_string(),
+        on_mount: body.on_mount.clone(),
+        on_unmount: body.on_unmount.clone(),
+        on_update: body.on_update.clone(),
+        lets: body.lets.clone(),
+        root: body.root.clone(),
+        implicit_owner: Some("__view_owner".to_string()),
+    };
+    (component_def, view_def)
+}
+
 /// The identifier of the crate currently being compiled, read fresh from the environment variables
 /// cargo (and rust-analyzer's own proc-macro-srv, same protocol/env vars) sets for *this*
 /// macro-expansion request. Mirrors `elwindui-macros/src/class.rs`'s own `compiling_crate_key`

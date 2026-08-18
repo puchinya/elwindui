@@ -11,6 +11,8 @@
 // `inherits`-carrying component becomes) — see docs/specs/macro_class_spec.md §10.
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
+use elwindui::core::ui::WindowExt;
+
 mod ui;
 use ui::{InheritanceDemoWindow, LabeledPanel, LoudPanel};
 

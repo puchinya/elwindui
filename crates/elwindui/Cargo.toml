@@ -29,6 +29,19 @@ tokio = { version = "1", features = ["time"] }
 # `tests/environment_scope_cross_crate.rs` can prove `#[environment(some_crate::name)]`/
 # `EnvironmentScope { some_crate::name: value }` actually cross a real crate boundary.
 elwindui-environment-key-fixture = { path = "../elwindui-environment-key-fixture" }
+# Issue #128: same dev-dependency-cycle pattern as the #129 fixture above, but proving
+# `#[overridable]`/`#[overrides]` propagation through a `struct_only` bridge crosses real crate
+# boundaries (`trait_only` in `elwindui-bridge-fixture-iface`, `struct_only` in
+# `elwindui-bridge-fixture-backend`, ordinary `#[overrides]` descendant here in
+# `tests/class_bridge_cross_crate.rs`) — the same shape that originally exposed the bug in `Window`
+# (`elwindui-core` trait_only -> each backend's struct_only -> a generated host-composition
+# component), reproduced as a minimal, backend-independent fixture.
+elwindui-bridge-fixture-backend = { path = "../elwindui-bridge-fixture-backend" }
+# Issue #128 remediation (review finding A2): `tests/class_bridge_cross_crate.rs` dispatches through
+# the real `BridgeFixtureInterfaceExt` (crate A's own interface trait) directly, not a backend-side
+# `{ConcreteName}Ext` compatibility alias — needs crate A as a direct dev-dependency here too, not
+# just transitively through the backend crate.
+elwindui-bridge-fixture-iface = { path = "../elwindui-bridge-fixture-iface" }
 
 [features]
 default = []

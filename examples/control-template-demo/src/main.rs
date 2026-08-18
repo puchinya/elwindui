@@ -3,7 +3,9 @@
 
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
-use elwindui::core::ui::{ContentControlExt as _, ControlTemplate, TextBlock, TextBlockExt as _};
+use elwindui::core::ui::{
+    ContentControlExt as _, ControlTemplate, TextBlock, TextBlockExt as _, WindowExt,
+};
 use std::rc::Rc;
 
 #[elwindui::environment_key(

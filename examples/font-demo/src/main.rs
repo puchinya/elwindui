@@ -10,6 +10,7 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::graphics::{Brush, Color, FontFamily, FontStretch, FontStyle, FontWeight};
+use elwindui::core::ui::WindowExt;
 
 #[elwindui::viewmodel]
 mod font_demo_view_model {

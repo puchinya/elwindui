@@ -992,7 +992,7 @@ mod tests {
     /// the `trait_only` -> `struct_only` -> ordinary chain — see this codegen's own comment at the
     /// `window_lifecycle_overrides` definition in `codegen.rs`).
     #[test]
-    fn host_composition_gets_inherent_show_hide_close_and_no_auto_mount_on_constructed() {
+    fn host_composition_gets_override_chain_show_hide_close_and_no_auto_mount_on_constructed() {
         let src = r#"
             struct AppWindow {
                 body: view! {
@@ -1007,9 +1007,14 @@ mod tests {
         syn::parse2::<syn::File>(generated.clone())
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         let s = generated.to_string();
-        assert!(s.contains("pub fn show"), "{s}");
-        assert!(s.contains("pub fn hide"), "{s}");
-        assert!(s.contains("pub fn close"), "{s}");
+        // Issue #128: `show`/`hide`/`close` are now ordinary `#[overrides]` methods (private —
+        // `#[class]` normalizes an `#[overrides]` method's visibility to inherited, regardless of
+        // what's written), not `pub fn` inherent shadows.
+        assert!(s.contains("# [overrides] fn show"), "{s}");
+        assert!(s.contains("# [overrides] fn hide"), "{s}");
+        assert!(s.contains("# [overrides] fn close"), "{s}");
+        // `unmount`/`__unmount_local` remain plain, framework-internal inherent methods — untouched
+        // by the #128 migration (they were never part of `WindowExt`).
         assert!(s.contains("pub fn unmount"), "{s}");
         assert!(
             s.contains("self . unmount ()"),
@@ -1023,9 +1028,19 @@ mod tests {
             s.contains("__mount_environment . get () . is_none ()"),
             "show() must mount-check before mounting: {s}"
         );
+        // Issue #128: reaches the backend's own concrete implementation through the real ancestor-
+        // forwarding chain (`self.base.show()`), not the old CI-8 UFCS workaround.
         assert!(
-            s.contains("as elwindui :: core :: ui :: WindowExt > :: show"),
-            "show() must reach the real implementation via UFCS, not recurse into itself: {s}"
+            s.contains("self . base . show ()"),
+            "show() must reach the backend's own implementation via the ordinary ancestor chain \
+             (self.base.show()), not UFCS: {s}"
+        );
+        assert!(s.contains("self . base . hide ()"), "{s}");
+        assert!(s.contains("self . base . close ()"), "{s}");
+        assert!(
+            !s.contains("as elwindui :: core :: ui :: WindowExt > :: show"),
+            "the old CI-8 UFCS shadow for show() must be gone now that #128 restored the normal \
+             override chain: {s}"
         );
         // `on_constructed` must NOT unconditionally auto-mount for this host-composition case —
         // the only `self.mount(` call in the whole generated output must be the one inside `show()`
@@ -1061,7 +1076,10 @@ mod tests {
         assert!(s.contains("add_unmount_hook"), "{s}");
         assert!(s.contains("__run_on_unmount"), "{s}");
         assert!(s.contains("unmount_subtree"), "{s}");
-        assert!(s.contains("__property_changed_subscriptions . borrow_mut () . clear ()"), "{s}");
+        assert!(
+            s.contains("__property_changed_subscriptions . borrow_mut () . clear ()"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -1084,7 +1102,10 @@ mod tests {
         assert!(s.contains("add_unmount_hook"), "{s}");
         assert!(s.contains("__run_on_unmount"), "{s}");
         assert!(s.contains("unmount_subtree"), "{s}");
-        assert!(s.contains("__property_changed_subscriptions . borrow_mut () . clear ()"), "{s}");
+        assert!(
+            s.contains("__property_changed_subscriptions . borrow_mut () . clear ()"),
+            "{s}"
+        );
     }
 
     /// Issue #68 bug 4: a component's own `dyn UIElement`-typed field, inserted bare (no `key:`)

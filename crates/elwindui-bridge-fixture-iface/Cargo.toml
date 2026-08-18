@@ -1,0 +1,12 @@
+[package]
+name = "elwindui-bridge-fixture-iface"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+elwindui-core = { path = "../elwindui-core" }
+elwindui-macros = { path = "../elwindui-macros" }
+
+[lints]
+workspace = true

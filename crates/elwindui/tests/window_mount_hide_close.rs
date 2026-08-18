@@ -10,6 +10,7 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 #![cfg(any(feature = "backend-appkit", feature = "backend-winui3"))]
 
+use elwindui::core::ui::WindowExt;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 

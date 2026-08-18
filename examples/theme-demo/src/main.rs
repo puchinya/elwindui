@@ -17,6 +17,7 @@
 use elwindui::core::environment::application_environment;
 use elwindui::core::graphics::{Brush, Color, FontWeight};
 use elwindui::core::theme::{BrushStyle, Theme};
+use elwindui::core::ui::WindowExt;
 
 #[elwindui::environment_key(name = layout_spacing, value = f32, default = 10.0)]
 struct LayoutSpacingEnvironment;

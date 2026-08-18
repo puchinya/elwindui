@@ -3409,6 +3409,7 @@ fn generate_view(
         mutable_own_fields: HashSet::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
+        implicit_owner: view.implicit_owner.clone(),
         target: target.clone(),
     };
 
@@ -3486,12 +3487,19 @@ fn generate_view(
     // from another field's initializer, and one referenced directly in the view body (e.g.
     // `vm.active_tab`) — either way, "does this field need a subscription" now depends solely on
     // whether *it itself* is `#[bindable]`, not on how other fields/expressions reference it.
+    // `templated_parent` (`ControlTemplate`, always explicit-qualification-only) and
+    // `__view_owner` (Issue #162's deferred-view lowering, additionally an implicit bare-name
+    // fallback — `ctx.implicit_owner`, `emit_expr`'s own `ViewExpr::Path` handling) are both
+    // reserved weak-owner field names, generalizing the same "owner is `Weak<T>`, reads upgrade
+    // it, its own properties are still ordinary reactive dependencies" mechanism.
+    let is_reserved_weak_owner = |f: &&FieldDef| {
+        matches!(f.name.as_str(), "templated_parent" | "__view_owner") && is_weak_type(&f.ty)
+    };
     let bind_owners: Vec<syn::Ident> = component
         .fields
         .iter()
         .filter(|f| {
-            f.attrs.iter().any(|a| matches!(a, Attr::Bindable))
-                || (f.name == "templated_parent" && is_weak_type(&f.ty))
+            f.attrs.iter().any(|a| matches!(a, Attr::Bindable)) || is_reserved_weak_owner(f)
         })
         .map(|f| format_ident!("{}", f.name))
         .collect();
@@ -3499,11 +3507,17 @@ fn generate_view(
     ctx.weak_bindable_owners = component
         .fields
         .iter()
-        .filter(|f| f.name == "templated_parent" && is_weak_type(&f.ty))
+        .filter(is_reserved_weak_owner)
         .map(|f| f.name.clone())
         .collect();
+    // Deliberately keyed on `templated_parent` specifically, not "any weak bindable owner": a
+    // hidden Component lowered from a `ViewExpr::DeferredView` (`__view_owner`) is an ordinary,
+    // freshly-`mount()`-ed Component like any other — it has no `ControlTemplate`-style "selected
+    // once by an already-mounted target, before `Self` exists" lifecycle needing the
+    // `__control_template_environment` capture/propagation below, so it must not opt into it
+    // merely because it also happens to have a `Weak<T>` owner field (Issue #162 §3.10).
     let is_replaceable_template_body =
-        is_control_template_enabled || !ctx.weak_bindable_owners.is_empty();
+        is_control_template_enabled || ctx.weak_bindable_owners.contains("templated_parent");
 
     // Every node that has a callback or a value that can change after construction gets a
     // generated field name and is stored on the component so `resync`/closures can reach it later.
@@ -4854,10 +4868,10 @@ fn generate_view(
             let method = format_ident!("__resync_{}", owner_ident);
             let owner_name = owner_ident.to_string();
             let owner = if ctx.weak_bindable_owners.contains(&owner_name) {
+                let upgrade_panic_message =
+                    format!("weak owner `{owner_name}` was dropped before its template instance");
                 quote! {
-                    let owner = this.#owner_ident.upgrade().expect(
-                        "ControlTemplate templated_parent was dropped before its template instance"
-                    );
+                    let owner = this.#owner_ident.upgrade().expect(#upgrade_panic_message);
                 }
             } else {
                 quote! { let owner = std::rc::Rc::clone(&this.#owner_ident); }
@@ -5981,6 +5995,12 @@ struct ViewCtx {
     /// instance cannot keep its templated parent alive. Expression and subscription emission
     /// upgrades these owners only for the duration of each read/resync.
     weak_bindable_owners: HashSet<String>,
+    /// Issue #162 §3.10-§3.11: the generated field name (`ViewDef::implicit_owner`, always
+    /// `"__view_owner"` when set) an otherwise-unresolved bare name falls back to, for a hidden
+    /// Component lowered from a `ViewExpr::DeferredView`. `None` for every ordinary component
+    /// (including a `ControlTemplate` — `templated_parent` stays explicit-qualification-only, never
+    /// an implicit bare-name fallback; see `emit_expr`'s own `ViewExpr::Path` handling).
+    implicit_owner: Option<String>,
     /// The concrete type being generated (`generate_view`'s own `target`) — needed by
     /// `emit_for_item_wiring` to downcast `__self_weak` the same way `on_constructed`'s own
     /// `#wiring_stmts` does (see that field's own doc comment), since a `for`-loop item's renderer
@@ -5999,6 +6019,7 @@ impl ViewCtx {
             mutable_own_fields: self.mutable_own_fields.clone(),
             bindable_owners: self.bindable_owners.clone(),
             weak_bindable_owners: self.weak_bindable_owners.clone(),
+            implicit_owner: self.implicit_owner.clone(),
             target: self.target.clone(),
         }
     }
@@ -11852,6 +11873,17 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                     }
                     return mode.owner_tokens(only);
                 }
+                // Issue #162 §3.11: inside a lowered deferred view (`ViewDef::implicit_owner`),
+                // an otherwise-unresolved bare name falls back to the implicit weak lexical owner
+                // — `selected_item` becomes semantically `__view_owner.selected_item`, generalizing
+                // `emit_path_get`'s existing 2-segment `owner.field` machinery (weak upgrade
+                // included, via `owner_value_tokens`/`ctx.weak_bindable_owners`) rather than
+                // duplicating it. Only reached once the closure-param/own-field checks above have
+                // already ruled out a local binding, preserving ordinary lexical shadowing.
+                if let Some(owner) = &ctx.implicit_owner {
+                    let owner_path = [owner.clone(), only.clone()];
+                    return emit_path_get(&owner_path, ctx, mode);
+                }
             }
             emit_path_get(path, ctx, mode)
         }
@@ -11885,10 +11917,10 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
 fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
     let base = mode.owner_tokens(owner);
     if ctx.weak_bindable_owners.contains(owner) {
+        let upgrade_panic_message =
+            format!("weak owner `{owner}` was dropped before its template instance");
         quote! {
-            #base.upgrade().expect(
-                "ControlTemplate templated_parent was dropped before its template instance"
-            )
+            #base.upgrade().expect(#upgrade_panic_message)
         }
     } else {
         base

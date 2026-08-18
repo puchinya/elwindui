@@ -72,6 +72,16 @@ macro processで完全に解決できないRust型やpathは、生成するRust�
 ControlTemplateのcross-crate target、Environment Key Value、`templated_parent` getter、
 `ContentPresenter` targetはそれぞれ生成した`ControlExt`、型一致、method resolution、`ContentControlExt` boundで検査する。
 
+### 3.35 Deferred view lowering (`context_popup: view! { .. }`, #162)
+
+`context_popup`属性に`ViewTemplate`型の通常式ではなく裸の`view! { .. }`ブロックが与えられた場合、staticvalidation(3.3、`check_vm_references`をenclosing scopeの`vm_fields`/`component_name`/`table`で再利用して検証済み)の直後、`codegen::build_symbol_table`より前に、`lower_deferred_views_in_module`が該当moduleを一度だけ走査し変換する。この変換は新しいruntime機構を導入せず、既存のComponent/View構築pipelineへ委譲する:
+
+- 見つかった各`view! { .. }`ブロックを、独立した隠しComponent/View pair(`ContentControl`基底、`__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>`という決定的な名前)として抽出する。この隠しComponentは唯一の合成field `#[param] __view_owner: Weak<Owner>`を持ち、`ViewDef::implicit_owner = Some("__view_owner")`としてmarkされる。
+- 元の`context_popup`属性値は、抽出した隠しComponent名を参照する`ViewExpr::DeferredView`markerへ置き換わる。
+- 隠しComponentの本体は変換なしにそのまま既存pipelineへ流れる — 3.3のvalidation、3.4のdependency analysis、3.5のcode generationのいずれも、この隠しComponentを他の通常Componentと区別する特別な分岐を必要としない。唯一の例外は`__view_owner`(`implicit_owner.is_some()`)を`ControlTemplate`の`templated_parent`と同様にweak-owner/Environment伝播対象として扱う既存分岐(`is_replaceable_template_body`)であり、これも`templated_parent`向けに既に存在する仕組みの一般化であって新設ではない。
+
+`context_popup`の代入site自体では、`ViewExpr::DeferredView`から`ViewTemplate::new(move |ctx| { .. })`を生成する(`docs/design/runtime/view_template_design.md` §2の`ViewTemplate`をそのまま利用)。生成closureは`self.__self_weak`(`__build_view`の`__most_derived` localと同じ復元手順)からenclosing Componentのweak selfを復元し、popup open毎に隠しComponentの新しいinstanceを`__new_unmounted`→`mount`する。詳細な実行時sequenceは`docs/design/runtime/popup_context_menu_design.md`の該当節を参照する。
+
 ### 3.4 Dependency analysis
 
 binding式からdependencyを抽出し、initial assignment、sourceからtargetへのsubscription、必要ならtargetからsourceへのwrite-backを生成できる形へ正規化する。

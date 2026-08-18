@@ -283,14 +283,68 @@ post-dismiss notification whose toolkit only reports the dismissal *after* chang
 (currently just WinUI3's `Popup.Closed`, see §7). `on_unmount` must never be documented or assumed to
 require the native popup to still be visible/open while it runs.
 
-**Declarative `context_popup: view! { .. }` DSL** (evaluating the same `view!` grammar as a normal
-Component body, deferred to open time, reusing `view!`'s existing AST/codegen pipeline) is a planned
-follow-up, not yet implemented as of this design revision — tracked in Issue
-[#162](https://github.com/puchinya/elwindui/issues/162) (split from
-[#161](https://github.com/puchinya/elwindui/issues/161), which owns the `ViewTemplate` runtime/
-backend foundation this design revision describes). Today, popup content is authored via the
-low-level `ViewTemplate::new(|ctx| ...)` API directly — see `docs/design/runtime/
-view_template_design.md` §4 for exactly what that low-level API does and does not guarantee.
+**Declarative `context_popup: view! { .. }` DSL** (Issue [#162](https://github.com/puchinya/elwindui/issues/162),
+split from [#161](https://github.com/puchinya/elwindui/issues/161), which owns the `ViewTemplate`
+runtime/backend foundation this design revision describes) is implemented. A `context_popup`
+attribute may now be assigned a bare `view! { .. }` block — the same grammar/AST/codegen pipeline a
+normal Component body uses — instead of an ordinary `ViewTemplate`-typed expression. It desugars
+entirely at macro-expansion time, before validation and codegen ever see the enclosing Component, so
+no new runtime binding system is introduced:
+
+1. **Lowering** (`elwindui-codegen::lower_deferred_views_in_module`, run once per enclosing module
+   after `validate::validate` and before `codegen::build_symbol_table`): every `view! { .. }` block
+   found in `context_popup` position is extracted into its own hidden, framework-synthesized
+   `ComponentDef`/`ViewDef` pair — `ContentControl`-based, named
+   `__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>` — carrying exactly one synthetic field,
+   `#[param] __view_owner: Weak<Owner>` (`ViewDef::implicit_owner = Some("__view_owner")`). The
+   original `context_popup` attribute value is replaced with a `ViewExpr::DeferredView` marker
+   referencing the hidden component by name.
+2. **Weak-owner codegen** (reusing, not duplicating, `ControlTemplate`'s own `templated_parent`
+   weak-owner mechanism — see `docs/design/runtime/view_template_design.md` §3's "why `Weak`, never
+   `Rc`" and `is_replaceable_template_body`): the hidden component's generated code treats
+   `__view_owner` exactly like `templated_parent` for bindable-owner and Environment-propagation
+   purposes (`docs/agents/class-model.md`'s "no second binding system" principle — see also
+   `synthesize_external_base_fields`'s explicit `implicit_owner.is_some()` exemption, which stops
+   bare names resolved against the *enclosing* Component's own scope from being mistaken for
+   unresolved external-builtin-base fields needing synthesis).
+3. **Factory emission**: the `context_popup` site emits
+   `ViewTemplate::new(move |ctx| { .. })` (`docs/design/runtime/view_template_design.md` §2 — the
+   same `ViewTemplate` every other deferred-view-typed field already uses). The closure recovers the
+   enclosing Component's own weak self via `self.__self_weak.borrow().upgrade().and_then(|rc|
+   rc.downcast::<Self>().ok()).map(|rc| Rc::downgrade(&rc))` (the same idiom `__build_view`'s own
+   `__most_derived` local already uses — *not* `Rc::downgrade(self)`, which assumes an ownership
+   shape not every generated component has), returns `None` immediately if that owner has already
+   been dropped, and otherwise constructs a **fresh hidden-component instance on every popup open**
+   (`__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>::__new_unmounted(owner_weak)`, then
+   `mount(ctx.environment)`) — so bare names inside the `view! { .. }` block resolve directly against
+   the enclosing Component's own fields/methods/`view!` scope, read at the moment the popup is
+   actually opened (not at the enclosing Component's own mount time), and any reactive binding inside
+   the block live-updates for as long as the popup instance stays mounted, exactly as an ordinary
+   nested `view!` region would.
+
+Environment propagates from the hidden component into *its own* nested children the same way
+`ControlTemplate`'s replaced body already does (`node.environment_scope`,
+`is_replaceable_template_body` triggered by `implicit_owner.is_some()`) — without this, nested
+Components inside a declarative popup would silently fall back to `application_environment()`
+instead of inheriting the popup's actual mount-time Environment (including
+`#[environment(popup_dismiss)]`), a correctness gap this design's own implementation found and fixed
+in the same generalized mechanism rather than a `context_popup`-specific special case.
+
+Today, popup content may still be authored via the low-level `ViewTemplate::new(|ctx| ...)` API
+directly when full manual control is wanted — see `docs/design/runtime/view_template_design.md` §4
+for exactly what that low-level API does and does not guarantee; the declarative sugar above compiles
+down to exactly that API and guarantees nothing beyond it.
+
+**Owner-`Window`-close interaction**: closing the owner `Window` while one of its declarative (or
+manually-authored `ViewTemplate`) popups is still open must close that popup — and run its
+`unmount_subtree` teardown — *before* the Window's own content unmounts, not leave it to be
+orphaned by the native surface disappearing out from under it. `Window::unmount_override`
+(`docs/design/runtime/component_lifecycle_design.md`'s "Window mount_override/unmount_override
+hooks") calls the backend's own `close_active_popup` (`TreeHostView`/`TreeHostPanel`, both a thin
+`take()`-then-`close()` on the same `active_popup` slot §6's Build/Mount/Unmount Sequence already
+tracks) at exactly this point, ahead of the owner's own content teardown — the same portable
+invariant this section already establishes for popup dismissal in isolation now also holds across an
+owning-Window close.
 
 ---
 

@@ -4,8 +4,8 @@
 
 use elwindui::core::base::{Point, Rect, Size};
 use elwindui::core::ui::popup::{
-    ContextMenuService, ContextRequest, PopupAnchor, PopupDismissAction,
-    PopupHost, PopupRequest, PopupSurfaceHandle, ResolvedContextDefinition,
+    ContextMenuService, ContextRequest, PopupAnchor, PopupDismissAction, PopupHost, PopupRequest,
+    PopupSurfaceHandle, ResolvedContextDefinition,
 };
 use elwindui::core::ui::{LayoutExt, MenuItemExt, UIElementExt, ViewTemplate, unmount_subtree};
 use std::cell::{Cell, RefCell};
@@ -194,7 +194,9 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
     let template = ViewTemplate::new(|_ctx| {
         let layout = elwindui::core::ui::VerticalLayout::new();
         let title = elwindui::core::ui::TextBlock::new();
-        layout.children().add(Rc::clone(&title) as Rc<dyn UIElementExt>);
+        layout
+            .children()
+            .add(Rc::clone(&title) as Rc<dyn UIElementExt>);
         Some(layout as Rc<dyn UIElementExt>)
     });
 
@@ -202,8 +204,8 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
 
     let target_dyn: Rc<dyn UIElementExt> = target;
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 50.0, y: 50.0 })));
-    let (resolved, anchor) =
-        ContextMenuService::process_request_for_target(&target_dyn, &request).expect("should resolve");
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("should resolve");
 
     match resolved.definition {
         ResolvedContextDefinition::Popup { template: t } => {
@@ -322,7 +324,12 @@ fn custom_menu_keyboard_dispatcher_navigates_and_selects() {
     menu.items.add(Rc::clone(&item2) as Rc<dyn MenuItemExt>);
 
     let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
-    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
 
     let _handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
 
@@ -330,7 +337,9 @@ fn custom_menu_keyboard_dispatcher_navigates_and_selects() {
     let keyboard = elwindui::core::input::KeyboardDispatcher::new();
 
     // Give focus to the menu root
-    keyboard.focus.set_focus(content, elwindui::core::input::FocusState::Programmatic);
+    keyboard
+        .focus
+        .set_focus(content, elwindui::core::input::FocusState::Programmatic);
 
     // Send Key::Down -> highlights first item
     keyboard.handle_key(
@@ -366,8 +375,14 @@ fn custom_menu_keyboard_dispatcher_navigates_and_selects() {
     );
 
     assert!(!sel1.get(), "first item should not be selected");
-    assert!(sel2.get(), "second item should be selected via KeyboardDispatcher");
-    assert!(host.closed.get(), "popup surface should be dismissed upon selection");
+    assert!(
+        sel2.get(),
+        "second item should be selected via KeyboardDispatcher"
+    );
+    assert!(
+        host.closed.get(),
+        "popup surface should be dismissed upon selection"
+    );
 }
 
 #[test]
@@ -375,13 +390,28 @@ fn custom_menu_requests_root_focus_policy() {
     let host = TestPopupHost::new();
     let menu = TestMenu::new();
     let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
-    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
 
     let _handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
 
-    let req = host.last_request.borrow().clone().expect("must have received PopupRequest");
-    assert_eq!(req.focus_policy, elwindui::core::ui::popup::PopupFocusPolicy::Root);
-    assert_eq!(req.dismiss_policy, elwindui::core::ui::popup::PopupDismissPolicy::LightDismiss);
+    let req = host
+        .last_request
+        .borrow()
+        .clone()
+        .expect("must have received PopupRequest");
+    assert_eq!(
+        req.focus_policy,
+        elwindui::core::ui::popup::PopupFocusPolicy::Root
+    );
+    assert_eq!(
+        req.dismiss_policy,
+        elwindui::core::ui::popup::PopupDismissPolicy::LightDismiss
+    );
 }
 
 #[test]
@@ -389,14 +419,22 @@ fn custom_menu_popup_handle_cycle_and_weak_release() {
     let host = TestPopupHost::new();
     let menu = TestMenu::new();
     let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
-    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
 
     let handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
     assert!(!host.closed.get(), "popup is initially open");
 
     // Explicit drop of the handle should trigger close() and cleanly release without cycle
     drop(handle);
-    assert!(host.closed.get(), "popup surface should be closed when handle is dropped");
+    assert!(
+        host.closed.get(),
+        "popup surface should be closed when handle is dropped"
+    );
 }
 
 #[test]
@@ -408,8 +446,14 @@ fn calculate_placement_secondary_monitor_negative_coordinates() {
         width: 1920.0,
         height: 1080.0,
     };
-    let anchor = PopupAnchor::Point(Point { x: -100.0, y: 1000.0 });
-    let popup_size = Size { width: 200.0, height: 150.0 };
+    let anchor = PopupAnchor::Point(Point {
+        x: -100.0,
+        y: 1000.0,
+    });
+    let popup_size = Size {
+        width: 200.0,
+        height: 150.0,
+    };
 
     let pos = elwindui::core::ui::popup::calculate_popup_placement(
         &anchor,
@@ -482,14 +526,22 @@ fn environment_scope_dsl_context_popup_integration() {
     LAST_TARGET_BLOCK.with(|c| *c.borrow_mut() = None);
 
     let _parent = PopupScopeParent::new();
-    let child_target = LAST_TARGET_BLOCK.with(|c| c.borrow().clone()).expect("target block must be mounted");
+    let child_target = LAST_TARGET_BLOCK
+        .with(|c| c.borrow().clone())
+        .expect("target block must be mounted");
 
     let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 50.0, y: 50.0 })));
     let (resolved, anchor) =
-        ContextMenuService::process_request_for_target(&child_target, &request).expect("should resolve target");
+        ContextMenuService::process_request_for_target(&child_target, &request)
+            .expect("should resolve target");
 
     let host = TestPopupHost::new();
-    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
 
     match resolved.definition {
         ResolvedContextDefinition::Popup { template: t } => {
@@ -504,8 +556,7 @@ fn environment_scope_dsl_context_popup_integration() {
 
             let observed = OBSERVED_SCOPE_THEME.with(|c| c.borrow().clone());
             assert_eq!(
-                observed,
-                "DerivedDarkTheme",
+                observed, "DerivedDarkTheme",
                 "popup template should inherit derived environment via actual EnvironmentScope DSL"
             );
         }
@@ -534,7 +585,12 @@ fn custom_menu_callback_mutates_state_and_resyncs_without_panic() {
     menu.items.add(Rc::clone(&item) as Rc<dyn MenuItemExt>);
 
     let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
-    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
 
     let _handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
 
@@ -553,7 +609,11 @@ fn custom_menu_callback_mutates_state_and_resyncs_without_panic() {
         &routed_args,
     );
 
-    assert_eq!(*state_counter.borrow(), 1, "callback should execute cleanly");
+    assert_eq!(
+        *state_counter.borrow(),
+        1,
+        "callback should execute cleanly"
+    );
     assert!(host.closed.get(), "popup should close on selection");
 }
 
@@ -563,11 +623,15 @@ fn context_request_separates_local_hittest_from_screen_anchor() {
     let menu = TestMenu::new();
     let child = elwindui::core::ui::TextBlock::new();
     child.set_context_menu(Some(Rc::clone(&menu) as Rc<dyn elwindui::core::ui::MenuExt>));
-    root.children().add(Rc::clone(&child) as Rc<dyn UIElementExt>);
+    root.children()
+        .add(Rc::clone(&child) as Rc<dyn UIElementExt>);
 
     // Local coordinates in window (e.g. at (10, 10)) vs desktop screen coordinates (e.g. at (1930, 500))
     let local_pos = Point { x: 0.0, y: 0.0 };
-    let screen_pos = Point { x: 1930.0, y: 500.0 };
+    let screen_pos = Point {
+        x: 1930.0,
+        y: 500.0,
+    };
 
     let root_dyn: Rc<dyn UIElementExt> = root;
     let focus = elwindui::core::focus::FocusTracker::new();
@@ -576,11 +640,20 @@ fn context_request_separates_local_hittest_from_screen_anchor() {
     let (resolved, anchor) = ContextMenuService::process_request(&root_dyn, &focus, &request)
         .expect("should hit-test child at local position");
 
-    assert!(Rc::ptr_eq(&resolved.owner, &(child as Rc<dyn UIElementExt>)));
+    assert!(Rc::ptr_eq(
+        &resolved.owner,
+        &(child as Rc<dyn UIElementExt>)
+    ));
     match anchor {
         PopupAnchor::Point(pt) => {
-            assert_eq!(pt.x, 1930.0, "anchor must use screen_position, not local_position");
-            assert_eq!(pt.y, 500.0, "anchor must use screen_position, not local_position");
+            assert_eq!(
+                pt.x, 1930.0,
+                "anchor must use screen_position, not local_position"
+            );
+            assert_eq!(
+                pt.y, 500.0,
+                "anchor must use screen_position, not local_position"
+            );
         }
         _ => panic!("expected Point anchor"),
     }
@@ -657,7 +730,12 @@ fn popup_dismiss_environment_field_resolves_and_dismisses_declaratively() {
     });
 
     let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
 
     let _handle = ContextMenuService::open_custom_popup(
         &host,
@@ -679,7 +757,10 @@ fn popup_dismiss_environment_field_resolves_and_dismisses_declaratively() {
 
     assert!(!host.closed.get());
     dismiss.dismiss();
-    assert!(host.closed.get(), "declarative dismiss() must close the popup surface");
+    assert!(
+        host.closed.get(),
+        "declarative dismiss() must close the popup surface"
+    );
 
     // The test host doesn't itself run unmount_subtree on close (that's a backend responsibility,
     // exercised by elwindui-core's own teardown-ordering tests) — simulate it here, exactly as
@@ -719,7 +800,12 @@ fn popup_dismiss_field_content_repeated_open_close_has_independent_lifetimes() {
             Some(instance.into_node())
         });
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
         let _handle = ContextMenuService::open_custom_popup(
             &host,
             &owner,
@@ -732,7 +818,10 @@ fn popup_dismiss_field_content_repeated_open_close_has_independent_lifetimes() {
         let content = Rc::clone(&host.shown.borrow().last().unwrap().0);
         // Mirrors the backend close() sequence this PR fixed: unmount before detach.
         unmount_subtree(&content);
-        captured.borrow().clone().expect("popup_dismiss must resolve inside the popup")
+        captured
+            .borrow()
+            .clone()
+            .expect("popup_dismiss must resolve inside the popup")
     };
 
     let dismiss_a = open_and_close();
@@ -796,7 +885,8 @@ fn popup_dismiss_during_on_mount_prevents_popup_from_showing() {
     let host = TestPopupHost::new();
     let owner: Rc<dyn UIElementExt> = elwindui::core::ui::TextBlock::new();
 
-    let weak_content: Rc<RefCell<Option<std::rc::Weak<dyn UIElementExt>>>> = Rc::new(RefCell::new(None));
+    let weak_content: Rc<RefCell<Option<std::rc::Weak<dyn UIElementExt>>>> =
+        Rc::new(RefCell::new(None));
     let weak_clone = Rc::clone(&weak_content);
     let template = ViewTemplate::new(move |ctx| {
         // Mirrors #162's planned codegen shape: construct without auto-mounting, then mount
@@ -811,7 +901,12 @@ fn popup_dismiss_during_on_mount_prevents_popup_from_showing() {
     });
 
     let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-    let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
 
     let handle = ContextMenuService::open_custom_popup(
         &host,
@@ -822,7 +917,10 @@ fn popup_dismiss_during_on_mount_prevents_popup_from_showing() {
         work_area,
     );
 
-    assert!(handle.is_none(), "a popup dismissed during on_mount must not be shown");
+    assert!(
+        handle.is_none(),
+        "a popup dismissed during on_mount must not be shown"
+    );
     assert_eq!(
         host.shown.borrow().len(),
         0,
@@ -835,9 +933,167 @@ fn popup_dismiss_during_on_mount_prevents_popup_from_showing() {
         "content mounted before the pre-show dismiss must still be unmounted exactly once"
     );
 
-    let weak = weak_content.borrow().clone().expect("template captured its content");
+    let weak = weak_content
+        .borrow()
+        .clone()
+        .expect("template captured its content");
     assert!(
         weak.upgrade().is_none(),
         "content built/mounted before a pre-show dismiss must be released, not retained"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #162: declarative `context_popup: view! { .. }`
+// ---------------------------------------------------------------------------
+
+#[elwindui::viewmodel]
+mod deferred_popup_view_model {
+    struct DeferredPopupViewModel {
+        #[observable(default = 1)]
+        selected_item: i32,
+    }
+}
+
+/// The popup's own content Component — a real, ordinary `#[bindable]`-injected viewmodel read,
+/// completely unrelated to Issue #162's own machinery. Its `on_mount` records the *current*
+/// `vm.selected_item` at the moment it's built (once per popup-open, per a fresh instance).
+#[elwindui::component(inherits ContentControl)]
+struct DeferredPopupProbe {
+    #[bindable]
+    vm: std::rc::Rc<DeferredPopupViewModel>,
+    #[param]
+    log: std::rc::Rc<RefCell<Vec<i32>>>,
+    body: view! {
+        on_mount {
+            log.borrow_mut().push(vm.selected_item());
+        }
+        TextBlock { text: "probe" }
+    },
+}
+
+#[elwindui::component]
+impl DeferredPopupProbe {}
+
+/// The owner element declaring `context_popup: view! { .. }` directly. `vm`/`log` inside the
+/// deferred body are bare 1-segment references to *this* Component's own fields — Issue #162's
+/// implicit lexical owner (`__view_owner`) resolves them, the same way an ordinary `view!` body
+/// resolves its own fields.
+#[elwindui::component(inherits VerticalLayout)]
+struct OwnerWithDeferredPopup {
+    #[bindable]
+    vm: std::rc::Rc<DeferredPopupViewModel>,
+    #[param]
+    log: std::rc::Rc<RefCell<Vec<i32>>>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                DeferredPopupProbe { vm: vm, log: log }
+            },
+        };
+
+        VerticalLayout {
+            target
+        }
+    },
+}
+
+#[elwindui::component]
+impl OwnerWithDeferredPopup {}
+
+/// Issue #162 T7: the owner's *current* value (not a mount-time snapshot) is observed at
+/// popup-open time — `vm.selected_item` is changed after `OwnerWithDeferredPopup::new(..)` but
+/// before the popup opens, and the built popup content must observe the new value.
+#[test]
+fn declarative_context_popup_reads_current_owner_value_at_open_time() {
+    let vm = DeferredPopupViewModel::new();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = OwnerWithDeferredPopup::new(vm.clone(), Rc::clone(&log));
+
+    vm.set_selected_item(2);
+
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+
+    match resolved.definition {
+        ResolvedContextDefinition::Popup { template: t } => {
+            let host = TestPopupHost::new();
+            let work_area = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            };
+            let handle = ContextMenuService::open_custom_popup(
+                &host,
+                &resolved.owner,
+                &t,
+                &anchor,
+                resolved.owner.effective_environment(),
+                work_area,
+            )
+            .expect("owner is alive, deferred view should build");
+
+            assert_eq!(
+                *log.borrow(),
+                vec![2],
+                "the declarative popup must read the owner's CURRENT value at open time, not a \
+                 value snapshotted earlier"
+            );
+            handle.close();
+        }
+        _ => panic!("expected Popup definition"),
+    }
+}
+
+/// Issue #162: every open of the same declarative `context_popup: view! { .. }` builds a fresh
+/// hidden Component instance (fresh `on_mount`), not a single instance reused/rebuilt in place.
+#[test]
+fn declarative_context_popup_builds_a_fresh_instance_on_every_open() {
+    let vm = DeferredPopupViewModel::new();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = OwnerWithDeferredPopup::new(vm.clone(), Rc::clone(&log));
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let open_once = |value: i32, log: &Rc<RefCell<Vec<i32>>>| {
+        vm.set_selected_item(value);
+        let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+        let (resolved, anchor) =
+            ContextMenuService::process_request_for_target(&target_dyn, &request)
+                .expect("target should resolve a context popup");
+        let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+            panic!("expected Popup definition");
+        };
+        let host = TestPopupHost::new();
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+        let handle = ContextMenuService::open_custom_popup(
+            &host,
+            &resolved.owner,
+            &t,
+            &anchor,
+            resolved.owner.effective_environment(),
+            work_area,
+        )
+        .expect("owner is alive, deferred view should build");
+        let _ = log;
+        handle.close();
+    };
+
+    open_once(1, &log);
+    open_once(2, &log);
+
+    assert_eq!(
+        *log.borrow(),
+        vec![1, 2],
+        "each open must build a fresh instance observing that open's own current value"
     );
 }

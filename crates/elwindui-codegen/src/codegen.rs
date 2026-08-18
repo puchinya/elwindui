@@ -4,9 +4,9 @@
 //! 依存関係グラフに基づくCell/RefCellベースの更新関数生成は`docs/design/runtime/state_management_design.md`に対応する。
 
 use crate::ast::{
-    AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef,
-    FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef, ViewAttribute,
-    ViewBody, ViewDef, ViewExpr, ViewModelDef,
+    AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, DeferredViewExpr, ElementNode,
+    EnumDef, FieldDef, FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef,
+    ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -829,6 +829,18 @@ fn synthesize_external_base_fields(
     let Some(view) = view else {
         return c.fields.clone();
     };
+    // Issue #162: a hidden Component lowered from a `ViewExpr::DeferredView`
+    // (`ViewDef::implicit_owner`) already resolves every otherwise-unresolved bare name through its
+    // own `__view_owner` weak-owner fallback (`emit_expr`'s own `ViewExpr::Path` handling) — a bare
+    // name used as a nested Component's own attribute value there (`DeferredPopupProbe { vm: vm,
+    // log: log }`) is a forwarded reference to the *lexically enclosing* Component's field, not an
+    // unresolved reference to `base`'s (`ContentControl`'s) own field needing synthesis here. Only
+    // relevant in a real (non-`elwindui-codegen`-internal-test) compilation, where every real
+    // `#[elwindui::component(inherits ContentControl)]` composes over an external, `TypeInfo`-less
+    // base (`resolve_composed_shape`'s own doc comment) and so always reaches this function.
+    if view.implicit_owner.is_some() {
+        return c.fields.clone();
+    }
     let own_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
     let bound_names = collect_locally_bound_names(view);
     let mut bare_names: Vec<String> = collect_bare_attribute_value_names(view)
@@ -8494,6 +8506,60 @@ fn emit_closure_value(
     quote! { Box::new(move |#param_ident: &_| { #body_expr }) }
 }
 
+/// Issue #162 §3.8/§4.7: emits the `ViewTemplate::new(move |ctx| { .. })` factory for a lowered
+/// `ViewExpr::DeferredView` (`context_popup: view! { .. }`) attribute value. Called from every
+/// deferred-`Option<T>`-field value-computation site (`build_virtual_value`/
+/// `build_component_setters`/`build_component_optional_setters`) in place of the ordinary
+/// `emit_expr` call those sites otherwise use for a ViewTemplate-typed field's value — mirrors
+/// those functions' own `ViewExpr::Element`/`ViewExpr::Closure` special-casing, since a deferred
+/// view is likewise "not a plain reactive value expression".
+///
+/// This function's own value-computation call sites run in different generated scopes depending on
+/// this component's own shape (a shape/host-composed component's non-root children build inside
+/// `__build_view(&self)`, everything else inside `__build_view(self: &Rc<Self>)` — `generate_view`'s
+/// own two `__build_view` shapes) and there is no single already-in-scope `self`/`__self_weak`
+/// binding whose *type* is uniformly `Weak<Self>` across both. So this reuses `__build_view`'s own
+/// existing "most-derived self" recovery idiom instead of assuming either shape directly: read the
+/// type-erased `self.__self_weak` field every component carries (populated once, during
+/// `Rc::new_cyclic`, regardless of composition style), upgrade, `downcast::<#target>()`. `ctx.target`
+/// (`generate_view`'s own target identifier — the *concrete* type currently being generated) is the
+/// same `#target` `__build_view`'s own `__most_derived` local already downcasts to.
+///
+/// The factory is an `Fn`, not `FnOnce` (`ViewTemplate::new`'s own bound) — cloning the captured
+/// weak owner on every call (Issue #162 §3.8) is required, not merely an optimization choice: the
+/// same `ViewTemplate` value is built once and may be `.build()` many times (once per popup-open).
+fn emit_deferred_view_value(deferred: &DeferredViewExpr, ctx: &ViewCtx) -> TokenStream {
+    let hidden_name = deferred.hidden_component.as_deref().unwrap_or_else(|| {
+        panic!(
+            "a `ViewExpr::DeferredView` reached codegen without being lowered first (Issue #162 \
+             Step 6) — this is an elwindui-codegen bug, not a user error"
+        )
+    });
+    let hidden_ident = format_ident!("{}", hidden_name);
+    let target = &ctx.target;
+    quote! {
+        {
+            let __view_owner_weak: std::rc::Weak<#target> = self
+                .__self_weak
+                .borrow()
+                .upgrade()
+                .and_then(|__rc| __rc.downcast::<#target>().ok())
+                .map(|__rc| std::rc::Rc::downgrade(&__rc))
+                .unwrap_or_else(std::rc::Weak::new);
+            elwindui::core::ui::ViewTemplate::new(move |ctx| {
+                // `ViewTemplate::build` has already checked `ctx.owner`'s liveness before ever
+                // invoking this factory (docs/design/runtime/view_template_design.md §2) — this
+                // upgrade is for the *lexical* enclosing Component (`__view_owner_weak`), a
+                // distinct liveness check (Issue #162 §3.7).
+                __view_owner_weak.upgrade()?;
+                let __instance = #hidden_ident::__new_unmounted(__view_owner_weak.clone());
+                __instance.mount(ctx.environment);
+                Some(__instance.into_node())
+            })
+        }
+    }
+}
+
 /// Whether `info` names a hand-written native type with no generated Rust of its own
 /// (`is_native && !has_view` — `Button`/`TextArea`/`TabView`/`TabViewItem` via `inherits
 /// NativeControl`, and `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` via `#[native]`
@@ -8890,6 +8956,22 @@ fn emit_external_attribute_sets(
         let value = match expr {
             ViewExpr::Closure { params, body } => {
                 emit_closure_value(params, body, ctx, from, table)
+            }
+            // Issue #162: every real builtin (`TextBlock`, `Window`, ...) goes through this
+            // `TypeInfo`-less path in a real (non-`elwindui-codegen`-internal-test) compilation —
+            // `context_popup`/any other `ViewTemplate`-typed field on one of them reaches codegen
+            // here, not through `build_virtual_value`/`build_component_setters` (those only ever
+            // run for a component whose shape *does* have a local `TypeInfo`, e.g. this crate's own
+            // `#[cfg(test)]` builtin-module fixtures). No `TypeInfo` here means no `is_option` to
+            // check either — `wrap_prop_value` (`elwindui-macros`) only auto-`Some(..)`-wraps a
+            // handful of recognized shapes (`String`/`Vec`/`BareFn`/`Brush`/`Color`/`Rc<dyn Trait>`),
+            // none of which `ViewTemplate` is, so this wraps unconditionally: every real target a
+            // `ViewExpr::DeferredView` validates against (`validate::check_deferred_view_assignment`,
+            // §3.13) is `Option<ViewTemplate>` in practice — `context_popup` is still the only
+            // production consumer.
+            ViewExpr::DeferredView(deferred) => {
+                let factory = emit_deferred_view_value(deferred, ctx);
+                quote! { Some(#factory) }
             }
             other => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
@@ -9377,6 +9459,12 @@ fn build_component_args(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
+            // `is_deferred_field` always routes a `ViewTemplate`-typed (`Option<T>`, never
+            // referenced elsewhere in its own view — Issue #162 §3.9) field's value here only when
+            // that guard doesn't apply; kept for defense-in-depth/exhaustiveness, not a normally-
+            // reached path for `context_popup` itself. `emit_deferred_view_value`'s own `Some(..)`-
+            // wrap is applied uniformly below with every other value.
+            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     if is_option && is_brush_type(inner_ty) {
@@ -9599,6 +9687,7 @@ fn build_component_setters(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
+            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
             Some(other) => {
                 let value = if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     coerced
@@ -9720,6 +9809,7 @@ fn build_component_optional_setters(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
+            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     coerced
@@ -10262,7 +10352,18 @@ fn build_virtual_value(
             setters.extend(emit_semantic_brush_resolution(raw, environment, set, clear));
             continue;
         }
-        let value = if let Some(coerced) = coerce_color_literal(inner_ty, expr) {
+        let value = if let ViewExpr::DeferredView(deferred) = expr {
+            // Issue #162: a virtual builtin (e.g. `TextBlock`) has no `ViewExpr::Element`/
+            // `ViewExpr::Closure` special-casing elsewhere in this function (none of its own
+            // fields take one) — `context_popup`/any other `ViewTemplate`-typed field is the
+            // first one that needs a non-`emit_expr` value here.
+            let factory = emit_deferred_view_value(deferred, ctx);
+            if is_option {
+                quote! { Some(#factory) }
+            } else {
+                factory
+            }
+        } else if let Some(coerced) = coerce_color_literal(inner_ty, expr) {
             if is_option {
                 quote! { Some(#coerced) }
             } else {

@@ -4,9 +4,9 @@
 
 use crate::ast::{
     AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, FieldDef, FieldKind,
-    Item, Module, ViewExpr,
+    Item, Module, ViewAttribute, ViewExpr,
 };
-use crate::codegen::{self, SymbolTable, strip_rc_wrapper, strip_weak_wrapper};
+use crate::codegen::{self, SymbolTable, strip_option, strip_rc_wrapper, strip_weak_wrapper};
 use std::collections::{HashMap, HashSet};
 use syn::visit::Visit;
 
@@ -1097,6 +1097,9 @@ fn check_vm_references(
         check_not_abstract(node, from, component_name, table, errors);
     }
     for attribute in &node.attributes {
+        if matches!(attribute.value, ViewExpr::DeferredView(_)) {
+            check_deferred_view_assignment(node, attribute, from, component_name, table, errors);
+        }
         check_vm_expr(
             &attribute.value,
             from,
@@ -1108,6 +1111,62 @@ fn check_vm_references(
     }
     for child in &node.children {
         check_child_vm_references(child, from, component_name, vm_fields, table, errors);
+    }
+}
+
+/// Issue #162 §3.13: a `ViewExpr::DeferredView` value (`context_popup: view! { .. }`) may only be
+/// assigned to a property declared `ViewTemplate`/`Option<ViewTemplate>` (any qualified-path
+/// spelling that resolves to the same bare type name), via a plain `property: value` or
+/// `once!(value)` assignment — never `<=>` (`AssignmentKind::TwoWay`), since a deferred view has no
+/// writable target to read back from. `once!(view! { .. })` is a distinct rejection from the target-
+/// type check: it's independently meaningless (a deferred view is already only ever built once per
+/// popup-open, never resynced — see `codegen.rs`'s dependency-boundary treatment of
+/// `ViewExpr::DeferredView`), so it's rejected outright rather than merely made a no-op.
+fn check_deferred_view_assignment(
+    node: &ElementNode,
+    attribute: &ViewAttribute,
+    from: &Module,
+    component_name: &str,
+    table: &SymbolTable,
+    errors: &mut Vec<String>,
+) {
+    let location = format!("{}:{}", attribute.span.line, attribute.span.column);
+    if attribute.kind == AssignmentKind::TwoWay {
+        errors.push(format!(
+            "{component_name}: {location}: `{}.{}` — a deferred view (`view! {{ .. }}`) cannot be \
+             the target of `<=>`; it has no writable value to read back from",
+            node.type_path, attribute.name
+        ));
+        return;
+    }
+    if attribute.kind == AssignmentKind::Once {
+        errors.push(format!(
+            "{component_name}: {location}: `{}.{}` — `once!(view! {{ .. }})` is redundant: a \
+             deferred view is already built once per popup-open, never resynced; write `{}: view! \
+             {{ .. }}` directly",
+            node.type_path, attribute.name, attribute.name
+        ));
+        return;
+    }
+    let Some(info) = table.resolve(from, &node.type_path) else {
+        return;
+    };
+    let Some(declared_ty) = info.field_types.get(attribute.name.as_str()) else {
+        return;
+    };
+    let (inner, _) = strip_option(declared_ty);
+    let bare_name = strip_rc_wrapper(inner)
+        .rsplit("::")
+        .next()
+        .unwrap_or(inner)
+        .trim();
+    if bare_name != "ViewTemplate" {
+        errors.push(format!(
+            "{component_name}: {location}: `{}.{}` is declared `{declared_ty}`, not `ViewTemplate` \
+             / `Option<ViewTemplate>` — a deferred view (`view! {{ .. }}`) can only be assigned to a \
+             `ViewTemplate`-typed property",
+            node.type_path, attribute.name
+        ));
     }
 }
 
@@ -1247,13 +1306,43 @@ fn check_vm_expr(
         ViewExpr::Element(elem) => {
             check_element_value(elem, None, from, component_name, vm_fields, table, errors)
         }
-        // TODO(Issue #162 Step 5): recursively validate the deferred body's own `lets`/`root`
-        // under this same enclosing lexical scope (`vm_fields`/`component_name`/`table`), the way
-        // an ordinary top-level `ViewDef` is validated — see docs/design/runtime/
-        // view_template_design.md §3 and Issue #162 §3.4/§4.4. Left unchecked for now (structurally
-        // wired, not yet semantically validated); real errors inside a deferred body currently
-        // surface later, as ordinary `rustc` errors once Step 6/7 lowering and codegen exist.
-        ViewExpr::DeferredView(_) => {}
+        // Issue #162 §3.4: a deferred body validates in the *enclosing* Component's own lexical
+        // scope — reusing the exact same `vm_fields`/`component_name`/`table` this call already
+        // has, mirroring how `validate`'s top-level loop walks an ordinary `ViewDef`'s own
+        // `lets`/root. `check_vm_references`/`check_vm_expr` recurse on their own, so a further
+        // nested `DeferredView` inside this one (or an ordinary nested Component's own `view!`
+        // reached through `ClosureBody::Element`/`ViewExpr::Element`) is still reached correctly.
+        ViewExpr::DeferredView(deferred) => {
+            for l in &deferred.body.lets {
+                check_vm_references(
+                    &l.element,
+                    from,
+                    component_name,
+                    vm_fields,
+                    table,
+                    None,
+                    errors,
+                );
+            }
+            match codegen::resolve_view_root_element(&deferred.body.root, None, false) {
+                Some(resolved_root) => {
+                    check_vm_references(
+                        &resolved_root,
+                        from,
+                        component_name,
+                        vm_fields,
+                        table,
+                        None,
+                        errors,
+                    );
+                }
+                None => errors.push(format!(
+                    "{component_name}: `context_popup: view! {{ .. }}` body must be exactly one \
+                     element unless preceded only by `on_mount`/`on_unmount`/`on_update`/`let` \
+                     bindings"
+                )),
+            }
+        }
     }
 }
 
@@ -3805,6 +3894,166 @@ mod tests {
         assert!(
             errs.iter().any(|e| e
                 .contains("cannot specify both `context_menu` and `context_popup` simultaneously")),
+            "errors: {errs:?}"
+        );
+    }
+
+    /// Issue #162 T5: a raw-`UIElement`-rooted `context_popup: view! { .. }` validates cleanly.
+    #[test]
+    fn accepts_deferred_view_context_popup_with_raw_root() {
+        let window_src = r#"
+        struct WindowWithDeferredPopup {
+            body: view! {
+                TextBlock {
+                    text: "Open popup",
+                    context_popup: view! {
+                        VerticalLayout {
+                            TextBlock { text: "Popup" }
+                        }
+                    },
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [component_module(Some("Window"), window_src)]
+            .into_iter()
+            .chain(crate::test_builtin_modules())
+            .collect();
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// Issue #162 §3.4: a bare `vm.field` reference inside a deferred `context_popup: view! { .. }`
+    /// body validates against the *enclosing* Component's own `vm_fields` — accepted when valid.
+    #[test]
+    fn accepts_deferred_view_referencing_enclosing_vm_field() {
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod deferred_vm_mod {
+                struct DeferredVm {
+                    #[observable(default = String::new())]
+                    selected_item: String,
+                }
+            }
+            "#,
+        );
+        let window_src = r#"
+        struct WindowWithDeferredVmRef {
+            #[param]
+            #[inject]
+            vm: DeferredVm,
+            body: view! {
+                TextBlock {
+                    text: "Open popup",
+                    context_popup: view! {
+                        TextBlock { text: vm.selected_item }
+                    },
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [
+            viewmodel_module,
+            component_module(Some("Window"), window_src),
+        ]
+        .into_iter()
+        .chain(crate::test_builtin_modules())
+        .collect();
+        assert_eq!(validate(&modules), Ok(()));
+    }
+
+    /// Issue #162 §3.4: the same check must actually be rejected when the bare `vm.field`
+    /// reference inside a deferred body is wrong — proving real recursive validation happens
+    /// (not merely that the deferred body is silently skipped).
+    #[test]
+    fn rejects_deferred_view_referencing_unknown_vm_field() {
+        let viewmodel_module = viewmodel_module_from_rust(
+            r#"
+            mod deferred_vm_mod2 {
+                struct DeferredVm2 {
+                    #[observable(default = String::new())]
+                    selected_item: String,
+                }
+            }
+            "#,
+        );
+        let window_src = r#"
+        struct WindowWithBadDeferredVmRef {
+            #[param]
+            #[inject]
+            vm: DeferredVm2,
+            body: view! {
+                Window {
+                    TextBlock {
+                        text: "Open popup",
+                        context_popup: view! {
+                            TextBlock { text: vm.no_such_field }
+                        },
+                    }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [viewmodel_module, component_module(None, window_src)]
+            .into_iter()
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("vm.no_such_field") || e.contains("no field `no_such_field`")),
+            "errors: {errs:?}"
+        );
+    }
+
+    /// Issue #162 T3: a deferred view assigned to a non-`ViewTemplate`-typed property is rejected.
+    #[test]
+    fn rejects_deferred_view_assigned_to_non_view_template_field() {
+        let window_src = r#"
+        struct WindowWithMistargetedDeferredView {
+            body: view! {
+                Window {
+                    TextBlock {
+                        text: view! { TextBlock { text: "nope" } },
+                    }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [component_module(None, window_src)]
+            .into_iter()
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("ViewTemplate") && e.contains("text")),
+            "errors: {errs:?}"
+        );
+    }
+
+    /// Issue #162 T4: `<=>` on a deferred view is rejected — a deferred view has no writable
+    /// value to read back from.
+    #[test]
+    fn rejects_two_way_deferred_view_assignment() {
+        let window_src = r#"
+        struct WindowWithTwoWayDeferredView {
+            body: view! {
+                Window {
+                    TextBlock {
+                        context_popup <=> view! { TextBlock { text: "nope" } },
+                    }
+                }
+            },
+        }
+        "#;
+        let modules: Vec<_> = [component_module(None, window_src)]
+            .into_iter()
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let errs = validate(&modules).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("<=>") && e.contains("context_popup")),
             "errors: {errs:?}"
         );
     }

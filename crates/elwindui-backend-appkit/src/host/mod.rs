@@ -377,39 +377,31 @@ impl TreeHostView {
         };
         let (screen_anchor_pt, work_area) = self.query_screen_and_work_area(location);
         let request = ContextRequest::pointer(local_point, screen_anchor_pt);
-        let Some((resolved, anchor)) = ContextMenuService::process_request(
-            &tree,
-            &self.ivars().keyboard.focus,
-            &request,
-        ) else {
+        let Some((resolved, anchor)) =
+            ContextMenuService::process_request(&tree, &self.ivars().keyboard.focus, &request)
+        else {
             return std::ptr::null_mut();
         };
         if let Some(prev) = self.ivars().active_popup.borrow_mut().take() {
             prev.close();
         }
         match resolved.definition {
-            ResolvedContextDefinition::Menu { menu, presentation } => {
-                match presentation {
-                    ContextMenuPresentation::Native => {
-                        let appkit_menu = menu
-                            .as_any()
-                            .downcast_ref::<crate::native_ui::Menu>()
-                            .expect("AppKit MenuExt: menu must be this backend's Menu");
-                        Retained::autorelease_return(appkit_menu.inner_ns())
-                    }
-                    ContextMenuPresentation::Custom => {
-                        let host = crate::inner::AppKitPopupHost::new(self.window());
-                        let handle = ContextMenuService::open_custom_menu(
-                            &host,
-                            &*menu,
-                            &anchor,
-                            work_area,
-                        );
-                        *self.ivars().active_popup.borrow_mut() = handle;
-                        std::ptr::null_mut()
-                    }
+            ResolvedContextDefinition::Menu { menu, presentation } => match presentation {
+                ContextMenuPresentation::Native => {
+                    let appkit_menu = menu
+                        .as_any()
+                        .downcast_ref::<crate::native_ui::Menu>()
+                        .expect("AppKit MenuExt: menu must be this backend's Menu");
+                    Retained::autorelease_return(appkit_menu.inner_ns())
                 }
-            }
+                ContextMenuPresentation::Custom => {
+                    let host = crate::inner::AppKitPopupHost::new(self.window());
+                    let handle =
+                        ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
+                    *self.ivars().active_popup.borrow_mut() = handle;
+                    std::ptr::null_mut()
+                }
+            },
             ResolvedContextDefinition::Popup { template } => {
                 let host = crate::inner::AppKitPopupHost::new(self.window());
                 let handle = ContextMenuService::open_custom_popup(
@@ -468,7 +460,8 @@ impl TreeHostView {
 
         let work_area = Rect {
             x: visible_frame.origin.x as f32,
-            y: (primary_screen_height - (visible_frame.origin.y + visible_frame.size.height)) as f32,
+            y: (primary_screen_height - (visible_frame.origin.y + visible_frame.size.height))
+                as f32,
             width: visible_frame.size.width as f32,
             height: visible_frame.size.height as f32,
         };
@@ -627,9 +620,25 @@ impl TreeHostView {
         *self.ivars().render_tree.borrow_mut() = None;
     }
 
+    /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —
+    /// `take()`s the slot *before* calling `close()` so a reentrant close triggered from within
+    /// `close()` itself (e.g. the popup's own `on_unmount` closing the owner Window again) finds
+    /// the slot already empty rather than double-closing or double-borrowing it. Shared by the
+    /// existing request-replacement paths above and the owner `Window::unmount_override` path
+    /// (`native_ui::window.rs`).
+    pub(crate) fn close_active_popup(&self) {
+        let popup = self.ivars().active_popup.borrow_mut().take();
+        if let Some(popup) = popup {
+            popup.close();
+        }
+    }
+
     /// Focuses the specified element within this host's focus tracker.
     pub(crate) fn focus_element(&self, element: &Rc<dyn UIElementExt>) {
-        self.ivars().keyboard.focus.set_focus(element, FocusState::Programmatic);
+        self.ivars()
+            .keyboard
+            .focus
+            .set_focus(element, FocusState::Programmatic);
     }
 
     /// Opts this host's own `relayout` into measuring `width`/`height` unconstrained (`f32::

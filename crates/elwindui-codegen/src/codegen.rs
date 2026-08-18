@@ -5082,6 +5082,26 @@ fn generate_view(
             );
         }
     });
+    // Issue #162 §3.14-§3.15: `Window`'s own framework-reserved `mount_override` hook, inserted
+    // into the fixed generated `mount()` at the exact point the contract specifies — after the
+    // lifecycle state is already `Mounted`, before the generated content is built (`__build_view`)
+    // and before user `on_mount` (spliced later, inside `__build_view` itself). Only for a
+    // host-composition (`inherits Window`) component — `mount_override` exists on `Window`
+    // specifically, not on every composed component. UFCS (`<Self as WindowExt>::..`), matching
+    // this same generated block's existing `content_element`/`show`/`hide`/`close` precedent.
+    let mount_override_call = is_host_composition.then(|| {
+        quote! {
+            <Self as elwindui::core::ui::WindowExt>::mount_override(self, environment.clone());
+        }
+    });
+    // Issue #162 §3.16: the `unmount()` counterpart, inserted into `window_lifecycle_overrides`'s
+    // own generated `unmount()` below (not here — that method, not this `mount`/`__build_view`
+    // pair, is where the fixed unmount algorithm lives for a host-composition component).
+    let unmount_override_call = is_host_composition.then(|| {
+        quote! {
+            <Self as elwindui::core::ui::WindowExt>::unmount_override(self);
+        }
+    });
     let call_on_unmount = on_unmount_method
         .is_some()
         .then(|| quote! { self.__run_on_unmount(); });
@@ -5118,6 +5138,7 @@ fn generate_view(
                         return;
                     }
                 }
+                #unmount_override_call
                 if let Some(content) = <Self as elwindui::core::ui::WindowExt>::content_element(self) {
                     elwindui::core::ui::unmount_subtree(&content);
                 }
@@ -5163,6 +5184,42 @@ fn generate_view(
                 }
                 self.unmount();
                 self.base.close();
+            }
+
+            // Issue #162 §3.19-§3.20: chains into the backend's own `mount_override` (installing
+            // the native close-request handler, e.g. AppKit's `windowShouldClose:`/WinUI3's
+            // `AppWindow.Closing`) first, then registers the common close callback every backend's
+            // native close affordance must route through — a weak, downcast-recovered `Rc<Self>`
+            // invoking this generated Window's own most-derived `WindowExt::close`, never the
+            // backend base directly (the former inherent/UFCS workaround #128 removed). Ownership
+            // stays acyclic: the closure captures only the type-erased `Weak<dyn Any>` this
+            // component's own `__self_weak` field already holds, never a strong `Rc`.
+            #[overrides]
+            fn mount_override(&self, environment: elwindui::core::environment::EnvironmentContext) {
+                self.base.mount_override(environment);
+                let __weak_self_erased = self.__self_weak.borrow().clone();
+                elwindui::core::ui::WindowLifecycleHost::set_close_request_handler(
+                    &self.base,
+                    Some(std::rc::Rc::new(move || {
+                        let Some(__this) = __weak_self_erased
+                            .upgrade()
+                            .and_then(|__rc| __rc.downcast::<#target>().ok())
+                        else {
+                            return false;
+                        };
+                        <#target as elwindui::core::ui::WindowExt>::close(&__this);
+                        true
+                    })),
+                );
+            }
+
+            // Clears the close-request handler *before* delegating to the backend's own
+            // `unmount_override` (Issue #162 §3.23) — the backend's native close-request storage
+            // must never keep pointing at a closure this component is about to tear down.
+            #[overrides]
+            fn unmount_override(&self) {
+                elwindui::core::ui::WindowLifecycleHost::set_close_request_handler(&self.base, None);
+                self.base.unmount_override();
             }
         }
     });
@@ -5790,6 +5847,7 @@ fn generate_view(
                         .expect("mount: component is already mounted");
                     self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Mounted);
                     #mount_set_env
+                    #mount_override_call
                     self.__build_view();
                 }
 
@@ -5898,6 +5956,7 @@ fn generate_view(
                         .expect("mount: component is already mounted");
                     self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Mounted);
                     #mount_set_env
+                    #mount_override_call
                     self.__build_view();
                 }
 

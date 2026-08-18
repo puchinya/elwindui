@@ -15,6 +15,7 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_foundation::{NSObjectProtocol, NSRect, NSString};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Walks up from `responder`'s own `NSView` ancestor chain looking for the nearest `TreeHostView`
@@ -121,6 +122,11 @@ define_class!(
 pub(crate) struct InnerWindow {
     ns: Retained<NSWindow>,
     content_host: Retained<TreeHostView>,
+    /// Issue #162 §3.19-§3.23: the common Window close callback a native close affordance must
+    /// route through — `Weak<GeneratedWindow>`-capturing, never `Rc` (acyclic ownership). Stored
+    /// here (not yet read anywhere — native `windowShouldClose:` routing is tracked separately,
+    /// Issue #162 Step 12) so `WindowLifecycleHost::set_close_request_handler` has real storage.
+    close_request_handler: Rc<RefCell<Option<Rc<dyn Fn() -> bool>>>>,
 }
 
 impl InnerWindow {
@@ -157,7 +163,24 @@ impl InnerWindow {
                 | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         ns.setContentView(Some(&content_host));
-        Self { ns, content_host }
+        Self {
+            ns,
+            content_host,
+            close_request_handler: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    /// Issue #162 §3.18: closes this window's own active custom popup/context-menu surface, if
+    /// any — the owner-Window-close half of the popup-before-owner-content teardown ordering
+    /// (`Window::unmount_override`, `native_ui::window.rs`).
+    pub(crate) fn close_active_popup(&self) {
+        self.content_host.close_active_popup();
+    }
+
+    /// Issue #162 §3.19-§3.23: stores (or clears) the common Window close callback. See
+    /// `close_request_handler`'s own doc comment for why nothing reads this yet.
+    pub(crate) fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
+        *self.close_request_handler.borrow_mut() = handler;
     }
 
     pub(crate) fn set_content(&self, content: Rc<dyn UIElementExt>) {

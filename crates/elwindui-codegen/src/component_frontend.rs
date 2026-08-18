@@ -790,6 +790,21 @@ pub fn methods_from_item_impl(
         let is_overridable = attr_path_ends_with(&f.attrs, "overridable");
         let is_overrides = attr_path_ends_with(&f.attrs, "overrides");
         let fn_name = f.sig.ident.to_string();
+        // Issue #162 §3.17: `mount_override`/`unmount_override` are framework-reserved
+        // implementation hooks (`Window`'s own `#[overridable]` slots, reached only through the
+        // ordinary `#[overridable]`/`#[overrides]` class-bridge chain PR #164 restored) — not a
+        // second user-facing lifecycle authoring surface alongside `on_mount`/`on_unmount`.
+        if matches!(fn_name.as_str(), "mount_override" | "unmount_override") {
+            return Err(format!(
+                "{name}::{fn_name}: `{fn_name}` is reserved for framework lifecycle integration; \
+                 use `{}` instead",
+                if fn_name == "mount_override" {
+                    "on_mount"
+                } else {
+                    "on_unmount"
+                }
+            ));
+        }
         match (is_overridable, is_overrides) {
             (false, false) => {
                 return Err(format!(
@@ -962,6 +977,40 @@ pub fn sibling_component_modules(skip_name: &str) -> Vec<Module> {
 mod tests {
     use super::*;
     use crate::codegen::{build_symbol_table, generate_module};
+
+    /// Issue #162 T16: `mount_override`/`unmount_override` are framework-reserved — a user
+    /// `#[elwindui::component] impl` method with either name is rejected with a diagnostic
+    /// pointing at the real user-facing lifecycle surface (`on_mount`/`on_unmount`).
+    #[test]
+    fn rejects_user_authored_mount_override_and_unmount_override_methods() {
+        let mount_override_impl: syn::ItemImpl = syn::parse_str(
+            r#"
+            impl SomeWindow {
+                #[overrides]
+                fn mount_override(&self, environment: elwindui_core::environment::EnvironmentContext) {}
+            }
+            "#,
+        )
+        .expect("impl should parse");
+        let err = methods_from_item_impl(&mount_override_impl)
+            .expect_err("mount_override must be rejected");
+        assert!(err.contains("mount_override"), "error: {err}");
+        assert!(err.contains("on_mount"), "error: {err}");
+
+        let unmount_override_impl: syn::ItemImpl = syn::parse_str(
+            r#"
+            impl SomeWindow {
+                #[overrides]
+                fn unmount_override(&self) {}
+            }
+            "#,
+        )
+        .expect("impl should parse");
+        let err = methods_from_item_impl(&unmount_override_impl)
+            .expect_err("unmount_override must be rejected");
+        assert!(err.contains("unmount_override"), "error: {err}");
+        assert!(err.contains("on_unmount"), "error: {err}");
+    }
 
     #[test]
     fn popup_dismiss_resolves_for_read_but_not_for_write() {

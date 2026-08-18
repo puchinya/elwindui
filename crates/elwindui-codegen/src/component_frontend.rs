@@ -85,6 +85,7 @@ pub fn component_and_view_from_item_struct(
                 on_update,
                 lets,
                 root,
+                implicit_owner: None,
             })
         })
         .transpose()?;

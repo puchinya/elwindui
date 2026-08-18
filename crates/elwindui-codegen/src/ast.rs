@@ -407,6 +407,16 @@ pub struct ViewDef {
     /// within `root` or a later `let`'s own element.
     pub lets: Vec<LetBinding>,
     pub root: ViewBody,
+    /// Field/state/vm-owning generated field name a bare, otherwise-unresolved reference inside
+    /// this view falls back to, `Weak`-typed on the generated struct. `None` for every ordinary
+    /// `ViewDef` (the vast majority) — only a synthetic hidden `Component` produced by Issue #162's
+    /// `ViewExpr::DeferredView` lowering pass (`lib.rs`'s deferred-view lowering,
+    /// `component_frontend.rs`'s hidden-Component construction helper) sets this, always to
+    /// `Some("__view_owner".to_string())`. Unlike `ControlTemplate<C>`'s `templated_parent` (always
+    /// explicit-qualification-only, never a bare-name fallback), this is exactly the "implicit bare
+    /// fallback" half of `codegen.rs`'s generalized weak-owner mechanism —
+    /// docs/design/runtime/view_template_design.md §3.
+    pub implicit_owner: Option<String>,
 }
 
 /// `view Name { attrs...; children... }`'s own body — the same shape as `ElementNode` minus a
@@ -573,6 +583,42 @@ pub enum ViewExpr {
     /// `content` params instead of positional/type-based child detection). Same shape as
     /// `ClosureBody::Element`, just not behind a `|params|`.
     Element(Box<ElementNode>),
+    /// `context_popup: view! { .. }` — a nested `view!` macro body, deferred to a
+    /// `elwindui::core::ui::ViewTemplate` built lazily (popup-open time, not owner-mount time), not
+    /// evaluated where it's declared. Only valid where the target field's declared type is
+    /// `ViewTemplate`/`Option<ViewTemplate>` (`validate.rs`); lowered by an internal pre-emission
+    /// pass (`lib.rs`) into a synthetic hidden `Component` (`inherits ContentControl`, one synthetic
+    /// `#[param] __view_owner: Weak<OuterComponent>` field) reusing the ordinary Component codegen
+    /// pipeline — see docs/design/runtime/view_template_design.md §3, Issue #162. `context_popup` is
+    /// merely the first public property that consumes this general deferred-View expression form;
+    /// this is not a `context_popup`-specific AST variant.
+    DeferredView(Box<DeferredViewExpr>),
+}
+
+/// The parsed body of a nested `context_popup: view! { .. }` expression — the same shape
+/// `parse_view_body_tail` already produces for an ordinary top-level `view!`, before this deferred
+/// body is lowered into a real `ViewDef` for its own synthetic hidden Component (`lib.rs`). Kept
+/// separate from `ViewDef` (rather than reusing it directly) because it has no `target` name of its
+/// own yet — that name is only assigned once lowering picks a deterministic hidden-Component
+/// identifier.
+#[derive(Debug, Clone)]
+pub struct DeferredViewBody {
+    pub on_mount: Option<syn::Block>,
+    pub on_unmount: Option<syn::Block>,
+    pub on_update: Option<OnUpdateHook>,
+    pub lets: Vec<LetBinding>,
+    pub root: ViewBody,
+}
+
+/// See `ViewExpr::DeferredView`.
+#[derive(Debug, Clone)]
+pub struct DeferredViewExpr {
+    pub body: DeferredViewBody,
+    /// The deterministic generated hidden-Component type name this deferred body lowers to
+    /// (`__ElwinduiViewTemplateInstanceFor<OuterComponent>_<ordinal>`). `None` until the lowering
+    /// pass (`lib.rs`) fills it in; always `Some` by the time `codegen.rs` emits the
+    /// `ViewTemplate::new(..)` factory referencing it.
+    pub hidden_component: Option<String>,
 }
 
 /// The body of a `ViewExpr::Closure`. `key`/`render_label` return a plain expression;

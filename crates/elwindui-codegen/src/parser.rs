@@ -632,6 +632,28 @@ impl<'a> Parser<'a> {
             return Ok(ViewExpr::Expr(expr));
         }
 
+        // `context_popup: view! { .. }` — a nested deferred view, parsed with exactly the same
+        // full-body grammar (`parse_view_body_tail`) an ordinary top-level `view!` uses, not a
+        // second, narrower grammar. Checked before the generic macro-call/`syn::Expr` fallbacks
+        // below (`looks_like_macro_call` would otherwise swallow `view!{..}`'s tokens as an opaque
+        // `syn::Expr::Macro`, losing its structure entirely) — see docs/design/runtime/
+        // view_template_design.md §3, Issue #162.
+        if self.eat_keyword_bang("view") {
+            self.skip_trivia();
+            self.expect_char('{')?;
+            let (on_mount, on_unmount, on_update, lets, root) = self.parse_view_body_tail()?;
+            return Ok(ViewExpr::DeferredView(Box::new(DeferredViewExpr {
+                body: DeferredViewBody {
+                    on_mount,
+                    on_unmount,
+                    on_update,
+                    lets,
+                    root,
+                },
+                hidden_component: None,
+            })));
+        }
+
         if self.eat_keyword_bang("t") {
             self.expect_char('(')?;
             self.skip_trivia();
@@ -1215,6 +1237,100 @@ mod tests {
         assert!(matches!(root.children[0], ChildEntry::If { .. }));
         assert!(matches!(root.children[1], ChildEntry::Match { .. }));
         assert!(matches!(root.children[2], ChildEntry::For { .. }));
+    }
+
+    /// Issue #162 T1: a raw-`UIElement`-rooted `context_popup: view! { .. }` parses as
+    /// `ViewExpr::DeferredView`, reusing `parse_view_body_tail`'s full grammar rather than a
+    /// single-element-only sugar.
+    #[test]
+    fn parses_deferred_view_attribute_with_raw_root() {
+        let (_, _, _, _, root) = parse_view_body(
+            r#"
+                TextBlock {
+                    text: "Open popup",
+                    context_popup: view! {
+                        VerticalLayout {
+                            TextBlock { text: "Popup" }
+                        }
+                    },
+                }
+            "#,
+        )
+        .expect("deferred view attribute should parse");
+        let root = literal(&root.children[0]);
+        let attr = root
+            .attributes
+            .iter()
+            .find(|a| a.name == "context_popup")
+            .expect("context_popup attribute should be present");
+        let ViewExpr::DeferredView(deferred) = &attr.value else {
+            panic!(
+                "context_popup value should parse as ViewExpr::DeferredView, got {:?}",
+                attr.value
+            );
+        };
+        assert_eq!(deferred.hidden_component, None);
+        assert!(deferred.body.on_mount.is_none());
+        assert!(deferred.body.lets.is_empty());
+        let deferred_root = literal(&deferred.body.root.children[0]);
+        assert_eq!(deferred_root.type_path, "VerticalLayout");
+    }
+
+    /// Issue #162 T2: the full existing `view!` body grammar (`on_mount`/`on_unmount`/`on_update`/
+    /// `#[id]` lets/`if`) is accepted inside a nested `context_popup: view! { .. }`, not just a
+    /// bare element construction.
+    #[test]
+    fn parses_deferred_view_attribute_with_full_body() {
+        let (_, _, _, _, root) = parse_view_body(
+            r#"
+                TextBlock {
+                    context_popup: view! {
+                        on_mount { record("mount"); }
+                        on_unmount { record("unmount"); }
+                        on_update(selected_item) { record("update"); }
+
+                        #[id("title")]
+                        let title = TextBlock { text: selected_item };
+
+                        VerticalLayout {
+                            title
+
+                            if show_extra {
+                                TextBlock { text: "extra" }
+                            }
+                        }
+                    },
+                }
+            "#,
+        )
+        .expect("full deferred view body should parse");
+        let root = literal(&root.children[0]);
+        let attr = root
+            .attributes
+            .iter()
+            .find(|a| a.name == "context_popup")
+            .expect("context_popup attribute should be present");
+        let ViewExpr::DeferredView(deferred) = &attr.value else {
+            panic!("expected ViewExpr::DeferredView, got {:?}", attr.value);
+        };
+        assert!(deferred.body.on_mount.is_some());
+        assert!(deferred.body.on_unmount.is_some());
+        let on_update = deferred
+            .body
+            .on_update
+            .as_ref()
+            .expect("on_update should parse");
+        assert_eq!(
+            on_update.fields.as_deref(),
+            Some(["selected_item".to_string()].as_slice())
+        );
+        assert_eq!(deferred.body.lets.len(), 1);
+        assert_eq!(deferred.body.lets[0].id.as_deref(), Some("title"));
+        assert_eq!(deferred.body.lets[0].name, "title");
+        let deferred_root = literal(&deferred.body.root.children[0]);
+        assert_eq!(deferred_root.type_path, "VerticalLayout");
+        assert!(matches!(deferred_root.children[0], ChildEntry::Ref(ref n) if n == "title"));
+        assert!(matches!(deferred_root.children[1], ChildEntry::If { .. }));
     }
 
     #[test]

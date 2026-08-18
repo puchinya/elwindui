@@ -415,11 +415,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                     &table,
                                     &mut errors,
                                 );
-                                check_context_menu_attributes(
-                                    &resolved_root,
-                                    &c.name,
-                                    &mut errors,
-                                );
+                                check_context_menu_attributes(&resolved_root, &c.name, &mut errors);
                                 check_binding_assignments(
                                     &resolved_root,
                                     module,
@@ -857,7 +853,10 @@ fn unsupported_dependency_macro(expr: &ViewExpr) -> Option<String> {
             .attributes
             .iter()
             .find_map(|attribute| unsupported_dependency_macro(&attribute.value)),
-        ViewExpr::Path(_) | ViewExpr::Closure { .. } => None,
+        // A deferred view's value is never reactively resynced (Issue #162 §3.9), so whatever
+        // macros its own nested body uses are irrelevant to *this* dependency-macro check, which
+        // exists only to police attribute values that participate in reactive resync.
+        ViewExpr::Path(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => None,
     }
 }
 
@@ -1248,6 +1247,13 @@ fn check_vm_expr(
         ViewExpr::Element(elem) => {
             check_element_value(elem, None, from, component_name, vm_fields, table, errors)
         }
+        // TODO(Issue #162 Step 5): recursively validate the deferred body's own `lets`/`root`
+        // under this same enclosing lexical scope (`vm_fields`/`component_name`/`table`), the way
+        // an ordinary top-level `ViewDef` is validated — see docs/design/runtime/
+        // view_template_design.md §3 and Issue #162 §3.4/§4.4. Left unchecked for now (structurally
+        // wired, not yet semantically validated); real errors inside a deferred body currently
+        // surface later, as ordinary `rustc` errors once Step 6/7 lowering and codegen exist.
+        ViewExpr::DeferredView(_) => {}
     }
 }
 
@@ -1352,7 +1358,7 @@ fn check_closure_expr_body(
         // The parser never produces a closure directly nested inside another closure's expression
         // body, nor a bare element there (an element-valued closure body is always
         // `ClosureBody::Element`, handled separately by `check_vm_expr`'s own `Closure` arm).
-        ViewExpr::Closure { .. } | ViewExpr::Element(_) => return,
+        ViewExpr::Closure { .. } | ViewExpr::Element(_) | ViewExpr::DeferredView(_) => return,
     };
     match first_segment {
         Some(first) if params.iter().any(|p| p == first) => {}
@@ -1605,6 +1611,23 @@ fn check_shortcut_attrs_in_expr(
                 check_shortcut_attrs_in_expr(arg, from, component_name, table, errors);
             }
         }
+        // A deferred view's own nested elements still need the same structural
+        // `#[shortcut(...)]`-usage check (it doesn't depend on the enclosing lexical scope) —
+        // walked the same shallow (`ChildEntry::Literal`-only) way `check_shortcut_attrs` itself
+        // walks an ordinary element's children.
+        ViewExpr::DeferredView(deferred) => {
+            for l in &deferred.body.lets {
+                check_shortcut_attrs(&l.element, from, component_name, table, errors);
+            }
+            for child in &deferred.body.root.children {
+                if let ChildEntry::Literal(elem) = child {
+                    check_shortcut_attrs(elem, from, component_name, table, errors);
+                }
+            }
+            for attribute in &deferred.body.root.attributes {
+                check_shortcut_attrs_in_expr(&attribute.value, from, component_name, table, errors);
+            }
+        }
         ViewExpr::Path(_)
         | ViewExpr::Expr(_)
         | ViewExpr::Closure {
@@ -1654,6 +1677,22 @@ fn check_context_menu_attributes_in_expr(
                 check_context_menu_attributes_in_expr(arg, component_name, errors);
             }
         }
+        // Same rationale as `check_shortcut_attrs_in_expr`'s own `DeferredView` arm: the
+        // `context_menu`/`context_popup` mutual-exclusion rule is structural, not lexical-scope-
+        // dependent, so it still applies to a popup's own nested elements.
+        ViewExpr::DeferredView(deferred) => {
+            for l in &deferred.body.lets {
+                check_context_menu_attributes(&l.element, component_name, errors);
+            }
+            for child in &deferred.body.root.children {
+                if let ChildEntry::Literal(elem) = child {
+                    check_context_menu_attributes(elem, component_name, errors);
+                }
+            }
+            for attribute in &deferred.body.root.attributes {
+                check_context_menu_attributes_in_expr(&attribute.value, component_name, errors);
+            }
+        }
         ViewExpr::Path(_)
         | ViewExpr::Expr(_)
         | ViewExpr::Closure {
@@ -1681,6 +1720,26 @@ fn check_attached_properties_in_expr(
         ViewExpr::TFluent(_, args) => {
             for (_, arg) in args {
                 check_attached_properties_in_expr(arg, from, component_name, table, errors);
+            }
+        }
+        // Same rationale as `check_shortcut_attrs_in_expr`'s own `DeferredView` arm.
+        ViewExpr::DeferredView(deferred) => {
+            for l in &deferred.body.lets {
+                check_attached_properties(&l.element, from, component_name, table, errors);
+            }
+            for child in &deferred.body.root.children {
+                if let ChildEntry::Literal(elem) = child {
+                    check_attached_properties(elem, from, component_name, table, errors);
+                }
+            }
+            for attribute in &deferred.body.root.attributes {
+                check_attached_properties_in_expr(
+                    &attribute.value,
+                    from,
+                    component_name,
+                    table,
+                    errors,
+                );
             }
         }
         ViewExpr::Path(_)
@@ -2952,6 +3011,7 @@ mod tests {
             on_update,
             lets,
             root,
+            implicit_owner: None,
         };
         let modules: Vec<_> = std::iter::once(module_with_component(component, Some(view)))
             .chain(crate::test_builtin_modules())
@@ -3743,7 +3803,8 @@ mod tests {
             .collect();
         let errs = validate(&modules).unwrap_err();
         assert!(
-            errs.iter().any(|e| e.contains("cannot specify both `context_menu` and `context_popup` simultaneously")),
+            errs.iter().any(|e| e
+                .contains("cannot specify both `context_menu` and `context_popup` simultaneously")),
             "errors: {errs:?}"
         );
     }

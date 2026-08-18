@@ -488,7 +488,12 @@ fn validate_replaceable_template_view(view: &ast::ViewDef) -> Result<(), String>
                 }
                 Ok(())
             }
-            ast::ViewExpr::Path(_) | ast::ViewExpr::Expr(_) => Ok(()),
+            // A deferred view is its own independent nested scope (lowered to its own hidden
+            // Component, Issue #162) — its `ContentPresenter`/`#[id]` usage is no more this
+            // `ControlTemplate`'s concern than an ordinary nested Component's own view would be.
+            ast::ViewExpr::Path(_) | ast::ViewExpr::Expr(_) | ast::ViewExpr::DeferredView(_) => {
+                Ok(())
+            }
         }
     }
 

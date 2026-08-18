@@ -907,7 +907,11 @@ fn collect_locally_bound_names_in_view_expr(expr: &ViewExpr, bound: &mut HashSet
                 collect_locally_bound_names_in_view_expr(v, bound);
             }
         }
-        ViewExpr::Path(_) | ViewExpr::Expr(_) => {}
+        // A deferred view is lowered to its own synthetic hidden Component with its own,
+        // independent `lets`/closure-param scope (`lib.rs`'s lowering pass) — it introduces no
+        // locally-bound name into the *enclosing* view's own scope, so there is nothing to walk
+        // here (Issue #162 §3.9's dependency-boundary rule applies to local-name collection too).
+        ViewExpr::Path(_) | ViewExpr::Expr(_) | ViewExpr::DeferredView(_) => {}
     }
 }
 
@@ -1041,7 +1045,10 @@ fn collect_view_expr_bare_names(expr: &ViewExpr, names: &mut HashSet<String>) {
                 collect_view_expr_bare_names(v, names);
             }
         }
+        // A deferred view's own inner bare names are not this outer view's dependencies — Issue
+        // #162 §3.9: outer dependency scans must not recurse into `ViewExpr::DeferredView`.
         ViewExpr::Expr(_)
+        | ViewExpr::DeferredView(_)
         | ViewExpr::Closure {
             body: ClosureBody::Expr(_) | ClosureBody::Block(_),
             ..
@@ -1204,7 +1211,9 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
         ViewExpr::TFluent(_, args) => args
             .iter()
             .any(|(_, v)| view_expr_references_bare_name(v, name)),
+        // Issue #162 §3.9: a deferred view is a dependency boundary, not a bare forward of `name`.
         ViewExpr::Expr(_)
+        | ViewExpr::DeferredView(_)
         | ViewExpr::Closure {
             body: ClosureBody::Expr(_) | ClosureBody::Block(_),
             ..
@@ -1320,6 +1329,13 @@ fn view_expr_references_name_anywhere(expr: &ViewExpr, name: &str) -> bool {
             .iter()
             .any(|(_, v)| view_expr_references_name_anywhere(v, name)),
         ViewExpr::Expr(e) => expr_references_ident(e, name),
+        // A bare outer name read inside a deferred view is not read eagerly, at the enclosing
+        // component's own construction time — it is read later, through the generated hidden
+        // Component's `__view_owner` weak upgrade, at popup-open (build) time. So it must not force
+        // `is_deferred_field`'s own "referenced anywhere -> not deferrable" decision the way an
+        // ordinary eager reference would (Issue #162 §3.9's dependency-boundary rule, applied here
+        // to construction-time-need rather than resync).
+        ViewExpr::DeferredView(_) => false,
     }
 }
 
@@ -6902,7 +6918,10 @@ fn emit_for_item_subscriptions(
             let expr = &attribute.value;
             if name.starts_with("on_")
                 || !info.field_types.contains_key(name)
-                || matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. })
+                || matches!(
+                    expr,
+                    ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
+                )
                 || !view_expr_references_closure_parameter(expr, parameter.to_string().as_str())
                 || (info.has_view
                     && info.param_fields.iter().any(|(field, _)| field == name)
@@ -6980,7 +6999,7 @@ fn view_expr_references_closure_parameter(expr: &ViewExpr, parameter: &str) -> b
             collector.visit_expr(expr);
             collector.found
         }
-        ViewExpr::Element(_) | ViewExpr::Closure { .. } => false,
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => false,
     }
 }
 
@@ -11045,7 +11064,7 @@ fn collect_view_expr_owner_properties(
             let mut collector = Collector { owner, out };
             collector.visit_expr(expr);
         }
-        ViewExpr::Element(_) | ViewExpr::Closure { .. } => {}
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => {}
     }
 }
 
@@ -11184,7 +11203,7 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
             collector.visit_expr(expr);
             collector.found
         }
-        ViewExpr::Element(_) | ViewExpr::Closure { .. } => false,
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => false,
     }
 }
 
@@ -11385,7 +11404,7 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
             collector.visit_expr(expr);
             collector.found || collector.opaque_macro
         }
-        ViewExpr::Element(_) | ViewExpr::Closure { .. } => false,
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => false,
     }
 }
 
@@ -11506,7 +11525,10 @@ fn emit_resync_with_receiver(
         if name.starts_with("on_") {
             continue;
         }
-        if matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. }) {
+        if matches!(
+            expr,
+            ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
+        ) {
             continue;
         }
         match filter {
@@ -11845,6 +11867,14 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
         }
         ViewExpr::Element(_) => {
             panic!("an element (`Type {{ .. }}`) cannot itself be used as a value expression here")
+        }
+        ViewExpr::DeferredView(_) => {
+            panic!(
+                "a deferred view (`view! {{ .. }}`) cannot itself be used as a value expression \
+                 here — it is only valid as a whole attribute value (e.g. `context_popup: view! \
+                 {{ .. }}`), emitted via its own dedicated ViewTemplate construction path, never \
+                 nested inside a larger expression"
+            )
         }
     }
 }

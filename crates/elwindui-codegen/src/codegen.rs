@@ -3522,14 +3522,24 @@ fn generate_view(
         .filter(is_reserved_weak_owner)
         .map(|f| f.name.clone())
         .collect();
-    // Deliberately keyed on `templated_parent` specifically, not "any weak bindable owner": a
-    // hidden Component lowered from a `ViewExpr::DeferredView` (`__view_owner`) is an ordinary,
-    // freshly-`mount()`-ed Component like any other — it has no `ControlTemplate`-style "selected
-    // once by an already-mounted target, before `Self` exists" lifecycle needing the
-    // `__control_template_environment` capture/propagation below, so it must not opt into it
-    // merely because it also happens to have a `Weak<T>` owner field (Issue #162 §3.10).
-    let is_replaceable_template_body =
-        is_control_template_enabled || ctx.weak_bindable_owners.contains("templated_parent");
+    // `templated_parent` (`ControlTemplate`) triggers this for its own, narrower reason (a
+    // "selected once by an already-mounted target, before `Self` exists" lifecycle). A hidden
+    // Component lowered from a `ViewExpr::DeferredView` (`view.implicit_owner`, Issue #162) needs
+    // this same machinery for a different reason: it's `mount()`-ed with the popup-scoped derived
+    // `ctx.environment`, not `application_environment()` — and an *ordinary* nested `has_view`
+    // child (`node.environment_scope.is_none()`, `emit_construction`'s `None` arm) constructs via
+    // plain `Type::new()`, which unconditionally self-mounts against `application_environment()`,
+    // never its own parent's mount-time environment. Without opting into the same
+    // `node.environment_scope` propagation `ControlTemplate`'s own replaceable body already uses,
+    // a nested Component inside a popup's declarative content (e.g. one reading
+    // `#[environment(popup_dismiss)]`) would silently observe the *global* Environment instead of
+    // the popup-scoped one — confirmed by `declarative_context_popup_dismiss_during_on_mount_
+    // prevents_popup_from_showing` failing without this. The `ContentPresenter`-binding branch
+    // below (§ "content_capture_stmt/content_attach_stmt") stays independently gated on
+    // `templated_parent` specifically, so enabling this for `__view_owner` too does not affect it.
+    let is_replaceable_template_body = is_control_template_enabled
+        || ctx.weak_bindable_owners.contains("templated_parent")
+        || view.implicit_owner.is_some();
 
     // Every node that has a callback or a value that can change after construction gets a
     // generated field name and is stored on the component so `resync`/closures can reach it later.

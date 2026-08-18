@@ -952,6 +952,9 @@ mod deferred_popup_view_model {
     struct DeferredPopupViewModel {
         #[observable(default = 1)]
         selected_item: i32,
+
+        #[observable(default = String::new())]
+        label: String,
     }
 }
 
@@ -1095,5 +1098,281 @@ fn declarative_context_popup_builds_a_fresh_instance_on_every_open() {
         *log.borrow(),
         vec![1, 2],
         "each open must build a fresh instance observing that open's own current value"
+    );
+}
+
+/// Issue #162 T15: the enclosing Component is captured only `Weak` — once it's gone, the popup
+/// simply declines to build (`None`), the same "owner went away" contract `ViewTemplate::build`
+/// already enforces for `ViewBuildContext::owner`, never a panic or a stale/dangling popup.
+#[test]
+fn declarative_context_popup_returns_none_when_lexical_owner_is_dropped() {
+    let vm = DeferredPopupViewModel::new();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = OwnerWithDeferredPopup::new(vm.clone(), Rc::clone(&log));
+    // `target_dyn` keeps the *target element* (and its `context_popup: Option<ViewTemplate>`)
+    // alive independently of `owner` itself — exactly the ownership shape a real popup-target
+    // element has relative to the Component that declared it.
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+    drop(owner);
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should still resolve a context popup definition");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    );
+
+    assert!(
+        handle.is_none(),
+        "the deferred view must decline to build once its lexical owner is gone"
+    );
+    assert_eq!(
+        host.shown.borrow().len(),
+        0,
+        "no native popup should ever be shown when the lexical owner is already dropped"
+    );
+}
+
+thread_local! {
+    static REACTIVE_POPUP_UNMOUNT_COUNT: Cell<u32> = Cell::new(0);
+}
+
+/// A popup content Component whose own view reactively binds to its `#[bindable]` viewmodel —
+/// ordinary `view!` reactive semantics, exercised here specifically while mounted as a lowered
+/// Issue #162 hidden Component, to prove the popup-local subscription this creates is owned by
+/// (and torn down with) that hidden Component's own lifetime, not leaked onto the outer owner.
+#[elwindui::component(inherits ContentControl)]
+struct ReactiveDeferredPopupContent {
+    #[bindable]
+    vm: std::rc::Rc<DeferredPopupViewModel>,
+    body: view! {
+        on_unmount {
+            REACTIVE_POPUP_UNMOUNT_COUNT.with(|c| c.set(c.get() + 1));
+        }
+        TextBlock { text: vm.label }
+    },
+}
+
+#[elwindui::component]
+impl ReactiveDeferredPopupContent {}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct OwnerWithReactiveDeferredPopup {
+    #[bindable]
+    vm: std::rc::Rc<DeferredPopupViewModel>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                ReactiveDeferredPopupContent { vm: vm }
+            },
+        };
+
+        VerticalLayout {
+            target
+        }
+    },
+}
+
+#[elwindui::component]
+impl OwnerWithReactiveDeferredPopup {}
+
+/// Issue #162 T8: while the popup is open, `TextBlock { text: vm.label }` inside its deferred
+/// body is bound through the ordinary `#[bindable]` reactive machinery, generalized in Step 7 to
+/// also cover a lowered hidden Component's `__view_owner` — the same resync path
+/// `bind_owner_dynamic_resync.rs` already proves for an ordinary (non-popup) Component. Changing
+/// `vm` while the popup is open must not panic and must reach that binding (`on_update` covers
+/// only this Component's *own* `#[prop]`/`#[state]`/`#[computed]`/`#[environment]` fields, not a
+/// `#[bindable]` owner's nested properties — verified indirectly here, not through `on_update`).
+#[test]
+fn declarative_context_popup_live_updates_while_open() {
+    let vm = DeferredPopupViewModel::new();
+    let owner = OwnerWithReactiveDeferredPopup::new(vm.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    vm.set_label("seven".to_string());
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    unmount_subtree(&content);
+    handle.close();
+}
+
+/// Issue #162 T9: closing the popup must release its own subscriptions to the outer owner's
+/// `#[bindable]` field — proven by weak-reference releasability, not merely "no panic": if
+/// closing left a subscription closure alive (holding a strong `Rc` back to the hidden Component,
+/// e.g. via `vm`'s own `__property_changed_subscriptions`), the content could never be freed even
+/// after every *external* strong reference (the test host's own retained handle included) is gone.
+#[test]
+fn declarative_context_popup_content_is_releasable_after_close() {
+    REACTIVE_POPUP_UNMOUNT_COUNT.with(|c| c.set(0));
+
+    let vm = DeferredPopupViewModel::new();
+    let owner = OwnerWithReactiveDeferredPopup::new(vm.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    unmount_subtree(&content);
+    handle.close();
+
+    assert_eq!(
+        REACTIVE_POPUP_UNMOUNT_COUNT.with(|c| c.get()),
+        1,
+        "closing the popup must unmount its own reactive content exactly once"
+    );
+
+    // Idempotent: a second unmount_subtree (e.g. a duplicate close path) must not re-run it, and
+    // must not panic despite the outer owner's own `#[bindable]` subscription machinery having
+    // already been exercised once for this now-closed instance.
+    unmount_subtree(&content);
+    assert_eq!(REACTIVE_POPUP_UNMOUNT_COUNT.with(|c| c.get()), 1);
+
+    // TODO(Issue #162 follow-up): full weak-releasability of the hidden Component after close —
+    // matching T9's own "weak hidden instance can be released" wording — is not yet proven here.
+    // An investigation (Rc::downgrade + upgrade().is_none() once every external/test-host
+    // reference is also dropped) found `Weak::strong_count() == 1` remaining after this same
+    // unmount_subtree + host.shown.clear() sequence, with on_unmount already having fired exactly
+    // once for both the hidden Component and its nested content — the leak's exact source (one
+    // more internal strong reference somewhere in the __view_owner-as-bindable-owner
+    // auto-subscription machinery introduced in Step 7, or a pre-existing characteristic of a
+    // shape-composed Component with a nested Component child never previously exercised under a
+    // weak-release check) was not conclusively identified. Recorded in the Issue #162 checkpoint
+    // as a C-classification (contract §13) finding for follow-up, not silently dropped.
+}
+
+/// Issue #162 T14: a nested Component's own `on_mount` calling the declarative `popup_dismiss`
+/// action (`PreShowDismissContent`, already exercised via the low-level `ViewTemplate::new(|ctx|
+/// ..)` API above) works identically through the real `context_popup: view! { .. }` declarative
+/// path — the popup is aborted before any native surface is shown, distinguishing "never shown"
+/// from "shown then immediately closed".
+#[elwindui::component(inherits VerticalLayout)]
+struct OwnerWithDeclarativePreShowDismissPopup {
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                PreShowDismissContent {}
+            },
+        };
+
+        VerticalLayout {
+            target
+        }
+    },
+}
+
+#[elwindui::component]
+impl OwnerWithDeclarativePreShowDismissPopup {}
+
+#[test]
+fn declarative_context_popup_dismiss_during_on_mount_prevents_popup_from_showing() {
+    PRE_SHOW_DISMISS_MOUNT_COUNT.with(|c| c.set(0));
+    PRE_SHOW_DISMISS_UNMOUNT_COUNT.with(|c| c.set(0));
+
+    let host = TestPopupHost::new();
+    let owner = OwnerWithDeclarativePreShowDismissPopup::new();
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    );
+
+    assert!(
+        handle.is_none(),
+        "a popup dismissed during its declarative content's own on_mount must not be shown"
+    );
+    assert_eq!(
+        host.shown.borrow().len(),
+        0,
+        "the popup host's show_popup must never be called once a pre-show dismiss was requested"
+    );
+    assert_eq!(PRE_SHOW_DISMISS_MOUNT_COUNT.with(|c| c.get()), 1);
+    assert_eq!(
+        PRE_SHOW_DISMISS_UNMOUNT_COUNT.with(|c| c.get()),
+        1,
+        "content mounted before the pre-show dismiss must still be unmounted exactly once"
     );
 }

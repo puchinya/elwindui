@@ -4689,23 +4689,27 @@ fn expand_impl(attr_args: ClassArgs, item: syn::ItemImpl, attr_is_empty: bool) -
                 // non-root class as a `struct_only` target) consequence.
                 //
                 // Deliberately *not* extended to root-mode interfaces (`is_root_mode`, e.g. `UIElement`
-                // itself): a root class's own `as_ui_element(&self) -> &Self` is a *required* trait
-                // method whose return type is hard-pinned to the declaring root struct's own concrete
-                // type at that root class's own compile time (`pub trait #ext_ident { fn
-                // as_ui_element(&self) -> &#impl_name; .. }`, `expand_impl`'s root-mode branch) — not
-                // generic/associated over the implementor. No `struct_only` implementor other than the
-                // root class itself can ever satisfy that signature (it would need to return a
-                // reference to a `BridgeRootBase`, say, that it neither owns nor can conjure). This is
-                // a genuine, pre-existing architectural incompatibility between root mode's own
-                // `as_ui_element` design and `struct_only` bridging to *any* other concrete type,
-                // confirmed empirically (`E0053`: incompatible return type) and *not* something this
-                // remediation's own `__ElwindUIOwnExt`/bridge mechanism can paper over without a
-                // material redesign of root mode's `as_ui_element` itself (out of scope — see this
-                // contract's own non-goals). A/T3's coverage is therefore macro-expansion-level only
-                // (`class.rs`'s own test module: proves the bridge macro + wrapper module are still
-                // generated for a root-mode class, without requiring a working runtime `struct_only`
-                // consumer of it) — reported as a discovered conflict rather than silently designed
-                // around with a real runtime fixture.
+                // itself): root-mode interfaces are the one case where the implemented interface
+                // requires access to the *declaring root's own concrete type*, not just to `Self` — a
+                // root class's own `as_ui_element(&self) -> &Self` is a required trait method whose
+                // return type is hard-pinned to the declaring root struct's own concrete type
+                // (`pub trait #ext_ident { fn as_ui_element(&self) -> &#impl_name; .. }`,
+                // `expand_impl`'s root-mode branch), so this reflexive `interface_named_accessor`
+                // (which only ever returns `&Self`) can't be the mechanism that satisfies it. PR #164
+                // final remediation round (finding C2) is what makes a *different* concrete
+                // implementor valid here instead: a forwardable `struct_only` implementor pairs
+                // `struct_only = RootExt` with `inherits = Root`, composing the actual root storage in
+                // `self.base` — the generated class-interface bridge's own `@impl_struct_only_members`
+                // arm (`has_matching_base = true`) forwards the required `as_ui_element` accessor to
+                // that composed base (`self.base.as_ui_element()`), rather than through this accessor.
+                // The public accessor's own signature (a concrete, non-`dyn` return type) is
+                // unchanged; the composition, not a redesign of `as_ui_element` itself, is what makes
+                // this work. A missing or non-matching `inherits` on such a `struct_only` is rejected
+                // by the bridge's own `has_matching_base = false` diagnostic arm, not a confusing
+                // downstream `E0609`/`E0053`. Runtime coverage exists both same-crate
+                // (`elwindui-core::ui::testsupport`'s `BridgeRootBase` -> `BridgeRootConcrete` ->
+                // `BridgeRootDerived`) and cross-crate (`crates/elwindui/tests/class_bridge_cross_crate.rs`'s
+                // `BridgeFixtureRoot` -> `BridgeFixtureRootConcrete` -> `BridgeFixtureRootDerived`).
                 //
                 // Skipped when `class_name == bare_name` (the established "shares the interface's own
                 // bare name" convention — `Window`/`NativeControl`, per this module's own top doc

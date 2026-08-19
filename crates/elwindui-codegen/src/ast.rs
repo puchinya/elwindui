@@ -407,16 +407,52 @@ pub struct ViewDef {
     /// within `root` or a later `let`'s own element.
     pub lets: Vec<LetBinding>,
     pub root: ViewBody,
-    /// Field/state/vm-owning generated field name a bare, otherwise-unresolved reference inside
-    /// this view falls back to, `Weak`-typed on the generated struct. `None` for every ordinary
-    /// `ViewDef` (the vast majority) — only a synthetic hidden `Component` produced by Issue #162's
+    /// Field/state/vm-owning generated field this view's implicit lexical-owner fallback targets,
+    /// `Weak`-typed on the generated struct, together with the exact schema of source-Component
+    /// field names that fallback is allowed to reach. `None` for every ordinary `ViewDef` (the vast
+    /// majority) — only a synthetic hidden `Component` produced by Issue #162's
     /// `ViewExpr::DeferredView` lowering pass (`lib.rs`'s deferred-view lowering,
-    /// `component_frontend.rs`'s hidden-Component construction helper) sets this, always to
-    /// `Some("__view_owner".to_string())`. Unlike `ControlTemplate<C>`'s `templated_parent` (always
-    /// explicit-qualification-only, never a bare-name fallback), this is exactly the "implicit bare
-    /// fallback" half of `codegen.rs`'s generalized weak-owner mechanism —
-    /// docs/design/runtime/view_template_design.md §3.
-    pub implicit_owner: Option<String>,
+    /// `component_frontend.rs`'s hidden-Component construction helper) sets this. Unlike
+    /// `ControlTemplate<C>`'s `templated_parent` (always explicit-qualification-only, never a
+    /// bare-name fallback), this is exactly the "implicit bare fallback" half of `codegen.rs`'s
+    /// generalized weak-owner mechanism — docs/design/runtime/view_template_design.md §3. PR #165
+    /// final rereview remediation, A2: this used to be a bare `Option<String>` field name, which let
+    /// *any* unshadowed bare Rust name (not just an actual source-Component field) fall back to a
+    /// `__view_owner.<name>()` getter call — see `ImplicitOwnerDef`'s own doc comment for why that
+    /// was wrong and what replaced it.
+    pub implicit_owner: Option<ImplicitOwnerDef>,
+}
+
+/// The exact schema a `ViewDef::implicit_owner` fallback is allowed to reach — computed once, from
+/// the *source* lexical-owner Component's own effective (`resolve_effective_fields`, inherited
+/// fields included) field list, by `codegen::implicit_owner_schema`, *before* `ViewExpr::
+/// DeferredView` lowering runs (`lib.rs`'s `generate_component_from_item_impl`). PR #165 final
+/// rereview remediation, A2: an earlier revision let *any* unshadowed bare Rust name inside a
+/// lowered deferred view fall back to `__view_owner.<name>()` — including ordinary Rust constants,
+/// `None`, and free values with no relation to the source Component at all — because the fallback
+/// only checked "is this name shadowed by a real lexical binding", never "is this name actually a
+/// field the source Component declares". This schema closes that gap: `readable_fields`/
+/// `writable_fields` are computed once from the source Component's own field kinds and are
+/// identical at every `DeferredView` nesting depth (nested lowering reuses the same schema its
+/// outer level received, never recomputing it from the synthetic hidden Component's own — usually
+/// empty — field list).
+#[derive(Debug, Clone)]
+pub struct ImplicitOwnerDef {
+    /// The generated hidden-Component field holding `Weak<SourceComponent>` — always
+    /// `"__view_owner"` for a `ViewExpr::DeferredView` lowering today, but not hardcoded as a
+    /// literal everywhere this schema is consulted, so a future second implicit-owner producer
+    /// (if one is ever added) doesn't have to match that exact name.
+    pub field_name: String,
+    /// Source-Component field names the implicit-owner fallback may read (`<owner>.<name>()`).
+    /// Exactly the source Component's own effective `Prop`/`State`/`Param`/`Computed`/`Environment`
+    /// fields — see `codegen::implicit_owner_schema`'s own doc comment for the exact rule and why
+    /// `Attached` is excluded (not real instance data of the declaring component at all).
+    pub readable_fields: std::collections::HashSet<String>,
+    /// Source-Component field names the implicit-owner fallback may write
+    /// (`<owner>.set_<name>(rhs)`) — exactly the source Component's own effective `Prop`/`State`
+    /// fields (`Param`/`Computed`/`Environment` are readable but never routed through a generated
+    /// setter this way).
+    pub writable_fields: std::collections::HashSet<String>,
 }
 
 /// `view Name { attrs...; children... }`'s own body — the same shape as `ElementNode` minus a

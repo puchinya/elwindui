@@ -217,10 +217,15 @@ pub(crate) fn component_module_items(
 /// remediation, A3: an earlier revision passed the *hidden* Component's own name here for a
 /// nested `DeferredView`, changing source lexical-scoping semantics — see `lib.rs`'s
 /// `lower_deferred_views_in_expr` for why every level keeps the same `owner_type_name` and only
-/// the generated hidden component's own *name* changes per nesting depth).
+/// the generated hidden component's own *name* changes per nesting depth). `implicit_owner` is the
+/// same source-Component field-readable/writable schema at every nesting depth too (PR #165 final
+/// rereview remediation, A2 — `codegen::implicit_owner_schema`, computed once from `owner_type_name`
+/// before any lowering happens, threaded through unchanged by every `lower_deferred_views_in_*`
+/// call, never recomputed from the hidden Component's own field list).
 pub(crate) fn hidden_view_template_component(
     hidden_name: &str,
     owner_type_name: &str,
+    implicit_owner: &ast::ImplicitOwnerDef,
     body: &ast::DeferredViewBody,
 ) -> (ComponentDef, ViewDef) {
     let component_def = ComponentDef {
@@ -249,7 +254,7 @@ pub(crate) fn hidden_view_template_component(
         on_update: body.on_update.clone(),
         lets: body.lets.clone(),
         root: body.root.clone(),
-        implicit_owner: Some("__view_owner".to_string()),
+        implicit_owner: Some(implicit_owner.clone()),
     };
     (component_def, view_def)
 }

@@ -287,11 +287,18 @@ pub fn generate_component_from_item_impl(
         .chain(component_frontend::sibling_enum_modules())
         .collect();
     validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
+    // PR #165 final rereview remediation, A2: the implicit-owner field-readable/writable schema
+    // for `name` must be derived from a symbol table built over the *unlowered* `all_modules` —
+    // built here, before lowering, specifically so `codegen::implicit_owner_schema` can resolve
+    // `name`'s own effective (inherited-included) fields. Lowering itself still runs before the
+    // *final* symbol table below (which must see the newly synthesized hidden components).
+    let pre_lowering_table = codegen::build_symbol_table(&all_modules);
+    let implicit_owner_schema = codegen::implicit_owner_schema(&pre_lowering_table, &module, &name);
     // Issue #162 §4.6: lower every `ViewExpr::DeferredView` reachable from `name`'s own `view`
     // into a synthetic hidden Component/View pair *after* validation (which still needs to see
     // the original, unlowered `DeferredView` nodes in `name`'s own enclosing lexical scope) and
     // *before* `build_symbol_table` (which needs to see the newly synthesized hidden components).
-    lower_deferred_views_in_module(&mut module, &name);
+    lower_deferred_views_in_module(&mut module, &name, &implicit_owner_schema);
     let all_modules: Vec<_> = std::iter::once(module.clone())
         .chain(all_modules.into_iter().skip(1))
         .collect();
@@ -327,7 +334,17 @@ pub fn generate_component_from_item_impl(
 /// `Item::Component`/`Item::View` pair per deferred view found (`component_frontend::
 /// hidden_view_template_component`) directly into `module.items`. A no-op when `module` has no
 /// matching view (a `view`-less component can't contain a `context_popup: view! { .. }` at all).
-pub(crate) fn lower_deferred_views_in_module(module: &mut ast::Module, outer_component_name: &str) {
+///
+/// `implicit_owner_schema` is `codegen::implicit_owner_schema`'s output for `outer_component_name`,
+/// computed by the caller *before* this runs (PR #165 final rereview remediation, A2) — every
+/// `DeferredView` reachable from this one call, at every nesting depth, receives the identical
+/// schema (see `lower_deferred_views_in_expr`'s own doc comment for why it must never be
+/// recomputed per nesting level).
+pub(crate) fn lower_deferred_views_in_module(
+    module: &mut ast::Module,
+    outer_component_name: &str,
+    implicit_owner_schema: &ast::ImplicitOwnerDef,
+) {
     let Some(view) = module.items.iter_mut().find_map(|item| match item {
         ast::Item::View(v) if v.target == outer_component_name => Some(v),
         _ => None,
@@ -336,91 +353,189 @@ pub(crate) fn lower_deferred_views_in_module(module: &mut ast::Module, outer_com
     };
     let mut ordinal = 0usize;
     let mut new_items = Vec::new();
-    lower_deferred_views_in_view(view, outer_component_name, &mut ordinal, &mut new_items);
+    lower_deferred_views_in_view(
+        view,
+        outer_component_name,
+        implicit_owner_schema,
+        &mut ordinal,
+        &mut new_items,
+    );
     module.items.extend(new_items);
 }
 
 fn lower_deferred_views_in_view(
     view: &mut ast::ViewDef,
     owner_type_name: &str,
+    implicit_owner_schema: &ast::ImplicitOwnerDef,
     ordinal: &mut usize,
     new_items: &mut Vec<ast::Item>,
 ) {
     for l in &mut view.lets {
-        lower_deferred_views_in_element(&mut l.element, owner_type_name, ordinal, new_items);
+        lower_deferred_views_in_element(
+            &mut l.element,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        );
     }
-    lower_deferred_views_in_body(&mut view.root, owner_type_name, ordinal, new_items);
+    lower_deferred_views_in_body(
+        &mut view.root,
+        owner_type_name,
+        implicit_owner_schema,
+        ordinal,
+        new_items,
+    );
 }
 
 fn lower_deferred_views_in_body(
     body: &mut ast::ViewBody,
     owner_type_name: &str,
+    implicit_owner_schema: &ast::ImplicitOwnerDef,
     ordinal: &mut usize,
     new_items: &mut Vec<ast::Item>,
 ) {
     for attribute in &mut body.attributes {
-        lower_deferred_views_in_expr(&mut attribute.value, owner_type_name, ordinal, new_items);
+        lower_deferred_views_in_expr(
+            &mut attribute.value,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        );
     }
     for (_, _, expr) in &mut body.attached {
-        lower_deferred_views_in_expr(expr, owner_type_name, ordinal, new_items);
+        lower_deferred_views_in_expr(
+            expr,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        );
     }
     for child in &mut body.children {
-        lower_deferred_views_in_child(child, owner_type_name, ordinal, new_items);
+        lower_deferred_views_in_child(
+            child,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        );
     }
 }
 
 fn lower_deferred_views_in_element(
     elem: &mut ast::ElementNode,
     owner_type_name: &str,
+    implicit_owner_schema: &ast::ImplicitOwnerDef,
     ordinal: &mut usize,
     new_items: &mut Vec<ast::Item>,
 ) {
     for attribute in &mut elem.attributes {
-        lower_deferred_views_in_expr(&mut attribute.value, owner_type_name, ordinal, new_items);
+        lower_deferred_views_in_expr(
+            &mut attribute.value,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        );
     }
     for (_, _, expr) in &mut elem.attached {
-        lower_deferred_views_in_expr(expr, owner_type_name, ordinal, new_items);
+        lower_deferred_views_in_expr(
+            expr,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        );
     }
     for child in &mut elem.children {
-        lower_deferred_views_in_child(child, owner_type_name, ordinal, new_items);
+        lower_deferred_views_in_child(
+            child,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        );
     }
 }
 
 fn lower_deferred_views_in_child(
     child: &mut ast::ChildEntry,
     owner_type_name: &str,
+    implicit_owner_schema: &ast::ImplicitOwnerDef,
     ordinal: &mut usize,
     new_items: &mut Vec<ast::Item>,
 ) {
     match child {
-        ast::ChildEntry::Literal(elem) => {
-            lower_deferred_views_in_element(elem, owner_type_name, ordinal, new_items)
-        }
+        ast::ChildEntry::Literal(elem) => lower_deferred_views_in_element(
+            elem,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        ),
         ast::ChildEntry::Ref(_) => {}
         ast::ChildEntry::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            lower_deferred_views_in_expr(condition, owner_type_name, ordinal, new_items);
+            lower_deferred_views_in_expr(
+                condition,
+                owner_type_name,
+                implicit_owner_schema,
+                ordinal,
+                new_items,
+            );
             for c in then_branch.iter_mut().chain(else_branch.iter_mut()) {
-                lower_deferred_views_in_child(c, owner_type_name, ordinal, new_items);
+                lower_deferred_views_in_child(
+                    c,
+                    owner_type_name,
+                    implicit_owner_schema,
+                    ordinal,
+                    new_items,
+                );
             }
         }
         ast::ChildEntry::Match { value, arms } => {
-            lower_deferred_views_in_expr(value, owner_type_name, ordinal, new_items);
+            lower_deferred_views_in_expr(
+                value,
+                owner_type_name,
+                implicit_owner_schema,
+                ordinal,
+                new_items,
+            );
             for arm in arms {
                 for c in &mut arm.body {
-                    lower_deferred_views_in_child(c, owner_type_name, ordinal, new_items);
+                    lower_deferred_views_in_child(
+                        c,
+                        owner_type_name,
+                        implicit_owner_schema,
+                        ordinal,
+                        new_items,
+                    );
                 }
             }
         }
         ast::ChildEntry::For {
             collection, body, ..
         } => {
-            lower_deferred_views_in_expr(collection, owner_type_name, ordinal, new_items);
+            lower_deferred_views_in_expr(
+                collection,
+                owner_type_name,
+                implicit_owner_schema,
+                ordinal,
+                new_items,
+            );
             for c in body {
-                lower_deferred_views_in_child(c, owner_type_name, ordinal, new_items);
+                lower_deferred_views_in_child(
+                    c,
+                    owner_type_name,
+                    implicit_owner_schema,
+                    ordinal,
+                    new_items,
+                );
             }
         }
     }
@@ -432,7 +547,9 @@ fn lower_deferred_views_in_child(
 /// deferred body's own content *after* assigning this one's ordinal/name, using the **original**
 /// `owner_type_name` — never the hidden component name just generated for *this* level — as the
 /// lexical owner for any further-nested `view! { .. }` found inside it (a `context_popup` opened
-/// from within another `context_popup`'s own content, at arbitrary depth).
+/// from within another `context_popup`'s own content, at arbitrary depth). `implicit_owner_schema`
+/// is likewise the *same* schema at every nesting depth (PR #165 final rereview remediation, A2) —
+/// never recomputed from a nested level's own (synthetic, effectively field-less) hidden Component.
 ///
 /// PR #165 review remediation, A3: an earlier revision passed the just-assigned `hidden_name`
 /// here instead, which changed source lexical-scoping semantics — a doubly-nested deferred view's
@@ -449,6 +566,7 @@ fn lower_deferred_views_in_child(
 fn lower_deferred_views_in_expr(
     expr: &mut ast::ViewExpr,
     owner_type_name: &str,
+    implicit_owner_schema: &ast::ImplicitOwnerDef,
     ordinal: &mut usize,
     new_items: &mut Vec<ast::Item>,
 ) {
@@ -461,6 +579,7 @@ fn lower_deferred_views_in_expr(
                 &mut deferred.body.lets,
                 &mut deferred.body.root,
                 owner_type_name,
+                implicit_owner_schema,
                 ordinal,
                 new_items,
             );
@@ -468,6 +587,7 @@ fn lower_deferred_views_in_expr(
                 component_frontend::hidden_view_template_component(
                     &hidden_name,
                     owner_type_name,
+                    implicit_owner_schema,
                     &deferred.body,
                 );
             new_items.push(ast::Item::Component(hidden_component));
@@ -478,16 +598,28 @@ fn lower_deferred_views_in_expr(
             // own doc comment).
             deferred.lexical_owner = Some(owner_type_name.to_string());
         }
-        ast::ViewExpr::Element(elem) => {
-            lower_deferred_views_in_element(elem, owner_type_name, ordinal, new_items)
-        }
+        ast::ViewExpr::Element(elem) => lower_deferred_views_in_element(
+            elem,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        ),
         ast::ViewExpr::Closure { body, .. } => match body {
-            ast::ClosureBody::Element(elem) => {
-                lower_deferred_views_in_element(elem, owner_type_name, ordinal, new_items)
-            }
-            ast::ClosureBody::Expr(inner) => {
-                lower_deferred_views_in_expr(inner, owner_type_name, ordinal, new_items)
-            }
+            ast::ClosureBody::Element(elem) => lower_deferred_views_in_element(
+                elem,
+                owner_type_name,
+                implicit_owner_schema,
+                ordinal,
+                new_items,
+            ),
+            ast::ClosureBody::Expr(inner) => lower_deferred_views_in_expr(
+                inner,
+                owner_type_name,
+                implicit_owner_schema,
+                ordinal,
+                new_items,
+            ),
             // A raw `syn::Block` (`on_*` handler body) has no reachable `ast::ViewExpr` of its own
             // to recurse into — `view!` only ever appears at a DSL attribute-value position, which
             // a `syn::Block` doesn't parse through this AST at all.
@@ -495,7 +627,13 @@ fn lower_deferred_views_in_expr(
         },
         ast::ViewExpr::TFluent(_, args) => {
             for (_, v) in args {
-                lower_deferred_views_in_expr(v, owner_type_name, ordinal, new_items);
+                lower_deferred_views_in_expr(
+                    v,
+                    owner_type_name,
+                    implicit_owner_schema,
+                    ordinal,
+                    new_items,
+                );
             }
         }
         ast::ViewExpr::Path(_) | ast::ViewExpr::Expr(_) => {}
@@ -506,13 +644,26 @@ fn lower_deferred_views_in_element_lets_and_body(
     lets: &mut [ast::LetBinding],
     root: &mut ast::ViewBody,
     owner_type_name: &str,
+    implicit_owner_schema: &ast::ImplicitOwnerDef,
     ordinal: &mut usize,
     new_items: &mut Vec<ast::Item>,
 ) {
     for l in lets.iter_mut() {
-        lower_deferred_views_in_element(&mut l.element, owner_type_name, ordinal, new_items);
+        lower_deferred_views_in_element(
+            &mut l.element,
+            owner_type_name,
+            implicit_owner_schema,
+            ordinal,
+            new_items,
+        );
     }
-    lower_deferred_views_in_body(root, owner_type_name, ordinal, new_items);
+    lower_deferred_views_in_body(
+        root,
+        owner_type_name,
+        implicit_owner_schema,
+        ordinal,
+        new_items,
+    );
 }
 
 /// Generates the private component instance and typed factory for

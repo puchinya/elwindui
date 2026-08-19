@@ -1411,11 +1411,12 @@ struct A2DirectDeferredHookOwner {
             context_popup: view! {
                 on_mount {
                     // A2 test 1: `on_mount` reads the enclosing source Component's own field via
-                    // a bare identifier. Deliberately the *only* reference to `label` in this
-                    // block — `collect_locally_bound_names_in_block`'s own doc comment explains
-                    // why it is block-scoped rather than statement-order-precise, so this and the
-                    // shadowing test below (a separate fixture, `A2DirectDeferredLocalShadowOwner`)
-                    // are intentionally kept in different blocks rather than combined here.
+                    // a bare identifier. Kept in a separate fixture from the shadowing test below
+                    // (`A2DirectDeferredLocalShadowOwner`) as a focused regression, not because the
+                    // compiler needs them split — `ViewClosureRewriter`'s real lexical scope stack
+                    // (see `declarative_context_popup_direct_lexical_scope_stack_matches_rust_
+                    // scoping`, below, for the full statement-order-precise regression suite) would
+                    // handle both cases correctly combined in one block too.
                     log.borrow_mut().push(format!("mount:{label}"));
                 }
                 on_unmount {
@@ -1952,7 +1953,8 @@ fn declarative_context_popup_nested_popup_observes_current_outer_value() {
         .cloned()
         .unwrap_or_else(|| outer_content.clone());
 
-    let inner_request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let inner_request =
+        ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
     let (inner_resolved, inner_anchor) =
         ContextMenuService::process_request_for_target(&inner_target, &inner_request)
             .expect("inner target should resolve its own context popup");
@@ -1996,4 +1998,188 @@ fn declarative_context_popup_nested_popup_observes_current_outer_value() {
     unmount_subtree(&inner_content);
     unmount_subtree(&outer_content);
     outer_handle.close();
+}
+
+/// PR #165 final rereview remediation, A2-R4: a popup event closure's assignment to a bare name
+/// that is a *writable* (`Prop`/`State`) field of the enclosing source Component must actually
+/// mutate that Component's own state through its real generated setter — not merely compile, and
+/// not silently become a no-op/local shadow. Proven end-to-end (real popup open, real routed event
+/// dispatch, real post-dispatch read of the owner's own state) rather than by inspecting generated
+/// tokens, since the contract explicitly requires this over a codegen-level check.
+#[elwindui::component(inherits VerticalLayout)]
+struct A2OuterStateWriteOwner {
+    #[state(default = false)]
+    selected: bool,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                TextBlock {
+                    text: "popup content",
+                    on_tapped: |_event| {
+                        selected = true;
+                    },
+                }
+            }
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl A2OuterStateWriteOwner {}
+
+#[test]
+fn declarative_context_popup_event_closure_writes_the_enclosing_owner_state() {
+    let owner = A2OuterStateWriteOwner::new();
+    assert!(!owner.selected());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    let inner_target = content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| content.clone());
+    let routed_args = elwindui::core::input::RoutedEventArgs::default();
+    elwindui::core::ui::dispatch_routed(
+        &inner_target,
+        "on_tapped",
+        &elwindui::core::input::TappedEventArgs {
+            position: Point { x: 0.0, y: 0.0 },
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+        },
+        &routed_args,
+    );
+
+    assert!(
+        owner.selected(),
+        "the popup event closure's assignment must mutate the enclosing owner's own #[state] \
+         field through its generated setter, not a local/no-op"
+    );
+
+    unmount_subtree(&content);
+    handle.close();
+}
+
+/// PR #165 final rereview remediation, A2-R5: the write-side counterpart to
+/// `declarative_context_popup_direct_on_mount_local_let_shadows_the_enclosing_owner_field` — a
+/// local `let mut` binding of the same name as a writable enclosing-owner field must shadow it for
+/// *assignment* too, not only for reads. If the write-routing decision in `ViewClosureRewriter`
+/// ever stopped checking `is_shadowed` before routing to the implicit-owner setter, this local
+/// assignment would incorrectly reach through to (and flip) the real owner's own `#[state]`.
+#[elwindui::component(inherits VerticalLayout)]
+struct A2LocalShadowWriteOwner {
+    #[state(default = false)]
+    selected: bool,
+    #[param]
+    log: Rc<RefCell<Vec<bool>>>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                TextBlock {
+                    text: "popup content",
+                    on_tapped: |_event| {
+                        let mut selected = false;
+                        selected = true;
+                        log.borrow_mut().push(selected);
+                    },
+                }
+            }
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl A2LocalShadowWriteOwner {}
+
+#[test]
+fn declarative_context_popup_event_closure_local_shadow_assignment_does_not_write_outer_state() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = A2LocalShadowWriteOwner::new(log.clone());
+    assert!(!owner.selected());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    let inner_target = content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| content.clone());
+    let routed_args = elwindui::core::input::RoutedEventArgs::default();
+    elwindui::core::ui::dispatch_routed(
+        &inner_target,
+        "on_tapped",
+        &elwindui::core::input::TappedEventArgs {
+            position: Point { x: 0.0, y: 0.0 },
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+        },
+        &routed_args,
+    );
+
+    assert_eq!(
+        log.borrow().as_slice(),
+        [true],
+        "the block-local shadow must itself have been mutated"
+    );
+    assert!(
+        !owner.selected(),
+        "a lexically-shadowed local assignment must never reach through to the enclosing \
+         owner's own #[state] setter"
+    );
+
+    unmount_subtree(&content);
+    handle.close();
 }

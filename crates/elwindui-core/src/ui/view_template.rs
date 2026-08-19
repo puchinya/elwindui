@@ -208,7 +208,11 @@ mod tests {
             environment: EnvironmentContext::root(),
         });
         assert!(built.is_none());
-        assert_eq!(calls.get(), 0, "factory must not run once the owner is already gone");
+        assert_eq!(
+            calls.get(),
+            0,
+            "factory must not run once the owner is already gone"
+        );
     }
 
     #[test]

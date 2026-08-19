@@ -83,19 +83,40 @@ identifiers written inside `context_popup: view! { .. }` (e.g. `item: selected_i
 *enclosing* Component's own field) need to resolve exactly the way any other bare name inside an
 ordinary `view!` body already does — through the same `self`/`vm` accessor-rewriting mechanism
 ordinary nested elements already use — rather than through `ControlTemplate`'s
-`templated_parent.foo`-style *explicit*-qualification convention. The shipped solution does not
-extend the closure/weak-self-capture machinery to a new multi-statement body shape (the approach this
-document originally speculated would be needed); instead it lowers the whole `view! { .. }` block, at
-macro-expansion time, into its own hidden `ComponentDef`/`ViewDef` — a real, ordinary Component whose
-single synthetic field (`__view_owner: Weak<Owner>`) is treated exactly like `ControlTemplate`'s own
-`templated_parent` for weak-owner and Environment-propagation purposes. Because the lowered body is a
-genuinely ordinary Component, every existing bare-name-resolution, `on_mount`/`lets`/`if`/`match`/`for`
-code path in `codegen.rs` already handles it correctly with no new `ViewExpr`/`ClosureBody` match arms
-needed for the body's *interior* — only the small amount of new surface area needed to recognize a
-`view! { .. }` token sequence in `context_popup` position, extract it into the hidden pair, and emit a
-`ViewTemplate::new(..)` factory that constructs a fresh instance of it per popup open. See
+`templated_parent.foo`-style *explicit*-qualification convention. The shipped solution lowers the
+whole `view! { .. }` block, at macro-expansion time, into its own hidden `ComponentDef`/`ViewDef` — a
+real, ordinary Component whose single synthetic field (`__view_owner: Weak<Owner>`) is treated exactly
+like `ControlTemplate`'s own `templated_parent` for weak-owner and Environment-propagation purposes.
+Because the lowered body is a genuinely ordinary Component, every existing *DSL-attribute-value*
+bare-name-resolution code path in `codegen.rs` (`emit_expr`'s own `ViewExpr::Path` handling —
+`on_mount`/`lets`/`if`/`match`/`for` as *structural* `view!` constructs, element/value codegen) already
+handles the body's interior correctly with no new `ViewExpr`/`ClosureBody` match arms needed there.
+
+This does **not** extend to the *raw Rust* inside `on_mount { .. }`/`on_unmount { .. }`/`on_update { ..
+}` blocks and `on_*` event-handler closure bodies — an arbitrary, unconstrained Rust statement
+sequence, not DSL grammar, walked by a separate `syn::visit_mut::VisitMut` pass
+(`ViewClosureRewriter`/`rewrite_view_closure_block`/`rewrite_view_closure_expr`) that already existed
+for event handlers before this Issue. That pass genuinely did need generalizing (PR #165 review
+remediation, A2): it gained an implicit-owner fallback (`ViewClosureRewriter::
+resolved_implicit_owner_field`, reusing the same 2-segment `owner.field` machinery `resolved_owner`
+already uses) so an otherwise-unresolved bare name inside one of these raw blocks falls back to
+`__view_owner` the same way a DSL attribute value's bare name already did — and, since raw Rust
+(unlike `view!`'s own attribute-value grammar) can contain arbitrary nested scopes, a real lexical
+scope stack (not a single flat per-block set — an earlier revision's own bug, changing source
+semantics for a block combining an outer-field read with a same-named local shadow) tracking `let`/`if
+let`/`while let`/`match`/`for`/nested-closure bindings, so a local binding shadows the implicit owner
+only exactly where real Rust scoping would consider it in scope. This is still "no second popup
+binding engine" in the sense the original design intended — it is the *same* rewriter every `on_click`
+handler already went through, generalized once, not a parallel mechanism built specifically for
+`context_popup`.
+
+Only the small amount of new surface area needed to recognize a `view! { .. }` token sequence in
+`context_popup` position, extract it into the hidden pair, and emit a `ViewTemplate::new(..)` factory
+that constructs a fresh instance of it per popup open is genuinely new. See
 `docs/design/runtime/popup_context_menu_design.md`'s "Declarative `context_popup: view! { .. }` DSL"
-subsection for the full three-part mechanism (lowering / weak-owner codegen / factory emission).
+subsection for the full three-part mechanism (lowering / weak-owner codegen / factory emission), and
+`docs/design/tools/codegen_design.md` §3.35 for the lowering pass and the raw-block rewriter's own
+lexical-scope-stack mechanism.
 
 `context_popup` may still be authored via the low-level `ViewTemplate::new(|ctx| ...)` API directly
 when full manual control is wanted (see `crates/elwindui/tests/context_menu_and_popup.rs` for

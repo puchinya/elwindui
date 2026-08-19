@@ -56,7 +56,14 @@ This applies identically at *every* recursive hop, not only the immediate `inher
 
 `Window` declares two `#[overridable]` hooks — `mount_override(&self, environment)` and `unmount_override(&self)` — reached through the ordinary `#[overridable]`/`#[overrides]` mechanism above, exactly like any other class-managed interface method. They are **framework-reserved**, not a second DSL-author-facing lifecycle surface: a user-authored `#[overrides] fn mount_override`/`unmount_override` on a `#[elwindui::component] impl` is rejected with a diagnostic pointing at `on_mount`/`on_unmount` (`docs/specs/dsl_spec.md` §13 rule 38) — those two remain the only lifecycle hooks a DSL author ever writes. `mount()`/`unmount()` themselves stay fixed, non-overridable framework algorithms; `mount_override`/`unmount_override` exist purely so each backend's own concrete `Window` (`struct_only`) has a normal override point to reach through, spliced into the generated `mount()`/`unmount()` at fixed points (`docs/design/runtime/component_lifecycle_design.md` §4i).
 
-The generated host-composition (`inherits Window`) component's own `#[overrides] mount_override`/`unmount_override` are ordinary generated methods, reached through the same ancestor-forwarding chain as `show`/`hide`/`close` — no inherent-method/UFCS workaround. Each first chains into `self.base.mount_override()`/`unmount_override()` (the backend's own implementation), then installs or clears the native close-request callback via `#[doc(hidden)] WindowLifecycleHost::set_close_request_handler`, called through UFCS the same way `self.base.show()` etc. already are.
+The generated host-composition (`inherits Window`) component's own `#[overrides] mount_override`/`unmount_override` are ordinary generated methods, reached through the same ancestor-forwarding chain as `show`/`hide`/`close` — no inherent-method/UFCS workaround. The two are **not** symmetric in ordering (PR #165 rereview remediation round 2, A7 — an earlier revision of this paragraph incorrectly claimed both "chain into `self.base` first, then install/clear"):
+
+```text
+mount_override:   self.base.mount_override(..) first, THEN install the close-request handler
+unmount_override: clear the close-request handler FIRST, then self.base.unmount_override()
+```
+
+`unmount_override` clears the handler *before* forwarding to the backend deliberately — the backend's native close-request storage must never keep pointing at a closure this component is about to tear down while `self.base.unmount_override()` (which closes any active popup, see below) is still running. Both directions use `#[doc(hidden)] WindowLifecycleHost::set_close_request_handler`, called through UFCS the same way `self.base.show()` etc. already are.
 
 **Native close callback contract**: the installed `Rc<dyn Fn() -> bool>` closure captures only a type-erased `Weak<dyn Any>` (this component's own `__self_weak`, cloned — never a strong `Rc<Self>`), and its return value has a fixed meaning both backends' native close affordance (AppKit `windowShouldClose:`, WinUI3 `AppWindow.Closing`) must honor identically:
 

@@ -15412,9 +15412,7 @@ struct NotepadWindow {
             .find("__unmount_local ()")
             .expect("unmount() should call __unmount_local()");
         assert!(
-            unmounting_pos < override_pos
-                && override_pos < subtree_pos
-                && subtree_pos < local_pos,
+            unmounting_pos < override_pos && override_pos < subtree_pos && subtree_pos < local_pos,
             "unmount() must order: state = Unmounting, then unmount_override() (closes any active \
              popup), then the owner's own content unmount_subtree, then local teardown \
              (__unmount_local, which itself runs user on_unmount before Unmounted): \
@@ -15468,7 +15466,9 @@ struct NotepadWindow {
         let created_arm_end = unmount_body[created_arm_pos..]
             .find("ComponentLifecycleState :: Mounted =>")
             .map(|p| p + created_arm_pos)
-            .expect("unmount() should also match on ComponentLifecycleState::Mounted, after Created");
+            .expect(
+                "unmount() should also match on ComponentLifecycleState::Mounted, after Created",
+            );
         let created_arm = &unmount_body[created_arm_pos..created_arm_end];
 
         assert!(

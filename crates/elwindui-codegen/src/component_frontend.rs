@@ -210,9 +210,14 @@ pub(crate) fn component_module_items(
 /// is no token-level `view!` invocation left to re-parse here, only already-structured AST.
 ///
 /// `hidden_name` must already be the deterministic, ordinal-qualified name the caller assigned
-/// (`__ElwinduiViewTemplateInstanceFor<Outer>_<ordinal>`); `owner_type_name` is the *lexically
-/// enclosing* Component's own bare name (the outer Component being compiled, or another hidden
-/// Component when this deferred body is itself nested inside one — see `lib.rs`'s lowering walker).
+/// (`__ElwinduiViewTemplateInstanceFor<Outer>_<ordinal>`); `owner_type_name` is always the
+/// *original source* lexical Component's own bare name — the real, DSL-author-visible Component
+/// whose `view! { .. }` body this `DeferredView` was written inside — regardless of how many
+/// levels of nested `context_popup: view! { .. }` separate it from that Component (PR #165 review
+/// remediation, A3: an earlier revision passed the *hidden* Component's own name here for a
+/// nested `DeferredView`, changing source lexical-scoping semantics — see `lib.rs`'s
+/// `lower_deferred_views_in_expr` for why every level keeps the same `owner_type_name` and only
+/// the generated hidden component's own *name* changes per nesting depth).
 pub(crate) fn hidden_view_template_component(
     hidden_name: &str,
     owner_type_name: &str,

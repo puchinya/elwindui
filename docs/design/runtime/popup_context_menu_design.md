@@ -288,8 +288,12 @@ split from [#161](https://github.com/puchinya/elwindui/issues/161), which owns t
 runtime/backend foundation this design revision describes) is implemented. A `context_popup`
 attribute may now be assigned a bare `view! { .. }` block — the same grammar/AST/codegen pipeline a
 normal Component body uses — instead of an ordinary `ViewTemplate`-typed expression. It desugars
-entirely at macro-expansion time, before validation and codegen ever see the enclosing Component, so
-no new runtime binding system is introduced:
+entirely at macro-expansion time, so no new *runtime* binding system is introduced — but the desugar
+itself runs in the middle of the pipeline, not before it: `validate::validate` runs first, against the
+*original*, unlowered `ViewExpr::DeferredView` node (so it can validate bare names against the
+enclosing lexical Component's own scope, `check_deferred_view_assignment`), and only *after* that does
+`lower_deferred_views_in_module` extract it into the hidden Component/View pair described below,
+before `codegen::build_symbol_table`/code emission ever run — see step 1's own ordering note.
 
 1. **Lowering** (`elwindui-codegen::lower_deferred_views_in_module`, run once per enclosing module
    after `validate::validate` and before `codegen::build_symbol_table`): every `view! { .. }` block
@@ -309,11 +313,26 @@ no new runtime binding system is introduced:
    unresolved external-builtin-base fields needing synthesis).
 3. **Factory emission**: the `context_popup` site emits
    `ViewTemplate::new(move |ctx| { .. })` (`docs/design/runtime/view_template_design.md` §2 — the
-   same `ViewTemplate` every other deferred-view-typed field already uses). The closure recovers the
-   enclosing Component's own weak self via `self.__self_weak.borrow().upgrade().and_then(|rc|
-   rc.downcast::<Self>().ok()).map(|rc| Rc::downgrade(&rc))` (the same idiom `__build_view`'s own
-   `__most_derived` local already uses — *not* `Rc::downgrade(self)`, which assumes an ownership
-   shape not every generated component has), returns `None` immediately if that owner has already
+   same `ViewTemplate` every other deferred-view-typed field already uses). The closure recovers a
+   weak reference to the *lexical owner* (`DeferredViewExpr::lexical_owner` — always the original
+   source Component, at any nesting depth, PR #165 review remediation A3) one of two ways, chosen at
+   the point this factory expression is emitted, not by the hidden component's own shape:
+   - **Top-level** (`ctx.implicit_owner.is_none()` — this factory is being emitted inside the true
+     lexical owner's own generated code): `self.__self_weak.borrow().upgrade().and_then(|rc|
+     rc.downcast::<Self>().ok()).map(|rc| Rc::downgrade(&rc))` (the same idiom `__build_view`'s own
+     `__most_derived` local already uses — *not* `Rc::downgrade(self)`, which assumes an ownership
+     shape not every generated component has).
+   - **Nested** (`ctx.implicit_owner.is_some()` — a `context_popup: view! { .. }` written inside
+     *another* `context_popup: view! { .. }`'s own body, so this factory expression is emitted while
+     generating the *outer* hidden Component's own code): `self.__view_owner.clone()` directly — the
+     outer hidden Component's own `__view_owner` field already holds exactly the right
+     `Weak<lexical_owner>` value (by the same A3 guarantee that keeps every nesting level's
+     `lexical_owner` equal to the same original source Component), so it is reused rather than
+     re-derived. The `__self_weak`-downcast approach above cannot work here: `self` at this emission
+     point genuinely *is* an instance of the outer hidden Component's own type, not the lexical
+     owner's, so `downcast::<lexical_owner>()` on it can never succeed.
+
+   Either way, the recovered weak reference returns `None` immediately if that owner has already
    been dropped, and otherwise constructs a **fresh hidden-component instance on every popup open**
    (`__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>::__new_unmounted(owner_weak)`, then
    `mount(ctx.environment)`) — so bare names inside the `view! { .. }` block resolve directly against

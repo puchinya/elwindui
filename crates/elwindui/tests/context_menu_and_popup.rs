@@ -1494,10 +1494,10 @@ fn declarative_context_popup_direct_on_mount_and_on_unmount_resolve_the_enclosin
 /// `ViewClosureRewriter` treated every bare name matching an own/implicit-owner field as a rewrite
 /// target, even one a local `let`/`if let` pattern re-binds first, producing e.g.
 /// `self.__view_owner...label().position` for what should have stayed the plain local `label`.
-/// Kept in its own fixture/block (rather than combined with the plain field-read tests above) so
-/// `collect_locally_bound_names_in_block`'s own deliberately block-scoped (not statement-order-
-/// precise) local-binding collection does not also suppress an *earlier*, unrelated field read of
-/// the same name in the same block — see that function's own doc comment.
+/// See `declarative_context_popup_direct_lexical_scope_stack_matches_rust_scoping`, below, for the
+/// full A2-T1 through A2-T6 regression suite proving real (not block-wide-flat) lexical scoping,
+/// including the exact statement-order case (an *earlier*, unrelated outer-field read followed by
+/// a local shadow of the same name in the *same* block) this fixture originally had to avoid.
 #[elwindui::component(inherits VerticalLayout)]
 struct A2DirectDeferredLocalShadowOwner {
     #[state(default = "outer".to_string())]
@@ -1558,6 +1558,195 @@ fn declarative_context_popup_direct_on_mount_local_let_shadows_the_enclosing_own
     assert_eq!(log.borrow().as_slice(), ["shadowed:43"]);
 
     let content = Rc::clone(&host.shown.borrow()[0].0);
+    unmount_subtree(&content);
+    handle.close();
+}
+
+// PR #165 rereview remediation round 2, A2: `ViewClosureRewriter` now tracks a genuine lexical
+// scope stack (`ViewClosureRewriter::scopes`) instead of one block-wide flat set, so a local
+// binding shadows an outer field of the same name only where real Rust scoping would actually
+// consider it in scope. A2-T1 through A2-T6 below are the required regression suite proving this,
+// deliberately combined into a *single* `on_mount` block (unlike the flat-set-era fixtures above,
+// which had to keep an outer-field read and a same-name local shadow in *separate* blocks to
+// avoid the old implementation's own block-wide over-suppression).
+thread_local! {
+    static A2_SCOPE_STACK_FREE_FUNCTION_LOG: RefCell<Vec<&'static str>> = RefCell::new(Vec::new());
+}
+
+/// A2-T6: a plain free function, called bare (no receiver) directly inside a deferred view's own
+/// `on_mount` — must remain an ordinary free-function call, never rewritten into a bogus
+/// `__view_owner.a2_scope_stack_free_function(..)` method call.
+fn a2_scope_stack_free_function(tag: &'static str) {
+    A2_SCOPE_STACK_FREE_FUNCTION_LOG.with(|l| l.borrow_mut().push(tag));
+}
+
+#[elwindui::component(inherits VerticalLayout)]
+struct A2LexicalScopeStackOwner {
+    #[state(default = "outer".to_string())]
+    label: String,
+    #[param]
+    log: Rc<RefCell<Vec<String>>>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                on_mount {
+                    // A2-T1: statement-order `let` — the outer field is read correctly both
+                    // *before* and *after* a nested block-local shadow of the same name; the
+                    // shadow's own initializer itself still reads the *outer* field (not the not-
+                    // yet-bound local), and the shadow never leaks past its own block.
+                    log.borrow_mut().push(format!("outer-before:{label}"));
+                    {
+                        let label = format!("local-from:{label}");
+                        log.borrow_mut().push(format!("local-from:{label}"));
+                    }
+                    log.borrow_mut().push(format!("outer-after:{label}"));
+
+                    // A2-T2: `if let` scope — the pattern's own binding is visible only inside
+                    // `then`, never after the `if`.
+                    let maybe_label: Option<i32> = Some(99);
+                    if let Some(label) = maybe_label {
+                        log.borrow_mut().push(format!("iflet-inner:{label}"));
+                    }
+                    log.borrow_mut().push(format!("iflet-after:{label}"));
+
+                    // A2-T3: `match` arm isolation — one arm binds a name equal to the outer
+                    // field; a *different* arm (and code after the whole `match`) still reads the
+                    // outer field. Two separate `match`es (rather than one, since only one arm of
+                    // any single `match` ever runs) exercise both arms in one test run.
+                    match 0 {
+                        0 => {
+                            let label = "matched-zero".to_string();
+                            log.borrow_mut().push(format!("match-shadow-arm:{label}"));
+                        }
+                        _ => {}
+                    }
+                    match 1 {
+                        0 => {}
+                        _ => {
+                            log.borrow_mut().push(format!("match-other-arm:{label}"));
+                        }
+                    }
+                    log.borrow_mut().push(format!("match-after:{label}"));
+
+                    // A2-T4: `for` binding — the loop pattern shadows the outer field only inside
+                    // the loop body.
+                    for label in 0..1 {
+                        log.borrow_mut().push(format!("for-inner:{label}"));
+                    }
+                    log.borrow_mut().push(format!("for-after:{label}"));
+
+                    // A2-T5: nested closure parameter — shadows the outer field only inside the
+                    // closure's own body.
+                    let describe = |label: i32| {
+                        log.borrow_mut().push(format!("closure-inner:{label}"));
+                    };
+                    describe(7);
+                    log.borrow_mut().push(format!("closure-after:{label}"));
+
+                    // A2-T6: a bare free-function call must remain a free-function call.
+                    a2_scope_stack_free_function("free-fn-called");
+                }
+                TextBlock {
+                    text: "popup content",
+                    // A2-T7: an event closure whose own parameter does *not* collide with the
+                    // outer field reads the enclosing source Component's *current* field value.
+                    on_tapped: |_event| {
+                        log.borrow_mut().push(format!("event-closure-outer-read:{label}"));
+                    },
+                }
+            }
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl A2LexicalScopeStackOwner {}
+
+#[test]
+fn declarative_context_popup_direct_lexical_scope_stack_matches_rust_scoping() {
+    A2_SCOPE_STACK_FREE_FUNCTION_LOG.with(|l| l.borrow_mut().clear());
+
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = A2LexicalScopeStackOwner::new(log.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    assert_eq!(
+        log.borrow().as_slice(),
+        [
+            "outer-before:outer",
+            "local-from:local-from:outer",
+            "outer-after:outer",
+            "iflet-inner:99",
+            "iflet-after:outer",
+            "match-shadow-arm:matched-zero",
+            "match-other-arm:outer",
+            "match-after:outer",
+            "for-inner:0",
+            "for-after:outer",
+            "closure-inner:7",
+            "closure-after:outer",
+        ],
+        "real lexical scoping (statement-order let, if-let/match/for/nested-closure scope \
+         isolation) must hold inside a deferred view's own on_mount block"
+    );
+    assert_eq!(
+        A2_SCOPE_STACK_FREE_FUNCTION_LOG.with(|l| l.borrow().clone()),
+        ["free-fn-called"],
+        "a bare free-function call must remain an ordinary free-function call"
+    );
+
+    // A2-T7: dispatch the popup content's own `on_tapped` (a non-shadowing event closure) and
+    // confirm it reads the enclosing source Component's current field.
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    let inner_target = content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| content.clone());
+    let routed_args = elwindui::core::input::RoutedEventArgs::default();
+    elwindui::core::ui::dispatch_routed(
+        &inner_target,
+        "on_tapped",
+        &elwindui::core::input::TappedEventArgs {
+            position: Point { x: 0.0, y: 0.0 },
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+        },
+        &routed_args,
+    );
+    assert_eq!(
+        log.borrow().last(),
+        Some(&"event-closure-outer-read:outer".to_string()),
+        "a non-shadowing event closure parameter must not block the implicit-owner fallback for \
+         an unrelated bare name"
+    );
+
     unmount_subtree(&content);
     handle.close();
 }

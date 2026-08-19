@@ -11085,65 +11085,93 @@ fn emit_on_event_closure_body(
 /// almost always meant as the local, everywhere in that scope — the alternative (perfectly
 /// scope-precise tracking) would need a real lexical-scope stack for comparatively little benefit
 /// over this simpler flat pre-pass.
-fn collect_locally_bound_names_in_block(block: &syn::Block) -> HashSet<String> {
-    struct Collector {
-        found: HashSet<String>,
-    }
-    impl<'ast> Visit<'ast> for Collector {
-        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
-            self.found.insert(node.ident.to_string());
-            syn::visit::visit_pat_ident(self, node);
-        }
-    }
-    let mut collector = Collector {
-        found: HashSet::new(),
-    };
-    collector.visit_block(block);
-    collector.found
-}
-
-fn collect_locally_bound_names_in_expr(expr: &syn::Expr) -> HashSet<String> {
-    struct Collector {
-        found: HashSet<String>,
-    }
-    impl<'ast> Visit<'ast> for Collector {
-        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
-            self.found.insert(node.ident.to_string());
-            syn::visit::visit_pat_ident(self, node);
-        }
-    }
-    let mut collector = Collector {
-        found: HashSet::new(),
-    };
-    collector.visit_expr(expr);
-    collector.found
-}
-
 /// Rewrites bare references to one of this component's own fields (for example `vm`) inside an
 /// `on_*` event handler's closure body, or (Issue #162, PR #165 A2) an `on_mount`/`on_unmount`/
 /// `on_update` lifecycle hook block, into the same `self.vm.field()`/`self.vm` forms every other
-/// DSL attribute value resolves to. Two kinds of names are left untouched as genuine locals: the
-/// closure's own bound parameters (`closure_params`, e.g. `index`), and any name this same block
-/// binds itself via `let`/`if let`/`match`/`for`/a nested closure (`local_bindings`, collected once
-/// up front by [`collect_locally_bound_names`] — see that function's own doc comment for why this
-/// preserves ordinary lexical shadowing without a full scope stack). Shared by
-/// [`rewrite_view_closure_expr`]/[`rewrite_view_closure_block`] since a `syn::Expr` and a
-/// `syn::Block` both just need the same `syn::visit_mut::VisitMut` walk applied at a different
-/// entry point.
+/// DSL attribute value resolves to.
+///
+/// PR #165 review remediation round 2, A2: a name is shadowed only where real Rust lexical
+/// scoping would actually consider it in scope — tracked with a genuine scope stack (`scopes`,
+/// innermost last), not a single block-wide flat set. The closure's own bound parameters
+/// (`closure_params` at construction time, e.g. `index`) seed the outermost scope; every deeper
+/// scope (a nested `{ .. }` block, an `if let`/`while let`/let-chain condition's own bindings —
+/// visible only in the following block, a `for` loop's own pattern, each `match` arm's own
+/// pattern independently of every other arm, a nested closure's own parameters) is pushed and
+/// popped by the `VisitMut` overrides below at exactly the points real Rust scoping would enter
+/// and leave them. A `let` statement's own initializer (and, for a let-else, its diverging
+/// branch) is rewritten *before* its pattern's bindings are added to the current scope, so
+/// `let x = x.clone();` correctly reads the *outer* `x` on the right-hand side.
 struct ViewClosureRewriter<'a> {
-    closure_params: &'a [String],
-    local_bindings: &'a HashSet<String>,
+    scopes: Vec<HashSet<String>>,
     ctx: &'a ViewCtx,
     mode: &'a EmitMode,
 }
 
 impl<'a> ViewClosureRewriter<'a> {
-    /// A name currently shadowed by a genuine local binding — either a closure parameter
-    /// (`closure_params`) or anything this same block/expression binds itself via `let`/`if
-    /// let`/`match`/`for`/a nested closure (`local_bindings`). Checked before every
-    /// field/implicit-owner resolution below, so ordinary Rust lexical shadowing always wins.
+    fn new(closure_params: &[String], ctx: &'a ViewCtx, mode: &'a EmitMode) -> Self {
+        Self {
+            scopes: vec![closure_params.iter().cloned().collect()],
+            ctx,
+            mode,
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(HashSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    /// Adds every name `pat` binds (recursively — a single `syn::Pat::Ident` at any nesting
+    /// depth inside a tuple/struct/reference/or-pattern, ...) to the *current* (innermost) scope.
+    fn bind_pattern(&mut self, pat: &syn::Pat) {
+        struct Collector {
+            found: HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for Collector {
+            fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+                self.found.insert(node.ident.to_string());
+                syn::visit::visit_pat_ident(self, node);
+            }
+        }
+        let mut collector = Collector {
+            found: HashSet::new(),
+        };
+        collector.visit_pat(pat);
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.extend(collector.found);
+        }
+    }
+
+    /// Rewrites an `if`/`while` condition left-to-right, binding each `&&`-chained `Expr::Let`'s
+    /// own pattern into the *caller's* current (already-pushed) scope as it goes — matching
+    /// Rust's own let-chain semantics, where a later chained condition may observe an earlier
+    /// one's bindings, but an ordinary (non-`let`) condition needs no scope change, only
+    /// rewriting. The caller is responsible for pushing a scope before calling this and popping
+    /// it after the following block has been visited (so the bindings are visible in exactly
+    /// that block, never in an `else` branch or after the `if`/`while`).
+    fn rewrite_let_chain_condition(&mut self, cond: &mut syn::Expr) {
+        match cond {
+            syn::Expr::Let(expr_let) => {
+                self.visit_expr_mut(&mut expr_let.expr);
+                self.bind_pattern(&expr_let.pat);
+            }
+            syn::Expr::Binary(bin) if matches!(bin.op, syn::BinOp::And(_)) => {
+                self.rewrite_let_chain_condition(&mut bin.left);
+                self.rewrite_let_chain_condition(&mut bin.right);
+            }
+            other => self.visit_expr_mut(other),
+        }
+    }
+
+    /// A name currently shadowed by a genuine lexical binding anywhere on the current scope
+    /// stack (a closure parameter, `let`/`if let`/`while let`/`match`/`for`/a nested closure).
+    /// Checked before every field/implicit-owner resolution below, so ordinary Rust lexical
+    /// shadowing always wins.
     fn is_shadowed(&self, name: &str) -> bool {
-        self.closure_params.iter().any(|p| p == name) || self.local_bindings.contains(name)
+        self.scopes.iter().any(|scope| scope.contains(name))
     }
 
     fn resolved_owner(&self, name: &str) -> Option<TokenStream> {
@@ -11204,7 +11232,99 @@ impl<'a> ViewClosureRewriter<'a> {
 }
 
 impl<'a> VisitMut for ViewClosureRewriter<'a> {
+    /// Every block introduces its own scope — a bare nested `{ .. }` (reached generically, as an
+    /// ordinary `Expr::Block`, through `visit_expr_mut`'s own default recursive fallback) equally
+    /// as the outermost hook/closure body (`rewrite_view_closure_block`'s own entry point).
+    /// Bindings a block introduces never escape it.
+    fn visit_block_mut(&mut self, block: &mut syn::Block) {
+        self.push_scope();
+        for stmt in block.stmts.iter_mut() {
+            self.visit_stmt_mut(stmt);
+        }
+        self.pop_scope();
+    }
+
+    /// A `let` statement is the one place statement-order matters: the initializer (and, for a
+    /// let-else, the diverging branch) must be rewritten *before* the pattern's own bindings are
+    /// added to scope, so `let x = x.clone();` reads the *outer* `x`. Every other statement kind
+    /// falls through to `syn`'s own default dispatch (which already reaches `visit_expr_mut` for
+    /// an expression statement, `visit_block_mut` is not otherwise involved here).
+    fn visit_stmt_mut(&mut self, stmt: &mut syn::Stmt) {
+        if let syn::Stmt::Local(local) = stmt {
+            if let Some(init) = &mut local.init {
+                self.visit_expr_mut(&mut init.expr);
+                if let Some((_, diverge)) = &mut init.diverge {
+                    self.visit_expr_mut(diverge);
+                }
+            }
+            self.bind_pattern(&local.pat);
+            return;
+        }
+        syn::visit_mut::visit_stmt_mut(self, stmt);
+    }
+
     fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+        // `if`/`if let`/let-chain: a pattern-introducing condition's own bindings are visible
+        // only in `then_branch`, never in `else_branch` or after the `if` — scoped by pushing
+        // before the condition and popping after `then_branch` (which may itself push further
+        // nested scopes for its own body, via `visit_block_mut` above), *before* `else_branch` is
+        // ever visited.
+        if let syn::Expr::If(expr_if) = node {
+            self.push_scope();
+            self.rewrite_let_chain_condition(&mut expr_if.cond);
+            self.visit_block_mut(&mut expr_if.then_branch);
+            self.pop_scope();
+            if let Some((_, else_branch)) = &mut expr_if.else_branch {
+                self.visit_expr_mut(else_branch);
+            }
+            return;
+        }
+        // `while`/`while let`: the condition's own bindings are visible only in the loop body.
+        if let syn::Expr::While(expr_while) = node {
+            self.push_scope();
+            self.rewrite_let_chain_condition(&mut expr_while.cond);
+            self.visit_block_mut(&mut expr_while.body);
+            self.pop_scope();
+            return;
+        }
+        // `for pat in iter { body }`: the iterator expression is evaluated in the *outer* scope;
+        // the loop pattern's own bindings are visible only in `body`.
+        if let syn::Expr::ForLoop(for_loop) = node {
+            self.visit_expr_mut(&mut for_loop.expr);
+            self.push_scope();
+            self.bind_pattern(&for_loop.pat);
+            self.visit_block_mut(&mut for_loop.body);
+            self.pop_scope();
+            return;
+        }
+        // `match scrutinee { pat1 if guard1 => body1, pat2 => body2, .. }`: the scrutinee is
+        // evaluated in the outer scope; each arm's own pattern (and therefore its guard and
+        // body) gets its *own independent* scope — one arm's bindings must never leak into
+        // another arm, even one with a colliding name.
+        if let syn::Expr::Match(expr_match) = node {
+            self.visit_expr_mut(&mut expr_match.expr);
+            for arm in expr_match.arms.iter_mut() {
+                self.push_scope();
+                self.bind_pattern(&arm.pat);
+                if let Some((_, guard)) = &mut arm.guard {
+                    self.visit_expr_mut(guard);
+                }
+                self.visit_expr_mut(&mut arm.body);
+                self.pop_scope();
+            }
+            return;
+        }
+        // A nested closure's own parameters are visible only inside its own body — must not
+        // shadow anything before it, and must not leak out after it.
+        if let syn::Expr::Closure(closure) = node {
+            self.push_scope();
+            for input in closure.inputs.iter() {
+                self.bind_pattern(input);
+            }
+            self.visit_expr_mut(&mut closure.body);
+            self.pop_scope();
+            return;
+        }
         // `x = <rhs>` where `x` is a bare 1-segment reference to one of this component's own
         // mutable fields (`#[prop] is_checked: bool` mutated as `is_checked = !is_checked`) has no
         // real lvalue to assign into — the field's actual storage is `Cell`/`RefCell`-backed, only
@@ -11357,14 +11477,7 @@ fn rewrite_view_closure_expr(
     ctx: &ViewCtx,
     mode: &EmitMode,
 ) -> TokenStream {
-    let local_bindings = collect_locally_bound_names_in_expr(&expr);
-    ViewClosureRewriter {
-        closure_params,
-        local_bindings: &local_bindings,
-        ctx,
-        mode,
-    }
-    .visit_expr_mut(&mut expr);
+    ViewClosureRewriter::new(closure_params, ctx, mode).visit_expr_mut(&mut expr);
     quote! { #expr }
 }
 
@@ -11374,14 +11487,10 @@ fn rewrite_view_closure_block(
     ctx: &ViewCtx,
     mode: &EmitMode,
 ) -> TokenStream {
-    let local_bindings = collect_locally_bound_names_in_block(&block);
-    ViewClosureRewriter {
-        closure_params,
-        local_bindings: &local_bindings,
-        ctx,
-        mode,
-    }
-    .visit_block_mut(&mut block);
+    // `visit_block_mut` itself pushes a *further* nested scope for the block's own top-level
+    // statements (see that override's own doc comment) — the scope seeded here by `new` is only
+    // the closure/hook's own parameter scope, layered *outside* the block's own.
+    ViewClosureRewriter::new(closure_params, ctx, mode).visit_block_mut(&mut block);
     quote! { #block }
 }
 
@@ -14947,6 +15056,68 @@ struct NotepadWindow {
                  view's lexical owner type ({bad} found):\n{generated_str}"
             );
         }
+    }
+
+    /// PR #165 rereview remediation round 2, A2-T8: a deferred view's `on_update` block is
+    /// rewritten through the same scope-aware `ViewClosureRewriter`/`rewrite_view_closure_block`
+    /// machinery as `on_mount`/`on_unmount`/event closures — proven by inspecting the generated
+    /// source directly, since a lowered hidden Component structurally has no own `#[prop]`/
+    /// `#[state]`/`#[computed]`/`#[environment]` field to ever trigger `on_update`'s own
+    /// `subscribe_property_changed` dispatch with at runtime (`DeferredViewBody` carries only
+    /// `on_mount`/`on_unmount`/`on_update`/`lets`/`root` — no field declarations at all), making
+    /// runtime firing unreachable by construction for *every* deferred view, not just this test's
+    /// own fixture (see `declarative_context_popup_direct_on_update_compiles_and_resolves_the_
+    /// enclosing_owner_field` in `context_menu_and_popup.rs` for the compile/construct-time
+    /// counterpart this codegen-level test complements).
+    #[test]
+    fn deferred_view_on_update_block_resolves_unshadowed_names_through_the_implicit_owner() {
+        let mut module = crate::test_module(&[(
+            None,
+            r#"
+            struct A2OnUpdateOwner {
+                #[state(default = "outer".to_string())]
+                label: String,
+                #[param]
+                log: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+                body: view! {
+                    TextBlock {
+                        text: "target",
+                        context_popup: view! {
+                            on_update: {
+                                // Unshadowed — no local binds `label` anywhere in this block, so
+                                // this must resolve through the implicit lexical owner.
+                                log.borrow_mut().push(label.clone());
+                            }
+                            TextBlock { text: "popup" }
+                        },
+                    }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        crate::lower_deferred_views_in_module(&mut module, "A2OnUpdateOwner");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("a2_t8_on_update_scope", &generated);
+        let generated_str = generated.to_string();
+
+        assert!(
+            generated_str.contains("subscribe_property_changed"),
+            "expected an on_update subscription to be generated: {generated_str}"
+        );
+        // The unshadowed `label` inside on_update's own block must have been rewritten into an
+        // implicit-owner getter call (`<owner>.label()`) — proving on_update's block is routed
+        // through the same scope-aware `rewrite_view_closure_block`/`ViewClosureRewriter` machinery
+        // as on_mount/on_unmount/event closures, not spliced raw (its pre-A2 behavior, when a bare
+        // `label` reference here would have failed to compile at all — there being no local of
+        // that name in scope).
+        assert!(
+            generated_str.contains(". label ()"),
+            "expected on_update's own unshadowed `label` reference to become an implicit-owner \
+             getter call (`<owner>.label()`): {generated_str}"
+        );
     }
 
     /// PR #165 review remediation, A6/T26: the generated `mount_override`'s close-request-handler

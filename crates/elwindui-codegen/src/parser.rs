@@ -651,6 +651,7 @@ impl<'a> Parser<'a> {
                     root,
                 },
                 hidden_component: None,
+                lexical_owner: None,
             })));
         }
 

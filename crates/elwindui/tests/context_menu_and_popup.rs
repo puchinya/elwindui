@@ -1376,3 +1376,308 @@ fn declarative_context_popup_dismiss_during_on_mount_prevents_popup_from_showing
         "content mounted before the pre-show dismiss must still be unmounted exactly once"
     );
 }
+
+// PR #165 review remediation, A2: `on_mount`/`on_unmount`/event-handler closures written
+// *directly* inside a `context_popup: view! { .. }` block (not inside a separately-declared,
+// ordinary Component nested as the popup's root) must resolve bare references to the *enclosing
+// source* Component's own fields through the implicit lexical owner — the same resolution the
+// deferred view's own root value expressions already had. Every existing declarative-popup test
+// above constructs a *separate* ordinary Component as the popup's content and only exercises bare
+// names at the deferred view's root-element-construction-argument position; none of them reach
+// `on_mount`/`on_unmount`/an event closure's own body written directly inside the `view! { .. }`
+// block itself, which is exactly the gap A2 found (those hook bodies went through
+// `rewrite_base_calls` only — or, for `on_update`, no rewriting at all — never through
+// `ViewClosureRewriter`'s `ctx.implicit_owner` fallback).
+
+#[elwindui::component(inherits VerticalLayout)]
+struct A2DirectDeferredHookOwner {
+    #[state(default = "outer".to_string())]
+    label: String,
+    #[param]
+    log: Rc<RefCell<Vec<String>>>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                on_mount {
+                    // A2 test 1: `on_mount` reads the enclosing source Component's own field via
+                    // a bare identifier. Deliberately the *only* reference to `label` in this
+                    // block — `collect_locally_bound_names_in_block`'s own doc comment explains
+                    // why it is block-scoped rather than statement-order-precise, so this and the
+                    // shadowing test below (a separate fixture, `A2DirectDeferredLocalShadowOwner`)
+                    // are intentionally kept in different blocks rather than combined here.
+                    log.borrow_mut().push(format!("mount:{label}"));
+                }
+                on_unmount {
+                    // A2 test 2: `on_unmount` reads the enclosing source Component's own field via
+                    // a bare identifier.
+                    log.borrow_mut().push(format!("unmount:{label}"));
+                }
+                TextBlock {
+                    text: "popup content",
+                    on_tapped: |label| {
+                        // A2 test 5b: an event closure's own declared parameter shadows the outer
+                        // field of the same name — `label` here must be the `TappedEventArgs`
+                        // parameter (proven by `.position.x`, which does not exist on the outer
+                        // `String` field), not the outer field.
+                        log.borrow_mut().push(format!("tapped-shadowed-x:{}", label.position.x));
+                    },
+                }
+            }
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl A2DirectDeferredHookOwner {}
+
+#[test]
+fn declarative_context_popup_direct_on_mount_and_on_unmount_resolve_the_enclosing_owner_field() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = A2DirectDeferredHookOwner::new(log.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["mount:outer"],
+        "on_mount must read the enclosing owner's current field value via a bare identifier"
+    );
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    unmount_subtree(&content);
+    handle.close();
+
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["mount:outer", "unmount:outer"],
+        "on_unmount must also read the enclosing owner's current field value via a bare identifier"
+    );
+}
+
+/// A2 test 5a: a block-local `let` shadows the outer field of the same name — the exact shape
+/// (`if let Some(dismiss) = ..) { dismiss.dismiss() }`) the A2 investigation found already broken:
+/// `ViewClosureRewriter` treated every bare name matching an own/implicit-owner field as a rewrite
+/// target, even one a local `let`/`if let` pattern re-binds first, producing e.g.
+/// `self.__view_owner...label().position` for what should have stayed the plain local `label`.
+/// Kept in its own fixture/block (rather than combined with the plain field-read tests above) so
+/// `collect_locally_bound_names_in_block`'s own deliberately block-scoped (not statement-order-
+/// precise) local-binding collection does not also suppress an *earlier*, unrelated field read of
+/// the same name in the same block — see that function's own doc comment.
+#[elwindui::component(inherits VerticalLayout)]
+struct A2DirectDeferredLocalShadowOwner {
+    #[state(default = "outer".to_string())]
+    label: String,
+    #[param]
+    log: Rc<RefCell<Vec<String>>>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                on_mount {
+                    let label: i32 = 42;
+                    // `label + 1` only type-checks against the local `i32`, never the outer
+                    // `String` field — a real, compile-distinguishing proof of shadowing.
+                    log.borrow_mut().push(format!("shadowed:{}", label + 1));
+                }
+                TextBlock { text: "popup content" }
+            }
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl A2DirectDeferredLocalShadowOwner {}
+
+#[test]
+fn declarative_context_popup_direct_on_mount_local_let_shadows_the_enclosing_owner_field() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = A2DirectDeferredLocalShadowOwner::new(log.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    assert_eq!(log.borrow().as_slice(), ["shadowed:43"]);
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    unmount_subtree(&content);
+    handle.close();
+}
+
+#[test]
+fn declarative_context_popup_direct_event_closure_param_shadows_the_enclosing_owner_field() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = A2DirectDeferredHookOwner::new(log.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    let inner = content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| content.clone());
+
+    let routed_args = elwindui::core::input::RoutedEventArgs::default();
+    elwindui::core::ui::dispatch_routed(
+        &inner,
+        "on_tapped",
+        &elwindui::core::input::TappedEventArgs {
+            position: Point { x: 42.0, y: 7.0 },
+            modifiers: elwindui::core::input::KeyModifiers::default(),
+        },
+        &routed_args,
+    );
+
+    assert_eq!(
+        log.borrow().as_slice(),
+        ["mount:outer", "tapped-shadowed-x:42"],
+        "the event closure's own `|label|` parameter must shadow the outer `label` field \
+         (`.position.x` only compiles/resolves against the TappedEventArgs parameter, never the \
+         outer String field) — `mount:outer` is this same fixture's own on_mount hook firing first"
+    );
+
+    unmount_subtree(&content);
+    handle.close();
+}
+
+/// A2 test 3 (`on_update`): a lowered deferred view has no own `#[prop]`/`#[state]`/`#[computed]`/
+/// `#[environment]` field of its own to trigger `on_update` with (`DeferredViewBody` only carries
+/// `on_mount`/`on_unmount`/`on_update`/`lets`/`root` — no field declarations at all), so
+/// `on_update`'s own `subscribe_property_changed` dispatch is unreachable at runtime for a hidden
+/// Component *by construction*, on every DSL-authored component this way, not merely in this test.
+/// This is therefore verified at the only level that is actually meaningful here: the bare
+/// `log`/`label` references inside it must still generate valid Rust resolving against the
+/// enclosing owner — proven by this compiling and constructing successfully at all (an incorrect
+/// resolution, e.g. treating `label` as an unresolvable bare name, is a `elwindui-codegen`
+/// compile-time failure, not a silently-wrong runtime value).
+#[elwindui::component(inherits VerticalLayout)]
+struct A2DirectDeferredOnUpdateOwner {
+    #[state(default = "outer".to_string())]
+    label: String,
+    #[param]
+    log: Rc<RefCell<Vec<String>>>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                on_update: {
+                    log.borrow_mut().push(format!("update:{label}"));
+                }
+                TextBlock { text: "popup content" }
+            }
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl A2DirectDeferredOnUpdateOwner {}
+
+#[test]
+fn declarative_context_popup_direct_on_update_compiles_and_resolves_the_enclosing_owner_field() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let owner = A2DirectDeferredOnUpdateOwner::new(log.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    unmount_subtree(&content);
+    handle.close();
+}

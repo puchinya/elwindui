@@ -11,6 +11,46 @@ use windows::Graphics::{PointInt32, SizeInt32};
 use windows::core::HSTRING;
 use windows::core::Interface;
 
+/// PR #165 review remediation, A1/T22-T24: pure decision logic for a native `AppWindow.Closing`
+/// event, extracted so it is unit-testable without any real WinRT/native window machinery — this
+/// crate is `#![cfg(target_os = "windows")]`-gated in its entirety, so a test exercising the real
+/// `TypedEventHandler` closure below cannot run outside a Windows environment, but this pure
+/// function can be verified anywhere. `try_register_closing_handler`'s closure is a thin wrapper
+/// around this and `should_veto_native_close`, below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeCloseDecision {
+    /// Let the native close proceed unmodified: either this is the framework's own close
+    /// (`framework_initiated_close` — already being handled through `InnerWindow::close()`, T24),
+    /// or no close-request handler is installed at all (e.g. `Created`/`Unmounted` state — T21 —
+    /// nothing to route through).
+    AllowNativeDefault,
+    /// A close-request handler is installed and this is a genuine external close attempt —
+    /// invoke it; its return value (T22/T23) decides the final outcome via
+    /// `should_veto_native_close`.
+    InvokeHandler,
+}
+
+pub(crate) fn decide_native_close(
+    framework_initiated: bool,
+    handler_installed: bool,
+) -> NativeCloseDecision {
+    if framework_initiated || !handler_installed {
+        NativeCloseDecision::AllowNativeDefault
+    } else {
+        NativeCloseDecision::InvokeHandler
+    }
+}
+
+/// Whether the original native close attempt should be vetoed
+/// (`AppWindowClosingEventArgs::SetCancel(true)`), given the close-request handler's own return
+/// value. `true` (T22): the framework accepted the close request and is now handling it through
+/// its own lifecycle — veto the native attempt. `false` (T23): the generated owner is already
+/// gone — allow the native default close to proceed (cancelling here would strand the native
+/// window open with no framework owner left to ever close it).
+pub(crate) fn should_veto_native_close(handler_result: bool) -> bool {
+    handler_result
+}
+
 pub(crate) struct InnerWindow {
     xaml: XamlWindow,
     content_host: TreeHostPanel,
@@ -74,23 +114,18 @@ impl InnerWindow {
             let Some(args) = args else {
                 return Ok(());
             };
-            if framework_initiated_close.get() {
-                // The framework's own final native close (`InnerWindow::close`, below) — let it
-                // proceed unmodified; the close-request handler must not run again for our own
-                // close (it would try to re-invoke `WindowExt::close()` on an already-closing
-                // Window).
-                return Ok(());
-            }
             let handler = close_request_handler.borrow().clone();
-            let Some(handler) = handler else {
-                return Ok(());
-            };
-            // Prevent this native close attempt from proceeding independently — the framework's
-            // own lifecycle decides whether/when the real native close happens (via this same
-            // `InnerWindow::close()`, `framework_initiated_close`-guarded so it isn't re-entered
-            // through this same handler once it runs).
-            let _ = args.SetCancel(true);
-            handler();
+            match decide_native_close(framework_initiated_close.get(), handler.is_some()) {
+                NativeCloseDecision::AllowNativeDefault => {}
+                NativeCloseDecision::InvokeHandler => {
+                    let handler = handler.expect(
+                        "InvokeHandler is only returned when handler_installed was true",
+                    );
+                    if should_veto_native_close(handler()) {
+                        let _ = args.SetCancel(true);
+                    }
+                }
+            }
             Ok(())
         });
         if app_window.Closing(&handler).is_ok() {
@@ -315,5 +350,59 @@ impl InnerWindow {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod native_close_decision_tests {
+    use super::*;
+
+    /// T24: a framework-initiated close (the framework's own `InnerWindow::close()` in progress)
+    /// always allows the native default, regardless of whether a handler is installed — the
+    /// reentrancy guard takes priority over handler dispatch.
+    #[test]
+    fn framework_initiated_close_allows_native_default_even_with_handler_installed() {
+        assert_eq!(
+            decide_native_close(true, true),
+            NativeCloseDecision::AllowNativeDefault
+        );
+        assert_eq!(
+            decide_native_close(true, false),
+            NativeCloseDecision::AllowNativeDefault
+        );
+    }
+
+    /// T21: no close-request handler installed (e.g. the generated owner never reached
+    /// `mount_override`, or already cleared it in `unmount_override`) allows the native default.
+    #[test]
+    fn no_handler_installed_allows_native_default() {
+        assert_eq!(
+            decide_native_close(false, false),
+            NativeCloseDecision::AllowNativeDefault
+        );
+    }
+
+    /// A genuine external close attempt with a handler installed must invoke it.
+    #[test]
+    fn external_close_with_handler_installed_invokes_handler() {
+        assert_eq!(
+            decide_native_close(false, true),
+            NativeCloseDecision::InvokeHandler
+        );
+    }
+
+    /// T22: the handler returning `true` (framework accepted and is handling the close) vetoes
+    /// the original native close attempt.
+    #[test]
+    fn handler_accepting_the_close_vetoes_the_native_attempt() {
+        assert!(should_veto_native_close(true));
+    }
+
+    /// T23: the handler returning `false` (generated owner already gone) allows the native
+    /// default close to proceed — this is the exact case A1 originally got wrong (cancelling
+    /// unconditionally regardless of the handler's return value).
+    #[test]
+    fn handler_declining_the_close_allows_native_default() {
+        assert!(!should_veto_native_close(false));
     }
 }

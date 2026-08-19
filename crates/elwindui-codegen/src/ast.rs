@@ -619,6 +619,20 @@ pub struct DeferredViewExpr {
     /// pass (`lib.rs`) fills it in; always `Some` by the time `codegen.rs` emits the
     /// `ViewTemplate::new(..)` factory referencing it.
     pub hidden_component: Option<String>,
+    /// The **source** lexical owner type name — the real, DSL-author-visible Component whose
+    /// `view! { .. }` body this `DeferredView` was originally written inside, no matter how many
+    /// levels of nested `context_popup: view! { .. }` separate it from that Component today. This
+    /// is what `hidden_component`'s own generated struct's `__view_owner: Weak<..>` field is typed
+    /// against (`component_frontend::hidden_view_template_component`), so it is also what
+    /// `codegen.rs`'s `emit_deferred_view_value` must recover a `Weak<..>` of at the *point this
+    /// factory expression is emitted* — which is **not** necessarily `ctx.target` (the concrete
+    /// type currently being code-generated): for a `DeferredView` nested inside another
+    /// `DeferredView`'s own body, `ctx.target` at emission time is the *outer* hidden Component,
+    /// while `lexical_owner` stays the original source Component (PR #165 review remediation, A3
+    /// — see `lib.rs`'s `lower_deferred_views_in_expr` for why these two are deliberately kept
+    /// distinct). `None` until the lowering pass fills it in, same lifecycle as
+    /// `hidden_component`.
+    pub lexical_owner: Option<String>,
 }
 
 /// The body of a `ViewExpr::Closure`. `key`/`render_label` return a plain expression;

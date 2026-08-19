@@ -5041,11 +5041,21 @@ fn generate_view(
         (None, None)
     };
 
-    let this_ident = format_ident!("this");
-    let on_mount_stmt = view
-        .on_mount
-        .as_ref()
-        .map(|block| rewrite_base_calls(block.clone(), &this_ident));
+    // PR #165 review remediation, A2: `on_mount`/`on_unmount` fire synchronously, inline within
+    // `__build_view`/`__run_on_unmount`, always behind a plain `self`-shaped receiver in every
+    // generated shape (`&self` for the `#[class]`-composed shapes, `self: &Rc<Self>` for the plain
+    // shape) — `self` is therefore the one receiver token valid everywhere these two hooks are
+    // spliced, unlike `this` (only bound in some of those shapes). `rewrite_view_closure_block`
+    // (the same `ViewClosureRewriter` machinery `on_*` event handlers already go through) resolves
+    // bare references to this component's own fields *and*, inside a lowered deferred view
+    // (`ctx.implicit_owner`), the enclosing source Component's own fields — generalizing the exact
+    // mechanism, not duplicating it for lifecycle hooks specifically.
+    let self_ident = format_ident!("self");
+    let hook_mode = EmitMode::WithSelf(quote! { #self_ident });
+    let on_mount_stmt = view.on_mount.as_ref().map(|block| {
+        let rewritten = rewrite_base_calls(block.clone(), &self_ident);
+        rewrite_view_closure_block(rewritten, &[], &ctx, &hook_mode)
+    });
 
     let mut shadow_hooks = TokenStream::new();
     if let Some(block) = &base_on_mount_block {
@@ -5055,7 +5065,8 @@ fn generate_view(
         shadow_hooks.extend(quote! { #[allow(dead_code)] fn __base_on_unmount(&self) #block });
     }
     let on_unmount_method = view.on_unmount.as_ref().map(|block| {
-        let rewritten = rewrite_base_calls(block.clone(), &format_ident!("self"));
+        let rewritten = rewrite_base_calls(block.clone(), &self_ident);
+        let rewritten = rewrite_view_closure_block(rewritten, &[], &ctx, &hook_mode);
         quote! { #[allow(dead_code)] fn __run_on_unmount(&self) #rewritten }
     });
 
@@ -5579,10 +5590,16 @@ fn generate_view(
     // value, .. }` struct literal, which never calls `self.on_property_changed(..)` — only a
     // generated setter does, and only a setter call after this subscription exists can be observed
     // by it.
+    // PR #165 review remediation, A2: unlike `on_mount`/`on_unmount` (synchronous, inline), this
+    // block runs later, inside a *stored* `subscribe_property_changed` closure — the closure
+    // captures only `weak` and re-derives an owned `this: Rc<Self>` from it on each invocation
+    // (below), so `this` (not `self`, which cannot be captured into a `'static` closure by
+    // reference) is the correct `EmitMode::WithSelf` receiver here.
+    let on_update_hook_mode = EmitMode::WithSelf(quote! { this });
     let own_on_update_subscription = view.on_update.as_ref().map(|hook| {
-        let block = &hook.block;
+        let block = rewrite_view_closure_block(hook.block.clone(), &[], &ctx, &on_update_hook_mode);
         let match_arms = match &hook.fields {
-            None => quote! { _ => { #block } },
+            None => quote! { _ => #block },
             Some(names) => {
                 let mut variant_idents = Vec::new();
                 let mut unknown_errors = TokenStream::new();
@@ -5600,7 +5617,7 @@ fn generate_view(
                     unknown_errors
                 } else {
                     quote! {
-                        #(#component_property_enum::#variant_idents)|* => { #block }
+                        #(#component_property_enum::#variant_idents)|* => #block
                         _ => {}
                     }
                 }
@@ -8590,14 +8607,24 @@ fn emit_closure_value(
 /// binding whose *type* is uniformly `Weak<Self>` across both. So this reuses `__build_view`'s own
 /// existing "most-derived self" recovery idiom instead of assuming either shape directly: read the
 /// type-erased `self.__self_weak` field every component carries (populated once, during
-/// `Rc::new_cyclic`, regardless of composition style), upgrade, `downcast::<#target>()`. `ctx.target`
-/// (`generate_view`'s own target identifier — the *concrete* type currently being generated) is the
-/// same `#target` `__build_view`'s own `__most_derived` local already downcasts to.
+/// `Rc::new_cyclic`, regardless of composition style), upgrade, `downcast::<#target>()`.
+///
+/// PR #165 review remediation, A3: the downcast target is `deferred.lexical_owner` — the real
+/// source Component this `DeferredView` was written inside — **not** `ctx.target` (`generate_view`'s
+/// own target identifier, the concrete type *currently being generated*). For a top-level deferred
+/// view these are the same identifier, since `ctx.target` at that point *is* the source Component.
+/// But for a `DeferredView` nested inside another `DeferredView`'s own body, this factory expression
+/// is emitted while generating the *outer* hidden Component's own code — `ctx.target` there is that
+/// outer hidden Component, not the true source Component `lexical_owner` still correctly names (see
+/// `lib.rs`'s `lower_deferred_views_in_expr` and `DeferredViewExpr::lexical_owner`'s own doc
+/// comment). Using `ctx.target` there would build a `Weak<OuterHiddenComponent>` and hand it to a
+/// hidden-Component constructor whose own field expects `Weak<SourceComponent>` — a straight type
+/// mismatch, not merely a semantic one.
 ///
 /// The factory is an `Fn`, not `FnOnce` (`ViewTemplate::new`'s own bound) — cloning the captured
 /// weak owner on every call (Issue #162 §3.8) is required, not merely an optimization choice: the
 /// same `ViewTemplate` value is built once and may be `.build()` many times (once per popup-open).
-fn emit_deferred_view_value(deferred: &DeferredViewExpr, ctx: &ViewCtx) -> TokenStream {
+fn emit_deferred_view_value(deferred: &DeferredViewExpr, _ctx: &ViewCtx) -> TokenStream {
     let hidden_name = deferred.hidden_component.as_deref().unwrap_or_else(|| {
         panic!(
             "a `ViewExpr::DeferredView` reached codegen without being lowered first (Issue #162 \
@@ -8605,7 +8632,13 @@ fn emit_deferred_view_value(deferred: &DeferredViewExpr, ctx: &ViewCtx) -> Token
         )
     });
     let hidden_ident = format_ident!("{}", hidden_name);
-    let target = &ctx.target;
+    let lexical_owner_name = deferred.lexical_owner.as_deref().unwrap_or_else(|| {
+        panic!(
+            "a `ViewExpr::DeferredView` reached codegen without `lexical_owner` set by lowering \
+             (Issue #162 Step 6 / PR #165 A3) — this is an elwindui-codegen bug, not a user error"
+        )
+    });
+    let target = format_ident!("{}", lexical_owner_name);
     quote! {
         {
             let __view_owner_weak: std::rc::Weak<#target> = self
@@ -11004,22 +11037,82 @@ fn emit_on_event_closure_body(
     }
 }
 
+/// Collects every identifier bound by a `syn::Pat::Ident` anywhere inside `node` — `let`/`if
+/// let`/`while let` bindings, `match`-arm patterns, `for`-loop patterns, and any nested closure's
+/// own parameters — regardless of nesting depth or which specific construct introduced the
+/// binding. `syn::Pat::Ident` is the common node every one of those binding forms lowers to, so a
+/// single `visit_pat_ident` override reaches all of them uniformly.
+///
+/// PR #165 review remediation, A2 (found while fixing it): not scope-precise — a name bound only
+/// inside one `if`/`match` arm is treated as shadowed for the *entire* surrounding block, not just
+/// that arm's own body. This is deliberately conservative rather than wrong: once a block-local
+/// name collides with a component's own field/implicit-owner name anywhere in it, that name is
+/// almost always meant as the local, everywhere in that scope — the alternative (perfectly
+/// scope-precise tracking) would need a real lexical-scope stack for comparatively little benefit
+/// over this simpler flat pre-pass.
+fn collect_locally_bound_names_in_block(block: &syn::Block) -> HashSet<String> {
+    struct Collector {
+        found: HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Collector {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            self.found.insert(node.ident.to_string());
+            syn::visit::visit_pat_ident(self, node);
+        }
+    }
+    let mut collector = Collector {
+        found: HashSet::new(),
+    };
+    collector.visit_block(block);
+    collector.found
+}
+
+fn collect_locally_bound_names_in_expr(expr: &syn::Expr) -> HashSet<String> {
+    struct Collector {
+        found: HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Collector {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            self.found.insert(node.ident.to_string());
+            syn::visit::visit_pat_ident(self, node);
+        }
+    }
+    let mut collector = Collector {
+        found: HashSet::new(),
+    };
+    collector.visit_expr(expr);
+    collector.found
+}
+
 /// Rewrites bare references to one of this component's own fields (for example `vm`) inside an
-/// `on_*` event handler's closure body into the same
-/// `self.vm.field()`/`self.vm` forms every other DSL attribute value resolves to — the closure's
-/// own bound parameters (`closure_params`, e.g. `index`) are left untouched as genuine locals.
-/// Shared by [`rewrite_view_closure_expr`]/[`rewrite_view_closure_block`] since a `syn::Expr` and a
+/// `on_*` event handler's closure body, or (Issue #162, PR #165 A2) an `on_mount`/`on_unmount`/
+/// `on_update` lifecycle hook block, into the same `self.vm.field()`/`self.vm` forms every other
+/// DSL attribute value resolves to. Two kinds of names are left untouched as genuine locals: the
+/// closure's own bound parameters (`closure_params`, e.g. `index`), and any name this same block
+/// binds itself via `let`/`if let`/`match`/`for`/a nested closure (`local_bindings`, collected once
+/// up front by [`collect_locally_bound_names`] — see that function's own doc comment for why this
+/// preserves ordinary lexical shadowing without a full scope stack). Shared by
+/// [`rewrite_view_closure_expr`]/[`rewrite_view_closure_block`] since a `syn::Expr` and a
 /// `syn::Block` both just need the same `syn::visit_mut::VisitMut` walk applied at a different
 /// entry point.
 struct ViewClosureRewriter<'a> {
     closure_params: &'a [String],
+    local_bindings: &'a HashSet<String>,
     ctx: &'a ViewCtx,
     mode: &'a EmitMode,
 }
 
 impl<'a> ViewClosureRewriter<'a> {
+    /// A name currently shadowed by a genuine local binding — either a closure parameter
+    /// (`closure_params`) or anything this same block/expression binds itself via `let`/`if
+    /// let`/`match`/`for`/a nested closure (`local_bindings`). Checked before every
+    /// field/implicit-owner resolution below, so ordinary Rust lexical shadowing always wins.
+    fn is_shadowed(&self, name: &str) -> bool {
+        self.closure_params.iter().any(|p| p == name) || self.local_bindings.contains(name)
+    }
+
     fn resolved_owner(&self, name: &str) -> Option<TokenStream> {
-        if self.closure_params.iter().any(|p| p == name) {
+        if self.is_shadowed(name) {
             return None;
         }
         if self.ctx.own_fields.contains_key(name) {
@@ -11036,7 +11129,7 @@ impl<'a> ViewClosureRewriter<'a> {
     /// itself, not its value). Only matters in `WithSelf` mode — see that same comment for why
     /// `Construction` mode's raw, not-yet-cell-wrapped local needs no such unwrapping.
     fn resolved_mutable_field_read(&self, name: &str) -> Option<TokenStream> {
-        if self.closure_params.iter().any(|p| p == name) {
+        if self.is_shadowed(name) {
             return None;
         }
         if !self.ctx.mutable_own_fields.contains(name) {
@@ -11052,6 +11145,26 @@ impl<'a> ViewClosureRewriter<'a> {
         } else {
             quote! { #self_tok.#ident.borrow().clone() }
         })
+    }
+
+    /// PR #165 review remediation, A2: a bare 1-segment name that is *not* a closure parameter and
+    /// *not* one of this component's own fields falls back to the implicit lexical owner
+    /// (`ViewCtx::implicit_owner`, `__view_owner` inside a lowered deferred view — Issue #162
+    /// §3.10-§3.11), the same fallback `emit_expr`'s own `ViewExpr::Path` handling already applies
+    /// for an ordinary DSL attribute-value expression. `name` becomes `<owner>.name()` — a getter
+    /// call on the (weak-upgraded, via `resolved_owner`/`owner_value_tokens`/`ctx.
+    /// weak_bindable_owners`) owner value — generalizing the exact same 2-segment `owner.field`
+    /// machinery `resolved_owner` already reuses, rather than duplicating it. Only reached once the
+    /// closure-param/own-field/mutable-field checks above have already ruled out a local binding,
+    /// preserving ordinary lexical shadowing (a component's own field of the same name always wins).
+    fn resolved_implicit_owner_field(&self, name: &str) -> Option<TokenStream> {
+        if self.is_shadowed(name) {
+            return None;
+        }
+        let owner = self.ctx.implicit_owner.as_deref()?;
+        let base = self.resolved_owner(owner)?;
+        let getter = format_ident!("{}", name);
+        Some(quote! { #base.#getter() })
     }
 }
 
@@ -11069,8 +11182,7 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
             if let syn::Expr::Path(p) = assign.left.as_ref() {
                 if let Some(ident) = p.path.get_ident() {
                     let name = ident.to_string();
-                    let is_closure_param = self.closure_params.iter().any(|p| p == &name);
-                    if !is_closure_param && self.ctx.mutable_own_fields.contains(&name) {
+                    if !self.is_shadowed(&name) && self.ctx.mutable_own_fields.contains(&name) {
                         if let EmitMode::WithSelf(self_tok) = self.mode {
                             self.visit_expr_mut(&mut assign.right);
                             let setter = format_ident!("set_{}", name);
@@ -11090,7 +11202,7 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 .map(|s| s.ident.to_string())
                 .collect();
             if let [only] = segments.as_slice() {
-                if self.closure_params.iter().any(|p| p == only) {
+                if self.is_shadowed(only) {
                     return;
                 }
                 if let Some(value) = self.resolved_mutable_field_read(only) {
@@ -11099,6 +11211,10 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 }
                 if let Some(base) = self.resolved_owner(only) {
                     *node = syn::parse_quote! { #base };
+                    return;
+                }
+                if let Some(value) = self.resolved_implicit_owner_field(only) {
+                    *node = syn::parse_quote! { #value };
                 }
                 return;
             }
@@ -11151,6 +11267,7 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                         let Some(value) = self
                             .resolved_mutable_field_read(&name)
                             .or_else(|| self.resolved_owner(&name))
+                            .or_else(|| self.resolved_implicit_owner_field(&name))
                         else {
                             continue;
                         };
@@ -11170,8 +11287,10 @@ fn rewrite_view_closure_expr(
     ctx: &ViewCtx,
     mode: &EmitMode,
 ) -> TokenStream {
+    let local_bindings = collect_locally_bound_names_in_expr(&expr);
     ViewClosureRewriter {
         closure_params,
+        local_bindings: &local_bindings,
         ctx,
         mode,
     }
@@ -11185,8 +11304,10 @@ fn rewrite_view_closure_block(
     ctx: &ViewCtx,
     mode: &EmitMode,
 ) -> TokenStream {
+    let local_bindings = collect_locally_bound_names_in_block(&block);
     ViewClosureRewriter {
         closure_params,
+        local_bindings: &local_bindings,
         ctx,
         mode,
     }
@@ -14669,8 +14790,11 @@ struct NotepadWindow {
             generated_str.contains("fn __base_on_mount"),
             "{generated_str}"
         );
+        // PR #165 review remediation, A2: `on_mount`/`on_unmount`'s `base::name()` rewriting now
+        // uses `self` as the receiver (valid in every generated shape, unlike `this`, which is
+        // only ever bound in some of them) — see `generate_view`'s own comment on `self_ident`.
         assert!(
-            generated_str.contains("this . __base_on_mount"),
+            generated_str.contains("self . __base_on_mount"),
             "{generated_str}"
         );
     }

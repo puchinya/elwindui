@@ -429,11 +429,23 @@ fn lower_deferred_views_in_child(
 /// The one variant-specific step: everything else in this file's lowering walker only exists to
 /// *reach* every `ViewExpr::DeferredView` anywhere in `owner_type_name`'s own view tree — this is
 /// where one gets turned into a hidden Component/View pair (Issue #162 §3.5). Recurses into the
-/// deferred body's own content *after* assigning this one's ordinal/name, using the newly assigned
-/// `hidden_name` as the lexical owner for any further-nested `view!` found inside it (a popup
-/// opened from within another popup's own content) — deliberately not chained back further than
-/// one level (the doubly-nested case is outside Issue #162's required scope; see
-/// `docs/design/runtime/view_template_design.md` §3 for the single-level contract this lowers).
+/// deferred body's own content *after* assigning this one's ordinal/name, using the **original**
+/// `owner_type_name` — never the hidden component name just generated for *this* level — as the
+/// lexical owner for any further-nested `view! { .. }` found inside it (a `context_popup` opened
+/// from within another `context_popup`'s own content, at arbitrary depth).
+///
+/// PR #165 review remediation, A3: an earlier revision passed the just-assigned `hidden_name`
+/// here instead, which changed source lexical-scoping semantics — a doubly-nested deferred view's
+/// bare names would resolve against the *synthetic* outer hidden Component instead of the real
+/// source Component the DSL author actually wrote both `view! { .. }` blocks inside of. Lowering
+/// is a compiler-internal transformation invisible to the DSL author's own mental model: from
+/// their perspective every `context_popup: view! { .. }` — no matter how many levels deep inside
+/// another one — is still textually nested inside the *same* outer `view! { .. }` macro
+/// invocation the enclosing Component declared, exactly like an `on_click` closure's own bare
+/// names already resolve against the outer Component regardless of closure nesting depth. Every
+/// `DeferredView` reachable from one `lower_deferred_views_in_module` call therefore keeps the
+/// *same* `owner_type_name` — the original source Component — no matter its nesting depth; only
+/// the generated hidden component's own *name* (`hidden_name`) changes per level.
 fn lower_deferred_views_in_expr(
     expr: &mut ast::ViewExpr,
     owner_type_name: &str,
@@ -448,7 +460,7 @@ fn lower_deferred_views_in_expr(
             lower_deferred_views_in_element_lets_and_body(
                 &mut deferred.body.lets,
                 &mut deferred.body.root,
-                &hidden_name,
+                owner_type_name,
                 ordinal,
                 new_items,
             );
@@ -461,6 +473,10 @@ fn lower_deferred_views_in_expr(
             new_items.push(ast::Item::Component(hidden_component));
             new_items.push(ast::Item::View(hidden_view));
             deferred.hidden_component = Some(hidden_name);
+            // A3: the true source lexical owner, not whatever component's generated code this
+            // factory expression ends up emitted inside of (see `DeferredViewExpr::lexical_owner`'s
+            // own doc comment).
+            deferred.lexical_owner = Some(owner_type_name.to_string());
         }
         ast::ViewExpr::Element(elem) => {
             lower_deferred_views_in_element(elem, owner_type_name, ordinal, new_items)

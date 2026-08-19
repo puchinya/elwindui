@@ -9092,6 +9092,22 @@ fn emit_external_attribute_sets(
             // production consumer.
             ViewExpr::DeferredView(deferred) => {
                 let factory = emit_deferred_view_value(deferred, ctx);
+                // PR #165 review remediation, A4: `validate::check_deferred_view_assignment`
+                // only catches a mismatched target when the target component has a local
+                // `TypeInfo` — a no-op for this real-builtin path (no `TypeInfo` exists here at
+                // all). Assert the target's *real* declared type here instead, read through the
+                // same cross-crate `@field_type` transport `synthesize_external_base_fields`
+                // already uses (Refs #90) — an unknown property name falls through to
+                // `@field_type`'s own existing terminal `compile_error!` unchanged (never reaches
+                // this assertion at all), and a known property whose declared type isn't
+                // `ViewTemplate`/`Option<ViewTemplate>` fails this bound with
+                // `DeferredViewAssignmentTarget`'s own `#[diagnostic::on_unimplemented]` message
+                // naming both the field and the required type (`docs/specs/dsl_spec.md` rule 37).
+                sets.extend(quote! {
+                    elwindui::core::ui::__assert_deferred_view_assignment_target::<
+                        elwindui::core::#props_macro!(@field_type #name_ident)
+                    >();
+                });
                 quote! { Some(#factory) }
             }
             other => {

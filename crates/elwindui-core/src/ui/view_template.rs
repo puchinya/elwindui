@@ -97,6 +97,45 @@ where
     }
 }
 
+/// PR #165 review remediation, A4: a sealed marker implemented only for `ViewTemplate` and
+/// `Option<ViewTemplate>` — the only two types a `context_popup: view! { .. }` (or any other
+/// `ViewExpr::DeferredView`) may ever be assigned to (`docs/specs/dsl_spec.md` rule 37).
+///
+/// `elwindui-codegen`'s own `validate::check_deferred_view_assignment` already rejects a
+/// mismatched target *when* the target component has a local `TypeInfo` (a same-crate
+/// `#[elwindui::component]`) — but a real builtin (`TextBlock`, `Window`, every hand-written
+/// `#[class]`-declared type in `elwindui-core`/a backend crate) never has one, so that check
+/// silently no-ops for the actual production path (`emit_external_attribute_sets`). This trait is
+/// the other half: `elwindui-codegen` emits a bound against it, generic over
+/// `__elwindui_props_{Type}!(@field_type {field})` (the same cross-crate field-type transport
+/// `synthesize_external_base_fields`/`resolve_effective_fields` already use, Refs #90) — so a
+/// mismatched real builtin target fails *at the consumer crate's own compile time*, with this
+/// trait's `#[diagnostic::on_unimplemented]` message naming the field and the required type,
+/// exactly like the local-`TypeInfo` diagnostic already does. See
+/// `docs/design/tools/codegen_design.md` §3.35 and `docs/specs/dsl_spec.md` rule 37.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a valid `context_popup`/deferred-view target type",
+    label = "a deferred view (`view! {{ .. }}`) can only be assigned to a `ViewTemplate` or `Option<ViewTemplate>` property, not `{Self}`",
+    note = "rewrite the target property's declared type to `ViewTemplate` or `Option<ViewTemplate>`, or assign an ordinary value instead of `view! {{ .. }}`"
+)]
+pub trait DeferredViewAssignmentTarget: private::Sealed {}
+
+mod private {
+    pub trait Sealed {}
+    impl Sealed for super::ViewTemplate {}
+    impl Sealed for Option<super::ViewTemplate> {}
+}
+
+impl DeferredViewAssignmentTarget for ViewTemplate {}
+impl DeferredViewAssignmentTarget for Option<ViewTemplate> {}
+
+/// Used only by `elwindui-codegen`'s generated static assertion (`emit_external_attribute_sets`) —
+/// never called, its only job is to force the type parameter's `DeferredViewAssignmentTarget`
+/// bound to be checked at the consumer crate's own compile time.
+#[doc(hidden)]
+pub fn __assert_deferred_view_assignment_target<T: DeferredViewAssignmentTarget>() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

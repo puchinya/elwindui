@@ -75,11 +75,12 @@ struct MountHideCloseWindow {
 #[elwindui::component]
 impl MountHideCloseWindow {}
 
-/// PR #165 review remediation, A6/T25: a Window whose content declares a `context_popup: view! {
-/// .. }` directly (not through a nested Component) — used only to prove the *shape* type-checks;
-/// see `type_checked_popup_before_owner_close_ordering`, below, for the intended ordering this
-/// documents (real execution needs a native Window, main-thread-only, same constraint as every
-/// other fixture in this file).
+/// PR #165 rereview remediation round 2, A6/T25: a Window whose content declares a
+/// `context_popup: view! { .. }` directly (not through a nested Component) — used only to prove
+/// the *shape* compiles; see `type_checked_window_with_declarative_popup_content_compiles`, below,
+/// for why this is compile-only (real execution needs a native Window, main-thread-only, same
+/// constraint as every other fixture in this file) and where the actual T25 ordering proof lives
+/// instead.
 #[elwindui::component(inherits Window)]
 struct MountHideCloseWindowWithPopup {
     body: view! {
@@ -164,33 +165,28 @@ fn type_checked_new_show_hide_close_usage() {
     debug_assert_eq!(BUILD_COUNT.with(|c| c.get()), 1);
 }
 
-/// PR #165 review remediation, A6/T25: type-checked only (see module doc comment — same
-/// main-thread constraint as `type_checked_new_show_hide_close_usage`, above). Documents the
-/// intended ordering `Window::unmount_override` establishes
-/// (`docs/design/runtime/popup_context_menu_design.md`'s Owner-`Window`-close-interaction
-/// paragraph): closing the owner Window while one of its declarative popups is open must tear the
-/// popup down (`PopupContent`'s own `on_unmount`) *before* the owner's own content unmounts
-/// (`PopupWindowRoot`).
+/// PR #165 rereview remediation round 2, A6/T25: compile-only usage fixture — a `debug_assert_eq!`
+/// inside a function that is never executed (this crate's own tests never call it; see the module
+/// doc comment for why AppKit `Window` construction can't run in this `#[test]` harness at all)
+/// proves *nothing* about runtime ordering, so this function's own body no longer makes that
+/// claim. Its only remaining job is to keep `Window` + a declarative `context_popup: view! { .. }`
+/// on the same content tree compiling. The actual T25 (popup-before-owner-content teardown
+/// ordering) proof lives at two lower layers that genuinely do execute (or are structurally
+/// inspected) without needing a real native `Window`:
+/// - `elwindui-codegen::codegen::tests::t25_generated_unmount_override_runs_before_owner_content_unmount_subtree`
+///   (and `t19_generated_close_and_unmount_order_teardown_before_native_close`, which asserts the
+///   same ordering as part of a broader proof) — inspects the real generated `unmount()` source,
+///   proving `unmount_override()` (which closes any active popup) runs before the owner's own
+///   content `unmount_subtree`.
+/// - `elwindui_backend_appkit::host::close_active_popup_slot_tests` (executed on this environment)
+///   and `elwindui_backend_winui3::host::tests` (code-reviewed only, this crate does not compile
+///   here) — prove the backend's own active-popup slot is taken and closed reentrancy-safely.
 #[allow(dead_code)]
 #[cfg(feature = "backend-appkit")]
-fn type_checked_popup_before_owner_close_ordering() {
-    UNMOUNT_EVENTS.with(|events| events.borrow_mut().clear());
-
+fn type_checked_window_with_declarative_popup_content_compiles() {
     let window: Rc<MountHideCloseWindowWithPopup> = MountHideCloseWindowWithPopup::new();
     window.show();
-
-    // A real run would need to open the popup through `ContextMenuService` here (target ==
-    // the `TextBlock` declaring `context_popup`) before `close()` — omitted because reaching it
-    // requires walking the same generated visual tree `context_menu_and_popup.rs`'s own
-    // integration tests already navigate, and this function never executes regardless (main
-    // thread only) — the type/ordering contract below is what this fixture exists to document.
     window.close();
-    debug_assert_eq!(
-        get_unmount_events(),
-        vec!["PopupContent", "PopupWindowRoot"],
-        "an active popup's own on_unmount must fire before the owning Window's own content \
-         unmounts"
-    );
 }
 
 #[cfg(all(feature = "backend-winui3", target_os = "windows"))]

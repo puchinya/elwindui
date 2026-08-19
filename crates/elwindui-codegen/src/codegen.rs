@@ -15250,6 +15250,266 @@ struct NotepadWindow {
         );
     }
 
+    /// PR #165 rereview remediation round 2, A6: parses `generated` as a `syn::File` and returns
+    /// the pretty-printed source of the *first* `fn #method_name` found in *any* `impl` block
+    /// (an `ImplItemFn`), for deterministic ordering assertions against the real generated Window
+    /// lifecycle methods — real `NSWindow`/native-Window construction needs the main thread
+    /// (unavailable in any `#[test]` harness, see `window_mount_hide_close.rs`'s own established
+    /// type-check-only convention), so ordering must be proven by inspecting what the generator
+    /// actually emits rather than by observing a constructed Window at runtime. Every T17-T21
+    /// fixture below declares exactly one component, so a single unqualified match is
+    /// unambiguous; a multi-component fixture would need to disambiguate by enclosing `impl`
+    /// target, which none of these do.
+    fn generated_method_body(generated: &TokenStream, method_name: &str) -> String {
+        let file: syn::File = syn::parse2(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code should parse as a file: {e}\n{generated}"));
+        struct Finder<'a> {
+            name: &'a str,
+            found: Vec<String>,
+        }
+        impl<'a, 'ast> Visit<'ast> for Finder<'a> {
+            fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+                if node.sig.ident == self.name {
+                    self.found.push(quote! { #node }.to_string());
+                }
+                syn::visit::visit_impl_item_fn(self, node);
+            }
+        }
+        let mut finder = Finder {
+            name: method_name,
+            found: Vec::new(),
+        };
+        finder.visit_file(&file);
+        finder.found.into_iter().next().unwrap_or_else(|| {
+            panic!("method `{method_name}` not found in generated code:\n{generated}")
+        })
+    }
+
+    /// Shared host-composition (`inherits Window`) fixture for the A6/T17-T21 deterministic
+    /// lifecycle-ordering tests below — a single minimal component, so `generated_method_body`'s
+    /// unqualified match stays unambiguous.
+    fn generate_t17_t21_window_module() -> TokenStream {
+        let module = crate::test_module(&[(
+            Some("Window"),
+            r#"
+            struct T17T21TestWindow {
+                body: view! {
+                    title: "T17-T21"
+                    content: VerticalLayout { }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t17_t21_window", &generated);
+        generated
+    }
+
+    /// A6/T17: first-mount ordering. Proves the generated `mount()` body sets the lifecycle state
+    /// to `Mounted` *before* calling `mount_override(environment)`, which in turn happens *before*
+    /// `__build_view()` (content construction, wiring, and — inside `__build_view` itself — the
+    /// user's own `on_mount`, spliced in last, after every construction/wiring/subscribe step —
+    /// see `generate_view`'s own splice order, unchanged by this delta).
+    #[test]
+    fn t17_generated_mount_orders_state_then_mount_override_then_build_view() {
+        let generated = generate_t17_t21_window_module();
+        let mount_body = generated_method_body(&generated, "mount");
+
+        let state_pos = mount_body
+            .find("ComponentLifecycleState :: Mounted")
+            .expect("mount() should set the lifecycle state to Mounted");
+        let override_pos = mount_body
+            .find("WindowExt > :: mount_override")
+            .expect("mount() should call mount_override");
+        let build_pos = mount_body
+            .find("__build_view ()")
+            .expect("mount() should call __build_view()");
+
+        assert!(
+            state_pos < override_pos,
+            "lifecycle state must be set to Mounted before mount_override is called: {mount_body}"
+        );
+        assert!(
+            override_pos < build_pos,
+            "mount_override must be called before __build_view(): {mount_body}"
+        );
+        // Exactly one call in the generated mount() body — mount() itself is guarded (`if state
+        // != Created { panic }`) so a real second mount() call never reaches this point again.
+        assert_eq!(
+            mount_body.matches("WindowExt > :: mount_override").count(),
+            1,
+            "mount_override must be called exactly once from mount(): {mount_body}"
+        );
+    }
+
+    /// A6/T18: `show()`/`hide()`/`show()` structural ordering. Proves `hide()` never mounts,
+    /// unmounts, or rebuilds — its own generated body contains no lifecycle-state transition, no
+    /// `unmount`, and no `__build_view`/`mount(` call — so a second `show()` after `hide()` (which
+    /// re-enters `show()`'s own `if self.__mount_environment.get().is_none()` guard, already
+    /// `Some` after the first mount) structurally cannot rebuild either.
+    #[test]
+    fn t18_generated_hide_never_mounts_unmounts_or_rebuilds() {
+        let generated = generate_t17_t21_window_module();
+        let show_body = generated_method_body(&generated, "show");
+        let hide_body = generated_method_body(&generated, "hide");
+
+        assert!(
+            show_body.contains("__mount_environment . get () . is_none ()"),
+            "show() must only mount when not already mounted: {show_body}"
+        );
+        for forbidden in ["unmount", "__build_view", "ComponentLifecycleState"] {
+            assert!(
+                !hide_body.contains(forbidden),
+                "hide() must never {forbidden}: {hide_body}"
+            );
+        }
+        assert!(
+            hide_body.contains("self . base . hide ()"),
+            "hide() must forward to the backend: {hide_body}"
+        );
+    }
+
+    /// A6/T19: programmatic `close()` ordering. Proves the generated `close()` body orders its own
+    /// idempotency guard before `self.unmount()`, which itself happens before `self.base.close()`
+    /// (the real native close) — and that the generated `unmount()` body orders the lifecycle
+    /// transition to `Unmounting` before `unmount_override()` (closes any active popup — Issue
+    /// #162 §3.18), before the owner's own content `unmount_subtree`, before local teardown
+    /// (`__unmount_local`, which itself runs the user's `on_unmount` before clearing subscriptions
+    /// before transitioning to `Unmounted`).
+    #[test]
+    fn t19_generated_close_and_unmount_order_teardown_before_native_close() {
+        let generated = generate_t17_t21_window_module();
+        let close_body = generated_method_body(&generated, "close");
+        let guard_pos = close_body
+            .find("__closed . replace (true)")
+            .expect("close() should have an idempotency guard");
+        let unmount_pos = close_body
+            .find("self . unmount ()")
+            .expect("close() should call self.unmount()");
+        let base_close_pos = close_body
+            .find("self . base . close ()")
+            .expect("close() should forward to the backend's own close()");
+        assert!(
+            guard_pos < unmount_pos && unmount_pos < base_close_pos,
+            "close() must order: idempotency guard, then unmount(), then base.close(): \
+             {close_body}"
+        );
+
+        let unmount_body = generated_method_body(&generated, "unmount");
+        let unmounting_pos = unmount_body
+            .find("ComponentLifecycleState :: Unmounting")
+            .expect("unmount() should transition to Unmounting");
+        let override_pos = unmount_body
+            .find("WindowExt > :: unmount_override")
+            .expect("unmount() should call unmount_override");
+        let subtree_pos = unmount_body
+            .find("unmount_subtree")
+            .expect("unmount() should unmount the owner's own content subtree");
+        let local_pos = unmount_body
+            .find("__unmount_local ()")
+            .expect("unmount() should call __unmount_local()");
+        assert!(
+            unmounting_pos < override_pos
+                && override_pos < subtree_pos
+                && subtree_pos < local_pos,
+            "unmount() must order: state = Unmounting, then unmount_override() (closes any active \
+             popup), then the owner's own content unmount_subtree, then local teardown \
+             (__unmount_local, which itself runs user on_unmount before Unmounted): \
+             {unmount_body}"
+        );
+    }
+
+    /// A6/T20: repeated-close idempotency. Proves `close()`'s own guard
+    /// (`self.__closed.replace(true)`) syntactically *dominates* both `self.unmount()` and
+    /// `self.base.close()` — an early `return` inside the guard's own `if` body, appearing before
+    /// either call in the method's linear token order, so a second `close()` call can never reach
+    /// either again.
+    #[test]
+    fn t20_generated_close_guard_dominates_unmount_and_base_close() {
+        let generated = generate_t17_t21_window_module();
+        let close_body = generated_method_body(&generated, "close");
+        let guard_if_pos = close_body
+            .find("if self . __closed . replace (true)")
+            .expect("close() should guard on __closed.replace(true)");
+        let guard_return_pos = close_body[guard_if_pos..]
+            .find("return")
+            .map(|p| p + guard_if_pos)
+            .expect("the __closed guard should return early");
+        let unmount_pos = close_body
+            .find("self . unmount ()")
+            .expect("close() should call self.unmount()");
+        let base_close_pos = close_body
+            .find("self . base . close ()")
+            .expect("close() should forward to the backend's own close()");
+        assert!(
+            guard_return_pos < unmount_pos && guard_return_pos < base_close_pos,
+            "the __closed guard's own early return must textually dominate both unmount() and \
+             base.close(): {close_body}"
+        );
+    }
+
+    /// A6/T21: close-before-first-show. Proves the generated `unmount()` body's `Created` match
+    /// arm only sets the lifecycle state to `Unmounted` and returns — *before* `unmount_override`/
+    /// `unmount_subtree`/`__unmount_local` (and therefore before `mount_override`/`on_mount`/
+    /// `unmount_override`/`on_unmount` are ever reached) — so `close()` on a never-shown Window
+    /// reaches the real native `base.close()` without any of those framework hooks or user
+    /// lifecycle callbacks having run.
+    #[test]
+    fn t21_generated_unmount_created_branch_returns_before_any_override_or_hook() {
+        let generated = generate_t17_t21_window_module();
+        let unmount_body = generated_method_body(&generated, "unmount");
+
+        let created_arm_pos = unmount_body
+            .find("ComponentLifecycleState :: Created =>")
+            .expect("unmount() should match on ComponentLifecycleState::Created");
+        let created_arm_end = unmount_body[created_arm_pos..]
+            .find("ComponentLifecycleState :: Mounted =>")
+            .map(|p| p + created_arm_pos)
+            .expect("unmount() should also match on ComponentLifecycleState::Mounted, after Created");
+        let created_arm = &unmount_body[created_arm_pos..created_arm_end];
+
+        assert!(
+            created_arm.contains("ComponentLifecycleState :: Unmounted"),
+            "the Created arm must transition directly to Unmounted: {created_arm}"
+        );
+        assert!(
+            created_arm.contains("return"),
+            "the Created arm must return immediately: {created_arm}"
+        );
+        for forbidden in ["unmount_override", "unmount_subtree", "__unmount_local"] {
+            assert!(
+                !created_arm.contains(forbidden),
+                "the Created arm must not reach {forbidden}: {created_arm}"
+            );
+        }
+    }
+
+    /// A6/T25 (Layer 1 of 2 — Layer 2 is `elwindui-backend-appkit`'s/`elwindui-backend-winui3`'s
+    /// own `close_active_popup_slot` unit tests): the generated `unmount()` body calls
+    /// `unmount_override()` (closes any active declarative popup, Issue #162 §3.18) *before*
+    /// `unmount_subtree` on the owner's own content — restated here, on its own, as a directly
+    /// T25-traceable test, even though `t19_generated_close_and_unmount_order_teardown_before_
+    /// native_close` already asserts this exact ordering as part of its own broader proof.
+    #[test]
+    fn t25_generated_unmount_override_runs_before_owner_content_unmount_subtree() {
+        let generated = generate_t17_t21_window_module();
+        let unmount_body = generated_method_body(&generated, "unmount");
+        let override_pos = unmount_body
+            .find("WindowExt > :: unmount_override")
+            .expect("unmount() should call unmount_override");
+        let subtree_pos = unmount_body
+            .find("unmount_subtree")
+            .expect("unmount() should unmount the owner's own content subtree");
+        assert!(
+            override_pos < subtree_pos,
+            "unmount_override() (closes any active popup) must run before the owner's own \
+             content unmount_subtree: {unmount_body}"
+        );
+    }
+
     /// `Grid` (§3) + attached properties (`Grid::row`/`Grid::column`, §3) end to end: a `view`
     /// using `Grid` with `rows`/`columns` array-literal params and attached setters on its children
     /// must generate valid Rust, constructing `elwindui::core::ui::Grid` directly (a virtual

@@ -669,16 +669,11 @@ impl TreeHostPanel {
     }
 
     /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —
-    /// `take()`s the slot *before* calling `close()` so a reentrant close triggered from within
-    /// `close()` itself (e.g. the popup's own `on_unmount` closing the owner Window again) finds
-    /// the slot already empty rather than double-closing or double-borrowing it. Shared by the
-    /// existing request-replacement paths above and the owner `Window::unmount_override` path
-    /// (`native_ui::window.rs`).
+    /// see `close_active_popup_slot`'s own doc comment for the reentrancy-safety reasoning. Shared
+    /// by the existing request-replacement paths above and the owner `Window::unmount_override`
+    /// path (`native_ui::window.rs`).
     pub(crate) fn close_active_popup(&self) {
-        let popup = self.active_popup.borrow_mut().take();
-        if let Some(popup) = popup {
-            popup.close();
-        }
+        close_active_popup_slot(&self.active_popup);
     }
 
     /// Focuses the specified element within this host's focus tracker.
@@ -1529,9 +1524,106 @@ pub fn screen_logical_to_xaml_local_pure(
     }
 }
 
+/// PR #165 rereview remediation round 2, A6/T25 (Layer 2): closes `slot`'s own active custom
+/// popup/context-menu surface, if any — extracted out of `TreeHostPanel::close_active_popup` as a
+/// free function over a bare `&RefCell<..>` (no `TreeHostPanel`/native host construction needed)
+/// so it is unit-testable in isolation, mirroring `elwindui-backend-appkit`'s own identical
+/// extraction (`host::close_active_popup_slot`). `take()`s the slot *before* calling `close()` so
+/// a reentrant close triggered from within `close()` itself (e.g. the popup's own `on_unmount`
+/// closing the owner Window again, which reaches `Window::unmount_override` ->
+/// `close_active_popup` -> this same function a second time) finds the slot already empty rather
+/// than double-closing it or panicking on a nested `RefCell` borrow. This crate is
+/// `#![cfg(target_os = "windows")]`-gated in its entirety, so — like every other test in this same
+/// module's own `#[cfg(test)] mod tests` below — this function's own unit tests cannot run in this
+/// (macOS) environment regardless of how pure the function itself is; NOT VERIFIED here.
+pub(crate) fn close_active_popup_slot(
+    slot: &RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>,
+) {
+    let popup = slot.borrow_mut().take();
+    if let Some(popup) = popup {
+        popup.close();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    struct FakePopupSurfaceHandle {
+        slot: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>>,
+        close_count: Rc<Cell<u32>>,
+        reenter: bool,
+    }
+
+    impl elwindui_core::ui::popup::PopupSurfaceHandle for FakePopupSurfaceHandle {
+        fn close(&self) {
+            assert!(
+                self.slot.borrow().is_none(),
+                "the slot must already be empty by the time PopupSurfaceHandle::close() runs"
+            );
+            self.close_count.set(self.close_count.get() + 1);
+            if self.reenter {
+                close_active_popup_slot(&self.slot);
+            }
+        }
+    }
+
+    /// T25 (Layer 2): a plain close — the slot holds a handle, `close_active_popup_slot` takes it
+    /// (leaving the slot empty) before calling `close()`, and `close()` runs exactly once.
+    #[test]
+    fn close_active_popup_slot_takes_before_close_and_closes_exactly_once() {
+        let slot: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>> =
+            Rc::new(RefCell::new(None));
+        let close_count = Rc::new(Cell::new(0));
+        let handle: Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle> =
+            Rc::new(FakePopupSurfaceHandle {
+                slot: slot.clone(),
+                close_count: close_count.clone(),
+                reenter: false,
+            });
+        *slot.borrow_mut() = Some(handle);
+
+        close_active_popup_slot(&slot);
+
+        assert_eq!(close_count.get(), 1);
+        assert!(slot.borrow().is_none());
+    }
+
+    /// T25 (Layer 2): an empty slot is a no-op — no panic, nothing closed.
+    #[test]
+    fn close_active_popup_slot_on_empty_slot_is_a_no_op() {
+        let slot: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>> =
+            Rc::new(RefCell::new(None));
+        close_active_popup_slot(&slot);
+        assert!(slot.borrow().is_none());
+    }
+
+    /// T25 (Layer 2): reentrancy safety — `PopupSurfaceHandle::close()` itself calls back into
+    /// `close_active_popup_slot` on the *same* slot. Must not panic on a nested `RefCell` borrow,
+    /// and the reentrant call must observe an already-empty slot (no second close).
+    #[test]
+    fn close_active_popup_slot_is_reentrancy_safe() {
+        let slot: Rc<RefCell<Option<Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle>>>> =
+            Rc::new(RefCell::new(None));
+        let close_count = Rc::new(Cell::new(0));
+        let handle: Rc<dyn elwindui_core::ui::popup::PopupSurfaceHandle> =
+            Rc::new(FakePopupSurfaceHandle {
+                slot: slot.clone(),
+                close_count: close_count.clone(),
+                reenter: true,
+            });
+        *slot.borrow_mut() = Some(handle);
+
+        close_active_popup_slot(&slot);
+
+        assert_eq!(
+            close_count.get(),
+            1,
+            "the reentrant call must find the slot already empty and close nothing a second time"
+        );
+        assert!(slot.borrow().is_none());
+    }
 
     #[test]
     fn display_area_work_area_primary_monitor_scale_1() {

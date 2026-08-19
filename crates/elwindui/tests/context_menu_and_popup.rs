@@ -1681,3 +1681,121 @@ fn declarative_context_popup_direct_on_update_compiles_and_resolves_the_enclosin
     unmount_subtree(&content);
     handle.close();
 }
+
+/// PR #165 review remediation, A3: a `context_popup: view! { .. }` nested inside another
+/// `context_popup: view! { .. }` must still resolve bare names against the *original* source
+/// Component, at runtime, for both levels — the end-to-end counterpart to `codegen.rs`'s own
+/// `nested_deferred_view_keeps_the_original_source_component_as_lexical_owner` (which proves the
+/// generated `Weak<..>` type; this proves the *value* actually observed is correct and current).
+#[elwindui::component(inherits VerticalLayout)]
+struct A3NestedDeferredOwner {
+    #[state(default = "outer".to_string())]
+    value: String,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                TextBlock {
+                    text: "inner",
+                    context_popup: view! {
+                        TextBlock { text: value }
+                    },
+                }
+            },
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl A3NestedDeferredOwner {}
+
+#[test]
+fn declarative_context_popup_nested_popup_observes_current_outer_value() {
+    let owner = A3NestedDeferredOwner::new();
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    // Change the outer value *after* construction, before either popup is opened — proves the
+    // inner (second-level) popup reads the *current* value, not one snapshotted at construction.
+    owner.set_value("changed".to_string());
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let outer_host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let outer_handle = ContextMenuService::open_custom_popup(
+        &outer_host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, outer deferred view should build");
+
+    // Navigate to the inner TextBlock (the outer popup's own deferred-view root) to open the
+    // *second*, nested popup from it — reusing the same `visual_children().first()` navigation
+    // already proven correct for a bare-root-TextBlock deferred view above.
+    let outer_content = Rc::clone(&outer_host.shown.borrow()[0].0);
+    let inner_target = outer_content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| outer_content.clone());
+
+    let inner_request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (inner_resolved, inner_anchor) =
+        ContextMenuService::process_request_for_target(&inner_target, &inner_request)
+            .expect("inner target should resolve its own context popup");
+    let ResolvedContextDefinition::Popup { template: inner_t } = inner_resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let inner_host = TestPopupHost::new();
+    let _inner_handle = ContextMenuService::open_custom_popup(
+        &inner_host,
+        &inner_resolved.owner,
+        &inner_t,
+        &inner_anchor,
+        inner_resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("outer popup content is alive, inner deferred view should build");
+
+    assert_eq!(inner_host.shown.borrow().len(), 1);
+    // The inner popup's own root is `TextBlock { text: value }` — `value` must resolve against
+    // `A3NestedDeferredOwner` (the original source Component), reading its *current* value
+    // ("changed", set above), not the outer popup's own hidden Component (which has no `value`
+    // field of its own at all — this DSL bare name is only satisfiable via the implicit_owner
+    // chain reaching all the way back to `A3NestedDeferredOwner`).
+    let inner_content = Rc::clone(&inner_host.shown.borrow()[0].0);
+    // The inner popup's own content root is the second hidden Component's own root (a
+    // `ContentControl`, per `hidden_view_template_component`'s base) — its declared `TextBlock {
+    // text: value }` is its visual *child*, same one-level-of-wrapping shape already navigated
+    // from `outer_content` to `inner_target` above.
+    let inner_text_node = inner_content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| inner_content.clone());
+    let text_block = inner_text_node
+        .as_any()
+        .downcast_ref::<elwindui::core::ui::TextBlock>()
+        .expect("inner popup content should resolve to the TextBlock itself");
+    assert_eq!(text_block.text.borrow().as_str(), "changed");
+
+    unmount_subtree(&inner_content);
+    unmount_subtree(&outer_content);
+    outer_handle.close();
+}

@@ -8624,7 +8624,7 @@ fn emit_closure_value(
 /// The factory is an `Fn`, not `FnOnce` (`ViewTemplate::new`'s own bound) — cloning the captured
 /// weak owner on every call (Issue #162 §3.8) is required, not merely an optimization choice: the
 /// same `ViewTemplate` value is built once and may be `.build()` many times (once per popup-open).
-fn emit_deferred_view_value(deferred: &DeferredViewExpr, _ctx: &ViewCtx) -> TokenStream {
+fn emit_deferred_view_value(deferred: &DeferredViewExpr, ctx: &ViewCtx) -> TokenStream {
     let hidden_name = deferred.hidden_component.as_deref().unwrap_or_else(|| {
         panic!(
             "a `ViewExpr::DeferredView` reached codegen without being lowered first (Issue #162 \
@@ -8639,8 +8639,22 @@ fn emit_deferred_view_value(deferred: &DeferredViewExpr, _ctx: &ViewCtx) -> Toke
         )
     });
     let target = format_ident!("{}", lexical_owner_name);
-    quote! {
-        {
+    // PR #165 review remediation, A3 (second half): when this factory expression is itself being
+    // emitted *inside an already-lowered hidden Component* (`ctx.implicit_owner.is_some()` — a
+    // `DeferredView` nested inside another `DeferredView`'s own body), `self` here is that outer
+    // hidden Component, not the true lexical owner — `self.__self_weak` downcast to `#target`
+    // (the original source Component) would never succeed, since `self` really is an instance of
+    // the *outer* hidden Component's own type, not `#target`. But the outer hidden Component
+    // already carries exactly the right value in its own implicit-owner field (`self.__view_owner:
+    // Weak<#target>`, by the same A3 lowering guarantee that keeps every level's `lexical_owner`
+    // equal to the same original source Component) — reuse that directly instead of re-deriving it
+    // through a downcast that can only work at the top level.
+    let owner_capture = match &ctx.implicit_owner {
+        Some(owner_field) => {
+            let owner_field = format_ident!("{}", owner_field);
+            quote! { let __view_owner_weak: std::rc::Weak<#target> = self.#owner_field.clone(); }
+        }
+        None => quote! {
             let __view_owner_weak: std::rc::Weak<#target> = self
                 .__self_weak
                 .borrow()
@@ -8648,6 +8662,11 @@ fn emit_deferred_view_value(deferred: &DeferredViewExpr, _ctx: &ViewCtx) -> Toke
                 .and_then(|__rc| __rc.downcast::<#target>().ok())
                 .map(|__rc| std::rc::Rc::downgrade(&__rc))
                 .unwrap_or_else(std::rc::Weak::new);
+        },
+    };
+    quote! {
+        {
+            #owner_capture
             elwindui::core::ui::ViewTemplate::new(move |ctx| {
                 // `ViewTemplate::build` has already checked `ctx.owner`'s liveness before ever
                 // invoking this factory (docs/design/runtime/view_template_design.md §2) — this
@@ -14797,6 +14816,86 @@ struct NotepadWindow {
             generated_str.contains("self . __base_on_mount"),
             "{generated_str}"
         );
+    }
+
+    /// PR #165 review remediation, A3: a `context_popup: view! { .. }` nested inside *another*
+    /// `context_popup: view! { .. }` must keep the *original source* Component as the lexical
+    /// owner for both levels — not the first level's own generated hidden Component. Proven at the
+    /// codegen level (not merely by end-to-end runtime behavior, `context_menu_and_popup.rs`'s own
+    /// `declarative_context_popup_nested_popup_observes_current_outer_value`) by inspecting the
+    /// generated `Weak<..>` field type on *both* hidden components' own struct definitions.
+    #[test]
+    fn nested_deferred_view_keeps_the_original_source_component_as_lexical_owner() {
+        let mut module = crate::test_module(&[(
+            None,
+            r#"
+            struct NestedPopupOwner {
+                #[state(default = "outer".to_string())]
+                value: String,
+                body: view! {
+                    TextBlock {
+                        text: "Open popup",
+                        context_popup: view! {
+                            TextBlock {
+                                text: "inner",
+                                context_popup: view! {
+                                    TextBlock { text: value }
+                                },
+                            }
+                        },
+                    }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        crate::lower_deferred_views_in_module(&mut module, "NestedPopupOwner");
+
+        // Two hidden components must have been synthesized — one per `context_popup: view! { .. }`.
+        let hidden_names: Vec<&str> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Component(c) if c.name.starts_with("__ElwinduiViewTemplateInstance") => {
+                    Some(c.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hidden_names.len(),
+            2,
+            "expected exactly 2 hidden components, got {hidden_names:?}"
+        );
+
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_deferred_view_owner", &generated);
+        let generated_str = generated.to_string();
+
+        // Both hidden components' own `__view_owner` field (and its constructor/downcast plumbing)
+        // must be typed against the *original* source Component (`NestedPopupOwner`) — never
+        // against the other hidden component's own generated name. `Weak < NestedPopupOwner >`
+        // must appear at least once per hidden component (each mentions it more than once —
+        // struct field, `__new_unmounted` parameter, weak-upgrade downcast target — so this checks
+        // a lower bound, not an exact count) — and no hidden-component name may appear as the
+        // argument of a `Weak < .. >` anywhere (which would mean one hidden Component's own
+        // `__view_owner` field was incorrectly typed against the *other* hidden Component).
+        let owner_weak_count = generated_str.matches("Weak < NestedPopupOwner >").count();
+        assert!(
+            owner_weak_count >= 2,
+            "expected both hidden components' __view_owner field to be Weak<NestedPopupOwner>, \
+             got only {owner_weak_count} occurrence(s) in:\n{generated_str}"
+        );
+        for hidden_name in &hidden_names {
+            let bad = format!("Weak < {hidden_name} >");
+            assert!(
+                !generated_str.contains(&bad),
+                "a hidden component's own generated name must never appear as another deferred \
+                 view's lexical owner type ({bad} found):\n{generated_str}"
+            );
+        }
     }
 
     /// `Grid` (§3) + attached properties (`Grid::row`/`Grid::column`, §3) end to end: a `view`

@@ -327,7 +327,7 @@ pub fn generate_component_from_item_impl(
 /// `Item::Component`/`Item::View` pair per deferred view found (`component_frontend::
 /// hidden_view_template_component`) directly into `module.items`. A no-op when `module` has no
 /// matching view (a `view`-less component can't contain a `context_popup: view! { .. }` at all).
-fn lower_deferred_views_in_module(module: &mut ast::Module, outer_component_name: &str) {
+pub(crate) fn lower_deferred_views_in_module(module: &mut ast::Module, outer_component_name: &str) {
     let Some(view) = module.items.iter_mut().find_map(|item| match item {
         ast::Item::View(v) if v.target == outer_component_name => Some(v),
         _ => None,

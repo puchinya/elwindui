@@ -1276,6 +1276,7 @@ fn declarative_context_popup_content_is_releasable_after_close() {
     .expect("owner is alive, deferred view should build");
 
     let content = Rc::clone(&host.shown.borrow()[0].0);
+    let weak_content = Rc::downgrade(&content);
     unmount_subtree(&content);
     handle.close();
 
@@ -1291,17 +1292,25 @@ fn declarative_context_popup_content_is_releasable_after_close() {
     unmount_subtree(&content);
     assert_eq!(REACTIVE_POPUP_UNMOUNT_COUNT.with(|c| c.get()), 1);
 
-    // TODO(Issue #162 follow-up): full weak-releasability of the hidden Component after close —
-    // matching T9's own "weak hidden instance can be released" wording — is not yet proven here.
-    // An investigation (Rc::downgrade + upgrade().is_none() once every external/test-host
-    // reference is also dropped) found `Weak::strong_count() == 1` remaining after this same
-    // unmount_subtree + host.shown.clear() sequence, with on_unmount already having fired exactly
-    // once for both the hidden Component and its nested content — the leak's exact source (one
-    // more internal strong reference somewhere in the __view_owner-as-bindable-owner
-    // auto-subscription machinery introduced in Step 7, or a pre-existing characteristic of a
-    // shape-composed Component with a nested Component child never previously exercised under a
-    // weak-release check) was not conclusively identified. Recorded in the Issue #162 checkpoint
-    // as a C-classification (contract §13) finding for follow-up, not silently dropped.
+    // PR #165 review remediation, A5: T9 must prove actual weak releasability, not merely that
+    // on_unmount fired. The prior version of this test stopped here, leaving `Weak::strong_count()
+    // == 1` unexplained — the actual cause (found while fixing this) was never a real internal
+    // leak in the deferred-view/subscription machinery at all: `TestPopupHost` itself retains two
+    // independent strong references beyond this test's own `content` local — `shown` (pushed by
+    // `show_popup`, never popped) and `last_request` (the whole `PopupRequest`, including its own
+    // `content: Rc<dyn UIElementExt>`, also never cleared). Every external/test-host strong
+    // reference must be dropped — not just the one this test happened to hold locally — before a
+    // `Weak::upgrade().is_none()` check can mean anything.
+    drop(content);
+    host.shown.borrow_mut().clear();
+    host.last_request.borrow_mut().take();
+
+    assert!(
+        weak_content.upgrade().is_none(),
+        "the hidden Component's own content must be releasable once every external strong \
+         reference (including the test popup host's own `shown`/`last_request` bookkeeping) is \
+         dropped — a real leak here would mean closing a popup never actually frees its content"
+    );
 }
 
 /// Issue #162 T14: a nested Component's own `on_mount` calling the declarative `popup_dismiss`

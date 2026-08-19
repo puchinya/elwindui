@@ -91,24 +91,39 @@ Because the lowered body is a genuinely ordinary Component, every existing *DSL-
 bare-name-resolution code path in `codegen.rs` (`emit_expr`'s own `ViewExpr::Path` handling —
 `on_mount`/`lets`/`if`/`match`/`for` as *structural* `view!` constructs, element/value codegen) already
 handles the body's interior correctly with no new `ViewExpr`/`ClosureBody` match arms needed there.
+The implicit-owner fallback that handling applies is schema-gated (PR #165 final rereview
+remediation, A2 — `ImplicitOwnerDef::readable_fields`, computed once from the source Component's own
+effective fields): only a bare name that is actually a real, readable field of the source Component
+falls back to `__view_owner.<name>()` — an ordinary Rust name with no relation to the source Component
+is never rewritten.
 
 This does **not** extend to the *raw Rust* inside `on_mount { .. }`/`on_unmount { .. }`/`on_update { ..
 }` blocks and `on_*` event-handler closure bodies — an arbitrary, unconstrained Rust statement
 sequence, not DSL grammar, walked by a separate `syn::visit_mut::VisitMut` pass
 (`ViewClosureRewriter`/`rewrite_view_closure_block`/`rewrite_view_closure_expr`) that already existed
 for event handlers before this Issue. That pass genuinely did need generalizing (PR #165 review
-remediation, A2): it gained an implicit-owner fallback (`ViewClosureRewriter::
-resolved_implicit_owner_field`, reusing the same 2-segment `owner.field` machinery `resolved_owner`
-already uses) so an otherwise-unresolved bare name inside one of these raw blocks falls back to
-`__view_owner` the same way a DSL attribute value's bare name already did — and, since raw Rust
-(unlike `view!`'s own attribute-value grammar) can contain arbitrary nested scopes, a real lexical
-scope stack (not a single flat per-block set — an earlier revision's own bug, changing source
-semantics for a block combining an outer-field read with a same-named local shadow) tracking `let`/`if
+remediation, A2, further tightened by PR #165 final rereview remediation, A2): it gained an
+implicit-owner fallback (`ViewClosureRewriter::resolved_implicit_owner_field`, reusing the same
+2-segment `owner.field` machinery `resolved_owner` already uses) so a bare name inside one of these
+raw blocks that is a known-readable field of the source Component (the exact same
+`ImplicitOwnerDef::readable_fields` schema the DSL-attribute-value path above consults, so both paths
+agree on membership) falls back to `__view_owner` the same way a DSL attribute value's bare name
+already did. An unshadowed bare name that is *not* in that schema — a module constant, `None`, a free
+function call, anything unrelated to the source Component — is left as ordinary Rust, never rewritten;
+an earlier revision fell back to the owner for *any* unshadowed bare name regardless of whether it was
+actually a source-Component field at all, which silently miscompiled such names into bogus
+`__view_owner` getter calls. Assignment to a bare name that is a known-*writable* source-Component
+field (`Prop`/`State` only — `ImplicitOwnerDef::writable_fields`) is likewise routed through that
+owner's own generated `set_<name>` setter (`resolved_implicit_owner_setter`), so `selected = true;`
+inside a popup event closure actually mutates the enclosing Component's own state, not a no-op. Since
+raw Rust (unlike `view!`'s own attribute-value grammar) can contain arbitrary nested scopes, a real
+lexical scope stack (not a single flat per-block set — an earlier revision's own bug, changing source
+semantics for a block combining an outer-field read with a same-named local shadow) tracks `let`/`if
 let`/`while let`/`match`/`for`/nested-closure bindings, so a local binding shadows the implicit owner
-only exactly where real Rust scoping would consider it in scope. This is still "no second popup
-binding engine" in the sense the original design intended — it is the *same* rewriter every `on_click`
-handler already went through, generalized once, not a parallel mechanism built specifically for
-`context_popup`.
+— for both reads and writes — only exactly where real Rust scoping would consider it in scope. This is
+still "no second popup binding engine" in the sense the original design intended — it is the *same*
+rewriter every `on_click` handler already went through, generalized (twice) rather than replaced by a
+parallel mechanism built specifically for `context_popup`.
 
 Only the small amount of new surface area needed to recognize a `view! { .. }` token sequence in
 `context_popup` position, extract it into the hidden pair, and emit a `ViewTemplate::new(..)` factory

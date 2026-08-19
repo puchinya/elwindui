@@ -97,9 +97,11 @@ where
     }
 }
 
-/// PR #165 review remediation, A4: a sealed marker implemented only for `ViewTemplate` and
-/// `Option<ViewTemplate>` — the only two types a `context_popup: view! { .. }` (or any other
-/// `ViewExpr::DeferredView`) may ever be assigned to (`docs/specs/dsl_spec.md` rule 37).
+/// PR #165 review remediation, A4 (round 2: `from_view_template` replaces the assertion-only
+/// original): a sealed marker implemented only for `ViewTemplate` and `Option<ViewTemplate>` —
+/// the only two types a `context_popup: view! { .. }` (or any other `ViewExpr::DeferredView`) may
+/// ever be assigned to (`docs/specs/dsl_spec.md` rule 37) — that also *converts* a freshly-built
+/// `ViewTemplate` factory into whichever of the two shapes the target property actually declares.
 ///
 /// `elwindui-codegen`'s own `validate::check_deferred_view_assignment` already rejects a
 /// mismatched target *when* the target component has a local `TypeInfo` (a same-crate
@@ -113,13 +115,27 @@ where
 /// trait's `#[diagnostic::on_unimplemented]` message naming the field and the required type,
 /// exactly like the local-`TypeInfo` diagnostic already does. See
 /// `docs/design/tools/codegen_design.md` §3.35 and `docs/specs/dsl_spec.md` rule 37.
+///
+/// The round-1 version of this trait was assertion-only (`__assert_deferred_view_assignment_target`)
+/// — it type-checked the target but `emit_external_attribute_sets` still unconditionally wrapped
+/// the built factory in `Some(..)` regardless of which of the two accepted shapes the property
+/// actually declared, so a real builtin property declared bare `ViewTemplate` (not
+/// `Option<ViewTemplate>`) would pass this assertion and then fail immediately afterward with a
+/// type mismatch on the generated setter call — only accidentally correct for `context_popup`
+/// (the only production `Option<ViewTemplate>` consumer today). `from_view_template` fixes this by
+/// performing the actual shape conversion generically, so the external emission path works for
+/// either accepted shape identically to the local-`TypeInfo` path, which already branches on
+/// `is_option`.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a valid `context_popup`/deferred-view target type",
     label = "a deferred view (`view! {{ .. }}`) can only be assigned to a `ViewTemplate` or `Option<ViewTemplate>` property, not `{Self}`",
     note = "rewrite the target property's declared type to `ViewTemplate` or `Option<ViewTemplate>`, or assign an ordinary value instead of `view! {{ .. }}`"
 )]
-pub trait DeferredViewAssignmentTarget: private::Sealed {}
+pub trait DeferredViewAssignmentTarget: private::Sealed + Sized {
+    #[doc(hidden)]
+    fn from_view_template(value: ViewTemplate) -> Self;
+}
 
 mod private {
     pub trait Sealed {}
@@ -127,14 +143,28 @@ mod private {
     impl Sealed for Option<super::ViewTemplate> {}
 }
 
-impl DeferredViewAssignmentTarget for ViewTemplate {}
-impl DeferredViewAssignmentTarget for Option<ViewTemplate> {}
+impl DeferredViewAssignmentTarget for ViewTemplate {
+    fn from_view_template(value: ViewTemplate) -> Self {
+        value
+    }
+}
 
-/// Used only by `elwindui-codegen`'s generated static assertion (`emit_external_attribute_sets`) —
-/// never called, its only job is to force the type parameter's `DeferredViewAssignmentTarget`
-/// bound to be checked at the consumer crate's own compile time.
+impl DeferredViewAssignmentTarget for Option<ViewTemplate> {
+    fn from_view_template(value: ViewTemplate) -> Self {
+        Some(value)
+    }
+}
+
+/// Generated-code-only entry point (`elwindui-codegen`'s `emit_external_attribute_sets`): converts
+/// a freshly-built `ViewTemplate` factory into whichever of `ViewTemplate`/`Option<ViewTemplate>`
+/// the real builtin's own `@field_type` transport reports as `T`, failing to compile (via
+/// `DeferredViewAssignmentTarget`'s own `#[diagnostic::on_unimplemented]`) for any other `T`.
 #[doc(hidden)]
-pub fn __assert_deferred_view_assignment_target<T: DeferredViewAssignmentTarget>() {}
+pub fn __coerce_deferred_view_assignment_target<T: DeferredViewAssignmentTarget>(
+    value: ViewTemplate,
+) -> T {
+    T::from_view_template(value)
+}
 
 #[cfg(test)]
 mod tests {
@@ -196,5 +226,35 @@ mod tests {
             environment: EnvironmentContext::root(),
         });
         assert_eq!(calls.get(), 1);
+    }
+
+    /// A4-T1: `__coerce_deferred_view_assignment_target::<ViewTemplate>` returns the same
+    /// logical template value unwrapped — the bare, non-`Option` accepted shape.
+    #[test]
+    fn coerce_deferred_view_assignment_target_bare_view_template() {
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_factory = calls.clone();
+        let template = ViewTemplate::new(move |_ctx| {
+            calls_for_factory.set(calls_for_factory.get() + 1);
+            Some(crate::ui::TextBlock::new())
+        });
+        let value: ViewTemplate = __coerce_deferred_view_assignment_target(template);
+        let owner: Rc<dyn UIElementExt> = crate::ui::TextBlock::new();
+        let built = value.build(ViewBuildContext {
+            owner: Rc::downgrade(&owner),
+            environment: EnvironmentContext::root(),
+        });
+        assert!(built.is_some());
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// A4-T2: `__coerce_deferred_view_assignment_target::<Option<ViewTemplate>>` wraps the
+    /// template in `Some` — the optional accepted shape (`context_popup`'s own real declared
+    /// type today).
+    #[test]
+    fn coerce_deferred_view_assignment_target_optional_view_template() {
+        let template = ViewTemplate::new(|_ctx| Some(crate::ui::TextBlock::new()));
+        let value: Option<ViewTemplate> = __coerce_deferred_view_assignment_target(template);
+        assert!(value.is_some());
     }
 }

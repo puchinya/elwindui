@@ -9092,23 +9092,26 @@ fn emit_external_attribute_sets(
             // production consumer.
             ViewExpr::DeferredView(deferred) => {
                 let factory = emit_deferred_view_value(deferred, ctx);
-                // PR #165 review remediation, A4: `validate::check_deferred_view_assignment`
-                // only catches a mismatched target when the target component has a local
-                // `TypeInfo` — a no-op for this real-builtin path (no `TypeInfo` exists here at
-                // all). Assert the target's *real* declared type here instead, read through the
-                // same cross-crate `@field_type` transport `synthesize_external_base_fields`
-                // already uses (Refs #90) — an unknown property name falls through to
-                // `@field_type`'s own existing terminal `compile_error!` unchanged (never reaches
-                // this assertion at all), and a known property whose declared type isn't
-                // `ViewTemplate`/`Option<ViewTemplate>` fails this bound with
+                // PR #165 review remediation, A4 (round 2): `validate::check_deferred_view_
+                // assignment` only catches a mismatched target when the target component has a
+                // local `TypeInfo` — a no-op for this real-builtin path (no `TypeInfo` exists
+                // here at all). Convert the built factory to the target's own *real* declared
+                // type here instead, read through the same cross-crate `@field_type` transport
+                // `synthesize_external_base_fields` already uses (Refs #90) — an unknown property
+                // name falls through to `@field_type`'s own existing terminal `compile_error!`
+                // unchanged (never reaches this call at all), and a known property whose declared
+                // type isn't `ViewTemplate`/`Option<ViewTemplate>` fails to compile with
                 // `DeferredViewAssignmentTarget`'s own `#[diagnostic::on_unimplemented]` message
                 // naming both the field and the required type (`docs/specs/dsl_spec.md` rule 37).
-                sets.extend(quote! {
-                    elwindui::core::ui::__assert_deferred_view_assignment_target::<
+                // Unlike the round-1 version (which asserted the target type but then always
+                // wrapped in `Some(..)` regardless), this genuinely *produces* whichever of the
+                // two accepted shapes the property declares — correct for a real builtin property
+                // declared bare `ViewTemplate`, not only `Option<ViewTemplate>`.
+                quote! {
+                    elwindui::core::ui::__coerce_deferred_view_assignment_target::<
                         elwindui::core::#props_macro!(@field_type #name_ident)
-                    >();
-                });
-                quote! { Some(#factory) }
+                    >(#factory)
+                }
             }
             other => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
@@ -15117,6 +15120,67 @@ struct NotepadWindow {
             generated_str.contains(". label ()"),
             "expected on_update's own unshadowed `label` reference to become an implicit-owner \
              getter call (`<owner>.label()`): {generated_str}"
+        );
+    }
+
+    /// PR #165 rereview remediation round 2, A4-T5: `emit_external_attribute_sets` — the real
+    /// production path for a `DeferredView` targeting a real builtin (`TextBlock`, `Window`, ...,
+    /// none of which have a local `TypeInfo` for `elwindui-codegen` to check against directly) —
+    /// must route the built factory through `__coerce_deferred_view_assignment_target::<@field_type
+    /// ..>(..)`, never through an unconditional `Some(..)` wrap regardless of the target's real
+    /// declared type. Regression test for the exact round-1 defect: a real builtin property
+    /// declared bare `ViewTemplate` (not `Option<ViewTemplate>`) would have compiled (the round-1
+    /// assertion only checked the type, never converted the value) and then failed at the
+    /// generated setter call with a confusing type mismatch.
+    ///
+    /// `TextBlock` deliberately has no local `TypeInfo` here (the symbol table is built *without*
+    /// chaining `test_builtin_modules()`, unlike every other codegen test in this module) — this
+    /// is what actually forces `emit_external_attribute_sets` rather than the local-`TypeInfo`
+    /// path (`build_virtual_value`/`build_component_setters`) every *other* codegen test in this
+    /// module exercises via `test_builtin_modules()`'s own local shape table for `TextBlock`.
+    #[test]
+    fn external_deferred_view_target_uses_coercion_not_unconditional_some() {
+        let mut module = crate::test_module(&[(
+            None,
+            r#"
+            struct A4ExternalDeferredViewOwner {
+                body: view! {
+                    TextBlock {
+                        text: "target",
+                        context_popup: view! {
+                            TextBlock { text: "popup" }
+                        },
+                    }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        crate::lower_deferred_views_in_module(&mut module, "A4ExternalDeferredViewOwner");
+        // Deliberately `build_symbol_table` (not `build_symbol_table_with_builtins`) — no chained
+        // builtin modules, so `TextBlock` has no local `TypeInfo` and `context_popup`'s value must
+        // go through `emit_external_attribute_sets`, the real-builtin code path.
+        let table = build_symbol_table(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        let generated_str = generated.to_string();
+
+        assert!(
+            generated_str.contains("__coerce_deferred_view_assignment_target"),
+            "expected the external DeferredView target to be converted via \
+             __coerce_deferred_view_assignment_target: {generated_str}"
+        );
+        assert!(
+            generated_str.contains("@ field_type context_popup"),
+            "expected the coercion's own type parameter to be read through @field_type \
+             context_popup: {generated_str}"
+        );
+        // The old, round-1 defect: the built factory wrapped unconditionally in `Some(..)` before
+        // the declared type was ever consulted, entirely independent of the coercion call above.
+        assert!(
+            !generated_str.contains("Some (elwindui :: core :: ui :: ViewTemplate :: new"),
+            "the external DeferredView branch must not unconditionally wrap the factory in \
+             Some(..) — the target's real declared type must decide the shape: {generated_str}"
         );
     }
 

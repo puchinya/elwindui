@@ -142,20 +142,50 @@ define_class!(
                     // (InnerWindow::close -> self.ns.close()) — never re-entering this method
                     // (see this fn's own doc comment) but still reentering *other* framework
                     // code, so the handler is called with no borrow of our own ivars held.
-                    if handler() {
-                        // The framework accepted and is handling the request — veto this
-                        // original native attempt; the framework's own close() will issue the
-                        // real native close once its lifecycle completes.
-                        false
-                    } else {
-                        // The generated owner is already gone — fall back to AppKit's default.
-                        true
-                    }
+                    should_allow_native_close(handler())
                 }
             }
         }
     }
 );
+
+/// PR #165 review remediation, A6/T22-T23: pure decision logic for `windowShouldClose:`,
+/// extracted so it is unit-testable without any real `NSWindow` construction (which requires the
+/// main thread — unavailable in this crate's own `#[test]` harness, see this module's own
+/// `type_checked_new_show_hide_close_usage`-style convention elsewhere). Mirrors WinUI3's own
+/// `decide_native_close`/`should_veto_native_close` (`elwindui-backend-winui3::inner::window`) —
+/// AppKit needs no equivalent `framework_initiated`/reentrancy branch, since `NSWindow::close`
+/// never consults `windowShouldClose:` at all (Apple's documented contract, this same `impl`
+/// block's own `window_should_close` doc comment).
+///
+/// `true` (T22): the installed close-request handler accepted the request and is now handling it
+/// through the framework's own lifecycle — veto this native close attempt. `false` (T23): the
+/// generated owner is already gone — allow AppKit's native default close to proceed.
+pub(crate) fn should_allow_native_close(handler_result: bool) -> bool {
+    !handler_result
+}
+
+#[cfg(test)]
+mod native_close_decision_tests {
+    use super::*;
+
+    /// T22: the handler accepting the close (`true`) vetoes the native attempt (`false` — do not
+    /// allow the native default).
+    #[test]
+    fn handler_accepting_the_close_vetoes_the_native_attempt() {
+        assert!(!should_allow_native_close(true));
+    }
+
+    /// T23: the handler declining the close (generated owner already gone, `false`) allows the
+    /// native default close to proceed (`true`) — this is the exact case A1 originally got wrong
+    /// on the WinUI3 side (cancelling unconditionally regardless of the handler's return value);
+    /// AppKit's own implementation never had that bug, but is covered here for parity and
+    /// regression protection.
+    #[test]
+    fn handler_declining_the_close_allows_native_default() {
+        assert!(should_allow_native_close(false));
+    }
+}
 
 /// Raw `NSWindow` + content host — composed by `native_ui::Window`.
 #[derive(Clone)]

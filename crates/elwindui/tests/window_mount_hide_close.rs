@@ -75,6 +75,35 @@ struct MountHideCloseWindow {
 #[elwindui::component]
 impl MountHideCloseWindow {}
 
+/// PR #165 review remediation, A6/T25: a Window whose content declares a `context_popup: view! {
+/// .. }` directly (not through a nested Component) — used only to prove the *shape* type-checks;
+/// see `type_checked_popup_before_owner_close_ordering`, below, for the intended ordering this
+/// documents (real execution needs a native Window, main-thread-only, same constraint as every
+/// other fixture in this file).
+#[elwindui::component(inherits Window)]
+struct MountHideCloseWindowWithPopup {
+    body: view! {
+        on_unmount {
+            record_unmount("PopupWindowRoot");
+        }
+        title: "popup window"
+        content: VerticalLayout {
+            TextBlock {
+                text: "target",
+                context_popup: view! {
+                    on_unmount {
+                        record_unmount("PopupContent");
+                    }
+                    TextBlock { text: "popup" }
+                },
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl MountHideCloseWindowWithPopup {}
+
 /// Type-checked, not executed (see module doc comment). Demonstrates the target usage shape from
 /// spec §10/§11 and Issue #126: `new()` performs no build; a property set between `new()` and `show()`
 /// is observed by the initial build; `show()` mounts+builds exactly once; `show(); hide(); show();`
@@ -133,6 +162,35 @@ fn type_checked_new_show_hide_close_usage() {
     // show() after close is a no-op (does not remount or rebuild or reopen)
     window.show();
     debug_assert_eq!(BUILD_COUNT.with(|c| c.get()), 1);
+}
+
+/// PR #165 review remediation, A6/T25: type-checked only (see module doc comment — same
+/// main-thread constraint as `type_checked_new_show_hide_close_usage`, above). Documents the
+/// intended ordering `Window::unmount_override` establishes
+/// (`docs/design/runtime/popup_context_menu_design.md`'s Owner-`Window`-close-interaction
+/// paragraph): closing the owner Window while one of its declarative popups is open must tear the
+/// popup down (`PopupContent`'s own `on_unmount`) *before* the owner's own content unmounts
+/// (`PopupWindowRoot`).
+#[allow(dead_code)]
+#[cfg(feature = "backend-appkit")]
+fn type_checked_popup_before_owner_close_ordering() {
+    UNMOUNT_EVENTS.with(|events| events.borrow_mut().clear());
+
+    let window: Rc<MountHideCloseWindowWithPopup> = MountHideCloseWindowWithPopup::new();
+    window.show();
+
+    // A real run would need to open the popup through `ContextMenuService` here (target ==
+    // the `TextBlock` declaring `context_popup`) before `close()` — omitted because reaching it
+    // requires walking the same generated visual tree `context_menu_and_popup.rs`'s own
+    // integration tests already navigate, and this function never executes regardless (main
+    // thread only) — the type/ordering contract below is what this fixture exists to document.
+    window.close();
+    debug_assert_eq!(
+        get_unmount_events(),
+        vec!["PopupContent", "PopupWindowRoot"],
+        "an active popup's own on_unmount must fire before the owning Window's own content \
+         unmounts"
+    );
 }
 
 #[cfg(all(feature = "backend-winui3", target_os = "windows"))]

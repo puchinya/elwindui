@@ -11229,6 +11229,41 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 }
             }
         }
+        // A bare 1-segment call callee (`record_unmount("...")`, `some_free_function()`) is
+        // never how this DSL's own field-backed values are invoked (a viewmodel action always
+        // reads `vm.save()` — a 2-segment `owner.method()` `syn::Expr::MethodCall`, an entirely
+        // different node shape — never a bare `save()`), so `resolved_implicit_owner_field`'s
+        // "unresolved bare name must be an implicit-owner field" fallback must never be applied to
+        // one — unlike a `view!` DSL attribute value (`emit_expr`'s own `ViewExpr::Path` handling),
+        // whose grammar structurally cannot contain a free-function call in this position at all,
+        // this rewriter walks *arbitrary* raw Rust (`on_mount`/`on_unmount`/`on_update`/event
+        // closure bodies), where a bare call to a genuine free function/helper is completely
+        // ordinary and must be left untouched (found via a real regression: PR #165 review
+        // remediation, A6's own `record_unmount("PopupContent")` test fixture, a plain free
+        // function called directly inside a declarative popup's own `on_unmount`, was rewritten
+        // into a bogus `__view_owner.record_unmount()` method call before this fix). A genuine
+        // mutable-own-field or own-field callee (rare, but not nonsensical — e.g. a `Fn`-typed
+        // prop field called bare) is still resolved normally; only the *implicit-owner* fallback
+        // is withheld here. Call *arguments* are ordinary value positions and are rewritten as
+        // usual, including through the implicit-owner fallback.
+        if let syn::Expr::Call(call) = node {
+            if let syn::Expr::Path(p) = call.func.as_ref() {
+                if let Some(ident) = p.path.get_ident() {
+                    let name = ident.to_string();
+                    if !self.is_shadowed(&name) {
+                        if let Some(value) = self.resolved_mutable_field_read(&name) {
+                            *call.func = syn::parse_quote! { #value };
+                        } else if let Some(base) = self.resolved_owner(&name) {
+                            *call.func = syn::parse_quote! { #base };
+                        }
+                    }
+                    for arg in call.args.iter_mut() {
+                        self.visit_expr_mut(arg);
+                    }
+                    return;
+                }
+            }
+        }
         if let syn::Expr::Path(p) = node {
             let segments: Vec<String> = p
                 .path
@@ -14912,6 +14947,72 @@ struct NotepadWindow {
                  view's lexical owner type ({bad} found):\n{generated_str}"
             );
         }
+    }
+
+    /// PR #165 review remediation, A6/T26: the generated `mount_override`'s close-request-handler
+    /// closure must capture only a type-erased `Weak<dyn Any>` (`__weak_self_erased`, cloned from
+    /// this component's own `__self_weak`), never a strong `Rc<Self>` — a strong capture would
+    /// keep the generated Window alive for as long as the backend's own native close-request
+    /// storage does, defeating the acyclic-ownership discipline every owner/callback capture in
+    /// this codebase follows. Also proves `unmount_override` clears the handler
+    /// (`set_close_request_handler(&self.base, None)`) *before* delegating to the backend's own
+    /// `unmount_override` — a stale handler must never be reachable once the Window starts
+    /// tearing down. Cannot be proven by constructing a real Window (native construction needs the
+    /// main thread, unavailable in any `#[test]` harness — see `window_mount_hide_close.rs`'s own
+    /// established type-check-only convention for that reason), so this inspects the generated
+    /// Rust source directly instead.
+    #[test]
+    fn window_mount_override_close_handler_captures_only_a_weak_self_reference() {
+        let module = crate::test_module(&[(
+            Some("Window"),
+            r#"
+            struct T26TestWindow {
+                body: view! {
+                    title: "T26"
+                    content: VerticalLayout { }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t26_window_mount_override", &generated);
+        let generated_str = generated.to_string();
+
+        assert!(
+            generated_str.contains("fn mount_override"),
+            "{generated_str}"
+        );
+        // The handler closure captures `__weak_self_erased` (a `Weak` clone) — never
+        // `Rc::clone(self)`/`self.clone()`/an owned `Rc<Self>` moved in directly.
+        assert!(
+            generated_str.contains("let __weak_self_erased = self . __self_weak . borrow () . clone ()"),
+            "expected the close-request handler to capture a weak self reference: {generated_str}"
+        );
+        assert!(
+            !generated_str.contains("std :: rc :: Rc :: clone (self)")
+                && !generated_str.contains("std :: rc :: Rc :: clone (& self)"),
+            "the close-request handler must never capture a strong Rc<Self>: {generated_str}"
+        );
+
+        // `unmount_override` clears the handler before forwarding to the backend.
+        let unmount_override_pos = generated_str
+            .find("fn unmount_override")
+            .expect("generated code should contain fn unmount_override");
+        let unmount_override_body = &generated_str[unmount_override_pos..];
+        let clear_pos = unmount_override_body
+            .find("set_close_request_handler (& self . base , None)")
+            .expect("unmount_override should clear the close-request handler");
+        let base_unmount_pos = unmount_override_body
+            .find("self . base . unmount_override ()")
+            .expect("unmount_override should forward to the backend's own unmount_override");
+        assert!(
+            clear_pos < base_unmount_pos,
+            "the close-request handler must be cleared *before* forwarding to the backend's own \
+             unmount_override, not after: {unmount_override_body}"
+        );
     }
 
     /// `Grid` (§3) + attached properties (`Grid::row`/`Grid::column`, §3) end to end: a `view`

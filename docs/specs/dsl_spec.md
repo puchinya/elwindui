@@ -665,20 +665,23 @@ struct CompactRoundedPanelTemplate {
 
 ### `view! { .. }`を属性値とする糖衣構文(deferred view、Issue #162)
 
-`Option<ViewTemplate>`型のフィールド(現時点では`context_popup`のみ、`docs/specs/ui_spec.md`参照)には、通常の式の代わりに裸の`view! { .. }`ブロックを直接書ける。これは新しい構築時ではなく**評価が遅延される**View — 実際に構築されるのは、そのフィールドの用途が定める「開かれた」時点(`context_popup`ならpopupが開かれた瞬間)である。
+`ViewTemplate`または`Option<ViewTemplate>`型のフィールド(現時点では`context_popup`のみ、`docs/specs/ui_spec.md`参照——実際にどちらの型で受けるかは宣言側が決め、代入側は宣言された型を`elwindui::core::ui::DeferredViewAssignmentTarget::from_view_template`経由で型主導に変換する)には、通常の式の代わりに裸の`view! { .. }`ブロックを直接書ける。これは新しい構築時ではなく**評価が遅延される**View — 実際に構築されるのは、そのフィールドの用途が定める「開かれた」時点(`context_popup`ならpopupが開かれた瞬間)である。
 
 ```rust
 #[elwindui::component]
 struct DocumentTabs {
-    #[computed]
-    selected_label: String,
+    #[bindable]
+    vm: std::rc::Rc<DocumentTabsViewModel>,
 
     body: view! {
         TabView {
             context_popup: view! {
                 VerticalLayout {
-                    TextBlock { text: selected_label }
-                    Button { text: "Close" on_click: || self.close_tab() }
+                    TextBlock { text: vm.selected_label }
+                    Button {
+                        text: "Close"
+                        on_click: vm.close_tab
+                    }
                 }
             }
         }
@@ -687,8 +690,14 @@ struct DocumentTabs {
 ```
 
 - ブロック内は通常の`view!`本体と全く同じ文法(`on_mount`/`lets`/`if`/`match`/`for`を含む)であり、専用の制限は無い。
-- ブロック内の裸の識別子(`selected_label`のような)は、そのブロックを**字句的に囲むComponent自身**のフィールド/メソッドに対して、通常の`view!`本体と同じ名前解決規則で解決される——`ControlTemplate`の`templated_parent.foo`のような明示的修飾は不要であり、また使えない。
+- ブロック内の裸の識別子は、そのブロックを**字句的に囲むComponent自身**の以下の範囲に対して、通常の`view!`本体と同じ名前解決規則で解決される——`ControlTemplate`の`templated_parent.foo`のような明示的修飾は不要であり、また使えない:
+  - enclosing Component自身の`field`/`state`/`param`/`computed`/`environment`値(裸の一段名、例: `selected_label`)。
+  - enclosing Component自身の`#[bindable]`ownerを経由した二段パス(例: `vm.selected_label`、`vm.close_tab`)。
+  - enclosing Component自身の書込み可能な(`prop`/`state`の)field/state値への代入——生成されたsetterへ経路付けられる。
+  - 上記のいずれにも該当しない裸の名前(モジュール定数、`None`、通常の自由関数呼び出しなど)は、通常のRustの名前としてそのまま残る。
+  - enclosing Component自身の**任意のメソッド**が暗黙に`self`扱いされるわけではない——ブロック内で明示的な`self`を書いた場合、それは(ブロックがlowerされる)隠しComponent自身を指す、通常のRustの`self`のままである。
 - 評価(構築)は宣言時点ではなく、そのフィールドの用途が定める時点で行われ、その時点でのenclosing Componentの現在値を読む。enclosing Componentが既に解放されている場合は何も構築されず、フィールドの実行時型(`ViewTemplate`)が`None`相当を返す。
+- **ライブ更新**: ブロックが実際に開かれて(popupなら表示されて)いる間、上記のenclosing Component自身のfield/state/computed/environment値、および`#[bindable]` ownerを経由した値は、通常のComponent自身の`view!`本体が持つのと同じ購読・resync規則(`PropertyChanged`)に従ってライブ更新される——ブロックが閉じられれば、対応する購読も解放される。
 - 生成コードはmacro展開時にこのブロックを独立した隠しComponent/View pairへlowerし、既存の`view!`構築pipelineへ委譲する——実行時に新しい束縛機構は導入しない。詳細は`docs/design/tools/codegen_design.md`§3.35、`docs/design/runtime/popup_context_menu_design.md`の該当節を参照。
 
 ---

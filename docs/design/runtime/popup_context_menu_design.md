@@ -300,9 +300,13 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
    found in `context_popup` position is extracted into its own hidden, framework-synthesized
    `ComponentDef`/`ViewDef` pair — `ContentControl`-based, named
    `__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>` — carrying exactly one synthetic field,
-   `#[param] __view_owner: Weak<Owner>` (`ViewDef::implicit_owner = Some("__view_owner")`). The
-   original `context_popup` attribute value is replaced with a `ViewExpr::DeferredView` marker
-   referencing the hidden component by name.
+   `#[param] __view_owner: Weak<Owner>` (`ViewDef::implicit_owner = Some(ImplicitOwnerDef {
+   field_name: "__view_owner", readable_fields, writable_fields, reactive_fields, bindable_fields
+   })` — PR #165 final/post-final rereview remediation, A2/A8/A9: an explicit schema, computed once
+   from `Owner`'s own effective fields, not a bare owner-field-name string — see
+   `docs/design/tools/codegen_design.md` §3.35 for the exact derivation rule). The original
+   `context_popup` attribute value is replaced with a `ViewExpr::DeferredView` marker referencing
+   the hidden component by name.
 2. **Weak-owner codegen** (reusing, not duplicating, `ControlTemplate`'s own `templated_parent`
    weak-owner mechanism — see `docs/design/runtime/view_template_design.md` §3's "why `Weak`, never
    `Rc`" and `is_replaceable_template_body`): the hidden component's generated code treats
@@ -336,10 +340,18 @@ before `codegen::build_symbol_table`/code emission ever run — see step 1's own
    been dropped, and otherwise constructs a **fresh hidden-component instance on every popup open**
    (`__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>::__new_unmounted(owner_weak)`, then
    `mount(ctx.environment)`) — so bare names inside the `view! { .. }` block resolve directly against
-   the enclosing Component's own fields/methods/`view!` scope, read at the moment the popup is
-   actually opened (not at the enclosing Component's own mount time), and any reactive binding inside
-   the block live-updates for as long as the popup instance stays mounted, exactly as an ordinary
-   nested `view!` region would.
+   the enclosing Component's own schema-listed fields/state/params/computed/environment values and
+   `#[bindable]`-owner-qualified paths (`ImplicitOwnerDef`'s `readable_fields`/`bindable_fields` —
+   *not* arbitrary methods, and *not* every name in scope: a bare name outside that schema is left as
+   ordinary Rust, and an explicit `self` inside the block still means the hidden Component itself,
+   never the enclosing Component), read at the moment the popup is actually opened (not at the
+   enclosing Component's own mount time). A writable schema field (`writable_fields`, `Prop`/`State`
+   only) assigned to inside the block routes through the enclosing Component's own generated setter.
+   Any reactive binding inside the block — including a direct bare schema field or a `#[bindable]`
+   owner's own qualified path — live-updates for as long as the popup instance stays mounted, exactly
+   as an ordinary nested `view!` region would (PR #165 post-final rereview remediation, A9: this
+   applies uniformly to a direct bare reference and a `vm.field`-qualified one alike, each backed by
+   its own real `ObservableExt` subscription — `codegen::implicit_bind_owners`).
 
 Environment propagates from the hidden component into *its own* nested children the same way
 `ControlTemplate`'s replaced body already does (`node.environment_scope`,
@@ -351,8 +363,15 @@ in the same generalized mechanism rather than a `context_popup`-specific special
 
 Today, popup content may still be authored via the low-level `ViewTemplate::new(|ctx| ...)` API
 directly when full manual control is wanted — see `docs/design/runtime/view_template_design.md` §4
-for exactly what that low-level API does and does not guarantee; the declarative sugar above compiles
-down to exactly that API and guarantees nothing beyond it.
+for exactly what that low-level API does and does not guarantee. Both forms share the same
+`ViewTemplate` runtime primitive, but they are not equivalent: the low-level API is just a raw
+closure the author fills in by hand, with no help resolving or capturing an outer owner correctly
+(it is entirely possible to hand-write one that captures a stale value or an accidental strong
+`Rc`). The declarative `context_popup: view! { .. }` sugar additionally provides, at compile time,
+lexical-owner resolution against the enclosing Component's own schema, disciplined weak-owner
+capture (never an accidental strong reference), and the same binding/dependency-tracking codegen
+(including live updates and subscription cleanup) an ordinary `view!` body gets — guarantees the raw
+closure API cannot enforce on its own.
 
 **Owner-`Window`-close interaction**: closing the owner `Window` while one of its declarative (or
 manually-authored `ViewTemplate`) popups is still open must close that popup — and run its

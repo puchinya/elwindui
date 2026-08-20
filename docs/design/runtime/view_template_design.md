@@ -125,6 +125,20 @@ still "no second popup binding engine" in the sense the original design intended
 rewriter every `on_click` handler already went through, generalized (twice) rather than replaced by a
 parallel mechanism built specifically for `context_popup`.
 
+The same schema also covers *source-qualified* 2-segment paths (`vm.label`, `vm.save`) and direct
+bare source-field reactivity, not just the 1-segment fallback above (PR #165 post-final rereview
+remediation, A8/A9): `ImplicitOwnerDef::bindable_fields` lets `emit_path_get`/`emit_setter`/
+`ViewClosureRewriter` bridge a `#[bindable]` owner through `__view_owner` instead of the nonexistent
+`self.vm` an earlier revision emitted, and `ImplicitOwnerDef::reactive_fields` lets the dependency
+scanners (`collect_view_expr_owner_properties`/`view_expr_has_reactive_dependency`/`view_expr_
+depends_on`) recognize a direct bare source field as a real dependency of the hidden Component's
+existing `__view_owner` subscription — before this, such a field could read correctly at popup-open
+time but never live-update while the popup stayed open. A `#[bindable]` owner referenced this way
+gets its own real `ObservableExt` subscription too (bridged through `__view_owner`, since the hidden
+Component has no physical field to subscribe through directly), reusing the exact same resync-method
+shape a physical bind owner already gets. See `docs/design/tools/codegen_design.md` §3.35 for the
+full derivation and emission detail.
+
 Only the small amount of new surface area needed to recognize a `view! { .. }` token sequence in
 `context_popup` position, extract it into the hidden pair, and emit a `ViewTemplate::new(..)` factory
 that constructs a fresh instance of it per popup open is genuinely new. See

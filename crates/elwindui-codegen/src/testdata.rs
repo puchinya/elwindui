@@ -103,6 +103,7 @@ fn builtin_view(target: &str, body_src: &str) -> ViewDef {
         on_update,
         lets,
         root,
+        implicit_owner: None,
     }
 }
 

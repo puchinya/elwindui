@@ -80,6 +80,36 @@ compile_error!("elwindui supports only macOS, Windows, and Linux");
 /// `elwindui-backend-appkit`/`elwindui-backend-winui3`はいずれも`native_ui`モジュール(非公開)の
 /// 内容をクレートルート直下に再エクスポートしている(各クレートの`src/lib.rs`参照)ため、
 /// ここではそのクレートルートを丸ごとglobする。
+///
+/// A deferred view (`view! { .. }` written as an attribute value, e.g. `context_popup: view! {
+/// .. }`) may only be assigned to a property declared `ViewTemplate`/`Option<ViewTemplate>` — on a
+/// same-crate `#[elwindui::component]`-declared type this is caught by static DSL validation, but
+/// a real builtin (`TextBlock`, every other type re-exported here) has no such local type
+/// information for the validator to check against, so this is instead enforced by a generated
+/// compile-time assertion reaching all the way into the real builtin's own declared property type
+/// (PR #165 review remediation, A4; `docs/specs/dsl_spec.md` rule 37):
+///
+/// ```compile_fail
+/// #[elwindui::component]
+/// struct InvalidDeferredViewTarget {
+///     body: view! {
+///         TextBlock {
+///             // `text` is declared `String`, not `ViewTemplate`/`Option<ViewTemplate>` — this
+///             // must fail to compile, not silently coerce or panic at runtime.
+///             text: view! {
+///                 TextBlock { text: "nope" }
+///             },
+///         }
+///     },
+/// }
+///
+/// #[elwindui::component]
+/// impl InvalidDeferredViewTarget {}
+/// ```
+///
+/// while the matching `context_popup` assignment (a real `ViewTemplate`-typed builtin property)
+/// compiles: see `crates/elwindui/tests/context_menu_and_popup.rs`'s many
+/// `declarative_context_popup_*` tests.
 pub mod ui {
     #[cfg(all(target_os = "macos", feature = "backend-appkit"))]
     pub use elwindui_backend_appkit::*;

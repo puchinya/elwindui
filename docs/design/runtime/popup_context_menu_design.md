@@ -283,14 +283,106 @@ post-dismiss notification whose toolkit only reports the dismissal *after* chang
 (currently just WinUI3's `Popup.Closed`, see §7). `on_unmount` must never be documented or assumed to
 require the native popup to still be visible/open while it runs.
 
-**Declarative `context_popup: view! { .. }` DSL** (evaluating the same `view!` grammar as a normal
-Component body, deferred to open time, reusing `view!`'s existing AST/codegen pipeline) is a planned
-follow-up, not yet implemented as of this design revision — tracked in Issue
-[#162](https://github.com/puchinya/elwindui/issues/162) (split from
-[#161](https://github.com/puchinya/elwindui/issues/161), which owns the `ViewTemplate` runtime/
-backend foundation this design revision describes). Today, popup content is authored via the
-low-level `ViewTemplate::new(|ctx| ...)` API directly — see `docs/design/runtime/
-view_template_design.md` §4 for exactly what that low-level API does and does not guarantee.
+**Declarative `context_popup: view! { .. }` DSL** (Issue [#162](https://github.com/puchinya/elwindui/issues/162),
+split from [#161](https://github.com/puchinya/elwindui/issues/161), which owns the `ViewTemplate`
+runtime/backend foundation this design revision describes) is implemented. A `context_popup`
+attribute may now be assigned a bare `view! { .. }` block — the same grammar/AST/codegen pipeline a
+normal Component body uses — instead of an ordinary `ViewTemplate`-typed expression. It desugars
+entirely at macro-expansion time, so no new *runtime* binding system is introduced — but the desugar
+itself runs in the middle of the pipeline, not before it: `validate::validate` runs first, against the
+*original*, unlowered `ViewExpr::DeferredView` node (so it can validate bare names against the
+enclosing lexical Component's own scope, `check_deferred_view_assignment`), and only *after* that does
+`lower_deferred_views_in_module` extract it into the hidden Component/View pair described below,
+before `codegen::build_symbol_table`/code emission ever run — see step 1's own ordering note.
+
+1. **Lowering** (`elwindui-codegen::lower_deferred_views_in_module`, run once per enclosing module
+   after `validate::validate` and before `codegen::build_symbol_table`): every `view! { .. }` block
+   found in `context_popup` position is extracted into its own hidden, framework-synthesized
+   `ComponentDef`/`ViewDef` pair — `ContentControl`-based, named
+   `__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>` — carrying exactly one synthetic field,
+   `#[param] __view_owner: Weak<Owner>` (`ViewDef::implicit_owner = Some(ImplicitOwnerDef {
+   field_name: "__view_owner", readable_fields, writable_fields, reactive_fields, bindable_fields
+   })` — PR #165 final/post-final rereview remediation, A2/A8/A9: an explicit schema, computed once
+   from `Owner`'s own effective fields, not a bare owner-field-name string — see
+   `docs/design/tools/codegen_design.md` §3.35 for the exact derivation rule). The original
+   `context_popup` attribute value is replaced with a `ViewExpr::DeferredView` marker referencing
+   the hidden component by name.
+2. **Weak-owner codegen** (reusing, not duplicating, `ControlTemplate`'s own `templated_parent`
+   weak-owner mechanism — see `docs/design/runtime/view_template_design.md` §3's "why `Weak`, never
+   `Rc`" and `is_replaceable_template_body`): the hidden component's generated code treats
+   `__view_owner` exactly like `templated_parent` for bindable-owner and Environment-propagation
+   purposes (`docs/agents/class-model.md`'s "no second binding system" principle — see also
+   `synthesize_external_base_fields`'s explicit `implicit_owner.is_some()` exemption, which stops
+   bare names resolved against the *enclosing* Component's own scope from being mistaken for
+   unresolved external-builtin-base fields needing synthesis).
+3. **Factory emission**: the `context_popup` site emits
+   `ViewTemplate::new(move |ctx| { .. })` (`docs/design/runtime/view_template_design.md` §2 — the
+   same `ViewTemplate` every other deferred-view-typed field already uses). The closure recovers a
+   weak reference to the *lexical owner* (`DeferredViewExpr::lexical_owner` — always the original
+   source Component, at any nesting depth, PR #165 review remediation A3) one of two ways, chosen at
+   the point this factory expression is emitted, not by the hidden component's own shape:
+   - **Top-level** (`ctx.implicit_owner.is_none()` — this factory is being emitted inside the true
+     lexical owner's own generated code): `self.__self_weak.borrow().upgrade().and_then(|rc|
+     rc.downcast::<Self>().ok()).map(|rc| Rc::downgrade(&rc))` (the same idiom `__build_view`'s own
+     `__most_derived` local already uses — *not* `Rc::downgrade(self)`, which assumes an ownership
+     shape not every generated component has).
+   - **Nested** (`ctx.implicit_owner.is_some()` — a `context_popup: view! { .. }` written inside
+     *another* `context_popup: view! { .. }`'s own body, so this factory expression is emitted while
+     generating the *outer* hidden Component's own code): `self.__view_owner.clone()` directly — the
+     outer hidden Component's own `__view_owner` field already holds exactly the right
+     `Weak<lexical_owner>` value (by the same A3 guarantee that keeps every nesting level's
+     `lexical_owner` equal to the same original source Component), so it is reused rather than
+     re-derived. The `__self_weak`-downcast approach above cannot work here: `self` at this emission
+     point genuinely *is* an instance of the outer hidden Component's own type, not the lexical
+     owner's, so `downcast::<lexical_owner>()` on it can never succeed.
+
+   Either way, the recovered weak reference returns `None` immediately if that owner has already
+   been dropped, and otherwise constructs a **fresh hidden-component instance on every popup open**
+   (`__ElwinduiViewTemplateInstanceFor<Owner>_<ordinal>::__new_unmounted(owner_weak)`, then
+   `mount(ctx.environment)`) — so bare names inside the `view! { .. }` block resolve directly against
+   the enclosing Component's own schema-listed fields/state/params/computed/environment values and
+   `#[bindable]`-owner-qualified paths (`ImplicitOwnerDef`'s `readable_fields`/`bindable_fields` —
+   *not* arbitrary methods, and *not* every name in scope: a bare name outside that schema is left as
+   ordinary Rust, and an explicit `self` inside the block still means the hidden Component itself,
+   never the enclosing Component), read at the moment the popup is actually opened (not at the
+   enclosing Component's own mount time). A writable schema field (`writable_fields`, `Prop`/`State`
+   only) assigned to inside the block routes through the enclosing Component's own generated setter.
+   Any reactive binding inside the block — including a direct bare schema field or a `#[bindable]`
+   owner's own qualified path — live-updates for as long as the popup instance stays mounted, exactly
+   as an ordinary nested `view!` region would (PR #165 post-final rereview remediation, A9: this
+   applies uniformly to a direct bare reference and a `vm.field`-qualified one alike, each backed by
+   its own real `ObservableExt` subscription — `codegen::implicit_bind_owners`).
+
+Environment propagates from the hidden component into *its own* nested children the same way
+`ControlTemplate`'s replaced body already does (`node.environment_scope`,
+`is_replaceable_template_body` triggered by `implicit_owner.is_some()`) — without this, nested
+Components inside a declarative popup would silently fall back to `application_environment()`
+instead of inheriting the popup's actual mount-time Environment (including
+`#[environment(popup_dismiss)]`), a correctness gap this design's own implementation found and fixed
+in the same generalized mechanism rather than a `context_popup`-specific special case.
+
+Today, popup content may still be authored via the low-level `ViewTemplate::new(|ctx| ...)` API
+directly when full manual control is wanted — see `docs/design/runtime/view_template_design.md` §4
+for exactly what that low-level API does and does not guarantee. Both forms share the same
+`ViewTemplate` runtime primitive, but they are not equivalent: the low-level API is just a raw
+closure the author fills in by hand, with no help resolving or capturing an outer owner correctly
+(it is entirely possible to hand-write one that captures a stale value or an accidental strong
+`Rc`). The declarative `context_popup: view! { .. }` sugar additionally provides, at compile time,
+lexical-owner resolution against the enclosing Component's own schema, disciplined weak-owner
+capture (never an accidental strong reference), and the same binding/dependency-tracking codegen
+(including live updates and subscription cleanup) an ordinary `view!` body gets — guarantees the raw
+closure API cannot enforce on its own.
+
+**Owner-`Window`-close interaction**: closing the owner `Window` while one of its declarative (or
+manually-authored `ViewTemplate`) popups is still open must close that popup — and run its
+`unmount_subtree` teardown — *before* the Window's own content unmounts, not leave it to be
+orphaned by the native surface disappearing out from under it. `Window::unmount_override`
+(`docs/design/runtime/component_lifecycle_design.md`'s "Window mount_override/unmount_override
+hooks") calls the backend's own `close_active_popup` (`TreeHostView`/`TreeHostPanel`, both a thin
+`take()`-then-`close()` on the same `active_popup` slot §6's Build/Mount/Unmount Sequence already
+tracks) at exactly this point, ahead of the owner's own content teardown — the same portable
+invariant this section already establishes for popup dismissal in isolation now also holds across an
+owning-Window close.
 
 ---
 

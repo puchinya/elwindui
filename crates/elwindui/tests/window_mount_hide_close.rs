@@ -75,6 +75,36 @@ struct MountHideCloseWindow {
 #[elwindui::component]
 impl MountHideCloseWindow {}
 
+/// PR #165 rereview remediation round 2, A6/T25: a Window whose content declares a
+/// `context_popup: view! { .. }` directly (not through a nested Component) — used only to prove
+/// the *shape* compiles; see `type_checked_window_with_declarative_popup_content_compiles`, below,
+/// for why this is compile-only (real execution needs a native Window, main-thread-only, same
+/// constraint as every other fixture in this file) and where the actual T25 ordering proof lives
+/// instead.
+#[elwindui::component(inherits Window)]
+struct MountHideCloseWindowWithPopup {
+    body: view! {
+        on_unmount {
+            record_unmount("PopupWindowRoot");
+        }
+        title: "popup window"
+        content: VerticalLayout {
+            TextBlock {
+                text: "target",
+                context_popup: view! {
+                    on_unmount {
+                        record_unmount("PopupContent");
+                    }
+                    TextBlock { text: "popup" }
+                },
+            }
+        }
+    },
+}
+
+#[elwindui::component]
+impl MountHideCloseWindowWithPopup {}
+
 /// Type-checked, not executed (see module doc comment). Demonstrates the target usage shape from
 /// spec §10/§11 and Issue #126: `new()` performs no build; a property set between `new()` and `show()`
 /// is observed by the initial build; `show()` mounts+builds exactly once; `show(); hide(); show();`
@@ -133,6 +163,30 @@ fn type_checked_new_show_hide_close_usage() {
     // show() after close is a no-op (does not remount or rebuild or reopen)
     window.show();
     debug_assert_eq!(BUILD_COUNT.with(|c| c.get()), 1);
+}
+
+/// PR #165 rereview remediation round 2, A6/T25: compile-only usage fixture — a `debug_assert_eq!`
+/// inside a function that is never executed (this crate's own tests never call it; see the module
+/// doc comment for why AppKit `Window` construction can't run in this `#[test]` harness at all)
+/// proves *nothing* about runtime ordering, so this function's own body no longer makes that
+/// claim. Its only remaining job is to keep `Window` + a declarative `context_popup: view! { .. }`
+/// on the same content tree compiling. The actual T25 (popup-before-owner-content teardown
+/// ordering) proof lives at two lower layers that genuinely do execute (or are structurally
+/// inspected) without needing a real native `Window`:
+/// - `elwindui-codegen::codegen::tests::t25_generated_unmount_override_runs_before_owner_content_unmount_subtree`
+///   (and `t19_generated_close_and_unmount_order_teardown_before_native_close`, which asserts the
+///   same ordering as part of a broader proof) — inspects the real generated `unmount()` source,
+///   proving `unmount_override()` (which closes any active popup) runs before the owner's own
+///   content `unmount_subtree`.
+/// - `elwindui_backend_appkit::host::close_active_popup_slot_tests` (executed on this environment)
+///   and `elwindui_backend_winui3::host::tests` (code-reviewed only, this crate does not compile
+///   here) — prove the backend's own active-popup slot is taken and closed reentrancy-safely.
+#[allow(dead_code)]
+#[cfg(feature = "backend-appkit")]
+fn type_checked_window_with_declarative_popup_content_compiles() {
+    let window: Rc<MountHideCloseWindowWithPopup> = MountHideCloseWindowWithPopup::new();
+    window.show();
+    window.close();
 }
 
 #[cfg(all(feature = "backend-winui3", target_os = "windows"))]

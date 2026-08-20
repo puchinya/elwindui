@@ -377,39 +377,31 @@ impl TreeHostView {
         };
         let (screen_anchor_pt, work_area) = self.query_screen_and_work_area(location);
         let request = ContextRequest::pointer(local_point, screen_anchor_pt);
-        let Some((resolved, anchor)) = ContextMenuService::process_request(
-            &tree,
-            &self.ivars().keyboard.focus,
-            &request,
-        ) else {
+        let Some((resolved, anchor)) =
+            ContextMenuService::process_request(&tree, &self.ivars().keyboard.focus, &request)
+        else {
             return std::ptr::null_mut();
         };
         if let Some(prev) = self.ivars().active_popup.borrow_mut().take() {
             prev.close();
         }
         match resolved.definition {
-            ResolvedContextDefinition::Menu { menu, presentation } => {
-                match presentation {
-                    ContextMenuPresentation::Native => {
-                        let appkit_menu = menu
-                            .as_any()
-                            .downcast_ref::<crate::native_ui::Menu>()
-                            .expect("AppKit MenuExt: menu must be this backend's Menu");
-                        Retained::autorelease_return(appkit_menu.inner_ns())
-                    }
-                    ContextMenuPresentation::Custom => {
-                        let host = crate::inner::AppKitPopupHost::new(self.window());
-                        let handle = ContextMenuService::open_custom_menu(
-                            &host,
-                            &*menu,
-                            &anchor,
-                            work_area,
-                        );
-                        *self.ivars().active_popup.borrow_mut() = handle;
-                        std::ptr::null_mut()
-                    }
+            ResolvedContextDefinition::Menu { menu, presentation } => match presentation {
+                ContextMenuPresentation::Native => {
+                    let appkit_menu = menu
+                        .as_any()
+                        .downcast_ref::<crate::native_ui::Menu>()
+                        .expect("AppKit MenuExt: menu must be this backend's Menu");
+                    Retained::autorelease_return(appkit_menu.inner_ns())
                 }
-            }
+                ContextMenuPresentation::Custom => {
+                    let host = crate::inner::AppKitPopupHost::new(self.window());
+                    let handle =
+                        ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
+                    *self.ivars().active_popup.borrow_mut() = handle;
+                    std::ptr::null_mut()
+                }
+            },
             ResolvedContextDefinition::Popup { template } => {
                 let host = crate::inner::AppKitPopupHost::new(self.window());
                 let handle = ContextMenuService::open_custom_popup(
@@ -468,7 +460,8 @@ impl TreeHostView {
 
         let work_area = Rect {
             x: visible_frame.origin.x as f32,
-            y: (primary_screen_height - (visible_frame.origin.y + visible_frame.size.height)) as f32,
+            y: (primary_screen_height - (visible_frame.origin.y + visible_frame.size.height))
+                as f32,
             width: visible_frame.size.width as f32,
             height: visible_frame.size.height as f32,
         };
@@ -627,9 +620,20 @@ impl TreeHostView {
         *self.ivars().render_tree.borrow_mut() = None;
     }
 
+    /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —
+    /// see `close_active_popup_slot`'s own doc comment for the reentrancy-safety reasoning. Shared
+    /// by the existing request-replacement paths above and the owner `Window::unmount_override`
+    /// path (`native_ui::window.rs`).
+    pub(crate) fn close_active_popup(&self) {
+        close_active_popup_slot(&self.ivars().active_popup);
+    }
+
     /// Focuses the specified element within this host's focus tracker.
     pub(crate) fn focus_element(&self, element: &Rc<dyn UIElementExt>) {
-        self.ivars().keyboard.focus.set_focus(element, FocusState::Programmatic);
+        self.ivars()
+            .keyboard
+            .focus
+            .set_focus(element, FocusState::Programmatic);
     }
 
     /// Opts this host's own `relayout` into measuring `width`/`height` unconstrained (`f32::
@@ -1073,5 +1077,105 @@ impl TreeHostView {
             s.process_footprint_bytes = process_memory.physical_footprint_bytes;
             s.process_resident_bytes = process_memory.resident_bytes;
         });
+    }
+}
+
+/// PR #165 rereview remediation round 2, A6/T25 (Layer 2): closes `slot`'s own active custom
+/// popup/context-menu surface, if any — extracted out of `TreeHostView::close_active_popup` as a
+/// free function over a bare `&RefCell<..>` (no `TreeHostView`/native host construction needed) so
+/// it is unit-testable without the main-thread-only native window/view construction every other
+/// AppKit backend test involving a real host needs. `take()`s the slot *before* calling `close()`
+/// so a reentrant close triggered from within `close()` itself (e.g. the popup's own `on_unmount`
+/// closing the owner Window again, which reaches `Window::unmount_override` ->
+/// `close_active_popup` -> this same function a second time) finds the slot already empty rather
+/// than double-closing it or panicking on a nested `RefCell` borrow.
+pub(crate) fn close_active_popup_slot(slot: &RefCell<Option<Rc<dyn PopupSurfaceHandle>>>) {
+    let popup = slot.borrow_mut().take();
+    if let Some(popup) = popup {
+        popup.close();
+    }
+}
+
+#[cfg(test)]
+mod close_active_popup_slot_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct FakePopupSurfaceHandle {
+        slot: Rc<RefCell<Option<Rc<dyn PopupSurfaceHandle>>>>,
+        close_count: Rc<Cell<u32>>,
+        reenter: bool,
+    }
+
+    impl PopupSurfaceHandle for FakePopupSurfaceHandle {
+        fn close(&self) {
+            // The real production contract this test exists to prove: by the time `close()` runs,
+            // the slot has already been emptied by `close_active_popup_slot`'s own `take()` — a
+            // reentrant call (this same handle's own `close()` calling back into
+            // `close_active_popup_slot` on the *same* slot, mirroring a popup's own on_unmount
+            // closing its owner Window again) must observe an empty slot and a `borrow_mut()` that
+            // does not panic.
+            assert!(
+                self.slot.borrow().is_none(),
+                "the slot must already be empty by the time PopupSurfaceHandle::close() runs"
+            );
+            self.close_count.set(self.close_count.get() + 1);
+            if self.reenter {
+                close_active_popup_slot(&self.slot);
+            }
+        }
+    }
+
+    /// T25 (Layer 2): a plain close — the slot holds a handle, `close_active_popup_slot` takes it
+    /// (leaving the slot empty) before calling `close()`, and `close()` runs exactly once.
+    #[test]
+    fn close_active_popup_slot_takes_before_close_and_closes_exactly_once() {
+        let slot: Rc<RefCell<Option<Rc<dyn PopupSurfaceHandle>>>> = Rc::new(RefCell::new(None));
+        let close_count = Rc::new(Cell::new(0));
+        let handle: Rc<dyn PopupSurfaceHandle> = Rc::new(FakePopupSurfaceHandle {
+            slot: slot.clone(),
+            close_count: close_count.clone(),
+            reenter: false,
+        });
+        *slot.borrow_mut() = Some(handle);
+
+        close_active_popup_slot(&slot);
+
+        assert_eq!(close_count.get(), 1);
+        assert!(slot.borrow().is_none());
+    }
+
+    /// T25 (Layer 2): an empty slot is a no-op — no panic, nothing closed.
+    #[test]
+    fn close_active_popup_slot_on_empty_slot_is_a_no_op() {
+        let slot: Rc<RefCell<Option<Rc<dyn PopupSurfaceHandle>>>> = Rc::new(RefCell::new(None));
+        close_active_popup_slot(&slot);
+        assert!(slot.borrow().is_none());
+    }
+
+    /// T25 (Layer 2): reentrancy safety — `PopupSurfaceHandle::close()` itself calls back into
+    /// `close_active_popup_slot` on the *same* slot (mirroring a popup's own on_unmount closing
+    /// its owner Window, which closes the popup again via `Window::unmount_override` ->
+    /// `close_active_popup`). Must not panic on a nested `RefCell` borrow, and the reentrant call
+    /// must observe an already-empty slot (no second close).
+    #[test]
+    fn close_active_popup_slot_is_reentrancy_safe() {
+        let slot: Rc<RefCell<Option<Rc<dyn PopupSurfaceHandle>>>> = Rc::new(RefCell::new(None));
+        let close_count = Rc::new(Cell::new(0));
+        let handle: Rc<dyn PopupSurfaceHandle> = Rc::new(FakePopupSurfaceHandle {
+            slot: slot.clone(),
+            close_count: close_count.clone(),
+            reenter: true,
+        });
+        *slot.borrow_mut() = Some(handle);
+
+        close_active_popup_slot(&slot);
+
+        assert_eq!(
+            close_count.get(),
+            1,
+            "the reentrant call must find the slot already empty and close nothing a second time"
+        );
+        assert!(slot.borrow().is_none());
     }
 }

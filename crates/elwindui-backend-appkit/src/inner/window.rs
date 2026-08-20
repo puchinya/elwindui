@@ -15,6 +15,7 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_foundation::{NSObjectProtocol, NSRect, NSString};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Walks up from `responder`'s own `NSView` ancestor chain looking for the nearest `TreeHostView`
@@ -49,16 +50,25 @@ fn resolve_focus_owner(
     None
 }
 
+/// Issue #162 §3.21: the native close-request handler `ElwinduiWindow::windowShouldClose:`
+/// consults. Lives on `ElwinduiWindow`'s own ivars (not `InnerWindow`) since that override method
+/// only ever has `self: &ElwinduiWindow`/`self.ivars()` in scope, not a real `InnerWindow`.
+#[derive(Default)]
+pub(crate) struct ElwinduiWindowIvars {
+    close_request_handler: RefCell<Option<Rc<dyn Fn() -> bool>>>,
+}
+
 define_class!(
     /// A plain `NSWindow` subclass whose only job is bridging AppKit's own first-responder changes
     /// into `elwindui_core::focus::FocusTracker` — see `docs/design/runtime/input_focus_design.md`.
     /// Subclassing the window (rather than every individual native leaf class) is the standard,
     /// minimal-surface-area AppKit technique for observing "did some view anywhere in this window
     /// become/stop being first responder" without per-widget-class overrides, and mirrors this same
-    /// file's own `TreeHostView` subclassing convention.
+    /// file's own `TreeHostView` subclassing convention. Also owns the Issue #162 §3.21 native
+    /// close-request veto (`windowShouldClose:`).
     #[unsafe(super(NSWindow))]
     #[thread_kind = objc2::MainThreadOnly]
-    #[ivars = ()]
+    #[ivars = ElwinduiWindowIvars]
     pub(crate) struct ElwinduiWindow;
 
     unsafe impl NSObjectProtocol for ElwinduiWindow {}
@@ -113,8 +123,69 @@ define_class!(
             }
             ok
         }
+
+        /// Issue #162 §3.19-§3.21: AppKit's own pre-close veto hook — participates in both a
+        /// user's title-bar click and a programmatic `-performClose:`, but is *not* consulted by
+        /// `NSWindow::close` itself (Apple's documented contract), so the framework's own
+        /// generated `Window::close()` calling `InnerWindow::close()` -> `self.ns.close()` at the
+        /// end of the common lifecycle never re-enters this method — no reentrancy guard needed
+        /// here (unlike WinUI3's `AppWindow.Closing`, which Step 12's WinUI3 half does need one
+        /// for). No handler installed (`None` — before `mount_override` ever ran, or after
+        /// `unmount_override` cleared it) means "allow the native default": `true`.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+            let handler = self.ivars().close_request_handler.borrow().clone();
+            match handler {
+                None => true,
+                Some(handler) => {
+                    // The generated Window::close() this may call reaches back into AppKit
+                    // (InnerWindow::close -> self.ns.close()) — never re-entering this method
+                    // (see this fn's own doc comment) but still reentering *other* framework
+                    // code, so the handler is called with no borrow of our own ivars held.
+                    should_allow_native_close(handler())
+                }
+            }
+        }
     }
 );
+
+/// PR #165 review remediation, A6/T22-T23: pure decision logic for `windowShouldClose:`,
+/// extracted so it is unit-testable without any real `NSWindow` construction (which requires the
+/// main thread — unavailable in this crate's own `#[test]` harness, see this module's own
+/// `type_checked_new_show_hide_close_usage`-style convention elsewhere). Mirrors WinUI3's own
+/// `decide_native_close`/`should_veto_native_close` (`elwindui-backend-winui3::inner::window`) —
+/// AppKit needs no equivalent `framework_initiated`/reentrancy branch, since `NSWindow::close`
+/// never consults `windowShouldClose:` at all (Apple's documented contract, this same `impl`
+/// block's own `window_should_close` doc comment).
+///
+/// `true` (T22): the installed close-request handler accepted the request and is now handling it
+/// through the framework's own lifecycle — veto this native close attempt. `false` (T23): the
+/// generated owner is already gone — allow AppKit's native default close to proceed.
+pub(crate) fn should_allow_native_close(handler_result: bool) -> bool {
+    !handler_result
+}
+
+#[cfg(test)]
+mod native_close_decision_tests {
+    use super::*;
+
+    /// T22: the handler accepting the close (`true`) vetoes the native attempt (`false` — do not
+    /// allow the native default).
+    #[test]
+    fn handler_accepting_the_close_vetoes_the_native_attempt() {
+        assert!(!should_allow_native_close(true));
+    }
+
+    /// T23: the handler declining the close (generated owner already gone, `false`) allows the
+    /// native default close to proceed (`true`) — this is the exact case A1 originally got wrong
+    /// on the WinUI3 side (cancelling unconditionally regardless of the handler's return value);
+    /// AppKit's own implementation never had that bug, but is covered here for parity and
+    /// regression protection.
+    #[test]
+    fn handler_declining_the_close_allows_native_default() {
+        assert!(should_allow_native_close(false));
+    }
+}
 
 /// Raw `NSWindow` + content host — composed by `native_ui::Window`.
 #[derive(Clone)]
@@ -137,7 +208,7 @@ impl InnerWindow {
         // `ElwinduiWindow` (not a stock `NSWindow`) so `makeFirstResponder:` can bridge native
         // focus changes into `elwindui_core::focus` — see that type's own doc comment.
         let ns: Retained<NSWindow> = unsafe {
-            let alloc = ElwinduiWindow::alloc(mtm).set_ivars(());
+            let alloc = ElwinduiWindow::alloc(mtm).set_ivars(ElwinduiWindowIvars::default());
             let window: Retained<ElwinduiWindow> = msg_send![
                 super(alloc),
                 initWithContentRect: content_rect,
@@ -158,6 +229,25 @@ impl InnerWindow {
         );
         ns.setContentView(Some(&content_host));
         Self { ns, content_host }
+    }
+
+    /// Issue #162 §3.18: closes this window's own active custom popup/context-menu surface, if
+    /// any — the owner-Window-close half of the popup-before-owner-content teardown ordering
+    /// (`Window::unmount_override`, `native_ui::window.rs`).
+    pub(crate) fn close_active_popup(&self) {
+        self.content_host.close_active_popup();
+    }
+
+    /// Issue #162 §3.19-§3.23: stores (or clears) the common Window close callback that
+    /// `ElwinduiWindow::windowShouldClose:` (this module's own `define_class!` block) consults.
+    /// `self.ns` was originally constructed as a real `ElwinduiWindow` (see `new`, above) before
+    /// being upcast to `NSWindow` for storage here, so this downcast always succeeds.
+    pub(crate) fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>) {
+        let window = self
+            .ns
+            .downcast_ref::<ElwinduiWindow>()
+            .expect("InnerWindow::ns is always a real ElwinduiWindow");
+        *window.ivars().close_request_handler.borrow_mut() = handler;
     }
 
     pub(crate) fn set_content(&self, content: Rc<dyn UIElementExt>) {

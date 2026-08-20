@@ -1055,33 +1055,49 @@ fn ancestor_bridge_path(bare_name: &str, ty: &Type) -> TokenStream2 {
     quote! { #prefix::#ident }
 }
 
-/// Rewrites a leading literal `crate` token to the `$crate` macro_rules metavariable. Needed
-/// specifically when a type/trait path is embedded as a *literal* token stream into a macro body
-/// this class generates for its *own* future descendants (`AncestorRoute`'s own fields, threaded
-/// into `build_inherit_macros`) — unlike `$crate` (designed exactly for this), a bare `crate`
-/// keyword's hygiene ties it to whatever crate the token was originally authored in, but once
-/// spliced into another macro's generated body and reached via a chain of macro-to-macro calls that
-/// ultimately gets triggered from a *third* crate, it no longer reliably resolves back to the
-/// authoring crate (confirmed empirically: `elwindui-core`'s own `ContentControl`, whose `inherits =
-/// crate::ui::Control` is embedded verbatim as its own trio's recursion target for descendants,
-/// failed to resolve when that recursion was ultimately triggered from `notepad`, three
-/// macro-invocation layers away). `crate` is only ever legally the *first* segment of an
-/// already-fully-qualified path (`validate_fully_qualified_path`), so only the leading token needs
-/// checking. Operates on tokens (not `syn::Type`) since the caller may already have a
-/// `TokenStream2` in hand (e.g. `own_ext_policy_path`'s return value) rather than a parsed type.
+/// Rewrites every literal `crate` token to the `$crate` macro_rules metavariable, recursing into
+/// delimited groups (`(..)`/`[..]`/`{..}`) so a `crate`-qualified path nested inside a wrapping
+/// generic (`Option<crate::ui::ViewTemplate>`, `Fn(crate::X) -> crate::Y`) is rewritten too, not
+/// only a path that *starts* the whole token stream. Needed specifically when a type/trait path is
+/// embedded as a *literal* token stream into a macro body this class generates for its *own* future
+/// descendants (`AncestorRoute`'s own fields, threaded into `build_inherit_macros`; `@field_type`'s
+/// own field-type transport, PR #165 review remediation A4) — unlike `$crate` (designed exactly for
+/// this), a bare `crate` keyword's hygiene ties it to whatever crate the token was originally
+/// authored in, but once spliced into another macro's generated body and reached via a chain of
+/// macro-to-macro calls that ultimately gets triggered from a *third* crate, it no longer reliably
+/// resolves back to the authoring crate (confirmed empirically: `elwindui-core`'s own
+/// `ContentControl`, whose `inherits = crate::ui::Control` is embedded verbatim as its own trio's
+/// recursion target for descendants, failed to resolve when that recursion was ultimately triggered
+/// from `notepad`, three macro-invocation layers away).
+///
+/// PR #165 review remediation, A4: an earlier revision of this function only ever checked the
+/// *first* token of the whole stream — correct for a token stream that *is itself* one bare path
+/// (`inherits = crate::ui::Control`'s own argument), but silently left `crate` unrewritten anywhere
+/// else, including a field type like `context_popup`'s own `Option<crate::ui::ViewTemplate>` (whose
+/// first token is `Option`, not `crate`) — undetected until `@field_type` (A4's own new consumer)
+/// was the first caller to ever pass a type shaped that way through this function. `crate` is a
+/// reserved keyword only legally valid as the *start* of a path, never as an ordinary identifier
+/// elsewhere, so unconditionally rewriting every occurrence (at any depth, not only the outermost
+/// stream's own leading token) is unambiguous and safe. Operates on tokens (not `syn::Type`) since
+/// the caller may already have a `TokenStream2` in hand (e.g. `own_ext_policy_path`'s return value)
+/// rather than a parsed type.
 fn rewrite_crate_segment(tokens: TokenStream2) -> TokenStream2 {
-    let mut iter = tokens.into_iter();
-    match iter.next() {
-        Some(proc_macro2::TokenTree::Ident(id)) if id == "crate" => {
-            let rest: TokenStream2 = iter.collect();
-            quote! { $crate #rest }
+    let mut out = TokenStream2::new();
+    for tt in tokens {
+        match tt {
+            proc_macro2::TokenTree::Ident(id) if id == "crate" => {
+                out.extend(quote! { $crate });
+            }
+            proc_macro2::TokenTree::Group(g) => {
+                let inner = rewrite_crate_segment(g.stream());
+                out.extend(std::iter::once(proc_macro2::TokenTree::Group(
+                    proc_macro2::Group::new(g.delimiter(), inner),
+                )));
+            }
+            other => out.extend(std::iter::once(other)),
         }
-        Some(first) => {
-            let rest: TokenStream2 = iter.collect();
-            quote! { #first #rest }
-        }
-        None => TokenStream2::new(),
     }
+    out
 }
 
 /// The `dyn TraitExt` element type of a content-collection field's declared type — backs

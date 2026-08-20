@@ -59,4 +59,42 @@ pub trait Window {
     fn set_width(&self, width: f32);
     fn height(&self) -> f32;
     fn set_height(&self, height: f32);
+    /// Issue #162 §3.14-§3.17: a framework-internal implementation hook, not a second lifecycle
+    /// authoring surface — `mount()`/`unmount()` themselves stay fixed, non-overridable framework
+    /// algorithms (`elwindui-codegen`'s generated host-composition `mount`/`unmount`, unchanged in
+    /// shape by this Issue). This hook runs once, before the generated Window content is built and
+    /// before the user's own `on_mount`, giving the backend/generated-host layer a place to
+    /// participate in the fixed mount algorithm (installing the native close-request handler, in
+    /// particular — `WindowLifecycleHost`, below) without a second override mechanism. Reached
+    /// through the ordinary `#[overridable]`/`#[overrides]` class-bridge chain PR #164 (Issue #128)
+    /// restored for `show`/`hide`/`close` above — never the old inherent-method/UFCS workaround.
+    /// A user-authored `#[overrides] fn mount_override` in a `#[elwindui::component] impl` is
+    /// rejected at compile time; user lifecycle code belongs in `on_mount` instead.
+    #[overridable]
+    fn mount_override(&self, environment: crate::environment::EnvironmentContext);
+    /// The `unmount()` counterpart to `mount_override` — runs once, before the generated Window
+    /// content subtree unmounts and before the user's own `on_unmount`, so a backend can close its
+    /// active popup (`docs/design/runtime/popup_context_menu_design.md`) while the owner Window's
+    /// own content (and therefore whatever the popup's `on_unmount` might still need to observe on
+    /// it) is still intact. Same framework-reserved status as `mount_override`.
+    #[overridable]
+    fn unmount_override(&self);
+}
+
+/// Issue #162 §3.19-§3.20: lets the generated host-composition Window register a close-request
+/// callback that a backend's native title-bar/system close affordance must route through, so a
+/// user clicking the OS close button enters the same fixed `mount_override`/popup-teardown/
+/// `unmount_override` lifecycle a programmatic `WindowExt::close()` call does, rather than
+/// destroying the native window directly and bypassing it. `#[doc(hidden)]`: framework-internal,
+/// never a DSL-visible property, never threaded through `EnvironmentContext`/`ViewBuildContext`.
+///
+/// The callback returns `true` when the generated most-derived Window accepted the request (it
+/// ran, or is running, the common Window close lifecycle — the native layer must not also close
+/// independently) or `false` when the generated owner is already gone (the native layer should
+/// fall back to its own default close behavior). Ownership must stay acyclic: a backend's native
+/// Window holds `Rc<dyn Fn() -> bool>`, whose closure captures only `Weak<GeneratedWindow>` —
+/// never `Rc<GeneratedWindow>`, which would keep the native window alive from the inside out.
+#[doc(hidden)]
+pub trait WindowLifecycleHost {
+    fn set_close_request_handler(&self, handler: Option<Rc<dyn Fn() -> bool>>);
 }

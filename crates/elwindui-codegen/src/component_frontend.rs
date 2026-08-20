@@ -85,6 +85,7 @@ pub fn component_and_view_from_item_struct(
                 on_update,
                 lets,
                 root,
+                implicit_owner: None,
             })
         })
         .transpose()?;
@@ -194,6 +195,68 @@ pub(crate) fn component_module_items(
         items.push(ast::Item::View(view_def));
     }
     items
+}
+
+/// Issue #162 §3.5: builds the synthetic hidden `ComponentDef`/`ViewDef` pair a single
+/// `ViewExpr::DeferredView` (`context_popup: view! { .. }`) lowers to — a pure AST construction
+/// helper, not a `syn::ItemStruct` frontend, since the deferred body is already fully parsed
+/// (`ast::DeferredViewBody`) by the time this runs (`lib.rs`'s lowering pass, called after
+/// validation, before `codegen::build_symbol_table`).
+///
+/// Mirrors `lib.rs::generate_control_template_from_item_struct`'s existing `ControlTemplate`
+/// precedent (a `#[param]` weak-owner field plus the authored body, composed over
+/// `ContentControl`), but builds the `ComponentDef`/`ViewDef` values directly rather than
+/// round-tripping through a synthesized `syn::ItemStruct` and re-parsing its `view!` tokens — there
+/// is no token-level `view!` invocation left to re-parse here, only already-structured AST.
+///
+/// `hidden_name` must already be the deterministic, ordinal-qualified name the caller assigned
+/// (`__ElwinduiViewTemplateInstanceFor<Outer>_<ordinal>`); `owner_type_name` is always the
+/// *original source* lexical Component's own bare name — the real, DSL-author-visible Component
+/// whose `view! { .. }` body this `DeferredView` was written inside — regardless of how many
+/// levels of nested `context_popup: view! { .. }` separate it from that Component (PR #165 review
+/// remediation, A3: an earlier revision passed the *hidden* Component's own name here for a
+/// nested `DeferredView`, changing source lexical-scoping semantics — see `lib.rs`'s
+/// `lower_deferred_views_in_expr` for why every level keeps the same `owner_type_name` and only
+/// the generated hidden component's own *name* changes per nesting depth). `implicit_owner` is the
+/// same source-Component field-readable/writable schema at every nesting depth too (PR #165 final
+/// rereview remediation, A2 — `codegen::implicit_owner_schema`, computed once from `owner_type_name`
+/// before any lowering happens, threaded through unchanged by every `lower_deferred_views_in_*`
+/// call, never recomputed from the hidden Component's own field list).
+pub(crate) fn hidden_view_template_component(
+    hidden_name: &str,
+    owner_type_name: &str,
+    implicit_owner: &ast::ImplicitOwnerDef,
+    body: &ast::DeferredViewBody,
+) -> (ComponentDef, ViewDef) {
+    let component_def = ComponentDef {
+        name: hidden_name.to_string(),
+        base: Some("ContentControl".to_string()),
+        base_path: None,
+        fields: vec![ast::FieldDef {
+            name: "__view_owner".to_string(),
+            ty: format!("std::rc::Weak<{owner_type_name}>"),
+            kind: FieldKind::Param,
+            attrs: Vec::new(),
+            initializer: None,
+        }],
+        methods: Vec::new(),
+        embedded: false,
+        sealed: false,
+        native: false,
+        is_abstract: false,
+        text_style: false,
+        content_field: None,
+    };
+    let view_def = ViewDef {
+        target: hidden_name.to_string(),
+        on_mount: body.on_mount.clone(),
+        on_unmount: body.on_unmount.clone(),
+        on_update: body.on_update.clone(),
+        lets: body.lets.clone(),
+        root: body.root.clone(),
+        implicit_owner: Some(implicit_owner.clone()),
+    };
+    (component_def, view_def)
 }
 
 /// The identifier of the crate currently being compiled, read fresh from the environment variables
@@ -737,6 +800,21 @@ pub fn methods_from_item_impl(
         let is_overridable = attr_path_ends_with(&f.attrs, "overridable");
         let is_overrides = attr_path_ends_with(&f.attrs, "overrides");
         let fn_name = f.sig.ident.to_string();
+        // Issue #162 §3.17: `mount_override`/`unmount_override` are framework-reserved
+        // implementation hooks (`Window`'s own `#[overridable]` slots, reached only through the
+        // ordinary `#[overridable]`/`#[overrides]` class-bridge chain PR #164 restored) — not a
+        // second user-facing lifecycle authoring surface alongside `on_mount`/`on_unmount`.
+        if matches!(fn_name.as_str(), "mount_override" | "unmount_override") {
+            return Err(format!(
+                "{name}::{fn_name}: `{fn_name}` is reserved for framework lifecycle integration; \
+                 use `{}` instead",
+                if fn_name == "mount_override" {
+                    "on_mount"
+                } else {
+                    "on_unmount"
+                }
+            ));
+        }
         match (is_overridable, is_overrides) {
             (false, false) => {
                 return Err(format!(
@@ -909,6 +987,40 @@ pub fn sibling_component_modules(skip_name: &str) -> Vec<Module> {
 mod tests {
     use super::*;
     use crate::codegen::{build_symbol_table, generate_module};
+
+    /// Issue #162 T16: `mount_override`/`unmount_override` are framework-reserved — a user
+    /// `#[elwindui::component] impl` method with either name is rejected with a diagnostic
+    /// pointing at the real user-facing lifecycle surface (`on_mount`/`on_unmount`).
+    #[test]
+    fn rejects_user_authored_mount_override_and_unmount_override_methods() {
+        let mount_override_impl: syn::ItemImpl = syn::parse_str(
+            r#"
+            impl SomeWindow {
+                #[overrides]
+                fn mount_override(&self, environment: elwindui_core::environment::EnvironmentContext) {}
+            }
+            "#,
+        )
+        .expect("impl should parse");
+        let err = methods_from_item_impl(&mount_override_impl)
+            .expect_err("mount_override must be rejected");
+        assert!(err.contains("mount_override"), "error: {err}");
+        assert!(err.contains("on_mount"), "error: {err}");
+
+        let unmount_override_impl: syn::ItemImpl = syn::parse_str(
+            r#"
+            impl SomeWindow {
+                #[overrides]
+                fn unmount_override(&self) {}
+            }
+            "#,
+        )
+        .expect("impl should parse");
+        let err = methods_from_item_impl(&unmount_override_impl)
+            .expect_err("unmount_override must be rejected");
+        assert!(err.contains("unmount_override"), "error: {err}");
+        assert!(err.contains("on_unmount"), "error: {err}");
+    }
 
     #[test]
     fn popup_dismiss_resolves_for_read_but_not_for_write() {

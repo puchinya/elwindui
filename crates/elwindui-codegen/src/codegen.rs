@@ -4,9 +4,9 @@
 //! 依存関係グラフに基づくCell/RefCellベースの更新関数生成は`docs/design/runtime/state_management_design.md`に対応する。
 
 use crate::ast::{
-    AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, ElementNode, EnumDef, FieldDef,
-    FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef, ViewAttribute,
-    ViewBody, ViewDef, ViewExpr, ViewModelDef,
+    AssignmentKind, Attr, ChildEntry, ClosureBody, ComponentDef, DeferredViewExpr, ElementNode,
+    EnumDef, FieldDef, FieldKind, Initializer, Item, MethodDef, Module, ShortcutScope, StoreDef,
+    ViewAttribute, ViewBody, ViewDef, ViewExpr, ViewModelDef,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -268,6 +268,89 @@ impl SymbolTable {
     /// error.
     pub fn resolve(&self, from: &Module, name: &str) -> Option<&TypeInfo> {
         self.resolve_key(from, name).map(|key| &self.types[&key])
+    }
+}
+
+/// PR #165 final rereview remediation, A2: computes the exact field-readable/writable schema a
+/// `ViewExpr::DeferredView` lowered out of `component_name`'s own `view! { .. }` body is allowed to
+/// implicitly fall back to (`crate::ast::ImplicitOwnerDef`). Called once per outer `#[elwindui::
+/// component] impl` invocation (`lib.rs`'s `generate_component_from_item_impl`), against a
+/// symbol table built from the *unlowered* `all_modules` (before any hidden Component/View pair
+/// exists), then threaded unchanged through every nesting depth of `lower_deferred_views_in_*` —
+/// never recomputed from a synthetic hidden Component's own (effectively empty) field list.
+///
+/// `readable_fields`/`writable_fields`/`reactive_fields`/`bindable_fields` are derived from
+/// `component_name`'s own *effective* fields (`TypeInfo::effective_fields` — `resolve_effective_
+/// fields`, inherited fields included, not just `ComponentDef::fields`'s literal declarations),
+/// matching exactly what that Component's own ordinary generated `view!` code can already read/
+/// write/subscribe-to through a bare name:
+///
+/// - readable: `Prop`, `State`, `Param`, `Computed`, `Environment` — every field kind with an
+///   ordinary generated instance getter.
+/// - writable: `Prop`, `State` — every field kind with an ordinary generated `set_<name>` setter.
+/// - reactive (PR #165 post-final rereview remediation, A9): `Prop`, `State`, `Computed`,
+///   `Environment` — every field kind that participates in `generate_view`'s own
+///   `component_property_variants` (the source of the generated `<Component>Property` enum and its
+///   `on_property_changed` dispatch). Deliberately excludes `Param`: a `#[param]` field (including a
+///   plain, non-`#[bindable]` one) is fixed at construction and never reassigned, so it has no
+///   `PropertyChanged` variant of its own in the generated code — repository reality confirmed via
+///   `component_property_variants`'s own construction (`mutable_required_names`/`own_default_names`/
+///   `own_computed_names`/`own_environment_names`, never `param_names`), not assumed.
+/// - bindable (PR #165 post-final rereview remediation, A9): reuses `TypeInfo::bindable_fields`
+///   directly (same `Attr::Bindable`-tagged effective-field derivation `build_symbol_table` already
+///   performs for every ordinary Component) rather than re-deriving it — a `#[bindable]` field is
+///   always `FieldKind::Param` (`attr_frontend.rs`'s own `"bindable"` arm), so it is already present
+///   in `readable_fields` and absent from `writable_fields`/`reactive_fields`; this set exists so a
+///   2-segment `vm.field` path can be recognized as a *logical* bindable owner reachable through the
+///   source lexical owner, distinct from a plain 1-segment readable field.
+/// - excluded entirely: `Attached` (schema-only, not real instance data of the declaring
+///   component — `FieldKind::Attached`'s own doc comment) and `Action` (never appears in a
+///   Component's own `effective_fields`; `#[observable]`/`#[async_computed]` are viewmodel/store-
+///   only by construction and validation rule 20, so they never appear here either).
+///
+/// Panics if `component_name` doesn't resolve in `table` as seen from `from` — an internal codegen
+/// invariant failure, since this is only ever called after `validate::validate` already confirmed
+/// `component_name` is a real, well-formed Component in this exact compilation unit.
+pub(crate) fn implicit_owner_schema(
+    table: &SymbolTable,
+    from: &Module,
+    component_name: &str,
+) -> crate::ast::ImplicitOwnerDef {
+    let info = table.resolve(from, component_name).unwrap_or_else(|| {
+        panic!(
+            "internal codegen invariant violated: source Component `{component_name}` must \
+             resolve in the pre-lowering symbol table once validation has already succeeded"
+        )
+    });
+    let mut readable_fields = HashSet::new();
+    let mut writable_fields = HashSet::new();
+    let mut reactive_fields = HashSet::new();
+    for f in &info.effective_fields {
+        match f.kind {
+            FieldKind::Prop | FieldKind::State => {
+                readable_fields.insert(f.name.clone());
+                writable_fields.insert(f.name.clone());
+                reactive_fields.insert(f.name.clone());
+            }
+            FieldKind::Computed | FieldKind::Environment => {
+                readable_fields.insert(f.name.clone());
+                reactive_fields.insert(f.name.clone());
+            }
+            FieldKind::Param => {
+                readable_fields.insert(f.name.clone());
+            }
+            FieldKind::Attached
+            | FieldKind::Action
+            | FieldKind::Observable
+            | FieldKind::AsyncComputed => {}
+        }
+    }
+    crate::ast::ImplicitOwnerDef {
+        field_name: "__view_owner".to_string(),
+        readable_fields,
+        writable_fields,
+        reactive_fields,
+        bindable_fields: info.bindable_fields.clone(),
     }
 }
 
@@ -829,6 +912,18 @@ fn synthesize_external_base_fields(
     let Some(view) = view else {
         return c.fields.clone();
     };
+    // Issue #162: a hidden Component lowered from a `ViewExpr::DeferredView`
+    // (`ViewDef::implicit_owner`) already resolves every otherwise-unresolved bare name through its
+    // own `__view_owner` weak-owner fallback (`emit_expr`'s own `ViewExpr::Path` handling) — a bare
+    // name used as a nested Component's own attribute value there (`DeferredPopupProbe { vm: vm,
+    // log: log }`) is a forwarded reference to the *lexically enclosing* Component's field, not an
+    // unresolved reference to `base`'s (`ContentControl`'s) own field needing synthesis here. Only
+    // relevant in a real (non-`elwindui-codegen`-internal-test) compilation, where every real
+    // `#[elwindui::component(inherits ContentControl)]` composes over an external, `TypeInfo`-less
+    // base (`resolve_composed_shape`'s own doc comment) and so always reaches this function.
+    if view.implicit_owner.is_some() {
+        return c.fields.clone();
+    }
     let own_names: HashSet<&str> = c.fields.iter().map(|f| f.name.as_str()).collect();
     let bound_names = collect_locally_bound_names(view);
     let mut bare_names: Vec<String> = collect_bare_attribute_value_names(view)
@@ -907,7 +1002,11 @@ fn collect_locally_bound_names_in_view_expr(expr: &ViewExpr, bound: &mut HashSet
                 collect_locally_bound_names_in_view_expr(v, bound);
             }
         }
-        ViewExpr::Path(_) | ViewExpr::Expr(_) => {}
+        // A deferred view is lowered to its own synthetic hidden Component with its own,
+        // independent `lets`/closure-param scope (`lib.rs`'s lowering pass) — it introduces no
+        // locally-bound name into the *enclosing* view's own scope, so there is nothing to walk
+        // here (Issue #162 §3.9's dependency-boundary rule applies to local-name collection too).
+        ViewExpr::Path(_) | ViewExpr::Expr(_) | ViewExpr::DeferredView(_) => {}
     }
 }
 
@@ -1041,7 +1140,10 @@ fn collect_view_expr_bare_names(expr: &ViewExpr, names: &mut HashSet<String>) {
                 collect_view_expr_bare_names(v, names);
             }
         }
+        // A deferred view's own inner bare names are not this outer view's dependencies — Issue
+        // #162 §3.9: outer dependency scans must not recurse into `ViewExpr::DeferredView`.
         ViewExpr::Expr(_)
+        | ViewExpr::DeferredView(_)
         | ViewExpr::Closure {
             body: ClosureBody::Expr(_) | ClosureBody::Block(_),
             ..
@@ -1204,7 +1306,9 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
         ViewExpr::TFluent(_, args) => args
             .iter()
             .any(|(_, v)| view_expr_references_bare_name(v, name)),
+        // Issue #162 §3.9: a deferred view is a dependency boundary, not a bare forward of `name`.
         ViewExpr::Expr(_)
+        | ViewExpr::DeferredView(_)
         | ViewExpr::Closure {
             body: ClosureBody::Expr(_) | ClosureBody::Block(_),
             ..
@@ -1320,6 +1424,13 @@ fn view_expr_references_name_anywhere(expr: &ViewExpr, name: &str) -> bool {
             .iter()
             .any(|(_, v)| view_expr_references_name_anywhere(v, name)),
         ViewExpr::Expr(e) => expr_references_ident(e, name),
+        // A bare outer name read inside a deferred view is not read eagerly, at the enclosing
+        // component's own construction time — it is read later, through the generated hidden
+        // Component's `__view_owner` weak upgrade, at popup-open (build) time. So it must not force
+        // `is_deferred_field`'s own "referenced anywhere -> not deferrable" decision the way an
+        // ordinary eager reference would (Issue #162 §3.9's dependency-boundary rule, applied here
+        // to construction-time-need rather than resync).
+        ViewExpr::DeferredView(_) => false,
     }
 }
 
@@ -3393,6 +3504,7 @@ fn generate_view(
         mutable_own_fields: HashSet::new(),
         bindable_owners: HashSet::new(),
         weak_bindable_owners: HashSet::new(),
+        implicit_owner: view.implicit_owner.as_ref().map(ImplicitOwnerCtx::from),
         target: target.clone(),
     };
 
@@ -3470,12 +3582,19 @@ fn generate_view(
     // from another field's initializer, and one referenced directly in the view body (e.g.
     // `vm.active_tab`) — either way, "does this field need a subscription" now depends solely on
     // whether *it itself* is `#[bindable]`, not on how other fields/expressions reference it.
+    // `templated_parent` (`ControlTemplate`, always explicit-qualification-only) and
+    // `__view_owner` (Issue #162's deferred-view lowering, additionally an implicit bare-name
+    // fallback — `ctx.implicit_owner`, `emit_expr`'s own `ViewExpr::Path` handling) are both
+    // reserved weak-owner field names, generalizing the same "owner is `Weak<T>`, reads upgrade
+    // it, its own properties are still ordinary reactive dependencies" mechanism.
+    let is_reserved_weak_owner = |f: &&FieldDef| {
+        matches!(f.name.as_str(), "templated_parent" | "__view_owner") && is_weak_type(&f.ty)
+    };
     let bind_owners: Vec<syn::Ident> = component
         .fields
         .iter()
         .filter(|f| {
-            f.attrs.iter().any(|a| matches!(a, Attr::Bindable))
-                || (f.name == "templated_parent" && is_weak_type(&f.ty))
+            f.attrs.iter().any(|a| matches!(a, Attr::Bindable)) || is_reserved_weak_owner(f)
         })
         .map(|f| format_ident!("{}", f.name))
         .collect();
@@ -3483,11 +3602,50 @@ fn generate_view(
     ctx.weak_bindable_owners = component
         .fields
         .iter()
-        .filter(|f| f.name == "templated_parent" && is_weak_type(&f.ty))
+        .filter(is_reserved_weak_owner)
         .map(|f| f.name.clone())
         .collect();
-    let is_replaceable_template_body =
-        is_control_template_enabled || !ctx.weak_bindable_owners.is_empty();
+    // PR #165 post-final rereview remediation, A9 (§10): a source-Component `#[bindable]` field
+    // (e.g. `vm`) referenced directly inside a lowered `DeferredView` (`vm.label`) is never a
+    // physical field of the hidden Component — it can never become a real `bind_owners` entry,
+    // whose `subscribe_stmts`/`property_resync_methods_for` machinery assumes `self.#owner_ident`
+    // is a genuine struct field to subscribe/upgrade. It still needs the exact same subscription/
+    // resync machinery, bridged through the source lexical owner (`__view_owner.upgrade().vm()`)
+    // instead of a physical field — see `implicit_bindable_subscribe_stmts`, below, and the
+    // `property_resync_methods_for(&implicit_bind_owners, ..)` call alongside the ordinary one.
+    // Excludes any name already resolvable as a real own field/bind owner of *this* Component (an
+    // actual own field of the same name always wins — mirrors `path_owner_value_tokens`'s own
+    // `ctx.own_fields` check).
+    let implicit_bind_owners: Vec<syn::Ident> = ctx
+        .implicit_owner
+        .as_ref()
+        .map(|implicit| {
+            implicit
+                .bindable_fields
+                .iter()
+                .filter(|name| !ctx.own_fields.contains_key(name.as_str()))
+                .map(|name| format_ident!("{}", name))
+                .collect()
+        })
+        .unwrap_or_default();
+    // `templated_parent` (`ControlTemplate`) triggers this for its own, narrower reason (a
+    // "selected once by an already-mounted target, before `Self` exists" lifecycle). A hidden
+    // Component lowered from a `ViewExpr::DeferredView` (`view.implicit_owner`, Issue #162) needs
+    // this same machinery for a different reason: it's `mount()`-ed with the popup-scoped derived
+    // `ctx.environment`, not `application_environment()` — and an *ordinary* nested `has_view`
+    // child (`node.environment_scope.is_none()`, `emit_construction`'s `None` arm) constructs via
+    // plain `Type::new()`, which unconditionally self-mounts against `application_environment()`,
+    // never its own parent's mount-time environment. Without opting into the same
+    // `node.environment_scope` propagation `ControlTemplate`'s own replaceable body already uses,
+    // a nested Component inside a popup's declarative content (e.g. one reading
+    // `#[environment(popup_dismiss)]`) would silently observe the *global* Environment instead of
+    // the popup-scoped one — confirmed by `declarative_context_popup_dismiss_during_on_mount_
+    // prevents_popup_from_showing` failing without this. The `ContentPresenter`-binding branch
+    // below (§ "content_capture_stmt/content_attach_stmt") stays independently gated on
+    // `templated_parent` specifically, so enabling this for `__view_owner` too does not affect it.
+    let is_replaceable_template_body = is_control_template_enabled
+        || ctx.weak_bindable_owners.contains("templated_parent")
+        || view.implicit_owner.is_some();
 
     // Every node that has a callback or a value that can change after construction gets a
     // generated field name and is stored on the component so `resync`/closures can reach it later.
@@ -3545,17 +3703,14 @@ fn generate_view(
     // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
     // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
     // `continue` in `generate_module` just above).
-    let resolved_root = resolve_view_root_element(
-        &view.root,
-        component.base.as_deref(),
-        is_composed,
-    )
-    .unwrap_or_else(|| {
-        panic!(
+    let resolved_root =
+        resolve_view_root_element(&view.root, component.base.as_deref(), is_composed)
+            .unwrap_or_else(|| {
+                panic!(
             "{}: view root must be exactly one element unless it inherits a composable base",
             component.name
         )
-    });
+            });
 
     plan_element(
         &resolved_root,
@@ -4838,10 +4993,10 @@ fn generate_view(
             let method = format_ident!("__resync_{}", owner_ident);
             let owner_name = owner_ident.to_string();
             let owner = if ctx.weak_bindable_owners.contains(&owner_name) {
+                let upgrade_panic_message =
+                    format!("weak owner `{owner_name}` was dropped before its template instance");
                 quote! {
-                    let owner = this.#owner_ident.upgrade().expect(
-                        "ControlTemplate templated_parent was dropped before its template instance"
-                    );
+                    let owner = this.#owner_ident.upgrade().expect(#upgrade_panic_message);
                 }
             } else {
                 quote! { let owner = std::rc::Rc::clone(&this.#owner_ident); }
@@ -4858,6 +5013,43 @@ fn generate_view(
             }
         })
         .collect();
+    // PR #165 post-final rereview remediation, A9 (§10.3): the implicit-bind-owner counterpart to
+    // `subscribe_stmts` above — subscribes to the *resolved* `vm` value's own `ObservableExt`
+    // stream (a genuinely separate notification stream from the source lexical owner's own
+    // `PropertyChanged`, since `vm` is a distinct object), bridged through `__view_owner` since the
+    // hidden Component has no physical `vm` field of its own to read `this.vm` from directly.
+    // Dispatches to the exact same `__resync_<name>` method shape `property_resync_methods_for`
+    // already generates for a physical bind owner (see the `implicit_property_resync_methods` call
+    // alongside `property_resync_methods`, below) — reused unmodified, not a second resync engine.
+    let implicit_bindable_subscribe_stmts: TokenStream = implicit_bind_owners
+        .iter()
+        .map(|owner_ident| {
+            let implicit_field_name = ctx
+                .implicit_owner
+                .as_ref()
+                .expect("implicit_bind_owners is only ever non-empty when ctx.implicit_owner is Some")
+                .field_name
+                .clone();
+            let implicit_field = format_ident!("{}", implicit_field_name);
+            let method = format_ident!("__resync_{}", owner_ident);
+            let upgrade_panic_message = format!(
+                "source lexical owner `{implicit_field_name}` was dropped before its template instance"
+            );
+            quote! {
+                {
+                    let weak = std::rc::Rc::downgrade(&this);
+                    let __source_owner = this.#implicit_field.upgrade().expect(#upgrade_panic_message);
+                    let owner = __source_owner.#owner_ident();
+                    let subscription = elwindui::core::reactive::ObservableExt::subscribe_property_changed(&*owner, move |property: &'static str| {
+                        if let Some(this) = weak.upgrade() { this.#method(property); }
+                    });
+                    this.__property_changed_subscriptions.borrow_mut().push(subscription);
+                }
+            }
+        })
+        .collect();
+    let subscribe_stmts: TokenStream =
+        quote! { #subscribe_stmts #implicit_bindable_subscribe_stmts };
     // Only real-anchored (top-level) dynamic nodes get their own top-level statement here — a
     // nested one (Phase 1) has no entry in any real element's own `child_bindings`, so the `find`
     // below returns `None` for it and `?` skips it; it's reached instead through
@@ -4989,11 +5181,21 @@ fn generate_view(
         (None, None)
     };
 
-    let this_ident = format_ident!("this");
-    let on_mount_stmt = view
-        .on_mount
-        .as_ref()
-        .map(|block| rewrite_base_calls(block.clone(), &this_ident));
+    // PR #165 review remediation, A2: `on_mount`/`on_unmount` fire synchronously, inline within
+    // `__build_view`/`__run_on_unmount`, always behind a plain `self`-shaped receiver in every
+    // generated shape (`&self` for the `#[class]`-composed shapes, `self: &Rc<Self>` for the plain
+    // shape) — `self` is therefore the one receiver token valid everywhere these two hooks are
+    // spliced, unlike `this` (only bound in some of those shapes). `rewrite_view_closure_block`
+    // (the same `ViewClosureRewriter` machinery `on_*` event handlers already go through) resolves
+    // bare references to this component's own fields *and*, inside a lowered deferred view
+    // (`ctx.implicit_owner`), the enclosing source Component's own fields — generalizing the exact
+    // mechanism, not duplicating it for lifecycle hooks specifically.
+    let self_ident = format_ident!("self");
+    let hook_mode = EmitMode::WithSelf(quote! { #self_ident });
+    let on_mount_stmt = view.on_mount.as_ref().map(|block| {
+        let rewritten = rewrite_base_calls(block.clone(), &self_ident);
+        rewrite_view_closure_block(rewritten, &[], &ctx, &hook_mode)
+    });
 
     let mut shadow_hooks = TokenStream::new();
     if let Some(block) = &base_on_mount_block {
@@ -5003,7 +5205,8 @@ fn generate_view(
         shadow_hooks.extend(quote! { #[allow(dead_code)] fn __base_on_unmount(&self) #block });
     }
     let on_unmount_method = view.on_unmount.as_ref().map(|block| {
-        let rewritten = rewrite_base_calls(block.clone(), &format_ident!("self"));
+        let rewritten = rewrite_base_calls(block.clone(), &self_ident);
+        let rewritten = rewrite_view_closure_block(rewritten, &[], &ctx, &hook_mode);
         quote! { #[allow(dead_code)] fn __run_on_unmount(&self) #rewritten }
     });
 
@@ -5028,6 +5231,26 @@ fn generate_view(
                 self,
                 environment.clone(),
             );
+        }
+    });
+    // Issue #162 §3.14-§3.15: `Window`'s own framework-reserved `mount_override` hook, inserted
+    // into the fixed generated `mount()` at the exact point the contract specifies — after the
+    // lifecycle state is already `Mounted`, before the generated content is built (`__build_view`)
+    // and before user `on_mount` (spliced later, inside `__build_view` itself). Only for a
+    // host-composition (`inherits Window`) component — `mount_override` exists on `Window`
+    // specifically, not on every composed component. UFCS (`<Self as WindowExt>::..`), matching
+    // this same generated block's existing `content_element`/`show`/`hide`/`close` precedent.
+    let mount_override_call = is_host_composition.then(|| {
+        quote! {
+            <Self as elwindui::core::ui::WindowExt>::mount_override(self, environment.clone());
+        }
+    });
+    // Issue #162 §3.16: the `unmount()` counterpart, inserted into `window_lifecycle_overrides`'s
+    // own generated `unmount()` below (not here — that method, not this `mount`/`__build_view`
+    // pair, is where the fixed unmount algorithm lives for a host-composition component).
+    let unmount_override_call = is_host_composition.then(|| {
+        quote! {
+            <Self as elwindui::core::ui::WindowExt>::unmount_override(self);
         }
     });
     let call_on_unmount = on_unmount_method
@@ -5066,6 +5289,7 @@ fn generate_view(
                         return;
                     }
                 }
+                #unmount_override_call
                 if let Some(content) = <Self as elwindui::core::ui::WindowExt>::content_element(self) {
                     elwindui::core::ui::unmount_subtree(&content);
                 }
@@ -5111,6 +5335,42 @@ fn generate_view(
                 }
                 self.unmount();
                 self.base.close();
+            }
+
+            // Issue #162 §3.19-§3.20: chains into the backend's own `mount_override` (installing
+            // the native close-request handler, e.g. AppKit's `windowShouldClose:`/WinUI3's
+            // `AppWindow.Closing`) first, then registers the common close callback every backend's
+            // native close affordance must route through — a weak, downcast-recovered `Rc<Self>`
+            // invoking this generated Window's own most-derived `WindowExt::close`, never the
+            // backend base directly (the former inherent/UFCS workaround #128 removed). Ownership
+            // stays acyclic: the closure captures only the type-erased `Weak<dyn Any>` this
+            // component's own `__self_weak` field already holds, never a strong `Rc`.
+            #[overrides]
+            fn mount_override(&self, environment: elwindui::core::environment::EnvironmentContext) {
+                self.base.mount_override(environment);
+                let __weak_self_erased = self.__self_weak.borrow().clone();
+                elwindui::core::ui::WindowLifecycleHost::set_close_request_handler(
+                    &self.base,
+                    Some(std::rc::Rc::new(move || {
+                        let Some(__this) = __weak_self_erased
+                            .upgrade()
+                            .and_then(|__rc| __rc.downcast::<#target>().ok())
+                        else {
+                            return false;
+                        };
+                        <#target as elwindui::core::ui::WindowExt>::close(&__this);
+                        true
+                    })),
+                );
+            }
+
+            // Clears the close-request handler *before* delegating to the backend's own
+            // `unmount_override` (Issue #162 §3.23) — the backend's native close-request storage
+            // must never keep pointing at a closure this component is about to tear down.
+            #[overrides]
+            fn unmount_override(&self) {
+                elwindui::core::ui::WindowLifecycleHost::set_close_request_handler(&self.base, None);
+                self.base.unmount_override();
             }
         }
     });
@@ -5389,6 +5649,14 @@ fn generate_view(
         Some(name) => base_trait_path(name),
         None => TokenStream::new(),
     };
+    // PR #165 post-final rereview remediation, A9 (§10.2): the implicit-bind-owner counterpart to
+    // `property_resync_methods` — `property_resync_methods_for` itself needs no changes at all,
+    // since `collect_view_expr_owner_properties`/`view_expr_depends_on`/`emit_resync` only ever
+    // compare `owner_name` by plain string equality against a `ViewExpr::Path`'s own first
+    // segment, never checking whether that name is a *physical* field — reusing it with
+    // `implicit_bind_owners` (`["vm"]`) already produces a correct `__resync_vm` method whose
+    // per-property read expressions go through `emit_expr`/`path_owner_value_tokens` (already
+    // fixed to bridge `vm.field` through `__view_owner`, A8) unmodified.
     let property_resync_methods: TokenStream = mark_inherent(property_resync_methods_for(
         &bind_owners,
         &plan,
@@ -5398,6 +5666,17 @@ fn generate_view(
         true,
         is_shape_composition || is_host_composition,
     ));
+    let implicit_property_resync_methods: TokenStream = mark_inherent(property_resync_methods_for(
+        &implicit_bind_owners,
+        &plan,
+        &ctx,
+        from,
+        table,
+        true,
+        is_shape_composition || is_host_composition,
+    ));
+    let property_resync_methods: TokenStream =
+        quote! { #property_resync_methods #implicit_property_resync_methods };
     let lazy_leaves_for_own_resync = collect_lazy_leaves(&plan);
     let component_property_resync_methods: TokenStream = component_property_variants
         .iter()
@@ -5470,10 +5749,16 @@ fn generate_view(
     // value, .. }` struct literal, which never calls `self.on_property_changed(..)` — only a
     // generated setter does, and only a setter call after this subscription exists can be observed
     // by it.
+    // PR #165 review remediation, A2: unlike `on_mount`/`on_unmount` (synchronous, inline), this
+    // block runs later, inside a *stored* `subscribe_property_changed` closure — the closure
+    // captures only `weak` and re-derives an owned `this: Rc<Self>` from it on each invocation
+    // (below), so `this` (not `self`, which cannot be captured into a `'static` closure by
+    // reference) is the correct `EmitMode::WithSelf` receiver here.
+    let on_update_hook_mode = EmitMode::WithSelf(quote! { this });
     let own_on_update_subscription = view.on_update.as_ref().map(|hook| {
-        let block = &hook.block;
+        let block = rewrite_view_closure_block(hook.block.clone(), &[], &ctx, &on_update_hook_mode);
         let match_arms = match &hook.fields {
-            None => quote! { _ => { #block } },
+            None => quote! { _ => #block },
             Some(names) => {
                 let mut variant_idents = Vec::new();
                 let mut unknown_errors = TokenStream::new();
@@ -5491,7 +5776,7 @@ fn generate_view(
                     unknown_errors
                 } else {
                     quote! {
-                        #(#component_property_enum::#variant_idents)|* => { #block }
+                        #(#component_property_enum::#variant_idents)|* => #block
                         _ => {}
                     }
                 }
@@ -5738,6 +6023,7 @@ fn generate_view(
                         .expect("mount: component is already mounted");
                     self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Mounted);
                     #mount_set_env
+                    #mount_override_call
                     self.__build_view();
                 }
 
@@ -5846,6 +6132,7 @@ fn generate_view(
                         .expect("mount: component is already mounted");
                     self.__lifecycle_state.set(elwindui::core::ui::ComponentLifecycleState::Mounted);
                     #mount_set_env
+                    #mount_override_call
                     self.__build_view();
                 }
 
@@ -5938,6 +6225,38 @@ fn generate_view(
     }
 }
 
+/// Codegen-side counterpart to `crate::ast::ImplicitOwnerDef`, with every field name set already
+/// converted to `HashSet` for `O(1)` membership checks during closure-body rewriting (`ast`'s own
+/// version stays a plain `HashSet<String>` too — this type exists mainly so `ViewCtx`/
+/// `ViewClosureRewriter` don't need to reach into `crate::ast` directly, and so a future divergence
+/// between the AST-level schema and the codegen-side consumption shape has somewhere to live). PR
+/// #165 final rereview remediation, A2: `readable_fields`/`writable_fields` are what makes the
+/// implicit-owner fallback schema-driven instead of "any unshadowed bare name falls back to the
+/// owner" — see `ViewClosureRewriter::resolved_implicit_owner_field`/`resolved_implicit_owner_setter`.
+/// PR #165 post-final rereview remediation, A8/A9: `reactive_fields`/`bindable_fields` extend this
+/// to source-qualified 2-segment paths (`vm.field`) and direct bare source-field dependency tracking
+/// — see `crate::ast::ImplicitOwnerDef`'s own doc comment for each set's exact derivation rule.
+#[derive(Clone)]
+struct ImplicitOwnerCtx {
+    field_name: String,
+    readable_fields: HashSet<String>,
+    writable_fields: HashSet<String>,
+    reactive_fields: HashSet<String>,
+    bindable_fields: HashSet<String>,
+}
+
+impl From<&crate::ast::ImplicitOwnerDef> for ImplicitOwnerCtx {
+    fn from(def: &crate::ast::ImplicitOwnerDef) -> Self {
+        ImplicitOwnerCtx {
+            field_name: def.field_name.clone(),
+            readable_fields: def.readable_fields.clone(),
+            writable_fields: def.writable_fields.clone(),
+            reactive_fields: def.reactive_fields.clone(),
+            bindable_fields: def.bindable_fields.clone(),
+        }
+    }
+}
+
 struct ViewCtx {
     /// Set while evaluating a `ViewExpr::Closure` body (`key`/`render_label`/`render_content`) to
     /// the closure's own declared parameter name (e.g. `"doc"`), so a bare reference to it emits
@@ -5965,6 +6284,15 @@ struct ViewCtx {
     /// instance cannot keep its templated parent alive. Expression and subscription emission
     /// upgrades these owners only for the duration of each read/resync.
     weak_bindable_owners: HashSet<String>,
+    /// Issue #162 §3.10-§3.11: the generated field (`ViewDef::implicit_owner`, always
+    /// `"__view_owner"` when set) an otherwise-unresolved bare name falls back to, for a hidden
+    /// Component lowered from a `ViewExpr::DeferredView` — together with the exact schema of
+    /// source-Component field names that fallback is allowed to reach (PR #165 final rereview
+    /// remediation, A2 — see `ImplicitOwnerCtx`'s own doc comment for why membership is checked at
+    /// all, not just shadowing). `None` for every ordinary component (including a `ControlTemplate`
+    /// — `templated_parent` stays explicit-qualification-only, never an implicit bare-name
+    /// fallback; see `emit_expr`'s own `ViewExpr::Path` handling).
+    implicit_owner: Option<ImplicitOwnerCtx>,
     /// The concrete type being generated (`generate_view`'s own `target`) — needed by
     /// `emit_for_item_wiring` to downcast `__self_weak` the same way `on_constructed`'s own
     /// `#wiring_stmts` does (see that field's own doc comment), since a `for`-loop item's renderer
@@ -5983,6 +6311,7 @@ impl ViewCtx {
             mutable_own_fields: self.mutable_own_fields.clone(),
             bindable_owners: self.bindable_owners.clone(),
             weak_bindable_owners: self.weak_bindable_owners.clone(),
+            implicit_owner: self.implicit_owner.clone(),
             target: self.target.clone(),
         }
     }
@@ -6902,7 +7231,10 @@ fn emit_for_item_subscriptions(
             let expr = &attribute.value;
             if name.starts_with("on_")
                 || !info.field_types.contains_key(name)
-                || matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. })
+                || matches!(
+                    expr,
+                    ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
+                )
                 || !view_expr_references_closure_parameter(expr, parameter.to_string().as_str())
                 || (info.has_view
                     && info.param_fields.iter().any(|(field, _)| field == name)
@@ -6980,7 +7312,7 @@ fn view_expr_references_closure_parameter(expr: &ViewExpr, parameter: &str) -> b
             collector.visit_expr(expr);
             collector.found
         }
-        ViewExpr::Element(_) | ViewExpr::Closure { .. } => false,
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => false,
     }
 }
 
@@ -8454,6 +8786,95 @@ fn emit_closure_value(
     quote! { Box::new(move |#param_ident: &_| { #body_expr }) }
 }
 
+/// Issue #162 §3.8/§4.7: emits the `ViewTemplate::new(move |ctx| { .. })` factory for a lowered
+/// `ViewExpr::DeferredView` (`context_popup: view! { .. }`) attribute value. Called from every
+/// deferred-`Option<T>`-field value-computation site (`build_virtual_value`/
+/// `build_component_setters`/`build_component_optional_setters`) in place of the ordinary
+/// `emit_expr` call those sites otherwise use for a ViewTemplate-typed field's value — mirrors
+/// those functions' own `ViewExpr::Element`/`ViewExpr::Closure` special-casing, since a deferred
+/// view is likewise "not a plain reactive value expression".
+///
+/// This function's own value-computation call sites run in different generated scopes depending on
+/// this component's own shape (a shape/host-composed component's non-root children build inside
+/// `__build_view(&self)`, everything else inside `__build_view(self: &Rc<Self>)` — `generate_view`'s
+/// own two `__build_view` shapes) and there is no single already-in-scope `self`/`__self_weak`
+/// binding whose *type* is uniformly `Weak<Self>` across both. So this reuses `__build_view`'s own
+/// existing "most-derived self" recovery idiom instead of assuming either shape directly: read the
+/// type-erased `self.__self_weak` field every component carries (populated once, during
+/// `Rc::new_cyclic`, regardless of composition style), upgrade, `downcast::<#target>()`.
+///
+/// PR #165 review remediation, A3: the downcast target is `deferred.lexical_owner` — the real
+/// source Component this `DeferredView` was written inside — **not** `ctx.target` (`generate_view`'s
+/// own target identifier, the concrete type *currently being generated*). For a top-level deferred
+/// view these are the same identifier, since `ctx.target` at that point *is* the source Component.
+/// But for a `DeferredView` nested inside another `DeferredView`'s own body, this factory expression
+/// is emitted while generating the *outer* hidden Component's own code — `ctx.target` there is that
+/// outer hidden Component, not the true source Component `lexical_owner` still correctly names (see
+/// `lib.rs`'s `lower_deferred_views_in_expr` and `DeferredViewExpr::lexical_owner`'s own doc
+/// comment). Using `ctx.target` there would build a `Weak<OuterHiddenComponent>` and hand it to a
+/// hidden-Component constructor whose own field expects `Weak<SourceComponent>` — a straight type
+/// mismatch, not merely a semantic one.
+///
+/// The factory is an `Fn`, not `FnOnce` (`ViewTemplate::new`'s own bound) — cloning the captured
+/// weak owner on every call (Issue #162 §3.8) is required, not merely an optimization choice: the
+/// same `ViewTemplate` value is built once and may be `.build()` many times (once per popup-open).
+fn emit_deferred_view_value(deferred: &DeferredViewExpr, ctx: &ViewCtx) -> TokenStream {
+    let hidden_name = deferred.hidden_component.as_deref().unwrap_or_else(|| {
+        panic!(
+            "a `ViewExpr::DeferredView` reached codegen without being lowered first (Issue #162 \
+             Step 6) — this is an elwindui-codegen bug, not a user error"
+        )
+    });
+    let hidden_ident = format_ident!("{}", hidden_name);
+    let lexical_owner_name = deferred.lexical_owner.as_deref().unwrap_or_else(|| {
+        panic!(
+            "a `ViewExpr::DeferredView` reached codegen without `lexical_owner` set by lowering \
+             (Issue #162 Step 6 / PR #165 A3) — this is an elwindui-codegen bug, not a user error"
+        )
+    });
+    let target = format_ident!("{}", lexical_owner_name);
+    // PR #165 review remediation, A3 (second half): when this factory expression is itself being
+    // emitted *inside an already-lowered hidden Component* (`ctx.implicit_owner.is_some()` — a
+    // `DeferredView` nested inside another `DeferredView`'s own body), `self` here is that outer
+    // hidden Component, not the true lexical owner — `self.__self_weak` downcast to `#target`
+    // (the original source Component) would never succeed, since `self` really is an instance of
+    // the *outer* hidden Component's own type, not `#target`. But the outer hidden Component
+    // already carries exactly the right value in its own implicit-owner field (`self.__view_owner:
+    // Weak<#target>`, by the same A3 lowering guarantee that keeps every level's `lexical_owner`
+    // equal to the same original source Component) — reuse that directly instead of re-deriving it
+    // through a downcast that can only work at the top level.
+    let owner_capture = match &ctx.implicit_owner {
+        Some(owner) => {
+            let owner_field = format_ident!("{}", owner.field_name);
+            quote! { let __view_owner_weak: std::rc::Weak<#target> = self.#owner_field.clone(); }
+        }
+        None => quote! {
+            let __view_owner_weak: std::rc::Weak<#target> = self
+                .__self_weak
+                .borrow()
+                .upgrade()
+                .and_then(|__rc| __rc.downcast::<#target>().ok())
+                .map(|__rc| std::rc::Rc::downgrade(&__rc))
+                .unwrap_or_else(std::rc::Weak::new);
+        },
+    };
+    quote! {
+        {
+            #owner_capture
+            elwindui::core::ui::ViewTemplate::new(move |ctx| {
+                // `ViewTemplate::build` has already checked `ctx.owner`'s liveness before ever
+                // invoking this factory (docs/design/runtime/view_template_design.md §2) — this
+                // upgrade is for the *lexical* enclosing Component (`__view_owner_weak`), a
+                // distinct liveness check (Issue #162 §3.7).
+                __view_owner_weak.upgrade()?;
+                let __instance = #hidden_ident::__new_unmounted(__view_owner_weak.clone());
+                __instance.mount(ctx.environment);
+                Some(__instance.into_node())
+            })
+        }
+    }
+}
+
 /// Whether `info` names a hand-written native type with no generated Rust of its own
 /// (`is_native && !has_view` — `Button`/`TextArea`/`TabView`/`TabViewItem` via `inherits
 /// NativeControl`, and `Window`/`MenuBar`/`MenuBarItem`/`Menu`/`MenuItem` via `#[native]`
@@ -8850,6 +9271,41 @@ fn emit_external_attribute_sets(
         let value = match expr {
             ViewExpr::Closure { params, body } => {
                 emit_closure_value(params, body, ctx, from, table)
+            }
+            // Issue #162: every real builtin (`TextBlock`, `Window`, ...) goes through this
+            // `TypeInfo`-less path in a real (non-`elwindui-codegen`-internal-test) compilation —
+            // `context_popup`/any other `ViewTemplate`-typed field on one of them reaches codegen
+            // here, not through `build_virtual_value`/`build_component_setters` (those only ever
+            // run for a component whose shape *does* have a local `TypeInfo`, e.g. this crate's own
+            // `#[cfg(test)]` builtin-module fixtures). No `TypeInfo` here means no `is_option` to
+            // check either — `wrap_prop_value` (`elwindui-macros`) only auto-`Some(..)`-wraps a
+            // handful of recognized shapes (`String`/`Vec`/`BareFn`/`Brush`/`Color`/`Rc<dyn Trait>`),
+            // none of which `ViewTemplate` is, so this wraps unconditionally: every real target a
+            // `ViewExpr::DeferredView` validates against (`validate::check_deferred_view_assignment`,
+            // §3.13) is `Option<ViewTemplate>` in practice — `context_popup` is still the only
+            // production consumer.
+            ViewExpr::DeferredView(deferred) => {
+                let factory = emit_deferred_view_value(deferred, ctx);
+                // PR #165 review remediation, A4 (round 2): `validate::check_deferred_view_
+                // assignment` only catches a mismatched target when the target component has a
+                // local `TypeInfo` — a no-op for this real-builtin path (no `TypeInfo` exists
+                // here at all). Convert the built factory to the target's own *real* declared
+                // type here instead, read through the same cross-crate `@field_type` transport
+                // `synthesize_external_base_fields` already uses (Refs #90) — an unknown property
+                // name falls through to `@field_type`'s own existing terminal `compile_error!`
+                // unchanged (never reaches this call at all), and a known property whose declared
+                // type isn't `ViewTemplate`/`Option<ViewTemplate>` fails to compile with
+                // `DeferredViewAssignmentTarget`'s own `#[diagnostic::on_unimplemented]` message
+                // naming both the field and the required type (`docs/specs/dsl_spec.md` rule 37).
+                // Unlike the round-1 version (which asserted the target type but then always
+                // wrapped in `Some(..)` regardless), this genuinely *produces* whichever of the
+                // two accepted shapes the property declares — correct for a real builtin property
+                // declared bare `ViewTemplate`, not only `Option<ViewTemplate>`.
+                quote! {
+                    elwindui::core::ui::__coerce_deferred_view_assignment_target::<
+                        elwindui::core::#props_macro!(@field_type #name_ident)
+                    >(#factory)
+                }
             }
             other => {
                 let value = emit_expr(other, ctx, &EmitMode::Construction);
@@ -9337,6 +9793,12 @@ fn build_component_args(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
+            // `is_deferred_field` always routes a `ViewTemplate`-typed (`Option<T>`, never
+            // referenced elsewhere in its own view — Issue #162 §3.9) field's value here only when
+            // that guard doesn't apply; kept for defense-in-depth/exhaustiveness, not a normally-
+            // reached path for `context_popup` itself. `emit_deferred_view_value`'s own `Some(..)`-
+            // wrap is applied uniformly below with every other value.
+            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     if is_option && is_brush_type(inner_ty) {
@@ -9559,6 +10021,7 @@ fn build_component_setters(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
+            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
             Some(other) => {
                 let value = if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     coerced
@@ -9680,6 +10143,7 @@ fn build_component_optional_setters(
             Some(ViewExpr::Closure { params, body }) => {
                 emit_closure_value(params, body, ctx, from, table)
             }
+            Some(ViewExpr::DeferredView(deferred)) => emit_deferred_view_value(deferred, ctx),
             Some(other) => {
                 if let Some(coerced) = coerce_color_literal(inner_ty, other) {
                     coerced
@@ -10222,7 +10686,18 @@ fn build_virtual_value(
             setters.extend(emit_semantic_brush_resolution(raw, environment, set, clear));
             continue;
         }
-        let value = if let Some(coerced) = coerce_color_literal(inner_ty, expr) {
+        let value = if let ViewExpr::DeferredView(deferred) = expr {
+            // Issue #162: a virtual builtin (e.g. `TextBlock`) has no `ViewExpr::Element`/
+            // `ViewExpr::Closure` special-casing elsewhere in this function (none of its own
+            // fields take one) — `context_popup`/any other `ViewTemplate`-typed field is the
+            // first one that needs a non-`emit_expr` value here.
+            let factory = emit_deferred_view_value(deferred, ctx);
+            if is_option {
+                quote! { Some(#factory) }
+            } else {
+                factory
+            }
+        } else if let Some(coerced) = coerce_color_literal(inner_ty, expr) {
             if is_option {
                 quote! { Some(#coerced) }
             } else {
@@ -10795,21 +11270,105 @@ fn emit_on_event_closure_body(
 }
 
 /// Rewrites bare references to one of this component's own fields (for example `vm`) inside an
-/// `on_*` event handler's closure body into the same
-/// `self.vm.field()`/`self.vm` forms every other DSL attribute value resolves to — the closure's
-/// own bound parameters (`closure_params`, e.g. `index`) are left untouched as genuine locals.
-/// Shared by [`rewrite_view_closure_expr`]/[`rewrite_view_closure_block`] since a `syn::Expr` and a
-/// `syn::Block` both just need the same `syn::visit_mut::VisitMut` walk applied at a different
-/// entry point.
+/// `on_*` event handler's closure body, or (Issue #162, PR #165 A2) an `on_mount`/`on_unmount`/
+/// `on_update` lifecycle hook block, into the same `self.vm.field()`/`self.vm` forms every other
+/// DSL attribute value resolves to — and, inside a lowered deferred view (`ViewCtx::
+/// implicit_owner`), an otherwise-unresolved bare name that is a known-readable/-writable field of
+/// the source lexical owner Component into the matching `<owner>.field()` getter / `<owner>.
+/// set_field(..)` setter call (PR #165 final rereview remediation, A2 — `resolved_implicit_owner_
+/// field`/`resolved_implicit_owner_setter`, schema-gated by `ImplicitOwnerCtx`).
+///
+/// PR #165 review remediation round 2, A2: a name is shadowed only where real Rust lexical
+/// scoping would actually consider it in scope — tracked with a genuine scope stack (`scopes`,
+/// innermost last), not a single block-wide flat set. The closure's own bound parameters
+/// (`closure_params` at construction time, e.g. `index`) seed the outermost scope; every deeper
+/// scope (a nested `{ .. }` block, an `if let`/`while let`/let-chain condition's own bindings —
+/// visible only in the following block, a `for` loop's own pattern, each `match` arm's own
+/// pattern independently of every other arm, a nested closure's own parameters) is pushed and
+/// popped by the `VisitMut` overrides below at exactly the points real Rust scoping would enter
+/// and leave them. A `let` statement's own initializer (and, for a let-else, its diverging
+/// branch) is rewritten *before* its pattern's bindings are added to the current scope, so
+/// `let x = x.clone();` correctly reads the *outer* `x` on the right-hand side. An earlier
+/// revision (PR #165 review remediation round 1, A2) tracked shadowing with a single block-wide
+/// flat `HashSet` instead — a name bound only inside one `if`/`match` arm was treated as shadowed
+/// for the *entire* surrounding block, not just that arm's own body. The rereview that found this
+/// (PR #165 final rereview remediation, A2) required the real scope stack this struct now uses;
+/// the flat-set collector helper that revision relied on no longer exists.
 struct ViewClosureRewriter<'a> {
-    closure_params: &'a [String],
+    scopes: Vec<HashSet<String>>,
     ctx: &'a ViewCtx,
     mode: &'a EmitMode,
 }
 
 impl<'a> ViewClosureRewriter<'a> {
+    fn new(closure_params: &[String], ctx: &'a ViewCtx, mode: &'a EmitMode) -> Self {
+        Self {
+            scopes: vec![closure_params.iter().cloned().collect()],
+            ctx,
+            mode,
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(HashSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    /// Adds every name `pat` binds (recursively — a single `syn::Pat::Ident` at any nesting
+    /// depth inside a tuple/struct/reference/or-pattern, ...) to the *current* (innermost) scope.
+    fn bind_pattern(&mut self, pat: &syn::Pat) {
+        struct Collector {
+            found: HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for Collector {
+            fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+                self.found.insert(node.ident.to_string());
+                syn::visit::visit_pat_ident(self, node);
+            }
+        }
+        let mut collector = Collector {
+            found: HashSet::new(),
+        };
+        collector.visit_pat(pat);
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.extend(collector.found);
+        }
+    }
+
+    /// Rewrites an `if`/`while` condition left-to-right, binding each `&&`-chained `Expr::Let`'s
+    /// own pattern into the *caller's* current (already-pushed) scope as it goes — matching
+    /// Rust's own let-chain semantics, where a later chained condition may observe an earlier
+    /// one's bindings, but an ordinary (non-`let`) condition needs no scope change, only
+    /// rewriting. The caller is responsible for pushing a scope before calling this and popping
+    /// it after the following block has been visited (so the bindings are visible in exactly
+    /// that block, never in an `else` branch or after the `if`/`while`).
+    fn rewrite_let_chain_condition(&mut self, cond: &mut syn::Expr) {
+        match cond {
+            syn::Expr::Let(expr_let) => {
+                self.visit_expr_mut(&mut expr_let.expr);
+                self.bind_pattern(&expr_let.pat);
+            }
+            syn::Expr::Binary(bin) if matches!(bin.op, syn::BinOp::And(_)) => {
+                self.rewrite_let_chain_condition(&mut bin.left);
+                self.rewrite_let_chain_condition(&mut bin.right);
+            }
+            other => self.visit_expr_mut(other),
+        }
+    }
+
+    /// A name currently shadowed by a genuine lexical binding anywhere on the current scope
+    /// stack (a closure parameter, `let`/`if let`/`while let`/`match`/`for`/a nested closure).
+    /// Checked before every field/implicit-owner resolution below, so ordinary Rust lexical
+    /// shadowing always wins.
+    fn is_shadowed(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| scope.contains(name))
+    }
+
     fn resolved_owner(&self, name: &str) -> Option<TokenStream> {
-        if self.closure_params.iter().any(|p| p == name) {
+        if self.is_shadowed(name) {
             return None;
         }
         if self.ctx.own_fields.contains_key(name) {
@@ -10826,7 +11385,7 @@ impl<'a> ViewClosureRewriter<'a> {
     /// itself, not its value). Only matters in `WithSelf` mode — see that same comment for why
     /// `Construction` mode's raw, not-yet-cell-wrapped local needs no such unwrapping.
     fn resolved_mutable_field_read(&self, name: &str) -> Option<TokenStream> {
-        if self.closure_params.iter().any(|p| p == name) {
+        if self.is_shadowed(name) {
             return None;
         }
         if !self.ctx.mutable_own_fields.contains(name) {
@@ -10843,24 +11402,194 @@ impl<'a> ViewClosureRewriter<'a> {
             quote! { #self_tok.#ident.borrow().clone() }
         })
     }
+
+    /// PR #165 review remediation, A2 (schema-gated by PR #165 final rereview remediation, A2): a
+    /// bare 1-segment name that is *not* a closure parameter, *not* one of this component's own
+    /// fields, and *is* a known-readable field of the source lexical owner Component
+    /// (`ViewCtx::implicit_owner`'s own `readable_fields`, `__view_owner` inside a lowered deferred
+    /// view — Issue #162 §3.10-§3.11) falls back to that owner, the same fallback `emit_expr`'s own
+    /// `ViewExpr::Path` handling already applies for an ordinary DSL attribute-value expression.
+    /// `name` becomes `<owner>.name()` — a getter call on the (weak-upgraded, via `resolved_owner`/
+    /// `owner_value_tokens`/`ctx.weak_bindable_owners`) owner value — generalizing the exact same
+    /// 2-segment `owner.field` machinery `resolved_owner` already reuses, rather than duplicating
+    /// it. Only reached once the closure-param/own-field/mutable-field checks above have already
+    /// ruled out a local binding, preserving ordinary lexical shadowing (a component's own field of
+    /// the same name always wins). The `readable_fields` membership check is what keeps an ordinary
+    /// Rust name unrelated to the source Component (a module constant, `None`, a free value) from
+    /// being misread as an owner field — an earlier revision fell back to the owner for *any*
+    /// unshadowed bare name, which silently miscompiled `on_mount { let _ = SOME_CONST; }`-shaped
+    /// code the moment `SOME_CONST` wasn't itself a real source-Component field.
+    fn resolved_implicit_owner_field(&self, name: &str) -> Option<TokenStream> {
+        if self.is_shadowed(name) {
+            return None;
+        }
+        let owner = self.ctx.implicit_owner.as_ref()?;
+        if !owner.readable_fields.contains(name) {
+            return None;
+        }
+        let base = self.resolved_owner(&owner.field_name)?;
+        let getter = format_ident!("{}", name);
+        Some(quote! { #base.#getter() })
+    }
+
+    /// PR #165 final rereview remediation, A2 (§6): the write-side counterpart to
+    /// `resolved_implicit_owner_field` — a bare 1-segment assignment target that is a known-
+    /// *writable* field of the source lexical owner Component (`Prop`/`State` only, never `Param`/
+    /// `Computed`/`Environment` — `implicit_owner_schema`'s own doc comment) routes through that
+    /// owner's own generated `set_<name>` setter instead of being left as an invalid plain-Rust
+    /// assignment (the hidden Component's own struct has no field named `name` at all in this
+    /// case, so leaving it unrewritten would simply fail to compile — or worse, silently resolve
+    /// to an unrelated same-named local/module item). Consulted by `Expr::Assign` handling in
+    /// `visit_expr_mut`, after the hidden Component's own mutable-field case has already been ruled
+    /// out.
+    fn resolved_implicit_owner_setter(&self, name: &str) -> Option<TokenStream> {
+        if self.is_shadowed(name) {
+            return None;
+        }
+        let owner = self.ctx.implicit_owner.as_ref()?;
+        if !owner.writable_fields.contains(name) {
+            return None;
+        }
+        let base = self.resolved_owner(&owner.field_name)?;
+        let setter = format_ident!("set_{}", name);
+        Some(quote! { #base.#setter })
+    }
+
+    /// PR #165 post-final rereview remediation, A8: the 2-segment (`vm.label`, `vm.save`) raw-Rust
+    /// counterpart to `resolved_implicit_owner_field` — reached only after `resolved_owner(owner)`
+    /// has already failed to resolve `owner` as a real field of the *current* generated Component
+    /// (e.g. inside a lowered `DeferredView` hidden Component, whose only real field is
+    /// `__view_owner`). If `owner` is instead a known source-Component `#[bindable]` field
+    /// (`ImplicitOwnerCtx::bindable_fields`), bridge through the source lexical owner
+    /// (`__view_owner.upgrade().vm()`) rather than leaving `owner` to resolve as a nonexistent
+    /// `self.vm` — the same bug `path_owner_value_tokens` fixes for ordinary DSL attribute values,
+    /// mirrored here for raw `on_mount`/`on_unmount`/`on_update`/event-handler Rust.
+    fn resolved_implicit_bindable_owner(&self, owner: &str) -> Option<TokenStream> {
+        if self.is_shadowed(owner) {
+            return None;
+        }
+        let implicit = self.ctx.implicit_owner.as_ref()?;
+        if !implicit.bindable_fields.contains(owner) {
+            return None;
+        }
+        let source = self.resolved_owner(&implicit.field_name)?;
+        let getter = format_ident!("{}", owner);
+        Some(quote! { #source.#getter() })
+    }
 }
 
 impl<'a> VisitMut for ViewClosureRewriter<'a> {
+    /// Every block introduces its own scope — a bare nested `{ .. }` (reached generically, as an
+    /// ordinary `Expr::Block`, through `visit_expr_mut`'s own default recursive fallback) equally
+    /// as the outermost hook/closure body (`rewrite_view_closure_block`'s own entry point).
+    /// Bindings a block introduces never escape it.
+    fn visit_block_mut(&mut self, block: &mut syn::Block) {
+        self.push_scope();
+        for stmt in block.stmts.iter_mut() {
+            self.visit_stmt_mut(stmt);
+        }
+        self.pop_scope();
+    }
+
+    /// A `let` statement is the one place statement-order matters: the initializer (and, for a
+    /// let-else, the diverging branch) must be rewritten *before* the pattern's own bindings are
+    /// added to scope, so `let x = x.clone();` reads the *outer* `x`. Every other statement kind
+    /// falls through to `syn`'s own default dispatch (which already reaches `visit_expr_mut` for
+    /// an expression statement, `visit_block_mut` is not otherwise involved here).
+    fn visit_stmt_mut(&mut self, stmt: &mut syn::Stmt) {
+        if let syn::Stmt::Local(local) = stmt {
+            if let Some(init) = &mut local.init {
+                self.visit_expr_mut(&mut init.expr);
+                if let Some((_, diverge)) = &mut init.diverge {
+                    self.visit_expr_mut(diverge);
+                }
+            }
+            self.bind_pattern(&local.pat);
+            return;
+        }
+        syn::visit_mut::visit_stmt_mut(self, stmt);
+    }
+
     fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+        // `if`/`if let`/let-chain: a pattern-introducing condition's own bindings are visible
+        // only in `then_branch`, never in `else_branch` or after the `if` — scoped by pushing
+        // before the condition and popping after `then_branch` (which may itself push further
+        // nested scopes for its own body, via `visit_block_mut` above), *before* `else_branch` is
+        // ever visited.
+        if let syn::Expr::If(expr_if) = node {
+            self.push_scope();
+            self.rewrite_let_chain_condition(&mut expr_if.cond);
+            self.visit_block_mut(&mut expr_if.then_branch);
+            self.pop_scope();
+            if let Some((_, else_branch)) = &mut expr_if.else_branch {
+                self.visit_expr_mut(else_branch);
+            }
+            return;
+        }
+        // `while`/`while let`: the condition's own bindings are visible only in the loop body.
+        if let syn::Expr::While(expr_while) = node {
+            self.push_scope();
+            self.rewrite_let_chain_condition(&mut expr_while.cond);
+            self.visit_block_mut(&mut expr_while.body);
+            self.pop_scope();
+            return;
+        }
+        // `for pat in iter { body }`: the iterator expression is evaluated in the *outer* scope;
+        // the loop pattern's own bindings are visible only in `body`.
+        if let syn::Expr::ForLoop(for_loop) = node {
+            self.visit_expr_mut(&mut for_loop.expr);
+            self.push_scope();
+            self.bind_pattern(&for_loop.pat);
+            self.visit_block_mut(&mut for_loop.body);
+            self.pop_scope();
+            return;
+        }
+        // `match scrutinee { pat1 if guard1 => body1, pat2 => body2, .. }`: the scrutinee is
+        // evaluated in the outer scope; each arm's own pattern (and therefore its guard and
+        // body) gets its *own independent* scope — one arm's bindings must never leak into
+        // another arm, even one with a colliding name.
+        if let syn::Expr::Match(expr_match) = node {
+            self.visit_expr_mut(&mut expr_match.expr);
+            for arm in expr_match.arms.iter_mut() {
+                self.push_scope();
+                self.bind_pattern(&arm.pat);
+                if let Some((_, guard)) = &mut arm.guard {
+                    self.visit_expr_mut(guard);
+                }
+                self.visit_expr_mut(&mut arm.body);
+                self.pop_scope();
+            }
+            return;
+        }
+        // A nested closure's own parameters are visible only inside its own body — must not
+        // shadow anything before it, and must not leak out after it.
+        if let syn::Expr::Closure(closure) = node {
+            self.push_scope();
+            for input in closure.inputs.iter() {
+                self.bind_pattern(input);
+            }
+            self.visit_expr_mut(&mut closure.body);
+            self.pop_scope();
+            return;
+        }
         // `x = <rhs>` where `x` is a bare 1-segment reference to one of this component's own
         // mutable fields (`#[prop] is_checked: bool` mutated as `is_checked = !is_checked`) has no
         // real lvalue to assign into — the field's actual storage is `Cell`/`RefCell`-backed, only
         // reachable through its generated `set_<name>` setter. Rewritten to a setter call before
         // the generic `Expr::Path` handling below ever sees the (otherwise ordinary-looking) left-
-        // hand side. Any other assignment (a genuine local variable, `+=`-style compound assignment
-        // which `syn` represents as `Expr::Binary` and never reaches here, ...) falls through to the
-        // default recursive visit at the bottom, unchanged.
+        // hand side. PR #165 final rereview remediation, A2 (§6.3): failing that, a bare 1-segment
+        // *writable source lexical-owner* field (`Prop`/`State` on the Component this deferred view
+        // was lexically written inside, e.g. `selected = true;` inside a `context_popup: view! { ..
+        // }` block mutating the enclosing Component's own `#[state] selected: bool`) routes through
+        // that owner's own weak-upgraded setter instead — `resolved_implicit_owner_setter`. Any
+        // other assignment (a genuine local variable, `+=`-style compound assignment which `syn`
+        // represents as `Expr::Binary` and never reaches here, ...) falls through to the default
+        // recursive visit at the bottom, unchanged.
         if let syn::Expr::Assign(assign) = node {
             if let syn::Expr::Path(p) = assign.left.as_ref() {
                 if let Some(ident) = p.path.get_ident() {
                     let name = ident.to_string();
-                    let is_closure_param = self.closure_params.iter().any(|p| p == &name);
-                    if !is_closure_param && self.ctx.mutable_own_fields.contains(&name) {
+                    if !self.is_shadowed(&name) && self.ctx.mutable_own_fields.contains(&name) {
                         if let EmitMode::WithSelf(self_tok) = self.mode {
                             self.visit_expr_mut(&mut assign.right);
                             let setter = format_ident!("set_{}", name);
@@ -10868,7 +11597,47 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                             *node = syn::parse_quote! { #self_tok.#setter(#rhs) };
                             return;
                         }
+                    } else if let Some(setter) = self.resolved_implicit_owner_setter(&name) {
+                        self.visit_expr_mut(&mut assign.right);
+                        let rhs = &assign.right;
+                        *node = syn::parse_quote! { #setter(#rhs) };
+                        return;
                     }
+                }
+            }
+        }
+        // A bare 1-segment call callee (`record_unmount("...")`, `some_free_function()`) is
+        // never how this DSL's own field-backed values are invoked (a viewmodel action always
+        // reads `vm.save()` — a 2-segment `owner.method()` `syn::Expr::MethodCall`, an entirely
+        // different node shape — never a bare `save()`), so `resolved_implicit_owner_field`'s
+        // "unresolved bare name must be an implicit-owner field" fallback must never be applied to
+        // one — unlike a `view!` DSL attribute value (`emit_expr`'s own `ViewExpr::Path` handling),
+        // whose grammar structurally cannot contain a free-function call in this position at all,
+        // this rewriter walks *arbitrary* raw Rust (`on_mount`/`on_unmount`/`on_update`/event
+        // closure bodies), where a bare call to a genuine free function/helper is completely
+        // ordinary and must be left untouched (found via a real regression: PR #165 review
+        // remediation, A6's own `record_unmount("PopupContent")` test fixture, a plain free
+        // function called directly inside a declarative popup's own `on_unmount`, was rewritten
+        // into a bogus `__view_owner.record_unmount()` method call before this fix). A genuine
+        // mutable-own-field or own-field callee (rare, but not nonsensical — e.g. a `Fn`-typed
+        // prop field called bare) is still resolved normally; only the *implicit-owner* fallback
+        // is withheld here. Call *arguments* are ordinary value positions and are rewritten as
+        // usual, including through the implicit-owner fallback.
+        if let syn::Expr::Call(call) = node {
+            if let syn::Expr::Path(p) = call.func.as_ref() {
+                if let Some(ident) = p.path.get_ident() {
+                    let name = ident.to_string();
+                    if !self.is_shadowed(&name) {
+                        if let Some(value) = self.resolved_mutable_field_read(&name) {
+                            *call.func = syn::parse_quote! { #value };
+                        } else if let Some(base) = self.resolved_owner(&name) {
+                            *call.func = syn::parse_quote! { #base };
+                        }
+                    }
+                    for arg in call.args.iter_mut() {
+                        self.visit_expr_mut(arg);
+                    }
+                    return;
                 }
             }
         }
@@ -10880,7 +11649,7 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 .map(|s| s.ident.to_string())
                 .collect();
             if let [only] = segments.as_slice() {
-                if self.closure_params.iter().any(|p| p == only) {
+                if self.is_shadowed(only) {
                     return;
                 }
                 if let Some(value) = self.resolved_mutable_field_read(only) {
@@ -10889,11 +11658,18 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 }
                 if let Some(base) = self.resolved_owner(only) {
                     *node = syn::parse_quote! { #base };
+                    return;
+                }
+                if let Some(value) = self.resolved_implicit_owner_field(only) {
+                    *node = syn::parse_quote! { #value };
                 }
                 return;
             }
             if let [owner, field] = segments.as_slice() {
-                if let Some(base) = self.resolved_owner(owner) {
+                let base = self
+                    .resolved_owner(owner)
+                    .or_else(|| self.resolved_implicit_bindable_owner(owner));
+                if let Some(base) = base {
                     let getter = format_ident!("{}", field);
                     *node = syn::parse_quote! { #base.#getter() };
                     return;
@@ -10941,6 +11717,7 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                         let Some(value) = self
                             .resolved_mutable_field_read(&name)
                             .or_else(|| self.resolved_owner(&name))
+                            .or_else(|| self.resolved_implicit_owner_field(&name))
                         else {
                             continue;
                         };
@@ -10960,12 +11737,7 @@ fn rewrite_view_closure_expr(
     ctx: &ViewCtx,
     mode: &EmitMode,
 ) -> TokenStream {
-    ViewClosureRewriter {
-        closure_params,
-        ctx,
-        mode,
-    }
-    .visit_expr_mut(&mut expr);
+    ViewClosureRewriter::new(closure_params, ctx, mode).visit_expr_mut(&mut expr);
     quote! { #expr }
 }
 
@@ -10975,12 +11747,10 @@ fn rewrite_view_closure_block(
     ctx: &ViewCtx,
     mode: &EmitMode,
 ) -> TokenStream {
-    ViewClosureRewriter {
-        closure_params,
-        ctx,
-        mode,
-    }
-    .visit_block_mut(&mut block);
+    // `visit_block_mut` itself pushes a *further* nested scope for the block's own top-level
+    // statements (see that override's own doc comment) — the scope seeded here by `new` is only
+    // the closure/hook's own parameter scope, layered *outside* the block's own.
+    ViewClosureRewriter::new(closure_params, ctx, mode).visit_block_mut(&mut block);
     quote! { #block }
 }
 
@@ -11001,6 +11771,16 @@ fn rewrite_view_closure_block(
 /// `ViewExpr::TFluent`, already handled below) contributes no name here — there is no property
 /// *name* to collect from "this might depend on something", only from an actual `owner.property`
 /// path.
+/// PR #165 post-final rereview remediation, A9 (§9.3): whether `ctx.implicit_owner` names `owner`
+/// as its own physical field (i.e. `owner == "__view_owner"`, the only case this ever matters for)
+/// — the shared guard `collect_view_expr_owner_properties`/`view_expr_depends_on` use before
+/// treating a *direct* bare source-field reference as belonging to `owner`'s own resync method.
+fn implicit_owner_matches<'a>(ctx: &'a ViewCtx, owner: &str) -> Option<&'a ImplicitOwnerCtx> {
+    ctx.implicit_owner
+        .as_ref()
+        .filter(|implicit| implicit.field_name == owner)
+}
+
 fn collect_view_expr_owner_properties(
     expr: &ViewExpr,
     ctx: &ViewCtx,
@@ -11008,13 +11788,28 @@ fn collect_view_expr_owner_properties(
     out: &mut std::collections::BTreeSet<String>,
 ) {
     match expr {
-        ViewExpr::Path(path) => {
-            if let [path_owner, path_property, ..] = path.as_slice() {
+        ViewExpr::Path(path) => match path.as_slice() {
+            // PR #165 post-final rereview remediation, A9: a *direct* bare source field
+            // (`TextBlock { text: label }`, no `vm.` qualification) inside a lowered `DeferredView`
+            // is a dependency of `__view_owner`'s own resync method — canonicalized to
+            // `(__view_owner, label)` — whenever `label` is one of the source Component's own
+            // `reactive_fields`. Before this, only `[path_owner, path_property, ..]` (2-segment)
+            // paths were ever recognized here at all, so a direct bare source field never got a
+            // resync-method arm and therefore never live-updated while the popup stayed open.
+            [field] => {
+                if let Some(implicit) = implicit_owner_matches(ctx, owner) {
+                    if implicit.reactive_fields.contains(field) {
+                        out.insert(field.clone());
+                    }
+                }
+            }
+            [path_owner, path_property, ..] => {
                 if path_owner == owner {
                     out.insert(path_property.clone());
                 }
             }
-        }
+            [] => {}
+        },
         ViewExpr::TFluent(_, args) => {
             for (_, value) in args {
                 collect_view_expr_owner_properties(value, ctx, owner, out);
@@ -11022,6 +11817,7 @@ fn collect_view_expr_owner_properties(
         }
         ViewExpr::Expr(expr) => {
             struct Collector<'a> {
+                ctx: &'a ViewCtx,
                 owner: &'a str,
                 out: &'a mut std::collections::BTreeSet<String>,
             }
@@ -11030,22 +11826,41 @@ fn collect_view_expr_owner_properties(
                     let segments: Vec<_> = node.path.segments.iter().collect();
                     if segments.len() >= 2 && segments[0].ident == self.owner {
                         self.out.insert(segments[1].ident.to_string());
+                    } else if segments.len() == 1 {
+                        if let Some(implicit) = implicit_owner_matches(self.ctx, self.owner) {
+                            let name = segments[0].ident.to_string();
+                            if implicit.reactive_fields.contains(&name) {
+                                self.out.insert(name);
+                            }
+                        }
                     }
                     syn::visit::visit_expr_path(self, node);
                 }
 
                 fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
                     if let Some(arguments) = supported_macro_expr_arguments(node) {
+                        if is_format_macro(node) {
+                            if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                                if let Some(implicit) = implicit_owner_matches(self.ctx, self.owner)
+                                {
+                                    for name in format_str_inline_idents(&fmt.value()) {
+                                        if implicit.reactive_fields.contains(&name) {
+                                            self.out.insert(name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         for argument in &arguments {
                             self.visit_expr(argument);
                         }
                     }
                 }
             }
-            let mut collector = Collector { owner, out };
+            let mut collector = Collector { ctx, owner, out };
             collector.visit_expr(expr);
         }
-        ViewExpr::Element(_) | ViewExpr::Closure { .. } => {}
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => {}
     }
 }
 
@@ -11126,11 +11941,33 @@ fn is_format_macro(node: &syn::ExprMacro) -> bool {
         .is_some_and(|s| matches!(s.ident.to_string().as_str(), "format" | "format_args"))
 }
 
+/// Whether `name` is a source-Component field this hidden Component's implicit-owner fallback may
+/// treat as reactive (`ImplicitOwnerCtx::reactive_fields`) — PR #165 post-final rereview
+/// remediation, A9.
+fn is_implicit_reactive_field(ctx: &ViewCtx, name: &str) -> bool {
+    ctx.implicit_owner
+        .as_ref()
+        .is_some_and(|implicit| implicit.reactive_fields.contains(name))
+}
+
+/// Whether `name` is a source-Component `#[bindable]` field reachable through this hidden
+/// Component's implicit owner (`ImplicitOwnerCtx::bindable_fields`) — PR #165 post-final rereview
+/// remediation, A9.
+fn is_implicit_bindable_owner(ctx: &ViewCtx, name: &str) -> bool {
+    ctx.implicit_owner
+        .as_ref()
+        .is_some_and(|implicit| implicit.bindable_fields.contains(name))
+}
+
 fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
     match expr {
         ViewExpr::Path(path) => match path.as_slice() {
-            [field] => ctx.mutable_own_fields.contains(field),
-            [owner, ..] => ctx.bindable_owners.contains(owner),
+            [field] => {
+                ctx.mutable_own_fields.contains(field) || is_implicit_reactive_field(ctx, field)
+            }
+            [owner, ..] => {
+                ctx.bindable_owners.contains(owner) || is_implicit_bindable_owner(ctx, owner)
+            }
             [] => false,
         },
         ViewExpr::TFluent(_, args) => args
@@ -11144,18 +11981,20 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
             impl<'ast> Visit<'ast> for Collector<'_> {
                 fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
                     let segments: Vec<_> = node.path.segments.iter().collect();
-                    if (segments.len() == 1
-                        && self
-                            .ctx
-                            .mutable_own_fields
-                            .contains(&segments[0].ident.to_string()))
-                        || (segments.len() >= 2
-                            && self
-                                .ctx
-                                .bindable_owners
-                                .contains(&segments[0].ident.to_string()))
-                    {
-                        self.found = true;
+                    if segments.len() == 1 {
+                        let name = segments[0].ident.to_string();
+                        if self.ctx.mutable_own_fields.contains(&name)
+                            || is_implicit_reactive_field(self.ctx, &name)
+                        {
+                            self.found = true;
+                        }
+                    } else if segments.len() >= 2 {
+                        let owner = segments[0].ident.to_string();
+                        if self.ctx.bindable_owners.contains(&owner)
+                            || is_implicit_bindable_owner(self.ctx, &owner)
+                        {
+                            self.found = true;
+                        }
                     }
                     syn::visit::visit_expr_path(self, node);
                 }
@@ -11164,10 +12003,10 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
                     if let Some(arguments) = supported_macro_expr_arguments(node) {
                         if is_format_macro(node) {
                             if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
-                                if format_str_inline_idents(&fmt.value())
-                                    .iter()
-                                    .any(|name| self.ctx.mutable_own_fields.contains(name))
-                                {
+                                if format_str_inline_idents(&fmt.value()).iter().any(|name| {
+                                    self.ctx.mutable_own_fields.contains(name)
+                                        || is_implicit_reactive_field(self.ctx, name)
+                                }) {
                                     self.found = true;
                                 }
                             }
@@ -11184,7 +12023,7 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
             collector.visit_expr(expr);
             collector.found
         }
-        ViewExpr::Element(_) | ViewExpr::Closure { .. } => false,
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => false,
     }
 }
 
@@ -11323,12 +12162,24 @@ fn property_resync_methods_for(
 /// emitted.  Expression macros that the DSL cannot inspect are deliberately conservative: they
 /// remain attached to that owner's notifications rather than risking a stale UI value.
 fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &str) -> bool {
+    // PR #165 post-final rereview remediation, A9: when `owner` names the hidden Component's own
+    // implicit lexical owner (`__view_owner`), a *direct* bare source field (`[field]`, no `vm.`
+    // qualification) depends on `(owner, property)` too — canonicalizing the same dependency
+    // identity `collect_view_expr_owner_properties`/`view_expr_has_reactive_dependency` already use
+    // — provided `field` is actually one of the source Component's own `reactive_fields` (never for
+    // an ordinary Component with no implicit owner at all, where this is always `None`).
+    let implicit_direct_field_matches = |field: &str| {
+        field == property
+            && implicit_owner_matches(ctx, owner)
+                .is_some_and(|implicit| implicit.reactive_fields.contains(field))
+    };
     match expr {
         ViewExpr::Path(path) => {
             if owner.is_empty() {
                 matches!(path.as_slice(), [path_property] if path_property == property)
             } else {
                 matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
+                    || matches!(path.as_slice(), [field] if implicit_direct_field_matches(field))
             }
         }
         ViewExpr::TFluent(_, args) => args
@@ -11336,6 +12187,7 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
             .any(|(_, value)| view_expr_depends_on(value, ctx, owner, property)),
         ViewExpr::Expr(expr) => {
             struct Collector<'a> {
+                ctx: &'a ViewCtx,
                 owner: &'a str,
                 property: &'a str,
                 found: bool,
@@ -11350,6 +12202,11 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
                         || (segments.len() >= 2
                             && segments[0].ident == self.owner
                             && segments[1].ident == self.property)
+                        || (segments.len() == 1
+                            && segments[0].ident == self.property
+                            && implicit_owner_matches(self.ctx, self.owner).is_some_and(
+                                |implicit| implicit.reactive_fields.contains(self.property),
+                            ))
                     {
                         self.found = true;
                     }
@@ -11367,6 +12224,19 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
                                     self.found = true;
                                 }
                             }
+                        } else if is_format_macro(node) {
+                            if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                                if format_str_inline_idents(&fmt.value()).iter().any(|name| {
+                                    name == self.property
+                                        && implicit_owner_matches(self.ctx, self.owner).is_some_and(
+                                            |implicit| {
+                                                implicit.reactive_fields.contains(self.property)
+                                            },
+                                        )
+                                }) {
+                                    self.found = true;
+                                }
+                            }
                         }
                         for argument in &arguments {
                             self.visit_expr(argument);
@@ -11377,6 +12247,7 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
                 }
             }
             let mut collector = Collector {
+                ctx,
                 owner,
                 property,
                 found: false,
@@ -11385,7 +12256,7 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
             collector.visit_expr(expr);
             collector.found || collector.opaque_macro
         }
-        ViewExpr::Element(_) | ViewExpr::Closure { .. } => false,
+        ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => false,
     }
 }
 
@@ -11506,7 +12377,10 @@ fn emit_resync_with_receiver(
         if name.starts_with("on_") {
             continue;
         }
-        if matches!(expr, ViewExpr::Element(_) | ViewExpr::Closure { .. }) {
+        if matches!(
+            expr,
+            ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_)
+        ) {
             continue;
         }
         match filter {
@@ -11830,6 +12704,23 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
                     }
                     return mode.owner_tokens(only);
                 }
+                // Issue #162 §3.11: inside a lowered deferred view (`ViewDef::implicit_owner`), a
+                // bare name that is a known-*readable* field of the source lexical owner Component
+                // (PR #165 final rereview remediation, A2 — `ImplicitOwnerCtx::readable_fields`,
+                // the same schema-membership check `resolved_implicit_owner_field` applies to raw
+                // Rust blocks, so a DSL attribute value and a raw `on_*` block agree on exactly
+                // which bare names fall back to the owner) falls back to the implicit weak lexical
+                // owner — `selected_item` becomes semantically `__view_owner.selected_item`,
+                // generalizing `emit_path_get`'s existing 2-segment `owner.field` machinery (weak
+                // upgrade included, via `owner_value_tokens`/`ctx.weak_bindable_owners`) rather than
+                // duplicating it. Only reached once the closure-param/own-field checks above have
+                // already ruled out a local binding, preserving ordinary lexical shadowing.
+                if let Some(owner) = &ctx.implicit_owner {
+                    if owner.readable_fields.contains(only) {
+                        let owner_path = [owner.field_name.clone(), only.clone()];
+                        return emit_path_get(&owner_path, ctx, mode);
+                    }
+                }
             }
             emit_path_get(path, ctx, mode)
         }
@@ -11846,6 +12737,14 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
         ViewExpr::Element(_) => {
             panic!("an element (`Type {{ .. }}`) cannot itself be used as a value expression here")
         }
+        ViewExpr::DeferredView(_) => {
+            panic!(
+                "a deferred view (`view! {{ .. }}`) cannot itself be used as a value expression \
+                 here — it is only valid as a whole attribute value (e.g. `context_popup: view! \
+                 {{ .. }}`), emitted via its own dedicated ViewTemplate construction path, never \
+                 nested inside a larger expression"
+            )
+        }
     }
 }
 
@@ -11855,20 +12754,54 @@ fn emit_expr(expr: &ViewExpr, ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
 fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
     let base = mode.owner_tokens(owner);
     if ctx.weak_bindable_owners.contains(owner) {
+        let upgrade_panic_message =
+            format!("weak owner `{owner}` was dropped before its template instance");
         quote! {
-            #base.upgrade().expect(
-                "ControlTemplate templated_parent was dropped before its template instance"
-            )
+            #base.upgrade().expect(#upgrade_panic_message)
         }
     } else {
         base
     }
 }
 
+/// PR #165 post-final rereview remediation, A8: the shared resolver behind both `emit_path_get`'s
+/// and `emit_setter`'s 2-segment `owner.field` path handling. Ordinarily `owner` is simply this
+/// generated Component's own field/bindable-owner, and `owner_value_tokens` blindly emits
+/// `self.#owner`/`#owner` — valid because `owner` really is a struct field there (`ctx.own_fields`
+/// covers every one of this Component's own literal fields, `Prop`/`State`/`Param`/`Computed`/
+/// `Environment` alike — see its own construction site's `own_fields.extend(..)`).
+///
+/// Inside a lowered `DeferredView` hidden Component, `owner` may instead be a *source*-lexical-owner
+/// `#[bindable]` field (`vm.label`, `vm.save`) that the hidden Component itself never physically
+/// declares — its only real field is `__view_owner`. Before this fix, `emit_path_get`/`emit_setter`
+/// called `owner_value_tokens` unconditionally, so `vm.label` was emitted as `self.vm.label()` on a
+/// struct with no `vm` field at all — syntactically valid tokens (so `assert_valid_rust`'s
+/// `syn::parse2`-only check missed it) but a genuine `rustc` compile error (`no field \`vm\` on type
+/// ..`). This resolver checks `ctx.own_fields` first (preserving every existing case unchanged,
+/// including `ControlTemplate`'s own `templated_parent` and `__view_owner` itself, both real fields
+/// of their own hidden Component); only when `owner` is *not* a real field of the current Component
+/// but *is* a known source-Component `#[bindable]` field (`ImplicitOwnerCtx::bindable_fields`) does
+/// it bridge through the source lexical owner instead: `__view_owner.upgrade().vm()`. Any other,
+/// genuinely unresolved `owner` falls through to the original `owner_value_tokens` call unchanged
+/// (preserving whatever diagnostic/behavior that already produced).
+fn path_owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
+    if ctx.own_fields.contains_key(owner) {
+        return owner_value_tokens(ctx, mode, owner);
+    }
+    if let Some(implicit) = &ctx.implicit_owner {
+        if implicit.bindable_fields.contains(owner) {
+            let source = owner_value_tokens(ctx, mode, &implicit.field_name);
+            let getter = format_ident!("{}", owner);
+            return quote! { #source.#getter() };
+        }
+    }
+    owner_value_tokens(ctx, mode, owner)
+}
+
 fn emit_path_get(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
     match path {
         [owner, field] => {
-            let base = owner_value_tokens(ctx, mode, owner);
+            let base = path_owner_value_tokens(ctx, mode, owner);
             let getter = format_ident!("{}", field);
             quote! { #base.#getter() }
         }
@@ -11886,7 +12819,7 @@ fn emit_setter(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
             path.join(".")
         );
     };
-    let base = owner_value_tokens(ctx, mode, owner);
+    let base = path_owner_value_tokens(ctx, mode, owner);
     let setter = format_ident!("set_{}", field);
     quote! { #base.#setter }
 }
@@ -14256,10 +15189,8 @@ struct NotepadWindow {
         // `content`/`padding` are `#[class]`-managed own (untagged) methods now (docs/
         // docs/design/runtime/ui_tree_design.md) — the macro derives the matching trait declaration/impl from
         // these at expansion time, invisible in these pre-expansion generated tokens.
-        assert!(
-            content_control_str
-                .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >")
-        );
+        assert!(content_control_str
+            .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
         assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
         // Real struct is always the bare `ContentControl` name itself — the *source* `#[class]` is
         // written against that same bare name (docs/design/runtime/ui_tree_design.md); the macro derives
@@ -14437,9 +15368,1131 @@ struct NotepadWindow {
             generated_str.contains("fn __base_on_mount"),
             "{generated_str}"
         );
+        // PR #165 review remediation, A2: `on_mount`/`on_unmount`'s `base::name()` rewriting now
+        // uses `self` as the receiver (valid in every generated shape, unlike `this`, which is
+        // only ever bound in some of them) — see `generate_view`'s own comment on `self_ident`.
         assert!(
-            generated_str.contains("this . __base_on_mount"),
+            generated_str.contains("self . __base_on_mount"),
             "{generated_str}"
+        );
+    }
+
+    /// PR #165 review remediation, A3: a `context_popup: view! { .. }` nested inside *another*
+    /// `context_popup: view! { .. }` must keep the *original source* Component as the lexical
+    /// owner for both levels — not the first level's own generated hidden Component. Proven at the
+    /// codegen level (not merely by end-to-end runtime behavior, `context_menu_and_popup.rs`'s own
+    /// `declarative_context_popup_nested_popup_observes_current_outer_value`) by inspecting the
+    /// generated `Weak<..>` field type on *both* hidden components' own struct definitions.
+    #[test]
+    fn nested_deferred_view_keeps_the_original_source_component_as_lexical_owner() {
+        let mut module = crate::test_module(&[(
+            None,
+            r#"
+            struct NestedPopupOwner {
+                #[state(default = "outer".to_string())]
+                value: String,
+                body: view! {
+                    TextBlock {
+                        text: "Open popup",
+                        context_popup: view! {
+                            TextBlock {
+                                text: "inner",
+                                context_popup: view! {
+                                    TextBlock { text: value }
+                                },
+                            }
+                        },
+                    }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let pre_lowering_table = build_symbol_table(&[module.clone()]);
+        let implicit_owner_schema =
+            implicit_owner_schema(&pre_lowering_table, &module, "NestedPopupOwner");
+        crate::lower_deferred_views_in_module(
+            &mut module,
+            "NestedPopupOwner",
+            &implicit_owner_schema,
+        );
+
+        // Two hidden components must have been synthesized — one per `context_popup: view! { .. }`.
+        let hidden_names: Vec<&str> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Component(c) if c.name.starts_with("__ElwinduiViewTemplateInstance") => {
+                    Some(c.name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hidden_names.len(),
+            2,
+            "expected exactly 2 hidden components, got {hidden_names:?}"
+        );
+
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("nested_deferred_view_owner", &generated);
+        let generated_str = generated.to_string();
+
+        // Both hidden components' own `__view_owner` field (and its constructor/downcast plumbing)
+        // must be typed against the *original* source Component (`NestedPopupOwner`) — never
+        // against the other hidden component's own generated name. `Weak < NestedPopupOwner >`
+        // must appear at least once per hidden component (each mentions it more than once —
+        // struct field, `__new_unmounted` parameter, weak-upgrade downcast target — so this checks
+        // a lower bound, not an exact count) — and no hidden-component name may appear as the
+        // argument of a `Weak < .. >` anywhere (which would mean one hidden Component's own
+        // `__view_owner` field was incorrectly typed against the *other* hidden Component).
+        let owner_weak_count = generated_str.matches("Weak < NestedPopupOwner >").count();
+        assert!(
+            owner_weak_count >= 2,
+            "expected both hidden components' __view_owner field to be Weak<NestedPopupOwner>, \
+             got only {owner_weak_count} occurrence(s) in:\n{generated_str}"
+        );
+        for hidden_name in &hidden_names {
+            let bad = format!("Weak < {hidden_name} >");
+            assert!(
+                !generated_str.contains(&bad),
+                "a hidden component's own generated name must never appear as another deferred \
+                 view's lexical owner type ({bad} found):\n{generated_str}"
+            );
+        }
+    }
+
+    /// PR #165 rereview remediation round 2, A2-T8: a deferred view's `on_update` block is
+    /// rewritten through the same scope-aware `ViewClosureRewriter`/`rewrite_view_closure_block`
+    /// machinery as `on_mount`/`on_unmount`/event closures — proven by inspecting the generated
+    /// source directly, since a lowered hidden Component structurally has no own `#[prop]`/
+    /// `#[state]`/`#[computed]`/`#[environment]` field to ever trigger `on_update`'s own
+    /// `subscribe_property_changed` dispatch with at runtime (`DeferredViewBody` carries only
+    /// `on_mount`/`on_unmount`/`on_update`/`lets`/`root` — no field declarations at all), making
+    /// runtime firing unreachable by construction for *every* deferred view, not just this test's
+    /// own fixture (see `declarative_context_popup_direct_on_update_compiles_and_resolves_the_
+    /// enclosing_owner_field` in `context_menu_and_popup.rs` for the compile/construct-time
+    /// counterpart this codegen-level test complements).
+    #[test]
+    fn deferred_view_on_update_block_resolves_unshadowed_names_through_the_implicit_owner() {
+        let mut module = crate::test_module(&[(
+            None,
+            r#"
+            struct A2OnUpdateOwner {
+                #[state(default = "outer".to_string())]
+                label: String,
+                #[param]
+                log: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+                body: view! {
+                    TextBlock {
+                        text: "target",
+                        context_popup: view! {
+                            on_update: {
+                                // Unshadowed — no local binds `label` anywhere in this block, so
+                                // this must resolve through the implicit lexical owner.
+                                log.borrow_mut().push(label.clone());
+                            }
+                            TextBlock { text: "popup" }
+                        },
+                    }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let pre_lowering_table = build_symbol_table(&[module.clone()]);
+        let implicit_owner_schema =
+            implicit_owner_schema(&pre_lowering_table, &module, "A2OnUpdateOwner");
+        crate::lower_deferred_views_in_module(
+            &mut module,
+            "A2OnUpdateOwner",
+            &implicit_owner_schema,
+        );
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("a2_t8_on_update_scope", &generated);
+        let generated_str = generated.to_string();
+
+        assert!(
+            generated_str.contains("subscribe_property_changed"),
+            "expected an on_update subscription to be generated: {generated_str}"
+        );
+        // The unshadowed `label` inside on_update's own block must have been rewritten into an
+        // implicit-owner getter call (`<owner>.label()`) — proving on_update's block is routed
+        // through the same scope-aware `rewrite_view_closure_block`/`ViewClosureRewriter` machinery
+        // as on_mount/on_unmount/event closures, not spliced raw (its pre-A2 behavior, when a bare
+        // `label` reference here would have failed to compile at all — there being no local of
+        // that name in scope).
+        assert!(
+            generated_str.contains(". label ()"),
+            "expected on_update's own unshadowed `label` reference to become an implicit-owner \
+             getter call (`<owner>.label()`): {generated_str}"
+        );
+    }
+
+    /// PR #165 rereview remediation round 2, A4-T5: `emit_external_attribute_sets` — the real
+    /// production path for a `DeferredView` targeting a real builtin (`TextBlock`, `Window`, ...,
+    /// none of which have a local `TypeInfo` for `elwindui-codegen` to check against directly) —
+    /// must route the built factory through `__coerce_deferred_view_assignment_target::<@field_type
+    /// ..>(..)`, never through an unconditional `Some(..)` wrap regardless of the target's real
+    /// declared type. Regression test for the exact round-1 defect: a real builtin property
+    /// declared bare `ViewTemplate` (not `Option<ViewTemplate>`) would have compiled (the round-1
+    /// assertion only checked the type, never converted the value) and then failed at the
+    /// generated setter call with a confusing type mismatch.
+    ///
+    /// `TextBlock` deliberately has no local `TypeInfo` here (the symbol table is built *without*
+    /// chaining `test_builtin_modules()`, unlike every other codegen test in this module) — this
+    /// is what actually forces `emit_external_attribute_sets` rather than the local-`TypeInfo`
+    /// path (`build_virtual_value`/`build_component_setters`) every *other* codegen test in this
+    /// module exercises via `test_builtin_modules()`'s own local shape table for `TextBlock`.
+    #[test]
+    fn external_deferred_view_target_uses_coercion_not_unconditional_some() {
+        let mut module = crate::test_module(&[(
+            None,
+            r#"
+            struct A4ExternalDeferredViewOwner {
+                body: view! {
+                    TextBlock {
+                        text: "target",
+                        context_popup: view! {
+                            TextBlock { text: "popup" }
+                        },
+                    }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        // Deliberately `build_symbol_table` (not `build_symbol_table_with_builtins`) — no chained
+        // builtin modules, so `TextBlock` has no local `TypeInfo` and `context_popup`'s value must
+        // go through `emit_external_attribute_sets`, the real-builtin code path. Reused for the
+        // pre-lowering schema table too, mirroring the production pipeline.
+        let pre_lowering_table = build_symbol_table(&[module.clone()]);
+        let implicit_owner_schema =
+            implicit_owner_schema(&pre_lowering_table, &module, "A4ExternalDeferredViewOwner");
+        crate::lower_deferred_views_in_module(
+            &mut module,
+            "A4ExternalDeferredViewOwner",
+            &implicit_owner_schema,
+        );
+        let table = build_symbol_table(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        let generated_str = generated.to_string();
+
+        assert!(
+            generated_str.contains("__coerce_deferred_view_assignment_target"),
+            "expected the external DeferredView target to be converted via \
+             __coerce_deferred_view_assignment_target: {generated_str}"
+        );
+        assert!(
+            generated_str.contains("@ field_type context_popup"),
+            "expected the coercion's own type parameter to be read through @field_type \
+             context_popup: {generated_str}"
+        );
+        // The old, round-1 defect: the built factory wrapped unconditionally in `Some(..)` before
+        // the declared type was ever consulted, entirely independent of the coercion call above.
+        assert!(
+            !generated_str.contains("Some (elwindui :: core :: ui :: ViewTemplate :: new"),
+            "the external DeferredView branch must not unconditionally wrap the factory in \
+             Some(..) — the target's real declared type must decide the shape: {generated_str}"
+        );
+    }
+
+    /// PR #165 final rereview remediation, A2 (A2-R1/R2/R3): the implicit-owner fallback is now
+    /// schema-driven (`ImplicitOwnerCtx::readable_fields`), not "any unshadowed bare name falls
+    /// back to the owner" — this proves all three membership outcomes in one fixture: an ordinary
+    /// free Rust name unrelated to the source Component (R1) and a literal `None` (R2) must both
+    /// remain untouched ordinary Rust, while a real source-owner field (R3, `label`) must still
+    /// resolve through the owner.
+    #[test]
+    fn deferred_view_on_mount_free_names_stay_rust_while_owner_fields_still_resolve() {
+        let mut module = crate::test_module(&[(
+            None,
+            r#"
+            struct A2SchemaFreeNameOwner {
+                #[state(default = "outer".to_string())]
+                label: String,
+                body: view! {
+                    TextBlock {
+                        text: "target",
+                        context_popup: view! {
+                            on_mount {
+                                let _ = A2_R1_FREE_CONST;
+                                let maybe: Option<i32> = None;
+                                let _ = maybe.is_none();
+                                let _ = label.clone();
+                            }
+                            TextBlock { text: "popup" }
+                        },
+                    }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let pre_lowering_table = build_symbol_table(&[module.clone()]);
+        let implicit_owner_schema =
+            implicit_owner_schema(&pre_lowering_table, &module, "A2SchemaFreeNameOwner");
+        crate::lower_deferred_views_in_module(
+            &mut module,
+            "A2SchemaFreeNameOwner",
+            &implicit_owner_schema,
+        );
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("a2_r1_r2_r3_free_names", &generated);
+        let generated_str = generated.to_string();
+
+        // A2-R1: a free Rust name unrelated to the source Component must never become a
+        // `__view_owner` getter call — only checked as `<something> . A2_R1_FREE_CONST ()`, the
+        // shape `resolved_implicit_owner_field`'s old, unconditional fallback would have produced.
+        assert!(
+            !generated_str.contains(". A2_R1_FREE_CONST ()"),
+            "a free Rust name outside the source Component's own schema must not be rewritten \
+             into an implicit-owner getter call: {generated_str}"
+        );
+        assert!(
+            generated_str.contains("A2_R1_FREE_CONST"),
+            "the free name should still appear, unrewritten: {generated_str}"
+        );
+        // A2-R2: `None` must remain the real `Option::None`, never rewritten into a getter call.
+        assert!(
+            generated_str.contains("let maybe : Option < i32 > = None ;"),
+            "`None` must remain untouched: {generated_str}"
+        );
+        assert!(
+            !generated_str.contains(". None ()"),
+            "`None` must never be rewritten into an implicit-owner getter call: {generated_str}"
+        );
+        // A2-R3: a real source-owner field must still resolve through the owner, exactly as before
+        // this schema was added.
+        assert!(
+            generated_str.contains(". label ()"),
+            "a real source-owner field must still resolve as an owner getter call: {generated_str}"
+        );
+    }
+
+    /// PR #165 final rereview remediation, A2-R6: `implicit_owner_schema` must classify each
+    /// `FieldKind` exactly per its own doc comment — `Prop`/`State` readable+writable, `Param`/
+    /// `Computed`/`Environment` readable-only, `Attached` excluded entirely. Inspects the schema
+    /// value directly rather than generated code, since this is testing the classification rule
+    /// itself, not any particular consumer of it.
+    #[test]
+    fn implicit_owner_schema_classifies_every_field_kind_correctly() {
+        let module = crate::test_module(&[(
+            None,
+            r#"
+            struct A2SchemaKindsOwner {
+                #[state(default = 0i32)]
+                state_field: i32,
+                prop_field: i32,
+                #[param]
+                param_field: i32,
+                #[computed(expr = state_field + 1)]
+                computed_field: i32,
+                #[environment(some_key)]
+                environment_field: i32,
+                #[attached(default = 0)]
+                attached_field: i32,
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let table = build_symbol_table(&[module.clone()]);
+        let schema = implicit_owner_schema(&table, &module, "A2SchemaKindsOwner");
+
+        assert_eq!(schema.field_name, "__view_owner");
+        for readable in [
+            "state_field",
+            "prop_field",
+            "param_field",
+            "computed_field",
+            "environment_field",
+        ] {
+            assert!(
+                schema.readable_fields.contains(readable),
+                "{readable} should be readable: {:?}",
+                schema.readable_fields
+            );
+        }
+        assert!(
+            !schema.readable_fields.contains("attached_field"),
+            "an #[attached] field is not real instance data of its declaring component and must \
+             not be readable: {:?}",
+            schema.readable_fields
+        );
+        for writable in ["state_field", "prop_field"] {
+            assert!(
+                schema.writable_fields.contains(writable),
+                "{writable} should be writable: {:?}",
+                schema.writable_fields
+            );
+        }
+        for not_writable in [
+            "param_field",
+            "computed_field",
+            "environment_field",
+            "attached_field",
+        ] {
+            assert!(
+                !schema.writable_fields.contains(not_writable),
+                "{not_writable} must not be writable: {:?}",
+                schema.writable_fields
+            );
+        }
+    }
+
+    /// PR #165 final rereview remediation, A2-R7: the schema must be derived from the source
+    /// Component's *effective* fields (`resolve_effective_fields`, inherited fields included), not
+    /// merely its own literal `ComponentDef::fields` — an inherited base field must still be
+    /// readable/writable through a derived Component's own deferred views. The base field is
+    /// declared plain (`FieldKind::Prop`, not `#[state]`): `resolve_effective_fields` deliberately
+    /// never inherits a `#[state]` field at all (`FieldKind::State`'s own doc comment — state is
+    /// private to the exact component that declares it, never part of a derived component's own
+    /// effective fields), so a `#[state]` fixture here would test that unrelated, pre-existing rule
+    /// instead of A2's own schema-derivation logic. The base field is also referenced by a *literal
+    /// bare forward* in the derived Component's own outer view (`text: shared_label`), not only
+    /// inside the nested deferred view — `resolve_effective_fields` treats a deferred view as a
+    /// dependency boundary, never itself counting as a forwarding reference (`view_expr_references_
+    /// bare_name`'s own `ViewExpr::DeferredView(_) => false` arm, Issue #162 §3.9), so the outer
+    /// forward is what actually makes `shared_label` part of `A2InheritedFieldDerived`'s own
+    /// effective fields in the first place — independent of, and prior to, whatever the deferred
+    /// view inside it goes on to do with that same name.
+    #[test]
+    fn implicit_owner_schema_includes_inherited_effective_fields() {
+        let mut module = crate::test_module(&[
+            (
+                None,
+                r#"
+                struct A2InheritedFieldBase {
+                    shared_label: String,
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("A2InheritedFieldBase"),
+                r#"
+                struct A2InheritedFieldDerived {
+                    body: view! {
+                        TextBlock {
+                            text: shared_label,
+                            context_popup: view! {
+                                TextBlock { text: shared_label }
+                            },
+                        }
+                    },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should parse");
+
+        let pre_lowering_table = build_symbol_table_with_builtins(&[module.clone()]);
+        let schema = implicit_owner_schema(&pre_lowering_table, &module, "A2InheritedFieldDerived");
+        assert!(
+            schema.readable_fields.contains("shared_label"),
+            "an inherited base field (not literally declared on the derived Component's own \
+             ComponentDef::fields) must still be part of the derived source Component's readable \
+             schema, derived from its *effective* fields: {:?}",
+            schema.readable_fields
+        );
+        assert!(
+            schema.writable_fields.contains("shared_label"),
+            "an inherited #[state] field must remain writable too: {:?}",
+            schema.writable_fields
+        );
+
+        crate::lower_deferred_views_in_module(&mut module, "A2InheritedFieldDerived", &schema);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("a2_r7_inherited_field", &generated);
+        let generated_str = generated.to_string();
+        assert!(
+            generated_str.contains("Weak < A2InheritedFieldDerived >"),
+            "the hidden component's lexical owner must be the derived Component itself (whose \
+             *effective* fields include the inherited one): {generated_str}"
+        );
+        assert!(
+            generated_str.contains(". shared_label ()"),
+            "the inherited field must resolve through the derived owner's own generated getter: \
+             {generated_str}"
+        );
+    }
+
+    /// PR #165 final rereview remediation, A2-R8: nested `DeferredView`s must reuse the *same*
+    /// readable/writable schema at every nesting depth (never recomputed from a nested level's own
+    /// synthetic, effectively field-less hidden Component) — the second-nesting-level counterpart
+    /// to `nested_deferred_view_keeps_the_original_source_component_as_lexical_owner`'s own
+    /// lexical-owner-*type* proof, this proves the lexical-owner *schema* survives nesting too.
+    #[test]
+    fn nested_deferred_view_reuses_the_same_source_readable_schema_at_every_level() {
+        let mut module = crate::test_module(&[(
+            None,
+            r#"
+            struct A2NestedSchemaOwner {
+                #[state(default = "outer".to_string())]
+                value: String,
+                body: view! {
+                    TextBlock {
+                        text: "outer",
+                        context_popup: view! {
+                            TextBlock {
+                                text: "inner",
+                                context_popup: view! {
+                                    on_mount {
+                                        let _ = A2_NESTED_FREE_NAME;
+                                    }
+                                    TextBlock { text: value }
+                                },
+                            }
+                        },
+                    }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let pre_lowering_table = build_symbol_table_with_builtins(&[module.clone()]);
+        let schema = implicit_owner_schema(&pre_lowering_table, &module, "A2NestedSchemaOwner");
+        crate::lower_deferred_views_in_module(&mut module, "A2NestedSchemaOwner", &schema);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("a2_r8_nested_schema", &generated);
+        let generated_str = generated.to_string();
+
+        assert!(
+            generated_str.contains(". value ()"),
+            "second-level nested deferred view must still resolve a known source-owner field: \
+             {generated_str}"
+        );
+        assert!(
+            !generated_str.contains(". A2_NESTED_FREE_NAME ()"),
+            "second-level nested deferred view must not fall back to the owner for a name \
+             outside its schema: {generated_str}"
+        );
+        assert!(
+            generated_str.contains("A2_NESTED_FREE_NAME"),
+            "the free name should still appear, unrewritten: {generated_str}"
+        );
+    }
+
+    /// PR #165 post-final rereview remediation, A8/T27: a direct, source-qualified 2-segment path
+    /// (`vm.label`) written straight inside a lowered `DeferredView` — with no intermediate nested
+    /// Component to bridge it — must build through the source lexical owner
+    /// (`__view_owner.upgrade().vm().label()`), never as `self.vm.label()` on the hidden Component
+    /// (which has no physical `vm` field at all — that shape does not even parse against the real
+    /// generated struct, a genuine `rustc` "no field `vm`" error `assert_valid_rust`'s
+    /// `syn::parse2`-only check cannot catch, only `cargo build`/`cargo test` on the real crate can).
+    #[test]
+    fn deferred_view_direct_qualified_source_path_builds_through_source_owner() {
+        let mut module = viewmodel_and_component_module(
+            r#"
+            #[elwindui::viewmodel]
+            mod t27_vm_mod {
+                struct T27Vm {
+                    #[observable(default = String::new())]
+                    label: String,
+                }
+            }
+            "#,
+            None,
+            r#"
+            struct T27Owner {
+                #[bindable]
+                vm: std::rc::Rc<T27Vm>,
+                body: view! {
+                    TextBlock {
+                        text: "target",
+                        context_popup: view! {
+                            TextBlock { text: vm.label }
+                        },
+                    }
+                },
+            }
+            "#,
+        );
+        let pre_lowering_table = build_symbol_table(&[module.clone()]);
+        let schema = implicit_owner_schema(&pre_lowering_table, &module, "T27Owner");
+        assert!(
+            schema.bindable_fields.contains("vm"),
+            "a #[bindable] field must be part of the source schema's bindable_fields: {:?}",
+            schema.bindable_fields
+        );
+        crate::lower_deferred_views_in_module(&mut module, "T27Owner", &schema);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t27_direct_qualified_source_path", &generated);
+        let generated_str = generated.to_string();
+
+        // `T27Owner` itself has a real `vm` field, so `self . vm` legitimately appears in *its own*
+        // generated code (its own `vm()` accessor, its own `#[bindable]` subscription) — the bug
+        // this test guards against is specific to the *hidden* Component's own generated section,
+        // which begins at its own struct name and has no `vm` field of its own at all.
+        let hidden_section_start = generated_str
+            .find("struct __ElwinduiViewTemplateInstanceForT27Owner_1")
+            .expect("a hidden Component must have been generated for the one context_popup");
+        let hidden_section = &generated_str[hidden_section_start..];
+        assert!(
+            !hidden_section.contains("self . vm"),
+            "a source-qualified path must never be emitted as a nonexistent physical `self.vm` \
+             field access on the hidden Component: {hidden_section}"
+        );
+        assert!(
+            hidden_section.contains(". vm () . label ()"),
+            "the source-qualified path must bridge through the source lexical owner's own `vm()` \
+             getter: {hidden_section}"
+        );
+    }
+
+    /// PR #165 post-final rereview remediation, A9/T34: a *second*-nesting-level `DeferredView`'s
+    /// own direct source-qualified path must still bridge through the *original* source
+    /// Component's own `vm`, not the first-level hidden Component's (which has no `vm` field of
+    /// its own either) — the schema/bindable-bridge counterpart to `nested_deferred_view_keeps_
+    /// the_original_source_component_as_lexical_owner`'s lexical-owner-*type* proof.
+    #[test]
+    fn nested_deferred_view_direct_qualified_source_path_uses_the_original_source_owner() {
+        let mut module = viewmodel_and_component_module(
+            r#"
+            #[elwindui::viewmodel]
+            mod t34_vm_mod {
+                struct T34Vm {
+                    #[observable(default = String::new())]
+                    label: String,
+                }
+            }
+            "#,
+            None,
+            r#"
+            struct T34Owner {
+                #[bindable]
+                vm: std::rc::Rc<T34Vm>,
+                body: view! {
+                    TextBlock {
+                        text: "outer",
+                        context_popup: view! {
+                            TextBlock {
+                                text: "inner",
+                                context_popup: view! {
+                                    TextBlock { text: vm.label }
+                                },
+                            }
+                        },
+                    }
+                },
+            }
+            "#,
+        );
+        let pre_lowering_table = build_symbol_table(&[module.clone()]);
+        let schema = implicit_owner_schema(&pre_lowering_table, &module, "T34Owner");
+        crate::lower_deferred_views_in_module(&mut module, "T34Owner", &schema);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t34_nested_direct_qualified_source_path", &generated);
+        let generated_str = generated.to_string();
+
+        // `T34Owner` itself has a real `vm` field, so `self . vm` legitimately appears in *its own*
+        // generated code — only the hidden components' own generated sections must never contain
+        // it. Lowering recurses into a `DeferredView`'s own body *before* pushing its own hidden
+        // Component/View pair, so the *inner* (second-level, `_2`) hidden component's own generated
+        // section actually precedes the outer (`_1`) one in emission order — take whichever struct
+        // declaration appears first so the slice always starts right after `T34Owner`'s own code,
+        // regardless of that internal emission-order detail.
+        let hidden_section_start = [
+            "struct __ElwinduiViewTemplateInstanceForT34Owner_1",
+            "struct __ElwinduiViewTemplateInstanceForT34Owner_2",
+        ]
+        .iter()
+        .filter_map(|marker| generated_str.find(marker))
+        .min()
+        .expect("both hidden Components must have been generated for the nested context_popup");
+        let hidden_section = &generated_str[hidden_section_start..];
+        assert!(
+            !hidden_section.contains("self . vm"),
+            "no level's hidden Component ever has a physical `vm` field: {hidden_section}"
+        );
+        assert!(
+            hidden_section.contains(". vm () . label ()"),
+            "the second-level deferred view's own qualified path must still bridge through the \
+             original source Component's own `vm()`: {hidden_section}"
+        );
+        assert!(
+            hidden_section.matches("Weak < T34Owner >").count() >= 2,
+            "both hidden components' own lexical-owner field must stay typed against the \
+             original source Component: {hidden_section}"
+        );
+    }
+
+    /// PR #165 review remediation, A6/T26: the generated `mount_override`'s close-request-handler
+    /// closure must capture only a type-erased `Weak<dyn Any>` (`__weak_self_erased`, cloned from
+    /// this component's own `__self_weak`), never a strong `Rc<Self>` — a strong capture would
+    /// keep the generated Window alive for as long as the backend's own native close-request
+    /// storage does, defeating the acyclic-ownership discipline every owner/callback capture in
+    /// this codebase follows. Also proves `unmount_override` clears the handler
+    /// (`set_close_request_handler(&self.base, None)`) *before* delegating to the backend's own
+    /// `unmount_override` — a stale handler must never be reachable once the Window starts
+    /// tearing down. Cannot be proven by constructing a real Window (native construction needs the
+    /// main thread, unavailable in any `#[test]` harness — see `window_mount_hide_close.rs`'s own
+    /// established type-check-only convention for that reason), so this inspects the generated
+    /// Rust source directly instead.
+    #[test]
+    fn window_mount_override_close_handler_captures_only_a_weak_self_reference() {
+        let module = crate::test_module(&[(
+            Some("Window"),
+            r#"
+            struct T26TestWindow {
+                body: view! {
+                    title: "T26"
+                    content: VerticalLayout { }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t26_window_mount_override", &generated);
+        let generated_str = generated.to_string();
+
+        assert!(
+            generated_str.contains("fn mount_override"),
+            "{generated_str}"
+        );
+        // The handler closure captures `__weak_self_erased` (a `Weak` clone) — never
+        // `Rc::clone(self)`/`self.clone()`/an owned `Rc<Self>` moved in directly.
+        assert!(
+            generated_str
+                .contains("let __weak_self_erased = self . __self_weak . borrow () . clone ()"),
+            "expected the close-request handler to capture a weak self reference: {generated_str}"
+        );
+        assert!(
+            !generated_str.contains("std :: rc :: Rc :: clone (self)")
+                && !generated_str.contains("std :: rc :: Rc :: clone (& self)"),
+            "the close-request handler must never capture a strong Rc<Self>: {generated_str}"
+        );
+
+        // `unmount_override` clears the handler before forwarding to the backend.
+        let unmount_override_pos = generated_str
+            .find("fn unmount_override")
+            .expect("generated code should contain fn unmount_override");
+        let unmount_override_body = &generated_str[unmount_override_pos..];
+        let clear_pos = unmount_override_body
+            .find("set_close_request_handler (& self . base , None)")
+            .expect("unmount_override should clear the close-request handler");
+        let base_unmount_pos = unmount_override_body
+            .find("self . base . unmount_override ()")
+            .expect("unmount_override should forward to the backend's own unmount_override");
+        assert!(
+            clear_pos < base_unmount_pos,
+            "the close-request handler must be cleared *before* forwarding to the backend's own \
+             unmount_override, not after: {unmount_override_body}"
+        );
+    }
+
+    /// PR #165 rereview remediation round 2, A6: parses `generated` as a `syn::File` and returns
+    /// the pretty-printed source of the *first* `fn #method_name` found in *any* `impl` block
+    /// (an `ImplItemFn`), for deterministic ordering assertions against the real generated Window
+    /// lifecycle methods — real `NSWindow`/native-Window construction needs the main thread
+    /// (unavailable in any `#[test]` harness, see `window_mount_hide_close.rs`'s own established
+    /// type-check-only convention), so ordering must be proven by inspecting what the generator
+    /// actually emits rather than by observing a constructed Window at runtime. Every T17-T21
+    /// fixture below declares exactly one component, so a single unqualified match is
+    /// unambiguous; a multi-component fixture would need to disambiguate by enclosing `impl`
+    /// target, which none of these do.
+    fn generated_method_body(generated: &TokenStream, method_name: &str) -> String {
+        let file: syn::File = syn::parse2(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code should parse as a file: {e}\n{generated}"));
+        struct Finder<'a> {
+            name: &'a str,
+            found: Vec<String>,
+        }
+        impl<'a, 'ast> Visit<'ast> for Finder<'a> {
+            fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+                if node.sig.ident == self.name {
+                    self.found.push(quote! { #node }.to_string());
+                }
+                syn::visit::visit_impl_item_fn(self, node);
+            }
+        }
+        let mut finder = Finder {
+            name: method_name,
+            found: Vec::new(),
+        };
+        finder.visit_file(&file);
+        finder.found.into_iter().next().unwrap_or_else(|| {
+            panic!("method `{method_name}` not found in generated code:\n{generated}")
+        })
+    }
+
+    /// Shared host-composition (`inherits Window`) fixture for the A6/T17-T21 deterministic
+    /// lifecycle-ordering tests below — a single minimal component, so `generated_method_body`'s
+    /// unqualified match stays unambiguous.
+    fn generate_t17_t21_window_module() -> TokenStream {
+        let module = crate::test_module(&[(
+            Some("Window"),
+            r#"
+            struct T17T21TestWindow {
+                body: view! {
+                    title: "T17-T21"
+                    content: VerticalLayout { }
+                },
+            }
+            "#,
+            None,
+        )])
+        .expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t17_t21_window", &generated);
+        generated
+    }
+
+    /// PR #165 final rereview remediation, A2's own §8.3: like `generated_method_body`, but scoped
+    /// to a specific generated type's own `impl` block — required once a fixture declares more than
+    /// one component (T17's own completed child-mount-before-user-on_mount proof, below, needs a
+    /// real generated child Component in the same fixture as the Window, so `generated_method_body`'s
+    /// "first match in any impl" convention is no longer unambiguous between the two types' own
+    /// same-named methods). Fails loudly if zero or more than one exact `(impl_target, method_name)`
+    /// match is found, rather than silently picking the first — same "prove a real position, don't
+    /// assume" discipline `generated_method_body` already applies to method selection alone.
+    fn generated_impl_method_body(
+        generated: &TokenStream,
+        impl_target: &str,
+        method_name: &str,
+    ) -> String {
+        let file: syn::File = syn::parse2(generated.clone())
+            .unwrap_or_else(|e| panic!("generated code should parse as a file: {e}\n{generated}"));
+        struct Finder<'a> {
+            impl_target: &'a str,
+            method_name: &'a str,
+            current_impl_target: Option<String>,
+            found: Vec<String>,
+        }
+        impl<'a, 'ast> Visit<'ast> for Finder<'a> {
+            fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+                let self_ty = &node.self_ty;
+                let previous = self
+                    .current_impl_target
+                    .replace(quote! { #self_ty }.to_string());
+                syn::visit::visit_item_impl(self, node);
+                self.current_impl_target = previous;
+            }
+            fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+                if node.sig.ident == self.method_name
+                    && self.current_impl_target.as_deref() == Some(self.impl_target)
+                {
+                    self.found.push(quote! { #node }.to_string());
+                }
+                syn::visit::visit_impl_item_fn(self, node);
+            }
+        }
+        let mut finder = Finder {
+            impl_target,
+            method_name,
+            current_impl_target: None,
+            found: Vec::new(),
+        };
+        finder.visit_file(&file);
+        match finder.found.len() {
+            1 => finder.found.into_iter().next().unwrap(),
+            0 => panic!(
+                "no `impl {impl_target} {{ fn {method_name} }}` found in generated code:\n{generated}"
+            ),
+            n => panic!(
+                "expected exactly one `impl {impl_target} {{ fn {method_name} }}`, found {n} in \
+                 generated code:\n{generated}"
+            ),
+        }
+    }
+
+    /// A6/T17 completion (PR #165 final rereview remediation, A2's own §8): the accepted portion of
+    /// T17 (`t17_generated_mount_orders_state_then_mount_override_then_build_view`, above) only
+    /// proved `Mounted < mount_override < __build_view`, relying on a comment for the second half of
+    /// the contract's own required ordering (`mount_override < child mount < user on_mount`) — this
+    /// completes it with a real assertion against the generated `__build_view` body of a Window that
+    /// actually has a real generated child Component (`T17Child`) as its own `content`, and a unique
+    /// marker call inside its own direct user `on_mount`.
+    #[test]
+    fn t17_generated_build_view_mounts_child_before_user_on_mount() {
+        let module = crate::test_module(&[
+            (
+                None,
+                r#"
+                struct T17Child {
+                    body: view! {
+                        TextBlock { text: "child" }
+                    },
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("Window"),
+                r#"
+                struct T17ChildMountWindow {
+                    body: view! {
+                        on_mount {
+                            t17_owner_on_mount_marker();
+                        }
+                        title: "T17-child-mount"
+                        content: T17Child { }
+                    },
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should parse");
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t17_child_mount_window", &generated);
+
+        let build_view_body =
+            generated_impl_method_body(&generated, "T17ChildMountWindow", "__build_view");
+
+        let child_mount_pos = build_view_body
+            .find("T17Child :: new")
+            .expect("__build_view should construct (and thereby mount) the real child Component");
+        let user_on_mount_pos = build_view_body
+            .find("t17_owner_on_mount_marker ()")
+            .expect("__build_view should splice the user's own on_mount marker call");
+
+        assert!(
+            child_mount_pos < user_on_mount_pos,
+            "the generated __build_view must construct/mount the real child Component before \
+             splicing the user's own on_mount body — completing T17's full required ordering \
+             (mount_override < __build_view < child mount < user on_mount): {build_view_body}"
+        );
+
+        // Combine with the already-accepted first half of T17 for the complete chain in one place.
+        // Target-qualified (not `generated_method_body`'s unqualified first match) since this
+        // fixture, unlike T17-T21's own single-component one, declares two components — an
+        // unqualified search could otherwise silently match `T17Child`'s own unrelated `mount()`.
+        let mount_body = generated_impl_method_body(&generated, "T17ChildMountWindow", "mount");
+        let state_pos = mount_body
+            .find("ComponentLifecycleState :: Mounted")
+            .expect("mount() should set the lifecycle state to Mounted");
+        let override_pos = mount_body
+            .find("WindowExt > :: mount_override")
+            .expect("mount() should call mount_override");
+        let build_pos = mount_body
+            .find("__build_view ()")
+            .expect("mount() should call __build_view()");
+        assert!(
+            state_pos < override_pos && override_pos < build_pos,
+            "mount() must order state = Mounted, then mount_override, then __build_view: \
+             {mount_body}"
+        );
+    }
+
+    /// A6/T17: first-mount ordering. Proves the generated `mount()` body sets the lifecycle state
+    /// to `Mounted` *before* calling `mount_override(environment)`, which in turn happens *before*
+    /// `__build_view()` (content construction, wiring, and — inside `__build_view` itself — the
+    /// user's own `on_mount`, spliced in last, after every construction/wiring/subscribe step —
+    /// see `generate_view`'s own splice order, unchanged by this delta).
+    #[test]
+    fn t17_generated_mount_orders_state_then_mount_override_then_build_view() {
+        let generated = generate_t17_t21_window_module();
+        let mount_body = generated_method_body(&generated, "mount");
+
+        let state_pos = mount_body
+            .find("ComponentLifecycleState :: Mounted")
+            .expect("mount() should set the lifecycle state to Mounted");
+        let override_pos = mount_body
+            .find("WindowExt > :: mount_override")
+            .expect("mount() should call mount_override");
+        let build_pos = mount_body
+            .find("__build_view ()")
+            .expect("mount() should call __build_view()");
+
+        assert!(
+            state_pos < override_pos,
+            "lifecycle state must be set to Mounted before mount_override is called: {mount_body}"
+        );
+        assert!(
+            override_pos < build_pos,
+            "mount_override must be called before __build_view(): {mount_body}"
+        );
+        // Exactly one call in the generated mount() body — mount() itself is guarded (`if state
+        // != Created { panic }`) so a real second mount() call never reaches this point again.
+        assert_eq!(
+            mount_body.matches("WindowExt > :: mount_override").count(),
+            1,
+            "mount_override must be called exactly once from mount(): {mount_body}"
+        );
+    }
+
+    /// A6/T18: `show()`/`hide()`/`show()` structural ordering. Proves `hide()` never mounts,
+    /// unmounts, or rebuilds — its own generated body contains no lifecycle-state transition, no
+    /// `unmount`, and no `__build_view`/`mount(` call — so a second `show()` after `hide()` (which
+    /// re-enters `show()`'s own `if self.__mount_environment.get().is_none()` guard, already
+    /// `Some` after the first mount) structurally cannot rebuild either.
+    #[test]
+    fn t18_generated_hide_never_mounts_unmounts_or_rebuilds() {
+        let generated = generate_t17_t21_window_module();
+        let show_body = generated_method_body(&generated, "show");
+        let hide_body = generated_method_body(&generated, "hide");
+
+        assert!(
+            show_body.contains("__mount_environment . get () . is_none ()"),
+            "show() must only mount when not already mounted: {show_body}"
+        );
+        for forbidden in ["unmount", "__build_view", "ComponentLifecycleState"] {
+            assert!(
+                !hide_body.contains(forbidden),
+                "hide() must never {forbidden}: {hide_body}"
+            );
+        }
+        assert!(
+            hide_body.contains("self . base . hide ()"),
+            "hide() must forward to the backend: {hide_body}"
+        );
+    }
+
+    /// A6/T19: programmatic `close()` ordering. Proves the generated `close()` body orders its own
+    /// idempotency guard before `self.unmount()`, which itself happens before `self.base.close()`
+    /// (the real native close) — and that the generated `unmount()` body orders the lifecycle
+    /// transition to `Unmounting` before `unmount_override()` (closes any active popup — Issue
+    /// #162 §3.18), before the owner's own content `unmount_subtree`, before local teardown
+    /// (`__unmount_local`, which itself runs the user's `on_unmount` before clearing subscriptions
+    /// before transitioning to `Unmounted`).
+    #[test]
+    fn t19_generated_close_and_unmount_order_teardown_before_native_close() {
+        let generated = generate_t17_t21_window_module();
+        let close_body = generated_method_body(&generated, "close");
+        let guard_pos = close_body
+            .find("__closed . replace (true)")
+            .expect("close() should have an idempotency guard");
+        let unmount_pos = close_body
+            .find("self . unmount ()")
+            .expect("close() should call self.unmount()");
+        let base_close_pos = close_body
+            .find("self . base . close ()")
+            .expect("close() should forward to the backend's own close()");
+        assert!(
+            guard_pos < unmount_pos && unmount_pos < base_close_pos,
+            "close() must order: idempotency guard, then unmount(), then base.close(): \
+             {close_body}"
+        );
+
+        let unmount_body = generated_method_body(&generated, "unmount");
+        let unmounting_pos = unmount_body
+            .find("ComponentLifecycleState :: Unmounting")
+            .expect("unmount() should transition to Unmounting");
+        let override_pos = unmount_body
+            .find("WindowExt > :: unmount_override")
+            .expect("unmount() should call unmount_override");
+        let subtree_pos = unmount_body
+            .find("unmount_subtree")
+            .expect("unmount() should unmount the owner's own content subtree");
+        let local_pos = unmount_body
+            .find("__unmount_local ()")
+            .expect("unmount() should call __unmount_local()");
+        assert!(
+            unmounting_pos < override_pos && override_pos < subtree_pos && subtree_pos < local_pos,
+            "unmount() must order: state = Unmounting, then unmount_override() (closes any active \
+             popup), then the owner's own content unmount_subtree, then local teardown \
+             (__unmount_local, which itself runs user on_unmount before Unmounted): \
+             {unmount_body}"
+        );
+    }
+
+    /// A6/T20: repeated-close idempotency. Proves `close()`'s own guard
+    /// (`self.__closed.replace(true)`) syntactically *dominates* both `self.unmount()` and
+    /// `self.base.close()` — an early `return` inside the guard's own `if` body, appearing before
+    /// either call in the method's linear token order, so a second `close()` call can never reach
+    /// either again.
+    #[test]
+    fn t20_generated_close_guard_dominates_unmount_and_base_close() {
+        let generated = generate_t17_t21_window_module();
+        let close_body = generated_method_body(&generated, "close");
+        let guard_if_pos = close_body
+            .find("if self . __closed . replace (true)")
+            .expect("close() should guard on __closed.replace(true)");
+        let guard_return_pos = close_body[guard_if_pos..]
+            .find("return")
+            .map(|p| p + guard_if_pos)
+            .expect("the __closed guard should return early");
+        let unmount_pos = close_body
+            .find("self . unmount ()")
+            .expect("close() should call self.unmount()");
+        let base_close_pos = close_body
+            .find("self . base . close ()")
+            .expect("close() should forward to the backend's own close()");
+        assert!(
+            guard_return_pos < unmount_pos && guard_return_pos < base_close_pos,
+            "the __closed guard's own early return must textually dominate both unmount() and \
+             base.close(): {close_body}"
+        );
+    }
+
+    /// A6/T21: close-before-first-show. Proves the generated `unmount()` body's `Created` match
+    /// arm only sets the lifecycle state to `Unmounted` and returns — *before* `unmount_override`/
+    /// `unmount_subtree`/`__unmount_local` (and therefore before `mount_override`/`on_mount`/
+    /// `unmount_override`/`on_unmount` are ever reached) — so `close()` on a never-shown Window
+    /// reaches the real native `base.close()` without any of those framework hooks or user
+    /// lifecycle callbacks having run.
+    #[test]
+    fn t21_generated_unmount_created_branch_returns_before_any_override_or_hook() {
+        let generated = generate_t17_t21_window_module();
+        let unmount_body = generated_method_body(&generated, "unmount");
+
+        let created_arm_pos = unmount_body
+            .find("ComponentLifecycleState :: Created =>")
+            .expect("unmount() should match on ComponentLifecycleState::Created");
+        let created_arm_end = unmount_body[created_arm_pos..]
+            .find("ComponentLifecycleState :: Mounted =>")
+            .map(|p| p + created_arm_pos)
+            .expect(
+                "unmount() should also match on ComponentLifecycleState::Mounted, after Created",
+            );
+        let created_arm = &unmount_body[created_arm_pos..created_arm_end];
+
+        assert!(
+            created_arm.contains("ComponentLifecycleState :: Unmounted"),
+            "the Created arm must transition directly to Unmounted: {created_arm}"
+        );
+        assert!(
+            created_arm.contains("return"),
+            "the Created arm must return immediately: {created_arm}"
+        );
+        for forbidden in ["unmount_override", "unmount_subtree", "__unmount_local"] {
+            assert!(
+                !created_arm.contains(forbidden),
+                "the Created arm must not reach {forbidden}: {created_arm}"
+            );
+        }
+    }
+
+    /// A6/T25 (Layer 1 of 2 — Layer 2 is `elwindui-backend-appkit`'s/`elwindui-backend-winui3`'s
+    /// own `close_active_popup_slot` unit tests): the generated `unmount()` body calls
+    /// `unmount_override()` (closes any active declarative popup, Issue #162 §3.18) *before*
+    /// `unmount_subtree` on the owner's own content — restated here, on its own, as a directly
+    /// T25-traceable test, even though `t19_generated_close_and_unmount_order_teardown_before_
+    /// native_close` already asserts this exact ordering as part of its own broader proof.
+    #[test]
+    fn t25_generated_unmount_override_runs_before_owner_content_unmount_subtree() {
+        let generated = generate_t17_t21_window_module();
+        let unmount_body = generated_method_body(&generated, "unmount");
+        let override_pos = unmount_body
+            .find("WindowExt > :: unmount_override")
+            .expect("unmount() should call unmount_override");
+        let subtree_pos = unmount_body
+            .find("unmount_subtree")
+            .expect("unmount() should unmount the owner's own content subtree");
+        assert!(
+            override_pos < subtree_pos,
+            "unmount_override() (closes any active popup) must run before the owner's own \
+             content unmount_subtree: {unmount_body}"
         );
     }
 

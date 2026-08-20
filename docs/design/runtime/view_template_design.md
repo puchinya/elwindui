@@ -4,7 +4,10 @@ Normative contract: [`../../specs/ui_spec.md`](../../specs/ui_spec.md) (`context
 
 Tracking: [#161](https://github.com/puchinya/elwindui/issues/161) (this document's own scope — the
 `ViewTemplate` runtime/backend foundation); declarative `context_popup: view! { .. }` DSL codegen
-sugar (§3) is split out to [#162](https://github.com/puchinya/elwindui/issues/162).
+sugar (§3) was split out to [#162](https://github.com/puchinya/elwindui/issues/162) and is now
+implemented — see `docs/design/runtime/popup_context_menu_design.md`'s "Declarative `context_popup:
+view! { .. }` DSL" subsection for the lowering mechanism in full; §3/§4 below are kept as a shorter
+summary from this document's own, narrower perspective.
 
 ## 1. Relationship to `ControlTemplate<C>`
 
@@ -68,37 +71,90 @@ that captured its owner strongly would create an ownership cycle through that pr
 upgrading a dead `owner` and returning `None` (rather than panicking or falling back to some default)
 is the documented, tested contract for "the owner went away between template capture and build time."
 
-## 3. Declarative `context_popup: view! { .. }` — not yet implemented (tracked in #162)
+## 3. Declarative `context_popup: view! { .. }` — implemented (Issue #162)
 
 The durable architecture for compiling `context_popup: view! { .. }` (the same `view!` grammar as an
 ordinary Component body, deferred to popup-open time, reusing `view!`'s existing parser/AST/codegen
-construction pipeline rather than a separate DSL) is **not implemented as of this design revision**.
-It is tracked as its own follow-up, Issue [#162](https://github.com/puchinya/elwindui/issues/162).
+construction pipeline rather than a separate DSL) is implemented, tracked by Issue
+[#162](https://github.com/puchinya/elwindui/issues/162).
 
-The investigation (recorded on #162) identified the central open design question precisely:
-unqualified identifiers written inside `context_popup: view! { .. }` (e.g. `item: selected_item`,
-referencing the *enclosing* Component's own field) need to resolve exactly the way any other bare
-name inside an ordinary `view!` body already does — through the same `self`/`vm` accessor-rewriting
-`emit_closure_value` already performs for `on_click`-style event-handler closures and
-`ClosureBody::Element`-shaped values (`render_content: |doc| DocumentView { doc: doc }`) — rather than
-through `ControlTemplate`'s `templated_parent.foo`-style *explicit*-qualification convention, which
-requires an explicit prefix and would not match the declarative examples #162's directive specifies.
-Implementing this correctly means extending the closure/weak-self-capture machinery already used for
-event handlers to a multi-statement, `on_mount`/`lets`/`if`/`match`/`for`-capable body shape (not just
-a single `ClosureBody::Element` construction) — substantial, delicate `elwindui-codegen` work spanning
-`parser.rs` (recognizing a nested `view! { .. }` token sequence as an attribute value), `ast.rs` (a new
-`ViewExpr` variant), and every one of `codegen.rs`'s ~20 exhaustive `ViewExpr`/`ClosureBody` match
-sites.
+The design question the original investigation (recorded on #162) identified was precise: unqualified
+identifiers written inside `context_popup: view! { .. }` (e.g. `item: selected_item`, referencing the
+*enclosing* Component's own field) need to resolve exactly the way any other bare name inside an
+ordinary `view!` body already does — through the same `self`/`vm` accessor-rewriting mechanism
+ordinary nested elements already use — rather than through `ControlTemplate`'s
+`templated_parent.foo`-style *explicit*-qualification convention. The shipped solution lowers the
+whole `view! { .. }` block, at macro-expansion time, into its own hidden `ComponentDef`/`ViewDef` — a
+real, ordinary Component whose single synthetic field (`__view_owner: Weak<Owner>`) is treated exactly
+like `ControlTemplate`'s own `templated_parent` for weak-owner and Environment-propagation purposes.
+Because the lowered body is a genuinely ordinary Component, every existing *DSL-attribute-value*
+bare-name-resolution code path in `codegen.rs` (`emit_expr`'s own `ViewExpr::Path` handling —
+`on_mount`/`lets`/`if`/`match`/`for` as *structural* `view!` constructs, element/value codegen) already
+handles the body's interior correctly with no new `ViewExpr`/`ClosureBody` match arms needed there.
+The implicit-owner fallback that handling applies is schema-gated (PR #165 final rereview
+remediation, A2 — `ImplicitOwnerDef::readable_fields`, computed once from the source Component's own
+effective fields): only a bare name that is actually a real, readable field of the source Component
+falls back to `__view_owner.<name>()` — an ordinary Rust name with no relation to the source Component
+is never rewritten.
 
-Until #162 lands, `context_popup` is authored via the low-level `ViewTemplate::new(|ctx| ...)` API
-directly (see `crates/elwindui/tests/context_menu_and_popup.rs` for examples), exactly as
-`PopupContentTemplate::new(|ctx| ...)` was authored before this revision.
+This does **not** extend to the *raw Rust* inside `on_mount { .. }`/`on_unmount { .. }`/`on_update { ..
+}` blocks and `on_*` event-handler closure bodies — an arbitrary, unconstrained Rust statement
+sequence, not DSL grammar, walked by a separate `syn::visit_mut::VisitMut` pass
+(`ViewClosureRewriter`/`rewrite_view_closure_block`/`rewrite_view_closure_expr`) that already existed
+for event handlers before this Issue. That pass genuinely did need generalizing (PR #165 review
+remediation, A2, further tightened by PR #165 final rereview remediation, A2): it gained an
+implicit-owner fallback (`ViewClosureRewriter::resolved_implicit_owner_field`, reusing the same
+2-segment `owner.field` machinery `resolved_owner` already uses) so a bare name inside one of these
+raw blocks that is a known-readable field of the source Component (the exact same
+`ImplicitOwnerDef::readable_fields` schema the DSL-attribute-value path above consults, so both paths
+agree on membership) falls back to `__view_owner` the same way a DSL attribute value's bare name
+already did. An unshadowed bare name that is *not* in that schema — a module constant, `None`, a free
+function call, anything unrelated to the source Component — is left as ordinary Rust, never rewritten;
+an earlier revision fell back to the owner for *any* unshadowed bare name regardless of whether it was
+actually a source-Component field at all, which silently miscompiled such names into bogus
+`__view_owner` getter calls. Assignment to a bare name that is a known-*writable* source-Component
+field (`Prop`/`State` only — `ImplicitOwnerDef::writable_fields`) is likewise routed through that
+owner's own generated `set_<name>` setter (`resolved_implicit_owner_setter`), so `selected = true;`
+inside a popup event closure actually mutates the enclosing Component's own state, not a no-op. Since
+raw Rust (unlike `view!`'s own attribute-value grammar) can contain arbitrary nested scopes, a real
+lexical scope stack (not a single flat per-block set — an earlier revision's own bug, changing source
+semantics for a block combining an outer-field read with a same-named local shadow) tracks `let`/`if
+let`/`while let`/`match`/`for`/nested-closure bindings, so a local binding shadows the implicit owner
+— for both reads and writes — only exactly where real Rust scoping would consider it in scope. This is
+still "no second popup binding engine" in the sense the original design intended — it is the *same*
+rewriter every `on_click` handler already went through, generalized (twice) rather than replaced by a
+parallel mechanism built specifically for `context_popup`.
+
+The same schema also covers *source-qualified* 2-segment paths (`vm.label`, `vm.save`) and direct
+bare source-field reactivity, not just the 1-segment fallback above (PR #165 post-final rereview
+remediation, A8/A9): `ImplicitOwnerDef::bindable_fields` lets `emit_path_get`/`emit_setter`/
+`ViewClosureRewriter` bridge a `#[bindable]` owner through `__view_owner` instead of the nonexistent
+`self.vm` an earlier revision emitted, and `ImplicitOwnerDef::reactive_fields` lets the dependency
+scanners (`collect_view_expr_owner_properties`/`view_expr_has_reactive_dependency`/`view_expr_
+depends_on`) recognize a direct bare source field as a real dependency of the hidden Component's
+existing `__view_owner` subscription — before this, such a field could read correctly at popup-open
+time but never live-update while the popup stayed open. A `#[bindable]` owner referenced this way
+gets its own real `ObservableExt` subscription too (bridged through `__view_owner`, since the hidden
+Component has no physical field to subscribe through directly), reusing the exact same resync-method
+shape a physical bind owner already gets. See `docs/design/tools/codegen_design.md` §3.35 for the
+full derivation and emission detail.
+
+Only the small amount of new surface area needed to recognize a `view! { .. }` token sequence in
+`context_popup` position, extract it into the hidden pair, and emit a `ViewTemplate::new(..)` factory
+that constructs a fresh instance of it per popup open is genuinely new. See
+`docs/design/runtime/popup_context_menu_design.md`'s "Declarative `context_popup: view! { .. }` DSL"
+subsection for the full three-part mechanism (lowering / weak-owner codegen / factory emission), and
+`docs/design/tools/codegen_design.md` §3.35 for the lowering pass and the raw-block rewriter's own
+lexical-scope-stack mechanism.
+
+`context_popup` may still be authored via the low-level `ViewTemplate::new(|ctx| ...)` API directly
+when full manual control is wanted (see `crates/elwindui/tests/context_menu_and_popup.rs` for
+examples) — the declarative sugar above compiles down to exactly that API.
 
 ## 4. Two distinct contracts — do not conflate them
 
-This document's own scope (§§1–2, delivered) and #162's future scope (§3, not yet delivered) make
-different guarantees, and the difference matters enough to state explicitly rather than leave implicit
-in "not yet implemented":
+This document's own scope (§§1–2) and #162's scope (§3) are both delivered, but they make different
+guarantees, and the difference matters enough to state explicitly rather than leave implicit:
 
 **The `ViewTemplate` runtime contract (delivered, this document)** guarantees only:
 
@@ -115,8 +171,7 @@ caller can just as easily capture a stale value by mistake (e.g. `move |_ctx| { 
 captured by value before this closure was even stored */ }`) as read it correctly through `ctx.owner`.
 The runtime type cannot enforce an authoring discipline it has no visibility into.
 
-**The declarative `context_popup: view! { .. }` DSL contract (§3, not yet delivered, #162)** will, once
-implemented, additionally guarantee:
+**The declarative `context_popup: view! { .. }` DSL contract (§3, #162)** additionally guarantees:
 
 - bare identifiers referencing the *enclosing* Component's own fields/state are read fresh, at
   popup-open time, not snapshotted at any earlier point;
@@ -126,8 +181,9 @@ implemented, additionally guarantee:
   lifetime, not the enclosing Component's.
 
 `docs/specs/ui_spec.md`'s "owner の現在値を評価する" wording describes the second (declarative)
-contract's target behavior, not something the first (low-level `ViewTemplate`) contract already
-enforces mechanically today — see that spec section's own note.
+contract's behavior specifically — not a guarantee the first (low-level `ViewTemplate`) contract
+enforces mechanically, since a hand-written closure can always capture a stale value by mistake as
+§4's first contract already notes.
 
 ## 5. `popup_dismiss` — a framework built-in Environment key
 
@@ -190,11 +246,14 @@ Independent of the DSL question above, this revision:
   `popup_surface_handle_releases_content_after_close_not_just_unmounted`.
 - Gave `PopupDismissAction` a private `PopupDismissState` (`Building` / `Open(Weak<..>)` /
   `Dismissed`) inside `open_custom_popup`, so a dismiss request arriving during `ViewTemplate::build`
-  (before any native surface exists — including a generated Component's own `on_mount`, once #162
-  lands) aborts the show entirely (`unmount_subtree`'d, never displayed) instead of being silently
-  lost. Verified by `elwindui-core`'s `open_custom_popup_dismiss_during_build_prevents_the_popup_from_
-  showing` and, end to end with a real `#[elwindui::component]`, `elwindui`'s
-  `popup_dismiss_during_on_mount_prevents_popup_from_showing`.
+  (before any native surface exists — including a generated Component's own `on_mount`, both the
+  hand-authored `ViewTemplate` case and, since #162, a lowered hidden Component's own `on_mount`)
+  aborts the show entirely (`unmount_subtree`'d, never displayed) instead of being silently lost.
+  Verified by `elwindui-core`'s `open_custom_popup_dismiss_during_build_prevents_the_popup_from_
+  showing`; end to end with a real `#[elwindui::component]`, `elwindui`'s
+  `popup_dismiss_during_on_mount_prevents_popup_from_showing` (low-level `ViewTemplate` API) and
+  `declarative_context_popup_dismiss_during_on_mount_prevents_popup_from_showing` (declarative
+  `context_popup: view! { .. }`, #162).
 - Made `PopupHost::show_popup` fallible (`-> Option<Rc<dyn PopupSurfaceHandle>>`, previously
   infallible) — WinUI3's `InnerPopupSurface::show` could already fail (coordinate conversion, `Popup`
   construction), but `WinUI3PopupHost::show_popup` previously papered over it with a handle wrapping a

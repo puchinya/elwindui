@@ -407,6 +407,77 @@ pub struct ViewDef {
     /// within `root` or a later `let`'s own element.
     pub lets: Vec<LetBinding>,
     pub root: ViewBody,
+    /// Field/state/vm-owning generated field this view's implicit lexical-owner fallback targets,
+    /// `Weak`-typed on the generated struct, together with the exact schema of source-Component
+    /// field names that fallback is allowed to reach. `None` for every ordinary `ViewDef` (the vast
+    /// majority) — only a synthetic hidden `Component` produced by Issue #162's
+    /// `ViewExpr::DeferredView` lowering pass (`lib.rs`'s deferred-view lowering,
+    /// `component_frontend.rs`'s hidden-Component construction helper) sets this. Unlike
+    /// `ControlTemplate<C>`'s `templated_parent` (always explicit-qualification-only, never a
+    /// bare-name fallback), this is exactly the "implicit bare fallback" half of `codegen.rs`'s
+    /// generalized weak-owner mechanism — docs/design/runtime/view_template_design.md §3. PR #165
+    /// final rereview remediation, A2: this used to be a bare `Option<String>` field name, which let
+    /// *any* unshadowed bare Rust name (not just an actual source-Component field) fall back to a
+    /// `__view_owner.<name>()` getter call — see `ImplicitOwnerDef`'s own doc comment for why that
+    /// was wrong and what replaced it.
+    pub implicit_owner: Option<ImplicitOwnerDef>,
+}
+
+/// The exact schema a `ViewDef::implicit_owner` fallback is allowed to reach — computed once, from
+/// the *source* lexical-owner Component's own effective (`resolve_effective_fields`, inherited
+/// fields included) field list, by `codegen::implicit_owner_schema`, *before* `ViewExpr::
+/// DeferredView` lowering runs (`lib.rs`'s `generate_component_from_item_impl`). PR #165 final
+/// rereview remediation, A2: an earlier revision let *any* unshadowed bare Rust name inside a
+/// lowered deferred view fall back to `__view_owner.<name>()` — including ordinary Rust constants,
+/// `None`, and free values with no relation to the source Component at all — because the fallback
+/// only checked "is this name shadowed by a real lexical binding", never "is this name actually a
+/// field the source Component declares". This schema closes that gap: `readable_fields`/
+/// `writable_fields` are computed once from the source Component's own field kinds and are
+/// identical at every `DeferredView` nesting depth (nested lowering reuses the same schema its
+/// outer level received, never recomputing it from the synthetic hidden Component's own — usually
+/// empty — field list).
+#[derive(Debug, Clone)]
+pub struct ImplicitOwnerDef {
+    /// The generated hidden-Component field holding `Weak<SourceComponent>` — always
+    /// `"__view_owner"` for a `ViewExpr::DeferredView` lowering today, but not hardcoded as a
+    /// literal everywhere this schema is consulted, so a future second implicit-owner producer
+    /// (if one is ever added) doesn't have to match that exact name.
+    pub field_name: String,
+    /// Source-Component field names the implicit-owner fallback may read (`<owner>.<name>()`).
+    /// Exactly the source Component's own effective `Prop`/`State`/`Param`/`Computed`/`Environment`
+    /// fields — see `codegen::implicit_owner_schema`'s own doc comment for the exact rule and why
+    /// `Attached` is excluded (not real instance data of the declaring component at all).
+    pub readable_fields: std::collections::HashSet<String>,
+    /// Source-Component field names the implicit-owner fallback may write
+    /// (`<owner>.set_<name>(rhs)`) — exactly the source Component's own effective `Prop`/`State`
+    /// fields (`Param`/`Computed`/`Environment` are readable but never routed through a generated
+    /// setter this way).
+    pub writable_fields: std::collections::HashSet<String>,
+    /// PR #165 post-final rereview remediation, A9: source-Component field names that participate
+    /// in the source Component's own generated `PropertyChanged`/resync machinery (its
+    /// `component_property_variants` — see `codegen::implicit_owner_schema`'s own doc comment for
+    /// the exact rule). A direct bare reference to one of these inside a lowered `DeferredView`
+    /// (`TextBlock { text: label }`, no `vm.` qualification) canonicalizes to the dependency
+    /// `(field_name, name)` for `view_expr_has_reactive_dependency`/`collect_view_expr_owner_
+    /// properties`/`view_expr_depends_on` purposes, so the hidden Component's existing `__view_owner`
+    /// subscription actually resyncs bindings that read it — before this, only `ctx.mutable_own_fields`
+    /// (the hidden Component's own, almost always empty, field set) was ever consulted, so a direct
+    /// bare source field could read correctly at build time but never live-update while the popup
+    /// stayed open. A strict subset of `readable_fields` — `Param` is excluded (never reassigned
+    /// after construction, no `PropertyChanged` variant of its own).
+    pub reactive_fields: std::collections::HashSet<String>,
+    /// PR #165 post-final rereview remediation, A9: source-Component field names carrying
+    /// `Attr::Bindable` (`#[bindable] vm: Rc<SomeViewModel>` — always `FieldKind::Param`, so already
+    /// in `readable_fields`, never in `writable_fields`/`reactive_fields`). A 2-segment path
+    /// `vm.label`/`vm.save` inside a lowered `DeferredView` uses this set (not `readable_fields`
+    /// alone) to decide whether `vm` is a *logical* bindable owner reachable through the source
+    /// lexical owner — `codegen`'s shared path-owner resolver bridges `vm` through `__view_owner.
+    /// upgrade().vm()` rather than the nonsensical `self.vm` a hidden Component (which has no `vm`
+    /// field of its own) would otherwise emit. Also drives a real `ObservableExt::
+    /// subscribe_property_changed` subscription on the resolved `vm` value, mirroring what an
+    /// ordinary Component with its own physical `#[bindable]` field already gets — see
+    /// `codegen::implicit_bind_owners`.
+    pub bindable_fields: std::collections::HashSet<String>,
 }
 
 /// `view Name { attrs...; children... }`'s own body — the same shape as `ElementNode` minus a
@@ -573,6 +644,56 @@ pub enum ViewExpr {
     /// `content` params instead of positional/type-based child detection). Same shape as
     /// `ClosureBody::Element`, just not behind a `|params|`.
     Element(Box<ElementNode>),
+    /// `context_popup: view! { .. }` — a nested `view!` macro body, deferred to a
+    /// `elwindui::core::ui::ViewTemplate` built lazily (popup-open time, not owner-mount time), not
+    /// evaluated where it's declared. Only valid where the target field's declared type is
+    /// `ViewTemplate`/`Option<ViewTemplate>` (`validate.rs`); lowered by an internal pre-emission
+    /// pass (`lib.rs`) into a synthetic hidden `Component` (`inherits ContentControl`, one synthetic
+    /// `#[param] __view_owner: Weak<OuterComponent>` field) reusing the ordinary Component codegen
+    /// pipeline — see docs/design/runtime/view_template_design.md §3, Issue #162. `context_popup` is
+    /// merely the first public property that consumes this general deferred-View expression form;
+    /// this is not a `context_popup`-specific AST variant.
+    DeferredView(Box<DeferredViewExpr>),
+}
+
+/// The parsed body of a nested `context_popup: view! { .. }` expression — the same shape
+/// `parse_view_body_tail` already produces for an ordinary top-level `view!`, before this deferred
+/// body is lowered into a real `ViewDef` for its own synthetic hidden Component (`lib.rs`). Kept
+/// separate from `ViewDef` (rather than reusing it directly) because it has no `target` name of its
+/// own yet — that name is only assigned once lowering picks a deterministic hidden-Component
+/// identifier.
+#[derive(Debug, Clone)]
+pub struct DeferredViewBody {
+    pub on_mount: Option<syn::Block>,
+    pub on_unmount: Option<syn::Block>,
+    pub on_update: Option<OnUpdateHook>,
+    pub lets: Vec<LetBinding>,
+    pub root: ViewBody,
+}
+
+/// See `ViewExpr::DeferredView`.
+#[derive(Debug, Clone)]
+pub struct DeferredViewExpr {
+    pub body: DeferredViewBody,
+    /// The deterministic generated hidden-Component type name this deferred body lowers to
+    /// (`__ElwinduiViewTemplateInstanceFor<OuterComponent>_<ordinal>`). `None` until the lowering
+    /// pass (`lib.rs`) fills it in; always `Some` by the time `codegen.rs` emits the
+    /// `ViewTemplate::new(..)` factory referencing it.
+    pub hidden_component: Option<String>,
+    /// The **source** lexical owner type name — the real, DSL-author-visible Component whose
+    /// `view! { .. }` body this `DeferredView` was originally written inside, no matter how many
+    /// levels of nested `context_popup: view! { .. }` separate it from that Component today. This
+    /// is what `hidden_component`'s own generated struct's `__view_owner: Weak<..>` field is typed
+    /// against (`component_frontend::hidden_view_template_component`), so it is also what
+    /// `codegen.rs`'s `emit_deferred_view_value` must recover a `Weak<..>` of at the *point this
+    /// factory expression is emitted* — which is **not** necessarily `ctx.target` (the concrete
+    /// type currently being code-generated): for a `DeferredView` nested inside another
+    /// `DeferredView`'s own body, `ctx.target` at emission time is the *outer* hidden Component,
+    /// while `lexical_owner` stays the original source Component (PR #165 review remediation, A3
+    /// — see `lib.rs`'s `lower_deferred_views_in_expr` for why these two are deliberately kept
+    /// distinct). `None` until the lowering pass fills it in, same lifecycle as
+    /// `hidden_component`.
+    pub lexical_owner: Option<String>,
 }
 
 /// The body of a `ViewExpr::Closure`. `key`/`render_label` return a plain expression;

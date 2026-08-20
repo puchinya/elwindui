@@ -453,6 +453,31 @@ pub struct ImplicitOwnerDef {
     /// fields (`Param`/`Computed`/`Environment` are readable but never routed through a generated
     /// setter this way).
     pub writable_fields: std::collections::HashSet<String>,
+    /// PR #165 post-final rereview remediation, A9: source-Component field names that participate
+    /// in the source Component's own generated `PropertyChanged`/resync machinery (its
+    /// `component_property_variants` — see `codegen::implicit_owner_schema`'s own doc comment for
+    /// the exact rule). A direct bare reference to one of these inside a lowered `DeferredView`
+    /// (`TextBlock { text: label }`, no `vm.` qualification) canonicalizes to the dependency
+    /// `(field_name, name)` for `view_expr_has_reactive_dependency`/`collect_view_expr_owner_
+    /// properties`/`view_expr_depends_on` purposes, so the hidden Component's existing `__view_owner`
+    /// subscription actually resyncs bindings that read it — before this, only `ctx.mutable_own_fields`
+    /// (the hidden Component's own, almost always empty, field set) was ever consulted, so a direct
+    /// bare source field could read correctly at build time but never live-update while the popup
+    /// stayed open. A strict subset of `readable_fields` — `Param` is excluded (never reassigned
+    /// after construction, no `PropertyChanged` variant of its own).
+    pub reactive_fields: std::collections::HashSet<String>,
+    /// PR #165 post-final rereview remediation, A9: source-Component field names carrying
+    /// `Attr::Bindable` (`#[bindable] vm: Rc<SomeViewModel>` — always `FieldKind::Param`, so already
+    /// in `readable_fields`, never in `writable_fields`/`reactive_fields`). A 2-segment path
+    /// `vm.label`/`vm.save` inside a lowered `DeferredView` uses this set (not `readable_fields`
+    /// alone) to decide whether `vm` is a *logical* bindable owner reachable through the source
+    /// lexical owner — `codegen`'s shared path-owner resolver bridges `vm` through `__view_owner.
+    /// upgrade().vm()` rather than the nonsensical `self.vm` a hidden Component (which has no `vm`
+    /// field of its own) would otherwise emit. Also drives a real `ObservableExt::
+    /// subscribe_property_changed` subscription on the resolved `vm` value, mirroring what an
+    /// ordinary Component with its own physical `#[bindable]` field already gets — see
+    /// `codegen::implicit_bind_owners`.
+    pub bindable_fields: std::collections::HashSet<String>,
 }
 
 /// `view Name { attrs...; children... }`'s own body — the same shape as `ElementNode` minus a

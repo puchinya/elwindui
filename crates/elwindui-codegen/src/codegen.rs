@@ -279,14 +279,30 @@ impl SymbolTable {
 /// exists), then threaded unchanged through every nesting depth of `lower_deferred_views_in_*` —
 /// never recomputed from a synthetic hidden Component's own (effectively empty) field list.
 ///
-/// `readable_fields`/`writable_fields` are derived from `component_name`'s own *effective* fields
-/// (`TypeInfo::effective_fields` — `resolve_effective_fields`, inherited fields included, not just
-/// `ComponentDef::fields`'s literal declarations), matching exactly what that Component's own
-/// ordinary generated `view!` code can already read/write through a bare name:
+/// `readable_fields`/`writable_fields`/`reactive_fields`/`bindable_fields` are derived from
+/// `component_name`'s own *effective* fields (`TypeInfo::effective_fields` — `resolve_effective_
+/// fields`, inherited fields included, not just `ComponentDef::fields`'s literal declarations),
+/// matching exactly what that Component's own ordinary generated `view!` code can already read/
+/// write/subscribe-to through a bare name:
 ///
 /// - readable: `Prop`, `State`, `Param`, `Computed`, `Environment` — every field kind with an
 ///   ordinary generated instance getter.
 /// - writable: `Prop`, `State` — every field kind with an ordinary generated `set_<name>` setter.
+/// - reactive (PR #165 post-final rereview remediation, A9): `Prop`, `State`, `Computed`,
+///   `Environment` — every field kind that participates in `generate_view`'s own
+///   `component_property_variants` (the source of the generated `<Component>Property` enum and its
+///   `on_property_changed` dispatch). Deliberately excludes `Param`: a `#[param]` field (including a
+///   plain, non-`#[bindable]` one) is fixed at construction and never reassigned, so it has no
+///   `PropertyChanged` variant of its own in the generated code — repository reality confirmed via
+///   `component_property_variants`'s own construction (`mutable_required_names`/`own_default_names`/
+///   `own_computed_names`/`own_environment_names`, never `param_names`), not assumed.
+/// - bindable (PR #165 post-final rereview remediation, A9): reuses `TypeInfo::bindable_fields`
+///   directly (same `Attr::Bindable`-tagged effective-field derivation `build_symbol_table` already
+///   performs for every ordinary Component) rather than re-deriving it — a `#[bindable]` field is
+///   always `FieldKind::Param` (`attr_frontend.rs`'s own `"bindable"` arm), so it is already present
+///   in `readable_fields` and absent from `writable_fields`/`reactive_fields`; this set exists so a
+///   2-segment `vm.field` path can be recognized as a *logical* bindable owner reachable through the
+///   source lexical owner, distinct from a plain 1-segment readable field.
 /// - excluded entirely: `Attached` (schema-only, not real instance data of the declaring
 ///   component — `FieldKind::Attached`'s own doc comment) and `Action` (never appears in a
 ///   Component's own `effective_fields`; `#[observable]`/`#[async_computed]` are viewmodel/store-
@@ -308,13 +324,19 @@ pub(crate) fn implicit_owner_schema(
     });
     let mut readable_fields = HashSet::new();
     let mut writable_fields = HashSet::new();
+    let mut reactive_fields = HashSet::new();
     for f in &info.effective_fields {
         match f.kind {
             FieldKind::Prop | FieldKind::State => {
                 readable_fields.insert(f.name.clone());
                 writable_fields.insert(f.name.clone());
+                reactive_fields.insert(f.name.clone());
             }
-            FieldKind::Param | FieldKind::Computed | FieldKind::Environment => {
+            FieldKind::Computed | FieldKind::Environment => {
+                readable_fields.insert(f.name.clone());
+                reactive_fields.insert(f.name.clone());
+            }
+            FieldKind::Param => {
                 readable_fields.insert(f.name.clone());
             }
             FieldKind::Attached
@@ -327,6 +349,8 @@ pub(crate) fn implicit_owner_schema(
         field_name: "__view_owner".to_string(),
         readable_fields,
         writable_fields,
+        reactive_fields,
+        bindable_fields: info.bindable_fields.clone(),
     }
 }
 
@@ -3581,6 +3605,29 @@ fn generate_view(
         .filter(is_reserved_weak_owner)
         .map(|f| f.name.clone())
         .collect();
+    // PR #165 post-final rereview remediation, A9 (§10): a source-Component `#[bindable]` field
+    // (e.g. `vm`) referenced directly inside a lowered `DeferredView` (`vm.label`) is never a
+    // physical field of the hidden Component — it can never become a real `bind_owners` entry,
+    // whose `subscribe_stmts`/`property_resync_methods_for` machinery assumes `self.#owner_ident`
+    // is a genuine struct field to subscribe/upgrade. It still needs the exact same subscription/
+    // resync machinery, bridged through the source lexical owner (`__view_owner.upgrade().vm()`)
+    // instead of a physical field — see `implicit_bindable_subscribe_stmts`, below, and the
+    // `property_resync_methods_for(&implicit_bind_owners, ..)` call alongside the ordinary one.
+    // Excludes any name already resolvable as a real own field/bind owner of *this* Component (an
+    // actual own field of the same name always wins — mirrors `path_owner_value_tokens`'s own
+    // `ctx.own_fields` check).
+    let implicit_bind_owners: Vec<syn::Ident> = ctx
+        .implicit_owner
+        .as_ref()
+        .map(|implicit| {
+            implicit
+                .bindable_fields
+                .iter()
+                .filter(|name| !ctx.own_fields.contains_key(name.as_str()))
+                .map(|name| format_ident!("{}", name))
+                .collect()
+        })
+        .unwrap_or_default();
     // `templated_parent` (`ControlTemplate`) triggers this for its own, narrower reason (a
     // "selected once by an already-mounted target, before `Self` exists" lifecycle). A hidden
     // Component lowered from a `ViewExpr::DeferredView` (`view.implicit_owner`, Issue #162) needs
@@ -4966,6 +5013,43 @@ fn generate_view(
             }
         })
         .collect();
+    // PR #165 post-final rereview remediation, A9 (§10.3): the implicit-bind-owner counterpart to
+    // `subscribe_stmts` above — subscribes to the *resolved* `vm` value's own `ObservableExt`
+    // stream (a genuinely separate notification stream from the source lexical owner's own
+    // `PropertyChanged`, since `vm` is a distinct object), bridged through `__view_owner` since the
+    // hidden Component has no physical `vm` field of its own to read `this.vm` from directly.
+    // Dispatches to the exact same `__resync_<name>` method shape `property_resync_methods_for`
+    // already generates for a physical bind owner (see the `implicit_property_resync_methods` call
+    // alongside `property_resync_methods`, below) — reused unmodified, not a second resync engine.
+    let implicit_bindable_subscribe_stmts: TokenStream = implicit_bind_owners
+        .iter()
+        .map(|owner_ident| {
+            let implicit_field_name = ctx
+                .implicit_owner
+                .as_ref()
+                .expect("implicit_bind_owners is only ever non-empty when ctx.implicit_owner is Some")
+                .field_name
+                .clone();
+            let implicit_field = format_ident!("{}", implicit_field_name);
+            let method = format_ident!("__resync_{}", owner_ident);
+            let upgrade_panic_message = format!(
+                "source lexical owner `{implicit_field_name}` was dropped before its template instance"
+            );
+            quote! {
+                {
+                    let weak = std::rc::Rc::downgrade(&this);
+                    let __source_owner = this.#implicit_field.upgrade().expect(#upgrade_panic_message);
+                    let owner = __source_owner.#owner_ident();
+                    let subscription = elwindui::core::reactive::ObservableExt::subscribe_property_changed(&*owner, move |property: &'static str| {
+                        if let Some(this) = weak.upgrade() { this.#method(property); }
+                    });
+                    this.__property_changed_subscriptions.borrow_mut().push(subscription);
+                }
+            }
+        })
+        .collect();
+    let subscribe_stmts: TokenStream =
+        quote! { #subscribe_stmts #implicit_bindable_subscribe_stmts };
     // Only real-anchored (top-level) dynamic nodes get their own top-level statement here — a
     // nested one (Phase 1) has no entry in any real element's own `child_bindings`, so the `find`
     // below returns `None` for it and `?` skips it; it's reached instead through
@@ -5565,6 +5649,14 @@ fn generate_view(
         Some(name) => base_trait_path(name),
         None => TokenStream::new(),
     };
+    // PR #165 post-final rereview remediation, A9 (§10.2): the implicit-bind-owner counterpart to
+    // `property_resync_methods` — `property_resync_methods_for` itself needs no changes at all,
+    // since `collect_view_expr_owner_properties`/`view_expr_depends_on`/`emit_resync` only ever
+    // compare `owner_name` by plain string equality against a `ViewExpr::Path`'s own first
+    // segment, never checking whether that name is a *physical* field — reusing it with
+    // `implicit_bind_owners` (`["vm"]`) already produces a correct `__resync_vm` method whose
+    // per-property read expressions go through `emit_expr`/`path_owner_value_tokens` (already
+    // fixed to bridge `vm.field` through `__view_owner`, A8) unmodified.
     let property_resync_methods: TokenStream = mark_inherent(property_resync_methods_for(
         &bind_owners,
         &plan,
@@ -5574,6 +5666,17 @@ fn generate_view(
         true,
         is_shape_composition || is_host_composition,
     ));
+    let implicit_property_resync_methods: TokenStream = mark_inherent(property_resync_methods_for(
+        &implicit_bind_owners,
+        &plan,
+        &ctx,
+        from,
+        table,
+        true,
+        is_shape_composition || is_host_composition,
+    ));
+    let property_resync_methods: TokenStream =
+        quote! { #property_resync_methods #implicit_property_resync_methods };
     let lazy_leaves_for_own_resync = collect_lazy_leaves(&plan);
     let component_property_resync_methods: TokenStream = component_property_variants
         .iter()
@@ -6122,7 +6225,7 @@ fn generate_view(
     }
 }
 
-/// Codegen-side counterpart to `crate::ast::ImplicitOwnerDef`, with the two field name sets already
+/// Codegen-side counterpart to `crate::ast::ImplicitOwnerDef`, with every field name set already
 /// converted to `HashSet` for `O(1)` membership checks during closure-body rewriting (`ast`'s own
 /// version stays a plain `HashSet<String>` too — this type exists mainly so `ViewCtx`/
 /// `ViewClosureRewriter` don't need to reach into `crate::ast` directly, and so a future divergence
@@ -6130,11 +6233,16 @@ fn generate_view(
 /// #165 final rereview remediation, A2: `readable_fields`/`writable_fields` are what makes the
 /// implicit-owner fallback schema-driven instead of "any unshadowed bare name falls back to the
 /// owner" — see `ViewClosureRewriter::resolved_implicit_owner_field`/`resolved_implicit_owner_setter`.
+/// PR #165 post-final rereview remediation, A8/A9: `reactive_fields`/`bindable_fields` extend this
+/// to source-qualified 2-segment paths (`vm.field`) and direct bare source-field dependency tracking
+/// — see `crate::ast::ImplicitOwnerDef`'s own doc comment for each set's exact derivation rule.
 #[derive(Clone)]
 struct ImplicitOwnerCtx {
     field_name: String,
     readable_fields: HashSet<String>,
     writable_fields: HashSet<String>,
+    reactive_fields: HashSet<String>,
+    bindable_fields: HashSet<String>,
 }
 
 impl From<&crate::ast::ImplicitOwnerDef> for ImplicitOwnerCtx {
@@ -6143,6 +6251,8 @@ impl From<&crate::ast::ImplicitOwnerDef> for ImplicitOwnerCtx {
             field_name: def.field_name.clone(),
             readable_fields: def.readable_fields.clone(),
             writable_fields: def.writable_fields.clone(),
+            reactive_fields: def.reactive_fields.clone(),
+            bindable_fields: def.bindable_fields.clone(),
         }
     }
 }
@@ -11344,6 +11454,28 @@ impl<'a> ViewClosureRewriter<'a> {
         let setter = format_ident!("set_{}", name);
         Some(quote! { #base.#setter })
     }
+
+    /// PR #165 post-final rereview remediation, A8: the 2-segment (`vm.label`, `vm.save`) raw-Rust
+    /// counterpart to `resolved_implicit_owner_field` — reached only after `resolved_owner(owner)`
+    /// has already failed to resolve `owner` as a real field of the *current* generated Component
+    /// (e.g. inside a lowered `DeferredView` hidden Component, whose only real field is
+    /// `__view_owner`). If `owner` is instead a known source-Component `#[bindable]` field
+    /// (`ImplicitOwnerCtx::bindable_fields`), bridge through the source lexical owner
+    /// (`__view_owner.upgrade().vm()`) rather than leaving `owner` to resolve as a nonexistent
+    /// `self.vm` — the same bug `path_owner_value_tokens` fixes for ordinary DSL attribute values,
+    /// mirrored here for raw `on_mount`/`on_unmount`/`on_update`/event-handler Rust.
+    fn resolved_implicit_bindable_owner(&self, owner: &str) -> Option<TokenStream> {
+        if self.is_shadowed(owner) {
+            return None;
+        }
+        let implicit = self.ctx.implicit_owner.as_ref()?;
+        if !implicit.bindable_fields.contains(owner) {
+            return None;
+        }
+        let source = self.resolved_owner(&implicit.field_name)?;
+        let getter = format_ident!("{}", owner);
+        Some(quote! { #source.#getter() })
+    }
 }
 
 impl<'a> VisitMut for ViewClosureRewriter<'a> {
@@ -11534,7 +11666,10 @@ impl<'a> VisitMut for ViewClosureRewriter<'a> {
                 return;
             }
             if let [owner, field] = segments.as_slice() {
-                if let Some(base) = self.resolved_owner(owner) {
+                let base = self
+                    .resolved_owner(owner)
+                    .or_else(|| self.resolved_implicit_bindable_owner(owner));
+                if let Some(base) = base {
                     let getter = format_ident!("{}", field);
                     *node = syn::parse_quote! { #base.#getter() };
                     return;
@@ -11636,6 +11771,16 @@ fn rewrite_view_closure_block(
 /// `ViewExpr::TFluent`, already handled below) contributes no name here — there is no property
 /// *name* to collect from "this might depend on something", only from an actual `owner.property`
 /// path.
+/// PR #165 post-final rereview remediation, A9 (§9.3): whether `ctx.implicit_owner` names `owner`
+/// as its own physical field (i.e. `owner == "__view_owner"`, the only case this ever matters for)
+/// — the shared guard `collect_view_expr_owner_properties`/`view_expr_depends_on` use before
+/// treating a *direct* bare source-field reference as belonging to `owner`'s own resync method.
+fn implicit_owner_matches<'a>(ctx: &'a ViewCtx, owner: &str) -> Option<&'a ImplicitOwnerCtx> {
+    ctx.implicit_owner
+        .as_ref()
+        .filter(|implicit| implicit.field_name == owner)
+}
+
 fn collect_view_expr_owner_properties(
     expr: &ViewExpr,
     ctx: &ViewCtx,
@@ -11643,13 +11788,28 @@ fn collect_view_expr_owner_properties(
     out: &mut std::collections::BTreeSet<String>,
 ) {
     match expr {
-        ViewExpr::Path(path) => {
-            if let [path_owner, path_property, ..] = path.as_slice() {
+        ViewExpr::Path(path) => match path.as_slice() {
+            // PR #165 post-final rereview remediation, A9: a *direct* bare source field
+            // (`TextBlock { text: label }`, no `vm.` qualification) inside a lowered `DeferredView`
+            // is a dependency of `__view_owner`'s own resync method — canonicalized to
+            // `(__view_owner, label)` — whenever `label` is one of the source Component's own
+            // `reactive_fields`. Before this, only `[path_owner, path_property, ..]` (2-segment)
+            // paths were ever recognized here at all, so a direct bare source field never got a
+            // resync-method arm and therefore never live-updated while the popup stayed open.
+            [field] => {
+                if let Some(implicit) = implicit_owner_matches(ctx, owner) {
+                    if implicit.reactive_fields.contains(field) {
+                        out.insert(field.clone());
+                    }
+                }
+            }
+            [path_owner, path_property, ..] => {
                 if path_owner == owner {
                     out.insert(path_property.clone());
                 }
             }
-        }
+            [] => {}
+        },
         ViewExpr::TFluent(_, args) => {
             for (_, value) in args {
                 collect_view_expr_owner_properties(value, ctx, owner, out);
@@ -11657,6 +11817,7 @@ fn collect_view_expr_owner_properties(
         }
         ViewExpr::Expr(expr) => {
             struct Collector<'a> {
+                ctx: &'a ViewCtx,
                 owner: &'a str,
                 out: &'a mut std::collections::BTreeSet<String>,
             }
@@ -11665,19 +11826,38 @@ fn collect_view_expr_owner_properties(
                     let segments: Vec<_> = node.path.segments.iter().collect();
                     if segments.len() >= 2 && segments[0].ident == self.owner {
                         self.out.insert(segments[1].ident.to_string());
+                    } else if segments.len() == 1 {
+                        if let Some(implicit) = implicit_owner_matches(self.ctx, self.owner) {
+                            let name = segments[0].ident.to_string();
+                            if implicit.reactive_fields.contains(&name) {
+                                self.out.insert(name);
+                            }
+                        }
                     }
                     syn::visit::visit_expr_path(self, node);
                 }
 
                 fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
                     if let Some(arguments) = supported_macro_expr_arguments(node) {
+                        if is_format_macro(node) {
+                            if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                                if let Some(implicit) = implicit_owner_matches(self.ctx, self.owner)
+                                {
+                                    for name in format_str_inline_idents(&fmt.value()) {
+                                        if implicit.reactive_fields.contains(&name) {
+                                            self.out.insert(name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         for argument in &arguments {
                             self.visit_expr(argument);
                         }
                     }
                 }
             }
-            let mut collector = Collector { owner, out };
+            let mut collector = Collector { ctx, owner, out };
             collector.visit_expr(expr);
         }
         ViewExpr::Element(_) | ViewExpr::Closure { .. } | ViewExpr::DeferredView(_) => {}
@@ -11761,11 +11941,33 @@ fn is_format_macro(node: &syn::ExprMacro) -> bool {
         .is_some_and(|s| matches!(s.ident.to_string().as_str(), "format" | "format_args"))
 }
 
+/// Whether `name` is a source-Component field this hidden Component's implicit-owner fallback may
+/// treat as reactive (`ImplicitOwnerCtx::reactive_fields`) — PR #165 post-final rereview
+/// remediation, A9.
+fn is_implicit_reactive_field(ctx: &ViewCtx, name: &str) -> bool {
+    ctx.implicit_owner
+        .as_ref()
+        .is_some_and(|implicit| implicit.reactive_fields.contains(name))
+}
+
+/// Whether `name` is a source-Component `#[bindable]` field reachable through this hidden
+/// Component's implicit owner (`ImplicitOwnerCtx::bindable_fields`) — PR #165 post-final rereview
+/// remediation, A9.
+fn is_implicit_bindable_owner(ctx: &ViewCtx, name: &str) -> bool {
+    ctx.implicit_owner
+        .as_ref()
+        .is_some_and(|implicit| implicit.bindable_fields.contains(name))
+}
+
 fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
     match expr {
         ViewExpr::Path(path) => match path.as_slice() {
-            [field] => ctx.mutable_own_fields.contains(field),
-            [owner, ..] => ctx.bindable_owners.contains(owner),
+            [field] => {
+                ctx.mutable_own_fields.contains(field) || is_implicit_reactive_field(ctx, field)
+            }
+            [owner, ..] => {
+                ctx.bindable_owners.contains(owner) || is_implicit_bindable_owner(ctx, owner)
+            }
             [] => false,
         },
         ViewExpr::TFluent(_, args) => args
@@ -11779,18 +11981,20 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
             impl<'ast> Visit<'ast> for Collector<'_> {
                 fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
                     let segments: Vec<_> = node.path.segments.iter().collect();
-                    if (segments.len() == 1
-                        && self
-                            .ctx
-                            .mutable_own_fields
-                            .contains(&segments[0].ident.to_string()))
-                        || (segments.len() >= 2
-                            && self
-                                .ctx
-                                .bindable_owners
-                                .contains(&segments[0].ident.to_string()))
-                    {
-                        self.found = true;
+                    if segments.len() == 1 {
+                        let name = segments[0].ident.to_string();
+                        if self.ctx.mutable_own_fields.contains(&name)
+                            || is_implicit_reactive_field(self.ctx, &name)
+                        {
+                            self.found = true;
+                        }
+                    } else if segments.len() >= 2 {
+                        let owner = segments[0].ident.to_string();
+                        if self.ctx.bindable_owners.contains(&owner)
+                            || is_implicit_bindable_owner(self.ctx, &owner)
+                        {
+                            self.found = true;
+                        }
                     }
                     syn::visit::visit_expr_path(self, node);
                 }
@@ -11799,10 +12003,10 @@ fn view_expr_has_reactive_dependency(expr: &ViewExpr, ctx: &ViewCtx) -> bool {
                     if let Some(arguments) = supported_macro_expr_arguments(node) {
                         if is_format_macro(node) {
                             if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
-                                if format_str_inline_idents(&fmt.value())
-                                    .iter()
-                                    .any(|name| self.ctx.mutable_own_fields.contains(name))
-                                {
+                                if format_str_inline_idents(&fmt.value()).iter().any(|name| {
+                                    self.ctx.mutable_own_fields.contains(name)
+                                        || is_implicit_reactive_field(self.ctx, name)
+                                }) {
                                     self.found = true;
                                 }
                             }
@@ -11958,12 +12162,24 @@ fn property_resync_methods_for(
 /// emitted.  Expression macros that the DSL cannot inspect are deliberately conservative: they
 /// remain attached to that owner's notifications rather than risking a stale UI value.
 fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &str) -> bool {
+    // PR #165 post-final rereview remediation, A9: when `owner` names the hidden Component's own
+    // implicit lexical owner (`__view_owner`), a *direct* bare source field (`[field]`, no `vm.`
+    // qualification) depends on `(owner, property)` too — canonicalizing the same dependency
+    // identity `collect_view_expr_owner_properties`/`view_expr_has_reactive_dependency` already use
+    // — provided `field` is actually one of the source Component's own `reactive_fields` (never for
+    // an ordinary Component with no implicit owner at all, where this is always `None`).
+    let implicit_direct_field_matches = |field: &str| {
+        field == property
+            && implicit_owner_matches(ctx, owner)
+                .is_some_and(|implicit| implicit.reactive_fields.contains(field))
+    };
     match expr {
         ViewExpr::Path(path) => {
             if owner.is_empty() {
                 matches!(path.as_slice(), [path_property] if path_property == property)
             } else {
                 matches!(path.as_slice(), [path_owner, path_property, ..] if path_owner == owner && path_property == property)
+                    || matches!(path.as_slice(), [field] if implicit_direct_field_matches(field))
             }
         }
         ViewExpr::TFluent(_, args) => args
@@ -11971,6 +12187,7 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
             .any(|(_, value)| view_expr_depends_on(value, ctx, owner, property)),
         ViewExpr::Expr(expr) => {
             struct Collector<'a> {
+                ctx: &'a ViewCtx,
                 owner: &'a str,
                 property: &'a str,
                 found: bool,
@@ -11985,6 +12202,11 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
                         || (segments.len() >= 2
                             && segments[0].ident == self.owner
                             && segments[1].ident == self.property)
+                        || (segments.len() == 1
+                            && segments[0].ident == self.property
+                            && implicit_owner_matches(self.ctx, self.owner).is_some_and(
+                                |implicit| implicit.reactive_fields.contains(self.property),
+                            ))
                     {
                         self.found = true;
                     }
@@ -12002,6 +12224,19 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
                                     self.found = true;
                                 }
                             }
+                        } else if is_format_macro(node) {
+                            if let Some(fmt) = arguments.first().and_then(expr_as_lit_str) {
+                                if format_str_inline_idents(&fmt.value()).iter().any(|name| {
+                                    name == self.property
+                                        && implicit_owner_matches(self.ctx, self.owner).is_some_and(
+                                            |implicit| {
+                                                implicit.reactive_fields.contains(self.property)
+                                            },
+                                        )
+                                }) {
+                                    self.found = true;
+                                }
+                            }
                         }
                         for argument in &arguments {
                             self.visit_expr(argument);
@@ -12012,6 +12247,7 @@ fn view_expr_depends_on(expr: &ViewExpr, ctx: &ViewCtx, owner: &str, property: &
                 }
             }
             let mut collector = Collector {
+                ctx,
                 owner,
                 property,
                 found: false,
@@ -12528,10 +12764,44 @@ fn owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStrea
     }
 }
 
+/// PR #165 post-final rereview remediation, A8: the shared resolver behind both `emit_path_get`'s
+/// and `emit_setter`'s 2-segment `owner.field` path handling. Ordinarily `owner` is simply this
+/// generated Component's own field/bindable-owner, and `owner_value_tokens` blindly emits
+/// `self.#owner`/`#owner` — valid because `owner` really is a struct field there (`ctx.own_fields`
+/// covers every one of this Component's own literal fields, `Prop`/`State`/`Param`/`Computed`/
+/// `Environment` alike — see its own construction site's `own_fields.extend(..)`).
+///
+/// Inside a lowered `DeferredView` hidden Component, `owner` may instead be a *source*-lexical-owner
+/// `#[bindable]` field (`vm.label`, `vm.save`) that the hidden Component itself never physically
+/// declares — its only real field is `__view_owner`. Before this fix, `emit_path_get`/`emit_setter`
+/// called `owner_value_tokens` unconditionally, so `vm.label` was emitted as `self.vm.label()` on a
+/// struct with no `vm` field at all — syntactically valid tokens (so `assert_valid_rust`'s
+/// `syn::parse2`-only check missed it) but a genuine `rustc` compile error (`no field \`vm\` on type
+/// ..`). This resolver checks `ctx.own_fields` first (preserving every existing case unchanged,
+/// including `ControlTemplate`'s own `templated_parent` and `__view_owner` itself, both real fields
+/// of their own hidden Component); only when `owner` is *not* a real field of the current Component
+/// but *is* a known source-Component `#[bindable]` field (`ImplicitOwnerCtx::bindable_fields`) does
+/// it bridge through the source lexical owner instead: `__view_owner.upgrade().vm()`. Any other,
+/// genuinely unresolved `owner` falls through to the original `owner_value_tokens` call unchanged
+/// (preserving whatever diagnostic/behavior that already produced).
+fn path_owner_value_tokens(ctx: &ViewCtx, mode: &EmitMode, owner: &str) -> TokenStream {
+    if ctx.own_fields.contains_key(owner) {
+        return owner_value_tokens(ctx, mode, owner);
+    }
+    if let Some(implicit) = &ctx.implicit_owner {
+        if implicit.bindable_fields.contains(owner) {
+            let source = owner_value_tokens(ctx, mode, &implicit.field_name);
+            let getter = format_ident!("{}", owner);
+            return quote! { #source.#getter() };
+        }
+    }
+    owner_value_tokens(ctx, mode, owner)
+}
+
 fn emit_path_get(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
     match path {
         [owner, field] => {
-            let base = owner_value_tokens(ctx, mode, owner);
+            let base = path_owner_value_tokens(ctx, mode, owner);
             let getter = format_ident!("{}", field);
             quote! { #base.#getter() }
         }
@@ -12549,7 +12819,7 @@ fn emit_setter(path: &[String], ctx: &ViewCtx, mode: &EmitMode) -> TokenStream {
             path.join(".")
         );
     };
-    let base = owner_value_tokens(ctx, mode, owner);
+    let base = path_owner_value_tokens(ctx, mode, owner);
     let setter = format_ident!("set_{}", field);
     quote! { #base.#setter }
 }
@@ -15612,6 +15882,152 @@ struct NotepadWindow {
         assert!(
             generated_str.contains("A2_NESTED_FREE_NAME"),
             "the free name should still appear, unrewritten: {generated_str}"
+        );
+    }
+
+    /// PR #165 post-final rereview remediation, A8/T27: a direct, source-qualified 2-segment path
+    /// (`vm.label`) written straight inside a lowered `DeferredView` — with no intermediate nested
+    /// Component to bridge it — must build through the source lexical owner
+    /// (`__view_owner.upgrade().vm().label()`), never as `self.vm.label()` on the hidden Component
+    /// (which has no physical `vm` field at all — that shape does not even parse against the real
+    /// generated struct, a genuine `rustc` "no field `vm`" error `assert_valid_rust`'s
+    /// `syn::parse2`-only check cannot catch, only `cargo build`/`cargo test` on the real crate can).
+    #[test]
+    fn deferred_view_direct_qualified_source_path_builds_through_source_owner() {
+        let mut module = viewmodel_and_component_module(
+            r#"
+            #[elwindui::viewmodel]
+            mod t27_vm_mod {
+                struct T27Vm {
+                    #[observable(default = String::new())]
+                    label: String,
+                }
+            }
+            "#,
+            None,
+            r#"
+            struct T27Owner {
+                #[bindable]
+                vm: std::rc::Rc<T27Vm>,
+                body: view! {
+                    TextBlock {
+                        text: "target",
+                        context_popup: view! {
+                            TextBlock { text: vm.label }
+                        },
+                    }
+                },
+            }
+            "#,
+        );
+        let pre_lowering_table = build_symbol_table(&[module.clone()]);
+        let schema = implicit_owner_schema(&pre_lowering_table, &module, "T27Owner");
+        assert!(
+            schema.bindable_fields.contains("vm"),
+            "a #[bindable] field must be part of the source schema's bindable_fields: {:?}",
+            schema.bindable_fields
+        );
+        crate::lower_deferred_views_in_module(&mut module, "T27Owner", &schema);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t27_direct_qualified_source_path", &generated);
+        let generated_str = generated.to_string();
+
+        // `T27Owner` itself has a real `vm` field, so `self . vm` legitimately appears in *its own*
+        // generated code (its own `vm()` accessor, its own `#[bindable]` subscription) — the bug
+        // this test guards against is specific to the *hidden* Component's own generated section,
+        // which begins at its own struct name and has no `vm` field of its own at all.
+        let hidden_section_start = generated_str
+            .find("struct __ElwinduiViewTemplateInstanceForT27Owner_1")
+            .expect("a hidden Component must have been generated for the one context_popup");
+        let hidden_section = &generated_str[hidden_section_start..];
+        assert!(
+            !hidden_section.contains("self . vm"),
+            "a source-qualified path must never be emitted as a nonexistent physical `self.vm` \
+             field access on the hidden Component: {hidden_section}"
+        );
+        assert!(
+            hidden_section.contains(". vm () . label ()"),
+            "the source-qualified path must bridge through the source lexical owner's own `vm()` \
+             getter: {hidden_section}"
+        );
+    }
+
+    /// PR #165 post-final rereview remediation, A9/T34: a *second*-nesting-level `DeferredView`'s
+    /// own direct source-qualified path must still bridge through the *original* source
+    /// Component's own `vm`, not the first-level hidden Component's (which has no `vm` field of
+    /// its own either) — the schema/bindable-bridge counterpart to `nested_deferred_view_keeps_
+    /// the_original_source_component_as_lexical_owner`'s lexical-owner-*type* proof.
+    #[test]
+    fn nested_deferred_view_direct_qualified_source_path_uses_the_original_source_owner() {
+        let mut module = viewmodel_and_component_module(
+            r#"
+            #[elwindui::viewmodel]
+            mod t34_vm_mod {
+                struct T34Vm {
+                    #[observable(default = String::new())]
+                    label: String,
+                }
+            }
+            "#,
+            None,
+            r#"
+            struct T34Owner {
+                #[bindable]
+                vm: std::rc::Rc<T34Vm>,
+                body: view! {
+                    TextBlock {
+                        text: "outer",
+                        context_popup: view! {
+                            TextBlock {
+                                text: "inner",
+                                context_popup: view! {
+                                    TextBlock { text: vm.label }
+                                },
+                            }
+                        },
+                    }
+                },
+            }
+            "#,
+        );
+        let pre_lowering_table = build_symbol_table(&[module.clone()]);
+        let schema = implicit_owner_schema(&pre_lowering_table, &module, "T34Owner");
+        crate::lower_deferred_views_in_module(&mut module, "T34Owner", &schema);
+        let table = build_symbol_table_with_builtins(&[module.clone()]);
+        let generated = generate_module(&module, &table);
+        assert_valid_rust("t34_nested_direct_qualified_source_path", &generated);
+        let generated_str = generated.to_string();
+
+        // `T34Owner` itself has a real `vm` field, so `self . vm` legitimately appears in *its own*
+        // generated code — only the hidden components' own generated sections must never contain
+        // it. Lowering recurses into a `DeferredView`'s own body *before* pushing its own hidden
+        // Component/View pair, so the *inner* (second-level, `_2`) hidden component's own generated
+        // section actually precedes the outer (`_1`) one in emission order — take whichever struct
+        // declaration appears first so the slice always starts right after `T34Owner`'s own code,
+        // regardless of that internal emission-order detail.
+        let hidden_section_start = [
+            "struct __ElwinduiViewTemplateInstanceForT34Owner_1",
+            "struct __ElwinduiViewTemplateInstanceForT34Owner_2",
+        ]
+        .iter()
+        .filter_map(|marker| generated_str.find(marker))
+        .min()
+        .expect("both hidden Components must have been generated for the nested context_popup");
+        let hidden_section = &generated_str[hidden_section_start..];
+        assert!(
+            !hidden_section.contains("self . vm"),
+            "no level's hidden Component ever has a physical `vm` field: {hidden_section}"
+        );
+        assert!(
+            hidden_section.contains(". vm () . label ()"),
+            "the second-level deferred view's own qualified path must still bridge through the \
+             original source Component's own `vm()`: {hidden_section}"
+        );
+        assert!(
+            hidden_section.matches("Weak < T34Owner >").count() >= 2,
+            "both hidden components' own lexical-owner field must stay typed against the \
+             original source Component: {hidden_section}"
         );
     }
 

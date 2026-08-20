@@ -2183,3 +2183,408 @@ fn declarative_context_popup_event_closure_local_shadow_assignment_does_not_writ
     unmount_subtree(&content);
     handle.close();
 }
+
+// ---------------------------------------------------------------------------
+// PR #165 post-final rereview remediation: A8/A9 — direct source-qualified paths and direct
+// source-field reactivity inside a lowered `DeferredView`, with no intermediate nested Component.
+// ---------------------------------------------------------------------------
+
+#[elwindui::viewmodel]
+mod t28_vm_mod {
+    struct T28Vm {
+        #[observable(default = String::new())]
+        label: String,
+    }
+}
+
+/// T28: a direct, source-qualified 2-segment path (`vm.label`) written straight inside a lowered
+/// `DeferredView` — no intermediate nested Component bridging it — must build with the owner's
+/// *current* value and live-update while the popup stays open, exactly like an ordinary Component's
+/// own `vm.field` reference already does.
+#[elwindui::component(inherits VerticalLayout)]
+struct T28DirectQualifiedOwner {
+    #[bindable]
+    vm: Rc<T28Vm>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                TextBlock { text: vm.label }
+            },
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl T28DirectQualifiedOwner {}
+
+#[test]
+fn declarative_context_popup_direct_qualified_source_path_live_updates_while_open() {
+    let vm = T28Vm::new();
+    vm.set_label("before".to_string());
+    let owner = T28DirectQualifiedOwner::new(vm.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    let text_node = content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| content.clone());
+    let text_block = text_node
+        .as_any()
+        .downcast_ref::<elwindui::core::ui::TextBlock>()
+        .expect("popup content should resolve to the TextBlock itself");
+    assert_eq!(text_block.text.borrow().as_str(), "before");
+
+    vm.set_label("after".to_string());
+    assert_eq!(
+        text_block.text.borrow().as_str(),
+        "after",
+        "the popup content must live-update when a direct source-qualified vm.label changes \
+         while the popup stays open, not only read it correctly at build time"
+    );
+
+    unmount_subtree(&content);
+    handle.close();
+}
+
+/// T29: a direct *bare* source field (`label`, no `vm.` qualification, backed by `#[state]` on the
+/// source Component itself, no viewmodel involved) must also live-update while the popup stays
+/// open — the counterpart to T28 for the source Component's own reactive fields, not a
+/// `#[bindable]` owner's.
+#[elwindui::component(inherits VerticalLayout)]
+struct T29DirectStateOwner {
+    #[state(default = "before".to_string())]
+    label: String,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                TextBlock { text: label }
+            },
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl T29DirectStateOwner {}
+
+#[test]
+fn declarative_context_popup_direct_source_state_live_updates_while_open() {
+    let owner = T29DirectStateOwner::new();
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    let text_node = content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| content.clone());
+    let text_block = text_node
+        .as_any()
+        .downcast_ref::<elwindui::core::ui::TextBlock>()
+        .expect("popup content should resolve to the TextBlock itself");
+    assert_eq!(text_block.text.borrow().as_str(), "before");
+
+    owner.set_label("after".to_string());
+    assert_eq!(
+        text_block.text.borrow().as_str(),
+        "after",
+        "the popup content must live-update when a direct bare source field changes while the \
+         popup stays open"
+    );
+
+    unmount_subtree(&content);
+    handle.close();
+}
+
+/// T30: a direct bare source field used *inside* a supported `format!` expression
+/// (`format!("value:{label}")`) must both build and live-update correctly — distinguishing "the
+/// value rewrite works" (already proven by `ViewClosureRewriter`'s own format! inline-capture
+/// handling) from "the dependency tracker recognizes this as a reactive dependency at all" (the
+/// actual A9 gap: `collect_view_expr_owner_properties`/`view_expr_has_reactive_dependency`/
+/// `view_expr_depends_on`'s own `format!`-macro branches).
+#[elwindui::component(inherits VerticalLayout)]
+struct T30DirectFormatOwner {
+    #[state(default = "before".to_string())]
+    label: String,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                TextBlock { text: format!("value:{label}") }
+            },
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl T30DirectFormatOwner {}
+
+#[test]
+fn declarative_context_popup_direct_source_field_format_expression_live_updates_while_open() {
+    let owner = T30DirectFormatOwner::new();
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    let text_node = content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| content.clone());
+    let text_block = text_node
+        .as_any()
+        .downcast_ref::<elwindui::core::ui::TextBlock>()
+        .expect("popup content should resolve to the TextBlock itself");
+    assert_eq!(text_block.text.borrow().as_str(), "value:before");
+
+    owner.set_label("after".to_string());
+    assert_eq!(
+        text_block.text.borrow().as_str(),
+        "value:after",
+        "a direct source field referenced only inside a format! expression must still be tracked \
+         as a reactive dependency and live-update while the popup stays open"
+    );
+
+    unmount_subtree(&content);
+    handle.close();
+}
+
+#[elwindui::viewmodel]
+mod t31_vm_mod {
+    struct T31Vm {
+        #[observable(default = 0i32)]
+        run_count: i32,
+    }
+
+    impl T31Vm {
+        fn run_action(&self) {
+            run_count = self.run_count() + 1;
+        }
+    }
+}
+
+/// T31: a direct source-qualified action reference (`vm.run_action`, no explicit closure — the
+/// zero-payload bare-callback shorthand `Button.on_click` supports) dispatched from inside a
+/// lowered `DeferredView` must at minimum compile and construct through the source-owner bridge.
+/// `Button` is a native leaf requiring real native construction on the main thread (unavailable in
+/// this harness — see `for_item_two_way.rs`'s own established type-check-only convention for the
+/// identical limitation on `TextArea`), so — like T32 — this stays a type-check rather than a real
+/// dispatch proof; `TextBlock`'s own generic `on_click` (`emit_generic_on_click_routing`) was tried
+/// as a native-free alternative, but `on_click` is only a *declared* property on the controls that
+/// explicitly opt into it (`Button`'s own `#[prop(routed, on_click: fn())]`) — `emit_generic_on_
+/// click_routing`'s generation logic exists, but the DSL's own static property-existence check
+/// (`__elwindui_props_UIElement!`) rejects `on_click` on a plain `TextBlock` before generation is
+/// ever reached, so there is no native-free way to exercise real dispatch through this specific
+/// event name.
+#[elwindui::component(inherits VerticalLayout)]
+struct T31DirectActionOwner {
+    #[bindable]
+    vm: Rc<T31Vm>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                Button {
+                    text: "Run",
+                    on_click: vm.run_action,
+                }
+            },
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl T31DirectActionOwner {}
+
+fn t31_type_checked_construction_and_drop(vm: Rc<T31Vm>) {
+    let owner = T31DirectActionOwner::new(vm);
+    drop(owner);
+}
+
+#[test]
+fn declarative_context_popup_direct_bindable_action_path_type_checks() {
+    let _ = t31_type_checked_construction_and_drop as fn(Rc<T31Vm>);
+}
+
+#[elwindui::viewmodel]
+mod t32_vm_mod {
+    struct T32Vm {
+        #[observable(default = String::new())]
+        text: String,
+    }
+}
+
+/// T32: a direct source-qualified `TwoWay` binding (`text <=> vm.text`) inside a lowered
+/// `DeferredView` must at minimum compile through the same source-owner bridge as every other
+/// direct qualified path. `TextArea` is a native leaf requiring real native construction on the
+/// main thread (unavailable in this harness — see `for_item_two_way.rs`'s own established
+/// type-check-only convention for the identical limitation on an ordinary, non-deferred TwoWay
+/// binding), so this stays a type-check rather than a live-update proof — matching that existing
+/// convention exactly rather than inventing a stronger guarantee this harness cannot back up.
+#[elwindui::component(inherits VerticalLayout)]
+struct T32DirectTwoWayOwner {
+    #[bindable]
+    vm: Rc<T32Vm>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "Open popup",
+            context_popup: view! {
+                TextArea { text <=> vm.text }
+            },
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl T32DirectTwoWayOwner {}
+
+fn t32_type_checked_construction_and_drop(vm: Rc<T32Vm>) {
+    let owner = T32DirectTwoWayOwner::new(vm);
+    drop(owner);
+}
+
+#[test]
+fn declarative_context_popup_direct_two_way_bindable_path_type_checks() {
+    let _ = t32_type_checked_construction_and_drop as fn(Rc<T32Vm>);
+}
+
+/// T33: the direct-qualified-path subscription this delta adds (T28's own `__resync_vm`
+/// subscription on the resolved `vm` value) must be released, and never fire into a destroyed
+/// hidden Component, once the popup closes and every external strong reference is dropped — the
+/// A8/A9 counterpart to the existing `declarative_context_popup_content_is_releasable_after_close`
+/// (T9), which predates the direct-qualified-path subscription this delta introduces.
+#[test]
+fn declarative_context_popup_direct_qualified_source_subscription_releases_after_close() {
+    let vm = T28Vm::new();
+    vm.set_label("before".to_string());
+    let owner = T28DirectQualifiedOwner::new(vm.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let handle = ContextMenuService::open_custom_popup(
+        &host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, deferred view should build");
+
+    let content = Rc::clone(&host.shown.borrow()[0].0);
+    let weak_content = Rc::downgrade(&content);
+    unmount_subtree(&content);
+    handle.close();
+
+    drop(content);
+    host.shown.borrow_mut().clear();
+    host.last_request.borrow_mut().take();
+
+    assert!(
+        weak_content.upgrade().is_none(),
+        "the hidden Component's own content (including its own direct-qualified-path vm \
+         subscription) must be releasable once every external strong reference is dropped"
+    );
+
+    // Changing `vm.label` after the hidden Component is fully released must not panic or attempt
+    // to reach a destroyed Component through a dangling subscription — the subscription's own
+    // `weak.upgrade()` guard (inside the generated subscribe_stmts closure) must simply no-op.
+    vm.set_label("after-close".to_string());
+}

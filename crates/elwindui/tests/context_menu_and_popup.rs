@@ -2588,3 +2588,135 @@ fn declarative_context_popup_direct_qualified_source_subscription_releases_after
     // `weak.upgrade()` guard (inside the generated subscribe_stmts closure) must simply no-op.
     vm.set_label("after-close".to_string());
 }
+
+// ---------------------------------------------------------------------------
+// PR #165 final merge-gate delta: M1 — nested DeferredView direct vm.field runtime live update.
+// ---------------------------------------------------------------------------
+
+#[elwindui::viewmodel]
+mod t34_runtime_vm_mod {
+    struct T34RuntimeVm {
+        #[observable(default = String::new())]
+        label: String,
+    }
+}
+
+/// M1: `nested_deferred_view_direct_qualified_source_path_uses_the_original_source_owner`
+/// (`elwindui-codegen`) proves the *generated source shape* — both hidden Components type their
+/// own `__view_owner` as `Weak<T34Owner>`, and the second-level `vm.label` bridges through the
+/// original source Component's own `vm()`. It does not prove the second-level hidden Component's
+/// subscription is actually *live* while its own popup instance stays open. This closes that gap:
+/// open both popups, change `vm.label` while *both* remain open (no reopen, no remount), and prove
+/// the inner popup's own visible content updates through its own real `ObservableExt` subscription.
+#[elwindui::component(inherits VerticalLayout)]
+struct T34RuntimeNestedOwner {
+    #[bindable]
+    vm: Rc<T34RuntimeVm>,
+    body: view! {
+        #[id("target")]
+        let target = TextBlock {
+            text: "outer target",
+            context_popup: view! {
+                TextBlock {
+                    text: "inner target",
+                    context_popup: view! {
+                        TextBlock { text: vm.label }
+                    },
+                }
+            },
+        };
+        VerticalLayout { target }
+    },
+}
+
+#[elwindui::component]
+impl T34RuntimeNestedOwner {}
+
+#[test]
+fn declarative_context_popup_nested_direct_qualified_source_path_live_updates_while_inner_popup_is_open()
+ {
+    let vm = T34RuntimeVm::new();
+    vm.set_label("before".to_string());
+    let owner = T34RuntimeNestedOwner::new(vm.clone());
+    let target_dyn: Rc<dyn UIElementExt> = owner.target();
+
+    let request = ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (resolved, anchor) = ContextMenuService::process_request_for_target(&target_dyn, &request)
+        .expect("target should resolve a context popup");
+    let ResolvedContextDefinition::Popup { template: t } = resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let outer_host = TestPopupHost::new();
+    let work_area = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    };
+    let outer_handle = ContextMenuService::open_custom_popup(
+        &outer_host,
+        &resolved.owner,
+        &t,
+        &anchor,
+        resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("owner is alive, outer deferred view should build");
+
+    let outer_content = Rc::clone(&outer_host.shown.borrow()[0].0);
+    let inner_target = outer_content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| outer_content.clone());
+
+    let inner_request =
+        ContextRequest::keyboard(Some(PopupAnchor::Point(Point { x: 0.0, y: 0.0 })));
+    let (inner_resolved, inner_anchor) =
+        ContextMenuService::process_request_for_target(&inner_target, &inner_request)
+            .expect("inner target should resolve its own context popup");
+    let ResolvedContextDefinition::Popup { template: inner_t } = inner_resolved.definition else {
+        panic!("expected Popup definition");
+    };
+
+    let inner_host = TestPopupHost::new();
+    let inner_handle = ContextMenuService::open_custom_popup(
+        &inner_host,
+        &inner_resolved.owner,
+        &inner_t,
+        &inner_anchor,
+        inner_resolved.owner.effective_environment(),
+        work_area,
+    )
+    .expect("outer popup content is alive, inner deferred view should build");
+
+    let inner_content = Rc::clone(&inner_host.shown.borrow()[0].0);
+    let inner_text_node = inner_content
+        .visual_children()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| inner_content.clone());
+    let text_block = inner_text_node
+        .as_any()
+        .downcast_ref::<elwindui::core::ui::TextBlock>()
+        .expect("inner popup content should resolve to the TextBlock itself");
+    assert_eq!(text_block.text.borrow().as_str(), "before");
+
+    // Both popups remain open here — no reopen, no remount. The second-level hidden Component's
+    // own `vm` subscription (bridged through `__view_owner.upgrade().vm()`, A9) must be the thing
+    // that actually drives this update, not a build-time-only read.
+    vm.set_label("after".to_string());
+    assert_eq!(
+        text_block.text.borrow().as_str(),
+        "after",
+        "the second-level nested DeferredView's own direct source-qualified vm.label must \
+         live-update through its own real ObservableExt subscription while both popups remain \
+         open, not merely read correctly once at build time"
+    );
+
+    unmount_subtree(&inner_content);
+    inner_handle.close();
+    unmount_subtree(&outer_content);
+    outer_handle.close();
+}

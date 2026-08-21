@@ -55,6 +55,7 @@ pub struct TabViewItem {
     // it's actually inserted as a real tab.
     content: RefCell<Option<Rc<dyn UIElementExt>>>,
     closable: Cell<bool>,
+    on_closable_changed: RefCell<Option<Box<dyn Fn()>>>,
     on_close: RefCell<Option<Box<dyn Fn()>>>,
 }
 
@@ -66,6 +67,7 @@ impl TabViewItem {
             on_header_changed: RefCell::new(None),
             content: RefCell::new(None),
             closable: Cell::new(true),
+            on_closable_changed: RefCell::new(None),
             on_close: RefCell::new(None),
         }
     }
@@ -88,7 +90,13 @@ impl TabViewItem {
 
     #[inherent]
     pub fn set_closable(&self, closable: bool) {
+        if self.closable.get() == closable {
+            return;
+        }
         self.closable.set(closable);
+        if let Some(callback) = self.on_closable_changed.borrow().as_ref() {
+            callback();
+        }
     }
 
     #[inherent]
@@ -139,7 +147,7 @@ impl TabView {
     #[inherent]
     pub fn set_children(&self, children: Vec<Rc<TabViewItem>>) {
         for item in &children {
-            self.attach_header_listener(
+            self.attach_item_listeners(
                 &(Rc::clone(item) as Rc<dyn elwindui_core::ui::TabViewItemExt>),
             );
         }
@@ -191,15 +199,24 @@ impl TabView {
         self.inner.handle()
     }
 
+    /// Installs both the header-change and closable-change listeners for one child — the two
+    /// pieces of `TabViewItem` state that can change at runtime without rebuilding the tab list.
     #[inherent]
-    fn attach_header_listener(&self, item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) {
+    fn attach_item_listeners(&self, item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) {
         let key = tab_view_item_key(item);
+        let concrete = downcast_tab_view_item(&**item);
+
         let weak = self.weak_self.borrow().clone();
-        *downcast_tab_view_item(&**item)
-            .on_header_changed
-            .borrow_mut() = Some(Box::new(move || {
+        *concrete.on_header_changed.borrow_mut() = Some(Box::new(move || {
             if let Some(tab_view) = weak.upgrade() {
                 tab_view.refresh_dynamic_header(key);
+            }
+        }));
+
+        let weak = self.weak_self.borrow().clone();
+        *concrete.on_closable_changed.borrow_mut() = Some(Box::new(move || {
+            if let Some(tab_view) = weak.upgrade() {
+                tab_view.refresh_dynamic_closable(key);
             }
         }));
     }
@@ -225,6 +242,30 @@ impl TabView {
         self.chips.borrow()[index]
             .0
             .set_title(&downcast_tab_view_item(&*item).header.borrow());
+    }
+
+    /// Updates only the existing chip's close-button presentation — no host recreation, no
+    /// reordering, no selection callback. Mirrors `refresh_dynamic_header`'s own shape.
+    #[inherent]
+    fn refresh_dynamic_closable(&self, key: usize) {
+        let Some(index) = self
+            .displayed
+            .borrow()
+            .iter()
+            .position(|displayed| *displayed == key)
+        else {
+            return;
+        };
+        let Some(item) = self
+            .children
+            .to_vec()
+            .into_iter()
+            .find(|item| tab_view_item_key(item) == key)
+        else {
+            return;
+        };
+        let closable = downcast_tab_view_item(&*item).closable.get();
+        self.chips.borrow()[index].0.set_closable(closable);
     }
 
     /// Keyed diff (pointer identity — see `displayed`'s doc comment): removes displayed tabs whose
@@ -258,6 +299,7 @@ impl TabView {
                 continue;
             }
             let label = downcast_tab_view_item(&**entry).header.borrow().clone();
+            let closable = downcast_tab_view_item(&**entry).closable.get();
             let key = *key;
             let on_select: Box<dyn Fn()> = {
                 let this = Rc::clone(&this);
@@ -293,7 +335,7 @@ impl TabView {
             let insert_at = target_index.min(displayed.len());
             let (chip, host) = self
                 .inner
-                .insert_tab(insert_at, &label, on_select, on_close);
+                .insert_tab(insert_at, &label, closable, on_select, on_close);
             if let Some(content) = downcast_tab_view_item(&**entry).content.borrow().clone() {
                 host.set_tree(content);
             }
@@ -305,9 +347,9 @@ impl TabView {
 
         for (i, key) in displayed.iter().enumerate() {
             if let Some(entry) = children.iter().find(|e| tab_view_item_key(e) == *key) {
-                chips[i]
-                    .0
-                    .set_title(&downcast_tab_view_item(&**entry).header.borrow());
+                let item = downcast_tab_view_item(&**entry);
+                chips[i].0.set_title(&item.header.borrow());
+                chips[i].0.set_closable(item.closable.get());
             }
             chips[i].0.set_selected(Some(*key) == selected_key);
         }
@@ -341,13 +383,13 @@ fn tab_view_item_key(item: &Rc<dyn elwindui_core::ui::TabViewItemExt>) -> usize 
 
 impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> for TabView {
     fn add(&self, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
-        self.attach_header_listener(&item);
+        self.attach_item_listeners(&item);
         self.children.add(item);
         self.rebuild();
     }
 
     fn insert(&self, index: usize, item: Rc<dyn elwindui_core::ui::TabViewItemExt>) {
-        self.attach_header_listener(&item);
+        self.attach_item_listeners(&item);
         self.children.insert(index, item);
         self.rebuild();
     }
@@ -379,5 +421,35 @@ impl elwindui_core::ui::ListExt<dyn elwindui_core::ui::TabViewItemExt> for TabVi
     }
     fn to_vec(&self) -> Vec<Rc<dyn elwindui_core::ui::TabViewItemExt>> {
         self.children.to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closable_change_notifies_only_on_real_change() {
+        let item = TabViewItem::new();
+        assert!(item.closable.get());
+
+        let count = Rc::new(Cell::new(0));
+        *item.on_closable_changed.borrow_mut() = Some(Box::new({
+            let count = Rc::clone(&count);
+            move || count.set(count.get() + 1)
+        }));
+
+        item.set_closable(false);
+        assert_eq!(count.get(), 1);
+
+        item.set_closable(false);
+        assert_eq!(
+            count.get(),
+            1,
+            "a repeated setter call with the same value must not renotify"
+        );
+
+        item.set_closable(true);
+        assert_eq!(count.get(), 2);
     }
 }

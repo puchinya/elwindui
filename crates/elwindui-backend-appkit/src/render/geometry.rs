@@ -8,30 +8,6 @@ use objc2::rc::Retained;
 use objc2_core_graphics::CGColor;
 use objc2_quartz_core::{CALayer, CAShapeLayer, kCAFillRuleEvenOdd, kCAFillRuleNonZero};
 
-/// Parses a `"#RRGGBB"`/`"#RRGGBBAA"` hex color (the only form `Rectangle`/`Ellipse`'s `fill`/
-/// `stroke` params accept — see docs/specs/graphics_spec.md) into a `CGColor`. An
-/// unparseable string falls back to opaque black rather than panicking, since this runs during
-/// layout, not construction.
-pub(crate) fn parse_color(hex: &str) -> objc2_core_foundation::CFRetained<CGColor> {
-    let hex = hex.trim_start_matches('#');
-    let (r, g, b, a) = match (hex.len(), u32::from_str_radix(hex, 16)) {
-        (6, Ok(v)) => (
-            ((v >> 16) & 0xFF) as f64,
-            ((v >> 8) & 0xFF) as f64,
-            (v & 0xFF) as f64,
-            255.0,
-        ),
-        (8, Ok(v)) => (
-            ((v >> 24) & 0xFF) as f64,
-            ((v >> 16) & 0xFF) as f64,
-            ((v >> 8) & 0xFF) as f64,
-            (v & 0xFF) as f64,
-        ),
-        _ => (0.0, 0.0, 0.0, 255.0),
-    };
-    CGColor::new_generic_rgb(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
-}
-
 fn transformed_rect_bounds(
     rect: &elwindui_core::base::Rect,
     world: &elwindui_core::base::AffineTransform,

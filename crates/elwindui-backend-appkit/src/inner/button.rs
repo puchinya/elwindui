@@ -4,8 +4,10 @@ use crate::ffi::{AnyView, mtm};
 use elwindui_core::ui::ButtonRole;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
-use objc2_app_kit::{NSButton, NSColor};
+use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSAccessibility, NSButton, NSCellImagePosition, NSColor, NSControlSize, NSImage,
+};
 use objc2_foundation::{NSObjectProtocol, NSString};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -96,6 +98,51 @@ impl InnerButton {
     /// instead of being hidden behind the button's own opaque default bezel.
     pub(crate) fn set_bordered(&self, bordered: bool) {
         self.ns.setBordered(bordered);
+    }
+
+    /// Exists only so `TabChipViewIvars` (`inner/tab_view.rs`) can retain the actual close
+    /// `NSButton` alongside this `InnerButton` wrapper — never exposed through `elwindui-core`.
+    pub(crate) fn native_button(&self) -> Retained<NSButton> {
+        self.ns.clone()
+    }
+
+    pub(crate) fn set_control_size(&self, size: NSControlSize) {
+        self.ns.setControlSize(size);
+    }
+
+    /// Shows an SF Symbol when the running OS supports the class-side symbol-image constructor,
+    /// otherwise falls back to plain text. Same runtime `respondsToSelector`-probing shape as
+    /// [`set_has_destructive_action`] below — probed on `NSImage`'s class object since the
+    /// constructor being probed is a class method, not an instance method.
+    pub(crate) fn set_system_symbol_or_text(
+        &self,
+        symbol_name: &str,
+        fallback_text: &str,
+        accessibility_description: &str,
+    ) {
+        let symbol_image = if NSImage::class().responds_to(sel!(
+            imageWithSystemSymbolName:accessibilityDescription:
+        )) {
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str(symbol_name),
+                Some(&NSString::from_str(accessibility_description)),
+            )
+        } else {
+            None
+        };
+        match symbol_image {
+            Some(image) => {
+                self.ns.setImage(Some(&image));
+                self.ns.setTitle(&NSString::from_str(""));
+                self.ns.setImagePosition(NSCellImagePosition::ImageOnly);
+            }
+            None => {
+                self.ns.setImage(None);
+                self.ns.setTitle(&NSString::from_str(fallback_text));
+            }
+        }
+        self.ns
+            .setAccessibilityLabel(Some(&NSString::from_str(accessibility_description)));
     }
 }
 

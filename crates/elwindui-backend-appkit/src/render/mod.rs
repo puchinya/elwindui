@@ -24,7 +24,7 @@ mod vector;
 pub(crate) use batch::try_batch_fills;
 pub(crate) use fastpath::{try_fast_path, try_update_fast_path};
 pub(crate) use geometry::{
-    clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, parse_color, transform_point,
+    clip_bounds, clip_mask_layer, color_to_cgcolor, geometry_bounds, transform_point,
 };
 pub(crate) use image::{
     build_image_container_layer, cgimage_bytes, fitted_image_rect, resolve_cgimage,

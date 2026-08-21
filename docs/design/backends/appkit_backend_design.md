@@ -30,6 +30,8 @@ Native control properties are synchronized from local, text-style, and Theme rev
 
 `NSSecureTextField` uses the system secure-entry font cascade. Ordinary text-style synthesis is not applied when it can break secure mask glyphs.
 
+AppKit `TabView` keeps a custom embedded tab strip rather than `NSTabView`, because the shared `TabView` contract includes per-item close and new-tab affordances that a real `NSTabView`/`NSWindow` tab bar does not expose with the right ownership boundary. Each chip is a layerless `NSStackView` subclass that draws its own selection/hover state with semantic AppKit colors and uses an `NSTrackingArea` for internal hover state, adjacent to its neighbors (Safari/Xcode-style, not spaced pills). When the strip's own combined natural width would exceed the available space, every chip shrinks together (down to a minimum floor) rather than either scrolling or clipping past the window edge — matching how Safari/Xcode actually handle tab overflow. Tab content remains in persistent, independently activated `TreeHostView`s.
+
 ## Rendering and cache lifetime
 
 Render groups replay into Core Graphics/layers with balanced clip, transform, and opacity state. Layer/image resources are owned by the corresponding render node and pruned when reconciliation removes or deactivates it.

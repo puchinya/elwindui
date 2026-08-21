@@ -48,6 +48,9 @@ objc2-app-kit = { version = "0.3", features = [
     "NSTextView",
     "NSFont",
     "NSLayoutManager",
+    # `TabChipView`'s own minimum-width floor (`inner/tab_view.rs`'s `TabChipView::new`), so a
+    # tab chip can shrink with the rest of the strip but never below a legible/clickable size.
+    "NSLayoutAnchor",
     "NSScrollView",
     "NSStackView",
     "NSLayoutConstraint",
@@ -61,6 +64,14 @@ objc2-app-kit = { version = "0.3", features = [
     "NSBitmapImageRep",
     "NSGraphicsContext",
     "NSScreen",
+    # Native TabView chip drawing (`inner/tab_view.rs`'s `TabChipView`) and the native
+    # separator between the tab strip and content container.
+    "NSBezierPath",
+    "NSBox",
+    # Accessibility labels for the system-symbol close/new-tab buttons. Note: the literal
+    # `NSAccessibility` feature does not gate `setAccessibilityLabel`/the button's protocol
+    # conformance in objc2-app-kit 0.3.2 — that lives behind `NSAccessibilityProtocols`.
+    "NSAccessibilityProtocols",
     "objc2-quartz-core",
     # Font model support (see crates/elwindui-backend-appkit/src/render/text.rs). Deliberately no
     # `objc2-core-text` dependency: `NSFontDescriptor`'s traits dictionary (weight/width/symbolic

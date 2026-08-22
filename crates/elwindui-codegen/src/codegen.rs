@@ -1327,7 +1327,7 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
 /// `resolve_effective_fields`'s own inherited-field-forwarding decision, which specifically wants
 /// the narrower "literal forward" notion (a field only *contributing* to some other computed value
 /// isn't being forwarded unchanged, so shouldn't be silently treated as inherited).
-fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
+pub(crate) fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
     view.lets
         .iter()
         .any(|l| element_references_name_anywhere(&l.element, name))
@@ -3857,12 +3857,33 @@ fn generate_view(
 
     // Unreferenced own `Option<T>` fields are initialized as `None` and exposed through
     // `set_<name>`. Fields needed while constructing the view remain constructor arguments.
+    //
+    // PR #169 review remediation (AD-R4): for a field declared directly on `component` (not a
+    // `synthesize_external_base_fields`-synthesized one, Refs #90 — `component_public_shape` is
+    // source-local only and has no notion of those), this reads `component_frontend::
+    // component_public_shape`'s own deferred-field classification instead of re-deriving the same
+    // `strip_option(..).1 && !view_references_name_anywhere(..)` rule independently — the exact
+    // rust-analyzer Component struct shadow (`rust_analyzer_shadow::build_component_struct_shadow`)
+    // consults, so the two can never silently drift. A synthesized field (absent from
+    // `component.fields`) falls back to the original direct computation unchanged.
+    let own_field_shape = crate::component_frontend::component_public_shape(component, Some(view));
+    let shape_deferred_names: HashSet<String> = own_field_shape
+        .deferred_option_fields
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    let declared_own_field_names: HashSet<&str> =
+        component.fields.iter().map(|f| f.name.as_str()).collect();
     let is_deferred_own_field = |name: &syn::Ident| -> bool {
+        let name_str = name.to_string();
+        if declared_own_field_names.contains(name_str.as_str()) {
+            return shape_deferred_names.contains(&name_str);
+        }
         let ty_str = ctx
             .own_fields
-            .get(&name.to_string())
+            .get(&name_str)
             .expect("own_struct_param_names names one of ctx.own_fields' own keys");
-        strip_option(ty_str).1 && !view_references_name_anywhere(view, &name.to_string())
+        strip_option(ty_str).1 && !view_references_name_anywhere(view, &name_str)
     };
     let deferred_own_names: Vec<syn::Ident> = own_struct_param_names
         .iter()

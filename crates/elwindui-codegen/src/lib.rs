@@ -217,11 +217,13 @@ pub fn generate_component_from_item_struct_with_template(
         component_def.base.as_deref(),
         item_struct,
         &component_def,
+        view_def.as_ref(),
     )?;
 
     match register_component_struct_real(base, template, item_struct, component_def, view_def) {
         Ok(()) => Ok(shadow),
-        Err(error) => {
+        Err(ComponentGenerationFailure::ItemLocal(error)) => Err(error),
+        Err(ComponentGenerationFailure::RegistryDependent(error)) => {
             let gated_error = quote::quote! {
                 #[cfg(not(rust_analyzer))]
                 #[allow(unexpected_cfgs)]
@@ -235,21 +237,72 @@ pub fn generate_component_from_item_struct_with_template(
     }
 }
 
+/// PR #169 review remediation (A1/A2): whether a Component generation failure is decidable from
+/// the current item alone (`ItemLocal` — must stay an unconditional `Err`, visible under
+/// rust-analyzer too, since it is a genuine mistake no same-crate registry state could excuse) or
+/// depends on same-crate sibling/registry data (`RegistryDependent` — routed to a
+/// `cfg(not(rust_analyzer))`-gated real error alongside the rust-analyzer shadow instead, since it
+/// may be a spurious rust-analyzer expansion-order artifact even when the source is correctly
+/// ordered). See `docs/design/tools/codegen_design.md` §3.2a and `validate::validate_classified`'s
+/// own doc comment for the classification method `classify_validate_result` (below) uses for a
+/// `validate::validate` failure specifically.
+enum ComponentGenerationFailure {
+    ItemLocal(String),
+    RegistryDependent(String),
+}
+
+/// Runs `validate::validate_classified` over `all_modules` and folds its per-diagnostic
+/// classification into one [`ComponentGenerationFailure`] for a Component generator to propagate:
+/// `RegistryDependent` only when *every* diagnostic found is registry-dependent, `ItemLocal`
+/// (bundling every diagnostic's message, exactly matching `validate::validate`'s own pre-#169
+/// `errors.join("\n")` shape) the moment even one is item-local — a single item-local mistake must
+/// never be hidden from rust-analyzer just because an unrelated registry-dependent diagnostic
+/// happened to fire in the same pass.
+fn classify_validate_result(all_modules: &[ast::Module]) -> Result<(), ComponentGenerationFailure> {
+    let diagnostics = validate::validate_classified(all_modules);
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    let has_item_local = diagnostics
+        .iter()
+        .any(|d| d.dependency == validate::ValidationDependency::ItemLocal);
+    let combined = diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if has_item_local {
+        Err(ComponentGenerationFailure::ItemLocal(combined))
+    } else {
+        Err(ComponentGenerationFailure::RegistryDependent(combined))
+    }
+}
+
 /// The registry-dependent half of `generate_component_from_item_struct_with_template` (Issue #146):
 /// template Environment Key resolution, cross-item `validate::validate` (chains in every same-crate
 /// sibling registry), and — only on success — registration into the same-crate Component registry.
 /// Emits no tokens of its own: the struct half always emits nothing (see this function's own tail
 /// doc comment on why the `impl` half emits the whole type) — the caller's own `shadow` is the only
 /// token output for a `struct` half either way.
+///
+/// PR #169 review remediation (A1): despite this function's own name, not every failure inside it
+/// is actually registry-dependent — `view_def.is_none()` (a `template = ..` with no `body: view! {
+/// .. }` at all) and `validate_replaceable_template_view`'s own structural checks are decidable
+/// from the struct alone, so those stay `ComponentGenerationFailure::ItemLocal`. Only a same-crate
+/// registry lookup (`same_crate_control_target`, `lookup_same_crate_environment_key`, or
+/// `validate::validate`'s own registry-dependent diagnostics) is `RegistryDependent`.
 fn register_component_struct_real(
     base: Option<String>,
     template: Option<String>,
     item_struct: &syn::ItemStruct,
     component_def: ast::ComponentDef,
     view_def: Option<ast::ViewDef>,
-) -> Result<(), String> {
+) -> Result<(), ComponentGenerationFailure> {
     let name = component_def.name.clone();
     if let Some(template_name) = &template {
+        // `same_crate_control_target` recurses through `registered_component_parts` — a same-crate
+        // registry lookup — so a spurious `false`/`None` under rust-analyzer's own incomplete
+        // expansion order is possible even for a correctly-ordered `inherits Control` chain.
         let is_control = component_def
             .base
             .as_deref()
@@ -259,26 +312,27 @@ fn register_component_struct_real(
             })
             .unwrap_or(Some(false));
         if is_control == Some(false) {
-            return Err(format!(
+            return Err(ComponentGenerationFailure::RegistryDependent(format!(
                 "`{name}`: template-enabled components must inherit Control; NativeControl and non-Control components are not supported"
-            ));
+            )));
         }
         if view_def.is_none() {
-            return Err(format!(
+            return Err(ComponentGenerationFailure::ItemLocal(format!(
                 "`{name}`: `template = {template_name}` requires a `body: view! {{ .. }}` default template"
-            ));
+            )));
         }
-        validate_replaceable_template_view(view_def.as_ref().unwrap())?;
+        validate_replaceable_template_view(view_def.as_ref().unwrap())
+            .map_err(ComponentGenerationFailure::ItemLocal)?;
         match component_frontend::lookup_same_crate_environment_key(template_name) {
             None => {
-                return Err(format!(
+                return Err(ComponentGenerationFailure::RegistryDependent(format!(
                     "`{name}`: template Environment Key `{template_name}` is not registered; declare it with #[elwindui::environment_key] before the component"
-                ));
+                )));
             }
             Some((_, value_type)) if !is_control_template_key_value(&value_type, &name) => {
-                return Err(format!(
+                return Err(ComponentGenerationFailure::RegistryDependent(format!(
                     "`{name}`: template Environment Key `{template_name}` must have Value = Option<ControlTemplate<{name}>>, found `{value_type}`"
-                ));
+                )));
             }
             Some(_) => {}
         }
@@ -300,7 +354,7 @@ fn register_component_struct_real(
         .chain(component_frontend::sibling_store_modules())
         .chain(component_frontend::sibling_enum_modules())
         .collect();
-    validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
+    classify_validate_result(&all_modules)?;
     component_frontend::register_same_crate_component_with_template(
         &name,
         base.as_deref(),
@@ -361,7 +415,8 @@ pub fn generate_component_from_item_impl(
                 #shadow
             })
         }
-        Err(error) => {
+        Err(ComponentGenerationFailure::ItemLocal(error)) => Err(error),
+        Err(ComponentGenerationFailure::RegistryDependent(error)) => {
             let gated_error = quote::quote! {
                 #[cfg(not(rust_analyzer))]
                 #[allow(unexpected_cfgs)]
@@ -379,16 +434,24 @@ pub fn generate_component_from_item_impl(
 /// original (pre-#146) function body did, unchanged, from the paired struct's own same-crate registry
 /// lookup through real code generation and registration. Returns the real generated tokens
 /// ungated; the caller gates them to `cfg(not(rust_analyzer))`.
+///
+/// PR #169 review remediation (A1): the struct-registry lookup miss, `validate::validate`'s
+/// registry-dependent diagnostics, and the base-qualified-path check (needs `table.resolve`, which
+/// sees sibling modules) are all genuinely `RegistryDependent`. `methods_from_item_impl`'s own
+/// parse (item-local) already succeeded before this function is ever reached —
+/// `build_component_impl_shadow` (called by the caller before this) runs that exact same parse and
+/// would have propagated any item-local error via `?` first.
 fn generate_component_impl_real(
     item_impl: &syn::ItemImpl,
-) -> Result<proc_macro2::TokenStream, String> {
-    let (name, methods) = component_frontend::methods_from_item_impl(item_impl)?;
+) -> Result<proc_macro2::TokenStream, ComponentGenerationFailure> {
+    let (name, methods) = component_frontend::methods_from_item_impl(item_impl)
+        .expect("item-local method parse already validated by build_component_impl_shadow");
     let Some((mut component_def, view_def)) = component_frontend::registered_component_parts(&name)
     else {
-        return Err(format!(
+        return Err(ComponentGenerationFailure::RegistryDependent(format!(
             "{name}: no `#[elwindui::component] struct {name} {{ .. }}` was expanded before this \
              `impl` block — declare the struct first"
-        ));
+        )));
     };
     component_def.methods = methods;
     let base = component_def.base.clone();
@@ -406,7 +469,7 @@ fn generate_component_impl_real(
         .chain(component_frontend::sibling_store_modules())
         .chain(component_frontend::sibling_enum_modules())
         .collect();
-    validate::validate(&all_modules).map_err(|errors| errors.join("\n"))?;
+    classify_validate_result(&all_modules)?;
     // PR #165 final rereview remediation, A2: the implicit-owner field-readable/writable schema
     // for `name` must be derived from a symbol table built over the *unlowered* `all_modules` —
     // built here, before lowering, specifically so `codegen::implicit_owner_schema` can resolve
@@ -434,14 +497,14 @@ fn generate_component_impl_real(
             .resolve(&module, base)
             .is_none_or(|info| info.is_builtin);
         if !base_is_builtin && base_path.is_none() {
-            return Err(format!(
+            return Err(ComponentGenerationFailure::RegistryDependent(format!(
                 "{name}: inherits `{base}`, but `{base}` is a user-defined component — write a \
                  full crate-root-qualified path instead of a bare name (e.g. `inherits \
                  crate::ui::{base}`). Also make sure the module exposing `{base}` re-exports it \
                  with a glob (`pub use some_module::*;`), not a named list — #[class] generates a \
                  companion `__elwindui_macros_of_{base}` alongside `{base}` itself that a named \
                  re-export would strand (docs/specs/dsl_spec.md §3)."
-            ));
+            )));
         }
     }
     let generated = codegen::generate_module(&module, &table);
@@ -847,15 +910,30 @@ pub fn generate_control_template_from_item_struct(
     // `ContentControl` gives the private instance a single, ordinary content slot for the authored
     // root. The instance itself is the template root stored by the target; its content remains an
     // implementation detail and is unrelated to the target's logical content/presenter channel.
-    generate_component_from_item_struct(Some("ContentControl".to_string()), &hidden_struct)?;
+    //
+    // PR #169 review remediation (A3): the struct half's own return value is captured now — an
+    // earlier revision discarded it here, which (once Issue #146 made the struct half return a
+    // non-empty rust-analyzer shadow instead of always-empty tokens) silently dropped that hidden
+    // Component's own `#[cfg(rust_analyzer)]` struct shadow. Under rust-analyzer, the impl half's own
+    // shadow (`hidden_generated`, built below) would then reference `#hidden_name` as an `impl`
+    // target with no matching `struct #hidden_name` declared anywhere in scope at all.
+    let hidden_struct_generated =
+        generate_component_from_item_struct(Some("ContentControl".to_string()), &hidden_struct)?;
     let hidden_impl: syn::ItemImpl = syn::parse_quote! { impl #hidden_name {} };
     let hidden_generated = generate_component_from_item_impl(&hidden_impl)?;
 
     let attrs = &item_struct.attrs;
     let vis = &item_struct.vis;
-    Ok(quote::quote! {
-        #hidden_generated
-
+    // PR #169 review remediation (A3/AD-R6/AD-R7): the real public `TemplateName::template()`
+    // declaration calls `#hidden_name::__new_unmounted`/`.mount(..)`/`.into_node()` — real runtime
+    // lifecycle methods the *generic* Component shadow (`rust_analyzer_shadow::
+    // build_component_impl_shadow`) deliberately never fakes (see that function's own doc comment,
+    // and AD-R6: "do not add runtime-only APIs to generic Component shadows"). So this whole real
+    // declaration is gated to `cfg(not(rust_analyzer))` here, and a dedicated, ControlTemplate-only
+    // rust-analyzer shadow (`rust_analyzer_shadow::build_control_template_shadow`) supplies just the
+    // public `TemplateName`/`TemplateName::template()` name-and-signature surface instead — no hidden
+    // instance construction, no runtime template body.
+    let real = rust_analyzer_shadow::gate_real_items_for_rustc(quote::quote! {
         #(#attrs)*
         #vis struct #name;
 
@@ -868,6 +946,14 @@ pub fn generate_control_template_from_item_struct(
                 })
             }
         }
+    })?;
+    let shadow = rust_analyzer_shadow::build_control_template_shadow(item_struct, target)?;
+
+    Ok(quote::quote! {
+        #hidden_struct_generated
+        #hidden_generated
+        #real
+        #shadow
     })
 }
 
@@ -1074,6 +1160,61 @@ mod control_template_tests {
         assert!(generated.contains("ControlTemplate < Control >"));
         assert!(generated.contains("Weak < Control >"));
         assert!(generated.contains("templated_parent"));
+    }
+
+    /// PR #169 review remediation, T12: `generate_control_template_from_item_struct`'s own output
+    /// contains both cfg branches — a real (`not(rust_analyzer)`) public `TemplateName`/`template()`
+    /// with its real runtime body, and a dedicated rust-analyzer-only (`rust_analyzer`) public
+    /// `TemplateName`/`template()` shadow with only the signature — plus the hidden Component
+    /// struct-half's own `#[cfg(rust_analyzer)]` shadow (A3: an earlier revision discarded that
+    /// struct half's return value, leaving the hidden impl-half's own shadow referencing an
+    /// undeclared type under rust-analyzer). No duplicate public `TemplateName` declaration appears
+    /// within either single cfg branch.
+    #[test]
+    fn t12_output_contains_real_and_shadow_branches_with_no_discarded_hidden_shadow() {
+        let generated = author(
+            r#"
+            struct CodegenControlTemplateT12 {
+                body: view! { TextBlock { text: "ok" } },
+            }
+            "#,
+        )
+        .expect("valid template should generate");
+
+        // Real: gated, with the real runtime body.
+        assert!(
+            generated.contains("cfg (not (rust_analyzer))"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("struct CodegenControlTemplateT12 ;"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("__new_unmounted") && generated.contains("into_node"),
+            "the real template() body must still construct/mount the hidden instance: {generated}"
+        );
+
+        // Shadow: gated, signature-only (no hidden-instance construction).
+        assert!(generated.contains("cfg (rust_analyzer)"), "{generated}");
+        assert!(
+            generated.contains(
+                "fn template () -> elwindui :: core :: ui :: ControlTemplate < Control > { unreachable ! () }"
+            ),
+            "the shadow template() must be signature-only, never calling the real hidden-instance \
+             construction: {generated}"
+        );
+
+        // A3: the hidden Component struct's own shadow (`struct
+        // __ElwinduiControlTemplateInstanceForCodegenControlTemplateT12 ;`) must survive into the
+        // output, not be silently discarded — otherwise the hidden impl-half's own shadow (below)
+        // references an undeclared type under rust-analyzer.
+        assert!(
+            generated
+                .contains("struct __ElwinduiControlTemplateInstanceForCodegenControlTemplateT12"),
+            "the hidden Component struct half's own rust-analyzer shadow must not be discarded: \
+             {generated}"
+        );
     }
 
     #[test]
@@ -1437,6 +1578,87 @@ mod store_registry_tests {
         assert!(err.contains("#[async_computed]"), "error: {err}");
         assert!(err.contains("viewmodel/store"), "error: {err}");
     }
+
+    /// PR #169 review remediation, T1: `#[async_computed]` on a plain Component field is decidable
+    /// from the field's own `FieldKind` alone — no sibling module is ever consulted to decide it —
+    /// so it must remain a genuine, unconditional `Err`, never downgraded to an
+    /// `Ok(..)`-carrying-a-`cfg(not(rust_analyzer))`-gated error the way a same-crate registry miss
+    /// is. `inherits VerticalLayout` here (unlike the sibling test above) isolates this from the
+    /// *also* item-local base-less-with-view rule, so this test exercises `#[async_computed]`
+    /// alone.
+    #[test]
+    fn t1_async_computed_on_component_field_is_an_unconditional_item_local_error() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct T1AsyncComputedMisuse {
+                #[async_computed(expr = fetch())]
+                remote: i32,
+                body: view! { TextBlock { text: "x" } },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let err = generate_component_from_item_struct(
+            Some("VerticalLayout".to_string()),
+            &item_struct,
+        )
+        .expect_err(
+            "an item-local #[async_computed]-on-Component-field mistake must be a hard Err, \
+                 never routed through Ok(..) + a gated compile_error!",
+        );
+        assert!(err.contains("#[async_computed]"), "error: {err}");
+        assert!(err.contains("viewmodel/store"), "error: {err}");
+    }
+
+    /// PR #169 review remediation, T2: `#[bindable]` on a field whose declared type is not
+    /// `Rc<..>`-wrapped is decidable from the field's own declared type text alone — no sibling
+    /// module lookup involved (contrast `bindable_field_on_non_viewmodel_type_is_rejected_on_macro_path`
+    /// above, which genuinely needs `table.resolve` to know whether the *pointee* type is a
+    /// viewmodel, and stays registry-dependent) — so this must be an unconditional `Err`.
+    #[test]
+    fn t2_non_rc_bindable_field_is_an_unconditional_item_local_error() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct T2NonRcBindable {
+                #[bindable]
+                vm: SomeViewModelNotWrappedInRc,
+                body: view! { TextBlock { text: "x" } },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let err = generate_component_from_item_struct(
+            Some("VerticalLayout".to_string()),
+            &item_struct,
+        )
+        .expect_err(
+            "a non-Rc-wrapped #[bindable] field is a hard Err, never routed through Ok(..) + \
+                 a gated compile_error!",
+        );
+        assert!(err.contains("#[bindable]"), "error: {err}");
+        assert!(err.contains("Rc<..>"), "error: {err}");
+    }
+
+    /// PR #169 review remediation, T3: a Component with its own `body: view! { .. }` but no
+    /// `inherits <Base>` is decidable from the struct alone — no sibling module lookup involved —
+    /// so it must be an unconditional `Err`.
+    #[test]
+    fn t3_base_less_component_with_own_view_is_an_unconditional_item_local_error() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct T3BaseLessWithView {
+                body: view! { TextBlock { text: "x" } },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let err = generate_component_from_item_struct(None, &item_struct).expect_err(
+            "a base-less component with its own view is a hard Err, never routed through Ok(..) \
+             + a gated compile_error!",
+        );
+        assert!(err.contains("must declare"), "error: {err}");
+        assert!(err.contains("inherits"), "error: {err}");
+    }
 }
 
 /// `#[elwindui::component] impl Name { .. }` — §3's `#[overridable]`/`#[overrides]` method
@@ -1615,6 +1837,71 @@ mod component_impl_tests {
         let err = methods(r#"impl Clone for MiTraitImpl { fn clone(&self) -> Self { todo!() } }"#)
             .expect_err("a trait impl should be rejected");
         assert!(err.contains("trait impl"), "error: {err}");
+    }
+
+    /// PR #169 review remediation, T10: the real `impl` half (`codegen::generate_view`'s own
+    /// `not(rust_analyzer)`-gated output, via `generate_component_from_item_impl`) and the
+    /// rust-analyzer Component struct shadow (its `rust_analyzer`-gated output) must agree on which
+    /// own `Option<T>` fields are required constructor parameters vs. deferred setter-only fields —
+    /// because both now consult the same `component_frontend::component_public_shape` classification
+    /// (AD-R4 of the PR #169 review contract), not two independently hand-written copies of it. Mirrors
+    /// `examples/graphics-demo`'s own `GraphicsDemoWindow` shape (an ordinary unannotated required
+    /// field plus a referenced-vs-unreferenced own `Option<T>` pair).
+    #[test]
+    fn t10_real_and_shadow_agree_on_own_field_constructor_deferred_classification() {
+        let struct_item: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct T10ShapeSharing {
+                required_prop: i32,
+                referenced_padding: Option<f32>,
+                unreferenced_padding: Option<f32>,
+                body: view! {
+                    VerticalLayout {
+                        Rectangle { corner_radius: referenced_padding }
+                        TextBlock { text: "x" }
+                    }
+                },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        // The struct half's own return value carries the rust-analyzer struct shadow
+        // (`new(..)`/getters/setters) — captured directly here rather than through the shared
+        // `declare` helper (used by every other test in this module), which discards it.
+        let struct_out =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &struct_item)
+                .expect("struct half should generate")
+                .to_string();
+        let impl_out = methods(r#"impl T10ShapeSharing {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let out = format!("{struct_out} {impl_out}");
+
+        // Real generation names this an ancestor-composed `construct(..)` (this component inherits
+        // `VerticalLayout`, a shape-composition base); the shadow always names it `new(..)` — a
+        // pre-existing, unrelated naming/formatting difference (the shadow also always trails every
+        // parameter with a comma, real generation doesn't) this test doesn't care about. Both must
+        // still agree on *which* fields appear as parameters at all.
+        assert!(
+            out.contains(
+                "fn construct (required_prop : i32 , referenced_padding : Option < f32 >)"
+            ),
+            "real construct(..) must take required_prop and the referenced own Option<T> field, in \
+             field order, with unreferenced_padding excluded: {out}"
+        );
+        assert!(
+            out.contains(
+                "pub fn new (required_prop : i32 , referenced_padding : Option < f32 > ,) -> std :: rc :: Rc < Self >"
+            ),
+            "shadow new(..) must classify the same two fields as required, in the same order: {out}"
+        );
+
+        // Both branches expose a setter for the deferred field, and — since this Component has a
+        // `view!` and `referenced_padding` is a plain `prop` (runtime-mutable by definition even
+        // though also required at construction time, `codegen::generate_view`'s own
+        // `mutable_required_names`) — for the required-but-referenced field too.
+        assert!(out.contains("fn set_unreferenced_padding"), "{out}");
+        assert!(out.contains("fn set_referenced_padding"), "{out}");
     }
 }
 

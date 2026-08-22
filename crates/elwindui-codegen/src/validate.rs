@@ -479,6 +479,82 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
     }
 }
 
+/// PR #169 review remediation (A1): whether a [`ValidationDiagnostic`] is decidable from the
+/// current component's own module alone (`ItemLocal`) or its presence/absence depends on
+/// same-crate sibling module data being available (`RegistryDependent`) — see
+/// `docs/design/tools/codegen_design.md` §3.2a's item-local/registry-dependent split. Under
+/// rust-analyzer, only `RegistryDependent` diagnostics may be suppressed (routed to a
+/// `cfg(not(rust_analyzer))`-gated real error instead of an unconditional one) — `ItemLocal`
+/// diagnostics are a genuine mistake decidable without any registry, so they must remain an
+/// unconditional diagnostic on both rust-analyzer and real `rustc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValidationDependency {
+    ItemLocal,
+    RegistryDependent,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ValidationDiagnostic {
+    pub dependency: ValidationDependency,
+    pub message: String,
+}
+
+/// Classifies every diagnostic [`validate`] would produce for `modules` into
+/// [`ValidationDependency::ItemLocal`] vs [`ValidationDependency::RegistryDependent`] — the
+/// classification `lib.rs`'s Component generators need to decide whether a `validate::validate`
+/// failure may be routed to a rust-analyzer-suppressible gated error (Issue #146) or must stay an
+/// unconditional diagnostic (PR #169 review finding A1: the pre-remediation code treated the
+/// *entire* `validate::validate` outcome as registry-dependent, which wrongly hid genuinely
+/// item-local mistakes — e.g. `#[async_computed]` on a plain component field — from
+/// rust-analyzer).
+///
+/// `modules[0]` is assumed to be the "current" module under validation and every other entry a
+/// same-crate sibling chained in for cross-item resolution — exactly the shape every existing
+/// caller already builds (`std::iter::once(module).chain(sibling_component_modules(..))...`).
+///
+/// Rather than hand-classifying each of `validate`'s ~60 own diagnostic call sites (a
+/// `dependency` tag threaded through a ~4000-line, deeply nested function, guaranteed to drift out
+/// of sync with that function's own evolution the first time a new check is added without
+/// remembering to tag it), this classifies **behaviorally**: `validate` is run twice — once
+/// against the full `modules` slice (siblings included, `full_errors`) and once against
+/// `modules[0]` alone (`isolated_errors`, no sibling context at all). A diagnostic message that
+/// appears in `full_errors` is `ItemLocal` exactly when it *also* appears in `isolated_errors` —
+/// i.e. the current module already fails this way with **no** sibling data present at all, so
+/// nothing about same-crate registry completeness could have suppressed or produced it. Any
+/// `full_errors` message absent from `isolated_errors` is `RegistryDependent` by construction: its
+/// presence causally depended on sibling module data actually being available (a same-crate
+/// `#[bindable]`-target-is-a-viewmodel check, an enum-exhaustiveness check against a sibling
+/// `#[elwindui::dsl_enum]`, a `vm.field` reference resolving through a sibling `#[elwindui::
+/// viewmodel]`, ...). This is a stricter, self-maintaining property than a hand-classified table —
+/// it can never fall out of sync with what `validate` actually does, at the cost of one extra
+/// (cheap — a handful of AST nodes) `validate` call per generation attempt that already failed.
+pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnostic> {
+    let Err(full_errors) = validate(modules) else {
+        return Vec::new();
+    };
+    let isolated_errors: HashSet<String> = match modules.first() {
+        Some(own_module) => match validate(std::slice::from_ref(own_module)) {
+            Err(errors) => errors.into_iter().collect(),
+            Ok(()) => HashSet::new(),
+        },
+        None => HashSet::new(),
+    };
+    full_errors
+        .into_iter()
+        .map(|message| {
+            let dependency = if isolated_errors.contains(&message) {
+                ValidationDependency::ItemLocal
+            } else {
+                ValidationDependency::RegistryDependent
+            };
+            ValidationDiagnostic {
+                dependency,
+                message,
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 struct ForBinding<'a> {
     name: &'a str,

@@ -42,7 +42,7 @@
 //! It exists purely to give rust-analyzer's name/type resolution a self-contained, always-succeeding
 //! surface; real behavior is exclusively what `cfg(not(rust_analyzer))` generation already produces.
 
-use crate::ast::ComponentDef;
+use crate::ast::{self, ComponentDef};
 // `ComponentPublicShape` is not named directly in this file (only `component_public_shape`'s return
 // value, used structurally) but is re-exported as part of this module's own documented surface
 // (`docs/design/tools/codegen_design.md` §3.2a) alongside the function/enum this file does use.
@@ -171,15 +171,19 @@ fn parse_type(ty: &str) -> Result<syn::Type, String> {
 /// Every method body is `unreachable!()` — this type is never actually constructed; see this module's
 /// own doc comment for why. `new`'s own parameter list and every accessor's own name/type/visibility
 /// come from [`component_public_shape`], shared with `codegen::generate_component`'s real (view-less)
-/// generation.
+/// generation and `codegen::generate_view`'s own real `has_view` generation. `view` is `component`'s
+/// own `ViewDef` when it has one — `None` for a view-less component — and drives the same
+/// referenced-vs-unreferenced own `Option<T>` deferral decision real generation makes (PR #169
+/// review, AD-R3/AD-R4).
 pub(crate) fn build_component_struct_shadow(
     base: Option<&str>,
     item_struct: &syn::ItemStruct,
     component: &ComponentDef,
+    view: Option<&ast::ViewDef>,
 ) -> Result<TokenStream, String> {
     let vis = &item_struct.vis;
     let ident = &item_struct.ident;
-    let shape = component_public_shape(component);
+    let shape = component_public_shape(component, view);
 
     let mut ctor_params = TokenStream::new();
     for (name, ty) in &shape.constructor_params {
@@ -325,6 +329,33 @@ pub(crate) fn build_theme_shadow(item_struct: &syn::ItemStruct) -> Result<TokenS
     })
 }
 
+/// PR #169 review remediation (A3/AD-R6): the rust-analyzer-only shadow for
+/// `#[elwindui::control_template(target = ..)]`'s own **public** declaration — `TemplateName` and
+/// `TemplateName::template() -> ControlTemplate<Target>`, signature only. Deliberately does not
+/// reach for the generic Component shadow's own machinery: real `template()`'s body constructs and
+/// mounts a private hidden Component instance via real runtime-only methods
+/// (`__new_unmounted`/`mount`/`into_node`) the generic Component shadow never fakes (see
+/// `build_component_impl_shadow`'s own doc comment and AD-R6 of the Issue #146/PR #169 contract:
+/// "do not add runtime-only APIs to generic Component shadows just to make `#[control_template]`
+/// compile") — so this shadow's own `template()` body is `unreachable!()`, exactly like every other
+/// shadow method in this module, rather than attempting to replicate that construction.
+pub(crate) fn build_control_template_shadow(
+    item_struct: &syn::ItemStruct,
+    target: &syn::Path,
+) -> Result<TokenStream, String> {
+    let vis = &item_struct.vis;
+    let ident = &item_struct.ident;
+    gate_shadow_items(quote! {
+        #vis struct #ident;
+
+        impl #ident {
+            pub fn template() -> elwindui::core::ui::ControlTemplate<#target> {
+                unreachable!()
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,7 +449,7 @@ mod tests {
                 layout_spacing: f32,
             }
         };
-        let shadow = build_component_struct_shadow(Some("Window"), &item_struct, &component)
+        let shadow = build_component_struct_shadow(Some("Window"), &item_struct, &component, None)
             .expect("struct shadow should build");
         parses_as_items(&shadow);
         let s = shadow.to_string();
@@ -449,7 +480,7 @@ mod tests {
                 layout_spacing: f32,
             }
         };
-        let shadow = build_component_struct_shadow(None, &item_struct, &component)
+        let shadow = build_component_struct_shadow(None, &item_struct, &component, None)
             .expect("struct shadow should build");
         let s = shadow.to_string();
         assert!(!s.contains("Deref"), "{s}");
@@ -494,7 +525,7 @@ mod tests {
                 label: String,
             }
         };
-        let shadow = build_component_struct_shadow(None, &item_struct, &component)
+        let shadow = build_component_struct_shadow(None, &item_struct, &component, None)
             .expect("struct shadow should build");
         parses_as_items(&shadow);
         let s = shadow.to_string();

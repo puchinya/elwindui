@@ -81,6 +81,14 @@ Component struct halfとimpl halfは、runtime上「struct halfはmetadata登録
 
 Environment Key/ViewModel/Store/DSL enumのdefining expansion(`#[elwindui::environment_key]`等)はそれ自身のdefinitionにprevious sibling registry lookupを必要としないため、shadow化の対象外とし、既存のself-contained expansionをそのまま維持する。
 
+#### item-local/registry依存の分類実装(PR #169レビュー是正)
+
+「item-localとregistry依存の2種類に分ける」という原則は、`validate::validate`の個々の呼び出し箇所(60箇所超)を手作業でタグ付けするのではなく、`validate::validate_classified`が**挙動ベース**で分類する。同じ`validate::validate`をmodules全体(sibling込み)と`modules[0]`単体(sibling無し)の2回実行し、後者にも現れるmessageはitem-local、前者にしか現れないmessageはregistry依存と判定する——sibling data無しでも同じ理由で失敗する診断は、registry完全性に一切依存し得ない、という論理に基づく。手作業のタグ表と違い、`validate`自身の実装から独立して古びることがない。`lib.rs`の`ComponentGenerationFailure::{ItemLocal, RegistryDependent}`が、この分類結果(`classify_validate_result`)と、struct/impl半分それぞれの他のregistry依存チェック(`same_crate_control_target`、`lookup_same_crate_environment_key`、struct-before-impl registry miss、base qualified-path解決)を統一的に呼び出し元へ伝える。ItemLocalが1件でも含まれていれば全体を無条件`Err`とし、全件がRegistryDependentの場合のみ`cfg(not(rust_analyzer))`ゲートへ回す。
+
+`component_public_shape`は`view: Option<&ViewDef>`を受け取るようになり、own `Option<T>`fieldの deferred/required 判定を、real generation(`codegen::generate_view`)と同じ`codegen::view_references_name_anywhere`traversalで行う——PR #169レビュー指摘A2: 無属性(`#[param]`を書かない)fieldは`FieldKind::Prop`になるが、初期値なしの`Prop`もrequired constructor paramになる実際のルールを、旧実装は`FieldKind::Param`のみの対象と誤認しており、通常fieldをshadowのconstructorから丸ごと落としていた。さらに、required(非deferred)な`Prop`fieldはconstruction後もruntime-mutableのため、`has_view`な実装(`generate_view`の`mutable_required_names`、`FieldKind::Prop`のみが対象)ではsetterを持つ一方、view-lessな実装(`generate_component`)は同じrequired fieldにsetterを一切持たない——この実装差そのものをshadow側でも再現する(`view.is_some()`で分岐)。
+
+`#[elwindui::control_template]`は独自のRA shadow(`rust_analyzer_shadow::build_control_template_shadow`)を持つ——PR #169レビュー指摘A3: 隠しComponent struct半分の戻り値(RA shadowを含む)を`generate_control_template_from_item_struct`が破棄していたため、隠しComponent impl半分のRA shadowが宣言されない型を参照する状態になっていた。現在は隠しstruct半分の戻り値を保持しつつ、`TemplateName::template()`の公開宣言自体も`gate_real_items_for_rustc`で`cfg(not(rust_analyzer))`へ隔離し、専用のsignature-onlyなRA shadow(`__new_unmounted`/`mount`/`into_node`等、汎用Component shadowが決して持たないruntime専用methodを一切呼ばない)を別途生成する。
+
 真に外部(ローカル`TypeInfo`なし)なbaseを`inherits`し、自前の`view`内でbaseの属性を同名のまま裸参照している(`padding: padding`)component(Refs #90)については、baseの完全な field 一覧を持たないため、`resolve_effective_fields`は代わりにview自身の裸参照を唯一の証拠として当該fieldを合成する(`codegen.rs`の`synthesize_external_base_fields`)。合成されたfieldの型は具体的なRust型文字列ではなく、`{Base}!(@field_type {name})`という型位置macro呼び出し文字列——実際の型解決はconsumer crate側での`__elwindui_props_*!`展開(`class_macro_design.md`)まで遅延する、この節の冒頭の方針そのものの型情報版である。合成fieldの宣言元(`declaring_types`)は、辿れる祖先が存在しない以上、component自身とする。
 
 ### 3.3 Static validation

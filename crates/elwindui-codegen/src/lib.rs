@@ -2113,9 +2113,23 @@ mod component_impl_tests {
     /// verdict and returned a bare `Err`, discarding the shadow entirely.
     #[test]
     fn t_r2_3_end_to_end_mixed_diagnostics_both_gated_correctly_alongside_shadow() {
+        // PR #169 review remediation, round 3 (A1/AD-R3-1, T-R3-3): a base-less `#[content(..)]`
+        // typo is now correctly `ItemLocal` (see `t_r3_1_*` in `validate.rs`), so this end-to-end
+        // mix needs a genuine same-crate-base-dependent `#[content(..)]` miss for its
+        // registry-dependent half — declared and registered first, exactly like every other
+        // cross-invocation same-crate registry test in this module.
+        declare(
+            None,
+            r#"
+            struct TR23EndToEndMixedBase {
+                #[param]
+                unrelated_field: String,
+            }
+            "#,
+        );
         let item_struct: syn::ItemStruct = syn::parse_str(
             r#"
-            #[content(no_such_field)]
+            #[content(missing_on_base)]
             struct TR23EndToEndMixed {
                 #[async_computed(expr = fetch())]
                 value: i32,
@@ -2123,9 +2137,12 @@ mod component_impl_tests {
             "#,
         )
         .expect("struct should parse");
-        let generated = generate_component_from_item_struct(None, &item_struct)
-            .expect("a Classified failure must still be Ok(shadow + routed compile_error!s)")
-            .to_string();
+        let generated = generate_component_from_item_struct(
+            Some("TR23EndToEndMixedBase".to_string()),
+            &item_struct,
+        )
+        .expect("a Classified failure must still be Ok(shadow + routed compile_error!s)")
+        .to_string();
 
         // The shadow must still be present (not discarded the way a bare `Err` would).
         assert!(
@@ -2144,10 +2161,209 @@ mod component_impl_tests {
             "item-local diagnostic must not be gated: {generated}"
         );
 
-        // The registry-dependent diagnostic (`#[content(..)]` naming an unknown field) is gated.
+        // The registry-dependent diagnostic (`#[content(..)]` naming a field missing from the
+        // same-crate base) is gated.
         assert!(
-            generated.contains("cfg (not (rust_analyzer))") && generated.contains("no_such_field"),
+            generated.contains("cfg (not (rust_analyzer))")
+                && generated.contains("missing_on_base"),
             "registry-dependent diagnostic must be gated behind cfg(not(rust_analyzer)): {generated}"
+        );
+    }
+
+    /// PR #169 review remediation, round 3, T-R3-5 (A2/AD-R3-2/AD-R3-3/AD-R3-4): a derived
+    /// Component's inherited (not its own) field must keep being forwarded into the real generated
+    /// constructor exactly as before, even though `component_public_shape` is now given only the
+    /// derived's own literal fields (`source_component`) rather than the effective/flattened set —
+    /// proving the source/effective split preserves inherited-field forwarding rather than silently
+    /// dropping it (`codegen.rs`'s own `is_param_eligible` fallback for non-own fields).
+    #[test]
+    fn t_r3_5_generate_view_preserves_inherited_field_forwarding_with_source_local_shape() {
+        declare(
+            Some("VerticalLayout"),
+            r#"
+            struct TR35Base {
+                #[param]
+                base_value: i32,
+                body: view! { TextBlock { text: "base" } },
+            }
+            "#,
+        );
+        methods(r#"impl TR35Base {}"#).expect("base impl half should generate");
+
+        let derived_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR35Derived {
+                #[param]
+                own_value: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        generate_component_from_item_struct(Some("crate::TR35Base".to_string()), &derived_struct)
+            .expect("derived struct half should generate");
+        let derived_impl: syn::ItemImpl =
+            syn::parse_str("impl TR35Derived {}").expect("impl should parse");
+        let generated = generate_component_from_item_impl(&derived_impl)
+            .expect("derived impl half should generate")
+            .to_string();
+
+        let real_ctor = generated
+            .split("fn construct (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        assert!(
+            real_ctor.contains("base_value"),
+            "the inherited field must still be forwarded into the real constructor: {real_ctor}"
+        );
+        assert!(
+            real_ctor.contains("own_value"),
+            "the derived's own field must still be a real constructor parameter: {real_ctor}"
+        );
+    }
+
+    /// PR #169 review remediation, round 3, T-R3-6 (AD-R3-5): a required (referenced-by-view), own,
+    /// unannotated `prop` field's setter comes from `own_shape.writable_fields` — both the real
+    /// generated setter and the rust-analyzer shadow's own setter must still exist, sourced from the
+    /// same shape instance `generate_view` now builds from `source_component`.
+    #[test]
+    fn t_r3_6_required_writable_prop_comes_from_shape() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR36RequiredWritableProp {
+                value: i32,
+                body: view! { TextBlock { text: "x" } },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let struct_out =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
+                .expect("struct half should generate")
+                .to_string();
+        let impl_out = methods(r#"impl TR36RequiredWritableProp {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let out = format!("{struct_out} {impl_out}");
+
+        let real_ctor = out
+            .split("fn construct (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        assert!(real_ctor.contains("value"), "real ctor: {real_ctor}");
+        assert!(
+            out.contains("fn set_value"),
+            "real generation must expose a setter for a required, referenced, unannotated prop: {out}"
+        );
+        let shadow_ctor = out
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("shadow constructor signature should be present");
+        assert!(shadow_ctor.contains("value"), "shadow ctor: {shadow_ctor}");
+    }
+
+    /// PR #169 review remediation, round 3, T-R3-7: a required `#[param]` field is immutable once
+    /// constructed — no setter, in either real generation or the rust-analyzer shadow — since
+    /// `component_public_shape` only pushes a required field's setter into `writable_fields` for
+    /// `FieldKind::Prop`, never `FieldKind::Param`.
+    #[test]
+    fn t_r3_7_required_param_is_not_writable() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR37RequiredParamNotWritable {
+                #[param]
+                value: i32,
+                body: view! { TextBlock { text: "x" } },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let struct_out =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
+                .expect("struct half should generate")
+                .to_string();
+        let impl_out = methods(r#"impl TR37RequiredParamNotWritable {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let out = format!("{struct_out} {impl_out}");
+
+        assert!(
+            out.contains("fn value"),
+            "a #[param] field still has a getter: {out}"
+        );
+        assert!(
+            !out.contains("fn set_value"),
+            "a required #[param] field must have no setter anywhere in real or shadow output: {out}"
+        );
+    }
+
+    /// PR #169 review remediation, round 3, T-R3-8 (AD-R3-6): a view-less Component's real
+    /// (`generate_component`) and rust-analyzer-shadow public surfaces must agree exactly on
+    /// constructor params, getter names, and setter names for every own field kind — required
+    /// unannotated `prop`, deferred `Option<T>` `prop`, defaulted `prop`, and `#[param]`.
+    #[test]
+    fn t_r3_8_view_less_accessor_parity_across_field_kinds() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR38ViewLessParity {
+                required_prop: i32,
+                deferred_prop: Option<i32>,
+                #[prop(default = 1)]
+                defaulted_prop: i32,
+                #[param]
+                required_param: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let struct_out = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        let impl_out = methods(r#"impl TR38ViewLessParity {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let generated = format!("{struct_out} {impl_out}");
+
+        let real_ctor = generated
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        let shadow_ctor = generated
+            .split("pub fn new (")
+            .nth(2)
+            .and_then(|s| s.split(')').next())
+            .expect("shadow constructor signature should be present");
+        for ctor in [real_ctor, shadow_ctor] {
+            assert!(ctor.contains("required_prop"), "ctor: {ctor}");
+            assert!(ctor.contains("required_param"), "ctor: {ctor}");
+            assert!(!ctor.contains("deferred_prop"), "ctor: {ctor}");
+            assert!(!ctor.contains("defaulted_prop"), "ctor: {ctor}");
+        }
+        // Every field has a getter; only the deferred/defaulted own fields have setters (a
+        // view-less required field — Prop or Param — never gets a setter, matching real
+        // generation's own long-standing view-less-path behavior).
+        for name in [
+            "required_prop",
+            "deferred_prop",
+            "defaulted_prop",
+            "required_param",
+        ] {
+            assert!(
+                generated.contains(&format!("fn {name}")),
+                "missing getter for {name}: {generated}"
+            );
+        }
+        assert!(generated.contains("fn set_deferred_prop"), "{generated}");
+        assert!(generated.contains("fn set_defaulted_prop"), "{generated}");
+        assert!(!generated.contains("fn set_required_prop"), "{generated}");
+        assert!(!generated.contains("fn set_required_param"), "{generated}");
+        // Both real and shadow are view-less, so both return bare `Self`.
+        assert!(
+            generated.matches("-> Self").count() >= 2,
+            "both real and shadow constructors should return Self: {generated}"
         );
     }
 }

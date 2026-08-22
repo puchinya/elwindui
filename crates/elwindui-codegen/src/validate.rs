@@ -255,14 +255,32 @@ pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnosti
                     // built from the same effective list) — a typo'd name would otherwise silently
                     // mean "no field ever claims a bare nested child", caught only at codegen time
                     // (or not at all, if the component happens to never receive one).
+                    // PR #169 review remediation, round 3 (A1/AD-R3-1): whether the missing-field
+                    // verdict below is decidable from `c` alone or genuinely needs same-crate
+                    // sibling data is classified structurally by `codegen::content_field_knowledge`
+                    // first — a base-less component (or one whose base isn't a locally-visible
+                    // `ComponentDef`) never touches `modules` to decide this, so a typo there stays
+                    // `ItemLocal` regardless of `resolve_effective_fields` being a general-purpose,
+                    // registry-capable helper in other cases.
                     if let Some(name) = &c.content_field {
-                        let effective_fields =
-                            codegen::resolve_effective_fields(module, c, modules);
-                        if !effective_fields.iter().any(|f| &f.name == name) {
-                            errors.registry_dependent(format!(
-                                "{}: #[content({name})] names a field that doesn't exist on `{}`",
-                                c.name, c.name
-                            ));
+                        match codegen::content_field_knowledge(module, c, name, modules) {
+                            codegen::ContentFieldKnowledge::KnownPresent => {}
+                            codegen::ContentFieldKnowledge::KnownMissingItemLocal => {
+                                errors.item_local(format!(
+                                    "{}: #[content({name})] names a field that doesn't exist on `{}`",
+                                    c.name, c.name
+                                ));
+                            }
+                            codegen::ContentFieldKnowledge::NeedsSameCrateRegistry => {
+                                let effective_fields =
+                                    codegen::resolve_effective_fields(module, c, modules);
+                                if !effective_fields.iter().any(|f| &f.name == name) {
+                                    errors.registry_dependent(format!(
+                                        "{}: #[content({name})] names a field that doesn't exist on `{}`",
+                                        c.name, c.name
+                                    ));
+                                }
+                            }
                         }
                     }
 
@@ -4197,15 +4215,17 @@ mod tests {
         );
     }
 
-    /// PR #169 review remediation, round 2, T-R2-2 (AD-R2-1): `#[content(name)]` naming a field
-    /// absent from `codegen::resolve_effective_fields`'s own same-crate-registry-dependent result
-    /// (ancestor fields included) can only be decided once sibling/base data is available, so
-    /// `validate_classified` must tag it `RegistryDependent`.
+    /// PR #169 review remediation, round 2, T-R2-2 (AD-R2-1); **corrected round 3 (A1/AD-R3-1,
+    /// T-R3-1)**: a base-less component's own `#[content(name)]` typo is decidable from `c` alone —
+    /// `resolve_effective_fields` for a base-less component is exactly `c.fields.clone()`, no
+    /// `modules` lookup involved — so this must be `ItemLocal`, not `RegistryDependent` (round 2's
+    /// version of this test asserted the pre-round-3 bug's own behavior; this is the fix — see
+    /// `codegen::content_field_knowledge`). This must fail on the reviewed round-2 head (`73562ab`).
     #[test]
-    fn t_r2_2_unknown_content_field_is_classified_registry_dependent() {
+    fn t_r3_1_local_content_field_typo_on_a_base_less_component_is_classified_item_local() {
         let src = r#"
         #[content(no_such_field)]
-        struct TR22ContentFieldRegistryDependent {
+        struct TR31LocalContentTypo {
             #[param]
             label: String,
         }
@@ -4217,8 +4237,74 @@ mod tests {
         assert!(
             diagnostics
                 .iter()
-                .any(|d| d.dependency == ValidationDependency::RegistryDependent
+                .any(|d| d.dependency == ValidationDependency::ItemLocal
                     && d.message.contains("#[content(no_such_field)]")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// PR #169 review remediation, round 3, T-R3-2: an existing local `#[content(name)]` field
+    /// produces no diagnostic at all — the positive counterpart to T-R3-1.
+    #[test]
+    fn t_r3_2_existing_local_content_field_produces_no_diagnostic() {
+        let src = r#"
+        #[content(label)]
+        struct TR32ExistingLocalContentField {
+            #[param]
+            label: String,
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let diagnostics = validate_classified(&modules);
+        assert!(
+            !diagnostics.iter().any(|d| d.message.contains("#[content(")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// PR #169 review remediation, round 3, T-R3-3: `#[content(name)]` naming a field absent from
+    /// both the derived component's own fields *and* a same-crate user-defined base's own fields
+    /// genuinely needs that base's `ComponentDef` (`codegen::find_component_and_module`, itself a
+    /// `modules` lookup) to decide — this stays `RegistryDependent`, since a spurious same-crate
+    /// registry-ordering miss under rust-analyzer could hide the base's `ComponentDef` even when the
+    /// source is correctly ordered.
+    #[test]
+    fn t_r3_3_content_field_missing_from_a_same_crate_base_is_classified_registry_dependent() {
+        let combined = crate::test_module(&[
+            (
+                None,
+                r#"
+                struct TR33SameCrateBase {
+                    #[param]
+                    unrelated_field: String,
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("TR33SameCrateBase"),
+                r#"
+                #[content(missing_on_base)]
+                struct TR33DerivedWithMissingContent {
+                    #[param]
+                    own_field: String,
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should build");
+        let modules: Vec<_> = std::iter::once(combined)
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let diagnostics = validate_classified(&modules);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.dependency == ValidationDependency::RegistryDependent
+                    && d.message.contains("#[content(missing_on_base)]")),
             "{diagnostics:?}"
         );
     }
@@ -4226,17 +4312,37 @@ mod tests {
     /// PR #169 review remediation, round 2, T-R2-3 (AD-R2-3): one component producing both an
     /// `ItemLocal` and a `RegistryDependent` diagnostic in the same `validate_classified` pass — both
     /// must appear, independently and correctly tagged, in the same result (proving classification
-    /// happens per-diagnostic-site, not by collapsing the whole pass into one verdict).
+    /// happens per-diagnostic-site, not by collapsing the whole pass into one verdict). Uses the
+    /// T-R3-3 same-crate-base `#[content(..)]` fixture (round 3) for the registry-dependent half,
+    /// since a base-less one is now correctly `ItemLocal` (T-R3-1) and would no longer exercise a
+    /// genuine mix.
     #[test]
     fn t_r2_3_mixed_item_local_and_registry_dependent_diagnostics_both_appear() {
-        let src = r#"
-        #[content(no_such_field)]
-        struct TR23Mixed {
-            #[async_computed(expr = fetch())]
-            value: i32,
-        }
-        "#;
-        let modules: Vec<_> = std::iter::once(component_module(None, src))
+        let combined = crate::test_module(&[
+            (
+                None,
+                r#"
+                struct TR23SameCrateBase {
+                    #[param]
+                    unrelated_field: String,
+                }
+                "#,
+                None,
+            ),
+            (
+                Some("TR23SameCrateBase"),
+                r#"
+                #[content(missing_on_base)]
+                struct TR23Mixed {
+                    #[async_computed(expr = fetch())]
+                    value: i32,
+                }
+                "#,
+                None,
+            ),
+        ])
+        .expect("should build");
+        let modules: Vec<_> = std::iter::once(combined)
             .chain(crate::test_builtin_modules())
             .collect();
         let diagnostics = validate_classified(&modules);
@@ -4251,7 +4357,7 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|d| d.dependency == ValidationDependency::RegistryDependent
-                    && d.message.contains("#[content(no_such_field)]")),
+                    && d.message.contains("#[content(missing_on_base)]")),
             "missing registry-dependent diagnostic: {diagnostics:?}"
         );
     }

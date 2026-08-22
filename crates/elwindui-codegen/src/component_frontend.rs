@@ -1925,4 +1925,66 @@ mod modules_from_file_tests {
         let modules = modules_from_file(&file).expect("should succeed with zero DSL items");
         assert!(modules.is_empty());
     }
+
+    /// PR #169 review remediation, round 3, T-R3-4 (A2/AD-R3-2): `component_public_shape` must
+    /// receive the literal *source* `ComponentDef` a `#[elwindui::component] struct { .. }` actually
+    /// declares — never an ancestor-inclusive, `effective_fields`-flattened one — so it never treats
+    /// an inherited field as though this Component declared it itself.
+    /// `component_and_view_from_item_struct` (the real struct-parsing entry point every real
+    /// `#[elwindui::component]` struct half goes through) already only ever returns a component's own
+    /// literal fields — it has no ancestor/registry awareness at all — so calling
+    /// `component_public_shape` directly on its output is exactly the source-local input `codegen.rs`'s
+    /// `generate_component`/`generate_view` must now also pass (this test's own `source_component`
+    /// role at that call site).
+    #[test]
+    fn t_r3_4_component_public_shape_is_source_local_not_effective_fields_flattened() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR34Derived {
+                #[param]
+                own_value: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let (component_def, view_def) =
+            component_and_view_from_item_struct(Some("TR34Base".to_string()), &item_struct)
+                .expect("should build");
+
+        // The parser never resolves/flattens the ancestor's own fields into `component_def.fields` —
+        // confirming `component_def` here really is source-only, exactly like `source_component`
+        // must be at the real `generate_component`/`generate_view` call site.
+        assert_eq!(
+            component_def
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["own_value"],
+            "the struct parser itself must never synthesize an ancestor field"
+        );
+
+        let shape = component_public_shape(&component_def, view_def.as_ref());
+        assert!(
+            shape
+                .constructor_params
+                .iter()
+                .any(|(name, _)| name == "own_value"),
+            "shape should contain the component's own field: {:?}",
+            shape.constructor_params
+        );
+        assert!(
+            !shape
+                .constructor_params
+                .iter()
+                .any(|(name, _)| name == "base_value")
+                && !shape
+                    .readable_fields
+                    .iter()
+                    .any(|(name, _, _)| name == "base_value"),
+            "shape must never contain a field the component itself never declared: {:?} / {:?}",
+            shape.constructor_params,
+            shape.readable_fields
+        );
+    }
 }

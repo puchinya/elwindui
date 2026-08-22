@@ -3128,13 +3128,43 @@ fn generate_component(
         .iter()
         .map(|f| f.name.as_str())
         .collect();
-    let deferred_own_fields: HashMap<&str, &str> = own_field_shape
+    // PR #169 review remediation, round 4 (AD-R4-1/AD-R4-2): every own-field API-membership
+    // decision below (constructor param, deferred-option storage, getter, setter, and each
+    // accessor's visibility) is driven exclusively from these four shape-derived indices — never
+    // independently re-derived from `f.kind`/`f.initializer`/`strip_option` for a name in
+    // `declared_own_field_names`. `FieldDef` (`f` itself) is still consulted, but only to select
+    // *how* an already-shape-decided accessor is implemented (Cell vs RefCell, getter/setter body,
+    // recompute cascade) — never *whether* it exists. An inherited field (absent from
+    // `declared_own_field_names`) is untouched by any of these indices and keeps the pre-#146
+    // direct computation unchanged (AD-R3-3/AD-R4-8: inherited-field forwarding is real
+    // generation's own job, never routed through the source-local shape).
+    let own_constructor_params: HashMap<&str, &str> = own_field_shape
+        .constructor_params
+        .iter()
+        .map(|(name, ty)| (name.as_str(), ty.as_str()))
+        .collect();
+    let own_deferred_fields: HashMap<&str, (&str, &str)> = own_field_shape
         .deferred_option_fields
         .iter()
-        .map(|(name, _declared_ty, inner_ty)| (name.as_str(), inner_ty.as_str()))
+        .map(|(name, declared_ty, inner_ty)| {
+            (name.as_str(), (declared_ty.as_str(), inner_ty.as_str()))
+        })
         .collect();
+    let own_readable_fields: HashMap<&str, (&str, crate::component_frontend::ShadowVisibility)> =
+        own_field_shape
+            .readable_fields
+            .iter()
+            .map(|(name, ty, visibility)| (name.as_str(), (ty.as_str(), *visibility)))
+            .collect();
+    let own_writable_fields: HashMap<&str, (&str, crate::component_frontend::ShadowVisibility)> =
+        own_field_shape
+            .writable_fields
+            .iter()
+            .map(|(name, ty, visibility)| (name.as_str(), (ty.as_str(), *visibility)))
+            .collect();
 
     for f in &c.fields {
+        let is_own = declared_own_field_names.contains(f.name.as_str());
         let field_ident = format_ident!("{}", f.name);
         let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
 
@@ -3146,9 +3176,18 @@ fn generate_component(
                 // view-less path (see that loop's own doc comment).
                 struct_fields.extend(quote! { #field_ident: #ty, });
                 ctor_field_inits.extend(quote! { #field_ident, });
-                accessors.extend(quote! {
-                    pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
-                });
+                if is_own {
+                    if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                        accessors.extend(quote! {
+                            #vis fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                        });
+                    }
+                } else {
+                    accessors.extend(quote! {
+                        pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                    });
+                }
             }
             None => {
                 // `#[param] #[inject]` field: supplied by the caller. `Option<T>`-typed fields
@@ -3159,22 +3198,29 @@ fn generate_component(
                 // is `Option<T>`'s own natural "not yet set" value, so (unlike a required field of
                 // arbitrary, possibly non-`Default` type) there's always a sound value to start
                 // from. A required (non-`Option`) field stays exactly as before: a `new(..)`
-                // argument, plain storage, no setter. Every field is private (not `pub`) either
-                // way — external and internal reads alike go through the accessor below, since a
-                // deferred fields use storage specialized for post-construction mutation.
-                let is_deferred = if declared_own_field_names.contains(f.name.as_str()) {
-                    deferred_own_fields.contains_key(f.name.as_str())
+                // argument, plain storage, no setter.
+                //
+                // PR #169 review remediation, round 4 (AD-R4-3/AD-R4-4/AD-R4-5/AD-R4-6): for an
+                // *own* field, `is_deferred` (storage shape), constructor membership, and
+                // getter/setter membership+visibility all come from the shape's four indices —
+                // `f.kind`/`f.initializer`/`strip_option` below only ever select the deferred vs.
+                // required *implementation* (Cell/RefCell type, get/set body), never whether an
+                // accessor exists. An inherited field keeps the exact pre-#146 direct computation
+                // (unconditional pub getter/setter either way), unchanged (AD-R4-8).
+                let is_deferred = if is_own {
+                    own_deferred_fields.contains_key(f.name.as_str())
                 } else {
-                    // Inherited (not `source_component`'s own) — `component_public_shape` never
-                    // saw this field at all, so this stays the pre-#146 direct computation (AD-R3-3:
-                    // inherited-field forwarding is real generation's own job, not the shape's).
                     strip_option(&f.ty).1
                 };
                 if is_deferred {
-                    let inner_ty_str = deferred_own_fields
-                        .get(f.name.as_str())
-                        .copied()
-                        .unwrap_or_else(|| strip_option(&f.ty).0);
+                    let inner_ty_str = if is_own {
+                        own_deferred_fields
+                            .get(f.name.as_str())
+                            .map(|(_, inner_ty)| *inner_ty)
+                            .expect("is_deferred true for an own field implies a deferred_option_fields entry")
+                    } else {
+                        strip_option(&f.ty).0
+                    };
                     let inner_ty: syn::Type =
                         syn::parse_str(inner_ty_str).expect("field inner type must parse");
                     let cell_ty = if is_copy_type(inner_ty_str) {
@@ -3195,17 +3241,54 @@ fn generate_component(
                     } else {
                         quote! { *self.#field_ident.borrow_mut() = Some(value); }
                     };
-                    accessors.extend(quote! {
-                        pub fn #field_ident(&self) -> #ty { #get_body }
-                        pub fn #set_name(&self, value: #inner_ty) { #set_body }
-                    });
+                    if is_own {
+                        if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                            accessors.extend(quote! {
+                                #vis fn #field_ident(&self) -> #ty { #get_body }
+                            });
+                        }
+                        if let Some((_, visibility)) = own_writable_fields.get(f.name.as_str()) {
+                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                            accessors.extend(quote! {
+                                #vis fn #set_name(&self, value: #inner_ty) { #set_body }
+                            });
+                        }
+                    } else {
+                        accessors.extend(quote! {
+                            pub fn #field_ident(&self) -> #ty { #get_body }
+                            pub fn #set_name(&self, value: #inner_ty) { #set_body }
+                        });
+                    }
                 } else {
                     struct_fields.extend(quote! { #field_ident: #ty, });
-                    ctor_params.extend(quote! { #field_ident: #ty, });
                     ctor_field_inits.extend(quote! { #field_ident, });
-                    accessors.extend(quote! {
-                        pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
-                    });
+                    if is_own {
+                        if own_constructor_params.contains_key(f.name.as_str()) {
+                            ctor_params.extend(quote! { #field_ident: #ty, });
+                        }
+                        if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                            accessors.extend(quote! {
+                                #vis fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                            });
+                        }
+                        // A required (non-deferred) own field never appears in `writable_fields`
+                        // for `component_public_shape(.., None)` — the view-less path
+                        // (`component_public_shape`'s own doc comment: a required `Prop` field's
+                        // setter is `has_view`-only) — so there is no sound setter body to emit
+                        // here (this field's storage is plain `#ty`, not `Cell`/`RefCell`-wrapped).
+                        debug_assert!(
+                            !own_writable_fields.contains_key(f.name.as_str()),
+                            "view-less component_public_shape must never mark a required own field writable: {}",
+                            f.name
+                        );
+                    } else {
+                        ctor_params.extend(quote! { #field_ident: #ty, });
+                        accessors.extend(quote! {
+                            pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                        });
+                    }
                 }
             }
             Some(Initializer::Expr(raw_expr))
@@ -3242,19 +3325,45 @@ fn generate_component(
                         }
                     })
                     .collect();
-                let visibility = if f.kind == FieldKind::State {
-                    quote! {}
-                } else {
-                    quote! { pub }
-                };
-                accessors.extend(quote! {
-                    #visibility fn #field_ident(&self) -> #ty { #get_body }
-                    #visibility fn #set_name(&self, value: #ty) {
-                        #set_body
-                        #(#recompute_calls)*
-                        self.on_property_changed(#component_property_enum::#field_ident);
+                // PR #169 review remediation, round 4 (AD-R4-4/AD-R4-5): for an own field, getter
+                // and setter membership+visibility both come from the shape, not an independent
+                // `f.kind == FieldKind::State` check — `component_public_shape` already applies
+                // exactly this rule (`ShadowVisibility::Private` for `State`, `Public` for `Prop`)
+                // when it builds `readable_fields`/`writable_fields`, so this is the same decision
+                // read from one place instead of two. An inherited field keeps the original direct
+                // `FieldKind::State` check unchanged (AD-R4-8).
+                if is_own {
+                    if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                        accessors.extend(quote! {
+                            #vis fn #field_ident(&self) -> #ty { #get_body }
+                        });
                     }
-                });
+                    if let Some((_, visibility)) = own_writable_fields.get(f.name.as_str()) {
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                        accessors.extend(quote! {
+                            #vis fn #set_name(&self, value: #ty) {
+                                #set_body
+                                #(#recompute_calls)*
+                                self.on_property_changed(#component_property_enum::#field_ident);
+                            }
+                        });
+                    }
+                } else {
+                    let visibility = if f.kind == FieldKind::State {
+                        quote! {}
+                    } else {
+                        quote! { pub }
+                    };
+                    accessors.extend(quote! {
+                        #visibility fn #field_ident(&self) -> #ty { #get_body }
+                        #visibility fn #set_name(&self, value: #ty) {
+                            #set_body
+                            #(#recompute_calls)*
+                            self.on_property_changed(#component_property_enum::#field_ident);
+                        }
+                    });
+                }
                 let _ = raw_expr; // consumed by `default_let_stmts`, above
             }
             Some(Initializer::Expr(raw_expr)) if f.kind == FieldKind::Computed => {
@@ -3281,8 +3390,26 @@ fn generate_component(
                     &format_ident!("self"),
                 );
                 let recompute = format_ident!("recompute_{}", f.name);
+                // PR #169 review remediation, round 4 (AD-R4-4): the getter's own membership comes
+                // from the shape for an own field (`component_public_shape` always places a
+                // `Computed` field in `readable_fields`, `ShadowVisibility::Public`, so this never
+                // actually diverges from the previous unconditional `pub fn` — but it is now the
+                // shape making that decision, not this match arm independently). `recompute_<name>`
+                // is a private implementation helper with no `ComponentPublicShape` concept at
+                // all — always emitted, exactly as before.
+                if is_own {
+                    if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                        accessors.extend(quote! {
+                            #vis fn #field_ident(&self) -> #ty { #get_body }
+                        });
+                    }
+                } else {
+                    accessors.extend(quote! {
+                        pub fn #field_ident(&self) -> #ty { #get_body }
+                    });
+                }
                 accessors.extend(quote! {
-                    pub fn #field_ident(&self) -> #ty { #get_body }
                     fn #recompute(&self) {
                         let value: #ty = #compute_expr;
                         #set_cache
@@ -13029,6 +13156,102 @@ mod tests {
             .chain(crate::test_builtin_modules())
             .collect();
         build_symbol_table(&all)
+    }
+
+    fn minimal_component_def(
+        name: &str,
+        base: Option<&str>,
+        fields: Vec<FieldDef>,
+    ) -> ComponentDef {
+        ComponentDef {
+            name: name.to_string(),
+            base: base.map(str::to_string),
+            base_path: None,
+            fields,
+            methods: Vec::new(),
+            embedded: false,
+            sealed: false,
+            native: false,
+            is_abstract: false,
+            text_style: false,
+            content_field: None,
+        }
+    }
+
+    fn param_field(name: &str, ty: &str) -> FieldDef {
+        FieldDef {
+            name: name.to_string(),
+            ty: ty.to_string(),
+            kind: FieldKind::Param,
+            attrs: Vec::new(),
+            initializer: None,
+        }
+    }
+
+    /// PR #169 review remediation, round 4, T-R4-6 (AD-R4-8): `generate_component`'s own-field
+    /// membership must come only from `component_public_shape(source_component, None)` — an
+    /// inherited field (present in the effective/flattened `c` this function's other logic still
+    /// uses, absent from `source_component.fields`) must stay outside the shape, while real
+    /// generation still forwards/stores it exactly as it did before this round's refactor. Built
+    /// directly against `generate_component` with hand-crafted source/effective `ComponentDef`s
+    /// (the same pattern `embedded_attribute_is_the_builtin_boundary_within_builtin_module`, just
+    /// below, already uses) rather than through the full macro/validate pipeline — a *view-less*
+    /// Component inheriting another Component with no `view` of its own is not expressible through
+    /// the real DSL frontend at all (`validate.rs` rejects it: "must declare one composing over
+    /// ..."), so this is the only way to exercise `generate_component`'s own inherited-field
+    /// fallback boundary directly.
+    #[test]
+    fn t_r4_6_inherited_field_stays_outside_shape_but_real_generation_is_unchanged() {
+        let source_derived = minimal_component_def(
+            "TR46Derived",
+            Some("TR46Base"),
+            vec![param_field("own_value", "i32")],
+        );
+        let effective_derived = minimal_component_def(
+            "TR46Derived",
+            Some("TR46Base"),
+            vec![
+                param_field("base_value", "i32"),
+                param_field("own_value", "i32"),
+            ],
+        );
+
+        let shape = crate::component_frontend::component_public_shape(&source_derived, None);
+        assert!(
+            shape
+                .constructor_params
+                .iter()
+                .any(|(n, _)| n == "own_value"),
+            "{:?}",
+            shape.constructor_params
+        );
+        assert!(
+            !shape
+                .constructor_params
+                .iter()
+                .any(|(n, _)| n == "base_value"),
+            "the shape must never contain the inherited field: {:?}",
+            shape.constructor_params
+        );
+
+        let table = build_symbol_table(&[]);
+        let generated = generate_component(&source_derived, &effective_derived, &table).to_string();
+        let real_ctor = generated
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        assert!(
+            real_ctor.contains("base_value"),
+            "real generation must still include the inherited field, unaffected by the \
+             source-local shape: {real_ctor}"
+        );
+        assert!(
+            real_ctor.contains("own_value"),
+            "real generation must still include the derived's own field: {real_ctor}"
+        );
+        assert!(generated.contains("pub fn base_value"), "{generated}");
+        assert!(generated.contains("pub fn own_value"), "{generated}");
     }
 
     /// Issue #68 bug 5's underlying scanner: `{{`/`}}` escapes, positional/empty (`{}`/`{0}`)

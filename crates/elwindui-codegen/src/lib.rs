@@ -2366,6 +2366,226 @@ mod component_impl_tests {
             "both real and shadow constructors should return Self: {generated}"
         );
     }
+
+    /// PR #169 review remediation, round 4, T-R4-1 (AD-R4-1/AD-R4-3/AD-R4-4): a view-less
+    /// component's required (non-deferred, no-initializer) own field's constructor/getter
+    /// membership comes from `component_public_shape`'s own `constructor_params`/`readable_fields`
+    /// — checked directly against the same shape instance real generation consumes, not just
+    /// indirectly through the generated output.
+    #[test]
+    fn t_r4_1_view_less_required_prop_consumes_constructor_and_readable_shape() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR41Required {
+                value: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let (component_def, view_def) =
+            component_frontend::component_and_view_from_item_struct(None, &item_struct)
+                .expect("should build");
+        let shape = component_frontend::component_public_shape(&component_def, view_def.as_ref());
+        assert!(
+            shape.constructor_params.iter().any(|(n, _)| n == "value"),
+            "{:?}",
+            shape.constructor_params
+        );
+        assert!(
+            shape.readable_fields.iter().any(|(n, _, _)| n == "value"),
+            "{:?}",
+            shape.readable_fields
+        );
+        assert!(
+            !shape.writable_fields.iter().any(|(n, _, _)| n == "value"),
+            "{:?}",
+            shape.writable_fields
+        );
+
+        let struct_out = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        let impl_out = methods(r#"impl TR41Required {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let generated = format!("{struct_out} {impl_out}");
+        let real_ctor = generated
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        assert!(real_ctor.contains("value"), "{real_ctor}");
+        assert!(generated.contains("pub fn value"), "{generated}");
+        assert!(!generated.contains("fn set_value"), "{generated}");
+    }
+
+    /// PR #169 review remediation, round 4, T-R4-2 (AD-R4-1/AD-R4-6/AD-R4-5): a view-less
+    /// component's deferred `Option<T>` own field is excluded from `constructor_params`, present in
+    /// `deferred_option_fields`/`readable_fields`/`writable_fields`, and its real generated setter
+    /// takes the inner `T` — never `Option<T>`.
+    #[test]
+    fn t_r4_2_view_less_deferred_option_consumes_all_relevant_shape_surfaces() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR42Deferred {
+                value: Option<String>,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let (component_def, view_def) =
+            component_frontend::component_and_view_from_item_struct(None, &item_struct)
+                .expect("should build");
+        let shape = component_frontend::component_public_shape(&component_def, view_def.as_ref());
+        assert!(
+            !shape.constructor_params.iter().any(|(n, _)| n == "value"),
+            "{:?}",
+            shape.constructor_params
+        );
+        assert!(
+            shape
+                .deferred_option_fields
+                .iter()
+                .any(|(n, declared_ty, inner_ty)| n == "value"
+                    && declared_ty == "Option<String>"
+                    && inner_ty == "String"),
+            "{:?}",
+            shape.deferred_option_fields
+        );
+        assert!(
+            shape
+                .readable_fields
+                .iter()
+                .any(|(n, ty, _)| n == "value" && ty == "Option<String>"),
+            "{:?}",
+            shape.readable_fields
+        );
+        assert!(
+            shape
+                .writable_fields
+                .iter()
+                .any(|(n, ty, _)| n == "value" && ty == "String"),
+            "{:?}",
+            shape.writable_fields
+        );
+
+        let generated = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        let real_ctor = generated
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        assert!(!real_ctor.contains("value"), "{real_ctor}");
+        assert!(
+            generated.contains("fn value (& self) -> Option < String >"),
+            "{generated}"
+        );
+        let setter = generated
+            .split("fn set_value (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("setter signature should be present");
+        assert!(
+            setter.contains("value : String") && !setter.contains("Option"),
+            "setter parameter must be the inner T, not Option<T>: {setter}"
+        );
+    }
+
+    /// PR #169 review remediation, round 4, T-R4-3 (AD-R4-4): a `#[state(default = ..)]` own
+    /// field's getter/setter visibility comes from `ShadowVisibility::Private` (the shape), not an
+    /// independent `FieldKind::State` check — both accessors must be non-`pub`.
+    #[test]
+    fn t_r4_3_defaulted_state_visibility_follows_shape() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR43State {
+                #[state(default = 0)]
+                state_value: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let generated = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        assert!(
+            generated.contains("fn state_value") && !generated.contains("pub fn state_value"),
+            "{generated}"
+        );
+        assert!(
+            generated.contains("fn set_state_value")
+                && !generated.contains("pub fn set_state_value"),
+            "{generated}"
+        );
+    }
+
+    /// PR #169 review remediation, round 4, T-R4-4 (AD-R4-4): a `#[prop(default = ..)]` own field
+    /// stays public read-write, and its recompute/property-change notification behavior (an
+    /// implementation detail `ComponentPublicShape` has no concept of) is unaffected.
+    #[test]
+    fn t_r4_4_defaulted_prop_remains_public_read_write() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR44DefaultedProp {
+                #[prop(default = 0)]
+                value: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let struct_out = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        let impl_out = methods(r#"impl TR44DefaultedProp {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let generated = format!("{struct_out} {impl_out}");
+        assert!(generated.contains("pub fn value"), "{generated}");
+        assert!(generated.contains("pub fn set_value"), "{generated}");
+        assert!(
+            generated.contains("on_property_changed"),
+            "property-change notification must still fire: {generated}"
+        );
+    }
+
+    /// PR #169 review remediation, round 4, T-R4-5 (AD-R4-1/AD-R4-3/AD-R4-5): a `#[param]` own
+    /// field is a constructor argument with a public getter and, per the shape, definitively no
+    /// setter — matching the RA shadow's own (already shape-driven) surface.
+    #[test]
+    fn t_r4_5_param_remains_constructor_and_getter_only() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR45Param {
+                #[param]
+                value: String,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let struct_out = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        let impl_out = methods(r#"impl TR45Param {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let generated = format!("{struct_out} {impl_out}");
+        let real_ctor = generated
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        let shadow_ctor = generated
+            .split("pub fn new (")
+            .nth(2)
+            .and_then(|s| s.split(')').next())
+            .expect("shadow constructor signature should be present");
+        assert!(real_ctor.contains("value"), "{real_ctor}");
+        assert!(shadow_ctor.contains("value"), "{shadow_ctor}");
+        assert!(generated.contains("pub fn value"), "{generated}");
+        assert!(!generated.contains("fn set_value"), "{generated}");
+    }
 }
 
 /// Issue #84: exercises `#[elwindui::environment_key]` + `#[environment(name)]` end to end through

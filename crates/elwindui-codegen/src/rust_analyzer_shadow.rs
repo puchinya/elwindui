@@ -250,7 +250,10 @@ pub(crate) fn build_component_struct_shadow(
     })
 }
 
-fn shadow_vis_tokens(visibility: ShadowVisibility) -> TokenStream {
+// PR #169 review remediation, round 4 (AD-R4-4/AD-R4-5): `pub(crate)` so `codegen.rs`'s own
+// `generate_component` can reuse this exact mapping for own-field accessor visibility, rather than
+// duplicating a second `ShadowVisibility -> TokenStream` mapping.
+pub(crate) fn shadow_vis_tokens(visibility: ShadowVisibility) -> TokenStream {
     match visibility {
         ShadowVisibility::Public => quote! { pub },
         ShadowVisibility::Private => quote! {},

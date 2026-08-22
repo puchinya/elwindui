@@ -3248,10 +3248,20 @@ fn generate_component(
                                 #vis fn #field_ident(&self) -> #ty { #get_body }
                             });
                         }
-                        if let Some((_, visibility)) = own_writable_fields.get(f.name.as_str()) {
+                        // PR #169 review remediation, round 5 (AD-R5-1/AD-R5-3/AD-R5-4): the
+                        // setter parameter *type* comes from `own_writable_fields`'s own type
+                        // entry, not `inner_ty` (round 4 still discarded this with `_`) — `#ty`/
+                        // `strip_option`/`own_deferred_fields` remain the sole authority for
+                        // *storage* (`Cell`/`RefCell<Option<T>>`, the `Some(value)` wrapping in
+                        // `#set_body` above), never for the setter's own public signature.
+                        if let Some((setter_ty_str, visibility)) =
+                            own_writable_fields.get(f.name.as_str())
+                        {
+                            let setter_ty: syn::Type = syn::parse_str(setter_ty_str)
+                                .expect("shape setter type must parse");
                             let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
                             accessors.extend(quote! {
-                                #vis fn #set_name(&self, value: #inner_ty) { #set_body }
+                                #vis fn #set_name(&self, value: #setter_ty) { #set_body }
                             });
                         }
                     } else {
@@ -3339,10 +3349,18 @@ fn generate_component(
                             #vis fn #field_ident(&self) -> #ty { #get_body }
                         });
                     }
-                    if let Some((_, visibility)) = own_writable_fields.get(f.name.as_str()) {
+                    // PR #169 review remediation, round 5 (AD-R5-1/AD-R5-3/AD-R5-5): the setter
+                    // parameter type comes from `own_writable_fields`'s own type entry, not `#ty`
+                    // (round 4 still discarded this with `_`) — `#ty`/`is_copy_type` remain the
+                    // sole authority for `#set_body`'s own storage mechanics above.
+                    if let Some((setter_ty_str, visibility)) =
+                        own_writable_fields.get(f.name.as_str())
+                    {
+                        let setter_ty: syn::Type =
+                            syn::parse_str(setter_ty_str).expect("shape setter type must parse");
                         let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
                         accessors.extend(quote! {
-                            #vis fn #set_name(&self, value: #ty) {
+                            #vis fn #set_name(&self, value: #setter_ty) {
                                 #set_body
                                 #(#recompute_calls)*
                                 self.on_property_changed(#component_property_enum::#field_ident);

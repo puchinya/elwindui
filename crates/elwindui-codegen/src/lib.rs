@@ -2586,6 +2586,223 @@ mod component_impl_tests {
         assert!(generated.contains("pub fn value"), "{generated}");
         assert!(!generated.contains("fn set_value"), "{generated}");
     }
+
+    /// PR #169 review remediation, round 5, T-R5-1 (AD-R5-1/AD-R5-3/AD-R5-4): a deferred own
+    /// field's setter parameter type must come from `writable_fields`'s own type entry (the inner
+    /// `T`), not merely happen to equal it via `strip_option`/`deferred_option_fields` — checked
+    /// directly against the shape instance, and against the real generated setter signature.
+    #[test]
+    fn t_r5_1_deferred_setter_parameter_comes_from_writable_shape_entry() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR51Deferred {
+                value: Option<String>,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let (component_def, view_def) =
+            component_frontend::component_and_view_from_item_struct(None, &item_struct)
+                .expect("should build");
+        let shape = component_frontend::component_public_shape(&component_def, view_def.as_ref());
+        assert!(
+            shape
+                .readable_fields
+                .iter()
+                .any(|(n, ty, _)| n == "value" && ty == "Option<String>"),
+            "{:?}",
+            shape.readable_fields
+        );
+        assert!(
+            shape
+                .writable_fields
+                .iter()
+                .any(|(n, ty, _)| n == "value" && ty == "String"),
+            "{:?}",
+            shape.writable_fields
+        );
+
+        let generated = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        let setter = generated
+            .split("fn set_value (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("setter signature should be present");
+        assert_eq!(
+            setter.trim(),
+            "& self , value : String",
+            "setter parameter must come from writable_fields's own String entry, not Option<String>: {setter}"
+        );
+    }
+
+    /// PR #169 review remediation, round 5, T-R5-2 (AD-R5-1/AD-R5-3/AD-R5-5): a defaulted `prop`
+    /// field's setter parameter type comes from `writable_fields`, not `#ty` directly.
+    #[test]
+    fn t_r5_2_defaulted_prop_setter_uses_writable_type() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR52DefaultedProp {
+                #[prop(default = String::new())]
+                value: String,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let (component_def, view_def) =
+            component_frontend::component_and_view_from_item_struct(None, &item_struct)
+                .expect("should build");
+        let shape = component_frontend::component_public_shape(&component_def, view_def.as_ref());
+        assert!(
+            shape
+                .writable_fields
+                .iter()
+                .any(|(n, ty, _)| n == "value" && ty == "String"),
+            "{:?}",
+            shape.writable_fields
+        );
+
+        let struct_out = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        let impl_out = methods(r#"impl TR52DefaultedProp {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let generated = format!("{struct_out} {impl_out}");
+        let setter = generated
+            .split("fn set_value (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("setter signature should be present");
+        assert!(
+            setter.contains("value : String"),
+            "setter parameter must come from writable_fields: {setter}"
+        );
+    }
+
+    /// PR #169 review remediation, round 5, T-R5-3 (AD-R5-1/AD-R5-3/AD-R5-5): a `#[state(default =
+    /// ..)]` field's setter parameter type comes from `writable_fields`, and its visibility (also
+    /// from `writable_fields`'s `ShadowVisibility`) stays private.
+    #[test]
+    fn t_r5_3_state_setter_uses_writable_type_and_private_visibility() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR53State {
+                #[state(default = 0)]
+                value: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let (component_def, view_def) =
+            component_frontend::component_and_view_from_item_struct(None, &item_struct)
+                .expect("should build");
+        let shape = component_frontend::component_public_shape(&component_def, view_def.as_ref());
+        assert!(
+            shape
+                .writable_fields
+                .iter()
+                .any(|(n, ty, visibility)| n == "value"
+                    && ty == "i32"
+                    && matches!(visibility, component_frontend::ShadowVisibility::Private)),
+            "{:?}",
+            shape.writable_fields
+        );
+
+        let generated = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        assert!(
+            generated.contains("fn set_value (& self , value : i32)")
+                && !generated.contains("pub fn set_value"),
+            "{generated}"
+        );
+    }
+
+    /// PR #169 review remediation, round 5, T-R5-4 (AD-R5-1): every legal own writable field
+    /// category's real setter name/type/visibility matches `shape.writable_fields` exactly —
+    /// deferred `prop`, deferred `#[param]` (a same-crate `Option<T>` `#[param]` field is deferred
+    /// the same way an unannotated `prop` is — `component_public_shape`'s own deferral branch does
+    /// not distinguish `FieldKind::Param`/`Prop` for the deferred case), defaulted `prop`, and
+    /// defaulted `#[state]`.
+    #[test]
+    fn t_r5_4_all_own_writable_categories_match_shape_exactly() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR54AllWritable {
+                deferred_prop: Option<i32>,
+                #[param]
+                deferred_param: Option<String>,
+                #[prop(default = 1)]
+                defaulted_prop: i32,
+                #[state(default = String::new())]
+                defaulted_state: String,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let (component_def, view_def) =
+            component_frontend::component_and_view_from_item_struct(None, &item_struct)
+                .expect("should build");
+        let shape = component_frontend::component_public_shape(&component_def, view_def.as_ref());
+
+        let struct_out = generate_component_from_item_struct(None, &item_struct)
+            .expect("struct half should generate")
+            .to_string();
+        let impl_out = methods(r#"impl TR54AllWritable {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let generated = format!("{struct_out} {impl_out}");
+
+        let expected: &[(&str, &str, component_frontend::ShadowVisibility)] = &[
+            (
+                "deferred_prop",
+                "i32",
+                component_frontend::ShadowVisibility::Public,
+            ),
+            (
+                "deferred_param",
+                "String",
+                component_frontend::ShadowVisibility::Public,
+            ),
+            (
+                "defaulted_prop",
+                "i32",
+                component_frontend::ShadowVisibility::Public,
+            ),
+            (
+                "defaulted_state",
+                "String",
+                component_frontend::ShadowVisibility::Private,
+            ),
+        ];
+        for (name, ty, visibility) in expected {
+            assert!(
+                shape
+                    .writable_fields
+                    .iter()
+                    .any(|(n, t, v)| n == name && t == ty && v == visibility),
+                "shape missing/mismatched entry for {name}: {:?}",
+                shape.writable_fields
+            );
+            let setter = generated
+                .split(&format!("fn set_{name} ("))
+                .nth(1)
+                .and_then(|s| s.split(')').next())
+                .unwrap_or_else(|| panic!("setter for {name} should be present: {generated}"));
+            assert!(
+                setter.contains(&format!("value : {ty}")),
+                "setter for {name} must use the shape's own type: {setter}"
+            );
+            let is_pub = generated.contains(&format!("pub fn set_{name}"));
+            let expected_pub = matches!(visibility, component_frontend::ShadowVisibility::Public);
+            assert_eq!(
+                is_pub, expected_pub,
+                "setter visibility for {name} must match the shape: {generated}"
+            );
+        }
+    }
 }
 
 /// Issue #84: exercises `#[elwindui::environment_key]` + `#[environment(name)]` end to end through

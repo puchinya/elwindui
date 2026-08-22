@@ -259,6 +259,230 @@ pub(crate) fn hidden_view_template_component(
     (component_def, view_def)
 }
 
+/// Visibility a [`component_public_shape`] accessor should be emitted with — mirrors the exact
+/// getter/setter visibility `codegen::generate_component`'s own field-classification loop already
+/// decides per `FieldKind` (that function's own `visibility` local, `#[state]`'s bare exception). Not
+/// a general Rust visibility type: only the two shapes any own-field accessor here ever actually
+/// gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShadowVisibility {
+    Public,
+    Private,
+}
+
+/// Issue #146 / PR #169 review remediation (A2): the source-local constructor/getter/setter surface
+/// one `#[elwindui::component]` struct's own fields alone (no ancestor/effective-field resolution,
+/// no cross-item lookup) determine — shared by `codegen::generate_component`'s own view-less real
+/// generation, the own-field constructor/deferred portion of `codegen::generate_view`'s real
+/// `has_view` generation, and every rust-analyzer Component struct shadow
+/// (`rust_analyzer_shadow::build_component_struct_shadow`), so all three can never independently
+/// drift. See [`component_public_shape`]'s own doc comment for the exact per-`FieldKind` rule.
+/// PR #169 review remediation, round 2 (AD-R2-4): the real `new(..)` return type — a view-less
+/// Component's own real generator (`codegen::generate_component`) returns a bare `Self`; a `has_view`
+/// Component's own real generator (`codegen::generate_view`) always returns `std::rc::Rc<Self>`. The
+/// rust-analyzer Component struct shadow consumes this directly rather than deciding independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComponentConstructorReturn {
+    SelfValue,
+    RcSelf,
+}
+
+pub(crate) struct ComponentPublicShape {
+    /// `(field name, declared type)` pairs, in field order — exactly `new(..)`'s own positional
+    /// argument list for a required (non-deferred, no-initializer) field.
+    pub constructor_params: Vec<(String, String)>,
+    /// Whether real `new(..)` returns a bare `Self` or `std::rc::Rc<Self>` — see
+    /// [`ComponentConstructorReturn`]'s own doc comment.
+    pub constructor_return: ComponentConstructorReturn,
+    /// `(field name, declared `Option<T>` type, inner `T` type)` for every deferred own field, in
+    /// field order — real generation's own `Cell`/`RefCell<Option<T>>` storage and the rust-analyzer
+    /// shadow's own setter-parameter type both read the inner `T` from here directly, rather than
+    /// each independently re-running `codegen::strip_option` on `readable_fields`'/`writable_fields`'
+    /// own already-stringified types (PR #169 review, AD-R3).
+    pub deferred_option_fields: Vec<(String, String, String)>,
+    /// `(field name, getter return type, visibility)` — every own field with a public or private
+    /// getter (every kind except `#[attached]`, a viewmodel/store-only kind, or a malformed
+    /// initializer combination `validate::validate` would already reject). Includes deferred fields
+    /// (returning the full `Option<T>`) — `deferred_option_fields` above is a more specifically
+    /// *typed* view into that same subset, not a replacement for their entry here.
+    pub readable_fields: Vec<(String, String, ShadowVisibility)>,
+    /// `(field name, setter parameter type, visibility)` — a deferred field's setter takes the
+    /// *inner* `T` (matching `deferred_option_fields`'s own inner type); a `#[prop]`/`#[state]`
+    /// field's setter takes the full declared type.
+    pub writable_fields: Vec<(String, String, ShadowVisibility)>,
+}
+
+/// Classifies `component`'s own fields into the constructor/getter/setter surface described by
+/// [`ComponentPublicShape`] — the single source of truth real generation (both
+/// `codegen::generate_component`'s view-less path and `codegen::generate_view`'s own own-field
+/// constructor/deferred decision) and every rust-analyzer Component struct shadow (Issue #146) all
+/// consult, so none of them can independently drift (PR #169 review finding A2: an earlier revision
+/// of this function had its own, incorrect, real-generation-independent copy of this classification —
+/// see the per-`FieldKind` rule below, and `codegen::view_references_name_anywhere`'s own doc
+/// comment for the deferred-field decision this shares with real generation).
+///
+/// Deliberately **source-local only**: unlike `codegen::resolve_effective_fields`, this never
+/// resolves an inherited ancestor's own fields (a rust-analyzer shadow must never guess at another
+/// crate's/another same-crate registry entry's constructor shape) and never consults sibling module
+/// data. `view`, when given, is only ever `component`'s *own* `ViewDef` (never an ancestor's) —
+/// passing `None` (a view-less component, or a caller that hasn't resolved the view yet) is always
+/// sound: it can only make an own `Option<T>` field's classification *more* conservative (deferred
+/// rather than required), never less, matching real generation's own view-less-path behavior exactly
+/// (`codegen::generate_component`).
+///
+/// Per-`FieldKind` rule (mirrors real generation's own per-field decisions exactly):
+/// - `#[attached]`, and the viewmodel/store-only `Action`/`Observable`/`AsyncComputed` kinds (never
+///   legal on a real `#[elwindui::component]` field; `validate::validate` rejects them there): no
+///   constructor param, no accessor at all.
+/// - `#[environment(name)]`: never a constructor param; public getter only, no setter.
+/// - `#[computed(expr = ..)]`: never a constructor param; public getter only, no setter.
+/// - An ordinary field with **no initializer** — `#[param]`/`#[bindable]`, *or* a bare unannotated
+///   field (which the Rust Component frontend defaults to `FieldKind::Prop`, not `Param` — PR #169
+///   review finding A2: treating only `Param` as constructor-eligible silently dropped every
+///   ordinary unannotated field, e.g. `examples/graphics-demo`'s `GraphicsDemoWindow::fills_canvas`,
+///   from the shadow's own constructor entirely):
+///   - declared `Option<T>`, and either `view` is `None` or `view` never references this field's own
+///     name anywhere in its element tree (`codegen::view_references_name_anywhere`): deferred — no
+///     constructor param; public getter (returning the full `Option<T>`) and public setter (taking
+///     bare `T`).
+///   - declared `Option<T>`, referenced somewhere in `view`: **not** deferred — a required
+///     constructor param (needed while constructing the view, before `Self`/a setter exists), plus a
+///     public getter, exactly like any other required field.
+///   - any other type: a required constructor param, plus a public getter.
+///   - a required field's *setter* depends on which real generator would build it: `#[param]`/
+///     `#[bindable]` is immutable once required (no setter) in both real generators; a plain
+///     unannotated `prop` field is runtime-mutable *by definition* (`ast::FieldKind::Prop`'s own doc
+///     comment) even when also required at construction time, but only `codegen::generate_view`'s
+///     `has_view` real path actually exposes that setter (its own `mutable_required_names`) —
+///     `codegen::generate_component`'s view-less real path gives every required field a getter only,
+///     with no exception for `Prop`. This shape mirrors that real difference rather than papering
+///     over it: a required `Prop` field gets a public setter here only when `view` is `Some(..)`.
+/// - `#[prop(default = ..)]`: never a constructor param (defaulted); public getter and setter.
+/// - `#[state(default = ..)]`: never a constructor param; **private** getter and setter (never part
+///   of the component's external property surface — `ast::FieldKind::State`'s own doc comment).
+///
+/// A field combination `validate::validate` would reject anyway (e.g. a `#[param]` field carrying an
+/// initializer expression) contributes no constructor param and no accessor rather than panicking —
+/// a rust-analyzer shadow builder must stay self-contained and never abort a proc-macro-srv process
+/// over a shape mistake real validation would have caught first.
+pub(crate) fn component_public_shape(
+    component: &ComponentDef,
+    view: Option<&ViewDef>,
+) -> ComponentPublicShape {
+    let mut constructor_params = Vec::new();
+    let mut deferred_option_fields = Vec::new();
+    let mut readable_fields = Vec::new();
+    let mut writable_fields = Vec::new();
+
+    for f in &component.fields {
+        match f.kind {
+            FieldKind::Attached
+            | FieldKind::Action
+            | FieldKind::Observable
+            | FieldKind::AsyncComputed => {
+                continue;
+            }
+            FieldKind::Environment => {
+                if f.initializer.is_some() {
+                    continue;
+                }
+                readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
+            }
+            FieldKind::Computed => {
+                if !matches!(f.initializer, Some(ast::Initializer::Expr(_))) {
+                    continue;
+                }
+                readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
+            }
+            FieldKind::Param | FieldKind::Prop if f.initializer.is_none() => {
+                // PR #169 review remediation, round 2 (AD-R2-5): a has-view Component's own
+                // `on_*`-named no-initializer field is a `#[routed]` callback wired through the
+                // `on_x: ..` DSL attribute + `register_routed_handler`
+                // (`codegen::generate_view`'s own `param_names`/`TypeInfo::param_fields`
+                // exclusion) — never a positional constructor argument or an ordinary
+                // getter/setter property. The view-less real path
+                // (`codegen::generate_component`) has no such exclusion (it has no `view!` to
+                // wire event handling from at all), so this only applies when `view` is
+                // `Some(..)`.
+                if view.is_some() && f.name.starts_with("on_") {
+                    continue;
+                }
+                let (inner_ty, is_option) = crate::codegen::strip_option(&f.ty);
+                let is_deferred = is_option
+                    && !view.is_some_and(|view| {
+                        crate::codegen::view_references_name_anywhere(view, &f.name)
+                    });
+                if is_deferred {
+                    deferred_option_fields.push((
+                        f.name.clone(),
+                        f.ty.clone(),
+                        inner_ty.to_string(),
+                    ));
+                    readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
+                    writable_fields.push((
+                        f.name.clone(),
+                        inner_ty.to_string(),
+                        ShadowVisibility::Public,
+                    ));
+                } else {
+                    constructor_params.push((f.name.clone(), f.ty.clone()));
+                    readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
+                    // PR #169 review remediation (T10 cross-check against real `codegen::generate_view`):
+                    // a required (non-deferred) `#[param]`/`#[bindable]` field is immutable after
+                    // construction — no setter. A required *plain* `prop` (unannotated, no `#[param]`)
+                    // is runtime-mutable *by definition* even though it's also needed at construction
+                    // time (`codegen::generate_view`'s own `mutable_required_names`, filtered to
+                    // `FieldKind::Prop` specifically) — it still gets a public setter, but only for a
+                    // `has_view` component: `codegen::generate_component`'s own view-less real path
+                    // gives every no-initializer field (`Prop` included) a getter only, never a setter,
+                    // for a required field — a real, pre-existing difference between the two real
+                    // generators this shape mirrors rather than papers over (`view.is_some()` is
+                    // exactly the same condition that routes a component to one real generator or the
+                    // other).
+                    if f.kind == FieldKind::Prop && view.is_some() {
+                        writable_fields.push((
+                            f.name.clone(),
+                            f.ty.clone(),
+                            ShadowVisibility::Public,
+                        ));
+                    }
+                }
+            }
+            FieldKind::Prop | FieldKind::State => {
+                // Reaches here only with `f.initializer.is_some()` — an uninitialized `Prop` matched
+                // the guarded arm above.
+                if !matches!(f.initializer, Some(ast::Initializer::Expr(_))) {
+                    continue;
+                }
+                let visibility = if f.kind == FieldKind::State {
+                    ShadowVisibility::Private
+                } else {
+                    ShadowVisibility::Public
+                };
+                readable_fields.push((f.name.clone(), f.ty.clone(), visibility));
+                writable_fields.push((f.name.clone(), f.ty.clone(), visibility));
+            }
+            // A `#[param]` field carrying an initializer expression is a `validate::validate`-rejected
+            // combination (`#[param]` is always caller-supplied) — skip defensively rather than panic.
+            FieldKind::Param => continue,
+        }
+    }
+
+    let constructor_return = if view.is_some() {
+        ComponentConstructorReturn::RcSelf
+    } else {
+        ComponentConstructorReturn::SelfValue
+    };
+
+    ComponentPublicShape {
+        constructor_params,
+        constructor_return,
+        deferred_option_fields,
+        readable_fields,
+        writable_fields,
+    }
+}
+
 /// The identifier of the crate currently being compiled, read fresh from the environment variables
 /// cargo (and rust-analyzer's own proc-macro-srv, same protocol/env vars) sets for *this*
 /// macro-expansion request. Mirrors `elwindui-macros/src/class.rs`'s own `compiling_crate_key`
@@ -304,6 +528,14 @@ struct StoredComponent {
 /// the same file. This only ever works in file/declaration order (a component can't see a sibling
 /// declared *after* it) — the same order-dependency `class.rs` already relies on and documents for
 /// its own struct-before-impl same-crate mechanism, not a new kind of fragility.
+///
+/// Issue #146: this registry is the strict source of truth for real `rustc`/`cargo build` only.
+/// rust-analyzer's own `struct`/`impl` name resolution never depends on this registry being complete
+/// at lookup time — see `rust_analyzer_shadow::build_component_struct_shadow`/
+/// `build_component_impl_shadow`, both of which build a self-contained shadow straight from the one
+/// `syn::ItemStruct`/`syn::ItemImpl` they're handed, with no lookup into this map at all — and
+/// `lib.rs::generate_component_from_item_impl`, which never lets a lookup miss here suppress that
+/// shadow (`docs/design/tools/codegen_design.md` §3.2a).
 fn same_crate_components() -> &'static Mutex<HashMap<(String, String), StoredComponent>> {
     static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredComponent>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -566,6 +798,14 @@ struct StoredEnvironmentKey {
 /// `EnvironmentContext::get`/`subscribe` with. Same declaration-order requirement as the other
 /// registries in this file — an environment key must be declared before the component(s)/
 /// `EnvironmentScope` that reference its name.
+///
+/// Issue #146: strict source of truth for real `rustc`/`cargo build` only — a `#[elwindui::theme]`
+/// field's same-crate key lookup miss here (`lookup_writable_environment_key`) never suppresses that
+/// Theme's own rust-analyzer shadow (`rust_analyzer_shadow::build_theme_shadow`, which never consults
+/// this registry at all — see `theme_frontend.rs`'s own dual-expansion split,
+/// `docs/design/tools/codegen_design.md` §3.2a). Environment Key/ViewModel/Store/DSL enum *defining*
+/// expansions themselves stay unchanged — they never depend on a sibling registry to define
+/// themselves, so they need no shadow of their own (AD-11 of the Issue #146 implementation contract).
 fn same_crate_environment_keys() -> &'static Mutex<HashMap<(String, String), StoredEnvironmentKey>>
 {
     static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredEnvironmentKey>>> =
@@ -1684,5 +1924,67 @@ mod modules_from_file_tests {
         let file: syn::File = syn::parse_str(src).unwrap();
         let modules = modules_from_file(&file).expect("should succeed with zero DSL items");
         assert!(modules.is_empty());
+    }
+
+    /// PR #169 review remediation, round 3, T-R3-4 (A2/AD-R3-2): `component_public_shape` must
+    /// receive the literal *source* `ComponentDef` a `#[elwindui::component] struct { .. }` actually
+    /// declares — never an ancestor-inclusive, `effective_fields`-flattened one — so it never treats
+    /// an inherited field as though this Component declared it itself.
+    /// `component_and_view_from_item_struct` (the real struct-parsing entry point every real
+    /// `#[elwindui::component]` struct half goes through) already only ever returns a component's own
+    /// literal fields — it has no ancestor/registry awareness at all — so calling
+    /// `component_public_shape` directly on its output is exactly the source-local input `codegen.rs`'s
+    /// `generate_component`/`generate_view` must now also pass (this test's own `source_component`
+    /// role at that call site).
+    #[test]
+    fn t_r3_4_component_public_shape_is_source_local_not_effective_fields_flattened() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR34Derived {
+                #[param]
+                own_value: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let (component_def, view_def) =
+            component_and_view_from_item_struct(Some("TR34Base".to_string()), &item_struct)
+                .expect("should build");
+
+        // The parser never resolves/flattens the ancestor's own fields into `component_def.fields` —
+        // confirming `component_def` here really is source-only, exactly like `source_component`
+        // must be at the real `generate_component`/`generate_view` call site.
+        assert_eq!(
+            component_def
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["own_value"],
+            "the struct parser itself must never synthesize an ancestor field"
+        );
+
+        let shape = component_public_shape(&component_def, view_def.as_ref());
+        assert!(
+            shape
+                .constructor_params
+                .iter()
+                .any(|(name, _)| name == "own_value"),
+            "shape should contain the component's own field: {:?}",
+            shape.constructor_params
+        );
+        assert!(
+            !shape
+                .constructor_params
+                .iter()
+                .any(|(name, _)| name == "base_value")
+                && !shape
+                    .readable_fields
+                    .iter()
+                    .any(|(name, _, _)| name == "base_value"),
+            "shape must never contain a field the component itself never declared: {:?} / {:?}",
+            shape.constructor_params,
+            shape.readable_fields
+        );
     }
 }

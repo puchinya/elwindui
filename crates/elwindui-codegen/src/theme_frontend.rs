@@ -11,8 +11,17 @@
 //!
 //! See `docs/specs/theme_environment_spec.md` §2/§3/§4 and
 //! `docs/design/runtime/theme_environment_design.md` (`## Theme`).
+//!
+//! Issue #146: `generate_theme_from_item_struct` splits into an item-local phase
+//! (`item_local_theme_fields` — struct/field shape, always an unconditional error on both
+//! rust-analyzer and real `rustc`) and a registry-dependent phase (`resolve_theme_set_calls` — each
+//! field's writable Environment Key resolution, real-generation-only, gated to
+//! `cfg(not(rust_analyzer))` so a spurious same-crate registry miss under rust-analyzer's own
+//! incomplete expansion order never blanks out this Theme's own name/type resolution there). See
+//! `rust_analyzer_shadow::build_theme_shadow` and `docs/design/tools/codegen_design.md` §3.2a.
 
 use crate::component_frontend::lookup_writable_environment_key;
+use crate::rust_analyzer_shadow::{build_theme_shadow, gate_real_items_for_rustc};
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
@@ -53,17 +62,12 @@ fn field_value_expr(field: &Field) -> Result<Expr, String> {
     value.ok_or_else(|| format!("`{ident}`: missing `value = ..`"))
 }
 
-pub fn generate_theme_from_item_struct(
-    args: TokenStream,
-    item: &ItemStruct,
-) -> Result<TokenStream, String> {
-    if !args.is_empty() {
-        return Err("`#[elwindui::theme]` takes no arguments".into());
-    }
-    if !item.generics.params.is_empty() {
-        return Err("theme structs cannot be generic".into());
-    }
-
+/// Issue #146: item-local structural validation only — attribute syntax, struct shape, duplicate
+/// field names, a malformed `#[theme(value = ..)]`. None of this depends on the same-crate
+/// Environment Key registry, so it stays an unconditional error under rust-analyzer exactly as under
+/// real `rustc` (`docs/design/tools/codegen_design.md` §3.2a's item-local/registry-dependent split).
+/// Returns each field's own identifier and parsed `value` expression, in declaration order.
+fn item_local_theme_fields(item: &ItemStruct) -> Result<Vec<(syn::Ident, Expr)>, String> {
     let fields = match &item.fields {
         syn::Fields::Named(fields) => &fields.named,
         syn::Fields::Unit => {
@@ -73,7 +77,7 @@ pub fn generate_theme_from_item_struct(
     };
 
     let mut field_names = HashSet::new();
-    let mut set_calls = Vec::new();
+    let mut out = Vec::new();
     for field in fields {
         let ident = field
             .ident
@@ -83,6 +87,20 @@ pub fn generate_theme_from_item_struct(
             return Err(format!("duplicate theme field `{ident}`"));
         }
         let value = field_value_expr(field)?;
+        out.push((ident, value));
+    }
+    Ok(out)
+}
+
+/// Resolves every field's writable Environment Key and builds its `env.set::<K>(value)` call — the
+/// registry-dependent half of theme generation. Fails on the first field whose key can't be
+/// resolved (same-crate registry miss under rust-analyzer's own incomplete expansion order, or a
+/// genuine missing/misspelled declaration under real `rustc` — see this module's own dual-expansion
+/// split for why both share one error path here and are only told apart by which `cfg` branch a
+/// caller routes this error message into).
+fn resolve_theme_set_calls(fields: &[(syn::Ident, Expr)]) -> Result<Vec<TokenStream>, String> {
+    let mut set_calls = Vec::new();
+    for (ident, value) in fields {
         let (key_type_name, _value_type) = lookup_writable_environment_key(&ident.to_string())
             .ok_or_else(|| {
                 format!(
@@ -100,6 +118,48 @@ pub fn generate_theme_from_item_struct(
             env.set::<#key_type>(#value);
         });
     }
+    Ok(set_calls)
+}
+
+pub fn generate_theme_from_item_struct(
+    args: TokenStream,
+    item: &ItemStruct,
+) -> Result<TokenStream, String> {
+    if !args.is_empty() {
+        return Err("`#[elwindui::theme]` takes no arguments".into());
+    }
+    if !item.generics.params.is_empty() {
+        return Err("theme structs cannot be generic".into());
+    }
+
+    // Item-local (Issue #146): a malformed struct/field shape is a genuine mistake real generation
+    // would also reject — propagated immediately, unconditionally, on both rust-analyzer and rustc.
+    let fields = item_local_theme_fields(item)?;
+
+    // The shadow is built unconditionally once the struct/field shape is known to be valid, entirely
+    // independent of whether the registry-dependent step below succeeds — see `build_theme_shadow`'s
+    // own doc comment for why it never needs the resolved `set_calls` at all.
+    let shadow = build_theme_shadow(item)?;
+
+    // Registry-dependent (Issue #146): a same-crate Environment Key miss here may be a spurious
+    // rust-analyzer ordering artifact even when the source is correctly ordered — real generation
+    // stays exactly as strict as before, just gated to `cfg(not(rust_analyzer))` so a real miss is
+    // still a real `cargo build`/`cargo check` error while rust-analyzer keeps `shadow`'s own
+    // resolution available regardless.
+    let set_calls = match resolve_theme_set_calls(&fields) {
+        Ok(set_calls) => set_calls,
+        Err(error) => {
+            let gated_error = quote! {
+                #[cfg(not(rust_analyzer))]
+                #[allow(unexpected_cfgs)]
+                compile_error!(#error);
+            };
+            return Ok(quote! {
+                #shadow
+                #gated_error
+            });
+        }
+    };
 
     let visibility = &item.vis;
     let name = &item.ident;
@@ -108,7 +168,7 @@ pub fn generate_theme_from_item_struct(
          `docs/specs/theme_environment_spec.md` §3/§4."
     );
 
-    Ok(quote! {
+    let real = gate_real_items_for_rustc(quote! {
         #[doc = #doc]
         #[derive(Debug, Clone, Copy, Default)]
         #visibility struct #name;
@@ -118,6 +178,11 @@ pub fn generate_theme_from_item_struct(
                 #(#set_calls)*
             }
         }
+    })?;
+
+    Ok(quote! {
+        #real
+        #shadow
     })
 }
 
@@ -146,8 +211,17 @@ mod tests {
         assert!(output.contains("struct OceanTheme"));
         assert!(output.contains("impl elwindui :: core :: theme :: Theme for OceanTheme"));
         assert!(output.contains("env . set :: < BrandEnvironmentForTestGeneratesThemeImpl > ("));
+        // Issue #146: real items gated to `cfg(not(rust_analyzer))`, plus a no-op RA-only shadow —
+        // see `rust_analyzer_shadow::build_theme_shadow`.
+        assert!(output.contains("cfg (not (rust_analyzer))"), "{output}");
+        assert!(output.contains("cfg (rust_analyzer)"), "{output}");
+        assert!(output.contains("fn apply"), "{output}");
     }
 
+    /// Issue #146, T6: a same-crate custom Environment Key miss stays a real (gated
+    /// `cfg(not(rust_analyzer))`) `compile_error!` — exactly the existing diagnostic text — while a
+    /// no-op Theme shadow is still emitted for rust-analyzer, so a spurious registry-ordering miss
+    /// under rust-analyzer never blanks out this Theme's own name/type resolution.
     #[test]
     fn rejects_field_with_no_registered_environment_key() {
         let item: ItemStruct = syn::parse_quote! {
@@ -156,8 +230,19 @@ mod tests {
                 unregistered_field_for_test_rejects_missing_key: f32,
             }
         };
-        let error = generate_theme_from_item_struct(TokenStream::new(), &item).unwrap_err();
-        assert!(error.contains("no writable Environment Key named"));
+        let output = generate_theme_from_item_struct(TokenStream::new(), &item)
+            .expect("a registry-dependent miss must not fail the whole macro expansion")
+            .to_string();
+        assert!(output.contains("cfg (not (rust_analyzer))"), "{output}");
+        assert!(output.contains("compile_error !"), "{output}");
+        assert!(
+            output.contains("no writable Environment Key named"),
+            "{output}"
+        );
+        assert!(
+            output.contains("cfg (rust_analyzer)") && output.contains("struct OceanTheme"),
+            "a Theme shadow must still be emitted: {output}"
+        );
     }
 
     #[test]
@@ -171,12 +256,15 @@ mod tests {
                 popup_dismiss: Option<i32>,
             }
         };
-        let error = generate_theme_from_item_struct(TokenStream::new(), &item).unwrap_err();
+        let output = generate_theme_from_item_struct(TokenStream::new(), &item)
+            .expect("a registry-dependent miss must not fail the whole macro expansion")
+            .to_string();
         assert!(
-            error.contains("popup_dismiss") && error.contains("read-only"),
+            output.contains("popup_dismiss") && output.contains("read-only"),
             "error should explain popup_dismiss is framework-installed and read-only, not just \
-             \"unregistered\": {error}"
+             \"unregistered\": {output}"
         );
+        assert!(output.contains("cfg (not (rust_analyzer))"), "{output}");
     }
 
     #[test]

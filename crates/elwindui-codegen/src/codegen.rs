@@ -811,6 +811,58 @@ fn find_view<'m>(module: &'m Module, target: &str) -> Option<&'m ViewDef> {
     })
 }
 
+/// PR #169 review remediation, round 3 (A1/AD-R3-1): whether `#[content(name)]`'s target field's
+/// presence-or-absence on `c` is decidable from `c`/`c`'s own `view` alone, or genuinely needs
+/// `modules` (same-crate sibling registry data that may not yet be fully populated under
+/// rust-analyzer's own incremental expansion order even when the source is correctly ordered).
+pub(crate) enum ContentFieldKnowledge {
+    /// `name` is one of `c`'s own literal fields, or — when `c.base` has no local `ComponentDef` in
+    /// `modules` — one of `synthesize_external_base_fields`'s own view-bare-reference-derived
+    /// fields. Both are fully decidable from `c`/`c`'s own view alone.
+    KnownPresent,
+    /// `name` is absent from `c`'s own fields, and either `c` has no `base` at all, or `c.base` has
+    /// no local `ComponentDef` in `modules` (so `synthesize_external_base_fields`'s own
+    /// view-bare-reference-only synthesis is the complete answer) — either way, decidable from `c`
+    /// alone with no sibling-registry dependency.
+    KnownMissingItemLocal,
+    /// `name` is absent from `c`'s own fields, and `c.base` names a `ComponentDef` found locally in
+    /// `modules` (a same-crate sibling) — whether `name` is actually present depends on that
+    /// sibling's own (possibly further-inherited) effective fields, which may be spuriously
+    /// unresolvable under rust-analyzer's own incomplete same-crate registry expansion order even
+    /// when the source is correctly ordered.
+    NeedsSameCrateRegistry,
+}
+
+/// Classifies whether `#[content(name)]` naming a field absent from `c`'s own literal fields is
+/// decidable from `c` alone (see [`ContentFieldKnowledge`]) — used by `validate::validate_classified`
+/// to route the corresponding diagnostic (PR #169 review, round 3, A1/AD-R3-1: a local
+/// `#[content(name)]` typo on a base-less component, or one whose base isn't a locally-visible
+/// `ComponentDef` at all, was previously over-classified `RegistryDependent` merely because the
+/// general-purpose `resolve_effective_fields` this check calls *can*, in other cases, consult
+/// `modules` — not because *this* call's own branch actually needed to).
+pub(crate) fn content_field_knowledge(
+    from: &Module,
+    c: &ComponentDef,
+    name: &str,
+    modules: &[Module],
+) -> ContentFieldKnowledge {
+    if c.fields.iter().any(|f| f.name == *name) {
+        return ContentFieldKnowledge::KnownPresent;
+    }
+    let Some(base) = c.base.as_deref() else {
+        return ContentFieldKnowledge::KnownMissingItemLocal;
+    };
+    if find_component_and_module(from, base, modules).is_none() {
+        let synthesized = synthesize_external_base_fields(c, base, find_view(from, &c.name));
+        return if synthesized.iter().any(|f| f.name == *name) {
+            ContentFieldKnowledge::KnownPresent
+        } else {
+            ContentFieldKnowledge::KnownMissingItemLocal
+        };
+    }
+    ContentFieldKnowledge::NeedsSameCrateRegistry
+}
+
 /// Recursively flattens `c`'s effective field list: its (non-`NativeControl`) base's own effective
 /// fields, minus any this component legitimately redeclares (an `#[override]`n `#[computed]` field
 /// — validated by `validate::validate_field_overrides`; codegen trusts that here rather than
@@ -1327,7 +1379,7 @@ fn view_expr_references_bare_name(expr: &ViewExpr, name: &str) -> bool {
 /// `resolve_effective_fields`'s own inherited-field-forwarding decision, which specifically wants
 /// the narrower "literal forward" notion (a field only *contributing* to some other computed value
 /// isn't being forwarded unchanged, so shouldn't be silently treated as inherited).
-fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
+pub(crate) fn view_references_name_anywhere(view: &ViewDef, name: &str) -> bool {
     view.lets
         .iter()
         .any(|l| element_references_name_anywhere(&l.element, name))
@@ -1991,8 +2043,8 @@ pub fn generate_module(module: &Module, table: &SymbolTable) -> TokenStream {
                     content_field: None,
                 };
                 match &info.effective_view {
-                    Some(view) => generate_view(view, &synthetic, module, table),
-                    None => generate_component(&synthetic, table),
+                    Some(view) => generate_view(view, c, &synthetic, module, table),
+                    None => generate_component(c, &synthetic, table),
                 }
             }
             // Always handled above, via the paired `Item::Component`'s effective view (own or
@@ -2966,7 +3018,20 @@ fn environment_key_type_by_name(
     }
 }
 
-fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
+// PR #169 review remediation, round 3 (A2/AD-R3-2/AD-R3-4): `source_component` is the literal,
+// un-flattened `ComponentDef` this Component's own source actually declares (never
+// `info.effective_fields`-flattened) — the only input `component_public_shape` may ever receive
+// (AD-R3-2: the helper is source-local by design and must never be handed an ancestor-inclusive
+// field list, which would make it treat an inherited field as though this Component declared it
+// itself). `c` (unchanged parameter name/position, still the effective/possibly-flattened
+// `ComponentDef` the caller already built) remains the input to every other, non-shape decision in
+// this function — inherited-field forwarding/storage stays real generation's own job, not the
+// shape's (AD-R3-3).
+fn generate_component(
+    source_component: &ComponentDef,
+    c: &ComponentDef,
+    table: &SymbolTable,
+) -> TokenStream {
     let struct_name = format_ident!("{}", c.name);
     let mut struct_fields = TokenStream::new();
     let mut ctor_params = TokenStream::new();
@@ -3045,7 +3110,61 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
         .map(|f| format_ident!("{}", f.name))
         .collect();
 
+    // PR #169 review remediation, round 2 (AD-R2-6), input corrected round 3 (A2/AD-R3-2): a
+    // no-initializer *own* field's (one `source_component.fields` itself declares — never an
+    // inherited one, see this function's own leading doc comment) deferred-vs-required membership
+    // is decided once, here, by `component_public_shape(source_component, None)` — the same
+    // source-local classification `rust_analyzer_shadow::build_component_struct_shadow` and
+    // `generate_view`'s own own-field constructor decision (below, in this file) both consult —
+    // rather than this loop independently re-running `strip_option`/deferral logic (PR #169 review
+    // finding A2's own forbidden pattern). `view: None` matches this function's own view-less
+    // generation exactly. A field present in `c.fields` (the effective set) but absent from
+    // `source_component.fields` is inherited, not this Component's own declaration — never looked
+    // up here, so it falls through to the pre-#146 direct `strip_option` computation below
+    // unchanged, exactly mirroring `generate_view`'s own `is_deferred_own_field` fallback boundary.
+    let own_field_shape = crate::component_frontend::component_public_shape(source_component, None);
+    let declared_own_field_names: HashSet<&str> = source_component
+        .fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    // PR #169 review remediation, round 4 (AD-R4-1/AD-R4-2): every own-field API-membership
+    // decision below (constructor param, deferred-option storage, getter, setter, and each
+    // accessor's visibility) is driven exclusively from these four shape-derived indices — never
+    // independently re-derived from `f.kind`/`f.initializer`/`strip_option` for a name in
+    // `declared_own_field_names`. `FieldDef` (`f` itself) is still consulted, but only to select
+    // *how* an already-shape-decided accessor is implemented (Cell vs RefCell, getter/setter body,
+    // recompute cascade) — never *whether* it exists. An inherited field (absent from
+    // `declared_own_field_names`) is untouched by any of these indices and keeps the pre-#146
+    // direct computation unchanged (AD-R3-3/AD-R4-8: inherited-field forwarding is real
+    // generation's own job, never routed through the source-local shape).
+    let own_constructor_params: HashMap<&str, &str> = own_field_shape
+        .constructor_params
+        .iter()
+        .map(|(name, ty)| (name.as_str(), ty.as_str()))
+        .collect();
+    let own_deferred_fields: HashMap<&str, (&str, &str)> = own_field_shape
+        .deferred_option_fields
+        .iter()
+        .map(|(name, declared_ty, inner_ty)| {
+            (name.as_str(), (declared_ty.as_str(), inner_ty.as_str()))
+        })
+        .collect();
+    let own_readable_fields: HashMap<&str, (&str, crate::component_frontend::ShadowVisibility)> =
+        own_field_shape
+            .readable_fields
+            .iter()
+            .map(|(name, ty, visibility)| (name.as_str(), (ty.as_str(), *visibility)))
+            .collect();
+    let own_writable_fields: HashMap<&str, (&str, crate::component_frontend::ShadowVisibility)> =
+        own_field_shape
+            .writable_fields
+            .iter()
+            .map(|(name, ty, visibility)| (name.as_str(), (ty.as_str(), *visibility)))
+            .collect();
+
     for f in &c.fields {
+        let is_own = declared_own_field_names.contains(f.name.as_str());
         let field_ident = format_ident!("{}", f.name);
         let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
 
@@ -3057,9 +3176,18 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                 // view-less path (see that loop's own doc comment).
                 struct_fields.extend(quote! { #field_ident: #ty, });
                 ctor_field_inits.extend(quote! { #field_ident, });
-                accessors.extend(quote! {
-                    pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
-                });
+                if is_own {
+                    if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                        accessors.extend(quote! {
+                            #vis fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                        });
+                    }
+                } else {
+                    accessors.extend(quote! {
+                        pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                    });
+                }
             }
             None => {
                 // `#[param] #[inject]` field: supplied by the caller. `Option<T>`-typed fields
@@ -3070,11 +3198,29 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                 // is `Option<T>`'s own natural "not yet set" value, so (unlike a required field of
                 // arbitrary, possibly non-`Default` type) there's always a sound value to start
                 // from. A required (non-`Option`) field stays exactly as before: a `new(..)`
-                // argument, plain storage, no setter. Every field is private (not `pub`) either
-                // way — external and internal reads alike go through the accessor below, since a
-                // deferred fields use storage specialized for post-construction mutation.
-                let (inner_ty_str, is_option) = strip_option(&f.ty);
-                if is_option {
+                // argument, plain storage, no setter.
+                //
+                // PR #169 review remediation, round 4 (AD-R4-3/AD-R4-4/AD-R4-5/AD-R4-6): for an
+                // *own* field, `is_deferred` (storage shape), constructor membership, and
+                // getter/setter membership+visibility all come from the shape's four indices —
+                // `f.kind`/`f.initializer`/`strip_option` below only ever select the deferred vs.
+                // required *implementation* (Cell/RefCell type, get/set body), never whether an
+                // accessor exists. An inherited field keeps the exact pre-#146 direct computation
+                // (unconditional pub getter/setter either way), unchanged (AD-R4-8).
+                let is_deferred = if is_own {
+                    own_deferred_fields.contains_key(f.name.as_str())
+                } else {
+                    strip_option(&f.ty).1
+                };
+                if is_deferred {
+                    let inner_ty_str = if is_own {
+                        own_deferred_fields
+                            .get(f.name.as_str())
+                            .map(|(_, inner_ty)| *inner_ty)
+                            .expect("is_deferred true for an own field implies a deferred_option_fields entry")
+                    } else {
+                        strip_option(&f.ty).0
+                    };
                     let inner_ty: syn::Type =
                         syn::parse_str(inner_ty_str).expect("field inner type must parse");
                     let cell_ty = if is_copy_type(inner_ty_str) {
@@ -3095,17 +3241,64 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                     } else {
                         quote! { *self.#field_ident.borrow_mut() = Some(value); }
                     };
-                    accessors.extend(quote! {
-                        pub fn #field_ident(&self) -> #ty { #get_body }
-                        pub fn #set_name(&self, value: #inner_ty) { #set_body }
-                    });
+                    if is_own {
+                        if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                            accessors.extend(quote! {
+                                #vis fn #field_ident(&self) -> #ty { #get_body }
+                            });
+                        }
+                        // PR #169 review remediation, round 5 (AD-R5-1/AD-R5-3/AD-R5-4): the
+                        // setter parameter *type* comes from `own_writable_fields`'s own type
+                        // entry, not `inner_ty` (round 4 still discarded this with `_`) — `#ty`/
+                        // `strip_option`/`own_deferred_fields` remain the sole authority for
+                        // *storage* (`Cell`/`RefCell<Option<T>>`, the `Some(value)` wrapping in
+                        // `#set_body` above), never for the setter's own public signature.
+                        if let Some((setter_ty_str, visibility)) =
+                            own_writable_fields.get(f.name.as_str())
+                        {
+                            let setter_ty: syn::Type = syn::parse_str(setter_ty_str)
+                                .expect("shape setter type must parse");
+                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                            accessors.extend(quote! {
+                                #vis fn #set_name(&self, value: #setter_ty) { #set_body }
+                            });
+                        }
+                    } else {
+                        accessors.extend(quote! {
+                            pub fn #field_ident(&self) -> #ty { #get_body }
+                            pub fn #set_name(&self, value: #inner_ty) { #set_body }
+                        });
+                    }
                 } else {
                     struct_fields.extend(quote! { #field_ident: #ty, });
-                    ctor_params.extend(quote! { #field_ident: #ty, });
                     ctor_field_inits.extend(quote! { #field_ident, });
-                    accessors.extend(quote! {
-                        pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
-                    });
+                    if is_own {
+                        if own_constructor_params.contains_key(f.name.as_str()) {
+                            ctor_params.extend(quote! { #field_ident: #ty, });
+                        }
+                        if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                            let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                            accessors.extend(quote! {
+                                #vis fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                            });
+                        }
+                        // A required (non-deferred) own field never appears in `writable_fields`
+                        // for `component_public_shape(.., None)` — the view-less path
+                        // (`component_public_shape`'s own doc comment: a required `Prop` field's
+                        // setter is `has_view`-only) — so there is no sound setter body to emit
+                        // here (this field's storage is plain `#ty`, not `Cell`/`RefCell`-wrapped).
+                        debug_assert!(
+                            !own_writable_fields.contains_key(f.name.as_str()),
+                            "view-less component_public_shape must never mark a required own field writable: {}",
+                            f.name
+                        );
+                    } else {
+                        ctor_params.extend(quote! { #field_ident: #ty, });
+                        accessors.extend(quote! {
+                            pub fn #field_ident(&self) -> #ty { self.#field_ident.clone() }
+                        });
+                    }
                 }
             }
             Some(Initializer::Expr(raw_expr))
@@ -3142,19 +3335,53 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                         }
                     })
                     .collect();
-                let visibility = if f.kind == FieldKind::State {
-                    quote! {}
-                } else {
-                    quote! { pub }
-                };
-                accessors.extend(quote! {
-                    #visibility fn #field_ident(&self) -> #ty { #get_body }
-                    #visibility fn #set_name(&self, value: #ty) {
-                        #set_body
-                        #(#recompute_calls)*
-                        self.on_property_changed(#component_property_enum::#field_ident);
+                // PR #169 review remediation, round 4 (AD-R4-4/AD-R4-5): for an own field, getter
+                // and setter membership+visibility both come from the shape, not an independent
+                // `f.kind == FieldKind::State` check — `component_public_shape` already applies
+                // exactly this rule (`ShadowVisibility::Private` for `State`, `Public` for `Prop`)
+                // when it builds `readable_fields`/`writable_fields`, so this is the same decision
+                // read from one place instead of two. An inherited field keeps the original direct
+                // `FieldKind::State` check unchanged (AD-R4-8).
+                if is_own {
+                    if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                        accessors.extend(quote! {
+                            #vis fn #field_ident(&self) -> #ty { #get_body }
+                        });
                     }
-                });
+                    // PR #169 review remediation, round 5 (AD-R5-1/AD-R5-3/AD-R5-5): the setter
+                    // parameter type comes from `own_writable_fields`'s own type entry, not `#ty`
+                    // (round 4 still discarded this with `_`) — `#ty`/`is_copy_type` remain the
+                    // sole authority for `#set_body`'s own storage mechanics above.
+                    if let Some((setter_ty_str, visibility)) =
+                        own_writable_fields.get(f.name.as_str())
+                    {
+                        let setter_ty: syn::Type =
+                            syn::parse_str(setter_ty_str).expect("shape setter type must parse");
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                        accessors.extend(quote! {
+                            #vis fn #set_name(&self, value: #setter_ty) {
+                                #set_body
+                                #(#recompute_calls)*
+                                self.on_property_changed(#component_property_enum::#field_ident);
+                            }
+                        });
+                    }
+                } else {
+                    let visibility = if f.kind == FieldKind::State {
+                        quote! {}
+                    } else {
+                        quote! { pub }
+                    };
+                    accessors.extend(quote! {
+                        #visibility fn #field_ident(&self) -> #ty { #get_body }
+                        #visibility fn #set_name(&self, value: #ty) {
+                            #set_body
+                            #(#recompute_calls)*
+                            self.on_property_changed(#component_property_enum::#field_ident);
+                        }
+                    });
+                }
                 let _ = raw_expr; // consumed by `default_let_stmts`, above
             }
             Some(Initializer::Expr(raw_expr)) if f.kind == FieldKind::Computed => {
@@ -3181,8 +3408,26 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                     &format_ident!("self"),
                 );
                 let recompute = format_ident!("recompute_{}", f.name);
+                // PR #169 review remediation, round 4 (AD-R4-4): the getter's own membership comes
+                // from the shape for an own field (`component_public_shape` always places a
+                // `Computed` field in `readable_fields`, `ShadowVisibility::Public`, so this never
+                // actually diverges from the previous unconditional `pub fn` — but it is now the
+                // shape making that decision, not this match arm independently). `recompute_<name>`
+                // is a private implementation helper with no `ComponentPublicShape` concept at
+                // all — always emitted, exactly as before.
+                if is_own {
+                    if let Some((_, visibility)) = own_readable_fields.get(f.name.as_str()) {
+                        let vis = crate::rust_analyzer_shadow::shadow_vis_tokens(*visibility);
+                        accessors.extend(quote! {
+                            #vis fn #field_ident(&self) -> #ty { #get_body }
+                        });
+                    }
+                } else {
+                    accessors.extend(quote! {
+                        pub fn #field_ident(&self) -> #ty { #get_body }
+                    });
+                }
                 accessors.extend(quote! {
-                    pub fn #field_ident(&self) -> #ty { #get_body }
                     fn #recompute(&self) {
                         let value: #ty = #compute_expr;
                         #set_cache
@@ -3312,8 +3557,16 @@ impl EmitMode {
     }
 }
 
+// PR #169 review remediation, round 3 (A2/AD-R3-2/AD-R3-4): `source_component` is the literal,
+// un-flattened `ComponentDef` this Component's own source actually declares — the only input
+// `component_public_shape` may ever receive (AD-R3-2). `component` (unchanged parameter
+// name/position) remains the effective/possibly-`effective_fields`-flattened `ComponentDef` every
+// other, non-shape decision in this function already uses — inherited-field
+// forwarding/composition/storage stays real generation's own job (AD-R3-3), never routed through
+// the shape.
 fn generate_view(
     view: &ViewDef,
+    source_component: &ComponentDef,
     component: &ComponentDef,
     from: &Module,
     table: &SymbolTable,
@@ -3508,35 +3761,68 @@ fn generate_view(
         target: target.clone(),
     };
 
-    // `on_*`-named fields are excluded here for the same reason `TypeInfo::param_fields` (built
-    // separately, in `build_symbol_table`) already excludes them: a `#[routed]` field (`UIElement`'s
-    // own `on_tapped`/`on_pointer_pressed`/... — inherited by every component through
-    // `resolve_effective_fields`, not just ones that declare it directly, e.g. `Button.on_click`) is
-    // wired through the `on_x: ..` DSL attribute + `register_routed_handler` (`emit_wiring`'s own
-    // `is_routed` branch), never as a positional constructor argument — before this filter existed
-    // here, every `has_view` composed component's `new(..)` silently gained 9 required
-    // `fn(PointerEventArgs)`-typed parameters nothing ever supplied, breaking every existing call
-    // site the moment these fields became inheritable (`RoundedPanel`/`DocumentView`, e.g.).
-    // `#[environment(name)]` fields are excluded here too — see `build_symbol_table`'s matching
-    // `param_fields` filter (`codegen.rs`, `Item::Component` arm) for why.
-    let param_names: Vec<syn::Ident> = component
+    // PR #169 review remediation, round 2 (AD-R2-6), input corrected round 3 (A2/AD-R3-2/AD-R3-3):
+    // `component_public_shape` is the single source-local classification of which no-initializer
+    // *own* fields are constructor-eligible at all — computed once, here, before
+    // `param_names`/`param_types`, from `source_component` (the literal, un-flattened `ComponentDef`
+    // this Component's own source declares — never `component`, the *synthetic*,
+    // already-`effective_fields`-flattened one this function's other, non-shape logic still uses
+    // throughout). `component_public_shape` is source-local by design (AD-R3-2): it must never be
+    // handed an ancestor-inclusive field list, which would make it treat an inherited field as
+    // though this Component declared it itself.
+    let own_field_shape =
+        crate::component_frontend::component_public_shape(source_component, Some(view));
+    let declared_own_field_names: HashSet<&str> = source_component
         .fields
         .iter()
-        .filter(|f| {
+        .map(|f| f.name.as_str())
+        .collect();
+    // `on_*`-named fields are excluded because a `#[routed]` field (`UIElement`'s own
+    // `on_tapped`/`on_pointer_pressed`/... — inherited by every component through
+    // `resolve_effective_fields`, not just ones that declare it directly, e.g. `Button.on_click`) is
+    // wired through the `on_x: ..` DSL attribute + `register_routed_handler` (`emit_wiring`'s own
+    // `is_routed` branch), never as a positional constructor argument — before this exclusion
+    // existed, every `has_view` composed component's `new(..)` silently gained 9 required
+    // `fn(PointerEventArgs)`-typed parameters nothing ever supplied, breaking every existing call
+    // site the moment these fields became inheritable (`RoundedPanel`/`DocumentView`, e.g.).
+    // `#[environment(name)]` fields never appear in `constructor_params`/`deferred_option_fields`
+    // either — see `build_symbol_table`'s matching `param_fields` filter (`codegen.rs`,
+    // `Item::Component` arm) for the parallel reasoning on the `TypeInfo` side.
+    let shape_param_eligible_names: HashSet<&str> = own_field_shape
+        .constructor_params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(
+            own_field_shape
+                .deferred_option_fields
+                .iter()
+                .map(|(name, _, _)| name.as_str()),
+        )
+        .collect();
+    // Field-level membership: an *own* field (in `source_component.fields`) is decided by the shape
+    // above; an *inherited* one (present in `component.fields`, the effective set, but not
+    // `source_component.fields` — a base's own field this Component never redeclares) is decided by
+    // the original, pre-shape direct predicate unchanged (AD-R3-3: inherited-field forwarding stays
+    // real generation's own job, never routed through the source-local shape).
+    let is_param_eligible = |f: &FieldDef| -> bool {
+        if declared_own_field_names.contains(f.name.as_str()) {
+            shape_param_eligible_names.contains(f.name.as_str())
+        } else {
             f.initializer.is_none()
                 && !f.name.starts_with("on_")
                 && f.kind != FieldKind::Environment
-        })
+        }
+    };
+    let param_names: Vec<syn::Ident> = component
+        .fields
+        .iter()
+        .filter(|f| is_param_eligible(f))
         .map(|f| format_ident!("{}", f.name))
         .collect();
     let param_types: Vec<syn::Type> = component
         .fields
         .iter()
-        .filter(|f| {
-            f.initializer.is_none()
-                && !f.name.starts_with("on_")
-                && f.kind != FieldKind::Environment
-        })
+        .filter(|f| is_param_eligible(f))
         .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
         .collect();
 
@@ -3703,14 +3989,17 @@ fn generate_view(
     // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
     // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
     // `continue` in `generate_module` just above).
-    let resolved_root =
-        resolve_view_root_element(&view.root, component.base.as_deref(), is_composed)
-            .unwrap_or_else(|| {
-                panic!(
+    let resolved_root = resolve_view_root_element(
+        &view.root,
+        component.base.as_deref(),
+        is_composed,
+    )
+    .unwrap_or_else(|| {
+        panic!(
             "{}: view root must be exactly one element unless it inherits a composable base",
             component.name
         )
-            });
+    });
 
     plan_element(
         &resolved_root,
@@ -3854,12 +4143,34 @@ fn generate_view(
 
     // Unreferenced own `Option<T>` fields are initialized as `None` and exposed through
     // `set_<name>`. Fields needed while constructing the view remain constructor arguments.
+    //
+    // PR #169 review remediation (AD-R4); source corrected round 3 (A2/AD-R3-2): for a field
+    // declared directly on `source_component` (not a `synthesize_external_base_fields`-synthesized
+    // one, Refs #90, and not merely present in `component`'s own `effective_fields`-flattened list
+    // — `component_public_shape` is source-local only and has no notion of either), this reads
+    // `component_frontend::component_public_shape`'s own deferred-field classification instead of
+    // re-deriving the same `strip_option(..).1 && !view_references_name_anywhere(..)` rule
+    // independently — the exact rust-analyzer Component struct shadow
+    // (`rust_analyzer_shadow::build_component_struct_shadow`) consults, so the two can never
+    // silently drift. A synthesized or inherited field (absent from `source_component.fields`) falls
+    // back to the original direct computation unchanged. `own_field_shape`/`declared_own_field_names`
+    // are computed once, above (before `param_names`), and reused here (AD-R2-6) rather than
+    // recomputed.
+    let shape_deferred_names: HashSet<String> = own_field_shape
+        .deferred_option_fields
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect();
     let is_deferred_own_field = |name: &syn::Ident| -> bool {
+        let name_str = name.to_string();
+        if declared_own_field_names.contains(name_str.as_str()) {
+            return shape_deferred_names.contains(&name_str);
+        }
         let ty_str = ctx
             .own_fields
-            .get(&name.to_string())
+            .get(&name_str)
             .expect("own_struct_param_names names one of ctx.own_fields' own keys");
-        strip_option(ty_str).1 && !view_references_name_anywhere(view, &name.to_string())
+        strip_option(ty_str).1 && !view_references_name_anywhere(view, &name_str)
     };
     let deferred_own_names: Vec<syn::Ident> = own_struct_param_names
         .iter()
@@ -3949,13 +4260,35 @@ fn generate_view(
     // setter also re-runs `self.resync()` (its own view, being required, is guaranteed to actually
     // reference it, so the change needs to reach the widgets built from it right away — see the
     // setter loop below).
+    //
+    // PR #169 review remediation, round 3 (AD-R3-5): for an *own* field (declared directly on
+    // `source_component`), membership comes from `own_shape.writable_fields` — `required_own_names`
+    // (the outer iteration) already establishes "required" (in `own_shape.constructor_params`, via
+    // `param_names`'s own shape-driven filter above), so intersecting with `writable_fields` here is
+    // exactly the "required + writable" the shape already models (`component_public_shape`'s own
+    // doc comment: a required own `Prop` field's setter is `has_view`-only, i.e. exactly this
+    // function). The forbidden pattern this replaces re-derived `FieldKind::Prop` membership
+    // directly from `component.fields` (the effective/flattened set) instead of consuming the
+    // shape. An inherited field (absent from `source_component.fields`) falls back to the original
+    // direct `FieldKind::Prop` check unchanged (AD-R3-3: inherited-field forwarding stays real
+    // generation's own job, never routed through the source-local shape).
+    let shape_writable_names: HashSet<&str> = own_field_shape
+        .writable_fields
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .collect();
     let mutable_required_names: Vec<syn::Ident> = required_own_names
         .iter()
         .filter(|n| {
-            component
-                .fields
-                .iter()
-                .any(|f| f.name == n.to_string() && f.kind == FieldKind::Prop)
+            let name_str = n.to_string();
+            if declared_own_field_names.contains(name_str.as_str()) {
+                shape_writable_names.contains(name_str.as_str())
+            } else {
+                component
+                    .fields
+                    .iter()
+                    .any(|f| f.name == name_str && f.kind == FieldKind::Prop)
+            }
         })
         .cloned()
         .collect();
@@ -10832,7 +11165,10 @@ fn shape_composition_base_type(base: &str) -> TokenStream {
 /// module the DSL author's own `use`s are visible from — so a bare consumer-defined name can't be
 /// trusted to resolve on its own; see `elwindui_macros::class::validate_fully_qualified_path`'s own
 /// doc comment for the fully general version of this same requirement.
-fn immediate_base_qualified_path(component: &ComponentDef, name: &str) -> Option<TokenStream> {
+pub(crate) fn immediate_base_qualified_path(
+    component: &ComponentDef,
+    name: &str,
+) -> Option<TokenStream> {
     if component.base.as_deref() != Some(name) {
         return None;
     }
@@ -12838,6 +13174,102 @@ mod tests {
             .chain(crate::test_builtin_modules())
             .collect();
         build_symbol_table(&all)
+    }
+
+    fn minimal_component_def(
+        name: &str,
+        base: Option<&str>,
+        fields: Vec<FieldDef>,
+    ) -> ComponentDef {
+        ComponentDef {
+            name: name.to_string(),
+            base: base.map(str::to_string),
+            base_path: None,
+            fields,
+            methods: Vec::new(),
+            embedded: false,
+            sealed: false,
+            native: false,
+            is_abstract: false,
+            text_style: false,
+            content_field: None,
+        }
+    }
+
+    fn param_field(name: &str, ty: &str) -> FieldDef {
+        FieldDef {
+            name: name.to_string(),
+            ty: ty.to_string(),
+            kind: FieldKind::Param,
+            attrs: Vec::new(),
+            initializer: None,
+        }
+    }
+
+    /// PR #169 review remediation, round 4, T-R4-6 (AD-R4-8): `generate_component`'s own-field
+    /// membership must come only from `component_public_shape(source_component, None)` — an
+    /// inherited field (present in the effective/flattened `c` this function's other logic still
+    /// uses, absent from `source_component.fields`) must stay outside the shape, while real
+    /// generation still forwards/stores it exactly as it did before this round's refactor. Built
+    /// directly against `generate_component` with hand-crafted source/effective `ComponentDef`s
+    /// (the same pattern `embedded_attribute_is_the_builtin_boundary_within_builtin_module`, just
+    /// below, already uses) rather than through the full macro/validate pipeline — a *view-less*
+    /// Component inheriting another Component with no `view` of its own is not expressible through
+    /// the real DSL frontend at all (`validate.rs` rejects it: "must declare one composing over
+    /// ..."), so this is the only way to exercise `generate_component`'s own inherited-field
+    /// fallback boundary directly.
+    #[test]
+    fn t_r4_6_inherited_field_stays_outside_shape_but_real_generation_is_unchanged() {
+        let source_derived = minimal_component_def(
+            "TR46Derived",
+            Some("TR46Base"),
+            vec![param_field("own_value", "i32")],
+        );
+        let effective_derived = minimal_component_def(
+            "TR46Derived",
+            Some("TR46Base"),
+            vec![
+                param_field("base_value", "i32"),
+                param_field("own_value", "i32"),
+            ],
+        );
+
+        let shape = crate::component_frontend::component_public_shape(&source_derived, None);
+        assert!(
+            shape
+                .constructor_params
+                .iter()
+                .any(|(n, _)| n == "own_value"),
+            "{:?}",
+            shape.constructor_params
+        );
+        assert!(
+            !shape
+                .constructor_params
+                .iter()
+                .any(|(n, _)| n == "base_value"),
+            "the shape must never contain the inherited field: {:?}",
+            shape.constructor_params
+        );
+
+        let table = build_symbol_table(&[]);
+        let generated = generate_component(&source_derived, &effective_derived, &table).to_string();
+        let real_ctor = generated
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        assert!(
+            real_ctor.contains("base_value"),
+            "real generation must still include the inherited field, unaffected by the \
+             source-local shape: {real_ctor}"
+        );
+        assert!(
+            real_ctor.contains("own_value"),
+            "real generation must still include the derived's own field: {real_ctor}"
+        );
+        assert!(generated.contains("pub fn base_value"), "{generated}");
+        assert!(generated.contains("pub fn own_value"), "{generated}");
     }
 
     /// Issue #68 bug 5's underlying scanner: `{{`/`}}` escapes, positional/empty (`{}`/`{0}`)
@@ -15189,8 +15621,10 @@ struct NotepadWindow {
         // `content`/`padding` are `#[class]`-managed own (untagged) methods now (docs/
         // docs/design/runtime/ui_tree_design.md) — the macro derives the matching trait declaration/impl from
         // these at expansion time, invisible in these pre-expansion generated tokens.
-        assert!(content_control_str
-            .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
+        assert!(
+            content_control_str
+                .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >")
+        );
         assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
         // Real struct is always the bare `ContentControl` name itself — the *source* `#[class]` is
         // written against that same bare name (docs/design/runtime/ui_tree_design.md); the macro derives

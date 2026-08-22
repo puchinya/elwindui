@@ -3703,14 +3703,17 @@ fn generate_view(
     // reports that case as a real diagnostic; this is a second, codegen-level guarantee that holds
     // even if this function is ever called on unvalidated input (mirrors `is_abstract`'s own
     // `continue` in `generate_module` just above).
-    let resolved_root =
-        resolve_view_root_element(&view.root, component.base.as_deref(), is_composed)
-            .unwrap_or_else(|| {
-                panic!(
+    let resolved_root = resolve_view_root_element(
+        &view.root,
+        component.base.as_deref(),
+        is_composed,
+    )
+    .unwrap_or_else(|| {
+        panic!(
             "{}: view root must be exactly one element unless it inherits a composable base",
             component.name
         )
-            });
+    });
 
     plan_element(
         &resolved_root,
@@ -10832,7 +10835,10 @@ fn shape_composition_base_type(base: &str) -> TokenStream {
 /// module the DSL author's own `use`s are visible from — so a bare consumer-defined name can't be
 /// trusted to resolve on its own; see `elwindui_macros::class::validate_fully_qualified_path`'s own
 /// doc comment for the fully general version of this same requirement.
-fn immediate_base_qualified_path(component: &ComponentDef, name: &str) -> Option<TokenStream> {
+pub(crate) fn immediate_base_qualified_path(
+    component: &ComponentDef,
+    name: &str,
+) -> Option<TokenStream> {
     if component.base.as_deref() != Some(name) {
         return None;
     }
@@ -15189,8 +15195,10 @@ struct NotepadWindow {
         // `content`/`padding` are `#[class]`-managed own (untagged) methods now (docs/
         // docs/design/runtime/ui_tree_design.md) — the macro derives the matching trait declaration/impl from
         // these at expansion time, invisible in these pre-expansion generated tokens.
-        assert!(content_control_str
-            .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >"));
+        assert!(
+            content_control_str
+                .contains("fn content (& self) -> std :: rc :: Rc < dyn UIElement >")
+        );
         assert!(content_control_str.contains("fn padding (& self) -> Option < f32 >"));
         // Real struct is always the bare `ContentControl` name itself — the *source* `#[class]` is
         // written against that same bare name (docs/design/runtime/ui_tree_design.md); the macro derives

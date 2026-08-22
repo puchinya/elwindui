@@ -4,6 +4,7 @@ pub mod codegen;
 pub mod component_frontend;
 pub mod environment_frontend;
 pub mod parser;
+mod rust_analyzer_shadow;
 #[cfg(test)]
 mod testdata;
 mod text_style;
@@ -65,6 +66,31 @@ pub(crate) fn test_module(
         is_builtin: false,
         allows_external_builtins: false,
     })
+}
+
+/// Issue #146 test helper: a registry-dependent generation failure (a same-crate sibling registry
+/// miss, a cross-item `validate::validate` rejection, ...) no longer returns `Err` from
+/// `generate_component_from_item_struct`/`_with_template`/`generate_component_from_item_impl` — it
+/// returns `Ok` carrying a `#[cfg(not(rust_analyzer))]`-gated `compile_error!` alongside the
+/// rust-analyzer shadow (`docs/design/tools/codegen_design.md` §3.2a), so a spurious same-crate
+/// registry-ordering miss under rust-analyzer never blanks out that shadow. Every pre-existing test
+/// asserting on one of these *registry-dependent* rejections goes through this helper instead of a
+/// bare `.expect_err(..)`; an *item-local* rejection (a malformed `view!`, an untagged `impl` method,
+/// ...) is unaffected and still returns a real `Err` this helper also accepts unchanged.
+#[cfg(test)]
+pub(crate) fn expect_generation_error(result: Result<proc_macro2::TokenStream, String>) -> String {
+    match result {
+        Err(error) => error,
+        Ok(tokens) => {
+            let s = tokens.to_string();
+            assert!(
+                s.contains("cfg (not (rust_analyzer))") && s.contains("compile_error !"),
+                "expected either a hard Err or an Ok(..) carrying a `#[cfg(not(rust_analyzer))]`-gated \
+                 compile_error! (Issue #146 dual expansion) — got: {s}"
+            );
+            s
+        }
+    }
 }
 
 /// The attribute-macro counterpart to `generate_component_from_item_struct`: takes a
@@ -166,15 +192,62 @@ pub fn generate_component_from_item_struct(
 }
 
 /// Generates a component whose `body: view!` is replaceable by a typed Environment template.
+///
+/// Issue #146: splits into an item-local phase (`component_frontend::component_and_view_from_item_struct`
+/// — a malformed `view!`/field attribute is a genuine mistake, reported unconditionally on both
+/// rust-analyzer and real `rustc`) and a registry-dependent phase (`register_component_struct_real`
+/// — template Environment Key resolution and cross-item `validate::validate`, both of which may fail
+/// spuriously under rust-analyzer's own incomplete same-crate registry expansion order even when the
+/// source is correctly ordered). The rust-analyzer struct shadow
+/// (`rust_analyzer_shadow::build_component_struct_shadow`) is built once the item-local phase
+/// succeeds, entirely independent of the registry-dependent phase's own outcome — see
+/// `docs/design/tools/codegen_design.md` §3.2a.
 pub fn generate_component_from_item_struct_with_template(
     base: Option<String>,
     template: Option<String>,
     item_struct: &syn::ItemStruct,
 ) -> Result<proc_macro2::TokenStream, String> {
     // Shape errors (a malformed `view!`, a bad field attribute, ...) are reported here, against the
-    // struct that actually contains them, rather than being deferred to the `impl` half.
+    // struct that actually contains them, rather than being deferred to the `impl` half. Item-local:
+    // always an unconditional error.
     let (component_def, view_def) =
         component_frontend::component_and_view_from_item_struct(base.clone(), item_struct)?;
+
+    let shadow = rust_analyzer_shadow::build_component_struct_shadow(
+        component_def.base.as_deref(),
+        item_struct,
+        &component_def,
+    )?;
+
+    match register_component_struct_real(base, template, item_struct, component_def, view_def) {
+        Ok(()) => Ok(shadow),
+        Err(error) => {
+            let gated_error = quote::quote! {
+                #[cfg(not(rust_analyzer))]
+                #[allow(unexpected_cfgs)]
+                compile_error!(#error);
+            };
+            Ok(quote::quote! {
+                #shadow
+                #gated_error
+            })
+        }
+    }
+}
+
+/// The registry-dependent half of `generate_component_from_item_struct_with_template` (Issue #146):
+/// template Environment Key resolution, cross-item `validate::validate` (chains in every same-crate
+/// sibling registry), and — only on success — registration into the same-crate Component registry.
+/// Emits no tokens of its own: the struct half always emits nothing (see this function's own tail
+/// doc comment on why the `impl` half emits the whole type) — the caller's own `shadow` is the only
+/// token output for a `struct` half either way.
+fn register_component_struct_real(
+    base: Option<String>,
+    template: Option<String>,
+    item_struct: &syn::ItemStruct,
+    component_def: ast::ComponentDef,
+    view_def: Option<ast::ViewDef>,
+) -> Result<(), String> {
     let name = component_def.name.clone();
     if let Some(template_name) = &template {
         let is_control = component_def
@@ -234,14 +307,14 @@ pub fn generate_component_from_item_struct_with_template(
         template.as_deref(),
         item_struct,
     );
-    // Emits nothing on purpose: the paired `#[elwindui::component] impl Name { .. }` generates the
-    // whole type. This mirrors `#[elwindui_macros::class]` exactly — there too the `struct` half
-    // only stashes what the `impl` half needs (`store_class_args`/`load_class_args`), and the
-    // `impl` half is what emits the trait, the trait impl and `new()`. Components need the same
-    // split because a `#[overridable]`/`#[overrides]` method body has nowhere to live on a bare
+    // The struct half emits nothing on purpose: the paired `#[elwindui::component] impl Name { .. }`
+    // generates the whole type. This mirrors `#[elwindui_macros::class]` exactly — there too the
+    // `struct` half only stashes what the `impl` half needs (`store_class_args`/`load_class_args`),
+    // and the `impl` half is what emits the trait, the trait impl and `new()`. Components need the
+    // same split because a `#[overridable]`/`#[overrides]` method body has nowhere to live on a bare
     // `struct`, and the generated type can only be emitted once — so it has to be emitted by
     // whichever half comes last, which is the `impl`.
-    Ok(proc_macro2::TokenStream::new())
+    Ok(())
 }
 
 /// The generating half of the pair: `#[elwindui::component] impl Name { .. }`, whose `struct`
@@ -259,7 +332,54 @@ pub fn generate_component_from_item_struct_with_template(
 /// An `#[overrides]` method also gets its base's original body kept as a private `__base_<name>`
 /// shadow (`codegen::resolve_effective_methods`), since `base::<name>(..)` in the override body is
 /// rewritten to `self.__base_<name>(..)`.
+///
+/// Issue #146: splits into an item-local phase (`component_frontend::methods_from_item_impl` — a
+/// malformed method signature/tag is a genuine mistake, reported unconditionally on both
+/// rust-analyzer and real `rustc`) and a registry-dependent phase (`generate_component_impl_real` —
+/// the paired struct's own same-crate registry lookup, cross-item `validate::validate`, and the rest
+/// of real generation, all of which may fail spuriously under rust-analyzer's own incomplete
+/// same-crate registry expansion order even when the source is correctly ordered — including the
+/// exact "no struct was expanded before this impl block" ghost diagnostic this Issue tracks). The
+/// rust-analyzer impl method shadow (`rust_analyzer_shadow::build_component_impl_shadow`) is built
+/// once the item-local phase succeeds, entirely independent of the registry-dependent phase's own
+/// outcome — see `docs/design/tools/codegen_design.md` §3.2a. A registry-dependent failure keeps its
+/// exact existing diagnostic text, just gated to `cfg(not(rust_analyzer))` so a real ordering mistake
+/// stays a real `cargo build`/`cargo check` error.
 pub fn generate_component_from_item_impl(
+    item_impl: &syn::ItemImpl,
+) -> Result<proc_macro2::TokenStream, String> {
+    // Item-local: a malformed method tag/signature is a genuine mistake, reported unconditionally —
+    // `build_component_impl_shadow` itself calls `component_frontend::methods_from_item_impl` first
+    // and propagates any such error via `?` below, so no separate check is needed here.
+    let shadow = rust_analyzer_shadow::build_component_impl_shadow(item_impl)?;
+
+    match generate_component_impl_real(item_impl) {
+        Ok(real) => {
+            let gated_real = rust_analyzer_shadow::gate_real_items_for_rustc(real)?;
+            Ok(quote::quote! {
+                #gated_real
+                #shadow
+            })
+        }
+        Err(error) => {
+            let gated_error = quote::quote! {
+                #[cfg(not(rust_analyzer))]
+                #[allow(unexpected_cfgs)]
+                compile_error!(#error);
+            };
+            Ok(quote::quote! {
+                #shadow
+                #gated_error
+            })
+        }
+    }
+}
+
+/// The registry-dependent half of `generate_component_from_item_impl` (Issue #146) — everything the
+/// original (pre-#146) function body did, unchanged, from the paired struct's own same-crate registry
+/// lookup through real code generation and registration. Returns the real generated tokens
+/// ungated; the caller gates them to `cfg(not(rust_analyzer))`.
+fn generate_component_impl_real(
     item_impl: &syn::ItemImpl,
 ) -> Result<proc_macro2::TokenStream, String> {
     let (name, methods) = component_frontend::methods_from_item_impl(item_impl)?;
@@ -1023,12 +1143,11 @@ mod control_template_tests {
             "#,
         )
         .unwrap();
-        let error = generate_component_from_item_struct_with_template(
+        let error = expect_generation_error(generate_component_from_item_struct_with_template(
             Some("ContentControl".to_string()),
             Some("codegen_control_template_key_c".to_string()),
             &item,
-        )
-        .expect_err("default template ids must be rejected");
+        ));
         assert!(error.contains("#[id"), "error: {error}");
     }
 
@@ -1048,12 +1167,11 @@ mod control_template_tests {
             "#,
         )
         .unwrap();
-        let error = generate_component_from_item_struct_with_template(
+        let error = expect_generation_error(generate_component_from_item_struct_with_template(
             Some("ContentControl".to_string()),
             Some("codegen_control_template_key_mismatch_e".to_string()),
             &item,
-        )
-        .expect_err("mismatched template key target must be rejected");
+        ));
         assert!(
             error.contains("Option<ControlTemplate<CodegenControlTemplatePanelE>>"),
             "error: {error}"
@@ -1091,12 +1209,12 @@ mod control_template_tests {
             "Option<ControlTemplate<CodegenControlTemplateNotControlD>>",
         )
         .unwrap();
-        let component_error = generate_component_from_item_struct_with_template(
-            Some("VerticalLayout".to_string()),
-            Some("codegen_control_template_key_d".to_string()),
-            &target,
-        )
-        .expect_err("template-enabled non-Control component must be rejected");
+        let component_error =
+            expect_generation_error(generate_component_from_item_struct_with_template(
+                Some("VerticalLayout".to_string()),
+                Some("codegen_control_template_key_d".to_string()),
+                &target,
+            ));
         assert!(component_error.contains("must inherit Control"));
     }
 }
@@ -1163,8 +1281,7 @@ mod dsl_enum_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = generate_component_from_item_struct(None, &item_struct)
-            .expect_err("non-exhaustive match should be rejected");
+        let err = expect_generation_error(generate_component_from_item_struct(None, &item_struct));
         assert!(
             err.contains("not exhaustive") && err.contains("Ready"),
             "error should name the missing variant: {err}"
@@ -1215,8 +1332,7 @@ mod viewmodel_registry_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = generate_component_from_item_struct(None, &item_struct)
-            .expect_err("a typo'd vm field reference should be rejected");
+        let err = expect_generation_error(generate_component_from_item_struct(None, &item_struct));
         assert!(err.contains("no_such_field"), "error: {err}");
     }
 
@@ -1249,8 +1365,7 @@ mod viewmodel_registry_tests {
             "#,
         )
         .unwrap();
-        let err = generate_component_from_item_struct(None, &item_struct)
-            .expect_err("#[bindable] on a non-viewmodel type should be rejected");
+        let err = expect_generation_error(generate_component_from_item_struct(None, &item_struct));
         assert!(err.contains("isn't a `viewmodel`"), "error: {err}");
     }
 }
@@ -1318,8 +1433,7 @@ mod store_registry_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = generate_component_from_item_struct(None, &item_struct)
-            .expect_err("#[async_computed] on a component prop should be rejected (rule 20)");
+        let err = expect_generation_error(generate_component_from_item_struct(None, &item_struct));
         assert!(err.contains("#[async_computed]"), "error: {err}");
         assert!(err.contains("viewmodel/store"), "error: {err}");
     }
@@ -1344,21 +1458,29 @@ mod component_impl_tests {
             .expect("struct half should generate");
     }
 
-    fn methods(src: &str) -> Result<String, String> {
+    fn methods(src: &str) -> Result<proc_macro2::TokenStream, String> {
         let item_impl: syn::ItemImpl = syn::parse_str(src).expect("impl should parse");
-        generate_component_from_item_impl(&item_impl).map(|t| t.to_string())
+        generate_component_from_item_impl(&item_impl)
     }
 
-    /// The `struct` half emits nothing at all now — every token comes from the `impl` half.
+    /// The `struct` half emits no *real* item at all now — every real token comes from the `impl`
+    /// half. Issue #146: it does now unconditionally emit a `cfg(rust_analyzer)`-only shadow, so this
+    /// checks for the absence of an unconditional/`cfg(not(rust_analyzer))` real item instead of bare
+    /// emptiness.
     #[test]
     fn the_struct_half_emits_nothing() {
         let item_struct: syn::ItemStruct =
             syn::parse_str(r#"struct MiSilent {}"#).expect("struct should parse");
         let out = generate_component_from_item_struct(None, &item_struct)
-            .expect("struct half should succeed");
+            .expect("struct half should succeed")
+            .to_string();
         assert!(
-            out.is_empty(),
-            "struct half should emit nothing, got: {out}"
+            out.contains("cfg (rust_analyzer)"),
+            "struct half should still emit its rust-analyzer shadow: {out}"
+        );
+        assert!(
+            !out.contains("cfg (not (rust_analyzer))"),
+            "struct half should emit no real (unconditional) item: {out}"
         );
     }
 
@@ -1373,7 +1495,8 @@ mod component_impl_tests {
             }
             "#,
         )
-        .expect("impl half should generate");
+        .expect("impl half should generate")
+        .to_string();
         assert!(
             out.contains("struct MiBase"),
             "the impl half emits the whole type: {out}"
@@ -1405,7 +1528,8 @@ mod component_impl_tests {
             }
             "#,
         )
-        .expect("derived impl should generate");
+        .expect("derived impl should generate")
+        .to_string();
         assert!(
             out.contains("fn __base_label"),
             "base body should be kept as a private shadow: {out}"
@@ -1423,15 +1547,14 @@ mod component_impl_tests {
             Some("crate::MiNoHook"),
             r#"struct MiNoHookChild { body: view! { MiNoHook { } }, }"#,
         );
-        let err = methods(
+        let err = expect_generation_error(methods(
             r#"
             impl MiNoHookChild {
                 #[overrides]
                 fn missing(&self) -> String { String::new() }
             }
             "#,
-        )
-        .expect_err("overriding a method the base never declared should be rejected");
+        ));
         assert!(err.contains("no matching"), "error: {err}");
     }
 
@@ -1451,15 +1574,14 @@ mod component_impl_tests {
             Some("crate::MiSigBase"),
             r#"struct MiSigChild { body: view! { MiSigBase { } }, }"#,
         );
-        let err = methods(
+        let err = expect_generation_error(methods(
             r#"
             impl MiSigChild {
                 #[overrides]
                 fn label(&self, extra: i32) -> String { let _ = extra; String::new() }
             }
             "#,
-        )
-        .expect_err("a different signature should be rejected");
+        ));
         assert!(err.contains("different signature"), "error: {err}");
     }
 
@@ -1476,15 +1598,14 @@ mod component_impl_tests {
 
     #[test]
     fn an_impl_before_its_struct_is_rejected() {
-        let err = methods(
+        let err = expect_generation_error(methods(
             r#"
             impl MiNeverDeclared {
                 #[overridable]
                 fn label(&self) -> String { String::new() }
             }
             "#,
-        )
-        .expect_err("an impl with no registered struct should be rejected");
+        ));
         assert!(err.contains("declare the struct first"), "error: {err}");
     }
 
@@ -1584,9 +1705,10 @@ mod environment_key_tests {
             "#,
         )
         .expect("struct should parse");
-        let err =
-            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct)
-                .expect_err("an unresolvable #[environment(name)] should be rejected");
+        let err = expect_generation_error(generate_component_from_item_struct(
+            Some("VerticalLayout".to_string()),
+            &item_struct,
+        ));
         assert!(
             err.contains("env_key_test_never_registered") && err.contains("isn't declared"),
             "error: {err}"
@@ -1691,9 +1813,9 @@ mod user_base_inherits_tests {
         generate_component_from_item_struct(base.map(str::to_string), &item_struct).map(|_| ())
     }
 
-    fn build(src: &str) -> Result<String, String> {
+    fn build(src: &str) -> Result<proc_macro2::TokenStream, String> {
         let item_impl: syn::ItemImpl = syn::parse_str(src).expect("impl should parse");
-        generate_component_from_item_impl(&item_impl).map(|t| t.to_string())
+        generate_component_from_item_impl(&item_impl)
     }
 
     /// `inherits crate::UbBase` (a fully crate-root-qualified path, as `#25`'s fix now requires
@@ -1715,7 +1837,9 @@ mod user_base_inherits_tests {
             r#"struct UbDerived { body: view! { UbBase { } }, }"#,
         )
         .expect("derived struct");
-        let out = build(r#"impl UbDerived { }"#).expect("derived impl should generate");
+        let out = build(r#"impl UbDerived { }"#)
+            .expect("derived impl should generate")
+            .to_string();
         assert!(
             out.contains("inherits = crate :: UbBase"),
             "expected the qualified path to survive into `#[elwindui::class(inherits = ..)]` \
@@ -1740,8 +1864,7 @@ mod user_base_inherits_tests {
             r#"struct UbBareDerived { body: view! { UbBareBase { } }, }"#,
         )
         .expect("derived struct");
-        let err = build(r#"impl UbBareDerived { }"#)
-            .expect_err("a bare name naming a user-defined base should be rejected");
+        let err = expect_generation_error(build(r#"impl UbBareDerived { }"#));
         assert!(
             err.contains("crate::ui::UbBareBase") || err.contains("crate::UbBareBase"),
             "error should suggest a qualified path: {err}"
@@ -1757,7 +1880,9 @@ mod user_base_inherits_tests {
             r#"struct UbBuiltinDerived { body: view! { TextBlock { text: "x" } }, }"#,
         )
         .expect("derived struct");
-        let out = build(r#"impl UbBuiltinDerived { }"#).expect("derived impl should generate");
+        let out = build(r#"impl UbBuiltinDerived { }"#)
+            .expect("derived impl should generate")
+            .to_string();
         assert!(
             out.contains("inherits = elwindui :: ui :: ContentControl"),
             "builtin base should stay fully-qualified via the existing `elwindui::ui::` rule: {out}"

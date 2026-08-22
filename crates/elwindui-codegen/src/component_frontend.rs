@@ -259,6 +259,132 @@ pub(crate) fn hidden_view_template_component(
     (component_def, view_def)
 }
 
+/// Visibility a [`component_public_shape`] accessor should be emitted with — mirrors the exact
+/// getter/setter visibility `codegen::generate_component`'s own field-classification loop already
+/// decides per `FieldKind` (that function's own `visibility` local, `#[state]`'s bare exception). Not
+/// a general Rust visibility type: only the two shapes any own-field accessor here ever actually
+/// gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShadowVisibility {
+    Public,
+    Private,
+}
+
+/// Issue #146: the source-local constructor/getter/setter surface one `#[elwindui::component]`
+/// struct's own fields alone (no ancestor/effective-field resolution, no `view!` cross-reference)
+/// determine — shared by `codegen::generate_component`'s own view-less real generation and every
+/// rust-analyzer Component struct shadow (`rust_analyzer_shadow::build_component_struct_shadow`), so
+/// the two can never independently drift. See [`component_public_shape`]'s own doc comment for the
+/// exact per-`FieldKind` rule and why a `has_view` component's richer, ancestor-composed/
+/// view-reference-driven constructor shape (`codegen::generate_view`) is a deliberately separate,
+/// unshared computation — `docs/design/tools/codegen_design.md` §3.2a.
+pub(crate) struct ComponentPublicShape {
+    /// `(field name, declared type)` pairs, in field order — exactly `new(..)`'s own positional
+    /// argument list for a required (non-deferred, no-initializer) `#[param]`/`#[bindable]` field.
+    pub constructor_params: Vec<(String, String)>,
+    /// `(field name, getter return type, visibility)` — every own field with a public or private
+    /// getter (every kind except `#[attached]`, a viewmodel/store-only kind, or a malformed
+    /// initializer combination `validate::validate` would already reject).
+    pub readable_fields: Vec<(String, String, ShadowVisibility)>,
+    /// `(field name, setter parameter type, visibility)` — a deferred `Option<T>` `#[param]` field's
+    /// setter takes the *inner* `T`, matching `codegen::generate_component`'s own deferred-setter
+    /// shape; a `#[prop]`/`#[state]` field's setter takes the full declared type.
+    pub writable_fields: Vec<(String, String, ShadowVisibility)>,
+}
+
+/// Classifies `component`'s own fields into the constructor/getter/setter surface described by
+/// [`ComponentPublicShape`] — the single source of truth `codegen::generate_component`'s view-less
+/// real generation and every rust-analyzer Component struct shadow (Issue #146) both consult, so the
+/// two can never independently drift. Deliberately **source-local only**: unlike
+/// `codegen::resolve_effective_fields`, this never resolves an inherited ancestor's own fields (a
+/// rust-analyzer shadow must never guess at another crate's/another same-crate registry entry's
+/// constructor shape) and never consults a `ViewDef` (unlike `codegen::generate_view`'s own richer,
+/// view-reference-driven deferred-field decision for a `has_view` component's own *ancestor-composed*
+/// constructor, which stays its own separate, real-generation-only computation — see this function's
+/// own doc comment above).
+///
+/// Per-`FieldKind` rule (mirrors `codegen::generate_component`'s own per-field `match` exactly):
+/// - `#[attached]`, and the viewmodel/store-only `Action`/`Observable`/`AsyncComputed` kinds (never
+///   legal on a real `#[elwindui::component]` field; `validate::validate` rejects them there): no
+///   constructor param, no accessor at all.
+/// - `#[environment(name)]`: never a constructor param; public getter only, no setter.
+/// - `#[computed(expr = ..)]`: never a constructor param; public getter only, no setter.
+/// - `#[param]`/`#[bindable]` (no initializer), declared `Option<T>`: never a constructor param
+///   (deferred); public getter (returning the full `Option<T>`) and public setter (taking bare `T`).
+/// - `#[param]`/`#[bindable]` (no initializer), any other type: a required constructor param; public
+///   getter, no setter (immutable after construction).
+/// - `#[prop(default = ..)]`: never a constructor param (defaulted); public getter and setter.
+/// - `#[state(default = ..)]`: never a constructor param; **private** getter and setter (never part
+///   of the component's external property surface — `ast::FieldKind::State`'s own doc comment).
+///
+/// A field combination `validate::validate` would reject anyway (e.g. a `#[param]` field carrying an
+/// initializer expression) contributes no constructor param and no accessor rather than panicking —
+/// a rust-analyzer shadow builder must stay self-contained and never abort a proc-macro-srv process
+/// over a shape mistake real validation would have caught first.
+pub(crate) fn component_public_shape(component: &ComponentDef) -> ComponentPublicShape {
+    let mut constructor_params = Vec::new();
+    let mut readable_fields = Vec::new();
+    let mut writable_fields = Vec::new();
+
+    for f in &component.fields {
+        match f.kind {
+            FieldKind::Attached
+            | FieldKind::Action
+            | FieldKind::Observable
+            | FieldKind::AsyncComputed => {
+                continue;
+            }
+            FieldKind::Environment => {
+                if f.initializer.is_some() {
+                    continue;
+                }
+                readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
+            }
+            FieldKind::Computed => {
+                if !matches!(f.initializer, Some(ast::Initializer::Expr(_))) {
+                    continue;
+                }
+                readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
+            }
+            FieldKind::Param => {
+                if f.initializer.is_some() {
+                    continue;
+                }
+                let (inner_ty, is_option) = crate::codegen::strip_option(&f.ty);
+                if is_option {
+                    readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
+                    writable_fields.push((
+                        f.name.clone(),
+                        inner_ty.to_string(),
+                        ShadowVisibility::Public,
+                    ));
+                } else {
+                    constructor_params.push((f.name.clone(), f.ty.clone()));
+                    readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
+                }
+            }
+            FieldKind::Prop | FieldKind::State => {
+                if !matches!(f.initializer, Some(ast::Initializer::Expr(_))) {
+                    continue;
+                }
+                let visibility = if f.kind == FieldKind::State {
+                    ShadowVisibility::Private
+                } else {
+                    ShadowVisibility::Public
+                };
+                readable_fields.push((f.name.clone(), f.ty.clone(), visibility));
+                writable_fields.push((f.name.clone(), f.ty.clone(), visibility));
+            }
+        }
+    }
+
+    ComponentPublicShape {
+        constructor_params,
+        readable_fields,
+        writable_fields,
+    }
+}
+
 /// The identifier of the crate currently being compiled, read fresh from the environment variables
 /// cargo (and rust-analyzer's own proc-macro-srv, same protocol/env vars) sets for *this*
 /// macro-expansion request. Mirrors `elwindui-macros/src/class.rs`'s own `compiling_crate_key`
@@ -304,6 +430,14 @@ struct StoredComponent {
 /// the same file. This only ever works in file/declaration order (a component can't see a sibling
 /// declared *after* it) — the same order-dependency `class.rs` already relies on and documents for
 /// its own struct-before-impl same-crate mechanism, not a new kind of fragility.
+///
+/// Issue #146: this registry is the strict source of truth for real `rustc`/`cargo build` only.
+/// rust-analyzer's own `struct`/`impl` name resolution never depends on this registry being complete
+/// at lookup time — see `rust_analyzer_shadow::build_component_struct_shadow`/
+/// `build_component_impl_shadow`, both of which build a self-contained shadow straight from the one
+/// `syn::ItemStruct`/`syn::ItemImpl` they're handed, with no lookup into this map at all — and
+/// `lib.rs::generate_component_from_item_impl`, which never lets a lookup miss here suppress that
+/// shadow (`docs/design/tools/codegen_design.md` §3.2a).
 fn same_crate_components() -> &'static Mutex<HashMap<(String, String), StoredComponent>> {
     static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredComponent>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -566,6 +700,14 @@ struct StoredEnvironmentKey {
 /// `EnvironmentContext::get`/`subscribe` with. Same declaration-order requirement as the other
 /// registries in this file — an environment key must be declared before the component(s)/
 /// `EnvironmentScope` that reference its name.
+///
+/// Issue #146: strict source of truth for real `rustc`/`cargo build` only — a `#[elwindui::theme]`
+/// field's same-crate key lookup miss here (`lookup_writable_environment_key`) never suppresses that
+/// Theme's own rust-analyzer shadow (`rust_analyzer_shadow::build_theme_shadow`, which never consults
+/// this registry at all — see `theme_frontend.rs`'s own dual-expansion split,
+/// `docs/design/tools/codegen_design.md` §3.2a). Environment Key/ViewModel/Store/DSL enum *defining*
+/// expansions themselves stay unchanged — they never depend on a sibling registry to define
+/// themselves, so they need no shadow of their own (AD-11 of the Issue #146 implementation contract).
 fn same_crate_environment_keys() -> &'static Mutex<HashMap<(String, String), StoredEnvironmentKey>>
 {
     static REGISTRY: OnceLock<Mutex<HashMap<(String, String), StoredEnvironmentKey>>> =

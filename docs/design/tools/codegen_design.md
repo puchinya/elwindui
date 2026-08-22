@@ -53,6 +53,34 @@ private template-instance Componentと`ControlTemplate<T>` factoryを生成す�
 
 Rust pathそのものの最終的な名前解決は生成後のrustcへ委譲する。別crateの型情報をmacro process内registryへ複製しない。
 
+### 3.2a rust-analyzerとの二重展開境界(#146)
+
+3.2のsame-crate registryは、「`cargo build`はクレートごとに新規プロセスでコンパイルし、宣言順に一度だけ展開されれば正しく埋まる」という通常rustcの前提の上でのみ機能する。rust-analyzerはワークスペース全体で1つの永続`proc-macro-srv`を使い、マクロ展開をインクリメンタル・オンデマンドに行うため、ソース上は正しい宣言順であってもregistry参照側が先に評価され、幽霊(ghost) diagnosticsを出すことがある(Component struct/impl pair、Theme→same-crate Environment Key参照が代表例)。
+
+`#[class]`マクロが既に採用している[rust-analyzer shadow expansion](class_macro_design.md#registry-and-analysis)と同じ二重展開modelを、Component/Themeにも適用する。
+
+```text
+normal rustc/cargo
+    -> 既存のstrict registry-backed expansion(3.2/3.3のまま)
+    -> #[cfg(not(rust_analyzer))] real generated items
+
+rust-analyzer
+    -> source-local/self-contained shadow expansion
+    -> #[cfg(rust_analyzer)] shadow items
+```
+
+境界となる原則は次のとおり。
+
+- **通常rustc側のstrict semanticsは変更しない。** source上で本当にmissingなComponent struct/same-crate Environment Keyは、通常の`cargo build`/`cargo check`では引き続きcompile errorになる。「rust-analyzerで誤診断になるからstrict validationを削除する」は採らない。
+- **validationをitem-localとregistry依存の2種類に分ける。** attribute構文、対応不能なtarget item、`view!`構文異常などitem単体で判定できるerrorは、RA/rustc問わず常時diagnosticのままにする。Component structの登録有無やTheme参照先Environment Keyの存在などcross-item registry依存のerrorだけを、`#[cfg(not(rust_analyzer))]`側のreal expansionへ限定する。
+- **rust-analyzer shadowはIDEのname/type resolutionに必要な最小限の形状のみを提供する。** 型名、constructor/property/methodのsurfaceだけを生成し、runtime実装やcross-item semantic validationをshadow内で再現しない——それらの一部のcross-item errorはIDEではなくcargo checkでのみ確定するという意図的なtrade-offである。
+- **rust-analyzer検出はconsumer側生成Rust itemsの`cfg(rust_analyzer)`だけで行う。** proc-macroプロセス内でenvironment変数・process名等からRA/rustcを推測しない。同様にproc-macroからsource filesystemを走査してregistryの穴を埋めることもしない——両方ともincremental analysis・unsaved buffer・macro hygiene・workspace isolationを壊すため採用しない。
+- **同じsource item -> 同じshadow shape。** rust-analyzerのproc-macro-srvが同じitemを複数回展開しても、shadowの正しさはprocess-local registryの過去の状態に依存してはならない。
+
+Component struct halfとimpl halfは、runtime上「struct halfはmetadata登録のみ、impl halfが実型を生成する」という既存contractのまま変わらない。rust-analyzer shadowだけは例外で、struct half自身がown source fieldsから型・constructor・property shapeのshadowを出し(`build_component_struct_shadow`)、impl halfはregistry lookupより前のitem-local method parsingからmethod shadowを出す(`build_component_impl_shadow`)。両者が使うconstructor/getter/setter classificationは、real generatorとも共有する単一のsource-local helper(`component_public_shape`、`crates/elwindui-codegen/src/component_frontend.rs`)に集約し、別実装として複製しない。Themeはmarker型と`Theme` implの存在だけをIDEへ伝えれば十分なため、Environment Keyごとのreal `set::<K>()` bodyを再現しないno-op shadow(`build_theme_shadow`)を生成する。real側とshadow側のtop-level itemsは常に`cfg(not(rust_analyzer))`/`cfg(rust_analyzer)`で排他になるよう、`crates/elwindui-codegen/src/rust_analyzer_shadow.rs`の`gate_real_items_for_rustc`が一箇所でcfg付与を担う。
+
+Environment Key/ViewModel/Store/DSL enumのdefining expansion(`#[elwindui::environment_key]`等)はそれ自身のdefinitionにprevious sibling registry lookupを必要としないため、shadow化の対象外とし、既存のself-contained expansionをそのまま維持する。
+
 真に外部(ローカル`TypeInfo`なし)なbaseを`inherits`し、自前の`view`内でbaseの属性を同名のまま裸参照している(`padding: padding`)component(Refs #90)については、baseの完全な field 一覧を持たないため、`resolve_effective_fields`は代わりにview自身の裸参照を唯一の証拠として当該fieldを合成する(`codegen.rs`の`synthesize_external_base_fields`)。合成されたfieldの型は具体的なRust型文字列ではなく、`{Base}!(@field_type {name})`という型位置macro呼び出し文字列——実際の型解決はconsumer crate側での`__elwindui_props_*!`展開(`class_macro_design.md`)まで遅延する、この節の冒頭の方針そのものの型情報版である。合成fieldの宣言元(`declaring_types`)は、辿れる祖先が存在しない以上、component自身とする。
 
 ### 3.3 Static validation

@@ -3045,6 +3045,19 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
         .map(|f| format_ident!("{}", f.name))
         .collect();
 
+    // PR #169 review remediation, round 2 (AD-R2-6): a no-initializer own field's deferred-vs-required
+    // membership is decided once, here, by `component_public_shape` — the same source-local
+    // classification `rust_analyzer_shadow::build_component_struct_shadow` and `generate_view`'s own
+    // own-field constructor decision (below, in this file) both consult — rather than this loop
+    // independently re-running `strip_option`/deferral logic (PR #169 review finding A2's own
+    // forbidden pattern). `view: None` matches this function's own view-less generation exactly.
+    let own_field_shape = crate::component_frontend::component_public_shape(c, None);
+    let deferred_own_fields: HashMap<&str, &str> = own_field_shape
+        .deferred_option_fields
+        .iter()
+        .map(|(name, _declared_ty, inner_ty)| (name.as_str(), inner_ty.as_str()))
+        .collect();
+
     for f in &c.fields {
         let field_ident = format_ident!("{}", f.name);
         let ty: syn::Type = syn::parse_str(&f.ty).expect("field type must parse");
@@ -3073,8 +3086,7 @@ fn generate_component(c: &ComponentDef, table: &SymbolTable) -> TokenStream {
                 // argument, plain storage, no setter. Every field is private (not `pub`) either
                 // way — external and internal reads alike go through the accessor below, since a
                 // deferred fields use storage specialized for post-construction mutation.
-                let (inner_ty_str, is_option) = strip_option(&f.ty);
-                if is_option {
+                if let Some(inner_ty_str) = deferred_own_fields.get(f.name.as_str()).copied() {
                     let inner_ty: syn::Type =
                         syn::parse_str(inner_ty_str).expect("field inner type must parse");
                     let cell_ty = if is_copy_type(inner_ty_str) {
@@ -3508,35 +3520,48 @@ fn generate_view(
         target: target.clone(),
     };
 
-    // `on_*`-named fields are excluded here for the same reason `TypeInfo::param_fields` (built
-    // separately, in `build_symbol_table`) already excludes them: a `#[routed]` field (`UIElement`'s
-    // own `on_tapped`/`on_pointer_pressed`/... — inherited by every component through
+    // PR #169 review remediation, round 2 (AD-R2-6): `component_public_shape` is the single
+    // source-local classification of which no-initializer own fields are constructor-eligible at
+    // all — computed once, here, before `param_names`/`param_types` (rather than at its previous
+    // position further below) so this list itself consults it instead of independently re-deriving
+    // the same `on_*`/`#[environment(..)]` exclusion. `component.fields` at this point is the
+    // *synthetic*, already-`effective_fields`-flattened `ComponentDef` (see this function's own
+    // caller, `Item::Component`'s arm) — every ancestor-forwarded field the base contributes is
+    // already present here too, so the shape sees them as if own, which is exactly what
+    // `param_names` itself has always needed (`forward_param_names`, below, slices this same list).
+    let own_field_shape = crate::component_frontend::component_public_shape(component, Some(view));
+    // `on_*`-named fields are excluded because a `#[routed]` field (`UIElement`'s own
+    // `on_tapped`/`on_pointer_pressed`/... — inherited by every component through
     // `resolve_effective_fields`, not just ones that declare it directly, e.g. `Button.on_click`) is
     // wired through the `on_x: ..` DSL attribute + `register_routed_handler` (`emit_wiring`'s own
-    // `is_routed` branch), never as a positional constructor argument — before this filter existed
-    // here, every `has_view` composed component's `new(..)` silently gained 9 required
+    // `is_routed` branch), never as a positional constructor argument — before this exclusion
+    // existed, every `has_view` composed component's `new(..)` silently gained 9 required
     // `fn(PointerEventArgs)`-typed parameters nothing ever supplied, breaking every existing call
     // site the moment these fields became inheritable (`RoundedPanel`/`DocumentView`, e.g.).
-    // `#[environment(name)]` fields are excluded here too — see `build_symbol_table`'s matching
-    // `param_fields` filter (`codegen.rs`, `Item::Component` arm) for why.
+    // `#[environment(name)]` fields never appear in `constructor_params`/`deferred_option_fields`
+    // either — see `build_symbol_table`'s matching `param_fields` filter (`codegen.rs`,
+    // `Item::Component` arm) for the parallel reasoning on the `TypeInfo` side.
+    let shape_param_eligible_names: HashSet<&str> = own_field_shape
+        .constructor_params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(
+            own_field_shape
+                .deferred_option_fields
+                .iter()
+                .map(|(name, _, _)| name.as_str()),
+        )
+        .collect();
     let param_names: Vec<syn::Ident> = component
         .fields
         .iter()
-        .filter(|f| {
-            f.initializer.is_none()
-                && !f.name.starts_with("on_")
-                && f.kind != FieldKind::Environment
-        })
+        .filter(|f| shape_param_eligible_names.contains(f.name.as_str()))
         .map(|f| format_ident!("{}", f.name))
         .collect();
     let param_types: Vec<syn::Type> = component
         .fields
         .iter()
-        .filter(|f| {
-            f.initializer.is_none()
-                && !f.name.starts_with("on_")
-                && f.kind != FieldKind::Environment
-        })
+        .filter(|f| shape_param_eligible_names.contains(f.name.as_str()))
         .map(|f| syn::parse_str(&f.ty).expect("field type must parse"))
         .collect();
 
@@ -3865,8 +3890,9 @@ fn generate_view(
     // `strip_option(..).1 && !view_references_name_anywhere(..)` rule independently — the exact
     // rust-analyzer Component struct shadow (`rust_analyzer_shadow::build_component_struct_shadow`)
     // consults, so the two can never silently drift. A synthesized field (absent from
-    // `component.fields`) falls back to the original direct computation unchanged.
-    let own_field_shape = crate::component_frontend::component_public_shape(component, Some(view));
+    // `component.fields`) falls back to the original direct computation unchanged. `own_field_shape`
+    // itself is computed once, above (before `param_names`), and reused here (AD-R2-6) rather than
+    // recomputed.
     let shape_deferred_names: HashSet<String> = own_field_shape
         .deferred_option_fields
         .iter()

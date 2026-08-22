@@ -277,10 +277,23 @@ pub(crate) enum ShadowVisibility {
 /// `has_view` generation, and every rust-analyzer Component struct shadow
 /// (`rust_analyzer_shadow::build_component_struct_shadow`), so all three can never independently
 /// drift. See [`component_public_shape`]'s own doc comment for the exact per-`FieldKind` rule.
+/// PR #169 review remediation, round 2 (AD-R2-4): the real `new(..)` return type — a view-less
+/// Component's own real generator (`codegen::generate_component`) returns a bare `Self`; a `has_view`
+/// Component's own real generator (`codegen::generate_view`) always returns `std::rc::Rc<Self>`. The
+/// rust-analyzer Component struct shadow consumes this directly rather than deciding independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComponentConstructorReturn {
+    SelfValue,
+    RcSelf,
+}
+
 pub(crate) struct ComponentPublicShape {
     /// `(field name, declared type)` pairs, in field order — exactly `new(..)`'s own positional
     /// argument list for a required (non-deferred, no-initializer) field.
     pub constructor_params: Vec<(String, String)>,
+    /// Whether real `new(..)` returns a bare `Self` or `std::rc::Rc<Self>` — see
+    /// [`ComponentConstructorReturn`]'s own doc comment.
+    pub constructor_return: ComponentConstructorReturn,
     /// `(field name, declared `Option<T>` type, inner `T` type)` for every deferred own field, in
     /// field order — real generation's own `Cell`/`RefCell<Option<T>>` storage and the rust-analyzer
     /// shadow's own setter-parameter type both read the inner `T` from here directly, rather than
@@ -382,6 +395,18 @@ pub(crate) fn component_public_shape(
                 readable_fields.push((f.name.clone(), f.ty.clone(), ShadowVisibility::Public));
             }
             FieldKind::Param | FieldKind::Prop if f.initializer.is_none() => {
+                // PR #169 review remediation, round 2 (AD-R2-5): a has-view Component's own
+                // `on_*`-named no-initializer field is a `#[routed]` callback wired through the
+                // `on_x: ..` DSL attribute + `register_routed_handler`
+                // (`codegen::generate_view`'s own `param_names`/`TypeInfo::param_fields`
+                // exclusion) — never a positional constructor argument or an ordinary
+                // getter/setter property. The view-less real path
+                // (`codegen::generate_component`) has no such exclusion (it has no `view!` to
+                // wire event handling from at all), so this only applies when `view` is
+                // `Some(..)`.
+                if view.is_some() && f.name.starts_with("on_") {
+                    continue;
+                }
                 let (inner_ty, is_option) = crate::codegen::strip_option(&f.ty);
                 let is_deferred = is_option
                     && !view.is_some_and(|view| {
@@ -443,8 +468,15 @@ pub(crate) fn component_public_shape(
         }
     }
 
+    let constructor_return = if view.is_some() {
+        ComponentConstructorReturn::RcSelf
+    } else {
+        ComponentConstructorReturn::SelfValue
+    };
+
     ComponentPublicShape {
         constructor_params,
+        constructor_return,
         deferred_option_fields,
         readable_fields,
         writable_fields,

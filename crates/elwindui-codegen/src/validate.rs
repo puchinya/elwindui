@@ -10,8 +10,87 @@ use crate::codegen::{self, SymbolTable, strip_option, strip_rc_wrapper, strip_we
 use std::collections::{HashMap, HashSet};
 use syn::visit::Visit;
 
+/// PR #169 review remediation (A1, round 2): whether a [`ValidationDiagnostic`] is decidable from
+/// the current component's own module alone (`ItemLocal`) or its presence/absence depends on
+/// same-crate sibling module data being available (`RegistryDependent`) — see
+/// `docs/design/tools/codegen_design.md` §3.2a's item-local/registry-dependent split. Under
+/// rust-analyzer, only `RegistryDependent` diagnostics may be suppressed (routed to a
+/// `cfg(not(rust_analyzer))`-gated real error instead of an unconditional one) — `ItemLocal`
+/// diagnostics are a genuine mistake decidable without any registry, so they must remain an
+/// unconditional diagnostic on both rust-analyzer and real `rustc`.
+///
+/// Round 2 of the review replaced an earlier behavioral (run-`validate`-twice-and-diff-messages)
+/// classifier with this: every validation rule now chooses its own dependency at the exact point
+/// it emits a diagnostic, via [`ValidationErrors::item_local`]/[`ValidationErrors::registry_dependent`]
+/// below — structural metadata attached at the source, never inferred from message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValidationDependency {
+    ItemLocal,
+    RegistryDependent,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ValidationDiagnostic {
+    pub dependency: ValidationDependency,
+    pub message: String,
+}
+
+/// The single diagnostic sink every validation helper in this file writes through — replaces the
+/// former bare `&mut Vec<String>` so that every call site is forced to choose
+/// [`ValidationDependency::ItemLocal`] or [`ValidationDependency::RegistryDependent`] explicitly,
+/// rather than leaving dependency to be inferred after the fact.
+struct ValidationErrors {
+    diagnostics: Vec<ValidationDiagnostic>,
+}
+
+impl ValidationErrors {
+    fn new() -> Self {
+        Self {
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// A diagnostic decidable from the current item alone (the current `ComponentDef`'s own
+    /// fields, the current `ViewExpr`/`ElementNode` structure, current-item attribute syntax, ...)
+    /// — no same-crate sibling/registry data was consulted to produce it.
+    fn item_local(&mut self, message: impl Into<String>) {
+        self.diagnostics.push(ValidationDiagnostic {
+            dependency: ValidationDependency::ItemLocal,
+            message: message.into(),
+        });
+    }
+
+    /// A diagnostic whose correctness depends on same-crate sibling module data (a `SymbolTable`
+    /// lookup, a sibling `#[elwindui::viewmodel]`/`#[elwindui::dsl_enum]`'s own fields/variants, ...)
+    /// that may be legitimately absent under rust-analyzer's own incomplete expansion order even
+    /// when the source is correctly ordered.
+    fn registry_dependent(&mut self, message: impl Into<String>) {
+        self.diagnostics.push(ValidationDiagnostic {
+            dependency: ValidationDependency::RegistryDependent,
+            message: message.into(),
+        });
+    }
+}
+
+/// Compatibility projection of [`validate_classified`] — every existing (pre-#169) caller that
+/// only needs the combined message list, not per-diagnostic dependency, keeps working unchanged.
+/// Contains no validation logic of its own.
 pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
-    let mut errors = Vec::new();
+    let diagnostics = validate_classified(modules);
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(diagnostics.into_iter().map(|d| d.message).collect())
+    }
+}
+
+/// The real validation entry point (PR #169 review remediation, A1, round 2) — a single traversal
+/// producing classified [`ValidationDiagnostic`]s directly, via the [`ValidationErrors`] sink every
+/// helper below writes through. `lib.rs`'s Component generators call this directly so they can
+/// route an `ItemLocal` diagnostic to an unconditional error and a `RegistryDependent` one to a
+/// `cfg(not(rust_analyzer))`-gated error, independently, even when both occur in the same pass.
+pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnostic> {
+    let mut errors = ValidationErrors::new();
     let enum_variants: HashMap<String, HashSet<String>> = modules
         .iter()
         .flat_map(|module| &module.items)
@@ -61,7 +140,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     // real production frontend, doesn't even parse this attribute name) — this gate
                     // only ever fires for `parser.rs`'s test-only textual-DSL frontend.
                     if c.embedded && !module.is_builtin {
-                        errors.push(format!(
+                        errors.item_local(format!(
                             "{}: #[embedded] can only be used on a component from elwindui-codegen's own \
                              BUILTIN_SHAPE_SOURCE, not a consumer's own source",
                             c.name
@@ -77,7 +156,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     // crate's own builtin shape declarations.
                     if c.text_style {
                         if !module.is_builtin {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}: #[text_style] can only be used on a component from elwindui-codegen's \
                                  own BUILTIN_SHAPE_SOURCE, not a consumer's own source",
                                 c.name
@@ -93,7 +172,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                             if crate::text_style::is_text_style_field_name(&f.name)
                                 && !seen.insert(f.name.as_str())
                             {
-                                errors.push(format!(
+                                errors.item_local(format!(
                                     "{}: #[text_style] already declares `{}` — remove this component's own \
                                      field with the same name",
                                     c.name, f.name
@@ -112,14 +191,14 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     // `resolve_is_native`'s `#[native]` fallback assumes (no `base`, no own `view`).
                     if c.native {
                         if !module.is_builtin {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}: #[native] can only be used on a component from elwindui-codegen's own \
                                  BUILTIN_SHAPE_SOURCE, not a consumer's own source",
                                 c.name
                             ));
                         }
                         if c.base.is_some() {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}: #[native] components must have no `inherits` base — it marks a leaf \
                                  with no meaningful inheritance ancestor at all (e.g. WinUI3's `Window : \
                                  Object`); use `inherits NativeControl` instead if `{}` does share a real \
@@ -132,7 +211,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                             .iter()
                             .any(|item| matches!(item, Item::View(v) if v.target == c.name));
                         if has_own_view {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}: #[native] components must have no `view` of its own — each backend \
                                  crate hand-writes the real Rust implementation directly",
                                 c.name
@@ -157,7 +236,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                             .iter()
                             .any(|item| matches!(item, Item::View(v) if v.target == c.name));
                         if has_own_view {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}: a component with a `body: view! {{ .. }}` field must declare \
                                  `inherits <Base>` — `view!`'s top-level attributes write into the \
                                  base's own fields and its bare child elements bind into the base's \
@@ -180,7 +259,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         let effective_fields =
                             codegen::resolve_effective_fields(module, c, modules);
                         if !effective_fields.iter().any(|f| &f.name == name) {
-                            errors.push(format!(
+                            errors.registry_dependent(format!(
                                 "{}: #[content({name})] names a field that doesn't exist on `{}`",
                                 c.name, c.name
                             ));
@@ -189,7 +268,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
 
                     for f in &c.fields {
                         if f.kind == FieldKind::State && f.initializer.is_none() {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}.{}: #[state] field needs `default = expr`",
                                 c.name, f.name
                             ));
@@ -199,14 +278,14 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         // never a plain `component` prop (docs/design/runtime/state_management_design.md
                         // "Async work").
                         if f.kind == FieldKind::AsyncComputed {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}.{}: #[async_computed] may only attach to a viewmodel/store \
                                  field, not a component prop",
                                 c.name, f.name
                             ));
                         }
                         if f.kind == FieldKind::State && !f.attrs.is_empty() {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}.{}: #[state] cannot be combined with other field attributes",
                                 c.name, f.name
                             ));
@@ -215,7 +294,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         // *themselves* via `Owner::field: value` — it needs a default value for
                         // whichever of them never set it explicitly (see `check_attached_properties`).
                         if f.kind == FieldKind::Attached && f.initializer.is_none() {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}.{}: #[attached] field needs a default value (e.g. `= 0`)",
                                 c.name, f.name
                             ));
@@ -249,7 +328,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                 && crate::component_frontend::lookup_environment_key(key_name)
                                     .is_none()
                             {
-                                errors.push(format!(
+                                errors.registry_dependent(format!(
                                     "{}.{}: #[environment({key_name})] references an Environment \
                                      Key that isn't declared by any \
                                      #[elwindui::environment_key(name = {key_name}, ..)] earlier \
@@ -269,7 +348,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                         if f.attrs.iter().any(|a| matches!(a, Attr::Bindable))
                             && strip_rc_wrapper(&f.ty) == f.ty.trim()
                         {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}.{}: #[bindable] field must be `Rc<..>`-wrapped, found `{}`",
                                 c.name, f.name, f.ty
                             ));
@@ -289,7 +368,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                             let inner = strip_rc_wrapper(&f.ty);
                             if let Some(info) = table.resolve(module, inner) {
                                 if !info.is_viewmodel {
-                                    errors.push(format!(
+                                    errors.registry_dependent(format!(
                                         "{}.{}: #[bindable] field's type `{}` isn't a `viewmodel` — \
                                          #[bindable] is only for injecting a viewmodel",
                                         c.name, f.name, inner
@@ -434,7 +513,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                                     &mut errors,
                                 );
                             }
-                            None => errors.push(format!(
+                            None => errors.registry_dependent(format!(
                                 "{}: view root must be exactly one element unless it inherits a \
                                  composable base",
                                 c.name
@@ -447,7 +526,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     // construction: `ViewModelDef` has no `view` body in this AST.
                     for field in &viewmodel.fields {
                         if field.kind == FieldKind::State {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}.{}: #[state] is only allowed on a component",
                                 viewmodel.name, field.name
                             ));
@@ -460,7 +539,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
                     // `viewmodel` uses, which has no syntax that could carry an `ElementNode`).
                     for field in &store.fields {
                         if field.kind == FieldKind::State {
-                            errors.push(format!(
+                            errors.item_local(format!(
                                 "{}.{}: #[state] is only allowed on a component",
                                 store.name, field.name
                             ));
@@ -472,87 +551,7 @@ pub fn validate(modules: &[Module]) -> Result<(), Vec<String>> {
         }
     }
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors)
-    }
-}
-
-/// PR #169 review remediation (A1): whether a [`ValidationDiagnostic`] is decidable from the
-/// current component's own module alone (`ItemLocal`) or its presence/absence depends on
-/// same-crate sibling module data being available (`RegistryDependent`) — see
-/// `docs/design/tools/codegen_design.md` §3.2a's item-local/registry-dependent split. Under
-/// rust-analyzer, only `RegistryDependent` diagnostics may be suppressed (routed to a
-/// `cfg(not(rust_analyzer))`-gated real error instead of an unconditional one) — `ItemLocal`
-/// diagnostics are a genuine mistake decidable without any registry, so they must remain an
-/// unconditional diagnostic on both rust-analyzer and real `rustc`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ValidationDependency {
-    ItemLocal,
-    RegistryDependent,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ValidationDiagnostic {
-    pub dependency: ValidationDependency,
-    pub message: String,
-}
-
-/// Classifies every diagnostic [`validate`] would produce for `modules` into
-/// [`ValidationDependency::ItemLocal`] vs [`ValidationDependency::RegistryDependent`] — the
-/// classification `lib.rs`'s Component generators need to decide whether a `validate::validate`
-/// failure may be routed to a rust-analyzer-suppressible gated error (Issue #146) or must stay an
-/// unconditional diagnostic (PR #169 review finding A1: the pre-remediation code treated the
-/// *entire* `validate::validate` outcome as registry-dependent, which wrongly hid genuinely
-/// item-local mistakes — e.g. `#[async_computed]` on a plain component field — from
-/// rust-analyzer).
-///
-/// `modules[0]` is assumed to be the "current" module under validation and every other entry a
-/// same-crate sibling chained in for cross-item resolution — exactly the shape every existing
-/// caller already builds (`std::iter::once(module).chain(sibling_component_modules(..))...`).
-///
-/// Rather than hand-classifying each of `validate`'s ~60 own diagnostic call sites (a
-/// `dependency` tag threaded through a ~4000-line, deeply nested function, guaranteed to drift out
-/// of sync with that function's own evolution the first time a new check is added without
-/// remembering to tag it), this classifies **behaviorally**: `validate` is run twice — once
-/// against the full `modules` slice (siblings included, `full_errors`) and once against
-/// `modules[0]` alone (`isolated_errors`, no sibling context at all). A diagnostic message that
-/// appears in `full_errors` is `ItemLocal` exactly when it *also* appears in `isolated_errors` —
-/// i.e. the current module already fails this way with **no** sibling data present at all, so
-/// nothing about same-crate registry completeness could have suppressed or produced it. Any
-/// `full_errors` message absent from `isolated_errors` is `RegistryDependent` by construction: its
-/// presence causally depended on sibling module data actually being available (a same-crate
-/// `#[bindable]`-target-is-a-viewmodel check, an enum-exhaustiveness check against a sibling
-/// `#[elwindui::dsl_enum]`, a `vm.field` reference resolving through a sibling `#[elwindui::
-/// viewmodel]`, ...). This is a stricter, self-maintaining property than a hand-classified table —
-/// it can never fall out of sync with what `validate` actually does, at the cost of one extra
-/// (cheap — a handful of AST nodes) `validate` call per generation attempt that already failed.
-pub(crate) fn validate_classified(modules: &[Module]) -> Vec<ValidationDiagnostic> {
-    let Err(full_errors) = validate(modules) else {
-        return Vec::new();
-    };
-    let isolated_errors: HashSet<String> = match modules.first() {
-        Some(own_module) => match validate(std::slice::from_ref(own_module)) {
-            Err(errors) => errors.into_iter().collect(),
-            Ok(()) => HashSet::new(),
-        },
-        None => HashSet::new(),
-    };
-    full_errors
-        .into_iter()
-        .map(|message| {
-            let dependency = if isolated_errors.contains(&message) {
-                ValidationDependency::ItemLocal
-            } else {
-                ValidationDependency::RegistryDependent
-            };
-            ValidationDiagnostic {
-                dependency,
-                message,
-            }
-        })
-        .collect()
+    errors.diagnostics
 }
 
 #[derive(Clone, Copy)]
@@ -567,14 +566,14 @@ fn check_binding_assignments(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     let target_info = table.resolve(from, &node.type_path);
     for attribute in &node.attributes {
         if attribute.kind != AssignmentKind::Once
             && let Some(macro_name) = unsupported_dependency_macro(&attribute.value)
         {
-            errors.push(format!(
+            errors.item_local(format!(
                 "{}: {}:{}: cannot safely analyze dependencies inside `{macro_name}!`; wrap the whole RHS in once!(...) to evaluate it only during initialization",
                 component.name, attribute.span.line, attribute.span.column
             ));
@@ -583,7 +582,7 @@ fn check_binding_assignments(
             let location = format!("{}:{}", attribute.span.line, attribute.span.column);
             match target_info {
                 Some(info) if info.two_way_fields.contains(&attribute.name) => {}
-                Some(_) => errors.push(format!(
+                Some(_) => errors.registry_dependent(format!(
                     "{}: {location}: `{}.{}` does not support #[two_way]",
                     component.name, node.type_path, attribute.name
                 )),
@@ -606,11 +605,11 @@ fn check_binding_assignments(
                     let source = &path[0];
                     match component.fields.iter().find(|field| &field.name == source) {
                         Some(field) if matches!(field.kind, FieldKind::Prop | FieldKind::State) => {}
-                        Some(field) => errors.push(format!(
+                        Some(field) => errors.item_local(format!(
                             "{}: {location}: `{source}` is {:?}; a two-way source must be a mutable #[prop] or #[state] field",
                             component.name, field.kind
                         )),
-                        None => errors.push(format!(
+                        None => errors.item_local(format!(
                             "{}: {location}: unknown two-way source `{source}`",
                             component.name
                         )),
@@ -632,32 +631,32 @@ fn check_binding_assignments(
                             };
                             match table.resolve(from, owner_ty) {
                                 Some(info) if info.fields.contains_key(property) => {}
-                                Some(_) => errors.push(format!(
+                                Some(_) => errors.registry_dependent(format!(
                                     "{}: {location}: bindable owner `{owner}` has no property `{property}`",
                                     component.name
                                 )),
-                                None => errors.push(format!(
+                                None => errors.registry_dependent(format!(
                                     "{}: {location}: cannot resolve bindable owner type `{owner_ty}`",
                                     component.name
                                 )),
                             }
                         }
-                        Some(_) => errors.push(format!(
+                        Some(_) => errors.item_local(format!(
                             "{}: {location}: `{owner}` is not a direct #[bindable] owner",
                             component.name
                         )),
-                        None => errors.push(format!(
+                        None => errors.item_local(format!(
                             "{}: {location}: unknown bindable owner `{owner}`",
                             component.name
                         )),
                     }
                 }
-                ViewExpr::Path(path) => errors.push(format!(
+                ViewExpr::Path(path) => errors.item_local(format!(
                     "{}: {location}: unsupported two-way path `{}`; use a component field or direct bindable owner.field",
                     component.name,
                     path.join(".")
                 )),
-                _ => errors.push(format!(
+                _ => errors.item_local(format!(
                     "{}: {location}: two-way RHS must be a writable component field or direct bindable owner.field",
                     component.name
                 )),
@@ -737,17 +736,17 @@ fn check_for_item_two_way_target(
     component: &ComponentDef,
     table: &SymbolTable,
     location: &str,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     let ViewExpr::Path(path) = expr else {
-        errors.push(format!(
+        errors.item_local(format!(
             "{}: {location}: two-way binding in a `for` item template must target a direct `{}` field path",
             component.name, for_binding.name
         ));
         return;
     };
     let [owner, property] = path.as_slice() else {
-        errors.push(format!(
+        errors.item_local(format!(
             "{}: {location}: unsupported two-way `for` item path `{}`; use `{}.field`",
             component.name,
             path.join("."),
@@ -756,7 +755,7 @@ fn check_for_item_two_way_target(
         return;
     };
     if owner != for_binding.name {
-        errors.push(format!(
+        errors.item_local(format!(
             "{}: {location}: two-way binding in a `for` item template must target `{}.field`",
             component.name, for_binding.name
         ));
@@ -765,34 +764,43 @@ fn check_for_item_two_way_target(
 
     let item_info = match resolve_for_item_info(for_binding.collection, from, component, table) {
         Ok(info) => info,
-        Err(reason) => {
-            errors.push(format!(
+        Err((dependency, reason)) => {
+            let message = format!(
                 "{}: {location}: cannot use `{}` as a two-way `for` item target: {reason}",
                 component.name,
                 path.join(".")
-            ));
+            );
+            match dependency {
+                ValidationDependency::ItemLocal => errors.item_local(message),
+                ValidationDependency::RegistryDependent => errors.registry_dependent(message),
+            }
             return;
         }
     };
     match item_info.fields.get(property) {
         Some(FieldKind::Prop | FieldKind::Observable) => {}
-        Some(kind) => errors.push(format!(
+        Some(kind) => errors.registry_dependent(format!(
             "{}: {location}: `{}.{property}` is {kind:?}; a two-way `for` item target must be a mutable #[prop] or #[observable] field",
             component.name, for_binding.name
         )),
-        None => errors.push(format!(
+        None => errors.registry_dependent(format!(
             "{}: {location}: `for` item type has no property `{property}`",
             component.name
         )),
     }
 }
 
+/// PR #169 review remediation, round 2 (A1): returns a classified `(ValidationDependency, String)`
+/// error rather than a bare `String` — this helper's own branches genuinely mix item-local
+/// reasons (an unknown/non-`#[bindable]` own field) with registry-dependent ones (a `table.resolve`
+/// miss), so the caller (`check_for_item_two_way_target`) must not blanket-classify whatever comes
+/// back; each branch tags its own reason at the point it's produced.
 fn resolve_for_item_info<'a>(
     collection: &ViewExpr,
     from: &Module,
     component: &ComponentDef,
     table: &'a SymbolTable,
-) -> Result<&'a crate::codegen::TypeInfo, String> {
+) -> Result<&'a crate::codegen::TypeInfo, (ValidationDependency, String)> {
     let (collection_ty, is_viewmodel_observable) = match collection {
         ViewExpr::Path(path) if path.len() == 1 => {
             let name = &path[0];
@@ -800,7 +808,12 @@ fn resolve_for_item_info<'a>(
                 .fields
                 .iter()
                 .find(|field| &field.name == name)
-                .ok_or_else(|| format!("collection `{name}` is not a component field"))?;
+                .ok_or_else(|| {
+                    (
+                        ValidationDependency::ItemLocal,
+                        format!("collection `{name}` is not a component field"),
+                    )
+                })?;
             (field.ty.as_str(), false)
         }
         ViewExpr::Path(path) if path.len() == 2 => {
@@ -810,7 +823,12 @@ fn resolve_for_item_info<'a>(
                 .fields
                 .iter()
                 .find(|field| &field.name == owner)
-                .ok_or_else(|| format!("collection owner `{owner}` is not a component field"))?;
+                .ok_or_else(|| {
+                    (
+                        ValidationDependency::ItemLocal,
+                        format!("collection owner `{owner}` is not a component field"),
+                    )
+                })?;
             let is_templated_parent = owner_field.name == "templated_parent"
                 && strip_weak_wrapper(&owner_field.ty) != owner_field.ty.trim();
             if !owner_field
@@ -819,20 +837,28 @@ fn resolve_for_item_info<'a>(
                 .any(|attr| matches!(attr, Attr::Bindable))
                 && !is_templated_parent
             {
-                return Err(format!("collection owner `{owner}` is not #[bindable]"));
+                return Err((
+                    ValidationDependency::ItemLocal,
+                    format!("collection owner `{owner}` is not #[bindable]"),
+                ));
             }
             let owner_ty = if is_templated_parent {
                 strip_weak_wrapper(&owner_field.ty)
             } else {
                 strip_rc_wrapper(&owner_field.ty)
             };
-            let owner_info = table
-                .resolve(from, owner_ty)
-                .ok_or_else(|| format!("cannot resolve collection owner type `{owner_ty}`"))?;
-            let collection_ty = owner_info
-                .value_field_types
-                .get(name)
-                .ok_or_else(|| format!("bindable owner `{owner}` has no collection `{name}`"))?;
+            let owner_info = table.resolve(from, owner_ty).ok_or_else(|| {
+                (
+                    ValidationDependency::RegistryDependent,
+                    format!("cannot resolve collection owner type `{owner_ty}`"),
+                )
+            })?;
+            let collection_ty = owner_info.value_field_types.get(name).ok_or_else(|| {
+                (
+                    ValidationDependency::RegistryDependent,
+                    format!("bindable owner `{owner}` has no collection `{name}`"),
+                )
+            })?;
             (
                 collection_ty.as_str(),
                 owner_info.is_viewmodel
@@ -840,12 +866,20 @@ fn resolve_for_item_info<'a>(
             )
         }
         ViewExpr::Path(path) => {
-            return Err(format!(
-                "collection path `{}` is not a direct component or bindable-owner field",
-                path.join(".")
+            return Err((
+                ValidationDependency::ItemLocal,
+                format!(
+                    "collection path `{}` is not a direct component or bindable-owner field",
+                    path.join(".")
+                ),
             ));
         }
-        _ => return Err("collection is not a statically resolvable path".to_string()),
+        _ => {
+            return Err((
+                ValidationDependency::ItemLocal,
+                "collection is not a statically resolvable path".to_string(),
+            ));
+        }
     };
 
     let item_ty = explicit_rc_vec_item_type(collection_ty).or_else(|| {
@@ -859,13 +893,19 @@ fn resolve_for_item_info<'a>(
         }
     });
     let item_ty = item_ty.ok_or_else(|| {
-        format!(
-            "collection type `{collection_ty}` does not provide stable Vec<Rc<T>> item identity"
+        (
+            ValidationDependency::ItemLocal,
+            format!(
+                "collection type `{collection_ty}` does not provide stable Vec<Rc<T>> item identity"
+            ),
         )
     })?;
-    table
-        .resolve(from, item_ty)
-        .ok_or_else(|| format!("cannot resolve `for` item type `{item_ty}`"))
+    table.resolve(from, item_ty).ok_or_else(|| {
+        (
+            ValidationDependency::RegistryDependent,
+            format!("cannot resolve `for` item type `{item_ty}`"),
+        )
+    })
 }
 
 fn explicit_rc_vec_item_type(ty: &str) -> Option<&str> {
@@ -942,7 +982,7 @@ fn check_binding_assignment_child(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     if let ChildEntry::Literal(element) = child {
         check_binding_assignments(element, from, component, table, for_binding, errors);
@@ -964,7 +1004,7 @@ fn check_binding_assignments_in_expr(
     component: &ComponentDef,
     table: &SymbolTable,
     for_binding: Option<ForBinding<'_>>,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match expr {
         ViewExpr::Element(element) => {
@@ -985,7 +1025,7 @@ fn check_match_exhaustiveness(
     module: &Module,
     table: &SymbolTable,
     enum_variants: &HashMap<String, HashSet<String>>,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     for child in &node.children {
         check_match_in_child(
@@ -1007,7 +1047,7 @@ fn check_match_in_child(
     module: &Module,
     table: &SymbolTable,
     enum_variants: &HashMap<String, HashSet<String>>,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match child {
         ChildEntry::Literal(node) => check_match_exhaustiveness(
@@ -1086,7 +1126,7 @@ fn check_match_in_child(
                     let mut missing: Vec<_> = enum_name.difference(&covered).cloned().collect();
                     missing.sort();
                     if !missing.is_empty() {
-                        errors.push(format!(
+                        errors.registry_dependent(format!(
                             "{}: match is not exhaustive; missing {}",
                             component.name,
                             missing.join(", ")
@@ -1125,7 +1165,7 @@ fn find_vm_fields<'a>(
     fields: &'a [FieldDef],
     table: &SymbolTable,
     known_type_names: &HashSet<&str>,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) -> HashMap<&'a str, &'a str> {
     let mut vm_fields = HashMap::new();
     for f in fields {
@@ -1140,7 +1180,7 @@ fn find_vm_fields<'a>(
         if table.resolve(from, ty).is_some() {
             vm_fields.insert(f.name.as_str(), ty);
         } else {
-            errors.push(format!(
+            errors.registry_dependent(format!(
                 "{owner_name}.{}: type `{}` is not in scope here — add a `use` for it (or define it in this file)",
                 f.name, f.ty
             ));
@@ -1167,7 +1207,7 @@ fn check_vm_references(
     vm_fields: &HashMap<&str, &str>,
     table: &SymbolTable,
     exempt_root_type: Option<&str>,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     if exempt_root_type != Some(node.type_path.as_str()) {
         check_not_abstract(node, from, component_name, table, errors);
@@ -1204,11 +1244,11 @@ fn check_deferred_view_assignment(
     from: &Module,
     component_name: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     let location = format!("{}:{}", attribute.span.line, attribute.span.column);
     if attribute.kind == AssignmentKind::TwoWay {
-        errors.push(format!(
+        errors.item_local(format!(
             "{component_name}: {location}: `{}.{}` — a deferred view (`view! {{ .. }}`) cannot be \
              the target of `<=>`; it has no writable value to read back from",
             node.type_path, attribute.name
@@ -1216,7 +1256,7 @@ fn check_deferred_view_assignment(
         return;
     }
     if attribute.kind == AssignmentKind::Once {
-        errors.push(format!(
+        errors.item_local(format!(
             "{component_name}: {location}: `{}.{}` — `once!(view! {{ .. }})` is redundant: a \
              deferred view is already built once per popup-open, never resynced; write `{}: view! \
              {{ .. }}` directly",
@@ -1237,7 +1277,7 @@ fn check_deferred_view_assignment(
         .unwrap_or(inner)
         .trim();
     if bare_name != "ViewTemplate" {
-        errors.push(format!(
+        errors.registry_dependent(format!(
             "{component_name}: {location}: `{}.{}` is declared `{declared_ty}`, not `ViewTemplate` \
              / `Option<ViewTemplate>` — a deferred view (`view! {{ .. }}`) can only be assigned to a \
              `ViewTemplate`-typed property",
@@ -1252,7 +1292,7 @@ fn check_child_vm_references(
     component_name: &str,
     vm_fields: &HashMap<&str, &str>,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match child {
         ChildEntry::Literal(element) => check_vm_references(
@@ -1311,13 +1351,13 @@ fn check_not_abstract(
     from: &Module,
     component_name: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     if table
         .resolve(from, &node.type_path)
         .is_some_and(|info| info.is_abstract)
     {
-        errors.push(format!(
+        errors.registry_dependent(format!(
             "{component_name}: `{}` is #[abstract] and cannot be instantiated directly — use a concrete subtype instead",
             node.type_path
         ));
@@ -1330,7 +1370,7 @@ fn check_vm_expr(
     component_name: &str,
     vm_fields: &HashMap<&str, &str>,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match expr {
         ViewExpr::Path(path) => match path.as_slice() {
@@ -1340,7 +1380,7 @@ fn check_vm_expr(
                         .resolve(from, ty)
                         .is_some_and(|info| info.fields.contains_key(field.as_str()));
                     if !has_field {
-                        errors.push(format!(
+                        errors.registry_dependent(format!(
                             "{component_name}: `{vm_name}.{field}` — `{ty}` has no field `{field}`"
                         ));
                     }
@@ -1412,7 +1452,7 @@ fn check_vm_expr(
                         errors,
                     );
                 }
-                None => errors.push(format!(
+                None => errors.item_local(format!(
                     "{component_name}: `context_popup: view! {{ .. }}` body must be exactly one \
                      element unless preceded only by `on_mount`/`on_unmount`/`on_update`/`let` \
                      bindings"
@@ -1425,7 +1465,7 @@ fn check_vm_expr(
 /// View attributes must remain statically inspectable.  This deliberately accepts the concrete
 /// value forms the DSL already parses (literals, arrays, enum paths and enum constructors), while
 /// refusing arbitrary Rust code whose dependencies cannot be subscribed to safely.
-fn check_static_view_expr(expr: &syn::Expr, component_name: &str, errors: &mut Vec<String>) {
+fn check_static_view_expr(expr: &syn::Expr, component_name: &str, errors: &mut ValidationErrors) {
     fn allowed(expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Lit(_) | syn::Expr::Path(_) => true,
@@ -1478,7 +1518,7 @@ fn check_static_view_expr(expr: &syn::Expr, component_name: &str, errors: &mut V
     }
 
     if !allowed(expr) {
-        errors.push(format!(
+        errors.item_local(format!(
             "{component_name}: view expression `{}` is not statically analyzable — use #[computed], an explicit prop, or split it into literal/enum/path expressions",
             quote::ToTokens::to_token_stream(expr)
         ));
@@ -1498,7 +1538,7 @@ fn check_closure_expr_body(
     component_name: &str,
     vm_fields: &HashMap<&str, &str>,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     let first_segment = match expr {
         ViewExpr::Path(path) => path.first(),
@@ -1530,7 +1570,7 @@ fn check_closure_expr_body(
         Some(first) if vm_fields.contains_key(first.as_str()) => {
             check_vm_expr(expr, from, component_name, vm_fields, table, errors);
         }
-        Some(first) => errors.push(format!(
+        Some(first) => errors.item_local(format!(
             "{component_name}: closure body references `{first}`, which is neither one of the closure's own parameters (`{}`) nor a recognized field",
             params.join(", ")
         )),
@@ -1546,7 +1586,7 @@ fn check_dynamic_child_hosts(
     from: &Module,
     component_name: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     if node.children.iter().any(|child| {
         matches!(
@@ -1569,7 +1609,7 @@ fn check_dynamic_child_hosts(
             // dynamic analogue of the existing "single content field can only bind one bare child"
             // rule (`codegen.rs`'s `panics_on_multiple_bare_children_for_a_single_content_field`).
             if !is_collection && !dynamic_children_reduce_to_one_element(&node.children) {
-                errors.push(format!(
+                errors.registry_dependent(format!(
                     "{component_name}: dynamic child control flow under `{}` — `#[content({field})]` has scalar type `{}`, so every branch must resolve to exactly one element (`for` and multiple children per branch aren't allowed here; a collection-typed content field allows both, see `#[content({field})]`'s own type)",
                     node.type_path,
                     info.field_types.get(field).map(String::as_str).unwrap_or("<missing>")
@@ -1595,7 +1635,7 @@ fn check_dynamic_child_host_in_child(
     from: &Module,
     component_name: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match child {
         ChildEntry::Literal(element) => {
@@ -1663,7 +1703,7 @@ fn check_attached_properties(
     from: &Module,
     component_name: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     // `EnvironmentScope { some_crate::name: value }` (Issue #129) reuses this same
     // `Owner::field: value` grammar for its own qualified cross-crate key overrides — `owner` is a
@@ -1676,7 +1716,7 @@ fn check_attached_properties(
         for (owner, field, _value) in &node.attached {
             match table.resolve(from, owner) {
                 Some(info) if info.fields.get(field.as_str()) == Some(&FieldKind::Attached) => {}
-                Some(_) => errors.push(format!(
+                Some(_) => errors.registry_dependent(format!(
                     "{component_name}: `{owner}::{field}` — `{owner}` has no #[attached] property named `{field}`"
                 )),
                 // External (no local `TypeInfo`) — same tradeoff as `check_element_value`'s own
@@ -1685,7 +1725,7 @@ fn check_attached_properties(
                 // table at all; a genuinely wrong `Owner::field` still fails to compile, just
                 // later, via `@attached_set`'s own generated dispatch.
                 None if from.allows_external_builtins => {}
-                None => errors.push(format!(
+                None => errors.registry_dependent(format!(
                     "{component_name}: `{owner}::{field}` — `{owner}` is not a known component/builtin (missing `use`?)"
                 )),
             }
@@ -1715,12 +1755,12 @@ fn check_shortcut_attrs(
     from: &Module,
     component_name: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     for (name, chords, _scope) in &node.attribute_shortcuts {
         match table.resolve(from, &node.type_path) {
             Some(info) if info.routed_fields.contains(name) => {}
-            Some(_) => errors.push(format!(
+            Some(_) => errors.registry_dependent(format!(
                 "{component_name}: #[shortcut(...)] on `{}.{name}` — `{name}` is not a #[routed] attribute",
                 node.type_path
             )),
@@ -1741,7 +1781,7 @@ fn check_shortcut_attrs(
                     .as_deref()
                     .map(|b| format!(" ({b})"))
                     .unwrap_or_default();
-                errors.push(format!(
+                errors.item_local(format!(
                     "{component_name}: #[shortcut] key spec `{spec}`{backend_note} on `{}.{name}`: {e}",
                     node.type_path
                 ));
@@ -1763,7 +1803,7 @@ fn check_shortcut_attrs_in_expr(
     from: &Module,
     component_name: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match expr {
         ViewExpr::Element(elem) => check_shortcut_attrs(elem, from, component_name, table, errors),
@@ -1806,12 +1846,12 @@ fn check_shortcut_attrs_in_expr(
 fn check_context_menu_attributes(
     node: &ElementNode,
     component_name: &str,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     let has_context_menu = node.attributes.iter().any(|a| a.name == "context_menu");
     let has_context_popup = node.attributes.iter().any(|a| a.name == "context_popup");
     if has_context_menu && has_context_popup {
-        errors.push(format!(
+        errors.item_local(format!(
             "{component_name}: `{}` cannot specify both `context_menu` and `context_popup` simultaneously",
             node.type_path
         ));
@@ -1829,7 +1869,7 @@ fn check_context_menu_attributes(
 fn check_context_menu_attributes_in_expr(
     expr: &ViewExpr,
     component_name: &str,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match expr {
         ViewExpr::Element(elem) => check_context_menu_attributes(elem, component_name, errors),
@@ -1872,7 +1912,7 @@ fn check_attached_properties_in_expr(
     from: &Module,
     component_name: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match expr {
         ViewExpr::Element(elem) => {
@@ -1932,12 +1972,12 @@ fn check_element_value(
     component_name: &str,
     vm_fields: &HashMap<&str, &str>,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     match table.resolve(from, &elem.type_path) {
         Some(info) => {
             if info.is_abstract {
-                errors.push(format!(
+                errors.registry_dependent(format!(
                     "{component_name}: `{}` is #[abstract] and cannot be instantiated directly — use a concrete subtype instead",
                     elem.type_path
                 ));
@@ -1960,7 +2000,7 @@ fn check_element_value(
                     next_positional_child += 1;
                     continue;
                 }
-                errors.push(format!(
+                errors.registry_dependent(format!(
                     "{component_name}: `{}` is missing required attribute `{name}`",
                     elem.type_path
                 ));
@@ -1975,7 +2015,7 @@ fn check_element_value(
         // On the DSL text path (`allows_external_builtins == false`), no such escape hatch
         // exists — every type there must resolve through `table`, so `None` still means a typo.
         None if from.allows_external_builtins => {}
-        None => errors.push(format!(
+        None => errors.registry_dependent(format!(
             "{component_name}: `{}` is an unknown or out-of-scope component — add a `use` for it",
             elem.type_path
         )),
@@ -2047,7 +2087,7 @@ fn validate_inherits(
     base: &str,
     modules: &[Module],
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     let Some(base_info) = table.resolve(from, base) else {
         // External (no local `TypeInfo`, e.g. a builtin declared entirely in `elwindui-core`): the
@@ -2068,7 +2108,7 @@ fn validate_inherits(
     };
 
     if base_info.sealed {
-        errors.push(format!(
+        errors.registry_dependent(format!(
             "{}: inherits `{base}`, but `{base}` is #[sealed] and cannot be inherited from",
             c.name
         ));
@@ -2112,7 +2152,7 @@ fn validate_inherits(
                 .resolve(from, &c.name)
                 .is_some_and(|info| info.is_native);
             if !is_native {
-                errors.push(format!(
+                errors.registry_dependent(format!(
                     "{}: inherits `NativeControl`, but its `view` root isn't itself native (or no \
                      `view` exists) — `NativeControl` is only a category tag for genuinely \
                      native-backed components",
@@ -2139,7 +2179,7 @@ fn validate_inherits(
         .flat_map(|m| &m.items)
         .any(|item| matches!(item, Item::View(v) if v.target == c.name));
     if !has_own_view {
-        errors.push(format!(
+        errors.item_local(format!(
             "{}: inherits `{base}`, but has no `view {}` — a component inheriting a shape \
              primitive with no `view` of its own must declare one composing over `{base}`",
             c.name, c.name
@@ -2159,7 +2199,7 @@ fn validate_field_overrides(
     c: &ComponentDef,
     base: &str,
     table: &SymbolTable,
-    errors: &mut Vec<String>,
+    errors: &mut ValidationErrors,
 ) {
     if base == "NativeControl" {
         return;
@@ -2174,18 +2214,18 @@ fn validate_field_overrides(
         };
         let is_override = f.attrs.iter().any(|a| matches!(a, Attr::Override));
         if base_kind != f.kind {
-            errors.push(format!(
+            errors.registry_dependent(format!(
                 "{}.{}: redeclares a field already inherited from `{base}` with a different kind \
                  ({:?} here, {:?} in `{base}`) — an inherited field's kind can't change",
                 c.name, f.name, f.kind, base_kind
             ));
         } else if f.kind != FieldKind::Computed {
-            errors.push(format!(
+            errors.registry_dependent(format!(
                 "{}.{}: is already inherited from `{base}` — remove the redeclaration",
                 c.name, f.name
             ));
         } else if !is_override {
-            errors.push(format!(
+            errors.registry_dependent(format!(
                 "{}.{}: is inherited as #[computed] from `{base}` — add #[override] to intentionally override it",
                 c.name, f.name
             ));
@@ -2203,7 +2243,7 @@ fn validate_field_overrides(
             continue;
         }
         let Some(base_method) = base_virtual_methods.get(m.name.as_str()) else {
-            errors.push(format!(
+            errors.registry_dependent(format!(
                 "{}: #[overrides] fn {} has no matching #[overridable] method named `{}` on `{base}`",
                 c.name, m.name, m.name
             ));
@@ -2224,7 +2264,7 @@ fn validate_field_overrides(
             _ => false,
         };
         if !same_params || !same_return {
-            errors.push(format!(
+            errors.registry_dependent(format!(
                 "{}: #[overrides] fn {} has a different signature than `{base}`'s #[overridable] fn {}",
                 c.name, m.name, m.name
             ));
@@ -4131,6 +4171,88 @@ mod tests {
             errs.iter()
                 .any(|e| e.contains("<=>") && e.contains("context_popup")),
             "errors: {errs:?}"
+        );
+    }
+
+    /// PR #169 review remediation, round 2, T-R2-1 (AD-R2-1): `#[async_computed]` misuse on a
+    /// component field is decidable from the field's own declared kind alone — no sibling/registry
+    /// lookup involved — so `validate_classified` must tag it `ItemLocal` structurally, not by
+    /// re-running validation and diffing message text (the round-1 approach this contract forbids).
+    #[test]
+    fn t_r2_1_async_computed_misuse_is_classified_item_local() {
+        let src = r#"
+        struct TR21AsyncComputedMisuse {
+            #[async_computed(expr = fetch())]
+            value: i32,
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src)).collect();
+        let diagnostics = validate_classified(&modules);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.dependency == ValidationDependency::ItemLocal
+                    && d.message.contains("async_computed")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// PR #169 review remediation, round 2, T-R2-2 (AD-R2-1): `#[content(name)]` naming a field
+    /// absent from `codegen::resolve_effective_fields`'s own same-crate-registry-dependent result
+    /// (ancestor fields included) can only be decided once sibling/base data is available, so
+    /// `validate_classified` must tag it `RegistryDependent`.
+    #[test]
+    fn t_r2_2_unknown_content_field_is_classified_registry_dependent() {
+        let src = r#"
+        #[content(no_such_field)]
+        struct TR22ContentFieldRegistryDependent {
+            #[param]
+            label: String,
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let diagnostics = validate_classified(&modules);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.dependency == ValidationDependency::RegistryDependent
+                    && d.message.contains("#[content(no_such_field)]")),
+            "{diagnostics:?}"
+        );
+    }
+
+    /// PR #169 review remediation, round 2, T-R2-3 (AD-R2-3): one component producing both an
+    /// `ItemLocal` and a `RegistryDependent` diagnostic in the same `validate_classified` pass — both
+    /// must appear, independently and correctly tagged, in the same result (proving classification
+    /// happens per-diagnostic-site, not by collapsing the whole pass into one verdict).
+    #[test]
+    fn t_r2_3_mixed_item_local_and_registry_dependent_diagnostics_both_appear() {
+        let src = r#"
+        #[content(no_such_field)]
+        struct TR23Mixed {
+            #[async_computed(expr = fetch())]
+            value: i32,
+        }
+        "#;
+        let modules: Vec<_> = std::iter::once(component_module(None, src))
+            .chain(crate::test_builtin_modules())
+            .collect();
+        let diagnostics = validate_classified(&modules);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.dependency == ValidationDependency::ItemLocal
+                    && d.message.contains("async_computed")),
+            "missing item-local diagnostic: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.dependency == ValidationDependency::RegistryDependent
+                    && d.message.contains("#[content(no_such_field)]")),
+            "missing registry-dependent diagnostic: {diagnostics:?}"
         );
     }
 }

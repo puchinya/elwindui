@@ -48,7 +48,7 @@ use crate::ast::{self, ComponentDef};
 // (`docs/design/tools/codegen_design.md` §3.2a) alongside the function/enum this file does use.
 #[allow(unused_imports)]
 pub(crate) use crate::component_frontend::{
-    ComponentPublicShape, ShadowVisibility, component_public_shape,
+    ComponentConstructorReturn, ComponentPublicShape, ShadowVisibility, component_public_shape,
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -192,11 +192,22 @@ pub(crate) fn build_component_struct_shadow(
         ctor_params.extend(quote! { #field_ident: #ty, });
     }
 
+    // PR #169 review remediation, round 2 (AD-R2-7): the real constructor return type — bare
+    // `Self` for a view-less Component (`codegen::generate_component`), `std::rc::Rc<Self>` for a
+    // `has_view` one (`codegen::generate_view`) — is read from `shape.constructor_return`, not
+    // decided independently here.
     let mut methods = TokenStream::new();
-    methods.extend(quote! {
-        pub fn new(#ctor_params) -> std::rc::Rc<Self> {
-            unreachable!()
-        }
+    methods.extend(match shape.constructor_return {
+        ComponentConstructorReturn::SelfValue => quote! {
+            pub fn new(#ctor_params) -> Self {
+                unreachable!()
+            }
+        },
+        ComponentConstructorReturn::RcSelf => quote! {
+            pub fn new(#ctor_params) -> std::rc::Rc<Self> {
+                unreachable!()
+            }
+        },
     });
     for (name, ty, visibility) in &shape.readable_fields {
         let field_ident = format_ident!("{name}");
@@ -404,6 +415,27 @@ mod tests {
         assert!(err.contains("internal"), "error: {err}");
     }
 
+    /// A minimal, otherwise-empty `ViewDef` — used only to give `component_public_shape` a
+    /// `Some(view)` to consult (real `has_view` components always have one), without needing a
+    /// real element tree for tests that don't exercise the referenced-vs-unreferenced own
+    /// `Option<T>` distinction.
+    fn empty_view(target: &str) -> ast::ViewDef {
+        ast::ViewDef {
+            target: target.to_string(),
+            on_mount: None,
+            on_unmount: None,
+            on_update: None,
+            lets: Vec::new(),
+            root: ast::ViewBody {
+                attributes: Vec::new(),
+                attached: Vec::new(),
+                attribute_shortcuts: Vec::new(),
+                children: Vec::new(),
+            },
+            implicit_owner: None,
+        }
+    }
+
     fn demo_component(base: Option<&str>) -> ComponentDef {
         ComponentDef {
             name: "ShadowDemo".to_string(),
@@ -449,8 +481,10 @@ mod tests {
                 layout_spacing: f32,
             }
         };
-        let shadow = build_component_struct_shadow(Some("Window"), &item_struct, &component, None)
-            .expect("struct shadow should build");
+        let view = empty_view("ShadowDemo");
+        let shadow =
+            build_component_struct_shadow(Some("Window"), &item_struct, &component, Some(&view))
+                .expect("struct shadow should build");
         parses_as_items(&shadow);
         let s = shadow.to_string();
         assert!(s.contains("cfg (rust_analyzer)"), "{s}");
@@ -484,6 +518,51 @@ mod tests {
             .expect("struct shadow should build");
         let s = shadow.to_string();
         assert!(!s.contains("Deref"), "{s}");
+    }
+
+    /// PR #169 review remediation, round 2, T-R2-9/T-R2-10 (AD-R2-4/AD-R2-7): the shadow's own
+    /// `new(..)` return type must match the real generator that would actually build this
+    /// Component — bare `Self` for a view-less Component (`codegen::generate_component`),
+    /// `std::rc::Rc<Self>` for a `has_view` one (`codegen::generate_view`) — read from
+    /// `ComponentPublicShape::constructor_return`, not decided independently by the shadow itself.
+    #[test]
+    fn struct_shadow_constructor_return_matches_view_less_vs_has_view_real_generator() {
+        let component = demo_component(None);
+        let item_struct: syn::ItemStruct = syn::parse_quote! {
+            pub struct ShadowDemo {
+                #[bindable]
+                vm: std::rc::Rc<ShadowDemoViewModel>,
+                #[environment(layout_spacing)]
+                layout_spacing: f32,
+            }
+        };
+
+        let view_less_shadow = build_component_struct_shadow(None, &item_struct, &component, None)
+            .expect("struct shadow should build")
+            .to_string();
+        assert!(
+            view_less_shadow
+                .contains("pub fn new (vm : std :: rc :: Rc < ShadowDemoViewModel > ,) -> Self"),
+            "a view-less Component's shadow constructor must return bare Self, matching \
+             codegen::generate_component: {view_less_shadow}"
+        );
+        assert!(
+            !view_less_shadow.contains("Rc < Self >"),
+            "{view_less_shadow}"
+        );
+
+        let view = empty_view("ShadowDemo");
+        let has_view_shadow =
+            build_component_struct_shadow(None, &item_struct, &component, Some(&view))
+                .expect("struct shadow should build")
+                .to_string();
+        assert!(
+            has_view_shadow.contains(
+                "pub fn new (vm : std :: rc :: Rc < ShadowDemoViewModel > ,) -> std :: rc :: Rc < Self >"
+            ),
+            "a has-view Component's shadow constructor must return Rc<Self>, matching \
+             codegen::generate_view: {has_view_shadow}"
+        );
     }
 
     /// T2 (deferred `Option<T>` surface): a deferred own field gets a getter returning the full

@@ -234,6 +234,13 @@ pub fn generate_component_from_item_struct_with_template(
                 #gated_error
             })
         }
+        Err(ComponentGenerationFailure::Classified(diagnostics)) => {
+            let error_tokens = validation_diagnostic_tokens(&diagnostics);
+            Ok(quote::quote! {
+                #shadow
+                #error_tokens
+            })
+        }
     }
 }
 
@@ -249,33 +256,57 @@ pub fn generate_component_from_item_struct_with_template(
 enum ComponentGenerationFailure {
     ItemLocal(String),
     RegistryDependent(String),
+    /// PR #169 review remediation, round 2 (AD-R2-3): `validate::validate_classified` can find both
+    /// `ItemLocal` and `RegistryDependent` diagnostics in the same pass — collapsing that mix into a
+    /// single `ItemLocal`/`RegistryDependent` verdict (this variant's predecessor) either hides a
+    /// real registry-dependent diagnostic behind an item-local one under `cargo build` (both are
+    /// bundled into the same message either way, so nothing is technically lost there) or, worse,
+    /// turns a genuine item-local mistake into a `cfg(not(rust_analyzer))`-gated error invisible to
+    /// rust-analyzer the moment an unrelated registry-dependent diagnostic also fired. Carries every
+    /// diagnostic from one `validate::validate_classified` call untouched; `validation_diagnostic_tokens`
+    /// (below) routes each individually.
+    Classified(Vec<validate::ValidationDiagnostic>),
 }
 
-/// Runs `validate::validate_classified` over `all_modules` and folds its per-diagnostic
-/// classification into one [`ComponentGenerationFailure`] for a Component generator to propagate:
-/// `RegistryDependent` only when *every* diagnostic found is registry-dependent, `ItemLocal`
-/// (bundling every diagnostic's message, exactly matching `validate::validate`'s own pre-#169
-/// `errors.join("\n")` shape) the moment even one is item-local — a single item-local mistake must
-/// never be hidden from rust-analyzer just because an unrelated registry-dependent diagnostic
-/// happened to fire in the same pass.
+/// Runs `validate::validate_classified` over `all_modules`, returning every diagnostic found
+/// untouched (PR #169 review remediation, round 2, AD-R2-3) rather than folding them into one
+/// collapsed verdict — a Component generator's own caller routes each diagnostic individually via
+/// `validation_diagnostic_tokens`.
 fn classify_validate_result(all_modules: &[ast::Module]) -> Result<(), ComponentGenerationFailure> {
     let diagnostics = validate::validate_classified(all_modules);
     if diagnostics.is_empty() {
-        return Ok(());
-    }
-    let has_item_local = diagnostics
-        .iter()
-        .any(|d| d.dependency == validate::ValidationDependency::ItemLocal);
-    let combined = diagnostics
-        .iter()
-        .map(|d| d.message.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if has_item_local {
-        Err(ComponentGenerationFailure::ItemLocal(combined))
+        Ok(())
     } else {
-        Err(ComponentGenerationFailure::RegistryDependent(combined))
+        Err(ComponentGenerationFailure::Classified(diagnostics))
     }
+}
+
+/// PR #169 review remediation, round 2 (AD-R2-3): renders a classified diagnostic list as generated
+/// `compile_error!` tokens, one per diagnostic — an `ItemLocal` diagnostic unconditional (a genuine
+/// mistake no same-crate registry state could excuse, so it must stay visible to rust-analyzer too),
+/// a `RegistryDependent` one `#[cfg(not(rust_analyzer))]`-gated (it may be a spurious same-crate
+/// registry-ordering artifact under rust-analyzer even when the source is correctly ordered) —
+/// mirroring the single-diagnostic gating every other `ComponentGenerationFailure` call site already
+/// applies inline, just for a whole list instead of one message.
+fn validation_diagnostic_tokens(
+    diagnostics: &[validate::ValidationDiagnostic],
+) -> proc_macro2::TokenStream {
+    diagnostics
+        .iter()
+        .map(|d| {
+            let message = &d.message;
+            match d.dependency {
+                validate::ValidationDependency::ItemLocal => quote::quote! {
+                    compile_error!(#message);
+                },
+                validate::ValidationDependency::RegistryDependent => quote::quote! {
+                    #[cfg(not(rust_analyzer))]
+                    #[allow(unexpected_cfgs)]
+                    compile_error!(#message);
+                },
+            }
+        })
+        .collect()
 }
 
 /// The registry-dependent half of `generate_component_from_item_struct_with_template` (Issue #146):
@@ -300,21 +331,34 @@ fn register_component_struct_real(
 ) -> Result<(), ComponentGenerationFailure> {
     let name = component_def.name.clone();
     if let Some(template_name) = &template {
-        // `same_crate_control_target` recurses through `registered_component_parts` — a same-crate
-        // registry lookup — so a spurious `false`/`None` under rust-analyzer's own incomplete
-        // expansion order is possible even for a correctly-ordered `inherits Control` chain.
-        let is_control = component_def
-            .base
-            .as_deref()
-            .map(|base| {
-                same_crate_control_target(base)
-                    .or_else(|| component_def.base_path.is_none().then_some(false))
-            })
-            .unwrap_or(Some(false));
-        if is_control == Some(false) {
-            return Err(ComponentGenerationFailure::RegistryDependent(format!(
-                "`{name}`: template-enabled components must inherit Control; NativeControl and non-Control components are not supported"
-            )));
+        // PR #169 review remediation, round 2 (AD-R2-2): whether this is a Control-target mistake
+        // is only genuinely registry-dependent when the base is a same-crate *user* Component
+        // (`ControlTargetKnowledge::NeedsSameCrateRegistry`) — `same_crate_control_target` itself
+        // already resolves the fixed builtin category-tag set (`Control`/`ContentControl`/
+        // `UIElement`/`Layout`/`Shape`/`NativeControl`/`Window`) without touching the registry at
+        // all, and a base-less template-enabled Component is a mistake decidable from the current
+        // item alone. Only the `NeedsSameCrateRegistry` branch below may fail for a reason that
+        // could be a spurious rust-analyzer expansion-order artifact.
+        match control_target_knowledge(component_def.base.as_deref()) {
+            ControlTargetKnowledge::KnownNonControl => {
+                return Err(ComponentGenerationFailure::ItemLocal(format!(
+                    "`{name}`: template-enabled components must inherit Control; NativeControl and non-Control components are not supported"
+                )));
+            }
+            ControlTargetKnowledge::KnownControl => {}
+            ControlTargetKnowledge::NeedsSameCrateRegistry => {
+                let base = component_def
+                    .base
+                    .as_deref()
+                    .expect("NeedsSameCrateRegistry is only returned when a base is present");
+                let is_control = same_crate_control_target(base)
+                    .or_else(|| component_def.base_path.is_none().then_some(false));
+                if is_control == Some(false) {
+                    return Err(ComponentGenerationFailure::RegistryDependent(format!(
+                        "`{name}`: template-enabled components must inherit Control; NativeControl and non-Control components are not supported"
+                    )));
+                }
+            }
         }
         if view_def.is_none() {
             return Err(ComponentGenerationFailure::ItemLocal(format!(
@@ -425,6 +469,13 @@ pub fn generate_component_from_item_impl(
             Ok(quote::quote! {
                 #shadow
                 #gated_error
+            })
+        }
+        Err(ComponentGenerationFailure::Classified(diagnostics)) => {
+            let error_tokens = validation_diagnostic_tokens(&diagnostics);
+            Ok(quote::quote! {
+                #shadow
+                #error_tokens
             })
         }
     }
@@ -955,6 +1006,73 @@ pub fn generate_control_template_from_item_struct(
         #real
         #shadow
     })
+}
+
+/// PR #169 review remediation, round 2 (AD-R2-2): whether a template-enabled Component's `inherits`
+/// base is decidable as Control-derived (or not) purely from the current item plus the fixed set of
+/// builtin category-tag names `same_crate_control_target` itself already resolves without any
+/// same-crate registry lookup, or whether deciding requires resolving a same-crate user-defined base
+/// through the Component registry (`same_crate_control_target`'s own recursive
+/// `registered_component_parts` walk).
+enum ControlTargetKnowledge {
+    KnownControl,
+    KnownNonControl,
+    NeedsSameCrateRegistry,
+}
+
+/// Classifies `base` (a template-enabled Component's own `inherits` target, if any) into
+/// [`ControlTargetKnowledge`]. A base-less Component and every fixed builtin category-tag name
+/// (`Control`/`ContentControl`/`UIElement`/`Layout`/`Shape`/`NativeControl`/`Window`) are decidable
+/// from the current item alone; only a name outside that fixed set — necessarily a same-crate user
+/// Component, since a builtin ancestor is always one of these tags — needs the registry.
+fn control_target_knowledge(base: Option<&str>) -> ControlTargetKnowledge {
+    match base {
+        None => ControlTargetKnowledge::KnownNonControl,
+        Some("Control") | Some("ContentControl") => ControlTargetKnowledge::KnownControl,
+        Some("UIElement")
+        | Some("Layout")
+        | Some("Shape")
+        | Some("NativeControl")
+        | Some("Window") => ControlTargetKnowledge::KnownNonControl,
+        Some(_) => ControlTargetKnowledge::NeedsSameCrateRegistry,
+    }
+}
+
+#[cfg(test)]
+mod control_target_knowledge_tests {
+    use super::*;
+
+    /// PR #169 review remediation, round 2, T-R2-4 (AD-R2-2): a fixed builtin category-tag name
+    /// known to be non-Control (`NativeControl`, e.g.) is decidable from the current item alone —
+    /// no same-crate registry lookup needed — so `register_component_struct_real` must reject it
+    /// with an unconditional `ItemLocal` failure, never a registry-dependent one.
+    #[test]
+    fn t_r2_4_known_non_control_builtin_base_needs_no_registry() {
+        assert!(matches!(
+            control_target_knowledge(Some("NativeControl")),
+            ControlTargetKnowledge::KnownNonControl
+        ));
+        assert!(matches!(
+            control_target_knowledge(Some("Control")),
+            ControlTargetKnowledge::KnownControl
+        ));
+        assert!(matches!(
+            control_target_knowledge(None),
+            ControlTargetKnowledge::KnownNonControl
+        ));
+    }
+
+    /// PR #169 review remediation, round 2, T-R2-5 (AD-R2-2): a same-crate user-defined base name
+    /// (outside the fixed builtin category-tag set) can only be resolved as Control-derived or not
+    /// through `same_crate_control_target`'s own registry walk — `control_target_knowledge` must
+    /// route it to `NeedsSameCrateRegistry` rather than guessing.
+    #[test]
+    fn t_r2_5_same_crate_user_base_needs_registry() {
+        assert!(matches!(
+            control_target_knowledge(Some("SomeUserDefinedComponent")),
+            ControlTargetKnowledge::NeedsSameCrateRegistry
+        ));
+    }
 }
 
 fn same_crate_control_target(name: &str) -> Option<bool> {
@@ -1562,6 +1680,43 @@ mod store_registry_tests {
         );
     }
 
+    /// Asserts `result` carries `message` as an *unconditional* `compile_error!` — never gated
+    /// behind `#[cfg(not(rust_analyzer))]` (PR #169 review remediation, round 2, AD-R2-3: an
+    /// `ItemLocal` diagnostic from `classify_validate_result`/`validate::validate_classified` is
+    /// routed through `ComponentGenerationFailure::Classified` + `validation_diagnostic_tokens` into
+    /// an unconditional generated `compile_error!` alongside the rust-analyzer shadow, not a hard
+    /// proc-macro `Err` — a real mistake stays a real `cargo build`/`cargo check` error either way,
+    /// but this form also keeps the shadow available to other same-crate consumers of the type under
+    /// rust-analyzer, matching every other item-local check's own inline gating already does for a
+    /// single diagnostic). A bare `Err` (an item-local mistake caught before `classify_validate_result`
+    /// is ever reached, e.g. a `component_frontend` parse failure) is also accepted — the two forms
+    /// have the same end-user-visible effect under `cargo build`.
+    fn expect_unconditional_item_local_error(
+        result: Result<proc_macro2::TokenStream, String>,
+        message_substrings: &[&str],
+    ) -> String {
+        match result {
+            Err(error) => {
+                for substring in message_substrings {
+                    assert!(error.contains(substring), "error: {error}");
+                }
+                error
+            }
+            Ok(tokens) => {
+                let s = tokens.to_string();
+                assert!(
+                    s.contains("compile_error !") && !s.contains("cfg (not (rust_analyzer))"),
+                    "expected an unconditional (non-gated) compile_error!, not one gated behind \
+                     `#[cfg(not(rust_analyzer))]`: {s}"
+                );
+                for substring in message_substrings {
+                    assert!(s.contains(substring), "generated: {s}");
+                }
+                s
+            }
+        }
+    }
+
     #[test]
     fn async_computed_on_a_plain_component_prop_is_rejected() {
         let item_struct: syn::ItemStruct = syn::parse_str(
@@ -1574,18 +1729,21 @@ mod store_registry_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = expect_generation_error(generate_component_from_item_struct(None, &item_struct));
-        assert!(err.contains("#[async_computed]"), "error: {err}");
-        assert!(err.contains("viewmodel/store"), "error: {err}");
+        expect_unconditional_item_local_error(
+            generate_component_from_item_struct(None, &item_struct),
+            &["#[async_computed]", "viewmodel/store"],
+        );
     }
 
-    /// PR #169 review remediation, T1: `#[async_computed]` on a plain Component field is decidable
-    /// from the field's own `FieldKind` alone — no sibling module is ever consulted to decide it —
-    /// so it must remain a genuine, unconditional `Err`, never downgraded to an
-    /// `Ok(..)`-carrying-a-`cfg(not(rust_analyzer))`-gated error the way a same-crate registry miss
-    /// is. `inherits VerticalLayout` here (unlike the sibling test above) isolates this from the
-    /// *also* item-local base-less-with-view rule, so this test exercises `#[async_computed]`
-    /// alone.
+    /// PR #169 review remediation, T1 (round 1); updated round 2 (AD-R2-3): `#[async_computed]` on a
+    /// plain Component field is decidable from the field's own `FieldKind` alone — no sibling module
+    /// is ever consulted to decide it — so `validate::validate_classified` tags it `ItemLocal`. Round
+    /// 2's `ComponentGenerationFailure::Classified` routes an `ItemLocal` diagnostic to an
+    /// *unconditional* generated `compile_error!` (visible under both rust-analyzer and real
+    /// `cargo build`) rather than a hard proc-macro `Err` — see `expect_unconditional_item_local_error`'s
+    /// own doc comment. `inherits VerticalLayout` here (unlike the sibling test above) isolates this
+    /// from the *also* item-local base-less-with-view rule, so this test exercises
+    /// `#[async_computed]` alone.
     #[test]
     fn t1_async_computed_on_component_field_is_an_unconditional_item_local_error() {
         let item_struct: syn::ItemStruct = syn::parse_str(
@@ -1598,23 +1756,19 @@ mod store_registry_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = generate_component_from_item_struct(
-            Some("VerticalLayout".to_string()),
-            &item_struct,
-        )
-        .expect_err(
-            "an item-local #[async_computed]-on-Component-field mistake must be a hard Err, \
-                 never routed through Ok(..) + a gated compile_error!",
+        expect_unconditional_item_local_error(
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct),
+            &["#[async_computed]", "viewmodel/store"],
         );
-        assert!(err.contains("#[async_computed]"), "error: {err}");
-        assert!(err.contains("viewmodel/store"), "error: {err}");
     }
 
-    /// PR #169 review remediation, T2: `#[bindable]` on a field whose declared type is not
+    /// PR #169 review remediation, T2 (round 1); updated round 2 (AD-R2-3, see T1's own doc comment
+    /// for the shape of the change): `#[bindable]` on a field whose declared type is not
     /// `Rc<..>`-wrapped is decidable from the field's own declared type text alone — no sibling
     /// module lookup involved (contrast `bindable_field_on_non_viewmodel_type_is_rejected_on_macro_path`
     /// above, which genuinely needs `table.resolve` to know whether the *pointee* type is a
-    /// viewmodel, and stays registry-dependent) — so this must be an unconditional `Err`.
+    /// viewmodel, and stays registry-dependent) — so it is `ItemLocal`, surfaced as an unconditional
+    /// `compile_error!`.
     #[test]
     fn t2_non_rc_bindable_field_is_an_unconditional_item_local_error() {
         let item_struct: syn::ItemStruct = syn::parse_str(
@@ -1627,21 +1781,16 @@ mod store_registry_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = generate_component_from_item_struct(
-            Some("VerticalLayout".to_string()),
-            &item_struct,
-        )
-        .expect_err(
-            "a non-Rc-wrapped #[bindable] field is a hard Err, never routed through Ok(..) + \
-                 a gated compile_error!",
+        expect_unconditional_item_local_error(
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &item_struct),
+            &["#[bindable]", "Rc<..>"],
         );
-        assert!(err.contains("#[bindable]"), "error: {err}");
-        assert!(err.contains("Rc<..>"), "error: {err}");
     }
 
-    /// PR #169 review remediation, T3: a Component with its own `body: view! { .. }` but no
-    /// `inherits <Base>` is decidable from the struct alone — no sibling module lookup involved —
-    /// so it must be an unconditional `Err`.
+    /// PR #169 review remediation, T3 (round 1); updated round 2 (AD-R2-3, see T1's own doc comment
+    /// for the shape of the change): a Component with its own `body: view! { .. }` but no
+    /// `inherits <Base>` is decidable from the struct alone — no sibling module lookup involved — so
+    /// it is `ItemLocal`, surfaced as an unconditional `compile_error!`.
     #[test]
     fn t3_base_less_component_with_own_view_is_an_unconditional_item_local_error() {
         let item_struct: syn::ItemStruct = syn::parse_str(
@@ -1652,12 +1801,10 @@ mod store_registry_tests {
             "#,
         )
         .expect("struct should parse");
-        let err = generate_component_from_item_struct(None, &item_struct).expect_err(
-            "a base-less component with its own view is a hard Err, never routed through Ok(..) \
-             + a gated compile_error!",
+        expect_unconditional_item_local_error(
+            generate_component_from_item_struct(None, &item_struct),
+            &["must declare", "inherits"],
         );
-        assert!(err.contains("must declare"), "error: {err}");
-        assert!(err.contains("inherits"), "error: {err}");
     }
 }
 
@@ -1902,6 +2049,106 @@ mod component_impl_tests {
         // `mutable_required_names`) — for the required-but-referenced field too.
         assert!(out.contains("fn set_unreferenced_padding"), "{out}");
         assert!(out.contains("fn set_referenced_padding"), "{out}");
+    }
+
+    /// PR #169 review remediation, round 2, T-R2-6 (AD-R2-5): a has-view Component's own
+    /// `on_*`-named no-initializer field (a `#[routed]`-style callback, wired through event
+    /// handling — `codegen::generate_view`'s own `param_names` exclusion is purely name-based, not
+    /// attribute-based) must not become a positional constructor parameter, in either the real
+    /// generator or the rust-analyzer shadow — both consult `component_public_shape`'s own
+    /// exclusion (AD-R2-5), so this test fails if either independently reintroduces it.
+    #[test]
+    fn t_r2_6_own_on_prefixed_field_excluded_from_real_and_shadow_constructor() {
+        let struct_item: syn::ItemStruct = syn::parse_str(
+            r#"
+            struct TR26OnFieldExclusion {
+                on_custom: fn(),
+                body: view! { TextBlock { text: "x" } },
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let struct_out =
+            generate_component_from_item_struct(Some("VerticalLayout".to_string()), &struct_item)
+                .expect("struct half should generate")
+                .to_string();
+        let impl_out = methods(r#"impl TR26OnFieldExclusion {}"#)
+            .expect("impl half should generate")
+            .to_string();
+        let out = format!("{struct_out} {impl_out}");
+
+        assert!(
+            !out.contains("on_custom : fn ()") || !out.contains("fn new"),
+            "sanity: on_custom must not appear as a typed struct/shadow field storage entry: {out}"
+        );
+        // Neither the real `construct(..)`/`new(..)` positional list nor the shadow's own `new(..)`
+        // may take `on_custom` as a parameter.
+        let real_ctor = out
+            .split("fn construct (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("real constructor signature should be present");
+        assert!(
+            !real_ctor.contains("on_custom"),
+            "real constructor must not include the on_*-prefixed field: {real_ctor}"
+        );
+        let shadow_ctor = out
+            .split("pub fn new (")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .expect("shadow constructor signature should be present");
+        assert!(
+            !shadow_ctor.contains("on_custom"),
+            "shadow constructor must not include the on_*-prefixed field: {shadow_ctor}"
+        );
+    }
+
+    /// PR #169 review remediation, round 2, T-R2-3 (AD-R2-3), end-to-end: a Component whose struct
+    /// half triggers both an `ItemLocal` diagnostic (`#[async_computed]` misuse) and a
+    /// `RegistryDependent` one (`#[content(name)]` naming an unknown field) in the same
+    /// `validate::validate_classified` pass must surface *both* in the same generated output — the
+    /// item-local one as an unconditional `compile_error!`, the registry-dependent one gated behind
+    /// `#[cfg(not(rust_analyzer))]` — alongside the still-present rust-analyzer shadow. This fails on
+    /// the pre-AD-R2-3 `classify_validate_result`, which collapsed both into a single `ItemLocal`
+    /// verdict and returned a bare `Err`, discarding the shadow entirely.
+    #[test]
+    fn t_r2_3_end_to_end_mixed_diagnostics_both_gated_correctly_alongside_shadow() {
+        let item_struct: syn::ItemStruct = syn::parse_str(
+            r#"
+            #[content(no_such_field)]
+            struct TR23EndToEndMixed {
+                #[async_computed(expr = fetch())]
+                value: i32,
+            }
+            "#,
+        )
+        .expect("struct should parse");
+        let generated = generate_component_from_item_struct(None, &item_struct)
+            .expect("a Classified failure must still be Ok(shadow + routed compile_error!s)")
+            .to_string();
+
+        // The shadow must still be present (not discarded the way a bare `Err` would).
+        assert!(
+            generated.contains("cfg (rust_analyzer)")
+                && generated.contains("struct TR23EndToEndMixed"),
+            "generated: {generated}"
+        );
+
+        // The item-local diagnostic (`#[async_computed]` misuse) is unconditional.
+        let async_computed_error = generated
+            .split("compile_error !")
+            .find(|segment| segment.contains("async_computed"))
+            .expect("async_computed diagnostic should be present");
+        assert!(
+            !async_computed_error.contains("cfg (not (rust_analyzer))"),
+            "item-local diagnostic must not be gated: {generated}"
+        );
+
+        // The registry-dependent diagnostic (`#[content(..)]` naming an unknown field) is gated.
+        assert!(
+            generated.contains("cfg (not (rust_analyzer))") && generated.contains("no_such_field"),
+            "registry-dependent diagnostic must be gated behind cfg(not(rust_analyzer)): {generated}"
+        );
     }
 }
 

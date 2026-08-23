@@ -208,7 +208,8 @@ impl Menu {
     #[inherent]
     pub fn create_flyout(
         &self,
-    ) -> Result<crate::bindings::Microsoft::UI::Xaml::Controls::MenuFlyout, windows::core::Error> {
+    ) -> Result<crate::bindings::Microsoft::UI::Xaml::Controls::MenuFlyout, windows::core::Error>
+    {
         self.inner.create_flyout()
     }
 }
@@ -282,6 +283,12 @@ impl MenuItem {
     }
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
+    }
+    fn icon(&self) -> Option<elwindui_core::graphics::IconSource> {
+        self.inner.icon()
+    }
+    fn set_icon(&self, icon: Option<elwindui_core::graphics::IconSource>) {
+        self.inner.set_icon(icon);
     }
     fn enabled(&self) -> bool {
         self.inner.enabled()

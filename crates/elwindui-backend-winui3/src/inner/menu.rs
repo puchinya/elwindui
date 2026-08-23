@@ -2,13 +2,17 @@
 
 use crate::bindings;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
-    MenuFlyout, MenuFlyoutItem, MenuFlyoutItemBase,
+    IconElement, ImageIcon, MenuFlyout, MenuFlyoutItem, MenuFlyoutItemBase, Symbol, SymbolIcon,
 };
 use crate::bindings::Microsoft::UI::Xaml::Input::KeyboardAccelerator;
+use crate::bindings::Microsoft::UI::Xaml::Media::ImageSource as XamlImageSource;
+use crate::bindings::Microsoft::UI::Xaml::Media::Imaging::BitmapImage as XamlBitmapImage;
 use crate::bindings::Microsoft::UI::Xaml::RoutedEventHandler;
 use crate::ffi::{invoke_ui_event_callback, register_ui_event_callback};
+use elwindui_core::graphics::{IconSource, ImageData, ImageSource, SystemIcon};
 use std::cell::RefCell;
 use std::rc::Rc;
+use windows::Storage::Streams::{DataWriter, IRandomAccessStream, InMemoryRandomAccessStream};
 use windows::System::{VirtualKey, VirtualKeyModifiers};
 use windows::core::{HSTRING, Interface};
 
@@ -20,6 +24,10 @@ pub(crate) struct InnerMenuItem {
     xaml: MenuFlyoutItem,
     shortcut: Rc<RefCell<Option<String>>>,
     on_select: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    /// Semantic `MenuItem.icon` state — shared across `Clone`s (see AppKit's `InnerMenuItem::icon`
+    /// doc comment for why) and read by `InnerMenu::create_flyout` to snapshot the icon onto each
+    /// newly-realized Context Menu `MenuFlyoutItem` (§2.13 of `icon_source_design.md`).
+    icon: Rc<RefCell<Option<IconSource>>>,
 }
 
 impl InnerMenuItem {
@@ -29,6 +37,7 @@ impl InnerMenuItem {
             xaml,
             shortcut: Rc::new(RefCell::new(None)),
             on_select: Rc::new(RefCell::new(None)),
+            icon: Rc::new(RefCell::new(None)),
         };
         {
             let callback = this.on_select.clone();
@@ -101,6 +110,95 @@ impl InnerMenuItem {
     pub(crate) fn set_on_select(&self, callback: Box<dyn Fn()>) {
         *self.on_select.borrow_mut() = Some(Rc::from(callback));
     }
+
+    pub(crate) fn icon(&self) -> Option<IconSource> {
+        self.icon.borrow().clone()
+    }
+
+    /// Ordering per `icon_source_design.md` §7: semantic state first, then the live native
+    /// reflection — a failed conversion (§2.11) only omits `MenuFlyoutItem.Icon`, it never rolls
+    /// back the semantic state or touches text/enabled/shortcut/on_select.
+    pub(crate) fn set_icon(&self, icon: Option<IconSource>) {
+        *self.icon.borrow_mut() = icon.clone();
+        let icon_element = icon.and_then(|icon| icon_source_to_icon_element(&icon));
+        let _ = self.xaml.SetIcon(icon_element.as_ref());
+    }
+}
+
+/// Exact mapping fixed by `docs/design/runtime/icon_source_design.md` §2 — every `SystemIcon`
+/// variant maps to exactly one WinUI `Symbol`, no wildcard/typo fallback. The `_` arm exists only
+/// because `SystemIcon` is `#[non_exhaustive]` (required by the compiler for a match in a
+/// downstream crate); it can never fire for any variant that exists today — see
+/// `elwindui_backend_appkit::inner::menu::sf_symbol_name`'s identical reasoning.
+fn winui_symbol(icon: SystemIcon) -> Symbol {
+    match icon {
+        SystemIcon::Add => Symbol::Add,
+        SystemIcon::Remove => Symbol::Remove,
+        SystemIcon::Delete => Symbol::Delete,
+        SystemIcon::Edit => Symbol::Edit,
+        SystemIcon::Copy => Symbol::Copy,
+        SystemIcon::Cut => Symbol::Cut,
+        SystemIcon::Paste => Symbol::Paste,
+        SystemIcon::Undo => Symbol::Undo,
+        SystemIcon::Redo => Symbol::Redo,
+        SystemIcon::Search => Symbol::Find,
+        SystemIcon::Settings => Symbol::Setting,
+        SystemIcon::Refresh => Symbol::Refresh,
+        _ => unreachable!("SystemIcon variant not mapped to a WinUI Symbol in winui_symbol"),
+    }
+}
+
+fn icon_source_to_icon_element(icon: &IconSource) -> Option<IconElement> {
+    match icon {
+        IconSource::System(system_icon) => system_icon_element(*system_icon),
+        IconSource::Image(source) => user_image_icon_element(source),
+    }
+}
+
+/// A lookup/construction failure (out-of-process activation error, symbol unavailable) simply
+/// omits the icon (§2.11) rather than panicking.
+fn system_icon_element(icon: SystemIcon) -> Option<IconElement> {
+    let symbol_icon = SymbolIcon::new().ok()?;
+    symbol_icon.SetSymbol(winui_symbol(icon)).ok()?;
+    symbol_icon.cast::<IconElement>().ok()
+}
+
+/// Reuses `render/composition/cache.rs`'s exact `InMemoryRandomAccessStream`/`DataWriter`
+/// byte-stream pattern (rather than a new decoder, §3.7) to feed `BitmapImage.SetSource`, then
+/// wraps the result in an `ImageIcon`.
+///
+/// Two cases return `None` (icon omitted, §2.11 — never a panic, never touches the rest of the
+/// item) rather than being handled, and are recorded as a known, disclosed gap in
+/// `docs/design/runtime/icon_source_design.md` §5/§9 pending Windows-side follow-up, since neither
+/// can be exercised or verified without a Windows build environment (this whole crate is
+/// `#![cfg(target_os = "windows")]` and has never been built/type-checked on this machine):
+///
+/// - `ImageSource::Vector` — no existing WinUI3 code path rasterizes a `VectorImage` to a
+///   XAML-compatible image source; doing so would need a `CanvasRenderTarget`-based Win2D
+///   rasterize-then-encode round trip this crate does not have today.
+/// - `ImageData::Rgba8`/`ImageData::Backend` — same limitation this backend's existing composition
+///   image path already has (see `ImageSurfaceCache::surface_for`'s own "RGBA and backend image
+///   handles require ... fallback" comment): there is no encoded container to hand
+///   `BitmapImage.SetSource` for raw pixel data.
+fn user_image_icon_element(source: &ImageSource) -> Option<IconElement> {
+    let ImageSource::Raster(bitmap) = source else {
+        return None;
+    };
+    let ImageData::Encoded { bytes, .. } = bitmap.data() else {
+        return None;
+    };
+    let stream = InMemoryRandomAccessStream::new().ok()?;
+    let writer = DataWriter::CreateDataWriter(&stream).ok()?;
+    writer.WriteBytes(bytes).ok()?;
+    writer.StoreAsync().ok()?.join().ok()?;
+    let stream: IRandomAccessStream = stream.cast().ok()?;
+    stream.Seek(0).ok()?;
+    let bitmap_image = XamlBitmapImage::new().ok()?;
+    bitmap_image.SetSource(&stream).ok()?;
+    let image_source: XamlImageSource = bitmap_image.cast().ok()?;
+    let image_icon = ImageIcon::new().ok()?;
+    image_icon.SetSource(&image_source).ok()?;
+    image_icon.cast::<IconElement>().ok()
 }
 
 /// A dropdown attached to a `MenuBarItem` — see `elwindui_backend_appkit::inner::InnerMenu`'s doc
@@ -162,8 +260,19 @@ impl InnerMenu {
             flyout_item.SetText(&windows::core::HSTRING::from(item.text().as_str()))?;
             flyout_item.SetIsEnabled(item.enabled())?;
             if let Some(shortcut) = item.shortcut() {
-                let _ = flyout_item
-                    .SetKeyboardAcceleratorTextOverride(&windows::core::HSTRING::from(shortcut.as_str()));
+                let _ = flyout_item.SetKeyboardAcceleratorTextOverride(
+                    &windows::core::HSTRING::from(shortcut.as_str()),
+                );
+            }
+            // §2.13/§8.14: this Context Menu realization is a brand-new `MenuFlyoutItem` distinct
+            // from `item`'s own live `xaml` (PR #156's realization-ownership separation) — so the
+            // current icon must be snapshotted onto it explicitly here, the same as
+            // text/enabled/shortcut above. Missing this step is exactly the regression §8.14 tests
+            // for.
+            if let Some(icon) = item.icon() {
+                if let Some(icon_element) = icon_source_to_icon_element(&icon) {
+                    let _ = flyout_item.SetIcon(&icon_element);
+                }
             }
             let item_clone = item.clone();
             let _ = flyout_item.Click(&RoutedEventHandler::new(move |_, _| {
@@ -233,6 +342,41 @@ impl InnerMenuBar {
             if items.IndexOf(&item.xaml, &mut index) == Ok(true) {
                 let _ = items.RemoveAt(index);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    /// §8.12: every `SystemIcon` variant maps to exactly one WinUI `Symbol`, matching
+    /// `docs/design/runtime/icon_source_design.md` §2's table exactly, no variant omitted. Pure
+    /// value comparison only — no `MenuFlyoutItem`/`SymbolIcon` construction, so no UI-thread
+    /// requirement (mirrors `elwindui_backend_appkit::inner::menu::icon_tests`'s equivalent).
+    #[test]
+    fn every_system_icon_variant_maps_to_its_documented_symbol() {
+        let expected: &[(SystemIcon, Symbol)] = &[
+            (SystemIcon::Add, Symbol::Add),
+            (SystemIcon::Remove, Symbol::Remove),
+            (SystemIcon::Delete, Symbol::Delete),
+            (SystemIcon::Edit, Symbol::Edit),
+            (SystemIcon::Copy, Symbol::Copy),
+            (SystemIcon::Cut, Symbol::Cut),
+            (SystemIcon::Paste, Symbol::Paste),
+            (SystemIcon::Undo, Symbol::Undo),
+            (SystemIcon::Redo, Symbol::Redo),
+            (SystemIcon::Search, Symbol::Find),
+            (SystemIcon::Settings, Symbol::Setting),
+            (SystemIcon::Refresh, Symbol::Refresh),
+        ];
+        assert_eq!(expected.len(), 12, "must cover every SystemIcon variant");
+        for (icon, symbol) in expected {
+            assert_eq!(
+                winui_symbol(*icon),
+                *symbol,
+                "{icon:?} must map to Symbol {symbol:?}"
+            );
         }
     }
 }

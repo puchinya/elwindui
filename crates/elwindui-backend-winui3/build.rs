@@ -205,6 +205,17 @@ fn main() {
         "Microsoft.UI.Xaml.Controls.MenuFlyoutItemBase".to_owned(),
         "Microsoft.UI.Xaml.Controls.MenuBar".to_owned(),
         "Microsoft.UI.Xaml.Controls.MenuBarItem".to_owned(),
+        // `MenuItem.icon` (Issue #170, docs/design/runtime/icon_source_design.md): `MenuFlyoutItem
+        // .Icon` is typed `IconElement`; `SystemIcon` maps to a `SymbolIcon` (built from the
+        // `Symbol` enum), a user `ImageSource::Raster` maps to an `ImageIcon` wrapping a
+        // `BitmapImage` fed from the same `InMemoryRandomAccessStream`/`DataWriter` byte-stream
+        // pattern `render/composition/cache.rs`'s `surface_for` already uses.
+        "Microsoft.UI.Xaml.Controls.IconElement".to_owned(),
+        "Microsoft.UI.Xaml.Controls.SymbolIcon".to_owned(),
+        "Microsoft.UI.Xaml.Controls.Symbol".to_owned(),
+        "Microsoft.UI.Xaml.Controls.ImageIcon".to_owned(),
+        "Microsoft.UI.Xaml.Media.ImageSource".to_owned(),
+        "Microsoft.UI.Xaml.Media.Imaging.BitmapImage".to_owned(),
         "Microsoft.UI.Xaml.Controls.Primitives.Popup".to_owned(),
         "Microsoft.UI.Xaml.Input.ContextRequestedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Input.RightTappedEventHandler".to_owned(),

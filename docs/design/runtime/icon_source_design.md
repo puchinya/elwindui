@@ -2,7 +2,7 @@
 
 規範仕様: [`../../specs/ui_spec.md`](../../specs/ui_spec.md) §9 Menu, [`../../specs/graphics_spec.md`](../../specs/graphics_spec.md) §9 Icons
 
-関連 Issue: #170 (`feat: add backend-neutral icons to Menu and Context Menu`)、依存元: #152 / PR #154 / PR #156（Context Menu / PopupSurface 基盤）
+関連 Issue: #170 (`feat: add backend-neutral icons to Menu and Context Menu`)、実装: PR #171(review remediation delta 含む)、依存元: #152 / PR #154 / PR #156（Context Menu / PopupSurface 基盤）
 
 ## 1. Ownership
 
@@ -79,10 +79,31 @@ Custom presentation は backend-neutral な `UIElement` ツリーのままであ
 
 ## 5. User-defined icon conversion
 
-`IconSource::Image(ImageSource)` は既存の raster/vector decode・rasterize pipeline をそのまま再利用する。
+`IconSource::Image(ImageSource)` は既存の raster/vector decode・rasterize pipeline をそのまま再利用する。`ImageSource::Raster`/`Vector` のいずれも、AppKit・WinUI 3 両 backend で完全にサポートする(PR #171 review remediation で完了)。
 
-- AppKit: `render/image.rs` の decode helper（raster）と `render/vector/raster.rs` の `rasterize_vector_image_to_cgimage`(vector)を再利用し、16×16pt の `NSImage` を構築する。新しいデコーダは追加しない。
-- WinUI 3: 既存の decode 経路(`render/composition/cache.rs`)は `LoadedImageSurface`(composition layer 向け)にしか変換しないため、XAML `ImageIcon` が要求する `BitmapImage` への薄いブリッジを新規に追加する。これは同じデコード済みバイト列を `BitmapImage.SetSourceAsync`(WinRT 標準 API)に渡すだけであり、新しいデコーダ/パーサの追加ではない。
+### AppKit
+
+`render/image.rs` の decode helper（raster、`resolve_cgimage`）と `render/vector/raster.rs` の `rasterize_vector_image_to_cgimage`(vector)を再利用し、16×16pt の `NSImage` を構築する。新しいデコーダは追加しない。
+
+### WinUI 3
+
+`ImageData::Encoded` は既存の `InMemoryRandomAccessStream`/`DataWriter` バイトストリームパターン(`render/composition/cache.rs`の`ImageSurfaceCache::surface_for`と同じ手法)で直接 `BitmapImage.SetSource` に渡す fast path を使う(再エンコード無し)。
+
+`ImageData::Rgba8` および Win2D `CanvasBitmap` を保持する `ImageData::Backend` は、既存の `render::win2d_bitmap`(`render/win2d.rs`、通常の render command path が既に使っている変換関数)をそのまま再利用する——menu icon 専用の別実装は作らない。`ImageData::Backend` が Win2D 以外のハンドルを保持している場合は conversion failure として icon を省略する(§6 の failure semantics通り、§B1 参照)。
+
+`ImageSource::Vector` は、既存の `render::emit_vector_image`/`replay_win2d_primitives`(vector scene を Win2D primitive へ変換・再生する既存パイプライン、`draw_vector_image_surface` と共有)をそのまま再利用し、`render::rasterize_vector_image_to_canvas_bitmap` で 32×32 の透明な `CanvasRenderTarget` へラスタライズする。第二の VectorScene traversal は作らない。
+
+いずれの経路で得た `CanvasBitmap`/`CanvasRenderTarget` も、`canvas_bitmap_to_xaml_image_source`(`CanvasBitmap.SaveAsync` で in-memory PNG stream にエンコードし、`XamlBitmapImage.SetSource` に渡す——同じ `InMemoryRandomAccessStream` ブリッジ規約)経由で XAML image source に変換し、`xaml_image_source_to_icon_element` で `ImageIcon`/`IconElement` にラップする。encoded fast path も含め、全経路がこの同じ終端ロジックを共有する。
+
+**未検証の注記**: `CanvasRenderTarget` のコンストラクタと `CanvasBitmap.SaveAsync` の正確な windows_bindgen 生成名は、このセッションに Windows ビルド環境が無いため実機確認できていない。既存の命名規則(`CanvasBitmap::LoadAsyncFromStream`/`CanvasBitmap::CreateFromBytes`)から推測した最善の呼び出しをコード内コメントで明記しており、初回 Windows ビルド時に確認・必要なら修正すること(アーキテクチャ変更ではなく機械的なスペル修正)。
+
+### `ImageData::Backend` の扱い(PR #171 review remediation の決定)
+
+元の contract では `ImageSource` を user icon に再利用するとしていたが、`ImageData::Backend` は型消去された backend-native resource であり、本質的に portable ではないという曖昧さがあった。これを次のように解決する。
+
+- WinUI 3: `ImageData::Backend` のハンドルが Win2D `CanvasBitmap` へ downcast できれば(`win2d_bitmap` の既存 `downcast_ref::<CanvasBitmap>()` 経路)、通常の render command path と同じくそのまま使う。
+- downcast できない(他 backend 由来などの)ハンドルは conversion failure として扱い、icon を省略する(§6 failure semantics)。panic しない。新しい cross-backend reflection や public trait は追加しない。
+- AppKit も同様に、`BackendImageHandle` が扱えない場合は同じ decode helper の既存の失敗経路(`None` 返却)で icon を省略する——AppKit 側はこの Issue で新たに handle した動作ではなく、既存の `resolve_cgimage`/decode helper が元々持つ振る舞い。
 
 ## 6. Failure semantics
 
@@ -107,7 +128,11 @@ Custom presentation は backend-neutral な `UIElement` ツリーのままであ
 
 ### WinUI 3 バインディング
 
-`crates/elwindui-backend-winui3/build.rs` の `windows_bindgen` `--filter` allowlist には現時点で `Symbol`/`SymbolIcon`/`ImageIcon`/`IconElement` が含まれていない。生成済みバインディングファイルを手編集するのではなく、`build.rs` の filter リストに必要な型を追加してから再ビルドする。
+`crates/elwindui-backend-winui3/build.rs` の `windows_bindgen` `--filter` allowlist に `Symbol`/`SymbolIcon`/`ImageIcon`/`IconElement`/`CanvasRenderTarget`/`CanvasBitmapFileFormat` を追加済み(生成済みバインディングファイルは手編集していない)。
+
+### Vector rasterization のコード共有
+
+`render/vector.rs` の `draw_vector_image_surface`(既存の `CompositionDrawingSurface` fallback path)と menu icon 用の `rasterize_vector_image_to_canvas_bitmap` は、どちらも同じ `replay_win2d_primitives`(Win2D primitive stream の解釈器)を呼ぶ。Vector scene の traversal(`emit_vector_image`)も共有する。menu icon 専用の第二の traversal/interpreter は存在しない。
 
 ## 8. Non-goals(この Issue で行わないこと)
 

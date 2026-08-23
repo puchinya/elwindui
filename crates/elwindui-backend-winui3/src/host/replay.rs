@@ -9,7 +9,7 @@ use crate::ffi::{AnyView, UiCallbackRegistryOwner};
 use crate::render::xaml_text_alignment;
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::{Canvas, TextBlock};
-use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, RoutedEventHandler};
+use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, RoutedEventHandler, UIElement};
 use crate::render::composition::IslandId;
 use elwindui_core::input::{FocusState, KeyboardDispatcher};
 use std::cell::RefCell;
@@ -158,6 +158,12 @@ pub(crate) fn reconcile_native_children(
                         alignment,
                     } => {
                         let text_block = TextBlock::new().expect("TextBlock::new");
+                        // This XAML child is a paint projection of a self-drawn ElwindUI node,
+                        // not an input owner. Let native hit testing pass through to the host
+                        // Canvas so the common render-tree hit test chooses the actual target.
+                        let ui: UIElement =
+                            text_block.clone().cast().expect("TextBlock is a UIElement");
+                        let _ = ui.SetIsHitTestVisible(false);
                         let _ = text_block.SetText(&HSTRING::from(content.as_str()));
                         let _ = crate::render::apply_text_style_to_text_block_with_foreground(
                             &text_block,

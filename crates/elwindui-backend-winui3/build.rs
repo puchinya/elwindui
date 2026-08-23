@@ -284,6 +284,8 @@ fn main() {
         "Microsoft.UI.Xaml.Input.KeyRoutedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Input.KeyEventHandler".to_owned(),
         "Microsoft.UI.Xaml.Input.KeyboardAccelerator".to_owned(),
+        "Microsoft.UI.Xaml.Input.PointerEventHandler".to_owned(),
+        "Microsoft.UI.Xaml.Input.PointerRoutedEventArgs".to_owned(),
         "Microsoft.UI.Xaml.Media.Brush".to_owned(),
         "Microsoft.UI.Xaml.Media.LoadedImageSurface".to_owned(),
         "Microsoft.UI.Xaml.Media.LoadedImageSourceLoadCompletedEventArgs".to_owned(),

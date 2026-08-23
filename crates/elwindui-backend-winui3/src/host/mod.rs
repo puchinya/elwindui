@@ -16,7 +16,7 @@ use replay::*;
 
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::Input::{
-    CharacterReceivedRoutedEventArgs, KeyEventHandler,
+    CharacterReceivedRoutedEventArgs, KeyEventHandler, PointerEventHandler, PointerRoutedEventArgs,
 };
 use crate::bindings::Microsoft::UI::Xaml::{FrameworkElement, SizeChangedEventHandler, UIElement};
 use crate::render::composition::{
@@ -24,9 +24,10 @@ use crate::render::composition::{
     DesiredCompositionNode, IslandId,
 };
 use elwindui_core::input::{
-    FocusState, KeyboardDispatcher, RawKeyEvent, RawKeyEventKind, RawTextInputEvent,
+    FocusState, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent, RawKeyEventKind,
+    RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
-use elwindui_core::ui::{FocusHost, UIElementExt as _};
+use elwindui_core::ui::{CoordinateHost, FocusHost, UIElementExt as _};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -64,6 +65,8 @@ pub struct TreeHostPanel {
     /// wiring (see `native_ui.rs`'s `Button`/`TextArea`) — `canvas`'s own `KeyDown`/`KeyUp` below
     /// never even fire while one is focused.
     keyboard: Rc<KeyboardDispatcher>,
+    /// Core routed-pointer dispatcher for self-drawn content hosted directly by `canvas`.
+    pointer: Rc<PointerDispatcher>,
     /// `(width_unconstrained, height_unconstrained)` — mirrors
     /// `elwindui_backend_appkit::inner::TreeHostIvars::unconstrained_axes` (see that field's own
     /// doc comment for the full rationale). `false`/`false` (the default, every existing host) means
@@ -197,6 +200,22 @@ impl FocusHost for WinUI3FocusHost {
     }
 }
 
+/// Root/screen conversion for one WinUI3 hosted tree. XAML objects support WinRT weak references,
+/// so the tree does not retain its owning Canvas through this capability.
+pub(crate) struct WinUI3CoordinateHost {
+    canvas: windows::core::Weak<Canvas>,
+}
+
+impl CoordinateHost for WinUI3CoordinateHost {
+    fn root_to_screen(&self, point: Point) -> Option<Point> {
+        TreeHostPanel::canvas_to_screen_point(&self.canvas.upgrade()?, point)
+    }
+
+    fn screen_to_root(&self, point: Point) -> Option<Point> {
+        TreeHostPanel::screen_to_canvas_point(&self.canvas.upgrade()?, point)
+    }
+}
+
 impl TreeHostPanel {
     pub(crate) fn new() -> Self {
         let canvas = Canvas::new().expect("Canvas::new");
@@ -208,6 +227,7 @@ impl TreeHostPanel {
             render_tree: Rc::new(RefCell::new(None)),
             native_children: Rc::new(RefCell::new(NativeChildMap::new())),
             keyboard: Rc::new(KeyboardDispatcher::new()),
+            pointer: Rc::new(PointerDispatcher::new()),
             unconstrained_axes: Rc::new(Cell::new((false, false))),
             active: Rc::new(Cell::new(true)),
             active_popup: Rc::new(RefCell::new(None)),
@@ -355,6 +375,87 @@ impl TreeHostPanel {
                 };
                 if !ch.is_control() {
                     invoke_ui_text_event_callback(callback_id, ch.to_string());
+                }
+                Ok(())
+            }));
+        }
+        {
+            let tree = Rc::downgrade(&this.tree);
+            let pointer = Rc::downgrade(&this.pointer);
+            let keyboard = Rc::downgrade(&this.keyboard);
+            let canvas = this.canvas.clone();
+            let canvas_for_handler = canvas.clone();
+            let _ = canvas.PointerPressed(&PointerEventHandler::new(move |_sender, args| {
+                let Some(args) = args.as_ref() else {
+                    return Ok(());
+                };
+                let Some(kind) = Self::pointer_button_kind(args, &canvas_for_handler, true) else {
+                    return Ok(());
+                };
+                if Self::dispatch_pointer_routed(
+                    &tree,
+                    &pointer,
+                    &keyboard,
+                    &canvas_for_handler,
+                    args,
+                    kind,
+                ) {
+                    if let Ok(native_pointer) = args.Pointer() {
+                        let _ = canvas_for_handler.CapturePointer(&native_pointer);
+                    }
+                    let _ = args.SetHandled(true);
+                }
+                Ok(())
+            }));
+        }
+        {
+            let tree = Rc::downgrade(&this.tree);
+            let pointer = Rc::downgrade(&this.pointer);
+            let keyboard = Rc::downgrade(&this.keyboard);
+            let canvas = this.canvas.clone();
+            let canvas_for_handler = canvas.clone();
+            let _ = canvas.PointerMoved(&PointerEventHandler::new(move |_sender, args| {
+                let Some(args) = args.as_ref() else {
+                    return Ok(());
+                };
+                if Self::dispatch_pointer_routed(
+                    &tree,
+                    &pointer,
+                    &keyboard,
+                    &canvas_for_handler,
+                    args,
+                    RawPointerEventKind::Moved,
+                ) {
+                    let _ = args.SetHandled(true);
+                }
+                Ok(())
+            }));
+        }
+        {
+            let tree = Rc::downgrade(&this.tree);
+            let pointer = Rc::downgrade(&this.pointer);
+            let keyboard = Rc::downgrade(&this.keyboard);
+            let canvas = this.canvas.clone();
+            let canvas_for_handler = canvas.clone();
+            let _ = canvas.PointerReleased(&PointerEventHandler::new(move |_sender, args| {
+                let Some(args) = args.as_ref() else {
+                    return Ok(());
+                };
+                let Some(kind) = Self::pointer_button_kind(args, &canvas_for_handler, false) else {
+                    return Ok(());
+                };
+                if Self::dispatch_pointer_routed(
+                    &tree,
+                    &pointer,
+                    &keyboard,
+                    &canvas_for_handler,
+                    args,
+                    kind,
+                ) {
+                    if let Ok(native_pointer) = args.Pointer() {
+                        let _ = canvas_for_handler.ReleasePointerCapture(&native_pointer);
+                    }
+                    let _ = args.SetHandled(true);
                 }
                 Ok(())
             }));
@@ -520,6 +621,86 @@ impl TreeHostPanel {
         this
     }
 
+    /// `Canvas` receives bubbled events from native XAML children too. Only events whose original
+    /// XAML source is the Canvas itself belong to the self-drawn core tree.
+    fn pointer_originates_from_canvas(canvas: &Canvas, args: &PointerRoutedEventArgs) -> bool {
+        args.OriginalSource()
+            .ok()
+            .and_then(|source| source.cast::<Canvas>().ok())
+            .is_some_and(|source| source == *canvas)
+    }
+
+    fn pointer_button_kind(
+        args: &PointerRoutedEventArgs,
+        canvas: &Canvas,
+        pressed: bool,
+    ) -> Option<RawPointerEventKind> {
+        use windows::UI::Input::PointerUpdateKind;
+
+        let update = args
+            .GetCurrentPoint(canvas)
+            .ok()?
+            .Properties()
+            .ok()?
+            .PointerUpdateKind()
+            .ok()?;
+        let button = match (pressed, update) {
+            (true, PointerUpdateKind::LeftButtonPressed)
+            | (false, PointerUpdateKind::LeftButtonReleased) => MouseButton::Left,
+            (true, PointerUpdateKind::RightButtonPressed)
+            | (false, PointerUpdateKind::RightButtonReleased) => MouseButton::Right,
+            (true, PointerUpdateKind::MiddleButtonPressed)
+            | (false, PointerUpdateKind::MiddleButtonReleased) => MouseButton::Middle,
+            _ => return None,
+        };
+        Some(if pressed {
+            RawPointerEventKind::Pressed(button)
+        } else {
+            RawPointerEventKind::Released(button)
+        })
+    }
+
+    fn dispatch_pointer_routed(
+        tree: &Weak<RefCell<Option<Rc<dyn elwindui_core::ui::UIElementExt>>>>,
+        pointer: &Weak<PointerDispatcher>,
+        keyboard: &Weak<KeyboardDispatcher>,
+        canvas: &Canvas,
+        args: &PointerRoutedEventArgs,
+        kind: RawPointerEventKind,
+    ) -> bool {
+        if !Self::pointer_originates_from_canvas(canvas, args) {
+            return false;
+        }
+        let Some(tree) = tree.upgrade().and_then(|tree| tree.borrow().clone()) else {
+            return false;
+        };
+        let (Some(pointer), Some(keyboard)) = (pointer.upgrade(), keyboard.upgrade()) else {
+            return false;
+        };
+        let Ok(point) = args.GetCurrentPoint(canvas) else {
+            return false;
+        };
+        let Ok(position) = point.Position() else {
+            return false;
+        };
+        let local = Point {
+            x: position.X,
+            y: position.Y,
+        };
+        pointer.handle(
+            &tree,
+            &keyboard.focus,
+            RawPointerEvent {
+                kind,
+                position: local,
+                screen_position: Self::canvas_to_screen_point(canvas, local),
+                modifiers: winui_modifiers(),
+                timestamp_ms: point.Timestamp().unwrap_or(0) as f64 / 1000.0,
+            },
+        );
+        true
+    }
+
     pub(crate) fn as_element(&self) -> FrameworkElement {
         self.canvas
             .cast()
@@ -634,6 +815,10 @@ impl TreeHostPanel {
         });
         *host.weak_self.borrow_mut() = Rc::downgrade(&host);
         tree.as_ui_element().set_invalidate_host(Some(host));
+        tree.as_ui_element()
+            .set_coordinate_host(Some(Rc::new(WinUI3CoordinateHost {
+                canvas: self.canvas.downgrade().unwrap_or_default(),
+            })));
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(WinUI3FocusHost {
                 keyboard: Rc::downgrade(&self.keyboard),
@@ -1289,6 +1474,28 @@ impl TreeHostPanel {
         }
 
         None
+    }
+
+    /// Converts normalized screen logical coordinates to this Canvas's own root-local DIPs.
+    pub(crate) fn screen_to_canvas_point(
+        canvas: &crate::bindings::Microsoft::UI::Xaml::Controls::Canvas,
+        screen_point: Point,
+    ) -> Option<Point> {
+        let xaml_root = canvas.XamlRoot().ok()?;
+        let content = xaml_root.Content().ok()?;
+        let xaml_local = Self::screen_logical_to_xaml_local(canvas, screen_point)?;
+        let canvas_element: crate::bindings::Microsoft::UI::Xaml::UIElement = canvas.cast().ok()?;
+        let transform = content.TransformToVisual(&canvas_element).ok()?;
+        let canvas_local = transform
+            .TransformPoint(windows::Foundation::Point {
+                X: xaml_local.x,
+                Y: xaml_local.y,
+            })
+            .ok()?;
+        Some(Point {
+            x: canvas_local.X,
+            y: canvas_local.Y,
+        })
     }
 
     /// Converts desktop screen logical coordinates to XAML root local DIPs.

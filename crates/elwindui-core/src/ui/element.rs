@@ -44,6 +44,18 @@ pub trait RelayoutHost {
     fn request_relayout(&self, dirty_group_id: u64, kind: InvalidationKind);
 }
 
+/// Backend-neutral coordinate conversion supplied by the native host that owns a Visual tree.
+/// Screen coordinates use top-left/Y-down logical desktop units on every platform. Implementors
+/// return `None` when native conversion is unavailable; callers must never estimate a result from
+/// window decoration geometry.
+pub trait CoordinateHost {
+    /// Converts a hosted-tree root-relative point to normalized logical desktop coordinates.
+    fn root_to_screen(&self, point: Point) -> Option<Point>;
+
+    /// Converts normalized logical desktop coordinates to a hosted-tree root-relative point.
+    fn screen_to_root(&self, point: Point) -> Option<Point>;
+}
+
 /// The `FocusHost` counterpart to `RelayoutHost` — registered the same way (`UIElement::focus_host`
 /// on a hosted tree's root, set by the host's own `set_tree`), discovered the same way
 /// (`request_focus` walks `visual_parent` up to the root, mirroring `request_relayout`), and backed
@@ -212,6 +224,9 @@ pub struct UIElement {
     /// on `self` directly. See `RelayoutHost`'s own doc comment for why this is a trait object
     /// rather than a raw closure.
     pub invalidate_host: RefCell<Option<Rc<dyn RelayoutHost>>>,
+    /// The coordinate counterpart to `invalidate_host`, installed on a hosted tree's root by the
+    /// backend and discovered through the Visual-parent chain.
+    pub coordinate_host: RefCell<Option<Rc<dyn CoordinateHost>>>,
     /// WinUI3's `Control.IsTabStop` — whether this element participates in `FocusTracker`'s tab
     /// order at all. `false` by default; a `NativeControl<H>`-backed leaf (`Button`/`TextArea`/
     /// `TabView`) sets this `true` in its own `new()` (mirrors `Button::new()`'s `on_click` wiring),
@@ -286,6 +301,7 @@ impl std::fmt::Debug for UIElement {
             )
             .field("visual_children_len", &self.visual_collection.len())
             .field("invalidate_host", &self.invalidate_host.borrow().is_some())
+            .field("coordinate_host", &self.coordinate_host.borrow().is_some())
             .field("tab_stop", &self.tab_stop.get())
             .field("focus_order", &self.focus_order.get())
             .field("focus_state", &self.focus_state.get())
@@ -345,6 +361,7 @@ impl UIElement {
             visual_parent: RefCell::new(None),
             visual_collection: UIElementVisualCollection::new(__self_weak.clone()),
             invalidate_host: RefCell::new(None),
+            coordinate_host: RefCell::new(None),
             tab_stop: Cell::new(false),
             focus_order: Cell::new(None),
             focus_state: Cell::new(FocusState::Unfocused),
@@ -732,6 +749,20 @@ impl UIElement {
     fn set_invalidate_host(&self, host: Option<Rc<dyn RelayoutHost>>) {
         *self.as_ui_element().invalidate_host.borrow_mut() = host;
     }
+    /// Called by a backend host when this element becomes or ceases to be the root of its hosted
+    /// tree. Descendants discover this registration by walking their Visual-parent chain.
+    fn set_coordinate_host(&self, host: Option<Rc<dyn CoordinateHost>>) {
+        *self.as_ui_element().coordinate_host.borrow_mut() = host;
+    }
+    /// Converts a point from this element's hosted-tree root coordinate space to normalized
+    /// logical desktop coordinates.
+    fn root_to_screen(&self, point: Point) -> Option<Point> {
+        coordinate_host(self.as_ui_element()).and_then(|host| host.root_to_screen(point))
+    }
+    /// Converts normalized logical desktop coordinates to this element's hosted-tree root space.
+    fn screen_to_root(&self, point: Point) -> Option<Point> {
+        coordinate_host(self.as_ui_element()).and_then(|host| host.screen_to_root(point))
+    }
     /// WinUI3's `Control.IsTabStop` — see `UIElement::tab_stop`'s own doc comment.
     fn is_tab_stop(&self) -> bool {
         self.as_ui_element().tab_stop.get()
@@ -775,7 +806,10 @@ impl UIElement {
     /// Registers a pre-unmount hook invoked before descending into this element's visual children.
     /// Returning `false` aborts descending into this element's subtree (e.g. already unmounting or unmounted).
     fn add_begin_unmount_hook(&self, hook: Box<dyn Fn() -> bool>) {
-        self.as_ui_element().begin_unmount_hooks.borrow_mut().push(hook);
+        self.as_ui_element()
+            .begin_unmount_hooks
+            .borrow_mut()
+            .push(hook);
     }
     /// Invokes all registered begin-unmount hooks. Returns `true` if unmount traversal should continue.
     fn begin_unmount(&self) -> bool {
@@ -796,11 +830,15 @@ impl UIElement {
     /// Teardown this element: invokes all registered unmount hooks and clears host / environment references.
     fn unmount(&self) {
         let hooks = std::mem::take(&mut *self.as_ui_element().unmount_hooks.borrow_mut());
-        self.as_ui_element().begin_unmount_hooks.borrow_mut().clear();
+        self.as_ui_element()
+            .begin_unmount_hooks
+            .borrow_mut()
+            .clear();
         for hook in hooks {
             hook();
         }
         *self.as_ui_element().invalidate_host.borrow_mut() = None;
+        *self.as_ui_element().coordinate_host.borrow_mut() = None;
         *self.as_ui_element().focus_host.borrow_mut() = None;
         *self.as_ui_element().environment.borrow_mut() = None;
     }
@@ -985,6 +1023,26 @@ pub(crate) fn request_focus(target: &Rc<dyn UIElementExt>) -> bool {
     }
 }
 
+/// Finds the nearest coordinate host registered on `base`'s Visual ancestry.
+fn coordinate_host(base: &UIElement) -> Option<Rc<dyn CoordinateHost>> {
+    let mut current = base
+        .visual_parent
+        .borrow()
+        .as_ref()
+        .and_then(|weak| weak.upgrade());
+    let mut host = base.coordinate_host.borrow().clone();
+    while let Some(element) = current {
+        host = element
+            .as_ui_element()
+            .coordinate_host
+            .borrow()
+            .clone()
+            .or(host);
+        current = element.visual_parent();
+    }
+    host
+}
+
 /// Lifecycle state of a UI component during its creation, mount, unmount traversal, and teardown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ComponentLifecycleState {
@@ -1049,6 +1107,40 @@ mod tests {
             3,
             "un-registering the host should make invalidate a no-op again"
         );
+    }
+
+    #[test]
+    fn coordinate_conversion_walks_to_the_host_registered_on_the_root() {
+        struct OffsetCoordinateHost;
+
+        impl CoordinateHost for OffsetCoordinateHost {
+            fn root_to_screen(&self, point: Point) -> Option<Point> {
+                Some(Point {
+                    x: point.x + 100.0,
+                    y: point.y + 200.0,
+                })
+            }
+
+            fn screen_to_root(&self, point: Point) -> Option<Point> {
+                Some(Point {
+                    x: point.x - 100.0,
+                    y: point.y - 200.0,
+                })
+            }
+        }
+
+        let leaf = native("a", size(10.0, 20.0));
+        let root = stack(Orientation::Vertical, 0.0, vec![Rc::clone(&leaf)]);
+        root.set_coordinate_host(Some(Rc::new(OffsetCoordinateHost)));
+
+        let screen = leaf
+            .root_to_screen(Point { x: 5.0, y: 7.0 })
+            .expect("descendant must discover the root coordinate host");
+        assert_eq!(screen, Point { x: 105.0, y: 207.0 });
+        assert_eq!(leaf.screen_to_root(screen), Some(Point { x: 5.0, y: 7.0 }));
+
+        root.set_coordinate_host(None);
+        assert_eq!(leaf.root_to_screen(Point { x: 5.0, y: 7.0 }), None);
     }
 
     #[test]

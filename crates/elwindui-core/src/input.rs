@@ -38,11 +38,16 @@ pub struct KeyModifiers {
 /// `on_pointer_exited` (docs/design/runtime/ui_tree_design.md). `position` is in the hosting
 /// tree's own root-relative coordinate space (the same space `elwindui_core::ui::hit_test`'s `at`
 /// argument uses) — not relative to whichever ancestor happens to handle the bubbled event, since a
-/// single payload value is shared across every handler on the bubble path. `button` is `Some` only
-/// for `Pressed`/`Released`; `None` for `Moved`/`Entered`/`Exited`.
+/// single payload value is shared across every handler on the bubble path. `screen_position`, when
+/// available, is the same point in top-left/Y-down logical desktop coordinates. Backends return
+/// `None` rather than estimating it when their native conversion fails. `button` is `Some` only for
+/// `Pressed`/`Released`; `None` for `Moved`/`Entered`/`Exited`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointerEventArgs {
     pub position: Point,
+    /// The same pointer position in normalized logical desktop coordinates, when the backend can
+    /// obtain it without estimation.
+    pub screen_position: Option<Point>,
     pub button: Option<MouseButton>,
     pub modifiers: KeyModifiers,
 }
@@ -79,14 +84,17 @@ pub enum RawPointerEventKind {
     WheelChanged { delta_x: f32, delta_y: f32 },
 }
 
-/// A single raw mouse event, in the hosting tree's own root-relative coordinate space (see
-/// `PointerEventArgs::position`'s own doc comment). `timestamp_ms` is any monotonically increasing
-/// clock in milliseconds (AppKit's `NSEvent.timestamp * 1000.0`, say) — only ever compared against
-/// other `RawPointerEvent`s from the same dispatcher, never interpreted as wall-clock time.
+/// A single raw mouse event. `position` is in the hosting tree's root-relative coordinate space;
+/// `screen_position` is the optional normalized logical desktop coordinate supplied by the same
+/// backend event. `timestamp_ms` is any monotonically increasing clock in milliseconds (AppKit's
+/// `NSEvent.timestamp * 1000.0`, say) — only ever compared against other `RawPointerEvent`s from the
+/// same dispatcher, never interpreted as wall-clock time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawPointerEvent {
     pub kind: RawPointerEventKind,
     pub position: Point,
+    /// Backend-normalized logical desktop position for this native event.
+    pub screen_position: Option<Point>,
     pub modifiers: KeyModifiers,
     pub timestamp_ms: f64,
 }
@@ -188,10 +196,16 @@ impl PointerDispatcher {
         match event.kind {
             RawPointerEventKind::Moved => {
                 let hit = crate::ui::hit_test(root, event.position);
-                self.update_hover(hit.clone(), event.position, event.modifiers);
+                self.update_hover(
+                    hit.clone(),
+                    event.position,
+                    event.screen_position,
+                    event.modifiers,
+                );
                 if let Some(target) = self.captured_or(hit) {
                     let payload = PointerEventArgs {
                         position: event.position,
+                        screen_position: event.screen_position,
                         button: None,
                         modifiers: event.modifiers,
                     };
@@ -205,7 +219,12 @@ impl PointerDispatcher {
             }
             RawPointerEventKind::Pressed(button) => {
                 let hit = crate::ui::hit_test(root, event.position);
-                self.update_hover(hit.clone(), event.position, event.modifiers);
+                self.update_hover(
+                    hit.clone(),
+                    event.position,
+                    event.screen_position,
+                    event.modifiers,
+                );
                 let target = self.captured_or(hit);
                 if let Some(target) = &target {
                     if target.is_tab_stop() {
@@ -213,6 +232,7 @@ impl PointerDispatcher {
                     }
                     let payload = PointerEventArgs {
                         position: event.position,
+                        screen_position: event.screen_position,
                         button: Some(button),
                         modifiers: event.modifiers,
                     };
@@ -227,11 +247,17 @@ impl PointerDispatcher {
             }
             RawPointerEventKind::Released(button) => {
                 let hit = crate::ui::hit_test(root, event.position);
-                self.update_hover(hit.clone(), event.position, event.modifiers);
+                self.update_hover(
+                    hit.clone(),
+                    event.position,
+                    event.screen_position,
+                    event.modifiers,
+                );
                 let target = self.captured_or(hit);
                 if let Some(target) = &target {
                     let payload = PointerEventArgs {
                         position: event.position,
+                        screen_position: event.screen_position,
                         button: Some(button),
                         modifiers: event.modifiers,
                     };
@@ -377,12 +403,14 @@ impl PointerDispatcher {
         &self,
         new_hit: Option<Rc<dyn UIElementExt>>,
         position: Point,
+        screen_position: Option<Point>,
         modifiers: KeyModifiers,
     ) {
         let new_chain = ancestor_chain(new_hit);
         let old_chain = self.last_hover.replace(new_chain.clone());
         let payload = PointerEventArgs {
             position,
+            screen_position,
             button: None,
             modifiers,
         };

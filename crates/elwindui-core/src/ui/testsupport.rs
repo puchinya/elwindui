@@ -1067,6 +1067,7 @@ pub(crate) fn move_event(x: f32, y: f32) -> crate::input::RawPointerEvent {
     crate::input::RawPointerEvent {
         kind: crate::input::RawPointerEventKind::Moved,
         position: Point { x, y },
+        screen_position: None,
         modifiers: crate::input::KeyModifiers::default(),
         timestamp_ms: 0.0,
     }
@@ -1081,6 +1082,7 @@ pub(crate) fn press_event(
     crate::input::RawPointerEvent {
         kind: crate::input::RawPointerEventKind::Pressed(button),
         position: Point { x, y },
+        screen_position: None,
         modifiers: crate::input::KeyModifiers::default(),
         timestamp_ms: at_ms,
     }
@@ -1095,6 +1097,7 @@ pub(crate) fn release_event(
     crate::input::RawPointerEvent {
         kind: crate::input::RawPointerEventKind::Released(button),
         position: Point { x, y },
+        screen_position: None,
         modifiers: crate::input::KeyModifiers::default(),
         timestamp_ms: at_ms,
     }

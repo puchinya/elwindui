@@ -1,6 +1,6 @@
 use super::brush::Brush;
 use super::command::{Clip, RenderCommand, TextAlignment};
-use super::image::{Image, ImageDrawOptions};
+use super::image::{BitmapImage, ImageDrawOptions};
 use super::path::{FillRule, Path};
 use super::stroke::StrokeStyle;
 use super::text::ComputedTextStyle;
@@ -269,7 +269,7 @@ impl<'a> RenderContext<'a> {
 
     pub fn draw_image(
         &mut self,
-        image: &Image,
+        image: &BitmapImage,
         dest: Rect,
         source: Option<Rect>,
         options: ImageDrawOptions,

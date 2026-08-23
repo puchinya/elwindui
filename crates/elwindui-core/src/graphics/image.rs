@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-/// Stable identity of one logical [`Image`] resource.
+/// Stable identity of one logical [`BitmapImage`] resource.
 ///
 /// Clones of an image share its ID. Independently created images intentionally receive distinct
 /// IDs even when their pixel contents are identical, so backends can cache decoded native images
@@ -101,11 +101,11 @@ impl std::error::Error for ImageError {}
 /// A decode-agnostic, cheaply-`Clone`able (via `Arc`) image handle — never re-decoded/re-uploaded
 /// on repaint (painter design doc §13.1/§14 "画像・pathリソースをフレーム再生成しない").
 #[derive(Debug, Clone)]
-pub struct Image {
+pub struct BitmapImage {
     inner: Arc<ImageResource>,
 }
 
-impl PartialEq for Image {
+impl PartialEq for BitmapImage {
     fn eq(&self, other: &Self) -> bool {
         self.data() == other.data()
     }
@@ -126,7 +126,7 @@ impl ImageResource {
     }
 }
 
-impl Image {
+impl BitmapImage {
     pub fn from_encoded(bytes: impl Into<Arc<[u8]>>) -> Self {
         Self {
             inner: Arc::new(ImageResource::new(ImageData::Encoded {
@@ -333,40 +333,40 @@ mod tests {
 
     #[test]
     fn clones_share_a_stable_image_id_for_rgba_images() {
-        let image = Image::from_rgba8(1, 1, 4, vec![0, 0, 0, 255], AlphaMode::Premultiplied)
+        let image = BitmapImage::from_rgba8(1, 1, 4, vec![0, 0, 0, 255], AlphaMode::Premultiplied)
             .expect("valid RGBA image");
         assert_eq!(image.id(), image.clone().id());
     }
 
     #[test]
     fn separately_created_images_have_distinct_ids() {
-        let first = Image::from_encoded(vec![1, 2, 3]);
-        let second = Image::from_encoded(vec![1, 2, 3]);
+        let first = BitmapImage::from_encoded(vec![1, 2, 3]);
+        let second = BitmapImage::from_encoded(vec![1, 2, 3]);
         assert_ne!(first.id(), second.id());
     }
 
     #[test]
     fn encoded_images_keep_their_id_when_cloned() {
-        let image = Image::from_encoded_with_format(vec![1, 2, 3], ImageFormat::Png);
+        let image = BitmapImage::from_encoded_with_format(vec![1, 2, 3], ImageFormat::Png);
         assert_eq!(image.id(), image.clone().id());
     }
 
     #[test]
     fn rgba8_validates_buffer_size() {
         let pixels = vec![0u8; 4 * 4 * 4];
-        assert!(Image::from_rgba8(4, 4, 16, pixels.clone(), AlphaMode::Straight).is_ok());
-        assert!(Image::from_rgba8(4, 4, 16, vec![0u8; 4], AlphaMode::Straight).is_err());
+        assert!(BitmapImage::from_rgba8(4, 4, 16, pixels.clone(), AlphaMode::Straight).is_ok());
+        assert!(BitmapImage::from_rgba8(4, 4, 16, vec![0u8; 4], AlphaMode::Straight).is_err());
     }
 
     #[test]
     fn rgba8_rejects_stride_smaller_than_row_bytes() {
         let pixels = vec![0u8; 4 * 4 * 4];
-        assert!(Image::from_rgba8(4, 4, 8, pixels, AlphaMode::Straight).is_err());
+        assert!(BitmapImage::from_rgba8(4, 4, 8, pixels, AlphaMode::Straight).is_err());
     }
 
     #[test]
     fn encoded_image_has_no_known_pixel_size() {
-        let image = Image::from_encoded(vec![0u8; 10]);
+        let image = BitmapImage::from_encoded(vec![0u8; 10]);
         assert_eq!(image.pixel_size(), None);
     }
 
@@ -375,7 +375,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("elwindui-image-test-{}.png", std::process::id()));
         std::fs::write(&path, b"not a real png, just bytes to round-trip").unwrap();
-        let image = Image::from_file(&path).unwrap();
+        let image = BitmapImage::from_file(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         match image.data() {
             ImageData::Encoded { bytes, format_hint } => {
@@ -391,7 +391,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("elwindui-image-test-{}.bin", std::process::id()));
         std::fs::write(&path, b"bytes").unwrap();
-        let image = Image::from_file(&path).unwrap();
+        let image = BitmapImage::from_file(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         match image.data() {
             ImageData::Encoded { format_hint, .. } => {
@@ -403,6 +403,6 @@ mod tests {
 
     #[test]
     fn from_file_errors_on_missing_file() {
-        assert!(Image::from_file("/nonexistent/elwindui-image-test.png").is_err());
+        assert!(BitmapImage::from_file("/nonexistent/elwindui-image-test.png").is_err());
     }
 }

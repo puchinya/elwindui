@@ -23,8 +23,8 @@ use crate::bindings::Microsoft::UI::Xaml::Media::{
 };
 use elwindui_core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui_core::graphics::{
-    Brush, BrushMappingMode, FillRule, GradientSpreadMethod, Image, ImageData, LineCap, LineJoin,
-    PathCommand, StrokeStyle,
+    BitmapImage, Brush, BrushMappingMode, FillRule, GradientSpreadMethod, ImageData, LineCap,
+    LineJoin, PathCommand, StrokeStyle,
 };
 use std::collections::{HashMap, HashSet};
 use windows::Foundation::TypedEventHandler;
@@ -88,7 +88,7 @@ impl ImageSurfaceCache {
 
     pub(crate) fn surface_for(
         &mut self,
-        image: &Image,
+        image: &BitmapImage,
     ) -> std::result::Result<LoadedImageSurface, &'static str> {
         let key = image.data() as *const ImageData as usize;
         if let Some(entry) = self.entries.get(&key) {

@@ -1,4 +1,4 @@
-//! Decoding, cropping, and placing raster images: `elwindui_core::graphics::Image` ->
+//! Decoding, cropping, and placing raster images: `elwindui_core::graphics::BitmapImage` ->
 //! `CGImage`, plus the `masksToBounds` container layer a `DrawImage` command needs so a
 //! `Cover`/`None` fit can overflow its destination rect without bleeding outside it.
 
@@ -210,10 +210,10 @@ pub(crate) fn build_image_container_layer(
     Some(container)
 }
 
-/// Resolves an `Image` to a `CGImage`, decoding at most once per distinct `Image` (`image_cache`,
-/// keyed by the `Image`'s stable [`elwindui_core::graphics::ImageId`].
+/// Resolves a `BitmapImage` to a `CGImage`, decoding at most once per distinct `BitmapImage`
+/// (`image_cache`, keyed by the `BitmapImage`'s stable [`elwindui_core::graphics::ImageId`].
 pub(crate) fn resolve_cgimage(
-    image: &elwindui_core::graphics::Image,
+    image: &elwindui_core::graphics::BitmapImage,
     cache: &mut HashMap<elwindui_core::graphics::ImageId, CFRetained<CGImage>>,
 ) -> Option<CFRetained<CGImage>> {
     let key = image.id();
@@ -248,7 +248,7 @@ pub(crate) unsafe extern "C-unwind" fn release_boxed_pixels(
 }
 
 pub(crate) fn decode_cgimage(
-    image: &elwindui_core::graphics::Image,
+    image: &elwindui_core::graphics::BitmapImage,
 ) -> Option<CFRetained<CGImage>> {
     match image.data() {
         elwindui_core::graphics::ImageData::Rgba8 {

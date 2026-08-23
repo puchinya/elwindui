@@ -1,9 +1,9 @@
 //! `VectorImage` — the SVG-non-specific, cheap-clone handle a loaded vector document is carried
 //! as through `RenderCommand`/`RenderContext` (SVG読み込み・ベクター描画対応 実装指示書 §5). Mirrors
-//! `Image`(`super::image`)'s own design: an immutable `Arc<...Data>` payload behind a plain value
+//! `BitmapImage`(`super::image`)'s own design: an immutable `Arc<...Data>` payload behind a plain value
 //! type, never `Arc<VectorImage>` in public APIs (指示書§1.2).
 
-use super::image::Image;
+use super::image::BitmapImage;
 use super::vector_scene::VectorGroup;
 use crate::base::{Rect, Size};
 use std::fmt;
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// cheap to clone on its own (指示書§1.2).
 #[derive(Debug, Clone)]
 pub enum ImageSource {
-    Raster(Image),
+    Raster(BitmapImage),
     Vector(VectorImage),
 }
 
@@ -88,7 +88,7 @@ struct VectorImageData {
     root: VectorGroup,
 }
 
-/// A loaded, immutable vector document — the SVG analogue of [`super::image::Image`]. Cheap to
+/// A loaded, immutable vector document — the SVG analogue of [`super::image::BitmapImage`]. Cheap to
 /// `Clone` (an `Arc` bump only; `path`/`filter`/`mask` graphs inside `root` are never deep-cloned)
 /// and never re-parsed after construction (指示書§1.2/§25).
 #[derive(Debug, Clone)]

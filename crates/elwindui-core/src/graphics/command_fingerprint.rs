@@ -669,7 +669,7 @@ impl RenderCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphics::{AlphaMode, Color, Image};
+    use crate::graphics::{AlphaMode, BitmapImage, Color};
 
     fn solid_fill_rect(x: f32, color: Color) -> RenderCommand {
         RenderCommand::FillRect {
@@ -782,13 +782,14 @@ mod tests {
 
     #[test]
     fn cloned_image_shares_its_id_so_a_moved_but_otherwise_identical_image_brush_is_visually_eq() {
-        // `Image` is `Arc`-backed — cloning it (as `RenderCommand::visually_eq`'s `DrawImage` arm
-        // is specifically designed to compare via `ImageId` rather than `Image`'s own deep-pixel
-        // `PartialEq`) must keep the same id. This is the property the AppKit render optimization
-        // work's leaf diffing actually depends on: two `RenderCommand`s built from the same
-        // decoded `Image` resource, even if not the literal same `Image` value, must compare
-        // cheaply equal.
-        let image = Image::from_rgba8(1, 1, 4, vec![0u8, 0, 0, 255], AlphaMode::Straight).unwrap();
+        // `BitmapImage` is `Arc`-backed — cloning it (as `RenderCommand::visually_eq`'s `DrawImage`
+        // arm is specifically designed to compare via `ImageId` rather than `BitmapImage`'s own
+        // deep-pixel `PartialEq`) must keep the same id. This is the property the AppKit render
+        // optimization work's leaf diffing actually depends on: two `RenderCommand`s built from the
+        // same decoded `BitmapImage` resource, even if not the literal same `BitmapImage` value,
+        // must compare cheaply equal.
+        let image =
+            BitmapImage::from_rgba8(1, 1, 4, vec![0u8, 0, 0, 255], AlphaMode::Straight).unwrap();
         let cloned = image.clone();
         assert_eq!(image.id(), cloned.id());
 

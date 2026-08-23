@@ -65,7 +65,7 @@ pub(crate) enum Win2dPrimitive {
     PushOpacityLayer(f32),
     PopOpacityLayer,
     DrawImage {
-        image: elwindui_core::graphics::Image,
+        image: elwindui_core::graphics::BitmapImage,
         dest: elwindui_core::base::Rect,
         source: Option<elwindui_core::base::Rect>,
         options: elwindui_core::graphics::ImageDrawOptions,
@@ -473,7 +473,7 @@ pub(crate) fn win2d_stroke_style(
 
 pub(crate) fn win2d_bitmap(
     creator: &ICanvasResourceCreator,
-    image: &elwindui_core::graphics::Image,
+    image: &elwindui_core::graphics::BitmapImage,
 ) -> Result<CanvasBitmap> {
     use elwindui_core::graphics::{AlphaMode, ImageData};
 

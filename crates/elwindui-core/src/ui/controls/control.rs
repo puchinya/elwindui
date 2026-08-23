@@ -18,7 +18,9 @@ use super::*;
 /// `elwindui-core::ui`) delegates to.
 #[elwindui_macros::class(inherits = crate::ui::UIElement)]
 #[text_style]
+#[content(visual_root)]
 #[prop(padding: Option<f32>)]
+#[prop(visual_root: std::rc::Rc<dyn crate::ui::UIElementExt>)]
 pub struct Control {
     pub padding: Cell<f32>,
     pub content_horizontal_alignment: Cell<HorizontalAlignment>,
@@ -83,6 +85,14 @@ impl Control {
     fn set_padding(&self, padding: f32) {
         self.padding.set(padding);
         self.invalidate_measure();
+    }
+    /// Installs the authored visual root through the same private template-root ownership path
+    /// used by selected [`ControlTemplate`](crate::ui::ControlTemplate) presentations. This is an
+    /// internal scalar content-property surface for DSL/codegen lowering, not a second root store
+    /// or a public generic child collection.
+    #[doc(hidden)]
+    fn set_visual_root(&self, root: Rc<dyn UIElementExt>) {
+        self.__set_template_root(root);
     }
     fn set_content_horizontal_alignment(&self, alignment: HorizontalAlignment) {
         self.content_horizontal_alignment.set(alignment);

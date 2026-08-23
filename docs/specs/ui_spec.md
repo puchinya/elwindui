@@ -294,7 +294,10 @@ typed factoryと選択規則は[ControlTemplate Specification](control_template_
 `Control` 自身は公開 content collection を持たない。`#[component(inherits Control)]` の
 `view!` body に書かれた単一の authored visual root は、private な `template_root` 経路を通じて
 Visual child として接続される。collection children は `Layout`、単一の logical content は
-`ContentControl`、専用の複数項目は各 specialized control が所有する。
+`ContentControl`、専用の複数項目は各 specialized control が所有する。DSL/codegen の内部では
+この authored root を受ける scalar `visual_root` content destination が使われるが、これは
+通常の公開プロパティではなく、`template_root` の private ownership を二重化しないための
+metadata surface である。
 
 #### Properties
 

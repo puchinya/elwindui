@@ -1485,8 +1485,12 @@ mod tests {
             .unwrap_or_else(|e| panic!("generated code is not valid Rust: {e}\n---\n{generated}"));
         let rendered = generated.to_string();
         assert!(
-            rendered.contains("__set_template_root"),
-            "Control body composition must attach its authored root through the private template-root path: {rendered}"
+            rendered.contains("set_visual_root"),
+            "an authored root must target the effective scalar content property: {rendered}"
+        );
+        assert!(
+            !rendered.contains("__set_template_root"),
+            "the frontend test must not depend on Control's private template-root implementation: {rendered}"
         );
     }
 

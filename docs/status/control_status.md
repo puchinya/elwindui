@@ -1,6 +1,6 @@
 # Control implementation status
 
-Snapshot: 2026-08-23. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
+Snapshot: 2026-08-24. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
 
 | Control | AppKit | WinUI 3 | GTK4 | Notes |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@ Snapshot: 2026-08-23. Public behavior is defined by [`../specs/ui_spec.md`](../s
 | TabView / TabViewItem | ✅ | ✅ | ⬜ | hosted page activation and native child reconciliation; AppKit tab chrome (layerless chip drawing, system-symbol close/new-tab, closable live sync, shrink-to-fit overflow) screenshot-verified on `controls-demo`/`notepad` ([#167](https://github.com/puchinya/elwindui/issues/167)) — Accessibility-driven interaction verification (`find`/`click`) not run, no Accessibility permission granted to the verification environment |
 | Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | backend-neutral self-rendered controls |
 | IconElement / IconSourceElement | ✅ | ✅ | ⬜ | backend-neutral self-rendered icon base/value wrapper; Core unit and cross-crate DSL tests, no backend-specific control path ([#176](https://github.com/puchinya/elwindui/issues/176)) |
-| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection and ContentControl logical/Visual separation; backend-neutral runtime |
+| ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection and ContentControl logical/Visual separation; backend-neutral runtime; Control authored roots use the internal scalar `visual_root` metadata surface and private template-root ownership |
 
 ## Current gaps
 

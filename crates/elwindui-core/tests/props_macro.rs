@@ -553,6 +553,34 @@ fn children_of_a_vec_property_are_set_in_bulk() {
     assert_eq!(*tabs.children.borrow(), vec!["one", "two", "three"]);
 }
 
+#[test]
+fn content_shape_dispatch_selects_scalar_or_collection_lowering() {
+    let window = FakeWindow::default();
+    let body = Rc::new(FakeElement("body"));
+    elwindui_core::__elwindui_props_Window!(@content_shape
+        { window.set_content(body.clone()); },
+        { panic!("Window content must not use collection lowering"); }
+    );
+    assert_eq!(window.content.borrow().as_ref().map(|c| c.0), Some("body"));
+
+    let layout = FakeLayout::default();
+    elwindui_core::__elwindui_props_VerticalLayout!(@content_shape
+        { panic!("VerticalLayout children must not use scalar lowering"); },
+        { layout.children().add("child"); }
+    );
+    assert_eq!(*layout.added.borrow(), vec!["child"]);
+}
+
+#[test]
+fn content_slot_type_dispatch_selects_scalar_or_collection_storage() {
+    let _scalar: elwindui_core::__elwindui_props_Window!(@content_slot_type
+        dyn elwindui_core::ui::UIElementExt
+    ) = ();
+    let _collection: elwindui_core::__elwindui_props_VerticalLayout!(@content_slot_type
+        dyn elwindui_core::ui::UIElementExt
+    ) = elwindui_core::ui::DynamicChildSlot::default();
+}
+
 // --- `@routed`: registering a #[routed] callback instead of assigning it ------------------------
 //
 // `register_routed_handler` is a default `UIElementExt` method (`self.as_ui_element()...`), so it

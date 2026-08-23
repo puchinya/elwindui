@@ -5,7 +5,6 @@ use super::*;
 /// `HorizontalLayout`'s own class trait (docs/design/runtime/ui_tree_design.md). `spacing` lives here
 /// (not on `Layout`) — see `VerticalLayout`'s own doc comment.
 #[elwindui_macros::class(inherits = crate::ui::Layout)]
-#[content(children)]
 #[prop(spacing: Option<f32>)]
 pub struct HorizontalLayout {
     spacing: Cell<f32>,

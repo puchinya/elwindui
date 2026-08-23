@@ -25,10 +25,12 @@ template rootはControlのVisual childであり、logical `parent`は設定し�
 初期版ではmount中に一度設定されるが、replace helper自体はdetach/attach invariantを守る。
 
 `Control` は公開 collection content を所有しない。`Layout` が collection children、
-`ContentControl` が単一の logical content を所有する。`#[component(inherits Control)]` の
-default body に authored visual root がある場合、codegen はその単一 root を
-`ControlExt::__set_template_root` で接続する。`template_root` は依然として private であり、
-ユーザーへ公開する children collection や別の汎用 content slot は追加しない。
+`ContentControl` が単一の logical content を所有する。`Control` の内部 scalar
+`#[content(visual_root)]` surface は `set_visual_root(root)` から同じ
+`__set_template_root(root)` replacement helper へ委譲される。したがって
+`#[component(inherits Control)]` の default body に authored visual root がある場合も、codegen は
+型名を特別扱いせず scalar content setter を呼ぶだけでよい。`template_root` は依然として
+private であり、ユーザーへ公開する children collection や別の汎用 content slot は追加しない。
 
 ## 3. Generated mount path
 

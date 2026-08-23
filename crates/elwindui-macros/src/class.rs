@@ -2016,17 +2016,24 @@ fn build_props_macro(
         .iter()
         .map(|p| {
             let name = &p.name;
+            let ext_ident = format_ident!("{}Ext", bare_name);
             let setter = format_ident!("set_{}", name);
             let body = match attach_kind(&p.ty) {
                 // A live collection (`UIElementCollection`, `ListExt<T>`): append through the
                 // accessor, mirroring the `.children().add(..)` convention virtual builtins already
                 // use, rather than replacing the whole collection.
                 AttachKind::Collection => quote! {
-                    $( $recv.#name().add($child); )*
+                    $( {
+                        use $crate::ui::#ext_ident as _;
+                        $recv.#name().add($child);
+                    } )*
                 },
                 // A `Vec<T>` property is replaced wholesale by its setter (`TabView`'s `children`).
                 AttachKind::VecProperty => quote! {
-                    $recv.#setter(::std::vec![$($child),*]);
+                    {
+                        use $crate::ui::#ext_ident as _;
+                        $recv.#setter(::std::vec![$($child),*]);
+                    }
                 },
                 // A single slot (`Rc<dyn ..>`): exactly one child, enforced by the arity of the
                 // dedicated arm below rather than by a runtime check.
@@ -2042,7 +2049,10 @@ fn build_props_macro(
                 let child = single_slot_child_value(&p.ty, quote! { $child });
                 quote! {
                     (@children_into $origin:ident, #name, $recv:expr, [$child:expr]) => {
-                        $recv.#setter(#child);
+                        {
+                            use $crate::ui::#ext_ident as _;
+                            $recv.#setter(#child);
+                        }
                     };
                 }
             });
@@ -2055,12 +2065,122 @@ fn build_props_macro(
         })
         .collect();
 
+    // Already-erased children cannot call the normal single-slot conversion helper (`Self: Sized`)
+    // through a trait object. This parallel hidden protocol keeps the same metadata-selected
+    // destination while assigning an existing `Rc<dyn TraitExt>` directly.
+    let children_erased_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let ext_ident = format_ident!("{}Ext", bare_name);
+            let setter = format_ident!("set_{}", name);
+            let body = match attach_kind(&p.ty) {
+                AttachKind::Collection => quote! {
+                    $( {
+                        use $crate::ui::#ext_ident as _;
+                        $recv.#name().add($child);
+                    } )*
+                },
+                AttachKind::VecProperty => quote! {
+                    {
+                        use $crate::ui::#ext_ident as _;
+                        $recv.#setter(::std::vec![$($child),*]);
+                    }
+                },
+                AttachKind::SingleSlot => quote! {
+                    compile_error!(concat!(
+                        "`",
+                        stringify!($origin),
+                        " takes exactly one child element, but got several"
+                    ));
+                },
+            };
+            let single_slot_arm = matches!(attach_kind(&p.ty), AttachKind::SingleSlot).then(|| {
+                quote! {
+                    (@children_erased_into $origin:ident, #name, $recv:expr, [$child:expr]) => {
+                        {
+                            use $crate::ui::#ext_ident as _;
+                            $recv.#setter($child);
+                        }
+                    };
+                }
+            });
+            quote! {
+                #single_slot_arm
+                (@children_erased_into $origin:ident, #name, $recv:expr, [$($child:expr),* $(,)?]) => {
+                    #body
+                };
+            }
+        })
+        .collect();
+
+    // Cross-crate consumers cannot inspect an external class's field type in the codegen table.
+    // This callback lets generated code choose between scalar and collection lowering from the
+    // same effective content metadata that powers `@children`, without a type-name dispatch table.
+    let content_shape_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let selected = match attach_kind(&p.ty) {
+                AttachKind::Collection | AttachKind::VecProperty => quote! { $collection },
+                AttachKind::SingleSlot => quote! { $scalar },
+            };
+            quote! {
+                (@content_shape_into $origin:ident, #name, $scalar:block, $collection:block) => {
+                    #selected
+                };
+            }
+        })
+        .collect();
+
+    let content_slot_type_into_arms: Vec<TokenStream2> = shape
+        .props
+        .iter()
+        .map(|p| {
+            let name = &p.name;
+            let selected = match attach_kind(&p.ty) {
+                AttachKind::Collection | AttachKind::VecProperty => {
+                    quote! { $crate::ui::DynamicChildSlot<$item> }
+                }
+                AttachKind::SingleSlot => quote! { () },
+            };
+            quote! {
+                (@content_slot_type_into $origin:ident, #name, $item:ty) => {
+                    #selected
+                };
+            }
+        })
+        .collect();
+
     // A class that designates content resolves the name here; one that doesn't lets the catch-all
     // below carry the whole `@children` call up to an ancestor that does.
     let children_entry = shape.content_field().map(|content| {
         quote! {
             (@children $recv:expr, [$($child:expr),* $(,)?]) => {
                 $crate::#macro_ident!(@children_into #bare_ident, #content, $recv, [$($child),*]);
+            };
+        }
+    });
+    let children_erased_entry = shape.content_field().map(|content| {
+        quote! {
+            (@children_erased $recv:expr, [$($child:expr),* $(,)?]) => {
+                $crate::#macro_ident!(@children_erased_into #bare_ident, #content, $recv, [$($child),*]);
+            };
+        }
+    });
+    let content_shape_entry = shape.content_field().map(|content| {
+        quote! {
+            (@content_shape $scalar:block, $collection:block) => {
+                $crate::#macro_ident!(@content_shape_into #bare_ident, #content, $scalar, $collection);
+            };
+        }
+    });
+    let content_slot_type_entry = shape.content_field().map(|content| {
+        quote! {
+            (@content_slot_type $item:ty) => {
+                $crate::#macro_ident!(@content_slot_type_into #bare_ident, #content, $item)
             };
         }
     });
@@ -2138,6 +2258,9 @@ fn build_props_macro(
         assert_fallback,
         declared_fallback,
         children_fallback,
+        children_erased_fallback,
+        content_shape_fallback,
+        content_slot_type_fallback,
     ) = match parent {
         Some((parent_bare, parent_ty)) => {
             let parent_macro =
@@ -2189,6 +2312,30 @@ fn build_props_macro(
                     };
                     (@children_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
                         #parent_macro!(@children_into $origin, $name, $recv, [$($child),*]);
+                    };
+                },
+                quote! {
+                    (@children_erased $recv:expr, [$($child:expr),* $(,)?]) => {
+                        #parent_macro!(@children_erased $recv, [$($child),*]);
+                    };
+                    (@children_erased_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
+                        #parent_macro!(@children_erased_into $origin, $name, $recv, [$($child),*]);
+                    };
+                },
+                quote! {
+                    (@content_shape $scalar:block, $collection:block) => {
+                        #parent_macro!(@content_shape $scalar, $collection);
+                    };
+                    (@content_shape_into $origin:ident, $name:ident, $scalar:block, $collection:block) => {
+                        #parent_macro!(@content_shape_into $origin, $name, $scalar, $collection);
+                    };
+                },
+                quote! {
+                    (@content_slot_type $item:ty) => {
+                        #parent_macro!(@content_slot_type $item)
+                    };
+                    (@content_slot_type_into $origin:ident, $name:ident, $item:ty) => {
+                        #parent_macro!(@content_slot_type_into $origin, $name, $item)
                     };
                 },
             )
@@ -2287,6 +2434,57 @@ fn build_props_macro(
                         "`: neither it nor any ancestor declares a `",
                         stringify!($name),
                         "` property"
+                    ));
+                };
+            },
+            quote! {
+                (@children_erased $recv:expr, [$($child:expr),* $(,)?]) => {
+                    compile_error!(
+                        "this element takes no nested child elements — no `#[content(..)]` is \
+                         declared on it or any ancestor"
+                    );
+                };
+                (@children_erased_into $origin:ident, $name:ident, $recv:expr, [$($child:expr),* $(,)?]) => {
+                    compile_error!(concat!(
+                        "#[content(",
+                        stringify!($name),
+                        ")] on `",
+                        stringify!($origin),
+                        "`: neither it nor any ancestor declares a `",
+                        stringify!($name),
+                        "` property"
+                    ));
+                };
+            },
+            quote! {
+                (@content_shape $scalar:block, $collection:block) => {
+                    compile_error!(
+                        "cannot resolve the effective #[content(..)] destination for this element"
+                    );
+                };
+                (@content_shape_into $origin:ident, $name:ident, $scalar:block, $collection:block) => {
+                    compile_error!(concat!(
+                        "#[content(",
+                        stringify!($name),
+                        ")] on `",
+                        stringify!($origin),
+                        "` has no declared destination"
+                    ));
+                };
+            },
+            quote! {
+                (@content_slot_type $item:ty) => {
+                    compile_error!(
+                        "cannot resolve the effective #[content(..)] destination for this element"
+                    );
+                };
+                (@content_slot_type_into $origin:ident, $name:ident, $item:ty) => {
+                    compile_error!(concat!(
+                        "#[content(",
+                        stringify!($name),
+                        ")] on `",
+                        stringify!($origin),
+                        "` has no declared destination"
                     ));
                 };
             },
@@ -2424,6 +2622,15 @@ fn build_props_macro(
             #children_entry
             #(#children_into_arms)*
             #children_fallback
+            #children_erased_entry
+            #(#children_erased_into_arms)*
+            #children_erased_fallback
+            #content_shape_entry
+            #(#content_shape_into_arms)*
+            #content_shape_fallback
+            #content_slot_type_entry
+            #(#content_slot_type_into_arms)*
+            #content_slot_type_fallback
             #content_item_dyn_entry
             #(#content_item_dyn_into_arms)*
             #content_item_dyn_fallback

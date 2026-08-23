@@ -1,10 +1,10 @@
 # Tooling status
 
-Snapshot: 2026-08-12. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
+Snapshot: 2026-08-24. Tool architecture is indexed in [`../design/README.md`](../design/README.md).
 
 | Tool | State | Current capability / gap |
 |---|---|---|
-| `elwindui-codegen` | ✅ | component/ViewModel/enum/ControlTemplate frontend, parser, diagnostics, binding and dynamic-region code generation; ControlTemplate includes typed `templated_parent` weak-owner resync and static presenter/id checks; a consumer component that `inherits` a genuinely external (no local `TypeInfo`) builtin and bare-forwards one of its attribute values (`padding: padding`, dsl_spec.md §3's `ContentControl` pattern) now compiles — previously panicked (Refs #90) |
+| `elwindui-codegen` | ✅ | component/ViewModel/enum/ControlTemplate frontend, parser, diagnostics, binding and dynamic-region code generation; bare children now lower from effective `#[content(field)]` metadata plus field type (scalar setter or collection insertion), including Control's internal scalar `visual_root`; Control-specific type-name lowering was removed and scalar branch-shape diagnostics are covered by codegen tests |
 | `elwindui-languageserver` | 🚧 | single-file diagnostics, member completion, and DSL semantic tokens; no cross-file resolution, hover, or generated-code preview |
 | Preview | ⬜ | design exists; no workspace preview application |
 | `elwindui-hotreload` | 🚧 | tested Patch/Remount decision helper exists; artifact loading and live replacement pipeline are absent |

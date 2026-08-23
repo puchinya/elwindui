@@ -1,6 +1,6 @@
 # ElwindUI implementation status
 
-Snapshot: 2026-08-19. Desired behavior is defined by [`../specs/README.md`](../specs/README.md).
+Snapshot: 2026-08-24. Desired behavior is defined by [`../specs/README.md`](../specs/README.md).
 
 Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
@@ -8,7 +8,7 @@ Legend: ✅ implemented/verified, 🚧 partial, ⬜ not implemented.
 
 | Area | State | Current evidence / gap |
 |---|---|---|
-| Component frontend and `view!` DSL | ✅ | proc-macro frontend, parser, validation, and code generation are in workspace tests |
+| Component frontend and `view!` DSL | ✅ | proc-macro frontend, parser, metadata-driven scalar/collection `#[content]` validation and lowering, and code generation are in workspace tests |
 | ControlTemplate | ✅ | `#[component(template = key)]` mount-time selection, `#[control_template]`, typed/reactive `templated_parent`, backend-neutral template-root ownership, and `ContentPresenter`/ContentControl logical-Visual separation are implemented and tested ([#83](https://github.com/puchinya/elwindui/issues/83)); runtime re-template/per-instance template/TemplatePart/VisualState remain out of scope |
 | `param` / `prop` / `state` / `computed` / `bindable` | ✅ | generated storage, notifications, and dependency refresh are used by examples |
 | Once / OneWay / TwoWay binding | ✅ | component and ViewModel examples exercise generated paths |

@@ -176,7 +176,7 @@ pub(crate) fn test_builtin_modules() -> Vec<Module> {
             false,
             true,
             false,
-            None,
+            Some("children"),
             r#"
             children: UIElementCollection,
             #[semantic_brush]
@@ -311,9 +311,10 @@ pub(crate) fn test_builtin_modules() -> Vec<Module> {
             false,
             false,
             true,
-            None,
+            Some("visual_root"),
             r#"
             padding: Option<f32>,
+            visual_root: std::rc::Rc<dyn UIElement>,
             "#,
         )),
         Item::Component(builtin_component(

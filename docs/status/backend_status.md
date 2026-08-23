@@ -28,7 +28,7 @@ Snapshot: 2026-08-23. Architecture is indexed in [`../design/README.md`](../desi
 
 ## WinUI 3 current gaps
 
-- Self-drawn Canvas pointer pressed/moved/released forwarding, native capture, optional normalized screen positions, and bidirectional root/screen conversion are implemented for #174. The code is not runtime-verified on Windows from the current macOS environment.
+- Self-drawn Canvas pointer pressed/moved/released forwarding, native capture, optional normalized screen positions, and bidirectional root/screen conversion are implemented for #174. Windows verification is pending in Issue #178 and was intentionally separated from PR #175.
 - SVG group blend modes without direct `CanvasBlend` mappings, isolation, filters, and luminance-mask rasterization need an offscreen effect graph.
 - Cross-backend parity has been verified for the controls recorded in [`control_status.md`](control_status.md), but the entire backend contract has not been re-audited.
 - Whole-workspace rust-analyzer diagnostics have pre-existing failures and were not established as a clean Windows backend gate.

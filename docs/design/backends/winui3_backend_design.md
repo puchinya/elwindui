@@ -18,7 +18,7 @@ Tree hosts own XAML roots, ElwindUI owner mappings, viewport layout, activation,
 
 Arrange writes explicit `Width` / `Height` for Canvas positioning. Before every natural `Measure`, the adapter resets both values to `NaN` (`Auto`), invalidates native measure, and then measures with the current constraint. This prevents arrange-time sizes from becoming a self-reinforcing natural-size cache.
 
-The root Canvas forwards self-drawn pointer press/move/release to the common `PointerDispatcher`. Events originating from native XAML children are excluded through `OriginalSource`; a successful press captures the native pointer and release relinquishes it. `WinUI3CoordinateHost` weakly references the Canvas and promotes the existing `ContentCoordinateConverter`/rasterization-scale path for both root-to-screen and screen-to-root conversion, including transforms between Canvas and XamlRoot content.
+The root Canvas forwards self-drawn pointer press/move/release to the common `PointerDispatcher`. Events originating from native XAML children are excluded through `OriginalSource`; a successful press captures the native pointer and release relinquishes it. XAML elements created only as render projections of self-drawn nodes are input-transparent, so native hit testing passes through to the Canvas and the common render-tree hit test selects the target. Real `NativeControl` children remain native input owners and therefore remain hit-testable. `WinUI3CoordinateHost` weakly references the Canvas and promotes the existing `ContentCoordinateConverter`/rasterization-scale path for both root-to-screen and screen-to-root conversion, including transforms between Canvas and XamlRoot content.
 
 ## Rendering
 

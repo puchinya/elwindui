@@ -182,6 +182,63 @@ mod controls_demo_view_model {
         })]
         custom_menu_icon: Option<elwindui::core::graphics::IconSource>,
 
+        // A small in-memory `IconSource::Image(ImageSource::Vector(..))` (a filled triangle, built
+        // directly with `VectorImageBuilder` — no external SVG asset), covering the user-defined
+        // *vector* icon path (PR #171 delta remediation §6.6) alongside the raster one above.
+        #[computed(expr = {
+            let mut builder = elwindui::core::graphics::PathBuilder::new();
+            builder.move_to(elwindui::core::base::Point { x: 8.0, y: 1.0 });
+            builder.line_to(elwindui::core::base::Point { x: 14.0, y: 14.0 });
+            builder.line_to(elwindui::core::base::Point { x: 1.0, y: 14.0 });
+            builder.close();
+            let path = builder
+                .build()
+                .expect("demo vector menu icon triangle is well-formed");
+            let node = elwindui::core::graphics::VectorNode::Path(
+                elwindui::core::graphics::VectorPathNode {
+                    path,
+                    transform: elwindui::core::base::AffineTransform::IDENTITY,
+                    fill: Some(elwindui::core::graphics::VectorFill {
+                        paint: elwindui::core::graphics::VectorPaint::Brush(
+                            elwindui::core::graphics::Brush::Solid(
+                                elwindui::core::graphics::Color::rgb(60, 140, 220),
+                            ),
+                        ),
+                        opacity: 1.0,
+                        rule: elwindui::core::graphics::FillRule::NonZero,
+                    }),
+                    stroke: None,
+                    paint_order: elwindui::core::graphics::VectorPaintOrder::default(),
+                    rendering: elwindui::core::graphics::VectorShapeRendering::default(),
+                    visibility: true,
+                },
+            );
+            let group = elwindui::core::graphics::VectorGroup {
+                children: std::sync::Arc::from([node]),
+                ..elwindui::core::graphics::VectorGroup::default()
+            };
+            let vector_image = elwindui::core::graphics::VectorImageBuilder::new(
+                elwindui::core::base::Size {
+                    width: 16.0,
+                    height: 16.0,
+                },
+                elwindui::core::base::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 16.0,
+                    height: 16.0,
+                },
+            )
+            .expect("demo vector menu icon canvas is a valid size")
+            .root(group)
+            .finish()
+            .expect("demo vector menu icon builds successfully");
+            Some(elwindui::core::graphics::IconSource::Image(
+                elwindui::core::graphics::ImageSource::Vector(vector_image),
+            ))
+        })]
+        custom_menu_vector_icon: Option<elwindui::core::graphics::IconSource>,
+
         // `IconSource::System` items for the menus below — plain `vm.field` bindings rather than
         // inline `Some(IconSource::System(..))` DSL expressions, since the `view!` prop-value
         // grammar doesn't parse an arbitrary `Some(..)` call the way a `#[computed(expr = ..)]`
@@ -640,6 +697,11 @@ struct ControlsDemoWindow {
                                         icon: vm.icon_delete
                                         on_select: || vm.context_menu_item_selected("Native > Delete".to_string())
                                     }
+                                    MenuItem {
+                                        text: "User Vector Icon"
+                                        icon: vm.custom_menu_vector_icon
+                                        on_select: || vm.context_menu_item_selected("Native > User Vector Icon".to_string())
+                                    }
                                 }
                             }
                         }
@@ -667,6 +729,11 @@ struct ControlsDemoWindow {
                                         text: "Custom Action 2 (user image icon)"
                                         icon: vm.custom_menu_icon
                                         on_select: || vm.context_menu_item_selected("Custom > Action 2".to_string())
+                                    }
+                                    MenuItem {
+                                        text: "Custom Action 3 (user vector icon)"
+                                        icon: vm.custom_menu_vector_icon
+                                        on_select: || vm.context_menu_item_selected("Custom > Action 3".to_string())
                                     }
                                     MenuItem {
                                         text: "No Icon Action"

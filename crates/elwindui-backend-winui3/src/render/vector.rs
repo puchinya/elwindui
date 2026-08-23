@@ -4,8 +4,8 @@
 use super::win2d::*;
 use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::Graphics::Canvas::{
-    CanvasActiveLayer, CanvasAntialiasing, CanvasBlend, CanvasImageInterpolation,
-    ICanvasResourceCreator,
+    CanvasActiveLayer, CanvasAntialiasing, CanvasBlend, CanvasDrawingSession,
+    CanvasImageInterpolation, CanvasRenderTarget, ICanvasResourceCreator,
 };
 use crate::bindings::Microsoft::UI::Composition::CompositionDrawingSurface;
 use crate::render::composition::{CompositionPrimitive, DesiredCompositionNode};
@@ -485,10 +485,28 @@ pub(crate) fn draw_vector_image_surface(
         G: 0,
         B: 0,
     })?;
+    replay_win2d_primitives(&session, &primitives, rasterization_scale)?;
+    session.Close()
+}
+
+/// Replays a recorded `Win2dPrimitive` stream onto an already-created, already-cleared
+/// `CanvasDrawingSession` — the transform/clip/opacity/fill/stroke/image interpreter shared by
+/// every Win2D-backed surface this backend draws into. `draw_vector_image_surface` (the retained
+/// `CompositionDrawingSurface` fallback path) and the menu-icon `VectorImage` rasterizer
+/// (`rasterize_vector_image_to_canvas_bitmap`, PR #171 delta remediation) both call this rather
+/// than each walking `Win2dPrimitive` themselves — one interpreter, so a fix/feature to fill,
+/// stroke, clip, or image drawing lands in both places at once. Does not close `session`; the
+/// caller owns that (each caller's target surface has different close/finalize semantics —
+/// `CompositionDrawingSurface` vs. an offscreen `CanvasRenderTarget`).
+pub(crate) fn replay_win2d_primitives(
+    session: &CanvasDrawingSession,
+    primitives: &[Win2dPrimitive],
+    rasterization_scale: f32,
+) -> Result<()> {
     let creator: ICanvasResourceCreator = session.clone().cast()?;
     let mut opacity = 1.0_f32;
     let mut active_layers = Vec::<CanvasActiveLayer>::new();
-    for primitive in &primitives {
+    for primitive in primitives {
         match primitive {
             Win2dPrimitive::SetTransform {
                 m11,
@@ -660,7 +678,74 @@ pub(crate) fn draw_vector_image_surface(
     while let Some(layer) = active_layers.pop() {
         layer.Close()?;
     }
-    session.Close()
+    Ok(())
+}
+
+/// Rasterizes a user-defined `VectorImage` menu icon (PR #171 delta remediation, replacing the
+/// previous "Vector user icons are not yet bridged" gap) into a fresh, transparent
+/// `width`x`height` `CanvasRenderTarget`, reusing the exact same `emit_vector_image`/
+/// `replay_win2d_primitives` pipeline `draw_vector_image_surface` uses for ordinary retained
+/// vector drawing — no second VectorScene traversal (§3.7/§13.2 of the delta contract). The
+/// caller (`inner/menu.rs`) encodes the result to PNG and feeds it to a XAML `BitmapImage`; this
+/// function returns the offscreen `CanvasRenderTarget` itself and does not touch any XAML type.
+///
+/// **Unverified naming**: `CanvasRenderTarget::CreateWithWidthAndHeightAndDpi` is this crate's
+/// best-effort guess at the `windows_bindgen` projection of `CanvasRenderTarget`'s
+/// `(ICanvasResourceCreator, width: f32, height: f32, dpi: f32)` constructor overload, following
+/// the "method name mirrors the WinRT factory method" convention `CanvasBitmap::
+/// LoadAsyncFromStream`/`CanvasBitmap::CreateFromBytes` already establish in `win2d.rs`. This
+/// crate has never been built on Windows (`#![cfg(target_os = "windows")]`, unverified per the
+/// crate's own disclaimer) — confirm the exact generated name in `bindings.rs` on first Windows
+/// build and correct this call site (a mechanical binding-spelling fix, not an architecture
+/// change) if it differs.
+pub(crate) fn rasterize_vector_image_to_canvas_bitmap(
+    creator: &ICanvasResourceCreator,
+    image: &elwindui_core::graphics::VectorImage,
+    width: f32,
+    height: f32,
+) -> Result<CanvasRenderTarget> {
+    const RASTER_TARGET_DPI: f32 = 96.0;
+    let target = CanvasRenderTarget::CreateWithWidthAndHeightAndDpi(
+        creator,
+        width,
+        height,
+        RASTER_TARGET_DPI,
+    )?;
+    let session = target.CreateDrawingSession()?;
+    session.Clear(Color {
+        A: 0,
+        R: 0,
+        G: 0,
+        B: 0,
+    })?;
+    let mut primitives = vec![
+        Win2dPrimitive::SetTransform {
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            dx: 0.0,
+            dy: 0.0,
+        },
+        Win2dPrimitive::SetOpacity(1.0),
+    ];
+    emit_vector_image(
+        image,
+        elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        },
+        None,
+        &elwindui_core::graphics::VectorImageDrawOptions::default(),
+        elwindui_core::base::AffineTransform::identity(),
+        1.0,
+        &mut primitives,
+    );
+    replay_win2d_primitives(&session, &primitives, 1.0)?;
+    session.Close()?;
+    Ok(target)
 }
 
 #[cfg(test)]

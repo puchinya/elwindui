@@ -1,6 +1,7 @@
 //! `MenuBar`/`MenuFlyout` for the app menu bar and context menus.
 
 use crate::bindings;
+use crate::bindings::Microsoft::Graphics::Canvas::ICanvasResourceCreator;
 use crate::bindings::Microsoft::UI::Xaml::Controls::{
     IconElement, ImageIcon, MenuFlyout, MenuFlyoutItem, MenuFlyoutItemBase, Symbol, SymbolIcon,
 };
@@ -163,27 +164,43 @@ fn system_icon_element(icon: SystemIcon) -> Option<IconElement> {
     symbol_icon.cast::<IconElement>().ok()
 }
 
-/// Reuses `render/composition/cache.rs`'s exact `InMemoryRandomAccessStream`/`DataWriter`
-/// byte-stream pattern (rather than a new decoder, §3.7) to feed `BitmapImage.SetSource`, then
-/// wraps the result in an `ImageIcon`.
+/// Fixed native menu icon raster size for a rasterized `VectorImage` (§2.10 of
+/// `icon_source_design.md`: 16 DIP base size; rasterized at 2x for Retina/high-DPI crispness,
+/// matching AppKit's `MENU_ICON_PIXEL_SIZE`).
+const MENU_ICON_RASTER_SIZE: f32 = 32.0;
+
+/// PR #171 delta remediation: completes user `ImageSource` menu icon support for every case —
+/// `ImageData::Encoded` keeps the direct fast path (no re-encode); `ImageData::Rgba8` and a
+/// Win2D-`CanvasBitmap`-backed `ImageData::Backend` reuse the crate's existing
+/// `render::win2d_bitmap` conversion (never re-implemented here, §3.1/§13.1 of the delta
+/// contract); `ImageSource::Vector` reuses the crate's existing vector rendering pipeline via
+/// `render::rasterize_vector_image_to_canvas_bitmap` (§3.3/§13.2). A `CanvasBitmap` produced by
+/// either of the latter two paths is bridged to a XAML image source via
+/// `canvas_bitmap_to_xaml_image_source`, then wrapped in an `ImageIcon` by
+/// `xaml_image_source_to_icon_element` — the same terminal step the encoded fast path also uses,
+/// so every user-image case ends in identical `ImageIcon`/`IconElement` construction.
 ///
-/// Two cases return `None` (icon omitted, §2.11 — never a panic, never touches the rest of the
-/// item) rather than being handled, and are recorded as a known, disclosed gap in
-/// `docs/design/runtime/icon_source_design.md` §5/§9 pending Windows-side follow-up, since neither
-/// can be exercised or verified without a Windows build environment (this whole crate is
-/// `#![cfg(target_os = "windows")]` and has never been built/type-checked on this machine):
-///
-/// - `ImageSource::Vector` — no existing WinUI3 code path rasterizes a `VectorImage` to a
-///   XAML-compatible image source; doing so would need a `CanvasRenderTarget`-based Win2D
-///   rasterize-then-encode round trip this crate does not have today.
-/// - `ImageData::Rgba8`/`ImageData::Backend` — same limitation this backend's existing composition
-///   image path already has (see `ImageSurfaceCache::surface_for`'s own "RGBA and backend image
-///   handles require ... fallback" comment): there is no encoded container to hand
-///   `BitmapImage.SetSource` for raw pixel data.
+/// A conversion failure at any step (incompatible backend handle, offscreen rasterization error,
+/// XAML source creation error) returns `None` — icon omitted, `MenuItem` otherwise unaffected
+/// (§2.11) — never a panic, never a state rollback (`set_icon` above keeps ordering: semantic
+/// state first, native reflection second).
 fn user_image_icon_element(source: &ImageSource) -> Option<IconElement> {
-    let ImageSource::Raster(bitmap) = source else {
-        return None;
-    };
+    match source {
+        ImageSource::Raster(bitmap) => match bitmap.data() {
+            ImageData::Encoded { .. } => encoded_raster_icon_element(bitmap),
+            ImageData::Rgba8 { .. } | ImageData::Backend(..) => win2d_raster_icon_element(bitmap),
+        },
+        ImageSource::Vector(vector) => vector_icon_element(vector),
+    }
+}
+
+/// The direct `ImageData::Encoded` fast path: no decode/re-encode round trip, same
+/// `InMemoryRandomAccessStream`/`DataWriter` byte-stream pattern
+/// `render/composition/cache.rs`'s `ImageSurfaceCache::surface_for` already uses (§3.7 — no new
+/// decoder).
+fn encoded_raster_icon_element(
+    bitmap: &elwindui_core::graphics::BitmapImage,
+) -> Option<IconElement> {
     let ImageData::Encoded { bytes, .. } = bitmap.data() else {
         return None;
     };
@@ -196,6 +213,85 @@ fn user_image_icon_element(source: &ImageSource) -> Option<IconElement> {
     let bitmap_image = XamlBitmapImage::new().ok()?;
     bitmap_image.SetSource(&stream).ok()?;
     let image_source: XamlImageSource = bitmap_image.cast().ok()?;
+    xaml_image_source_to_icon_element(image_source)
+}
+
+/// `ImageData::Rgba8` and a Win2D-`CanvasBitmap`-backed `ImageData::Backend` — reuses
+/// `render::win2d_bitmap` (the crate's one, already-existing raw-pixel/backend-handle conversion;
+/// never duplicated here, §13.1) to obtain a `CanvasBitmap`, then bridges it to XAML the same way
+/// the vector path does. An incompatible `ImageData::Backend` handle (resolved via
+/// `win2d_bitmap`'s own `downcast_ref::<CanvasBitmap>()` — see that function's `Err` arm) fails
+/// this call with `None`: icon omitted, no panic (§2.11, §8.1 of this delta contract — the
+/// approved resolution of the original contract's `ImageData::Backend` ambiguity).
+fn win2d_raster_icon_element(bitmap: &elwindui_core::graphics::BitmapImage) -> Option<IconElement> {
+    let device =
+        crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice::GetSharedDevice().ok()?;
+    let creator: ICanvasResourceCreator = device.cast().ok()?;
+    let canvas_bitmap = crate::render::win2d_bitmap(&creator, bitmap).ok()?;
+    let image_source = canvas_bitmap_to_xaml_image_source(&canvas_bitmap)?;
+    xaml_image_source_to_icon_element(image_source)
+}
+
+/// `ImageSource::Vector` — reuses `render::rasterize_vector_image_to_canvas_bitmap`, which itself
+/// reuses the crate's existing `emit_vector_image`/`replay_win2d_primitives` vector-drawing
+/// pipeline (no second VectorScene traversal, §3.3/§13.2). Rasterizes into a fixed
+/// `MENU_ICON_RASTER_SIZE`x`MENU_ICON_RASTER_SIZE` transparent offscreen target, matching the
+/// system-icon and encoded-raster paths' fixed native menu icon sizing (§2.10).
+fn vector_icon_element(vector: &elwindui_core::graphics::VectorImage) -> Option<IconElement> {
+    let device =
+        crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice::GetSharedDevice().ok()?;
+    let creator: ICanvasResourceCreator = device.cast().ok()?;
+    let render_target = crate::render::rasterize_vector_image_to_canvas_bitmap(
+        &creator,
+        vector,
+        MENU_ICON_RASTER_SIZE,
+        MENU_ICON_RASTER_SIZE,
+    )
+    .ok()?;
+    let canvas_bitmap: crate::bindings::Microsoft::Graphics::Canvas::CanvasBitmap =
+        render_target.cast().ok()?;
+    let image_source = canvas_bitmap_to_xaml_image_source(&canvas_bitmap)?;
+    xaml_image_source_to_icon_element(image_source)
+}
+
+/// Encodes a `CanvasBitmap`/`CanvasRenderTarget` to an in-memory PNG stream and hands that stream
+/// to a fresh XAML `BitmapImage`, matching this crate's established
+/// `InMemoryRandomAccessStream`-based bridging convention (§4.5 of the delta contract) — no
+/// temporary filesystem file, no retained stream cache (menu icons are set rarely, not once per
+/// frame; the stream/temporary Canvas resources are released once the XAML source has consumed
+/// them, same reasoning as AppKit's per-call `user_image_nsimage` cache).
+///
+/// **Unverified naming**: `CanvasBitmap::SaveAsync` is this crate's best-effort guess at the
+/// `windows_bindgen` projection of `CanvasBitmap.SaveAsync(IRandomAccessStream, CanvasBitmapFileFormat)`
+/// — Win2D has several `SaveAsync` overloads (filename-based and stream-based, with/without a
+/// quality parameter), so the generated name may carry a disambiguating suffix (this crate's own
+/// `CanvasBitmap::LoadAsyncFromStream`/`DrawImageToRectWithSourceRectAndOpacityAndInterpolation`
+/// are precedent for that pattern). Confirm the exact name in `bindings.rs` on first Windows
+/// build and correct this call site if it differs — a mechanical binding-spelling fix, not an
+/// architecture change (delta contract §16).
+fn canvas_bitmap_to_xaml_image_source(
+    bitmap: &crate::bindings::Microsoft::Graphics::Canvas::CanvasBitmap,
+) -> Option<XamlImageSource> {
+    use crate::bindings::Microsoft::Graphics::Canvas::CanvasBitmapFileFormat;
+
+    let stream = InMemoryRandomAccessStream::new().ok()?;
+    let random_access_stream: IRandomAccessStream = stream.cast().ok()?;
+    bitmap
+        .SaveAsync(&random_access_stream, CanvasBitmapFileFormat::Png)
+        .ok()?
+        .join()
+        .ok()?;
+    random_access_stream.Seek(0).ok()?;
+    let bitmap_image = XamlBitmapImage::new().ok()?;
+    bitmap_image.SetSource(&random_access_stream).ok()?;
+    bitmap_image.cast::<XamlImageSource>().ok()
+}
+
+/// The terminal step every user-image path shares: wrap an already-produced XAML
+/// `Microsoft.UI.Xaml.Media.ImageSource` in an `ImageIcon`, then cast up to the `IconElement`
+/// `MenuFlyoutItem.Icon` expects — factored out so encoded/Rgba8/Backend/Vector all end in
+/// identical construction (§6.4 of the delta contract).
+fn xaml_image_source_to_icon_element(image_source: XamlImageSource) -> Option<IconElement> {
     let image_icon = ImageIcon::new().ok()?;
     image_icon.SetSource(&image_source).ok()?;
     image_icon.cast::<IconElement>().ok()

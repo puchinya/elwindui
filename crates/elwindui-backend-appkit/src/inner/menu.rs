@@ -7,7 +7,9 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{NSImage, NSMenu, NSMenuItem};
-use objc2_foundation::{NSObjectProtocol, NSSize, NSString};
+use objc2_foundation::{
+    NSObjectProtocol, NSOperatingSystemVersion, NSProcessInfo, NSSize, NSString,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -138,16 +140,29 @@ fn sf_symbol_name(icon: SystemIcon) -> &'static str {
     }
 }
 
-/// A lookup failure (old OS, or a symbol name the running OS doesn't recognize) simply omits the
-/// icon (§2.11) rather than panicking — `imageWithSystemSymbolName:accessibilityDescription:`
-/// itself already returns `None` in that case, so no separate `respondsToSelector:` probe is
-/// needed here. (`InnerButton::set_system_symbol_or_text`, `inner/button.rs`, gates the same call
-/// behind `NSImage::class().responds_to(..)` first — verified against a real window during this
-/// Issue's AppKit runtime check that this particular `responds_to` probe reports `false` on this
-/// machine's OS/objc2 version even though the call it's guarding succeeds immediately afterward;
-/// tracked as a pre-existing, out-of-scope finding rather than fixed here, since `button.rs` is
-/// unrelated to Menu icons.)
+/// SF Symbols (`NSImage(systemSymbolName:accessibilityDescription:)`) were introduced in macOS
+/// 11.0. `objc2_app_kit`'s binding for this method is compiled in unconditionally regardless of
+/// the running OS, so calling it on an OS that predates the selector's introduction would send an
+/// unrecognized selector to `NSImage`'s class object — undefined Objective-C runtime behavior
+/// (typically a crash), not a graceful `None` (PR #171 delta remediation §5 — a runtime
+/// `respondsToSelector:` probe on the class object was tried here first and empirically found
+/// unreliable: it reported `false` even on this machine's current macOS, well past 11.0, while
+/// the guarded call itself succeeded immediately afterward. `NSProcessInfo` OS-version comparison
+/// below replaces it, since it does not depend on that probe at all).
+fn supports_sf_symbols() -> bool {
+    NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+        majorVersion: 11,
+        minorVersion: 0,
+        patchVersion: 0,
+    })
+}
+
+/// A lookup failure (old OS, or — on a supported OS — a symbol name it doesn't recognize) simply
+/// omits the icon (§2.11) rather than panicking.
 fn system_icon_nsimage(icon: SystemIcon) -> Option<Retained<NSImage>> {
+    if !supports_sf_symbols() {
+        return None;
+    }
     NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(sf_symbol_name(icon)),
         None,

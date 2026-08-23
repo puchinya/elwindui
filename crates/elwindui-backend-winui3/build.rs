@@ -346,6 +346,12 @@ fn main() {
         "Microsoft.Graphics.Canvas.CanvasDevice".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasActiveLayer".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasBitmap".to_owned(),
+        // Menu icon remediation (PR #171 delta): a `CanvasRenderTarget` is used as the offscreen
+        // surface a user `VectorImage` menu icon is rasterized into, then encoded to PNG via
+        // `CanvasBitmap.SaveAsync(..., CanvasBitmapFileFormat.Png, ...)` for the
+        // `InMemoryRandomAccessStream` -> XAML `BitmapImage` bridge (`icon_source_design.md` §5).
+        "Microsoft.Graphics.Canvas.CanvasRenderTarget".to_owned(),
+        "Microsoft.Graphics.Canvas.CanvasBitmapFileFormat".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasAlphaMode".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasBlend".to_owned(),
         "Microsoft.Graphics.Canvas.CanvasImageInterpolation".to_owned(),

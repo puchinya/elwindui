@@ -9,19 +9,23 @@
 use crate::ffi::{AnyView, mtm};
 use elwindui_core::base::{Point, Rect};
 use elwindui_core::input::{
-    FocusState, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
+    FocusState, Key, KeyModifiers, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent,
     RawKeyEventKind, RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
 use elwindui_core::ui::popup::PopupSurfaceHandle;
 use elwindui_core::ui::{
     ContextMenuPresentation, ContextMenuService, ContextRequest, CoordinateHost, FocusHost,
-    InvalidationKind, RelayoutHost, ResolvedContextDefinition, UIElementExt, layout_root,
+    InvalidationKind, PointerGestureHost, RelayoutHost, ResolvedContextDefinition, UIElementExt,
+    layout_root,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSMenu, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView};
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSApplicationDidResignActiveNotification, NSEvent, NSMenu, NSScreen, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
+};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -172,6 +176,18 @@ impl FocusHost for AppKitFocusHost {
     }
 }
 
+/// Pointer-cancellation bridge for one AppKit tree. The weak view reference prevents the hosted
+/// root's capability registration from retaining its native owner.
+pub(crate) struct AppKitPointerGestureHost(objc2::rc::Weak<TreeHostView>);
+
+impl PointerGestureHost for AppKitPointerGestureHost {
+    fn cancel_pointer_gesture_in_subtree(&self, subtree: &Rc<dyn UIElementExt>) -> bool {
+        self.0
+            .load()
+            .is_some_and(|view| view.ivars().pointer.cancel_for_subtree(subtree))
+    }
+}
+
 /// Root/screen conversion for one hosted AppKit tree. The weak reference avoids the same host/tree
 /// cycle as `AppKitRelayoutHost` and `AppKitFocusHost`.
 pub(crate) struct AppKitCoordinateHost(objc2::rc::Weak<TreeHostView>);
@@ -255,6 +271,40 @@ define_class!(
             self.setNeedsLayout(true);
         }
 
+        /// A hosted gesture cannot survive detaching from its native window or moving to a
+        /// different one. Cancel before AppKit performs that ownership transition.
+        #[unsafe(method(viewWillMoveToWindow:))]
+        fn view_will_move_to_window(&self, new_window: Option<&NSWindow>) {
+            if self
+                .window()
+                .as_deref()
+                .is_some_and(|current| new_window.is_none_or(|new| !std::ptr::eq(current, new)))
+            {
+                self.ivars().pointer.cancel();
+            }
+            unsafe {
+                let _: () = msg_send![super(self), viewWillMoveToWindow: new_window];
+            }
+        }
+
+        #[unsafe(method(elwinduiWindowDidResignKey:))]
+        fn window_did_resign_key(&self, notification: &NSNotification) {
+            let Some(notification_window) = notification.object() else {
+                return;
+            };
+            let Some(window) = self.window() else { return };
+            if Retained::as_ptr(&notification_window)
+                == Retained::as_ptr(&window).cast::<AnyObject>()
+            {
+                self.ivars().pointer.cancel();
+            }
+        }
+
+        #[unsafe(method(elwinduiApplicationDidResignActive:))]
+        fn application_did_resign_active(&self, _notification: &NSNotification) {
+            self.ivars().pointer.cancel();
+        }
+
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking_areas(&self) {
             unsafe {
@@ -296,6 +346,9 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            if is_pointer_cancel_key(nsevent_key(event)) {
+                self.ivars().pointer.cancel();
+            }
             self.dispatch_key(event, true);
             self.dispatch_text_input(event);
         }
@@ -307,6 +360,9 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            if let Some(window) = self.window() {
+                let _ = window.makeFirstResponder(Some(self));
+            }
             if let Some(prev) = self.ivars().active_popup.borrow_mut().take() {
                 prev.close();
             }
@@ -320,6 +376,9 @@ define_class!(
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
+            if let Some(window) = self.window() {
+                let _ = window.makeFirstResponder(Some(self));
+            }
             self.dispatch_pointer(event, RawPointerEventKind::Pressed(MouseButton::Right));
             let menu = self.menu_for_event_inner(event);
             if !menu.is_null() {
@@ -389,6 +448,18 @@ define_class!(
         }
     }
 );
+
+fn is_pointer_cancel_key(key: Option<Key>) -> bool {
+    key == Some(Key::Escape)
+}
+
+impl Drop for TreeHostView {
+    fn drop(&mut self) {
+        unsafe {
+            NSNotificationCenter::defaultCenter().removeObserver(self as &AnyObject);
+        }
+    }
+}
 
 impl TreeHostView {
     fn menu_for_event_inner(&self, event: &NSEvent) -> *mut NSMenu {
@@ -552,6 +623,21 @@ impl TreeHostView {
         let this: Retained<Self> =
             unsafe { msg_send![super(this), initWithFrame: NSRect::default()] };
         *this.ivars().weak_self.borrow_mut() = objc2::rc::Weak::from_retained(&this);
+        let notifications = NSNotificationCenter::defaultCenter();
+        unsafe {
+            notifications.addObserver_selector_name_object(
+                &*this as &AnyObject,
+                sel!(elwinduiWindowDidResignKey:),
+                Some(NSWindowDidResignKeyNotification),
+                None,
+            );
+            notifications.addObserver_selector_name_object(
+                &*this as &AnyObject,
+                sel!(elwinduiApplicationDidResignActive:),
+                Some(NSApplicationDidResignActiveNotification),
+                None,
+            );
+        }
         this
     }
 
@@ -648,6 +734,7 @@ impl TreeHostView {
 
     /// Replaces this host's entire content, discarding whatever native subviews were there before.
     pub(crate) fn set_tree(&self, tree: Rc<dyn UIElementExt>) {
+        self.cancel_and_unregister_current_tree();
         for old in self.subviews().iter() {
             old.removeFromSuperview();
         }
@@ -659,6 +746,8 @@ impl TreeHostView {
             .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self.clone()))));
         tree.as_ui_element()
             .set_coordinate_host(Some(Rc::new(AppKitCoordinateHost(weak_self.clone()))));
+        tree.as_ui_element()
+            .set_pointer_gesture_host(Some(Rc::new(AppKitPointerGestureHost(weak_self.clone()))));
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(AppKitFocusHost(weak_self))));
         self.ivars().keyboard.focus.clear_focus();
@@ -672,6 +761,7 @@ impl TreeHostView {
 
     /// Clears this host's tree and releases native compositor islands and focus.
     pub(crate) fn clear_tree(&self) {
+        self.cancel_and_unregister_current_tree();
         for old in self.subviews().iter() {
             old.removeFromSuperview();
         }
@@ -682,6 +772,16 @@ impl TreeHostView {
         self.ivars().keyboard.shortcuts().clear();
         *self.ivars().tree.borrow_mut() = None;
         *self.ivars().render_tree.borrow_mut() = None;
+    }
+
+    fn cancel_and_unregister_current_tree(&self) {
+        self.ivars().pointer.cancel();
+        if let Some(old_tree) = self.ivars().tree.borrow().as_ref() {
+            old_tree.set_invalidate_host(None);
+            old_tree.set_coordinate_host(None);
+            old_tree.set_pointer_gesture_host(None);
+            old_tree.set_focus_host(None);
+        }
     }
 
     /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —
@@ -754,6 +854,7 @@ impl TreeHostView {
                 .set(objc2_foundation::NSSize::new(-1.0, -1.0));
             self.relayout();
         } else {
+            self.ivars().pointer.cancel();
             // `relayout_inner`'s own GC (the `retain` calls below) only runs during a relayout
             // pass, which a suppressed host by definition no longer gets — so every currently-
             // attached CALayer/NSView must be detached here, explicitly, before the caches that
@@ -1176,6 +1277,13 @@ mod coordinate_conversion_tests {
             }
         );
         assert_eq!(core_screen_to_appkit(core, 1440.0), native);
+    }
+
+    #[test]
+    fn escape_is_the_only_appkit_key_that_cancels_a_pointer_gesture() {
+        assert!(is_pointer_cancel_key(Some(Key::Escape)));
+        assert!(!is_pointer_cancel_key(Some(Key::Enter)));
+        assert!(!is_pointer_cancel_key(None));
     }
 }
 

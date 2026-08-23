@@ -34,14 +34,15 @@ pub struct KeyModifiers {
     pub meta: bool,
 }
 
-/// Payload for `on_pointer_pressed`/`on_pointer_released`/`on_pointer_moved`/`on_pointer_entered`/
-/// `on_pointer_exited` (docs/design/runtime/ui_tree_design.md). `position` is in the hosting
+/// Payload for `on_pointer_pressed`/`on_pointer_released`/`on_pointer_moved`/
+/// `on_pointer_canceled`/`on_pointer_entered`/`on_pointer_exited`
+/// (docs/design/runtime/ui_tree_design.md). `position` is in the hosting
 /// tree's own root-relative coordinate space (the same space `elwindui_core::ui::hit_test`'s `at`
 /// argument uses) — not relative to whichever ancestor happens to handle the bubbled event, since a
 /// single payload value is shared across every handler on the bubble path. `screen_position`, when
 /// available, is the same point in top-left/Y-down logical desktop coordinates. Backends return
 /// `None` rather than estimating it when their native conversion fails. `button` is `Some` only for
-/// `Pressed`/`Released`; `None` for `Moved`/`Entered`/`Exited`.
+/// `Pressed`/`Released`; `None` for `Moved`/`Canceled`/`Entered`/`Exited`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointerEventArgs {
     pub position: Point,
@@ -81,7 +82,12 @@ pub enum RawPointerEventKind {
     Pressed(MouseButton),
     Released(MouseButton),
     Moved,
-    WheelChanged { delta_x: f32, delta_y: f32 },
+    /// Terminates the current implicit capture without producing a normal release or tap.
+    Canceled,
+    WheelChanged {
+        delta_x: f32,
+        delta_y: f32,
+    },
 }
 
 /// A single raw mouse event. `position` is in the hosting tree's root-relative coordinate space;
@@ -128,6 +134,17 @@ fn ancestor_chain(elem: Option<Rc<dyn UIElementExt>>) -> Vec<Rc<dyn UIElementExt
     chain
 }
 
+fn is_in_subtree(target: &Rc<dyn UIElementExt>, subtree: &Rc<dyn UIElementExt>) -> bool {
+    let mut current = Some(Rc::clone(target));
+    while let Some(element) = current {
+        if Rc::ptr_eq(&element, subtree) {
+            return true;
+        }
+        current = element.visual_parent();
+    }
+    false
+}
+
 /// State kept for the button that started the current implicit capture — see
 /// `PointerDispatcher`'s own doc comment.
 struct PressState {
@@ -135,6 +152,19 @@ struct PressState {
     initiating_button: MouseButton,
     start_position: Point,
     held_buttons: HashSet<MouseButton>,
+    last_position: Point,
+    last_screen_position: Option<Point>,
+    last_modifiers: KeyModifiers,
+}
+
+/// Tap recognition deferred across `on_pointer_released` dispatch so reentrant cancellation or
+/// unmount can suppress it before it becomes observable.
+struct PendingTap {
+    target: Rc<dyn UIElementExt>,
+    button: MouseButton,
+    position: Point,
+    modifiers: KeyModifiers,
+    at_ms: f64,
 }
 
 /// The most recent tap this dispatcher fired, kept only long enough to decide whether the *next*
@@ -168,6 +198,7 @@ pub struct PointerDispatcher {
     /// Previous call's hover chain (innermost first) — see `ancestor_chain`.
     last_hover: RefCell<Vec<Rc<dyn UIElementExt>>>,
     press: RefCell<Option<PressState>>,
+    pending_tap: RefCell<Option<PendingTap>>,
     last_tap: RefCell<Option<TapRecord>>,
 }
 
@@ -202,6 +233,7 @@ impl PointerDispatcher {
                     event.screen_position,
                     event.modifiers,
                 );
+                self.update_active_position(&event);
                 if let Some(target) = self.captured_or(hit) {
                     let payload = PointerEventArgs {
                         position: event.position,
@@ -226,6 +258,7 @@ impl PointerDispatcher {
                     event.modifiers,
                 );
                 let target = self.captured_or(hit);
+                self.begin_or_extend_press(button, target.clone(), &event);
                 if let Some(target) = &target {
                     if target.is_tab_stop() {
                         focus.set_focus(target, FocusState::Pointer);
@@ -243,7 +276,6 @@ impl PointerDispatcher {
                         &RoutedEventArgs::default(),
                     );
                 }
-                self.begin_or_extend_press(button, target, event.position);
             }
             RawPointerEventKind::Released(button) => {
                 let hit = crate::ui::hit_test(root, event.position);
@@ -254,6 +286,7 @@ impl PointerDispatcher {
                     event.modifiers,
                 );
                 let target = self.captured_or(hit);
+                self.prepare_release(button, &event);
                 if let Some(target) = &target {
                     let payload = PointerEventArgs {
                         position: event.position,
@@ -268,7 +301,11 @@ impl PointerDispatcher {
                         &RoutedEventArgs::default(),
                     );
                 }
-                self.finish_press(button, event.position, event.modifiers, event.timestamp_ms);
+                self.finish_pending_tap();
+            }
+            RawPointerEventKind::Canceled => {
+                self.update_active_position(&event);
+                self.cancel();
             }
             RawPointerEventKind::WheelChanged { delta_x, delta_y } => {
                 if let Some(target) = crate::ui::hit_test(root, event.position) {
@@ -303,12 +340,15 @@ impl PointerDispatcher {
         &self,
         button: MouseButton,
         target: Option<Rc<dyn UIElementExt>>,
-        position: Point,
+        event: &RawPointerEvent,
     ) {
         let mut press = self.press.borrow_mut();
         match press.as_mut() {
             Some(existing) => {
                 existing.held_buttons.insert(button);
+                existing.last_position = event.position;
+                existing.last_screen_position = event.screen_position;
+                existing.last_modifiers = event.modifiers;
             }
             None => {
                 if let Some(target) = target {
@@ -317,25 +357,34 @@ impl PointerDispatcher {
                     *press = Some(PressState {
                         target,
                         initiating_button: button,
-                        start_position: position,
+                        start_position: event.position,
                         held_buttons,
+                        last_position: event.position,
+                        last_screen_position: event.screen_position,
+                        last_modifiers: event.modifiers,
                     });
                 }
             }
         }
     }
 
-    fn finish_press(
-        &self,
-        button: MouseButton,
-        release_position: Point,
-        modifiers: KeyModifiers,
-        timestamp_ms: f64,
-    ) {
+    fn update_active_position(&self, event: &RawPointerEvent) {
+        if let Some(press) = self.press.borrow_mut().as_mut() {
+            press.last_position = event.position;
+            press.last_screen_position = event.screen_position;
+            press.last_modifiers = event.modifiers;
+        }
+    }
+
+    fn prepare_release(&self, button: MouseButton, event: &RawPointerEvent) {
+        *self.pending_tap.borrow_mut() = None;
         let mut press_slot = self.press.borrow_mut();
         let Some(press) = press_slot.as_mut() else {
             return;
         };
+        press.last_position = event.position;
+        press.last_screen_position = event.screen_position;
+        press.last_modifiers = event.modifiers;
         press.held_buttons.remove(&button);
         let is_initiating = button == press.initiating_button;
         let press_target = Rc::clone(&press.target);
@@ -348,51 +397,131 @@ impl PointerDispatcher {
         if !is_initiating {
             return;
         }
-        if distance(release_position, start_position) > TAP_MOVE_THRESHOLD_PX {
+        if distance(event.position, start_position) > TAP_MOVE_THRESHOLD_PX {
             // A real drag, not a tap — also cancels any pending double-tap streak.
             *self.last_tap.borrow_mut() = None;
             return;
         }
-        let tap_event_name = match button {
+        if button == MouseButton::Middle {
+            return;
+        }
+        *self.pending_tap.borrow_mut() = Some(PendingTap {
+            target: press_target,
+            button,
+            position: event.position,
+            modifiers: event.modifiers,
+            at_ms: event.timestamp_ms,
+        });
+    }
+
+    fn finish_pending_tap(&self) {
+        let Some(pending) = self.pending_tap.borrow_mut().take() else {
+            return;
+        };
+        let tap_event_name = match pending.button {
             MouseButton::Left => "on_tapped",
             MouseButton::Right => "on_right_tapped",
-            // WinUI3 has no middle-button tap gesture.
             MouseButton::Middle => return,
         };
         let tapped_payload = TappedEventArgs {
-            position: release_position,
-            modifiers,
+            position: pending.position,
+            modifiers: pending.modifiers,
         };
+        let is_double = {
+            let mut last_tap = self.last_tap.borrow_mut();
+            let is_double = last_tap.as_ref().is_some_and(|prev| {
+                prev.button == pending.button
+                    && Rc::ptr_eq(&prev.target, &pending.target)
+                    && (pending.at_ms - prev.at_ms).abs() <= DOUBLE_TAP_INTERVAL_MS
+                    && distance(pending.position, prev.position) <= DOUBLE_TAP_DISTANCE_PX
+            });
+            *last_tap = if is_double {
+                None
+            } else {
+                Some(TapRecord {
+                    target: Rc::clone(&pending.target),
+                    button: pending.button,
+                    position: pending.position,
+                    at_ms: pending.at_ms,
+                })
+            };
+            is_double
+        };
+        // Tap state is installed before invoking user handlers, so a reentrant subtree unmount can
+        // clear every retained reference without either a RefCell conflict or a stale write-back.
         crate::ui::dispatch_routed(
-            &press_target,
+            &pending.target,
             tap_event_name,
             &tapped_payload,
             &RoutedEventArgs::default(),
         );
-
-        let mut last_tap = self.last_tap.borrow_mut();
-        let is_double = last_tap.as_ref().is_some_and(|prev| {
-            prev.button == button
-                && Rc::ptr_eq(&prev.target, &press_target)
-                && (timestamp_ms - prev.at_ms).abs() <= DOUBLE_TAP_INTERVAL_MS
-                && distance(release_position, prev.position) <= DOUBLE_TAP_DISTANCE_PX
-        });
         if is_double {
             crate::ui::dispatch_routed(
-                &press_target,
+                &pending.target,
                 "on_double_tapped",
                 &tapped_payload,
                 &RoutedEventArgs::default(),
             );
-            *last_tap = None;
-        } else {
-            *last_tap = Some(TapRecord {
-                target: press_target,
-                button,
-                position: release_position,
-                at_ms: timestamp_ms,
-            });
         }
+    }
+
+    /// Cancels this dispatcher's active implicit capture, if any.
+    ///
+    /// State is cleared before `on_pointer_canceled` bubbles, so cancellation is idempotent and
+    /// reentrant handlers cannot observe or cancel the same gesture twice. The event uses the most
+    /// recently observed pointer position and modifiers. Returns `true` only when an active capture
+    /// was canceled and notified.
+    pub fn cancel(&self) -> bool {
+        let Some(press) = self.press.borrow_mut().take() else {
+            return false;
+        };
+        *self.pending_tap.borrow_mut() = None;
+        *self.last_tap.borrow_mut() = None;
+        let payload = PointerEventArgs {
+            position: press.last_position,
+            screen_position: press.last_screen_position,
+            button: None,
+            modifiers: press.last_modifiers,
+        };
+        crate::ui::dispatch_routed(
+            &press.target,
+            "on_pointer_canceled",
+            &payload,
+            &RoutedEventArgs::default(),
+        );
+        true
+    }
+
+    /// Cancels capture only when the captured target belongs to `subtree`, and removes every
+    /// retained tap/hover reference into that subtree before it unmounts.
+    ///
+    /// Returns `true` when an active captured gesture was canceled and notified.
+    pub fn cancel_for_subtree(&self, subtree: &Rc<dyn UIElementExt>) -> bool {
+        let press_matches = self
+            .press
+            .borrow()
+            .as_ref()
+            .is_some_and(|press| is_in_subtree(&press.target, subtree));
+        let pending_matches = self
+            .pending_tap
+            .borrow()
+            .as_ref()
+            .is_some_and(|tap| is_in_subtree(&tap.target, subtree));
+        if pending_matches {
+            *self.pending_tap.borrow_mut() = None;
+        }
+        let last_tap_matches = self
+            .last_tap
+            .borrow()
+            .as_ref()
+            .is_some_and(|tap| is_in_subtree(&tap.target, subtree));
+        if last_tap_matches {
+            *self.last_tap.borrow_mut() = None;
+        }
+        self.last_hover
+            .borrow_mut()
+            .retain(|element| !is_in_subtree(element, subtree));
+        press_matches && self.cancel()
     }
 
     /// Fires `on_pointer_exited`/`on_pointer_entered` (non-bubbling per element —

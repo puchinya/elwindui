@@ -28,16 +28,19 @@ pub enum SystemIcon {
 Issue #176では、WinUI 3と同じvalue/element分離をCoreのclass modelへ追加する。
 
 ```text
-IconSource                 shareable graphics value
-    │
-    ▼
-IconSourceElement          concrete, single-parent UIElement leaf
-    │ inherits
-    ▼
 IconElement                abstract self-drawn icon base
+├─ foreground              icon-common property
+├─ IconSourceElement       concrete IconSource realization leaf
+│  └─ icon_source          shareable graphics value
+└─ future FontIcon         font-specific derived type
+   ├─ glyph
+   ├─ font_family
+   ├─ font_size
+   ├─ font_style
+   └─ font_weight
 ```
 
-`IconElement` はlocal `foreground: Option<Brush>`だけを所有し、derived iconは未設定時に既存のVisual-tree text foreground cascadeを読む。TextStyleOwner全体や第二のstyle systemは導入しない。`IconSourceElement` は `IconSource` を保持するだけで、UIElement/native handleをvalue側へ逆流させない。
+`IconElement` はiconに共通するlocal `foreground: Option<Brush>`だけを所有し、`TextStyleOwner` を実装せず、完全な `TextStyleStorage` も所有しない。derived iconはforeground未設定時に既存のVisual-tree foreground cascadeを読む。glyphとfont-family/font-size/font-style/font-weightは共通baseの責務ではなく、将来のderived `FontIcon` が所有する。`IconSourceElement` は `IconSource` を保持するrealization leafであり、UIElement/native handleをvalue側へ逆流させない。
 
 ## 2. `SystemIcon` common-set invariant
 

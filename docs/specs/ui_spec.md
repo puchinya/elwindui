@@ -470,7 +470,7 @@ Grid {
 
 ### `elwindui::ui::IconElement` / `IconSourceElement`
 
-`IconElement` は backend-neutral な自己描画アイコン要素の抽象基底であり、直接構築できない。共有可能な `IconSource` 値を Visual tree に配置する場合は、具象 leaf の `IconSourceElement` を使用する。
+`IconElement` は backend-neutral な自己描画アイコン要素の抽象基底であり、直接構築できない。共通baseが所有するicon propertyは `foreground` だけであり、font-family/font-size/font-style/font-weight等のfont-specific propertyは含まない。これらは将来のderived `FontIcon` の責務である。共有可能な `IconSource` 値を Visual tree に配置する場合は、具象realization leafの `IconSourceElement` を使用する。
 
 #### Properties
 

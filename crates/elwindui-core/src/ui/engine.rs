@@ -1297,6 +1297,79 @@ mod tests {
     }
 
     #[test]
+    fn pointer_dispatch_preserves_backend_screen_position_during_capture() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let observed = Rc::new(RefCell::new(Vec::<crate::input::PointerEventArgs>::new()));
+        for event_name in [
+            "on_pointer_pressed",
+            "on_pointer_moved",
+            "on_pointer_released",
+        ] {
+            let observed = Rc::clone(&observed);
+            leaf.as_ui_element()
+                .register_routed_handler::<crate::input::PointerEventArgs>(
+                    event_name,
+                    Box::new(move |args, _| observed.borrow_mut().push(*args)),
+                );
+        }
+
+        let dispatcher = crate::input::PointerDispatcher::new();
+        let focus = crate::focus::FocusTracker::new();
+        let event = |kind, position, screen_position, timestamp_ms| crate::input::RawPointerEvent {
+            kind,
+            position,
+            screen_position: Some(screen_position),
+            modifiers: crate::input::KeyModifiers::default(),
+            timestamp_ms,
+        };
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            event(
+                crate::input::RawPointerEventKind::Pressed(crate::input::MouseButton::Left),
+                Point { x: 5.0, y: 5.0 },
+                Point { x: 105.0, y: 205.0 },
+                0.0,
+            ),
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            event(
+                crate::input::RawPointerEventKind::Moved,
+                Point { x: 500.0, y: 500.0 },
+                Point { x: 600.0, y: 700.0 },
+                1.0,
+            ),
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            event(
+                crate::input::RawPointerEventKind::Released(crate::input::MouseButton::Left),
+                Point { x: 500.0, y: 500.0 },
+                Point { x: 600.0, y: 700.0 },
+                2.0,
+            ),
+        );
+
+        let observed = observed.borrow();
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed
+                .iter()
+                .map(|args| args.screen_position)
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Point { x: 105.0, y: 205.0 }),
+                Some(Point { x: 600.0, y: 700.0 }),
+                Some(Point { x: 600.0, y: 700.0 }),
+            ]
+        );
+    }
+
+    #[test]
     fn tap_fires_even_after_dragging_out_and_back_within_threshold() {
         let leaf = native("a", size(50.0, 50.0));
         layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));

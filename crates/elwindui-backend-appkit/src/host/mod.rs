@@ -14,8 +14,8 @@ use elwindui_core::input::{
 };
 use elwindui_core::ui::popup::PopupSurfaceHandle;
 use elwindui_core::ui::{
-    ContextMenuPresentation, ContextMenuService, ContextRequest, FocusHost, InvalidationKind,
-    RelayoutHost, ResolvedContextDefinition, UIElementExt, layout_root,
+    ContextMenuPresentation, ContextMenuService, ContextRequest, CoordinateHost, FocusHost,
+    InvalidationKind, RelayoutHost, ResolvedContextDefinition, UIElementExt, layout_root,
 };
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -170,6 +170,31 @@ impl FocusHost for AppKitFocusHost {
             None => false,
         }
     }
+}
+
+/// Root/screen conversion for one hosted AppKit tree. The weak reference avoids the same host/tree
+/// cycle as `AppKitRelayoutHost` and `AppKitFocusHost`.
+pub(crate) struct AppKitCoordinateHost(objc2::rc::Weak<TreeHostView>);
+
+impl CoordinateHost for AppKitCoordinateHost {
+    fn root_to_screen(&self, point: Point) -> Option<Point> {
+        self.0.load()?.root_to_screen_point(point)
+    }
+
+    fn screen_to_root(&self, point: Point) -> Option<Point> {
+        self.0.load()?.screen_to_root_point(point)
+    }
+}
+
+fn appkit_screen_to_core(point: NSPoint, primary_height: f64) -> Point {
+    Point {
+        x: point.x as f32,
+        y: (primary_height - point.y) as f32,
+    }
+}
+
+fn core_screen_to_appkit(point: Point, primary_height: f64) -> NSPoint {
+    NSPoint::new(point.x as f64, primary_height - point.y as f64)
 }
 
 define_class!(
@@ -436,10 +461,12 @@ impl TreeHostView {
             location
         };
 
-        let core_screen_pt = Point {
-            x: screen_pt.x as f32,
-            y: (primary_screen_height - screen_pt.y) as f32,
-        };
+        let core_screen_pt = self
+            .root_to_screen_point(Point {
+                x: location.x as f32,
+                y: location.y as f32,
+            })
+            .unwrap_or_else(|| appkit_screen_to_core(screen_pt, primary_screen_height));
 
         let target_screen = NSScreen::screens(m)
             .iter()
@@ -467,6 +494,37 @@ impl TreeHostView {
         };
 
         (core_screen_pt, work_area)
+    }
+
+    /// Converts this flipped view's root-local logical point to Core screen coordinates.
+    fn root_to_screen_point(&self, point: Point) -> Option<Point> {
+        let window = self.window()?;
+        let m = mtm();
+        let primary_height = NSScreen::screens(m)
+            .firstObject()
+            .or_else(|| NSScreen::mainScreen(m))
+            .map(|screen| screen.frame().size.height)?;
+        let window_point =
+            self.convertPoint_toView(NSPoint::new(point.x as f64, point.y as f64), None);
+        let native_screen = window.convertPointToScreen(window_point);
+        Some(appkit_screen_to_core(native_screen, primary_height))
+    }
+
+    /// Inverse of `root_to_screen_point`; the AppKit Y-axis flip stays at this backend boundary.
+    fn screen_to_root_point(&self, point: Point) -> Option<Point> {
+        let window = self.window()?;
+        let m = mtm();
+        let primary_height = NSScreen::screens(m)
+            .firstObject()
+            .or_else(|| NSScreen::mainScreen(m))
+            .map(|screen| screen.frame().size.height)?;
+        let native_screen = core_screen_to_appkit(point, primary_height);
+        let window_point = window.convertPointFromScreen(native_screen);
+        let local = self.convertPoint_fromView(window_point, None);
+        Some(Point {
+            x: local.x as f32,
+            y: local.y as f32,
+        })
     }
 
     pub(crate) fn new() -> Retained<Self> {
@@ -506,11 +564,13 @@ impl TreeHostView {
         // top-left-origin local space — the same space `elwindui_core::ui::hit_test`'s `at`
         // expects, matching `elwindui_core::ui::layout_root`'s own coordinate convention.
         let location = self.convertPoint_fromView(event.locationInWindow(), None);
+        let root_position = Point {
+            x: location.x as f32,
+            y: location.y as f32,
+        };
         self.dispatch_pointer_at(
-            Point {
-                x: location.x as f32,
-                y: location.y as f32,
-            },
+            root_position,
+            self.root_to_screen_point(root_position),
             nsevent_modifiers(event),
             kind,
             event.timestamp(),
@@ -520,6 +580,7 @@ impl TreeHostView {
     fn dispatch_pointer_at(
         &self,
         position: Point,
+        screen_position: Option<Point>,
         modifiers: KeyModifiers,
         kind: RawPointerEventKind,
         timestamp: f64,
@@ -532,6 +593,7 @@ impl TreeHostView {
             RawPointerEvent {
                 kind,
                 position,
+                screen_position,
                 modifiers,
                 timestamp_ms: timestamp * 1000.0,
             },
@@ -595,6 +657,8 @@ impl TreeHostView {
         let weak_self = self.ivars().weak_self.borrow().clone();
         tree.as_ui_element()
             .set_invalidate_host(Some(Rc::new(AppKitRelayoutHost(weak_self.clone()))));
+        tree.as_ui_element()
+            .set_coordinate_host(Some(Rc::new(AppKitCoordinateHost(weak_self.clone()))));
         tree.as_ui_element()
             .set_focus_host(Some(Rc::new(AppKitFocusHost(weak_self))));
         self.ivars().keyboard.focus.clear_focus();
@@ -1093,6 +1157,25 @@ pub(crate) fn close_active_popup_slot(slot: &RefCell<Option<Rc<dyn PopupSurfaceH
     let popup = slot.borrow_mut().take();
     if let Some(popup) = popup {
         popup.close();
+    }
+}
+
+#[cfg(test)]
+mod coordinate_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn appkit_and_core_screen_points_round_trip_with_y_flip() {
+        let native = NSPoint::new(-320.0, 812.5);
+        let core = appkit_screen_to_core(native, 1440.0);
+        assert_eq!(
+            core,
+            Point {
+                x: -320.0,
+                y: 627.5
+            }
+        );
+        assert_eq!(core_screen_to_appkit(core, 1440.0), native);
     }
 }
 

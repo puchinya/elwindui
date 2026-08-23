@@ -22,6 +22,8 @@ Application startup runs on the main thread. Window and tree hosts own AppKit vi
 
 Owner mapping associates native views and event targets with weak ElwindUI owners. Disposal removes delegates, notifications, and mappings before releasing the view.
 
+`TreeHostView` forwards self-drawn mouse press/move/release through the common `PointerDispatcher`; AppKit's drag event overrides preserve delivery during an active press. A weak `AppKitCoordinateHost` converts between flipped view-root coordinates and Core's top-left/Y-down logical desktop coordinates using `NSWindow` point conversion and the primary-screen-height flip. Context requests and ordinary pointer payloads share this conversion.
+
 ## Layout and native controls
 
 Common layout measures native controls through AppKit fitting/intrinsic size and applies arranged rectangles in host coordinates. Scroll content is wrapped by the native scroll view plus an ElwindUI content root; the public content tree remains backend-neutral.

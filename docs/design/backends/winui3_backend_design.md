@@ -18,6 +18,8 @@ Tree hosts own XAML roots, ElwindUI owner mappings, viewport layout, activation,
 
 Arrange writes explicit `Width` / `Height` for Canvas positioning. Before every natural `Measure`, the adapter resets both values to `NaN` (`Auto`), invalidates native measure, and then measures with the current constraint. This prevents arrange-time sizes from becoming a self-reinforcing natural-size cache.
 
+The root Canvas forwards self-drawn pointer press/move/release to the common `PointerDispatcher`. Events originating from native XAML children are excluded through `OriginalSource`; a successful press captures the native pointer and release relinquishes it. `WinUI3CoordinateHost` weakly references the Canvas and promotes the existing `ContentCoordinateConverter`/rasterization-scale path for both root-to-screen and screen-to-root conversion, including transforms between Canvas and XamlRoot content.
+
 ## Rendering
 
 Win2D handles retained primitive replay for paths, images, gradients, brushes, clipping, opacity, strokes, and supported blend operations. Composition resources and image caches are owned by the render group or host that created them and are released on removal/deactivation.

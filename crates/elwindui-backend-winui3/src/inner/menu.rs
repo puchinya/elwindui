@@ -261,14 +261,16 @@ fn vector_icon_element(vector: &elwindui_core::graphics::VectorImage) -> Option<
 /// frame; the stream/temporary Canvas resources are released once the XAML source has consumed
 /// them, same reasoning as AppKit's per-call `user_image_nsimage` cache).
 ///
-/// **Unverified naming**: `CanvasBitmap::SaveAsync` is this crate's best-effort guess at the
-/// `windows_bindgen` projection of `CanvasBitmap.SaveAsync(IRandomAccessStream, CanvasBitmapFileFormat)`
-/// — Win2D has several `SaveAsync` overloads (filename-based and stream-based, with/without a
-/// quality parameter), so the generated name may carry a disambiguating suffix (this crate's own
-/// `CanvasBitmap::LoadAsyncFromStream`/`DrawImageToRectWithSourceRectAndOpacityAndInterpolation`
-/// are precedent for that pattern). Confirm the exact name in `bindings.rs` on first Windows
-/// build and correct this call site if it differs — a mechanical binding-spelling fix, not an
-/// architecture change (delta contract §16).
+/// Calls the stream-overload projection of Win2D's `ICanvasBitmap` save surface — the Win2D ABI
+/// names this overload `SaveToStreamAsync(IRandomAccessStream, CanvasBitmapFileFormat)`,
+/// distinct from the filename-based `SaveToFileAsync`/`SaveToFileWithBitmapFileFormatAsync` and
+/// the quality-parameterized `SaveToStreamWithQualityAsync` overloads (second PR #171 review
+/// delta §A1 — a plain `SaveAsync` name was an unjustified guess given this crate's own
+/// `CanvasBitmap::LoadAsyncFromStream` already demonstrates `windows_bindgen` projects
+/// ABI-specific overload names, not a collapsed friendly name). Windows build/execution itself
+/// remains deferred to Issue #157; if the actual generated binding differs mechanically from
+/// `SaveToStreamAsync`, correct the spelling there — not a reason to revert this call site to a
+/// name already known to be wrong.
 fn canvas_bitmap_to_xaml_image_source(
     bitmap: &crate::bindings::Microsoft::Graphics::Canvas::CanvasBitmap,
 ) -> Option<XamlImageSource> {
@@ -277,7 +279,7 @@ fn canvas_bitmap_to_xaml_image_source(
     let stream = InMemoryRandomAccessStream::new().ok()?;
     let random_access_stream: IRandomAccessStream = stream.cast().ok()?;
     bitmap
-        .SaveAsync(&random_access_stream, CanvasBitmapFileFormat::Png)
+        .SaveToStreamAsync(&random_access_stream, CanvasBitmapFileFormat::Png)
         .ok()?
         .join()
         .ok()?;
@@ -502,22 +504,55 @@ mod live_menu_item_icon_tests {
         let selected_clone = std::rc::Rc::clone(&selected);
         item.set_on_select(Box::new(move || selected_clone.set(true)));
 
+        // 1. SystemIcon::Copy -> the live native Icon must actually be a SymbolIcon carrying
+        //    Symbol::Copy, not merely "something non-null" (second PR #171 review delta §A2 — a
+        //    broken implementation that updates semantic state but leaves a stale/wrong native
+        //    icon installed would still pass an `is_some()`-only check).
         item.set_icon(Some(IconSource::System(SystemIcon::Copy)));
-        assert!(
-            item.xaml.Icon().ok().flatten().is_some(),
-            "MenuFlyoutItem.Icon must be non-null after set_icon(Some(..))"
+        let icon_after_copy = item
+            .xaml
+            .Icon()
+            .ok()
+            .flatten()
+            .expect("MenuFlyoutItem.Icon must be non-null after set_icon(System(Copy))");
+        let symbol_icon: SymbolIcon = icon_after_copy
+            .cast()
+            .expect("native icon after System(Copy) must be a SymbolIcon");
+        assert_eq!(
+            symbol_icon.Symbol().expect("SymbolIcon.Symbol"),
+            Symbol::Copy,
+            "native SymbolIcon must carry Symbol::Copy"
         );
         match item.icon() {
             Some(IconSource::System(SystemIcon::Copy)) => {}
             other => panic!("expected Some(System(Copy)), got {other:?}"),
         }
 
-        item.set_icon(Some(IconSource::System(SystemIcon::Delete)));
-        match item.icon() {
-            Some(IconSource::System(SystemIcon::Delete)) => {}
-            other => panic!("expected Some(System(Delete)) after replace, got {other:?}"),
-        }
+        // 2. Replace with a user Rgba8 raster icon -> the live native Icon must now be an
+        //    ImageIcon (exercising the win2d_bitmap-backed menu path this remediation added, not
+        //    just re-checking the SystemIcon path).
+        let rgba8_bitmap = elwindui_core::graphics::BitmapImage::from_rgba8(
+            2,
+            2,
+            8,
+            vec![
+                10u8, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255,
+            ],
+            elwindui_core::graphics::AlphaMode::Opaque,
+        )
+        .expect("well-formed 2x2 rgba8 buffer");
+        item.set_icon(Some(IconSource::Image(ImageSource::Raster(rgba8_bitmap))));
+        let icon_after_rgba8 = item
+            .xaml
+            .Icon()
+            .ok()
+            .flatten()
+            .expect("MenuFlyoutItem.Icon must be non-null after set_icon(Image(Rgba8))");
+        let _image_icon: ImageIcon = icon_after_rgba8
+            .cast()
+            .expect("native icon after a user Rgba8 image must be an ImageIcon, not a SymbolIcon");
 
+        // 3. Clear -> live native Icon must become null again.
         item.set_icon(None);
         assert!(item.icon().is_none());
         assert!(
@@ -554,16 +589,29 @@ mod live_menu_item_icon_tests {
             .expect("realized flyout item")
             .cast()
             .expect("realized item casts to MenuFlyoutItem");
-        assert!(
-            realized.Icon().ok().flatten().is_some(),
-            "the newly-realized MenuFlyoutItem must have an icon"
+        // Explicitly Symbol::Copy, not merely "has some icon" (second PR #171 review delta §A3 —
+        // a regression that always copied the *first* icon onto every later realization would
+        // still pass an `is_some()`-only check).
+        let realized_icon = realized
+            .Icon()
+            .ok()
+            .flatten()
+            .expect("the newly-realized MenuFlyoutItem must have an icon");
+        let realized_symbol: SymbolIcon = realized_icon
+            .cast()
+            .expect("realized icon must be a SymbolIcon");
+        assert_eq!(
+            realized_symbol.Symbol().expect("SymbolIcon.Symbol"),
+            Symbol::Copy,
+            "first realization must carry the current semantic icon, Symbol::Copy"
         );
         assert_ne!(
             realized, item.xaml,
             "create_flyout() must not reuse the live MenuBar-side MenuFlyoutItem instance (PR #156)"
         );
 
-        // Latest semantic value flows into the next realization.
+        // Latest semantic value flows into the next realization: change to Delete before the
+        // second create_flyout() call.
         item.set_icon(Some(IconSource::System(SystemIcon::Delete)));
         let flyout2 = menu
             .create_flyout()
@@ -574,7 +622,24 @@ mod live_menu_item_icon_tests {
             .expect("second realized flyout item")
             .cast()
             .expect("second realized item casts to MenuFlyoutItem");
-        assert!(realized2.Icon().ok().flatten().is_some());
+        let realized2_icon = realized2
+            .Icon()
+            .ok()
+            .flatten()
+            .expect("second realization must have an icon");
+        let realized2_symbol: SymbolIcon = realized2_icon
+            .cast()
+            .expect("second realized icon must be a SymbolIcon");
+        assert_eq!(
+            realized2_symbol.Symbol().expect("SymbolIcon.Symbol"),
+            Symbol::Delete,
+            "second realization must carry the *updated* semantic icon, Symbol::Delete — not the \
+             first realization's stale Symbol::Copy"
+        );
+        assert_ne!(
+            realized, realized2,
+            "each create_flyout() call must produce its own new realization, not reuse the previous one"
+        );
     }
 
     /// §9.9: a failed icon conversion (an unsupported user `ImageSource` case, before this

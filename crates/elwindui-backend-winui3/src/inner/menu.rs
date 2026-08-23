@@ -476,3 +476,136 @@ mod icon_tests {
         }
     }
 }
+
+/// §9.7/§9.8/§9.9 of the PR #171 delta remediation contract. Unlike every existing test in this
+/// crate (pure logic — see `render::win2d_bitmap_tests`'s own doc comment for the same point about
+/// `render/win2d.rs`), these construct live `MenuFlyoutItem`/`SymbolIcon` XAML objects, which (per
+/// this crate's established test conventions — no prior test in this crate does this) may need a
+/// WinUI `DispatcherQueue`/`Application` context this test binary does not currently set up.
+/// **Unverified**: written but not run — no Windows build/runtime environment available in this
+/// remediation session. If XAML object construction fails inside `cargo test`'s default worker
+/// threads, that is the concrete "WinUI UI-thread test harness" gap the delta contract's §9.7
+/// anticipates; report it as a finding rather than assuming these pass.
+#[cfg(test)]
+mod live_menu_item_icon_tests {
+    use super::*;
+
+    /// §9.7: `InnerMenuItem::set_icon` set / replace / clear against the live `MenuFlyoutItem`,
+    /// leaving `text`/`enabled`/`shortcut`/the select callback untouched.
+    #[test]
+    fn live_inner_menu_item_icon_set_replace_clear() {
+        let item = InnerMenuItem::new();
+        item.set_text("Copy");
+        item.set_enabled(true);
+        item.set_shortcut("c");
+        let selected = std::rc::Rc::new(std::cell::Cell::new(false));
+        let selected_clone = std::rc::Rc::clone(&selected);
+        item.set_on_select(Box::new(move || selected_clone.set(true)));
+
+        item.set_icon(Some(IconSource::System(SystemIcon::Copy)));
+        assert!(
+            item.xaml.Icon().ok().flatten().is_some(),
+            "MenuFlyoutItem.Icon must be non-null after set_icon(Some(..))"
+        );
+        match item.icon() {
+            Some(IconSource::System(SystemIcon::Copy)) => {}
+            other => panic!("expected Some(System(Copy)), got {other:?}"),
+        }
+
+        item.set_icon(Some(IconSource::System(SystemIcon::Delete)));
+        match item.icon() {
+            Some(IconSource::System(SystemIcon::Delete)) => {}
+            other => panic!("expected Some(System(Delete)) after replace, got {other:?}"),
+        }
+
+        item.set_icon(None);
+        assert!(item.icon().is_none());
+        assert!(
+            item.xaml.Icon().ok().flatten().is_none(),
+            "MenuFlyoutItem.Icon must be null after set_icon(None)"
+        );
+
+        assert_eq!(item.text(), "Copy");
+        assert!(item.enabled());
+        assert_eq!(item.shortcut().as_deref(), Some("c"));
+        item.select();
+        assert!(selected.get(), "select() must still invoke the callback");
+    }
+
+    /// §9.8: mandatory PR #156 regression — `InnerMenu::create_flyout()` snapshots the current
+    /// icon onto a *newly*-realized `MenuFlyoutItem`, distinct from the live MenuBar-side item's
+    /// own `xaml`, and reflects the latest semantic value on each subsequent call.
+    #[test]
+    fn create_flyout_snapshots_icon_onto_a_distinct_realization() {
+        let item = InnerMenuItem::new();
+        item.set_text("Copy");
+        item.set_icon(Some(IconSource::System(SystemIcon::Copy)));
+
+        let menu = InnerMenu::new();
+        menu.add_item(&item);
+
+        let flyout = menu
+            .create_flyout()
+            .expect("create_flyout must succeed for a single-item menu");
+        let items = flyout.Items().expect("MenuFlyout.Items");
+        assert_eq!(items.Size().unwrap_or(0), 1);
+        let realized: MenuFlyoutItem = items
+            .GetAt(0)
+            .expect("realized flyout item")
+            .cast()
+            .expect("realized item casts to MenuFlyoutItem");
+        assert!(
+            realized.Icon().ok().flatten().is_some(),
+            "the newly-realized MenuFlyoutItem must have an icon"
+        );
+        assert_ne!(
+            realized, item.xaml,
+            "create_flyout() must not reuse the live MenuBar-side MenuFlyoutItem instance (PR #156)"
+        );
+
+        // Latest semantic value flows into the next realization.
+        item.set_icon(Some(IconSource::System(SystemIcon::Delete)));
+        let flyout2 = menu
+            .create_flyout()
+            .expect("second create_flyout must also succeed");
+        let items2 = flyout2.Items().expect("MenuFlyout.Items");
+        let realized2: MenuFlyoutItem = items2
+            .GetAt(0)
+            .expect("second realized flyout item")
+            .cast()
+            .expect("second realized item casts to MenuFlyoutItem");
+        assert!(realized2.Icon().ok().flatten().is_some());
+    }
+
+    /// §9.9: a failed icon conversion (an unsupported user `ImageSource` case, before this
+    /// remediation — kept here as a regression guard using the still-legitimately-fallible
+    /// incompatible `ImageData::Backend` case) omits the icon but leaves the item fully
+    /// functional: text preserved, still selectable, callback still fires exactly once.
+    #[test]
+    fn failed_icon_conversion_does_not_remove_the_action() {
+        let item = InnerMenuItem::new();
+        item.set_text("Broken Icon Action");
+        let selected = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let selected_clone = std::rc::Rc::clone(&selected);
+        item.set_on_select(Box::new(move || {
+            selected_clone.set(selected_clone.get() + 1)
+        }));
+
+        let incompatible = elwindui_core::graphics::BitmapImage::from_backend_handle(
+            elwindui_core::graphics::BackendImageHandle(std::sync::Arc::new(42u32)),
+        );
+        item.set_icon(Some(IconSource::Image(ImageSource::Raster(incompatible))));
+
+        assert!(
+            item.xaml.Icon().ok().flatten().is_none(),
+            "an incompatible backend handle must omit the icon, not synthesize one"
+        );
+        assert_eq!(item.text(), "Broken Icon Action");
+        item.select();
+        assert_eq!(
+            selected.get(),
+            1,
+            "the callback must still fire exactly once"
+        );
+    }
+}

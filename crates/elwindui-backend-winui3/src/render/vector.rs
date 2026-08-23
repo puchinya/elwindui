@@ -814,3 +814,133 @@ mod vector_view_box_tests {
         );
     }
 }
+
+/// §9.5 of the PR #171 delta remediation contract. See `render::win2d_bitmap_tests`'s own module
+/// doc comment for why this depends on live `CanvasDevice`/`CanvasRenderTarget` construction
+/// (unverified without a Windows build/run) rather than pure logic like the rest of this file's
+/// tests.
+#[cfg(test)]
+mod menu_vector_rasterization_tests {
+    use super::*;
+    use elwindui_core::base::{Rect, Size};
+    use elwindui_core::graphics::{
+        Brush, Color, FillRule, PathBuilder, VectorFill, VectorGroup, VectorImageBuilder,
+        VectorNode, VectorPaint, VectorPaintOrder, VectorPathNode, VectorShapeRendering,
+    };
+    use std::sync::Arc;
+
+    fn creator() -> Result<ICanvasResourceCreator> {
+        let device = crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice::GetSharedDevice()?;
+        device.cast()
+    }
+
+    /// A simple 16x16 filled square vector image — enough to have an obvious non-transparent
+    /// region to check against, without depending on any other part of this remediation.
+    fn filled_square_vector_image() -> elwindui_core::graphics::VectorImage {
+        let mut builder = PathBuilder::new();
+        builder.add_rect(Rect {
+            x: 2.0,
+            y: 2.0,
+            width: 12.0,
+            height: 12.0,
+        });
+        let path = builder.build().expect("filled square path is well-formed");
+        let node = VectorNode::Path(VectorPathNode {
+            path,
+            transform: elwindui_core::base::AffineTransform::IDENTITY,
+            fill: Some(VectorFill {
+                paint: VectorPaint::Brush(Brush::Solid(Color::rgb(200, 40, 40))),
+                opacity: 1.0,
+                rule: FillRule::NonZero,
+            }),
+            stroke: None,
+            paint_order: VectorPaintOrder::default(),
+            rendering: VectorShapeRendering::default(),
+            visibility: true,
+        });
+        let group = VectorGroup {
+            children: Arc::from([node]),
+            ..VectorGroup::default()
+        };
+        VectorImageBuilder::new(
+            Size {
+                width: 16.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 16.0,
+            },
+        )
+        .expect("16x16 canvas is a valid size")
+        .root(group)
+        .finish()
+        .expect("filled square vector image builds successfully")
+    }
+
+    /// §9.5: rasterizing a simple filled-square `VectorImage` produces a 32x32
+    /// `CanvasRenderTarget` (the fixed menu-icon raster size, `MENU_ICON_RASTER_SIZE` in
+    /// `inner/menu.rs`) with at least one non-transparent pixel — so a silently blank target
+    /// cannot pass this test.
+    #[test]
+    fn rasterizes_a_filled_shape_into_a_32x32_non_blank_render_target() {
+        let creator = creator().expect("CanvasDevice::GetSharedDevice must succeed on Windows");
+        let image = filled_square_vector_image();
+        let target = rasterize_vector_image_to_canvas_bitmap(&creator, &image, 32.0, 32.0)
+            .expect("vector rasterization must succeed for a simple filled shape");
+        let size = target.SizeInPixels().expect("SizeInPixels");
+        assert_eq!((size.Width, size.Height), (32, 32));
+
+        // The square covers most of the 16x16 viewBox, which maps to the render target's center;
+        // sample its center pixel and confirm the fill's red channel dominates (not fully
+        // transparent/black, i.e. something was actually drawn there).
+        let bytes = target
+            .GetPixelBytes()
+            .expect("GetPixelBytes must succeed for a freshly-drawn CanvasRenderTarget");
+        let center_pixel_index = ((16 * 32) + 16) * 4; // row 16, column 16, BGRA8
+        let alpha = bytes[center_pixel_index + 3];
+        assert!(
+            alpha > 0,
+            "center pixel must not be fully transparent — the fill did not render"
+        );
+    }
+
+    /// §9.6 half: an empty/degenerate `VectorImage` (empty group) rasterizes without error into an
+    /// all-transparent target — confirms the offscreen target/session lifecycle itself (create,
+    /// clear, draw nothing, close) doesn't fail even when there is nothing to draw, distinguishing
+    /// "rasterization pipeline broken" from "this specific shape didn't render".
+    #[test]
+    fn rasterizing_an_empty_vector_image_succeeds_and_stays_transparent() {
+        let creator = creator().expect("CanvasDevice::GetSharedDevice must succeed on Windows");
+        let empty_group = VectorGroup::default();
+        let image = VectorImageBuilder::new(
+            Size {
+                width: 16.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 16.0,
+            },
+        )
+        .expect("16x16 canvas is a valid size")
+        .root(empty_group)
+        .finish()
+        .expect("empty vector image builds successfully");
+        let target = rasterize_vector_image_to_canvas_bitmap(&creator, &image, 32.0, 32.0)
+            .expect("rasterizing an empty scene must still succeed");
+        let bytes = target
+            .GetPixelBytes()
+            .expect("GetPixelBytes must succeed for a freshly-drawn CanvasRenderTarget");
+        let center_pixel_index = ((16 * 32) + 16) * 4;
+        assert_eq!(
+            bytes[center_pixel_index + 3],
+            0,
+            "an empty vector scene must rasterize to a fully transparent target"
+        );
+    }
+}

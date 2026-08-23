@@ -140,21 +140,43 @@ fn sf_symbol_name(icon: SystemIcon) -> &'static str {
     }
 }
 
-/// SF Symbols (`NSImage(systemSymbolName:accessibilityDescription:)`) were introduced in macOS
-/// 11.0. `objc2_app_kit`'s binding for this method is compiled in unconditionally regardless of
-/// the running OS, so calling it on an OS that predates the selector's introduction would send an
-/// unrecognized selector to `NSImage`'s class object — undefined Objective-C runtime behavior
-/// (typically a crash), not a graceful `None` (PR #171 delta remediation §5 — a runtime
-/// `respondsToSelector:` probe on the class object was tried here first and empirically found
-/// unreliable: it reported `false` even on this machine's current macOS, well past 11.0, while
-/// the guarded call itself succeeded immediately afterward. `NSProcessInfo` OS-version comparison
-/// below replaces it, since it does not depend on that probe at all).
+/// Minimum macOS version SF Symbols require — `NSImage(systemSymbolName:
+/// accessibilityDescription:)` was introduced in macOS 11.0.
+const SF_SYMBOL_MIN_MACOS_VERSION: NSOperatingSystemVersion = NSOperatingSystemVersion {
+    majorVersion: 11,
+    minorVersion: 0,
+    patchVersion: 0,
+};
+
+/// Pure lexicographic (major, minor, patch) version comparison, factored out of
+/// `supports_sf_symbols` below so the actual decision logic can be unit tested without depending
+/// on the real running OS (§9.10 of the PR #171 delta remediation contract).
+fn version_at_least(version: NSOperatingSystemVersion, minimum: NSOperatingSystemVersion) -> bool {
+    (
+        version.majorVersion,
+        version.minorVersion,
+        version.patchVersion,
+    ) >= (
+        minimum.majorVersion,
+        minimum.minorVersion,
+        minimum.patchVersion,
+    )
+}
+
+/// `objc2_app_kit`'s binding for `imageWithSystemSymbolName:accessibilityDescription:` is
+/// compiled in unconditionally regardless of the running OS, so calling it on an OS that predates
+/// the selector's introduction would send an unrecognized selector to `NSImage`'s class object —
+/// undefined Objective-C runtime behavior (typically a crash), not a graceful `None` (PR #171
+/// delta remediation §5 — a runtime `respondsToSelector:` probe on the class object was tried
+/// here first and empirically found unreliable: it reported `false` even on this machine's
+/// current macOS, well past 11.0, while the guarded call itself succeeded immediately afterward.
+/// This `NSProcessInfo`-based version comparison replaces it, since it does not depend on that
+/// probe at all).
 fn supports_sf_symbols() -> bool {
-    NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
-        majorVersion: 11,
-        minorVersion: 0,
-        patchVersion: 0,
-    })
+    version_at_least(
+        NSProcessInfo::processInfo().operatingSystemVersion(),
+        SF_SYMBOL_MIN_MACOS_VERSION,
+    )
 }
 
 /// A lookup failure (old OS, or — on a supported OS — a symbol name it doesn't recognize) simply
@@ -366,5 +388,29 @@ mod icon_tests {
                 "{icon:?} must map to SF Symbol {symbol_name:?}"
             );
         }
+    }
+
+    /// §9.10 of the PR #171 delta remediation contract: the pure OS-version decision logic
+    /// `supports_sf_symbols` relies on, exercised directly rather than by invoking an unavailable
+    /// selector — no `NSMenuItem`/`NSImage` construction, no main-thread requirement.
+    #[test]
+    fn version_at_least_matches_the_documented_sf_symbol_threshold_cases() {
+        let v = |major: isize, minor: isize, patch: isize| NSOperatingSystemVersion {
+            majorVersion: major,
+            minorVersion: minor,
+            patchVersion: patch,
+        };
+        // 10.x -> false
+        assert!(!version_at_least(v(10, 15, 7), SF_SYMBOL_MIN_MACOS_VERSION));
+        assert!(!version_at_least(
+            v(10, 999, 999),
+            SF_SYMBOL_MIN_MACOS_VERSION
+        ));
+        // 11.x -> true (including the exact threshold)
+        assert!(version_at_least(v(11, 0, 0), SF_SYMBOL_MIN_MACOS_VERSION));
+        assert!(version_at_least(v(11, 3, 1), SF_SYMBOL_MIN_MACOS_VERSION));
+        // newer -> true
+        assert!(version_at_least(v(14, 4, 1), SF_SYMBOL_MIN_MACOS_VERSION));
+        assert!(version_at_least(v(26, 6, 2), SF_SYMBOL_MIN_MACOS_VERSION));
     }
 }

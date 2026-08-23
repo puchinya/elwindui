@@ -53,6 +53,9 @@ ElwindUI のコンテキストメニューおよびポップアップ基盤は�
   - `ContextMenuPresentation::Native`: `Menu` / `MenuItem` のセマンティックモデルを Backend のネイティブメニュー（`NSMenu` / `MenuFlyout`）に渡して表示。
   - `ContextMenuPresentation::Custom`: 標準 `Menu` モデルを `ContextMenuPresenter` により通常 UIElement ツリーとして構築し、`PopupSurface` 上で表示。
   - `context_popup`: 任意の UIElement を生成する `ViewTemplate`（汎用 deferred View factory 型、`docs/design/runtime/view_template_design.md`）を、ターゲットの有効な `EnvironmentContext` から `derive()` した popup 専用コンテキストで評価し、`PopupSurface` 上で表示。
+  - `MenuItem.icon`(`IconSource`、規範仕様: [UI Specification §9 Menu](../../specs/ui_spec.md)、値型設計: [Icon Source Design](icon_source_design.md)): 同じ `MenuItem.icon` が presentation mode に関わらず表示される。
+    - `Native`: `MenuItem.icon` を backend のネイティブ icon slot（`NSMenuItem.image` / `MenuFlyoutItem.Icon`）に渡す。`SystemIcon` は OS/toolkit のネイティブシステムアイコンとして表示する。
+    - `Custom`: `ContextMenuPresenter` が構築する行に既存の `elwindui::ui::Image` コントロールを leading icon slot として配置する。`IconSource::Image` はそのまま `Image.source` に設定し、`IconSource::System` は Core 内部の canonical monochrome vector fallback（`system_icon_vector`）を経由して `Image.source` に設定する——backend native icon をこの UIElement ツリーへ注入しない。
 
 ---
 

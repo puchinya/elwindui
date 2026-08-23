@@ -6,7 +6,7 @@
 
 ## 1. Scope
 
-本書は `elwindui::core::graphics` モジュールが公開するグラフィックス表現型（Color, Brush, Path, Image, VectorImage 等）とbackend-neutralな描画記録型の公開意味論を規定する。
+本書は `elwindui::core::graphics` モジュールが公開するグラフィックス表現型（Color, Brush, Path, BitmapImage, VectorImage 等）とbackend-neutralな描画記録型の公開意味論を規定する。
 
 描画記録型はbackend実装を接続する公開surfaceである。一方、reconciliation algorithm、backend replay、layer/cache strategyは内部設計であり、[`../design/runtime/rendering_design.md`](../design/runtime/rendering_design.md) とbackend designを参照する。
 
@@ -19,7 +19,8 @@
 ```rust
 use elwindui::core::graphics::{
     Color, Brush, LinearGradientBrush, RadialGradientBrush, ImageBrush,
-    StrokeStyle, Path, PathBuilder, Image, ImageData, VectorImage,
+    StrokeStyle, Path, PathBuilder, BitmapImage, ImageData, VectorImage,
+    IconSource, SystemIcon,
     RenderCommand, RenderContext, RenderGroup, RenderTree, ...
 };
 ```
@@ -118,7 +119,7 @@ pub enum Brush {
 
 | Name | Type | Description |
 |---|---|---|
-| `image` | `Image` | パターン画像 |
+| `image` | `BitmapImage` | パターン画像 |
 | `stretch` | `Stretch` | フィット伸長方式（`None`, `Fill`, `Uniform`, `UniformToFill`） |
 | `tile_mode` | `TileMode` | タイリング方式（`None`, `FlipX`, `FlipY`, `FlipXY`, `Tile`） |
 | `alignment_x` | `AlignmentX` | 水平揃え（`Left`, `Center`, `Right`） |
@@ -184,7 +185,7 @@ pub enum Brush {
 
 ラスタ画像データのメモリ表現とフォーマット。
 
-### `elwindui::core::graphics::Image` & `ImageData`
+### `elwindui::core::graphics::BitmapImage` & `ImageData`
 
 ```rust
 pub enum ImageData {
@@ -207,9 +208,38 @@ pub enum ImageData {
 - **`AlphaMode`**: `Straight`, `Premultiplied`, `Opaque`
 - **`ImageSampling`**: `Linear`, `Nearest`
 
+`BitmapImage` は decode-agnostic かつ安価に `Clone` 可能な resource handle（内部 `Arc` 共有）である。`elwindui::ui::Image`(UI control、[UI Specification](ui_spec.md) 参照)とは異なる型であり、混同を避けるため意図的に別名を用いている——前者はグラフィックス値型（raster pixel data の保持者）、後者は `ImageSource` を自己描画する `UIElement` である。
+
 ---
 
-## 9. Vector graphics
+## 9. Icons
+
+### `elwindui::core::graphics::IconSource` / `SystemIcon`
+
+Menu 等で使う backend-neutral なアイコン表現。normative な公開契約・failure semantics は [UI Specification §9 Menu](ui_spec.md) が正とし、本節は型としての値意味論のみを定義する。
+
+```rust
+#[derive(Debug, Clone)]
+pub enum IconSource {
+    System(SystemIcon),
+    Image(ImageSource),
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SystemIcon {
+    Add, Remove, Delete, Edit, Copy, Cut, Paste,
+    Undo, Redo, Search, Settings, Refresh,
+}
+```
+
+- `IconSource::Image` はユーザー定義アイコンを表し、既存の `ImageSource`(`Raster(BitmapImage)` / `Vector(VectorImage)`)をそのまま再利用する。新しい bitmap/vector resource 抽象は導入しない。
+- `SystemIcon` は意味ベース（semantic）の enum であり、backend 固有の識別子（SF Symbol 名、WinUI `Symbol` 名、GTK icon 名等）を一切公開しない。`#[non_exhaustive]` であり、将来の追加は全対応 backend で同一の意味を持つことを設計で確認してから行う。
+- `SystemIcon` の各 variant が持つ backend ごとの実際のマッピングと、Custom 表示用の canonical vector fallback（`system_icon_vector`、`elwindui-core` 内部専用）は [Icon Source Design](../design/runtime/icon_source_design.md) に記載する。`IconSource`/`SystemIcon` は将来 Menu 以外の control（Button/Toolbar 等）でも再利用され得る generic 型として設計されているが、現時点で公開 API を持つのは `MenuItem.icon` のみである。
+
+---
+
+## 10. Vector graphics
 
 SVG等のベクター文書の保持・レンダリング構造。
 
@@ -225,7 +255,7 @@ SVG等のベクター文書の保持・レンダリング構造。
 
 ---
 
-## 10. SVG loading
+## 11. SVG loading
 
 Cargo feature `svg` が有効な場合、facadeは `elwindui::svg` を公開する。
 
@@ -236,7 +266,7 @@ Cargo feature `svg` が有効な場合、facadeは `elwindui::svg` を公開す�
 
 ---
 
-## 11. Drawing recording and retained tree
+## 12. Drawing recording and retained tree
 
 - `RenderContext` は1つのVisualのlocal drawing commandsを記録する。fill/stroke、text、raster/vector imageに加え、clip、transform、opacityのpush/popとscope guardを提供する。
 - `RenderCommand` はそのbackend-neutralな記録を表し、backendはvariantの順序とstack操作を保持してreplayする。
@@ -246,7 +276,7 @@ Cargo feature `svg` が有効な場合、facadeは `elwindui::svg` を公開す�
 
 ---
 
-## 12. Related specifications
+## 13. Related specifications
 
 - [UI Specification](ui_spec.md) - 本グラフィックス型を利用するUI要素仕様
 - [DSL Specification](dsl_spec.md) - DSLにおける属性指定ルール

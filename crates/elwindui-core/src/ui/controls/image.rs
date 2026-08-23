@@ -16,6 +16,49 @@ pub(crate) fn stretch_to_image_fit(stretch: Stretch) -> ImageFit {
     }
 }
 
+pub(crate) fn image_source_intrinsic_size(source: &ImageSource) -> Size {
+    match source {
+        ImageSource::Raster(image) => image
+            .pixel_size()
+            .map(|(width, height)| Size {
+                width: width as f32,
+                height: height as f32,
+            })
+            .unwrap_or_default(),
+        ImageSource::Vector(vector) => vector.intrinsic_size(),
+    }
+}
+
+pub(crate) fn render_image_source(
+    context: &mut RenderContext<'_>,
+    source: &ImageSource,
+    rect: Rect,
+    fit: ImageFit,
+    rasterize: VectorRasterizeMode,
+) {
+    match source {
+        ImageSource::Raster(image) => context.draw_image(
+            image,
+            rect,
+            None,
+            ImageDrawOptions {
+                fit,
+                ..Default::default()
+            },
+        ),
+        ImageSource::Vector(vector) => context.draw_vector_image(
+            vector,
+            rect,
+            None,
+            VectorImageDrawOptions {
+                fit,
+                rasterize,
+                ..Default::default()
+            },
+        ),
+    }
+}
+
 /// `elwindui::ui::Image`(SVG読み込み・ベクター描画対応 実装指示書§24) — a self-drawing leaf like `Shape`,
 /// not backed by any native widget on any backend: `render()` calls `RenderContext::draw_image`/
 /// `draw_vector_image` directly depending on which `ImageSource` variant `source` holds, so no
@@ -44,14 +87,7 @@ impl Image {
     #[overrides]
     fn measure_override(&self, _available: Size) -> Size {
         match &*self.source.borrow() {
-            Some(ImageSource::Raster(image)) => image
-                .pixel_size()
-                .map(|(width, height)| Size {
-                    width: width as f32,
-                    height: height as f32,
-                })
-                .unwrap_or_default(),
-            Some(ImageSource::Vector(vector)) => vector.intrinsic_size(),
+            Some(source) => image_source_intrinsic_size(source),
             None => Size::default(),
         }
     }
@@ -76,31 +112,8 @@ impl Image {
             height: self.arranged_height().unwrap_or(0.0),
         };
         let fit = stretch_to_image_fit(self.stretch.get());
-        match &*self.source.borrow() {
-            Some(ImageSource::Raster(image)) => {
-                context.draw_image(
-                    image,
-                    rect,
-                    None,
-                    ImageDrawOptions {
-                        fit,
-                        ..Default::default()
-                    },
-                );
-            }
-            Some(ImageSource::Vector(vector)) => {
-                context.draw_vector_image(
-                    vector,
-                    rect,
-                    None,
-                    VectorImageDrawOptions {
-                        fit,
-                        rasterize: self.rasterize.get(),
-                        ..Default::default()
-                    },
-                );
-            }
-            None => {}
+        if let Some(source) = self.source.borrow().as_ref() {
+            render_image_source(context, source, rect, fit, self.rasterize.get());
         }
     }
     fn set_source(&self, source: Option<ImageSource>) {

@@ -2,11 +2,11 @@
 
 規範仕様: [`../../specs/ui_spec.md`](../../specs/ui_spec.md) §9 Menu, [`../../specs/graphics_spec.md`](../../specs/graphics_spec.md) §9 Icons
 
-関連 Issue: #170 (`feat: add backend-neutral icons to Menu and Context Menu`)、実装: PR #171(review remediation delta 含む)、依存元: #152 / PR #154 / PR #156（Context Menu / PopupSurface 基盤）、WinUI 3 ビルド/テスト実行/実機検証の委譲先: #157
+関連 Issue: #170 (`feat: add backend-neutral icons to Menu and Context Menu`)、#176 (`IconElement` / `IconSourceElement`)、実装: PR #171(review remediation delta 含む)、依存元: #152 / PR #154 / PR #156（Context Menu / PopupSurface 基盤）、WinUI 3 ビルド/テスト実行/実機検証の委譲先: #157
 
 ## 1. Ownership
 
-`IconSource` / `SystemIcon` は `elwindui_core::graphics`(`crates/elwindui-core/src/graphics/icon.rs`)が所有する generic value type であり、`MenuItem` 専用ではない。将来 Button / Toolbar 等が同じ semantic icon model を再利用できるよう、`ui::controls::menu_item` ではなく `graphics` モジュールに配置する。ただし、この Issue の scope は `MenuItem.icon` のみであり、他 control への icon property 追加は行わない。
+`IconSource` / `SystemIcon` は `elwindui_core::graphics`(`crates/elwindui-core/src/graphics/icon.rs`)が所有する generic value type であり、`MenuItem` 専用ではない。Button / Toolbar / custom controls 等が同じ semantic icon model を再利用できるよう、`ui::controls::menu_item` ではなく `graphics` モジュールに配置する。
 
 ```rust
 #[derive(Debug, Clone)]
@@ -24,6 +24,23 @@ pub enum SystemIcon {
 ```
 
 `IconSource::Image` は既存の `ImageSource`(`Raster(BitmapImage)` / `Vector(VectorImage)`)をラップするのみで、新しい bitmap/vector resource abstraction は導入しない。
+
+Issue #176では、WinUI 3と同じvalue/element分離をCoreのclass modelへ追加する。
+
+```text
+IconElement                abstract self-drawn icon base
+├─ foreground              icon-common property
+├─ IconSourceElement       concrete IconSource realization leaf
+│  └─ icon_source          shareable graphics value
+└─ future FontIcon         font-specific derived type
+   ├─ glyph
+   ├─ font_family
+   ├─ font_size
+   ├─ font_style
+   └─ font_weight
+```
+
+`IconElement` はiconに共通するlocal `foreground: Option<Brush>`だけを所有し、`TextStyleOwner` を実装せず、完全な `TextStyleStorage` も所有しない。derived iconはforeground未設定時に既存のVisual-tree foreground cascadeを読む。glyphとfont-family/font-size/font-style/font-weightは共通baseの責務ではなく、将来のderived `FontIcon` が所有する。`IconSourceElement` は `IconSource` を保持するrealization leafであり、UIElement/native handleをvalue側へ逆流させない。
 
 ## 2. `SystemIcon` common-set invariant
 
@@ -61,19 +78,19 @@ MenuItem.icon: Option<IconSource>
     │                                    native 16x16 相当の icon へ変換
     │
     └── Custom (Core ContextMenuPresenter::build_menu_view)
-            leading slot に既存の `elwindui::ui::Image` コントロールを配置
-            IconSource::System(icon)  -> system_icon_vector(icon, color) -> Image.source
-            IconSource::Image(source) -> Image.source にそのまま設定
+            leading slot に `elwindui::ui::IconSourceElement` を配置
+            IconSource::System(icon)  -> private canonical vector -> existing vector render command
+            IconSource::Image(source) -> existing raster/vector render command
 ```
 
 Custom presentation は backend-neutral な `UIElement` ツリーのままであり、`NSImageView`/`SymbolIcon` 等の backend native 型を注入しない。Native presentation では ElwindUI の canonical fallback artwork ではなく OS/toolkit のシステムアイコンを優先する。
 
 ## 4. Core canonical vector fallback
 
-`system_icon_vector(icon: SystemIcon, color: Color) -> ImageSource`(`elwindui-core` 内部専用、非公開)は Custom presentation 専用の visual fallback であり、`SystemIcon` の public semantic identity ではない。
+`system_icon_vector(icon: SystemIcon, foreground: Brush) -> ImageSource`(`elwindui-core` 内部専用、非公開)は Custom presentation と `IconSourceElement` が共有する visual realization detailであり、`SystemIcon` の public semantic identity ではない。
 
 - `VectorImageBuilder`(既存 API)で構築する。intrinsic size `16x16`、viewBox `(0,0,16,16)`、monochrome。
-- enabled item は menu foreground 系、disabled item は disabled foreground 系の色を使う。
+- `IconSourceElement` はlocal foregroundを優先し、未設定ならVisual ancestorのforegroundを継承する。どちらも無い場合はplatform色を推測せずpaint commandを生成しない。Custom Menuはenabled/disabled labelと同じforegroundをlocalに設定する。
 - 12 variant 分の geometry は static data として構築し、フレームごとに再構築しない。key space が固定(12 個)であるため、bounded な static cache を許容する。unbounded なグローバル icon cache は導入しない。
 - 新しい SVG parser や外部 icon package 依存は追加しない。既存の Core vector primitives のみを使う。
 
@@ -136,8 +153,8 @@ Custom presentation は backend-neutral な `UIElement` ツリーのままであ
 
 ## 8. Non-goals(この Issue で行わないこと)
 
-`MenuBarItem.icon`、checked/radio menu item、submenu 拡張、separator 再設計、Toolbar/Button icon、GTK4 Menu 実装、任意 `UIElement` を icon として使う API、icon の色/テーマ API、icon animation/badge、icon-only menu item、新しい SVG parser/image decoder、`PopupSurface`/`ContextRequest`/keyboard navigation/shortcut 構文の再設計は、いずれもこの Issue の scope 外とする。
+`MenuBarItem.icon`、checked/radio menu item、submenu 拡張、separator 再設計、Toolbar/Buttonへのicon property追加、GTK4 Menu実装、任意 `UIElement` をicon値として使うAPI、foregroundを超える専用icon palette/theme API、`FontIcon`/`PathIcon`/`BitmapIcon`/`SymbolIcon`、icon animation/badge、icon-only menu item、新しいSVG parser/image decoder、`PopupSurface`/`ContextRequest`/keyboard navigation/shortcut構文の再設計は、#170/#176のscope外とする。
 
 ## 9. `BitmapImage` rename(付随作業)
 
-Custom presentation の icon slot は既存の `elwindui::ui::Image`(UIElement control、`crates/elwindui-core/src/ui/controls/image.rs`)を再利用する。この control 名 `Image` と、既存の raster resource 型 `elwindui_core::graphics::Image`(`crates/elwindui-core/src/graphics/image.rs`)が同名で紛らわしいため、後者を `BitmapImage` にリネームする。`ImageBrush`/`ImageData`/`ImageId`/`Brush::Image` 等、`Image` を含む他の型名・variant 名は変更しない。値意味論は [Graphics Specification §8](../../specs/graphics_spec.md#8-image) を正とする。
+Custom presentation の icon slot は `elwindui::ui::IconSourceElement` を使用する。Issue #170で行ったraster resource型の `BitmapImage` renameと、`ImageBrush`/`ImageData`/`ImageId`/`Brush::Image` 等の名称・値意味論は変更しない。[Graphics Specification §8](../../specs/graphics_spec.md#8-image) を正とする。

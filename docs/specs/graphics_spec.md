@@ -235,7 +235,7 @@ pub enum SystemIcon {
 
 - `IconSource::Image` はユーザー定義アイコンを表し、既存の `ImageSource`(`Raster(BitmapImage)` / `Vector(VectorImage)`)をそのまま再利用する。新しい bitmap/vector resource 抽象は導入しない。
 - `SystemIcon` は意味ベース（semantic）の enum であり、backend 固有の識別子（SF Symbol 名、WinUI `Symbol` 名、GTK icon 名等）を一切公開しない。`#[non_exhaustive]` であり、将来の追加は全対応 backend で同一の意味を持つことを設計で確認してから行う。
-- `SystemIcon` の各 variant が持つ backend ごとの実際のマッピングと、Custom 表示用の canonical vector fallback（`system_icon_vector`、`elwindui-core` 内部専用）は [Icon Source Design](../design/runtime/icon_source_design.md) に記載する。`IconSource`/`SystemIcon` は将来 Menu 以外の control（Button/Toolbar 等）でも再利用され得る generic 型として設計されているが、現時点で公開 API を持つのは `MenuItem.icon` のみである。
+- `SystemIcon` の各 variant が持つ backend ごとの実際のマッピングと、Custom 表示用の canonical vector fallback（`system_icon_vector`、`elwindui-core` 内部専用）は [Icon Source Design](../design/runtime/icon_source_design.md) に記載する。`IconSource`/`SystemIcon` は Menu 固有ではないgeneric value typeであり、`IconSourceElement.icon_source` に設定して通常のVisual treeでも表示できる。UI elementとしてのlayout・foreground・ownership契約は [UI Specification](ui_spec.md) を正とする。
 
 ---
 

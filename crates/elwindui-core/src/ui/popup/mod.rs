@@ -6,8 +6,8 @@ use crate::base::{Point, Rect, Size};
 use crate::environment::{EnvironmentContext, EnvironmentKey};
 use crate::focus::FocusTracker;
 use crate::ui::{
-    HorizontalLayoutExt, ImageExt, LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt,
-    ViewBuildContext, ViewTemplate, unmount_subtree,
+    HorizontalLayoutExt, IconElementExt, IconSourceElementExt, LayoutExt, MenuExt, TextBlockExt,
+    TextStyleOwner, UIElementExt, ViewBuildContext, ViewTemplate, unmount_subtree,
 };
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -594,21 +594,15 @@ impl ContextMenuPresenter {
             };
 
             if any_icon {
-                let icon_slot = crate::ui::Image::new();
+                let icon_slot = crate::ui::IconSourceElement::new();
                 icon_slot.set_width(16.0);
                 icon_slot.set_height(16.0);
-                icon_slot.set_stretch(crate::graphics::Stretch::Uniform);
+                icon_slot.set_foreground(Some(text_color.into()));
                 // Failure/unknown-icon semantics (§2.11): an absent `icon` (or, in the backend
                 // layer, a failed user-image decode) simply leaves this slot's source unset —
                 // never removes the row, never touches text/enabled/shortcut/on_select.
                 if let Some(icon) = item.icon() {
-                    let source = match icon {
-                        crate::graphics::IconSource::Image(source) => Some(source),
-                        crate::graphics::IconSource::System(system_icon) => {
-                            Some(crate::graphics::system_icon_vector(system_icon, text_color))
-                        }
-                    };
-                    icon_slot.set_source(source);
+                    icon_slot.set_icon_source(Some(icon));
                 }
                 crate::ui::LayoutExt::children(&*row)
                     .add(Rc::clone(&icon_slot) as Rc<dyn UIElementExt>);
@@ -827,7 +821,8 @@ mod tests {
     use crate::graphics::{Brush, IconSource, ImageSource, SystemIcon, VectorNode, VectorPaint};
     use crate::ui::testsupport::FakeMenu;
     use crate::ui::{
-        HorizontalLayout, Image, LayoutExt, ListExt, MenuItemExt, TextBlock, VerticalLayout,
+        HorizontalLayout, IconSourceElement, LayoutExt, ListExt, MenuItemExt, TextBlock,
+        VerticalLayout,
     };
     use std::cell::{Cell, RefCell};
 
@@ -1896,17 +1891,17 @@ mod tests {
         assert!(item.enabled());
     }
 
-    /// The row's leading icon slot — `None` unless the row's first child is actually an `Image`
+    /// The row's leading icon slot — `None` unless the row's first child is actually an
+    /// `IconSourceElement`
     /// (as opposed to the label `TextBlock`, which is first when the menu has no icon column at
-    /// all). Still type-erased but `Rc`-owned so a caller can `.as_any().downcast_ref::<Image>()`
-    /// it in its own scope.
+    /// all). Still type-erased but `Rc`-owned so callers can inspect the concrete icon element.
     fn icon_slot(row: &Rc<dyn UIElementExt>) -> Option<Rc<dyn UIElementExt>> {
         let row_layout = row.as_any().downcast_ref::<HorizontalLayout>()?;
         let first = crate::ui::LayoutExt::children(row_layout)
             .to_vec()
             .into_iter()
             .next()?;
-        if first.as_any().downcast_ref::<Image>().is_some() {
+        if first.as_any().downcast_ref::<IconSourceElement>().is_some() {
             Some(first)
         } else {
             None
@@ -1918,7 +1913,7 @@ mod tests {
     /// all when no item has an icon (the pre-icon-support layout, unchanged).
     #[test]
     fn build_menu_view_reserves_icon_column_only_when_any_item_has_icon() {
-        // No icons anywhere: no row gets a leading Image slot.
+        // No icons anywhere: no row gets a leading icon slot.
         let plain_menu = FakeMenu::new();
         let plain_item = crate::ui::testsupport::FakeMenuItem::new();
         plain_item.set_text("Plain");
@@ -1936,7 +1931,7 @@ mod tests {
         );
 
         // Mixed menu: SystemIcon item, icon-less item, user ImageSource item — all three rows must
-        // reserve the same leading Image slot.
+        // reserve the same leading IconSourceElement slot.
         let mixed_menu = FakeMenu::new();
         let with_system_icon = crate::ui::testsupport::FakeMenuItem::new();
         with_system_icon.set_text("System");
@@ -1970,13 +1965,13 @@ mod tests {
                 "row {i} must reserve the leading icon slot once any item in the menu has an icon"
             );
         }
-        // The icon-less row's Image slot has no source set (empty slot, not a shifted label).
-        let empty_slot = icon_slot(&mixed_rows[1]).expect("row 1 has an Image slot");
-        let empty_image = empty_slot
+        // The icon-less row's slot has no source set (empty slot, not a shifted label).
+        let empty_slot = icon_slot(&mixed_rows[1]).expect("row 1 has an icon slot");
+        let empty_icon = empty_slot
             .as_any()
-            .downcast_ref::<Image>()
-            .expect("icon slot is an Image");
-        assert!(empty_image.source().is_none());
+            .downcast_ref::<IconSourceElement>()
+            .expect("icon slot is an IconSourceElement");
+        assert!(empty_icon.icon_source().is_none());
     }
 
     /// §8.7: a disabled item's canonical `SystemIcon` vector uses the disabled foreground color
@@ -1996,16 +1991,21 @@ mod tests {
             .downcast_ref::<VerticalLayout>()
             .expect("build_menu_view returns a VerticalLayout");
         let rows = crate::ui::LayoutExt::children(layout).to_vec();
-        let slot = icon_slot(&rows[0]).expect("disabled row has an Image slot");
-        let icon_image = slot
+        let slot = icon_slot(&rows[0]).expect("disabled row has an icon slot");
+        let icon_element = slot
             .as_any()
-            .downcast_ref::<Image>()
-            .expect("icon slot is an Image");
-        let source = icon_image
-            .source()
-            .expect("disabled item's icon source is set");
-        let ImageSource::Vector(vector) = source else {
-            panic!("SystemIcon must render as the Core canonical vector fallback");
+            .downcast_ref::<IconSourceElement>()
+            .expect("icon slot is an IconSourceElement");
+        let mut commands = Vec::new();
+        icon_element.render(&mut crate::graphics::RenderContext::begin_group(
+            &mut commands,
+            Point { x: 0.0, y: 0.0 },
+            None,
+        ));
+        let Some(crate::graphics::RenderCommand::DrawVectorImage { image: vector, .. }) =
+            commands.first()
+        else {
+            panic!("SystemIcon must emit the Core canonical vector fallback");
         };
         let node = vector
             .root()

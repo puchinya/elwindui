@@ -28,6 +28,7 @@ use super::*;
 // Bases first — see the ordering note in `super`'s own `mod.rs`. `UIElement` itself is declared
 // there, before `mod controls`, so everything below can `inherits = crate::ui::UIElement`.
 mod control;
+mod icon_element;
 mod layout;
 mod native_control;
 mod shape;
@@ -43,6 +44,7 @@ mod dropdown_item;
 mod ellipse;
 mod grid;
 mod horizontal_layout;
+mod icon_source_element;
 mod image;
 mod menu;
 mod menu_bar;
@@ -75,6 +77,8 @@ pub use dropdown_item::*;
 pub use ellipse::*;
 pub use grid::*;
 pub use horizontal_layout::*;
+pub use icon_element::*;
+pub use icon_source_element::*;
 pub use image::*;
 pub use layout::*;
 pub use menu::*;

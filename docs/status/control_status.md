@@ -1,6 +1,6 @@
 # Control implementation status
 
-Snapshot: 2026-08-15. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
+Snapshot: 2026-08-23. Public behavior is defined by [`../specs/ui_spec.md`](../specs/ui_spec.md).
 
 | Control | AppKit | WinUI 3 | GTK4 | Notes |
 |---|---|---|---|---|
@@ -19,6 +19,7 @@ Snapshot: 2026-08-15. Public behavior is defined by [`../specs/ui_spec.md`](../s
 | PopupSurface / context_popup | ✅ | 🚧 | ⬜ | arbitrary UIElement popup surface with auto-flip placement, light dismiss, and above-native-control elevation; `ViewTemplate`-based deferred build (owner captured `Weak`, popup-scoped derived Environment, declarative `#[environment(popup_dismiss)]`-resolvable `PopupDismissAction`) and `unmount_subtree` teardown-before-detach on close, both backends ([#161](https://github.com/puchinya/elwindui/issues/161)) — portable guarantee is unmount before ElwindUI's own host-tree detach on every path; framework-initiated close additionally unmounts before native visibility/detach on both backends, but WinUI3 native light-dismiss (`Popup.Closed`, which fires only after WinUI itself sets `IsOpen=false`) is a documented exception to that stronger ordering, not to the portable one; declarative `context_popup: view! { .. }` DSL sugar not yet implemented (low-level `ViewTemplate::new(...)` only) — see [#162](https://github.com/puchinya/elwindui/issues/162); AppKit verified, WinUI 3 runtime verification (including native light-dismiss ordering) in [#157](https://github.com/puchinya/elwindui/issues/157) ([#152](https://github.com/puchinya/elwindui/issues/152)) |
 | TabView / TabViewItem | ✅ | ✅ | ⬜ | hosted page activation and native child reconciliation; AppKit tab chrome (layerless chip drawing, system-symbol close/new-tab, closable live sync, shrink-to-fit overflow) screenshot-verified on `controls-demo`/`notepad` ([#167](https://github.com/puchinya/elwindui/issues/167)) — Accessibility-driven interaction verification (`find`/`click`) not run, no Accessibility permission granted to the verification environment |
 | Rectangle / Ellipse / Image | ✅ | ✅ | ⬜ | backend-neutral self-rendered controls |
+| IconElement / IconSourceElement | ✅ | ✅ | ⬜ | backend-neutral self-rendered icon base/value wrapper; Core unit and cross-crate DSL tests, no backend-specific control path ([#176](https://github.com/puchinya/elwindui/issues/176)) |
 | ControlTemplate / ContentPresenter | ✅ | ✅ | ⬜ | mount-time typed Environment selection and ContentControl logical/Visual separation; backend-neutral runtime |
 
 ## Current gaps

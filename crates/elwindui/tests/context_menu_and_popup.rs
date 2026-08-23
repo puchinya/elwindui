@@ -241,6 +241,7 @@ fn rich_context_popup_displays_arbitrary_layout_and_controls() {
 #[elwindui::class(struct_only = elwindui::core::ui::MenuItemExt)]
 struct TestMenuItem {
     text: RefCell<String>,
+    icon: RefCell<Option<elwindui::core::graphics::IconSource>>,
     enabled: Cell<bool>,
     shortcut: RefCell<Option<String>>,
     on_select: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
@@ -251,6 +252,7 @@ impl TestMenuItem {
     fn construct() -> Self {
         Self {
             text: RefCell::new(String::new()),
+            icon: RefCell::new(None),
             enabled: Cell::new(true),
             shortcut: RefCell::new(None),
             on_select: Rc::new(RefCell::new(None)),
@@ -261,6 +263,12 @@ impl TestMenuItem {
     }
     fn set_text(&self, text: &str) {
         *self.text.borrow_mut() = text.to_string();
+    }
+    fn icon(&self) -> Option<elwindui::core::graphics::IconSource> {
+        self.icon.borrow().clone()
+    }
+    fn set_icon(&self, icon: Option<elwindui::core::graphics::IconSource>) {
+        *self.icon.borrow_mut() = icon;
     }
     fn enabled(&self) -> bool {
         self.enabled.get()

@@ -65,7 +65,7 @@ pub(crate) enum Win2dPrimitive {
     PushOpacityLayer(f32),
     PopOpacityLayer,
     DrawImage {
-        image: elwindui_core::graphics::Image,
+        image: elwindui_core::graphics::BitmapImage,
         dest: elwindui_core::base::Rect,
         source: Option<elwindui_core::base::Rect>,
         options: elwindui_core::graphics::ImageDrawOptions,
@@ -473,7 +473,7 @@ pub(crate) fn win2d_stroke_style(
 
 pub(crate) fn win2d_bitmap(
     creator: &ICanvasResourceCreator,
-    image: &elwindui_core::graphics::Image,
+    image: &elwindui_core::graphics::BitmapImage,
 ) -> Result<CanvasBitmap> {
     use elwindui_core::graphics::{AlphaMode, ImageData};
 
@@ -626,5 +626,83 @@ pub(crate) fn xaml_text_alignment(
         elwindui_core::ui::TextAlignment::Right => {
             bindings::Microsoft::UI::Xaml::TextAlignment::Right
         }
+    }
+}
+
+/// §9.2/§9.3/§9.4 of the PR #171 delta remediation contract: `win2d_bitmap`'s `Rgba8` and
+/// `Backend` conversion paths (`Encoded` is unchanged from before this remediation and already
+/// covered by ordinary render-path usage). Unlike every other test in this crate (all pure logic,
+/// no live WinRT/Win2D object — see `inner/window.rs`'s `native_close_decision_tests` and
+/// `render/vector.rs`'s `vector_view_box_tests`), these construct a real `CanvasDevice` and
+/// `CanvasBitmap`, so they are the first tests in this crate to depend on WinRT/COM apartment
+/// initialization being available to a plain `#[test]`. **Unverified**: this crate has never been
+/// built or run on Windows; if `CanvasDevice::GetSharedDevice()` (or any call here) fails inside
+/// `cargo test`'s default worker threads because no COM apartment is initialized, that is the
+/// exact "WinUI UI-thread test harness" gap the delta contract's §9.7 anticipates — report it as
+/// a concrete Windows-side finding on first run rather than assuming a fix.
+#[cfg(test)]
+mod win2d_bitmap_tests {
+    use super::*;
+    use elwindui_core::graphics::{AlphaMode, BackendImageHandle, BitmapImage};
+    use std::sync::Arc;
+
+    fn creator() -> Result<ICanvasResourceCreator> {
+        let device = CanvasDevice::GetSharedDevice()?;
+        device.cast()
+    }
+
+    /// §9.2: a `Straight`-alpha `Rgba8` buffer (deliberately including a pixel with `alpha != 255`
+    /// so the premultiplication arithmetic is actually exercised, not just the opaque fast path)
+    /// converts to a 2x2 `CanvasBitmap` through the same `win2d_bitmap` the menu-icon path reuses.
+    #[test]
+    fn rgba8_straight_alpha_converts_to_a_correctly_sized_canvas_bitmap() {
+        let creator = creator().expect("CanvasDevice::GetSharedDevice must succeed on Windows");
+        // 2x2, stride padded to 12 bytes/row (not tightly packed: width*4 = 8) so the padding
+        // handling in `win2d_bitmap`'s row-slicing is exercised, not just the tightly-packed case.
+        let stride = 12u32;
+        let mut pixels = vec![0u8; (stride * 2) as usize];
+        // Row 0, pixel 0: half-transparent red.
+        pixels[0..4].copy_from_slice(&[255, 0, 0, 128]);
+        // Row 0, pixel 1: opaque green.
+        pixels[4..8].copy_from_slice(&[0, 255, 0, 255]);
+        // Row 1, pixel 0: opaque blue.
+        pixels[stride as usize..stride as usize + 4].copy_from_slice(&[0, 0, 255, 255]);
+        let image = BitmapImage::from_rgba8(2, 2, stride, pixels, AlphaMode::Straight)
+            .expect("well-formed 2x2 rgba8 buffer");
+        let bitmap =
+            win2d_bitmap(&creator, &image).expect("Rgba8 must convert via win2d_bitmap, not fail");
+        let size = bitmap.SizeInPixels().expect("SizeInPixels");
+        assert_eq!((size.Width, size.Height), (2, 2));
+    }
+
+    /// §9.3: an `ImageData::Backend` handle wrapping a real `CanvasBitmap` downcasts successfully
+    /// and is returned as-is (no re-decode).
+    #[test]
+    fn compatible_backend_canvas_bitmap_handle_round_trips() {
+        let creator = creator().expect("CanvasDevice::GetSharedDevice must succeed on Windows");
+        let source = win2d_bitmap(
+            &creator,
+            &BitmapImage::from_rgba8(1, 1, 4, vec![10u8, 20, 30, 255], AlphaMode::Opaque)
+                .expect("well-formed 1x1 rgba8 buffer"),
+        )
+        .expect("seed CanvasBitmap for the backend-handle test");
+        let wrapped = BitmapImage::from_backend_handle(BackendImageHandle(Arc::new(source)));
+        let round_tripped =
+            win2d_bitmap(&creator, &wrapped).expect("compatible CanvasBitmap backend handle");
+        let size = round_tripped.SizeInPixels().expect("SizeInPixels");
+        assert_eq!((size.Width, size.Height), (1, 1));
+    }
+
+    /// §9.4: an `ImageData::Backend` handle that is *not* a `CanvasBitmap` fails conversion
+    /// (`None`/`Err`, never a panic) rather than being silently accepted.
+    #[test]
+    fn incompatible_backend_handle_fails_without_panicking() {
+        let creator = creator().expect("CanvasDevice::GetSharedDevice must succeed on Windows");
+        let wrapped = BitmapImage::from_backend_handle(BackendImageHandle(Arc::new(42u32)));
+        let result = win2d_bitmap(&creator, &wrapped);
+        assert!(
+            result.is_err(),
+            "a non-CanvasBitmap backend handle must fail conversion, not panic or succeed"
+        );
     }
 }

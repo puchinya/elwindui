@@ -1,5 +1,5 @@
 use super::color::Color;
-use super::image::Image;
+use super::image::BitmapImage;
 use crate::base::{AffineTransform, Point};
 use std::sync::Arc;
 
@@ -176,7 +176,7 @@ pub enum TileMode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageBrush {
-    pub image: Image,
+    pub image: BitmapImage,
     pub source_rect: Option<crate::base::Rect>,
     pub stretch: Stretch,
     pub alignment_x: AlignmentX,
@@ -187,7 +187,7 @@ pub struct ImageBrush {
 }
 
 impl ImageBrush {
-    pub fn new(image: Image) -> Self {
+    pub fn new(image: BitmapImage) -> Self {
         Self {
             image,
             source_rect: None,

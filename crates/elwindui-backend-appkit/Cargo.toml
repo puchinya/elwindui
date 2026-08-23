@@ -20,7 +20,7 @@ elwindui-macros = { path = "../elwindui-macros" }
 objc2 = "0.6"
 block2 = "0.6"
 dispatch2 = "0.3"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSNotification", "NSURL", "NSDictionary", "NSValue", "NSAttributedString"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSNotification", "NSURL", "NSDictionary", "NSValue", "NSAttributedString", "NSProcessInfo"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
     "NSResponder",

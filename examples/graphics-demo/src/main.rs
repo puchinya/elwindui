@@ -34,10 +34,10 @@
 
 use elwindui::core::base::{AffineTransform, CornerRadius, Point, Rect};
 use elwindui::core::graphics::{
-    Brush, Clip, Color, ComputedTextStyle, FillRule, GeometryCombineMode, GradientStop, Image,
-    ImageBrush, ImageDrawOptions, ImageFit, LineCap, LineJoin, LinearGradientBrush, Path,
-    PathBuilder, RadialGradientBrush, RenderContext, Stretch, StrokeStyle, TextAlignment, TileMode,
-    VectorImage, VectorImageDrawOptions,
+    BitmapImage, Brush, Clip, Color, ComputedTextStyle, FillRule, GeometryCombineMode,
+    GradientStop, ImageBrush, ImageDrawOptions, ImageFit, LineCap, LineJoin, LinearGradientBrush,
+    Path, PathBuilder, RadialGradientBrush, RenderContext, Stretch, StrokeStyle, TextAlignment,
+    TileMode, VectorImage, VectorImageDrawOptions,
 };
 use elwindui::core::ui::{UIElementExt, WindowExt};
 use std::rc::Rc;
@@ -664,14 +664,16 @@ fn draw_opacity_demo(context: &mut RenderContext<'_>, rect: Rect) {
 /// `std::fs::read` at run time, this constant just makes the path launch-directory-independent.
 const ELWIND_CHAN_PNG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/elwind_chan.png");
 
-/// `resolve_cgimage` (AppKit backend) caches decoded `CGImage`s by the `&Image`'s own address, so
-/// every demo cell below must share one `Image` handle rather than each calling `Image::from_file`
-/// itself — a fresh `Image` per call would defeat that cache and re-decode the PNG on every
-/// repaint (painter design doc §13.1's "never re-decoded/re-uploaded on repaint" invariant).
-fn elwind_chan_image() -> &'static Image {
-    static IMAGE: OnceLock<Image> = OnceLock::new();
+/// `resolve_cgimage` (AppKit backend) caches decoded `CGImage`s by the `&BitmapImage`'s own
+/// address, so every demo cell below must share one `BitmapImage` handle rather than each calling
+/// `BitmapImage::from_file` itself — a fresh `BitmapImage` per call would defeat that cache and
+/// re-decode the PNG on every repaint (painter design doc §13.1's "never re-decoded/re-uploaded on
+/// repaint" invariant).
+fn elwind_chan_image() -> &'static BitmapImage {
+    static IMAGE: OnceLock<BitmapImage> = OnceLock::new();
     IMAGE.get_or_init(|| {
-        Image::from_file(ELWIND_CHAN_PNG_PATH).expect("assets/elwind_chan.png must be readable")
+        BitmapImage::from_file(ELWIND_CHAN_PNG_PATH)
+            .expect("assets/elwind_chan.png must be readable")
     })
 }
 

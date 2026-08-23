@@ -713,6 +713,7 @@ ON / OFF を切り替えるスイッチコントロール。
 | Name | Type | Binding | Description |
 |---|---|---|---|
 | `text` | `String` | OneWay | メニュー表示名 |
+| `icon` | `Option<IconSource>` | OneWay | 任意の backend-neutral メニューアイコン。`MenuBar` submenu と `context_menu` の両方の表示に共通で使われる |
 | `shortcut` | `Option<String>` | OneWay | キーボードショートカット記号（例: `"Cmd+S"`） |
 | `enabled` | `Option<bool>` | OneWay | 有効状態 |
 
@@ -721,6 +722,38 @@ ON / OFF を切り替えるスイッチコントロール。
 | Name | Type | Description |
 |---|---|---|
 | `on_select` | `fn()` | メニュー選択時に発火 |
+
+#### `IconSource` / `SystemIcon`
+
+`icon` プロパティの型 `elwindui::core::graphics::IconSource` は、ユーザー定義アイコンとシステム定義アイコンの両方を表す backend-neutral な value type である。値型としての詳細（`ImageSource` との関係、`SystemIcon` variant 一覧）は [Graphics Specification §9 Icons](graphics_spec.md#9-icons) を正とする。本節は `MenuItem.icon` としての normative な公開契約のみを定義する。
+
+```rust
+pub enum IconSource {
+    System(SystemIcon),
+    Image(ImageSource),
+}
+```
+
+- `IconSource::Image(ImageSource)`: 既存の `ImageSource::Raster(BitmapImage)` / `ImageSource::Vector(VectorImage)` をそのまま利用する。
+- `IconSource::System(SystemIcon)`: `SystemIcon` は semantic な `#[non_exhaustive]` enum であり、**backend 固有の識別子（SF Symbol 名、WinUI `Symbol` 名、GTK icon 名等）を一切公開しない**。初期リリースで許可される variant は `Add`, `Remove`, `Delete`, `Edit`, `Copy`, `Cut`, `Paste`, `Undo`, `Redo`, `Search`, `Settings`, `Refresh` の12種のみであり、ElwindUI が対象とする全 backend(AppKit / WinUI 3 / GTK4)間で同一の意味として表現可能な subset に限定される。
+
+#### Native / Custom presentation semantics
+
+`context_menu_presentation`(`UIElement` 共通プロパティ、本書 §2 参照)の値に関わらず、同一の `MenuItem.icon` が表示される。
+
+- `ContextMenuPresentation::Native`(および `MenuBarItem.submenu`): backend のネイティブメニューアイテムの native icon slot(AppKit `NSMenuItem.image` / WinUI 3 `MenuFlyoutItem.Icon`)に、`SystemIcon` は OS/toolkit のシステムアイコン(SF Symbols / `SymbolIcon`)として、ユーザー定義アイコンは native な 16×16 相当サイズの画像として反映される。
+- `ContextMenuPresentation::Custom`: Core の `ContextMenuPresenter` が構築する `UIElement` ツリー内に、backend-neutral な 16×16 DIP の leading icon slot として表示される。`SystemIcon` は ElwindUI 内部の canonical monochrome vector fallback で描画され(OS のネイティブシステムアイコンそのものではない)、ユーザー定義アイコンはそのまま `ImageSource` として描画される。メニュー内の項目が1つでも `icon` を持てば、全ての行に同じ leading slot が予約される(icon を持たない行は空スロットのまま、ラベルの位置は揃う)。メニュー全体に `icon` を持つ項目が1つも無ければ、leading slot 自体を作らず既存のレイアウトを維持する。
+
+#### Failure semantics
+
+アイコンは補助情報であり、失敗が `MenuItem` 自体の失敗に昇格することはない。
+
+- ユーザー定義アイコンのデコード/ラスタライズに失敗した場合: アイコンを表示しないが、`text`/`enabled`/`shortcut`/`on_select` は通常通り機能する。パニックせず、`MenuItem` を削除しない。
+- ネイティブ `SystemIcon` ルックアップ(例: SF Symbol)が実行時に失敗した場合: アイコンを省略し、`MenuItem` は正常に残る。ただし、ある `SystemIcon` variant に対して backend 側の mapping 自体が存在しないことは実行時 fallback で隠してはならず、compile-time/design defect として扱う。
+
+`icon` の repeated mutation(`set_icon(Some(a))` → `set_icon(Some(b))` → `set_icon(None)`)は、都度アイコンを差し替え/クリアするのみで、`text`/`enabled`/`shortcut`/`on_select` の状態には影響しない。
+
+`MenuBarItem` 自体には `icon` プロパティを追加しない。
 
 ---
 
@@ -767,5 +800,5 @@ ON / OFF を切り替えるスイッチコントロール。
 ## 11. Related specifications
 
 - [DSL Specification](dsl_spec.md) - ElwindUI DSL の構文・バインディングルール
-- [Graphics Specification](graphics_spec.md) - `Color`, `Brush`, `Path`, `Image` などの描画仕様
+- [Graphics Specification](graphics_spec.md) - `Color`, `Brush`, `Path`, `BitmapImage`, `IconSource` などの描画仕様
 - [Platform Specification](platform_spec.md) - OSサービス（ファイルダイアログ等）の仕様

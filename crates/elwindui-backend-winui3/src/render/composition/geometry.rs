@@ -13,7 +13,7 @@ use crate::bindings::Microsoft::UI::Composition::{
 use crate::bindings::Microsoft::UI::Xaml::Controls::Canvas;
 use crate::bindings::Microsoft::UI::Xaml::UIElement;
 use elwindui_core::base::{AffineTransform, Point, Rect};
-use elwindui_core::graphics::{Brush, Image, ImageData, Stretch, TileMode};
+use elwindui_core::graphics::{BitmapImage, Brush, ImageData, Stretch, TileMode};
 use windows::Foundation::Rect as WinRect;
 use windows::Foundation::Size as WinSize;
 use windows::Storage::Streams::{DataWriter, IRandomAccessStream, InMemoryRandomAccessStream};
@@ -222,7 +222,7 @@ pub(crate) fn raster_scale_matrix(rasterization_scale: f32) -> Matrix3x2 {
 
 pub(crate) fn canvas_bitmap(
     creator: &ICanvasResourceCreator,
-    image: &Image,
+    image: &BitmapImage,
 ) -> Result<CanvasBitmap> {
     let ImageData::Encoded { bytes, .. } = image.data() else {
         return Err(windows::core::Error::new(

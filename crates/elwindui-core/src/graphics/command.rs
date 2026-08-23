@@ -1,5 +1,5 @@
 use super::brush::Brush;
-use super::image::{Image, ImageDrawOptions};
+use super::image::{BitmapImage, ImageDrawOptions};
 use super::path::{FillRule, Path};
 use super::stroke::StrokeStyle;
 use super::text::ComputedTextStyle;
@@ -81,7 +81,7 @@ pub enum RenderCommand {
         stroke: StrokeStyle,
     },
     DrawImage {
-        image: Image,
+        image: BitmapImage,
         dest: Rect,
         source: Option<Rect>,
         options: ImageDrawOptions,

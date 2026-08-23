@@ -844,7 +844,7 @@ fn draw_image_contain_letterboxes_and_leaves_the_gap_unpainted() {
     // (already exact) while the height (half of the square) leaves 5px letterbox gaps above
     // and below, centered by default alignment.
     let pixels = vec![0u8, 0, 255, 255].repeat(20 * 10);
-    let image = elwindui_core::graphics::Image::from_rgba8(
+    let image = elwindui_core::graphics::BitmapImage::from_rgba8(
         20,
         10,
         20 * 4,
@@ -880,7 +880,7 @@ fn draw_image_contain_letterboxes_and_leaves_the_gap_unpainted() {
 
 #[test]
 fn transformed_image_uses_a_container_layer() {
-    let image = elwindui_core::graphics::Image::from_rgba8(
+    let image = elwindui_core::graphics::BitmapImage::from_rgba8(
         1,
         1,
         4,
@@ -916,7 +916,7 @@ fn transformed_image_uses_a_container_layer() {
 
 #[test]
 fn resolving_cloned_images_keeps_one_decoded_cache_entry() {
-    let image = elwindui_core::graphics::Image::from_rgba8(
+    let image = elwindui_core::graphics::BitmapImage::from_rgba8(
         1,
         1,
         4,
@@ -946,7 +946,7 @@ fn draw_image_source_crop_only_shows_the_cropped_region() {
     ));
     // A 2x1 image: left pixel red, right pixel blue.
     let pixels = vec![255u8, 0, 0, 255, 0, 0, 255, 255];
-    let image = elwindui_core::graphics::Image::from_rgba8(
+    let image = elwindui_core::graphics::BitmapImage::from_rgba8(
         2,
         1,
         2 * 4,

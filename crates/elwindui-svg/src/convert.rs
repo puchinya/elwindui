@@ -8,7 +8,7 @@ use crate::error::{SvgError, SvgLimitKind};
 use crate::loader::SvgLimits;
 use elwindui_core::base::{AffineTransform, Point, Rect, Size};
 use elwindui_core::graphics::{
-    Color, Image, ImageFormat, ImageSampling, VectorGroup, VectorImage, VectorImageBuilder,
+    BitmapImage, Color, ImageFormat, ImageSampling, VectorGroup, VectorImage, VectorImageBuilder,
     VectorNode, VectorRasterNode,
 };
 use std::sync::Arc;
@@ -233,7 +233,8 @@ fn convert_image_node(image: &usvg::Image, parent_abs: usvg::Transform) -> Vecto
         | usvg::ImageKind::GIF(bytes)
         | usvg::ImageKind::WEBP(bytes)) => {
             let format = image_format_from_kind(kind).unwrap_or(ImageFormat::Unknown);
-            let elwindui_image = Image::from_encoded_with_format(bytes.as_slice().to_vec(), format);
+            let elwindui_image =
+                BitmapImage::from_encoded_with_format(bytes.as_slice().to_vec(), format);
             VectorNode::RasterImage(VectorRasterNode {
                 image: elwindui_image,
                 rect,

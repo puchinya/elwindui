@@ -4,8 +4,8 @@
 use super::win2d::*;
 use crate::bindings::Microsoft::Graphics::Canvas::UI::Composition::CanvasComposition;
 use crate::bindings::Microsoft::Graphics::Canvas::{
-    CanvasActiveLayer, CanvasAntialiasing, CanvasBlend, CanvasImageInterpolation,
-    ICanvasResourceCreator,
+    CanvasActiveLayer, CanvasAntialiasing, CanvasBlend, CanvasDrawingSession,
+    CanvasImageInterpolation, CanvasRenderTarget, ICanvasResourceCreator,
 };
 use crate::bindings::Microsoft::UI::Composition::CompositionDrawingSurface;
 use crate::render::composition::{CompositionPrimitive, DesiredCompositionNode};
@@ -485,10 +485,28 @@ pub(crate) fn draw_vector_image_surface(
         G: 0,
         B: 0,
     })?;
+    replay_win2d_primitives(&session, &primitives, rasterization_scale)?;
+    session.Close()
+}
+
+/// Replays a recorded `Win2dPrimitive` stream onto an already-created, already-cleared
+/// `CanvasDrawingSession` — the transform/clip/opacity/fill/stroke/image interpreter shared by
+/// every Win2D-backed surface this backend draws into. `draw_vector_image_surface` (the retained
+/// `CompositionDrawingSurface` fallback path) and the menu-icon `VectorImage` rasterizer
+/// (`rasterize_vector_image_to_canvas_bitmap`, PR #171 delta remediation) both call this rather
+/// than each walking `Win2dPrimitive` themselves — one interpreter, so a fix/feature to fill,
+/// stroke, clip, or image drawing lands in both places at once. Does not close `session`; the
+/// caller owns that (each caller's target surface has different close/finalize semantics —
+/// `CompositionDrawingSurface` vs. an offscreen `CanvasRenderTarget`).
+pub(crate) fn replay_win2d_primitives(
+    session: &CanvasDrawingSession,
+    primitives: &[Win2dPrimitive],
+    rasterization_scale: f32,
+) -> Result<()> {
     let creator: ICanvasResourceCreator = session.clone().cast()?;
     let mut opacity = 1.0_f32;
     let mut active_layers = Vec::<CanvasActiveLayer>::new();
-    for primitive in &primitives {
+    for primitive in primitives {
         match primitive {
             Win2dPrimitive::SetTransform {
                 m11,
@@ -660,7 +678,74 @@ pub(crate) fn draw_vector_image_surface(
     while let Some(layer) = active_layers.pop() {
         layer.Close()?;
     }
-    session.Close()
+    Ok(())
+}
+
+/// Rasterizes a user-defined `VectorImage` menu icon (PR #171 delta remediation, replacing the
+/// previous "Vector user icons are not yet bridged" gap) into a fresh, transparent
+/// `width`x`height` `CanvasRenderTarget`, reusing the exact same `emit_vector_image`/
+/// `replay_win2d_primitives` pipeline `draw_vector_image_surface` uses for ordinary retained
+/// vector drawing — no second VectorScene traversal (§3.7/§13.2 of the delta contract). The
+/// caller (`inner/menu.rs`) encodes the result to PNG and feeds it to a XAML `BitmapImage`; this
+/// function returns the offscreen `CanvasRenderTarget` itself and does not touch any XAML type.
+///
+/// **Unverified naming**: `CanvasRenderTarget::CreateWithWidthAndHeightAndDpi` is this crate's
+/// best-effort guess at the `windows_bindgen` projection of `CanvasRenderTarget`'s
+/// `(ICanvasResourceCreator, width: f32, height: f32, dpi: f32)` constructor overload, following
+/// the "method name mirrors the WinRT factory method" convention `CanvasBitmap::
+/// LoadAsyncFromStream`/`CanvasBitmap::CreateFromBytes` already establish in `win2d.rs`. This
+/// crate has never been built on Windows (`#![cfg(target_os = "windows")]`, unverified per the
+/// crate's own disclaimer) — confirm the exact generated name in `bindings.rs` on first Windows
+/// build and correct this call site (a mechanical binding-spelling fix, not an architecture
+/// change) if it differs.
+pub(crate) fn rasterize_vector_image_to_canvas_bitmap(
+    creator: &ICanvasResourceCreator,
+    image: &elwindui_core::graphics::VectorImage,
+    width: f32,
+    height: f32,
+) -> Result<CanvasRenderTarget> {
+    const RASTER_TARGET_DPI: f32 = 96.0;
+    let target = CanvasRenderTarget::CreateWithWidthAndHeightAndDpi(
+        creator,
+        width,
+        height,
+        RASTER_TARGET_DPI,
+    )?;
+    let session = target.CreateDrawingSession()?;
+    session.Clear(Color {
+        A: 0,
+        R: 0,
+        G: 0,
+        B: 0,
+    })?;
+    let mut primitives = vec![
+        Win2dPrimitive::SetTransform {
+            m11: 1.0,
+            m12: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            dx: 0.0,
+            dy: 0.0,
+        },
+        Win2dPrimitive::SetOpacity(1.0),
+    ];
+    emit_vector_image(
+        image,
+        elwindui_core::base::Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        },
+        None,
+        &elwindui_core::graphics::VectorImageDrawOptions::default(),
+        elwindui_core::base::AffineTransform::identity(),
+        1.0,
+        &mut primitives,
+    );
+    replay_win2d_primitives(&session, &primitives, 1.0)?;
+    session.Close()?;
+    Ok(target)
 }
 
 #[cfg(test)]
@@ -726,6 +811,136 @@ mod vector_view_box_tests {
         assert_eq!(
             (transform.m11, transform.m22, transform.dx, transform.dy),
             (1.0, 2.0, 0.0, 0.0)
+        );
+    }
+}
+
+/// §9.5 of the PR #171 delta remediation contract. See `render::win2d_bitmap_tests`'s own module
+/// doc comment for why this depends on live `CanvasDevice`/`CanvasRenderTarget` construction
+/// (unverified without a Windows build/run) rather than pure logic like the rest of this file's
+/// tests.
+#[cfg(test)]
+mod menu_vector_rasterization_tests {
+    use super::*;
+    use elwindui_core::base::{Rect, Size};
+    use elwindui_core::graphics::{
+        Brush, Color, FillRule, PathBuilder, VectorFill, VectorGroup, VectorImageBuilder,
+        VectorNode, VectorPaint, VectorPaintOrder, VectorPathNode, VectorShapeRendering,
+    };
+    use std::sync::Arc;
+
+    fn creator() -> Result<ICanvasResourceCreator> {
+        let device = crate::bindings::Microsoft::Graphics::Canvas::CanvasDevice::GetSharedDevice()?;
+        device.cast()
+    }
+
+    /// A simple 16x16 filled square vector image — enough to have an obvious non-transparent
+    /// region to check against, without depending on any other part of this remediation.
+    fn filled_square_vector_image() -> elwindui_core::graphics::VectorImage {
+        let mut builder = PathBuilder::new();
+        builder.add_rect(Rect {
+            x: 2.0,
+            y: 2.0,
+            width: 12.0,
+            height: 12.0,
+        });
+        let path = builder.build().expect("filled square path is well-formed");
+        let node = VectorNode::Path(VectorPathNode {
+            path,
+            transform: elwindui_core::base::AffineTransform::IDENTITY,
+            fill: Some(VectorFill {
+                paint: VectorPaint::Brush(Brush::Solid(Color::rgb(200, 40, 40))),
+                opacity: 1.0,
+                rule: FillRule::NonZero,
+            }),
+            stroke: None,
+            paint_order: VectorPaintOrder::default(),
+            rendering: VectorShapeRendering::default(),
+            visibility: true,
+        });
+        let group = VectorGroup {
+            children: Arc::from([node]),
+            ..VectorGroup::default()
+        };
+        VectorImageBuilder::new(
+            Size {
+                width: 16.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 16.0,
+            },
+        )
+        .expect("16x16 canvas is a valid size")
+        .root(group)
+        .finish()
+        .expect("filled square vector image builds successfully")
+    }
+
+    /// §9.5: rasterizing a simple filled-square `VectorImage` produces a 32x32
+    /// `CanvasRenderTarget` (the fixed menu-icon raster size, `MENU_ICON_RASTER_SIZE` in
+    /// `inner/menu.rs`) with at least one non-transparent pixel — so a silently blank target
+    /// cannot pass this test.
+    #[test]
+    fn rasterizes_a_filled_shape_into_a_32x32_non_blank_render_target() {
+        let creator = creator().expect("CanvasDevice::GetSharedDevice must succeed on Windows");
+        let image = filled_square_vector_image();
+        let target = rasterize_vector_image_to_canvas_bitmap(&creator, &image, 32.0, 32.0)
+            .expect("vector rasterization must succeed for a simple filled shape");
+        let size = target.SizeInPixels().expect("SizeInPixels");
+        assert_eq!((size.Width, size.Height), (32, 32));
+
+        // The square covers most of the 16x16 viewBox, which maps to the render target's center;
+        // sample its center pixel and confirm the fill's red channel dominates (not fully
+        // transparent/black, i.e. something was actually drawn there).
+        let bytes = target
+            .GetPixelBytes()
+            .expect("GetPixelBytes must succeed for a freshly-drawn CanvasRenderTarget");
+        let center_pixel_index = ((16 * 32) + 16) * 4; // row 16, column 16, BGRA8
+        let alpha = bytes[center_pixel_index + 3];
+        assert!(
+            alpha > 0,
+            "center pixel must not be fully transparent — the fill did not render"
+        );
+    }
+
+    /// §9.6 half: an empty/degenerate `VectorImage` (empty group) rasterizes without error into an
+    /// all-transparent target — confirms the offscreen target/session lifecycle itself (create,
+    /// clear, draw nothing, close) doesn't fail even when there is nothing to draw, distinguishing
+    /// "rasterization pipeline broken" from "this specific shape didn't render".
+    #[test]
+    fn rasterizing_an_empty_vector_image_succeeds_and_stays_transparent() {
+        let creator = creator().expect("CanvasDevice::GetSharedDevice must succeed on Windows");
+        let empty_group = VectorGroup::default();
+        let image = VectorImageBuilder::new(
+            Size {
+                width: 16.0,
+                height: 16.0,
+            },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 16.0,
+            },
+        )
+        .expect("16x16 canvas is a valid size")
+        .root(empty_group)
+        .finish()
+        .expect("empty vector image builds successfully");
+        let target = rasterize_vector_image_to_canvas_bitmap(&creator, &image, 32.0, 32.0)
+            .expect("rasterizing an empty scene must still succeed");
+        let bytes = target
+            .GetPixelBytes()
+            .expect("GetPixelBytes must succeed for a freshly-drawn CanvasRenderTarget");
+        let center_pixel_index = ((16 * 32) + 16) * 4;
+        assert_eq!(
+            bytes[center_pixel_index + 3],
+            0,
+            "an empty vector scene must rasterize to a fully transparent target"
         );
     }
 }

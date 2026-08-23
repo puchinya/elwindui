@@ -178,7 +178,7 @@ pub(crate) struct ReplayState {
     /// counterpart of `group_order`, compared the same way to decide whether the native z-order
     /// restore loop (`relayout_inner`) needs to run at all.
     pub(crate) native_order: Vec<usize>,
-    /// Decoded-image cache (`RenderCommand::DrawImage`'s `elwindui_core::graphics::Image` -> real
+    /// Decoded-image cache (`RenderCommand::DrawImage`'s `elwindui_core::graphics::BitmapImage` -> real
     /// `CGImage`), keyed by the image's stable `ImageId`. Pruned after each pass to the resources
     /// referenced by the currently retained render tree.
     pub(crate) image_cache: HashMap<ImageId, CFRetained<CGImage>>,

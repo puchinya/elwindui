@@ -3,7 +3,7 @@
 #![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]
 
 use elwindui::core::base::{Point, Rect};
-use elwindui::core::graphics::{Image, ImageDrawOptions, ImageFit, RenderContext};
+use elwindui::core::graphics::{BitmapImage, ImageDrawOptions, ImageFit, RenderContext};
 use elwindui::core::input::{MouseButton, PointerEventArgs};
 use elwindui::core::ui::{UIElementExt, WindowExt};
 use std::cell::RefCell;
@@ -15,10 +15,11 @@ const MASCOT_PATH: &str = concat!(
     "/../../images/elwind_chan_real_anime.png"
 );
 
-fn mascot_image() -> &'static Image {
-    static IMAGE: OnceLock<Image> = OnceLock::new();
+fn mascot_image() -> &'static BitmapImage {
+    static IMAGE: OnceLock<BitmapImage> = OnceLock::new();
     IMAGE.get_or_init(|| {
-        Image::from_file(MASCOT_PATH).expect("images/elwind_chan_real_anime.png must be readable")
+        BitmapImage::from_file(MASCOT_PATH)
+            .expect("images/elwind_chan_real_anime.png must be readable")
     })
 }
 

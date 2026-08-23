@@ -39,4 +39,7 @@ pub(crate) use paint::{
 };
 pub(crate) use path::{ellipse_cgpath, path_to_cgpath, rounded_rect_cgpath};
 pub(crate) use text::{AppKitTextBackend, attributed_string, ns_font, secure_text_font};
-pub(crate) use vector::{draw_vector_image, pixels_to_cgimage, rasterize_calayer_to_pixels};
+pub(crate) use vector::{
+    draw_vector_image, pixels_to_cgimage, rasterize_calayer_to_pixels,
+    rasterize_vector_image_to_cgimage,
+};

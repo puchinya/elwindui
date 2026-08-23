@@ -282,6 +282,12 @@ impl MenuItem {
     fn set_text(&self, text: &str) {
         self.inner.set_text(text);
     }
+    fn icon(&self) -> Option<elwindui_core::graphics::IconSource> {
+        self.inner.icon()
+    }
+    fn set_icon(&self, icon: Option<elwindui_core::graphics::IconSource>) {
+        self.inner.set_icon(icon);
+    }
     fn enabled(&self) -> bool {
         self.inner.enabled()
     }

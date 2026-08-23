@@ -1,9 +1,9 @@
 //! SVG vector scene graph types — nodes/groups/paint/clip/mask retained exactly as loaded (SVG読み
 //!込み・ベクター描画対応 実装指示書 §6〜§8). Reuses the existing `Path`/`Brush`/`StrokeStyle`/
-//! `Image` types unchanged rather than inventing SVG-specific geometry/paint types (§6.2).
+//! `BitmapImage` types unchanged rather than inventing SVG-specific geometry/paint types (§6.2).
 
 use super::brush::Brush;
-use super::image::{Image, ImageSampling};
+use super::image::{BitmapImage, ImageSampling};
 use super::path::{FillRule, GeometryCombineMode, Path, PathBuilder};
 use super::stroke::StrokeStyle;
 use super::vector_filter::VectorFilter;
@@ -205,7 +205,7 @@ pub struct VectorPathNode {
 /// never this variant (実装指示書§11.2).
 #[derive(Debug, Clone)]
 pub struct VectorRasterNode {
-    pub image: Image,
+    pub image: BitmapImage,
     pub rect: Rect,
     pub transform: AffineTransform,
     pub sampling: ImageSampling,

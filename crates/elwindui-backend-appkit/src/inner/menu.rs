@@ -5,7 +5,7 @@ use crate::ffi::mtm;
 use elwindui_core::graphics::{IconSource, ImageSource, SystemIcon};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send, sel};
 use objc2_app_kit::{NSImage, NSMenu, NSMenuItem};
 use objc2_foundation::{NSObjectProtocol, NSSize, NSString};
 use std::cell::RefCell;
@@ -138,16 +138,16 @@ fn sf_symbol_name(icon: SystemIcon) -> &'static str {
     }
 }
 
-/// Runtime `respondsToSelector`-probed the same way as `InnerButton::set_system_symbol_or_text`
-/// (`inner/button.rs`) — `imageWithSystemSymbolName:accessibilityDescription:` is a class method,
-/// so the class object itself is probed. A lookup failure (old OS, or a symbol name the running
-/// OS doesn't recognize) simply omits the icon (§2.11) rather than panicking.
+/// A lookup failure (old OS, or a symbol name the running OS doesn't recognize) simply omits the
+/// icon (§2.11) rather than panicking — `imageWithSystemSymbolName:accessibilityDescription:`
+/// itself already returns `None` in that case, so no separate `respondsToSelector:` probe is
+/// needed here. (`InnerButton::set_system_symbol_or_text`, `inner/button.rs`, gates the same call
+/// behind `NSImage::class().responds_to(..)` first — verified against a real window during this
+/// Issue's AppKit runtime check that this particular `responds_to` probe reports `false` on this
+/// machine's OS/objc2 version even though the call it's guarding succeeds immediately afterward;
+/// tracked as a pre-existing, out-of-scope finding rather than fixed here, since `button.rs` is
+/// unrelated to Menu icons.)
 fn system_icon_nsimage(icon: SystemIcon) -> Option<Retained<NSImage>> {
-    if !NSImage::class().responds_to(sel!(
-        imageWithSystemSymbolName:accessibilityDescription:
-    )) {
-        return None;
-    }
     NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(sf_symbol_name(icon)),
         None,

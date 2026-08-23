@@ -837,6 +837,7 @@ impl MeasureProbe {
 #[elwindui_macros::class(struct_only = crate::ui::MenuItemExt)]
 pub(crate) struct FakeMenuItem {
     text: RefCell<String>,
+    icon: RefCell<Option<crate::graphics::IconSource>>,
     enabled: Cell<bool>,
     shortcut: RefCell<Option<String>>,
     on_select: RefCell<Option<Box<dyn Fn()>>>,
@@ -847,6 +848,7 @@ impl FakeMenuItem {
     fn construct() -> Self {
         Self {
             text: RefCell::new(String::new()),
+            icon: RefCell::new(None),
             enabled: Cell::new(true),
             shortcut: RefCell::new(None),
             on_select: RefCell::new(None),
@@ -857,6 +859,12 @@ impl FakeMenuItem {
     }
     fn set_text(&self, text: &str) {
         *self.text.borrow_mut() = text.to_string();
+    }
+    fn icon(&self) -> Option<crate::graphics::IconSource> {
+        self.icon.borrow().clone()
+    }
+    fn set_icon(&self, icon: Option<crate::graphics::IconSource>) {
+        *self.icon.borrow_mut() = icon;
     }
     fn enabled(&self) -> bool {
         self.enabled.get()

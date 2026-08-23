@@ -35,7 +35,9 @@ use filter::*;
 use paint::*;
 use raster::*;
 
-pub(crate) use raster::{pixels_to_cgimage, rasterize_calayer_to_pixels};
+pub(crate) use raster::{
+    pixels_to_cgimage, rasterize_calayer_to_pixels, rasterize_vector_image_to_cgimage,
+};
 
 /// The largest offscreen buffer dimension (mask/pattern-tile/filter rasterization) allowed in
 /// either axis — a defensive cap against a pathological `mask`/`filter` region blowing up memory,

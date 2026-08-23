@@ -9,6 +9,7 @@ mod color;
 mod command;
 mod command_fingerprint;
 mod context;
+mod icon;
 mod image;
 mod path;
 mod path_combine;
@@ -27,6 +28,8 @@ pub use color::{Color, ParseColorError};
 pub use command::{Clip, RenderCommand, TextAlignment};
 pub use command_fingerprint::{CommandFingerprint, CommandKind};
 pub use context::{Fill, RenderContext, SaveGuard, Stroke};
+pub(crate) use icon::system_icon_vector;
+pub use icon::{IconSource, SystemIcon};
 pub use image::{
     AlphaMode, BackendImageHandle, BitmapImage, ImageData, ImageDrawOptions, ImageError, ImageFit,
     ImageFormat, ImageId, ImageSampling, fitted_image_rect,

@@ -6,8 +6,8 @@ use crate::base::{Point, Rect, Size};
 use crate::environment::{EnvironmentContext, EnvironmentKey};
 use crate::focus::FocusTracker;
 use crate::ui::{
-    LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt, ViewBuildContext, ViewTemplate,
-    unmount_subtree,
+    HorizontalLayoutExt, ImageExt, LayoutExt, MenuExt, TextBlockExt, TextStyleOwner, UIElementExt,
+    ViewBuildContext, ViewTemplate, unmount_subtree,
 };
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -66,7 +66,10 @@ impl ContextRequest {
     }
 
     /// Creates an accessibility-driven context request with optional screen anchor.
-    pub fn accessibility(local_position: Option<Point>, screen_anchor: Option<PopupAnchor>) -> Self {
+    pub fn accessibility(
+        local_position: Option<Point>,
+        screen_anchor: Option<PopupAnchor>,
+    ) -> Self {
         Self {
             source: ContextRequestSource::Accessibility,
             local_position,
@@ -144,9 +147,7 @@ pub enum ResolvedContextDefinition {
         presentation: ContextMenuPresentation,
     },
     /// A custom UIElement popup template.
-    Popup {
-        template: ViewTemplate,
-    },
+    Popup { template: ViewTemplate },
 }
 
 /// An element and its resolved context menu/popup definition.
@@ -226,7 +227,9 @@ pub fn calculate_popup_placement(
             let mut y = p.y;
 
             if placement == PopupPlacement::AutoFlip || placement == PopupPlacement::Below {
-                if y + popup_size.height > work_area_bottom && p.y - popup_size.height >= work_area.y {
+                if y + popup_size.height > work_area_bottom
+                    && p.y - popup_size.height >= work_area.y
+                {
                     y = p.y - popup_size.height;
                 }
             } else if placement == PopupPlacement::Above {
@@ -265,7 +268,9 @@ pub fn calculate_popup_placement(
                 }
             } else {
                 // AutoFlip / Below
-                if y + popup_size.height > work_area_bottom && r.y - popup_size.height >= work_area.y {
+                if y + popup_size.height > work_area_bottom
+                    && r.y - popup_size.height >= work_area.y
+                {
                     y = r.y - popup_size.height;
                 }
             }
@@ -311,9 +316,7 @@ impl ContextMenuService {
                 let local_pos = request.local_position?;
                 crate::ui::hit_test(root, local_pos)?
             }
-            ContextRequestSource::Keyboard => {
-                focus.focused()?
-            }
+            ContextRequestSource::Keyboard => focus.focused()?,
             ContextRequestSource::Accessibility | ContextRequestSource::Other => {
                 focus.focused().unwrap_or_else(|| Rc::clone(root))
             }
@@ -406,7 +409,8 @@ impl ContextMenuService {
             width: measured.width.max(1.0),
             height: measured.height.max(1.0),
         };
-        let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
+        let position =
+            calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
         // `dismiss()` may run synchronously from *inside* `host.show_popup` (a backend's native
         // "show" call can itself dispatch events reentrantly) — the `Building` state above only
         // covers up to this call, not through it. `dismiss_state` is checked again, atomically,
@@ -492,7 +496,8 @@ impl ContextMenuService {
             width: measured.width.max(1.0),
             height: measured.height.max(1.0),
         };
-        let position = calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
+        let position =
+            calculate_popup_placement(anchor, popup_size, work_area, PopupPlacement::AutoFlip);
         let Some(inner_handle) = host.show_popup(PopupRequest {
             content: Rc::clone(&content),
             position,
@@ -539,16 +544,17 @@ pub struct ContextMenuPresenter;
 impl ContextMenuPresenter {
     /// Builds a custom-rendered context menu UIElement tree for a menu.
     /// When an item is selected or dismissed, `on_close` is invoked.
-    pub fn build_menu_view(
-        menu: &dyn MenuExt,
-        on_close: Rc<dyn Fn()>,
-    ) -> Rc<dyn UIElementExt> {
+    pub fn build_menu_view(menu: &dyn MenuExt, on_close: Rc<dyn Fn()>) -> Rc<dyn UIElementExt> {
         let layout = crate::ui::VerticalLayout::new();
         layout.set_margin(4.0);
         layout.set_background(Some(crate::graphics::Color::rgb(45, 45, 48).into()));
         layout.set_tab_stop(true);
 
         let items = menu.items().to_vec();
+        // §2.9 icon column: reserved on every row once any item in the menu has an icon, so
+        // labels stay aligned across icon and icon-less rows; otherwise the layout is unchanged
+        // from before icon support existed.
+        let any_icon = items.iter().any(|item| item.icon().is_some());
         let rows: Rc<RefCell<Vec<Rc<crate::ui::HorizontalLayout>>>> =
             Rc::new(RefCell::new(Vec::new()));
         let selected_index: Rc<std::cell::Cell<Option<usize>>> =
@@ -561,7 +567,10 @@ impl ContextMenuPresenter {
             let sel = selected_for_highlight.get();
             let rows_borrow = rows_for_highlight.borrow();
             for (i, row) in rows_borrow.iter().enumerate() {
-                let enabled = items_for_highlight.get(i).map(|it| it.enabled()).unwrap_or(true);
+                let enabled = items_for_highlight
+                    .get(i)
+                    .map(|it| it.enabled())
+                    .unwrap_or(true);
                 if enabled && sel == Some(i) {
                     row.set_background(Some(crate::graphics::Color::rgb(0, 120, 215).into()));
                 } else {
@@ -573,16 +582,40 @@ impl ContextMenuPresenter {
         for (i, item) in items.iter().enumerate() {
             let row = crate::ui::HorizontalLayout::new();
             row.set_margin(4.0);
+            if any_icon {
+                row.set_spacing(6.0);
+            }
 
             let enabled = item.enabled();
-
-            let label = crate::ui::TextBlock::new();
-            label.set_text(&item.text());
             let text_color = if enabled {
                 crate::graphics::Color::rgb(240, 240, 240)
             } else {
                 crate::graphics::Color::rgb(128, 128, 128)
             };
+
+            if any_icon {
+                let icon_slot = crate::ui::Image::new();
+                icon_slot.set_width(16.0);
+                icon_slot.set_height(16.0);
+                icon_slot.set_stretch(crate::graphics::Stretch::Uniform);
+                // Failure/unknown-icon semantics (§2.11): an absent `icon` (or, in the backend
+                // layer, a failed user-image decode) simply leaves this slot's source unset —
+                // never removes the row, never touches text/enabled/shortcut/on_select.
+                if let Some(icon) = item.icon() {
+                    let source = match icon {
+                        crate::graphics::IconSource::Image(source) => Some(source),
+                        crate::graphics::IconSource::System(system_icon) => {
+                            Some(crate::graphics::system_icon_vector(system_icon, text_color))
+                        }
+                    };
+                    icon_slot.set_source(source);
+                }
+                crate::ui::LayoutExt::children(&*row)
+                    .add(Rc::clone(&icon_slot) as Rc<dyn UIElementExt>);
+            }
+
+            let label = crate::ui::TextBlock::new();
+            label.set_text(&item.text());
             label.set_foreground(Some(text_color.into()));
             crate::ui::LayoutExt::children(&*row).add(Rc::clone(&label) as Rc<dyn UIElementExt>);
 
@@ -595,7 +628,8 @@ impl ContextMenuPresenter {
                     crate::graphics::Color::rgb(100, 100, 100)
                 };
                 shortcut_label.set_foreground(Some(sc_color.into()));
-                crate::ui::LayoutExt::children(&*row).add(Rc::clone(&shortcut_label) as Rc<dyn UIElementExt>);
+                crate::ui::LayoutExt::children(&*row)
+                    .add(Rc::clone(&shortcut_label) as Rc<dyn UIElementExt>);
             }
 
             let item_clone = Rc::clone(item);
@@ -655,7 +689,11 @@ impl ContextMenuPresenter {
                         let mut next = (current.wrapping_add(1)) % items_len.max(1);
                         // Skip disabled items
                         for _ in 0..items_len {
-                            if items_for_key.get(next).map(|it| it.enabled()).unwrap_or(false) {
+                            if items_for_key
+                                .get(next)
+                                .map(|it| it.enabled())
+                                .unwrap_or(false)
+                            {
                                 sel_key.set(Some(next));
                                 hl_key();
                                 break;
@@ -665,19 +703,35 @@ impl ContextMenuPresenter {
                     }
                     crate::input::Key::Up => {
                         let current = sel_key.get().unwrap_or(0);
-                        let mut prev = if current == 0 { items_len.saturating_sub(1) } else { current - 1 };
+                        let mut prev = if current == 0 {
+                            items_len.saturating_sub(1)
+                        } else {
+                            current - 1
+                        };
                         for _ in 0..items_len {
-                            if items_for_key.get(prev).map(|it| it.enabled()).unwrap_or(false) {
+                            if items_for_key
+                                .get(prev)
+                                .map(|it| it.enabled())
+                                .unwrap_or(false)
+                            {
                                 sel_key.set(Some(prev));
                                 hl_key();
                                 break;
                             }
-                            prev = if prev == 0 { items_len.saturating_sub(1) } else { prev - 1 };
+                            prev = if prev == 0 {
+                                items_len.saturating_sub(1)
+                            } else {
+                                prev - 1
+                            };
                         }
                     }
                     crate::input::Key::Home => {
                         for idx in 0..items_len {
-                            if items_for_key.get(idx).map(|it| it.enabled()).unwrap_or(false) {
+                            if items_for_key
+                                .get(idx)
+                                .map(|it| it.enabled())
+                                .unwrap_or(false)
+                            {
                                 sel_key.set(Some(idx));
                                 hl_key();
                                 break;
@@ -686,7 +740,11 @@ impl ContextMenuPresenter {
                     }
                     crate::input::Key::End => {
                         for idx in (0..items_len).rev() {
-                            if items_for_key.get(idx).map(|it| it.enabled()).unwrap_or(false) {
+                            if items_for_key
+                                .get(idx)
+                                .map(|it| it.enabled())
+                                .unwrap_or(false)
+                            {
                                 sel_key.set(Some(idx));
                                 hl_key();
                                 break;
@@ -830,7 +888,10 @@ mod tests {
         let resolved = resolve_context_target(&node_dyn).expect("should resolve context target");
         assert!(Rc::ptr_eq(&resolved.owner, &node_dyn));
         match resolved.definition {
-            ResolvedContextDefinition::Menu { menu: m, presentation } => {
+            ResolvedContextDefinition::Menu {
+                menu: m,
+                presentation,
+            } => {
                 assert!(Rc::ptr_eq(&m, &(menu as Rc<dyn MenuExt>)));
                 assert_eq!(presentation, ContextMenuPresentation::Native);
             }
@@ -844,7 +905,9 @@ mod tests {
         let template = ViewTemplate::new(|_ctx| {
             let layout = VerticalLayout::new();
             let label = TextBlock::new();
-            layout.children().add(Rc::clone(&label) as Rc<dyn UIElementExt>);
+            layout
+                .children()
+                .add(Rc::clone(&label) as Rc<dyn UIElementExt>);
             Some(layout as Rc<dyn UIElementExt>)
         });
         node.set_context_popup(Some(template));
@@ -890,7 +953,13 @@ mod tests {
         assert_eq!(host.shown.borrow().len(), 1);
         let (_, pos, size) = &host.shown.borrow()[0];
         assert_eq!(*pos, Point { x: 50.0, y: 50.0 });
-        assert_eq!(*size, Size { width: 120.0, height: 80.0 });
+        assert_eq!(
+            *size,
+            Size {
+                width: 120.0,
+                height: 80.0
+            }
+        );
 
         assert!(!host.closed.get());
         handle.close();
@@ -907,7 +976,12 @@ mod tests {
         let template = ViewTemplate::new(|_ctx| None);
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let handle = ContextMenuService::open_custom_popup(
             &host,
@@ -934,13 +1008,8 @@ mod tests {
             height: 768.0,
         };
 
-        let handle = ContextMenuService::open_custom_menu(
-            &host,
-            &*menu,
-            &anchor,
-            work_area,
-        )
-        .expect("host should show successfully");
+        let handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area)
+            .expect("host should show successfully");
 
         assert_eq!(host.shown.borrow().len(), 1);
         let (_, pos, size) = &host.shown.borrow()[0];
@@ -966,14 +1035,14 @@ mod tests {
         menu.add(Rc::clone(&item) as Rc<dyn MenuItemExt>);
 
         let anchor = PopupAnchor::Point(Point { x: 50.0, y: 50.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
-        let _handle = ContextMenuService::open_custom_menu(
-            &host,
-            &*menu,
-            &anchor,
-            work_area,
-        );
+        let _handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
 
         assert_eq!(host.shown.borrow().len(), 1);
         let (content, _pos, _size) = &host.shown.borrow()[0];
@@ -996,8 +1065,14 @@ mod tests {
         );
 
         // Verification: item was selected and popup surface was closed!
-        assert!(selected.get(), "menu item on_select callback should be invoked");
-        assert!(host.closed.get(), "popup surface handle close() should be invoked on item selection");
+        assert!(
+            selected.get(),
+            "menu item on_select callback should be invoked"
+        );
+        assert!(
+            host.closed.get(),
+            "popup surface handle close() should be invoked on item selection"
+        );
     }
 
     #[test]
@@ -1007,13 +1082,15 @@ mod tests {
         root.set_context_menu(Some(Rc::clone(&menu) as Rc<dyn MenuExt>));
 
         let child = TextBlock::new();
-        root.children().add(Rc::clone(&child) as Rc<dyn UIElementExt>);
+        root.children()
+            .add(Rc::clone(&child) as Rc<dyn UIElementExt>);
 
         let root_dyn: Rc<dyn UIElementExt> = root;
         let child_dyn: Rc<dyn UIElementExt> = child;
 
         // child has no context menu, so lookup finds root
-        let resolved = resolve_context_target(&child_dyn).expect("should resolve ancestor context target");
+        let resolved =
+            resolve_context_target(&child_dyn).expect("should resolve ancestor context target");
         assert!(Rc::ptr_eq(&resolved.owner, &root_dyn));
     }
 
@@ -1034,7 +1111,8 @@ mod tests {
         let mid_dyn: Rc<dyn UIElementExt> = mid;
         let leaf_dyn: Rc<dyn UIElementExt> = leaf;
 
-        let resolved = resolve_context_target(&leaf_dyn).expect("should resolve nearest context target");
+        let resolved =
+            resolve_context_target(&leaf_dyn).expect("should resolve nearest context target");
         assert!(Rc::ptr_eq(&resolved.owner, &mid_dyn));
         match resolved.definition {
             ResolvedContextDefinition::Menu { menu: m, .. } => {
@@ -1048,7 +1126,8 @@ mod tests {
     fn resolve_target_no_context_returns_none() {
         let root = VerticalLayout::new();
         let leaf = TextBlock::new();
-        root.children().add(Rc::clone(&leaf) as Rc<dyn UIElementExt>);
+        root.children()
+            .add(Rc::clone(&leaf) as Rc<dyn UIElementExt>);
 
         let leaf_dyn: Rc<dyn UIElementExt> = leaf;
         assert!(resolve_context_target(&leaf_dyn).is_none());
@@ -1120,10 +1199,13 @@ mod tests {
         root.set_environment_context(env);
 
         let child = VerticalLayout::new();
-        root.children().add(Rc::clone(&child) as Rc<dyn UIElementExt>);
+        root.children()
+            .add(Rc::clone(&child) as Rc<dyn UIElementExt>);
 
         let leaf = TextBlock::new();
-        child.children().add(Rc::clone(&leaf) as Rc<dyn UIElementExt>);
+        child
+            .children()
+            .add(Rc::clone(&leaf) as Rc<dyn UIElementExt>);
 
         let leaf_dyn: Rc<dyn UIElementExt> = leaf;
         let effective = leaf_dyn.effective_environment();
@@ -1140,7 +1222,12 @@ mod tests {
 
         let host = FakePopupHost::new();
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         ContextMenuService::open_custom_popup(
             &host,
@@ -1151,7 +1238,10 @@ mod tests {
             work_area,
         );
 
-        let resolved_env = captured_env.borrow().clone().expect("popup should capture environment");
+        let resolved_env = captured_env
+            .borrow()
+            .clone()
+            .expect("popup should capture environment");
         assert_eq!(resolved_env.get::<TestKey>(), 42);
     }
 
@@ -1172,7 +1262,12 @@ mod tests {
 
         let host = FakePopupHost::new();
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         ContextMenuService::open_custom_popup(
             &host,
@@ -1183,7 +1278,10 @@ mod tests {
             work_area,
         );
 
-        let popup_env = captured_env.borrow().clone().expect("popup should capture environment");
+        let popup_env = captured_env
+            .borrow()
+            .clone()
+            .expect("popup should capture environment");
         // The derived popup Environment inherits the owner's value...
         assert_eq!(popup_env.get::<TestKey>(), 7);
         // ...but is a distinct derived context, and a popup-side override never leaks back to the
@@ -1206,7 +1304,12 @@ mod tests {
         });
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let handle = ContextMenuService::open_custom_popup(
             &host,
@@ -1224,7 +1327,10 @@ mod tests {
             .expect("PopupDismissAction should be installed in the popup-scoped Environment");
         assert!(!host.closed.get());
         dismiss.dismiss();
-        assert!(host.closed.get(), "dismiss action should close the popup surface");
+        assert!(
+            host.closed.get(),
+            "dismiss action should close the popup surface"
+        );
 
         // Idempotent: dismissing again after the handle is already dropped/closed must not panic.
         dismiss.dismiss();
@@ -1269,7 +1375,12 @@ mod tests {
         });
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let _handle = ContextMenuService::open_custom_popup(
             &host,
@@ -1329,15 +1440,15 @@ mod tests {
         popup_env.set::<TestKey>(99);
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let _handle = ContextMenuService::open_custom_popup(
-            &host,
-            &owner,
-            &template,
-            &anchor,
-            popup_env,
-            work_area,
+            &host, &owner, &template, &anchor, popup_env, work_area,
         )
         .expect("owner is alive, template should build");
 
@@ -1393,7 +1504,10 @@ mod tests {
                 // Obtains the installed PopupDismissAction from the content's own effective popup
                 // Environment and calls it *before* returning the handle — simulating a backend
                 // whose native "show" call reenters synchronously.
-                let dismiss = request.content.effective_environment().get::<PopupDismissActionKey>();
+                let dismiss = request
+                    .content
+                    .effective_environment()
+                    .get::<PopupDismissActionKey>();
                 let handle: Rc<dyn PopupSurfaceHandle> = Rc::new(DismissDuringShowHandle {
                     content: RefCell::new(Some(Rc::clone(&request.content))),
                     close_count: Rc::clone(&self.close_count),
@@ -1420,7 +1534,12 @@ mod tests {
         });
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let result = ContextMenuService::open_custom_popup(
             &host,
@@ -1441,7 +1560,10 @@ mod tests {
             "the handle created during show_popup must be closed exactly once by open_custom_popup \
              (not left open, and not closed twice)"
         );
-        let weak = weak_content.borrow().clone().expect("template captured its content");
+        let weak = weak_content
+            .borrow()
+            .clone()
+            .expect("template captured its content");
         assert!(
             weak.upgrade().is_none(),
             "content built before a dismiss-during-show must be unmounted and released, not \
@@ -1476,7 +1598,12 @@ mod tests {
         });
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let handle = ContextMenuService::open_custom_popup(
             &host,
@@ -1487,7 +1614,10 @@ mod tests {
             work_area,
         );
 
-        assert!(handle.is_none(), "a popup dismissed during build/mount must not be shown");
+        assert!(
+            handle.is_none(),
+            "a popup dismissed during build/mount must not be shown"
+        );
         assert_eq!(
             host.shown.borrow().len(),
             0,
@@ -1520,7 +1650,12 @@ mod tests {
         });
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let handle = ContextMenuService::open_custom_popup(
             &host,
@@ -1531,9 +1666,16 @@ mod tests {
             work_area,
         );
 
-        assert!(handle.is_none(), "open_custom_popup must return None when the backend show fails");
+        assert!(
+            handle.is_none(),
+            "open_custom_popup must return None when the backend show fails"
+        );
         assert_eq!(host.shown.borrow().len(), 0);
-        assert_eq!(unmount_count.get(), 1, "built content must be unmounted exactly once on show failure");
+        assert_eq!(
+            unmount_count.get(),
+            1,
+            "built content must be unmounted exactly once on show failure"
+        );
     }
 
     #[test]
@@ -1542,11 +1684,19 @@ mod tests {
         let menu = FakeMenu::new();
 
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let handle = ContextMenuService::open_custom_menu(&host, &*menu, &anchor, work_area);
 
-        assert!(handle.is_none(), "open_custom_menu must return None when the backend show fails");
+        assert!(
+            handle.is_none(),
+            "open_custom_menu must return None when the backend show fails"
+        );
         assert_eq!(host.shown.borrow().len(), 0);
     }
 
@@ -1599,7 +1749,12 @@ mod tests {
 
         let host = ReleasingPopupHost;
         let anchor = PopupAnchor::Point(Point { x: 0.0, y: 0.0 });
-        let work_area = Rect { x: 0.0, y: 0.0, width: 800.0, height: 600.0 };
+        let work_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
 
         let handle = ContextMenuService::open_custom_popup(
             &host,
@@ -1611,8 +1766,14 @@ mod tests {
         )
         .expect("owner is alive, template should build");
 
-        let weak = weak_content.borrow().clone().expect("template captured its content");
-        assert!(weak.upgrade().is_some(), "content must be alive while the popup is open");
+        let weak = weak_content
+            .borrow()
+            .clone()
+            .expect("template captured its content");
+        assert!(
+            weak.upgrade().is_some(),
+            "content must be alive while the popup is open"
+        );
 
         handle.close();
         drop(handle);
@@ -1655,7 +1816,8 @@ mod tests {
 
         let closed = Rc::new(Cell::new(false));
         let closed_clone = Rc::clone(&closed);
-        let menu_view = ContextMenuPresenter::build_menu_view(&*menu, Rc::new(move || closed_clone.set(true)));
+        let menu_view =
+            ContextMenuPresenter::build_menu_view(&*menu, Rc::new(move || closed_clone.set(true)));
 
         let routed_args = crate::input::RoutedEventArgs::default();
 

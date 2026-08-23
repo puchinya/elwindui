@@ -56,6 +56,18 @@ pub trait CoordinateHost {
     fn screen_to_root(&self, point: Point) -> Option<Point>;
 }
 
+/// Backend-neutral cancellation capability installed by the native host that owns a Visual tree.
+///
+/// The capability lets common subtree teardown cancel an implicit pointer capture before the
+/// captured element unmounts. Backend implementations also release their native capture when this
+/// method reports a canceled gesture. Implementations must use weak back-links to their host.
+pub trait PointerGestureHost {
+    /// Cancels the active gesture only when its captured target belongs to `subtree`.
+    ///
+    /// Returns `true` when an active gesture was canceled and notified.
+    fn cancel_pointer_gesture_in_subtree(&self, subtree: &Rc<dyn UIElementExt>) -> bool;
+}
+
 /// The `FocusHost` counterpart to `RelayoutHost` — registered the same way (`UIElement::focus_host`
 /// on a hosted tree's root, set by the host's own `set_tree`), discovered the same way
 /// (`request_focus` walks `visual_parent` up to the root, mirroring `request_relayout`), and backed
@@ -124,6 +136,7 @@ pub trait FocusHost {
 #[prop(routed, on_pointer_pressed: fn(crate::input::PointerEventArgs))]
 #[prop(routed, on_pointer_released: fn(crate::input::PointerEventArgs))]
 #[prop(routed, on_pointer_moved: fn(crate::input::PointerEventArgs))]
+#[prop(routed, on_pointer_canceled: fn(crate::input::PointerEventArgs))]
 #[prop(routed, on_pointer_entered: fn(crate::input::PointerEventArgs))]
 #[prop(routed, on_pointer_exited: fn(crate::input::PointerEventArgs))]
 #[prop(routed, on_pointer_wheel_changed: fn(crate::input::PointerWheelEventArgs))]
@@ -227,6 +240,9 @@ pub struct UIElement {
     /// The coordinate counterpart to `invalidate_host`, installed on a hosted tree's root by the
     /// backend and discovered through the Visual-parent chain.
     pub coordinate_host: RefCell<Option<Rc<dyn CoordinateHost>>>,
+    /// Pointer-gesture cancellation counterpart to `coordinate_host`, installed only on a hosted
+    /// root and discovered by descendants through the Visual-parent chain.
+    pub pointer_gesture_host: RefCell<Option<Rc<dyn PointerGestureHost>>>,
     /// WinUI3's `Control.IsTabStop` — whether this element participates in `FocusTracker`'s tab
     /// order at all. `false` by default; a `NativeControl<H>`-backed leaf (`Button`/`TextArea`/
     /// `TabView`) sets this `true` in its own `new()` (mirrors `Button::new()`'s `on_click` wiring),
@@ -362,6 +378,7 @@ impl UIElement {
             visual_collection: UIElementVisualCollection::new(__self_weak.clone()),
             invalidate_host: RefCell::new(None),
             coordinate_host: RefCell::new(None),
+            pointer_gesture_host: RefCell::new(None),
             tab_stop: Cell::new(false),
             focus_order: Cell::new(None),
             focus_state: Cell::new(FocusState::Unfocused),
@@ -754,6 +771,11 @@ impl UIElement {
     fn set_coordinate_host(&self, host: Option<Rc<dyn CoordinateHost>>) {
         *self.as_ui_element().coordinate_host.borrow_mut() = host;
     }
+    /// Registers the host capability used to cancel an implicit gesture before subtree teardown.
+    /// Backend hosts set this only on the root they own and clear it when ownership ends.
+    fn set_pointer_gesture_host(&self, host: Option<Rc<dyn PointerGestureHost>>) {
+        *self.as_ui_element().pointer_gesture_host.borrow_mut() = host;
+    }
     /// Converts a point from this element's hosted-tree root coordinate space to normalized
     /// logical desktop coordinates.
     fn root_to_screen(&self, point: Point) -> Option<Point> {
@@ -839,6 +861,7 @@ impl UIElement {
         }
         *self.as_ui_element().invalidate_host.borrow_mut() = None;
         *self.as_ui_element().coordinate_host.borrow_mut() = None;
+        *self.as_ui_element().pointer_gesture_host.borrow_mut() = None;
         *self.as_ui_element().focus_host.borrow_mut() = None;
         *self.as_ui_element().environment.borrow_mut() = None;
     }
@@ -1043,6 +1066,26 @@ fn coordinate_host(base: &UIElement) -> Option<Rc<dyn CoordinateHost>> {
     host
 }
 
+/// Finds the nearest pointer-gesture host registered on `base`'s Visual ancestry.
+fn pointer_gesture_host(base: &UIElement) -> Option<Rc<dyn PointerGestureHost>> {
+    let mut current = base
+        .visual_parent
+        .borrow()
+        .as_ref()
+        .and_then(|weak| weak.upgrade());
+    let mut host = base.pointer_gesture_host.borrow().clone();
+    while let Some(element) = current {
+        host = element
+            .as_ui_element()
+            .pointer_gesture_host
+            .borrow()
+            .clone()
+            .or(host);
+        current = element.visual_parent();
+    }
+    host
+}
+
 /// Lifecycle state of a UI component during its creation, mount, unmount traversal, and teardown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ComponentLifecycleState {
@@ -1057,12 +1100,19 @@ pub enum ComponentLifecycleState {
 /// invokes each node's unmount hooks (including generated Component lifecycle teardown, `on_unmount`,
 /// and subscription cancellations), and detaches visual collections.
 pub fn unmount_subtree(node: &Rc<dyn UIElementExt>) {
+    if let Some(host) = pointer_gesture_host(node.as_ui_element()) {
+        host.cancel_pointer_gesture_in_subtree(node);
+    }
+    unmount_subtree_inner(node);
+}
+
+fn unmount_subtree_inner(node: &Rc<dyn UIElementExt>) {
     if !node.begin_unmount() {
         return;
     }
     let children = node.visual_children();
     for child in &children {
-        unmount_subtree(child);
+        unmount_subtree_inner(child);
     }
     node.unmount();
     node.as_ui_element().visual_collection.clear();
@@ -1072,6 +1122,33 @@ pub fn unmount_subtree(node: &Rc<dyn UIElementExt>) {
 mod tests {
     use super::*;
     use crate::ui::testsupport::*;
+
+    #[test]
+    fn unmount_cancels_pointer_gesture_before_teardown_and_clears_host() {
+        struct RecordingPointerHost {
+            events: Rc<RefCell<Vec<&'static str>>>,
+        }
+
+        impl PointerGestureHost for RecordingPointerHost {
+            fn cancel_pointer_gesture_in_subtree(&self, _subtree: &Rc<dyn UIElementExt>) -> bool {
+                self.events.borrow_mut().push("cancel");
+                true
+            }
+        }
+
+        let root = native("a", size(10.0, 20.0));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        root.set_pointer_gesture_host(Some(Rc::new(RecordingPointerHost {
+            events: Rc::clone(&events),
+        })));
+        let unmounted = Rc::clone(&events);
+        root.add_unmount_hook(Box::new(move || unmounted.borrow_mut().push("unmount")));
+
+        unmount_subtree(&root);
+
+        assert_eq!(*events.borrow(), vec!["cancel", "unmount"]);
+        assert!(root.as_ui_element().pointer_gesture_host.borrow().is_none());
+    }
 
     #[test]
     fn invalidate_family_reaches_a_relayout_host_registered_on_the_root() {

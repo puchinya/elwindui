@@ -124,12 +124,21 @@ fn main() {
             }),
         );
     }
+    {
+        let drag_anchor = drag_anchor.clone();
+        mascot.register_routed_handler(
+            "on_pointer_released",
+            Box::new(move |args: &PointerEventArgs, _| {
+                if args.button == Some(MouseButton::Left) {
+                    *drag_anchor.borrow_mut() = None;
+                }
+            }),
+        );
+    }
     mascot.register_routed_handler(
-        "on_pointer_released",
-        Box::new(move |args: &PointerEventArgs, _| {
-            if args.button == Some(MouseButton::Left) {
-                *drag_anchor.borrow_mut() = None;
-            }
+        "on_pointer_canceled",
+        Box::new(move |_: &PointerEventArgs, _| {
+            *drag_anchor.borrow_mut() = None;
         }),
     );
 

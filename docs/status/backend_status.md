@@ -13,7 +13,7 @@ Snapshot: 2026-08-23. Architecture is indexed in [`../design/README.md`](../desi
 
 ## AppKit current gaps
 
-- Host-level pointer/keyboard dispatch covers self-drawn elements, including screen-position payloads and drag delivery through release; native leaves receive OS events directly and require control-specific focus/input wiring. Root/screen conversion is exposed through the common coordinate-host capability (#174).
+- Host-level pointer/keyboard dispatch covers self-drawn elements, including screen-position payloads, drag delivery through release, and exactly-once cancellation for Escape, window/application deactivation, host suppression/detach, tree replacement/clear, and captured-subtree unmount (#179). Native leaves receive OS events directly and require control-specific focus/input wiring. Root/screen conversion is exposed through the common coordinate-host capability (#174).
 - Gradient/Image foreground brushes are reduced when a native text widget cannot represent the full brush.
 - Editable TextArea character spacing does not cover every native text-storage path.
 - Secure PasswordBox intentionally retains the system secure font cascade instead of applying ordinary font synthesis.
@@ -29,6 +29,7 @@ Snapshot: 2026-08-23. Architecture is indexed in [`../design/README.md`](../desi
 ## WinUI 3 current gaps
 
 - Self-drawn Canvas pointer pressed/moved/released forwarding, native capture, optional normalized screen positions, and bidirectional root/screen conversion are implemented for #174. Windows verification is pending in Issue #178 and was intentionally separated from PR #175.
+- Pointer cancellation/capture-loss handling is implemented for #179 through `PointerCanceled`, `PointerCaptureLost`, host deactivation, tree replacement/clear, and captured-subtree unmount. Windows verification is pending in Issue #180.
 - SVG group blend modes without direct `CanvasBlend` mappings, isolation, filters, and luminance-mask rasterization need an offscreen effect graph.
 - Cross-backend parity has been verified for the controls recorded in [`control_status.md`](control_status.md), but the entire backend contract has not been re-audited.
 - Whole-workspace rust-analyzer diagnostics have pre-existing failures and were not established as a clean Windows backend gate.

@@ -27,7 +27,7 @@ use elwindui_core::input::{
     FocusState, KeyboardDispatcher, MouseButton, PointerDispatcher, RawKeyEvent, RawKeyEventKind,
     RawPointerEvent, RawPointerEventKind, RawTextInputEvent,
 };
-use elwindui_core::ui::{CoordinateHost, FocusHost, UIElementExt as _};
+use elwindui_core::ui::{CoordinateHost, FocusHost, PointerGestureHost, UIElementExt as _};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -213,6 +213,31 @@ impl CoordinateHost for WinUI3CoordinateHost {
 
     fn screen_to_root(&self, point: Point) -> Option<Point> {
         TreeHostPanel::screen_to_canvas_point(&self.canvas.upgrade()?, point)
+    }
+}
+
+/// Pointer-cancellation bridge for one WinUI3 hosted tree. Both references are weak so the Core
+/// root cannot retain either its dispatcher or native Canvas owner.
+pub(crate) struct WinUI3PointerGestureHost {
+    pointer: Weak<PointerDispatcher>,
+    canvas: windows::core::Weak<Canvas>,
+}
+
+impl PointerGestureHost for WinUI3PointerGestureHost {
+    fn cancel_pointer_gesture_in_subtree(
+        &self,
+        subtree: &Rc<dyn elwindui_core::ui::UIElementExt>,
+    ) -> bool {
+        let canceled = self
+            .pointer
+            .upgrade()
+            .is_some_and(|pointer| pointer.cancel_for_subtree(subtree));
+        if canceled {
+            if let Some(canvas) = self.canvas.upgrade() {
+                let _ = canvas.ReleasePointerCaptures();
+            }
+        }
+        canceled
     }
 }
 
@@ -455,6 +480,53 @@ impl TreeHostPanel {
                     if let Ok(native_pointer) = args.Pointer() {
                         let _ = canvas_for_handler.ReleasePointerCapture(&native_pointer);
                     }
+                    let _ = args.SetHandled(true);
+                }
+                Ok(())
+            }));
+        }
+        {
+            let tree = Rc::downgrade(&this.tree);
+            let pointer = Rc::downgrade(&this.pointer);
+            let keyboard = Rc::downgrade(&this.keyboard);
+            let canvas = this.canvas.clone();
+            let canvas_for_handler = canvas.clone();
+            let _ = canvas.PointerCanceled(&PointerEventHandler::new(move |_sender, args| {
+                let Some(args) = args.as_ref() else {
+                    return Ok(());
+                };
+                if Self::dispatch_pointer_routed(
+                    &tree,
+                    &pointer,
+                    &keyboard,
+                    &canvas_for_handler,
+                    args,
+                    RawPointerEventKind::Canceled,
+                ) {
+                    let _ = canvas_for_handler.ReleasePointerCaptures();
+                    let _ = args.SetHandled(true);
+                }
+                Ok(())
+            }));
+        }
+        {
+            let tree = Rc::downgrade(&this.tree);
+            let pointer = Rc::downgrade(&this.pointer);
+            let keyboard = Rc::downgrade(&this.keyboard);
+            let canvas = this.canvas.clone();
+            let canvas_for_handler = canvas.clone();
+            let _ = canvas.PointerCaptureLost(&PointerEventHandler::new(move |_sender, args| {
+                let Some(args) = args.as_ref() else {
+                    return Ok(());
+                };
+                if Self::dispatch_pointer_routed(
+                    &tree,
+                    &pointer,
+                    &keyboard,
+                    &canvas_for_handler,
+                    args,
+                    RawPointerEventKind::Canceled,
+                ) {
                     let _ = args.SetHandled(true);
                 }
                 Ok(())
@@ -773,6 +845,9 @@ impl TreeHostPanel {
             return;
         }
 
+        if self.pointer.cancel() {
+            let _ = self.canvas.ReleasePointerCaptures();
+        }
         self.keyboard.focus.clear_focus();
         let _ = self
             .composition
@@ -801,6 +876,7 @@ impl TreeHostPanel {
     /// new tree's `RenderGroup` ids never match the old tree's, so the diff naturally tears down
     /// every old child and builds every new one on its own.
     pub(crate) fn set_tree(&self, tree: Rc<dyn elwindui_core::ui::UIElementExt>) {
+        self.cancel_and_unregister_current_tree();
         let host = Rc::new(WinUI3RelayoutHost {
             canvas: self.canvas.clone(),
             composition: Rc::downgrade(&self.composition),
@@ -820,6 +896,11 @@ impl TreeHostPanel {
                 canvas: self.canvas.downgrade().unwrap_or_default(),
             })));
         tree.as_ui_element()
+            .set_pointer_gesture_host(Some(Rc::new(WinUI3PointerGestureHost {
+                pointer: Rc::downgrade(&self.pointer),
+                canvas: self.canvas.downgrade().unwrap_or_default(),
+            })));
+        tree.as_ui_element()
             .set_focus_host(Some(Rc::new(WinUI3FocusHost {
                 keyboard: Rc::downgrade(&self.keyboard),
             })));
@@ -833,6 +914,7 @@ impl TreeHostPanel {
 
     /// Clears this host's tree, cleans up native composition and children, and closes any active popup.
     pub(crate) fn clear_tree(&self) {
+        self.cancel_and_unregister_current_tree();
         if let Some(old) = self.active_popup.borrow_mut().take() {
             old.close();
         }
@@ -851,6 +933,19 @@ impl TreeHostPanel {
         );
         *self.tree.borrow_mut() = None;
         *self.render_tree.borrow_mut() = None;
+    }
+
+    fn cancel_and_unregister_current_tree(&self) {
+        let old_tree = self.tree.borrow().clone();
+        if let Some(old_tree) = old_tree {
+            if self.pointer.cancel_for_subtree(&old_tree) {
+                let _ = self.canvas.ReleasePointerCaptures();
+            }
+            old_tree.set_invalidate_host(None);
+            old_tree.set_coordinate_host(None);
+            old_tree.set_pointer_gesture_host(None);
+            old_tree.set_focus_host(None);
+        }
     }
 
     /// Issue #162 §3.18: closes this host's own active custom popup/context-menu surface, if any —

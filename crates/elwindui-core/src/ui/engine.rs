@@ -1370,6 +1370,234 @@ mod tests {
     }
 
     #[test]
+    fn pointer_cancel_uses_latest_payload_once_and_suppresses_release_and_tap() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let canceled = Rc::new(RefCell::new(Vec::<crate::input::PointerEventArgs>::new()));
+        let observed = Rc::clone(&canceled);
+        leaf.as_ui_element()
+            .register_routed_handler::<crate::input::PointerEventArgs>(
+                "on_pointer_canceled",
+                Box::new(move |args, _| observed.borrow_mut().push(*args)),
+            );
+        let released = count_calls::<crate::input::PointerEventArgs>(&leaf, "on_pointer_released");
+        let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
+
+        let dispatcher = crate::input::PointerDispatcher::new();
+        let focus = crate::focus::FocusTracker::new();
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            crate::input::RawPointerEvent {
+                kind: crate::input::RawPointerEventKind::Moved,
+                position: Point { x: 60.0, y: 70.0 },
+                screen_position: Some(Point { x: 160.0, y: 270.0 }),
+                modifiers: crate::input::KeyModifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                timestamp_ms: 1.0,
+            },
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            crate::input::RawPointerEvent {
+                kind: crate::input::RawPointerEventKind::Canceled,
+                position: Point { x: 65.0, y: 75.0 },
+                screen_position: Some(Point { x: 165.0, y: 275.0 }),
+                modifiers: crate::input::KeyModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+                timestamp_ms: 2.0,
+            },
+        );
+        dispatcher.handle(&leaf, &focus, cancel_event(80.0, 90.0));
+
+        assert_eq!(
+            *canceled.borrow(),
+            vec![crate::input::PointerEventArgs {
+                position: Point { x: 65.0, y: 75.0 },
+                screen_position: Some(Point { x: 165.0, y: 275.0 }),
+                button: None,
+                modifiers: crate::input::KeyModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            }]
+        );
+        assert_eq!(*released.borrow(), 0);
+        assert_eq!(*tapped.borrow(), 0);
+    }
+
+    #[test]
+    fn pointer_cancel_restores_fresh_hit_testing() {
+        let leaf_a = native("a", size(10.0, 10.0));
+        let leaf_b = native("b", size(10.0, 10.0));
+        let root = stack(
+            Orientation::Vertical,
+            0.0,
+            vec![Rc::clone(&leaf_a), Rc::clone(&leaf_b)],
+        );
+        layout_tree::<FakeHandle>(&root, size(20.0, 20.0));
+        let moved_a = count_calls::<crate::input::PointerEventArgs>(&leaf_a, "on_pointer_moved");
+        let moved_b = count_calls::<crate::input::PointerEventArgs>(&leaf_b, "on_pointer_moved");
+        let canceled_root =
+            count_calls::<crate::input::PointerEventArgs>(&root, "on_pointer_canceled");
+
+        let dispatcher = crate::input::PointerDispatcher::new();
+        let focus = crate::focus::FocusTracker::new();
+        dispatcher.handle(
+            &root,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
+        );
+        dispatcher.handle(&root, &focus, cancel_event(5.0, 5.0));
+        dispatcher.handle(&root, &focus, move_event(5.0, 15.0));
+
+        assert_eq!(*moved_a.borrow(), 0);
+        assert_eq!(*moved_b.borrow(), 1);
+        assert_eq!(*canceled_root.borrow(), 1, "cancellation must bubble");
+    }
+
+    #[test]
+    fn pointer_cancel_breaks_the_double_tap_streak() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let double_tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_double_tapped");
+        let dispatcher = crate::input::PointerDispatcher::new();
+        let focus = crate::focus::FocusTracker::new();
+
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            release_event(5.0, 5.0, crate::input::MouseButton::Left, 10.0),
+        );
+        // Native capture-loss can arrive after the normal release path. With no active Core
+        // capture it is an idempotent no-op and must not erase the completed tap streak.
+        dispatcher.handle(&leaf, &focus, cancel_event(5.0, 5.0));
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 100.0),
+        );
+        dispatcher.handle(&leaf, &focus, cancel_event(5.0, 5.0));
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 200.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            release_event(5.0, 5.0, crate::input::MouseButton::Left, 210.0),
+        );
+
+        assert_eq!(*double_tapped.borrow(), 0);
+    }
+
+    #[test]
+    fn pointer_cancel_is_reentrant_safe_from_pressed_handler() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let dispatcher = Rc::new(crate::input::PointerDispatcher::new());
+        let weak_dispatcher = Rc::downgrade(&dispatcher);
+        leaf.as_ui_element()
+            .register_routed_handler::<crate::input::PointerEventArgs>(
+                "on_pointer_pressed",
+                Box::new(move |_, _| {
+                    weak_dispatcher
+                        .upgrade()
+                        .expect("dispatcher should outlive dispatch")
+                        .cancel();
+                }),
+            );
+        let canceled = count_calls::<crate::input::PointerEventArgs>(&leaf, "on_pointer_canceled");
+        let focus = crate::focus::FocusTracker::new();
+
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
+        );
+
+        assert_eq!(*canceled.borrow(), 1);
+        assert!(!dispatcher.cancel());
+    }
+
+    #[test]
+    fn subtree_cancel_during_release_clears_all_retained_state_without_active_press() {
+        let leaf = native("a", size(50.0, 50.0));
+        layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
+        let dispatcher = Rc::new(crate::input::PointerDispatcher::new());
+        let focus = crate::focus::FocusTracker::new();
+        let tapped = count_calls::<crate::input::TappedEventArgs>(&leaf, "on_tapped");
+
+        // Seed both the completed-tap record and hover chain with references to `leaf`.
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 0.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            release_event(5.0, 5.0, crate::input::MouseButton::Left, 10.0),
+        );
+        assert_eq!(*tapped.borrow(), 1);
+        *tapped.borrow_mut() = 0;
+
+        let weak_dispatcher = Rc::downgrade(&dispatcher);
+        let weak_subtree = Rc::downgrade(&leaf);
+        leaf.as_ui_element()
+            .register_routed_handler::<crate::input::PointerEventArgs>(
+                "on_pointer_released",
+                Box::new(move |_, _| {
+                    let dispatcher = weak_dispatcher
+                        .upgrade()
+                        .expect("dispatcher should outlive dispatch");
+                    let subtree = weak_subtree
+                        .upgrade()
+                        .expect("subtree should remain alive during release dispatch");
+                    // `prepare_release` has already removed the active press. The subtree cleanup
+                    // must still remove the pending tap, prior tap record, and hover chain.
+                    assert!(!dispatcher.cancel_for_subtree(&subtree));
+                }),
+            );
+
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            press_event(5.0, 5.0, crate::input::MouseButton::Left, 100.0),
+        );
+        dispatcher.handle(
+            &leaf,
+            &focus,
+            release_event(5.0, 5.0, crate::input::MouseButton::Left, 110.0),
+        );
+
+        assert_eq!(*tapped.borrow(), 0);
+        assert!(!dispatcher.cancel_for_subtree(&leaf));
+        let weak_leaf = Rc::downgrade(&leaf);
+        drop(leaf);
+        assert!(
+            weak_leaf.upgrade().is_none(),
+            "pending_tap, last_tap, and last_hover must not retain the removed subtree"
+        );
+    }
+
+    #[test]
     fn tap_fires_even_after_dragging_out_and_back_within_threshold() {
         let leaf = native("a", size(50.0, 50.0));
         layout_tree::<FakeHandle>(&leaf, size(50.0, 50.0));
@@ -1439,6 +1667,9 @@ mod tests {
             &focus,
             release_event(5.0, 5.0, crate::input::MouseButton::Left, 10.0),
         );
+        // WinUI3 can report capture loss after a normal release relinquishes native capture. With
+        // no active Core press this must be a no-op, preserving the completed first tap.
+        dispatcher.handle(&leaf, &focus, cancel_event(5.0, 5.0));
         dispatcher.handle(
             &leaf,
             &focus,

@@ -22,7 +22,9 @@ Application startup runs on the main thread. Window and tree hosts own AppKit vi
 
 Owner mapping associates native views and event targets with weak ElwindUI owners. Disposal removes delegates, notifications, and mappings before releasing the view.
 
-`TreeHostView` forwards self-drawn mouse press/move/release through the common `PointerDispatcher`; AppKit's drag event overrides preserve delivery during an active press. A weak `AppKitCoordinateHost` converts between flipped view-root coordinates and Core's top-left/Y-down logical desktop coordinates using `NSWindow` point conversion and the primary-screen-height flip. Context requests and ordinary pointer payloads share this conversion.
+`TreeHostView` forwards self-drawn mouse press/move/release through the common `PointerDispatcher`; AppKit's drag event overrides preserve delivery during an active press. A self-drawn press also makes the host the window's first responder so Escape reaches the same host during the gesture. Escape, key-window/application deactivation, host suppression, view detachment/window transfer, and hosted-tree replacement/clear cancel the Core gesture before teardown. A weak `AppKitPointerGestureHost` lets common subtree unmount perform the same ordered cancellation without retaining the native view.
+
+A weak `AppKitCoordinateHost` converts between flipped view-root coordinates and Core's top-left/Y-down logical desktop coordinates using `NSWindow` point conversion and the primary-screen-height flip. Context requests and ordinary pointer payloads share this conversion.
 
 ## Layout and native controls
 

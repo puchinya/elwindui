@@ -122,7 +122,7 @@ ElwindUI のイベント伝播はルーティングイベントモデルを採�
 
 1. **Bubbling（バブリング / 下から上へ）**:
    - イベント発生源（Target）のノードから開始し、`visual_parent` チェーンを辿ってルート要素（Window/Root）に向けて親方向へ順次伝播する。
-   - 主な対象: マウス/ポインタイベント（`on_pointer_pressed`, `on_pointer_released`, `on_pointer_moved`, `on_pointer_wheel_changed`, `on_tapped`, `on_double_tapped`, `on_right_tapped`）、キーボード入力（`on_key_down`, `on_key_up`, `on_text_input`）。
+   - 主な対象: マウス/ポインタイベント（`on_pointer_pressed`, `on_pointer_released`, `on_pointer_moved`, `on_pointer_canceled`, `on_pointer_wheel_changed`, `on_tapped`, `on_double_tapped`, `on_right_tapped`）、キーボード入力（`on_key_down`, `on_key_up`, `on_text_input`）。
 2. **Direct（ダイレクト / ルーティングなし）**:
    - ツリー伝播を行わず、イベントが発生した特定の要素のハンドラのみを直接呼び出す。
    - 主な対象: 領域進入/退出（`on_pointer_entered`, `on_pointer_exited`）、フォーカス変化（`on_got_focus`, `on_lost_focus`）、コントロール固有の状態変化通知（`TabView::on_select` 等）。
@@ -138,6 +138,7 @@ ElwindUI のイベント伝播はルーティングイベントモデルを採�
 - **ポインタイベント**:
   - host-root-relative論理座標を基に視覚ツリーを検索（`hit_test`）し、クリッピング、表示状態（`visibility`）、ヒットテスト有効性（`hit_test_visible`）を考慮して最前面のターゲット要素を決定した後、Bubbling/Direct ルーティングを開始する。
   - press中は暗黙captureを維持し、pointerが元要素またはhost boundsの外へ移動しても`moved`/`released`をpress targetへ配送する。hoverの`entered`/`exited`判定は実cursor位置を使い続ける。
+  - native cancellation、capture loss、host/subtree teardown等で正常なreleaseが成立しない場合は、capture状態とtap/double-tap候補を先に破棄し、press targetへ`on_pointer_canceled`を一度だけBubbling配送する。payloadは最後に観測したroot/screen位置とmodifierを保持し、`button`は`None`とする。以後のmoveは新たにhit testする。
 - **キーボードイベント**:
   - フォーカス管理機構（Focus Tracker）が保持する現在のフォーカス要素をターゲットとして決定した後、Bubbling ルーティングを開始する。
 
@@ -186,6 +187,7 @@ ElwindUI は、キーボード入力およびアクセシビリティ操作の�
 | `on_pointer_pressed` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で押下された際に発火 |
 | `on_pointer_released` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で離された際に発火 |
 | `on_pointer_moved` | `fn(PointerEventArgs)` | Bubbling | ポインタが要素上で移動した際に発火 |
+| `on_pointer_canceled` | `fn(PointerEventArgs)` | Bubbling | 暗黙capture中の操作が正常なreleaseなしで中止された際に一度だけ発火 |
 | `on_pointer_entered` | `fn(PointerEventArgs)` | Direct | ポインタが要素領域内に進入した際に発火 |
 | `on_pointer_exited` | `fn(PointerEventArgs)` | Direct | ポインタが要素領域外へ退出した際に発火 |
 | `on_pointer_wheel_changed` | `fn(PointerWheelEventArgs)` | Bubbling | マウスホイール操作時に発火 |

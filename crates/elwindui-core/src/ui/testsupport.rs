@@ -1103,6 +1103,16 @@ pub(crate) fn release_event(
     }
 }
 
+pub(crate) fn cancel_event(x: f32, y: f32) -> crate::input::RawPointerEvent {
+    crate::input::RawPointerEvent {
+        kind: crate::input::RawPointerEventKind::Canceled,
+        position: Point { x, y },
+        screen_position: None,
+        modifiers: crate::input::KeyModifiers::default(),
+        timestamp_ms: 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

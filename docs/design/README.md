@@ -10,6 +10,7 @@
 | Pointer、routed event、keyboard、focus | [`runtime/input_focus_design.md`](runtime/input_focus_design.md) |
 | Native widget host、owner mapping、reconciliation | [`runtime/native_control_design.md`](runtime/native_control_design.md) |
 | Text cascade、measurement seam | [`runtime/text_design.md`](runtime/text_design.md) |
+| IconSource value、IconElement realization、native/custom icon paths | [`runtime/icon_source_design.md`](runtime/icon_source_design.md) |
 | Theme / Environment runtime | [`runtime/theme_environment_design.md`](runtime/theme_environment_design.md) |
 | ControlTemplate selection、ownership、ContentPresenter | [`runtime/control_template_design.md`](runtime/control_template_design.md) |
 | Context Menu、PopupSurface、ContextRequest | [`runtime/popup_context_menu_design.md`](runtime/popup_context_menu_design.md) |

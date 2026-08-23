@@ -6,7 +6,6 @@
 //! express the same semantic meaning.
 
 use super::brush::Brush;
-use super::color::Color;
 use super::path::{FillRule, Path, PathBuilder};
 use super::stroke::{LineCap, LineJoin, StrokeStyle};
 use super::vector_image::{ImageSource, VectorImageBuilder};
@@ -17,9 +16,11 @@ use super::vector_scene::{
 use crate::base::{AffineTransform, Point, Rect, Size};
 use std::sync::{Arc, OnceLock};
 
-/// A `MenuItem.icon` value: either a user-supplied `ImageSource` or a backend-neutral
-/// `SystemIcon`. Generic on purpose (not `MenuItem`-specific) so other controls can reuse it
-/// later, but this Issue only wires it up for `MenuItem.icon`.
+/// A shareable icon value: either a user-supplied `ImageSource` or a backend-neutral `SystemIcon`.
+///
+/// `MenuItem.icon` consumes this value directly; [`crate::ui::IconSourceElement`] wraps it when an
+/// icon must participate in the Visual tree. The value itself never owns a `UIElement` or backend
+/// native handle.
 #[derive(Debug, Clone)]
 pub enum IconSource {
     System(SystemIcon),
@@ -287,7 +288,7 @@ fn build_refresh_path() -> Path {
 
 /// The 12 canonical vectors' geometry, built once and cached for the process lifetime — the key
 /// space is fixed (`SystemIcon::ALL`), so this bounded cache doesn't grow (`icon_source_design.md`
-/// §4). Only the `Path` (the expensive, static part) is cached; color is applied fresh per call in
+/// §4). Only the `Path` (the expensive, static part) is cached; foreground is applied per call in
 /// [`system_icon_vector`], since it varies with the caller's enabled/disabled foreground.
 fn icon_geometry() -> &'static [(Path, IconPaint); 12] {
     static CACHE: OnceLock<[(Path, IconPaint); 12]> = OnceLock::new();
@@ -309,19 +310,18 @@ fn icon_geometry() -> &'static [(Path, IconPaint); 12] {
     })
 }
 
-/// The Custom Context Menu's canonical monochrome vector fallback for a `SystemIcon` — never the
-/// `SystemIcon`'s public semantic identity, only a backend-neutral visual stand-in used when
-/// `ContextMenuPresentation::Custom` renders a `MenuItem.icon` (native presentation uses the OS's
-/// own system icon instead — see `icon_source_design.md` §3). Intrinsic size `16x16`, viewBox
-/// `(0,0,16,16)`, monochrome: `color` should be the caller's enabled/disabled menu foreground.
-pub(crate) fn system_icon_vector(icon: SystemIcon, color: Color) -> ImageSource {
+/// Core's canonical monochrome vector realization for a `SystemIcon` — never the `SystemIcon`'s
+/// public semantic identity, only a backend-neutral visual used by `IconSourceElement` (including
+/// the Custom Context Menu; native presentation uses the OS's own system icon instead — see
+/// `icon_source_design.md` §3). Intrinsic size `16x16`, viewBox `(0,0,16,16)`.
+pub(crate) fn system_icon_vector(icon: SystemIcon, foreground: Brush) -> ImageSource {
     let (path, paint) = &icon_geometry()[icon.index()];
     let node = VectorNode::Path(VectorPathNode {
         path: path.clone(),
         transform: AffineTransform::IDENTITY,
         fill: match paint {
             IconPaint::Fill(rule) => Some(VectorFill {
-                paint: VectorPaint::Brush(Brush::Solid(color)),
+                paint: VectorPaint::Brush(foreground.clone()),
                 opacity: 1.0,
                 rule: *rule,
             }),
@@ -330,7 +330,7 @@ pub(crate) fn system_icon_vector(icon: SystemIcon, color: Color) -> ImageSource 
         stroke: match paint {
             IconPaint::Fill(_) => None,
             IconPaint::Stroke => Some(VectorStroke {
-                paint: VectorPaint::Brush(Brush::Solid(color)),
+                paint: VectorPaint::Brush(foreground),
                 opacity: 1.0,
                 style: StrokeStyle {
                     width: 1.4,
@@ -371,11 +371,12 @@ pub(crate) fn system_icon_vector(icon: SystemIcon, color: Color) -> ImageSource 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graphics::Color;
 
     #[test]
     fn every_system_icon_variant_produces_a_16x16_vector() {
         for icon in SystemIcon::ALL {
-            let source = system_icon_vector(icon, Color::rgb(240, 240, 240));
+            let source = system_icon_vector(icon, Color::rgb(240, 240, 240).into());
             match source {
                 ImageSource::Vector(vector) => {
                     assert_eq!(
@@ -413,8 +414,8 @@ mod tests {
         let enabled = Color::rgb(240, 240, 240);
         let disabled = Color::rgb(128, 128, 128);
         for icon in SystemIcon::ALL {
-            let enabled_source = system_icon_vector(icon, enabled);
-            let disabled_source = system_icon_vector(icon, disabled);
+            let enabled_source = system_icon_vector(icon, enabled.into());
+            let disabled_source = system_icon_vector(icon, disabled.into());
             let color_of = |source: ImageSource| -> Color {
                 let ImageSource::Vector(vector) = source else {
                     panic!("canonical fallback must be a vector");

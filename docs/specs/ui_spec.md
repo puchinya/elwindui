@@ -454,6 +454,23 @@ Grid {
 
 ---
 
+### `elwindui::ui::IconElement` / `IconSourceElement`
+
+`IconElement` は backend-neutral な自己描画アイコン要素の抽象基底であり、直接構築できない。共有可能な `IconSource` 値を Visual tree に配置する場合は、具象 leaf の `IconSourceElement` を使用する。
+
+#### Properties
+
+| Owner | Name | Type | Binding | Description |
+|---|---|---|---|---|
+| `IconElement` | `foreground` | `Option<Brush>` | OneWay | monochrome な `SystemIcon` の描画 Brush。未指定時は Visual tree の foreground を継承する |
+| `IconSourceElement` | `icon_source` | `Option<IconSource>` | OneWay | 表示する共有可能なアイコン値。`None` はアイコンを描画しない |
+
+- `IconSource::System` の自然サイズは canonical geometry の 16×16 logical unitsであり、arranged boundsには縦横比を維持して収める。有効な local/inherited `foreground` が存在しない場合は、platform色を推測せず描画commandを生成しない。
+- `IconSource::Image` の自然サイズは既存 `ImageSource` の intrinsic sizeとし、raster/vectorの既存描画経路を再利用する。`foreground` によるrecolorは行わない。
+- `IconSource` は複数箇所で共有できるvalue typeだが、`IconSourceElement` は通常の `UIElement` と同様に一つのVisual parentだけが所有する。
+
+---
+
 ## 7. Shapes
 
 ### `elwindui::ui::Rectangle`
@@ -742,7 +759,7 @@ pub enum IconSource {
 `context_menu_presentation`(`UIElement` 共通プロパティ、本書 §2 参照)の値に関わらず、同一の `MenuItem.icon` が表示される。
 
 - `ContextMenuPresentation::Native`(および `MenuBarItem.submenu`): backend のネイティブメニューアイテムの native icon slot(AppKit `NSMenuItem.image` / WinUI 3 `MenuFlyoutItem.Icon`)に、`SystemIcon` は OS/toolkit のシステムアイコン(SF Symbols / `SymbolIcon`)として、ユーザー定義アイコンは native な 16×16 相当サイズの画像として反映される。
-- `ContextMenuPresentation::Custom`: Core の `ContextMenuPresenter` が構築する `UIElement` ツリー内に、backend-neutral な 16×16 DIP の leading icon slot として表示される。`SystemIcon` は ElwindUI 内部の canonical monochrome vector fallback で描画され(OS のネイティブシステムアイコンそのものではない)、ユーザー定義アイコンはそのまま `ImageSource` として描画される。メニュー内の項目が1つでも `icon` を持てば、全ての行に同じ leading slot が予約される(icon を持たない行は空スロットのまま、ラベルの位置は揃う)。メニュー全体に `icon` を持つ項目が1つも無ければ、leading slot 自体を作らず既存のレイアウトを維持する。
+- `ContextMenuPresentation::Custom`: Core の `ContextMenuPresenter` が構築する `UIElement` ツリー内に、`IconSourceElement` を使うbackend-neutral な 16×16 DIP の leading icon slot として表示される。`SystemIcon` は ElwindUI 内部の canonical monochrome vector fallback で描画され(OS のネイティブシステムアイコンそのものではない)、ユーザー定義アイコンはそのまま `ImageSource` として描画される。メニュー内の項目が1つでも `icon` を持てば、全ての行に同じ leading slot が予約される(icon を持たない行は空スロットのまま、ラベルの位置は揃う)。メニュー全体に `icon` を持つ項目が1つも無ければ、leading slot 自体を作らず既存のレイアウトを維持する。
 
 #### Failure semantics
 

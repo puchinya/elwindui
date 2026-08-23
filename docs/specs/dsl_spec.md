@@ -233,7 +233,7 @@ impl ContentControl {}
 
 ここで`Control`は`elwindui::ui::Control`(ビルトイン、裸名で参照)で、`ContentControl`は上記の例で定義しているユーザー自身のcomponent名——ビルトインの同名`ContentControl`(`docs/specs/ui_spec.md`参照)と衝突しない。ローカルに定義された`ContentControl`は、`elwindui::ui::*`の自動`use`(§2)より常に優先して解決される(Rustの通常の名前解決が、同一スコープのグロブ`use`よりローカル定義を優先するのと同じ)。
 
-`view`の中身が暗黙に`Base`自身になるかどうかは、`Base`が実際に合成可能(2番目のケースに当てはまるか)によって決まり、`Name`自身がラッパーを書くかどうかでは選べない――合成可能な`Base`を持つ`component`の`view`は常にこの形で書く。`Control`のshape compositionだけは公開collectionではなくprivate template rootへ単一rootを接続する。3番目のケース(合成されていない論理コンポーネントの継承)だけが、今まで通り「独自のルート要素を持つ完全なテンプレート上書き」になる。
+`view`の中身が暗黙に`Base`自身になるかどうかは、`Base`が実際に合成可能(2番目のケースに当てはまるか)によって決まり、`Name`自身がラッパーを書くかどうかでは選べない――合成可能な`Base`を持つ`component`の`view`は常にこの形で書く。`Control`の実効content destinationは内部scalar property `visual_root`であるため、`Control`派生componentは同じgenericな`#[content]` lowering ruleを通じて単一の authored visual rootを受け取り、そのsetterがprivate template-root ownershipへ委譲する。3番目のケース(合成されていない論理コンポーネントの継承)だけが、今まで通り「独自のルート要素を持つ完全なテンプレート上書き」になる。
 
 継承したフィールドは、派生component自身の`view`が**同名のまま裸で参照**している場合のみ、派生側の実効フィールド(＝コンストラクタ引数)になる。リテラル値で上書きしている場合(例:`Rectangle { fill: "#3a3a3c" }`)や、そもそも参照していない場合は、その基底フィールドは派生側の公開APIには現れない。
 
